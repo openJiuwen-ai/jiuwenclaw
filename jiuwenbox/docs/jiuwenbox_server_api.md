@@ -32,6 +32,22 @@ unix:///run/jiuwenbox/jiuwenbox.sock          # 容器内 uvicorn 绑定的路�
 
 业务接口统一使用 `/api/v1` 前缀，健康检查接口为 `/health`。
 
+### API 认证（opt-in）
+
+设置环境变量 `JIUWENBOX_API_TOKEN`（或 `jiuwenbox-server --api-token`）后启用。
+所有 HTTP 端点（含 `/health`、`/api/v1/*`、`/mcp`）均需在请求头携带：
+
+```http
+Authorization: Bearer <token>
+```
+
+未设置 `JIUWENBOX_API_TOKEN` 时行为与旧版一致（无认证）。错误 token 返回
+`401`，响应体 `{"error":"unauthorized"}`。
+
+服务端与 jiuwenbox CLI 共用 `JIUWENBOX_API_TOKEN`；CLI 亦支持 `--api-token`
+（优先级高于 env）。jiuwenclaw / openjiuwen provider 当前不会自动发送该
+header，启用认证后需自行在 HTTP 客户端层携带 token。
+
 ### 通用接入示例
 
 以下三种方式分别通过 TCP 与 UDS 访问同一个 `/health`，请求行为完全等价；
@@ -42,6 +58,9 @@ curl：
 ```bash
 # TCP
 curl http://127.0.0.1:8321/health
+
+# TCP 并设置认证 token
+curl -H "Authorization: Bearer $JIUWENBOX_API_TOKEN" http://127.0.0.1:8321/health
 
 # UDS
 curl --unix-socket /tmp/jiuwenbox-sock/jiuwenbox.sock http://localhost/health
@@ -493,9 +512,11 @@ print(resp.json())
 
 接口：`POST /api/v1/sandboxes/{sandbox_id}/exec_background`
 
-用途：在沙箱内启动后台进程，进程创建后立即返回。`Popen` 成功即 `started=true`；**不**区分长任务与瞬时任务。
+用途：在沙箱内启动后台进程，进程创建后立即返回。与 ``exec`` 相同，命令由沙箱 daemon 在**同一 PID 命名空间**内 ``fork+exec``，不再为每次后台任务单独 spawn bubblewrap。
 
-`running`、`exit_code` 为**返回时刻的快照**：服务端在 spawn 后对跟踪的 bwrap 监控进程调用一次 `poll()`。命令本身可能很快结束，但 bwrap 清理/回收可能尚未完成，因此 `python3 --version` 这类瞬时命令在 `exec_background` 响应里 **`running` 仍常为 `true`**。要可靠判断结束并读取输出，请轮询 `GET .../background/{job_id}`。
+`running`、`exit_code` 为**返回时刻的快照**（daemon 在 spawn 后立即响应）。瞬时命令可能在 `exec_background` 响应里已显示 `running=false`；长任务则 `running=true`。要可靠判断结束并读取输出，请轮询 `GET .../background/{job_id}`。
+
+`pid` 为**沙箱 PID 命名空间内**的用户进程 pid（与 ``sandbox exec ps`` 中看到的 pid 一致），不是 host 上的 bwrap 监控进程 pid。
 
 请求体（`BackgroundExecRequest`）：
 
@@ -507,7 +528,8 @@ print(resp.json())
 | `env` | object | 否 | 额外环境变量 |
 | `stdin` | string | 否 | 标准输入文本 |
 | `timeout_seconds` | int | 否 | 预留字段 |
-| `capture_output` | bool | 否 | 默认 `true`；为 `true` 时将 stdout/stderr 写入 host `{control_dir}/bg-logs/{job_id}.out\|.err` |
+
+后台任务**不捕获** stdout/stderr（始终丢弃）；需要输出时请使用同步 `exec`。
 
 错误码：`job_id` 格式非法 → **400**；同 sandbox 内 `job_id` 已占用 → **409**；沙箱非 ready → **409**。
 
@@ -523,7 +545,6 @@ resp = requests.post(
         "job_id": "http-srv",
         "command": ["python3", "-m", "http.server", "18080"],
         "workdir": "/tmp",
-        "capture_output": True,
     },
     timeout=30,
 )
@@ -541,12 +562,11 @@ print(resp.json())
   "command": ["python3", "-m", "http.server", "18080"],
   "running": true,
   "exit_code": null,
-  "error_message": null,
-  "capture_output": true
+  "error_message": null
 }
 ```
 
-轮询 `GET .../background/{job_id}` 直至 `running=false` 后，可得到最终状态与输出（示例：`python3 --version` 结束后）：
+轮询 `GET .../background/{job_id}` 直至 `running=false` 后，可得到最终状态（示例：`python3 --version` 结束后）：
 
 ```json
 {
@@ -558,8 +578,7 @@ print(resp.json())
   "exit_code": 0,
   "started_at": "2026-06-16T10:00:01.000000",
   "finished_at": "2026-06-16T10:00:01.050000",
-  "capture_output": true,
-  "stdout": "Python 3.12.3\n",
+  "stdout": "",
   "stderr": "",
   "workdir": null
 }
@@ -569,9 +588,9 @@ print(resp.json())
 
 接口：`GET /api/v1/sandboxes/{sandbox_id}/background/{job_id}`
 
-用途：查询单个后台任务状态，并返回**全量** stdout/stderr 快照（无 offset 参数）。
+用途：查询单个后台任务状态。stdout/stderr 恒为空（后台任务不记录输出）。
 
-响应体（`BackgroundJobStatus`）含：`job_id`、`sandbox_id`、`command`、`pid`、`running`、`exit_code`、`started_at`、`finished_at`、`capture_output`、`stdout`、`stderr`、`workdir`。
+响应体（`BackgroundJobStatus`）含：`job_id`、`sandbox_id`、`command`、`pid`、`running`、`exit_code`、`started_at`、`finished_at`、`stdout`、`stderr`、`workdir`。
 
 沙箱或 job 不存在 → **404**。
 

@@ -36,9 +36,9 @@ issues:
     dimension: boundary_safety
     severity: medium
     status: open
-    summary: "Team-delete selection may use stale cached metadata."
-    evidence: "_find_team_session_ids calls get_session_metadata(session_id) without cache_bust=True, while nearby session.list explicitly cache-busts for cross-process freshness; this helper feeds destructive team.delete cleanup."
-    suggested_action: "Use cache_bust=True here or document why team metadata for deletion is guaranteed to be AgentServer-local and fresh."
+    summary: "Destructive selection lacks an explicit metadata authority contract."
+    evidence: "It uses process-local cached metadata, while Gateway can write metadata cross-process and AgentServer team identity writes may remain newer in cache before async disk flush. Either cache or disk can be stale when this feeds team.delete."
+    suggested_action: "Define ownership/versioning for mode/team_name and reconcile cache plus disk before destructive selection."
   - id: ISSUE-002
     dimension: error_handling
     severity: low
@@ -52,7 +52,14 @@ issues:
     status: open
     summary: "Boundary and freshness cases are not directly covered."
     evidence: "Direct test covers mode/team_name filtering only; team-delete tests override the helper."
-    suggested_action: "Add direct tests for missing/non-directory roots, stale cache versus disk metadata, malformed metadata, and deterministic sorting."
+    suggested_action: "Test missing/non-directory roots, cache/disk divergence, malformed metadata, and multi-match sorting."
+  - id: ISSUE-004
+    dimension: performance_risk
+    severity: low
+    status: open
+    summary: "The async helper performs an unbounded synchronous scan."
+    evidence: "It iterates every session directory and reads metadata synchronously on the event loop before team deletion can continue."
+    suggested_action: "Use indexed team metadata or offload the scan when session counts can be large."
 confidence: confirmed
 details: {}
 ---
@@ -68,8 +75,8 @@ Enumerates the AgentServer sessions directory and returns a deterministic list o
 - Input: Pre-trimmed team name string from `_handle_team_delete`.
 - Output: Sorted unique `list[str]` of matching local session directory names; empty list when the sessions root is absent.
 - Main side effects: No writes; performs synchronous filesystem iteration and metadata reads.
-- Main risk: Cached metadata and unhandled scan errors can affect destructive team-delete selection.
-- Related tests: Direct happy-path filter test exists; team-delete tests stub this helper.
+- Main risk: Cache/disk freshness ambiguity and scan failures can change destructive team-delete selection.
+- Related tests: One direct filter test exists; team-delete tests stub this helper. Freshness, root errors, malformed metadata, multi-match ordering, and the partial session lifecycle flow remain gaps.
 
 ## Detail Index
 

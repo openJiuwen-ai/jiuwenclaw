@@ -36,6 +36,8 @@ from jiuwenswarm.common.config import (
     get_config,
     get_evolution_auto_save_enabled,
     get_evolution_auto_scan_enabled,
+    get_evolution_review_trigger_enabled,
+    get_evolution_signal_trigger_enabled,
     get_skill_create_enabled,
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
@@ -211,9 +213,10 @@ def build_member_rails(
             logger.warning("[TeamRuntime] StructuredAskUserRail failed: %s", exc)
 
     try:
-        rail = TaskPlanningRail()
-        rails_list.append(rail)
-        logger.info("[TeamRuntime] TaskPlanningRail created")
+        if role != "leader":
+            rail = TaskPlanningRail()
+            rails_list.append(rail)
+            logger.info("[TeamRuntime] TaskPlanningRail created")
     except Exception as exc:
         logger.warning("[TeamRuntime] TaskPlanningRail failed: %s", exc)
 
@@ -258,7 +261,10 @@ def build_member_rails(
         try:
             Path(team_ws_skills_dir).mkdir(parents=True, exist_ok=True)
             llm_model, actual_model_name = build_evolution_llm()
-            evolution_auto_scan = get_evolution_auto_scan_enabled(config)
+            evolution_review_trigger = get_evolution_review_trigger_enabled(
+                config,
+                fallback=get_evolution_auto_scan_enabled(config),
+            )
             evolution_auto_save = get_evolution_auto_save_enabled(config)
             bound_team_trajectory_registry = team_trajectory_registry if team_id else None
             review_runtime = EvolutionReviewRuntime()
@@ -271,10 +277,9 @@ def build_member_rails(
                 trajectory_source=bound_team_trajectory_registry,
                 trajectory_sink=bound_team_trajectory_registry,
                 member_role=role,
-                auto_scan=False,
+                signal_trigger=False,
                 auto_save=evolution_auto_save,
-                fuzzy_review=False,
-                completion_followup_enabled=evolution_auto_scan,
+                review_trigger=evolution_review_trigger,
                 team_id=team_id,
                 disabled_skills=load_execution_disabled_skills(),
             )
@@ -289,11 +294,11 @@ def build_member_rails(
             rails_list.append(team_skill_rail)
             logger.info(
                 "[TeamRuntime] TeamSkillEvolutionRail created: skills_dir=%s, "
-                "model=%s, auto_scan=%s, completion_followup_enabled=%s, team_trajectory_registry=%s",
+                "model=%s, signal_trigger=%s, review_trigger=%s, team_trajectory_registry=%s",
                 team_ws_skills_dir,
                 actual_model_name,
                 False,
-                evolution_auto_scan,
+                evolution_review_trigger,
                 bool(bound_team_trajectory_registry),
             )
         except Exception as exc:
@@ -524,7 +529,10 @@ def build_skill_evolution_rail(
     """
     try:
         llm, model_name = build_evolution_llm(config)
-        evolution_auto_scan = get_evolution_auto_scan_enabled(config)
+        evolution_signal_trigger = get_evolution_signal_trigger_enabled(
+            config,
+            fallback=get_evolution_auto_scan_enabled(config),
+        )
         review_runtime = review_runtime or EvolutionReviewRuntime()
 
         rail = SkillEvolutionRail(
@@ -532,9 +540,8 @@ def build_skill_evolution_rail(
             llm=llm,
             model=model_name,
             review_runtime=review_runtime,
-            auto_scan=evolution_auto_scan,
+            signal_trigger=evolution_signal_trigger,
             auto_save=True,
-            fuzzy_review=False,
             disabled_skills=load_execution_disabled_skills(),
         )
         has_team_trajectory_sink = team_trajectory_sink is not None and bool(team_id)
@@ -545,10 +552,10 @@ def build_skill_evolution_rail(
                 member_role="teammate",
             )
         logger.info(
-            "[TeamRuntime] SkillEvolutionRail created: model=%s, auto_scan=%s, "
+            "[TeamRuntime] SkillEvolutionRail created: model=%s, signal_trigger=%s, "
             "team_trajectory_sink=%s",
             model_name,
-            evolution_auto_scan,
+            evolution_signal_trigger,
             has_team_trajectory_sink,
         )
         return rail
@@ -590,6 +597,8 @@ def _build_context_processor_rail(config: dict[str, Any] | None) -> ContextProce
     try:
         from typing import List, Tuple
 
+        from openjiuwen.harness.prompts import resolve_language
+
         user_processors: List[Tuple[str, dict]] = []
         ctx_cfg: dict[str, Any] = {}
         if isinstance(config, dict):
@@ -611,6 +620,16 @@ def _build_context_processor_rail(config: dict[str, Any] | None) -> ContextProce
         round_level_cfg = ctx_cfg.get("round_level_compressor_config", {})
         if isinstance(round_level_cfg, dict) and round_level_cfg:
             user_processors.append(("RoundLevelCompressor", round_level_cfg))
+
+        reasoning_loop_cfg = ctx_cfg.get("reasoning_tool_loop_compact_config", {})
+        if isinstance(reasoning_loop_cfg, dict) and reasoning_loop_cfg:
+            reasoning_loop_cfg = {
+                **reasoning_loop_cfg,
+                "language": resolve_language(
+                    str(get_config().get("preferred_language", "zh")).strip().lower()
+                ),
+            }
+            user_processors.append(("ReasoningToolLoopCompactProcessor", reasoning_loop_cfg))
 
         rail = ContextProcessorRail(
             processors=user_processors if user_processors else None,

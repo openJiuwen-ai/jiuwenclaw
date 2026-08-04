@@ -9,6 +9,9 @@ RUN echo "insecure" >> ~/.curlrc
 RUN sed -i 's/gpgcheck=1/gpgcheck=0/g' /etc/yum.conf /etc/yum.repos.d/openEuler.repo
 
 RUN yum makecache
+# JDK 17 uses the headless + devel pair (BiSheng OpenJDK 17 on openEuler 24.03):
+# headless gives `java` without X11 deps, devel gives `javac`/`jar`.
+# Verified on 205 (aarch64).
 RUN yum install -y \
         bubblewrap \
         iproute \
@@ -20,7 +23,19 @@ RUN yum install -y \
         python3-pip \
         git \
         vim \
-        unzip
+        unzip \
+        java-17-openjdk-headless \
+        java-17-openjdk-devel \
+    && yum clean all \
+    && rm -rf /var/cache/yum
+
+# JAVA_HOME points at the stable, version-independent symlink
+# (/usr/lib/jvm/java-17-openjdk -> /etc/alternatives/java_sdk_17_openjdk -> the
+# versioned dir), so minor JDK upgrades do not break the path. java/javac/jar
+# are also on PATH via /usr/bin alternatives, but prepending $JAVA_HOME/bin
+# makes the JDK the authoritative one.
+ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk
+ENV PATH="${JAVA_HOME}/bin:${PATH}"
 
 WORKDIR /app
 

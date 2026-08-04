@@ -154,7 +154,7 @@ Every class, function, and method audit record must use one of:
 - `script_assessed`: `scripts/audit_integrity.py` processed the record, but no agent or human audit is trusted for closure.
 - `agent_audited`: a real audit agent reviewed behavior, health, and issues and recorded evidence from the implementation, relevant callers or callees, and tests or missing-test evidence. This status is provisional until `scripts/audit_integrity.py verify` or `report` classifies the record as `trusted_agent_audit`.
 - `human_audited`: a human reviewed or confirmed behavior, health, and issues.
-- `audit_expired`: the source hash changed since the recorded audit.
+- `audit_expired`: the symbol hash changed since the recorded audit. For a changed method, expire that method and its containing class audit without expiring unchanged sibling methods.
 - `out_of_scope`: the symbol is intentionally excluded with a reason.
 
 `scripts/inventory_symbols.py` is not an auditor. It reads audit metadata from entry docs, preserves matching prior audited records, and expires stale records; it does not perform the review required for `agent_audited`. A generated entry doc, extractor confidence, placeholder health block, or clean script run must remain `unaudited` or `script_assessed` until a real audit agent or human has read the symbol implementation and recorded evidence-based conclusions.
@@ -168,11 +168,12 @@ audit:
   audited_at: "YYYY-MM-DDTHH:MM:SSZ"
   audited_commit: abc1234
   audited_source_hash: sha256...
+  audited_symbol_hash: sha256...
   confidence: confirmed | inferred | unknown
   expired_reason: null
 ```
 
-`scripts/inventory_symbols.py` preserves previous `agent_audited` and `human_audited` states only while `audited_source_hash` matches the current source hash. If the hash differs, the generated audit map marks the symbol `audit_expired`.
+`scripts/inventory_symbols.py` preserves previous `agent_audited` and `human_audited` states while `audited_symbol_hash` matches the current symbol hash. Python fingerprints use normalized AST so formatting, comments, and line movement do not create broad false expiration. A changed method expires its own audit and its containing class audit, while unchanged sibling methods stay current. Legacy records with only `audited_source_hash` migrate only after the file hash is confirmed unchanged; unreliable symbol extraction falls back conservatively to the file hash.
 
 ## Controlled Audit Entrypoint
 
@@ -331,6 +332,7 @@ audit:
   audited_at: null
   audited_commit: null
   audited_source_hash: null
+  audited_symbol_hash: null
   confidence: unknown
   expired_reason: null
 issues:

@@ -56,25 +56,33 @@ def pytest_collection_modifyitems(config, items):
                 item.add_marker(skip_network)
 
 
-_UDS_SCHEME = "unix://"
-_UDS_PLACEHOLDER_BASE_URL = "http://jiuwenbox"
+_UDS_PREFIX = "unix:"
+_UDS_PLACEHOLDER_BASE_URL = "https://jiuwenbox"
 
 
 def _normalize_endpoint(endpoint: str) -> str:
-    return endpoint if "://" in endpoint else f"http://{endpoint}"
+    if endpoint.startswith(_UDS_PREFIX):
+        return _UDS_PLACEHOLDER_BASE_URL
+    return endpoint if "://" in endpoint else f"https://{endpoint}"
 
 
 def _build_httpx_client(endpoint: str, *, timeout: float = 30.0) -> httpx.Client:
-    if endpoint.startswith(_UDS_SCHEME):
-        uds_path = endpoint[len(_UDS_SCHEME):]
+    if endpoint.startswith(_UDS_PREFIX):
+        # Strip the "unix:" prefix; the remainder may be "//<path>" or "/<path>"
+        uds_raw = endpoint[len(_UDS_PREFIX):]
+        # Remove leading slashes until we find the absolute path
+        while uds_raw.startswith("/"):
+            uds_raw = uds_raw[1:]
+        uds_path = "/" + uds_raw
         if not uds_path.startswith("/"):
             raise ValueError(f"unix endpoint requires absolute path: {endpoint!r}")
         return httpx.Client(
             transport=httpx.HTTPTransport(uds=uds_path),
             base_url=_UDS_PLACEHOLDER_BASE_URL,
             timeout=timeout,
+            verify=True,
         )
-    return httpx.Client(base_url=_normalize_endpoint(endpoint), timeout=timeout)
+    return httpx.Client(base_url=_normalize_endpoint(endpoint), timeout=timeout, verify=True)
 
 
 class SandboxTrackingClient:
@@ -249,14 +257,12 @@ def resource_degradation_cleanup():
     try:
         yield processes
     finally:
+        import subprocess
         for proc in processes:
             try:
                 proc.terminate()
                 proc.wait(timeout=5)
-            except Exception as exc:
-                logger.debug(
-                    "Failed to terminate process during cleanup: %s", exc
-                )
+            except subprocess.TimeoutExpired:
                 try:
                     proc.kill()
                     proc.wait(timeout=5)
@@ -264,3 +270,7 @@ def resource_degradation_cleanup():
                     logger.warning(
                         "Failed to kill process during cleanup: %s", kill_exc
                     )
+            except Exception as exc:
+                logger.debug(
+                    "Failed to terminate process during cleanup: %s", exc
+                )

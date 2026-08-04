@@ -314,14 +314,14 @@ export function AgentPanel({ sessionId: _sessionId }: AgentPanelProps) {
         <button
           type="button"
           onClick={() => toggleFolder(folderKey)}
-          className="w-full min-h-10 flex items-center gap-2 rounded-lg px-2 py-2 text-left text-[15px] text-text-muted hover:bg-secondary/40 hover:text-text transition-colors"
+          className="w-full min-h-10 flex items-center gap-2 rounded-lg px-2 py-2 text-left text-[15px] text-text-muted hover:bg-secondary/40 hover:text-text "
           style={{ paddingLeft: `${depth * 14 + 8}px` }}
           title={node.label}
         >
           <span className="w-4 h-4 flex items-center justify-center text-text-muted/80">
             {hasChildren ? (
               <svg
-                className={`w-3 h-3 transition-transform ${isExpanded ? 'rotate-90' : ''}`}
+                className={`w-3 h-3  ${isExpanded ? 'rotate-90' : ''}`}
                 viewBox="0 0 24 24"
                 fill="none"
                 stroke="currentColor"
@@ -336,7 +336,7 @@ export function AgentPanel({ sessionId: _sessionId }: AgentPanelProps) {
           </svg>
           <span className="flex-1 min-w-0 truncate">{node.label}</span>
           {node.isSkillFolder ? (
-            <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded border border-[var(--border-accent)] bg-accent-subtle text-accent">
+            <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded border border-[var(--color-border-accent)] bg-accent-subtle text-accent">
               skills
             </span>
           ) : null}
@@ -352,9 +352,9 @@ export function AgentPanel({ sessionId: _sessionId }: AgentPanelProps) {
                 <button
                   key={file.path}
                   type="button"
-                  className={`w-full min-h-10 flex items-center gap-2 rounded-lg px-2 py-2 text-left text-[15px] transition-colors ${
+                  className={`w-full min-h-10 flex items-center gap-2 rounded-lg px-2 py-2 text-left text-[15px]  ${
                     selected
-                      ? 'bg-accent-subtle text-text border border-[var(--border-accent)]'
+                      ? 'bg-accent-subtle text-text border border-[var(--color-border-accent)]'
                       : selectable
                         ? 'text-text-muted hover:bg-secondary/40 hover:text-text border border-transparent'
                         : 'text-text-muted/60 border border-transparent cursor-not-allowed'
@@ -453,9 +453,9 @@ export function AgentPanel({ sessionId: _sessionId }: AgentPanelProps) {
                       <button
                         key={file.path}
                         type="button"
-                        className={`w-full min-h-10 flex items-center gap-2 rounded-lg px-2 py-2 text-left text-[15px] transition-colors ${
+                        className={`w-full min-h-10 flex items-center gap-2 rounded-lg px-2 py-2 text-left text-[15px]  ${
                           selected
-                            ? 'bg-accent-subtle text-text border border-[var(--border-accent)]'
+                            ? 'bg-accent-subtle text-text border border-[var(--color-border-accent)]'
                             : selectable
                               ? 'text-text-muted hover:bg-secondary/40 hover:text-text border border-transparent'
                               : 'text-text-muted/60 border border-transparent cursor-not-allowed'

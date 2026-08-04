@@ -21,20 +21,28 @@ export class WsClient {
   private ws: WebSocket | null = null;
   private readonly url: string;
   private readonly token: string;
+  private readonly userId: string;
   private handlers: FrameHandler[] = [];
   private pending = new Map<string, PendingRequest>();
   private retryCount = 0;
   private readonly maxBackoffRetries = 5;
   private readonly baseDelay = 1000;
+  /**
+   * 权威认证过期回调；由 index.ts 注入 ReauthenticationPort。
+   * 仅在收到 close code 1008（auth_failed）时调用，表示服务端权威拒绝当前 token。
+   * 非 1008 的断线、1006、5xx、普通超时不触发该回调。
+   */
+  onAuthExpired?: () => void;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private _status: ConnectionStatus = "idle";
   private statusListeners: Array<(status: ConnectionStatus) => void> = [];
   private closeCode = 0;
   private closeReason = "";
 
-  constructor(url: string, token = "") {
+  constructor(url: string, token = "", userId = "") {
     this.url = url;
     this.token = token;
+    this.userId = userId;
   }
 
   get status(): ConnectionStatus {
@@ -129,6 +137,9 @@ export class WsClient {
     if (this.token) {
       headers.Authorization = `Bearer ${this.token}`;
     }
+    if (this.userId) {
+      headers["X-User-Id"] = this.userId;
+    }
 
     this.ws = new WebSocket(this.url, { headers });
 
@@ -154,6 +165,9 @@ export class WsClient {
       if (code === 1008) {
         this.setStatus("auth_failed");
         this.rejectAllPending(new Error(`auth failed: ${this.closeReason}`));
+        // 权威认证过期：通知 ReauthenticationPort 以 89 动作码退出（仅托管模式）。
+        // 非托管模式下该回调为 undefined，状态变更为 auth_failed 后由 UI 显示错误。
+        this.onAuthExpired?.();
         return;
       }
 

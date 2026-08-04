@@ -53,9 +53,9 @@
 | `/mode` | 模式切换（支持一级入口与直达写法） |
 | `/switch` | 在当前模式族内切换二级模式 |
 | `/skills` | 技能管理（列表、安装、卸载、市场源、ClawHub、SkillNet） |
-| `/model` | 模型查看、新增、切换（见下文） |
+| `/model` | 模型查看、新增、编辑、删除、切换（见下文） |
 | `/mcp` | MCP 服务管理（见下文） |
-| `/diff` | 查看当前会话按轮次改动（见下文） |
+| `/diff` | 交互式改动回顾：按轮次 diff + 未提交工作树改动（见下文） |
 | `/compact` | 压缩当前上下文（见下文） |
 | `/init` | 项目初始化（见下文） |
 | `/branch` | 从当前对话点创建分支会话（见下文） |
@@ -79,14 +79,15 @@
 |---|---|
 | `/workspace` 或 `/workspace get` | 查看系统默认工作空间与当前可信目录列表 |
 | `/workspace add [path]` | 添加可信目录（默认为当前目录，路径不存在时提示错误） |
-| `/workspace set <path>` | 重置可信目录为单个路径（已有可信目录时需确认） |
+| `/workspace set <path>` | 切换当前项目作用域，并把该路径加入对应项目的可信目录 |
 | `/workspace remove <path>` | 移除指定可信目录 |
 | `/workspace clear` | 清空所有可信目录（仅使用默认工作空间） |
 
 #### 概念说明
 
-- **系统默认工作空间（workspace）**：固定路径 `~/.jiuwenswarm/agent/jiuwenswarm_workspace`，始终可用
+- **系统默认工作空间（workspace）**：固定路径 `~/.jiuwenswarm/agent/workspace`，始终可用
 - **可信目录（trusted_dirs）**：用户授权的可访问目录，由 TUI 管理，传递给后端 Agent
+- **项目作用域（project scope）**：用于选择对应的可信目录集合，并填充请求中的 `project_dir` / `cwd`
 
 #### 控制逻辑
 
@@ -94,9 +95,9 @@
    - 选择「信任」：将当前目录添加为可信目录
    - 选择「不信任」：仅使用默认工作空间
 
-2. **会话级管理**：可信目录会持久化到./jiuwenswarm-tui/config.json文件里
+2. **按项目持久化**：可信目录以规范化后的项目路径为键，保存到 `~/.jiuwenswarm-tui/config.json`。`/workspace set` 对项目作用域的切换仅在当前 TUI 进程中有效；重启后重新以启动目录作为项目作用域。
 
-3. **后端传递**：TUI 通过请求参数 `trusted_dirs` 传递可信目录列表，Agent 据此限制文件操作范围
+3. **后端传递**：TUI 通过请求参数传递 `trusted_dirs`、`project_dir` 和 `cwd`，Agent 据此限制文件操作范围并解析项目上下文
 
 4. **路径限制**：Agent 收到可信目录后，文件操作需限制在可信目录范围内；超出范围需向用户确认
 
@@ -155,22 +156,45 @@
 
 > 完整快捷键与行为详见 [TUI 使用指南](TUI使用指南.md#resume-与-continue-在-tui-中的特殊行为)；自定义快捷键见 [快捷键](TUI使用指南.md#快捷键)。
 
-### `/model`（查看 / 新增 / 切换模型）
+### `/model`（查看 / 新增 / 编辑 / 删除 / 切换模型）
 
-- 用法：
-  - `/model` 或 `/model list`：列出可切换模型（含当前模型标记）；
-  - `/model <name>`：切换到指定模型；
-  - `/model add <name> key=value ...`：新增模型配置（如 `model=...`、`provider=...`、`api_base=...`、`api_key=...`）。
-- 限制：`video` / `audio` / `vision` 不能通过 `/model <name>` 设置为默认聊天模型，需改用 `/config edit` 或 `/config set`。
-- 配置写入行为：
-  - 新增模型会写入 `config.yaml` 的 `models.defaults`（兼容旧结构），并触发 Agent 配置重载；
+管理 `config.yaml` 中 `models.defaults` 下定义的模型配置。支持文本子命令与**交互式列表**两种操作方式，删除/编辑主要通过交互列表完成。
+
+- **文本用法**：
+  - `/model` 或 `/model list`：打开**交互式模型列表**（含当前模型标记），可在列表内完成切换、新增、编辑、删除；
+  - `/model <name>`：按名称直接切换到指定模型；
+  - `/model add <name> key=value ...`：以文本表单新增模型配置（如 `model_name=...`、`provider=...`、`api_base=...`、`api_key=...`、`reasoning_level=...`）。
+- **交互列表快捷键**（`/model` 或 `/model list` 打开列表后）：
+
+  | 按键 | 作用 |
+  | --- | --- |
+  | `↑` / `↓` | 上下选择模型 |
+  | `Enter` | 切换到当前选中的模型 |
+  | `a` | 打开表单**新增**模型 |
+  | `e` | 打开表单**编辑**当前选中的模型 |
+  | `d` | 对当前选中的模型进入**删除确认** |
+  | `Esc` | 关闭列表 / 取消当前操作 |
+
+- **删除流程**（`d` → 确认）：进入 `Delete model: <名称>` 确认页后——
+  - `Enter`：确认删除；后端按模型在 `models.defaults` 中的**原始下标**（`index`，即未过滤 video/audio/vision 等多模态条目前的下标）定位并移除该条目，回写 `config.yaml`，随后触发 Agent 配置重载（`AGENT_RELOAD_CONFIG`）。成功响应为 `{type: "model_deleted", name, current}`。
+  - `Esc`：取消，返回列表。
+- **编辑流程**（`e`）：复用新增表单，但 `api_key` 留空表示**保持原密钥不变**；只提交发生变化的字段。
+- **限制与校验**：
+  - `video` / `audio` / `vision` 为多模态专用键，不能通过 `/model <name>` 设置为默认聊天模型，需改用 `/config edit` 或 `/config set`；
+  - 删除会拒绝移除**最后一个**模型（返回 `Cannot delete the last model`），索引越界返回 `model index not found`；
+- **配置写入行为**：
+  - 新增 / 编辑 / 删除会改写 `config.yaml` 的 `models.defaults`（兼容旧结构），并触发 Agent 配置重载；
   - 切换模型会校验配置与环境变量占位符，更新 `MODEL_NAME` / `MODEL_PROVIDER` / `API_BASE` / `API_KEY`，并回写 `.env`。
-- 安全展示：涉及 `api_key`、`token` 等敏感字段会掩码显示。
+- **安全展示**：列表中 `api_key`、`token` 等敏感字段掩码显示；仅当存在**同名且 provider+api_base 完全相同**的模型（真正无法区分）时，才会附带显示密钥末 4 位 `[…xxxx]`。
 
 ### `/diff`（交互式改动回顾）
 
 - 用法：`/diff`（无子命令）。
-- 数据来源：TUI 通过 `command.diff` 请求 Agent 侧 diff 服务，按当前 `session_id` 返回 `turns`（每轮改动集合）及 `gitDiff`（未提交的工作树改动）。
+- 适用模式：全部模式。
+- 数据来源：TUI 通过 `command.diff` 请求 AgentServer diff 服务（60s 超时），处理器从请求元数据解析当前 `session_id` 与 `project_dir`，然后**并行**通过 worker 线程获取两组数据：
+  - `turns` — 基于 `.agent_history` 文件操作日志计算的每轮改动集合；
+  - `gitDiff` — 基于 `git diff HEAD` 获取的未提交工作树改动。
+- 响应格式：`{ type: "list", turns: [...], gitDiff?: {...} }`；出错时返回 `{ ok: false, error: "..." }`。
 - 展示方式：打开 **交互式 Diff 查看器**（全屏覆盖模式）：
   - **列表视图**：展示所有变更文件（含工作树 `working` 和按轮次 `Turn N`），显示相对路径、来源、增删行数；
   - **详情视图**：选中文件后 `Enter` 进入，展示完整的 hunk diff，支持上下滚动。
@@ -186,8 +210,44 @@
   - `Home` / `g` — 跳至文件开头；
   - `End` / `Shift+g` — 跳至文件末尾；
   - `←` / `Esc` — 返回列表视图。
-- 作用范围：同时覆盖工作树（`git diff HEAD`）和会话按轮次改动轨迹，不替代 `git diff` 的完整版本控制视角。
 - 回退行为：当 TUI 不提供 `enterDiffViewer` 能力时，回退为内联展示（仅显示文件名、来源和增删行数）。
+
+#### 按轮次 diff 数据来源
+
+按轮次 diff 基于 `.agent_history/file_ops_jiuwenswarm*.json` 日志计算，而非 git。服务从多个位置读取并合并文件操作日志：
+
+1. Agent 工作区（`~/.jiuwenswarm/agent/jiuwenswarm_workspace/.agent_history/`）
+2. 用户工作区 `.agent_history/`
+3. 项目目录 `.agent_history/`（含 session 专属文件和全局文件）
+
+条目通过路径规范化和时间戳邻近度（±1 秒）去重。轮次边界由 session history 中的用户消息定义：一个轮次从一条用户消息时间戳到下一条用户消息为止。仅返回有文件变更的轮次，空轮次被过滤。轮次编号保留原始序号（与 history 中实际用户消息计数对齐），以便 `/rewind` 正确映射。
+
+#### Git diff 数据来源
+
+工作树改动通过 `git diff HEAD`（仅已跟踪文件）获取。Git 仓库根目录从 `project_dir`（可以是子目录）解析。暂存区重命名（含 brace 简写形式 `a/{b => c}/d.txt`）会进行归一化处理，确保 numstat key 与 hunk key 对齐。
+
+#### 效果边界与限制
+
+| 边界 | 值 | 行为 |
+|---|---|---|
+| 详情最大文件数 | 50 | 仅前 50 个已跟踪文件有 hunks；统计仍覆盖所有变更文件 |
+| 单文件最大行数 | 400 | 超过 400 行的 hunk 被截断，设置 `isTruncated` 标志 |
+| 单文件最大 diff 大小 | 1 MB | diff 超过 1 MB 的文件跳过 hunk 解析，设置 `isLargeFile` 标志，统计仍计入 |
+| 详情最大文件数阈值 | 500 | 变更文件超过 500 时，仅返回汇总统计（无逐文件 hunk） |
+| Git 命令超时 | 10s | 超过 10 秒的 git 命令返回 `None` |
+| Git 根目录解析超时 | 5s | `git rev-parse --show-toplevel` 超过 5 秒返回 `None` |
+
+#### 不覆盖的范围
+
+- **未跟踪文件**：`git diff HEAD` 仅覆盖已跟踪文件的修改。未跟踪文件不在 git diff 部分中显示。（由 agent 编辑过的未跟踪文件可能通过 file_ops 日志出现在按轮次 diff 中。）
+- **手动/bash 编辑**：按轮次 diff 来源于 agent 的 `.agent_history` 文件操作日志。手动或通过 bash 命令编辑的文件不在按轮次 diff 中追踪。
+- **已提交的改动**：仅显示未提交的工作树改动，已提交的历史不覆盖。
+- **瞬态 git 状态**：在 merge、rebase、cherry-pick、revert 期间，git diff 返回 `None`，避免显示误导性的 incoming 改动。
+- **二进制文件**：二进制文件变更计入统计但不展示 hunks（设置 `isBinary` 标志）。
+- **非 git 仓库**：`project_dir` 不在 git 仓库中时，`gitDiff` 为 `None`，仅返回按轮次 diff。
+- **无 project_dir**：无法解析 `project_dir` 时，`gitDiff` 为 `None`，按轮次 diff 仍可通过 session metadata 工作。
+
+> `/diff` 并非 `git diff` 的完整版本控制替代方案。它将 agent 追踪的按轮次变更与未提交已跟踪文件的快照结合，用于在编码会话内快速回顾改动。
 
 ### `/compact`（上下文压缩）
 
@@ -313,7 +373,7 @@
   - 当前会话正在处理中（`session is busy`）时拒绝执行；
   - 当前会话无对话记录时拒绝执行。
 - 行为：
-  1. 生成新 `session_id`，向后端发送 `session.fork` RPC（携带 `source_session_id`、`target_session_id` 与可选标题）。
+  1. 向后端发送 `session.fork` RPC，只携带 `source_session_id` 与可选标题；AgentServer 分配目标 `session_id` 并在响应中返回。
   2. TUI 自动切换到新分支会话，清空当前 transcript 并恢复分支的历史记录。
   3. 提示用户已在新分支，并告知可用 `/resume <原会话ID>` 返回原会话。
 - 示例：
@@ -324,7 +384,7 @@
 
 - 用法：`/rewind [turn_number]`。
 - 别名：`/checkpoint`。
-- 功能：将当前会话回退到指定轮次之前，支持仅回退对话、仅恢复文件、或两者同时恢复。
+- 功能：围绕指定轮次回退或压缩当前会话，支持仅回退对话、仅恢复文件、两者同时恢复，或摘要部分历史。
 - 约束：
   - 当前会话正在处理中（`session is busy`）时拒绝执行；
   - 无对话轮次时拒绝执行。
@@ -334,12 +394,17 @@
      - **Restore conversation and code** — 截断对话并恢复文件到该轮次之前的状态；
      - **Restore conversation only** — 仅截断对话，文件保持不变；
      - **Restore code only** — 仅恢复文件，对话保持不变（仅当目标轮次有文件变更时显示）；
+     - **Summarize from here** — 保留更早的消息，把所选轮次及之后的内容替换为压缩摘要；
+     - **Summarize up to here** — 摘要所选轮次之前的消息，保留所选轮次及之后的内容；
      - **Cancel** — 取消操作。
   3. 根据选择调用对应后端 RPC：
      - `both` → `session.rewind_and_restore`
      - `conversation` → `session.rewind`
      - `code` → `session.restore_files`
+     - `summarize` → `command.rewind_compact`，`direction=from`
+     - `summarize_up_to` → `command.rewind_compact`，`direction=up_to`
 - 回退后：TUI 清空 transcript 并重新加载历史；若回退内容包含用户输入，会自动填入输入框。
+- 仅恢复文件时，如果没有需要还原的文件，会明确显示 `No file changes to restore`；若部分文件恢复失败，会逐项列出失败文件并保持这些文件不变，不再统一报告为成功。
 - 局限：回退不影响通过 bash 命令或手动编辑的文件。
 - 示例：
   - `/rewind` — 交互式选择轮次并确认恢复方式
@@ -360,6 +425,11 @@
 | `/memory toggle` | 打开页签控制台并选中 toggle 页签 |
 | `/memory toggle <key>` | 直接切换指定记忆系统开关 |
 | `/memory open` | 打开页签控制台并选中 open 页签 |
+
+- 编辑安全边界：
+  - 目标文件必须已经存在并位于允许的记忆目录中；`/memory edit` 不负责新建文件。
+  - 运行时 auto/coding memory 文件为只读，禁止手动编辑。
+  - 项目目录或其祖先目录中的 `JIUWENSWARM.md` / `JIUWENSWARM.local.md` 只有在文件已存在且通过路径校验时才能打开。
 
 - 页签控制台：无参数或仅指定子命令（不带操作对象）时打开，包含 edit / status / toggle / open 四个页签。
   - ←/→ 切换页签；
@@ -427,7 +497,7 @@
 | `timezone` | 否 | IANA 时区，默认 `Asia/Shanghai` |
 | `mode` | 否 | 执行模式，默认 `agent.fast`。可选：`agent`、`agent.fast`、`agent.plan`、`plan`、`team`、`team.plan`、`code.team`。`team` 系列走多 Agent 流式执行，详见 [定时任务 — Team 模式](定时任务.md#6-team-模式与-swarmflow多智能体定时任务) |
 | `timeout_seconds` | 否 | 单次执行超时（秒），范围 60～259200。未设置时普通模式默认 600，Team 模式默认 1200 |
-| `wake_offset_seconds` | 否 | 提前唤醒秒数，默认 300 |
+| `wake_offset_seconds` | 否 | 提前唤醒秒数，默认 0 |
 | `delete_after_run` | 否 | 执行一次后自动删除，默认 false |
 
 - `add` 示例：
@@ -647,7 +717,7 @@
 - **平台限制**：`/sandbox` 仅支持 Linux 平台（jiuwenbox 依赖 bwrap / Landlock / Linux namespace 等内核能力）。 在 Windows / macOS 上运行的 agent-server 收到任何 `/sandbox` 子命令都会返回 `SANDBOX_BAD_REQUEST` 错误；如果 TUI 在 Mac/Windows 上、agent-server 在 Linux 主机上，是支持的（看 agent-server 所在主机的平台）。
 - **写入策略语义**：`allow` / `deny` 控制的是沙箱内的**写访问**（rw/ro），不是 Unix 八进制权限；enforcement 由 bwrap bind mount + `--remount-ro` 实现，Landlock 为纵深防御（`landlock.compatibility=disabled` 时主要依赖 bwrap）。
 - **嵌套路径**：支持「父 allow + 子 deny」（例如 allow `/tmp`、deny `/tmp/secret`）；不支持「子 allow + 父 deny」（父 deny 会覆盖子 allow），服务端会拒绝此类配置。
-- **生效写入策略**：状态面板里的 `files.allow_write` / `files.deny_write` 是 auto-managed 与 user-configured 合并后的视图，每条路径显示 `(rw)` 或 `(ro)`。auto-managed 条目由服务端自动注入（intrinsic 文件 `AGENT.md`、`HEARTBEAT.md`、`IDENTITY.md`、`SOUL.md`、`USER.md`，`memory/daily_memory/` 目录，以及按 mode 决定的 `project_dir` 与 `config/config.yaml`），不能通过 `/sandbox files remove` 移除。
+- **生效写入策略**：状态面板里的 `files.allow_write` / `files.deny_write` 是 auto-managed 与 user-configured 合并后的视图，每条路径显示 `(rw)` 或 `(ro)`。
 - **preserve_file_sharing_mode**：由 jiuwenswarm 配置决定，不通过 `/sandbox` 切换。仅支持 `mount`：intrinsic 文件与 `project_dir` 通过 bind mount 注入沙箱，`project_dir/config/config.yaml` 会显式加进 `deny_write`；yaml 里写入其它值会被服务端拒绝。
 - **excluded_commands**：按完整命令字符串匹配（不是只看 `argv[0]`），命中后该次调用穿透到本地，相当于把对应命令的副作用授权给本地环境。
 - **add / remove 的去重与冲突**：`exclude add` 在已存在同名 pattern 时报错；`exclude remove` 在不存在该 pattern 时报错。`files allow|deny` 在同一 bucket 已有同 path 时报错，在对侧 bucket（allow vs deny）已登记同 path 时也报错，需要先 `files remove` 再 add；`files remove` 在用户配置里找不到该 path 时报错。
@@ -941,14 +1011,17 @@ hooks:
 |---|---|
 | `/statusline` 或 `/statusline get` | 查看当前状态栏配置 |
 | `/statusline set <shell-command>` | 设置状态栏命令（命令输出将显示在 TUI 底部） |
+| `/statusline padding <number>` | 设置左右 padding；参数必须为非负整数，且需要先配置状态栏命令 |
 | `/statusline clear` | 清除状态栏配置（底部栏将不再显示） |
 | `/statusline help` | 显示使用指南（含写法模式、实用示例、字段列表） |
 | `/statusline json` | 显示当前实际的 JSON 数据值（方便调试 jq 表达式） |
+| `/statusline <prompt>` | 根据自然语言描述让 Agent 自动生成并配置状态栏脚本 |
 
 #### 概念说明
 
 - **状态栏（StatusLine）**：TUI 底部的文字区域，实时显示用户自定义的动态信息，支持多行输出。配置了自定义状态栏后，内置状态栏会自动隐藏，避免信息冗余。
 - **Shell 命令**：用户配置的 shell 命令每 2 秒自动执行一次，其 stdout 输出渲染为状态栏文字。
+- **Agent 自动生成模式**：非空参数若不是已知子命令（`set`、`padding`、`clear`、`help`、`json`、`get`），TUI 会将其交给 Agent，并使用 `script-creator` skill 生成配置。例如：`/statusline 显示模式、模型和剩余上下文`。无参数 `/statusline` 仍然只查看当前配置。
 - **JSON 输入**：每次执行时，系统将当前会话信息以 JSON 格式传入命令，用户可在命令中用 `jq` 等工具解析。POSIX（Linux/macOS）通过 stdin 管道传入；Windows 上因 MSYS2 管道继承限制，系统自动将 JSON 写入临时文件，并将命令中的 `$(cat)` 替换为 `$(cat "文件路径")`，用户无需修改命令格式。
 - **前置依赖**：需要 `jq`（https://stedolan.github.io/jq/）用于解析 JSON；Windows 用户还需将 Git Bash 的 `usr\bin` 目录加入系统 PATH（如 `E:\Git\usr\bin`）。
 

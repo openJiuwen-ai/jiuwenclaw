@@ -126,3 +126,85 @@ async def test_resolve_member_by_user_skips_godview():
     assert reg.resolve_member_by_user("feishu", "default", "ou_user1", chat_id="oc_group1") is None
     # 无 chat_id 兜底也不命中
     assert reg.resolve_member_by_user("feishu", "default", "ou_user1") is None
+
+
+# ---------- Fix 3: lookup_by_identity（/exit team_name 一致性校验的基础） ----------
+#
+# /exit 带完整 session_ref 时，handler 用 lookup_by_identity 按
+# (channel+app+user+session[+member]) 反查真实订阅，读 agent_ref.id 校验
+# team_name。命中范围须与 unregister_all_for_identity 一致、跳过 GodView。
+
+
+def _rk_team(channel_id: str, user_id: str, session_id: str, team_name: str) -> RoutingKey:
+    """带指定 team_name 的 RoutingKey，用于 /exit team_name 校验测试。"""
+    return RoutingKey(
+        user_id=user_id,
+        channel_id=channel_id,
+        app_id="default",
+        agent_ref=AgentRef("team", team_name),
+        session_id=session_id,
+    )
+
+
+async def _register_team(
+    reg: SessionSharingRegistry, session_id: str, member_name: str,
+    channel_id: str, user_id: str, chat_id: str, team_name: str,
+) -> None:
+    rk = _rk_team(channel_id, user_id, session_id, team_name)
+    dt = make_delivery_target(channel_id, chat_id=chat_id, physical_user_id=user_id)
+    await reg.register(session_id, member_name, rk, dt)
+
+
+@pytest.mark.asyncio
+async def test_lookup_by_identity_finds_held_subscription_with_team_name():
+    """/exit 校验基础：反查命中该用户在该 session 的真实订阅，可读 agent_ref.id。"""
+    reg = SessionSharingRegistry()
+    await _register_team(
+        reg, "sess-1", "reviewer-1", "feishu", "ou_user1", "oc_group1",
+        team_name="jiwen-team_sess-1",
+    )
+
+    held = reg.lookup_by_identity("feishu", "default", "ou_user1", session_id="sess-1")
+    assert len(held) == 1
+    sub = held[0]
+    assert sub.member_name == "reviewer-1"
+    assert sub.routing_key.agent_ref.mode == "team"
+    assert sub.routing_key.agent_ref.id == "jiwen-team_sess-1"  # 校验 team_name 用
+
+
+@pytest.mark.asyncio
+async def test_lookup_by_identity_skips_godview():
+    """GodView 订阅不参与 /exit 校验反查（与 unregister/resolve 语义一致）。"""
+    reg = SessionSharingRegistry()
+    await _register_team(
+        reg, "sess-1", SubRole.GODVIEW, "feishu", "ou_user1", "oc_group1",
+        team_name="jiwen-team_sess-1",
+    )
+    assert reg.lookup_by_identity("feishu", "default", "ou_user1", session_id="sess-1") == []
+
+
+@pytest.mark.asyncio
+async def test_lookup_by_identity_member_filter_and_wrong_user_miss():
+    """指定 member_name 时只命中该 member；身份不符时返回空（→ /exit 报"未加入"）。"""
+    reg = SessionSharingRegistry()
+    await _register_team(
+        reg, "sess-1", "reviewer-1", "feishu", "ou_user1", "oc_group1",
+        team_name="jiwen-team_sess-1",
+    )
+    await _register_team(
+        reg, "sess-1", "reviewer-2", "feishu", "ou_user2", "oc_group2",
+        team_name="jiwen-team_sess-1",
+    )
+    # 指定 member=reviewer-1：只命中 ou_user1 那条
+    held = reg.lookup_by_identity(
+        "feishu", "default", "ou_user1", session_id="sess-1", member_name="reviewer-1",
+    )
+    assert len(held) == 1 and held[0].member_name == "reviewer-1"
+    # member 名输错（reviewer-99）：不命中 → /exit 报 member 未加入
+    assert reg.lookup_by_identity(
+        "feishu", "default", "ou_user1", session_id="sess-1", member_name="reviewer-99",
+    ) == []
+    # 用户身份不符：不命中
+    assert reg.lookup_by_identity(
+        "feishu", "default", "ou_nobody", session_id="sess-1",
+    ) == []

@@ -5,7 +5,7 @@ source: jiuwenswarm/server/agent_ws_server.py
 source_role: runtime_source
 audit_scope: default_health_audit
 class: AgentWebSocketServer
-signature: "_handle_command_workflows(ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None"
+signature: "_handle_command_workflows(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None"
 health:
   overall: risky
   name_behavior_match: good
@@ -15,7 +15,7 @@ health:
   implementation_soundness: partial
   boundary_safety: risky
   input_contract: weak
-  output_contract: clear
+  output_contract: partial
   side_effects: explicit
   error_handling: partial
   state_mutation: global
@@ -24,11 +24,12 @@ health:
   observability: clear
   performance_risk: medium
 audit:
-  status: unaudited
-  auditor: null
-  audited_at: null
-  audited_commit: null
-  audited_source_hash: null
+  status: agent_audited
+  auditor: codex
+  audited_at: 2026-07-14T11:38:12Z
+  audited_commit: 39feee89e00dc6b0b6a6b16ca80a527beb631bd7
+  audited_source_hash: sha256:5fbbae5104a1791ca98014aeed0b81fea243b57dcd2faac3f8f37886833c4fa5
+  audited_symbol_hash: sha256:59273fdda666022d999100624ea0ec6c5467dceec3779fd7d1df394951e1a019
   confidence: confirmed
   expired_reason: null
 issues:
@@ -37,40 +38,38 @@ issues:
     severity: high
     status: open
     summary: "session_id is not validated before checkpoint metadata restore."
-    evidence: "The handler uses request.session_id or empty string, then restore_workflow_runs(session_id); restore reads get_agent_sessions_dir() / session_id / metadata.json."
-    suggested_action: "Validate session_id as a safe session identifier before fallback restore, or use a metadata accessor that enforces containment."
+    evidence: "At HEAD 39feee89, request.session_id is reduced only to request.session_id or an empty string, then. See AgentWebSocketServer._handle_command_workflows/risks.md#issue-001."
+    suggested_action: "Validate session_id as a safe session identifier before fallback restore, or use a metadata accessor that enforces."
   - id: ISSUE-002
     dimension: error_handling
     severity: medium
     status: open
     summary: "Snapshot and restore failures are reported as successful empty snapshots."
-    evidence: "Both restore exceptions and live get_workflow_snapshot exceptions log a warning and send ok=true with an empty workflow_run_snapshot."
-    suggested_action: "Return diagnostic metadata or ok=false for backend failures while preserving empty snapshots for real no-data cases."
+    evidence: "At HEAD 39feee89, checkpoint restore exceptions and live get_workflow_snapshot/serialization exceptions. See AgentWebSocketServer._handle_command_workflows/risks.md#issue-002."
+    suggested_action: "Use the persisted snapshot after live-read failure when safe, and otherwise return diagnostic metadata or ok=false."
   - id: ISSUE-003
     dimension: test_coverage
     severity: medium
     status: open
     summary: "Fallback and dispatch behavior are not fully tested."
-    evidence: "Tests call the handler directly and do not assert restored workflow runs, restore failure behavior, or real dispatch routing."
-    suggested_action: "Add tests for dispatcher routing, checkpoint restore success, restore exception, and unsafe or invalid session_id handling."
-confidence: confirmed
-details: {}
+    evidence: "Nine direct tests cover empty/live snapshots, size bounds, live-handler failure, and defaults; none. See AgentWebSocketServer._handle_command_workflows/risks.md#issue-003."
+    suggested_action: "Add tests for dispatcher routing, checkpoint restore success, restore exception, and unsafe or invalid session_id."
+  - id: ISSUE-004
+    dimension: performance_risk
+    severity: medium
+    status: open
+    summary: "Checkpoint fallback performs synchronous restore work in the async request path."
+    evidence: "At HEAD 39feee89, restore_workflow_runs(session_id) is called synchronously inside the async WebSocket. See AgentWebSocketServer._handle_command_workflows/risks.md#issue-004."
+    suggested_action: "Move checkpoint loading to an async storage boundary or a worker thread, with a bounded timeout."
 ---
 
-# `AgentWebSocketServer._handle_command_workflows`
+# AgentWebSocketServer._handle_command_workflows
 
 ## Actual Role
 
-Handles `command.workflows` by returning a `workflow_run_snapshot` from a live workflow handler when present, or from persisted workflow-run metadata after the handler is gone. It always sends one encoded response under the send lock and currently degrades backend errors to an empty successful snapshot.
+The reviewed behavior, contracts, side effects, callers, callees, tests, and documentation evidence are preserved in the linked detail pages.
 
-## Key Signals
+## Audit Details
 
-- Input: `request.session_id`, `channel_id`, and request id after COMMAND_WORKFLOWS routing.
-- Output: `ok: true` AgentResponse with `{type, workflows, session_id, total, truncated}`.
-- Main side effects: Logs request/result/failures, may create a TeamManager, reads metadata on fallback, and sends one websocket frame.
-- Main risk: Unvalidated session id reaches checkpoint restore and failures look like valid empty snapshots.
-- Related tests: Direct handler tests cover live snapshots, size limits, defaults, and handler exception; restore and real dispatch tests are missing.
-
-## Detail Index
-
-- Detail docs pending.
+- [Reviewed behavior](AgentWebSocketServer._handle_command_workflows/actual-behavior.md)
+- [Full issue evidence](AgentWebSocketServer._handle_command_workflows/risks.md)

@@ -22,8 +22,8 @@ class TestFileTransfer:
         return random.randbytes(size_mb * 1024 * 1024)
 
     @staticmethod
-    def _calculate_md5(data: bytes) -> str:
-        return hashlib.md5(data).hexdigest()
+    def _calculate_sha256(data: bytes) -> str:
+        return hashlib.sha256(data).hexdigest()
 
     @staticmethod
     def test_ft_001_file_transfer_1m(client, wait_for_sandbox_ready):
@@ -33,7 +33,7 @@ class TestFileTransfer:
         wait_for_sandbox_ready(sandbox_id)
 
         file_data = TestFileTransfer._generate_test_data(1)
-        original_md5 = TestFileTransfer._calculate_md5(file_data)
+        original_hash = TestFileTransfer._calculate_sha256(file_data)
 
         upload_start = time.time()
         resp = client.post(
@@ -48,14 +48,14 @@ class TestFileTransfer:
 
         resp = client.post(
             f"/api/v1/sandboxes/{sandbox_id}/exec",
-            json={"command": ["md5sum", "/tmp/test_1m.bin"], "timeout_seconds": 10},
+            json={"command": ["sha256sum", "/tmp/test_1m.bin"], "timeout_seconds": 10},
         )
         assert resp.status_code == 200
         output = (resp.json().get("stdout") or "").strip()
         parts = output.split()
-        assert parts, "md5sum returned empty output"
-        downloaded_md5 = parts[0]
-        assert downloaded_md5 == original_md5
+        assert parts, "sha256sum returned empty output"
+        downloaded_hash = parts[0]
+        assert downloaded_hash == original_hash
 
     @staticmethod
     def test_ft_002_file_transfer_10m(client, wait_for_sandbox_ready):
@@ -65,7 +65,7 @@ class TestFileTransfer:
         wait_for_sandbox_ready(sandbox_id)
 
         file_data = TestFileTransfer._generate_test_data(10)
-        original_md5 = TestFileTransfer._calculate_md5(file_data)
+        original_hash = TestFileTransfer._calculate_sha256(file_data)
 
         upload_start = time.time()
         resp = client.post(
@@ -80,14 +80,14 @@ class TestFileTransfer:
 
         resp = client.post(
             f"/api/v1/sandboxes/{sandbox_id}/exec",
-            json={"command": ["md5sum", "/tmp/test_10m.bin"], "timeout_seconds": 10},
+            json={"command": ["sha256sum", "/tmp/test_10m.bin"], "timeout_seconds": 10},
         )
         assert resp.status_code == 200
         output = (resp.json().get("stdout") or "").strip()
         parts = output.split()
-        assert parts, "md5sum returned empty output"
-        downloaded_md5 = parts[0]
-        assert downloaded_md5 == original_md5
+        assert parts, "sha256sum returned empty output"
+        downloaded_hash = parts[0]
+        assert downloaded_hash == original_hash
 
     @staticmethod
     def test_ft_003_file_transfer_50m(client, wait_for_sandbox_ready):
@@ -97,7 +97,7 @@ class TestFileTransfer:
         wait_for_sandbox_ready(sandbox_id)
 
         file_data = TestFileTransfer._generate_test_data(50)
-        original_md5 = TestFileTransfer._calculate_md5(file_data)
+        original_hash = TestFileTransfer._calculate_sha256(file_data)
 
         upload_start = time.time()
         resp = client.post(
@@ -112,11 +112,11 @@ class TestFileTransfer:
 
         resp = client.post(
             f"/api/v1/sandboxes/{sandbox_id}/exec",
-            json={"command": ["md5sum", "/tmp/test_50m.bin"], "timeout_seconds": 10},
+            json={"command": ["sha256sum", "/tmp/test_50m.bin"], "timeout_seconds": 10},
         )
         assert resp.status_code == 200
         output = (resp.json().get("stdout") or "").strip()
         parts = output.split()
-        assert parts, "md5sum returned empty output"
-        downloaded_md5 = parts[0]
-        assert downloaded_md5 == original_md5
+        assert parts, "sha256sum returned empty output"
+        downloaded_hash = parts[0]
+        assert downloaded_hash == original_hash

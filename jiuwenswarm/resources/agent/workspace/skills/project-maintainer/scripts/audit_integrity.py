@@ -16,6 +16,8 @@ import subprocess
 import sys
 from typing import Any
 
+from symbol_fingerprints import normalize_hash, symbol_fingerprint
+
 
 ALLOWED_AUDIT_STATUSES = (
     "unaudited",
@@ -352,6 +354,7 @@ def promote(args: argparse.Namespace) -> int:
     signed_at = utc_now()
     agent_batch = normalize_signature_batch(resolve_repo_path(root, args.agent_call_signature_json)) if args.agent_call_signature_json else None
     source_hash = file_hash(source_file)
+    current_symbol_hash, symbol_hash_mode = symbol_fingerprint(source_file, record)
     entry_hash = file_hash(entry_doc)
     current_script_hash = script_hash()
     current_head = git_head(root)
@@ -363,6 +366,7 @@ def promote(args: argparse.Namespace) -> int:
     audit["audited_at"] = signed_at
     audit["audited_commit"] = current_head
     audit["audited_source_hash"] = source_hash
+    audit["audited_symbol_hash"] = current_symbol_hash
     audit["confidence"] = audit.get("confidence") or "unknown"
     audit["expired_reason"] = None
     if agent_batch:
@@ -383,6 +387,8 @@ def promote(args: argparse.Namespace) -> int:
         "script_hash": current_script_hash,
         "canonicalization": CANONICALIZATION,
         "source_hash": source_hash,
+        "symbol_hash": current_symbol_hash,
+        "symbol_hash_mode": symbol_hash_mode,
         "entry_doc_hash": entry_hash,
         "entry_doc": entry_doc_relative(root, entry_doc),
         "audit_map_hash_before": audit_map_hash_before,
@@ -461,9 +467,16 @@ def verify_agent_record(
         codes.append("untrusted_script_hash")
         invalid = True
     source_path = root / str(record.get("source") or "")
-    if source_path.exists() and file_hash(source_path) != integrity.get("source_hash"):
-        codes.append("source_hash_changed")
-        stale = True
+    if source_path.exists():
+        expected_symbol_hash = normalize_hash(integrity.get("symbol_hash"))
+        if expected_symbol_hash:
+            current_symbol_hash, _ = symbol_fingerprint(source_path, record)
+            if normalize_hash(current_symbol_hash) != expected_symbol_hash:
+                codes.append("symbol_hash_changed")
+                stale = True
+        elif normalize_hash(file_hash(source_path)) != normalize_hash(integrity.get("source_hash")):
+            codes.append("source_hash_changed")
+            stale = True
     entry_doc = entry_doc_for_record(root, record)
     if entry_doc and entry_doc.exists() and file_hash(entry_doc) != integrity.get("entry_doc_hash"):
         codes.append("entry_doc_hash_changed")
@@ -541,7 +554,9 @@ def verify_or_report(args: argparse.Namespace, *, verify_mode: bool) -> int:
             )
             trust_counts[trust_result] += 1
             invalid_seen = invalid_seen or "integrity_mismatch" in codes or "unsigned_agent_audit" in codes
-            stale_seen = stale_seen or "source_hash_changed" in codes or "entry_doc_hash_changed" in codes
+            stale_seen = stale_seen or any(
+                code in codes for code in ("symbol_hash_changed", "source_hash_changed", "entry_doc_hash_changed")
+            )
             suspicious_seen = suspicious_seen or "suspicious_batch_signature_reuse" in codes
         elif status == "script_assessed":
             codes.append("script_assessed_only")
@@ -623,7 +638,11 @@ def verify_or_report(args: argparse.Namespace, *, verify_mode: bool) -> int:
 def recommended_action(result_counts: dict[str, int], pending: int) -> str:
     if result_counts.get("integrity_mismatch") or result_counts.get("unsigned_agent_audit"):
         return "Rerun affected agent audits through promote with the correct signing key and controlled entrypoint."
-    if result_counts.get("source_hash_changed") or result_counts.get("entry_doc_hash_changed"):
+    if (
+        result_counts.get("symbol_hash_changed")
+        or result_counts.get("source_hash_changed")
+        or result_counts.get("entry_doc_hash_changed")
+    ):
         return "Expire stale audits through the controlled entrypoint and rerun review for changed records."
     if result_counts.get("suspicious_batch_signature_reuse"):
         return "Review reused batch signatures and rerun per-action promotions before treating agent audits as trusted."

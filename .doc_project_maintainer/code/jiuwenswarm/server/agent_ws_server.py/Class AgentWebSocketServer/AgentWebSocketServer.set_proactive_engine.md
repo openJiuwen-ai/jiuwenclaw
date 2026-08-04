@@ -17,7 +17,7 @@ health:
   input_contract: implicit
   output_contract: clear
   side_effects: explicit
-  error_handling: partial
+  error_handling: clear
   state_mutation: isolated
   dependency_coupling: medium
   test_coverage: partial
@@ -44,8 +44,8 @@ issues:
     severity: low
     status: open
     summary: "Server-level proactive engine injection and proactive.tick dispatch lack direct tests."
-    evidence: "ProactiveEngine behavior is tested directly, but no test was found for set_proactive_engine, init_proactive_engine, _handle_proactive_tick, or proactive.tick routing."
-    suggested_action: "Add a small fake-engine handler test covering assignment and proactive.tick success/failure responses."
+    evidence: "tests/unit_tests/agentserver/test_agent_reload_scope.py verifies reload_config through a MagicMock assigned directly to server._proactive_engine, and tests/symphony/test_proactive_recommendation_flow.py exercises ProactiveEngine.tick_now directly; no test was found that calls set_proactive_engine, init_proactive_engine, or AgentWebSocketServer._handle_proactive_tick."
+    suggested_action: "Add a fake-engine test that injects through set_proactive_engine and covers proactive.tick success, missing-engine, and incompatible-engine responses."
 confidence: confirmed
 details: {}
 ---
@@ -54,7 +54,7 @@ details: {}
 
 ## Actual Role
 
-Stores a proactive recommendation engine instance on the server, replacing the constructor's default `None`. It does not initialize, validate, start, or wrap the engine; later server handlers use the stored object for `proactive.tick` and hot reload behavior.
+Stores a proactive recommendation engine instance on the server, replacing the constructor's default `None`; the startup adapter calls it only after constructing the engine and installing its callbacks. The setter does not initialize, validate, start, or wrap the object, while later tick and configuration-reload handlers expect `tick_now`, `last_tick_at`, `reload_config`, and `rebuild_proactive_agent`.
 
 ## Key Signals
 
@@ -62,7 +62,7 @@ Stores a proactive recommendation engine instance on the server, replacing the c
 - Output: None.
 - Main side effects: Updates `self._proactive_engine`.
 - Main risk: A bad injected object fails later in tick or reload handlers because the setter does not enforce the expected engine surface.
-- Related tests: `tests/symphony/test_proactive_recommendation_flow.py` covers the engine directly; server injection and `proactive.tick` handler tests are pending.
+- Related tests: `tests/unit_tests/agentserver/test_agent_reload_scope.py` indirectly covers the stored engine's reload use but bypasses this setter; `tests/symphony/test_proactive_recommendation_flow.py` covers the engine directly. Injection and `proactive.tick` handler tests are pending.
 
 ## Detail Index
 

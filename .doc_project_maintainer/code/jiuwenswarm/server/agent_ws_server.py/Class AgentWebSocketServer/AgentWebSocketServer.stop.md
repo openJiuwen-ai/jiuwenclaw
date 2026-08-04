@@ -37,7 +37,7 @@ issues:
     severity: medium
     status: open
     summary: "WebSocket close or wait failures can skip JiuwenBox cleanup."
-    evidence: "server.close() and await server.wait_closed() run before self._server is cleared and before the best-effort _jiuwenbox_runner.stop() block."
+    evidence: "server.close() and await server.wait_closed() run before self._server is cleared and before the best-effort _jiuwenbox_runner.stop() block. An exception or cancellation in either listener step bypasses runner cleanup and the final stopped log."
     suggested_action: "Use finally-style cleanup so runner shutdown is attempted even when close() or wait_closed() raises."
   - id: ISSUE-002
     dimension: boundary_safety
@@ -45,14 +45,21 @@ issues:
     status: open
     summary: "The no-op branch skips JiuwenBox runner cleanup when _server is None."
     evidence: "stop() returns immediately if self._server is None, before checking whether the shared JiuwenBox runner needs cleanup."
-    suggested_action: "Stop the runner independently where appropriate, or document that this method only cleans the runner after successful listener startup."
+    suggested_action: "Stop the runner independently, or document that cleanup requires a bound listener."
   - id: ISSUE-003
     dimension: test_coverage
     severity: medium
     status: open
     summary: "Missing direct lifecycle tests for stop cleanup and failure paths."
-    evidence: "Existing app-level tests use a fake server start/stop path; no direct tests were found for close/wait, idempotent no-op, runner stop calls, runner stop exception logging, or server close failure cleanup."
-    suggested_action: "Add focused async lifecycle tests with fake server and runner objects covering normal, no-op, runner failure, and server close failure cases."
+    evidence: "App-level tests use a fake start/stop; no direct test covers close/wait, no-op, runner calls or failures, or listener-close failure cleanup."
+    suggested_action: "Add async lifecycle tests with fake listener and runner objects for normal, no-op, and failure paths."
+  - id: ISSUE-004
+    dimension: performance_risk
+    severity: medium
+    status: open
+    summary: "Listener shutdown has no method-level deadline for connection cleanup."
+    evidence: "stop() awaits wait_closed() without a timeout. Connection handlers await inflight cancellation, scheduler stop, team cancellation, and task gathering before completing, so stuck cleanup can delay this method indefinitely."
+    suggested_action: "Apply an explicit shutdown deadline with diagnostics for unfinished cleanup, while preserving a controlled fallback for remaining tasks."
 confidence: confirmed
 details: {}
 ---
@@ -61,14 +68,14 @@ details: {}
 
 ## Actual Role
 
-Stops the bound WebSocket server when `self._server` is present, waits for listener shutdown, clears the server reference, then best-effort stops the shared JiuwenBox runner and logs shutdown. If no server is present, it returns without additional cleanup.
+With `_server` present, closes the listener, awaits server and connection-handler termination, clears the reference, then best-effort stops JiuwenBox and logs completion. Scheduler and request-task cleanup occur indirectly in connection-handler `finally` blocks. With no server, it returns without cleanup.
 
 ## Key Signals
 
 - Input: Implicit runtime state in `self._server` and `self._jiuwenbox_runner`.
 - Output: None.
 - Main side effects: Closes the WebSocket listener, mutates `self._server`, may stop the JiuwenBox subprocess runner, and writes logs.
-- Main risk: Cleanup is gated by `_server is None`, and WebSocket close failures can prevent JiuwenBox cleanup from running.
+- Main risk: Cleanup is gated by `_server is None`; listener close failure or cancellation skips JiuwenBox cleanup, while unbounded downstream connection cleanup can delay return.
 - Related tests: No direct `AgentWebSocketServer.stop` lifecycle tests were found; current app-level tests use fake or mocked server instances.
 
 ## Detail Index

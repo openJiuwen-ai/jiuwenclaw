@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -20,52 +20,6 @@ class ArtifactRef:
 
     def to_dict(self) -> dict[str, Any]:
         return {"name": self.name, "type": self.type, "source": self.source}
-
-
-@dataclass(frozen=True)
-class InferredInput:
-    """A skill input value inferred from the user request."""
-
-    skill_id: str
-    name: str
-    type: str = "unknown"
-    value: Any = None
-    source: str = "llm_grounding"
-
-    @property
-    def key(self) -> tuple[str, str, str]:
-        return (self.skill_id, self.name, self.type)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "skill_id": self.skill_id,
-            "name": self.name,
-            "type": self.type,
-            "value": self.value,
-            "source": self.source,
-        }
-
-
-@dataclass(frozen=True)
-class GroundedQuery:
-    """User query grounded into known artifacts and seed Skills."""
-
-    query: str
-    available_artifacts: list[ArtifactRef]
-    inferred_inputs: list[InferredInput] = field(default_factory=list)
-    seed_skill_ids: tuple[str, ...] = ()
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "query": self.query,
-            "available_artifacts": [
-                artifact.to_dict() for artifact in self.available_artifacts
-            ],
-            "inferred_inputs": [
-                inferred_input.to_dict() for inferred_input in self.inferred_inputs
-            ],
-            "seed_skill_ids": list(self.seed_skill_ids),
-        }
 
 
 @dataclass(frozen=True)
@@ -128,25 +82,10 @@ class OrchestrationPlan:
         }
 
 
-class GroundingClient(Protocol):
-    """Minimal JSON completion interface used by Skill orchestration."""
-
-    async def complete_json_async(
-        self,
-        *,
-        system_prompt: str,
-        user_content: str,
-        timeout: int | None = None,
-        error_context: str = "LLM",
-    ) -> str:
-        ...
-
-
 @dataclass(frozen=True)
 class SearchState:
     """Internal forward-search state."""
 
     skill_ids: tuple[str, ...]
-    available: frozenset[tuple[str, str]]
     edges: tuple[int, ...]
     score_reasons: tuple[str, ...] = ()

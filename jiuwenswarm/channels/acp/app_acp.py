@@ -76,7 +76,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def run_acp(args: argparse.Namespace) -> int:
     prompt = " ".join(list(args.args or [])).strip()
     if not prompt:
-        logger.warning("acp prompt is required", file=sys.stderr)
+        logger.warning("acp prompt is required")
         return 2
 
     request_id = f"acp_cli_{uuid.uuid4().hex[:12]}"

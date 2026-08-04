@@ -1,22 +1,19 @@
 {
   "calls": [
     {
-      "tool_name": "multi_agent_v1.spawn_agent",
+      "tool_name": "collaboration.followup_task",
       "raw_input": {
-        "agent_id": "019f4003-78be-7df0-a53e-32be4889416a",
-        "agent_type": "explorer",
+        "target": "/root/reaudit_proactive",
         "symbol_id": "AgentWebSocketServer._find_team_session_ids",
-        "assignment": "Audit exactly one symbol: AgentWebSocketServer._find_team_session_ids in jiuwenswarm/server/agent_ws_server.py."
+        "assignment": "Re-audit exactly one expired symbol against current source."
       }
     },
     {
-      "tool_name": "multi_agent_v1.wait_agent",
+      "tool_name": "collaboration.wait_agent",
       "raw_input": {
-        "agent_id": "019f4003-78be-7df0-a53e-32be4889416a",
-        "nickname": "Parfit",
+        "target": "/root/reaudit_proactive",
         "symbol_id": "AgentWebSocketServer._find_team_session_ids",
-        "completed": true,
-        "finding_count": 3
+        "completed": true
       }
     }
   ]

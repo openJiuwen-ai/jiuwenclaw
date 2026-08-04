@@ -22,6 +22,7 @@ declare -ga MODULES=()
 
 declare -A DEPLOY_VARS=(
     ["FUNC_SVC_NAME"]="0@jiuwen@swarm"
+    ["SANDBOX_TYPE"]=""
     ["MGR_CPU"]="300"
     ["MGR_MEMORY"]="600"
     ["MGR_MIN_INSTANCE"]="1"
@@ -46,6 +47,15 @@ declare -A DEPLOY_VARS=(
     ["FRONTEND_PORT"]=""
     ["FUNCTION_ID"]=""
     ["MASTER_NODE_IP"]=""
+    ["REGISTRY_PORT"]=""
+    ["SSH_PORT"]=""
+    # TUI GatewayServer bind host; empty → default to MASTER_NODE_IP at deploy check time
+    ["GATEWAY_HOST"]=""
+    ["GATEWAY_PORT"]=""
+    # WebChannel bind host; empty → default to MASTER_NODE_IP at deploy check time
+    ["WEB_HOST"]=""
+    ["WEB_PORT"]=""
+    ["SANDBOX_IDLE_TIMEOUT_SECONDS"]=""
     ["OS_TYPE"]=""
     ["EXTENSION_DIRS"]=""
 )

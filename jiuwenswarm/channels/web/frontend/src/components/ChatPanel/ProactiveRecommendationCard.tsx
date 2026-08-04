@@ -24,21 +24,21 @@ const typeConfig = {
     gradient: 'from-indigo-500/20 via-purple-500/15 to-pink-500/20',
     border: 'border-indigo-400/40',
     iconColor: 'text-indigo-400',
-    labelColor: 'text-indigo-300 dark:text-indigo-300',
+    labelColor: 'text-indigo-300',
   },
   task_reminder: {
     icon: Clock,
     gradient: 'from-orange-500/20 via-amber-500/15 to-yellow-500/20',
     border: 'border-orange-400/40',
     iconColor: 'text-orange-400',
-    labelColor: 'text-orange-300 dark:text-orange-300',
+    labelColor: 'text-orange-300',
   },
   need_exploration: {
     icon: Compass,
     gradient: 'from-emerald-500/20 via-teal-500/15 to-cyan-500/20',
     border: 'border-emerald-400/40',
     iconColor: 'text-emerald-400',
-    labelColor: 'text-emerald-300 dark:text-emerald-300',
+    labelColor: 'text-emerald-300',
   },
 };
 
@@ -61,7 +61,7 @@ export const ProactiveRecommendationCard: React.FC<ProactiveRecommendationCardPr
         </div>
 
         {/* Content */}
-        <div className="proactive-card-content prose prose-sm max-w-none dark:prose-invert">
+        <div className="proactive-card-content prose prose-sm max-w-none">
           <ReactMarkdown>{message.content}</ReactMarkdown>
         </div>
 

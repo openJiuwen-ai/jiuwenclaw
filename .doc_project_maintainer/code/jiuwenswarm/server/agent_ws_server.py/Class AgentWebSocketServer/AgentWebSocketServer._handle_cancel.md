@@ -5,65 +5,71 @@ source: jiuwenswarm/server/agent_ws_server.py
 source_role: runtime_source
 audit_scope: default_health_audit
 class: AgentWebSocketServer
-signature: "_handle_cancel(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None"
+signature: "_handle_cancel(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock, *, allow_create: bool = True) -> None"
 health:
-  overall: watch
+  overall: risky
   name_behavior_match: good
   responsibility_focus: mixed
   length: long
-  complexity: high
+  complexity: medium
   implementation_soundness: partial
-  boundary_safety: partial
-  input_contract: implicit
+  boundary_safety: risky
+  input_contract: weak
   output_contract: clear
   side_effects: explicit
   error_handling: partial
   state_mutation: shared
   dependency_coupling: high
   test_coverage: partial
-  observability: clear
-  performance_risk: low
+  observability: partial
+  performance_risk: medium
 audit:
-  status: unaudited
-  auditor: null
-  audited_at: null
-  audited_commit: null
-  audited_source_hash: null
+  status: agent_audited
+  auditor: codex
+  audited_at: 2026-07-14T11:37:47Z
+  audited_commit: 39feee89e00dc6b0b6a6b16ca80a527beb631bd7
+  audited_source_hash: sha256:5fbbae5104a1791ca98014aeed0b81fea243b57dcd2faac3f8f37886833c4fa5
+  audited_symbol_hash: sha256:3edeec23f98743055e846cec892020626323db8b495263ecbdd3d128494dd144
   confidence: confirmed
   expired_reason: null
 issues:
   - id: ISSUE-001
     dimension: boundary_safety
     severity: medium
-    status: open
-    summary: "Missing team mode params can make cancel cleanup run too late for team cancel semantics."
-    evidence: "_handle_cancel calls agent.process_message before checking team runtime state; generic interrupt handling may terminate runtime before this method can invoke cancel_session_runtime for missing-mode team requests."
-    suggested_action: "Snapshot team runtime before agent.process_message or otherwise ensure missing-mode team cancel requests invoke cancel_session_runtime."
+    status: fixed
+    summary: "Missing team mode params could make team cancellation cleanup run after generic interrupt handling."
+    evidence: "Current _handle_message lines 1624-1636 cancel the session-keyed stream task before calling. See AgentWebSocketServer._handle_cancel/risks.md#issue-001."
+    suggested_action: "Retain the pre-dispatch session-task cancellation and its disconnect/manual cancel regression coverage."
   - id: ISSUE-002
     dimension: test_coverage
     severity: medium
     status: open
-    summary: "No direct server-side tests cover _handle_cancel selection and team cleanup."
-    evidence: "Related tests cover adapter interrupts and Gateway cancel emission, but not AgentWebSocketServer._handle_cancel's existing-agent reuse, fallback, missing-mode team cancel, or response send."
-    suggested_action: "Add focused tests for existing-agent reuse, fallback avoidance, missing-mode team cancel, supplement team terminate, and response send."
-confidence: confirmed
-details: {}
+    summary: "Coverage exercises disconnect no-create behavior but not runtime selection."
+    evidence: "Eight focused cancel cases in test_agent_ws_connection_close.py cover existing fake-agent dispatch. See AgentWebSocketServer._handle_cancel/risks.md#issue-002."
+    suggested_action: "Add focused tests for exact-mode reuse, ambiguous/missing-mode selection, default creation, malformed params, and."
+  - id: ISSUE-003
+    dimension: boundary_safety
+    severity: medium
+    status: open
+    summary: "Cache fallback can deliver cancellation to the wrong mode runtime."
+    evidence: "Lines 1797-1814 first look up requested mode/project, then retry get_agent_nowait(channel_id. See AgentWebSocketServer._handle_cancel/risks.md#issue-003."
+    suggested_action: "Resolve cancellation by session-to-runtime ownership, or reject ambiguous fallback instead of selecting the first."
+  - id: ISSUE-004
+    dimension: side_effects
+    severity: medium
+    status: open
+    summary: "A normal cancel can create a new agent when no runtime exists."
+    evidence: "With default allow_create=True, two cache misses reach AgentManager.get_agent at lines 1836-1849, which. See AgentWebSocketServer._handle_cancel/risks.md#issue-004."
+    suggested_action: "Default cancellation to no-create and return the existing acknowledgement unless a caller explicitly requires runtime."
 ---
 
-# `AgentWebSocketServer._handle_cancel`
+# AgentWebSocketServer._handle_cancel
 
 ## Actual Role
 
-Processes `CHAT_CANCEL` after `_handle_message` has already canceled any tracked stream task for cancel/supplement intents. It selects an existing cached agent when possible, delegates interrupt semantics to `agent.process_message`, then performs opportunistic team-runtime cleanup and sends the encoded response.
+The reviewed behavior, contracts, side effects, callers, callees, tests, and documentation evidence are preserved in the linked detail pages.
 
-## Key Signals
+## Audit Details
 
-- Input: `CHAT_CANCEL` request and intent parameters.
-- Output: E2A response acknowledging interrupt handling.
-- Main side effects: active agent interruption, optional team runtime cleanup, and WebSocket response send.
-- Main risk: team runtime cleanup is checked after agent interrupt handling.
-- Related tests: adapter interrupt and Gateway cancel emission tests; direct `_handle_cancel` tests are missing.
-
-## Detail Index
-
-- Detail docs pending.
+- [Reviewed behavior](AgentWebSocketServer._handle_cancel/actual-behavior.md)
+- [Full issue evidence](AgentWebSocketServer._handle_cancel/risks.md)

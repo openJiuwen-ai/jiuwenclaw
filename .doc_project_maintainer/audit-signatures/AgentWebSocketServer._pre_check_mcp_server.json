@@ -1,22 +1,19 @@
 {
   "calls": [
     {
-      "tool_name": "multi_agent_v1.spawn_agent",
+      "tool_name": "collaboration.followup_task",
       "raw_input": {
-        "agent_id": "019f40da-8ad0-74f0-9917-ee5058088342",
-        "agent_type": "explorer",
+        "target": "/root/reaudit_ws_key",
         "symbol_id": "AgentWebSocketServer._pre_check_mcp_server",
-        "assignment": "Audit exactly one symbol: AgentWebSocketServer._pre_check_mcp_server in jiuwenswarm/server/agent_ws_server.py."
+        "assignment": "Re-audit exactly one expired symbol against current source."
       }
     },
     {
-      "tool_name": "multi_agent_v1.wait_agent",
+      "tool_name": "collaboration.wait_agent",
       "raw_input": {
-        "agent_id": "019f40da-8ad0-74f0-9917-ee5058088342",
-        "nickname": "Dewey",
+        "target": "/root/reaudit_ws_key",
         "symbol_id": "AgentWebSocketServer._pre_check_mcp_server",
-        "completed": true,
-        "finding_count": 3
+        "completed": true
       }
     }
   ]

@@ -5,7 +5,7 @@ source: jiuwenswarm/server/agent_ws_server.py
 source_role: runtime_source
 audit_scope: default_health_audit
 class: AgentWebSocketServer
-signature: "_process_request(self, *args)"
+signature: "_process_request(self, *args: Any) -> Any"
 health:
   overall: watch
   name_behavior_match: good
@@ -37,8 +37,8 @@ issues:
     severity: medium
     status: open
     summary: "Missing direct tests for origin allow/reject behavior and both websockets callback shapes."
-    evidence: "start() registers _process_request with legacy and current websockets serve APIs, but no direct tests were found for disabled checks, allowed origins, rejected origins, missing Origin, or legacy/current response shapes."
-    suggested_action: "Add async unit tests for disabled origin checking, allowed origin, rejected origin, absent Origin, legacy tuple response, and current Response behavior."
+    evidence: "start() registers this callback with both serve APIs; repository-wide test search found no coverage for the hook or shared ws_origin helpers, including disabled checks, allowed/rejected/missing Origin, and legacy/current response shapes."
+    suggested_action: "Add async tests for the feature-disabled path, allowed and rejected hosts, absent Origin with and without the 'none' allowlist token, and both callback shapes."
 confidence: confirmed
 details: {}
 ---
@@ -47,15 +47,15 @@ details: {}
 
 ## Actual Role
 
-WebSocket handshake hook registered as `process_request` during server startup. It extracts request data from either legacy `(path, headers)` arguments or current websockets request objects, reads the `Origin` header, skips validation unless origin checking is enabled, and returns a 403 handshake response for disallowed browser origins.
+WebSocket handshake hook registered with both legacy and current `websockets` servers. It normalizes either callback shape, reads `Origin`, permits every handshake unless `JIUWENSWARM_ENABLE_ORIGIN_CHECK=1`, and otherwise allows configured hostnames (or missing Origin only via the `none` allowlist token) while returning an API-shaped 403 response for rejection.
 
 ## Key Signals
 
 - Input: Variable `process_request` callback arguments from legacy or current websockets APIs.
 - Output: `None` to continue the handshake, or a forbidden handshake response from `forbidden_origin_response(args)`.
 - Main side effects: Emits info/warning logs for origin-check state and rejected origins.
-- Main risk: This is a security-boundary hook whose behavior is environment and helper driven, but it lacks direct allow/reject tests.
-- Related tests: No direct `_process_request` or origin response-shape tests were found.
+- Main risk: The security check is explicitly fail-open when its environment flag is absent, and neither callback compatibility nor allow/reject policy has regression coverage.
+- Related tests: No direct `_process_request` tests or tests of the shared `ws_origin` helpers were found anywhere under `tests/`.
 
 ## Detail Index
 

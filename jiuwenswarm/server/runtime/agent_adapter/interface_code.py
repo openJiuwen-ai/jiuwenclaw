@@ -15,6 +15,7 @@ Code 模式独占逻辑全部收敛于此：
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from dataclasses import dataclass
@@ -45,11 +46,18 @@ from openjiuwen.harness.workspace.workspace import Workspace
 
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
     JiuWenSwarmDeepAdapter,
+    _AGENT_CARD_ID,
     _CRON_TOOL_CHANNEL_ID,
+    _RailBuildInfo,
     _agent_def_to_subagent_config,
+    _deep_agent_context_engine_config,
+    _deep_agent_kv_cache_affinity_config,
     parse_int,
 )
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import build_permission_rail
+from jiuwenswarm.agents.harness.common.browser_defaults import (
+    DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
+)
 from jiuwenswarm.agents.harness.code.prompt.code_prompt_builder import (
     build_code_system_prompt,
 )
@@ -61,12 +69,13 @@ from jiuwenswarm.agents.harness.common.rails import (
     ProjectMemoryRail,
     StructuredAskUserRail,
 )
-from jiuwenswarm.agents.harness.common.memory.config import get_memory_mode, is_memory_enabled
+from jiuwenswarm.agents.harness.common.memory.config import is_memory_enabled
 from jiuwenswarm.agents.harness.common.tools import (
     SkillToolkit,
 )
 from jiuwenswarm.agents.harness.common.tools.acp_chat import acp_chat
 from jiuwenswarm.common.config import get_config
+from jiuwenswarm.common.tool_ownership import mark_stateless, register_tool
 from jiuwenswarm.common.coding_memory_paths import (
     resolve_project_coding_memory_dir,
     resolve_project_coding_memory_workspace_path,
@@ -74,7 +83,10 @@ from jiuwenswarm.common.coding_memory_paths import (
 from jiuwenswarm.server.runtime.agent_adapter.code_agent_rail import CodeAgentRail
 from jiuwenswarm.common.hooks_config import load_hooks_config
 from jiuwenswarm.server.hooks.user_hook_rail import UserHookRail
-from jiuwenswarm.common.utils import get_agent_workspace_dir
+from jiuwenswarm.common.utils import (
+    get_agent_workspace_dir,
+    get_default_project_session_workspace_dir,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -171,13 +183,20 @@ ask_user is only for clarifying requirements — do not use it for approval ques
 # Plan mode exit notification appended to exit_plan_mode tool_result.
 # Explicitly tells the model it can now edit files. Without this, the model only sees
 # MODE_INSTRUCTIONS removed from system prompt but receives no explicit signal.
+# The tool_result this is appended to carries the whole plan text, so a mild
+# "proceed with the plan" wording loses to that blob and the model just echoes the
+# plan back and asks whether to start. Hence the explicit do-NOT-restate wording.
 # ---------------------------------------------------------------------------
 
 _EXIT_PLAN_MODE_NOTIFICATION = """\
 <system-reminder>
-Plan mode has ended. You are now in normal mode. You can edit files,
-run write operations, and make changes to the system. Proceed with
-implementing the approved plan.
+The user approved this plan. Plan mode has ended and you are now in normal mode:
+you can edit files, run write operations, and make changes to the system.
+
+Start executing the first step now. Do NOT restate the plan and do NOT ask again
+whether to begin — the user has already read and approved it. This turn's output
+should be the work itself and its results. Use ask_user only if execution is
+genuinely blocked.
 </system-reminder>"""
 
 
@@ -209,17 +228,6 @@ _TOOL_BUILD_NAMES: dict[str, str] = {
     "skill_retrieval": "_build_skill_retrieval_toolkit",
     "acp_chat": "_build_acp_chat_tool",
 }
-
-
-@dataclass
-class _RailBuildInfo:
-    """Rail 构建信息 — 统一固定和动态 Rails 的构建流程."""
-    attr_name: str
-    build_func: Callable
-    params: dict = None
-
-    def __post_init__(self):
-        self.params = self.params or {}
 
 
 def _resolve_coding_memory_dir(
@@ -342,7 +350,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
     """Code 模式适配器 — 配置驱动注册 rails/tools.
 
     继承 JiuWenSwarmDeepAdapter，只重写：
-    - create_instance(): 统一使用 create_deep_agent()，不传多模态/上下文引擎参数（completion_timeout 从配置读取）
+    - create_instance(): 统一使用 create_deep_agent()（completion_timeout 从配置读取）
     - _build_agent_rails(): 固定 Rails (含 LspRail/ProjectMemoryRail/CodingMemoryRail) + 从 config.yaml 读取动态 Rails
     - _get_tool_cards(): 从 config.yaml 读取动态 Tools
     - _build_configured_subagents(): 固定 explore_agent/plan_agent + 按配置启用 code_agent/browser_agent
@@ -357,6 +365,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         "LspRail", "ProjectMemoryRail", "PermissionInterruptRail",
         "ContextProcessorRail",
         "SysOperationRail", "CodingMemoryRail",
+        "MemoryForbiddenRail",
         "AgentModeRail", "StructuredAskUserRail", "ConfirmInterruptRail",
         "FileSystemRail",  # 别名
     })
@@ -391,21 +400,6 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
     def _resolve_output_language(self) -> str:
         """Resolve user's preferred output language for runtime_state display.
 
-        Distinct from prompt/runtime language, which defaults to "en" in code mode.
-        Returns the normalized language code ("cn"/"en") based on
-        config.yaml preferred_language, so the Language section injected
-        by RuntimePromptRail can instruct the LLM to respond in the
-        user's chosen language.
-        """
-        config_base = get_config()
-        raw = str(config_base.get("preferred_language", "zh")).strip().lower()
-        if raw == "zh":
-            raw = "cn"
-        return resolve_language(raw)
-
-    def _resolve_output_language(self) -> str:
-        """Resolve user's preferred output language for runtime_state display.
-
         Distinct from prompt/runtime language (always "en" in code mode).
         Returns the normalized language code ("cn"/"en") based on
         config.yaml preferred_language, so the Language section injected
@@ -425,7 +419,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         """初始化 DeepAgent 实例（code 模式）.
 
         统一使用 create_deep_agent()，不传 vision_model_config /
-        audio_model_config / context_engine_config。
+        audio_model_config。
         completion_timeout 从配置读取，可在 react / modes.code 中自定义。
         """
         # Propagate create params to per-session child adapters (see
@@ -463,10 +457,13 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
 
         self._dreaming_mode = "code"
 
-        model = self._create_model(config_base)
-        agent_card = AgentCard(name=self._agent_name, id='jiuwenswarm')
+        if self._skip_own_instance_build():
+            return
 
-        tool_cards = await self._get_tool_cards(agent_card.id)
+        model = self._create_model(config_base)
+        agent_card = AgentCard(name=self._agent_name, id=_AGENT_CARD_ID)
+
+        tool_cards = await self._get_tool_cards(self._tool_owner_id())
         self._tool_cards = tool_cards
 
         # 权限护栏由 openjiuwen PermissionInterruptRail + ToolPermissionHost 接管；
@@ -496,6 +493,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         self._instance = create_deep_agent(
             model=model,
             card=agent_card,
+            tool_owner_id=self._tool_owner_id(),
             system_prompt=build_code_system_prompt(),
             tools=tool_cards if tool_cards else [],
             subagents=configured_subagents,
@@ -505,12 +503,37 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             workspace=workspace,
             sys_operation=sys_operation,
             language=self._resolve_runtime_language(),
-            enable_read_image_multimodal=False,
+            enable_read_image_multimodal=self._resolve_enable_read_image_multimodal(config),
+            context_engine_config=_deep_agent_context_engine_config(config),
+            kv_cache_affinity_config=_deep_agent_kv_cache_affinity_config(config, model),
             auto_create_workspace=False,
             completion_timeout=config.get("completion_timeout", 3600.0),
         )
 
-        await self._instance.ensure_initialized()
+        # 改动3：让 agent 初始化（ensure_initialized）在独立线程 + 独立事件循环里跑，
+        # 主事件循环在初始化的十几秒里保持响应，esc 的 cancel 不再堵队列、后端能尽快停。
+        #
+        # 为什么不能直接 `await self._instance.ensure_initialized()`：
+        #   ensure_initialized 是 async def（openjiuwen/harness/deep_agent.py:864），但它内部
+        #   _ensure_initialized 里有同步阻塞段——init_workspace()（建目录）、rail_inst.init(self)
+        #   （各 rail init，ProjectMemoryRail 扫描项目记忆文件/建索引就在这）。这些是 CPU/磁盘密集
+        #   的同步调用，跑时不 yield 事件循环，主事件循环被占住，WebSocket recv() 读不进 esc 的
+        #   cancel 消息——用户按 esc 后后端要等十几秒才停（真 bug，日志 14:25:30→50 坐实）。
+        #
+        # 为什么不能用 asyncio.to_thread：to_thread 只能包同步函数；ensure_initialized 是 async def，
+        # 直接传会在无运行 loop 的线程里报错。必须用 asyncio.run 在子线程里另起独立 loop 来跑它。
+        #
+        # 做法：run_in_executor 把"在子线程跑 asyncio.run(ensure_initialized())"丢到线程池，
+        # 主事件循环 await 这个 future 时保持响应，期间能读取并处理 esc 的 cancel。
+        # 跑完后回主 loop 继续后续代码，时序与语义不变；唯一变化是初始化期间主 loop 活。
+        #
+        # 安全性：ensure_initialized 操作的是 self._pending_rails、workspace 文件等实例自己的资源，
+        # 不碰全局 asyncio 原语，不跨 loop 访问主 loop 对象，不会死锁。
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: asyncio.run(self._instance.ensure_initialized()),
+        )
         # 修正 .agent_history 写入路径：openjiuwen 文件工具默认将
         # .agent_history 写到 Workspace.root_path（即项目目录），
         # 这里覆写为 agent 系统 workspace，避免污染用户项目目录。
@@ -518,24 +541,30 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             for tool in getattr(rail, 'tools', []) or []:
                 if hasattr(tool, '_workspace_path'):
                     setattr(tool, '_workspace_path', self._agent_workspace_dir)
-        initial_workspace = self._project_dir or self._workspace_dir
+        initial_workspace = self._project_dir or str(
+            get_default_project_session_workspace_dir()
+        )
+        self._ensure_project_gitignore_agent_history(initial_workspace)
         self._seed_runtime_cwd(initial_workspace, workspace=initial_workspace)
 
         setattr(self._instance, "_jiuwenswarm_adapter_mode", "code")
         setattr(
             self._instance,
             "_jiuwenswarm_code_project_dir",
-            self._project_dir or self._workspace_dir,
+            initial_workspace,
         )
         setattr(
             self._instance,
             "_jiuwenswarm_project_dir",
-            self._project_dir or self._workspace_dir,
+            initial_workspace,
         )
 
-        # code 模式不传: vision_model_config, audio_model_config,
-        # context_engine_config（completion_timeout 已从配置读取传入）
+        # code 模式不传: vision_model_config, audio_model_config
+        #（context_engine_config / completion_timeout 已从配置读取传入）
 
+        # Cron tools belong to the agent's standing toolset, not to any one
+        # request; build them here so the first turn does not pay for it either.
+        self._ensure_cron_tools_registered(self._parent_session_id)
         self._registered_mcp_server_ids.clear()
         self._registered_mcp_servers.clear()
         await self._register_mcp_servers_from_config(config_base, tag="code")
@@ -554,7 +583,8 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
     ) -> list[Any]:
         """Build rails for code mode: fixed rails + dynamic rails from config.
 
-        Code 模式固定包含 LspRail、ProjectMemoryRail、CodingMemoryRail。
+        Code 模式固定包含 LspRail、ProjectMemoryRail、CodingMemoryRail。plan 相关
+        的 rails 同样固定挂载，不按子模式分叉。
         """
         # 固定 Rails — code 模式特有
         rail_infos = [
@@ -578,6 +608,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             ),
             _RailBuildInfo("_code_filesystem_rail", self._build_filesystem_rail),
             _RailBuildInfo("_coding_memory_rail", self._build_coding_memory_rail),
+            _RailBuildInfo("_memory_forbidden_rail", self._build_memory_forbidden_rail),
             _RailBuildInfo("_code_agent_mode_rail", self._build_agent_mode_rail),
             _RailBuildInfo("_code_ask_user_rail", self._build_structured_ask_user_rail),
             _RailBuildInfo(
@@ -630,44 +661,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                 rail_name,
             )
 
-        # 统一构建并注册
-        rails_list = []
-        for info in rail_infos:
-            logger.info(
-                "[JiuwenSwarmCodeAdapter] Building rail: %s with params: %s",
-                info.attr_name, info.params,
-            )
-            rail_instance = info.build_func(**info.params)
-            if rail_instance is not None:
-                setattr(self, info.attr_name, rail_instance)
-                rails_list.append(rail_instance)
-                logger.info(
-                    "[JiuwenSwarmCodeAdapter] Rail %s built successfully",
-                    info.attr_name,
-                )
-            else:
-                logger.warning(
-                    "[JiuwenSwarmCodeAdapter] Rail %s build returned None",
-                    info.attr_name,
-                )
-        logger.info(
-            "[JiuwenSwarmCodeAdapter] Total rails built: %d, rail names: %s",
-            len(rails_list),
-            [type(r).__name__ for r in rails_list],
-        )
-        # 用户配置的 hooks（UserHookRail）
-        try:
-            hooks_config = load_hooks_config(config_base)
-            if hooks_config.events:
-                user_hook_rail = UserHookRail(hooks_config)
-                rails_list.append(user_hook_rail)
-                logger.info(
-                    "[JiuwenSwarmCodeAdapter] UserHookRail loaded with %d event types",
-                    len(hooks_config.events),
-                )
-        except Exception as e:
-            logger.warning("[JiuwenSwarmCodeAdapter] Failed to load UserHookRail: %s", e)
-        return rails_list
+        return self._instantiate_rails(rail_infos, config_base)
 
     # ─── Code 专属 Rail 构建 ────────────────
 
@@ -685,7 +679,8 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         """构建 CodeAgentModeRail。
 
         与 Claude Code 对齐：
-        - ``plan_mode_system_note``: 静态注入 system prompt（KV-cache 友好），
+        - ``plan_mode_attachment_note``: 通过 prompt attachment 注入 plan 提示，
+          不修改 system prompt，保持 KV-cache 稳定，
           告知 LLM 必须先调 ``enter_plan_mode``。
         - ``enter_plan_instructions``: 追加到 ``enter_plan_mode`` 的 tool_result，
           包含完整的 5-phase 工作流说明（指令在对话中，不在 system prompt）。
@@ -699,7 +694,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
 
             return CodeAgentModeRail(
                 allowed_tools=_CODE_PLAN_ALLOWED_TOOLS,
-                plan_mode_system_note=_PLAN_MODE_SYSTEM_NOTE,
+                plan_mode_attachment_note=_PLAN_MODE_SYSTEM_NOTE,
                 enter_plan_instructions=_ENTER_PLAN_MODE_INSTRUCTIONS_EN,
                 exit_plan_notification=_EXIT_PLAN_MODE_NOTIFICATION,
             )
@@ -933,6 +928,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         resolved_language = self._resolve_runtime_language()
         workspace = self._workspace_dir or "./"
         subagents: list[Any] = []
+        self._sync_browser_runtime_environment(config_base)
 
         # ── 固定挂载：explore_agent（Code 模式核心子代理，始终启用）──
         if not self._subagent_list_has_name(subagents, "explore_agent"):
@@ -991,30 +987,6 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             # browser_agent
             browser_agent_cfg = subagents_cfg.get("browser_agent")
 
-            # Headless setup is unconditional: swarm members also spawn @playwright/mcp
-            # subprocesses and ManagedBrowserDriver both read BROWSER_MANAGED_ARGS.
-            # This must run regardless of whether the main-agent browser subagent is enabled.
-            headless = self._resolve_headless_from_config()
-            _mcp_args_raw = (os.getenv("PLAYWRIGHT_MCP_ARGS") or "-y @playwright/mcp@latest").strip()
-            _mcp_args_list = _mcp_args_raw.split() if _mcp_args_raw else ["-y", "@playwright/mcp@latest"]
-            _mcp_args_list = [a for a in _mcp_args_list if a != "--headless"]
-            if headless:
-                _mcp_args_list.append("--headless")
-                os.environ["BROWSER_MANAGED_ARGS"] = "--headless=new"
-                logger.info(
-                    "[JiuwenSwarmCodeAdapter] browser headless=True → "
-                    "BROWSER_MANAGED_ARGS=--headless=new, PLAYWRIGHT_MCP_ARGS=%s",
-                    " ".join(_mcp_args_list),
-                )
-            else:
-                os.environ.pop("BROWSER_MANAGED_ARGS", None)
-                logger.info(
-                    "[JiuwenSwarmCodeAdapter] browser headless=False → "
-                    "headed mode (BROWSER_MANAGED_ARGS cleared)",
-                )
-            os.environ["PLAYWRIGHT_MCP_ARGS"] = " ".join(_mcp_args_list)
-            self._browser_headless_setting = headless
-
             browser_enabled = self._browser_runtime_enabled()
             if browser_enabled:
                 if not str(os.getenv("BROWSER_DRIVER") or "").strip():
@@ -1023,21 +995,13 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                         "[JiuwenSwarmCodeAdapter] browser subagent enabled without BROWSER_DRIVER; "
                         "defaulting to managed mode"
                     )
-                if not str(os.getenv("BROWSER_MANAGED_BINARY") or "").strip():
-                    chrome_path = self._resolve_managed_browser_binary_from_config()
-                    if chrome_path:
-                        os.environ["BROWSER_MANAGED_BINARY"] = chrome_path
-                        logger.info(
-                            "[JiuwenSwarmCodeAdapter] using browser.chrome_path for managed browser: %s",
-                            chrome_path,
-                        )
                 browser_spec = build_browser_agent_config(
                     model,
                     workspace=workspace,
                     language=resolved_language,
                     max_iterations=parse_int(
                         browser_agent_cfg.get("max_iterations") if isinstance(browser_agent_cfg, dict) else None,
-                        react_cfg.get("max_iterations", 15),
+                        DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
                     )
                 )
                 browser_spec.factory_kwargs = {"auto_create_workspace": False}
@@ -1046,11 +1010,14 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         # ── 自定义 agent 不加入 deep_config.subagents ──
         # Code 模式下，自定义 agent 由 CodeAgentRail 的 Agent 工具管理，
         # 不走 SubagentRail 的 task_tool 路径。
-        # （agent.plan / agent.fast 模式仍由 interface_deep.py 的 _load_custom_subagents 管理）
+        # （agent 模式仍由 interface_deep.py 的 _load_custom_subagents 管理）
 
         return subagents or None, False
 
     # ─── Rail 生命周期(mode切换) ───────────────────
+
+    def _user_interaction_rail_attribute(self) -> str:
+        return "_code_ask_user_rail"
 
     async def _update_rails_for_mode(self, mode: str) -> None:
         """Code 模式下的 rail 生命周期管理.
@@ -1157,29 +1124,28 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             raise RuntimeError("JiuwenSwarmCodeAdapter 未初始化，请先调用 create_instance()")
 
         project_workspace = (
-            runtime_config.project_dir
-            or self._project_dir
-            or self._workspace_dir
-        )
-        self._seed_runtime_cwd(
-            runtime_config.cwd
+            runtime_config.workspace
             or runtime_config.project_dir
             or self._project_dir
-            or self._workspace_dir,
-            workspace=project_workspace,
+            or str(get_default_project_session_workspace_dir(runtime_config.session_id))
         )
+        task_cwd = runtime_config.cwd or project_workspace
+        self._seed_runtime_cwd(task_cwd, workspace=project_workspace)
         resolved_language = self._resolve_runtime_language()
         resolved_channel = str(runtime_config.channel_id or
                                self._resolve_prompt_channel(runtime_config.session_id) or "web").strip() or "web"
         if self._runtime_prompt_rail:
-            self._runtime_prompt_rail.set_language(resolved_language)
+            # Language section (response language) must follow the user's
+            # preferred language, not the code-mode "en" which only governs
+            # system-prompt scaffolding (time/runtime/env sections).
+            self._runtime_prompt_rail.set_language(self._resolve_output_language())
             self._runtime_prompt_rail.set_force_english(self._force_english_runtime_prompt)
             self._runtime_prompt_rail.set_channel(resolved_channel)
             self._runtime_prompt_rail.set_model_name(self._resolve_model_name())
             self._runtime_prompt_rail.set_mode(runtime_config.mode)
             self._runtime_prompt_rail.set_trusted_dirs(runtime_config.trusted_dirs)
             self._runtime_prompt_rail.set_runtime_paths(
-                cwd=runtime_config.cwd,
+                cwd=task_cwd,
                 project_dir=runtime_config.project_dir or self._project_dir,
             )
             self._runtime_prompt_rail.set_session_id(runtime_config.session_id)
@@ -1201,7 +1167,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             channel=resolved_channel,
             session_id=runtime_config.session_id,
             project_dir=runtime_config.project_dir
-            or runtime_config.cwd
+            or task_cwd
             or self._project_dir
             or self._workspace_dir,
         )
@@ -1218,6 +1184,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
 
         # code 模式始终走 _update_rails_for_mode 的 code 逻辑
         await self._update_rails_for_mode(runtime_config.mode)
+        await self._set_user_interaction_enabled(runtime_config.supports_user_interaction)
         await self._update_tools_for_mode(runtime_config.mode, runtime_config.session_id, runtime_config.request_id)
         await self._update_session_tools(
             runtime_config.session_id,
@@ -1242,8 +1209,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             _set_user_todo_workspace(self._agent_workspace_dir)
             _set_user_todo_channel_id(_CRON_TOOL_CHANNEL_ID.get())
             for tool in _get_user_todo_tools():
-                if not Runner.resource_mgr.get_tool(tool.card.id):
-                    Runner.resource_mgr.add_tool(tool)
+                self._register_shared_tool(tool)
                 self._instance.ability_manager.add(tool.card)
         except ImportError:
             pass
@@ -1254,8 +1220,21 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         return self.build_code_tool_cards(agent_id)
 
     def build_code_tool_cards(self, agent_id: str) -> list[Any]:
-        """Get tool cards for code mode — from config.yaml::modes.code.tools."""
+        """Get tool cards for code mode — from config.yaml::modes.code.tools.
 
+        ``modes.code.tools`` is an open extension point, so ownership is read
+        off each card rather than guessed from the build func: a card that does
+        not declare itself shared is treated as agent-owned, which is the safe
+        default (a shared instance registered per agent costs an extra object;
+        an agent-owned instance registered as shared would pin the first
+        session's state for the whole process).
+
+        Args:
+            agent_id: Owner id this adapter registers its own instances under.
+
+        Returns:
+            The cards of every successfully registered configured tool.
+        """
         tool_cards = []
 
         config_base = get_config()
@@ -1272,12 +1251,10 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                 continue
             if isinstance(result, list):
                 for tool_instance in result:
-                    if not Runner.resource_mgr.get_tool(tool_instance.card.id):
-                        Runner.resource_mgr.add_tool(tool_instance)
+                    register_tool(tool_instance, agent_id)
                     tool_cards.append(tool_instance.card)
             else:
-                if not Runner.resource_mgr.get_tool(result.card.id):
-                    Runner.resource_mgr.add_tool(result)
+                register_tool(result, agent_id)
                 tool_cards.append(result.card)
             logger.info(
                 "[JiuwenSwarmCodeAdapter] Tool %s registered from config",
@@ -1344,14 +1321,20 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             return None
 
     def _build_skill_toolkit(self, agent_id: str) -> list[Any] | None:
-        """构建 SkillToolkit 工具（不注册到 Runner，由 _get_tool_cards 统一注册）."""
+        """构建 SkillToolkit 工具（不注册到 Runner，由 _get_tool_cards 统一注册）.
+
+        Declared shared for the same reason as the deep adapter's path: skill
+        install/status is a process-wide conversation, so one toolkit instance
+        has to serve every adapter.
+        """
         try:
             skill_toolkit = SkillToolkit(manager=self._skill_manager)
+            tools = mark_stateless(skill_toolkit.get_tools())
             logger.info(
                 "[JiuwenSwarmCodeAdapter] SkillToolkit built: tools=%s",
-                [t.card.name for t in skill_toolkit.get_tools()],
+                [t.card.name for t in tools],
             )
-            return skill_toolkit.get_tools()
+            return tools
         except Exception as exc:
             logger.warning("[JiuwenSwarmCodeAdapter] skill_toolkit build failed: %s", exc)
             return None

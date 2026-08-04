@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jiuwenswarm-tui"
-version = "0.2.3.beta1"
+version = "0.2.3"
 description = "Native terminal UI launcher for JiuwenSwarm"
 requires-python = ">=3.11,<3.14"
 license = { text = "Apache-2.0" }

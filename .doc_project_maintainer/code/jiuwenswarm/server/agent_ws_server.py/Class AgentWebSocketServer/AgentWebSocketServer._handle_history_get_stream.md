@@ -15,7 +15,7 @@ health:
   implementation_soundness: partial
   boundary_safety: risky
   input_contract: weak
-  output_contract: partial
+  output_contract: weak
   side_effects: hidden
   error_handling: partial
   state_mutation: global
@@ -24,11 +24,12 @@ health:
   observability: partial
   performance_risk: medium
 audit:
-  status: unaudited
-  auditor: null
-  audited_at: null
-  audited_commit: null
-  audited_source_hash: null
+  status: agent_audited
+  auditor: codex
+  audited_at: 2026-07-14T11:38:13Z
+  audited_commit: 39feee89e00dc6b0b6a6b16ca80a527beb631bd7
+  audited_source_hash: sha256:5fbbae5104a1791ca98014aeed0b81fea243b57dcd2faac3f8f37886833c4fa5
+  audited_symbol_hash: sha256:87051df5f3981a359d6ee60ef408869d562fccd2f7cb90f7edf82b0c6fe1da2d
   confidence: confirmed
   expired_reason: null
 issues:
@@ -37,47 +38,45 @@ issues:
     severity: high
     status: open
     summary: "Unvalidated session_id flows into session history path construction."
-    evidence: "The handler passes params directly to get_conversation_history; session_history helpers build get_agent_sessions_dir()/session_id and may create dirs by default."
-    suggested_action: "Validate session_id as a safe single session name, prevent read-path mkdirs, enforce resolved-path containment, and add traversal tests."
+    evidence: "params.session_id is passed unchanged to get_conversation_history; history_exists/get_read_history_path. See AgentWebSocketServer._handle_history_get_stream/risks.md#issue-001."
+    suggested_action: "Require a safe single-name ID, enforce resolved-root containment, make read paths non-creating, and add."
   - id: ISSUE-002
     dimension: error_handling
     severity: medium
     status: open
     summary: "Invalid stream history emits chat.error instead of a history-scoped terminal frame."
-    evidence: "The error path sends event_type=chat.error, while TUI page restore waits for history.message status=done."
-    suggested_action: "Emit a history-scoped error/done frame or make the frontend resolve pending history page waiters on history errors."
+    evidence: "When get_conversation_history returns None, the method sends only an is_complete chat.error chunk.. See AgentWebSocketServer._handle_history_get_stream/risks.md#issue-002."
+    suggested_action: "Emit a history-scoped terminal error/done frame or explicitly resolve pending page waiters on chat.error."
   - id: ISSUE-003
     dimension: performance_risk
     severity: medium
     status: open
-    summary: "Each page request loads, filters, reverses, and slices the full history."
-    evidence: "get_conversation_history loads all records, builds all restorable records, reverses the list, then slices one page."
-    suggested_action: "Consider reverse JSONL/cursor paging or cached pagination metadata for large sessions."
+    summary: "Each page synchronously processes the full history on the event loop."
+    evidence: "The handler synchronously calls get_conversation_history on the event loop; that helper reads/parses the. See AgentWebSocketServer._handle_history_get_stream/risks.md#issue-003."
+    suggested_action: "Move reads off-loop and use reverse JSONL/cursor paging or cached pagination metadata for large sessions."
   - id: ISSUE-004
     dimension: test_coverage
     severity: medium
     status: open
     summary: "No direct stream-handler test evidence was found."
-    evidence: "Existing tests cover sanitization and generic history.message wire roundtrip, not success/error/done sequencing for this handler."
-    suggested_action: "Add async tests with fake websocket and send lock for valid page, invalid page, sequence numbers, and final done-frame publication."
-confidence: confirmed
-details: {}
+    evidence: "Tests cover get_conversation_history payload limits, gateway routing, and generic history.message codec. See AgentWebSocketServer._handle_history_get_stream/risks.md#issue-004."
+    suggested_action: "Add fake-websocket tests for valid/invalid pages, sequence numbers, done publication, traversal, and send failure."
+  - id: ISSUE-005
+    dimension: output_contract
+    severity: medium
+    status: open
+    summary: "An oversized record terminates the page without its history done frame."
+    evidence: "If send_wire_payload replaces a record chunk and returns false, the method logs and returns immediately. See AgentWebSocketServer._handle_history_get_stream/risks.md#issue-005."
+    suggested_action: "Define the replacement as an explicit terminal history error or emit a bounded history-scoped done/error frame, and."
 ---
 
-# `AgentWebSocketServer._handle_history_get_stream`
+# AgentWebSocketServer._handle_history_get_stream
 
 ## Actual Role
 
-Streams paged session history for `history.get` requests with `is_stream=True`. It delegates filtering, reverse paging, and sanitization to `get_conversation_history`, then sends one `history.message` chunk per record plus a final `history.message` done chunk; invalid page/history sends a terminal `chat.error` chunk.
+The reviewed behavior, contracts, side effects, callers, callees, tests, and documentation evidence are preserved in the linked detail pages.
 
-## Key Signals
+## Audit Details
 
-- Input: `params.session_id` and `params.page_idx`.
-- Output: E2A chunks for each history record plus a final done frame, or a final `chat.error`.
-- Main side effects: Reads session history and sends websocket stream frames.
-- Main risk: Caller-controlled session id reaches filesystem history helpers without path-safety validation.
-- Related tests: Helper and wire tests exist; no direct stream-handler test was found.
-
-## Detail Index
-
-- Detail docs pending.
+- [Reviewed behavior](AgentWebSocketServer._handle_history_get_stream/actual-behavior.md)
+- [Full issue evidence](AgentWebSocketServer._handle_history_get_stream/risks.md)

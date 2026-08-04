@@ -40,6 +40,8 @@ from openjiuwen.harness.rails.interrupt.interrupt_base import (
 
 logger = logging.getLogger(__name__)
 
+MAX_STRUCTURED_QUESTIONS = 4
+
 # ---------------------------------------------------------------------------
 # Extended input schema
 # ---------------------------------------------------------------------------
@@ -49,25 +51,40 @@ _QUESTIONS_ITEM_SCHEMA: dict[str, Any] = {
     "properties": {
         "question": {
             "type": "string",
+            "minLength": 1,
             "description": "The question to present to the user.",
         },
         "header": {
             "type": "string",
-            "description": "A short label displayed as a chip/tag (max 12 chars).",
+            "description": "A short label displayed as a chip/tag.",
         },
         "options": {
             "type": "array",
             "description": "Available choices for this question (2-4 items).",
+            "maxItems": 4,
+            "anyOf": [{"maxItems": 0}, {"minItems": 2}],
             "items": {
                 "type": "object",
                 "properties": {
                     "label": {
                         "type": "string",
+                        "minLength": 1,
                         "description": "Display text for this option (1-5 words).",
                     },
                     "description": {
                         "type": "string",
                         "description": "Explanation of what this option means.",
+                    },
+                    "preview": {
+                        "type": "string",
+                        "description": (
+                            "Optional preview content rendered beside this option when "
+                            "comparing concrete artifacts the user should visually compare "
+                            "(e.g. ASCII mockups, code snippets). Markdown is supported; "
+                            "use fenced code blocks for monospace mockups so alignment is "
+                            "preserved. Only rendered for single-select questions; ignored "
+                            "for multi-select."
+                        ),
                     },
                 },
                 "required": ["label"],
@@ -94,10 +111,12 @@ EXTENDED_INPUT_PARAMS_EN: dict[str, Any] = {
             "description": (
                 "Structured questions with selectable options. "
                 "Use this when you want the user to choose from predefined options "
-                "instead of typing free text. Each question must have 2-4 options. "
+                "instead of typing free text. Ask at most 4 questions per call. "
+                "Omit options for free-text input; otherwise provide 2-4 options. "
                 "The user can always select 'Other' for custom input."
             ),
             "items": _QUESTIONS_ITEM_SCHEMA,
+            "maxItems": MAX_STRUCTURED_QUESTIONS,
         },
     },
     "required": ["query"],
@@ -114,9 +133,12 @@ EXTENDED_INPUT_PARAMS_CN: dict[str, Any] = {
             "type": "array",
             "description": (
                 "带选项的结构化问题。当希望用户从预定义选项中选择而非自由输入时使用。"
-                "每个问题必须提供 2-4 个选项。用户始终可以选择「其他」进行自定义输入。"
+                "每次调用最多询问 4 个问题。"
+                "自由输入题不提供选项；否则必须提供 2-4 个选项。"
+                "用户始终可以选择「其他」进行自定义输入。"
             ),
             "items": _QUESTIONS_ITEM_SCHEMA,
+            "maxItems": MAX_STRUCTURED_QUESTIONS,
         },
     },
     "required": ["query"],
@@ -129,7 +151,11 @@ _EXTENDED_DESCRIPTION_EN: str = (
     "2. Structured questions (multi-choice): pass `query` + `questions` — "
     "the user selects from predefined options. "
     "Use `questions` when you want the user to choose between specific options "
-    "(e.g., 'Apply update' vs 'Skip'). Each question can have 2-4 options."
+    "(e.g., 'Apply update' vs 'Skip'). Ask at most 4 questions per call. "
+    "Omit options for free-text input; otherwise provide 2-4 options. "
+    "For single-select questions, an option may carry a `preview` (markdown, "
+    "e.g. fenced code block ASCII mockup) shown beside it to compare concrete "
+    "artifacts; use it only when a visual comparison helps the user decide."
 )
 
 _EXTENDED_DESCRIPTION_CN: str = (
@@ -137,7 +163,10 @@ _EXTENDED_DESCRIPTION_CN: str = (
     "1. 纯文本查询：只传 `query` —— 用户自由输入回答。\n"
     "2. 结构化选项：传 `query` + `questions` —— 用户从预定义选项中选择。"
     "当你希望用户在特定选项间做选择时（如「应用更新」vs「跳过」）使用 `questions`。"
-    "每个问题可提供 2-4 个选项。"
+    "每次调用最多询问 4 个问题。自由输入题不提供选项；否则必须提供 2-4 个选项。"
+    "对于单选问题，选项可携带 `preview`（markdown，"
+    "如带围栏代码块的 ASCII mockup）展示在选项旁，用于对比具体产物；"
+    "仅在视觉对比有助于用户决策时使用。"
 )
 
 # ---------------------------------------------------------------------------
@@ -148,9 +177,12 @@ _EXTENDED_DESCRIPTION_CN: str = (
 class StructuredAskUserPayload(BaseModel):
     """Payload for structured user answers."""
 
-    answers: dict[str, str] = Field(
+    answers: dict[str, str | list[str]] = Field(
         default_factory=dict,
-        description="Mapping of question text to selected option label.",
+        description=(
+            "Mapping of question text to selected option label(s). "
+            "Value is a str for single-select, or list[str] for multi-select."
+        ),
     )
 
 
@@ -261,11 +293,87 @@ class StructuredAskUserRail(AskUserRail):
 
         For plain query: delegate to parent class behavior (AskUserPayload).
         """
+        args = self._parse_tool_args(tool_call)
+        raw_questions = args.get("questions")
+        if "questions" in args and not isinstance(raw_questions, list):
+            return self.reject(
+                tool_result=(
+                    "[INVALID_ARGUMENT] questions must be an array when provided."
+                )
+            )
+        questions_data = raw_questions if raw_questions else None
+        if (
+            questions_data is not None
+            and len(questions_data) > MAX_STRUCTURED_QUESTIONS
+        ):
+            return self.reject(
+                tool_result=(
+                    "[INVALID_ARGUMENT] ask_user accepts at most "
+                    f"{MAX_STRUCTURED_QUESTIONS} questions per call; "
+                    f"received {len(questions_data)}. "
+                    "Split them across multiple calls."
+                )
+            )
+
+        for question_index, question in enumerate(questions_data or []):
+            if not isinstance(question, Mapping):
+                return self.reject(
+                    tool_result=(
+                        f"[INVALID_ARGUMENT] questions[{question_index}] "
+                        "must be an object."
+                    )
+                )
+            question_text = question.get("question")
+            if not isinstance(question_text, str) or not question_text.strip():
+                return self.reject(
+                    tool_result=(
+                        f"[INVALID_ARGUMENT] questions[{question_index}].question "
+                        "is required and must be a non-empty string."
+                    )
+                )
+            if "header" in question and not isinstance(question["header"], str):
+                return self.reject(
+                    tool_result=(
+                        f"[INVALID_ARGUMENT] questions[{question_index}].header "
+                        "must be a string when provided."
+                    )
+                )
+            if "options" not in question:
+                continue
+            options = question["options"]
+            if not isinstance(options, list):
+                return self.reject(
+                    tool_result=(
+                        f"[INVALID_ARGUMENT] questions[{question_index}].options "
+                        "must be an array when provided."
+                    )
+                )
+            for option_index, option in enumerate(options):
+                label = option.get("label") if isinstance(option, Mapping) else None
+                if not isinstance(label, str) or not label.strip():
+                    path = (
+                        f"questions[{question_index}]."
+                        f"options[{option_index}].label"
+                    )
+                    return self.reject(
+                        tool_result=(
+                            f"[INVALID_ARGUMENT] {path} is required "
+                            "and must be a non-empty string."
+                        )
+                    )
+            if options and not 2 <= len(options) <= 4:
+                return self.reject(
+                    tool_result=(
+                        f"[INVALID_ARGUMENT] questions[{question_index}].options "
+                        "must contain either 0 or 2-4 items; "
+                        f"received {len(options)}."
+                    )
+                )
+
         if user_input is None:
             return self.interrupt(self._build_ask_request(tool_call))
 
         # Detect if this was a structured questions call by checking tool_args
-        questions_data = self.extract_questions(tool_call)
         is_structured = questions_data is not None and len(questions_data) > 0
 
         if is_structured:
@@ -302,10 +410,19 @@ class StructuredAskUserRail(AskUserRail):
                 answer_parts = []
                 for q_text, selected in payload.answers.items():
                     if q_text == "__free_text__":
-                        answer_parts.append(selected)
+                        answer_parts.append(selected if isinstance(selected, str) else ", ".join(selected))
                     else:
-                        answer_parts.append(f"{q_text}: {selected}")
+                        value_text = selected if isinstance(selected, str) else ", ".join(selected)
+                        answer_parts.append(f"{q_text}: {value_text}")
                 answer_text = "\n".join(answer_parts) if answer_parts else ""
+                if not answer_text.strip():
+                    # Empty resume (e.g. bare Other) must not look like a valid answer (#2330).
+                    return self.reject(
+                        tool_result=(
+                            "[INVALID_ARGUMENT] answers must include at least "
+                            "one non-empty response."
+                        )
+                    )
                 logger.info(
                     "[StructuredAskUserRail] Resolved structured answer: %s",
                     answer_text,

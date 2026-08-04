@@ -246,6 +246,35 @@ class SessionSharingRegistry:
             result.extend(members)
         return result
 
+    def lookup_by_identity(
+        self, channel_id: str, app_id: str, user_id: str,
+        session_id: str, member_name: str | None = None,
+    ) -> list[Subscription]:
+        """只读查询该身份在某 session 下持有的订阅（/exit 校验用）。
+
+        过滤契约与 unregister_all_for_identity 一致（channel_id + app_id + user_id +
+        可选 member_name），跳过 GodView 订阅（GodView 不是 /join 认领的真实席位）。
+        与注销方法共享命中范围，确保"校验放行的订阅"恰是"将被注销的订阅"。
+        返回的 Subscription 可读 routing_key.agent_ref.id 反查真实 team_name。
+        """
+        results: list[Subscription] = []
+        members = self._subs.get(session_id, {})
+        for mname, subs in members.items():
+            if member_name and mname != member_name:
+                continue
+            for s in subs:
+                if s.is_godview:
+                    continue
+                rk = s.routing_key
+                if rk.channel_id != channel_id:
+                    continue
+                if rk.app_id != app_id:
+                    continue
+                if rk.user_id != user_id:
+                    continue
+                results.append(s)
+        return results
+
     def lookup_by_container(
         self, channel_id: str, app_id: str, container_id: str,
     ) -> list[tuple[str, str, Subscription]]:

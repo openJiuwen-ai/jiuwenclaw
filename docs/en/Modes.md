@@ -1,10 +1,29 @@
 # Modes
 
-JiuwenSwarm supports multiple runtime modes, each with its own tool set, permission policy, and memory behavior. Users can switch modes during a conversation using the `/mode` command.
+JiuwenSwarm supports multiple runtime modes, each with its own tool set, permission policy, and memory behavior.
+
+> **Note**: In the Web frontend, users can switch between **Agent mode** and **Cluster mode** using the **mode selector** in the chat input area. The `/mode` command is primarily for IM controlled channels and TUI.
 
 ---
 
-## Mode Overview
+## Web Frontend Modes
+
+The Web frontend provides two execution modes:
+
+| Mode | Description | Use Cases |
+|------|-------------|-----------|
+| **Agent mode** | Single agent handles tasks independently, supports task planning and dynamic adjustment | Most daily tasks, Q&A, code generation, etc. |
+| **Cluster mode** | Multi-agent collaboration mode, with a Leader orchestrating multiple specialized agents | Large complex tasks, scenarios requiring multi-role collaboration |
+
+![Mode Selector](../assets/images/current-ui-en/02-Mode-Selector.png)
+
+---
+
+## Command-Line Modes (IM/TUI)
+
+Users can switch to more granular modes using the `/mode` command during a conversation.
+
+### Mode Overview
 
 | Mode | Code | Description |
 |------|------|-------------|
@@ -43,7 +62,7 @@ You can also use `/switch` to change sub-modes within the same category:
 /switch team         # Under Code → code.team
 ```
 
-> The TUI source contains a `/switch` implementation, but the default TUI command registry does not currently register it. In TUI, prefer `/mode ...` for direct switching or `/plan` to enter Agent plan mode.
+> The examples above describe the Gateway-controlled command used by IM channels. TUI has a different command with the same name only when launched under `agentos-tui` supervision (`AGENTOS_TUI_SUPERVISED=1`): `/switch claude` hands off to the Claude TUI and `/switch list` shows handoff targets. A standalone TUI does not register that command; use `/mode ...` or `/plan` for mode switching in TUI.
 
 ---
 

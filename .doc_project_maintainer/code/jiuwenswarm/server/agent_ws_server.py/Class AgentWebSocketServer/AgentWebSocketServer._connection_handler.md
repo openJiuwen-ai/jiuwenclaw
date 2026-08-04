@@ -7,7 +7,7 @@ audit_scope: default_health_audit
 class: AgentWebSocketServer
 signature: "_connection_handler(self, ws: Any) -> None"
 health:
-  overall: watch
+  overall: risky
   name_behavior_match: good
   responsibility_focus: mixed
   length: long
@@ -22,13 +22,14 @@ health:
   dependency_coupling: high
   test_coverage: partial
   observability: clear
-  performance_risk: medium
+  performance_risk: high
 audit:
-  status: unaudited
-  auditor: null
-  audited_at: null
-  audited_commit: null
-  audited_source_hash: null
+  status: agent_audited
+  auditor: codex
+  audited_at: 2026-07-14T11:37:45Z
+  audited_commit: 39feee89e00dc6b0b6a6b16ca80a527beb631bd7
+  audited_source_hash: sha256:5fbbae5104a1791ca98014aeed0b81fea243b57dcd2faac3f8f37886833c4fa5
+  audited_symbol_hash: sha256:ca59500c0905ec1edfc92c348321cd54e94f4410eb6c4eb3c8716e4f39f8bf98
   confidence: confirmed
   expired_reason: null
 issues:
@@ -37,40 +38,45 @@ issues:
     severity: high
     status: open
     summary: "Any connection close clears global active-connection state and cancels global work."
-    evidence: "The handler assigns _current_ws/_current_send_lock before ack, then unconditionally clears them and cancels all inflight agent/team work plus session stream tasks in finally."
-    suggested_action: "Make connection ownership explicit and only clear/cancel global state if the closing connection still owns the active slot, or reject replacement connections deliberately."
+    evidence: "Current source assigns _current_ws/_current_send_lock before ack; every connection's finally. See AgentWebSocketServer._connection_handler/risks.md#issue-001."
+    suggested_action: "Guard cleanup by active-slot ownership, or deliberately reject replacement connections."
   - id: ISSUE-002
     dimension: state_mutation
     severity: medium
     status: open
     summary: "Scheduler shutdown is tied to per-connection cleanup."
-    evidence: "_handle_schedule_request lazily starts _scheduler_service, but _connection_handler calls _stop_scheduler() in every connection finally block while the comment says server shutdown."
-    suggested_action: "Move scheduler stop to process/server shutdown, or document and test that scheduler lifetime is intentionally Gateway-connection-scoped."
+    evidence: "The current per-connection finally block calls _stop_scheduler even though the scheduler is server state. See AgentWebSocketServer._connection_handler/risks.md#issue-002."
+    suggested_action: "Move scheduler stop to server shutdown, or define it as connection-scoped and test that contract."
   - id: ISSUE-003
     dimension: boundary_safety
     severity: medium
     status: open
     summary: "connection.ack ordering can race with server push."
-    evidence: "_current_ws is published before the ack send; send_push uses that socket and lock immediately, while the Gateway client expects the first frame to be connection.ack."
+    evidence: "_current_ws is published before send_wire_payload(connection.ack), and ack does not use send_lock. See AgentWebSocketServer._connection_handler/risks.md#issue-003."
     suggested_action: "Send ack under the same lock before publishing _current_ws, or gate send_push until ack completes."
-confidence: confirmed
-details: {}
+  - id: ISSUE-004
+    dimension: error_handling
+    severity: medium
+    status: open
+    summary: "Completed request-task exceptions are not retrieved."
+    evidence: "task.add_done_callback(tasks.discard) removes completed tasks without reading exceptions.. See AgentWebSocketServer._connection_handler/risks.md#issue-004."
+    suggested_action: "Retrieve and log task exceptions in the callback, or keep tasks until gather consumes them."
+  - id: ISSUE-005
+    dimension: performance_risk
+    severity: medium
+    status: open
+    summary: "Inbound frames create unbounded concurrent request tasks."
+    evidence: "Each frame immediately calls asyncio.create_task and adds it to a set; there is no per-connection task. See AgentWebSocketServer._connection_handler/risks.md#issue-005."
+    suggested_action: "Bound concurrent request tasks and pause or reject reads when the connection reaches that limit."
 ---
 
-# `AgentWebSocketServer._connection_handler`
+# AgentWebSocketServer._connection_handler
 
 ## Actual Role
 
-Handles one Gateway WebSocket connection by publishing it as the active server-push socket, sending the initial `connection.ack`, and faning inbound frames into concurrent `_handle_message` tasks. On connection exit it clears per-WebSocket ACP capabilities, cancels connection tasks, cancels global agent and team work, stops scheduler state, gathers outstanding tasks, and clears tracked session stream tasks.
+The reviewed behavior, contracts, side effects, callers, callees, tests, and documentation evidence are preserved in the linked detail pages.
 
-## Key Signals
+## Audit Details
 
-- Input: a WebSocket connection object.
-- Output: no direct return value; sends ack, dispatches messages, and performs cleanup.
-- Main side effects: mutates active connection state, starts request tasks, cancels inflight runtime work, clears ACP capability and session stream state.
-- Main risk: global cleanup is not guarded by connection ownership, so overlapping connections can interfere with each other.
-- Related tests: closed-WebSocket paths in `test_agent_ws_connection_close.py` and indirect system WebSocket coverage; no direct `_connection_handler` tests for ack ordering or overlapping connections found.
-
-## Detail Index
-
-- Detail docs pending.
+- [Reviewed behavior](AgentWebSocketServer._connection_handler/actual-behavior.md)
+- [Full issue evidence](AgentWebSocketServer._connection_handler/risks.md)

@@ -21,10 +21,25 @@ class DummyBus:
         return None
 
 
+class _FakeRequestHeaders:
+    def __init__(self, mapping: dict[str, str]) -> None:
+        self._mapping = {k.lower(): v for k, v in mapping.items()}
+
+    def get(self, key: str, default: str | None = None) -> str | None:
+        return self._mapping.get(key.lower(), default)
+
+
 class FakeWebSocket:
-    def __init__(self):
+    def __init__(self, *, user_id: str | None = None) -> None:
         self.sent_frames = []
         self.closed = False
+        if user_id is not None:
+            self._gateway_user_id = user_id
+            self.request = type(
+                "Request",
+                (),
+                {"headers": _FakeRequestHeaders({"X-User-Id": user_id})},
+            )()
 
     async def send(self, data):
         self.sent_frames.append(json.loads(data))
@@ -89,6 +104,11 @@ class GatewayServerProbe(GatewayServer):
     def get_acp_pending_request_contexts_for_test(self) -> list[Any]:
         return list(self._acp_bridge.request_contexts)
 
+    @classmethod
+    def extract_ws_user_id_for_test(cls, ws: Any) -> str | None:
+        """Expose _extract_ws_user_id for unit tests (G.CLS.11: subclass wrapper)."""
+        return cls._extract_ws_user_id(ws)
+
 
 def build_server() -> GatewayServerProbe:
     config = GatewayServerConfig(
@@ -131,6 +151,25 @@ def test_normalize_gateway_message_maps_chat_resume_to_interrupt_resume():
     assert normalized.session_id == "sess-1"
 
 
+def test_normalize_gateway_message_preserves_user_id():
+    msg = Message(
+        id="req-chat",
+        type="req",
+        channel_id="tui",
+        session_id="sess-1",
+        params={"session_id": "sess-1", "content": "hi"},
+        timestamp=time.time(),
+        ok=True,
+        req_method=ReqMethod.CHAT_SEND,
+        user_id="testuser",
+    )
+
+    normalized = _normalize_gateway_message(msg)
+
+    assert normalized.user_id == "testuser"
+    assert normalized.is_stream is True
+
+
 @pytest.mark.asyncio
 async def test_schedule_gateway_restart_sets_event_without_execv(monkeypatch):
     import jiuwenswarm.gateway.app_gateway as gateway_module
@@ -143,7 +182,7 @@ async def test_schedule_gateway_restart_sets_event_without_execv(monkeypatch):
     )
     restart_request = gateway_module.GatewayRestartRequest()
 
-    gateway_module._schedule_gateway_restart(restart_request, delay=0.0)  # pylint: disable=protected-access
+    gateway_module._schedule_gateway_restart(restart_request, delay=0.0)
 
     await asyncio.wait_for(restart_request.ready_event.wait(), timeout=1.0)
     assert restart_request.requested is True
@@ -158,7 +197,7 @@ async def test_wait_for_gateway_tasks_returns_false_when_services_finish():
     restart_request = gateway_module.GatewayRestartRequest()
 
     result = await asyncio.wait_for(
-        gateway_module._wait_for_gateway_tasks_or_restart([service_task], restart_request),  # pylint: disable=protected-access
+        gateway_module._wait_for_gateway_tasks_or_restart([service_task], restart_request),
         timeout=1.0,
     )
 
@@ -172,9 +211,9 @@ async def test_wait_for_gateway_tasks_keeps_delayed_restart_when_services_finish
     service_task = asyncio.create_task(asyncio.sleep(0))
     restart_request = gateway_module.GatewayRestartRequest()
 
-    gateway_module._schedule_gateway_restart(restart_request, delay=1.0)  # pylint: disable=protected-access
+    gateway_module._schedule_gateway_restart(restart_request, delay=1.0)
     result = await asyncio.wait_for(
-        gateway_module._wait_for_gateway_tasks_or_restart([service_task], restart_request),  # pylint: disable=protected-access
+        gateway_module._wait_for_gateway_tasks_or_restart([service_task], restart_request),
         timeout=1.0,
     )
 
@@ -191,9 +230,9 @@ async def test_wait_for_gateway_tasks_keeps_delayed_restart_when_service_fails()
     service_task = asyncio.create_task(fail_service())
     restart_request = gateway_module.GatewayRestartRequest()
 
-    gateway_module._schedule_gateway_restart(restart_request, delay=1.0)  # pylint: disable=protected-access
+    gateway_module._schedule_gateway_restart(restart_request, delay=1.0)
     result = await asyncio.wait_for(
-        gateway_module._wait_for_gateway_tasks_or_restart([service_task], restart_request),  # pylint: disable=protected-access
+        gateway_module._wait_for_gateway_tasks_or_restart([service_task], restart_request),
         timeout=1.0,
     )
 
@@ -498,13 +537,13 @@ async def test_gateway_server_promotes_pending_session_client_after_stale_owner_
     new_ws = FakeWebSocket()
     server.bind_session_client("sess-race", old_ws, channel_id="tui")
 
-    assert await server._bind_route_session_client(route, "sess-race", new_ws) is False  # pylint: disable=protected-access
+    assert await server._bind_route_session_client(route, "sess-race", new_ws) is False
 
-    await server._connection_handler(old_ws, "/tui")  # pylint: disable=protected-access
+    await server._connection_handler(old_ws, "/tui")
 
     assert disconnected == [([("tui", "sess-race")], [])]
     assert rebound == [("tui", "sess-race")]
-    assert server._session_to_client[("tui", "sess-race")] is new_ws  # pylint: disable=protected-access
+    assert server._session_to_client[("tui", "sess-race")] is new_ws
 
 
 @pytest.mark.asyncio
@@ -1696,7 +1735,7 @@ async def test_gateway_server_handle_raw_message_forwards_request():
     assert msg.session_id == "sess-3"
     assert msg.req_method == ReqMethod.CHAT_SEND
     assert msg.params.get("content") == "hello"
-    assert msg.mode.value == "agent.fast"
+    assert msg.mode.value == "agent"
     assert ws.sent_frames == []
 
 
@@ -1903,3 +1942,495 @@ async def test_gateway_server_routes_by_params_session_id_when_payload_empty():
 
     assert len(ws.sent_frames) == 1
     assert ws.sent_frames[0]["payload"].get("session_id") is None
+
+
+@pytest.mark.asyncio
+async def test_gateway_server_handle_raw_message_uses_connection_user_id():
+    server = build_server()
+    ws = FakeWebSocket(user_id="alice")
+    seen = []
+
+    async def on_message(msg):
+        seen.append(msg)
+
+    server.on_message(on_message)
+
+    await server.handle_raw_message_public(
+        ws,
+        json.dumps(
+            {
+                "type": "req",
+                "id": "req-user",
+                "method": "chat.send",
+                "params": {
+                    "session_id": "sess-user",
+                    "content": "hello",
+                },
+            },
+            ensure_ascii=False,
+        ),
+        path="/tui",
+    )
+
+    assert len(seen) == 1
+    assert seen[0].user_id == "alice"
+
+
+def test_gateway_server_extract_ws_user_id_case_insensitive():
+    ws_lower = type(
+        "Ws",
+        (),
+        {"request_headers": _FakeRequestHeaders({"x-user-id": "bob"})},
+    )()
+    ws_upper = type(
+        "Ws",
+        (),
+        {"request": type("Request", (), {"headers": _FakeRequestHeaders({"X-User-Id": "  carol  "})})()},
+    )()
+    ws_empty = type("Ws", (), {"request_headers": _FakeRequestHeaders({})})()
+
+    assert GatewayServerProbe.extract_ws_user_id_for_test(ws_lower) == "bob"
+    assert GatewayServerProbe.extract_ws_user_id_for_test(ws_upper) == "carol"
+    assert GatewayServerProbe.extract_ws_user_id_for_test(ws_empty) is None
+
+
+@pytest.mark.asyncio
+async def test_gateway_server_local_handler_receives_connection_user_id():
+    captured_user_ids = []
+
+    async def _session_list(ws, req_id, params, session_id, user_id=None):
+        captured_user_ids.append(user_id)
+
+    server = build_server()
+    server.config.routes["/tui"].local_handlers["session.list"] = _session_list
+    ws = FakeWebSocket(user_id="alice")
+
+    await server.handle_raw_message_public(
+        ws,
+        json.dumps(
+            {
+                "type": "req",
+                "id": "req-sess",
+                "method": "session.list",
+                "params": {},
+            },
+            ensure_ascii=False,
+        ),
+        path="/tui",
+    )
+
+    assert captured_user_ids == ["alice"]
+
+
+@pytest.mark.asyncio
+async def test_gateway_server_ignores_frame_x_user_id_without_handshake_header():
+    server = build_server()
+    ws = FakeWebSocket()
+    seen = []
+
+    async def on_message(msg):
+        seen.append(msg)
+
+    server.on_message(on_message)
+
+    await server.handle_raw_message_public(
+        ws,
+        json.dumps(
+            {
+                "type": "req",
+                "id": "req-user",
+                "method": "chat.send",
+                "X-User-Id": "alice",
+                "params": {
+                    "session_id": "sess-user",
+                    "content": "hello",
+                },
+            },
+            ensure_ascii=False,
+        ),
+        path="/tui",
+    )
+
+    assert len(seen) == 1
+    assert seen[0].user_id is None
+
+
+def _build_tui_server_with_agent_switch() -> GatewayServerProbe:
+    config = GatewayServerConfig(
+        enabled=True,
+        host="127.0.0.1",
+        port=19002,
+        routes={
+            "/tui": RouteConfig(
+                path="/tui",
+                channel_id="tui",
+                forward_methods=frozenset(
+                    {
+                        ReqMethod.CHAT_SEND.value,
+                    }
+                ),
+            ),
+        },
+    )
+    return GatewayServerProbe(config, DummyBus())
+
+
+@pytest.mark.asyncio
+async def test_gateway_injects_default_agent_type_on_forward():
+    server = _build_tui_server_with_agent_switch()
+    ws = FakeWebSocket(user_id="alice")
+    setattr(ws, "_gateway_agent_type", "jiuwenswarm")
+    seen = []
+
+    async def on_message(msg):
+        seen.append(msg)
+
+    server.on_message(on_message)
+
+    await server.handle_raw_message_public(
+        ws,
+        json.dumps(
+            {
+                "type": "req",
+                "id": "req-chat",
+                "method": "chat.send",
+                "params": {
+                    "session_id": "sess-1",
+                    "content": "hello",
+                },
+            },
+            ensure_ascii=False,
+        ),
+        path="/tui",
+    )
+
+    assert len(seen) == 1
+    assert seen[0].params.get("agent_type") == "jiuwenswarm"
+
+
+@pytest.fixture
+def _third_agent_registry():
+    from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
+
+    from jiuwenswarm.extensions.registry import ExtensionRegistry
+
+    ExtensionRegistry.reset_instance()
+    registry = ExtensionRegistry.create_instance(AsyncCallbackFramework(), {}, None)
+    yield registry
+    ExtensionRegistry.reset_instance()
+
+
+def _resolve_third_agent_for_test():
+    from jiuwenswarm.extensions.registry import ExtensionRegistry
+    from jiuwenswarm.gateway.routing.third_agent import get_unsupported_third_agent
+
+    third = ExtensionRegistry.get_instance().get_third_agent()
+    return third if third is not None else get_unsupported_third_agent()
+
+
+@pytest.mark.asyncio
+async def test_gateway_agent_list_uses_local_handler_default_unsupported(
+    _third_agent_registry,
+):
+    server = _build_tui_server_with_agent_switch()
+    seen = []
+
+    async def on_message(msg):
+        seen.append(msg)
+
+    server.on_message(on_message)
+
+    async def _list(ws, req_id, params, session_id, user_id=None):
+        third = _resolve_third_agent_for_test()
+        result = await third.thirdagent_list(
+            user_id=str(user_id or ""),
+            current_agent_type=str(getattr(ws, "_gateway_agent_type", "") or ""),
+        )
+        await server.send_response(
+            ws,
+            req_id,
+            ok=bool(result.get("ok")),
+            payload=result.get("payload"),
+            error=result.get("error"),
+            code=result.get("code"),
+        )
+
+    server.register_local_handler("/tui", "3rdagent.list", _list)
+    ws = FakeWebSocket(user_id="alice")
+    setattr(ws, "_gateway_agent_type", "claude")
+
+    await server.handle_raw_message_public(
+        ws,
+        json.dumps(
+            {
+                "type": "req",
+                "id": "req-list",
+                "method": "3rdagent.list",
+                "params": {"session_id": "sess-1"},
+            },
+            ensure_ascii=False,
+        ),
+        path="/tui",
+    )
+
+    assert seen == []
+    assert len(ws.sent_frames) == 1
+    assert ws.sent_frames[0]["ok"] is False
+    assert ws.sent_frames[0].get("code") == "UNSUPPORTED"
+
+
+@pytest.mark.asyncio
+async def test_gateway_agent_switch_local_handler_updates_connection(
+    _third_agent_registry,
+):
+    from jiuwenswarm.extensions.sdk.third_agent import ThirdAgentExtension
+    from jiuwenswarm.gateway.routing.third_agent import ThirdAgent
+
+    class _FakeThirdAgent(ThirdAgent):
+        def normalize_agent_type(self, raw):
+            return str(raw or "jiuwenswarm").strip().lower() or "jiuwenswarm"
+
+        async def thirdagent_list(self, *, user_id, current_agent_type=""):
+            del user_id, current_agent_type
+            return {"ok": True, "payload": {"agents": []}}
+
+        async def thirdagent_switch(self, *, user_id, agent_type, session_id="", params=None):
+            del user_id, session_id, params
+            normalized = self.normalize_agent_type(agent_type)
+            if normalized == "unknown":
+                return {
+                    "ok": False,
+                    "error": f"unsupported agent_type: {normalized}",
+                    "code": "UNSUPPORTED_AGENT_TYPE",
+                }
+            return {
+                "ok": True,
+                "payload": {
+                    "agent_id": "a1",
+                    "agent_type": normalized,
+                    "sandbox_id": "sbx-1",
+                    "status": "ready",
+                },
+            }
+
+    class _FakeThirdAgentExt(ThirdAgentExtension):
+        def __init__(self, impl: ThirdAgent) -> None:
+            self._impl = impl
+
+        async def initialize(self, config) -> None:
+            del config
+
+        def get_third_agent(self) -> ThirdAgent:
+            return self._impl
+
+    _third_agent_registry.register_third_agent(_FakeThirdAgentExt(_FakeThirdAgent()))
+    server = _build_tui_server_with_agent_switch()
+    seen = []
+
+    async def on_message(msg):
+        seen.append(msg)
+
+    server.on_message(on_message)
+
+    async def _switch(ws, req_id, params, session_id, user_id=None):
+        params = params if isinstance(params, dict) else {}
+        third = _resolve_third_agent_for_test()
+        result = await third.thirdagent_switch(
+            user_id=str(user_id or ""),
+            agent_type=str(params.get("agent_type") or ""),
+            session_id=str(session_id or ""),
+            params=params,
+        )
+        if result.get("ok"):
+            payload = dict(result.get("payload") or {})
+            switched = str(payload.get("agent_type") or "").strip()
+            if switched:
+                setattr(ws, "_gateway_agent_type", switched)
+            await server.send_response(ws, req_id, ok=True, payload=payload)
+            return
+        await server.send_response(
+            ws,
+            req_id,
+            ok=False,
+            error=result.get("error"),
+            code=result.get("code"),
+        )
+
+    server.register_local_handler("/tui", "3rdagent.switch", _switch)
+    ws = FakeWebSocket(user_id="alice")
+    setattr(ws, "_gateway_agent_type", "jiuwenswarm")
+
+    await server.handle_raw_message_public(
+        ws,
+        json.dumps(
+            {
+                "type": "req",
+                "id": "req-switch",
+                "method": "3rdagent.switch",
+                "params": {"agent_type": "claude", "session_id": "sess-1"},
+            },
+            ensure_ascii=False,
+        ),
+        path="/tui",
+    )
+
+    assert getattr(ws, "_gateway_agent_type") == "claude"
+    assert seen == []
+    assert ws.sent_frames[0]["ok"] is True
+
+    await server.handle_raw_message_public(
+        ws,
+        json.dumps(
+            {
+                "type": "req",
+                "id": "req-chat",
+                "method": "chat.send",
+                "params": {
+                    "session_id": "sess-1",
+                    "content": "hello",
+                    "agent_type": "opencode",
+                },
+            },
+            ensure_ascii=False,
+        ),
+        path="/tui",
+    )
+
+    assert len(seen) == 1
+    assert seen[0].params.get("agent_type") == "claude"
+
+
+@pytest.mark.asyncio
+async def test_gateway_agent_switch_rejects_unsupported_type(_third_agent_registry):
+    from jiuwenswarm.extensions.sdk.third_agent import ThirdAgentExtension
+    from jiuwenswarm.gateway.routing.third_agent import ThirdAgent
+
+    class _FakeThirdAgent(ThirdAgent):
+        async def thirdagent_list(self, *, user_id, current_agent_type=""):
+            del user_id, current_agent_type
+            return {"ok": True, "payload": {"agents": []}}
+
+        async def thirdagent_switch(self, *, user_id, agent_type, session_id="", params=None):
+            del user_id, session_id, params
+            return {
+                "ok": False,
+                "error": f"unsupported agent_type: {agent_type}",
+                "code": "UNSUPPORTED_AGENT_TYPE",
+            }
+
+    class _FakeThirdAgentExt(ThirdAgentExtension):
+        def __init__(self, impl: ThirdAgent) -> None:
+            self._impl = impl
+
+        async def initialize(self, config) -> None:
+            del config
+
+        def get_third_agent(self) -> ThirdAgent:
+            return self._impl
+
+    _third_agent_registry.register_third_agent(_FakeThirdAgentExt(_FakeThirdAgent()))
+    server = _build_tui_server_with_agent_switch()
+    seen = []
+
+    async def on_message(msg):
+        seen.append(msg)
+
+    server.on_message(on_message)
+
+    async def _switch(ws, req_id, params, session_id, user_id=None):
+        params = params if isinstance(params, dict) else {}
+        third = _resolve_third_agent_for_test()
+        result = await third.thirdagent_switch(
+            user_id=str(user_id or ""),
+            agent_type=str(params.get("agent_type") or ""),
+            session_id=str(session_id or ""),
+            params=params,
+        )
+        await server.send_response(
+            ws,
+            req_id,
+            ok=bool(result.get("ok")),
+            payload=result.get("payload"),
+            error=result.get("error"),
+            code=result.get("code"),
+        )
+
+    server.register_local_handler("/tui", "3rdagent.switch", _switch)
+    ws = FakeWebSocket(user_id="alice")
+    setattr(ws, "_gateway_agent_type", "jiuwenswarm")
+
+    await server.handle_raw_message_public(
+        ws,
+        json.dumps(
+            {
+                "type": "req",
+                "id": "req-switch-bad",
+                "method": "3rdagent.switch",
+                "params": {"agent_type": "unknown", "session_id": "sess-1"},
+            },
+            ensure_ascii=False,
+        ),
+        path="/tui",
+    )
+
+    assert getattr(ws, "_gateway_agent_type") == "jiuwenswarm"
+    assert seen == []
+    assert len(ws.sent_frames) == 1
+    assert ws.sent_frames[0]["ok"] is False
+    assert ws.sent_frames[0].get("code") == "UNSUPPORTED_AGENT_TYPE"
+
+
+def test_resolve_3rdagent_switch_session_id_requires_explicit_param():
+    from jiuwenswarm.gateway.channel_manager.tui.tui_connect import (
+        resolve_3rdagent_switch_session_id,
+    )
+
+    assert resolve_3rdagent_switch_session_id(None) == ""
+    assert resolve_3rdagent_switch_session_id({}) == ""
+    assert resolve_3rdagent_switch_session_id({"session_id": "  "}) == ""
+    assert resolve_3rdagent_switch_session_id({"session_id": "sess-1"}) == "sess-1"
+
+
+@pytest.mark.asyncio
+async def test_gateway_agent_switch_rejects_missing_session_id():
+    server = _build_tui_server_with_agent_switch()
+    from jiuwenswarm.gateway.channel_manager.tui.tui_connect import (
+        resolve_3rdagent_switch_session_id,
+    )
+
+    async def _switch(ws, req_id, params, session_id, user_id=None):
+        del session_id, user_id
+        params = params if isinstance(params, dict) else {}
+        if not resolve_3rdagent_switch_session_id(params):
+            await server.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="session_id is required for 3rdagent.switch",
+                code="BAD_REQUEST",
+            )
+            return
+        await server.send_response(ws, req_id, ok=True, payload={})
+
+    server.register_local_handler("/tui", "3rdagent.switch", _switch)
+    ws = FakeWebSocket(user_id="alice")
+    setattr(ws, "_gateway_agent_type", "jiuwenswarm")
+
+    await server.handle_raw_message_public(
+        ws,
+        json.dumps(
+            {
+                "type": "req",
+                "id": "req-switch-no-sid",
+                "method": "3rdagent.switch",
+                "params": {"agent_type": "claude"},
+            },
+            ensure_ascii=False,
+        ),
+        path="/tui",
+    )
+
+    assert getattr(ws, "_gateway_agent_type") == "jiuwenswarm"
+    assert len(ws.sent_frames) == 1
+    assert ws.sent_frames[0]["ok"] is False
+    assert ws.sent_frames[0].get("code") == "BAD_REQUEST"

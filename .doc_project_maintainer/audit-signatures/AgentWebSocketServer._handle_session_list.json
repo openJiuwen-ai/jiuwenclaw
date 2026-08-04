@@ -1,22 +1,19 @@
 {
   "calls": [
     {
-      "tool_name": "multi_agent_v1.spawn_agent",
+      "tool_name": "collaboration.followup_task",
       "raw_input": {
-        "agent_id": "019f3feb-42d3-7921-953a-ad2f01aecee9",
-        "agent_type": "explorer",
+        "target": "/root/reaudit_init",
         "symbol_id": "AgentWebSocketServer._handle_session_list",
-        "assignment": "Audit exactly one symbol: AgentWebSocketServer._handle_session_list in jiuwenswarm/server/agent_ws_server.py."
+        "assignment": "Re-audit exactly one expired symbol against current source at HEAD 39feee89."
       }
     },
     {
-      "tool_name": "multi_agent_v1.wait_agent",
+      "tool_name": "collaboration.wait_agent",
       "raw_input": {
-        "agent_id": "019f3feb-42d3-7921-953a-ad2f01aecee9",
-        "nickname": "Bernoulli",
+        "target": "/root/reaudit_init",
         "symbol_id": "AgentWebSocketServer._handle_session_list",
-        "completed": true,
-        "finding_count": 4
+        "completed": true
       }
     }
   ]

@@ -42,6 +42,33 @@ if getattr(sys, "frozen", False):
         except Exception:  # noqa: BLE001
             pass
 
+    # macOS：把 .app 内置的 node-runtime/bin 前置到 PATH，使 shutil.which("npx")
+    # 与 playwright_runtime 默认的 "npx" 命令命中内置 Node（> v18），
+    # 用户无需单独安装 Node。入口脚本是所有冻结进程（主进程 + --desktop-run-*
+    # 子进程）的共同入口，PATH 在每个进程启动时都会被前置，幂等且随子进程继承。
+    if sys.platform == "darwin":
+        _node_bin = (
+            Path(sys.executable).resolve().parent.parent
+            / "Resources" / "node-runtime" / "bin"
+        )
+        if _node_bin.is_dir():
+            _old_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = (
+                f"{_node_bin}{os.pathsep}{_old_path}" if _old_path else str(_node_bin)
+            )
+    # Windows: use the Node runtime bundled by scripts/build-exe.ps1, when present.
+    # This makes browser runtime's default "npx" command work on machines without
+    # a system Node.js installation. Frozen child processes inherit this PATH too.
+    elif os.name == "nt":
+        _node_runtime = Path(sys.executable).resolve().parent / "runtime" / "node-runtime"
+        if (_node_runtime / "npx.cmd").is_file():
+            _old_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = (
+                f"{_node_runtime}{os.pathsep}{_old_path}"
+                if _old_path
+                else str(_node_runtime)
+            )
+
     # Windows: 防止 subprocess 弹出控制台窗口（console=False 编译时 git 等命令会弹出黑框）
     # Monkey-patch asyncio.create_subprocess_exec 和 subprocess.Popen，
     # 自动添加 CREATE_NO_WINDOW 标志
@@ -330,13 +357,6 @@ def _dispatch() -> None:
         from jiuwenswarm.channels.desktop.desktop_app import main as desktop_main
         desktop_main()
         return
-    # 子命令：浏览器启动（供主进程 subprocess 调用）
-    if "--browser-start-client" in sys.argv:
-        idx = sys.argv.index("--browser-start-client")
-        sys.argv.pop(idx)
-        from jiuwenswarm.agents.harness.common.tools.browser_start_client import main as browser_main
-        raise SystemExit(browser_main())
-
     # 子进程模式：argv 有任何参数（.py 脚本或 -m 等），不检查单实例锁
     if getattr(sys, "frozen", False) and len(sys.argv) >= 2:
         script_path = next((arg for arg in sys.argv[1:] if arg.endswith(".py") or arg.endswith(".pyw")), None)

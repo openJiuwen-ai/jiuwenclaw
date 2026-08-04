@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { webRequest } from "../../services/webClient";
+import { ConfigFieldHintLabel } from "./ConfigFieldHintLabel";
 
 export type PermissionsToolsEditorProps = {
   isConnected: boolean;
@@ -14,6 +15,12 @@ const LEVEL_LABELS: Record<PermLevel, string> = {
   deny: "DENY",
   allow: "ALLOW",
 };
+
+/** 仅缩写/协议类不够直观的工具名显示问号；bash / write / ask_user 等常见名不加 */
+const AMBIGUOUS_TOOL_HELP_KEYS = new Set([
+  "mcp_exec_command",
+  "acp_chat",
+]);
 
 function normalizeLevel(value: unknown): PermLevel | null {
   if (typeof value === "string") {
@@ -58,7 +65,7 @@ function groupToolsByLevel(tools: Record<string, PermLevel>): Record<PermLevel, 
 }
 
 export function PermissionsToolsEditor({ isConnected }: PermissionsToolsEditorProps) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [tools, setTools] = useState<Record<string, PermLevel>>({});
   const [loading, setLoading] = useState(false);
   const [busyKey, setBusyKey] = useState<string | null>(null);
@@ -69,6 +76,15 @@ export function PermissionsToolsEditor({ isConnected }: PermissionsToolsEditorPr
 
   const grouped = useMemo(() => groupToolsByLevel(tools), [tools]);
   const normalizedToolNames = useMemo(() => new Set(Object.keys(tools).map((name) => name.trim())), [tools]);
+
+  const getToolHelp = useCallback(
+    (toolName: string): string => {
+      if (!AMBIGUOUS_TOOL_HELP_KEYS.has(toolName)) return "";
+      const key = `config.permissionsTools.toolHelp.${toolName}`;
+      return i18n.exists(key) ? t(key) : "";
+    },
+    [i18n, t],
+  );
 
   const load = useCallback(async () => {
     if (!isConnected) return;
@@ -175,7 +191,7 @@ export function PermissionsToolsEditor({ isConnected }: PermissionsToolsEditorPr
       </div>
 
       {!isConnected ? (
-        <p className="text-xs text-amber-600 dark:text-amber-400">{t("config.permissionsTools.needConnection")}</p>
+        <p className="text-xs text-warn">{t("config.permissionsTools.needConnection")}</p>
       ) : null}
 
       {error ? (
@@ -212,7 +228,11 @@ export function PermissionsToolsEditor({ isConnected }: PermissionsToolsEditorPr
                       {names.map((name) => (
                         <tr key={name} className="border-t border-border even:bg-secondary/10">
                           <td className="px-3 py-2 align-middle">
-                            <span className="mono text-[13px] text-text break-all">{name}</span>
+                            <ConfigFieldHintLabel
+                              mono
+                              label={<span className="text-[13px] text-text break-all">{name}</span>}
+                              help={getToolHelp(name)}
+                            />
                           </td>
                           <td className="px-3 py-2 align-middle">
                             <select

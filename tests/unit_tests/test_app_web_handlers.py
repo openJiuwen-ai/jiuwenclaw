@@ -1,18 +1,23 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import asyncio
+import os
+import threading
+import time
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from jiuwenswarm.gateway.channel_manager.web import app_web_handlers
 from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import (
     WebHandlersBindParams,
-    _FEISHU_APP_DEFAULTS,
-    _XIAOYI_APP_DEFAULTS,
     _flatten_modes_team_for_config_panel,
     _flatten_symphony_for_config_panel,
     _normalize_feishu_conf,
     _normalize_xiaoyi_conf,
     _register_web_handlers,
+    _validate_wechat_numeric_params,
 )
 
 
@@ -80,6 +85,285 @@ class FakeHeartbeatService:
 
     def get_heartbeat_conf(self):
         return dict(self.config)
+
+
+@pytest.mark.asyncio
+async def test_session_list_preserves_team_name_in_projected_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.session_metadata.get_all_sessions_metadata",
+        lambda **_kwargs: (
+            [
+                {
+                    "session_id": "sess-team-1",
+                    "mode": "team",
+                    "team_name": "dev-team-swarm_sess-team-1",
+                    "title": "team task",
+                    "delivery_context": {"channel_id": "internal"},
+                }
+            ],
+            1,
+        ),
+    )
+    channel = FakeWebChannel()
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    await channel.methods["session.list"](
+        object(),
+        "req-session-list",
+        {},
+        "current-session",
+    )
+
+    payload = channel.responses[-1]["payload"]
+    assert payload["sessions"][0]["mode"] == "team"
+    assert payload["sessions"][0]["team_name"] == "dev-team-swarm_sess-team-1"
+    assert "delivery_context" not in payload["sessions"][0]
+
+
+@pytest.mark.asyncio
+async def test_path_set_reloads_config_and_resets_agent_browser_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    channel = FakeWebChannel()
+    agent_client = object()
+    saved_configs: list[dict] = []
+    lifecycle_calls: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(
+        app_web_handlers,
+        "update_browser_in_config",
+        lambda config: saved_configs.append(config),
+    )
+    monkeypatch.setattr(
+        app_web_handlers,
+        "get_config",
+        lambda: {"browser": {"chrome_path": "", "headless": True}},
+    )
+
+    async def fake_clear(client):
+        lifecycle_calls.append(("reload", client))
+
+    async def fake_restart(client, **kwargs):
+        lifecycle_calls.append(("restart", client, kwargs))
+
+    monkeypatch.setattr(app_web_handlers, "_clear_agent_config_cache", fake_clear)
+    monkeypatch.setattr(
+        app_web_handlers,
+        "_restart_agent_browser_runtime",
+        fake_restart,
+    )
+    _register_web_handlers(
+        WebHandlersBindParams(channel=channel, agent_client=agent_client)
+    )
+
+    await channel.methods["path.set"](
+        object(),
+        "req-path",
+        {"chrome_path": " C:\\Chrome\\chrome.exe ", "headless": False},
+        "sess-1",
+    )
+
+    assert saved_configs == [
+        {"chrome_path": "C:\\Chrome\\chrome.exe", "headless": False}
+    ]
+    assert lifecycle_calls == [
+        ("reload", agent_client),
+        (
+            "restart",
+            agent_client,
+            {
+                "previous_chrome_path": "",
+                "previous_headless": True,
+            },
+        ),
+    ]
+    assert channel.responses[-1] == {
+        "id": "req-path",
+        "ok": True,
+        "payload": {
+            "chrome_path": "C:\\Chrome\\chrome.exe",
+            "headless": False,
+        },
+        "error": None,
+        "code": None,
+    }
+
+
+class FakeUpdaterService:
+    def get_runtime_config(self):
+        return {"release_api_type": "gitcode", "release_api_url": ""}
+
+
+@pytest.fixture
+def cleared_openai_account_login_jobs():
+    with app_web_handlers._OPENAI_ACCOUNT_LOGIN_JOBS_LOCK:
+        app_web_handlers._OPENAI_ACCOUNT_LOGIN_JOBS.clear()
+    yield
+    with app_web_handlers._OPENAI_ACCOUNT_LOGIN_JOBS_LOCK:
+        app_web_handlers._OPENAI_ACCOUNT_LOGIN_JOBS.clear()
+
+
+class FakeOpenAIAccountAuthManager:
+    authenticated = False
+    needs_refresh = False
+    poll_started = threading.Event()
+    release_poll = threading.Event()
+
+    def __init__(self):
+        self.base_url = "https://chatgpt.com/backend-api/codex"
+
+    @classmethod
+    def reset(cls):
+        cls.authenticated = False
+        cls.needs_refresh = False
+        cls.poll_started = threading.Event()
+        cls.release_poll = threading.Event()
+
+    def status(self):
+        return SimpleNamespace(
+            authenticated=self.authenticated,
+            auth_path=Path("test-auth.json"),
+            has_refresh_token=self.authenticated,
+            expires_at=None,
+            needs_refresh=self.needs_refresh,
+            error=None,
+        )
+
+    def poll_device_login(self, device_code):
+        del device_code
+        self.poll_started.set()
+        if not self.release_poll.wait(timeout=2):
+            raise TimeoutError("test poll was not released")
+        type(self).authenticated = True
+        type(self).needs_refresh = False
+        return object()
+
+    def logout(self):
+        type(self).authenticated = False
+        type(self).needs_refresh = False
+        return True
+
+
+class FakeOpenAIAccountModelCatalog:
+    def __init__(self, *, base_url):
+        self.base_url = base_url
+
+    def list_model_ids(self, *, auth_manager):
+        type(auth_manager).authenticated = True
+        type(auth_manager).needs_refresh = False
+        return ["gpt-test"]
+
+
+@pytest.mark.asyncio
+async def test_openai_account_models_list_returns_refreshed_auth_status(
+        monkeypatch,
+        cleared_openai_account_login_jobs,
+):
+    del cleared_openai_account_login_jobs
+    FakeOpenAIAccountAuthManager.reset()
+    FakeOpenAIAccountAuthManager.needs_refresh = True
+    monkeypatch.setattr(app_web_handlers, "OpenAIAccountAuthManager", FakeOpenAIAccountAuthManager)
+    monkeypatch.setattr(app_web_handlers, "OpenAIAccountModelCatalog", FakeOpenAIAccountModelCatalog)
+    channel = FakeWebChannel()
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    await channel.methods["openai_account.models.list"](object(), "req-models", {}, "sess-1")
+
+    assert channel.responses[-1]["ok"] is True
+    assert channel.responses[-1]["payload"] == {
+        "models": ["gpt-test"],
+        "base_url": "https://chatgpt.com/backend-api/codex",
+        "auth": {
+            "authenticated": True,
+            "auth_path": "test-auth.json",
+            "has_refresh_token": True,
+            "expires_at": None,
+            "needs_refresh": False,
+            "error": None,
+            "base_url": "https://chatgpt.com/backend-api/codex",
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_updater_reset_source_registered_and_restores_defaults(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_update_updater_in_config(updates):
+        captured.update(updates)
+
+    monkeypatch.setattr(app_web_handlers, "update_updater_in_config", fake_update_updater_in_config)
+
+    channel = FakeWebChannel()
+    _register_web_handlers(WebHandlersBindParams(channel=channel, updater_service=FakeUpdaterService()))
+
+    await channel.methods["updater.reset_source"](object(), "req-reset", {}, "sess-1")
+
+    assert channel.responses[-1]["ok"] is True
+    assert channel.responses[-1]["payload"] == {"release_api_type": "gitcode", "release_api_url": ""}
+    assert captured == app_web_handlers.DEFAULT_SOURCE_CONFIG
+
+
+@pytest.mark.asyncio
+async def test_openai_account_logout_clears_pending_login_jobs(
+        monkeypatch,
+        cleared_openai_account_login_jobs,
+):
+    del cleared_openai_account_login_jobs
+    FakeOpenAIAccountAuthManager.reset()
+    FakeOpenAIAccountAuthManager.authenticated = True
+    monkeypatch.setattr(app_web_handlers, "OpenAIAccountAuthManager", FakeOpenAIAccountAuthManager)
+    app_web_handlers._store_openai_account_login_job(
+        "login-1",
+        app_web_handlers._OpenAIAccountLoginJob(
+            device_code=SimpleNamespace(),
+            created_at=time.time(),
+            expires_at=time.time() + 60,
+        ),
+    )
+    channel = FakeWebChannel()
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    await channel.methods["openai_account.auth.logout"](object(), "req-logout", {}, "sess-1")
+
+    assert channel.responses[-1]["ok"] is True
+    assert app_web_handlers._OPENAI_ACCOUNT_LOGIN_JOBS == {}
+
+
+@pytest.mark.asyncio
+async def test_openai_account_logout_wins_against_inflight_poll(
+        monkeypatch,
+        cleared_openai_account_login_jobs,
+):
+    del cleared_openai_account_login_jobs
+    FakeOpenAIAccountAuthManager.reset()
+    monkeypatch.setattr(app_web_handlers, "OpenAIAccountAuthManager", FakeOpenAIAccountAuthManager)
+    app_web_handlers._store_openai_account_login_job(
+        "login-1",
+        app_web_handlers._OpenAIAccountLoginJob(
+            device_code=SimpleNamespace(),
+            created_at=time.time(),
+            expires_at=time.time() + 60,
+        ),
+    )
+    channel = FakeWebChannel()
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    poll_task = asyncio.create_task(channel.methods["openai_account.auth.poll_login"](
+        object(), "req-poll", {"login_id": "login-1"}, "sess-1",
+    ))
+    await asyncio.wait_for(asyncio.to_thread(FakeOpenAIAccountAuthManager.poll_started.wait), timeout=1)
+    logout_task = asyncio.create_task(channel.methods["openai_account.auth.logout"](
+        object(), "req-logout", {}, "sess-1",
+    ))
+    await asyncio.sleep(0.05)
+    FakeOpenAIAccountAuthManager.release_poll.set()
+    await asyncio.gather(poll_task, logout_task)
+
+    assert FakeOpenAIAccountAuthManager.authenticated is False
+    assert app_web_handlers._OPENAI_ACCOUNT_LOGIN_JOBS == {}
 
 
 @pytest.mark.asyncio
@@ -228,6 +512,83 @@ async def test_config_set_reports_saved_when_hot_reload_callback_fails(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_config_set_persists_setup_guide_without_runtime_reload(monkeypatch):
+    channel = FakeWebChannel()
+    persisted: list[bool] = []
+    reload_options_seen: list[dict] = []
+
+    monkeypatch.setattr(
+        app_web_handlers,
+        "get_config_raw",
+        lambda: {"setup_guide": {"enabled": True}},
+    )
+    monkeypatch.setattr(
+        app_web_handlers,
+        "get_config",
+        lambda: {"setup_guide": {"enabled": False}},
+    )
+    monkeypatch.setattr(
+        app_web_handlers,
+        "update_setup_guide_enabled_in_config",
+        lambda enabled: persisted.append(enabled),
+    )
+
+    async def on_config_saved(updated_keys, *, env_updates, config_payload, reload_options):
+        del updated_keys, env_updates, config_payload
+        reload_options_seen.append(dict(reload_options))
+        return True
+
+    _register_web_handlers(
+        WebHandlersBindParams(
+            channel=channel,
+            on_config_saved=on_config_saved,
+        )
+    )
+
+    await channel.methods["config.set"](
+        object(),
+        "req-setup-guide",
+        {"setup_guide_enabled": "false"},
+        "sess-setup-guide",
+    )
+
+    assert persisted == [False]
+    assert reload_options_seen == [{
+        "target_channel_id": "web",
+        "reload_scopes": ["web_ui"],
+    }]
+    assert channel.responses[-1]["payload"] == {
+        "updated": ["setup_guide_enabled"],
+        "applied_without_restart": True,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("raw_config", "expected"),
+    [
+        ({}, "true"),
+        ({"setup_guide": {"enabled": False}}, "false"),
+    ],
+)
+async def test_config_get_returns_setup_guide_switch(monkeypatch, raw_config, expected):
+    channel = FakeWebChannel()
+    monkeypatch.setattr(app_web_handlers, "get_config_raw", lambda: raw_config)
+    monkeypatch.setattr(app_web_handlers, "get_config", lambda: raw_config)
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    await channel.methods["config.get"](
+        object(),
+        "req-get-setup-guide",
+        {},
+        "sess-get-setup-guide",
+    )
+
+    assert channel.responses[-1]["ok"] is True
+    assert channel.responses[-1]["payload"]["setup_guide_enabled"] == expected
+
+
+@pytest.mark.asyncio
 async def test_models_replace_all_applies_scoped_reload_before_responding(monkeypatch):
     channel = FakeWebChannel()
     reload_started = asyncio.Event()
@@ -337,6 +698,125 @@ async def test_config_set_routes_team_payload_to_modes_team_helper(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["true", "false"])
+async def test_config_set_syncs_auto_scan_to_review_trigger_only(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    value: str,
+) -> None:
+    channel = FakeWebChannel()
+    saved_updates: list[dict[str, str]] = []
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._ENV_FILE",
+        tmp_path / ".env",
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config_raw",
+        lambda: {"preferred_language": "zh"},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config",
+        lambda: {"evolution": {}},
+    )
+    monkeypatch.setenv("EVOLUTION_AUTO_SCAN", "")
+    monkeypatch.setenv("EVOLUTION_REVIEW_TRIGGER", "")
+    monkeypatch.setenv("EVOLUTION_SIGNAL_TRIGGER", "manual")
+
+    _register_web_handlers(
+        WebHandlersBindParams(
+            channel=channel,
+            on_config_saved=lambda _, **kwargs: saved_updates.append(
+                kwargs["env_updates"]
+            ),
+        )
+    )
+
+    await channel.methods["config.set"](
+        object(),
+        "req-evolution",
+        {"evolution_auto_scan": value},
+        "sess-evolution",
+    )
+
+    expected = {
+        "EVOLUTION_AUTO_SCAN": value,
+        "EVOLUTION_REVIEW_TRIGGER": value,
+    }
+    assert saved_updates == [expected]
+    assert {key: os.environ[key] for key in expected} == expected
+    assert os.environ["EVOLUTION_SIGNAL_TRIGGER"] == "manual"
+    assert set((tmp_path / ".env").read_text(encoding="utf-8").splitlines()) == {
+        f'{key}="{env_value}"' for key, env_value in expected.items()
+    }
+    assert channel.responses[-1]["payload"] == {
+        "updated": ["evolution_auto_scan"],
+        "applied_without_restart": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_config_set_preserves_deleted_template_for_bound_team(monkeypatch, tmp_path):
+    from jiuwenswarm.server.runtime.team_binding_store import TeamBindingStore
+    from jiuwenswarm.server.runtime.team_entity_store import TeamEntityStore
+
+    channel = FakeWebChannel()
+    recorded: list[dict] = []
+    binding_store = TeamBindingStore(tmp_path / "teams" / "bindings.json")
+    binding_store.create(team_name="research_team", template_id="beta")
+    entity_store = TeamEntityStore(tmp_path / ".agent_teams")
+    current_config = {
+        "preferred_language": "zh",
+        "modes": {
+            "team": {
+                "alpha": {"team_name": "alpha", "leader": {"member_name": "alpha_leader"}},
+                "beta": {"team_name": "beta", "leader": {"member_name": "beta_leader"}},
+            }
+        },
+    }
+
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config_raw",
+        lambda: {"preferred_language": "zh"},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config",
+        lambda: current_config,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.replace_teams_in_config",
+        lambda payload: recorded.append(payload),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.team_binding_store.get_team_binding_store",
+        lambda: binding_store,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.team_entity_store.get_team_entity_store",
+        lambda: entity_store,
+    )
+
+    await channel.methods["config.set"](
+        object(),
+        "req-preserve",
+        {
+            "agents": {"agent_1": {"model": {"provider": "OpenAI"}}},
+            "team": [{"team_name": "alpha", "leader": {"agent_key": "agent_1"}}],
+        },
+        "sess-1",
+    )
+
+    entity = entity_store.get("research_team")
+    assert recorded and recorded[0]["team"][0]["team_name"] == "alpha"
+    assert entity is not None
+    assert entity.template_id == "beta"
+    assert entity.template_snapshot["leader"]["member_name"] == "beta_leader"
+    assert channel.responses[-1]["ok"] is True
+
+
+@pytest.mark.asyncio
 async def test_config_set_returns_bad_request_when_team_payload_is_invalid(monkeypatch):
     channel = FakeWebChannel()
 
@@ -344,6 +824,10 @@ async def test_config_set_returns_bad_request_when_team_payload_is_invalid(monke
 
     monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config_raw",
                         lambda: {"preferred_language": "zh"})
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config",
+        lambda: {"modes": {"team": {}}},
+    )
     monkeypatch.setattr(
         "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.replace_teams_in_config",
         lambda payload: (_ for _ in ()).throw(ValueError("duplicate team_name: alpha_team")),
@@ -426,6 +910,7 @@ def test_config_panel_flatten_reads_symphony_enabled_and_skill_retrieval():
     raw = {
         "symphony": {
             "enabled": True,
+            "evolution": {"enabled": False},
             "orchestration": {"mode": "fast"},
             "skill_retrieval": {
                 "enabled": True,
@@ -438,6 +923,7 @@ def test_config_panel_flatten_reads_symphony_enabled_and_skill_retrieval():
     flat = _flatten_symphony_for_config_panel(raw)
 
     assert flat["symphony_enabled"] == "true"
+    assert flat["symphony_dynamic_graph_enabled"] == "false"
     assert "symphony_orchestration_mode" not in flat
     assert flat["skill_retrieval_enabled"] == "true"
     assert flat["skill_retrieval_build_branching_factor"] == "64"
@@ -475,13 +961,14 @@ async def test_config_set_routes_symphony_payload_to_config_helper(monkeypatch):
         "req-3",
         {
             "symphony_enabled": "true",
+            "symphony_dynamic_graph_enabled": "false",
             "skill_retrieval_enabled": "false",
             "skill_retrieval_retrieve_flatten_tree": "true",
         },
         "sess-3",
     )
 
-    assert recorded_symphony == [{"enabled": True}]
+    assert recorded_symphony == [{"enabled": True, "evolution": {"enabled": False}}]
     assert recorded_skill_retrieval == [{"enabled": False, "retrieve": {"flatten_tree": True}}]
     assert channel.responses[-1] == {
         "id": "req-3",
@@ -489,6 +976,7 @@ async def test_config_set_routes_symphony_payload_to_config_helper(monkeypatch):
         "payload": {
             "updated": [
                 "symphony_enabled",
+                "symphony_dynamic_graph_enabled",
                 "skill_retrieval_enabled",
                 "skill_retrieval_retrieve_flatten_tree",
             ],
@@ -497,6 +985,12 @@ async def test_config_set_routes_symphony_payload_to_config_helper(monkeypatch):
         "error": None,
         "code": None,
     }
+
+
+def test_web_does_not_expose_symphony_evolution_rpc_methods():
+    assert "symphony.evolution_status" not in app_web_handlers._FORWARD_REQ_METHODS
+    assert "symphony.evolution_record_outcome" not in app_web_handlers._FORWARD_REQ_METHODS
+    assert "symphony.evolution_rebuild" not in app_web_handlers._FORWARD_REQ_METHODS
 
 
 # =====================================================================
@@ -904,6 +1398,98 @@ async def test_channel_set_conf_invalid_params():
 # =====================================================================
 # 落盘测试 — 验证 update_channel_subsection_in_config 真实写回文件
 # =====================================================================
+
+
+# =====================================================================
+# 微信通道数值参数校验 — _validate_wechat_numeric_params + set_conf 拦截
+# =====================================================================
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"qrcode_poll_interval_sec": -1},           # 负数
+        {"qrcode_poll_interval_sec": 0},            # 0
+        {"qrcode_poll_interval_sec": 999999999},    # 极大值越上限
+        {"long_poll_timeout_sec": 0},               # 0
+        {"long_poll_timeout_sec": -5},              # 负数
+        {"long_poll_timeout_sec": 45.5},            # 非整数
+        {"long_poll_timeout_sec": 10000},           # 越上限
+        {"backoff_base_sec": 0},                    # 0
+        {"backoff_base_sec": -2.0},                 # 负数
+        {"backoff_max_sec": 0},                     # 0
+        {"backoff_max_sec": 1e12},                  # 极大值
+        {"backoff_base_sec": 10, "backoff_max_sec": 5},  # max < base 跨字段
+        {"qrcode_poll_interval_sec": "2"},          # 字符串（非数字类型）
+        {"qrcode_poll_interval_sec": True},         # bool 不算数字
+        {"qrcode_poll_interval_sec": float("inf")}, # 无穷
+        {"qrcode_poll_interval_sec": float("nan")}, # NaN
+    ],
+)
+def test_validate_wechat_numeric_params_rejects_invalid(params):
+    assert _validate_wechat_numeric_params(params) is not None
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {},                                             # 无数值字段 → 交给默认值
+        {"qrcode_poll_interval_sec": 2.0},
+        {"qrcode_poll_interval_sec": 0.1},              # 下边界
+        {"qrcode_poll_interval_sec": 3600},             # 上边界
+        {"long_poll_timeout_sec": 1},                   # 下边界
+        {"long_poll_timeout_sec": 600},                 # 上边界
+        {"long_poll_timeout_sec": 45.0},                # 整数值的 float
+        {"backoff_base_sec": 1.0, "backoff_max_sec": 30.0},
+        {"backoff_base_sec": 5, "backoff_max_sec": 5},  # 相等允许
+    ],
+)
+def test_validate_wechat_numeric_params_accepts_valid(params):
+    assert _validate_wechat_numeric_params(params) is None
+
+
+@pytest.mark.asyncio
+async def test_channel_wechat_set_conf_rejects_invalid_numeric():
+    """非法数值 → 返回 BAD_REQUEST，且不写入 channel manager（不落盘）。"""
+    channel = FakeWebChannel()
+    cm = FakeChannelManager()
+    _register_web_handlers(WebHandlersBindParams(channel=channel, channel_manager=cm))
+
+    await channel.methods["channel.wechat.set_conf"](
+        object(), "req-bad", {"enabled": True, "backoff_base_sec": -1}, "sess-1"
+    )
+
+    assert channel.responses[-1]["ok"] is False
+    assert channel.responses[-1]["code"] == "BAD_REQUEST"
+    assert "wechat" not in cm.configs
+
+
+@pytest.mark.asyncio
+async def test_channel_wechat_set_conf_accepts_valid_numeric(monkeypatch):
+    """合法数值 → 保存成功并落入 channel manager。"""
+    channel = FakeWebChannel()
+    cm = FakeChannelManager()
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_channel_in_config",
+        lambda channel_id, conf: None,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._clear_agent_config_cache",
+        lambda *a, **kw: None,
+    )
+    _register_web_handlers(WebHandlersBindParams(channel=channel, channel_manager=cm))
+
+    params = {
+        "enabled": True,
+        "qrcode_poll_interval_sec": 2.0,
+        "long_poll_timeout_sec": 45,
+        "backoff_base_sec": 1.0,
+        "backoff_max_sec": 30.0,
+    }
+    await channel.methods["channel.wechat.set_conf"](object(), "req-ok", params, "sess-1")
+
+    assert channel.responses[-1]["ok"] is True
+    assert cm.configs.get("wechat", {}).get("backoff_max_sec") == 30.0
 
 
 def test_update_channel_subsection_in_config_persists_to_disk(tmp_path, monkeypatch):

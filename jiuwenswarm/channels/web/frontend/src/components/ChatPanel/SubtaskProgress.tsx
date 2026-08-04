@@ -10,7 +10,8 @@ import clsx from 'clsx';
 
 export function SubtaskProgress() {
   const { t } = useTranslation();
-  const { activeSubtasks } = useChatStore();
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const activeSubtasks = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.activeSubtasks ?? new Map());
 
   // 将 Map 转换为数组并按 index 排序
   const subtasks = Array.from(activeSubtasks.values()).sort(
@@ -68,7 +69,7 @@ function SubtaskItem({ subtask }: SubtaskItemProps) {
         );
       case 'tool_call':
         return (
-          <span className="w-3 h-3 rounded-full bg-warning animate-pulse flex-shrink-0" />
+          <span className="w-3 h-3 rounded-full bg-warn animate-pulse flex-shrink-0" />
         );
       case 'tool_result':
         return (
@@ -98,7 +99,7 @@ function SubtaskItem({ subtask }: SubtaskItemProps) {
     <div
       className={clsx(
         'flex items-start gap-2 py-1.5 px-2 rounded text-sm',
-        subtask.status === 'tool_call' && 'bg-warning/10',
+        subtask.status === 'tool_call' && 'bg-warn/10',
         subtask.status === 'tool_result' && 'bg-info/10'
       )}
     >

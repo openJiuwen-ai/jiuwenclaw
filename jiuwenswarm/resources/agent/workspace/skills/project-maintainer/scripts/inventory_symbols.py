@@ -15,6 +15,8 @@ import subprocess
 import sys
 from typing import Any
 
+from symbol_fingerprints import normalize_hash, symbol_fingerprint
+
 
 SOURCE_EXTENSIONS = {
     ".py": "python",
@@ -880,6 +882,7 @@ def normalize_doc_audit(metadata: dict[str, Any]) -> dict[str, Any] | None:
                 "audited_at": legacy_machine.get("assessed_at"),
                 "audited_commit": None,
                 "audited_source_hash": legacy_machine.get("source_hash"),
+                "audited_symbol_hash": None,
                 "confidence": "unknown",
                 "expired_reason": None,
                 "downgrade_reason": "legacy_machine_assessment",
@@ -894,6 +897,7 @@ def normalize_doc_audit(metadata: dict[str, Any]) -> dict[str, Any] | None:
         "audited_at": raw.get("audited_at"),
         "audited_commit": raw.get("audited_commit"),
         "audited_source_hash": raw.get("audited_source_hash"),
+        "audited_symbol_hash": raw.get("audited_symbol_hash"),
         "confidence": raw.get("confidence"),
         "expired_reason": raw.get("expired_reason"),
     }
@@ -999,6 +1003,9 @@ def inventory_file(path: Path, root: Path, docs_root: Path | None, verify: bool)
             warnings.extend(extractor_warnings)
             extractor = "heuristic"
             confidence = "heuristic"
+
+    for item in symbols:
+        item["source_hash"], item["source_hash_mode"] = symbol_fingerprint(path, item, text)
 
     result: dict[str, Any] = {
         "path": posix(relative),
@@ -1466,7 +1473,7 @@ def symbol_record_id(source_path: str, item: dict[str, Any]) -> str:
 
 
 def symbol_signature_hash(item: dict[str, Any]) -> str:
-    signature = str(item.get("signature") or f"{item.get('kind')}|{item.get('class', '')}|{item.get('name')}|{item.get('line')}")
+    signature = str(item.get("signature") or f"{item.get('kind')}|{item.get('class', '')}|{item.get('name')}")
     return hashlib.sha256(signature.encode("utf-8")).hexdigest()
 
 
@@ -1486,6 +1493,7 @@ def default_audit_record(confidence: str | None = None) -> dict[str, Any]:
         "audited_at": None,
         "audited_commit": None,
         "audited_source_hash": None,
+        "audited_symbol_hash": None,
         "confidence": confidence or "unknown",
         "expired_reason": None,
     }
@@ -1495,6 +1503,7 @@ def normalized_audit_record(
     audit: dict[str, Any] | None,
     *,
     current_source_hash: str | None,
+    current_symbol_hash: str | None,
     current_commit: str | None,
     fallback_confidence: str | None,
 ) -> dict[str, Any]:
@@ -1504,8 +1513,10 @@ def normalized_audit_record(
     if status not in AUDIT_STATUSES:
         status = "unaudited"
     audited_source_hash = audit.get("audited_source_hash")
-    if status in AUDITED_STATUSES and not audited_source_hash:
+    audited_symbol_hash = audit.get("audited_symbol_hash")
+    if status in AUDITED_STATUSES and not audited_source_hash and not audited_symbol_hash:
         audited_source_hash = current_source_hash
+        audited_symbol_hash = current_symbol_hash
     audited_commit = audit.get("audited_commit")
     if status in AUDITED_STATUSES and not audited_commit:
         audited_commit = current_commit
@@ -1515,6 +1526,7 @@ def normalized_audit_record(
         "audited_at": audit.get("audited_at"),
         "audited_commit": audited_commit,
         "audited_source_hash": audited_source_hash,
+        "audited_symbol_hash": audited_symbol_hash,
         "confidence": audit.get("confidence") or fallback_confidence or "unknown",
         "expired_reason": audit.get("expired_reason"),
         **({"downgrade_reason": audit.get("downgrade_reason")} if audit.get("downgrade_reason") else {}),
@@ -1525,11 +1537,13 @@ def resolved_symbol_audit(
     item: dict[str, Any],
     previous_symbol: dict[str, Any] | None,
     current_source_hash: str | None,
+    current_symbol_hash: str | None,
     current_commit: str | None,
 ) -> dict[str, Any]:
     doc_audit = normalized_audit_record(
         item.get("audit"),
         current_source_hash=current_source_hash,
+        current_symbol_hash=current_symbol_hash,
         current_commit=current_commit,
         fallback_confidence=item.get("confidence"),
     )
@@ -1538,6 +1552,7 @@ def resolved_symbol_audit(
         previous_audit = normalized_audit_record(
             previous_symbol["audit"],
             current_source_hash=current_source_hash,
+            current_symbol_hash=current_symbol_hash,
             current_commit=current_commit,
             fallback_confidence=item.get("confidence"),
         )
@@ -1547,13 +1562,25 @@ def resolved_symbol_audit(
         audit = previous_audit
 
     if audit["status"] in AUDITED_STATUSES:
-        audited_hash = audit.get("audited_source_hash")
-        if audited_hash and current_source_hash and audited_hash != current_source_hash:
+        audited_symbol_hash = normalize_hash(audit.get("audited_symbol_hash"))
+        normalized_symbol_hash = normalize_hash(current_symbol_hash)
+        audited_source_hash = normalize_hash(audit.get("audited_source_hash"))
+        normalized_source_hash = normalize_hash(current_source_hash)
+        if audited_symbol_hash and normalized_symbol_hash and audited_symbol_hash != normalized_symbol_hash:
             audit = {
                 **audit,
                 "status": "audit_expired",
-                "expired_reason": "source_hash_changed",
+                "expired_reason": "symbol_hash_changed",
             }
+        elif not audited_symbol_hash and audited_source_hash and normalized_source_hash:
+            if audited_source_hash != normalized_source_hash:
+                audit = {
+                    **audit,
+                    "status": "audit_expired",
+                    "expired_reason": "source_hash_changed",
+                }
+            elif normalized_symbol_hash:
+                audit["audited_symbol_hash"] = normalized_symbol_hash
     return audit
 
 
@@ -1579,8 +1606,9 @@ def symbol_audit_entry(
     verify_docs_enabled: bool,
 ) -> dict[str, Any]:
     source_hash = file_item.get("sha256")
+    current_symbol_hash = item.get("source_hash")
     record_id = symbol_record_id(file_item["path"], item)
-    audit = resolved_symbol_audit(item, previous_symbol, source_hash, current_commit)
+    audit = resolved_symbol_audit(item, previous_symbol, source_hash, current_symbol_hash, current_commit)
     entry: dict[str, Any] = {
         "id": record_id,
         "symbol": item["symbol"],
@@ -1598,6 +1626,8 @@ def symbol_audit_entry(
         "source_fingerprint": {
             "commit": current_commit,
             "source_hash": source_hash,
+            "symbol_hash": current_symbol_hash,
+            "symbol_hash_mode": item.get("source_hash_mode"),
             "signature_hash": symbol_signature_hash(item),
         },
         "extractor": item.get("extractor"),
@@ -1701,7 +1731,7 @@ def build_symbol_audit_map(
         "notes": [
             "This map records repository-wide audit state, health snapshots, and issues for every discovered class, top-level function, and top-level class method.",
             "Use health_audit_summary and health_audit_symbols for the default product/runtime health audit; repository-only roles remain coverage and verification evidence unless explicitly requested.",
-            "agent_audited and human_audited expire automatically when audited_source_hash differs from the current source hash.",
+            "Agent and human audits expire when audited_symbol_hash differs from the current symbol hash; legacy records without a symbol hash use the file hash once for safe migration.",
             "script_assessed records controlled script processing only; it does not satisfy trusted agent, human, or out-of-scope audit closure.",
         ],
     }
