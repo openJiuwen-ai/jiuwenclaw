@@ -7337,6 +7337,27 @@ class AgentWebSocketServer:
                     env_overrides,
                     **reload_kwargs,
                 )
+                try:
+                    from jiuwenswarm.agents.harness.team import (
+                        stop_all_paused_team_session_runtimes_across_managers,
+                    )
+
+                    stopped = await stop_all_paused_team_session_runtimes_across_managers(
+                        reason="agent.reload_config: ",
+                    )
+                    if stopped:
+                        logger.info(
+                            "[AgentWebSocketServer] stopped paused team runtimes after agent.reload_config: "
+                            "count=%s request_id=%s reload_scopes=%s",
+                            stopped,
+                            request.request_id,
+                            sorted(reload_scopes),
+                        )
+                except Exception as exc:  # noqa: BLE001 - cleanup must not reject config reload
+                    logger.warning(
+                        "[AgentWebSocketServer] failed to stop paused team runtimes after agent.reload_config: %s",
+                        exc,
+                    )
 
             # Hot-reload ProactiveEngine config if available
             should_reload_proactive = not reload_scopes or bool(reload_scopes & {"model", "proactive", "agent_runtime"})

@@ -825,6 +825,11 @@ class TeamManager:
                 normalized_previous,
                 reason=f"{reason}session-switch",
             )
+            await self.stop_paused_session_runtime(
+                normalized_previous,
+                reason=f"{reason}session-switch: ",
+                offload=False,
+            )
             pre_signaled_session_ids.add(normalized_previous)
 
         if not self._is_distributed_mode(get_config()):
@@ -2169,6 +2174,96 @@ class TeamManager:
         )
         return True
 
+    @staticmethod
+    async def _find_paused_runner_team_name(session_id: str) -> str | None:
+        """Return the paused Runner team name for a session using the public facade."""
+        try:
+            active_teams = await Runner.list_active_teams()
+        except Exception as exc:
+            logger.warning(
+                "[TeamManager] list active teams failed before paused lookup: session_id=%s error=%s",
+                session_id,
+                exc,
+            )
+            return None
+
+        for info in active_teams:
+            if info.current_session_id == session_id and info.state == RuntimeState.PAUSED:
+                return info.team_name or None
+        return None
+
+    async def stop_paused_session_runtime(
+        self,
+        session_id: str,
+        reason: str = "",
+        *,
+        offload: bool = True,
+    ) -> bool:
+        """Stop a parked Runner team runtime without touching active streams."""
+        async with self._get_lifecycle_lock(session_id):
+            if self.has_stream_task(session_id):
+                logger.debug(
+                    "[TeamManager] skip paused runtime stop because stream task is active: session_id=%s",
+                    session_id,
+                )
+                return False
+
+            team_name = await self._find_paused_runner_team_name(session_id)
+            if not team_name:
+                logger.debug(
+                    "[TeamManager] skip paused runtime stop because no paused Runner entry matched: session_id=%s",
+                    session_id,
+                )
+                return False
+
+            if offload:
+                await self.offload_session_kv_cache(
+                    session_id,
+                    reason=f"{reason}paused-runtime-stop",
+                )
+
+            logger.info(
+                "[TeamManager] %sstop paused team session runtime: session_id=%s team_name=%s",
+                reason,
+                session_id,
+                team_name,
+            )
+            stopped = await self._stop_runner_team_runtime(
+                session_id,
+                team_name,
+                "paused-runtime-stop",
+            )
+            await self._stop_runner_team_agent_transport(session_id)
+            await self._finalize_runtime_cleanup(session_id, "paused-runtime-stop")
+
+        logger.info(
+            "[TeamManager] %spaused team session stopped: session_id=%s stopped=%s",
+            reason,
+            session_id,
+            stopped,
+        )
+        return True
+
+    async def stop_all_paused_session_runtimes(self, reason: str = "") -> int:
+        """Stop every paused Runner team runtime known to the process."""
+        try:
+            active_teams = await Runner.list_active_teams()
+        except Exception as exc:
+            logger.warning("[TeamManager] list active teams failed before paused stop: %s", exc)
+            return 0
+
+        paused_session_ids = {
+            str(info.current_session_id)
+            for info in active_teams
+            if info.state == RuntimeState.PAUSED
+        }
+        stopped_count = 0
+        for session_id in paused_session_ids:
+            stopped = await self.stop_paused_session_runtime(session_id, reason=reason)
+            if stopped:
+                stopped_count += 1
+        return stopped_count
+
     async def pause_session_runtime(self, session_id: str, reason: str = "") -> bool:
         """Pause the current team runtime for this session.
 
@@ -2392,6 +2487,11 @@ async def stop_team_session_runtime_across_managers(
         reason=reason,
         stop_runner=stop_runner,
     )
+
+
+async def stop_all_paused_team_session_runtimes_across_managers(reason: str = "") -> int:
+    """Stop all paused team runtimes on the singleton manager."""
+    return await get_team_manager().stop_all_paused_session_runtimes(reason=reason)
 
 
 def get_all_team_managers() -> list[TeamManager]:
