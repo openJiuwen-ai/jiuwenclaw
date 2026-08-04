@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 
 RUN ln -sf /usr/bin/python3 /usr/bin/python
-RUN rm /usr/lib/python3.12/EXTERNALLY-MANAGED
+RUN rm /usr/lib/${PYTHON_VERSION}/EXTERNALLY-MANAGED
 
 USER app
 
