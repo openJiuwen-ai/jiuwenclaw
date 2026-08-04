@@ -1123,6 +1123,8 @@ async def test_handle_tui_explicit_create_rejects_id_owned_by_another_channel(
     [
         ("web", "web_external_001", "no longer accepts session_id"),
         ("tui", "../unsafe", "invalid session_id"),
+        ("tui", ".hidden", "invalid session_id"),
+        ("tui", "a" * 81, "invalid session_id"),
         ("tui", "a" * 129, "invalid session_id"),
     ],
 )

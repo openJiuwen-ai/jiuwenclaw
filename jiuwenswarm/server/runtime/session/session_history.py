@@ -28,7 +28,7 @@ _VALID_SESSION_ID = re.compile(
 )
 
 
-def _is_valid_session_id(session_id: str) -> bool:
+def is_valid_session_id(session_id: str) -> bool:
     """Return whether a session id is safe to use as one path component."""
 
     return _VALID_SESSION_ID.fullmatch(session_id) is not None
@@ -137,7 +137,7 @@ def resolve_session_dir(
         ``(resolved_path, None)`` —— 合法，返回解析后的绝对路径（确认在 sessions 目录内）。
         ``(None, error_reason)`` —— 非法，根本未触碰磁盘路径。
     """
-    if not session_id or not _is_valid_session_id(session_id):
+    if not session_id or not is_valid_session_id(session_id):
         return None, "invalid session_id"
 
     if sessions_root is None:

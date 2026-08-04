@@ -63,6 +63,7 @@ from jiuwenswarm.server.runtime.session.session_metadata import get_all_sessions
 from jiuwenswarm.server.runtime.session.session_history import (
     append_compact_history_records,
     history_exists,
+    is_valid_session_id,
     load_history_records,
     read_member_history_records,
     read_team_history_records,
@@ -7741,13 +7742,7 @@ class AgentWebSocketServer:
                     "bypassing prewarm compatibility path: session_id=%s",
                     requested_session_id,
                 )
-                from jiuwenswarm.server.runtime.prompt_attachment_loader import (
-                    sanitize_session_id,
-                )
-                if (
-                    sanitize_session_id(requested_session_id) != requested_session_id
-                    or len(requested_session_id) > 128
-                ):
+                if not is_valid_session_id(requested_session_id):
                     raise ValueError("invalid session_id")
 
                 lock_key = f"external-create:{requested_session_id}"
