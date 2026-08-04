@@ -24,33 +24,31 @@ health:
   observability: partial
   performance_risk: medium
 audit:
-  status: agent_audited
+  status: audit_expired
   auditor: codex
   audited_at: 2026-07-14T11:39:39Z
   audited_commit: 39feee89e00dc6b0b6a6b16ca80a527beb631bd7
   audited_source_hash: sha256:5fbbae5104a1791ca98014aeed0b81fea243b57dcd2faac3f8f37886833c4fa5
   audited_symbol_hash: sha256:33487351f0a252dd739869feacd05acef75371d18829a892b7f4d27be460572e
   confidence: confirmed
-  expired_reason: null
+  expired_reason: "Implementation changed through 2026-08-03 for AgentServer-owned allocation and scoped TUI explicit-ID session.create compatibility; no independent symbol health re-audit was performed."
 issues:
   - id: ISSUE-001
     dimension: boundary_safety
     severity: critical
-    status: open
+    status: fixed
     summary: "Untrusted explicit session IDs become authoritative filesystem identities."
-    evidence: "Current code only strips a string before AgentManager returns every nonempty explicit value unchanged.. See AgentWebSocketServer._handle_session_create/risks.md#issue-001."
-    suggested_action: "Centralize strict ID syntax/length validation and enforce resolved-path containment at each filesystem boundary."
+    evidence: "Normal create rejects explicit IDs outside TUI; the TUI compatibility branch sanitizes the ID, enforces a 128-character limit, and is channel-restricted. See AgentWebSocketServer._handle_session_create/risks.md#issue-001."
   - id: ISSUE-002
     dimension: implementation_soundness
     severity: high
-    status: open
+    status: fixed
     summary: "Create neither persists nor uniquely reserves a session."
-    evidence: "Current AgentManager.create_session only echoes a nonempty ID, generates acp_<8 hex> for ACP, or returns. See AgentWebSocketServer._handle_session_create/risks.md#issue-002."
-    suggested_action: "Use one transport-independent service to validate/reserve identity, persist metadata atomically, and report conflicts."
+    evidence: "Creation claims an AgentServer ID and writes metadata; TUI explicit-ID creation writes or reuses metadata while holding a per-ID lock. See AgentWebSocketServer._handle_session_create/risks.md#issue-002."
   - id: ISSUE-003
     dimension: side_effects
     severity: high
-    status: open
+    status: fixed
     summary: "Team creation can stop distributed runtimes before success is observable."
     evidence: "For resolved mode 'team', current code awaits TeamManager.prepare_session_switch before encoding or. See AgentWebSocketServer._handle_session_create/risks.md#issue-003."
     suggested_action: "Separate creation from switching; make switching recoverable and classify send failures before retrying."
@@ -59,15 +57,14 @@ issues:
     severity: high
     status: open
     summary: "Tests cover mocked success and one successful team switch only."
-    evidence: "The three direct tests use FakeAgentManager/FakeTeamManager to assert generated/explicit IDs and one. See AgentWebSocketServer._handle_session_create/risks.md#issue-004."
-    suggested_action: "Add real-manager contract, adversarial ID, persistence, switch-failure, and transport-failure tests."
+    evidence: "Direct tests now cover normal creation, TUI explicit-ID idempotency/concurrency, unsafe and cross-channel IDs, stable binding, warm bypass, and team preparation. See AgentWebSocketServer._handle_session_create/risks.md#issue-004."
 ---
 
 # AgentWebSocketServer._handle_session_create
 
 ## Actual Role
 
-The reviewed behavior, contracts, side effects, callers, callees, tests, and documentation evidence are preserved in the linked detail pages.
+Handles both AgentServer-allocated `session.create` and its scoped TUI explicit-ID compatibility form. It validates project/work-mode identity, claims an eligible warm or warming Session for normal creation, or validates and serializes a caller-supplied TUI ID while bypassing prewarm; it then persists or restores authoritative metadata, runs the switch-owner lifecycle, and returns normalized identity/status. The health audit remains expired pending an independent re-audit.
 
 ## Audit Details
 

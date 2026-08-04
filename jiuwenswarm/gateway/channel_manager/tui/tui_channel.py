@@ -2,7 +2,7 @@
 
 """TuiChannel —— TUI 终端 WebSocket 通道（出站契约 + 五维索引）.
 
-架构定位（见 .claude/plans/tui-channel-impl-2commit.md）：
+架构定位：
 - GatewayServer 仍是 /tui ws 宿主 + 入站帧解析 + local handler 派发（前端无感）。
 - TuiChannel 继承 BaseWsChannel，只负责「出站 send（按 delivery.ws_id 物理寻址 / 五维
   routing_keys 精确查）」+「被 GatewayServer 委托 register_ws/unregister_ws 维护五维索引」。

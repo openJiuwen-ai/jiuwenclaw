@@ -147,13 +147,23 @@ async def test_create_and_delete_sandbox_calls_agent_api(client: YuanrongFronten
         sandbox = await client.create_sandbox(
             namespace="dev",
             name="agent-001",
-            urn="sn:cn:yrk:default:function:0@myService@python-agent:$latest",
-            workspace="/home/hhc/userA",
+            workspace="/home/hhc/workspaceA",
+            runtime_spec={
+                "runtime": "python3.11",
+                "sandbox_type": "docker",
+                "rootfs": {
+                    "imageurl": "yr-docker-runtime:v0",
+                    "user": "agentos",
+                    "ports": ["tcp:22"],
+                },
+                "cpu": 600,
+                "memory": 512,
+            },
             env_vars={"userid": "u-9f3a", "TRACE_ID": "ver-1"},
             mounts=[
                 {
-                    "source": "/home/hhc/userB",
-                    "target": "/mnt/userB",
+                    "source": "/home/hhc/workspaceB",
+                    "target": "/mnt/workspaceB",
                     "readonly": False,
                 }
             ],
@@ -162,7 +172,7 @@ async def test_create_and_delete_sandbox_calls_agent_api(client: YuanrongFronten
 
     assert sandbox.sandbox_id == "0b6c6322-6533-4901-8000-00000000bb0b"
     assert sandbox.status == "ready"
-    assert sandbox.metadata["provisioning"] == "yuanrong_agent_api"
+    assert sandbox.metadata["provisioning"] == "yuanrong_agent_api_inline"
 
     create_method, create_url, create_body = requests[0]
     assert create_method == "POST"
@@ -171,17 +181,28 @@ async def test_create_and_delete_sandbox_calls_agent_api(client: YuanrongFronten
     assert create_payload == {
         "namespace": "dev",
         "name": "agent-001",
-        "urn": "sn:cn:yrk:default:function:0@myService@python-agent:$latest",
-        "workspace": "/home/hhc/userA",
+        "workspace": "/home/hhc/workspaceA",
+        "runtime_spec": {
+            "runtime": "python3.11",
+            "sandbox_type": "docker",
+            "rootfs": {
+                "imageurl": "yr-docker-runtime:v0",
+                "user": "agentos",
+                "ports": ["tcp:22"],
+            },
+            "cpu": 600,
+            "memory": 512,
+        },
         "env_vars": {"userid": "u-9f3a", "TRACE_ID": "ver-1"},
         "mounts": [
             {
-                "source": "/home/hhc/userB",
-                "target": "/mnt/userB",
+                "source": "/home/hhc/workspaceB",
+                "target": "/mnt/workspaceB",
                 "readonly": False,
             }
         ],
     }
+    assert "urn" not in create_payload
 
     delete_method, delete_url, delete_body = requests[1]
     assert delete_method == "DELETE"
@@ -190,6 +211,12 @@ async def test_create_and_delete_sandbox_calls_agent_api(client: YuanrongFronten
         "0b6c6322-6533-4901-8000-00000000bb0b"
     )
     assert delete_body is None
+
+
+_INLINE_RUNTIME_SPEC = {
+    "runtime": "python3.11",
+    "rootfs": {"imageurl": "yr-docker-runtime:v0"},
+}
 
 
 @pytest.mark.asyncio
@@ -218,7 +245,8 @@ async def test_create_sandbox_uses_agent_timeout():
         await client.create_sandbox(
             namespace="dev",
             name="agent-001",
-            urn="urn:test:function:1",
+            workspace="/home/hhc/workspaceA",
+            runtime_spec=_INLINE_RUNTIME_SPEC,
         )
 
     assert captured_timeout["timeout"] == 300.0
@@ -241,7 +269,8 @@ async def test_create_sandbox_raises_clear_timeout_error():
             await client.create_sandbox(
                 namespace="dev",
                 name="agent-001",
-                urn="urn:test:function:1",
+                workspace="/home/hhc/workspaceA",
+                runtime_spec=_INLINE_RUNTIME_SPEC,
             )
 
 
@@ -262,7 +291,8 @@ async def test_create_sandbox_raises_on_agent_api_error(client: YuanrongFrontend
             await client.create_sandbox(
                 namespace="dev",
                 name="agent-001",
-                urn="urn:test:function:1",
+                workspace="/home/hhc/workspaceA",
+                runtime_spec=_INLINE_RUNTIME_SPEC,
             )
 
 
@@ -272,7 +302,8 @@ async def test_create_sandbox_requires_connection(client: YuanrongFrontendAgentC
         await client.create_sandbox(
             namespace="dev",
             name="agent-001",
-            urn="urn:test:function:1",
+            workspace="/home/hhc/workspaceA",
+            runtime_spec=_INLINE_RUNTIME_SPEC,
         )
 
 
@@ -282,8 +313,37 @@ async def test_create_sandbox_requires_required_fields(
 ):
     await client.connect("http://127.0.0.1:8080")
     with pytest.raises(ValueError, match="namespace is required"):
-        await client.create_sandbox(namespace="", name="agent-001", urn="urn:test")
+        await client.create_sandbox(
+            namespace="",
+            name="agent-001",
+            workspace="/home/hhc/workspaceA",
+            runtime_spec=_INLINE_RUNTIME_SPEC,
+        )
     with pytest.raises(ValueError, match="name is required"):
-        await client.create_sandbox(namespace="dev", name="", urn="urn:test")
-    with pytest.raises(ValueError, match="urn is required"):
-        await client.create_sandbox(namespace="dev", name="agent-001", urn="")
+        await client.create_sandbox(
+            namespace="dev",
+            name="",
+            workspace="/home/hhc/workspaceA",
+            runtime_spec=_INLINE_RUNTIME_SPEC,
+        )
+    with pytest.raises(ValueError, match="workspace is required"):
+        await client.create_sandbox(
+            namespace="dev",
+            name="agent-001",
+            workspace="",
+            runtime_spec=_INLINE_RUNTIME_SPEC,
+        )
+    with pytest.raises(ValueError, match="runtime_spec.runtime is required"):
+        await client.create_sandbox(
+            namespace="dev",
+            name="agent-001",
+            workspace="/home/hhc/workspaceA",
+            runtime_spec={"rootfs": {"imageurl": "yr-docker-runtime:v0"}},
+        )
+    with pytest.raises(ValueError, match="runtime_spec.rootfs.imageurl is required"):
+        await client.create_sandbox(
+            namespace="dev",
+            name="agent-001",
+            workspace="/home/hhc/workspaceA",
+            runtime_spec={"runtime": "python3.11", "rootfs": {}},
+        )

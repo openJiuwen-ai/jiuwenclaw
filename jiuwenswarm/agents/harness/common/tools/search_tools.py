@@ -453,7 +453,7 @@ def _serper_search_sync(query: str, max_results: int, timeout_seconds: int) -> d
 
     response = _http_request(
         "POST",
-        "https://google.serper.dev/search",
+        os.environ.get("SERPER_API_URL", "https://google.serper.dev/search"),
         headers={"X-API-KEY": serper_key, "Content-Type": "application/json"},
         json={"q": query, "num": max_results},
         timeout=timeout_seconds,
@@ -482,7 +482,7 @@ def _jina_search_sync(query: str, timeout_seconds: int) -> dict[str, Any]:
     }
     response = _http_request(
         "POST",
-        "https://deepsearch.jina.ai/v1/chat/completions",
+        os.environ.get("JINA_API_URL", "https://deepsearch.jina.ai/v1/chat/completions"),
         headers={"Authorization": f"Bearer {jina_key}", "Content-Type": "application/json"},
         json=payload,
         timeout=timeout_seconds,

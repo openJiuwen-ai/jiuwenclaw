@@ -12,6 +12,8 @@ import {
   matchesKey,
   decodeKittyPrintable,
   truncateToWidth,
+  visibleWidth,
+  wrapTextWithAnsi,
 } from "@mariozechner/pi-tui";
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
@@ -54,7 +56,7 @@ import type { McpListItem, McpListPayload } from "../core/commands/builtins/mcp.
 import { buildModeAutocompleteItems } from "../core/commands/builtins/mode.js";
 import { MemoryViewController, type MemoryViewTab } from "./memory-view.js";
 import { PIPELINE_VALUES, PIPELINE_OPTIONS, INTERVAL_VALUES, INTERVAL_OPTIONS, FLAG_OPTIONS } from "../core/commands/builtins/auto-harness.js";
-import { isTeamMode } from "../core/modes.js";
+import { isClientMode, isTeamMode } from "../core/modes.js";
 import {
   countCompletedWorkflowAgents,
   countWaitingForHuman,
@@ -121,6 +123,22 @@ const SWARM_WORKFLOW_LOG_PREVIEW_ROWS = 8;
 const SWARM_WORKFLOW_AGENT_TEXT_PREVIEW_ROWS = 6;
 const PERMISSION_TOOL_RE = /工具\s+`([^`]+)`\s+需要授权/;
 const CONFIRM_TOOL_RE = /(?:Tool|工具)\s*:\s*`([^`]+)`/i;
+
+/**
+ * Terminal mouse reporting takes ownership of drag events, which prevents the
+ * terminal's native text selection and copy behaviour. Scope it to UI states
+ * that actually need mouse events (pending questions / interactive overlays)
+ * AND to scrollable transcripts: a transcript taller than the viewport needs
+ * mouse tracking so the wheel can page history, which costs native selection
+ * only while content overflows. Short transcripts stay selectable.
+ */
+export function shouldCaptureTerminalMouse(
+  pendingQuestionActive: boolean,
+  interactiveOverlayActive: boolean,
+  transcriptMayScroll: boolean,
+): boolean {
+  return pendingQuestionActive || interactiveOverlayActive || transcriptMayScroll;
+}
 const CONFIRM_ACTION_RE = /\*\*(?:Agent wants to|Tool `[^`]+` requires your approval)([^*]*)\*\*/i;
 const PLAN_REJECT_INPUT_RE = /(\s+\[ .+ \])$/;
 const PERMISSION_RISK_RE = /安全风险评估：\**\s*([^\s*]+)?\s*\**([^*\n]+?风险)\**/m;
@@ -242,7 +260,7 @@ const MODEL_VALUE_SEPARATOR = "\x00";
 const MODEL_FORM_FIELDS: ModelFormField[] = ["model_name", "alias", "api_base", "api_key", "model_provider", "reasoning_level"];
 const MODEL_REQUIRED_FIELDS: ModelFormField[] = ["model_name", "api_base", "api_key", "model_provider"];
 const DEFAULT_MODEL_PROVIDER = "OpenAI";
-const MODEL_PROVIDER_OPTIONS = ["OpenAI", "OpenRouter", "DashScope", "SiliconFlow", "InferenceAffinity", "DeepSeek"];
+const MODEL_PROVIDER_OPTIONS = ["OpenAI", "OpenRouter", "DashScope", "SiliconFlow", "InferenceAffinity", "AscendAffinity", "DeepSeek"];
 const REASONING_LEVEL_OPTIONS = ["", "off", "low", "medium", "high"];
 const MAX_MODEL_NAME_LENGTH = 100;
 const MAX_ALIAS_LENGTH = 100;
@@ -765,12 +783,89 @@ function fallbackAtFileSuggestions(
   return suggestions.length > 0 ? { items: suggestions, prefix: atPrefix } : null;
 }
 
+/**
+ * 放宽 pi-tui Editor 的行内 slash 补全触发。
+ *
+ * pi-tui 的 `isInSlashCommandContext`（打字母时是否触发 slash 补全）是 private 方法，
+ * 硬编码 `isSlashMenuAllowed()(=cursorLine===0) && trimStart().startsWith("/")`（行首限制）。
+ * private 无法用子类 public 覆盖（TS2415），故用运行时 monkey-patch 直接替换实例方法：
+ * 仍要求光标在第一行，但触发条件放宽为"最后一个 token 以 / 开头"，使行内 `/skill` 也能触发。
+ */
+function patchEditorInlineSlash(editor: Editor): void {
+  const target = editor as unknown as {
+    state: { cursorLine: number; lines: string[]; cursorCol: number };
+    isInSlashCommandContext: (textBeforeCursor: string) => boolean;
+    isAtStartOfMessage: () => boolean;
+  };
+
+  // Patch 1: 打字母时的触发判断
+  target.isInSlashCommandContext = function (textBeforeCursor: string): boolean {
+    if (this.state.cursorLine !== 0) return false;
+    const tokens = textBeforeCursor.split(/\s+/);
+    const lastToken = tokens[tokens.length - 1] ?? "";
+    return lastToken.startsWith("/");
+  };
+
+  // Patch 2: 打 `/` 首字符时的触发判断
+  // 放宽为：仍要求第一行，但允许 `/` 前有内容，只要 `/` 是当前 token 的开头。
+  target.isAtStartOfMessage = function (): boolean {
+    if (this.state.cursorLine !== 0) return false;
+    const currentLine = this.state.lines[this.state.cursorLine] || "";
+    const beforeCursor = currentLine.slice(0, this.state.cursorCol);
+    const tokens = beforeCursor.split(/\s+/);
+    const lastToken = tokens[tokens.length - 1] ?? "";
+    return lastToken === "/";
+  };
+}
+
 class ComposerAutocompleteProvider implements AutocompleteProvider {
   constructor(
     private readonly inner: AutocompleteProvider,
     private readonly cwd: string,
     private readonly memoryArgCompletion?: (sub: string) => Promise<{ label: string; description: string }[]>,
+    // 行内 skill 补全候选源。
+    // 内层 CombinedAutocompleteProvider 硬编码"行首 /"，
+    // 行内 /skill 不会进它的命令补全分支，故外层自备 skill 列表在行内自行补全。
+    private readonly skillCommands: readonly InstalledSkillEntry[] = [],
+    /** 补全把整行变成 /<名字> 时回调，供上层区分「补全带来的提交」与「用户回车」。 */
+    private readonly onSlashNameCompleted?: (name: string) => void,
   ) {}
+
+  /** 光标前最后一个 token（以空白切分）。 */
+  private static lastToken(textBeforeCursor: string): string {
+    const parts = textBeforeCursor.split(/\s+/);
+    return parts[parts.length - 1] ?? "";
+  }
+
+  /** 是否为"行内 skill 补全"场景：最后 token 形如 /xxx 且它不是整行第一个 token。 */
+  private isInlineSkillContext(textBeforeCursor: string): boolean {
+    const last = ComposerAutocompleteProvider.lastToken(textBeforeCursor);
+    if (!last.startsWith("/")) return false;
+    // 行首（整行只有这一个 token）交给内层库处理；行内才由外层接管。
+    const trimmed = textBeforeCursor.replace(/\s+$/, "");
+    return trimmed.length > last.length;
+  }
+
+  /** 用最后 token 的 / 后缀去 fuzzy 匹配已装 skill，生成候选。 */
+  private inlineSkillSuggestions(textBeforeCursor: string): {
+    items: AutocompleteItem[];
+    prefix: string;
+  } | null {
+    const last = ComposerAutocompleteProvider.lastToken(textBeforeCursor);
+    const term = last.slice(1).toLowerCase(); // 去掉开头 /
+    const matched = this.skillCommands.filter((s) =>
+      s.name.toLowerCase().includes(term),
+    );
+    if (matched.length === 0) return null;
+    return {
+      items: matched.map((s) => ({
+        value: s.name,
+        label: s.name,
+        ...(s.description ? { description: s.description } : {}),
+      })),
+      prefix: last,
+    };
+  }
 
   async getSuggestions(
     lines: string[],
@@ -780,11 +875,23 @@ class ComposerAutocompleteProvider implements AutocompleteProvider {
   ) {
     const currentLine = lines[cursorLine] ?? "";
     const textBeforeCursor = currentLine.slice(0, cursorCol);
-    const isCommandNameCompletion =
-      textBeforeCursor.startsWith("/") && !textBeforeCursor.includes(" ");
+    // 命令名补全触发：
+    // 光标前最后一个 token 以 / 开头 → 补全命令+skill 全集（不区分行首/行内）。
+    const tokens = textBeforeCursor.split(/\s+/);
+    const lastToken = tokens[tokens.length - 1] ?? "";
+    const isCommandNameCompletion = lastToken.startsWith("/");
 
     if (isCommandNameCompletion && cursorCol !== currentLine.length) {
       return null;
+    }
+
+    // 行内 skill 补全：内层库 CombinedAutocompleteProvider 硬编码"行首 /"（只认整行
+    // 第一个字符是 /），行内 `/xxx` 不会进它的命令补全。外层在此接管行内场景。
+    if (this.isInlineSkillContext(textBeforeCursor)) {
+      const result = this.inlineSkillSuggestions(textBeforeCursor);
+      if (result) {
+        return result;
+      }
     }
 
     // /memory edit|toggle + 空格：直接调用 completion 获取文件/key 列表，绕过 CombinedAutocompleteProvider
@@ -858,10 +965,26 @@ class ComposerAutocompleteProvider implements AutocompleteProvider {
   ) {
     const currentLine = lines[cursorLine] ?? "";
     const textBeforeCursor = currentLine.slice(0, cursorCol);
+    // 行首/行内统一：命令或 skill 名补全的 prefix 形如 /xxx（无第二个 /）。
+    // 原逻辑要求整行等于 prefix（强制行首），现改为比较光标前最后一个 token，
+    // 使行内 /skill 也能应用补全。
+    const lastToken = textBeforeCursor.split(/\s+/).pop() ?? "";
     const isCommandNameCompletion = prefix.startsWith("/") && !prefix.slice(1).includes("/");
 
-    if (isCommandNameCompletion && textBeforeCursor !== prefix) {
+    if (isCommandNameCompletion && lastToken !== prefix) {
       return { lines, cursorLine, cursorCol };
+    }
+
+    // 行内 skill 补全应用：内层库 applyCompletion 的 isSlashCommand 要求 /
+    // 前面为空（行首），行内会误走 path 分支。外层在此自行替换最后一个 /token。
+    if (isCommandNameCompletion && this.isInlineSkillContext(textBeforeCursor)) {
+      const before = textBeforeCursor.slice(0, textBeforeCursor.length - lastToken.length);
+      const afterCursor = currentLine.slice(cursorCol);
+      const newLine = `${before}/${item.value} ${afterCursor}`;
+      const newLines = [...lines];
+      newLines[cursorLine] = newLine;
+      const newCol = before.length + item.value.length + 2; // "/" + name + 空格
+      return { lines: newLines, cursorLine, cursorCol: newCol };
     }
 
     const result = this.inner.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
@@ -872,6 +995,11 @@ class ComposerAutocompleteProvider implements AutocompleteProvider {
       const newLines = [...result.lines];
       newLines[result.cursorLine] = line + " ";
       return { lines: newLines, cursorLine: result.cursorLine, cursorCol: result.cursorCol + 1 };
+    }
+
+    if (isCommandNameCompletion && this.onSlashNameCompleted) {
+      const completed = (result.lines[result.cursorLine] ?? "").trim().match(/^\/(\S+)$/);
+      if (completed?.[1]) this.onSlashNameCompleted(completed[1]);
     }
 
     return result;
@@ -1206,33 +1334,114 @@ const swarmWorkflowSelectListTheme = {
   description: (value: string) => palette.text.secondary(value),
 };
 
-function wrapPlainText(text: string, width: number): string[] {
-  const maxWidth = Math.max(12, width - 1);
+export function wrapPlainText(text: string, width: number): string[] {
+  const maxWidth = Math.max(1, width - 1);
   const source = text.replace(/\r/g, "").split("\n");
   const lines: string[] = [];
   for (const rawLine of source) {
-    const words = rawLine.split(/\s+/).filter((word) => word.length > 0);
-    if (words.length === 0) {
-      lines.push("");
-      continue;
-    }
-    let current = "";
-    for (const word of words) {
-      const next = current ? `${current} ${word}` : word;
-      if (next.length <= maxWidth) {
-        current = next;
-        continue;
+    const wrapped = wrapTextWithAnsi(rawLine, maxWidth);
+    lines.push(...(wrapped.length > 0 ? wrapped : [""]));
+  }
+  return lines.length > 0 ? lines : [""];
+}
+
+export function renderWrappedQuestionOptions(
+  items: SelectItem[],
+  selectedIndex: number,
+  maxVisible: number,
+  width: number,
+): { lines: string[]; selectedEndIndex: number } {
+  const safeWidth = Math.max(1, width);
+  if (items.length === 0) {
+    return {
+      lines: [padToWidth(selectListTheme.noMatch("  No matching commands"), safeWidth)],
+      selectedEndIndex: 1,
+    };
+  }
+
+  const visibleCount = Math.max(1, maxVisible);
+  const startIndex = Math.max(
+    0,
+    Math.min(selectedIndex - Math.floor(visibleCount / 2), items.length - visibleCount),
+  );
+  const endIndex = Math.min(startIndex + visibleCount, items.length);
+  const lines: string[] = [];
+  let selectedEndIndex = 0;
+  const primaryColumnWidth = Math.max(
+    34,
+    Math.min(
+      42,
+      items.reduce(
+        (widest, item) => Math.max(widest, visibleWidth(item.label || item.value) + 2),
+        0,
+      ),
+    ),
+  );
+
+  for (let index = startIndex; index < endIndex; index++) {
+    const item = items[index];
+    if (!item) continue;
+    const selected = index === selectedIndex;
+    const marker = selected ? "→ " : "  ";
+    const continuationMarker = " ".repeat(visibleWidth(marker));
+    const bodyWidth = Math.max(1, safeWidth - visibleWidth(marker));
+    const label = item.label || item.value;
+    const description = item.description?.replace(/[\r\n]+/g, " ").trim() ?? "";
+    const labelWidth = visibleWidth(label);
+    const remainingDescriptionWidth =
+      safeWidth - visibleWidth(marker) - primaryColumnWidth - 2;
+
+    if (
+      description &&
+      safeWidth > 40 &&
+      labelWidth <= primaryColumnWidth - 2 &&
+      remainingDescriptionWidth > 10 &&
+      visibleWidth(description) <= remainingDescriptionWidth
+    ) {
+      const spacing = " ".repeat(primaryColumnWidth - labelWidth);
+      const content = `${label}${spacing}${description}`;
+      const styled = selected
+        ? selectListTheme.selectedText(`${marker}${content}`)
+        : `${marker}${label}${selectListTheme.description(`${spacing}${description}`)}`;
+      lines.push(padToWidth(styled, safeWidth));
+    } else {
+      const labelLines = wrapTextWithAnsi(label, bodyWidth);
+      for (let lineIndex = 0; lineIndex < labelLines.length; lineIndex++) {
+        const prefix = lineIndex === 0 ? marker : continuationMarker;
+        const content = `${prefix}${labelLines[lineIndex]}`;
+        lines.push(
+          padToWidth(selected ? selectListTheme.selectedText(content) : content, safeWidth),
+        );
       }
-      if (current) {
-        lines.push(current);
+
+      if (description) {
+        const descriptionPrefix = "    ";
+        const descriptionWidth = Math.max(1, safeWidth - visibleWidth(descriptionPrefix));
+        for (const descriptionLine of wrapTextWithAnsi(description, descriptionWidth)) {
+          lines.push(
+            padToWidth(
+              `${descriptionPrefix}${selectListTheme.description(descriptionLine)}`,
+              safeWidth,
+            ),
+          );
+        }
       }
-      current = word.length <= maxWidth ? word : word.slice(0, maxWidth);
     }
-    if (current) {
-      lines.push(current);
+
+    if (selected) {
+      selectedEndIndex = lines.length;
     }
   }
-  return lines.length > 0 ? lines : [text.slice(0, maxWidth)];
+
+  if (startIndex > 0 || endIndex < items.length) {
+    lines.push(
+      padToWidth(
+        selectListTheme.scrollInfo(`  (${selectedIndex + 1}/${items.length})`),
+        safeWidth,
+      ),
+    );
+  }
+  return { lines, selectedEndIndex };
 }
 
 /** Skip separator/blank lines when showing a compact human-question preview in lists. */
@@ -1284,6 +1493,11 @@ function workflowStatusTone(status: WorkflowStatus): (value: string) => string {
 
 function formatWorkflowStatus(status: WorkflowStatus): string {
   return workflowStatusTone(status)(`${workflowStatusIcon(status)} ${status}`);
+}
+
+function formatSwarmWorkflowListStatus(status: WorkflowStatus): string {
+  const icon = status === "running" ? "●" : workflowStatusIcon(status);
+  return workflowStatusTone(status)(`${icon} ${status}`);
 }
 
 function formatWorkflowStatusWord(status: WorkflowStatus): string {
@@ -1373,7 +1587,7 @@ function formatConfigValue(schema: ConfigItemSchema, val: string): string {
   }
   if (schema.sensitive) {
     if (!val) return "(空)";
-    return val.length > 8 ? `${val.slice(0, 4)}****${val.slice(-4)}` : "***";
+    return "******";
   }
   return val || "(空)";
 }
@@ -1446,6 +1660,7 @@ export class AppScreen implements Component, Focusable {
   private syncingComposerInput = false;
   private pendingQuestionAnswers = new Map<number, string>();
   private pendingMultiSelectAnswers = new Map<number, string[]>();
+  private pendingQuestionCustomInputs = new Map<number, string>();
   private questionList: SelectList | null = null;
   private questionCheckboxList: CheckboxList | null = null;
   private questionDetailsMap: Map<string, string[]> | null = null;
@@ -1488,6 +1703,7 @@ export class AppScreen implements Component, Focusable {
   private runningStoppedAtMs: number | null = null;
   /** Whether the eager skill-cache fetch on first WebSocket connection has already been fired. */
   private didEagerFetchSkills = false;
+  private didEagerFetchSandboxMeta = false;
   private pendingSubmittedInput: string | null = null;
   private pendingSubmittedBaseline = 0;
   private pendingSubmittedSessionId: string | null = null;
@@ -1509,6 +1725,8 @@ export class AppScreen implements Component, Focusable {
   private mouseTrackingEnabled = false;
   /** Previous session title for terminal window title sync. */
   private previousSessionTitle: string = "";
+  /** 刚由补全填入的 /<名字>，用于识别补全回车连带的那次提交。 */
+  private slashNameCompletion: { name: string; at: number } | null = null;
 
   constructor(
     private readonly tui: TUI,
@@ -1517,6 +1735,7 @@ export class AppScreen implements Component, Focusable {
     private readonly exit: () => void,
   ) {
     this.editor = new Editor(tui, editorTheme, { paddingX: 1, autocompleteMaxVisible: 6 });
+    patchEditorInlineSlash(this.editor);  // 方案 E：行内 slash 补全 monkey-patch
     this.composerAutocompleteProvider = this.rebuildAutocompleteProvider();
     this.editor.setAutocompleteProvider(this.composerAutocompleteProvider);
     // Whenever CommandService refreshes its installed-skills cache (on first
@@ -1662,7 +1881,8 @@ export class AppScreen implements Component, Focusable {
     this.startupPromptList.onSelect = (item) => {
       if (item.value === "yes") {
         addTrustedDir(cwd);
-        // Sync to server so the dir lands in permissions.external_directory
+        // Sync to server so the dir lands in permissions.file_guard.paths
+        // (read/write allow, exec ask; Legacy readers may still see external_directory)
         // allow-list (persist_cli_trusted_directory), otherwise external_dir
         // checks would still intercept paths under this trusted directory.
         // Mirrors /workspace add (workspace-dir.ts).
@@ -2498,11 +2718,12 @@ export class AppScreen implements Component, Focusable {
         requestLocalInterrupt: () => {
           return this.state.requestLocalInterrupt();
         },
-        showCtrlCExitHint: () => {
+        showExitHint: (key: string) => {
           if (this.transientNoticeTimer) {
             clearTimeout(this.transientNoticeTimer);
           }
-          this.transientNotice = "Press Ctrl+C again to exit";
+          const keyLabel = key === "ctrl+c" ? "Ctrl+C" : "Ctrl+D";
+          this.transientNotice = `Press ${keyLabel} again to exit`;
           this.transientNoticeTimer = setTimeout(() => {
             this.transientNotice = null;
             this.transientNoticeTimer = null;
@@ -2954,9 +3175,11 @@ export class AppScreen implements Component, Focusable {
       this.configEditorState !== null ||
       this.questionList !== null;
     this.setMouseTrackingEnabled(
-      transcriptMayScroll ||
-        snapshot.pendingQuestion !== null ||
+      shouldCaptureTerminalMouse(
+        snapshot.pendingQuestion !== null,
         interactiveOverlayActive,
+        transcriptMayScroll,
+      ),
     );
     if (
       this.transcriptScrollOffset > 0 &&
@@ -3049,7 +3272,8 @@ export class AppScreen implements Component, Focusable {
     const { content, attachments } = this.buildOutgoingMessage(text);
 
     const snapshot = this.state.getSnapshot();
-    if (!content && !(snapshot.pendingQuestion && this.otherInputMode)) return;
+    // Other 自定义输入模式下空内容不得提交（#2330），避免触发黄色 thinking。
+    if (!content) return;
 
     if (snapshot.pendingQuestion) {
       if (this.questionList !== null) {
@@ -3063,11 +3287,14 @@ export class AppScreen implements Component, Focusable {
       if (this.otherInputMode) {
         const pendingQuestion = snapshot.pendingQuestion;
         const pickedLabel = this.pendingQuestionAnswers.get(this.activeQuestionIndex) ?? "";
+        this.pendingQuestionCustomInputs.set(this.activeQuestionIndex, text);
         this.otherInputMode = false;
         this.syncEditorSubmitState(this.state.getSnapshot());
 
         if (this.activeQuestionIndex < pendingQuestion.questions.length - 1) {
-          this.pendingQuestionAnswers.set(this.activeQuestionIndex, pickedLabel || text);
+          if (!pickedLabel && !this.pendingMultiSelectAnswers.has(this.activeQuestionIndex)) {
+            this.pendingQuestionAnswers.set(this.activeQuestionIndex, text);
+          }
           this.activeQuestionIndex += 1;
           this.syncQuestionList(this.state.getSnapshot());
           this.editor.setText("");
@@ -3077,24 +3304,23 @@ export class AppScreen implements Component, Focusable {
 
         const answers = pendingQuestion.questions.map((question, index) => {
           const label = this.pendingQuestionAnswers.get(index) ?? "";
+          const multi = this.pendingMultiSelectAnswers.get(index);
           const isPlanRejectFeedback = shouldAppendPlanRejectFeedback(
             pendingQuestion.source,
             label,
             pendingQuestion.planApprovalKind,
           );
-          if (label === "Other" || isPlanRejectFeedback) {
+          const customInput = this.pendingQuestionCustomInputs.get(index);
+          if (customInput || label === "Other" || isPlanRejectFeedback) {
             return {
               question: question.question,
-              selected_options: [label],
-              custom_input:
-                index === this.activeQuestionIndex && (label === "Other" || text)
-                  ? text
-                  : undefined,
+              selected_options: multi ?? [label],
+              custom_input: customInput,
             };
           }
           return {
             question: question.question,
-            selected_options: [label || text],
+            selected_options: multi ?? [label || text],
           };
         });
         this.state.submitQuestionAnswers(answers);
@@ -3171,6 +3397,63 @@ export class AppScreen implements Component, Focusable {
     }
 
     if (text.startsWith("/")) {
+      // /<installedSkill> 行首分流：命中已装 skill 时当普通消息发送（content 原样
+      // 保留 /<skill> 前缀，skill 名由 extractSkillsFromContent 提取注入 params.skills）。
+      // 未命中已装 skill 的 /xxx 不在此拦截，继续走下面的命令分支（仍可能 Unknown command）。
+      {
+        const slashMatch = text.match(/^\/(\S+)/);
+        const firstToken = slashMatch?.[1] ?? "";
+        const installedSkill = firstToken
+          ? this.commands.getInstalledSkills().find((s) => s.name === firstToken)
+          : undefined;
+        if (installedSkill) {
+          // 只有 /<skill> 而没有内容时没什么可发的。pi-tui 在补全弹窗上按回车会
+          // 「应用补全」并顺势提交（见其 editor 的 tui.select.confirm 分支），这一下
+          // 只是补全，所以把补全结果放回输入框等用户补内容；用户自己再回车才提示为空。
+          if (text === `/${installedSkill.name}`) {
+            const justCompleted =
+              this.slashNameCompletion?.name === installedSkill.name &&
+              Date.now() - this.slashNameCompletion.at < 1000;
+            this.slashNameCompletion = null;
+            if (justCompleted) {
+              this.editor.setText(`${text} `);
+              this.tui.requestRender();
+              return;
+            }
+            this.editor.addToHistory(text);
+            this.editor.setText("");
+            this.state.addItem(addCommandEcho(snapshot.sessionId, text));
+            this.state.addItem(
+              addError(snapshot.sessionId, `${text} 后面需要跟内容，例如 ${text} 帮我做…`),
+            );
+            return;
+          }
+          this.slashNameCompletion = null;
+          this.beginPendingSubmittedInput(text, snapshot);
+          const extractedSkills = this.extractSkillsFromContent(content);
+          const requestId = this.state.sendMessage(
+            content,
+            attachments,
+            undefined,
+            undefined,
+            extractedSkills,
+          );
+          if (!requestId) {
+            this.clearPendingSubmittedInput();
+            this.state.addItem({
+              kind: "error",
+              id: `offline-${Date.now()}`,
+              sessionId: snapshot.sessionId,
+              content: "offline: waiting for reconnect",
+              at: new Date().toISOString(),
+            });
+            return;
+          }
+          this.editor.addToHistory(text);
+          this.editor.setText("");
+          return;
+        }
+      }
       // Check for mode switch when there's ongoing work
       if (/^\/(?:mode|switch)\s/.test(text) && snapshot.cancellableWork) {
         const currentMode = snapshot.mode;
@@ -3314,8 +3597,8 @@ export class AppScreen implements Component, Focusable {
           enterConfigEditor: (focusKey, configPayload, mode) => {
             this.openConfigEditor(focusKey, configPayload, mode);
           },
-          openInEditor: (filePath: string) => {
-            openInExternalEditor(this.tui, filePath);
+          openInEditor: (filePath: string, onDone?: () => void) => {
+            openInExternalEditor(this.tui, filePath, onDone);
           },
           openFolder: (folderPath: string) => {
             return openFolderInExplorer(folderPath);
@@ -3354,7 +3637,8 @@ export class AppScreen implements Component, Focusable {
     }
 
     this.beginPendingSubmittedInput(text, snapshot);
-    const requestId = this.state.sendMessage(content, attachments);
+    const extractedSkills = this.extractSkillsFromContent(content);
+    const requestId = this.state.sendMessage(content, attachments, undefined, undefined, extractedSkills);
     if (!requestId) {
       this.clearPendingSubmittedInput();
       this.state.addItem({
@@ -3378,6 +3662,21 @@ export class AppScreen implements Component, Focusable {
       this.didEagerFetchSkills = true;
       void this.commands.refreshSkills(this.state.getCommandContext());
     }
+    // Hide /sandbox subcommand inline hints when sandbox.type=yuanrong.
+    if (!this.didEagerFetchSandboxMeta && snapshot.connectionStatus === "connected") {
+      this.didEagerFetchSandboxMeta = true;
+      void import("../core/commands/builtins/sandbox.js")
+        .then(({ refreshSandboxCommandPresentation }) =>
+          refreshSandboxCommandPresentation(this.state.getCommandContext()),
+        )
+        .then(() => {
+          this.composerAutocompleteProvider = this.rebuildAutocompleteProvider();
+          this.editor.setAutocompleteProvider(this.composerAutocompleteProvider);
+        })
+        .catch(() => {
+          // Best-effort; /sandbox action still probes on use.
+        });
+    }
     if (
       this.pendingSubmittedInput &&
       (snapshot.sessionId !== this.pendingSubmittedSessionId ||
@@ -3391,6 +3690,7 @@ export class AppScreen implements Component, Focusable {
       this.activeQuestionIndex = 0;
       this.pendingQuestionAnswers.clear();
       this.pendingMultiSelectAnswers.clear();
+      this.pendingQuestionCustomInputs.clear();
       this.draftBeforeQuestion = this.editor.getText();
       this.editor.setText("");
       const pendingQuestion = snapshot.pendingQuestion;
@@ -3409,6 +3709,7 @@ export class AppScreen implements Component, Focusable {
       this.otherInputMode = false;
       this.pendingQuestionAnswers.clear();
       this.pendingMultiSelectAnswers.clear();
+      this.pendingQuestionCustomInputs.clear();
       this.questionList = null;
       this.questionCheckboxList = null;
       this.questionDetailsMap = null;
@@ -3485,6 +3786,26 @@ export class AppScreen implements Component, Focusable {
       return true;
     }
 
+    // 输入框为空时，Enter / Space 关闭 btw 浮层；输入框有内容时保留原有 composer 行为。
+    // ctrl+c 始终优先关闭浮层，但只在确有 btw 请求进行中时发送中断。
+    const dismissWithCtrlC = matchesKey(data, "ctrl+c");
+    const dismissWithEnterOrSpace =
+      this.editor.getText().length === 0 &&
+      (matchesKey(data, "enter") ||
+        matchesKey(data, "return") ||
+        matchesKey(data, "space"));
+    if (dismissWithCtrlC || dismissWithEnterOrSpace) {
+      const hasPendingBtwRequest = this.state.getSnapshot().btwPendingQuestion !== null;
+      this.state.clearBtwOverlay();
+      this.btwOverlayScrollOffset = 0;
+      if (hasPendingBtwRequest) {
+        this.state.requestLocalInterrupt();
+      }
+      this.state.setBtwActive(false);
+      this.tui.requestRender();
+      return true;
+    }
+
     // ←/→ 在 btw 历史间切换（必须在 scroll 之前消费，避免落入 composer）
     if (matchesKey(data, "left")) {
       this.state.navigateBtw(-1);
@@ -3514,6 +3835,17 @@ export class AppScreen implements Component, Focusable {
     }
 
     const pageSize = Math.max(1, Math.floor(this.tui.terminal.rows * 0.8));
+    // ctrl+p / ctrl+n 翻页（对齐 PgUp/PgDn）
+    if (matchesKey(data, "ctrl+p")) {
+      this.btwOverlayScrollOffset = Math.max(0, this.btwOverlayScrollOffset - pageSize);
+      this.tui.requestRender();
+      return true;
+    }
+    if (matchesKey(data, "ctrl+n")) {
+      this.btwOverlayScrollOffset += pageSize;
+      this.tui.requestRender();
+      return true;
+    }
     if (matchesKey(data, "up")) {
       this.btwOverlayScrollOffset = Math.max(0, this.btwOverlayScrollOffset - 1);
       this.tui.requestRender();
@@ -3766,6 +4098,30 @@ export class AppScreen implements Component, Focusable {
     // 导致误拦截本已通过后端过滤的会话。
 
     this.resumeSessionList = null;
+    const snapshot = this.state.getSnapshot();
+    const previousSessionId = snapshot.sessionId;
+    const targetMode =
+      matchedSession?.mode && isClientMode(matchedSession.mode)
+        ? matchedSession.mode
+        : snapshot.mode;
+    try {
+      await this.state.request("session.switch", {
+        session_id: nextSessionId,
+        previous_session_id: previousSessionId,
+        previous_mode: snapshot.mode,
+        mode: targetMode,
+      });
+    } catch (error) {
+      if (isTeamMode(targetMode)) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.state.addItem(
+          addError(previousSessionId, "Failed to switch team session: " + message),
+        );
+        this.tui.requestRender();
+        return;
+      }
+    }
+    this.state.setMode(targetMode);
     this.state.updateSession(nextSessionId);
     this.state.clearEntries();
     this.state.setAccentColor(accentColor);
@@ -4120,19 +4476,17 @@ export class AppScreen implements Component, Focusable {
     const snapshot = this.state.getSnapshot();
     try {
       const payload = await this.state.request<ModelListPayload>("command.model", {});
-      const models = payload.available_models ?? [];
       const current = payload.current ?? "unknown";
-      if (models.length === 0) {
+      const modelsMeta = payload.models ?? [];
+      const skipped = modelsMeta.filter((m) => isReservedMultimodalModelKey(m.name));
+      const selectableWithOrigIdx = modelsMeta
+        .filter((meta) => meta.name && !isReservedMultimodalModelKey(meta.name))
+        .map((meta) => ({ name: meta.name, origIdx: meta.index, meta }));
+      const selectable = selectableWithOrigIdx.map((entry) => entry.name);
+      if (modelsMeta.length === 0) {
         this.openEmptyModelList(current, "No models configured");
         return;
       }
-
-      const skipped = models.filter((m) => isReservedMultimodalModelKey(m));
-      // 构建 selectable 时保留在完整 models 列表中的原始索引，避免 reserved 模型过滤后索引错位
-      const selectableWithOrigIdx = models
-        .map((m, i) => ({ name: m, origIdx: i }))
-        .filter((entry) => !isReservedMultimodalModelKey(entry.name));
-      const selectable = selectableWithOrigIdx.map((entry) => entry.name);
       if (skipped.length > 0) {
         this.state.addItem(
           addInfo(
@@ -4147,18 +4501,16 @@ export class AppScreen implements Component, Focusable {
         return;
       }
 
-      const modelsMeta = payload.models ?? [];
       // 优先用后端 is_current 标记判断当前模型（同名模型仅靠名字无法区分），
       // 回退到 name-matching（兼容不带 is_current 的旧后端）
       const currentIdx = selectableWithOrigIdx.findIndex((entry) => {
-        const meta = modelsMeta[entry.origIdx];
-        return meta?.is_current === true;
+        return entry.meta?.is_current === true;
       });
       const fallbackCurrentIdx = currentIdx < 0 ? selectable.findIndex((m) => m === current) : currentIdx;
       const nameOccurrence: Record<string, number> = {};
       const items = selectableWithOrigIdx.map((entry, i) => {
         const m = entry.name;
-        const meta = modelsMeta[entry.origIdx];
+        const meta = entry.meta;
         const isCurrent = i === fallbackCurrentIdx;
         const seq = (nameOccurrence[m] ?? 0) + 1;
         nameOccurrence[m] = seq;
@@ -4180,9 +4532,8 @@ export class AppScreen implements Component, Focusable {
           const _mk = (mm: ModelMeta | undefined) =>
             `${mm?.model_provider ?? ""}|${mm?.api_base ?? ""}`;
           const myFingerprint = _mk(meta);
-          // selectableWithOrigIdx 与 selectable 同序，origIdx 索引回 modelsMeta
           const conflictCount = selectableWithOrigIdx.reduce((acc, ent) => {
-            const xm = modelsMeta[ent.origIdx];
+            const xm = ent.meta;
             return xm && _mk(xm) === myFingerprint ? acc + 1 : acc;
           }, 0);
           if (conflictCount > 1) {
@@ -4342,7 +4693,7 @@ export class AppScreen implements Component, Focusable {
   }
 
   private createModelForm(mode: "add" | "edit", target?: { index: number }): ModelFormState {
-    const meta = target ? this.modelList?.modelsMeta[target.index] : undefined;
+    const meta = target ? this.modelList?.modelsMeta.find((m) => m.index !== undefined && m.index === target.index) : undefined;
     const fields: Record<ModelFormField, string> = {
       model_name: mode === "edit" ? meta?.model_name ?? "" : "",
       alias: mode === "edit" ? meta?.alias ?? "" : "",
@@ -4630,8 +4981,8 @@ export class AppScreen implements Component, Focusable {
       return "reasoning_level must be default, off, low, medium, or high";
     }
     if (trimmed.alias) {
-      const conflict = state.modelsMeta.find((model, index) => {
-        if (state.inputMode === "edit" && index === state.target?.index) return false;
+      const conflict = state.modelsMeta.find((model) => {
+        if (state.inputMode === "edit" && model.index !== undefined && model.index === state.target?.index) return false;
         return (model.alias || "") === trimmed.alias || model.model_name === trimmed.alias;
       });
       if (conflict) {
@@ -5422,7 +5773,7 @@ export class AppScreen implements Component, Focusable {
       const progress = workflow.status === "running" ? `${completed}/${total}` : `${total}`;
       return {
         value: workflow.id,
-        label: `${formatWorkflowStatus(workflow.status)} ${workflow.name}`,
+        label: `${formatSwarmWorkflowListStatus(workflow.status)} ${workflow.name}`,
         description: `${progress} agents`,
       };
     });
@@ -7241,6 +7592,33 @@ export class AppScreen implements Component, Focusable {
     };
   }
 
+  /**
+   * 从消息文本里提取被 /<skillName> 标记的已装 skill 名（用于 params.skills）。
+   *
+   * 规则：
+   * - 遍历已装 skill 名，在 content 里搜 `/<完整名>`。无空格也识别（如 `/doc写文档`）。
+   * - `/` 前必须是行首或空白（`(^|\s)/name`），避免 `路径a/doc` 这种误命中。
+   * - skill 名后必须是词边界（`/name\b`），避免 `/docs`、`/doc123` 这类更长非 skill
+   *   文本被当成短 skill 名误命中（如 `/docs` 不该命中 `doc`）。
+   *   u 模式下 CJK 字符不属于 `\w`，故 `/doc写文档` 的 `doc` 后是 `\b` 边界，正常命中。
+   * - content 本身不改动，仅返回命中的 skill 名（去重，按 content 中出现位置排序）。
+   */
+  private extractSkillsFromContent(content: string): string[] {
+    if (!content) return [];
+    const installed = this.commands.getInstalledSkills();
+    const found: { name: string; idx: number }[] = [];
+    for (const skill of installed) {
+      const escaped = skill.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const re = new RegExp(`(^|\\s)/${escaped}\\b`, "u");
+      const match = re.exec(content);
+      if (match && !found.some((f) => f.name === skill.name)) {
+        found.push({ name: skill.name, idx: match.index });
+      }
+    }
+    found.sort((a, b) => a.idx - b.idx);
+    return found.map((f) => f.name);
+  }
+
   private handleConfigEditorInput(data: string): void {
     if (!this.configEditorState) return;
     const state = this.configEditorState;
@@ -7522,7 +7900,7 @@ export class AppScreen implements Component, Focusable {
     currentValues: Record<string, string>,
   ): Promise<void> {
     const isReset = this.configEditorState?.mode === "reset";
-    const valueDisplay = schema.sensitive ? "***" : value;
+    const valueDisplay = schema.sensitive ? "******" : value;
     const statusLabel = isReset ? "已重置" : "已应用";
     const restartLabel = isReset ? "已重置(需重启)" : "需重启";
 
@@ -7862,7 +8240,7 @@ export class AppScreen implements Component, Focusable {
           schema.type === "toggle"
             ? val === "true" ? "Enabled" : "Disabled"
             : schema.sensitive
-              ? val.length > 8 ? `${val.slice(0, 4)}****${val.slice(-4)}` : "***"
+              ? val ? "******" : "(empty)"
               : val || "(empty)";
         items.push({
           value: schema.key,
@@ -8201,9 +8579,12 @@ export class AppScreen implements Component, Focusable {
       (workflow) => workflow.status === "running",
     );
     const hasRunningWorkflow = runningWorkflows.length > 0;
+    const hasBtwLoading = snapshot.btwPendingQuestion !== null;
     const runningWorkflow = runningWorkflows[0];
     const shouldAnimate =
-      !snapshot.isInterrupted && (snapshot.isProcessing || hasRunningTools || teamWorking || hasRunningWorkflow);
+      hasBtwLoading ||
+      (!snapshot.isInterrupted &&
+        (snapshot.isProcessing || hasRunningTools || teamWorking || hasRunningWorkflow));
     if (!shouldAnimate) {
       const nowMs = Date.now();
       if (this.runningStoppedAtMs === null) {
@@ -8403,6 +8784,10 @@ export class AppScreen implements Component, Focusable {
       async (sub: string) => {
         return this.ensureMvController().getMemoryCompletions(sub);
       },
+      skills, // ← 传给外层，用于行内 skill 补全
+      (name: string) => {
+        this.slashNameCompletion = { name, at: Date.now() };
+      },
     );
   }
 
@@ -8598,7 +8983,11 @@ export class AppScreen implements Component, Focusable {
         lines.push("");
         for (const opt of question.options) {
           const optLine = `  ${opt.label}${opt.description ? ` - ${opt.description}` : ""}`;
-          lines.push(padToWidth(palette.text.dim(optLine), width));
+          lines.push(
+            ...wrapPlainText(optLine, width).map((line) =>
+              padToWidth(palette.text.dim(line), width),
+            ),
+          );
         }
       }
       lines.push("");
@@ -8630,7 +9019,16 @@ export class AppScreen implements Component, Focusable {
       const checkboxLines = this.questionCheckboxList.render(width);
       lines.push(...checkboxLines);
     } else if (this.questionList !== null) {
-      const listLines = this.questionList.render(width);
+      const wrappedOptions =
+        pendingQuestion.source === "ask_user_interrupt"
+          ? renderWrappedQuestionOptions(
+              this.questionList["filteredItems"] ?? [],
+              this.questionList["selectedIndex"] ?? 0,
+              this.questionList["maxVisible"] ?? 20,
+              width,
+            )
+          : null;
+      const listLines = wrappedOptions?.lines ?? this.questionList.render(width);
 
       // Insert preview / details sub-lines right after the currently selected item
       // instead of appending them after the entire list.
@@ -8673,7 +9071,9 @@ export class AppScreen implements Component, Focusable {
             0,
             Math.min(selectedIdx - Math.floor(maxVis / 2), filteredLen - maxVis),
           );
-          const insertAt = Math.max(0, Math.min(selectedIdx - scrollStart + 1, listLines.length));
+          const insertAt = wrappedOptions
+            ? wrappedOptions.selectedEndIndex
+            : Math.max(0, Math.min(selectedIdx - scrollStart + 1, listLines.length));
           listLines.splice(insertAt, 0, ...subLines);
         }
       }
@@ -9015,9 +9415,18 @@ export class AppScreen implements Component, Focusable {
       return;
     }
 
+    this.pendingMultiSelectAnswers.set(this.activeQuestionIndex, selectedValues);
+    if (selectedValues.includes("Other")) {
+      this.otherInputMode = true;
+      this.questionCheckboxList = null;
+      this.setMouseTrackingEnabled(false);
+      this.syncEditorSubmitState(snapshot);
+      this.tui.requestRender();
+      return;
+    }
+
     if (this.activeQuestionIndex < pendingQuestion.questions.length - 1) {
       // Multiple questions: advance to the next one
-      this.pendingMultiSelectAnswers.set(this.activeQuestionIndex, selectedValues);
       this.activeQuestionIndex += 1;
       this.syncQuestionList(this.state.getSnapshot());
       this.tui.requestRender();
@@ -9031,10 +9440,12 @@ export class AppScreen implements Component, Focusable {
         index === this.activeQuestionIndex
           ? selectedValues
           : this.pendingMultiSelectAnswers.get(index);
-      return {
+      const answer = {
         question: question.question,
         selected_options: multi ?? [this.pendingQuestionAnswers.get(index) ?? ""],
       };
+      const customInput = this.pendingQuestionCustomInputs.get(index);
+      return customInput ? { ...answer, custom_input: customInput } : answer;
     });
     this.state.submitQuestionAnswers(answers);
   }
@@ -9084,6 +9495,10 @@ export class AppScreen implements Component, Focusable {
         question: question.question,
         selected_options: multi ?? [answerValue],
       };
+      const customInput = this.pendingQuestionCustomInputs.get(index);
+      if (customInput) {
+        return { ...answer, custom_input: customInput };
+      }
       if (
         index === this.activeQuestionIndex &&
         collectPlanRejectFeedback &&

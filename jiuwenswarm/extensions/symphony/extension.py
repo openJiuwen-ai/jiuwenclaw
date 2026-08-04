@@ -85,6 +85,7 @@ class SymphonyExtension(BaseExtension):
         config = load_symphony_config()
         skills_root = config.paths.skills_root
         score_dir = config.paths.score_dir
+        await self._repair_interrupted_build_state(score_dir)
 
         def status() -> dict[str, Any]:
             payload = score_status(
@@ -119,13 +120,24 @@ class SymphonyExtension(BaseExtension):
         async with self._build_guard:
             task = self._active_build_task
             if task is None or task.done():
+                if task is not None:
+                    self._active_build_task = None
+                _repair_interrupted_build_log(score_dir)
+                build_log_payload = _build_log_payload(score_dir)
+                is_paused = (
+                    build_log_payload["build_progress"].get("status") == "paused"
+                )
                 payload = {
                     "success": True,
                     "score_dir": str(score_dir),
-                    "paused": False,
-                    "detail": "当前没有正在运行的技能总谱构建。",
+                    "paused": is_paused,
+                    "detail": (
+                        "技能总谱构建已暂停，可再次执行增量构建继续。"
+                        if is_paused
+                        else "当前没有正在运行的技能总谱构建。"
+                    ),
                 }
-                payload.update(_build_log_payload(score_dir))
+                payload.update(build_log_payload)
                 return payload
             build_logger.record("update.pause_requested")
             task.cancel("symphony.pause_build")
@@ -146,6 +158,7 @@ class SymphonyExtension(BaseExtension):
         config = load_symphony_config()
         score_dir = config.paths.score_dir
         orchestration_min_edge_confidence = config.orchestration.min_edge_confidence
+        await self._repair_interrupted_build_state(score_dir)
 
         def load() -> dict[str, Any]:
             try:
@@ -356,6 +369,15 @@ class SymphonyExtension(BaseExtension):
             if self._active_build_task is task:
                 self._active_build_task = None
 
+    async def _repair_interrupted_build_state(self, score_dir: Path) -> bool:
+        async with self._build_guard:
+            task = self._active_build_task
+            if task is not None and not task.done():
+                return False
+            if task is not None:
+                self._active_build_task = None
+            return await asyncio.to_thread(_repair_interrupted_build_log, score_dir)
+
 
 async def register_extensions(registry):
     extension = SymphonyExtension()
@@ -547,6 +569,20 @@ def _read_build_log(score_dir: Path, *, limit: int = 80) -> list[dict[str, Any]]
         if isinstance(payload, dict) and payload.get("stage"):
             entries.append(_normalize_build_log_entry(payload))
     return entries
+
+
+def _repair_interrupted_build_log(score_dir: Path) -> bool:
+    """Close an orphaned running log after its owning process has disappeared.
+
+    Callers must hold the extension build guard and first rule out a live task.
+    """
+    if _build_progress(_read_build_log(score_dir)).get("status") != "running":
+        return False
+    _BuildProcessLogger(score_dir / "build_log.jsonl").record(
+        "update.paused",
+        reason="process_interrupted",
+    )
+    return True
 
 
 def _normalize_build_log_entry(payload: dict[str, Any]) -> dict[str, Any]:

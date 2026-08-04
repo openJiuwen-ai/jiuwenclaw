@@ -782,7 +782,10 @@ async def test_replace_teammate_card_after_direct_bootstrap_uses_local_a2x_state
         _jiuwen_a2x_blank_dataset="team_pool_local",
         _jiuwen_a2x_blank_service_id="sid-local",
     )
-    agent = SimpleNamespace(get_instance=lambda: deep_agent)
+    async def _ensure_instance():
+        return deep_agent
+
+    agent = SimpleNamespace(get_instance=lambda: deep_agent, ensure_instance=_ensure_instance)
     agent_manager = SimpleNamespace(
         get_agent_nowait=lambda channel_id: agent,
         get_agent=AsyncMock(return_value=agent),

@@ -572,7 +572,7 @@ def test_runtime_tool_owner_ids_isolate_without_changing_agent_identity() -> Non
     assert first_owner_id == first_adapter._build_runtime_tool_owner_id()
     first_root_id = JiuWenSwarmDeepAdapter()._build_runtime_tool_owner_id()
     second_root_id = JiuWenSwarmDeepAdapter()._build_runtime_tool_owner_id()
-    assert first_root_id != second_root_id
+    assert first_root_id == second_root_id == "jiuwenswarm_root"
 
     tool_name = f"extension_session_tool_{uuid.uuid4().hex}"
     first_tool = _FakeTool(tool_name)
@@ -668,8 +668,11 @@ async def test_deep_create_instance_passes_extension_resources_to_factory(
         ensure_initialized=AsyncMock(),
     )
     adapter = JiuWenSwarmDeepAdapter()
+    adapter.mark_as_session_scoped("extension-test")
+    monkeypatch.setattr(adapter, "_try_init_a2x_client", AsyncMock())
+    monkeypatch.setattr(adapter, "_ensure_cron_tools_registered", MagicMock())
 
-    monkeypatch.setattr(interface_deep, "load_dotenv", lambda **kwargs: None)
+    monkeypatch.setattr(interface_deep, "load_dotenv_runtime", lambda **kwargs: None)
     monkeypatch.setattr(
         interface_deep,
         "get_config",
@@ -736,7 +739,7 @@ async def test_deep_create_instance_passes_extension_resources_to_factory(
     factory_kwargs = create_agent.call_args.kwargs
     assert factory_kwargs["card"].id == "jiuwenswarm"
     assert factory_kwargs["tools"] == [base_tool]
-    assert factory_kwargs["ability_owner_id"] == adapter._build_runtime_tool_owner_id()
+    assert factory_kwargs["tool_owner_id"] == adapter._build_runtime_tool_owner_id()
     assert factory_kwargs["rails"][0] is base_rail
     assert factory_kwargs["rails"][1] is extension_rail
 
@@ -757,6 +760,9 @@ async def test_code_create_instance_passes_extension_resources_in_code_mode(
         _registered_rails=[],
     )
     adapter = interface_code.JiuwenSwarmCodeAdapter()
+    adapter.mark_as_session_scoped("extension-code-test")
+    monkeypatch.setattr(adapter, "_try_init_a2x_client", AsyncMock())
+    monkeypatch.setattr(adapter, "_ensure_cron_tools_registered", MagicMock())
 
     monkeypatch.setattr(
         interface_code,
@@ -828,7 +834,7 @@ async def test_code_create_instance_passes_extension_resources_in_code_mode(
     factory_kwargs = create_agent.call_args.kwargs
     assert factory_kwargs["card"].id == "jiuwenswarm"
     assert factory_kwargs["tools"] == [base_tool]
-    assert factory_kwargs["ability_owner_id"] == adapter._build_runtime_tool_owner_id()
+    assert factory_kwargs["tool_owner_id"] == adapter._build_runtime_tool_owner_id()
     assert factory_kwargs["rails"][0] is base_rail
     assert factory_kwargs["rails"][1] is extension_rail
 
@@ -852,8 +858,11 @@ async def test_deep_create_failure_tears_down_extension_resources(
         ),
     )
     adapter = JiuWenSwarmDeepAdapter()
+    adapter.mark_as_session_scoped("extension-failure-test")
+    monkeypatch.setattr(adapter, "_try_init_a2x_client", AsyncMock())
+    monkeypatch.setattr(adapter, "_ensure_cron_tools_registered", MagicMock())
 
-    monkeypatch.setattr(interface_deep, "load_dotenv", lambda **kwargs: None)
+    monkeypatch.setattr(interface_deep, "load_dotenv_runtime", lambda **kwargs: None)
     monkeypatch.setattr(
         interface_deep,
         "get_config",
@@ -941,6 +950,9 @@ async def test_code_create_failure_tears_down_extension_resources(
         _registered_rails=[],
     )
     adapter = interface_code.JiuwenSwarmCodeAdapter()
+    adapter.mark_as_session_scoped("extension-code-failure-test")
+    monkeypatch.setattr(adapter, "_try_init_a2x_client", AsyncMock())
+    monkeypatch.setattr(adapter, "_ensure_cron_tools_registered", MagicMock())
 
     monkeypatch.setattr(
         interface_code,

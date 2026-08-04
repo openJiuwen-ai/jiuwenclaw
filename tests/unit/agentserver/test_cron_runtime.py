@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -9,7 +11,33 @@ from jiuwenswarm.agents.harness.common.tools.cron.cron_runtime import (
     _extract_legacy_params,
 )
 from jiuwenswarm.agents.harness.common.tools.cron.cron_tools import CronToolRoute, CronTools
-from jiuwenswarm.gateway.cron.store import CronJobStore
+from jiuwenswarm.gateway.cron.scheduler import CronSchedulerService
+from jiuwenswarm.gateway.cron.store import CronJob, CronJobStore
+
+import time
+
+
+class _TestableScheduler(CronSchedulerService):
+    def compute_next_run(self, job: CronJob, *, now_ts: float):
+        return self._compute_next_run(job, now_ts=now_ts)
+
+
+def _make_job(job_id="job-1", name="test", **overrides):
+    defaults = {
+        "id": job_id,
+        "name": name,
+        "enabled": True,
+        "expired": False,
+        "cron_expr": "0 0 9 * * ? *",
+        "timezone": "Asia/Shanghai",
+        "wake_offset_seconds": 300,
+        "description": "reminder",
+        "targets": "tui",
+        "created_at": time.time(),
+        "updated_at": time.time(),
+    }
+    defaults.update(overrides)
+    return CronJob(**defaults)
 
 
 class _FakeCronTools:
@@ -238,6 +266,45 @@ async def test_cron_tools_create_job_resolves_route_project_dir(tmp_path, monkey
 
 
 @pytest.mark.asyncio
+async def test_cron_tools_create_job_uses_route_project_id_and_work_mode(
+    tmp_path, monkeypatch,
+) -> None:
+    project_store = _setup_project_store(tmp_path, monkeypatch)
+    project_dir = tmp_path / "shared-project"
+    project_dir.mkdir()
+    project_store.create_project("WorkP", str(project_dir), work_mode="work")
+    code_project = project_store.create_project("CodeP", str(project_dir), work_mode="code")
+    tools, push = _make_cron_tools(tmp_path, monkeypatch)
+
+    token = tools.push_cron_route(
+        CronToolRoute(
+            project_dir=str(project_dir),
+            project_id=code_project.project_id,
+            work_mode="code",
+        )
+    )
+    try:
+        job = await tools.create_job(
+            {
+                "id": "job-route-project",
+                "name": "daily",
+                "cron_expr": "0 9 * * *",
+                "timezone": "Asia/Shanghai",
+                "description": "hello",
+                "targets": "web",
+            }
+        )
+    finally:
+        tools.reset_cron_route(token)
+
+    assert job["project_id"] == code_project.project_id
+    assert job["work_mode"] == "code"
+    synced = push.payloads[-1]["body"]["data"]
+    assert synced["project_id"] == code_project.project_id
+    assert synced["work_mode"] == "code"
+
+
+@pytest.mark.asyncio
 async def test_cron_tools_create_job_rejects_relative_project_dir(tmp_path, monkeypatch) -> None:
     _setup_project_store(tmp_path, monkeypatch)
     tools, push = _make_cron_tools(tmp_path, monkeypatch)
@@ -445,3 +512,219 @@ async def test_cron_tools_update_job_rejects_invalid_patch(tmp_path, monkeypatch
     with pytest.raises(ValueError, match=match):
         await tools.update_job("job-reject", patch)
     assert push.payloads == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "session_pid, expected_pid",
+    [
+        pytest.param("default", "default", id="session_default_work"),
+        pytest.param("default_code", "default_code", id="session_default_code"),
+        pytest.param("", "", id="session_empty_like_manual"),
+    ],
+)
+async def test_cron_tools_create_job_inherits_session_default_project_id(
+    tmp_path, monkeypatch, session_pid, expected_pid
+):
+    """Issue #2653：对话创建未显式传 project_id 时注入会话 project_id。
+
+    会话在默认项目下会落库 default/default_code（与手动未选的空串不同）；
+    列表展示层须把二者统一显示为「-」。
+    """
+    _setup_project_store(tmp_path, monkeypatch)
+    tools, push = _make_cron_tools(tmp_path, monkeypatch)
+    token = tools.push_cron_route(CronToolRoute(project_id=session_pid))
+    try:
+        job = await tools.create_job(
+            {
+                "id": "job-session-default",
+                "name": "reminder",
+                "cron_expr": "0 9 * * *",
+                "timezone": "Asia/Shanghai",
+                "description": "drink",
+                "targets": "web",
+            }
+        )
+    finally:
+        tools.reset_cron_route(token)
+
+    assert job["project_id"] == expected_pid
+    synced = push.payloads[-1]["body"]["data"]
+    assert synced["project_id"] == expected_pid
+
+
+class TestExtractLegacyParamsKindAt:
+    def test_kind_at_converts_to_cron_expr(self) -> None:
+        context = SimpleNamespace(
+            channel_id="web",
+            session_id="sess-1",
+            metadata={"request_id": "req-1"},
+        )
+        payload = {
+            "schedule": {"kind": "at", "at": "2026-07-24T18:25:31+08:00"},
+            "payload": {"kind": "agentTurn", "message": "喝水提醒"},
+            "delivery": {"mode": "announce"},
+        }
+
+        out = _extract_legacy_params(payload, context=context, require_schedule=True)
+
+        assert out["cron_expr"] == "31 25 18 24 7 ? 2026"
+        assert out["timezone"] == "Asia/Shanghai"
+        assert out["description"] == "喝水提醒"
+        assert "wake_offset_seconds" not in out
+
+    def test_kind_at_without_at_field_raises(self) -> None:
+        context = SimpleNamespace(channel_id="web", session_id="sess-1")
+        payload = {
+            "schedule": {"kind": "at"},
+            "payload": {"kind": "agentTurn", "message": "提醒"},
+            "delivery": {"mode": "announce"},
+        }
+
+        with pytest.raises(ValueError, match="schedule.at"):
+            _extract_legacy_params(payload, context=context, require_schedule=True)
+
+    def test_kind_at_invalid_iso_raises(self) -> None:
+        context = SimpleNamespace(channel_id="web", session_id="sess-1")
+        payload = {
+            "schedule": {"kind": "at", "at": "not-a-date"},
+            "payload": {"kind": "agentTurn", "message": "提醒"},
+            "delivery": {"mode": "announce"},
+        }
+
+        with pytest.raises(ValueError, match="Cannot convert"):
+            _extract_legacy_params(payload, context=context, require_schedule=True)
+
+    def test_kind_at_preserves_timezone(self) -> None:
+        context = SimpleNamespace(channel_id="web", session_id="sess-1")
+        payload = {
+            "schedule": {"kind": "at", "at": "2026-01-01T09:00:00+09:00", "tz": "Asia/Tokyo"},
+            "payload": {"kind": "agentTurn", "message": "朝会"},
+            "delivery": {"mode": "announce"},
+        }
+
+        out = _extract_legacy_params(payload, context=context, require_schedule=True)
+
+        assert out["timezone"] == "Asia/Tokyo"
+        assert out["cron_expr"] == "0 0 9 1 1 ? 2026"
+
+    def test_kind_every_still_raises(self) -> None:
+        context = SimpleNamespace(channel_id="web", session_id="sess-1")
+        payload = {
+            "schedule": {"kind": "every", "interval": "5m"},
+            "payload": {"kind": "agentTurn", "message": "提醒"},
+            "delivery": {"mode": "announce"},
+        }
+
+        with pytest.raises(ValueError, match="Unsupported schedule.kind"):
+            _extract_legacy_params(payload, context=context, require_schedule=True)
+
+
+class TestExtractLegacyParamsSystemEventPayload:
+    def test_system_event_converts_to_agent_turn(self) -> None:
+        context = SimpleNamespace(
+            channel_id="web",
+            session_id="sess-1",
+            metadata={"request_id": "req-1"},
+        )
+        payload = {
+            "schedule": {"kind": "cron", "expr": "0 33 16 24 7 ? 2026"},
+            "payload": {"kind": "systemEvent", "text": "该喝水了！记得补充水分哦"},
+            "delivery": {"mode": "announce"},
+        }
+
+        out = _extract_legacy_params(payload, context=context, require_schedule=True)
+
+        assert out["description"] == "该喝水了！记得补充水分哦"
+        assert out["cron_expr"] == "0 33 16 24 7 ? 2026"
+
+    def test_system_event_text_used_as_description(self) -> None:
+        context = SimpleNamespace(channel_id="web", session_id="sess-1")
+        payload = {
+            "schedule": {"kind": "cron", "expr": "*/5 * * * *"},
+            "payload": {"kind": "systemEvent", "text": "系统消息内容"},
+            "delivery": {"channel": "web"},
+        }
+
+        out = _extract_legacy_params(payload, context=context, require_schedule=True)
+
+        assert out["description"] == "系统消息内容"
+
+    def test_agent_turn_message_takes_priority_over_system_event_text(self) -> None:
+        context = SimpleNamespace(channel_id="web", session_id="sess-1")
+        payload = {
+            "schedule": {"kind": "cron", "expr": "*/5 * * * *"},
+            "payload": {"kind": "agentTurn", "message": "agentTurn消息"},
+            "delivery": {"channel": "web"},
+        }
+
+        out = _extract_legacy_params(payload, context=context, require_schedule=True)
+
+        assert out["description"] == "agentTurn消息"
+
+    def test_other_payload_kind_raises(self) -> None:
+        context = SimpleNamespace(channel_id="web", session_id="sess-1")
+        payload = {
+            "schedule": {"kind": "cron", "expr": "*/5 * * * *"},
+            "payload": {"kind": "unknownType", "text": "提醒"},
+            "delivery": {"channel": "web"},
+        }
+
+        with pytest.raises(ValueError, match="Unsupported payload.kind"):
+            _extract_legacy_params(payload, context=context, require_schedule=True)
+
+
+class TestComputeNextRunMissedTriggerWindow:
+    """When croniter fails on a one-shot job, check if the missed trigger is within
+    the window and schedule immediate execution instead of marking expired."""
+
+    def test_missed_trigger_within_window_schedules_immediate(self) -> None:
+        svc = _TestableScheduler.__new__(_TestableScheduler)
+
+        job = _make_job(
+            job_id="one-shot",
+            cron_expr="31 25 18 24 7 ? 2026",
+            timezone="Asia/Shanghai",
+            wake_offset_seconds=0,
+        )
+
+        trigger_ts = datetime(2026, 7, 24, 18, 25, 31, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()
+        now_ts = trigger_ts + 2.0
+
+        push_dt, wake_dt, run_id = svc.compute_next_run(job, now_ts=now_ts)
+
+        assert push_dt == datetime(2026, 7, 24, 18, 25, 31, tzinfo=ZoneInfo("Asia/Shanghai"))
+        assert wake_dt == push_dt
+        assert run_id.startswith("one-shot:")
+
+    def test_missed_trigger_beyond_window_raises(self) -> None:
+        svc = _TestableScheduler.__new__(_TestableScheduler)
+
+        job = _make_job(
+            job_id="old-shot",
+            cron_expr="0 0 9 1 1 ? 2025",
+            timezone="Asia/Shanghai",
+            wake_offset_seconds=0,
+        )
+
+        now_ts = datetime(2026, 7, 24, 18, 25, 0, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()
+
+        with pytest.raises(Exception, match="failed to find next date"):
+            svc.compute_next_run(job, now_ts=now_ts)
+
+    def test_recurring_job_still_works(self) -> None:
+        svc = _TestableScheduler.__new__(_TestableScheduler)
+
+        job = _make_job(
+            job_id="recurring",
+            cron_expr="*/5 * * * *",
+            timezone="Asia/Shanghai",
+            wake_offset_seconds=0,
+        )
+
+        now_ts = datetime(2026, 7, 24, 18, 30, 0, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()
+
+        push_dt, wake_dt, run_id = svc.compute_next_run(job, now_ts=now_ts)
+
+        assert push_dt.minute == 35
+        assert wake_dt == push_dt

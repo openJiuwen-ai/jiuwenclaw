@@ -24,14 +24,14 @@ health:
   observability: partial
   performance_risk: low
 audit:
-  status: agent_audited
+  status: audit_expired
   auditor: codex
   audited_at: 2026-07-14T11:37:48Z
   audited_commit: 39feee89e00dc6b0b6a6b16ca80a527beb631bd7
   audited_source_hash: sha256:5fbbae5104a1791ca98014aeed0b81fea243b57dcd2faac3f8f37886833c4fa5
   audited_symbol_hash: sha256:0f201b65eefd1358f01cf2a596973166607d2ae05d7d088411e035b929ed19e4
   confidence: confirmed
-  expired_reason: null
+  expired_reason: "2026-08-01 source split into a foreground guard wrapper and _handle_stream_impl."
 issues:
   - id: ISSUE-001
     dimension: state_mutation
@@ -67,7 +67,7 @@ issues:
 
 ## Actual Role
 
-The reviewed behavior, contracts, side effects, callers, callees, tests, and documentation evidence are preserved in the linked detail pages.
+Wraps stream handling with the warm-pool foreground guard for chat-like methods. It increments the foreground count before delegating to `_handle_stream_impl` and releases it in `finally`, so exceptions and oversized-output termination cannot leave background warming paused.
 
 ## Audit Details
 
