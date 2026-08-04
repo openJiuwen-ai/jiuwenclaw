@@ -38,6 +38,7 @@ class AgentOSAuthenticator(CredentialAuthenticator):
 
         token = (token or "").strip()
         if not token:
+            await self.aclose()
             return AuthResult(
                 success=False,
                 user_id="",
@@ -63,12 +64,14 @@ class AgentOSAuthenticator(CredentialAuthenticator):
 
         # 3. 异常处理
         except httpx.RequestError as e:
+            await self.aclose()
             return AuthResult(success=False, user_id="", error=str(e))
 
         # 4. 解析业务响应
         try:
             body = resp.json()
         except ValueError:
+            await self.aclose()
             return AuthResult(success=False, extensions={"error_code": "INVALID_RESPONSE"})
         data = body.get("data", {}) if isinstance(body, dict) else {}
 
@@ -84,6 +87,7 @@ class AgentOSAuthenticator(CredentialAuthenticator):
                 },
             )
 
+        await self.aclose()
         return AuthResult(
             success=False,
             error=str(data.get("error") or "Token 无效或已过期"),
