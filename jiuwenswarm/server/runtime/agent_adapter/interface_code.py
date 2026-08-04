@@ -74,7 +74,6 @@ from jiuwenswarm.common.config import get_config
 from jiuwenswarm.common.tool_ownership import mark_stateless, register_tool
 from jiuwenswarm.common.coding_memory_paths import (
     resolve_project_coding_memory_dir,
-    resolve_project_coding_memory_workspace_path,
 )
 from jiuwenswarm.server.runtime.agent_adapter.code_agent_rail import CodeAgentRail
 from jiuwenswarm.common.hooks_config import load_hooks_config
@@ -264,7 +263,13 @@ def _set_workspace_coding_memory_directory(
     if not callable(set_directory):
         return
 
-    coding_memory_path = resolve_project_coding_memory_workspace_path(
+    # CodingMemoryRail uses this same app-owned directory for MEMORY.md.  The
+    # coding-memory tools resolve individual memory files through the workspace
+    # node, so the node must point at the absolute storage directory as well;
+    # a project-relative node would split memory files and their index across
+    # two locations.
+    coding_memory_path = resolve_project_coding_memory_dir(
+        agent_workspace_dir=agent_workspace_dir,
         project_dir=project_dir,
     )
     set_directory(
