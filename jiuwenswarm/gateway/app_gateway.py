@@ -1056,6 +1056,12 @@ class GatewayServer(BaseWebChannel):
                     ),
                 )
 
+        # 上报连接事件
+        if route.ws_channel is not None:
+            reporter = getattr(route.ws_channel, "report_connect", None)
+            if callable(reporter):
+                reporter(ws)
+
         # connection.ack
         try:
             await ws.send(json.dumps({
@@ -1110,6 +1116,10 @@ class GatewayServer(BaseWebChannel):
                         "GatewayServer delegate unregister_ws to ws_channel failed: path=%s",
                         request_path, exc_info=True,
                     )
+                # 上报断连事件
+                reporter = getattr(route.ws_channel, "report_disconnect", None)
+                if callable(reporter):
+                    reporter(ws)
             if route.disconnect_handler is not None:
                 try:
                     # Pass stale_request_keys so the handler can recover session_ids
