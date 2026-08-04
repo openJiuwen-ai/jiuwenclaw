@@ -856,6 +856,12 @@ class JiuWenSwarm:
     - 公共编排（session 队列、Skills 路由、heartbeat、流式包装）
     """
 
+    # Keep a small bounded hand-off buffer between the agent producer and the
+    # WebSocket consumer.  An unbounded queue lets a fast Team runtime retain
+    # every pending AgentResponseChunk while a slow client is sending earlier
+    # chunks, which raises the process RSS across short-lived TUI sessions.
+    STREAM_QUEUE_MAXSIZE = 64
+
     def __init__(self) -> None:
         self._adapter: AgentAdapter | None = None
         self._sdk_name: str | None = None
@@ -2345,8 +2351,9 @@ class JiuWenSwarm:
                 team_query_is_interactive_input,
             )
 
-        stream_queue = asyncio.Queue()
+        stream_queue = asyncio.Queue(maxsize=self.STREAM_QUEUE_MAXSIZE)
         stream_done = asyncio.Event()
+        producer_cancellation: asyncio.CancelledError | None = None
         final_answer_content = ""
         final_answer_chunks: list[str] = []
         durable_pending_final_chunks: list[str] = []
@@ -2392,10 +2399,13 @@ class JiuWenSwarm:
             durable_final_content = pending_text
 
         async def run_stream_task():
+            nonlocal producer_cancellation
             logger.info("[JiuWenSwarm] run_stream_task started: request_id=%s session_id=%s", rid, session_id)
             _put_count = 0
+            producer_stream: AsyncIterator[AgentResponseChunk] | None = None
             try:
-                async for chunk in adapter.process_message_stream_impl(request, inputs):
+                producer_stream = adapter.process_message_stream_impl(request, inputs)
+                async for chunk in producer_stream:
                     _put_count += 1
                     if _put_count <= 3:
                         _pl = getattr(chunk, "payload", None) or {}
@@ -2405,18 +2415,42 @@ class JiuWenSwarm:
                             _put_count, rid, _et,
                         )
                     await stream_queue.put(("chunk", chunk))
-            except asyncio.CancelledError:
+            except asyncio.CancelledError as exc:
+                producer_cancellation = exc
                 logger.info("[JiuWenSwarm] 流式任务被取消: request_id=%s session_id=%s", rid, session_id)
-                await stream_queue.put(("error", asyncio.CancelledError()))
+                # The outer consumer owns cancellation and awaits this task in
+                # its finally block.  Do not enqueue into a potentially full
+                # bounded queue after that consumer has gone away.
+                raise
             except Exception as exc:
                 logger.exception("[JiuWenSwarm] 流式任务异常: %s", exc)
-                await stream_queue.put(("error", exc))
+                try:
+                    await stream_queue.put(("error", exc))
+                except asyncio.CancelledError as cancel_exc:
+                    producer_cancellation = cancel_exc
+                    raise
             finally:
-                logger.info(
-                    "[JiuWenSwarm] run_stream_task finished: request_id=%s total_chunks=%s",
-                    rid, _put_count,
-                )
-                stream_done.set()
+                try:
+                    if producer_stream is not None:
+                        close_stream = getattr(producer_stream, "aclose", None)
+                        if callable(close_stream):
+                            try:
+                                await close_stream()
+                            except asyncio.CancelledError as exc:
+                                producer_cancellation = exc
+                                raise
+                            except Exception:
+                                logger.debug(
+                                    "[JiuWenSwarm] stream producer close failed: request_id=%s",
+                                    rid,
+                                    exc_info=True,
+                                )
+                finally:
+                    logger.info(
+                        "[JiuWenSwarm] run_stream_task finished: request_id=%s total_chunks=%s",
+                        rid, _put_count,
+                    )
+                    stream_done.set()
 
         # Team 模式: 后续请求直接执行，绕过 Session Manager 队列
         # 因为 Team 是长期运行的(persistent)，interact 调用不需要等待前一个任务完成
@@ -2580,7 +2614,9 @@ class JiuWenSwarm:
                                     if first_a2ui_suppression and not a2ui_pending_render_sent:
                                         yield _make_a2ui_pending_render_chunk(request_id=rid, channel_id=cid)
                                         a2ui_pending_render_sent = True
-                                    final_answer_content = payload_content
+                                    if payload_content:
+                                        final_answer_content = payload_content
+                                        final_answer_chunks.clear()
                                     durable_pending_final_chunks = []
                                     continue
                                 durable_pending_final_chunks = []
@@ -2615,7 +2651,10 @@ class JiuWenSwarm:
                                 if et == "chat.final":
                                     durable_final_content = str(data.payload.get("content", ""))
                             if et == "chat.final":
-                                final_answer_content = str(data.payload.get("content", ""))
+                                next_final_content = str(data.payload.get("content", ""))
+                                if next_final_content:
+                                    final_answer_content = next_final_content
+                                    final_answer_chunks.clear()
                         yield data
                     elif isinstance(data, dict) and isinstance(data.get("event_type"), str):
                         et = str(data.get("event_type"))
@@ -2693,7 +2732,9 @@ class JiuWenSwarm:
                                 if first_a2ui_suppression and not a2ui_pending_render_sent:
                                     yield _make_a2ui_pending_render_chunk(request_id=rid, channel_id=cid)
                                     a2ui_pending_render_sent = True
-                                final_answer_content = payload_content
+                                if payload_content:
+                                    final_answer_content = payload_content
+                                    final_answer_chunks.clear()
                                 durable_pending_final_chunks = []
                                 continue
                             durable_pending_final_chunks = []
@@ -2726,7 +2767,10 @@ class JiuWenSwarm:
                             if et == "chat.final":
                                 durable_final_content = str(data.get("content", ""))
                         if et == "chat.final":
-                            final_answer_content = str(data.get("content", ""))
+                            next_final_content = str(data.get("content", ""))
+                            if next_final_content:
+                                final_answer_content = next_final_content
+                                final_answer_chunks.clear()
                         yield AgentResponseChunk(
                             request_id=rid,
                             channel_id=cid,
@@ -2754,6 +2798,13 @@ class JiuWenSwarm:
                     rid,
                     exc_info=True,
                 )
+
+        # A producer may cancel itself without the outer WebSocket consumer
+        # being cancelled.  Keep that terminal state out of the bounded queue
+        # (which may be full after a disconnect), but preserve the public
+        # cancellation contract once all already-produced chunks are drained.
+        if producer_cancellation is not None:
+            raise producer_cancellation
 
         assistant_message = final_answer_content or "".join(final_answer_chunks)
         repair_call = getattr(adapter, "repair_model_response", None)

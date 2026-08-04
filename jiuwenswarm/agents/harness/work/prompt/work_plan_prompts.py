@@ -4,7 +4,7 @@
 
 与 code plan 的区别：
 
-- code plan 解决"这段代码应该怎么改"，强制走 explore_agent / plan_agent，
+- code plan 解决"这段代码应该怎么改"，可使用 plan_agent，
   重点防止改动源码与仓库。
 - work plan 解决"这项工作应该怎么完成"，由主 agent 自己调研并撰写计划，
   重点防止提前产生业务副作用（发送、提交、创建、调用外部系统）。

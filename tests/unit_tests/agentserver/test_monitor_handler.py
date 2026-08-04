@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -9,6 +10,10 @@ from unittest.mock import AsyncMock
 import pytest
 from openjiuwen.agent_teams.monitor.models import MonitorEvent, MonitorEventType
 
+from jiuwenswarm.agents.harness.team.handlers.base_monitor_handler import (
+    DropOldestQueue,
+    MONITOR_EVENT_QUEUE_MAXSIZE,
+)
 from jiuwenswarm.agents.harness.team.handlers.team_monitor_handler import (
     _TASK_BODY_EVENT_TYPES,
     _TASK_TEXT_LIMIT,
@@ -150,6 +155,122 @@ class _FakeMonitor:
         exercise the ``with self._monitor._bound_session():`` code path.
         """
         yield
+
+
+def test_drop_oldest_queue_keeps_memory_bounded_and_latest_events() -> None:
+    queue = DropOldestQueue(maxsize=3)
+
+    for seq in range(10):
+        queue.put_nowait({"seq": seq})
+
+    assert queue.qsize() == 3
+    assert queue.dropped_count == 7
+    assert [queue.get_nowait()["seq"] for _ in range(3)] == [7, 8, 9]
+
+
+def test_drop_oldest_queue_preserves_messages_over_state_events() -> None:
+    queue = DropOldestQueue(maxsize=3)
+    message = {"event_type": "team.message", "seq": "message"}
+    queue.put_nowait(message)
+    queue.put_nowait({"event_type": "team.task", "seq": 1})
+    queue.put_nowait({"event_type": "team.member", "seq": 2})
+
+    queue.put_nowait({"event_type": "team.task", "seq": 3})
+
+    assert list(queue._queue) == [
+        message,
+        {"event_type": "team.member", "seq": 2},
+        {"event_type": "team.task", "seq": 3},
+    ]
+    assert queue.dropped_count == 1
+
+    protected_queue = DropOldestQueue(maxsize=2)
+    protected_queue.put_nowait({"event_type": "team.message", "seq": 1})
+    protected_queue.put_nowait({"event_type": "team.message", "seq": 2})
+    protected_queue.put_nowait({"event_type": "team.task", "seq": 3})
+    assert [item["seq"] for item in protected_queue._queue] == [1, 2]
+
+    protected_queue.put_nowait(None)
+    assert list(protected_queue._queue) == [
+        {"event_type": "team.message", "seq": 2},
+        None,
+    ]
+    assert protected_queue.dropped_count == 2
+
+
+def test_handler_bounds_both_sdk_monitor_source_queues() -> None:
+    monitor = _FakeMonitor(members=[], leader_member_name=None)
+    monitor._event_queue = asyncio.Queue()
+    monitor._workflow_event_queue = asyncio.Queue()
+
+    TeamMonitorHandler(monitor, "sess-bounded-monitor")
+
+    assert isinstance(monitor._event_queue, DropOldestQueue)
+    assert isinstance(monitor._workflow_event_queue, DropOldestQueue)
+    assert monitor._event_queue.maxsize == MONITOR_EVENT_QUEUE_MAXSIZE
+    assert monitor._workflow_event_queue.maxsize == MONITOR_EVENT_QUEUE_MAXSIZE
+
+
+@pytest.mark.anyio
+async def test_stop_sentinel_is_written_when_local_queue_is_full() -> None:
+    monitor = _FakeMonitor(members=[], leader_member_name=None)
+    handler = TeamMonitorHandler(monitor, "sess-full-stop")
+    for seq in range(MONITOR_EVENT_QUEUE_MAXSIZE):
+        await handler._event_queue.put({"seq": seq})
+
+    handler._running = True
+    await handler.stop()
+
+    retained = [event async for event in handler.events()]
+
+    assert len(retained) == MONITOR_EVENT_QUEUE_MAXSIZE - 1
+    assert retained[0] == {"seq": 1}
+    assert retained[-1] == {"seq": MONITOR_EVENT_QUEUE_MAXSIZE - 1}
+    assert handler._event_queue.dropped_count == 1
+
+
+@pytest.mark.anyio
+async def test_stop_cancels_registered_consumer_task() -> None:
+    monitor = _FakeMonitor(members=[], leader_member_name=None)
+    handler = TeamMonitorHandler(monitor, "sess-consumer-stop")
+    consumer_started = asyncio.Event()
+    consumer_stopped = asyncio.Event()
+
+    async def consume_forever() -> None:
+        consumer_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            consumer_stopped.set()
+
+    await handler.start()
+    consumer_task = asyncio.create_task(consume_forever())
+    handler.set_consumer_task(consumer_task)
+    await consumer_started.wait()
+
+    await handler.stop()
+
+    assert consumer_task.cancelled()
+    assert consumer_stopped.is_set()
+    assert handler._consumer_task is None
+
+
+@pytest.mark.anyio
+async def test_stop_handles_collect_task_that_was_already_cancelled() -> None:
+    monitor = _FakeMonitor(members=[], leader_member_name=None)
+    handler = TeamMonitorHandler(monitor, "sess-cancelled-collector")
+
+    await handler.start()
+    collect_task = handler._collect_task
+    assert collect_task is not None
+    collect_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await collect_task
+
+    await handler.stop()
+
+    assert handler._collect_task is None
+    assert handler._running is False
 
 
 @pytest.mark.anyio
