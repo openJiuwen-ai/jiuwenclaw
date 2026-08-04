@@ -23,6 +23,7 @@ _INSTANCE_SCOPED_TABLES = frozenset(
         "config_effective_global_policy",
         "config_default_template_mapping",
         "model_template",
+        "log_masking_rule",
     }
 )
 

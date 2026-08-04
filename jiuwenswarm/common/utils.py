@@ -1915,6 +1915,17 @@ def _sanitize_log_text(text: str) -> str:
     if not text:
         return text
 
+    # 企业版：若已从 Gateway DB 下发脱敏规则，优先走 LogMaskingEngine。
+    if os.getenv("AGENT_RUNTIME", "").strip():
+        try:
+            from jiuwenswarm.infrastructure.log_masking.engine import LogMaskingEngine
+
+            engine = LogMaskingEngine.get_instance()
+            if engine.uses_external_rules:
+                return engine.sanitize(text)
+        except Exception:
+            pass
+
     masked = text
     masked = _DATA_IMAGE_PATTERN.sub("data:image/*;base64,******", masked)
     # _KV_SENSITIVE_PATTERN: 组1=键名, 组2=分隔符, 组4=值（组3/5 为可选引号）。
