@@ -38,6 +38,7 @@ from openjiuwen.harness.rails import (
 from openjiuwen.harness.rails.evolution import EvolutionReviewRuntime
 
 from jiuwenswarm.agents.swarm.context import SwarmBuildContext
+from jiuwenswarm.agents.harness.team.team_runtime_inheritance import get_team_evolution_skills_dirs
 from jiuwenswarm.common.config import get_skill_evolution_enabled
 from jiuwenswarm.server.runtime.skill import load_execution_disabled_skills
 
@@ -505,7 +506,7 @@ def build_team_skill_evolution_rail(
         bound_registry = inp.trajectory_registry if inp.team_id else None
         review_runtime = EvolutionReviewRuntime()
         rail = SwarmTeamSkillEvolutionRail(
-            inp.team_skills_dir,
+            get_team_evolution_skills_dirs(inp.team_skills_dir, ctx.global_skills_dir),
             llm=llm_model,
             model=actual_model_name,
             review_runtime=review_runtime,
@@ -696,7 +697,7 @@ def build_member_skill_evolution_rail(
         )
         review_runtime = EvolutionReviewRuntime()
         rail = SwarmMemberSkillEvolutionRail(
-            inp.team_skills_dir,
+            get_team_evolution_skills_dirs(inp.team_skills_dir, ctx.global_skills_dir),
             llm=llm_model,
             model=actual_model_name,
             review_runtime=review_runtime,

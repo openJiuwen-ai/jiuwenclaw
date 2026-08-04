@@ -1281,6 +1281,7 @@ def test_team_skill_evolution_provider_passes_review_runtime(
         team_id="t",
         team_ws_root=str(tmp_path),
         team_skills_dir=str(tmp_path / "skills"),
+        global_skills_dir=str(tmp_path / "global-skills"),
         trajectory_registry=object(),
         config=_skill_evolution_config(auto_save=auto_save),
     )
@@ -1300,6 +1301,10 @@ def test_team_skill_evolution_provider_passes_review_runtime(
         language="cn",
     )
     rail = built[1]
+    assert rail.args[0] == [
+        str(tmp_path / "skills"),
+        str(tmp_path / "global-skills"),
+    ]
     assert rail.kwargs["signal_trigger"] is False
     assert rail.kwargs["auto_save"] is auto_save
     assert rail.kwargs["review_trigger"] is True
@@ -1384,6 +1389,7 @@ def test_member_skill_evolution_provider_passes_review_runtime(
         channel="web",
         team_id="t",
         team_skills_dir=str(tmp_path / "skills"),
+        global_skills_dir=str(tmp_path / "global-skills"),
         trajectory_registry=registry_obj,
         config=_skill_evolution_config(),
     )
@@ -1396,6 +1402,10 @@ def test_member_skill_evolution_provider_passes_review_runtime(
     assert len(built) == 1
     rail = built[0]
     assert isinstance(rail, _FakeMemberSkillEvolutionRail)
+    assert rail.args[0] == [
+        str(tmp_path / "skills"),
+        str(tmp_path / "global-skills"),
+    ]
     assert rail.kwargs["language"] == "en"
     assert rail.kwargs["signal_trigger"] is True
     assert rail.kwargs["review_trigger"] is False

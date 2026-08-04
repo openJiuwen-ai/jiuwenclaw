@@ -40,6 +40,7 @@ from jiuwenswarm.common.config import (
     get_skill_evolution_enabled,
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
+from jiuwenswarm.common.utils import get_agent_skills_dir
 from jiuwenswarm.server.runtime.skill import load_execution_disabled_skills
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,14 @@ class MemberInfo:
     agent_name: str = "team_member"
     model_name: str = "gpt-4"
     role: str | None = None
+
+
+def get_team_evolution_skills_dirs(
+    team_skills_dir: str,
+    global_skills_dir: str | None = None,
+) -> list[str]:
+    """Return the team view and its trusted global symlink target root."""
+    return [team_skills_dir, global_skills_dir or str(get_agent_skills_dir())]
 
 
 @dataclass
@@ -265,7 +274,7 @@ def build_member_rails(
             bound_team_trajectory_registry = team_trajectory_registry if team_id else None
             review_runtime = EvolutionReviewRuntime()
             team_skill_rail = TeamSkillEvolutionRail(
-                skills_dir=team_ws_skills_dir,
+                skills_dir=get_team_evolution_skills_dirs(team_ws_skills_dir),
                 llm=llm_model,
                 model=actual_model_name,
                 review_runtime=review_runtime,
@@ -320,7 +329,7 @@ def build_member_rails(
     if role != "leader" and team_ws_skills_dir and skill_evolution_enabled:
         review_runtime = EvolutionReviewRuntime()
         evo_rail = build_skill_evolution_rail(
-            skills_dir=team_ws_skills_dir,
+            skills_dir=get_team_evolution_skills_dirs(team_ws_skills_dir),
             config=config,
             team_trajectory_sink=team_trajectory_registry,
             team_id=team_id,
@@ -494,7 +503,7 @@ def build_evolution_llm(
 
 
 def build_skill_evolution_rail(
-    skills_dir: str,
+    skills_dir: str | list[str],
     config: dict[str, Any] | None = None,
     team_trajectory_sink: Any | None = None,
     team_id: str | None = None,

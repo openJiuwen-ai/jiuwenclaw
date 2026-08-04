@@ -277,6 +277,11 @@ def test_build_member_rails_wires_team_trajectory_registry_to_evolution_rails(
         "jiuwenswarm.agents.harness.team.team_runtime_inheritance.SkillEvolutionRail",
         _FakeSkillEvolutionRail,
     )
+    global_skills_dir = tmp_path / "global-skills"
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_runtime_inheritance.get_agent_skills_dir",
+        lambda: global_skills_dir,
+    )
 
     leader_rails = build_member_rails(
         member_info=MemberInfo(role="leader"),
@@ -311,10 +316,18 @@ def test_build_member_rails_wires_team_trajectory_registry_to_evolution_rails(
     assert leader_rail.kwargs["member_role"] == "leader"
     assert leader_rail.kwargs["signal_trigger"] is False
     assert leader_rail.kwargs["review_trigger"] is True
+    assert leader_rail.kwargs["skills_dir"] == [
+        str(tmp_path / "skills"),
+        str(global_skills_dir),
+    ]
     assert member_rail.bound_sink is registry
     assert member_rail.bound_team_id == "demo-team"
     assert member_rail.bound_member_role == "teammate"
     assert member_rail.kwargs["signal_trigger"] is True
+    assert member_rail.kwargs["skills_dir"] == [
+        str(tmp_path / "skills"),
+        str(global_skills_dir),
+    ]
 
 
 def test_build_member_rails_creates_leader_team_skill_evolution_rail_with_canonical_switch(
