@@ -231,6 +231,9 @@ from jiuwenswarm.agents.harness.common.tools import (
 from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import (
     SkillRetrievalPromptRail,
 )
+from jiuwenswarm.agents.harness.common.rails.progressive_tool_rail import (
+    ProgressiveToolRail,
+)
 from jiuwenswarm.symphony.config import load_symphony_config
 from jiuwenswarm.agents.harness.common.tools.wiki_tools import wiki_ingest, wiki_query, wiki_lint
 from jiuwenswarm.agents.harness.common.tools.acp_output_tools import get_tools as get_acp_output_tools
@@ -644,6 +647,141 @@ _CRON_TOOL_NAMES = frozenset(
         "cron_preview_job",
     }
 )
+
+_DEFAULT_PROGRESSIVE_EAGER_TOOLS = [
+    "tools_search",
+    "invoke_tool",
+    "web_search",
+    "fetch_webpage",
+    "ask_user_question",
+    "list_files",
+    "read_file",
+    "write_file",
+    "edit_file",
+    "glob",
+    "grep",
+    "bash",
+    "code",
+    "skill_tool",
+    "skill_complete",
+    "todo_create",
+    "todo_list",
+    "todo_modify",
+]
+
+_PROGRESSIVE_META_TOOL_NAMES = frozenset({"tools_search", "invoke_tool"})
+
+
+def _normalize_tool_names(value: Any, default: list[str] | None = None) -> list[str]:
+    """Normalize comma-separated/list tool-name config values."""
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return list(default or [])
+
+
+def _ensure_progressive_meta_tools(eager_tools: list[str]) -> list[str]:
+    """Ensure tools_search / invoke_tool are in the eager list."""
+    if "tools_search" not in eager_tools:
+        eager_tools.insert(0, "tools_search")
+    if "invoke_tool" not in eager_tools:
+        eager_tools.insert(1, "invoke_tool")
+    return eager_tools
+
+
+def is_subagent_tool_lazy_load_enabled(react_config: dict[str, Any] | None) -> bool:
+    """True when react.tool_lazy_load and subagents are both enabled."""
+    config = react_config if isinstance(react_config, dict) else {}
+    lazy_cfg = config.get("tool_lazy_load") or {}
+    if not isinstance(lazy_cfg, dict):
+        return False
+    if not lazy_cfg.get("enabled", False):
+        return False
+    sub_cfg = lazy_cfg.get("subagents") or {}
+    if not isinstance(sub_cfg, dict):
+        return False
+    return bool(sub_cfg.get("enabled", False))
+
+
+def build_progressive_tool_rail_from_config(
+    react_config: dict[str, Any],
+    *,
+    language: str,
+    profile: str = "main",
+    agent_id: str | None = None,
+    agent_card_id: str | None = None,
+    subagent_kind: str | None = None,
+) -> ProgressiveToolRail | None:
+    """Build ProgressiveToolRail from react.tool_lazy_load config.
+
+    Fixed eager-tools schema; deferred tools are reached via tools_search +
+    invoke_tool. For subagents, set profile="subagent" and configure
+    react.tool_lazy_load.subagents.
+    """
+    config = react_config if isinstance(react_config, dict) else {}
+    lazy_cfg = config.get("tool_lazy_load") or {}
+    if not isinstance(lazy_cfg, dict):
+        lazy_cfg = {}
+
+    if not lazy_cfg.get("enabled", False):
+        return None
+
+    enable_for_models = _normalize_tool_names(
+        lazy_cfg.get("enable_for_models", []), []
+    )
+
+    normalized_profile = (profile or "main").strip().lower()
+    if normalized_profile == "subagent":
+        sub_cfg = lazy_cfg.get("subagents") or {}
+        if not isinstance(sub_cfg, dict):
+            sub_cfg = {}
+        if not sub_cfg.get("enabled", False):
+            return None
+
+        main_eager = _ensure_progressive_meta_tools(
+            _normalize_tool_names(
+                lazy_cfg.get("eager_tools", _DEFAULT_PROGRESSIVE_EAGER_TOOLS),
+                _DEFAULT_PROGRESSIVE_EAGER_TOOLS,
+            )
+        )
+        if sub_cfg.get("inherit_parent_eager_tools", False):
+            eager_tools = list(main_eager)
+        else:
+            eager_tools = _ensure_progressive_meta_tools(
+                _normalize_tool_names(
+                    sub_cfg.get("eager_tools", _DEFAULT_PROGRESSIVE_EAGER_TOOLS),
+                    _DEFAULT_PROGRESSIVE_EAGER_TOOLS,
+                )
+            )
+    else:
+        eager_tools = _ensure_progressive_meta_tools(
+            _normalize_tool_names(
+                lazy_cfg.get("eager_tools", _DEFAULT_PROGRESSIVE_EAGER_TOOLS),
+                _DEFAULT_PROGRESSIVE_EAGER_TOOLS,
+            )
+        )
+
+    normalized_language = resolve_language(language)
+    logger.info(
+        "[ProgressiveToolRail] enabled profile=%s kind=%s eager_tools=%s "
+        "agent_id=%s agent_card_id=%s enable_for_models=%s",
+        normalized_profile,
+        subagent_kind or "",
+        eager_tools,
+        agent_id,
+        agent_card_id,
+        enable_for_models,
+    )
+
+    return ProgressiveToolRail(
+        enabled=True,
+        eager_tools=eager_tools,
+        language=normalized_language,
+        agent_id=agent_id,
+        agent_card_id=agent_card_id,
+        enable_for_models=enable_for_models,
+    )
 
 
 def _set_skill_evolution_triggers(
@@ -2211,6 +2349,19 @@ class JiuWenSwarmDeepAdapter:
         subagents: list[Any] = []
         should_add_general_purpose = False
 
+        # Build progressive tool rail for subagents if enabled.
+        subagent_rails: list[Any] | None = None
+        if is_subagent_tool_lazy_load_enabled(react_cfg):
+            progressive_rail = build_progressive_tool_rail_from_config(
+                react_cfg,
+                language=resolved_language,
+                profile="subagent",
+                agent_id=self._tool_owner_id(),
+                agent_card_id=self._tool_owner_id(),
+            )
+            if progressive_rail is not None:
+                subagent_rails = [progressive_rail]
+
         if isinstance(subagents_cfg, dict):
             general_agent_cfg = subagents_cfg.get("general_agent")
             if self._is_subagent_enabled(general_agent_cfg):
@@ -2227,6 +2378,7 @@ class JiuWenSwarmDeepAdapter:
                             research_agent_cfg.get("max_iterations"),
                             react_cfg.get("max_iterations", 15),
                         ),
+                        rails=subagent_rails,
                     )
                 )
 
@@ -2259,6 +2411,7 @@ class JiuWenSwarmDeepAdapter:
                         ),
                         react_cfg.get("max_iterations", 15),
                     ),
+                    rails=subagent_rails,
                 )
             )
         elif (
@@ -4512,6 +4665,22 @@ class JiuWenSwarmDeepAdapter:
             logger.warning("[JiuWenSwarmDeepAdapter] SkillRetrievalPromptRail create failed: %s", exc)
             return None
 
+    def _build_progressive_tool_rail(
+        self, config: dict[str, Any]
+    ) -> ProgressiveToolRail | None:
+        """Build progressive tool rail from react.tool_lazy_load config."""
+        rail = build_progressive_tool_rail_from_config(
+            config,
+            language=self._resolve_runtime_language(),
+            agent_id=self._tool_owner_id(),
+            agent_card_id=self._tool_owner_id(),
+        )
+        if rail is not None:
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] ProgressiveToolRail enabled (fixed schema mode)"
+            )
+        return rail
+
     async def refresh_skill_rails(self) -> None:
         """轻量刷新 skill 相关 rail，避免全量重建 agent 实例.
 
@@ -4704,6 +4873,14 @@ class JiuWenSwarmDeepAdapter:
             )
         else:
             self._task_execution_rail = None
+
+        rail_infos.append(
+            _RailBuildInfo(
+                "_progressive_tool_rail",
+                self._build_progressive_tool_rail,
+                {"config": config},
+            )
+        )
 
         return self._instantiate_rails(rail_infos, config_base)
 
@@ -11379,6 +11556,23 @@ def _agent_def_to_subagent_config(
         description=agent_def.description,
     )
 
+    # Build progressive tool rail for custom subagent if enabled.
+    custom_rails: list[Any] | None = None
+    config_base = get_config()
+    react_config = config_base.get("react", {}) or {}
+    if is_subagent_tool_lazy_load_enabled(react_config):
+        progressive_rail = build_progressive_tool_rail_from_config(
+            react_config,
+            language=resolve_language(
+                str(config_base.get("preferred_language", "zh"))
+            ),
+            profile="subagent",
+            agent_id=card.id,
+            agent_card_id=card.id,
+        )
+        if progressive_rail is not None:
+            custom_rails = [progressive_rail]
+
     return SubAgentConfig(
         agent_card=card,
         system_prompt=agent_def.prompt,
@@ -11387,6 +11581,7 @@ def _agent_def_to_subagent_config(
         skills=agent_def.skills,
         max_iterations=agent_def.max_iterations,
         enable_task_loop=True,
+        rails=custom_rails,
     )
 
 
