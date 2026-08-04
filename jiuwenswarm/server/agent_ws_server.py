@@ -4760,16 +4760,6 @@ class AgentWebSocketServer:
                     f"{before_tokens / 1000:.1f}K tokens ({rate:.1f}% saved)"
                 )
 
-                await self.send_push({
-                    "channel_id": channel_id,
-                    "session_id": session_id,
-                    "payload": {
-                        "event_type": "context.compressed",
-                        "rate": rate,
-                        "beforeCompressed": before_tokens,
-                        "afterCompressed": after_tokens,
-                    },
-                })
                 if summary:
                     append_compact_history_records(
                         session_id=session_id,
@@ -4784,7 +4774,7 @@ class AgentWebSocketServer:
                     compression_state_payload: dict[str, Any] = {
                         **state,
                         "event_type": "context.compression_state",
-                        "status": state.get("status") or "compressed",
+                        "status": state.get("status") or "completed",
                         "phase": state.get("phase") or "active_compress",
                         "processor": state.get("processor") or _extract_compact_summary_processor(summary),
                         "before": state.get("before") or {"tokens": before_tokens},

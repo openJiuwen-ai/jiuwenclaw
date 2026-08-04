@@ -325,6 +325,17 @@
     "teamPauseHint": "团队暂停后，直接发送下一条消息即可继续",
     "teamBroadcastTarget": "@所有人",
     "contextCompressionCompleted": "本轮完成上下文压缩 {{count}} 次",
+    "contextCompressionStarted": {
+      "dialogue": "压缩过去轮消息中…",
+      "currentRound": "压缩当前轮…",
+      "roundLevel": "全量压缩…"
+    },
+    "historyPager": {
+      "loadedOfTotal": "历史已加载 {{loaded}} / {{total}} 页",
+      "loadingMore": "加载中…",
+      "clickOrScrollToLoadMore": "点击或向上滚动加载更多",
+      "allLoaded": "历史已全部加载"
+    },
     "historyLoading": "历史数据加载中…",
     "historyLoadMore": "加载更多历史消息",
     "config": {

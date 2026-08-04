@@ -50,6 +50,7 @@ from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
     _CRON_TOOL_CHANNEL_ID,
     _RailBuildInfo,
     _agent_def_to_subagent_config,
+    _deep_agent_context_engine_config,
     _deep_agent_kv_cache_affinity_config,
     parse_int,
 )
@@ -342,7 +343,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
     """Code 模式适配器 — 配置驱动注册 rails/tools.
 
     继承 JiuWenSwarmDeepAdapter，只重写：
-    - create_instance(): 统一使用 create_deep_agent()，不传多模态/上下文引擎参数（completion_timeout 从配置读取）
+    - create_instance(): 统一使用 create_deep_agent()（completion_timeout 从配置读取）
     - _build_agent_rails(): 固定 Rails (含 LspRail/ProjectMemoryRail/CodingMemoryRail) + 从 config.yaml 读取动态 Rails
     - _get_tool_cards(): 从 config.yaml 读取动态 Tools
     - _build_configured_subagents(): 固定 explore_agent/plan_agent + 按配置启用 code_agent/browser_agent
@@ -411,7 +412,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         """初始化 DeepAgent 实例（code 模式）.
 
         统一使用 create_deep_agent()，不传 vision_model_config /
-        audio_model_config / context_engine_config。
+        audio_model_config。
         completion_timeout 从配置读取，可在 react / modes.code 中自定义。
         """
         # Propagate create params to per-session child adapters (see
@@ -496,6 +497,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             sys_operation=sys_operation,
             language=self._resolve_runtime_language(),
             enable_read_image_multimodal=self._resolve_enable_read_image_multimodal(config),
+            context_engine_config=_deep_agent_context_engine_config(config),
             kv_cache_affinity_config=_deep_agent_kv_cache_affinity_config(config, model),
             auto_create_workspace=False,
             completion_timeout=config.get("completion_timeout", 3600.0),
@@ -550,8 +552,8 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             initial_workspace,
         )
 
-        # code 模式不传: vision_model_config, audio_model_config,
-        # context_engine_config（completion_timeout 已从配置读取传入）
+        # code 模式不传: vision_model_config, audio_model_config
+        #（context_engine_config / completion_timeout 已从配置读取传入）
 
         # Cron tools belong to the agent's standing toolset, not to any one
         # request; build them here so the first turn does not pay for it either.

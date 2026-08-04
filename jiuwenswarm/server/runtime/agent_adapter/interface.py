@@ -2462,7 +2462,7 @@ class JiuWenSwarm:
                             should_record = et.startswith("chat.")
                             if not should_record and et == EventType.TEAM_MESSAGE.value:
                                 should_record = True
-                            if et == "context_compression_state":
+                            if et == "context.compression_state":
                                 _append_compact_history_from_payload(
                                     payload=data.payload,
                                     session_id=session_id,
@@ -2575,7 +2575,7 @@ class JiuWenSwarm:
                         should_record = et.startswith("chat.")
                         if not should_record and et == EventType.TEAM_MESSAGE.value:
                             should_record = True
-                        if et == "context_compression_state":
+                        if et == "context.compression_state":
                             _append_compact_history_from_payload(
                                 payload=data,
                                 session_id=session_id,

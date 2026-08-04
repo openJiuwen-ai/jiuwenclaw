@@ -1507,6 +1507,15 @@ function AppContent() {
       onReasoningReplay: (items) => {
         restoreReasoningSegments(sessionId, items);
       },
+      onCompactionReplay: (info) => {
+        // 回显「本轮完成上下文压缩 N 次」：恢复进 chatStore，渲染与实时事件同一处
+        const chatStore = useChatStore.getState();
+        chatStore.ensureRuntime(sessionId);
+        chatStore.setContextCompressionStatus(sessionId, undefined, {
+          count: info.count,
+          summaries: info.summaries,
+        });
+      },
       onError: (message) => {
         console.warn('[history.restore]', message);
         setLoadingHistory(sessionId, false);

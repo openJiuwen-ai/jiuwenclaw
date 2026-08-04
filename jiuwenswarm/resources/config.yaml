@@ -465,6 +465,8 @@ react:
     enable_kv_cache_affinity: false
   context_engine_config:
     enable_openrouter_model_context_window_tokens: true
+    # 显式覆盖上下文窗口 token 上限（正整数）；注释掉或留空则按模型自动解析
+    # context_window_tokens: 131072
     enable_reload: true
     enabled: true
     message_summary_offloader_config:

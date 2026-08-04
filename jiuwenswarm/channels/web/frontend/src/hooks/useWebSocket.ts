@@ -622,6 +622,7 @@ interface ContextCompressionStatePayload extends Record<string, unknown> {
   operation_id?: string;
   phase?: string;
   processor?: string;
+  error?: string;
 }
 
 interface PendingContextCompressionStart {
@@ -990,7 +991,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
   const buildContextCompressionRuntimeState = useCallback(
     (payload: ContextCompressionStatePayload): Omit<ContextCompressionRuntime, 'status'> | null => {
-      const summary = payload.summary?.trim() || '';
+      const summary =
+        payload.summary?.trim() ||
+        payload.error?.trim() ||
+        (payload.status?.trim() ? `Context compression ${payload.status.trim()}` : '');
       if (!summary) return null;
       return {
         summary,

@@ -719,6 +719,12 @@ def _deep_agent_context_engine_config(react_cfg: dict[str, Any] | None) -> Conte
             "enable_openrouter_model_context_window_tokens": bool(
                 cec.get("enable_openrouter_model_context_window_tokens", False)
             ),
+            # 显式设置的上下文窗口上限；非法值回退 None（由 agent-core 按模型解析）
+            "context_window_tokens": parse_int(cec.get("context_window_tokens"), None),
+            # 上下文压缩 debug 落盘开关；目录缺省时由 agent-core 按
+            # OPENJIUWEN_CONTEXT_DEBUG_DIR / workspace 默认路径解析
+            "enable_context_debug": bool(cec.get("enable_context_debug", False)),
+            "context_debug_dir": cec.get("context_debug_dir") or None,
         }
     )
 
@@ -9724,7 +9730,12 @@ class JiuWenSwarmDeepAdapter:
                     getattr(self._model_request_config, "model_name", "") or ""
                     if self._model_request_config else ""
                 )
-                cw_fallback = ContextUtils.resolve_context_max(model_name=model_name)
+                # 与 ContextEngine 一致：显式配置的 context_window_tokens 优先于按模型名解析
+                cw_override = _deep_agent_context_engine_config(self._config_cache).context_window_tokens
+                cw_fallback = ContextUtils.resolve_context_max(
+                    model_name=model_name,
+                    fallback_context_window_tokens=cw_override,
+                )
                 if cw_fallback > 0:
                     context_window_tokens = cw_fallback
             except Exception:
