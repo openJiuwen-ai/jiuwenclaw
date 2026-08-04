@@ -664,10 +664,13 @@ class MessageHandler(ABC):
         return sid
 
     async def _resolve_external_channel_session(self, msg: "Message") -> None:
-        """Map A2A/SSH protocol IDs onto AgentServer-owned product Sessions."""
+        """Map A2A protocol IDs onto AgentServer-owned product Sessions.
+
+        SSH is AgentOS relay-only and must not allocate a jiuwenswarm Session.
+        """
         channel_id = str(msg.channel_id or "").strip()
         external_id = str(msg.session_id or "").strip()
-        if channel_id not in {"a2a", "ssh"} or not external_id:
+        if channel_id != "a2a" or not external_id:
             return
         key = (channel_id, external_id)
         resolved = self._external_session_aliases.get(key)
