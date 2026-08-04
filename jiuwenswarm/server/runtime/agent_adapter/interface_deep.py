@@ -325,6 +325,7 @@ from jiuwenswarm.server.runtime.agent_adapter.sysop_builder import (
     create_local_sysop_card,
     create_sandbox_sysop_card,
 )
+from jiuwenswarm.server.runtime.agent_adapter.user_turn import TEAM_USER_TURN_KEY, UserTurn
 from jiuwenswarm.agents.harness.common.auto_harness.service import _HARNESS_PACKAGES_FILE
 from jiuwenswarm.agents.harness.common.plugins.rail_manager import get_rail_manager
 from jiuwenswarm.gateway.cron import CronTargetChannel
@@ -8984,20 +8985,51 @@ class JiuWenSwarmDeepAdapter:
 
             resolved_model = self._resolve_model_for_request(request)
             self._apply_model_to_react_agent(resolved_model)
-            # Team mode hands the leader a plain query string — team_helpers
-            # forwards ``inputs={"query": ...}`` only — so the single-agent
-            # native-image path has nothing to hook onto: it injects image
-            # data URIs through a context-window mutator bound by
-            # ``set_current_multimodal_image_files``, and neither the
-            # ContextVar nor ``_multimodal_image_files`` survives the crossing
-            # into the team runner. Route images through the image-reading
-            # tool prompt unconditionally instead, so the leader at least
-            # receives their paths and a way to open them.
+            # Images take the single-agent path: native input rides the
+            # ``_CURRENT_MULTIMODAL_IMAGE_FILES`` ContextVar into each member's
+            # MultimodalImageRail (members mount ``swarm.multimodal_image``),
+            # and models without native image input fall back to the
+            # image-reading tool prompt. The ContextVar is set here, before
+            # team_helpers spawns the stream task, so the task inherits it.
+            #
+            # The pipeline runs against the user's own words rather than
+            # ``inputs["query"]``: team delivers ``turn.text`` re-rendered, so a
+            # hint appended to the rendered envelope would be dropped.
+            team_turn = inputs.get(TEAM_USER_TURN_KEY)
+            rewrite_turn_text = isinstance(team_turn, UserTurn) and isinstance(team_turn.text, str)
+            rendered_query = inputs.get("query")
+            if rewrite_turn_text:
+                inputs["query"] = team_turn.text
+            inputs = self._prepare_multimodal_image_inputs(request, inputs)
+            enable_read_image_multimodal = self._native_image_input_enabled(
+                self._config_cache,
+                resolved_model,
+            )
+            image_tool_fallback_notice = self._build_image_tool_fallback_notice(
+                request,
+                enable_read_image_multimodal=enable_read_image_multimodal,
+                model=resolved_model,
+            )
             inputs = self._prepare_react_image_tool_prompt(
                 request,
                 inputs,
-                enable_read_image_multimodal=False,
+                enable_read_image_multimodal=enable_read_image_multimodal,
             )
+            if rewrite_turn_text:
+                inputs[TEAM_USER_TURN_KEY] = team_turn.with_text(inputs["query"])
+                inputs["query"] = rendered_query
+            if image_tool_fallback_notice is not None:
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload=image_tool_fallback_notice,
+                    is_complete=False,
+                )
+            from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
+                set_current_multimodal_image_files,
+            )
+
+            set_current_multimodal_image_files(inputs.pop("_multimodal_image_files", []) or [])
             resolved_language = self._resolve_runtime_language()
             resolved_channel = str(cid or self._resolve_prompt_channel(session_id) or "web").strip() or "web"
             if self._runtime_prompt_rail:

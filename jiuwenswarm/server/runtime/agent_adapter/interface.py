@@ -19,7 +19,6 @@ import time
 from pathlib import Path
 from typing import Any, AsyncIterator, Tuple
 
-from datetime import datetime, timedelta, timezone
 from jiuwenswarm.dotenv_early import load_dotenv_runtime
 
 from jiuwenswarm.server.runtime.agent_adapter.agent_adapters import (
@@ -32,6 +31,7 @@ from jiuwenswarm.server.runtime.session.session_history import (
     append_compact_history_records,
     append_history_record,
 )
+from jiuwenswarm.server.runtime.agent_adapter.user_turn import TEAM_USER_TURN_KEY, UserTurn
 from jiuwenswarm.server.runtime.session.session_manager import SessionManager
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
 from jiuwenswarm.server.utils.utils import is_team_params
@@ -755,192 +755,40 @@ def _handle_statusline_prompt_command(query: str) -> Tuple[str, str]:
     return "", query
 
 
-# ``chat.send`` files keys that carry browser-uploaded attachment records.
-_UPLOADED_FILE_KEYS: tuple[str, ...] = ("uploaded_documents", "uploaded_images")
-
-_TEAM_ATTACHMENT_HEADERS: dict[str, str] = {
-    "zh": "【本轮上传的文件】以下为绝对路径，需要文件内容时用 read_file 直接读取：",
-    "en": (
-        "[Files uploaded in this turn] Absolute paths below; "
-        "read them with read_file when the content is needed:"
-    ),
-}
-
-
-def collect_uploaded_file_records(files: Any) -> list[dict[str, str]]:
-    """Collect uploaded document/image records from a ``chat.send`` files dict.
-
-    Args:
-        files: The ``params["files"]`` mapping; non-dict values yield an empty list.
-
-    Returns:
-        Records holding ``filename`` and an absolute ``path``, in upload order.
-        Entries without a usable path are dropped.
-    """
-    if not isinstance(files, dict):
-        return []
-
-    records: list[dict[str, str]] = []
-    for key in _UPLOADED_FILE_KEYS:
-        entries = files.get(key)
-        if not isinstance(entries, list):
-            continue
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            path = str(entry.get("path") or "").strip()
-            if not path:
-                continue
-            filename = str(entry.get("filename") or "").strip() or Path(path).name
-            records.append({"filename": filename, "path": path})
-    return records
-
-
-def append_team_attachment_manifest(query: Any, files: Any, *, language: str = "zh") -> Any:
-    """Append uploaded-attachment absolute paths to a team-mode query.
-
-    Team mode feeds the leader the raw user text instead of the
-    ``build_user_prompt`` JSON wrapper, so the ``files_updated_by_user`` field
-    that normally carries uploaded paths never reaches it. This restores the
-    same paths as a plain list. Paths the text already mentions are skipped —
-    the Web composer inlines document paths into the message itself.
-
-    Args:
-        query: Raw team query. Non-str values (e.g. ``InteractiveInput``) are
-            returned untouched.
-        files: The ``params["files"]`` mapping carrying uploaded_* records.
-        language: Runtime language selecting the section header wording.
-
-    Returns:
-        The query with an attachment section appended, or the original query
-        when there is nothing to add.
-    """
-    if not isinstance(query, str):
-        return query
-
-    records = collect_uploaded_file_records(files)
-    if not records:
-        return query
-
-    lines: list[str] = []
-    for record in records:
-        if record["path"] in query:
-            continue
-        lines.append(f"- {record['filename']}: {record['path']}")
-    if not lines:
-        return query
-
-    header = _TEAM_ATTACHMENT_HEADERS.get(language, _TEAM_ATTACHMENT_HEADERS["zh"])
-    return f"{query}\n\n{header}\n" + "\n".join(lines)
-
-
 def build_user_prompt(content: str | dict, files: dict, channel: str, language: str, *,
     trusted_dirs: list[str] | None = None, metadata: dict[str, Any] | None = None,
     skills: list[str] | None = None) -> str:
-    """Build user prompt for the agent.
+    """Build the user prompt for an agent.
+
+    Thin wrapper over :meth:`UserTurn.render` — the single renderer shared by
+    single-agent and team runs. Kept for callers that hold loose arguments
+    rather than a ``UserTurn``.
 
     Args:
+        content: The user's message text, or an A2UI client-event dict.
+        files: ``chat.send`` files mapping carrying uploaded attachments.
+        channel: Originating channel id.
+        language: Preferred response language.
+        trusted_dirs: Directories the client declared as trusted.
+        metadata: Request metadata (sender / chat_type / interaction context).
         skills: 显式传入的 skill 名列表（来自 params.skills，前端从 content 提取）。
             若提供，直接作为 skills_to_use，且 **不再对 content 做 /skills use 剥离**
             （content 原样保留，如 "帮我用 /doc写文档"）。
             若为 None，回退到从 content 文本解析 /skills use（兼容 IM/CLI 老路径），
             同样不剥离 content，仅提取 skill 名。
+
+    Returns:
+        The rendered prompt.
     """
-    from jiuwenswarm.server.runtime.a2ui.integration import build_user_prompt_if_a2ui_event
-
-    a2ui_prompt = build_user_prompt_if_a2ui_event(content, channel=channel, language=language)
-    if a2ui_prompt is not None:
-        return a2ui_prompt
-
-    interaction_prefix = ""
-    if metadata:
-        interaction_ctx = str(metadata.get("interaction_context") or "").strip()
-        if interaction_ctx:
-            interaction_prefix = f"\n{interaction_ctx}\n\n"
-
-    # skills 来源：优先显式参数（params.skills），否则回退从 content 文本解析（兼容老路径）。
-    # 两条路径都 **不剥离 content**——skill 名单独进 skills_to_use，content 原样保留语义通顺。
-    skills_to_use: list[str]
-    if skills:
-        skills_to_use = skills
-    elif isinstance(content, str):
-        parsed_skills, _stripped = _handle_skills_use_slash_command(content)
-        skills_to_use = parsed_skills  # 仅取 skill 名，忽略 _stripped（content 不剥离）
-    else:
-        skills_to_use = []
-
-    if isinstance(content, str):
-        # /statusline <prompt> prompt-type 命令（仿 Claude Code，不调用 /skills）
-        statusline_prompt, statusline_content = _handle_statusline_prompt_command(content)
-        if statusline_prompt:
-            content = statusline_content
-    else:
-        statusline_prompt = ""
-
-    if language == "zh":
-        prompt = "你收到一条消息：\n"
-        if channel == "cron":
-            prompt = "你收到一条消息，对于查询类任务必须输出查询到的内容，不要只回复确认，不要记录到memory：\n"
-    else:
-        prompt = "You receive a new message:\n"
-        if channel == "cron":
-            prompt = ("You receive a new message. For query tasks, you must output the queried content"
-                      "—don't just reply with confirmation, don't record to memory:\n")
-    msg_data: dict[str, Any] = {
-        "source": channel,
-        "preferred_response_language": language,
-        "content": content,
-        "type": "user input",
-    }
-    if channel in ["cron", "heartbeat"]:
-        msg_data["source"] = "system"
-        msg_data["type"] = channel
-    if metadata:
-        chat_type = str(metadata.get("chat_type") or metadata.get("im_chat_type") or "").strip()
-        if chat_type:
-            msg_data["chat_type"] = chat_type
-        sender_name = str(metadata.get("sender_name") or "").strip()
-        if sender_name:
-            msg_data["sender"] = sender_name
-    if channel not in ["cron", "heartbeat"]:
-        msg_data["files_updated_by_user"] = json.dumps(files, ensure_ascii=False)
-    final_prompt = interaction_prefix + prompt + json.dumps(msg_data, ensure_ascii=False)
-    if interaction_prefix:
-        logger.info(
-            "[build_user_prompt][DEBUG] interaction_context 存在，最终 prompt=\n%s",
-            final_prompt,
-        )
-
-    now = datetime.now(timezone(timedelta(hours=8)))
-    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
-
-    user_message_context = {
-        "source": channel,
-        "timezone": "Asia/Shanghai",
-        "timestamp": now_str,
-        "preferred_response_language": language,
-        "content": content,
-        "files_updated_by_user": json.dumps(files, ensure_ascii=False),
-        "type": "user input",
-    }
-    if skills_to_use:
-        user_message_context["skills_to_use"] = skills_to_use
-    if trusted_dirs:
-        user_message_context["trusted_dirs"] = json.dumps(trusted_dirs, ensure_ascii=False)
-
-    # 仿 Claude Code statusline-setup: 把指令文本直接嵌入 prompt
-    base_prompt = interaction_prefix + prompt + json.dumps(user_message_context, ensure_ascii=False)
-    if statusline_prompt:
-        if language == "zh":
-            return base_prompt + "\n\n你必须按照以下指令配置状态栏：\n" + statusline_prompt
-        else:
-            return (
-                base_prompt
-                + "\n\nYou must follow these instructions "
-                + "to configure the status line:\n"
-                + statusline_prompt
-            )
-    return base_prompt
+    return UserTurn(
+        text=content,
+        channel=channel,
+        language=language,
+        files=files or {},
+        trusted_dirs=trusted_dirs,
+        skills=skills,
+        metadata=metadata,
+    ).render()
 
 
 
@@ -1129,12 +977,17 @@ class JiuWenSwarm:
             project_dir=project_dir,
         )
 
-    def build_inputs(self, request: AgentRequest) -> Tuple[dict[str, Any], str, str]:
+    def build_inputs(self, request: AgentRequest) -> Tuple[dict[str, Any], str, UserTurn]:
         """构建 adapter 所需的 inputs 字典（公共接口）."""
         return self._build_inputs(request)
 
-    def _build_inputs(self, request: AgentRequest) -> Tuple[dict[str, Any], str, str]:
-        """构建 adapter 所需的 inputs 字典."""
+    def _build_inputs(self, request: AgentRequest) -> Tuple[dict[str, Any], str, UserTurn]:
+        """构建 adapter 所需的 inputs 字典.
+
+        Returns:
+            ``(inputs, memory_mode, turn)`` — ``turn`` is the rendered user turn;
+            ``turn.text`` keeps the user's own words for callers that parse them.
+        """
         from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
         from jiuwenswarm.common.schema.chat_send import ChatSendParams
 
@@ -1144,9 +997,8 @@ class JiuWenSwarm:
         query = params.get("query")
         if query is None or query == "":
             query = params.get("content", "")
-        # /debug 请求级指令：仅 agent/code 在此剥离前缀；team 自行从原始
-        # query 解析 /debug（process_message_stream 用 raw_query 覆写
-        # inputs["query"]），故此处对 team 不剥离。
+        # /debug 请求级指令：仅 agent/code 在此剥离前缀；team 自行从
+        # ``turn.text`` 解析 /debug（见 team_helpers），故此处对 team 不剥离。
         _request_debug = False
         _dbg_mode = params.get("mode")
         _dbg_mode_s = _dbg_mode.strip().lower() if isinstance(_dbg_mode, str) else ""
@@ -1197,6 +1049,19 @@ class JiuWenSwarm:
                 query[:2000] if isinstance(query, str) else str(query)[:2000],
             )
 
+        # One turn, one renderer: single-agent and team both deliver
+        # ``turn.render()``. The team path additionally keeps ``turn.text`` to
+        # parse directives / ``$member`` routing before it renders.
+        turn = UserTurn(
+            text=query,
+            channel=channel,
+            language=language,
+            files=params.get("files", {}) or {},
+            trusted_dirs=trusted_dirs,
+            skills=skills,
+            metadata=request.metadata,
+        )
+
         if isinstance(query, InteractiveInput):
             final_query = query
         else:
@@ -1214,26 +1079,11 @@ class JiuWenSwarm:
                 )
                 if interactive_input is not None:
                     final_query = interactive_input
+                    turn = turn.with_text(interactive_input)
                 else:
-                    final_query = build_user_prompt(
-                        query,
-                        files=params.get("files", {}),
-                        channel=channel,
-                        language=language,
-                        trusted_dirs=trusted_dirs,
-                        metadata=request.metadata,
-                        skills=skills,
-                    )
+                    final_query = turn.render()
             else:
-                final_query = build_user_prompt(
-                    query,
-                    files=params.get("files", {}),
-                    channel=channel,
-                    language=language,
-                    trusted_dirs=trusted_dirs,
-                    metadata=request.metadata,
-                    skills=skills,
-                )
+                final_query = turn.render()
                 # 调试日志：确认 /statusline prompt 注入是否生效
                 if isinstance(query, str) and "/statusline" in query:
                     logger.info(
@@ -1307,9 +1157,10 @@ class JiuWenSwarm:
                 inputs["cwd"] = str(expanded)
                 inputs["workspace_dir"] = str(expanded)
 
-        # 返回原始 query（未经 build_user_prompt 包装）
-        # Team 模式需要使用原始 query，而不是 JSON 包装后的 prompt
-        return inputs, memory_mode, query
+        # The turn carries both the user's own words (``turn.text``, needed by
+        # the team path for directive / ``$member`` / slash parsing) and the
+        # single renderer that produced ``inputs["query"]``.
+        return inputs, memory_mode, turn
 
     def _make_retry_without_a2ui_call(
             self,
@@ -2040,7 +1891,7 @@ class JiuWenSwarm:
         )
 
         try:
-            inputs, memory_mode, raw_query = self._build_inputs(request)
+            inputs, memory_mode, user_turn = self._build_inputs(request)
         except _TeamPlanApprovalPayloadError as exc:
             return AgentResponse(
                 request_id=request.request_id,
@@ -2080,7 +1931,7 @@ class JiuWenSwarm:
             content_str = await finalize_assistant_response_if_a2ui(
                 content_str,
                 channel=request.channel_id,
-                user_query=raw_query,
+                user_query=user_turn.text,
                 request_id=request.request_id or "",
                 repair_call=repair_call,
                 retry_without_a2ui_call=retry_without_a2ui_call,
@@ -2277,7 +2128,7 @@ class JiuWenSwarm:
         rid = request.request_id
         cid = request.channel_id
         try:
-            inputs, memory_mode, raw_query = self._build_inputs(request)
+            inputs, memory_mode, user_turn = self._build_inputs(request)
         except _TeamPlanApprovalPayloadError as exc:
             yield AgentResponseChunk(
                 request_id=rid,
@@ -2293,23 +2144,19 @@ class JiuWenSwarm:
             )
             return
 
-        # Team 模式：使用原始 query，而不是 build_user_prompt 包装后的内容
+        # Team 模式：把整个 turn 交给 team_helpers。它先用 turn.text（用户原
+        # 文）解析 /debug、$member 与 slash，再用同一个 render() 投递，因此
+        # leader 收到的信封与单 agent 逐字段一致。
         team_query_is_interactive_input = False
         if is_team_mode:
             from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 
             team_query_is_interactive_input = isinstance(inputs.get("query"), InteractiveInput)
-            if not team_query_is_interactive_input:
-                # 原始 query 不含 build_user_prompt 的 files_updated_by_user，
-                # 上传附件的绝对路径必须单独补回，否则 leader 只看得到文件名。
-                inputs["query"] = append_team_attachment_manifest(
-                    raw_query,
-                    request.params.get("files") if isinstance(request.params, dict) else None,
-                    language=str(inputs.get("language") or "zh"),
-                )
+            inputs[TEAM_USER_TURN_KEY] = user_turn
             logger.info(
-                "[JiuWenSwarm] Team模式使用原始query: %s",
-                raw_query[:100] if isinstance(raw_query, str) and raw_query else type(inputs.get("query")).__name__,
+                "[JiuWenSwarm] Team模式 user turn: interactive_input=%s text=%s",
+                team_query_is_interactive_input,
+                str(user_turn.text)[:100],
             )
 
         # cloud memory: before chat hook
@@ -3066,7 +2913,7 @@ class JiuWenSwarm:
         finalized_assistant_message = await finalize_assistant_response_if_a2ui(
             assistant_message,
             channel=cid,
-            user_query=raw_query,
+            user_query=user_turn.text,
             request_id=rid or "",
             repair_call=repair_call,
             retry_without_a2ui_call=retry_without_a2ui_call,
