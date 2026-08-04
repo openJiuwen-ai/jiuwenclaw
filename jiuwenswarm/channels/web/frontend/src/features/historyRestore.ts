@@ -13,6 +13,16 @@ import {
 export const HISTORY_GET_METHOD = 'history.get';
 export const HISTORY_MESSAGE_EVENT = 'history.message';
 
+/**
+ * 历史加载兜底超时（毫秒）。
+ * faas 侧 history.get 流若因旧 session runtime 过 TTL 被回收而 init 超时
+ * （60s timed out），后端不会发 done/batch_end 结束帧，也不会发匹配的
+ * chat.error；前端若无限等待会让 isLoadingHistory 永久卡 true，进而吞掉
+ * 后续所有 chat.processing_status(is_processing=false)，表现为「一直加载中」。
+ * 到期强制 finalize，让调用方 setLoadingHistory(false) 恢复可交互。
+ */
+const HISTORY_RESTORE_TIMEOUT_MS = 30_000;
+
 /** 助手侧仅恢复这些事件；用户消息无 event_type，单独保留 */
 const ALLOWED_ASSISTANT_EVENT_TYPES = new Set([
   'chat.final',
@@ -1114,6 +1124,8 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
   const entries: HistoryTimelineEntry[] = [];
   let totalPages: number | null = null;
   let disposed = false;
+  let finalized = false;
+  let restoreTimer: ReturnType<typeof setTimeout> | null = null;
 
   const unsubscribe = webClient.on(HISTORY_MESSAGE_EVENT, (event: WsEvent) => {
     if (disposed) {
@@ -1155,6 +1167,10 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
   function dispose(): void {
     if (disposed) return;
     disposed = true;
+    if (restoreTimer) {
+      clearTimeout(restoreTimer);
+      restoreTimer = null;
+    }
     unsubscribe();
     if (activeHistoryRequests.get(requestKey)?.generation === generation) {
       activeHistoryRequests.delete(requestKey);
@@ -1162,7 +1178,8 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
   }
 
   function finalize(): void {
-    if (disposed) return;
+    if (disposed || finalized) return;
+    finalized = true;
 
     const { messages, toolReplay, harnessReplay, teamReplay, reasoningReplay } =
       materializeHistoryTimeline(entries);
@@ -1197,6 +1214,13 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
 
   const handle: HistoryRestoreHandle = { generation, dispose };
   activeHistoryRequests.set(requestKey, handle);
+  // 兜底：后端 history.get 流超时（faas 旧 session runtime 过 TTL 被
+  // 回收、init 60s 超时）时不发结束帧，强制 finalize 恢复 isLoadingHistory，
+  // 避免前端永久转圈、吞掉后续 chat.processing_status(is_processing=false)。
+  restoreTimer = setTimeout(() => {
+    if (disposed || finalized) return;
+    finalize();
+  }, HISTORY_RESTORE_TIMEOUT_MS);
   return handle;
 }
 
@@ -1231,6 +1255,8 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
   const entries: HistoryTimelineEntry[] = [];
   let totalPages: number | null = null;
   let disposed = false;
+  let finalized = false;
+  let restoreTimer: ReturnType<typeof setTimeout> | null = null;
 
   const unsubscribe = webClient.on(HISTORY_MESSAGE_EVENT, (event: WsEvent) => {
     if (disposed) {
@@ -1272,6 +1298,10 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
   function dispose(): void {
     if (disposed) return;
     disposed = true;
+    if (restoreTimer) {
+      clearTimeout(restoreTimer);
+      restoreTimer = null;
+    }
     unsubscribe();
     if (activeHistoryRequests.get(requestKey)?.generation === generation) {
       activeHistoryRequests.delete(requestKey);
@@ -1279,7 +1309,8 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
   }
 
   function finalize(): void {
-    if (disposed) return;
+    if (disposed || finalized) return;
+    finalized = true;
 
     const { messages, toolReplay, harnessReplay, teamReplay, reasoningReplay } =
       materializeHistoryTimeline(entries);
@@ -1295,5 +1326,10 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
 
   const handle: HistoryRestoreHandle = { generation, dispose };
   activeHistoryRequests.set(requestKey, handle);
+  // 同 beginHistoryRestore：兜底超时，避免分页 history.get 流卡死。
+  restoreTimer = setTimeout(() => {
+    if (disposed || finalized) return;
+    finalize();
+  }, HISTORY_RESTORE_TIMEOUT_MS);
   return handle;
 }

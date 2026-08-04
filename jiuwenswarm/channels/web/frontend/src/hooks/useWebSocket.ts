@@ -3223,11 +3223,15 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (!sessionId) return;
         if (shouldDropDuplicatedEvent('chat.error', payload)) return;
         useChatStore.getState().setThinking(sessionId, false);
+        // 任何 chat.error 都应解除历史加载态：faas 侧 history.get 流超时
+        // （旧 session runtime 过 TTL 被回收、init 超时）只回发 chat.error
+        // 而非结束帧，若不清 isLoadingHistory 会永久吞掉后续
+        // chat.processing_status(is_processing=false)，表现为「一直加载中」。
+        useChatStore.getState().setLoadingHistory(sessionId, false);
         const errorMsg =
           typeof payload.error === 'string' ? payload.error : t('network.unknownError');
         // 忽略 "invalid page_idx or session history not found" 错误，因为这是新会话的正常情况
         if (errorMsg.includes('invalid page_idx or session history not found')) {
-          useChatStore.getState().setLoadingHistory(sessionId, false);
           return;
         }
         useChatStore.getState().setExecutionError(sessionId, errorMsg);

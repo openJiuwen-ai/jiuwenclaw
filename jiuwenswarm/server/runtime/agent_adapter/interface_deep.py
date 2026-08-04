@@ -368,6 +368,10 @@ _CRON_TOOL_BOUND: ContextVar[bool] = ContextVar(
     "cron_tool_bound",
     default=False,
 )
+_CRON_TOOL_USER_ID: ContextVar[str | None] = ContextVar(
+    "cron_tool_user_id",
+    default=None,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -378,6 +382,7 @@ class _RuntimeCronContextTokens:
     mode: Token[str | None]
     bound: Token[bool]
     shell: Token[str | None]
+    user_id: Token[str | None]
 
 
 def get_runtime_tool_session_id() -> str | None:
@@ -970,6 +975,7 @@ class _RuntimeCronToolContext:
         self._fallback_session_id: str | None = None
         self._fallback_metadata: dict[str, Any] | None = None
         self._fallback_mode: str | None = None
+        self._fallback_user_id: str | None = None
 
     def remember_current_binding(self) -> None:
         self._fallback_channel_id = _CRON_TOOL_CHANNEL_ID.get()
@@ -977,6 +983,7 @@ class _RuntimeCronToolContext:
         metadata = _CRON_TOOL_METADATA.get()
         self._fallback_metadata = dict(metadata) if isinstance(metadata, dict) else None
         self._fallback_mode = _CRON_TOOL_MODE.get()
+        self._fallback_user_id = _CRON_TOOL_USER_ID.get()
 
     @property
     def channel_id(self) -> str:
@@ -1003,6 +1010,12 @@ class _RuntimeCronToolContext:
         if _CRON_TOOL_BOUND.get():
             return _CRON_TOOL_MODE.get()
         return self._fallback_mode
+
+    @property
+    def user_id(self) -> str | None:
+        if _CRON_TOOL_BOUND.get():
+            return _CRON_TOOL_USER_ID.get()
+        return self._fallback_user_id
 
     @property
     def tool_scope(self) -> str:
@@ -5809,6 +5822,13 @@ class JiuWenSwarmDeepAdapter:
             session_value = session_metadata.get(key)
             if isinstance(session_value, str) and session_value.strip():
                 normalized_metadata[key] = session_value.strip()
+        # 提取 session metadata 中的 user_id，供 cron tool 透传给创建者标识。
+        # agent 内部调用 cron_create_job 时无 web 连接 user_id 来源，靠会话 metadata 兜底。
+        cron_user_id: str | None = None
+        if isinstance(session_metadata, dict):
+            sid_uid = str(session_metadata.get("user_id") or "").strip()
+            if sid_uid:
+                cron_user_id = sid_uid
         return _RuntimeCronContextTokens(
             channel=_CRON_TOOL_CHANNEL_ID.set(normalized_channel),
             session=_CRON_TOOL_SESSION_ID.set(session_id),
@@ -5816,6 +5836,7 @@ class JiuWenSwarmDeepAdapter:
             mode=_CRON_TOOL_MODE.set(normalized_mode),
             bound=_CRON_TOOL_BOUND.set(True),
             shell=set_shell_session_id(session_id),
+            user_id=_CRON_TOOL_USER_ID.set(cron_user_id),
         )
 
     @staticmethod
@@ -5832,6 +5853,7 @@ class JiuWenSwarmDeepAdapter:
         _CRON_TOOL_METADATA.reset(tokens.metadata)
         _CRON_TOOL_SESSION_ID.reset(tokens.session)
         _CRON_TOOL_CHANNEL_ID.reset(tokens.channel)
+        _CRON_TOOL_USER_ID.reset(tokens.user_id)
 
     async def _update_rails_for_mode(self, mode: str) -> None:
         """装配 agent 模式 rails。

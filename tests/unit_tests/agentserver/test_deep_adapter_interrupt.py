@@ -473,6 +473,7 @@ def test_reset_runtime_cron_context_resets_shell_session(
         "_CRON_TOOL_METADATA",
         "_CRON_TOOL_SESSION_ID",
         "_CRON_TOOL_CHANNEL_ID",
+        "_CRON_TOOL_USER_ID",
     ):
         monkeypatch.setattr(
             f"jiuwenswarm.server.runtime.agent_adapter.interface_deep.{var_name}",
@@ -488,6 +489,7 @@ def test_reset_runtime_cron_context_resets_shell_session(
             mode=MagicMock(),
             bound=MagicMock(),
             shell=shell_token,
+            user_id=MagicMock(),
         )
     )
     reset_shell_mock.assert_called_once_with(shell_token)

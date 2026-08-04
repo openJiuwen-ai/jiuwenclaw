@@ -41,6 +41,8 @@ _TITLE_MAX_LEN = 50
 # 心跳任务会话目录前缀，不参与 session.list 等列表展示
 _HEARTBEAT_SESSION_PREFIX = "heartbeat_"
 _DELIVERY_KIND_SERVER_PUSH = "server_push"
+# user_id 白名单: 仅允许字母数字及 _-, 拒绝路径遍历字符
+_SAFE_USER_ID_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 # 匹配所有小写 XML 块:
 # 如 <system-reminder>、<file-content>、<command-name> 等系统/工具注入内容
@@ -333,6 +335,25 @@ def _read_metadata(session_id: str, cache_bust: bool = False) -> dict[str, Any]:
         )
         return {}
     return data
+
+
+def _read_metadata_file_in(session_dir: Path) -> dict[str, Any]:
+    """直接读指定会话目录下的 metadata.json,不走全局 sessions 目录单例。
+
+    供 ``collect_all_sessions_metadata(user_id=...)`` 按用户家目录读时使用:
+    避免触碰进程级 ``get_agent_sessions_dir`` 全局态,多 web 连接并发各读各目录无串扰。
+    与 ``_read_metadata`` cache_bust 语义一致(直接读盘,不读内存缓存)。
+    """
+    fpath = session_dir / "metadata.json"
+    if not fpath.exists():
+        return {}
+    try:
+        data = json.loads(fpath.read_text(encoding="utf-8") or '{}')
+        if isinstance(data, dict):
+            return data
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("读取 %s 失败: %s", fpath, exc)
+    return {}
 
 
 def _write_metadata_sync(
@@ -740,6 +761,7 @@ def sync_session_request_metadata(
     project_dir: str | None = None,
     project_id: str | None = None,
     cron_id: str | None = None,
+    user_id: str | None = None,
     last_user_message_at: float | None = None,
     is_chat_turn: bool = True,
     explicit_mode_provided: bool = False,
@@ -807,7 +829,7 @@ def sync_session_request_metadata(
         metadata = {
             "session_id": session_id,
             "channel_id": channel_id or "",
-            "user_id": "",
+            "user_id": user_id or "",
             "created_at": now,
             "last_message_at": now,
             "title": "",
@@ -873,6 +895,10 @@ def sync_session_request_metadata(
             metadata["mode"] = mode
         if channel_id is not None:
             metadata["channel_id"] = channel_id
+        # user_id：首次锁定，已锁定则忽略请求值（与 project_id/cron_id 一致不可改）。
+        # 由 envelope.user_id 透传，供 gateway 列表接口按用户隔离会话历史。
+        if user_id and not (isinstance(metadata.get("user_id"), str) and metadata.get("user_id", "").strip()):
+            metadata["user_id"] = user_id
         # last_message_at：仅 chat 轮次刷新。语义为「agent 最后输出时间」，
         # 只读 RPC 无 agent 输出，不应刷新——否则只读查询会把历史会话的排序时间
         # 刷新成「现在」，导致旧会话被置顶。
@@ -1305,15 +1331,28 @@ def get_all_sessions_metadata(
     return sessions[offset: offset + limit], total
 
 
-def collect_all_sessions_metadata() -> list[dict[str, Any]]:
+def collect_all_sessions_metadata(
+    user_id: str | None = None,
+) -> list[dict[str, Any]]:
     """收集全部会话元数据(不分页、不排序),供项目统计与置顶会话聚合使用。
 
     跳过 heartbeat 会话;强制读盘(``cache_bust=True``)以跨进程拿最新数据。
     无 ``metadata.json`` 的旧会话以目录时间戳构造最小兜底信息
     (``project_id=""``、``project_dir=""``、``pinned=False``),归入默认项目统计。
     返回的每个 dict 已对新增字段应用默认值兜底。
+
+    user_id: 非空时,扫描该用户家目录 ``/home/<user_id>/.jiuwenswarm/agent/sessions``
+    (与 faas 沙箱按 OS 用户写入的目录一致;前提:业务 user_id == OS 用户名)。
+    该路径下直接读盘,不走进程级全局 ``get_agent_sessions_dir`` 单例,避免多连接
+    并发时全局态串扰。为空(None)时维持原行为(扫 gateway 进程默认目录)。
     """
-    sessions_dir = get_agent_sessions_dir()
+    if user_id:
+        if not _SAFE_USER_ID_RE.match(user_id):
+            logger.warning("[session_metadata] invalid user_id rejected: %r", user_id)
+            return []
+        sessions_dir = Path("/home") / user_id / ".jiuwenswarm" / "agent" / "sessions"
+    else:
+        sessions_dir = get_agent_sessions_dir()
     if not sessions_dir.is_dir():
         return []
     result: list[dict[str, Any]] = []
@@ -1325,7 +1364,12 @@ def collect_all_sessions_metadata() -> list[dict[str, Any]]:
         sid = session_dir.name
         if sid.startswith(_HEARTBEAT_SESSION_PREFIX):
             continue
-        meta = _read_metadata(sid, cache_bust=True)
+        if user_id:
+            # 按用户家目录读时,绕过走全局单例的 _read_metadata,直接读该目录下文件,
+            # 避免改全局态(并发安全)。仅 cache_bust 语义:直接读盘。
+            meta = _read_metadata_file_in(session_dir)
+        else:
+            meta = _read_metadata(sid, cache_bust=True)
         if not meta:
             # 旧会话无 metadata.json: 构造最小兜底,归入默认项目。
             # 不做推断写盘(无 metadata.json 通常是异常残留)。
