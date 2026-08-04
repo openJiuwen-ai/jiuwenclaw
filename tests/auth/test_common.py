@@ -10,8 +10,7 @@ from jiuwenswarm.extensions.agentos.auth.credential_authenticator import AuthCon
 from jiuwenswarm.extensions.agentos.auth.common import (
     extract_token,
     extract_headers,
-    get_remote_addr,
-    _handle_connect,
+    get_remote_addr
 )
 
 
@@ -110,71 +109,3 @@ class TestGetRemoteAddr:
     def test_no_address(self):
         ws = FakeWs()
         assert get_remote_addr(ws) == ""
-
-
-class TestHandleConnect:
-
-    @pytest.mark.asyncio
-    async def test_auth_success(self):
-        ws = FakeWs(path="/ws?token=valid")
-        mock_auth = AsyncMock()
-        mock_auth.authenticate.return_value = AuthResult(
-            success=True, user_id="user-1",
-            extensions={"username": "alice", "role": "admin"},
-        )
-        with patch("jiuwenswarm.gateway.auth.common.get_auth_handler", return_value=mock_auth):
-            result = await _handle_connect(ws, "/ws")
-
-        assert result is True
-        assert ws.user_id == "user-1"
-        assert ws.auth_username == "alice"
-        assert ws.auth_role == "admin"
-        assert ws.closed is False
-
-    @pytest.mark.asyncio
-    async def test_auth_failure(self):
-        ws = FakeWs(path="/ws?token=bad")
-        mock_auth = AsyncMock()
-        mock_auth.authenticate.return_value = AuthResult(success=False, error="Invalid token")
-        with patch("jiuwenswarm.gateway.auth.common.get_auth_handler", return_value=mock_auth):
-            result = await _handle_connect(ws, "/ws")
-
-        assert result is False
-        assert ws.closed is True
-
-    @pytest.mark.asyncio
-    async def test_auth_exception(self):
-        ws = FakeWs(path="/ws?token=valid")
-        mock_auth = AsyncMock()
-        mock_auth.authenticate.side_effect = RuntimeError("auth service down")
-        with patch("jiuwenswarm.gateway.auth.common.get_auth_handler", return_value=mock_auth):
-            result = await _handle_connect(ws, "/ws")
-
-        assert result is False
-        assert ws.closed is True
-
-    @pytest.mark.asyncio
-    async def test_auth_success_no_extensions(self):
-        ws = FakeWs(path="/ws?token=valid")
-        mock_auth = AsyncMock()
-        mock_auth.authenticate.return_value = AuthResult(success=True, user_id="user-2")
-        with patch("jiuwenswarm.gateway.auth.common.get_auth_handler", return_value=mock_auth):
-            result = await _handle_connect(ws, "/ws")
-
-        assert result is True
-        assert ws.user_id == "user-2"
-
-    @pytest.mark.asyncio
-    async def test_auth_context_built_correctly(self):
-        ws = FakeWs(path="/ws?token=mytoken", headers={"X-Custom": "val"}, remote_address=("10.0.0.1", 8080))
-        mock_auth = AsyncMock()
-        mock_auth.authenticate.return_value = AuthResult(success=True, user_id="user-3")
-
-        with patch("jiuwenswarm.gateway.auth.common.get_auth_handler", return_value=mock_auth):
-            await _handle_connect(ws, "/ws")
-
-        ctx = mock_auth.authenticate.call_args[0][0]
-        assert isinstance(ctx, AuthContext)
-        assert ctx.credentials == {"token": "mytoken"}
-        assert ctx.headers.get("X-Custom") == "val"
-        assert ctx.remote_addr == "10.0.0.1:8080"

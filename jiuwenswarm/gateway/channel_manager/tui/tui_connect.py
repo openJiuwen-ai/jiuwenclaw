@@ -48,7 +48,6 @@ from jiuwenswarm.gateway.routing.agent_request_timeout import (
     resolve_agent_request_timeout_seconds,
     send_agent_request_with_timeout,
 )
-from jiuwenswarm.extensions.agentos.auth.common import _handle_connect
 
 logger = logging.getLogger(__name__)
 
@@ -3353,7 +3352,10 @@ def build_cli_route_binding(bind: CliRouteBindParams) -> GatewayRouteBinding:
 
     async def _tui_connect_hook(ws, path):
         """WS 建立后、业务消息前的简单鉴权。"""
-        return await _handle_connect(ws, path, "tui")
+        ac = bind.agent_client
+        if hasattr(ac, "on_auth_connect"):
+            return await ac.on_auth_connect(ws, "tui")
+        return None
 
     return GatewayRouteBinding(
         path=bind.path,

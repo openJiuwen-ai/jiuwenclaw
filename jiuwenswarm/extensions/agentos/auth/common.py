@@ -179,25 +179,3 @@ async def bind_ws_auth_from_handshake(
             return result
     apply_auth_result_to_ws(ws, result)
     return result
-
-
-async def _handle_connect(ws: Any, path: str | None = None, *, channel_type: str = "web") -> bool:
-    """兼容旧调用：连接后鉴权。新路径请使用握手 process_request。"""
-    try:
-        result = await bind_ws_auth_from_handshake(ws, path, channel_type=channel_type)
-        if result is None or not result.success:
-            close = getattr(ws, "close", None)
-            if callable(close):
-                ret = close(code=1008, reason="unauthorized")
-                if hasattr(ret, "__await__"):
-                    await ret
-            return False
-        return True
-
-    except Exception:
-        close = getattr(ws, "close", None)
-        if callable(close):
-            ret = close(code=1008, reason="unauthorized")
-            if hasattr(ret, "__await__"):
-                await ret
-        return False

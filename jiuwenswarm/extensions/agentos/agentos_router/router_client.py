@@ -127,7 +127,7 @@ class AgentOSRouterClient(AgentServerClient):
         self._auth_client = auth_clinet
         # todo web_connect 的回调 tui_c 回调
 
-    async def on_web_connect(self, ws: Any, type: str) -> AuthResult | None:
+    async def on_auth_connect(self, ws: Any, type: str) -> AuthResult | None:
         if self._auth_client is None:
             return AuthResult(
                 success=False,
