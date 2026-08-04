@@ -93,7 +93,7 @@ Switches secondary style within the current primary mode, more concise than `/mo
 | `/switch normal` | Not supported | → `code.normal` |
 | `/switch team` | Not supported | → `code.team` |
 
-> The TUI source contains a `/switch` implementation, but the default TUI command registry does not currently register it. In TUI, prefer `/mode ...` or `/plan` for sub-mode switching.
+> This section describes the Gateway-controlled `/switch` command used by IM channels. The TUI has a different, conditionally registered command with the same name: when launched under `agentos-tui` supervision (`AGENTOS_TUI_SUPERVISED=1`), `/switch claude` hands the current task off to the Claude TUI and `/switch list` shows available handoff targets. A standalone TUI does not register that handoff command. In TUI, use `/mode ...` or `/plan` for mode switching.
 
 **Usage**
 
@@ -181,24 +181,27 @@ Cancel operation:
 
 ---
 
-### 7. TUI: `/workspace_dir` — Workspace Path for Outbound Requests
+### 7. TUI: `/workspace` — Project Scope and Trusted Directories
 
 **Scope:** Terminal UI (`jiuwenswarm-tui`) only; parsed locally, not by the Gateway control pipeline.
 
 **Behavior**
 
-- **`/workspace_dir`** or **`/workspace_dir get`**: show the saved workspace directory (if any).
-- **`/workspace_dir set <path>`**: save a path (spaces allowed). Example: `/workspace_dir set C:\Projects\my-app`
-- **`/workspace_dir clear`**: clear the saved value.
-- Alias: **`/workspace-dir`**.
+- **`/workspace`** or **`/workspace get`**: show the system workspace, current project scope, and trusted directories for that project.
+- **`/workspace add [path]`**: add a trusted directory; defaults to the current directory.
+- **`/workspace set <path>`**: switch the in-process project scope to `<path>` and add it to that project's trusted directories. Example: `/workspace set C:\Projects\my-app`.
+- **`/workspace remove <path>`**: remove a trusted directory from the current project.
+- **`/workspace clear`**: clear trusted directories for the current project and fall back to the system workspace.
+- Aliases: **`/workspace_dir`**, **`/workspace-dir`**.
 
 **Persistence**
 
-- Stored as a single-line file: **`~/.jiuwenswarm/tui-workspace-dir`**.
+- Trusted directories are stored per project in **`~/.jiuwenswarm-tui/config.json`** under `trustedDirs`.
+- The project-scope override selected by `/workspace set` lasts only for the current TUI process; after restart, the scope is derived from the launch directory again.
 
 **Gateway / Agent**
 
-- When a non-empty path is set, TUI includes **`workspace_dir`** in the WebSocket **`params`** for fire-and-forget requests built by `sendEventOnly` (e.g. `chat.send`), so Gateway and AgentServer can read it from `Message.params` / `AgentRequest.params`. Downstream usage depends on the agent and extensions.
+- TUI includes the current **`trusted_dirs`**, **`project_dir`**, and **`cwd`** in WebSocket request parameters. Gateway and AgentServer use them for project identity, runtime context, and file-access policy.
 
 ---
 
@@ -258,6 +261,10 @@ jiuwenswarm chat "Hello, introduce yourself"
 | `echo "analyze main.py" \| jiuwenswarm chat` | Pipe stdin |
 | `jiuwenswarm chat` | No args + interactive TTY → enter REPL mode |
 
+Single-message, piped, and JSON/JSONL invocations are non-interactive, so the
+runtime does not expose the `ask_user` tool to the Agent. Use REPL mode without
+a prompt argument when the Agent needs to ask follow-up questions or present options.
+
 ### Options
 
 | Option | Default | Description |
@@ -278,21 +285,21 @@ jiuwenswarm chat "Hello, introduce yourself"
 
 ### Modes (`--mode`)
 
-Supported mode values match those in [Modes](Modes.md):
+Supported mode values match those in [Modes](Modes.md) and TUI `/mode` command:
 
 | Mode | Alias | Description |
 |---|---|---|
-| `code.normal` | `code`, `normal` | Default, code normal mode |
+| `code.normal` | `code` | Default, code normal mode |
 | `code.plan` | — | Code planning mode |
 | `code.team` | — | Code team mode |
 | `agent.plan` | `agent` | Agent planning mode |
-| `agent.fast` | `fast` | Agent fast mode |
-| `team` | `team.normal` | Team mode |
+| `agent.fast` | — | Agent fast mode |
+| `team` | — | Team mode |
 
 ```bash
 # Using aliases
-jiuwenswarm chat --mode fast "quick answer"
 jiuwenswarm chat --mode agent "help me plan"
+jiuwenswarm chat --mode code "help me analyze the code"
 
 # Using canonical values
 jiuwenswarm chat --mode code.plan "design a user system"
@@ -378,7 +385,7 @@ jiuwenswarm chat --jsonl "analyze README" | jq
 | 1 | Agent returned an error |
 | 2 | CLI usage or invalid mode |
 | 3 | Gateway unavailable |
-| 4 | Interactive input required but stdin is not a TTY |
+| 4 | The current invocation does not support interactive input |
 | 130 | Interrupted by user |
 
 ### Relationship with TUI

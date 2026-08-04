@@ -25,12 +25,13 @@ import types
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
 from openjiuwen.agent_evolving.trajectory import InMemoryTrajectoryRegistry
 from openjiuwen.agent_teams.rails.builtin_elements import SKILL_USE as CORE_SKILL_USE
-from openjiuwen.agent_teams.schema import deep_agent_spec as das
+from openjiuwen.harness.schema import deep_agent_spec as das
 from openjiuwen.agent_teams.harness.manifest import get_catalog, resolve_factory
 from openjiuwen.agent_teams.schema.blueprint import LeaderSpec, TeamAgentSpec
 from openjiuwen.agent_teams.schema.deep_agent_spec import (
@@ -51,6 +52,7 @@ from openjiuwen.core.single_agent.rail.base import (
 )
 from openjiuwen.harness.tools.worktree import WorktreeConfig
 from openjiuwen.harness.prompts.builder import SystemPromptBuilder
+from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentManager
 from openjiuwen.harness.rails import SkillUseRail
 
 from jiuwenswarm.agents.swarm import (
@@ -71,6 +73,12 @@ from jiuwenswarm.agents.swarm.providers import (
     runtime_tools,
     tools,
 )
+from jiuwenswarm.agents.swarm.providers.code_subagents import (
+    SWARM_BROWSER_AGENT,
+    _PARENT_MODEL_EXTRAS_KEY,
+    _browser_key,
+    build_swarm_browser_agent,
+)
 from jiuwenswarm.common.coding_memory_paths import (
     resolve_project_coding_memory_dir,
     resolve_project_coding_memory_workspace_path,
@@ -79,9 +87,20 @@ from jiuwenswarm.common.config import get_config
 
 logger = logging.getLogger(__name__)
 
+
+@pytest.mark.parametrize("mode", ["team", "team.plan", "code.team"])
+def test_member_runtime_prompt_rail_binds_request_identity(mode: str) -> None:
+    context = SwarmBuildContext(session_id="session-123", mode=mode)
+
+    rail = member_rails._build_runtime_prompt_rail({}, context)
+
+    assert rail._session_id == "session-123"
+    assert rail._mode == mode
+
 # Rail provider names shared by both roles (no role-specific evolution rails).
+# Harness todo planning is teammate-only; leaders use the team task board instead.
 # Sourced from the registry symbols so the test tracks renames automatically.
-_COMMON_RAIL_NAMES: frozenset[str] = frozenset(
+_TEAM_SHARED_RAIL_NAMES: frozenset[str] = frozenset(
     {
         registry.RUNTIME_PROMPT,
         registry.TEAM_SKILL_STORAGE_POLICY,
@@ -89,7 +108,6 @@ _COMMON_RAIL_NAMES: frozenset[str] = frozenset(
         registry.RESPONSE_PROMPT,
         registry.SYS_OPERATION,
         registry.STREAM_EVENT,
-        registry.TASK_PLANNING,
         registry.SECURITY,
         registry.HEARTBEAT,
         registry.AVATAR_PROMPT,
@@ -97,9 +115,16 @@ _COMMON_RAIL_NAMES: frozenset[str] = frozenset(
         registry.CONTEXT_PROCESSOR,
         registry.PLUGIN_RAILS,
         registry.SKILL_RETRIEVAL_PROMPT,
+        registry.SYMPHONY_ORCHESTRATION_PROMPT,
         registry.MEMBER_SKILL_TOOLKIT,
     }
 )
+
+# Provider names from config ``_COMMON_RAIL_NAMES`` (includes TASK_PLANNING;
+# excludes MEMBER_SKILL_TOOLKIT, which is appended during team build).
+_COMMON_RAIL_PROVIDER_NAMES: frozenset[str] = _TEAM_SHARED_RAIL_NAMES | {
+    registry.TASK_PLANNING,
+} - {registry.MEMBER_SKILL_TOOLKIT}
 
 _COMMON_TOOL_NAMES: frozenset[str] = frozenset(
     {
@@ -182,7 +207,7 @@ def _assert_evolution_approval_stack(
     assert isinstance(interrupt_rail, _FakeEvolutionInterruptRail)
     assert "review_runtime" in rail.kwargs
     assert rail.kwargs["review_runtime"] is not None
-    assert rail.kwargs["fuzzy_review"] is False
+    assert "fuzzy_review" not in rail.kwargs
     assert interrupt_rail.kwargs == {
         "review_runtime": rail.kwargs["review_runtime"],
         "submission_service": rail.approval_submission_service,
@@ -228,7 +253,7 @@ def test_register_swarm_providers_populates_registries() -> None:
 
     # The legacy class-type registry is gone; every rail (including the unified
     # class rails) is now provider-backed.
-    for name in _COMMON_RAIL_NAMES:
+    for name in _COMMON_RAIL_PROVIDER_NAMES:
         assert name in rail_providers, name
     for name in _COMMON_TOOL_NAMES:
         assert name in tool_providers, name
@@ -256,7 +281,13 @@ def test_runtime_prompt_rail_resolves_via_registry() -> None:
 
 @pytest.mark.asyncio
 async def test_team_skill_storage_policy_rail_resolves_and_injects_paths(tmp_path: Path) -> None:
-    """The team skill storage policy should inject concrete team/member paths."""
+    """The team skill storage policy should inject concrete team-level paths.
+
+    Only team-level paths belong here: they are identical for every member, so
+    the team shares one cacheable prefix. The member's own workspace is
+    per-member and openjiuwen's team rail tells the member about it as part of
+    its identity, so this rail must not carry it in any lane.
+    """
     register_swarm_providers()
     global_skills_dir = str(tmp_path / "agent" / "workspace" / "skills")
     team_ws_root = str(tmp_path / ".agent_teams" / "unit" / "team-workspace")
@@ -277,16 +308,25 @@ async def test_team_skill_storage_policy_rail_resolves_and_injects_paths(tmp_pat
         context=fake_ctx,
     )
     builder = SystemPromptBuilder(language="cn")
-    rail.init(types.SimpleNamespace(system_prompt_builder=builder))
+    manager = PromptAttachmentManager()
+    rail.init(
+        types.SimpleNamespace(
+            system_prompt_builder=builder,
+            prompt_attachment_manager=manager,
+        )
+    )
 
-    await rail.before_model_call(AgentCallbackContext(agent=None, inputs=None, session=None))
+    session = types.SimpleNamespace(get_session_id=lambda: "sess-1")
+    await rail.before_model_call(AgentCallbackContext(agent=None, inputs=None, session=session))
 
     content = builder.build()
     assert f"{global_skills_dir}/<skill-name>/SKILL.md" in content
     assert team_ws_root in content
     assert team_skills_dir in content
-    assert member_workspace_root in content
     assert "skill-creator" not in content
+    # The per-member path is not this rail's business any more.
+    assert member_workspace_root not in content
+    assert await manager.list_by_filter(session_id="sess-1") == []
 
 
 @pytest.mark.asyncio
@@ -362,6 +402,7 @@ def test_unknown_swarm_rail_type_raises() -> None:
         (
             "leader",
             {
+                registry.STRUCTURED_ASK_USER,
                 registry.TEAM_SKILL_EVOLUTION,
                 registry.TEAM_SKILL_CREATE,
             },
@@ -378,7 +419,7 @@ def test_build_member_capability_specs_rail_names(
     role: str,
     extra_rails: set[str],
 ) -> None:
-    """Each role gets the common rails plus its role-specific evolution rails."""
+    """Each role gets the common rails plus its role-specific extra rails."""
     config = {
         "agents": {
             "leader": {"skills": ["alpha"]},
@@ -389,12 +430,14 @@ def test_build_member_capability_specs_rail_names(
     rails_specs, _ = build_member_capability_specs(config, "team", role)
     rail_names = {spec.type for spec in rails_specs}
 
-    assert _COMMON_RAIL_NAMES <= rail_names
+    expected = _TEAM_SHARED_RAIL_NAMES | extra_rails
+    if role == "teammate":
+        expected = expected | {registry.TASK_PLANNING}
+
+    assert _TEAM_SHARED_RAIL_NAMES <= rail_names
     assert extra_rails <= rail_names
-    # The common set has exactly 15 entries; the role adds only its evolution
-    # rails on top.
-    assert len(_COMMON_RAIL_NAMES) == 15
-    assert rail_names == _COMMON_RAIL_NAMES | extra_rails
+    assert len(_TEAM_SHARED_RAIL_NAMES) == 15
+    assert rail_names == expected
     # No DeepAgent is involved; every entry is a plain declarative RailSpec.
     assert all(isinstance(spec, RailSpec) for spec in rails_specs)
     logger.info("%s rails: %s", role, sorted(rail_names))
@@ -462,6 +505,30 @@ def test_swarm_skill_retrieval_tools_use_global_skill_manager(
 
     assert built == []
     assert calls == [None]
+
+
+def test_swarm_skill_retrieval_uses_context_team_skills_when_team_links_are_unavailable(
+    tmp_path: Path,
+) -> None:
+    """HarmonyOS copied team mounts remain visible without symlink metadata."""
+    member_skills = tmp_path / "member-workspace" / "skills"
+    team_skills = tmp_path / "team-workspace" / "skills"
+    skill_dir = team_skills / "demo-skill"
+    member_skills.mkdir(parents=True)
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# Demo", encoding="utf-8")
+
+    workspace = SimpleNamespace(
+        get_node_path=lambda _node: member_skills,
+        list_team_links=lambda: [],
+    )
+    ctx = SwarmBuildContext(
+        mode="team",
+        workspace=workspace,
+        team_skills_dir=str(team_skills),
+    )
+
+    assert tools.visible_skill_names_for_list_skill(ctx) == {"demo-skill"}
 
 
 def test_swarm_skill_retrieval_prompt_uses_global_skill_manager(
@@ -703,8 +770,12 @@ def test_enrich_team_spec_for_swarm_rewrites_spec_in_place() -> None:
     assert not hasattr(spec, "agent_customizer")
 
 
-def test_enrich_team_spec_defaults_member_workspace_to_project_dir() -> None:
-    """Core receives project-rooted member workspaces from swarm enrichment."""
+def test_enrich_team_spec_points_member_cwd_at_project_dir() -> None:
+    """Core receives project-rooted member cwd, not a rewritten workspace.
+
+    cwd and workspace are separate layers: members run in the project
+    directory while keeping their own workspace for artifacts.
+    """
     spec = _make_team_spec()
     spec.worktree = WorktreeConfig(enabled=True)
 
@@ -716,8 +787,10 @@ def test_enrich_team_spec_defaults_member_workspace_to_project_dir() -> None:
         channel_id="web",
     )
 
-    assert spec.agents["leader"].workspace.root_path == "/tmp/project"
-    assert spec.agents["teammate"].workspace.root_path == "/tmp/project"
+    for role in ("leader", "teammate"):
+        assert spec.agents[role].cwd == "/tmp/project"
+        assert spec.agents[role].project_root == "/tmp/project"
+        assert spec.agents[role].workspace is None
 
 
 def test_enrich_team_spec_leaves_workspace_when_worktree_disabled() -> None:
@@ -734,10 +807,13 @@ def test_enrich_team_spec_leaves_workspace_when_worktree_disabled() -> None:
 
     assert spec.agents["leader"].workspace is None
     assert spec.agents["teammate"].workspace is None
+    # cwd is seeded regardless of worktree isolation.
+    assert spec.agents["leader"].cwd == "/tmp/project"
+    assert spec.agents["teammate"].cwd == "/tmp/project"
 
 
 def test_enrich_team_spec_preserves_explicit_member_workspace() -> None:
-    """A configured member workspace is not overwritten by project_dir."""
+    """A configured member workspace survives; only cwd is seeded."""
     spec = _make_team_spec()
     spec.worktree = WorktreeConfig(enabled=True)
     spec.agents["leader"].workspace = WorkspaceSpec(root_path="/tmp/custom")
@@ -751,7 +827,9 @@ def test_enrich_team_spec_preserves_explicit_member_workspace() -> None:
     )
 
     assert spec.agents["leader"].workspace.root_path == "/tmp/custom"
-    assert spec.agents["teammate"].workspace.root_path == "/tmp/project"
+    assert spec.agents["teammate"].workspace is None
+    assert spec.agents["leader"].cwd == "/tmp/project"
+    assert spec.agents["teammate"].cwd == "/tmp/project"
 
 
 def test_enrich_team_spec_appends_after_existing_rails(monkeypatch) -> None:
@@ -1033,6 +1111,34 @@ def test_symphony_toolkit_respects_disabled_config(
     assert tools.build_symphony_toolkit({}, SwarmBuildContext(role="leader")) == []
 
 
+def test_symphony_orchestration_prompt_provider_is_leader_only() -> None:
+    """Only the leader gets the Symphony orchestration prompt rail."""
+    factory = resolve_factory(
+        get_catalog()[registry.SYMPHONY_ORCHESTRATION_PROMPT].factory_ref,
+    )
+
+    leader_rail = factory({}, SwarmBuildContext(role="leader"))
+    teammate_rail = factory({}, SwarmBuildContext(role="teammate"))
+
+    assert type(leader_rail).__name__ == "SymphonyOrchestrationRail"
+    assert teammate_rail is None
+
+
+def test_team_leader_spec_includes_symphony_orchestration_prompt() -> None:
+    """The team leader spec declares the Symphony orchestration prompt provider."""
+    spec = build_member_deep_agent_spec(
+        {"symphony": {"enabled": True}},
+        "team",
+        "leader",
+        DeepAgentSpec(),
+    )
+
+    assert any(
+        rail.type == registry.SYMPHONY_ORCHESTRATION_PROMPT
+        for rail in (spec.rails or [])
+    )
+
+
 def test_vision_model_config_params_gating(monkeypatch: pytest.MonkeyPatch) -> None:
     """Vision config params are empty without a dedicated model, filled when complete."""
     assert tools.vision_model_config_params({}) == {}
@@ -1100,7 +1206,11 @@ def test_team_skill_evolution_provider_passes_review_runtime(
     )
 
     built = evolution_rails.build_team_skill_evolution_rail(
-        {"evolution_model_config": {}, "auto_scan": True, "auto_save": auto_save},
+        {
+            "evolution_model_config": {},
+            "review_trigger": True,
+            "auto_save": auto_save,
+        },
         ctx,
     )
 
@@ -1111,9 +1221,9 @@ def test_team_skill_evolution_provider_passes_review_runtime(
         language="cn",
     )
     rail = built[1]
-    assert rail.kwargs["auto_scan"] is False
+    assert rail.kwargs["signal_trigger"] is False
     assert rail.kwargs["auto_save"] is auto_save
-    assert rail.kwargs["completion_followup_enabled"] is True
+    assert rail.kwargs["review_trigger"] is True
 
 
 def test_swarm_team_skill_evolution_registration_retries_deferred_watcher(
@@ -1200,7 +1310,7 @@ def test_member_skill_evolution_provider_passes_review_runtime(
     )
 
     built = evolution_rails.build_member_skill_evolution_rail(
-        {"evolution_model_config": {}, "auto_scan": False},
+        {"evolution_model_config": {}, "signal_trigger": False},
         ctx,
     )
 
@@ -1211,7 +1321,7 @@ def test_member_skill_evolution_provider_passes_review_runtime(
         language="en",
     )
     assert rail.kwargs["language"] == "en"
-    assert rail.kwargs["auto_scan"] is False
+    assert rail.kwargs["signal_trigger"] is False
     assert rail.kwargs["auto_save"] is True
     assert rail.bound_sink == (registry_obj, "t", "teammate")
 
@@ -1314,7 +1424,7 @@ def test_team_skill_create_rail_registers_full_workspace(
 # code.team / team.plan declarative profile
 # ---------------------------------------------------------------------------
 
-_EXPECTED_CODE_RAIL_NAMES: frozenset[str] = frozenset(
+_EXPECTED_CODE_RAIL_NAMES_LEADER: frozenset[str] = frozenset(
     {
         registry.CODE_RUNTIME_PROMPT,
         registry.RESPONSE_PROMPT,
@@ -1327,17 +1437,21 @@ _EXPECTED_CODE_RAIL_NAMES: frozenset[str] = frozenset(
         registry.CODE_AGENT_MODE,
         registry.STRUCTURED_ASK_USER,
         registry.CONTEXT_PROCESSOR,
-        registry.CODE_TASK_PLANNING,
         registry.CODE_AGENT_RAIL,
         registry.USER_HOOKS,
         registry.CODE_SKILL_USE,
         registry.SKILL_RETRIEVAL_PROMPT,
+        registry.SYMPHONY_ORCHESTRATION_PROMPT,
         registry.CODE_CONFIRM_INTERRUPT,
         registry.MEMBER_SKILL_TOOLKIT,
         registry.TEAM_WORKSPACE_REPORT_PATH,
         registry.PLUGIN_RAILS,
     }
 )
+
+_EXPECTED_CODE_RAIL_NAMES_TEAMMATE: frozenset[str] = _EXPECTED_CODE_RAIL_NAMES_LEADER | {
+    registry.CODE_TASK_PLANNING,
+}
 
 
 @pytest.mark.parametrize("mode", ["code.team", "team.plan"])
@@ -1349,10 +1463,11 @@ def test_code_capability_specs_rail_and_tool_names(mode: str) -> None:
     rail_params = {spec.type: spec.params for spec in rails_specs}
     tool_names = {spec.type for spec in tool_specs}
 
-    expected_rails = _EXPECTED_CODE_RAIL_NAMES
+    expected_rails = _EXPECTED_CODE_RAIL_NAMES_LEADER
     if mode == "team.plan":
         expected_rails = expected_rails - {registry.CODE_CONFIRM_INTERRUPT}
     assert expected_rails <= rail_names
+    assert registry.CODE_TASK_PLANNING not in rail_names
     assert registry.TEAM_SKILL_EVOLUTION in rail_names
     assert registry.STRUCTURED_ASK_USER in rail_names
     if mode == "team.plan":
@@ -1400,6 +1515,38 @@ def test_team_plan_approval_only_mounts_on_leader() -> None:
     assert registry.CODE_CONFIRM_INTERRUPT not in {spec.type for spec in teammate_rails}
 
 
+def test_leader_omits_harness_todo_planning_rails() -> None:
+    """Leaders use the team task board; harness todo rails stay on teammates."""
+    register_swarm_providers()
+    leader_rails, _ = build_member_capability_specs({}, "team", "leader")
+    teammate_rails, _ = build_member_capability_specs({}, "team", "teammate")
+    code_leader_rails, _ = build_member_capability_specs({}, "code.team", "leader")
+    code_teammate_rails, _ = build_member_capability_specs({}, "code.team", "teammate")
+
+    leader_types = {spec.type for spec in leader_rails}
+    teammate_types = {spec.type for spec in teammate_rails}
+    code_leader_types = {spec.type for spec in code_leader_rails}
+    code_teammate_types = {spec.type for spec in code_teammate_rails}
+
+    assert registry.TASK_PLANNING not in leader_types
+    assert registry.TASK_PLANNING in teammate_types
+    assert registry.CODE_TASK_PLANNING not in code_leader_types
+    assert registry.CODE_TASK_PLANNING in code_teammate_types
+
+
+@pytest.mark.parametrize("mode", ["team", "code.team", "team.plan"])
+def test_leader_deep_agent_spec_forces_enable_task_planning_off(mode: str) -> None:
+    """Leader must not rely on agent-core auto-inject when YAML enables the flag."""
+    register_swarm_providers()
+    base = DeepAgentSpec(enable_task_planning=True)
+
+    leader_spec = build_member_deep_agent_spec({}, mode, "leader", base)
+    teammate_spec = build_member_deep_agent_spec({}, mode, "teammate", base)
+
+    assert leader_spec.enable_task_planning is False
+    assert teammate_spec.enable_task_planning is True
+
+
 def test_code_subagent_specs_use_factory_names() -> None:
     """Code modes declare explore/plan (+ gated code) sub-agents via factory_name."""
     register_swarm_providers()
@@ -1438,6 +1585,7 @@ def test_code_runtime_prompt_provider_carries_project_dir(tmp_path: Path) -> Non
     ctx = SwarmBuildContext(
         mode="code.team",
         role="leader",
+        session_id="sess-code-team-runtime",
         channel="tui",
         project_dir=str(project_dir),
     )
@@ -1449,6 +1597,8 @@ def test_code_runtime_prompt_provider_carries_project_dir(tmp_path: Path) -> Non
 
     assert getattr(rail, "_project_dir") == str(project_dir)
     assert getattr(rail, "_cwd") == str(project_dir)
+    assert getattr(rail, "_mode") == "code.team"
+    assert getattr(rail, "_session_id") == "sess-code-team-runtime"
 
 
 def test_team_plan_approval_provider_builds_only_for_leader() -> None:
@@ -1603,6 +1753,32 @@ def test_team_plan_leader_structured_ask_user_provider_builds() -> None:
             context=code_team_leader,
         )
     ).__name__ == "StructuredAskUserRail"
+
+
+def test_non_interactive_team_omits_structured_ask_user_provider() -> None:
+    context = SwarmBuildContext(
+        mode="team",
+        role="leader",
+        request_metadata={"supports_user_interaction": False},
+    )
+
+    assert code_rails.build_structured_ask_user({}, context) is None
+
+
+def test_structured_ask_user_language_uses_team_leader_preferred_language() -> None:
+    team_leader = SwarmBuildContext(
+        mode="team",
+        role="leader",
+        config={"preferred_language": "zh"},
+    )
+    team_teammate = SwarmBuildContext(
+        mode="team",
+        role="teammate",
+        config={"preferred_language": "zh"},
+    )
+
+    assert code_rails.structured_ask_user_language(team_leader) == "cn"
+    assert code_rails.structured_ask_user_language(team_teammate) == "en"
 
 
 @pytest.mark.asyncio
@@ -1801,16 +1977,17 @@ def test_code_member_builds_declaratively_without_post_processing(
     assert post_processing_calls == []
     # Code-specific rails materialized via the normal declarative spec.build.
     for expected in (
-        "CodeTaskPlanningRail",
         "CodeAgentModeRail",
         "StructuredAskUserRail",
     ):
         assert expected in rail_types, (expected, sorted(rail_types))
+    # Leaders use the team task board; harness code todo stays on teammates.
+    assert "CodeTaskPlanningRail" not in rail_types
     assert "WorktreeRail" not in rail_types
     # The code system prompt is set declaratively on the spec.
     assert agent.deep_config.system_prompt
-    # CodingMemoryRail is published for the code_agent sub-agent to reuse.
-    assert ctx.extras.get(code_rails.CODING_MEMORY_EXTRAS_KEY) is not None
+    # CodingMemoryRail materializes through the derived build context.
+    assert "CodingMemoryRail" in rail_types
     coding_memory_dir = resolve_project_coding_memory_dir(
         agent_workspace_dir=str(tmp_path),
         project_dir=str(tmp_path),
@@ -1854,6 +2031,7 @@ def test_swarm_build_context_seed_round_trip() -> None:
         request_metadata={"mode": "code.team"},
         mode="code.team",
         project_dir="/tmp/proj",
+        disable_teammate_worktree=True,
         team_id="t1",
         team_ws_root="/tmp/ws",
         team_skills_dir="/tmp/ws/skills",
@@ -1884,6 +2062,7 @@ def test_swarm_build_context_seed_round_trip() -> None:
     assert restored.session_id == "s1"
     assert restored.mode == "code.team"
     assert restored.project_dir == "/tmp/proj"
+    assert restored.disable_teammate_worktree is True
     assert restored.team_id == "t1"
     assert restored.team_ws_root == "/tmp/ws"
     assert restored.request_metadata == {"mode": "code.team"}
@@ -1929,6 +2108,7 @@ def test_enrich_sets_serializable_build_context_seed() -> None:
     assert spec.build_context_seed is not None
     assert spec.build_context_seed["mode"] == "code.team"
     assert spec.build_context_seed["project_dir"] == "/tmp/proj"
+    assert spec.build_context_seed["disable_teammate_worktree"] is True
     assert spec.build_context_seed["team_id"] == spec.team_name
     # The seed equals what the live context exports.
     assert spec.build_context_seed == spec.build_context.to_seed()
@@ -2038,18 +2218,6 @@ def test_swarm_assembly_hint_from_seed_and_legacy() -> None:
     assert rmb._swarm_assembly_hint(types.SimpleNamespace()) == {}
 
 
-# ---------------------------------------------------------------------------
-# Browser isolation (feat/team-browser-isolation)
-# ---------------------------------------------------------------------------
-
-from jiuwenswarm.agents.swarm.providers.code_subagents import (
-    _browser_key,
-    _PARENT_MODEL_EXTRAS_KEY,
-    build_swarm_browser_agent,
-    SWARM_BROWSER_AGENT,
-)
-
-
 def test_browser_key_derivation() -> None:
     """_browser_key composes session+member into a unique, stable key."""
     # Normal: session_id + member_name → "sess-alice"
@@ -2111,7 +2279,6 @@ def test_browser_subagent_provider_passes_correct_browser_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """build_swarm_browser_agent passes the per-member browser_key to agent-core."""
-    from unittest.mock import MagicMock, call
     from jiuwenswarm.agents.swarm.providers import code_subagents as _cs
 
     captured: list[dict] = []

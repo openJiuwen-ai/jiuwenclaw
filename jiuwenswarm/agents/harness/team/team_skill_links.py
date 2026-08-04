@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -120,13 +121,40 @@ def remove_skill_dir_link(target: Path) -> None:
 
 
 def _create_directory_link(target_path: Path, link_path: Path) -> None:
-    """Create a directory link, falling back to a junction on Windows."""
+    """Create a directory link, falling back to a junction on Windows or a copy on sandboxed runtimes."""
     try:
         os.symlink(str(target_path), str(link_path), target_is_directory=True)
+        return
     except OSError as exc:
-        if sys.platform != "win32" or getattr(exc, "winerror", None) != ERROR_PRIVILEGE_NOT_HELD:
+        errno = getattr(exc, "errno", None)
+        is_privilege_error = errno in (13, 1)  # EACCES/EPERM
+        if sys.platform == "win32" and getattr(exc, "winerror", None) == ERROR_PRIVILEGE_NOT_HELD:
+            _create_windows_junction(target_path, link_path)
+            return
+        if not is_privilege_error:
             raise
-        _create_windows_junction(target_path, link_path)
+        # Sandboxed runtimes (e.g. HarmonyOS app sandbox) forbid symlink(2)
+        # even inside the app's own filesDir. Fall back to a real copy so
+        # team skill directories remain usable without kernel privileges.
+        logger.info(
+            "[TeamSkillLinks] symlink not permitted (%s); copying %s -> %s",
+            exc, target_path, link_path,
+        )
+        _copy_skill_directory(target_path, link_path)
+
+
+def _copy_skill_directory(target_path: Path, link_path: Path) -> None:
+    """Copy a skill directory as a fallback when symlinks are unavailable."""
+    link_path.parent.mkdir(parents=True, exist_ok=True)
+    if link_path.exists() or os.path.lexists(link_path):
+        return
+    shutil.copytree(
+        str(target_path),
+        str(link_path),
+        symlinks=False,
+        copy_function=shutil.copy2,
+        dirs_exist_ok=False,
+    )
 
 
 def _create_windows_junction(target_path: Path, link_path: Path) -> None:

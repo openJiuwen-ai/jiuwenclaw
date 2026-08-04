@@ -4,49 +4,59 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from .cluster import ClusteredQuery
-from .models import DistilledPattern, TraceRecord
+from .models import DistilledPattern
 
 LOGGER = logging.getLogger(__name__)
 
+_LLM_MAX_RETRIES = 4
+
 _DISTILL_PATTERN_PROMPT = """\
-You are an expert at generalizing query patterns. Given a cluster of semantically similar successful queries and the skills used to handle them, produce a generalized query template that captures their common intent.
+You are generating a query pattern for ONE target skill. The pattern must capture the TYPICAL USER INTENT for this skill, blending two sources:
 
-Use bracketed placeholders like [Entity], [Attribute], [Player], etc. for variable parts. Keep the result close to the original queries — only replace specific entities/names/values that vary across the cluster. Do NOT over-generalize: preserve the original sentence structure and as much concrete wording as possible. For example, avoid patterns like "[Action] on my [Platform] feed [Details]" — keep it readable and natural.
+1. SKILL DESCRIPTION (semantic anchor + DISCRIMINATOR): defines what this skill does. The pattern's core meaning MUST stay within this skill's capability, AND MUST preserve the SKILL-SPECIFIC DISCRIMINATOR WORDS from the description verbatim — the skill's name, its signature objects, and its hallmark action. These words are what distinguish this skill from same-domain neighbors; do NOT generalize them into neutral placeholders.
 
-For Chinese queries, use Chinese placeholders: [人名], [地点], [日期], [事物], etc., and keep the rest of the sentence natural.
+2. SUCCESSFUL QUERIES (real phrasing): show how users actually phrase requests that involve this skill. Borrow natural verbs, objects, and sentence structure from them — but ONLY the clause that maps to the TARGET skill's capability.
+
+CRITICAL — compound queries: The successful queries are COMPOUND (multiple skills per sentence). Extract ONLY the clause that maps to the TARGET skill's description. Any clause belonging to a DIFFERENT skill (e.g. translation when target is docx, marketing when target is docx) must be DROPPED from the pattern entirely — do NOT mention it even as "input" or "context"; replace its output with a neutral placeholder like [内容] if needed. If no clause matches the target skill, derive the pattern purely from the description.
+
+Discriminator principle (most important rule): same-domain skills must produce distinguishable patterns. Preserve each skill's signature word so its pattern does not collide with neighbors:
+- skill "tencent-docs" (腾讯文档): keep "腾讯文档"/"在线文档" — NOT just "[文档]"
+- skill "document-processor" (二维码生成器): keep "二维码" — NOT "[文档]"
+- skill "react-best-practices" (前端代码审计): keep "前端代码" + "审计/优化" — to distinguish from UI-design skills
+- skill "awesome-design-md" (UI设计): keep "UI设计页面" — to distinguish from code-audit skills
+Generalize ONLY truly variable entities unrelated to the skill domain (e.g. [人名][地点][日期]); keep domain entities concrete. The pattern must read like a standalone request for ONLY this skill, carrying its signature word.
 
 ---
 
-CLUSTER INFO:
-Cluster ID: {cluster_id}
-Representative Query: {centroid_query}
-
-SUCCESSFUL QUERIES:
-{member_queries}
-
-USED SKILLS IN THIS CLUSTER:
+SKILL DESCRIPTION (target):
 {used_skills}
 
----
+REPRESENTATIVE QUERY:
+{centroid_query}
 
-Guidelines for generalization:
-- For domain-specific skills (e.g., a weather skill for weather queries), keep domain-related entities concrete. Do NOT generalize them into placeholders like [City], [Date], etc. This preserves matching accuracy for future queries.
-- Only replace variable entities that are truly unrelated to the skill's domain.
-- The output should be a fluent, natural-sounding query template.
+SUCCESSFUL QUERIES (compound — extract only target-skill clauses):
+{member_queries}
 
-Produce a JSON object with a single key "pattern_description" whose value is the generalized query template.
+Produce a JSON object: {{"pattern_description": "<standalone pattern, preserving skill-specific discriminator words>"}}
 
 Examples:
-- Input queries: "Find Messi's goal record", "Find Tom Brady's career stats"
-Used skills: web_search (search the web for information)
-Output: {{"pattern_description": "Find [Player]'s career statistics/records"}}
-- Input queries: "上海明天的天气", "北京下周的天气"
-Used skills: weather_api (查询天气)
-Output: {{"pattern_description": "[城市][时间]的天气"}}
+- Compound queries: "拍这张法语菜单翻译并朗读，根据功效写三个促销口号，做成Word"
+Target skill: photo-translate-speak (拍照识别外文并翻译朗读)
+Output: {{"pattern_description": "帮我把这张[语言]的[菜单/标签/说明书]拍下来，识别文字翻译成中文并朗读给我听"}}
+Target skill: docx (创建编辑Word文档)
+Output: {{"pattern_description": "把[内容]做成Word文档，包含[表格/图文/排版要求]"}}
+Target skill: marketing-ideas (生成营销促销文案)
+Output: {{"pattern_description": "参考[产品信息]写一份针对[目标群体]的营销促销文案，包含[数量]个促销口号"}}
+- Discriminator examples (same domain, distinguishable):
+Target skill: tencent-docs (腾讯文档)
+Output: {{"pattern_description": "在腾讯文档里[创建/编辑]一个[在线文档/在线表格]，记录[内容]"}}
+Target skill: document-processor (二维码生成器)
+Output: {{"pattern_description": "帮我把这段[网址/图片/文本]转成二维码"}}
 
 Output ONLY valid JSON. No markdown, no explanation.
 """
@@ -68,7 +78,7 @@ class TraceDistiller:
 
     def __init__(
             self,
-            llm_client: Any | None,
+            llm_client: Any,
             llm_model: str,
             *,
             skills_info: list[dict[str, str]] | None = None,
@@ -76,10 +86,9 @@ class TraceDistiller:
             max_success_examples: int = 20,
     ) -> None:
         self._llm_model = llm_model
-        if llm_client is not None and llm_model:
-            self._llm = llm_client
-        else:
-            self._llm = None
+        if not llm_client or not llm_model:
+            raise ValueError("TraceDistiller requires both llm_client and llm_model.")
+        self._llm = llm_client
         self._max_workers = max_workers
         self._max_examples = max_success_examples
 
@@ -106,108 +115,156 @@ class TraceDistiller:
                     results[idx] = future.result()
                     LOGGER.info("TraceDistiller: finished cluster %d", idx)
                 except Exception as exc:
+                    # Skip the failed cluster rather than aborting the whole run.
+                    # A single transient LLM error (rate limit, server hiccup, bad
+                    # JSON) should not discard the patterns distilled for all other
+                    # clusters. Downstream `build()` already drops empty patterns,
+                    # so leaving results[idx] = None is safe.
                     LOGGER.error(
-                        "TraceDistiller: failed cluster %d (id=%d): %s (type=%s, repr=%r)",
+                        "TraceDistiller: failed cluster %d (id=%d): %s (type=%s) — skipping",
                         idx, clusters[idx].cluster_id, exc,
-                        type(exc).__name__, exc,
+                        type(exc).__name__,
                     )
+                    results[idx] = None
 
         return [r for r in results if r is not None]
 
     def _distill_one(self, cluster: ClusteredQuery) -> DistilledPattern | None:
-        metrics = self._compute_metrics(cluster.success_traces, cluster.failure_traces)
+        success_traces = cluster.success_traces
+        effective_skills = list(success_traces[0].skills) if success_traces else []
 
-        success_queries = [t.query for t in cluster.success_traces]
-        used_skill_names = {
-            s for combo in metrics["effective_skills"] for s in combo
-        }
+        success_queries = [t.query for t in success_traces]
+        used_skill_names = set(effective_skills)
 
         prompt = self._build_prompt(cluster, success_queries, used_skill_names)
 
-        pattern_description = ""
-        if self._llm and self._llm_model:
-            try:
-                response = self._llm.chat.completions.create(
-                    model=self._llm_model,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": (
-                                "You are an expert at generalizing query patterns. "
-                                "Output only valid JSON."
-                            ),
-                        },
-                        {"role": "user", "content": prompt},
-                    ],
-                    max_tokens=256,
-                    stream=False,
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are an expert at generalizing query patterns. "
+                    "Output only valid JSON."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ]
+        try:
+            content = self._llm_call_with_retry(messages)
+            if not content:
+                raise RuntimeError(
+                    f"LLM returned empty content for cluster {cluster.cluster_id}"
                 )
-                content = response.choices[0].message.content
-                if content:
-                    pattern_description = self._parse_response(content, cluster.cluster_id)
-            except Exception as exc:
-                LOGGER.debug(
-                    "TraceDistiller: LLM call failed for cluster %d: %s",
-                    cluster.cluster_id, exc,
-                )
-        else:
-            # No LLM available — use centroid query as the pattern
-            pattern_description = cluster.centroid_query
-            LOGGER.info(
-                "TraceDistiller: no LLM client, using centroid query as pattern for cluster %d",
-                cluster.cluster_id,
-            )
+            pattern_description = self._parse_response(content, cluster.cluster_id)
+        except Exception as exc:
+            raise RuntimeError(
+                f"LLM call failed for cluster {cluster.cluster_id}: {exc}"
+            ) from exc
 
         if not pattern_description:
             return None
 
         return DistilledPattern(
             cluster_id=cluster.cluster_id,
+            effective_skills=effective_skills,
             pattern_description=pattern_description,
-            **metrics,
         )
 
-    @staticmethod
-    def _compute_metrics(
-            success_traces: list[TraceRecord],
-            failure_traces: list[TraceRecord],
-    ) -> dict[str, Any]:
-        effective_skills_map: dict[tuple[str, ...], int] = {}
-        for t in success_traces:
-            key = tuple(sorted(t.skills))
-            effective_skills_map[key] = effective_skills_map.get(key, 0) + 1
-        effective_skills = [
-            list(k)
-            for k, _ in sorted(effective_skills_map.items(), key=lambda x: -x[1])
-        ]
+    def _llm_call_with_retry(self, messages: list[dict]) -> str:
+        """Call the LLM with retry/backoff on transient errors (429/5xx/transport).
 
-        ineffective_skills: list[dict[str, str | list[str]]] = []
-        seen: set[tuple[str, ...]] = set()
-        for t in failure_traces:
-            key = tuple(sorted(t.skills))
-            if key not in seen:
-                seen.add(key)
-                ineffective_skills.append(
-                    {
-                        "skills": list(key),
-                        "reason": t.error_type or "unknown",
-                    }
+        400-class client errors and JSON-parse issues are surfaced immediately
+        by the caller; here we only retry on rate-limit / server / transport
+        errors so a single 429 doesn't abort the whole multi-thousand-call
+        distillation run.
+        """
+        from openai import APIStatusError, RateLimitError
+
+        last_exc: Exception | None = None
+        for attempt in range(_LLM_MAX_RETRIES):
+            try:
+                response = self._llm.chat.completions.create(
+                    model=self._llm_model,
+                    messages=messages,
+                    max_tokens=256,
+                    stream=False,
+                    extra_body={"enable_thinking": False, "thinking": {"type": "disabled"}},
                 )
+                return response.choices[0].message.content or ""
+            except (RateLimitError, OSError) as exc:
+                last_exc = exc
+                wait = min(2 ** attempt, 30)
+                LOGGER.warning(
+                    "TraceDistiller: transient LLM error (attempt %d), retrying in %ds: %s",
+                    attempt + 1, wait, exc,
+                )
+                time.sleep(wait)
+            except APIStatusError as exc:
+                status = getattr(exc, "status_code", None)
+                if status is not None and 400 <= status < 500:
+                    # Client error — retrying won't fix it.
+                    raise
+                last_exc = exc
+                wait = min(2 ** attempt, 30)
+                LOGGER.warning(
+                    "TraceDistiller: LLM server error %s (attempt %d), retrying in %ds",
+                    status, attempt + 1, wait,
+                )
+                time.sleep(wait)
+        raise RuntimeError(f"LLM call failed after {_LLM_MAX_RETRIES} retries: {last_exc}")
 
-        avg_success = 0.0
-        avg_failure = 0.0
+    _MERGE_PATTERN_PROMPT = """\
+You are merging several semantically-overlapping query patterns for the SAME skill into ONE survivor pattern. Each input pattern already expresses the target skill's intent cleanly; your job is to produce a single generalized pattern that subsumes ALL of them without losing any sub-ability.
 
-        total = len(success_traces) + len(failure_traces)
-        success_rate = len(success_traces) / total if total > 0 else 0.0
+Rules:
+- Preserve the SKILL-SPECIFIC DISCRIMINATOR WORDS already present in the inputs (skill name, signature objects, hallmark action).
+- Union the variable placeholders across inputs (e.g. if one pattern has [物体/文字] and another has [色泽/摆盘], combine into [物体/文字/色泽/摆盘]).
+- Keep domain entities concrete; do NOT over-generalize.
+- The output must read like a single standalone request for ONLY this skill, covering every sub-ability seen in the inputs.
+- Drop any clause that does not appear in ANY input pattern (don't invent new sub-tasks).
 
-        return {
-            "effective_skills": effective_skills,
-            "ineffective_skills": ineffective_skills,
-            "avg_token_cost_success": avg_success,
-            "avg_token_cost_failure": avg_failure,
-            "success_rate": success_rate,
-            "raw_trace_count": total,
-        }
+SKILL (target):
+{skill}
+
+EXISTING PATTERNS (merge these):
+{patterns}
+
+Output JSON: {{"pattern_description": "<one merged pattern subsuming all inputs>"}}
+Output ONLY valid JSON. No markdown, no explanation.
+"""
+
+    def distill_merged_pattern(
+        self,
+        skill: str,
+        patterns: list[str],
+        fallback: str,
+    ) -> str:
+        """Merge N same-skill patterns into one survivor pattern via the LLM.
+
+        On any failure (LLM error, empty/invalid output), fall back to
+        ``fallback`` (typically the success_count-max pattern) so merging
+        never drops a group on the floor.
+        """
+        if not patterns:
+            return fallback
+        if len(patterns) == 1:
+            return patterns[0]
+        desc = self._skills_by_name.get(skill, "")
+        skill_line = f"- {skill}: {desc}" if desc else f"- {skill}"
+        pat_text = "\n".join(f"- {p!r}" for p in patterns)
+        prompt = self._MERGE_PATTERN_PROMPT.format(skill=skill_line, patterns=pat_text)
+        try:
+            content = self._llm_call_with_retry([
+                {"role": "system", "content": "Output only valid JSON."},
+                {"role": "user", "content": prompt},
+            ])
+            merged = self._parse_response(content, -1)
+            return merged or fallback
+        except Exception as exc:
+            LOGGER.warning(
+                "TraceDistiller: merge-distill failed for skill=%s (%s); using fallback pattern",
+                skill, type(exc).__name__,
+            )
+            return fallback
 
     def _build_prompt(
             self,

@@ -120,6 +120,7 @@ type GraphEdge = {
   target: string;
   type: string;
   confidence: number;
+  runtimeWeight?: number;
   method: string;
   evidence: RawRecord;
 };
@@ -306,11 +307,13 @@ function normalizeEdge(raw: RawRecord): GraphEdge | null {
   const rawSource = asString(raw.source ?? raw.source_id);
   const rawTarget = asString(raw.target ?? raw.target_id);
   if (!rawSource || !rawTarget) return null;
+  const runtimeWeight = Number(raw.runtime_weight);
   return {
     source: rawSource.includes(':') ? rawSource : `skill:${rawSource}`,
     target: rawTarget.includes(':') ? rawTarget : `skill:${rawTarget}`,
     type: asString(raw.type ?? raw.relation_type, 'relates_to'),
     confidence: Number(raw.confidence ?? 1),
+    runtimeWeight: Number.isFinite(runtimeWeight) ? runtimeWeight : undefined,
     method: asString(raw.method, 'deterministic'),
     evidence: asRecord(raw.evidence ?? raw.metadata),
   };
@@ -1649,7 +1652,13 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
                       }}
                     >
                       <span>{edge.source === selectedNode.id ? '→' : '←'} {other?.label || labelFromId(otherId)}</span>
-                      <small>{edge.type} · {Math.round(edge.confidence * 100)}%</small>
+                      <small>
+                        {edge.type}
+                        {edge.runtimeWeight === undefined
+                          ? ''
+                          : ` · runtime_weight ${edge.runtimeWeight.toFixed(2)}`}
+                        {' · '}{Math.round(edge.confidence * 100)}%
+                      </small>
                     </button>
                   );
                 })

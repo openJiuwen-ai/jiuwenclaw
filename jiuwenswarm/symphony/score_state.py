@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from jiuwenswarm.symphony.fingerprint.models import SkillFingerprint
+from jiuwenswarm.symphony.fingerprint.models import Fingerprint
 from jiuwenswarm.symphony.score_storage import resolve_score_artifact_dir
 
 SCORE_STATE_FILENAME = "score_state.json"
@@ -109,7 +109,7 @@ class ScoreStateBuilder:
         *,
         folders: list[Any],
         current_hashes: dict[str, str],
-        fingerprints_by_path: dict[str, SkillFingerprint],
+        fingerprints_by_path: dict[str, Fingerprint],
         old_state: ScoreState,
         removed_paths: set[str],
     ) -> ScoreState:
@@ -141,8 +141,12 @@ class ScoreStateBuilder:
         return ScoreState(skills=entries)
 
     @staticmethod
-    def fingerprint_hash(fingerprint: SkillFingerprint) -> str:
-        payload = json.dumps(fingerprint.to_dict(), ensure_ascii=False, sort_keys=True)
+    def fingerprint_hash(fingerprint: Fingerprint) -> str:
+        payload = json.dumps(
+            fingerprint.graph_identity_dict(),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     @staticmethod

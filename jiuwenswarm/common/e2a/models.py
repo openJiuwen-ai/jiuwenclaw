@@ -18,6 +18,7 @@ from jiuwenswarm.common.e2a.constants import (
     E2A_SOURCE_PROTOCOL_A2A,
     E2A_SOURCE_PROTOCOL_ACP,
     E2A_SOURCE_PROTOCOL_E2A,
+    E2A_WIRE_INTERNAL_METADATA_KEYS,
 )
 
 
@@ -122,6 +123,7 @@ class E2AEnvelope:
     identity_origin: IdentityOrigin = IdentityOrigin.USER
     channel: str | None = None
     user_id: str | None = None
+    agent_ref: dict | None = None
     chat_id: str | None = None
     source_agent_id: str | None = None
 
@@ -191,6 +193,7 @@ class E2AResponse:
     identity_origin: IdentityOrigin = IdentityOrigin.AGENT
     channel: str | None = None
     user_id: str | None = None
+    agent_ref: dict | None = None
     source_agent_id: str | None = None
     method: str | None = None
 
@@ -349,13 +352,18 @@ def _envelope_from_dict(data: dict[str, Any]) -> E2AEnvelope:
             _meta=dict(auth_raw.get("_meta") or {}),
         )
 
-    # channel_context：合并 wire 顶层 metadata 中尚未出现的键。
+    # channel_context：合并 wire 顶层 metadata + app_id 中尚未出现的键。
     channel_context = dict(data.get("channel_context") or {})
     meta_top = data.get("metadata")
     if isinstance(meta_top, dict) and meta_top:
         for k, v in meta_top.items():
+            if k in E2A_WIRE_INTERNAL_METADATA_KEYS:
+                continue
             if k not in channel_context:
                 channel_context[k] = v
+    app_id = data.get("app_id")
+    if app_id and "app_id" not in channel_context:
+        channel_context["app_id"] = app_id
 
     ch = data.get("channel")
     if ch is None:
@@ -383,6 +391,10 @@ def _envelope_from_dict(data: dict[str, Any]) -> E2AEnvelope:
         identity_origin=origin,
         channel=ch,
         user_id=data.get("user_id"),
+        # V2: agent_ref 全链路透传——入站反序列化须补读，否则 message_to_e2a
+        # 写入 d["agent_ref"] 后被 from_dict 丢弃，AgentServer 永远收不到
+        # （设计 §6.3 agent_ref 全程携带；§5.2 同人多窗 via agent_ref）。
+        agent_ref=data.get("agent_ref"),
         chat_id=data.get("chat_id"),
         source_agent_id=data.get("source_agent_id"),
         method=raw_method,
@@ -436,6 +448,7 @@ def _e2a_response_from_dict(data: dict[str, Any]) -> E2AResponse:
         identity_origin=origin,
         channel=ch,
         user_id=data.get("user_id"),
+        agent_ref=data.get("agent_ref"),
         source_agent_id=data.get("source_agent_id"),
         method=data.get("method"),
         projections=dict(data.get("projections") or {}),

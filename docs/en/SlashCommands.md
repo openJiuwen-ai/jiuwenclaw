@@ -53,9 +53,9 @@ Identified by Gateway and forwarded to AgentServer and other backend capabilitie
 | `/mode` | Mode switching (supports first-level entry and direct syntax) |
 | `/switch` | Switch second-level mode within current mode family |
 | `/skills` | Skills management (list, install, uninstall, marketplace, ClawHub, SkillNet) (see below) |
-| `/model` | Model view, add, switch (see below) |
+| `/model` | Model view, add, edit, delete, switch (see below) |
 | `/mcp` | MCP server management (see below) |
-| `/diff` | View session changes by turn (see below) |
+| `/diff` | Interactive change review: per-turn diffs + uncommitted working tree changes (see below) |
 | `/compact` | Compress current context (see below) |
 | `/init` | Project initialization (see below) |
 | `/branch` | Create a branch session from current conversation point (see below) |
@@ -79,14 +79,15 @@ Manages directories AI can access for file read, edit, and execute operations.
 |---|---|
 | `/workspace` or `/workspace get` | Show system default workspace and current trusted directories list |
 | `/workspace add [path]` | Add trusted directory (defaults to cwd; error if path doesn't exist) |
-| `/workspace set <path>` | Reset trusted dirs to single path (confirmation required if dirs exist) |
+| `/workspace set <path>` | Switch the current project scope to this path and add it to that project's trusted directories |
 | `/workspace remove <path>` | Remove specified trusted directory |
 | `/workspace clear` | Clear all trusted directories (use default workspace only) |
 
 #### Concepts
 
-- **System default workspace**: Fixed path `~/.jiuwenswarm/agent/jiuwenswarm_workspace`, always available
+- **System default workspace**: Fixed path `~/.jiuwenswarm/agent/workspace`, always available
 - **Trusted directories (`trusted_dirs`)**: User-authorized accessible directories, managed by TUI, passed to backend Agent
+- **Project scope**: The project identity used to select the corresponding trusted-directory set and populate `project_dir` / `cwd` in requests
 
 #### Control Logic
 
@@ -94,9 +95,9 @@ Manages directories AI can access for file read, edit, and execute operations.
    - "Trust" → add current directory as trusted
    - "Don't trust" → use default workspace only
 
-2. **Session-level management**: Trusted directories are effective for current CLI session, not persisted to file
+2. **Project-scoped persistence**: Trusted directories are stored by normalized project path in `~/.jiuwenswarm-tui/config.json`. `/workspace set` changes the active project scope only for the current TUI process; after restart, the launch directory becomes the scope again.
 
-3. **Backend passing**: TUI passes `trusted_dirs` via request params; Agent restricts file operations accordingly
+3. **Backend passing**: TUI passes `trusted_dirs`, `project_dir`, and `cwd` via request params; Agent restricts file operations and resolves project context accordingly
 
 4. **Path restriction**: Agent limits file operations within trusted directories; operations outside require user confirmation
 
@@ -153,22 +154,45 @@ Behavior:
 - **Branch recording & filtering (`Ctrl+B`)**: a session's git branch is recorded (per its `project_dir`) on the first message (`HEAD` for non-git/detached). When the filter is on, sessions are matched by branch **name** strictly; legacy sessions without a recorded branch and `HEAD` sessions are filtered out. Note the match is by name only and not repo-aware — with "all projects + branch filter" enabled, same-named branches in different directories are shown together.
 - **Restore scope**: resume only restores the **conversation context** (history, session ID, accent color, workflow snapshot, window title); it does **not** switch the workspace / current working directory.
 
-### `/model` (View / Add / Switch Model)
+### `/model` (View / Add / Edit / Delete / Switch Model)
 
-- Usage:
-  - `/model` or `/model list`: List switchable models (with current model marker);
-  - `/model <name>`: Switch to specified model;
-  - `/model add <name> key=value ...`: Add model config (e.g., `model=...`, `provider=...`, `api_base=...`, `api_key=...`).
-- Limitation: `video` / `audio` / `vision` cannot be set as default chat model via `/model <name>`, use `/config edit` or `/config set` instead.
-- Config write behavior:
-  - Adding model writes to `config.yaml` `models.defaults` (compatible with old structure), triggers Agent config reload;
+Manages model configs defined under `models.defaults` in `config.yaml`. Supports both text subcommands and an **interactive list**; delete/edit are done primarily through the interactive list.
+
+- **Text usage**:
+  - `/model` or `/model list`: Open the **interactive model list** (with current model marker); switch / add / edit / delete can all be done inside the list;
+  - `/model <name>`: Switch directly to the model by name;
+  - `/model add <name> key=value ...`: Add a model config via text form (e.g., `model_name=...`, `provider=...`, `api_base=...`, `api_key=...`, `reasoning_level=...`).
+- **Interactive list hotkeys** (after opening the list via `/model` or `/model list`):
+
+  | Key | Action |
+  | --- | --- |
+  | `↑` / `↓` | Select model up/down |
+  | `Enter` | Switch to the selected model |
+  | `a` | Open the form to **add** a model |
+  | `e` | Open the form to **edit** the selected model |
+  | `d` | Enter **delete confirmation** for the selected model |
+  | `Esc` | Close list / cancel current action |
+
+- **Delete flow** (`d` → confirm): After entering the `Delete model: <name>` confirmation page—
+  - `Enter`: confirm deletion; the backend locates the entry by its **original index** (`index`, i.e. the position in `models.defaults` before filtering out multimodal keys like video/audio/vision), removes it, writes back to `config.yaml`, then triggers an Agent config reload (`AGENT_RELOAD_CONFIG`). Success response: `{type: "model_deleted", name, current}`.
+  - `Esc`: cancel, return to the list.
+- **Edit flow** (`e`): reuses the add form, but leaving `api_key` empty means **keep the original key unchanged**; only changed fields are submitted.
+- **Limitations & validation**:
+  - `video` / `audio` / `vision` are multimodal-only keys and cannot be set as the default chat model via `/model <name>`; use `/config edit` or `/config set` instead;
+  - Deleting the **last** remaining model is rejected (`Cannot delete the last model`); an out-of-range index returns `model index not found`;
+- **Config write behavior**:
+  - Add / edit / delete mutate `models.defaults` in `config.yaml` (compatible with the old structure) and trigger an Agent config reload;
   - Switching model validates config and environment variable placeholders, updates `MODEL_NAME` / `MODEL_PROVIDER` / `API_BASE` / `API_KEY`, writes back to `.env`.
-- Secure display: Sensitive fields like `api_key`, `token` are masked.
+- **Secure display**: sensitive fields like `api_key`, `token` are masked in the list; only when models share **the same name AND identical provider+api_base** (genuinely indistinguishable) does the list append the key's last 4 characters `[…xxxx]`.
 
 ### `/diff` (Interactive Change Review)
 
 - Usage: `/diff` (no subcommands).
-- Data source: TUI requests Agent diff service via `command.diff`, returns `turns` (change sets per turn) and `gitDiff` (uncommitted working tree changes) for current `session_id`.
+- Applicable modes: All modes.
+- Data source: TUI sends a `command.diff` request to the AgentServer (60s timeout). The handler resolves the current `session_id` and `project_dir` from request metadata, then fetches two data sets **in parallel** via worker threads:
+  - `turns` — per-turn change sets derived from `.agent_history` file operation logs;
+  - `gitDiff` — uncommitted working tree changes from `git diff HEAD`.
+- Response payload: `{ type: "list", turns: [...], gitDiff?: {...} }`. On error: `{ ok: false, error: "..." }`.
 - Display mode: Opens a **full-screen interactive Diff viewer**:
   - **List view**: Shows all changed files (working tree `working` and per-turn `Turn N`) with relative paths, source label, and added/removed line counts;
   - **Detail view**: Press `Enter` on a selected file to view its full hunk-by-hunk diff with scrolling support.
@@ -184,8 +208,44 @@ Behavior:
   - `Home` / `g` — Go to file top;
   - `End` / `Shift+g` — Go to file bottom;
   - `←` / `Esc` — Return to list view.
-- Scope: Covers both the working tree (`git diff HEAD`) and per-turn change traces. Not a replacement for `git diff` full version control perspective.
 - Fallback: When the TUI does not provide the `enterDiffViewer` capability, falls back to inline display (file names, source, and line stats only).
+
+#### Turn-based diff data source
+
+Per-turn diffs are computed from `.agent_history/file_ops_jiuwenswarm*.json` logs, not from git. The service reads and merges file operation logs from multiple locations:
+
+1. Agent workspace (`~/.jiuwenswarm/agent/jiuwenswarm_workspace/.agent_history/`)
+2. User workspace `.agent_history/`
+3. Project directory `.agent_history/` (session-specific and global files)
+
+Entries are deduplicated by path normalization and timestamp proximity (±1 second). Turn boundaries are defined by user messages in session history: a turn spans from one user message timestamp to the next. Only turns with file changes are returned; empty turns are filtered out. Turn indices are preserved (aligned with the actual user message count in history) to allow `/rewind` to map correctly.
+
+#### Git diff data source
+
+Working tree changes are obtained via `git diff HEAD` (tracked files only). The git repo root is resolved from `project_dir` (which may be a subdirectory). Staged renames (including brace shorthand form `a/{b => c}/d.txt`) are handled to align numstat keys with hunk keys.
+
+#### Effect boundaries and limits
+
+| Boundary | Value | Behavior |
+|---|---|---|
+| Max files in detail | 50 | Only the first 50 tracked files get hunks; stats still cover all changed files |
+| Max lines per file | 400 | Hunks are truncated beyond 400 lines per file; `isTruncated` flag is set |
+| Max diff size per file | 1 MB | Files whose diff exceeds 1 MB are skipped in hunk parsing; `isLargeFile` flag is set, stats still counted |
+| Max files for details | 500 | If more than 500 files changed, only aggregate stats are returned (no per-file hunks) |
+| Git command timeout | 10s | Git commands that exceed 10 seconds return `None` |
+| Git root resolution timeout | 5s | `git rev-parse --show-toplevel` that exceeds 5 seconds returns `None` |
+
+#### What is NOT covered
+
+- **Untracked files**: `git diff HEAD` only covers tracked file modifications. Untracked files are excluded from the git diff section. (Untracked files edited by the agent may still appear in per-turn diffs via file_ops logs.)
+- **Manual/bash edits in turn diffs**: Per-turn diffs are derived from the agent's `.agent_history` file operation logs. Files edited manually or via bash commands are not tracked in turn diffs.
+- **Committed changes**: Only uncommitted working tree changes are shown. Committed history is not covered.
+- **Transient git states**: During merge, rebase, cherry-pick, or revert, git diff returns `None` to avoid showing misleading incoming changes.
+- **Binary files**: Binary file changes are counted in stats but no hunks are shown (`isBinary` flag set).
+- **Not a git repo**: If `project_dir` is not in a git repository, `gitDiff` is `None`; only per-turn diffs are returned.
+- **No project_dir**: If `project_dir` cannot be resolved, `gitDiff` is `None`; per-turn diffs may still work using session metadata.
+
+> `/diff` is not a replacement for `git diff` from a full version control perspective. It combines agent-tracked per-turn changes with a snapshot of uncommitted tracked-file changes for quick review within a coding session.
 
 ### `/compact` (Context Compression)
 
@@ -289,7 +349,7 @@ These commands are registered and parsed by the TUI, then forwarded as slash tex
   - Rejected when the session is busy (`session is busy`);
   - Rejected when the current session has no conversation records.
 - Behavior:
-  1. Generate a new `session_id` and send `session.fork` RPC to the backend (carrying `source_session_id`, `target_session_id`, and optional title).
+  1. Send `session.fork` with `source_session_id` and an optional title. AgentServer allocates the target `session_id` and returns it in the response.
   2. TUI automatically switches to the new branch session, clears the current transcript, and restores the branch history.
   3. Prompts the user that they are now in the new branch, and informs them they can use `/resume <original_session_id>` to return to the original session.
 - Examples:
@@ -300,7 +360,7 @@ These commands are registered and parsed by the TUI, then forwarded as slash tex
 
 - Usage: `/rewind [turn_number]`.
 - Alias: `/checkpoint`.
-- Function: Rewind the current session to before a specified turn, supporting conversation-only, code-only, or both.
+- Function: Rewind or compact the current session around a specified turn, supporting conversation-only, code-only, both, or partial-history summarization.
 - Constraints:
   - Rejected when the session is busy (`session is busy`);
   - Rejected when there are no conversation turns.
@@ -310,12 +370,17 @@ These commands are registered and parsed by the TUI, then forwarded as slash tex
      - **Restore conversation and code** — Truncate conversation and restore files to their prior state;
      - **Restore conversation only** — Only truncate conversation, files remain unchanged;
      - **Restore code only** — Only restore files, conversation remains unchanged (shown only when the target turn has file changes);
+     - **Summarize from here** — Keep earlier messages and replace the selected turn and everything after it with a compact summary;
+     - **Summarize up to here** — Summarize messages before the selected turn and keep the selected turn and everything after it unchanged;
      - **Cancel** — Abort the operation.
   3. Calls the corresponding backend RPC based on selection:
      - `both` → `session.rewind_and_restore`
      - `conversation` → `session.rewind`
      - `code` → `session.restore_files`
-- After rewind: TUI clears the transcript and reloads history; if the rewinded content contains user input, it is automatically filled into the input box.
+     - `summarize` → `command.rewind_compact` with `direction=from`
+     - `summarize_up_to` → `command.rewind_compact` with `direction=up_to`
+- After rewind: TUI clears the transcript and reloads history; if the rewound content contains user input, it is automatically filled into the input box.
+- Code-only restore reports `No file changes to restore` when there is nothing to change. Partial failures list every failed file and leave those files unchanged instead of reporting an unconditional success.
 - Limitation: Rewinding does not affect files edited manually or via bash commands.
 - Examples:
   - `/rewind` — Interactive turn selection and restore mode confirmation
@@ -324,30 +389,63 @@ These commands are registered and parsed by the TUI, then forwarded as slash tex
 ### `/memory` (Memory Management)
 
 - Alias: `/mem`.
-- Function: View and manage memory system status, memory files, toggle settings, and directory paths.
+- Function: View and manage memory system status, memory files, toggle settings, and directory paths via a tabbed console.
 - Subcommands:
 
 | Command | Description |
 |---|---|
-| `/memory` or `/memory edit` | Interactively select and edit a memory file (lists available files when no path is given) |
-| `/memory list` | List all memory files (with size, line count, modification time) |
-| `/memory edit <path>` | Open the specified memory file for editing (via `$EDITOR`) |
-| `/memory status` | Show detailed memory system status |
-| `/memory toggle [key]` | Toggle memory system switches (lists togglable items when no key is given) |
-| `/memory open` | Show memory system directory paths |
+| `/memory` or `/memory edit` | Open the tabbed console and select the edit tab |
+| `/memory edit <path>` | Directly edit the specified memory file (via `$EDITOR`) |
+| `/memory status` | Open the tabbed console and select the status tab |
+| `/memory toggle` | Open the tabbed console and select the toggle tab |
+| `/memory toggle <key>` | Directly toggle the specified memory system switch |
+| `/memory open` | Open the tabbed console and select the open tab |
 
+- Edit safety:
+  - The target must already exist and be inside an allowed memory location; `/memory edit` does not create a new file.
+  - Runtime auto/coding-memory files are read-only and cannot be edited manually.
+  - Project or ancestor `JIUWENSWARM.md` / `JIUWENSWARM.local.md` files may be opened only when they already exist and pass the allowed-path checks.
+
+- Tabbed console: The console has 4 tabs — edit / status / toggle / open. Interaction keys:
+  - `←`/`→` — Switch tabs;
+  - `↑`/`↓` — Navigate within the current tab;
+  - `Enter` — Execute the selected item;
+  - `Ctrl+O` — Toggle full path display (edit / open tabs); resets to default (relative path) when switching tabs;
+  - `Esc` — Close the console.
+- `edit` display contents:
+  - Lists memory files in priority order: Project memory (Checked in at `<path>`), Local memory (Saved in `<path>`), User memory (Saved in `<path>`), plus any rule files;
+  - `Enter` opens the selected file with `$EDITOR`.
 - `status` display contents:
-  - Current mode, storage engine, enabled status, proactive status, forbidden filter status;
-  - Index status (FTS5, Vector, Cache), file count, chunk count;
-  - Statistics for Project Memory, Coding Memory, Auto Memory, and External Memory.
-- `toggle` available keys:
-  - `memory_enabled` — Master memory switch;
-  - `memory_proactive` — Proactive memory switch;
-  - `memory_forbidden_enabled` — Forbidden filter switch.
+  - Engine (format `builtin (local)`, combining the storage engine and storage mode);
+  - Switch row — mode-adaptive (mirrors the current mode's toggle set), shown as `✓ on` / `✗ off`:
+    - agent mode: `memory_enabled` (Memory), `memory_proactive` (Proactive memory), `memory_forbidden_enabled` (Forbidden filter);
+    - code mode: `memory_enabled` (Memory), `auto_coding_memory` (Auto coding memory), `memory_forbidden_enabled` (Forbidden filter).
+  - Runtime memory statistics — mode-adaptive: agent mode shows "Auto Memory" (files / chars / dir); code mode shows "Coding Memory" (files / chars / dir);
+  - Project Memory statistics (files / chars / project dir);
+  - External Memory (provider + enabled status), shown only if configured.
+- `toggle` display contents:
+  - Each row shows the toggle **key** (padded to equal width), a `✓ on` / `✗ off` status marker, and a Chinese description. Only the key is shown (no English label); columns are separated by spaces, not `·`. Example (code mode):
+    ```
+    → memory_enabled            ✓ on   记忆功能总开关
+      auto_coding_memory        ✓ on   每轮对话后自动提取记忆（需总开关开启）
+      memory_forbidden_enabled  ✗ off  过滤敏感信息
+    ```
+  - Available keys (mode-adaptive):
+    - agent mode: `memory_enabled` (Master memory switch), `memory_proactive` (Proactive memory), `memory_forbidden_enabled` (Forbidden filter);
+    - code mode: `memory_enabled` (Master memory switch), `auto_coding_memory` (Auto coding memory), `memory_forbidden_enabled` (Forbidden filter).
   - After toggling, a prompt is shown if a session restart is required for the change to take effect.
+- `open` display contents:
+  - Lists memory directory paths — mode-adaptive:
+    - agent mode: Memory Dir / Project Dir / User Project Dir;
+    - code mode: Coding Memory Dir / Project Dir / User Project Dir.
+  - `Enter` opens the selected directory in the system file manager directly.
+- Tab completion:
+  - `/memory ` — Suggests subcommands (`edit`, `status`, `toggle`, `open`);
+  - `/memory edit ` — Suggests memory file paths (via `getDisplayPath`, relative/tilde-shortened, deduplicated, only existing rule files);
+  - `/memory toggle ` — Suggests toggle keys (mode-adaptive, mirrors the current mode's toggle set);
+  - All completions support prefix filtering.
 - Examples:
-  - `/memory` — Interactively edit a memory file
-  - `/memory list` — List memory files
+  - `/memory` — Open the tabbed console (edit tab)
   - `/memory edit memory/MEMORY.md` — Edit a specific memory file
   - `/memory status` — View detailed status
   - `/memory toggle memory_enabled` — Toggle the master memory switch
@@ -382,7 +480,7 @@ Manage cron jobs via RPC calls to the backend `CronController`, sharing the same
 | `timezone` | No | IANA timezone, default `Asia/Shanghai` |
 | `mode` | No | Execution mode, default `agent.fast`. Options: `agent`, `agent.fast`, `agent.plan`, `plan`, `team`, `team.plan`, `code.team`. Team modes use streaming multi-agent execution; see [Scheduled tasks — Team mode](ScheduledTasks.md#6-team-mode-and-swarmflow-multi-agent-scheduled-jobs) |
 | `timeout_seconds` | No | Per-run timeout in seconds (60–259200). Default 600 for normal modes, 1200 for team modes |
-| `wake_offset_seconds` | No | Wake-up offset in seconds, default 300 |
+| `wake_offset_seconds` | No | Wake-up offset in seconds, default 0 |
 | `delete_after_run` | No | Auto-delete after one run, default false |
 
 - `add` examples:
@@ -607,7 +705,7 @@ Enter / leave jiuwenbox sandbox mode and tune its runtime policy. Calls `command
 - **Platform support**: `/sandbox` is Linux-only (jiuwenbox depends on Linux kernel features such as bwrap, Landlock, and Linux namespaces). On a Windows or macOS agent-server, every `/sandbox` sub-command returns a `SANDBOX_BAD_REQUEST` error. If the TUI runs on Windows/macOS but the agent-server is on a Linux host, the command works — what matters is the agent-server's platform.
 - **Write policy semantics**: `allow` / `deny` control **write access** (rw/ro) inside the sandbox, not Unix octal modes. Enforcement uses bwrap bind mounts + `--remount-ro`; Landlock is defense-in-depth (when `landlock.compatibility=disabled`, bwrap is primary).
 - **Nested paths**: Supported: parent allow + child deny (e.g. allow `/tmp`, deny `/tmp/secret`). Not supported: child allow + parent deny (parent deny wins); the server rejects such configs.
-- **Effective write policy**: `files.allow_write` / `files.deny_write` in the status panel show the merged view of auto-managed and user-configured entries, each labeled `(rw)` or `(ro)`. Auto-managed entries are server-injected (intrinsic files such as `AGENT.md`, `HEARTBEAT.md`, `IDENTITY.md`, `SOUL.md`, `USER.md`, the `memory/daily_memory/` directory, and depending on the mode, `project_dir` and `config/config.yaml`) and cannot be removed via `/sandbox files remove`.
+- **Effective write policy**: `files.allow_write` / `files.deny_write` in the status panel show the merged view of auto-managed and user-configured entries, each labeled `(rw)` or `(ro)`.
 - **preserve_file_sharing_mode**: Controlled by jiuwenswarm config, not by `/sandbox`. Only `mount` is supported: intrinsic files and `project_dir` are bind-mounted into the sandbox and `project_dir/config/config.yaml` is explicitly added to `deny_write`. Writing any other value into config.yaml is rejected by the server.
 - **excluded_commands**: Match the full command string (not just `argv[0]`); a match makes that tool call run on the host, effectively granting the command's side effects to the local environment.
 - **Add / remove are strict**: `exclude add` rejects a pattern that is already in the list; `exclude remove` rejects a pattern that is not in the list. `files allow|deny` rejects a path that is already in the same bucket, and rejects a path that exists in the opposite bucket (allow vs deny conflict) — run `files remove` first if you want to flip it. `files remove` rejects paths that have no matching user-configured entry.
@@ -911,14 +1009,17 @@ Configure the TUI footer status bar with a custom shell command that dynamically
 |---|---|
 | `/statusline` or `/statusline get` | View current status line configuration |
 | `/statusline set <shell-command>` | Set the status line command (its output will appear in the TUI footer) |
+| `/statusline padding <number>` | Set left and right padding; the value must be zero or a positive integer and a status line must already be configured |
 | `/statusline clear` | Remove the status line configuration (footer bar will hide) |
 | `/statusline help` | Show usage guide (writing patterns, practical examples, field list) |
 | `/statusline json` | Show the actual current JSON data values (useful for debugging jq expressions) |
+| `/statusline <prompt>` | Ask the Agent to generate and configure a status-line script from a natural-language description |
 
 #### Concepts
 
 - **StatusLine**: A text area at the bottom of the TUI that displays user-defined dynamic information, supporting multi-line output. When a custom statusline is configured, the built-in status line is automatically hidden to avoid redundant information.
 - **Shell command**: The configured shell command is automatically executed every 2 seconds; its stdout output is rendered as the status bar text.
+- **Agent-generated mode**: Any non-empty argument that is not a known subcommand (`set`, `padding`, `clear`, `help`, `json`, or `get`) is sent to the Agent with the `script-creator` skill. For example: `/statusline show mode, model, and remaining context`. Running `/statusline` with no arguments still only shows the current configuration.
 - **JSON input**: Each execution receives current session info as JSON, which can be parsed with `jq` or other tools. On POSIX (Linux/macOS), JSON is passed via stdin pipe; on Windows, due to MSYS2 pipe inheritance limitations, the system automatically writes JSON to a temp file and replaces `$(cat)` in the command with `$(cat "filepath")` — the user doesn't need to modify their command format.
 - **Prerequisites**: Requires `jq` (https://stedolan.github.io/jq/) for JSON parsing; Windows users also need to add Git Bash's `usr\bin` directory to the system PATH (e.g., `E:\Git\usr\bin`).
 

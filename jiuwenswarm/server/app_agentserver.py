@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 """Standalone AgentServer entrypoint.
 
 This process only starts:
@@ -20,14 +20,14 @@ import logging.handlers
 import os
 import sys
 
-from dotenv import load_dotenv
 from openjiuwen.core.common.logging import LogManager
 
 # --- Early --dotenv parsing (before jiuwenswarm imports) ---
-from jiuwenswarm.dotenv_early import parse_dotenv_early
+from jiuwenswarm.dotenv_early import parse_dotenv_early, load_dotenv_runtime
 parse_dotenv_early("jiuwenswarm-agentserver")
 
 # --- Now safe to import jiuwenswarm modules ---
+from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.utils import (
     get_env_file,
     get_root_dir,
@@ -114,7 +114,7 @@ else:
     _perm_ns_logger.propagate = False
 
 # Load env from user workspace config/.env
-load_dotenv(dotenv_path=get_env_file(), override=True)
+load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
 reset_free_search_runtime_flags()
 
 from jiuwenswarm.agents.harness.common.tools.bash_tool_safety import (
@@ -128,6 +128,15 @@ from jiuwenswarm.llm_sse_patch import apply_openai_sse_invoke_patch
 
 apply_openai_sse_invoke_patch()
 
+# /debug 模式下捕获 builtin TaskTool 分发的 subagent 流（reasoning/tool_call/usage），
+# 内联写入主 dump。非 debug 或 include_subagent_flow 关闭时走原始 invoke，零回归。
+from jiuwenswarm.server.runtime.debug_trace.task_tool_patch import (
+    apply_task_tool_debug_patch,
+)
+
+apply_task_tool_debug_patch()
+
+
 
 async def _run(host: str, port: int) -> None:
     from openjiuwen.core.runner import Runner
@@ -135,6 +144,7 @@ async def _run(host: str, port: int) -> None:
     from jiuwenswarm.agents.harness.team.remote_member_bootstrap import run_teammate_bootstrap_daemon
     from jiuwenswarm.extensions.manager import ExtensionManager
     from jiuwenswarm.extensions.registry import ExtensionRegistry
+    from jiuwenswarm.common.config import get_config
 
     logger.info("[AgentServer] starting: ws://%s:%s", host, port)
 
@@ -151,11 +161,22 @@ async def _run(host: str, port: int) -> None:
     await extension_manager.load_all_extensions()
     logger.info("[AgentServer] 扩展加载完成，共 %d 个", len(extension_manager.list_extensions()))
 
+    # 会话 metadata 的字段补全已改为惰性迁移:读取时按需推断并写回磁盘
+    # (见 session_metadata._apply_metadata_defaults_with_inference),无需启动全量扫描。
+
     server = AgentWebSocketServer.get_instance(
         host=host,
         port=port
     )
     await server.start()
+
+    # ---------- ProactiveEngine 初始化 ----------
+    # 适配逻辑（建专用 agent + 触发主 agent 回调）封装在 proactive_adapter，
+    # app_agentserver 只调 init_proactive_engine。
+    from jiuwenswarm.server.runtime.proactive_adapter import init_proactive_engine
+    full_cfg = get_config()
+    proactive_config = full_cfg.get("proactive_recommendation", {}) if isinstance(full_cfg, dict) else {}
+    await init_proactive_engine(server, proactive_config)
 
     logger.info("[AgentServer] ready: ws://%s:%s  Ctrl+C to stop", host, port)
 
@@ -201,6 +222,16 @@ async def _run(host: str, port: int) -> None:
             shutdown_team_observability()
         except Exception as exc:
             logger.warning("[AgentServer] team observability shutdown failed: %s", exc)
+        # Shutdown single-agent / coding-agent observability. Independently
+        # tracked from team observability; no-op unless an agent run owned the
+        # provider (it will not tear down a provider the team still owns).
+        try:
+            from jiuwenswarm.agents.harness.agent_observability import (
+                shutdown_agent_observability,
+            )
+            shutdown_agent_observability()
+        except Exception as exc:
+            logger.warning("[AgentServer] agent observability shutdown failed: %s", exc)
         logger.info("[AgentServer] stopped")
 
 
@@ -248,9 +279,11 @@ def main() -> None:
         else:
             port = 18092
 
+    install_async_dump_handler("agentserver")
     asyncio.run(_run(host=host, port=port))
 
 
 if __name__ == "__main__":
     main()
+
 

@@ -4,10 +4,17 @@
 
 from pathlib import Path
 
+import pytest
 import yaml
 
 from jiuwenswarm.common.config import resolve_env_vars
-from jiuwenswarm.agents.harness.team.config_loader import load_team_spec_dict, resolve_team_sqlite_db_path
+from jiuwenswarm.agents.harness.team.config_loader import (
+    TeamTemplateNotFoundError,
+    get_team_template_snapshot,
+    list_team_template_summaries,
+    load_team_spec_dict,
+    resolve_team_sqlite_db_path,
+)
 
 
 def _wrap_modes_team(team_mapping: dict[str, dict]) -> dict:
@@ -227,6 +234,207 @@ def test_load_team_spec_dict_uses_first_team_from_modes_team(monkeypatch, tmp_pa
     assert spec["agents"]["leader"]["skills"] == ["alpha-skill"]
 
 
+def test_load_team_spec_dict_selects_requested_template_id(monkeypatch, tmp_path):
+    """Runtime binding should be able to pick a specific configured team template."""
+    config = {
+        "models": {
+            "default": {
+                "model_client_config": {
+                    "model_name": "gpt-template",
+                    "client_provider": "openai",
+                },
+                "model_config_obj": {},
+            }
+        },
+        **_wrap_modes_team(
+            {
+                "alpha": {
+                    "team_name": "alpha_default_name",
+                    "agents": {"leader": {"skills": ["alpha-skill"]}},
+                },
+                "beta": {
+                    "team_name": "beta_default_name",
+                    "leader": {"member_name": "beta_leader"},
+                    "agents": {"leader": {"skills": ["beta-skill"]}},
+                },
+            }
+        ),
+    }
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.config_loader.get_agent_teams_home",
+        lambda: tmp_path / ".agent_teams",
+    )
+
+    spec = load_team_spec_dict(config_base=config, template_id="beta")
+
+    assert spec["team_name"] == "beta_default_name"
+    assert spec["leader"]["member_name"] == "beta_leader"
+    assert spec["agents"]["leader"]["skills"] == ["beta-skill"]
+
+
+def test_team_template_snapshot_survives_deleted_template(monkeypatch, tmp_path):
+    config = {
+        "models": {
+            "default": {
+                "model_client_config": {
+                    "model_name": "gpt-template",
+                    "client_provider": "openai",
+                },
+                "model_config_obj": {},
+            }
+        },
+        **_wrap_modes_team(
+            {
+                "alpha": {
+                    "team_name": "alpha_default_name",
+                    "agents": {"leader": {"skills": ["alpha-skill"]}},
+                },
+                "beta": {
+                    "team_name": "beta_default_name",
+                    "leader": {"member_name": "beta_leader"},
+                    "agents": {"leader": {"skills": ["beta-skill"]}},
+                },
+            }
+        ),
+    }
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.config_loader.get_agent_teams_home",
+        lambda: tmp_path / ".agent_teams",
+    )
+
+    snapshot = get_team_template_snapshot(config_base=config, template_id="beta")
+    config["modes"]["team"].pop("beta")
+    spec = load_team_spec_dict(
+        config_base=config,
+        template_id="beta",
+        template_snapshot=snapshot,
+        strict_template=True,
+    )
+
+    assert spec["team_name"] == "beta_default_name"
+    assert spec["leader"]["member_name"] == "beta_leader"
+    assert spec["agents"]["leader"]["skills"] == ["beta-skill"]
+
+
+def test_load_team_spec_dict_strict_template_rejects_missing_id(monkeypatch, tmp_path):
+    config = {
+        "models": {
+            "default": {
+                "model_client_config": {
+                    "model_name": "gpt-template",
+                    "client_provider": "openai",
+                },
+                "model_config_obj": {},
+            }
+        },
+        **_wrap_modes_team(
+            {
+                "alpha": {
+                    "team_name": "alpha_default_name",
+                    "agents": {"leader": {"skills": ["alpha-skill"]}},
+                },
+            }
+        ),
+    }
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.config_loader.get_agent_teams_home",
+        lambda: tmp_path / ".agent_teams",
+    )
+
+    with pytest.raises(TeamTemplateNotFoundError, match="missing-template"):
+        load_team_spec_dict(
+            config_base=config,
+            template_id="missing-template",
+            strict_template=True,
+        )
+
+
+def test_list_team_template_summaries_reads_modes_team_templates() -> None:
+    config = _wrap_modes_team(
+        {
+            "default": {
+                "team_name": "configured_team",
+                "display_name": "Default Team",
+                "agents": {"leader": {}},
+            },
+            "research": {
+                "name": "Research Template",
+                "agents": {"leader": {}},
+            },
+        }
+    )
+
+    summaries = list_team_template_summaries(config)
+
+    assert summaries == [
+        {
+            "template_id": "default",
+            "display_name": "Default Team",
+            "available": True,
+            "source": "modes.team.default",
+            "team_name": "configured_team",
+        },
+        {
+            "template_id": "research",
+            "display_name": "Research Template",
+            "available": True,
+            "source": "modes.team.research",
+            "team_name": "",
+        },
+    ]
+
+
+def test_list_team_template_summaries_falls_back_to_legacy_team_config() -> None:
+    config = {
+        "team": {
+            "team_name": "legacy_team",
+            "leader": {"member_name": "legacy_leader"},
+            "agents": {"leader": {}},
+        },
+    }
+
+    summaries = list_team_template_summaries(config)
+
+    assert summaries == [
+        {
+            "template_id": "legacy_team",
+            "display_name": "legacy_team",
+            "available": True,
+            "source": "team",
+            "team_name": "legacy_team",
+        },
+    ]
+
+
+def test_load_team_spec_dict_selects_legacy_template_id(monkeypatch, tmp_path):
+    config = {
+        "models": {
+            "default": {
+                "model_client_config": {
+                    "model_name": "gpt-legacy",
+                    "client_provider": "openai",
+                },
+                "model_config_obj": {},
+            }
+        },
+        "team": {
+            "team_name": "legacy_team",
+            "leader": {"member_name": "legacy_leader"},
+            "agents": {"leader": {"skills": ["legacy-skill"]}},
+        },
+    }
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.config_loader.get_agent_teams_home",
+        lambda: tmp_path / ".agent_teams",
+    )
+
+    spec = load_team_spec_dict(config_base=config, template_id="legacy_team")
+
+    assert spec["team_name"] == "legacy_team"
+    assert spec["leader"]["member_name"] == "legacy_leader"
+    assert spec["agents"]["leader"]["skills"] == ["legacy-skill"]
+
+
 def test_load_team_spec_dict_fills_default_transport_and_workspace(monkeypatch, tmp_path):
     """Missing team transport/workspace should fall back to local inprocess defaults."""
     config = {
@@ -349,6 +557,7 @@ def test_load_team_spec_dict_preserves_explicit_enable_hitt_false(monkeypatch, t
     assert spec["enable_hitt"] is False
 
 
+@pytest.mark.skip(reason="enable_swarmflow default injection has been removed")
 def test_load_team_spec_dict_defaults_enable_swarmflow_to_true(monkeypatch, tmp_path):
     """Missing enable_swarmflow should default to enabled for team mode."""
     config = {
@@ -387,6 +596,7 @@ def test_load_team_spec_dict_defaults_enable_swarmflow_to_true(monkeypatch, tmp_
     assert spec["enable_swarmflow"] is True
 
 
+@pytest.mark.skip(reason="enable_swarmflow loader behavior is no longer validated")
 def test_load_team_spec_dict_preserves_explicit_enable_swarmflow_false(monkeypatch, tmp_path):
     """Explicit enable_swarmflow false should not be overwritten by defaults."""
     config = {

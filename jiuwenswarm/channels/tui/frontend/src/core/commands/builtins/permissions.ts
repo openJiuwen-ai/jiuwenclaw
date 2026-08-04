@@ -5,6 +5,19 @@ const VALID_LEVELS = new Set(["allow", "ask", "deny"]);
 
 const RULE_MATCH_RE = /^(\S+?)\((.+)\)$/;
 
+// 无空格长 token（如复杂正则 pattern）按固定宽度硬切分，避免 wrapPlainText 整体截断。
+const PATTERN_WRAP_WIDTH = 76;
+const PATTERN_CONT_INDENT = "    ";
+
+function wrapLongToken(text: string, width: number, indent: string): string[] {
+  if (!text) return [];
+  const lines: string[] = [];
+  for (let i = 0; i < text.length; i += width) {
+    lines.push(indent + text.slice(i, i + width));
+  }
+  return lines;
+}
+
 // ---------------------------------------------------------------------------
 // Type helpers
 // ---------------------------------------------------------------------------
@@ -336,17 +349,29 @@ async function manageRule(
   ctx: CommandCtx,
   entry: RuleEntry,
 ): Promise<"reload" | "exit" | null> {
-  // 先在聊天区域显示完整规则信息，使用 meta.items 让每行用不同颜色
-  ctx.addItem(
-    makeItem(ctx.sessionId, "info", "规则详情", "🔒", {
-      items: [
-        { label: "规则 ID", value: entry.key },
-        { label: "工具", value: entry.tools },
-        { label: "Pattern", value: entry.pattern },
-        { label: "动作", value: entry.action },
-      ],
-    }),
+  // 规则详情拼进 question（问询标题），固定渲染在选项列表上方，不随焦点跳动；
+  // 且仍属问询 UI 的一部分，选返回/Esc 后随之消失，不再 addItem 进聊天流残留。
+  // pattern 多为无空格长串，wrapPlainText 会整体截断，这里先按可用宽度切分多行。
+  const PATTERN_PREFIX = "  Pattern: ";
+  const chunks = wrapLongToken(
+    entry.pattern,
+    PATTERN_WRAP_WIDTH - PATTERN_PREFIX.length,
+    PATTERN_CONT_INDENT,
   );
+  const questionLines: string[] = [
+    `当前: ${entry.action}`,
+    `  工具: ${entry.tools}`,
+  ];
+  if (chunks.length === 0) {
+    questionLines.push(PATTERN_PREFIX);
+  } else {
+    questionLines.push(PATTERN_PREFIX + chunks[0].slice(PATTERN_CONT_INDENT.length));
+    for (let i = 1; i < chunks.length; i++) {
+      questionLines.push(chunks[i]);
+    }
+  }
+  questionLines.push("请选择操作:");
+  const question = questionLines.join("\n");
 
   const options = [
     { label: "移到 ALLOW", description: "自动允许匹配此 pattern 的请求" },
@@ -356,7 +381,7 @@ async function manageRule(
     { label: "返回", description: "返回列表" },
   ];
 
-  const selected = await pickOne(ctx, `规则: ${entry.key}`, `当前: ${entry.action}`, options, "perm_rule_action");
+  const selected = await pickOne(ctx, `规则: ${entry.key}`, question, options, "perm_rule_action");
   if (!selected || selected === "返回") return null;
 
   if (selected.startsWith("移到 ")) {

@@ -147,8 +147,9 @@ def build_permission_rail(
             Instead of replacing the entire ``permissions`` section with the
             in-memory snapshot (which may contain stale entries that were
             already deleted from config.yaml), we first re-read the current
-            on-disk permissions, then merge only the *approval_overrides*
-            and *external_directory* deltas from ``permissions`` into it.
+            on-disk permissions, then merge only the *approval_overrides*、
+            *file_guard*（及过渡期 *external_directory*）deltas from
+            ``permissions`` into it.
             This prevents re-creating tool-level entries (e.g. ``bash: ask``)
             that the user has already removed via the webui.
             """
@@ -164,13 +165,17 @@ def build_permission_rail(
                 if not isinstance(on_disk_perms, dict):
                     on_disk_perms = {}
 
-                # Only overlay approval_overrides & external_directory;
+                # Overlay path-related deltas + approval_overrides;
                 # keep on-disk tools/defaults/rules to avoid restoring
                 # entries the user already deleted via webui.
                 merged = dict(on_disk_perms)
                 overrides_new = permissions.get("approval_overrides")
                 if overrides_new is not None:
                     merged["approval_overrides"] = overrides_new
+                # 路径信任写 file_guard.paths（agent-core §5.5.6）；过渡期仍接受旧 external_directory
+                fg_new = permissions.get("file_guard")
+                if fg_new is not None:
+                    merged["file_guard"] = fg_new
                 ext_dir_new = permissions.get("external_directory")
                 if ext_dir_new is not None:
                     merged["external_directory"] = ext_dir_new
@@ -290,6 +295,21 @@ def build_permission_rail(
             )
 
             perm_ctx = TOOL_PERMISSION_CONTEXT.get()
+
+            # issue #1976: ask_user has its own dedicated interrupt rail. The
+            # permission rail intercepts *every* tool, so on resume it grabs the
+            # ask_user answer (keyed by tool_call_id) as its own user_input,
+            # fails to parse it as a ConfirmPayload, and re-raises a permission
+            # interrupt that swallows the answer — the option card then re-pops
+            # forever. Bypass the permission rail for ask_user so the ask_user
+            # rail's answer reaches the model. The digital-avatar scene below
+            # intentionally blocks interactive tools, so exclude it here.
+            if inp.normalized_tool_name == "ask_user" and (
+                perm_ctx is None
+                or getattr(perm_ctx, "scene", None) != "group_digital_avatar"
+            ):
+                return ("approve",)
+
             if perm_ctx is None:
                 return None
 
@@ -652,6 +672,9 @@ def _build_multi_questions(questions_data: list) -> list:
     questions = []
     for q in questions_data:
         raw_options = q.get("options", [])
+        # Non-array options (e.g. "a,b") must not be iterated as characters (#2331).
+        if not isinstance(raw_options, list):
+            raw_options = []
         if raw_options:
             options = [_normalize_question_option(opt) for opt in raw_options if isinstance(opt, dict)]
             options.append({"label": "Other", "description": "Custom input"})
@@ -659,7 +682,7 @@ def _build_multi_questions(questions_data: list) -> list:
             options = []
         question_payload = {
             "question": q["question"],
-            "header": q["header"],
+            "header": q.get("header") or "Question",
             "options": options,
             "multi_select": q.get("multi_select", False),
         }
@@ -697,6 +720,9 @@ def _normalize_question_option(option: dict[str, Any]) -> dict[str, Any]:
     value = option.get("value")
     if isinstance(value, str) and value:
         normalized["value"] = value
+    preview = option.get("preview")
+    if isinstance(preview, str) and preview.strip():
+        normalized["preview"] = preview
     return normalized
 
 

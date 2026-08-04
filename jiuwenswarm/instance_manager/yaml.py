@@ -219,11 +219,39 @@ def load_instances_yaml() -> dict:
 
 
 def save_instances_yaml(data: dict) -> None:
-    """Save instances.yaml file."""
+    """Save instances.yaml file atomically.
+
+    Writes to a sibling temp file then ``os.replace`` swaps it into place.
+    This avoids a partially-written (corrupt) instances.yaml if the process
+    is interrupted mid-write, and narrows the read-modify-write race window
+    when two named instances start concurrently and both call
+    ``update_instances_yaml``: a reader can never observe a half-written
+    file. (Interleaved writes from two concurrent updaters can still lose
+    one update — that's guarded per-instance by ``InstanceLock``; this
+    function guarantees the file is never left corrupted.)
+    """
+    import os
+    import tempfile
+
     path = get_instances_yaml_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, 'w', encoding='utf-8') as f:
-        yaml.safe_dump(data, f, default_flow_style=False, allow_unicode=True)
+
+    # Write to a temp file in the SAME directory (so os.replace is atomic
+    # on POSIX and a same-volume rename on Windows).
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=".instances.", suffix=".tmp", dir=str(path.parent)
+    )
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            yaml.safe_dump(data, f, default_flow_style=False, allow_unicode=True)
+        os.replace(tmp_name, path)
+    except Exception:
+        # Clean up the orphan temp file on any failure; never leave it behind.
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def create_instances_yaml_template() -> Path:

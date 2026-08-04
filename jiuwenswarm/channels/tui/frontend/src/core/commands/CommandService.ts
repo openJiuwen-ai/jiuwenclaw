@@ -133,32 +133,9 @@ export class CommandService {
     const parsed = parseSlashCommand(raw.trim(), this.getAll(true));
     const command = parsed.command;
     if (!command) {
-      // /<skill> <query> shorthand: check if the unknown name matches an installed skill.
-      const skillName = parsed.name;
-      if (skillName && this.installedSkills.some((s) => s.name.toLowerCase() === skillName.toLowerCase())) {
-        const skillsCommand = this.resolve("skills");
-        const useSubCommand = skillsCommand?.subCommands?.find((s) => s.name === "use");
-        if (useSubCommand) {
-          // parsed.args contains the full remainder starting with the skill name token
-          // (e.g. for `/pdf foo bar`, parsed.args = "pdf foo bar").  Strip the leading
-          // skill-name word so the "use" action receives only the user's query.
-          const query = parsed.args
-            .replace(new RegExp(`^${skillName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*`, "i"), "")
-            .trim();
-          if (!query) {
-            const message = "Usage: /<skill-name> <query>"
-            ctx.addItem(makeItem(ctx.sessionId, "error", message));
-            return;
-          }
-          try {
-            await useSubCommand.action(ctx, `${skillName}, ${query}`);
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            ctx.addItem(makeItem(ctx.sessionId, "error", message));
-          }
-          return;
-        }
-      }
+      // 注：/<skill> 已在 app-screen.handleSubmit 的行首分流里落到普通消息分支
+      //（content 原样发送 + 提取 skills_to_use），不再改写成 /skills use。
+      // 能走到这里的说明第一个 token 既非注册命令也非已装 skill → 未知命令。
       ctx.addItem(makeItem(ctx.sessionId, "error", `Unknown command: /${parsed.name || ""}`));
       return;
     }

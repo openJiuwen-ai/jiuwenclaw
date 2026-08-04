@@ -1,11 +1,21 @@
 import { webClient } from '../services/webClient';
 import type { Message } from '../types';
 import type {
+  HumanShareCommand,
   TeamTask,
   TeamMemberExecutionEvent,
   TeamTaskStatus,
 } from '../stores/sessionStore';
 import { normalizeFinalContent } from '../utils/finalContent';
+import {
+  findOverlappingFileExecutionEvent,
+  mergeFileDownloadItems,
+} from '../utils/fileDownloadDedup';
+import {
+  createTaskProgressBaseline,
+  registerConfirmedTaskCreation,
+  type TaskProgressBaseline,
+} from './teamTaskProgressBaseline';
 
 interface TeamMember {
   id: string;
@@ -29,6 +39,12 @@ interface TeamTaskEvent {
   team_name?: string;
   title?: string;
   content?: string;
+  // Truncation observability flags — kept aligned with TeamTaskEvent in
+  // stores/sessionStore.ts and components/teamArea/shared.tsx.
+  title_truncated?: boolean;
+  title_original_size?: number;
+  content_truncated?: boolean;
+  content_original_size?: number;
   updated_at?: number | string | null;
 }
 
@@ -38,13 +54,23 @@ export interface TeamHistoryPanelState {
   taskEvents: TeamTaskEvent[];
   executionEvents: TeamMemberExecutionEvent[];
   messages: Message[];
+  humanShareCommands: HumanShareCommand[];
+  taskProgressBaseline: TaskProgressBaseline;
+}
+
+interface TeamHistoryGetResponse {
+  records: Record<string, unknown>[];
+  session_id: string;
+  next_cursor?: number | string | null;
+  has_more?: boolean;
 }
 
 const TEAM_TASK_STATUSES = new Set<TeamTaskStatus>([
   'pending',
   'blocked',
-  'claimed',
-  'plan_approved',
+  'planning',
+  'in_progress',
+  'in_review',
   'completed',
   'cancelled',
 ]);
@@ -161,14 +187,10 @@ function normalizeTaskStatusWithFallback(
     : fallback;
 }
 
-function statusFromTaskEvent(type: string, status: unknown): TeamTaskStatus {
-  const normalized = normalizeTaskStatus(status);
-  if (type === 'team.task.claimed') return normalized === 'pending' ? 'claimed' : normalized;
-  if (type === 'team.task.completed') return normalized === 'pending' ? 'completed' : normalized;
-  if (type === 'team.task.cancelled') return normalized === 'pending' ? 'cancelled' : normalized;
-  if (type === 'team.task.unblocked') return normalized;
-  return normalized;
-}
+// Task status is resolved server-side (swarm layer) and carried on the event,
+// so restore reads it directly instead of re-deriving it from the event type.
+// Records persisted before the convergence may lack a status; those fall back
+// to 'pending' via normalizeTaskStatus.
 
 function shouldKeepMember(memberId: string): boolean {
   return Boolean(memberId) && memberId !== 'user' && memberId !== 'team_leader';
@@ -320,8 +342,10 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
   const taskEvents = new Map<string, TeamTaskEvent>();
   const tasks = new Map<string, TeamTask>();
   const executionEvents = new Map<string, TeamMemberExecutionEvent>();
+  const humanShareCommands = new Map<string, HumanShareCommand>();
   const messages: Message[] = [];
   const shutdownMembers = new Set<string>();
+  let taskProgressBaseline = createTaskProgressBaseline();
   let hasSeenMember = false;
 
   const addMember = (memberId: string, timestamp: number) => {
@@ -352,13 +376,53 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
     members.delete(memberId);
   };
 
+  const upsertHumanShareCommand = (
+    memberName: string,
+    patch: Partial<HumanShareCommand>,
+    timestamp: number
+  ) => {
+    if (!memberName) {
+      return;
+    }
+    const existing = humanShareCommands.get(memberName);
+    const teamName = patch.teamName || existing?.teamName || '';
+    const sessionRef =
+      patch.sessionRef ||
+      existing?.sessionRef ||
+      (teamName ? `team_${teamName}_session_${sessionId}` : '');
+    humanShareCommands.set(memberName, {
+      memberName,
+      displayName: patch.displayName || existing?.displayName,
+      sessionId,
+      teamName,
+      sessionRef,
+      joinCommand:
+        patch.joinCommand ||
+        existing?.joinCommand ||
+        (sessionRef ? `/join ${sessionRef} as ${memberName}` : ''),
+      exitCommand:
+        patch.exitCommand ||
+        existing?.exitCommand ||
+        (sessionRef ? `/exit ${sessionRef}` : ''),
+      status:
+        patch.status === 'pending' && existing?.status && existing.status !== 'pending'
+          ? existing.status
+          : patch.status || existing?.status || 'pending',
+      sourceChannel: patch.sourceChannel || existing?.sourceChannel,
+      userId: patch.userId || existing?.userId,
+      updatedAt: Math.max(existing?.updatedAt || 0, timestamp),
+    });
+  };
+
   const upsertTask = (
     rawTask: Record<string, unknown>,
     timestamp: number,
     fallbackStatus: TeamTaskStatus,
     allowCreate = true
   ) => {
-    const taskId = pickString(rawTask, ['task_id', 'id']);
+    // Card identity is the DB `task_id` only. Never fall back to LLM `id` —
+    // that mismatch is what produced duplicate cards historically.
+    const taskId = pickString(rawTask, ['task_id']);
     if (!taskId) {
       return;
     }
@@ -392,10 +456,29 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
       timestamp: Math.max(existing?.timestamp || 0, nextTimestamp),
       skills: skills || existing?.skills,
       files: files || existing?.files,
+      // Truncation flags: read raw with explicit guards so a status-only
+      // record (no flags) falls back to `existing?` — never resets to false.
+      // Mirrors the title/content `|| existing?` pattern above.
+      title_truncated:
+        rawTask.title_truncated === true ? true : existing?.title_truncated,
+      title_original_size:
+        typeof rawTask.title_original_size === 'number' &&
+        Number.isFinite(rawTask.title_original_size)
+          ? rawTask.title_original_size
+          : existing?.title_original_size,
+      content_truncated:
+        rawTask.content_truncated === true ? true : existing?.content_truncated,
+      content_original_size:
+        typeof rawTask.content_original_size === 'number' &&
+        Number.isFinite(rawTask.content_original_size)
+          ? rawTask.content_original_size
+          : existing?.content_original_size,
     });
     addMember(assignee, timestamp);
   };
 
+  // Member lifecycle from tool_call only. Task cards are NEVER built from
+  // tool_call arguments (LLM `id` like bubble-sort-task ≠ DB task_id).
   const applyToolInput = (
     name: string,
     args: Record<string, unknown>,
@@ -410,77 +493,33 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
       const spawnedMemberId = pickString(args, ['member_name', 'member_id', 'name']) || memberId;
       shutdownMembers.delete(spawnedMemberId);
       addMember(spawnedMemberId, timestamp);
-      return;
-    }
-    if (name === 'create_task') {
-      if (Array.isArray(args.tasks)) {
-        args.tasks.forEach((item) => {
-          if (isRecord(item)) {
-            upsertTask(item, timestamp, 'pending');
-          }
-        });
-        return;
-      }
-      upsertTask(args, timestamp, 'pending');
-      return;
-    }
-    if (name === 'update_task') {
-      upsertTask(args, timestamp, 'pending', false);
-      return;
-    }
-    if (name === 'claim_task') {
-      const task = { ...args };
-      if (!task.status) {
-        task.status = 'claimed';
-      }
-      if (!pickString(task, ['assignee', 'member_id', 'claimed_by', 'claimedBy']) && memberId) {
-        task.member_id = memberId;
-      }
-      upsertTask(task, timestamp, 'claimed', false);
     }
   };
 
+  // Tool *results* may carry the DB task_id + title (create_task brief()).
+  // Old history `team.task` events often have no title/content; without this
+  // path (and when team.snapshot is empty because the monitor is down) the
+  // board would only show UUID placeholder cards. Never read args.tasks —
+  // those carry the LLM `id`.
   const applyToolData = (
     name: string,
     data: Record<string, unknown>,
-    args: Record<string, unknown>,
+    _args: Record<string, unknown>,
     timestamp: number
   ) => {
-    if (name === 'view_task' && Array.isArray(data.tasks)) {
+    if (name !== 'create_task') {
+      return;
+    }
+    if (Array.isArray(data.tasks)) {
       data.tasks.forEach((item) => {
-        if (isRecord(item)) {
+        if (isRecord(item) && pickString(item, ['task_id'])) {
           upsertTask(item, timestamp, 'pending');
         }
       });
       return;
     }
-    if (name === 'view_task') {
-      upsertTask(data, timestamp, 'pending', false);
-      return;
-    }
-
-    if (name === 'create_task') {
-      if (Array.isArray(args.tasks)) {
-        args.tasks.forEach((item) => {
-          if (isRecord(item)) {
-            upsertTask(item, timestamp, 'pending');
-          }
-        });
-        return;
-      }
-      upsertTask({ ...args, ...data }, timestamp, 'pending');
-      return;
-    }
-
-    if (name === 'update_task' || name === 'claim_task') {
-      const merged = { ...args, ...data };
-      if (isRecord(data.status_change)) {
-        const nextStatus = pickString(data.status_change, ['to']);
-        if (nextStatus) {
-          merged.status = nextStatus;
-        }
-      }
-      upsertTask(merged, timestamp, name === 'claim_task' ? 'claimed' : 'pending', false);
+    if (pickString(data, ['task_id'])) {
+      upsertTask(data, timestamp, 'pending');
     }
   };
 
@@ -490,6 +529,25 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
     const timestamp = recordTimestamp(record);
     const eventType = typeof record.event_type === 'string' ? record.event_type : '';
     const recordSessionId = getRecordSessionId(record);
+    if (eventType === 'chat.final') {
+      const actionPayload = isRecord(record.event_payload)
+        ? { ...record, ...record.event_payload }
+        : record;
+      const memberAction = pickString(actionPayload, ['member_action']);
+      const actionMemberName = pickString(actionPayload, ['member_name']);
+      if (actionMemberName && (memberAction === 'joined' || memberAction === 'left')) {
+        upsertHumanShareCommand(
+          actionMemberName,
+          {
+            displayName: pickString(actionPayload, ['display_name']) || undefined,
+            status: memberAction,
+            sourceChannel: pickString(actionPayload, ['source_channel']) || undefined,
+            userId: pickString(actionPayload, ['user_id']) || undefined,
+          },
+          timestamp
+        );
+      }
+    }
     if (
       isTeamTeammateRecord(record) &&
       (!recordSessionId || recordSessionId === sessionId)
@@ -551,18 +609,25 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
                 size: typeof file.size === 'number' ? file.size : undefined,
                 mime_type: pickString(file, ['mime_type']) || undefined,
                 download_url: pickString(file, ['download_url']) || undefined,
+                path: pickString(file, ['path']) || undefined,
               }))
             : [];
           if (files.length > 0) {
-            const id = eventId('hist-file', record.id, memberId, timestamp, files.map((file) => file.name).join(','));
+            const existing = findOverlappingFileExecutionEvent(
+              Array.from(executionEvents.values()),
+              files,
+              (event) => event.member_id === memberId && event.kind === 'file'
+            );
+            const mergedFiles = mergeFileDownloadItems(existing?.files, files);
+            const id = existing?.id || eventId('hist-file', record.id, memberId, timestamp, files.map((file) => file.name).join(','));
             executionEvents.set(id, {
               id,
               member_id: memberId,
               kind: 'file',
               timestamp,
               title: '发送文件',
-              content: files.map((file) => file.name).join('\n'),
-              files,
+              content: mergedFiles.map((file) => file.name).join('\n'),
+              files: mergedFiles,
             });
           }
         }
@@ -620,6 +685,22 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
       if (!memberId) {
         continue;
       }
+      if (pickString(event, ['mode']) === 'human') {
+        const teamName = pickString(event, ['team_id']);
+        const sessionRef = teamName ? `team_${teamName}_session_${sessionId}` : '';
+        upsertHumanShareCommand(
+          memberId,
+          {
+            displayName: pickString(event, ['name']) || undefined,
+            teamName,
+            sessionRef,
+            joinCommand: sessionRef ? `/join ${sessionRef} as ${memberId}` : '',
+            exitCommand: sessionRef ? `/exit ${sessionRef}` : '',
+            status: 'pending',
+          },
+          eventTimestamp
+        );
+      }
       if (pickString(event, ['type']) === 'team.member.shutdown') {
         applyMemberShutdown(memberId);
         continue;
@@ -656,16 +737,24 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
       continue;
     }
 
-    const taskId = pickString(event, ['task_id', 'id']);
+    const taskId = pickString(event, ['task_id']);
     if (!taskId) {
       continue;
     }
     const type = pickString(event, ['type']);
-    const status = statusFromTaskEvent(type, event.status);
+    const status = normalizeTaskStatus(event.status);
     const assignee = pickString(event, ['assignee', 'member_id', 'claimed_by', 'claimedBy', 'from_member']);
     const title = pickString(event, ['title', 'name', 'description']);
     const content = pickString(event, ['content']);
     const teamId = pickString(event, ['team_id']);
+
+    if (type === 'team.task.created') {
+      taskProgressBaseline = registerConfirmedTaskCreation(
+        Array.from(tasks.values()),
+        taskProgressBaseline,
+        taskId
+      );
+    }
 
     taskEvents.set(taskId, {
       id: `hist-task-${taskId}-${timestamp}`,
@@ -691,6 +780,8 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
       taskEvents: [],
       executionEvents: [],
       messages: [],
+      humanShareCommands: [],
+      taskProgressBaseline: createTaskProgressBaseline(),
     };
   }
 
@@ -700,6 +791,8 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
     taskEvents: Array.from(taskEvents.values()),
     executionEvents: Array.from(executionEvents.values()),
     messages,
+    humanShareCommands: Array.from(humanShareCommands.values()),
+    taskProgressBaseline,
   };
 }
 
@@ -707,15 +800,134 @@ export function parseTeamHistoryPanelRecords(records: unknown[], sessionId: stri
   return collectTeamState(records.filter(isRecord), sessionId);
 }
 
+interface TeamSnapshotResponse {
+  tasks?: unknown;
+}
+
+function readSnapshotSize(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function snapshotItemToTask(item: Record<string, unknown>, fallbackTimestamp: number): TeamTask | null {
+  const taskId = pickString(item, ['task_id']);
+  if (!taskId) {
+    return null;
+  }
+  const title = pickString(item, ['title', 'name', 'description']);
+  const content = pickString(item, ['content']);
+  const status = normalizeTaskStatus(item.status);
+  const assignee = pickString(item, ['assignee', 'member_id', 'claimed_by', 'claimedBy']);
+  const teamId = pickString(item, ['team_id']);
+  const timestamp = taskTimestamp(item, fallbackTimestamp);
+  return {
+    task_id: taskId,
+    title: title || `任务 ${taskId}`,
+    content: content || undefined,
+    status,
+    assignee: assignee || undefined,
+    team_id: teamId || undefined,
+    timestamp,
+    skills: stringList(item.skills),
+    files: stringList(item.files),
+    title_truncated: item.title_truncated === true ? true : undefined,
+    title_original_size: readSnapshotSize(item.title_original_size),
+    content_truncated: item.content_truncated === true ? true : undefined,
+    content_original_size: readSnapshotSize(item.content_original_size),
+  };
+}
+
+/**
+ * Reconcile the restored task board against the live DB snapshot.
+ *
+ * History events alone can leave:
+ * - placeholder-body cards (`任务 <task_id>`) in the waiting column, or
+ * - orphan cards keyed by LLM `id` that were merged in from a prior live store.
+ *
+ * When `team.snapshot` returns tasks, it is the authoritative board (DB
+ * `task_id` + title/content + status): replace the list so wrong-id / stale
+ * waiting cards are refreshed to the correct ones. When the monitor is
+ * inactive (empty snapshot) or the RPC fails, keep the history-derived state.
+ */
+async function reconcileTasksFromSnapshot(
+  state: TeamHistoryPanelState,
+  sessionId: string,
+  signal?: AbortSignal
+): Promise<TeamHistoryPanelState> {
+  try {
+    const response = await webClient.request<TeamSnapshotResponse>(
+      'team.snapshot',
+      { session_id: sessionId },
+      { signal, timeoutMs: 5000 }
+    );
+    const snapshotTasks = Array.isArray(response?.tasks) ? response.tasks : [];
+    if (snapshotTasks.length === 0) {
+      return state;
+    }
+
+    const existingById = new Map(state.tasks.map((task) => [task.task_id, task]));
+    const now = Date.now();
+    const tasks: TeamTask[] = [];
+    for (const item of snapshotTasks) {
+      if (!isRecord(item)) {
+        continue;
+      }
+      const fromSnap = snapshotItemToTask(item, now);
+      if (!fromSnap) {
+        continue;
+      }
+      const existing = existingById.get(fromSnap.task_id);
+      // Snapshot wins for identity/body/status; keep history-only extras
+      // (skills/files) when the snapshot omits them.
+      tasks.push({
+        ...fromSnap,
+        skills: fromSnap.skills || existing?.skills,
+        files: fromSnap.files || existing?.files,
+        timestamp: Math.max(existing?.timestamp || 0, fromSnap.timestamp || 0),
+      });
+    }
+    return { ...state, tasks };
+  } catch {
+    return state;
+  }
+}
+
 export async function loadTeamHistoryPanelState(
   sessionId: string,
   signal?: AbortSignal
 ): Promise<TeamHistoryPanelState> {
-  const result = await webClient.request<{ records: Record<string, unknown>[]; session_id: string }>(
-    'team.history.get',
-    { session_id: sessionId },
-    { signal, timeoutMs: 30_000 }
-  );
-  const records = Array.isArray(result?.records) ? result.records : [];
-  return parseTeamHistoryPanelRecords(records, sessionId);
+  const records: Record<string, unknown>[] = [];
+  let cursor: number | string | null | undefined = 0;
+  let hasMore = true;
+  let guard = 0;
+
+  while (hasMore && guard < 10_000) {
+    guard += 1;
+    const result: TeamHistoryGetResponse = await webClient.request<TeamHistoryGetResponse>(
+      'team.history.get',
+      {
+        session_id: sessionId,
+        cursor,
+        limit: 500,
+        max_bytes: 1024 * 1024,
+      },
+      { signal, timeoutMs: 30_000 }
+    );
+    if (Array.isArray(result?.records)) {
+      records.push(...result.records);
+    }
+    hasMore = Boolean(result?.has_more);
+    const nextCursor: number | string | null | undefined = result?.next_cursor;
+    if (!hasMore || nextCursor === undefined || nextCursor === null || nextCursor === cursor) {
+      break;
+    }
+    cursor = nextCursor;
+  }
+
+  const state = parseTeamHistoryPanelRecords(records, sessionId);
+  // Prefer live DB snapshot as the authoritative board when the monitor is
+  // still up — refreshes placeholder / wrong-id waiting cards to real
+  // task_id + body. When the monitor is down (empty snapshot), keep the
+  // history-event-derived board. Runs only on this async path so the sync
+  // export path (shareImageExport) stays side-effect free.
+  return reconcileTasksFromSnapshot(state, sessionId, signal);
 }

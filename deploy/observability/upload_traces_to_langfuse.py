@@ -49,7 +49,14 @@ from pathlib import Path
 
 _logger = logging.getLogger(__name__)
 
-_COLLECTOR = "http://localhost:4318/v1/traces"
+# NOTE: use 127.0.0.1, not "localhost". On macOS, getaddrinfo("localhost")
+# returns IPv6 ::1 first and Python's socket.create_connection stops at the
+# first address whose TCP handshake completes. Docker Desktop's IPv6 loopback
+# port-forward accepts the connection but cannot relay it to the container,
+# answering 502 Bad Gateway with an empty body — so every POST fails. The
+# IPv4 path (127.0.0.1) works. curl avoids this via Happy Eyeballs; Python does
+# not fall back once ::1 connects. See deploy/observability/README.md.
+_COLLECTOR = "http://127.0.0.1:4318/v1/traces"
 
 
 def _default_traces_dir() -> str:

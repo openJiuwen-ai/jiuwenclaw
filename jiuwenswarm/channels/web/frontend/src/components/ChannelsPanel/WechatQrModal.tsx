@@ -43,7 +43,7 @@ export function WechatQrModal({ open, onClose, loginUi }: WechatQrModalProps) {
                 </div>
               ) : null}
               {loginUi.error ? (
-                <div className="rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+                <div className="rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
                   {loginUi.error}
                 </div>
               ) : null}
@@ -61,7 +61,7 @@ export function WechatQrModal({ open, onClose, loginUi }: WechatQrModalProps) {
                   <img
                     src={loginUi.qr.value}
                     alt="WeChat login QR"
-                    className="max-w-[240px] max-h-[240px] w-full h-auto rounded-lg border border-border bg-white p-2 object-contain"
+                    className="max-w-[240px] max-h-[240px] w-full h-auto rounded-lg border border-border bg-card p-2 object-contain"
                   />
                 </div>
               ) : null}
@@ -70,7 +70,7 @@ export function WechatQrModal({ open, onClose, loginUi }: WechatQrModalProps) {
                   {isWeixinHostedQrPageUrl(loginUi.qr.value) ? (
                     <>
                       <p className="text-xs text-text-muted">{t('channels.wechatLogin.qrHostedPageHint')}</p>
-                      <div className="flex justify-center rounded-lg border border-border bg-white p-3">
+                      <div className="flex justify-center rounded-lg border border-border bg-card p-3">
                         <QRCodeSVG
                           value={loginUi.qr.value}
                           size={220}
@@ -84,7 +84,7 @@ export function WechatQrModal({ open, onClose, loginUi }: WechatQrModalProps) {
                         href={loginUi.qr.value}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="text-center text-sm text-primary underline decoration-primary/40 underline-offset-2 hover:decoration-primary"
+                        className="text-center text-sm text-accent underline decoration-accent/40 underline-offset-2 hover:decoration-accent"
                       >
                         {t('channels.wechatLogin.openQrInNewTab')}
                       </a>
@@ -95,14 +95,14 @@ export function WechatQrModal({ open, onClose, loginUi }: WechatQrModalProps) {
                         src={loginUi.qr.value}
                         alt="WeChat login QR"
                         referrerPolicy="no-referrer"
-                        className="max-w-[240px] max-h-[240px] w-full h-auto rounded-lg border border-border bg-white p-2 object-contain"
+                        className="max-w-[240px] max-h-[240px] w-full h-auto rounded-lg border border-border bg-card p-2 object-contain"
                       />
                     </div>
                   )}
                 </div>
               ) : null}
               {loginUi.qr && loginUi.qr.kind === 'encode' ? (
-                <div className="flex justify-center rounded-lg border border-border bg-white p-3">
+                <div className="flex justify-center rounded-lg border border-border bg-card p-3">
                   <QRCodeSVG
                     value={loginUi.qr.value}
                     size={220}
@@ -122,7 +122,7 @@ export function WechatQrModal({ open, onClose, loginUi }: WechatQrModalProps) {
                 </div>
               ) : null}
               {loginUi.phase === 'success' ? (
-                <div className="rounded-md border border-[var(--border-ok)] bg-ok-subtle px-3 py-2 text-sm text-ok">
+                <div className="rounded-md border border-[var(--color-border-success)] bg-ok-subtle px-3 py-2 text-sm text-ok">
                   {loginUi.credentials_source === 'local_file'
                     ? t('channels.wechatLogin.savePromptFromFile')
                     : t('channels.wechatLogin.savePrompt')}

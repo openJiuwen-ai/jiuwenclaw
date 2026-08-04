@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from shared.rich_compat import BarColumn, Console, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
+from shared.tags import normalize_tags
 
 
 console = Console()
@@ -23,6 +24,7 @@ class ScannedItem:
     stars: int = 0
     is_official: bool = False
     author: str = ""
+    tags: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -36,6 +38,7 @@ class ScannedItem:
             "stars": self.stars,
             "is_official": self.is_official,
             "author": self.author,
+            "tags": list(normalize_tags(self.tags)),
         }
 
 

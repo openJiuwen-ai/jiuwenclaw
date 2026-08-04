@@ -41,7 +41,6 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
     setLoadingPackages,
     setActivatingPackage,
     setDeactivatingPackage,
-    setExtensionReady,
   } = useHarnessStore();
 
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -187,7 +186,7 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
         setActivateSuccess(t('harnessPackage.activateSuccess'));
 
         // Update extensionReady for the activated package
-        setExtensionReady({
+        useHarnessStore.getState().setExtensionReady(sessionId, {
           extensionName: payload.extension_name,
           runtimePath: payload.runtime_path,
           configPath: payload.config_path,
@@ -222,7 +221,7 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
       }
 
       setDeactivateSuccess(t('harnessPackage.allDeactivated'));
-      setExtensionReady(null);
+      useHarnessStore.getState().setExtensionReady(sessionId, null);
       await fetchPackages();
     } catch (err) {
       console.error('Failed to deactivate all packages:', err);
@@ -255,7 +254,7 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
 
       // If switched to native, update state
       if (payload.switched_to_native) {
-        setExtensionReady(null);
+        useHarnessStore.getState().setExtensionReady(sessionId, null);
         setSelectedPackageId('native');
       }
 

@@ -66,6 +66,7 @@ class TestMode:
     @staticmethod
     def test_mode_values():
         """Test mode enum values."""
+        assert Mode.AGENT.value == "agent"
         assert Mode.AGENT_PLAN.value == "agent.plan"
         assert Mode.AGENT_FAST.value == "agent.fast"
         assert Mode.CODE_PLAN.value == "code.plan"
@@ -75,20 +76,24 @@ class TestMode:
 
     @staticmethod
     def test_mode_from_raw_legacy_compatibility():
-        """Test only new mode strings are accepted directly."""
-        assert Mode.from_raw("agent.plan") == Mode.AGENT_PLAN
-        assert Mode.from_raw("agent.fast") == Mode.AGENT_FAST
+        """Test legacy agent mode strings normalize to merged agent mode."""
+        assert Mode.from_raw("agent") == Mode.AGENT
+        assert Mode.from_raw("agent.plan") == Mode.AGENT
+        assert Mode.from_raw("agent.fast") == Mode.AGENT
+        assert Mode.from_raw("plan") == Mode.AGENT
+        assert Mode.from_raw("fast") == Mode.AGENT
         assert Mode.from_raw("code.plan") == Mode.CODE_PLAN
         assert Mode.from_raw("code.normal") == Mode.CODE_NORMAL
         assert Mode.from_raw("code.team") == Mode.CODE_TEAM
         assert Mode.from_raw("team") == Mode.TEAM
-        assert Mode.from_raw("invalid") == Mode.AGENT_PLAN
+        assert Mode.from_raw("invalid") == Mode.AGENT
 
     @staticmethod
     def test_mode_to_runtime_mode():
-        """Test runtime mode mapping returns new mode values."""
-        assert Mode.AGENT_PLAN.to_runtime_mode() == "agent.plan"
-        assert Mode.AGENT_FAST.to_runtime_mode() == "agent.fast"
+        """Test runtime mode mapping returns canonical mode values."""
+        assert Mode.AGENT.to_runtime_mode() == "agent"
+        assert Mode.AGENT_PLAN.to_runtime_mode() == "agent"
+        assert Mode.AGENT_FAST.to_runtime_mode() == "agent"
         assert Mode.CODE_PLAN.to_runtime_mode() == "code.plan"
         assert Mode.CODE_NORMAL.to_runtime_mode() == "code.normal"
         assert Mode.CODE_TEAM.to_runtime_mode() == "code.team"

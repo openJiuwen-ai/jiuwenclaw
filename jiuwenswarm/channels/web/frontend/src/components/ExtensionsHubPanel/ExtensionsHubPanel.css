@@ -10,8 +10,8 @@
   display: flex;
   align-items: center;
   padding: 12px 20px;
-  border-bottom: 1px solid var(--border);
-  background: var(--panel-strong);
+  border-bottom: 1px solid var(--color-border-default);
+  background: var(--color-surface-panel-strong);
 }
 
 .extensions-hub-panel__tabs {
@@ -29,24 +29,23 @@
   border-radius: var(--radius-md);
   border: 1px solid transparent;
   background: transparent;
-  color: var(--muted);
+  color: var(--color-text-secondary);
   cursor: pointer;
-  transition: all 0.2s;
 }
 
 .extensions-hub-panel__tab:hover {
-  color: var(--text);
-  background: var(--bg-hover);
+  color: var(--color-text-primary);
+  background: var(--color-surface-hover);
 }
 
 .extensions-hub-panel__tab--active {
-  color: var(--text-strong);
-  background: var(--accent-subtle);
-  border-color: var(--border-accent);
+  color: var(--color-text-strong);
+  background: var(--color-action-primary-subtle);
+  border-color: var(--color-border-accent);
 }
 
 .extensions-hub-panel__tab--active svg {
-  color: var(--accent);
+  color: var(--color-action-primary);
 }
 
 .extensions-hub-panel__content {

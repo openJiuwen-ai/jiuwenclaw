@@ -180,6 +180,32 @@ UDS-related env vars:
 | `JIUWENBOX_UDS_HOST_DIR` | `/tmp/jiuwenbox-sock` | Host directory bind-mounted by `run_docker.sh` to expose the socket. |
 | `JIUWENBOX_UDS_CONTAINER_DIR` | `/run/jiuwenbox` | Container-side mount point; must match the directory in `JIUWENBOX_LISTEN`'s socket path. |
 
+### API authentication (opt-in)
+
+When `JIUWENBOX_API_TOKEN` is set, every HTTP endpoint (including `/health`, `/api/v1/*`, and `/mcp`) requires:
+
+```http
+Authorization: Bearer <token>
+```
+
+Missing or invalid tokens return `401` with `{"error":"unauthorized"}`.
+
+```bash
+export JIUWENBOX_API_TOKEN="$(openssl rand -hex 32)"
+JIUWENBOX_API_TOKEN=$JIUWENBOX_API_TOKEN jiuwenbox-server
+
+export JIUWENBOX_API_TOKEN=$JIUWENBOX_API_TOKEN
+jiuwenbox health
+
+curl -H "Authorization: Bearer $JIUWENBOX_API_TOKEN" http://127.0.0.1:8321/health
+```
+
+| Variable / flag | Notes |
+| --- | --- |
+| `JIUWENBOX_API_TOKEN` | Shared by server and CLI; unset = auth disabled |
+| `jiuwenbox-server --api-token` | Launch flag; overrides env |
+| `jiuwenbox --api-token` | CLI flag; overrides env |
+
 ### Persisting the audit log (`--save-logs DIR`)
 
 **By default jiuwenbox writes no log files at all.** Audit events
@@ -572,7 +598,7 @@ Field reference:
 | `sandbox.preserve_file_sharing_mode` | `mount` | `mount` | Intrinsic files (`AGENT.md` etc.) and `project_dir` are bind-mounted, with `project_dir/config/config.yaml` auto-added to `deny_write`. Writing any other value is rejected. |
 | `sandbox.enabled` | bool | `false` | When true, agent rebuilds route tools through the sandbox provider; toggled by `/sandbox enable`. |
 | `sandbox.excluded_commands` | list[str] | `[]` | Shell globs matched against the **full command string**; a match makes that single call run locally instead of in the sandbox. |
-| `sandbox.files.allow` / `sandbox.files.deny` | list | `[]` | User-configured write policy. The effective set shown by `/sandbox status` is `auto_managed ∪ user_configured`; see [the `/sandbox` design doc](../../agent-core/docs/en/2.Development%20Guide/Sandbox%20and%20sandbox%20command.md). |
+| `sandbox.files.allow` / `sandbox.files.deny` | list | `[]` | User-configured write policy. The effective set shown by `/sandbox status` is `auto_managed ∪ user_configured`; see [the `/sandbox` command reference](../docs/en/SlashCommands.md). |
 
 ### Two typical deployment shapes
 
@@ -889,6 +915,7 @@ Global flags:
 | Flag | Default | Env var | Description |
 | --- | --- | --- | --- |
 | `--base-url` | `http://127.0.0.1:8321` | `JIUWENBOX_URL` | Server endpoint. Accepts `http://host:port` or `unix:///abs/socket/path` |
+| `--api-token` | _unset_ | `JIUWENBOX_API_TOKEN` | Bearer token; required when the server has auth enabled |
 | `--timeout` | `30` | `JIUWENBOX_TIMEOUT` | HTTP timeout seconds |
 | `--verbose / -v` | off | – | Debug logging on stderr |
 | `--no-color` | off | `NO_COLOR` | Disable ANSI colors on stderr |

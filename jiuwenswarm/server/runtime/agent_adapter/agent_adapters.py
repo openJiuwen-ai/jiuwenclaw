@@ -41,12 +41,14 @@ class AgentAdapter(Protocol):
         self,
         config_base: dict[str, Any] | None = None,
         env_overrides: dict[str, Any] | None = None,
+        target_session_id: str | None = None,
     ) -> None:
         """Hot-reload configuration without restarting the process.
 
         Args:
             config_base: Optional complete config snapshot; if provided, use it instead of reading local config.yaml.
             env_overrides: Optional environment variable overrides; only override keys present in the request.
+            target_session_id: Optional session id to limit session-scoped reload fan-out.
         """
         ...
 
@@ -78,6 +80,14 @@ class AgentAdapter(Protocol):
 
     async def handle_user_answer(self, request: AgentRequest) -> AgentResponse:
         """Handle user answer for evolution approval or permission approval."""
+        ...
+
+    async def handle_swarmflow_reply(self, request: AgentRequest) -> AgentResponse:
+        """Handle a person's reply to a pending swarmflow human-session turn.
+
+        Builds a HumanAgentMessage(target="swarmflow:<run_id>:<corr>") and
+        delivers it via team_manager.interact (the agent-core thin route).
+        """
         ...
 
     async def handle_heartbeat(self, request: AgentRequest) -> AgentResponse:

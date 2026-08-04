@@ -12,7 +12,7 @@ CLI 工具：把 cron JSON 在「扁平结构」与「OpenClaw 嵌套结构」�
       "enabled": true,
       "cron_expr": "0 9 * * *",
       "timezone": "Asia/Shanghai",
-      "wake_offset_seconds": 300,
+      "wake_offset_seconds": 0,
       "description": "...",
       "targets": "web"
     }
@@ -117,8 +117,8 @@ def convert_cron_job_dict_to_flat(data: dict[str, Any]) -> dict[str, Any]:
     else:
         return data
 
-    # 你的偏好：不管 OpenClaw 里 wakeMode 是什么，转换到 jiuwenswarm 时都统一写成 60s
-    wake_offset_seconds = 300
+    # 你的偏好：不管 OpenClaw 里 wakeMode 是什么，转换到 jiuwenswarm 时都统一写成 0（不提前唤醒）
+    wake_offset_seconds = 0
 
     desc = str(data.get("description") or data.get("name") or "")
     payload = data.get("payload")

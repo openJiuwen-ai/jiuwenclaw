@@ -115,6 +115,7 @@ def _flush_stderr() -> None:
 
 _ENV_BASE_URL = "JIUWENBOX_URL"
 _ENV_TIMEOUT = "JIUWENBOX_TIMEOUT"
+_ENV_API_TOKEN_NAME = "JIUWENBOX_API_TOKEN"
 _DEFAULT_BASE_URL = "http://127.0.0.1:8321"
 _DEFAULT_TIMEOUT = 30.0
 _API_PREFIX = "/api/v1"
@@ -222,20 +223,31 @@ class _CliClient:
     ``cannot connect to unix:///tmp/jw.sock``) 仍可读。
     """
 
-    def __init__(self, base_url: str, timeout_seconds: float = _DEFAULT_TIMEOUT) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        timeout_seconds: float = _DEFAULT_TIMEOUT,
+        api_token: str | None = None,
+    ) -> None:
         cleaned = base_url.rstrip("/")
         self._base_url = cleaned
         self._timeout = timeout_seconds
+        client_headers: dict[str, str] = {}
+        if api_token:
+            client_headers["Authorization"] = f"Bearer {api_token}"
         uds_path = _split_uds_endpoint(cleaned)
         if uds_path is not None:
             self._client = httpx.Client(
                 transport=httpx.HTTPTransport(uds=uds_path),
                 base_url=_UDS_PLACEHOLDER_BASE_URL,
                 timeout=timeout_seconds,
+                headers=client_headers or None,
             )
         else:
             self._client = httpx.Client(
-                base_url=cleaned, timeout=timeout_seconds,
+                base_url=cleaned,
+                timeout=timeout_seconds,
+                headers=client_headers or None,
             )
 
     def __enter__(self) -> "_CliClient":
@@ -359,11 +371,9 @@ class _CliClient:
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         stdin: str | None = None,
-        capture_output: bool = True,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "command": command,
-            "capture_output": capture_output,
         }
         if job_id is not None:
             body["job_id"] = job_id
@@ -713,7 +723,6 @@ def cmd_sandbox_bg_exec(args: argparse.Namespace, client: _CliClient) -> Any:
         cwd=args.cwd,
         env=env,
         stdin=stdin_text,
-        capture_output=not args.no_capture,
     )
     if not result.get("started"):
         raise _CliError(result.get("error_message") or "background exec failed")
@@ -896,6 +905,14 @@ def _add_global_options(parser: argparse.ArgumentParser) -> None:
         help=f"HTTP client timeout seconds (env {_ENV_TIMEOUT}, default {int(_DEFAULT_TIMEOUT)})",
     )
     parser.add_argument(
+        "--api-token",
+        default=os.environ.get(_ENV_API_TOKEN_NAME),
+        help=(
+            f"Bearer token for API authentication (env {_ENV_API_TOKEN_NAME}; "
+            f"must match server-side {_ENV_API_TOKEN_NAME} when enabled)"
+        ),
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="enable debug logging on stderr",
@@ -956,7 +973,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--sandbox-id",
-        help="optional sandbox id (4-16 chars: lowercase letters, digits, -, _)",
+        help="optional sandbox id (4-40 chars: lowercase letters, digits, -, _)",
     )
     p.set_defaults(_handler=cmd_sandbox_create)
 
@@ -1025,12 +1042,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--job-id",
-        help="optional background job id (4-16 chars, [0-9a-z_-])",
-    )
-    p.add_argument(
-        "--no-capture",
-        action="store_true",
-        help="do not capture stdout/stderr",
+        help="optional background job id (4-40 chars, [0-9a-z_-])",
     )
     p.add_argument(
         "command", nargs="*",
@@ -1038,7 +1050,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.set_defaults(_handler=cmd_sandbox_bg_exec)
 
-    p = sandbox_subs.add_parser("bg-get", help="get background job status/output")
+    p = sandbox_subs.add_parser("bg-get", help="get background job status")
     _add_sandbox_id(p)
     p.add_argument("job_id", help="background job id")
     p.set_defaults(_handler=cmd_sandbox_bg_get)
@@ -1263,8 +1275,15 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("no command specified")
 
     base_url = args.base_url
+    api_token = getattr(args, "api_token", None)
+    if isinstance(api_token, str):
+        api_token = api_token.strip() or None
     try:
-        with _CliClient(base_url=base_url, timeout_seconds=args.timeout) as client:
+        with _CliClient(
+            base_url=base_url,
+            timeout_seconds=args.timeout,
+            api_token=api_token,
+        ) as client:
             try:
                 result = handler(args, client)
             except _CliError:

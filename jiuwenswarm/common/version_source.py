@@ -9,7 +9,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urljoin
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 from jiuwenswarm.common.version import __version__
@@ -50,6 +50,71 @@ def strip_prerelease_suffix(version: str) -> str:
     return normalized
 
 
+def release_sort_key(version: str) -> tuple[tuple[int, ...], int, tuple[int, ...]]:
+    """Total-order key so that newer versions sort higher.
+
+    Ordering rules:
+    - Base version compared numerically first (``0.2.3`` > ``0.2.2``).
+    - At the same base, a stable release ranks above any pre-release
+      (``0.2.3`` > ``0.2.3.beta1``).
+    - Among pre-releases at the same base, the pre-release type decides first:
+      dev < alpha < beta < rc < pre (``0.2.3.alpha2`` < ``0.2.3.beta1``).
+    - Within the same pre-release type, a larger number is newer
+      (``0.2.3.beta2`` > ``0.2.3.beta1``).
+    """
+    normalized = (version or "").strip().lstrip("vV")
+    base = strip_prerelease_suffix(normalized)
+    base_key = tuple(int(n) for n in re.findall(r"\d+", base)) or (0,)
+    is_pre = is_prerelease_version(normalized)
+    # Stable (5) outranks any pre-release at the same base.
+    pre_type_rank = 5 if not is_pre else _PRERELEASE_TYPE_ORDER.get(
+        _detect_prerelease_type(normalized), 0
+    )
+    pre_num: tuple[int, ...] = (0,)
+    if is_pre:
+        m = re.search(
+            r"(?:alpha|beta|rc|dev|pre|a|b)\D*(\d+)",
+            normalized,
+            re.IGNORECASE,
+        )
+        if m:
+            pre_num = (int(m.group(1)),)
+    return (base_key, pre_type_rank, pre_num)
+
+
+def _detect_prerelease_type(version: str) -> str:
+    """Return the lowercase pre-release type marker found in *version*.
+
+    Returns one of ``"dev"``, ``"alpha"``, ``"beta"``, ``"rc"``, ``"pre"``
+    or ``""`` when the single-letter forms ``a``/``b`` are used.
+    """
+    lowered = (version or "").lower()
+    for marker in ("dev", "alpha", "beta", "rc", "pre"):
+        if marker in lowered:
+            return marker
+    if re.search(r"(?<![a-z])a(?=\d|[.\-_])", lowered):
+        return "alpha"
+    if re.search(r"(?<![a-z])b(?=\d|[.\-_])", lowered):
+        return "beta"
+    return ""
+
+
+# Pre-release type ordering: dev < alpha < beta < rc < pre < stable.
+_PRERELEASE_TYPE_ORDER: dict[str, int] = {
+    "dev": 0,
+    "alpha": 1,
+    "beta": 2,
+    "rc": 3,
+    "pre": 4,
+    "": 0,
+}
+
+
+def _is_draft_entry(data: dict) -> bool:
+    """Return True when a release dict is an unpublished draft."""
+    return bool(data.get("draft"))
+
+
 def _is_prerelease_entry(data: dict) -> bool:
     """Return True when a release dict is a pre-release or draft."""
     return bool(
@@ -69,11 +134,19 @@ def _unwrap_list(raw: Any) -> list | None:
     if isinstance(raw, list):
         return raw
     if isinstance(raw, dict):
-        for key in ("data", "items", "releases", "results"):
+        for key in ("data", "items", "releases", "results", "value"):
             candidate = raw.get(key)
             if isinstance(candidate, list):
                 return candidate
     return None
+
+
+def _with_query_params(url: str, **params: str | int) -> str:
+    """Return *url* with query parameters added without dropping existing ones."""
+    parts = urlsplit(url)
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    query.update({key: str(value) for key, value in params.items()})
+    return urlunsplit(parts._replace(query=urlencode(query)))
 
 
 @dataclass
@@ -108,8 +181,82 @@ class VersionSource(ABC):
     @staticmethod
     def _clean_version(raw: str) -> str:
         cleaned = (raw or "").strip().lstrip("vV")
-        match = re.search(r"\d+(?:\.\d+)*", cleaned)
-        return match.group() if match else cleaned
+        # Match the full version including any pre-release suffix (e.g.
+        # "0.2.3.beta1") so beta releases keep their suffix for asset matching
+        # and version comparison.
+        match = re.search(
+            r"\d+(?:\.\d+)*(?:[.\-_]?(?:alpha|beta|rc|dev|pre|a|b)(?:\.?\d+)?)*",
+            cleaned,
+            re.IGNORECASE,
+        )
+        return match.group() if match else ""
+
+    @classmethod
+    def _best_version_from_texts(cls, values: list[str]) -> str:
+        versions = [cls._clean_version(value) for value in values]
+        versions = [version for version in versions if version]
+        if not versions:
+            return ""
+        return max(versions, key=release_sort_key)
+
+    @classmethod
+    def _best_version_from_release_data(cls, data: dict, assets_raw: list) -> str:
+        """Resolve a release version from tags, names, and asset filenames.
+
+        Some release APIs can omit or normalize the tag for pre-releases.  The
+        desktop installers still carry the canonical version in their filenames,
+        so include asset names when selecting the newest release.
+        """
+        candidates = [
+            str(data.get("tag_name") or ""),
+            str(data.get("tag") or ""),
+            str(data.get("version") or ""),
+            str(data.get("name") or ""),
+        ]
+        candidates.extend(
+            str(item.get("name") or "")
+            for item in assets_raw
+            if isinstance(item, dict)
+        )
+        return cls._best_version_from_texts(candidates)
+
+    def _fetch_newest_from_list(
+        self, list_url: str, headers: dict[str, str]
+    ) -> ReleaseInfo | None:
+        """Fetch the releases list and return the newest entry (incl. pre-releases).
+
+        Drafts are skipped; pre-releases are included so that beta channels are
+        detected.  Returns None when the list cannot be fetched or is empty.
+        """
+        try:
+            raw = self._fetch_json(list_url, headers)
+        except Exception as exc:
+            logger.warning(
+                "Failed to fetch releases list from %s (falling back to "
+                "/latest, which excludes pre-releases): %s",
+                list_url, exc,
+            )
+            return None
+        entries = _unwrap_list(raw)
+        if entries is None:
+            return None
+        best: ReleaseInfo | None = None
+        best_key: tuple = ()
+        for entry in entries:
+            if not isinstance(entry, dict) or _is_draft_entry(entry):
+                continue
+            release = self._parse_release(entry)
+            if release is None:
+                continue
+            key = release_sort_key(release.version)
+            if best is None or key > best_key:
+                best = release
+                best_key = key
+        return best
+
+    def _parse_release(self, data: dict) -> ReleaseInfo | None:
+        """Parse a single release dict.  Override in subclasses."""
+        raise NotImplementedError
 
     def _fetch_json(self, url: str, headers: dict[str, str] | None = None) -> Any:
         return json.loads(self._fetch_text(url, headers))
@@ -143,20 +290,34 @@ class GitHubReleasesSource(VersionSource):
         super().__init__(name=repo, timeout_seconds=timeout_seconds)
         self._api_url = api_url or GITHUB_API.format(owner=owner, repo=repo)
         self._token = token
+        # Derive the releases-list URL from the latest-release URL so that
+        # pre-releases are also discoverable (the /latest endpoint excludes them).
+        self._list_url = _with_query_params(
+            self._api_url.removesuffix("/latest"),
+            per_page=100,
+        )
 
     def fetch_latest(self) -> ReleaseInfo:
         headers = self._build_headers()
-        data = self._fetch_json(self._api_url, headers)
-        tag_name = str(data.get("tag_name") or "")
-        version = self._clean_version(tag_name)
-        if not version:
-            raise RuntimeError("GitHub release tag_name is missing or empty.")
+        release = self._fetch_newest_from_list(self._list_url, headers)
+        if release is not None:
+            return release
 
+        # Fallback to /latest (stable-only) when the list endpoint is unusable.
+        data = self._fetch_json(self._api_url, headers)
+        release = self._parse_release(data)
+        if release is None:
+            raise RuntimeError("GitHub release tag_name is missing or empty.")
+        return release
+
+    def _parse_release(self, data: dict) -> ReleaseInfo | None:
         published_at = str(data.get("published_at") or "")
         body = str(data.get("body") or "")
-        prerelease = bool(data.get("prerelease") or data.get("draft"))
-
+        prerelease = _is_prerelease_entry(data)
         assets_raw = data.get("assets") or []
+        version = self._best_version_from_release_data(data, assets_raw)
+        if not version:
+            return None
         assets = [
             ReleaseAsset(
                 name=str(item.get("name", "")),
@@ -166,7 +327,6 @@ class GitHubReleasesSource(VersionSource):
             for item in assets_raw
             if isinstance(item, dict) and item.get("name")
         ]
-
         return ReleaseInfo(
             version=version,
             release_notes=body,
@@ -199,75 +359,27 @@ class GitCodeReleasesSource(VersionSource):
         self._api_url = api_url or GITCODE_API.format(owner=owner, repo=repo)
         self._access_token = access_token
         # Derive the releases-list URL from the latest-release URL.
-        self._list_url = (
-            self._api_url.replace("/latest", "")
-            if "/latest" in self._api_url
-            else self._api_url
+        self._list_url = _with_query_params(
+            self._api_url.removesuffix("/latest"),
+            per_page=100,
         )
 
     def fetch_latest(self) -> ReleaseInfo:
         headers = self._build_headers()
-        data = self._fetch_json(self._api_url, headers)
+        release = self._fetch_newest_from_list(self._list_url, headers)
+        if release is not None:
+            return release
 
+        # Fallback to the /latest endpoint when the list endpoint is unusable.
+        data = self._fetch_json(self._api_url, headers)
         if not isinstance(data, dict):
             raise RuntimeError(f"Unexpected GitCode API response type: {type(data)}")
-
         release = self._parse_release(data)
         if release is None:
             raise RuntimeError("GitCode release tag_name is missing or empty.")
-
-        # If the /latest endpoint returned a pre-release, walk the releases list
-        # to find the newest stable release instead.
-        if release.prerelease:
-            try:
-                stable = self._fetch_latest_stable(headers)
-                if stable is not None:
-                    return stable
-            except Exception:
-                logger.warning("Failed to fetch latest stable release, using /latest result instead: %s",
-                    release.version)
-
         return release
 
-    def _fetch_latest_stable(self, headers: dict[str, str]) -> ReleaseInfo | None:
-        """Fetch the releases list, find the newest non-prerelease by version."""
-        raw = self._fetch_json(self._list_url, headers)
-
-        # Normalise wrapped responses (some APIs wrap lists in a dict)
-        entries = _unwrap_list(raw)
-        if entries is None:
-            return None
-
-        best: ReleaseInfo | None = None
-        best_key: tuple[int, ...] = ()
-
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            if _is_prerelease_entry(entry):
-                continue
-            release = self._parse_release(entry)
-            if release is None:
-                continue
-            key = self._version_key_for_cmp(release.version)
-            if best is None or key > best_key:
-                best = release
-                best_key = key
-
-        return best
-
-    @staticmethod
-    def _version_key_for_cmp(version: str) -> tuple[int, ...]:
-        numbers = re.findall(r"\d+", strip_prerelease_suffix(version))
-        return tuple(int(part) for part in numbers) or (0,)
-
-    @staticmethod
-    def _parse_release(data: dict) -> ReleaseInfo | None:
-        tag_name = str(data.get("tag_name") or "")
-        version = VersionSource._clean_version(tag_name)
-        if not version:
-            return None
-
+    def _parse_release(self, data: dict) -> ReleaseInfo | None:
         release_notes = str(data.get("body") or data.get("description") or "")
         published_at = str(
             data.get("published_at")
@@ -277,6 +389,9 @@ class GitCodeReleasesSource(VersionSource):
         prerelease = _is_prerelease_entry(data)
 
         assets_raw = data.get("assets") or []
+        version = VersionSource._best_version_from_release_data(data, assets_raw)
+        if not version:
+            return None
         assets = [
             ReleaseAsset(
                 name=str(item.get("name", "")),
@@ -345,10 +460,8 @@ class PyPIVersionSource(VersionSource):
         if not versions:
             raise RuntimeError("Could not parse any version from .whl filenames.")
 
-        # Prefer the latest *stable* version; fall back to pre-release if none exist
-        stable_versions = {v for v in versions if not is_prerelease_version(v)}
-        pool = stable_versions if stable_versions else versions
-        latest_version = max(pool, key=self._version_key)
+        # Pick the newest version overall, including pre-releases (beta channel).
+        latest_version = max(versions, key=release_sort_key)
         latest_whls = [e for e in whl_entries if latest_version in e.get("filename", "")]
         latest_whl = latest_whls[-1] if latest_whls else whl_entries[-1]
 
@@ -397,8 +510,3 @@ class PyPIVersionSource(VersionSource):
 
     def _resolve_url(self, url: str) -> str:
         return urljoin(self._api_url, url)
-
-    @staticmethod
-    def _version_key(version: str) -> tuple[int, ...]:
-        numbers = re.findall(r"\d+", version)
-        return tuple(int(part) for part in numbers) or (0,)

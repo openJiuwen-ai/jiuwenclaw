@@ -16,6 +16,8 @@ from jiuwenswarm.gateway.channel_manager.base import RobotMessageRouter, BaseCha
 from jiuwenswarm.gateway.channel_manager.im_platforms.dingtalk.dingtalk_file_service import DingTalkFileService
 from jiuwenswarm.common.schema.message import Message, ReqMethod
 from jiuwenswarm.common.utils import get_agent_workspace_dir
+from jiuwenswarm.gateway.routing.keys import DeliveryTarget
+from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +34,9 @@ class DingTalkConfig(BaseModel):
     send_file_allowed: bool = True  # 是否启用文件上传功能
     enable_file_download: bool = True  # 是否启用文件下载功能
     workspace_dir: str = ""  # 工作空间目录
+    # API 域名前缀（由 app_gateway 从 config.yaml 加载并兜底，此处不硬编码默认值）
+    api_base: str = ""  # 新版 v1.0 接口域名
+    oapi_base: str = ""  # 旧版 media 接口域名
 
 
 @dataclass
@@ -362,6 +367,8 @@ class DingTalkChannel(BaseChannel):
                 max_download_size=self.config.max_download_size,
                 download_timeout=self.config.download_timeout,
                 workspace_dir=workspace_dir,
+                api_base=self.config.api_base,
+                oapi_base=self.config.oapi_base,
             )
 
             self._initialize_stream_client()
@@ -450,7 +457,7 @@ class DingTalkChannel(BaseChannel):
 
     async def _request_new_token(self) -> str | None:
         """请求新的访问令牌"""
-        url = "https://api.dingtalk.com/v1.0/oauth2/accessToken"
+        url = f"{self.config.api_base}/v1.0/oauth2/accessToken"
         data = self._build_token_request_data()
 
         if not self._http:
@@ -525,9 +532,9 @@ class DingTalkChannel(BaseChannel):
     def _get_send_api_url(self, conversation_type: str) -> str:
         """根据会话类型获取发送API URL"""
         if conversation_type == "2":
-            return "https://api.dingtalk.com/v1.0/robot/groupMessages/send"
+            return f"{self.config.api_base}/v1.0/robot/groupMessages/send"
         else:
-            return "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend"
+            return f"{self.config.api_base}/v1.0/robot/oToMessages/batchSend"
 
     def _build_send_request(self, chat_id: str, content: str, conversation_type: str, open_conversation_id: str) -> \
     tuple[str, dict]:
@@ -558,12 +565,11 @@ class DingTalkChannel(BaseChannel):
         except Exception as e:
             logger.error(f"发送钉钉消息时出错: {e}")
 
-    async def send(self, msg: Message) -> None:
+    async def send(
+        self, msg: Message,
+        *, routing_target: RoutingTarget | None = None,
+    ) -> None:
         """通过钉钉发送消息"""
-        token = await self._get_access_token()
-        if not token:
-            return
-
         # 提取事件类型
         payload = msg.payload if isinstance(msg.payload, dict) else {}
         event_type = getattr(msg.event_type, "value", None) or payload.get("event_type") or ""
@@ -578,11 +584,18 @@ class DingTalkChannel(BaseChannel):
         if not content:
             logger.warning("钉钉发送: 在 msg.params 或 msg.payload 中未找到内容")
             return
+        if not content.strip():
+            logger.debug("钉钉发送: 跳过纯空白流式内容")
+            return
 
         # 提取聊天ID
         chat_id = self._extract_chat_id(msg)
         if not chat_id:
             logger.warning("钉钉发送: 在消息中未找到 chat_id 或 session_id")
+            return
+
+        token = await self._get_access_token()
+        if not token:
             return
 
         # 构建请求
@@ -1029,7 +1042,7 @@ class DingTalkChannel(BaseChannel):
         """发送媒体消息"""
         if request.conversation_type == "2":
             # 群聊
-            url = "https://api.dingtalk.com/v1.0/robot/groupMessages/send"
+            url = f"{self.config.api_base}/v1.0/robot/groupMessages/send"
             data = {
                 "robotCode": self.config.client_id,
                 "openConversationId": request.open_conversation_id,
@@ -1038,7 +1051,7 @@ class DingTalkChannel(BaseChannel):
             }
         else:
             # 私聊
-            url = "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend"
+            url = f"{self.config.api_base}/v1.0/robot/oToMessages/batchSend"
             data = {
                 "robotCode": self.config.client_id,
                 "userIds": [request.chat_id],

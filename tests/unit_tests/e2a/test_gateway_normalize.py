@@ -80,6 +80,33 @@ def test_e2a_to_agent_request_roundtrip():
     assert req.metadata == {"wecom_req_id": "abc"}
 
 
+def test_message_to_e2a_or_fallback_preserves_user_id():
+    msg = Message(
+        id="r-user",
+        type="req",
+        channel_id="tui",
+        session_id="s1",
+        params={"content": "hi"},
+        timestamp=time.time(),
+        ok=True,
+        req_method=ReqMethod.CHAT_SEND,
+        user_id="alice",
+    )
+    env = message_to_e2a_or_fallback(msg)
+    assert env.user_id == "alice"
+
+
+def test_e2a_from_agent_fields_user_id():
+    env = e2a_from_agent_fields(
+        request_id="r1",
+        channel_id="tui",
+        session_id="s1",
+        req_method=ReqMethod.CHAT_SEND,
+        user_id="bob",
+    )
+    assert env.user_id == "bob"
+
+
 def test_channel_context_for_channel_reply_strips_internal():
     env = e2a_from_agent_fields(
         request_id="x",

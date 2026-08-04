@@ -259,16 +259,15 @@ function StageSummaryList({
 
 export function HarnessProgressBar() {
     const { t } = useTranslation();
-    const {
-      stageResults,
-      stageDefinitions,
-      currentStage,
-      progressPercent,
-      extensionOrder,
-      extensionsByName,
-    } = useHarnessStore();
-    const { mode } = useSessionStore();
-    const { isProcessing } = useChatStore();
+    const activeSessionId = useChatStore((s) => s.activeSessionId);
+    const stageResults = useHarnessStore((s) => s.runtimes[activeSessionId ?? '']?.stageResults ?? []);
+    const stageDefinitions = useHarnessStore((s) => s.runtimes[activeSessionId ?? '']?.stageDefinitions ?? []);
+    const currentStage = useHarnessStore((s) => s.runtimes[activeSessionId ?? '']?.currentStage);
+    const progressPercent = useHarnessStore((s) => s.runtimes[activeSessionId ?? '']?.progressPercent ?? 0);
+    const extensionOrder = useHarnessStore((s) => s.runtimes[activeSessionId ?? '']?.extensionOrder ?? []);
+    const extensionsByName = useHarnessStore((s) => s.runtimes[activeSessionId ?? '']?.extensionsByName ?? {});
+    const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent');
+    const isProcessing = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.isProcessing ?? false);
     const [expanded, setExpanded] = useState(true);
 
     // Show when in auto_harness mode and:

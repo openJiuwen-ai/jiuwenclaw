@@ -14,6 +14,8 @@ from typing import Any, Callable
 
 from jiuwenswarm.gateway.channel_manager.base import BaseChannel, ChannelMetadata, RobotMessageRouter
 from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
+from jiuwenswarm.gateway.routing.keys import DeliveryTarget
+from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +104,7 @@ class WhatsAppChannel(BaseChannel):
         self._set_connection_state("stopped", bridge_ws_connected=False, whatsapp_connected=False, qr_pending=False)
         logger.info("WhatsAppChannel stopped")
 
-    async def send(self, msg: Message) -> None:
+    async def send(self, msg: Message, *, routing_target: RoutingTarget | None = None) -> None:
         if self._ws is None:
             return
         if not self._whatsapp_connected:
