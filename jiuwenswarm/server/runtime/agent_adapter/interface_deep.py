@@ -8984,15 +8984,19 @@ class JiuWenSwarmDeepAdapter:
 
             resolved_model = self._resolve_model_for_request(request)
             self._apply_model_to_react_agent(resolved_model)
-            inputs = self._prepare_multimodal_image_inputs(request, inputs)
-            enable_read_image_multimodal = self._native_image_input_enabled(
-                self._config_cache,
-                resolved_model,
-            )
+            # Team mode hands the leader a plain query string — team_helpers
+            # forwards ``inputs={"query": ...}`` only — so the single-agent
+            # native-image path has nothing to hook onto: it injects image
+            # data URIs through a context-window mutator bound by
+            # ``set_current_multimodal_image_files``, and neither the
+            # ContextVar nor ``_multimodal_image_files`` survives the crossing
+            # into the team runner. Route images through the image-reading
+            # tool prompt unconditionally instead, so the leader at least
+            # receives their paths and a way to open them.
             inputs = self._prepare_react_image_tool_prompt(
                 request,
                 inputs,
-                enable_read_image_multimodal=enable_read_image_multimodal,
+                enable_read_image_multimodal=False,
             )
             resolved_language = self._resolve_runtime_language()
             resolved_channel = str(cid or self._resolve_prompt_channel(session_id) or "web").strip() or "web"

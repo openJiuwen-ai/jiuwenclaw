@@ -27,6 +27,7 @@ import { ModelProviderIcon } from '../ModelProviderIcon';
 import { getEvolutionPillLabel } from './evolution-status';
 import { webRequest } from '../../services/webClient';
 import { getSkillAvatar } from '../../utils/skillAvatar';
+import { withUploadDocumentBlock } from '../../utils/documentMessage';
 import {
   isLikelyAbsolutePath,
   isProjectDirectoryPickerSupported,
@@ -351,18 +352,18 @@ function buildSubmitContent(text: string, attachments: AttachmentDraft[]): strin
     return text;
   }
   // Agent-facing hint only (stripped from chat bubble). List every file; no 说明 line.
-  // For binary documents that have a .txt sidecar (e.g. PDF), also expose the
-  // original file path — otherwise the model cannot see the .pdf and cannot use
-  // page-level tools such as read_pdf.
-  const lines = docs.map((doc) => {
-    const path = pickString(doc.persistedMediaItem?.path) || '';
-    const originalPath = pickString(doc.persistedMediaItem?.original_path) || '';
-    if (path && originalPath && originalPath !== path) {
-      return `- ${doc.filename}: ${path} (original file: ${originalPath})`;
-    }
-    return path ? `- ${doc.filename}: ${path}` : `- ${doc.filename}`;
-  });
-  return [text, '【上传文档】', ...lines].filter(Boolean).join('\n');
+  // Paths are missing on a brand-new session (attachments cannot persist before
+  // the session exists); useWebSocket rewrites this block after persisting.
+  // Binary documents with a .txt sidecar (e.g. PDF) also carry originalPath, so
+  // the model can still reach the .pdf for page-level tools such as read_pdf.
+  return withUploadDocumentBlock(
+    text,
+    docs.map((doc) => ({
+      filename: doc.filename,
+      path: pickString(doc.persistedMediaItem?.path),
+      originalPath: pickString(doc.persistedMediaItem?.original_path),
+    })),
+  );
 }
 
 export function InputArea({

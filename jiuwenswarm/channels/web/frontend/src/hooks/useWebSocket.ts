@@ -76,7 +76,11 @@ import {
   findActiveTeamLeaderMessage as findActiveTeamLeaderMessageInTurn,
 } from '../features/teamLeaderMessages';
 import { buildGoalCompletedContent } from '../components/GoalBar/goalCompletedMessage';
-import { stripUploadDocumentBlocks } from '../utils/documentMessage';
+import {
+  stripUploadDocumentBlocks,
+  toUploadDocumentHints,
+  withUploadDocumentBlock,
+} from '../utils/documentMessage';
 
 const WS_RECONNECT_EVENT = 'jiuwenclaw:ws-reconnect-request';
 
@@ -1475,6 +1479,14 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               }
               if (persistedDocs.files && typeof persistedDocs.files === 'object') {
                 Object.assign(mergedFiles, persistedDocs.files);
+              }
+              // The composer could not persist these documents before send (a
+              // brand-new session has no id yet), so its hint block carries
+              // filenames without paths. Rewrite it now that paths exist —
+              // team mode reads paths from the message text only.
+              const documentHints = toUploadDocumentHints(persistedDocs.media_items);
+              if (documentHints.length) {
+                outgoingContent = withUploadDocumentBlock(outgoingContent, documentHints);
               }
             }
             outgoingMediaItems = mergedItems.length ? slimPersistedMediaRecords(mergedItems) : undefined;

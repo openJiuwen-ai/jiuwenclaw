@@ -755,6 +755,85 @@ def _handle_statusline_prompt_command(query: str) -> Tuple[str, str]:
     return "", query
 
 
+# ``chat.send`` files keys that carry browser-uploaded attachment records.
+_UPLOADED_FILE_KEYS: tuple[str, ...] = ("uploaded_documents", "uploaded_images")
+
+_TEAM_ATTACHMENT_HEADERS: dict[str, str] = {
+    "zh": "【本轮上传的文件】以下为绝对路径，需要文件内容时用 read_file 直接读取：",
+    "en": (
+        "[Files uploaded in this turn] Absolute paths below; "
+        "read them with read_file when the content is needed:"
+    ),
+}
+
+
+def collect_uploaded_file_records(files: Any) -> list[dict[str, str]]:
+    """Collect uploaded document/image records from a ``chat.send`` files dict.
+
+    Args:
+        files: The ``params["files"]`` mapping; non-dict values yield an empty list.
+
+    Returns:
+        Records holding ``filename`` and an absolute ``path``, in upload order.
+        Entries without a usable path are dropped.
+    """
+    if not isinstance(files, dict):
+        return []
+
+    records: list[dict[str, str]] = []
+    for key in _UPLOADED_FILE_KEYS:
+        entries = files.get(key)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            path = str(entry.get("path") or "").strip()
+            if not path:
+                continue
+            filename = str(entry.get("filename") or "").strip() or Path(path).name
+            records.append({"filename": filename, "path": path})
+    return records
+
+
+def append_team_attachment_manifest(query: Any, files: Any, *, language: str = "zh") -> Any:
+    """Append uploaded-attachment absolute paths to a team-mode query.
+
+    Team mode feeds the leader the raw user text instead of the
+    ``build_user_prompt`` JSON wrapper, so the ``files_updated_by_user`` field
+    that normally carries uploaded paths never reaches it. This restores the
+    same paths as a plain list. Paths the text already mentions are skipped —
+    the Web composer inlines document paths into the message itself.
+
+    Args:
+        query: Raw team query. Non-str values (e.g. ``InteractiveInput``) are
+            returned untouched.
+        files: The ``params["files"]`` mapping carrying uploaded_* records.
+        language: Runtime language selecting the section header wording.
+
+    Returns:
+        The query with an attachment section appended, or the original query
+        when there is nothing to add.
+    """
+    if not isinstance(query, str):
+        return query
+
+    records = collect_uploaded_file_records(files)
+    if not records:
+        return query
+
+    lines: list[str] = []
+    for record in records:
+        if record["path"] in query:
+            continue
+        lines.append(f"- {record['filename']}: {record['path']}")
+    if not lines:
+        return query
+
+    header = _TEAM_ATTACHMENT_HEADERS.get(language, _TEAM_ATTACHMENT_HEADERS["zh"])
+    return f"{query}\n\n{header}\n" + "\n".join(lines)
+
+
 def build_user_prompt(content: str | dict, files: dict, channel: str, language: str, *,
     trusted_dirs: list[str] | None = None, metadata: dict[str, Any] | None = None,
     skills: list[str] | None = None) -> str:
@@ -2221,7 +2300,13 @@ class JiuWenSwarm:
 
             team_query_is_interactive_input = isinstance(inputs.get("query"), InteractiveInput)
             if not team_query_is_interactive_input:
-                inputs["query"] = raw_query
+                # 原始 query 不含 build_user_prompt 的 files_updated_by_user，
+                # 上传附件的绝对路径必须单独补回，否则 leader 只看得到文件名。
+                inputs["query"] = append_team_attachment_manifest(
+                    raw_query,
+                    request.params.get("files") if isinstance(request.params, dict) else None,
+                    language=str(inputs.get("language") or "zh"),
+                )
             logger.info(
                 "[JiuWenSwarm] Team模式使用原始query: %s",
                 raw_query[:100] if isinstance(raw_query, str) and raw_query else type(inputs.get("query")).__name__,
