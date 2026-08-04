@@ -59,6 +59,12 @@ class TestEvents:
         assert is_terminal_event("chat.final", {"event_type": "keepalive"}) is False
 
     @staticmethod
+    def test_is_terminal_chat_final_llm_usage():
+        assert is_terminal_event(
+            "chat.final", {"event_type": "chat.llm_usage"}
+        ) is False
+
+    @staticmethod
     def test_is_terminal_chat_final_team_runtime_ready():
         # team.runtime_ready is a control event wrapped in chat.final envelope;
         # it must NOT terminate the CLI stream (the team hasn't answered yet).

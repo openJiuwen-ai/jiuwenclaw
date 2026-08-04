@@ -244,7 +244,7 @@ class ChannelManager(ABC):
                 # chat.file / chat.media 默认只投递到发起 channel（msg.channel_id），
                 # team 模式下已 /join 的其他 channel（如飞书）收不到。这里在进入
                 # fan_out 分发前，依据 SessionSharingRegistry 自动补齐 fan_out_targets，
-                # 使文件能投递到所有已接入 channel（自动模式 godview + mention_all），或 send_file_targets 指定的目标。
+                # 使文件按发起者定向投递（自动模式 last-originator 精确到人，无则回退 godview），或 send_file_targets 指定的目标。
                 # helper 会按需写入 msg.metadata["fan_out_targets"]，下方既有逻辑随之分发。
                 await self._inject_file_delivery_fanout(msg, _et)
 
@@ -418,9 +418,10 @@ class ChannelManager(ABC):
         - 若 msg.metadata 含 send_file_targets（工具显式指定目标 channel/席位）→
           按目标反查 Registry 的 *人类成员* 订阅（排除 GodView，避免 godview 全量广播泄漏到
           其他 channel），构造 mention 目标；无匹配则回退 godview。
-        - 否则（自动模式）→ 构造 [godview, mention_all] 双目标：godview 覆盖 web 等已注册
-          GodView 的 channel；mention_all 覆盖所有 /join 的人类成员席位（飞书/xiaoyi 的
-          reviewer-N）。dispatch_to_session 按物理容器去重，同一 channel 不会重复收文件。
+        - 否则（自动模式）→ 发起者优先定向：按 session_id 反查最近一次人类发起者
+          (last-originator) 构造 mention 目标，精确定向到该席位（多 app 不互窜）；
+          无发起者（web 发起 / 无人类 /join / 并发覆盖到另一 human）→ 仅 godview
+          （不误投 feishu 等 IM channel）。
 
         非文件类事件、或 Registry 无订阅时返回 None（回退到单 channel 兜底，避免破坏纯 web 会话）。
         """

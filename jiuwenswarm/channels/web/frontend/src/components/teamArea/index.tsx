@@ -4,7 +4,8 @@
 
 import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { FileText, Minimize2 } from 'lucide-react';
+import { FileCheck2, FileText, Minimize2 } from 'lucide-react';
+import type { ReactNode } from 'react';
 import { useChatStore, useSessionStore, useTodoStore } from '../../stores';
 import type { Message } from '../../types';
 import { ArtifactsPanel, useSessionArtifactsCount } from '../ArtifactsPanel';
@@ -19,12 +20,20 @@ import {
   type TeamAreaProps,
   type TeamMember,
 } from './shared';
+import { getTasksForCurrentProgress } from '../../features/teamTaskProgressBaseline';
 
 function useTaskPlanningMetrics() {
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const todos = useTodoStore((s) => s.runtimes[activeSessionId ?? '']?.todos ?? []);
   const teamTaskEvents = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamTaskEvents ?? []);
   const teamTasks = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamTasks ?? []);
+  const taskProgressBaseline = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamTaskProgressBaseline);
+  const progressTasks = useMemo(
+    () => taskProgressBaseline
+      ? getTasksForCurrentProgress(teamTasks, taskProgressBaseline)
+      : teamTasks,
+    [taskProgressBaseline, teamTasks]
+  );
 
   const totalTasks = useMemo(() => {
     if (teamTasks.length > 0) return teamTasks.length;
@@ -52,7 +61,7 @@ function useTaskPlanningMetrics() {
     return completed.size;
   }, [teamTaskEvents, teamTasks, todos]);
 
-  return { completedTasks, teamTasks, totalTasks };
+  return { completedTasks, progressTasks, teamTasks, totalTasks };
 }
 
 function CompactTeamArea({
@@ -62,13 +71,14 @@ function CompactTeamArea({
   members: TeamMember[];
   onExpand?: (tab: TabType, memberId?: string) => void;
 }) {
-  const { completedTasks, teamTasks, totalTasks } = useTaskPlanningMetrics();
+  const { completedTasks, progressTasks, teamTasks, totalTasks } = useTaskPlanningMetrics();
 
   return (
     <>
       <TaskPlanningPanel
         variant="compact"
         tasks={teamTasks}
+        progressTasks={progressTasks}
         members={members}
         totalTasks={totalTasks}
         completedTasks={completedTasks}
@@ -93,24 +103,35 @@ function ExpandedTeamArea({
   activeTab,
   activeDetailTab,
   selectedMemberId: externalSelectedMemberId,
+  selectedArtifactId,
   onTabChange,
   onDetailTabChange,
   onMemberSelect,
+  onArtifactSelect,
   onCollapse,
+  reviewPanel,
 }: {
   members: TeamMember[];
   historyMessages?: Message[];
   activeTab: TabType;
   activeDetailTab: TeamDetailTab;
   selectedMemberId?: string;
+  selectedArtifactId?: string;
   onTabChange: (tab: TabType) => void;
   onDetailTabChange: (tab: TeamDetailTab) => void;
   onMemberSelect?: (memberId: string) => void;
+  onArtifactSelect?: (artifactId: string) => void;
   onCollapse?: () => void;
+  reviewPanel?: ReactNode;
 }) {
   const { t } = useTranslation();
-  const { completedTasks, teamTasks, totalTasks } = useTaskPlanningMetrics();
+  const { completedTasks, progressTasks, teamTasks, totalTasks } = useTaskPlanningMetrics();
   const artifactsCount = useSessionArtifactsCount();
+  const resolvedTab =
+    (activeTab === 'artifacts' && artifactsCount === 0) ||
+    (activeTab === 'review' && !reviewPanel)
+      ? 'planning'
+      : activeTab;
 
   const selectedMember = useMemo(() => {
     if (!externalSelectedMemberId) return null;
@@ -133,13 +154,16 @@ function ExpandedTeamArea({
       label: t('team.membersTab'),
       icon: <img src={teamIcon} width={16} height={16} />,
     },
-    {
-      key: 'artifacts',
-      label: t('artifacts.tab'),
-      count: artifactsCount,
-      icon: <FileText size={16} />,
-    },
-  ] as const;
+    ...(artifactsCount > 0
+      ? [{
+          key: 'artifacts' as const,
+          label: t('artifacts.tab'),
+          count: artifactsCount,
+          icon: <FileText size={16} />,
+        }]
+      : []),
+    ...(reviewPanel ? [{ key: 'review' as const, label: t('codeMode.review'), icon: <FileCheck2 size={16} /> }] : []),
+  ];
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-card">
@@ -149,7 +173,7 @@ function ExpandedTeamArea({
             <button
               key={tab.key}
               className={`h-9 rounded-lg px-4 text-sm  flex items-center gap-2 ${
-                activeTab === tab.key
+                resolvedTab === tab.key
                   ? 'bg-secondary font-medium text-text'
                   : 'text-text-muted hover:bg-secondary/50 hover:text-text'
               }`}
@@ -171,18 +195,21 @@ function ExpandedTeamArea({
       </div>
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        {activeTab === 'planning' ? (
+        {resolvedTab === 'planning' ? (
           <TaskPlanningPanel
             variant="expanded"
             tasks={teamTasks}
+            progressTasks={progressTasks}
             members={members}
             totalTasks={totalTasks}
             completedTasks={completedTasks}
           />
-        ) : activeTab === 'artifacts' ? (
-          <div className="flex min-w-0 flex-1 overflow-hidden mt-0 mx-6 mb-6">
-            <ArtifactsPanel />
+        ) : resolvedTab === 'artifacts' ? (
+          <div className="flex min-w-0 flex-1 overflow-hidden">
+            <ArtifactsPanel selectedArtifactId={selectedArtifactId} onSelectArtifact={onArtifactSelect} />
           </div>
+        ) : resolvedTab === 'review' && reviewPanel ? (
+          <div className="flex min-w-0 flex-1 overflow-hidden">{reviewPanel}</div>
         ) : (
           <TeamMembersPanel
             variant="expanded"
@@ -201,7 +228,7 @@ function ExpandedTeamArea({
 }
 
 export function TeamArea(props: TeamAreaProps) {
-  const { members, historyMessages = [] } = props;
+  const { members, historyMessages = [], reviewPanel } = props;
 
   if (props.expanded) {
     return (
@@ -211,10 +238,13 @@ export function TeamArea(props: TeamAreaProps) {
         activeTab={props.activeTab}
         activeDetailTab={props.activeDetailTab}
         selectedMemberId={props.selectedMemberId}
+        selectedArtifactId={props.selectedArtifactId}
         onTabChange={props.onTabChange}
         onDetailTabChange={props.onDetailTabChange}
         onMemberSelect={props.onMemberSelect}
+        onArtifactSelect={props.onArtifactSelect}
         onCollapse={props.onCollapse}
+        reviewPanel={reviewPanel}
       />
     );
   }

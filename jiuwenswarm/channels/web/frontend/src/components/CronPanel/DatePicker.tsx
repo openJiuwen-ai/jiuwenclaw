@@ -8,6 +8,8 @@ interface DatePickerProps {
   onChange: (v: string) => void;
   placeholder?: string;
   className?: string;
+  /** 最早可选日期 "YYYY-MM-DD"（含），早于它的日期禁用点选、手动输入也会被拒绝；不传则不限制。 */
+  minDate?: string;
 }
 
 function buildMonthList(centerYear: number, centerMonth: number): { year: number; month: number }[] {
@@ -31,7 +33,7 @@ function parseFlexibleDate(raw: string): string | null {
 
 const WEEKDAY_KEYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
 
-export default function DatePicker({ value, onChange, placeholder, className = 'flex-1 min-w-0' }: DatePickerProps) {
+export default function DatePicker({ value, onChange, placeholder, className = 'flex-1 min-w-0', minDate }: DatePickerProps) {
   const { t } = useTranslation();
   const initial = value ? new Date(value) : new Date();
   const [open, setOpen] = useState(false);
@@ -51,7 +53,7 @@ export default function DatePicker({ value, onChange, placeholder, className = '
 
   function commitText(raw: string) {
     const parsed = parseFlexibleDate(raw);
-    if (parsed) {
+    if (parsed && !(minDate && parsed < minDate)) {
       onChange(parsed);
       const d = new Date(parsed);
       setCursor({ year: d.getFullYear(), month: d.getMonth() });
@@ -197,13 +199,18 @@ export default function DatePicker({ value, onChange, placeholder, className = '
                   selectedDate.getFullYear() === cursor.year &&
                   selectedDate.getMonth() === cursor.month &&
                   selectedDate.getDate() === day;
+                const cellDateStr = `${cursor.year}-${String(cursor.month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+                const disabled = Boolean(minDate && cellDateStr < minDate);
                 return (
                   <button
                     key={idx}
                     type="button"
+                    disabled={disabled}
                     onClick={() => pick(day)}
                     className={`h-9 w-9 rounded-full text-sm transition-colors ${
-                      isSelected ? 'bg-accent text-accent-foreground' : 'text-text hover:bg-bg-hover'
+                      disabled
+                        ? 'cursor-not-allowed text-text-muted/40'
+                        : isSelected ? 'bg-accent text-accent-foreground' : 'text-text hover:bg-bg-hover'
                     }`}
                   >
                     {day}

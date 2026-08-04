@@ -60,6 +60,7 @@ uv sync --extra a2a
 | `A2A_SERVER_APP_NAME` | `JiuwenSwarm Gateway A2A Server` | Agent Card `name` |
 | `A2A_SERVER_APP_DESCRIPTION` | `A2A ingress for JiuwenSwarm Gateway` | Agent Card `description` |
 | `A2A_SERVER_APP_VERSION` | `0.1.0` | Agent Card `version` |
+| `A2A_SERVER_EXPOSE_REASONING` | `true`（默认开启） | 开启后思考（reasoning）内容以 working 状态的 `TaskStatusUpdateEvent` 输出（见 §6.2）；设为 `false`/`0`/`no`/`off` 时直接丢弃 |
 
 AgentServer 连接仍由网关既有逻辑配置（例如 `AGENT_SERVER_URL` 等），与 A2A 监听端口独立。
 
@@ -116,8 +117,11 @@ flowchart LR
 
 | 内部 | A2A |
 |------|-----|
-| `payload.content`、工具相关事件等 | `Part(text=...)` 等 |
+| `payload.content`、工具相关事件等 | `Part(text=...)` 等，写入 `response` artifact |
 | `payload.files[]` | `Part` 的 url / data / raw 等 |
+| 思考内容（`chat.reasoning` 或 `chat.delta` 且 `source_chunk_type == "llm_reasoning"`） | 见下 |
+
+**思考与正文的区分**：思考内容不会写入 `response` artifact。默认（`A2A_SERVER_EXPOSE_REASONING` 开启）以 working 状态的 `TaskStatusUpdateEvent` 输出，`status.message.parts[].metadata` 携带 `{"jiuwen_thought": true}` 标记（对齐 Google ADK 的 `adk_thought` 惯例），调用方可结构化识别或忽略；设为 `false`/`0`/`no`/`off` 时直接丢弃。
 
 ---
 

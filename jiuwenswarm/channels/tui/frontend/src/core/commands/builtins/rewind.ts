@@ -46,6 +46,10 @@ const GREEN = "\x1b[32m";
 const RED = "\x1b[31m";
 const RESET = "\x1b[0m";
 
+// 本地问题对话框（askQuestions）被 ESC/Ctrl+C 中断时，app-state.cancel() reject 的文案。
+// 属于用户主动取消，不应作为 rewind 失败上报。
+const LOCAL_QUESTION_CANCEL = "interrupted by Ctrl+C";
+
 function toRelativePath(absPath: string, workspaceDir?: string): string {
   if (!workspaceDir) return absPath;
   // Normalize separators to / for cross-platform comparison
@@ -147,16 +151,24 @@ export function createRewindCommand(): SlashCommand {
             });
           }
 
-          const answers = await ctx.askQuestions(
-            [
-              {
-                header: "Turn",
-                question: "Which turn do you want to rewind to? (this turn and all after will be removed)",
-                options: turnOptions,
-              },
-            ],
-            "rewind",
-          );
+          let answers: Awaited<ReturnType<typeof ctx.askQuestions>>;
+          try {
+            answers = await ctx.askQuestions(
+              [
+                {
+                  header: "Turn",
+                  question: "Which turn do you want to rewind to? (this turn and all after will be removed)",
+                  options: turnOptions,
+                },
+              ],
+              "rewind",
+            );
+          } catch (error) {
+            // ESC/Ctrl+C 取消本地问题对话框：静默退出，不报 failed。
+            const message = error instanceof Error ? error.message : String(error);
+            if (message === LOCAL_QUESTION_CANCEL) return;
+            throw error;
+          }
 
           const userInput = answers[0]?.selected_options?.[0] || answers[0]?.custom_input || "";
           if (userInput === "current" || !userInput) {
@@ -215,18 +227,26 @@ export function createRewindCommand(): SlashCommand {
         const limitationNote =
           "\nNote: Rewinding does not affect files edited manually or via bash commands.";
 
-        const confirmAnswers = await ctx.askQuestions(
-          [
-            {
-              header: "Confirm Rewind",
-              question:
-                `Rewind to before turn ${selectedTurnIndex}: "${selectedTurn.content_preview}"?` +
-                limitationNote,
-              options: restoreOptions,
-            },
-          ],
-          "rewind_confirm",
-        );
+        let confirmAnswers: Awaited<ReturnType<typeof ctx.askQuestions>>;
+        try {
+          confirmAnswers = await ctx.askQuestions(
+            [
+              {
+                header: "Confirm Rewind",
+                question:
+                  `Rewind to before turn ${selectedTurnIndex}: "${selectedTurn.content_preview}"?` +
+                  limitationNote,
+                options: restoreOptions,
+              },
+            ],
+            "rewind_confirm",
+          );
+        } catch (error) {
+          // ESC/Ctrl+C 取消本地问题对话框：静默退出，不报 failed。
+          const message = error instanceof Error ? error.message : String(error);
+          if (message === LOCAL_QUESTION_CANCEL) return;
+          throw error;
+        }
 
         const selectedOption = confirmAnswers[0]?.selected_options?.[0] as RestoreOption | undefined;
         // 从选项 label 反推 value（askQuestions 返回的是 label）
@@ -312,8 +332,17 @@ export function createRewindCommand(): SlashCommand {
           const restoredFiles = restorePayload.restored_files ?? [];
           const deletedFiles = restorePayload.deleted_files ?? [];
           const restoreErrors = restorePayload.restore_errors ?? [];
-
-          let msg = `Restored files to state before turn ${selectedTurnIndex}:`;
+          // 不要在实际什么都没还原（或有文件失败）时报告纯成功——用户会据此
+ 	      // 误判工作区状态。标题按结果分级，失败文件逐个列出。
+ 	      const anyRestored = restoredFiles.length > 0 || deletedFiles.length > 0;
+ 	      let msg: string;
+ 	      if (!anyRestored && restoreErrors.length === 0) {
+            msg = `No file changes to restore before turn ${selectedTurnIndex}.`;
+ 	      } else if (restoreErrors.length > 0) {
+            msg = `Partially restored files to state before turn ${selectedTurnIndex}:`;
+ 	      } else {
+            msg = `Restored files to state before turn ${selectedTurnIndex}:`;
+ 	      }
           if (restoredFiles.length > 0) {
             msg += `\n  Written back: ${restoredFiles.length} file(s)`;
           }
@@ -321,13 +350,14 @@ export function createRewindCommand(): SlashCommand {
             msg += `\n  Deleted: ${deletedFiles.length} file(s)`;
           }
           if (restoreErrors.length > 0) {
-            msg += `\n  Failed: ${restoreErrors.length} file(s)`;
-          }
-          if (restoredFiles.length === 0 && deletedFiles.length === 0) {
-            msg += "\n  No file changes found to restore.";
-          }
+            msg += `\n  Failed to restore ${restoreErrors.length} file(s):`;
+ 	        for (const e of restoreErrors) {
+ 	          msg += `\n    - ${e.file}: ${e.error}`;
+ 	        }
+            msg += "\n  These files still hold the agent's changes.";
+ 	      }
 
-          ctx.addItem(addInfo(ctx.sessionId, msg, "i"));
+ 	      ctx.addItem(addInfo(ctx.sessionId, msg, restoreErrors.length > 0 ? "w" : "i"));
         } else if (optionValue === "summarize") {
           ctx.addItem(
             addInfo(ctx.sessionId, "Messages after this point will be summarized.", "i", { view: "dim" }),

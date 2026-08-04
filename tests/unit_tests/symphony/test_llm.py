@@ -1,3 +1,4 @@
+from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
@@ -8,6 +9,7 @@ from jiuwenswarm.symphony.llm import (
     extract_message_content,
     get_llm_token_usage_summary,
     reset_llm_token_usage,
+    thinking_disabled_request_overrides,
     _record_usage_from_response,
 )
 
@@ -19,6 +21,48 @@ class _FakeInvokeModel:
     async def invoke(self, **kwargs):
         self.calls.append(kwargs)
         return SimpleNamespace(content='{"ok": true}')
+
+
+def _model_entry(*, reasoning_level=None, client=None, request=None):
+    client_config = {
+        "api_key": "key",
+        "api_base": "https://example.test/v1",
+        "model_name": "model-a",
+        "client_provider": "openai",
+        **(client or {}),
+    }
+    request_config = dict(request or {})
+    if reasoning_level is not None:
+        request_config["reasoning_level"] = reasoning_level
+    return {
+        "model_client_config": client_config,
+        "model_config_obj": request_config,
+    }
+
+
+def _llm_config():
+    return LLMConfig(
+        model="model-a",
+        model_client_config=_model_entry()["model_client_config"],
+    )
+
+
+def test_thinking_disabled_request_overrides_returns_isolated_compatibility_fields():
+    first = thinking_disabled_request_overrides()
+    second = thinking_disabled_request_overrides()
+
+    assert first == {
+        "extra_body": {
+            "thinking": {"type": "disabled"},
+            "enable_thinking": False,
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+    }
+    first["extra_body"]["thinking"]["type"] = "enabled"
+    first["extra_body"]["chat_template_kwargs"]["enable_thinking"] = True
+
+    assert second["extra_body"]["thinking"]["type"] == "disabled"
+    assert second["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
 
 
 def test_extract_message_content_supports_openjiuwen_response_shape():
@@ -78,6 +122,70 @@ def test_llm_config_from_default_models(monkeypatch):
     assert config.model_request_kwargs()["max_tokens"] == 99
 
 
+def test_llm_config_removes_internal_reasoning_level():
+    config = LLMConfig.from_model_entry(
+        _model_entry(reasoning_level="off", request={"max_tokens": 99})
+    )
+
+    request_kwargs = config.model_request_kwargs()
+
+    assert "reasoning_level" not in request_kwargs
+    assert request_kwargs["max_tokens"] == 99
+    assert request_kwargs["extra_body"] == thinking_disabled_request_overrides()["extra_body"]
+
+
+def test_llm_config_forces_high_reasoning_config_to_disabled():
+    config = LLMConfig.from_model_entry(
+        _model_entry(
+            reasoning_level="high",
+            client={
+                "api_base": "https://api.deepseek.com",
+                "model_name": "deepseek-v4-pro",
+            },
+            request={
+                "max_tokens": 99,
+                "extra_body": {"custom_option": {"enabled": True}},
+            },
+        )
+    )
+
+    request_kwargs = config.model_request_kwargs()
+
+    assert "reasoning_level" not in request_kwargs
+    assert "reasoning_effort" not in request_kwargs
+    assert request_kwargs["max_tokens"] == 99
+    assert request_kwargs["extra_body"] == {
+        "custom_option": {"enabled": True},
+        **thinking_disabled_request_overrides()["extra_body"],
+    }
+
+
+def test_llm_config_owns_nested_model_entry_data():
+    entry = _model_entry(
+        reasoning_level="off",
+        client={
+            "custom_headers": {"X-Test": "original"},
+        },
+        request={
+            "response_format": {"type": "json_object"},
+            "extra_body": {"custom_option": {"enabled": True}},
+        },
+    )
+    original = deepcopy(entry)
+
+    config = LLMConfig.from_model_entry(entry)
+    client_kwargs = config.model_client_kwargs()
+    request_kwargs = config.model_request_kwargs()
+    client_kwargs["custom_headers"]["X-Test"] = "changed"
+    request_kwargs["response_format"]["type"] = "text"
+    request_kwargs["extra_body"]["custom_option"]["enabled"] = False
+
+    assert entry == original
+    assert config.model_client_kwargs()["custom_headers"] == {"X-Test": "original"}
+    assert config.model_request_kwargs()["response_format"] == {"type": "json_object"}
+    assert config.model_request_kwargs()["extra_body"]["custom_option"] == {"enabled": True}
+
+
 def test_llm_config_prefers_resolved_default_model(monkeypatch):
     model_config = {
         "models": {
@@ -131,32 +239,14 @@ def test_llm_config_does_not_fallback_to_environment_model(monkeypatch):
 
 
 def test_create_llm_client_uses_jiuwenswarm_client():
-    client = create_llm_client(
-        LLMConfig(
-            model="model-a",
-            model_client_config={
-                "api_key": "key",
-                "api_base": "https://example.test/v1",
-                "client_provider": "openai",
-            },
-        )
-    )
+    client = create_llm_client(_llm_config())
 
     assert type(client).__name__ == "JiuwenSwarmChatClient"
 
 
 @pytest.mark.asyncio
 async def test_complete_json_async_passes_request_overrides_to_invoke():
-    client = create_llm_client(
-        LLMConfig(
-            model="model-a",
-            model_client_config={
-                "api_key": "key",
-                "api_base": "https://example.test/v1",
-                "client_provider": "openai",
-            },
-        )
-    )
+    client = create_llm_client(_llm_config())
     fake_model = _FakeInvokeModel()
     setattr(client, "_model", fake_model)
 
@@ -177,16 +267,7 @@ async def test_complete_json_async_passes_request_overrides_to_invoke():
 
 @pytest.mark.asyncio
 async def test_complete_json_async_omits_request_overrides_by_default():
-    client = create_llm_client(
-        LLMConfig(
-            model="model-a",
-            model_client_config={
-                "api_key": "key",
-                "api_base": "https://example.test/v1",
-                "client_provider": "openai",
-            },
-        )
-    )
+    client = create_llm_client(_llm_config())
     fake_model = _FakeInvokeModel()
     setattr(client, "_model", fake_model)
 
@@ -198,16 +279,7 @@ async def test_complete_json_async_omits_request_overrides_by_default():
 
 @pytest.mark.asyncio
 async def test_complete_json_many_async_passes_request_overrides_to_each_invoke():
-    client = create_llm_client(
-        LLMConfig(
-            model="model-a",
-            model_client_config={
-                "api_key": "key",
-                "api_base": "https://example.test/v1",
-                "client_provider": "openai",
-            },
-        )
-    )
+    client = create_llm_client(_llm_config())
     fake_model = _FakeInvokeModel()
     setattr(client, "_model", fake_model)
 
@@ -234,16 +306,7 @@ async def test_complete_json_many_async_passes_request_overrides_to_each_invoke(
 
 @pytest.mark.asyncio
 async def test_complete_json_many_async_omits_request_overrides_by_default():
-    client = create_llm_client(
-        LLMConfig(
-            model="model-a",
-            model_client_config={
-                "api_key": "key",
-                "api_base": "https://example.test/v1",
-                "client_provider": "openai",
-            },
-        )
-    )
+    client = create_llm_client(_llm_config())
     fake_model = _FakeInvokeModel()
     setattr(client, "_model", fake_model)
 

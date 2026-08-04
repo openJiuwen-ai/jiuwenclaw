@@ -1,6 +1,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -51,6 +52,10 @@ class FakeWebSocket:
 
 
 class FakeWebChannelForHandlers:
+    # 与真实 WebChannel.channel_id 保持一致(production handler 通过
+    # ``channel.channel_id`` 读取,见 app_web_handlers._session_create)
+    channel_id = "web"
+
     def __init__(self) -> None:
         self.methods: dict[str, object] = {}
         self.responses: list[dict[str, Any]] = []
@@ -79,6 +84,27 @@ class FakeWebChannelForHandlers:
                 "error": error,
                 "code": code,
             }
+        )
+
+
+class FakeSessionCreateClient:
+    def __init__(self, session_id: str) -> None:
+        self.session_id = session_id
+        self.requests: list[Any] = []
+
+    async def send_request(self, request: Any) -> Any:
+        self.requests.append(request)
+        return SimpleNamespace(
+            ok=True,
+            payload={
+                "session_id": self.session_id,
+                "sessionId": self.session_id,
+                "projectId": "default",
+                "projectDir": "",
+                "workMode": "work",
+                "prewarm_hit": True,
+                "prewarm_status": "ready",
+            },
         )
 
 
@@ -250,72 +276,95 @@ async def test_web_channel_invoke_method_handler_injects_user_id():
 
 
 @pytest.mark.asyncio
-async def test_session_create_uses_connection_user_id(tmp_path, monkeypatch):
-    channel = FakeWebChannelForHandlers()
-    sessions_dir = tmp_path / "sessions"
-    sessions_dir.mkdir()
+async def test_openai_account_unexpected_error_uses_method_dispatcher(monkeypatch):
+    channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+    responses: list[dict[str, Any]] = []
+
+    def raise_unexpected_error():
+        raise RuntimeError("unexpected OAuth failure")
+
+    async def capture_response(ws, req_id, *, ok, payload=None, error=None, code=None):
+        responses.append({
+            "id": req_id,
+            "ok": ok,
+            "payload": payload,
+            "error": error,
+            "code": code,
+        })
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.session_metadata.get_agent_sessions_dir",
-        lambda: sessions_dir,
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._openai_account_auth_status_payload",
+        raise_unexpected_error,
     )
-    monkeypatch.setattr(
-        "jiuwenswarm.common.utils.get_agent_sessions_dir",
-        lambda: sessions_dir,
+    monkeypatch.setattr(channel, "send_response", capture_response)
+    handler = channel._method_handlers["openai_account.auth.status"]
+
+    handled = await channel._invoke_method_handler(
+        _MethodHandlerInvocation(
+            FakeWebSocket(),
+            "openai_account.auth.status",
+            "req-oauth-error",
+            {},
+            "sess-oauth-error",
+            handler,
+        ),
     )
-    monkeypatch.setattr(
-        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_agent_sessions_dir",
-        lambda: sessions_dir,
+
+    assert handled is False
+    assert responses == [{
+        "id": "req-oauth-error",
+        "ok": False,
+        "payload": None,
+        "error": "handler error: unexpected OAuth failure",
+        "code": "INTERNAL_ERROR",
+    }]
+
+
+@pytest.mark.asyncio
+async def test_session_create_uses_connection_user_id(tmp_path, monkeypatch):
+    channel = FakeWebChannelForHandlers()
+    agent_client = FakeSessionCreateClient("web_allocated_1")
+    _register_web_handlers(
+        WebHandlersBindParams(channel=channel, agent_client=agent_client)
     )
-    _register_web_handlers(WebHandlersBindParams(channel=channel))
 
     ws = FakeWebSocket(query_user_id="alice")
     await channel.methods["session.create"](
         ws,
         "req-create",
-        {"session_id": "sess_create_1", "mode": "agent"},
-        "sess_create_1",
+        {"mode": "agent", "create_token": "web-create-1"},
+        "new",
         user_id="alice",
     )
 
     assert channel.responses[-1]["ok"] is True
-    meta_path = sessions_dir / "sess_create_1" / "metadata.json"
-    assert meta_path.exists()
-    data = json.loads(meta_path.read_text(encoding="utf-8"))
-    assert data["user_id"] == "alice"
+    assert channel.responses[-1]["payload"]["session_id"] == "web_allocated_1"
+    assert agent_client.requests[-1].user_id == "alice"
+    assert agent_client.requests[-1].params["user_id"] == "alice"
 
 
 @pytest.mark.asyncio
 async def test_session_create_ignores_params_user_id(tmp_path, monkeypatch):
     channel = FakeWebChannelForHandlers()
-    sessions_dir = tmp_path / "sessions"
-    sessions_dir.mkdir()
-
-    monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.session_metadata.get_agent_sessions_dir",
-        lambda: sessions_dir,
+    agent_client = FakeSessionCreateClient("web_allocated_2")
+    _register_web_handlers(
+        WebHandlersBindParams(channel=channel, agent_client=agent_client)
     )
-    monkeypatch.setattr(
-        "jiuwenswarm.common.utils.get_agent_sessions_dir",
-        lambda: sessions_dir,
-    )
-    monkeypatch.setattr(
-        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_agent_sessions_dir",
-        lambda: sessions_dir,
-    )
-    _register_web_handlers(WebHandlersBindParams(channel=channel))
 
     ws = FakeWebSocket(query_user_id="alice")
     await channel.methods["session.create"](
         ws,
         "req-create",
-        {"session_id": "sess_create_2", "mode": "agent", "user_id": "victim"},
-        "sess_create_2",
+        {
+            "mode": "agent",
+            "user_id": "victim",
+            "create_token": "web-create-2",
+        },
+        "new",
         user_id="alice",
     )
 
     assert channel.responses[-1]["ok"] is True
-    data = json.loads(
-        (sessions_dir / "sess_create_2" / "metadata.json").read_text(encoding="utf-8")
-    )
-    assert data["user_id"] == "alice"
+    assert agent_client.requests[-1].user_id == "alice"
+    assert agent_client.requests[-1].params["user_id"] == "alice"

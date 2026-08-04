@@ -1,10 +1,19 @@
 import { type ReactNode } from 'react';
 import { X } from 'lucide-react';
-import { useTranslation } from 'react-i18next';
+import { Trans, useTranslation } from 'react-i18next';
 import './dialogs.css';
 
 interface DialogShellProps { title: string; children: ReactNode; onCancel: () => void }
-interface DeleteDialogProps { title: string; deleting: boolean; error: string | null; onCancel: () => void; onDelete: () => void }
+interface DeleteDialogProps {
+  title: string;
+  dialogTitle?: string;
+  descriptionKey?: string;
+  descriptionValues?: Record<string, string>;
+  deleting: boolean;
+  error: string | null;
+  onCancel: () => void;
+  onDelete: () => void;
+}
 
 function DialogShell({ title, children, onCancel }: DialogShellProps) {
   const { t } = useTranslation();
@@ -32,11 +41,28 @@ function DialogActions({ busy, danger = false, confirmLabel, onCancel, onConfirm
   );
 }
 
-export function DeleteDialog({ title, deleting, error, onCancel, onDelete }: DeleteDialogProps) {
+export function DeleteDialog({
+  title,
+  dialogTitle,
+  descriptionKey = 'multiSession.deleteDialog.description',
+  descriptionValues = { title },
+  deleting,
+  error,
+  onCancel,
+  onDelete,
+}: DeleteDialogProps) {
   const { t } = useTranslation();
   return (
-    <DialogShell title={t('multiSession.deleteDialog.title')} onCancel={onCancel}>
-      <p>{t('multiSession.deleteDialog.description', { title })}</p>
+    <DialogShell title={dialogTitle ?? t('multiSession.deleteDialog.title')} onCancel={onCancel}>
+      <p>
+        <Trans
+          i18nKey={descriptionKey}
+          values={descriptionValues}
+          components={{
+            name: <span className="conversation-dialog__subject" title={title} />,
+          }}
+        />
+      </p>
       {error && <div className="conversation-dialog__error">{error}</div>}
       <DialogActions busy={deleting} danger confirmLabel={t('multiSession.delete')} onCancel={onCancel} onConfirm={onDelete} />
     </DialogShell>

@@ -3534,7 +3534,7 @@ def _wait_background_job_finished(
 
 class TestBackgroundJobs:
     @staticmethod
-    def test_instant_task_captures_output(client):
+    def test_instant_task_reports_exit_code(client):
         create_resp = client.post("/api/v1/sandboxes", json={})
         sandbox_id = create_resp.json()["id"]
         assert create_resp.json()["phase"] == "ready"
@@ -3551,7 +3551,8 @@ class TestBackgroundJobs:
             client, sandbox_id, started["job_id"],
         )
         assert status["exit_code"] == 0, status
-        assert "Python" in status["stdout"]
+        assert status["stdout"] == ""
+        assert status["stderr"] == ""
 
     @staticmethod
     def test_long_running_job_with_custom_job_id(client):
@@ -3593,7 +3594,7 @@ class TestBackgroundJobs:
         assert finished["running"] is False
 
     @staticmethod
-    def test_large_output_not_truncated(client):
+    def test_background_output_not_captured(client):
         create_resp = client.post("/api/v1/sandboxes", json={})
         sandbox_id = create_resp.json()["id"]
 
@@ -3605,7 +3606,9 @@ class TestBackgroundJobs:
         status = _wait_background_job_finished(
             client, sandbox_id, started["job_id"],
         )
-        assert len(status["stdout"]) >= 10000
+        assert status["exit_code"] == 0
+        assert status["stdout"] == ""
+        assert status["stderr"] == ""
 
     @staticmethod
     def test_duplicate_job_id_returns_409(client):
@@ -3652,25 +3655,6 @@ class TestBackgroundJobs:
         )
         assert resp.status_code == 400, resp.text
         assert JOB_ID_FORMAT_MESSAGE in resp.json()["error"]
-
-    @staticmethod
-    def test_capture_output_false(client):
-        create_resp = client.post("/api/v1/sandboxes", json={})
-        sandbox_id = create_resp.json()["id"]
-
-        started = _exec_background(
-            client,
-            sandbox_id,
-            ["python3", "--version"],
-            capture_output=False,
-        )
-        status = _wait_background_job_finished(
-            client, sandbox_id, started["job_id"],
-        )
-        assert status["capture_output"] is False
-        assert status["stdout"] == ""
-        assert status["stderr"] == ""
-        assert status["exit_code"] == 0
 
     @staticmethod
     def test_kill_already_exited_job(client):
@@ -3766,6 +3750,36 @@ class TestBackgroundJobs:
             f"/api/v1/sandboxes/{sandbox_id}/background/{job_id}",
         )
         assert get_resp.status_code == 404, get_resp.text
+
+    @staticmethod
+    def test_bg_exec_visible_via_exec_ps(client):
+        create_resp = client.post("/api/v1/sandboxes", json={})
+        sandbox_id = create_resp.json()["id"]
+        job_id = f"ps-{uuid.uuid4().hex[:4]}"
+
+        started = _exec_background(
+            client,
+            sandbox_id,
+            ["sleep", "3600"],
+            job_id=job_id,
+        )
+        assert started["started"] is True
+
+        ps_resp = client.post(
+            f"/api/v1/sandboxes/{sandbox_id}/exec",
+            json={
+                "command": ["ps", "-eo", "pid,args"],
+                "timeout_seconds": 10,
+            },
+        )
+        assert ps_resp.status_code == 200, ps_resp.text
+        assert ps_resp.json()["exit_code"] == 0
+        assert "sleep" in ps_resp.json()["stdout"]
+
+        client.post(
+            f"/api/v1/sandboxes/{sandbox_id}/background/{job_id}/kill",
+            json={},
+        )
 
 
 class TestSandboxListing:

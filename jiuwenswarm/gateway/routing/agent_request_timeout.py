@@ -19,6 +19,20 @@ _TUI_EXTENDED_UNARY_METHOD_PREFIXES = (
     "permissions.tools.",
     "permissions.rules.",
 )
+# Snapshot RPCs that may wait behind a busy TUI outbound writer (workflow.updated
+# / chat stream). Prefer the 55s window when the client does not pass timeout_ms,
+# so Gateway does not cut them at the default 25s.
+_TUI_EXTENDED_UNARY_METHODS = frozenset({
+    "command.workflows",
+})
+# Methods exempt from the TUI unary cap — they are long-lived by design and
+# must not be cut by the gateway-side 25s/55s limit. A swarmflow human reply
+# is an async deliver (thin-route publish to wake a pending future) whose
+# latency tracks the human-turn timeout (agent-core default 600s); capping it
+# at 55s aborts legitimate replies while the person is still typing.
+_TUI_UNARY_TIMEOUT_EXEMPT_METHODS = frozenset({
+    "chat.swarmflow_reply",
+})
 
 
 class AgentRequestTimeoutError(TimeoutError):
@@ -55,17 +69,29 @@ def resolve_agent_request_timeout_seconds(
     if is_stream or channel_id != _TUI_CHANNEL_ID:
         return None
 
+    # Exempt long-lived methods (e.g. chat.swarmflow_reply whose latency tracks
+    # the human-turn timeout) from the TUI unary cap.
+    method_value = str(method or "")
+    if method_value in _TUI_UNARY_TIMEOUT_EXEMPT_METHODS:
+        return None
+
     parsed_client_timeout_ms = coerce_client_timeout_ms(client_timeout_ms)
     if parsed_client_timeout_ms is not None:
         client_timeout_seconds = parsed_client_timeout_ms / 1000.0
-        timeout_seconds = max(
-            1.0,
-            client_timeout_seconds - _TUI_CLIENT_TIMEOUT_GRACE_SECONDS,
+        # Snapshot RPCs often wait behind a busy outbound writer; keep most of
+        # the client window instead of cutting a flat 5s (10s client → 5s wait).
+        grace = (
+            2.0
+            if method_value in _TUI_EXTENDED_UNARY_METHODS
+            else _TUI_CLIENT_TIMEOUT_GRACE_SECONDS
         )
+        timeout_seconds = max(1.0, client_timeout_seconds - grace)
         return min(timeout_seconds, _TUI_MAX_UNARY_TIMEOUT_SECONDS)
 
-    method_value = str(method or "")
-    if method_value.startswith(_TUI_EXTENDED_UNARY_METHOD_PREFIXES):
+    if (
+        method_value.startswith(_TUI_EXTENDED_UNARY_METHOD_PREFIXES)
+        or method_value in _TUI_EXTENDED_UNARY_METHODS
+    ):
         return _TUI_MAX_UNARY_TIMEOUT_SECONDS
 
     return _TUI_DEFAULT_UNARY_TIMEOUT_SECONDS

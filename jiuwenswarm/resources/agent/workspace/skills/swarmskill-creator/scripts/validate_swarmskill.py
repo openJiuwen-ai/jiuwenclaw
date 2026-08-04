@@ -31,8 +31,9 @@ What this script catches (deterministic):
     - Every roles[].skills / roles[].tools in SKILL.md appears in dependencies.yaml
     - scripts/workflow.py, when present, satisfies the executable SwarmFlow
       safety envelope: standalone shape, literal META, inline prompts, safe
-      imports, phase/agent consistency, permissive schemas, and blocked runtime
-      patterns. The full authoring constraint list lives in
+      imports, phase/agent consistency, human/session call discipline,
+      workflow composition, budget access discipline, permissive schemas, and
+      blocked runtime patterns. The full authoring constraint list lives in
       templates/scripts/workflow.py.template.
 
 What this script does NOT catch (judgment calls — see reference/compliance-checklist.md):
@@ -482,18 +483,24 @@ def validate_dependencies_yaml(path: Path, report: Report) -> dict[str, list[str
 
 SUPPORTED_SWARMFLOW_OPERATORS = {
     "agent",
+    "agent_session",
     "budget",
     "compact",
     "flatten_filter",
+    "human",
+    "human_session",
     "log",
     "map_parallel",
     "parallel",
     "phase",
     "pipeline",
     "pmap",
+    "workflow",
 }
 
+SUPPORTED_SWARMFLOW_TYPES = {"AgentSession", "HumanSession"}
 PROTECTED_SWARMFLOW_NAMES = SUPPORTED_SWARMFLOW_OPERATORS
+DEFERRED_THUNK_OPERATORS = {"map_parallel", "parallel", "pipeline", "pmap"}
 NON_DETERMINISTIC_IMPORTS = {"random", "time", "datetime"}
 FILESYSTEM_CALLS = {"open"}
 PATH_IO_METHODS = {"read_text", "write_text", "read_bytes", "write_bytes", "open"}
@@ -547,7 +554,7 @@ def _call_name(node: ast.Call) -> str | None:
     return None
 
 
-def _is_inside_parallel_lambda(node: ast.AST) -> bool:
+def _is_inside_deferred_lambda(node: ast.AST) -> bool:
     current = _parent(node)
     while current is not None:
         if isinstance(current, ast.Lambda):
@@ -555,7 +562,7 @@ def _is_inside_parallel_lambda(node: ast.AST) -> bool:
             container = _parent(lambda_node)
             while container is not None:
                 if isinstance(container, ast.Call):
-                    return _call_name(container) == "parallel"
+                    return _call_name(container) in DEFERRED_THUNK_OPERATORS
                 if isinstance(container, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                     return False
                 container = _parent(container)
@@ -836,6 +843,166 @@ def _is_module_level_mutable_assignment(node: ast.Assign | ast.AnnAssign) -> boo
     return is_mutable_literal or is_set_call
 
 
+def _session_variable_names(tree: ast.Module) -> set[str]:
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        value = node.value
+        if not isinstance(value, ast.Call):
+            continue
+        if _call_name(value) not in {"agent_session", "human_session"}:
+            continue
+        targets = [node.target] if isinstance(node, ast.AnnAssign) else list(node.targets)
+        names.update(target.id for target in targets if isinstance(target, ast.Name))
+    return names
+
+
+def _session_method_name(node: ast.Call, session_names: set[str]) -> str | None:
+    func = node.func
+    if not isinstance(func, ast.Attribute):
+        return None
+    if not isinstance(func.value, ast.Name):
+        return None
+    if func.value.id not in session_names:
+        return None
+    if func.attr not in {"send", "aclose"}:
+        return None
+    return func.attr
+
+
+def _keyword(node: ast.Call, name: str) -> ast.keyword | None:
+    return next((keyword for keyword in node.keywords if keyword.arg == name), None)
+
+
+def _is_literal_true(node: ast.AST) -> bool:
+    return isinstance(node, ast.Constant) and node.value is True
+
+
+def _is_literal_none(node: ast.AST) -> bool:
+    return isinstance(node, ast.Constant) and node.value is None
+
+
+def _has_notify_schema_conflict(node: ast.Call) -> bool:
+    notify_kw = _keyword(node, "notify")
+    if notify_kw is None or not _is_literal_true(notify_kw.value):
+        return False
+
+    schema_kw = _keyword(node, "schema")
+    if schema_kw is None:
+        return False
+
+    return not _is_literal_none(schema_kw.value)
+
+
+def _workflow_path_argument(node: ast.Call) -> ast.AST | None:
+    if node.args:
+        return node.args[0]
+    keyword = _keyword(node, "name_or_path")
+    return keyword.value if keyword is not None else None
+
+
+def _workflow_path_is_missing_or_empty(node: ast.AST | None) -> bool:
+    if node is None:
+        return True
+    if not isinstance(node, ast.Constant):
+        return False
+    return not isinstance(node.value, str) or not node.value.strip()
+
+
+def _is_budget_attribute(node: ast.AST, name: str) -> bool:
+    return (
+        isinstance(node, ast.Attribute)
+        and node.attr == name
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "budget"
+    )
+
+
+def _is_none_literal(node: ast.AST) -> bool:
+    return isinstance(node, ast.Constant) and node.value is None
+
+
+def _proves_budget_total_available(node: ast.AST) -> bool:
+    if _is_budget_attribute(node, "total"):
+        return True
+    if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.And):
+        return any(_proves_budget_total_available(value) for value in node.values)
+    if not isinstance(node, ast.Compare) or len(node.ops) != 1:
+        return False
+
+    op = node.ops[0]
+    comparator = node.comparators[0]
+    if not isinstance(op, (ast.IsNot, ast.NotEq)):
+        return False
+    return (
+        _is_budget_attribute(node.left, "total") and _is_none_literal(comparator)
+    ) or (
+        _is_none_literal(node.left) and _is_budget_attribute(comparator, "total")
+    )
+
+
+def _is_guarded_by_budget_total(node: ast.AST) -> bool:
+    current = node
+    parent = _parent(current)
+    while parent is not None:
+        if isinstance(parent, ast.BoolOp) and isinstance(parent.op, ast.And):
+            current_index = parent.values.index(current)
+            if any(
+                _proves_budget_total_available(value)
+                for value in parent.values[:current_index]
+            ):
+                return True
+        elif isinstance(parent, (ast.If, ast.While)):
+            if current in parent.body and _proves_budget_total_available(parent.test):
+                return True
+        elif isinstance(parent, ast.IfExp):
+            if current is parent.body and _proves_budget_total_available(parent.test):
+                return True
+        current = parent
+        parent = _parent(current)
+    return False
+
+
+def _budget_remaining_is_numeric(node: ast.Call) -> bool:
+    current: ast.AST = node
+    parent = _parent(current)
+    while isinstance(parent, (ast.UnaryOp, ast.BinOp)):
+        current = parent
+        parent = _parent(current)
+    if isinstance(parent, ast.Compare):
+        return any(
+            isinstance(op, (ast.Lt, ast.LtE, ast.Gt, ast.GtE))
+            for op in parent.ops
+        )
+    return isinstance(current, (ast.UnaryOp, ast.BinOp))
+
+
+def _has_guarded_budget_remaining(test: ast.AST) -> bool:
+    return any(
+        isinstance(candidate, ast.Call)
+        and _call_name(candidate) == "budget.remaining"
+        and _budget_remaining_is_numeric(candidate)
+        and _is_guarded_by_budget_total(candidate)
+        for candidate in ast.walk(test)
+    )
+
+
+def _caught_exception_names(node: ast.AST | None) -> set[str]:
+    if node is None:
+        return {"<bare>"}
+    if isinstance(node, ast.Name):
+        return {node.id}
+    if isinstance(node, ast.Attribute):
+        return {node.attr}
+    if isinstance(node, ast.Tuple):
+        names: set[str] = set()
+        for element in node.elts:
+            names.update(_caught_exception_names(element))
+        return names
+    return set()
+
+
 def _is_asyncio_orchestration_alias_call(node: ast.Call, asyncio_modules: set[str]) -> bool:
     if not isinstance(node.func, ast.Attribute):
         return False
@@ -850,6 +1017,8 @@ def _runtime_call_issues(tree: ast.Module) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
     asyncio_modules, asyncio_functions = _asyncio_orchestration_aliases(tree)
+    session_names = _session_variable_names(tree)
+    imported_swarmflow_types = _swarmflow_imported_names(tree) & SUPPORTED_SWARMFLOW_TYPES
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -868,7 +1037,7 @@ def _runtime_call_issues(tree: ast.Module) -> tuple[list[str], list[str]]:
                     f"line {getattr(node, 'lineno', '?')}: imports non-deterministic module "
                     f"{module!r}; pass values via args"
                 )
-        elif isinstance(node, ast.While):
+        elif isinstance(node, ast.While) and not _has_guarded_budget_remaining(node.test):
             warnings.append(
                 f"line {getattr(node, 'lineno', '?')}: loop must document a stop condition "
                 "(max_rounds, dry_count, budget guard, or input cap)"
@@ -878,6 +1047,13 @@ def _runtime_call_issues(tree: ast.Module) -> tuple[list[str], list[str]]:
                 warnings.append(
                     f"line {getattr(node, 'lineno', '?')}: avoid module-level mutable state; "
                     "keep run state inside run(args)"
+                )
+        elif isinstance(node, ast.ExceptHandler):
+            caught = _caught_exception_names(node.type)
+            if caught & {"<bare>", "BaseException", "BudgetExhausted"}:
+                warnings.append(
+                    f"line {getattr(node, 'lineno', '?')}: exception handler may catch "
+                    "budget exhaustion; use finally for cleanup and let BudgetExhausted propagate"
                 )
         elif isinstance(node, ast.Call):
             line = getattr(node, "lineno", "?")
@@ -892,11 +1068,61 @@ def _runtime_call_issues(tree: ast.Module) -> tuple[list[str], list[str]]:
                 errors.append(f"line {line}: use swarmflow.log(), not print()")
             elif call_name == "budget":
                 errors.append(f"line {line}: budget is an imported singleton; use budget.remaining(), not budget()")
+            elif call_name == "budget.total":
+                errors.append(f"line {line}: budget.total is a property; do not call it")
+            elif call_name == "budget.remaining":
+                if _budget_remaining_is_numeric(node) and not _is_guarded_by_budget_total(node):
+                    errors.append(
+                        f"line {line}: guard budget.remaining() numeric use with "
+                        "budget.total or `budget.total is not None`"
+                    )
+            elif call_name == "workflow":
+                path_argument = _workflow_path_argument(node)
+                path_literal = (
+                    _string_literal(path_argument)
+                    if path_argument is not None
+                    else None
+                )
+                if _workflow_path_is_missing_or_empty(path_argument):
+                    errors.append(
+                        f"line {line}: workflow() requires a non-empty child workflow name/path"
+                    )
+                elif path_literal is None:
+                    warnings.append(
+                        f"line {line}: dynamic child workflow path cannot be validated; "
+                        "prefer a stable string literal and validate external input"
+                    )
+                if not _is_directly_awaited(node) and not _is_inside_deferred_lambda(node):
+                    errors.append(
+                        f"line {line}: workflow() must be awaited or returned from a "
+                        "deferred SwarmFlow thunk"
+                    )
             elif call_name == "agent":
                 if node.args and _string_literal(node.args[0]) == "":
                     errors.append(f"line {line}: agent prompt must not be an empty string")
-                if not _is_directly_awaited(node) and not _is_inside_parallel_lambda(node):
-                    errors.append(f"line {line}: agent() must be awaited or returned from a parallel thunk")
+                if not _is_directly_awaited(node) and not _is_inside_deferred_lambda(node):
+                    errors.append(
+                        f"line {line}: agent() must be awaited or returned from a "
+                        "deferred SwarmFlow thunk"
+                    )
+            elif call_name == "human":
+                if node.args and _string_literal(node.args[0]) == "":
+                    errors.append(f"line {line}: human prompt must not be an empty string")
+                if _keyword(node, "notify") is not None:
+                    errors.append(f"line {line}: human() does not accept notify; use human_session().send()")
+                if not _is_directly_awaited(node) and not _is_inside_deferred_lambda(node):
+                    errors.append(
+                        f"line {line}: human() must be awaited or returned from a "
+                        "deferred SwarmFlow thunk"
+                    )
+            elif call_name in {"agent_session", "human_session"}:
+                if _is_directly_awaited(node):
+                    errors.append(f"line {line}: {call_name}() is synchronous and must not be awaited")
+            elif call_name in imported_swarmflow_types:
+                errors.append(
+                    f"line {line}: do not construct {call_name} directly; "
+                    "use agent_session() or human_session()"
+                )
             elif call_name in {"map_parallel", "pmap"}:
                 warnings.append(
                     f"line {line}: dynamic fan-out should declare an item cap and log skipped work "
@@ -917,10 +1143,39 @@ def _runtime_call_issues(tree: ast.Module) -> tuple[list[str], list[str]]:
             elif call_name in {"time.time", "datetime.now", "datetime.utcnow"}:
                 warnings.append(f"line {line}: current time access is non-deterministic; pass values via args")
 
+            method_name = _session_method_name(node, session_names)
+            if method_name is not None:
+                if not _is_directly_awaited(node):
+                    errors.append(
+                        f"line {line}: session.{method_name}() must be awaited"
+                    )
+                if method_name == "send" and _has_notify_schema_conflict(node):
+                    errors.append(
+                        f"line {line}: session.send(notify=True) must not also pass schema"
+                    )
+
             if isinstance(node.func, ast.Attribute) and node.func.attr in PATH_IO_METHODS:
                 warnings.append(
                     f"line {line}: avoid direct filesystem access via Path.{node.func.attr} in workflow.py"
                 )
+        elif isinstance(node, ast.Attribute):
+            line = getattr(node, "lineno", "?")
+            if _is_budget_attribute(node, "total") and isinstance(
+                node.ctx,
+                (ast.Store, ast.Del),
+            ):
+                errors.append(f"line {line}: budget.total is read-only")
+            elif (
+                node.attr in {"remaining", "spent"}
+                and _is_budget_attribute(node, node.attr)
+                and isinstance(node.ctx, ast.Load)
+            ):
+                parent = _parent(node)
+                if not (isinstance(parent, ast.Call) and parent.func is node):
+                    errors.append(
+                        f"line {line}: budget.{node.attr} is a method; "
+                        f"use budget.{node.attr}()"
+                    )
 
     return sorted(set(errors)), sorted(set(warnings))
 
@@ -955,7 +1210,10 @@ def _swarmflow_import_issues(tree: ast.Module) -> list[str]:
             if alias.name == "*":
                 issues.append(f"line {line}: import * from swarmflow is not allowed")
                 continue
-            if alias.name not in SUPPORTED_SWARMFLOW_OPERATORS:
+            if (
+                alias.name not in SUPPORTED_SWARMFLOW_OPERATORS
+                and alias.name not in SUPPORTED_SWARMFLOW_TYPES
+            ):
                 issues.append(f"line {line}: unsupported swarmflow operator {alias.name!r}")
             if alias.asname:
                 issues.append(f"line {line}: import swarmflow.{alias.name} without aliasing it")

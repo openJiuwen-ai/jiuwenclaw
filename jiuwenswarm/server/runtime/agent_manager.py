@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """AgentManager - 管理 Agent 实例."""
 
@@ -8,12 +8,14 @@ import asyncio
 import json
 import logging
 import os
+import time
 import uuid
 from typing import Any, TYPE_CHECKING
+from weakref import WeakValueDictionary
 
 from jiuwenswarm.common.e2a.acp.protocol import build_acp_initialize_result
 from jiuwenswarm.agents.harness.team import get_team_manager
-from jiuwenswarm.common.config import get_config
+from jiuwenswarm.common.config import get_config, get_default_models
 
 if TYPE_CHECKING:
     from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
@@ -90,6 +92,241 @@ class AgentManager:
         # reload 串行锁: 防止并发 reload 叠加导致内存爆炸
         self._reload_lock: asyncio.Lock = asyncio.Lock()
         self._last_reload_fingerprint: str | None = None
+        self._latest_effective_config: dict[str, Any] | None = None
+        # A cached root may be returned before its first session processor or
+        # child adapter exists. Track the request task that borrowed it so
+        # disconnect cleanup cannot tear it down in that gap.
+        self._agent_borrowers: dict[int, set[asyncio.Task]] = {}
+        self._agent_pins: dict[int, int] = {}
+        self._pending_tui_retirements: set[int] = set()
+        self._retirement_tasks: dict[int, asyncio.Task] = {}
+        self._agent_create_locks: WeakValueDictionary[
+            tuple[str, str], asyncio.Lock
+        ] = WeakValueDictionary()
+        # 上一次默认模型的连接身份快照 (diff_key -> ModelClientConfig), 用于
+        # 模型热更新后关闭"已被删除/改掉凭证"的 LLM 连接 (增量关闭)。
+        self._last_model_conn_configs: dict[tuple, Any] = {}
+        self._session_create_tokens: dict[tuple[str, str], tuple[Any, Any]] = {}
+        self._session_create_token_lock = asyncio.Lock()
+        from jiuwenswarm.server.runtime.agent_warm_pool import AgentWarmPool
+
+        self.warm_pool = AgentWarmPool(self)
+
+    def _get_agent_create_lock(
+        self,
+        channel_key: str,
+        cache_key: str,
+    ) -> asyncio.Lock:
+        lock_key = (channel_key, cache_key)
+        create_lock = self._agent_create_locks.get(lock_key)
+        if create_lock is None:
+            create_lock = asyncio.Lock()
+            self._agent_create_locks[lock_key] = create_lock
+        return create_lock
+
+    def _borrow_agent(self, agent: "JiuWenSwarm") -> "JiuWenSwarm":
+        try:
+            task = asyncio.current_task()
+        except RuntimeError:
+            task = None
+        if task is None:
+            return agent
+        agent_id = id(agent)
+        borrowers = self._agent_borrowers.setdefault(agent_id, set())
+        if task in borrowers:
+            return agent
+        borrowers.add(task)
+        task.add_done_callback(
+            lambda completed, aid=agent_id: self._release_agent_borrower(
+                aid, completed
+            )
+        )
+        return agent
+
+    def _release_agent_borrower(
+        self,
+        agent_id: int,
+        task: asyncio.Task,
+    ) -> None:
+        borrowers = self._agent_borrowers.get(agent_id)
+        if borrowers is None:
+            return
+        borrowers.discard(task)
+        if borrowers:
+            return
+        self._agent_borrowers.pop(agent_id, None)
+        self._schedule_pending_tui_retirement(agent_id)
+
+    def pin_agent(self, agent: "JiuWenSwarm") -> None:
+        """Keep a cached agent alive for a persistent background owner."""
+        agent_id = id(agent)
+        self._agent_pins[agent_id] = self._agent_pins.get(agent_id, 0) + 1
+
+    def unpin_agent(self, agent: "JiuWenSwarm") -> None:
+        """Release one persistent background ownership reference."""
+        agent_id = id(agent)
+        remaining = self._agent_pins.get(agent_id, 0) - 1
+        if remaining > 0:
+            self._agent_pins[agent_id] = remaining
+            return
+        self._agent_pins.pop(agent_id, None)
+        self._schedule_pending_tui_retirement(agent_id)
+
+    def _has_agent_borrowers(
+        self,
+        agent: "JiuWenSwarm",
+        *,
+        exclude: asyncio.Task | None = None,
+    ) -> bool:
+        agent_id = id(agent)
+        borrowers = self._agent_borrowers.get(agent_id)
+        if not borrowers:
+            return False
+        live = {task for task in borrowers if not task.done()}
+        if live:
+            self._agent_borrowers[agent_id] = live
+        else:
+            self._agent_borrowers.pop(agent_id, None)
+        return any(task is not exclude for task in live)
+
+    def _schedule_pending_tui_retirement(self, agent_id: int) -> None:
+        if agent_id not in self._pending_tui_retirements:
+            return
+        if agent_id in self._agent_pins or self._agent_borrowers.get(agent_id):
+            return
+        existing = self._retirement_tasks.get(agent_id)
+        if existing is not None and not existing.done():
+            return
+        try:
+            task = asyncio.create_task(
+                self._retire_pending_tui_agent(agent_id)
+            )
+        except RuntimeError:
+            return
+        self._retirement_tasks[agent_id] = task
+        task.add_done_callback(
+            lambda completed, aid=agent_id: self._finish_retirement_task(
+                aid, completed
+            )
+        )
+
+    def _finish_retirement_task(
+        self,
+        agent_id: int,
+        task: asyncio.Task,
+    ) -> None:
+        if self._retirement_tasks.get(agent_id) is task:
+            self._retirement_tasks.pop(agent_id, None)
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception(
+                "[AgentManager] deferred TUI root retirement failed: agent_id=%s",
+                agent_id,
+            )
+
+    async def _retire_pending_tui_agent(self, agent_id: int) -> None:
+        channel_agents = self.agents.get("tui")
+        if not isinstance(channel_agents, dict):
+            self._pending_tui_retirements.discard(agent_id)
+            return
+        for cache_key, agent in list(channel_agents.items()):
+            if id(agent) != agent_id:
+                continue
+            await self._retire_tui_agent_if_idle(
+                cache_key,
+                agent,
+                channel_agents,
+            )
+            return
+        self._pending_tui_retirements.discard(agent_id)
+
+    async def _retire_tui_agent_if_idle(
+        self,
+        cache_key: str,
+        agent: "JiuWenSwarm",
+        channel_agents: dict[str, "JiuWenSwarm"],
+        *,
+        exclude_borrower: asyncio.Task | None = None,
+    ) -> bool:
+        create_lock = self._get_agent_create_lock("tui", cache_key)
+        async with create_lock:
+            return await self._retire_tui_agent_if_idle_locked(
+                cache_key,
+                agent,
+                channel_agents,
+                exclude_borrower=exclude_borrower,
+            )
+
+    async def _retire_tui_agent_if_idle_locked(
+        self,
+        cache_key: str,
+        agent: "JiuWenSwarm",
+        channel_agents: dict[str, "JiuWenSwarm"],
+        *,
+        exclude_borrower: asyncio.Task | None = None,
+    ) -> bool:
+        agent_id = id(agent)
+        if (
+            self._agent_pins.get(agent_id, 0) > 0
+            or self._has_agent_borrowers(agent, exclude=exclude_borrower)
+        ):
+            self._pending_tui_retirements.add(agent_id)
+            return False
+
+        has_runtime = getattr(agent, "has_session_runtime", None)
+        if not callable(has_runtime):
+            return False
+        try:
+            if bool(has_runtime()):
+                self._pending_tui_retirements.discard(agent_id)
+                return False
+        except Exception:
+            logger.exception(
+                "[AgentManager] has_session_runtime failed: cache_key=%s",
+                cache_key,
+            )
+            raise
+        if channel_agents.get(cache_key) is not agent:
+            self._pending_tui_retirements.discard(agent_id)
+            return False
+
+        # Detach before awaiting cleanup so a new request creates a fresh
+        # root rather than receiving one that is being torn down.
+        channel_agents.pop(cache_key, None)
+        channel_params = self._agent_create_params.get("tui")
+        create_params = None
+        if isinstance(channel_params, dict):
+            create_params = channel_params.pop(cache_key, None)
+        self._pending_tui_retirements.discard(agent_id)
+        try:
+            await agent.cleanup()
+        except Exception:
+            logger.exception(
+                "[AgentManager] idle TUI root agent cleanup failed: cache_key=%s",
+                cache_key,
+            )
+            restored_agents = self.agents.setdefault("tui", channel_agents)
+            if cache_key not in restored_agents:
+                restored_agents[cache_key] = agent
+                if create_params is not None:
+                    self._agent_create_params.setdefault("tui", {})[
+                        cache_key
+                    ] = create_params
+            raise
+        else:
+            logger.info(
+                "[AgentManager] idle TUI root agent removed: cache_key=%s",
+                cache_key,
+            )
+        if not channel_agents and self.agents.get("tui") is channel_agents:
+            self.agents.pop("tui", None)
+        if isinstance(channel_params, dict) and not channel_params:
+            self._agent_create_params.pop("tui", None)
+        return True
+
 
     @staticmethod
     def _reload_fingerprint(
@@ -99,6 +336,7 @@ class AgentManager:
         agent_topology: Any,
         target_channel_id: str | None,
         target_session_id: str | None,
+        reload_scopes: list[str] | None = None,
     ) -> str:
         payload = {
             "config": config,
@@ -106,6 +344,7 @@ class AgentManager:
             "agent_topology": agent_topology,
             "target_channel_id": str(target_channel_id or "").strip() or None,
             "target_session_id": str(target_session_id or "").strip() or None,
+            "reload_scopes": reload_scopes if reload_scopes is not None else [],
         }
         return json.dumps(payload, sort_keys=True, ensure_ascii=False, default=repr)
 
@@ -228,7 +467,27 @@ class AgentManager:
                     logger.exception("[AgentManager] cancel_inflight_work failed")
 
     async def cleanup_session_runtime(self, *, channel_id: str = "", session_id: str) -> bool:
-        """Release in-memory runtime for one session across existing channel agents."""
+        """Release in-memory runtime for one session across existing channel agents.
+
+        Iterates every cached agent on the channel and calls its
+        ``cleanup_session_runtime(session_id)``. For ``tui`` channel agents that
+        become idle after cleanup (no pins, no borrowers, no remaining session
+        runtime), the cached root agent itself is retired so short-lived TUI
+        processes do not accumulate one root per project.
+
+        Returns:
+            ``True`` if at least one agent reported cleanup, ``False`` when the
+            channel has no matching agents or none exposes a cleanup hook.
+
+        Raises:
+            RuntimeError: if one or more agents failed to clean up -- an agent's
+                ``cleanup_session_runtime`` raised, the post-cleanup
+                ``has_session_runtime`` check raised, or runtime was still
+                retained after cleanup. Failures are aggregated across all
+                agents and raised once after the loop; partial successes are not
+                rolled back. Callers needing best-effort semantics must wrap the
+                call in try/except.
+        """
         sid = str(session_id or "").strip()
         if not sid:
             return False
@@ -238,18 +497,70 @@ class AgentManager:
             return False
 
         cleaned = False
-        for agent in list(channel_agents.values()):
+        failed_agents = 0
+        for cache_key, agent in list(channel_agents.items()):
             cleanup_fn = getattr(agent, "cleanup_session_runtime", None)
             if not callable(cleanup_fn):
                 continue
             try:
-                cleaned = bool(await cleanup_fn(sid)) or cleaned
+                session_cleaned = bool(await cleanup_fn(sid))
+                cleaned = session_cleaned or cleaned
             except Exception:
+                failed_agents += 1
                 logger.exception(
                     "[AgentManager] cleanup_session_runtime failed: channel_id=%s session_id=%s",
                     channel_key,
                     sid,
                 )
+                continue
+
+            has_runtime = getattr(agent, "has_session_runtime", None)
+            try:
+                session_retained = bool(has_runtime(sid)) if callable(has_runtime) else False
+            except Exception:
+                failed_agents += 1
+                logger.exception(
+                    "[AgentManager] session runtime state check failed: "
+                    "channel_id=%s session_id=%s",
+                    channel_key,
+                    sid,
+                )
+                continue
+            if session_retained:
+                failed_agents += 1
+                logger.warning(
+                    "[AgentManager] session runtime remains after cleanup: "
+                    "channel_id=%s session_id=%s cache_key=%s",
+                    channel_key,
+                    sid,
+                    cache_key,
+                )
+                continue
+
+            if channel_key != "tui":
+                continue
+            try:
+                await self._retire_tui_agent_if_idle(
+                    cache_key,
+                    agent,
+                    channel_agents,
+                    exclude_borrower=asyncio.current_task(),
+                )
+            except Exception:
+                failed_agents += 1
+                continue
+
+        if not channel_agents and self.agents.get(channel_key) is channel_agents:
+            self.agents.pop(channel_key, None)
+        channel_params = self._agent_create_params.get(channel_key)
+        if isinstance(channel_params, dict) and not channel_params:
+            self._agent_create_params.pop(channel_key, None)
+        if failed_agents:
+            raise RuntimeError(
+                "cleanup_session_runtime failed for "
+                f"{failed_agents} agent(s): channel_id={channel_key} "
+                f"session_id={sid}"
+            )
         return cleaned
 
     def get_client_capabilities(self, channel_id: str = "") -> dict[str, Any]:
@@ -271,11 +582,97 @@ class AgentManager:
             logger.info("[AgentManager] session ensured: channel_id=%s session_id=%s", channel_id, explicit_session_id)
             return explicit_session_id
         channel_key = _normalize_channel_id(channel_id)
-        if channel_key == "acp":
-            session_id = f"acp_{uuid.uuid4().hex[:8]}"
-            logger.info("[AgentManager] ACP session created: session_id=%s", session_id)
-            return session_id
-        return "default"
+        session_id = (
+            f"{channel_key}_{int(time.time() * 1000):x}_"
+            f"{uuid.uuid4().hex[:12]}"
+        )
+        logger.info(
+            "[AgentManager] session id allocated: channel_id=%s session_id=%s",
+            channel_key,
+            session_id,
+        )
+        return session_id
+
+    async def sync_prewarm_channels(
+        self,
+        enabled_channels: list[str],
+        *,
+        config: Any | None = None,
+        env: Any = None,
+    ) -> dict[str, int]:
+        return await self.warm_pool.sync(
+            enabled_channels,
+            config=(
+                config
+                if config is not None
+                else self._latest_effective_config or get_config()
+            ),
+            env=env if env is not None else self._latest_env_overrides,
+        )
+
+    async def claim_prewarmed_session(
+        self,
+        *,
+        channel_id: str,
+        project_id: str,
+        project_dir: str | None,
+        work_mode: str,
+        is_swarm: bool,
+        prewarm_eligible: bool = True,
+        create_token: str | None = None,
+    ):
+        token = str(create_token or "").strip()
+        key = self.warm_pool.make_key(
+            channel_id=channel_id,
+            project_id=project_id,
+            project_dir=project_dir,
+            work_mode=work_mode,
+            is_swarm=is_swarm,
+        )
+        create_signature = (key, bool(prewarm_eligible))
+        token_key = (key.channel_id, token)
+        async with self._session_create_token_lock:
+            if token:
+                existing = self._session_create_tokens.get(token_key)
+                if existing is not None:
+                    existing_key, claim = existing
+                    if existing_key != create_signature:
+                        raise ValueError(
+                            "create_token was already used with different session parameters"
+                        )
+                    return claim
+            if prewarm_eligible and not is_swarm:
+                claim = await self.warm_pool.claim(key)
+            else:
+                from jiuwenswarm.server.runtime.agent_warm_pool import WarmClaim
+
+                claim = WarmClaim(
+                    await self.create_session(channel_id=channel_id),
+                    False,
+                    "bypassed",
+                )
+            if token:
+                self._session_create_tokens[token_key] = (create_signature, claim)
+            return claim
+
+    async def wait_for_session_prewarm(self, session_id: str | None) -> None:
+        if session_id:
+            await self.warm_pool.wait_for_session(session_id)
+
+    async def begin_foreground_chat(self) -> None:
+        await self.warm_pool.begin_foreground()
+
+    async def end_foreground_chat(self) -> None:
+        await self.warm_pool.end_foreground()
+
+    def activate_session_prewarm(self, session_id: str | None) -> None:
+        """Mark a claimed prewarm workspace as a normal persisted session."""
+        if session_id:
+            self.warm_pool.clear_marker(session_id)
+
+    async def release_session_prewarm_claim(self, session_id: str | None) -> None:
+        if session_id:
+            await self.warm_pool.release_claim_pin(session_id)
 
     async def get_agent(
             self,
@@ -304,23 +701,30 @@ class AgentManager:
         cache_key = _make_agent_cache_key(mode_key, sub_mode_key, project_key)
         channel_agents = self.agents.get(channel_key, {})
         if cache_key in channel_agents:
-            return channel_agents[cache_key]
+            return self._borrow_agent(channel_agents[cache_key])
 
-        config = {}
-        if project_key:
-            config["project_dir"] = project_key
-        if channel_key == "acp":
-            config = {
-                **config,
-                **_build_acp_agent_config()
-            }
-        return await self._create_agent(
-            channel_key,
-            mode_key,
-            config,
-            sub_mode_key or None,
-            cache_key=cache_key,
-        )
+        create_lock = self._get_agent_create_lock(channel_key, cache_key)
+        async with create_lock:
+            existing = self.agents.get(channel_key, {}).get(cache_key)
+            if existing is not None:
+                return self._borrow_agent(existing)
+
+            config = {}
+            if project_key:
+                config["project_dir"] = project_key
+            if channel_key == "acp":
+                config = {
+                    **config,
+                    **_build_acp_agent_config()
+                }
+            agent = await self._create_agent(
+                channel_key,
+                mode_key,
+                config,
+                sub_mode_key or None,
+                cache_key=cache_key,
+            )
+            return self._borrow_agent(agent)
 
     def get_agent_nowait(
         self,
@@ -346,7 +750,7 @@ class AgentManager:
             cache_key = _make_agent_cache_key(mode, sub_mode, project_dir)
             agent = channel_agents.get(cache_key)
             if agent is not None:
-                return agent
+                return self._borrow_agent(agent)
 
         requested_mode = _normalize_mode(mode) if mode is not None else ""
         requested_sub_mode = _normalize_sub_mode(sub_mode) if sub_mode is not None else ""
@@ -358,13 +762,14 @@ class AgentManager:
                 continue
             if requested_project_dir and getattr(agent, "_jiuwenswarm_agent_project_dir", "") != requested_project_dir:
                 continue
-            return agent
+            return self._borrow_agent(agent)
 
         if mode is None and project_dir is None and sub_mode is None:
             for agent in channel_agents.values():
                 if getattr(agent, "_jiuwenswarm_agent_mode", "") == "agent":
-                    return agent
-            return next(iter(channel_agents.values()), None)
+                    return self._borrow_agent(agent)
+            agent = next(iter(channel_agents.values()), None)
+            return self._borrow_agent(agent) if agent is not None else None
         return None
 
     async def broadcast_package_change_to_single_agents(
@@ -401,7 +806,7 @@ class AgentManager:
                 if mode not in target_modes:
                     continue  # Skip team and other modes
 
-                instance = agent.get_instance()
+                instance = await agent.ensure_instance()
                 if instance is None:
                     continue
 
@@ -464,11 +869,18 @@ class AgentManager:
         *,
         target_channel_id: str | None = None,
         target_session_id: str | None = None,
+        reload_scopes: set[str] | None = None,
     ) -> None:
         """reload agent config.
 
         使用 ``self._reload_lock`` 串行化, 避免高频触发(如批量 MCP 增删)时多个
         reload 并发叠加, 同时重建大量 agent 实例导致内存暴涨被 OOM kill.
+
+        ``reload_scopes`` 含 ``"model"`` 时, 模型配置属于所有 channel 共享的
+        全局配置段, 此时忽略 ``target_channel_id`` 的窄化, fan-out 到全部
+        channel——否则 web 保存模型后只有 web 通道被热更新, IM 长连接通道
+        (xiaoyi 等)的 session adapter 会继续用旧错误模型, 直到用户手动
+        /new_session 才恢复.
         """
         async with self._reload_lock:
             self._latest_env_overrides = dict(env) if isinstance(env, dict) else {}
@@ -481,6 +893,17 @@ class AgentManager:
 
             target_channel = str(target_channel_id or "").strip() or None
             target_session = str(target_session_id or "").strip() or None
+            # model 是全局共享配置: 变更时必须广播到所有 channel, 否则非触发
+            # 通道(如 IM 长连接 xiaoyi)的 agent 不会收到热更新, 旧模型残留。
+            scope_set = set(reload_scopes) if reload_scopes else set()
+            model_scope = "model" in scope_set
+            effective_target_channel = None if model_scope else target_channel
+            if target_channel and model_scope:
+                logger.info(
+                    "[AgentManager] model config changed via channel=%s; fan-out reload "
+                    "to all channels (model is global)",
+                    target_channel,
+                )
             effective_config = config
             if effective_config is None:
                 try:
@@ -490,21 +913,22 @@ class AgentManager:
             fingerprint = self._reload_fingerprint(
                 effective_config,
                 self._latest_env_overrides,
-                agent_topology=self._reload_agent_topology(target_channel),
-                target_channel_id=target_channel,
+                agent_topology=self._reload_agent_topology(effective_target_channel),
+                target_channel_id=effective_target_channel,
                 target_session_id=target_session,
+                reload_scopes=sorted(scope_set) if scope_set else None,
             )
             if fingerprint == self._last_reload_fingerprint:
                 logger.info(
                     "[AgentManager] reload agent config skipped: unchanged scope/config/env "
                     "(channel=%s session=%s)",
-                    target_channel or "*",
+                    effective_target_channel or "*",
                     target_session or "*",
                 )
                 return
             channel_items = (
-                [(target_channel, self.agents.get(target_channel, {}))]
-                if target_channel
+                [(effective_target_channel, self.agents.get(effective_target_channel, {}))]
+                if effective_target_channel
                 else list(self.agents.items())
             )
             reload_completed = True
@@ -539,6 +963,72 @@ class AgentManager:
                 logger.info(f"channel {channel_id} reload agent config success.")
             if reload_completed:
                 self._last_reload_fingerprint = fingerprint
+                if isinstance(effective_config, dict):
+                    self._latest_effective_config = dict(effective_config)
+                asyncio.create_task(
+                    self.warm_pool.refresh(
+                        config=effective_config,
+                        env=self._latest_env_overrides,
+                    ),
+                    name="agent-prewarm-config-refresh",
+                )
+            # 模型配置变更时, 关闭已被删除/改掉凭证的旧 LLM 连接 (增量关闭)。
+            if model_scope:
+                await self._evict_stale_llm_clients(effective_config)
+
+    async def _evict_stale_llm_clients(self, effective_config: Any) -> None:
+        """模型热更新后, 关闭"已从 models.defaults 删除/改掉凭证"的 LLM 连接。
+
+        agent-core 的 HTTP client 缓存是进程级、被所有组件共享的, 因此这里只做
+        **增量关闭**(上次默认集 - 本次默认集), 绝不碰其它组件仍在使用的连接。
+        被删除/更新的模型即使有在途调用也会立即断开——用户既然不再使用它, 就不该
+        让它继续偷偷消耗 token。被误伤的连接(若有)也会在下次调用时自愈重建。
+
+        注意: 进程启动后的第一次模型变更, 因无历史快照, 只登记不关闭; 之后的变更
+        才做真正的 diff 关闭。
+        """
+        try:
+            from openjiuwen.core.foundation.llm import ModelClientConfig
+            from openjiuwen.core.foundation.llm.model_clients.openai_model_client import (
+                OpenAIModelClient,
+            )
+            from openjiuwen.core.foundation.llm.model_clients.anthropic_model_client import (
+                AnthropicModelClient,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[AgentManager] LLM client evict skipped (import failed): %s", exc)
+            return
+
+        def _diff_key(cfg: Any) -> tuple:
+            return (str(cfg.client_provider), cfg.api_key, cfg.api_base, cfg.verify_ssl, cfg.ssl_cert)
+
+        new_configs: dict[tuple, Any] = {}
+        try:
+            entries = get_default_models(effective_config if isinstance(effective_config, dict) else None)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[AgentManager] build live model configs failed: %s", exc)
+            return
+        for entry in entries or []:
+            mcc = (entry or {}).get("model_client_config") or {}
+            mcc_fields = {k: v for k, v in mcc.items() if k != "model_name"}
+            if not mcc_fields.get("client_provider"):
+                mcc_fields["client_provider"] = "OpenAI"
+            try:
+                cfg = ModelClientConfig(**mcc_fields)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[AgentManager] skip invalid model config during evict: %s", exc)
+                continue
+            new_configs[_diff_key(cfg)] = cfg
+
+        removed = [cfg for key, cfg in self._last_model_conn_configs.items() if key not in new_configs]
+        self._last_model_conn_configs = new_configs
+        if not removed:
+            return
+        for client_cls in (OpenAIModelClient, AnthropicModelClient):
+            try:
+                await client_cls.aclose_connections(removed)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[AgentManager] %s.aclose_connections failed: %s", client_cls.__name__, exc)
 
     async def recreate_agent(self, channel_id: str, *, immediate: bool = True) -> None:
         """重建指定 channel 的所有 agent 实例.
@@ -632,6 +1122,7 @@ class AgentManager:
             AgentResponse 对象
         """
         try:
+            await self.wait_for_session_prewarm(getattr(request, "session_id", None))
             channel_id = getattr(request, "channel_id", "")
             params = getattr(request, "params", {}) if isinstance(getattr(request, "params", {}), dict) else {}
             mode_full = params.get("mode", "agent")
@@ -661,6 +1152,7 @@ class AgentManager:
             AgentResponseChunk 对象
         """
         try:
+            await self.wait_for_session_prewarm(getattr(request, "session_id", None))
             channel_id = getattr(request, "channel_id", "")
             params = getattr(request, "params", {}) if isinstance(getattr(request, "params", {}), dict) else {}
             mode_full = params.get("mode", "agent")
@@ -684,6 +1176,14 @@ class AgentManager:
 
     async def cleanup(self) -> None:
         """清理所有 agent 实例."""
+        await self.warm_pool.close()
+        retirement_tasks = [
+            task
+            for task in self._retirement_tasks.values()
+            if task is not asyncio.current_task() and not task.done()
+        ]
+        if retirement_tasks:
+            await asyncio.gather(*retirement_tasks, return_exceptions=True)
         for key, agents in list(self.agents.items()):
             for agent in agents.values():
                 if hasattr(agent, "cleanup"):
@@ -694,4 +1194,10 @@ class AgentManager:
             del self.agents[key]
         self._agent_create_params.clear()
         self._client_capabilities_by_channel.clear()
+        self._session_create_tokens.clear()
+        self._agent_borrowers.clear()
+        self._agent_pins.clear()
+        self._pending_tui_retirements.clear()
+        self._retirement_tasks.clear()
+        self._agent_create_locks.clear()
         logger.info("[AgentManager] All agents cleaned up")

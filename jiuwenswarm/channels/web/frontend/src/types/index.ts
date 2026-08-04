@@ -2,8 +2,10 @@
  * 类型导出
  */
 
+export * from './goal';
 export * from './message';
 export * from './skillTree';
+export * from './beamSearch';
 export * from './todo';
 export * from './websocket';
 export * from '../features/workspace/projectTypes';
@@ -14,6 +16,7 @@ export interface Session {
   title: string;
   project_id: string;
   project_dir: string;
+  work_mode?: import('../features/workspace/projectTypes').WorkMode;
   pinned?: boolean;
   pin_order?: number;
   renamed_at?: string | null;
@@ -53,7 +56,7 @@ export interface ModelEntry {
   context_window_tokens?: number;
   /** 同 model_name 组内的默认勾选标识 */
   is_default?: boolean;
-  /** 可选别名，用于快捷切换模型（如 "mimo" → "xiaomi/mimo-v2-omni"） */
+  /** 可选别名，用于快捷切换模型（如 "gpt" → "gpt-4o"） */
   alias?: string;
   /** 用于原子性重命名操作，指定原模型名 */
   original_model_name?: string;

@@ -1183,13 +1183,19 @@ class WecomChannel(BaseChannel):
                     return
                 content = self._extract_content_from_payload(msg)
                 if content is not None:
-                    entry["accumulated"] = (entry.get("accumulated") or "") + content
+                    is_final = msg.event_type == EventType.CHAT_FINAL
+                    if is_final and content.strip():
+                        entry["accumulated"] = content
+                    else:
+                        entry["accumulated"] = (entry.get("accumulated") or "") + content
                     # 移除 <think>...</think> 块，不将 Agent 思考过程展示给用户
                     to_send = self._strip_think_tags(entry["accumulated"]).strip()
                     if not to_send or self._is_thinking_only_content(to_send):
                         if msg.event_type == EventType.CHAT_FINAL:
                             self._pending_streams.pop(req_id, None)
                             self._stream_completed_requests.add(req_id)
+                        return
+                    if not is_final and to_send == entry.get("last_sent"):
                         return
                     
                     # 群聊场景：出站管线已在 publish_robot_messages 时设置 reply_scope
@@ -1219,13 +1225,13 @@ class WecomChannel(BaseChannel):
                     
                     # 非群聊场景或无目标用户，正常流式发送
                     try:
-                        is_final = msg.event_type == EventType.CHAT_FINAL
                         await self._ws_client.reply_stream(
                             entry["frame"],
                             entry["stream_id"],
                             to_send,
                             finish=is_final,
                         )
+                        entry["last_sent"] = to_send
                         logger.debug(
                             "WecomChannel 流式发送: req_id=%s finish=%s len=%d",
                             req_id,

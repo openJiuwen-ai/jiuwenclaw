@@ -19,8 +19,10 @@ export function getTaskVisualProgressPercent(task: TeamTask, now = Date.now()): 
   switch (task.status) {
     case 'completed':
       return 100;
-    case 'claimed':
-    case 'plan_approved': {
+    // Running family: the execution state plus the planning / in_review gates.
+    case 'planning':
+    case 'in_progress':
+    case 'in_review': {
       const elapsedMs = Math.max(0, now - getTaskStartTime(task, now));
       const eased = 1 - Math.exp(-elapsedMs / RUNNING_PROGRESS_EASING_MS);
       const progress = RUNNING_PROGRESS_INITIAL

@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { CircleAlert, LoaderCircle } from 'lucide-react';
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { Check, ChevronDown, CircleAlert, Code2, LoaderCircle, Workflow } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useChatStore, type ChatRuntime } from '../../stores/chatStore';
 import { webClient } from '../../services/webClient';
+import { DeleteDialog } from '../dialogs/Dialogs';
 import {
   PROJECT_SESSION_PAGE_SIZE,
   useWorkspaceStore,
@@ -58,7 +60,7 @@ export type NewConversationOptions = {
 };
 
 function isDefaultProject(project: ProjectInfo): boolean {
-  return project.is_default || project.project_id === 'default';
+  return project.is_default || project.project_id === 'default' || project.project_id === 'default_code';
 }
 
 interface ConversationSidebarProps {
@@ -306,6 +308,7 @@ function ConversationListItem({
 
 function ProjectEntityRow({
   title,
+  path,
   isExpanded,
   isPinned,
   hideActions = false,
@@ -317,6 +320,7 @@ function ProjectEntityRow({
   newLabel,
 }: {
   title: string;
+  path?: string;
   isExpanded: boolean;
   isPinned?: boolean;
   hideActions?: boolean;
@@ -329,7 +333,13 @@ function ProjectEntityRow({
 }) {
   const { t } = useTranslation();
   const rowRef = useRef<HTMLDivElement>(null);
+  const mainRef = useRef<HTMLButtonElement>(null);
+  const tooltipId = useId();
   const [menuOpen, setMenuOpen] = useState(false);
+  const [tooltipPos, setTooltipPos] = useState<{ left: number; top: number } | null>(null);
+  // 分别跟踪 hover 与 focus 状态：任一活跃即保持 tooltip，避免 mouseleave/blur 互相误清
+  const hoverRef = useRef(false);
+  const focusRef = useRef(false);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -347,9 +357,35 @@ function ProjectEntityRow({
     };
   }, [menuOpen]);
 
+  const showTooltip = (source: 'hover' | 'focus') => {
+    if (source === 'hover') hoverRef.current = true;
+    else focusRef.current = true;
+    if (!path || !mainRef.current) return;
+    const rect = mainRef.current.getBoundingClientRect();
+    setTooltipPos({ left: rect.left, top: rect.bottom + 6 });
+  };
+
+  const hideTooltip = (source: 'hover' | 'focus') => {
+    if (source === 'hover') hoverRef.current = false;
+    else focusRef.current = false;
+    if (hoverRef.current || focusRef.current) return;
+    setTooltipPos(null);
+  };
+
   return (
     <div ref={rowRef} className={`conversation-entity-row${menuOpen ? ' is-menu-open' : ''}`}>
-      <button type="button" className="conversation-entity-row__main" onClick={onToggle} title={title}>
+      <button
+        type="button"
+        ref={mainRef}
+        className="conversation-entity-row__main"
+        onClick={onToggle}
+        title={path ? undefined : title}
+        aria-describedby={path ? tooltipId : undefined}
+        onMouseEnter={() => showTooltip('hover')}
+        onMouseLeave={() => hideTooltip('hover')}
+        onFocus={() => showTooltip('focus')}
+        onBlur={() => hideTooltip('focus')}
+      >
         <span className="conversation-entity-row__icon">
           {isExpanded ? <FolderFoldIcon aria-hidden /> : <FolderIcon aria-hidden />}
         </span>
@@ -407,6 +443,84 @@ function ProjectEntityRow({
           }}
         />
       ) : null}
+      {tooltipPos && path
+        ? createPortal(
+            <ProjectPathTooltip id={tooltipId} title={title} path={path} anchor={tooltipPos} mainRef={mainRef} />,
+            document.body,
+          )
+        : null}
+    </div>
+  );
+}
+
+function ProjectPathTooltip({
+  id,
+  title,
+  path,
+  anchor,
+  mainRef,
+}: {
+  id: string;
+  title: string;
+  path: string;
+  anchor: { left: number; top: number };
+  mainRef: React.RefObject<HTMLButtonElement | null>;
+}) {
+  const tipRef = useRef<HTMLDivElement>(null);
+  const [placed, setPlaced] = useState<{ left: number; top: number } | null>(null);
+
+  useLayoutEffect(() => {
+    const tip = tipRef.current;
+    const main = mainRef.current;
+    if (!tip || !main) return;
+    const reposition = () => {
+      const tipRect = tip.getBoundingClientRect();
+      const mainRect = main.getBoundingClientRect();
+      const margin = 6;
+      let top = mainRect.bottom + margin;
+      // 下方空间不足则翻转到上方
+      if (top + tipRect.height > window.innerHeight) {
+        top = mainRect.top - tipRect.height - margin;
+      }
+      let left = mainRect.left;
+      // 右侧溢出则向左收
+      if (left + tipRect.width > window.innerWidth - margin) {
+        left = Math.max(margin, window.innerWidth - tipRect.width - margin);
+      }
+      setPlaced({ left, top });
+    };
+    reposition();
+    // 滚动/缩放/列表重排时按钮位置会变，需重算定位
+    window.addEventListener('scroll', reposition, true);
+    window.addEventListener('resize', reposition);
+    return () => {
+      window.removeEventListener('scroll', reposition, true);
+      window.removeEventListener('resize', reposition);
+    };
+  }, [mainRef]);
+
+  return (
+    <div
+      ref={tipRef}
+      id={id}
+      className="project-path-tooltip"
+      role="tooltip"
+      style={{
+        position: 'fixed',
+        left: placed ? placed.left : anchor.left,
+        top: placed ? placed.top : anchor.top,
+        opacity: placed ? 1 : 0,
+      }}
+    >
+      <div className="project-path-tooltip__row">
+        <FolderIcon className="project-path-tooltip__icon" aria-hidden />
+        <span className="project-path-tooltip__name">{title}</span>
+      </div>
+      <div className="project-path-tooltip__divider" />
+      <div className="project-path-tooltip__row project-path-tooltip__row--muted">
+        <FolderIcon className="project-path-tooltip__icon project-path-tooltip__icon--muted" aria-hidden />
+        <span className="project-path-tooltip__path" dir="ltr">{path}</span>
+      </div>
     </div>
   );
 }
@@ -567,19 +681,16 @@ function ProjectDeleteDialog({
 }) {
   const { t } = useTranslation();
   return (
-    <div className="conversation-path-dialog-backdrop" role="presentation">
-      <div className="conversation-path-dialog" role="dialog" aria-modal="true" aria-labelledby="project-delete-title">
-        <div id="project-delete-title" className="conversation-path-dialog__title">{t('multiSession.project.deleteProject')}</div>
-        <div className="conversation-path-dialog__message">
-          {t('multiSession.project.deleteProjectDescription', { projectName: project.name })}
-        </div>
-        {error ? <div className="conversation-path-dialog__error">{error}</div> : null}
-        <div className="conversation-path-dialog__actions">
-          <button type="button" onClick={onCancel} disabled={deleting}>{t('multiSession.project.cancel')}</button>
-          <button type="button" onClick={onDelete} disabled={deleting}>{t('multiSession.delete')}</button>
-        </div>
-      </div>
-    </div>
+    <DeleteDialog
+      title={project.name}
+      dialogTitle={t('multiSession.project.deleteProject')}
+      descriptionKey="multiSession.project.deleteProjectDescription"
+      descriptionValues={{ projectName: project.name }}
+      deleting={deleting}
+      error={error ?? null}
+      onCancel={onCancel}
+      onDelete={onDelete}
+    />
   );
 }
 
@@ -610,9 +721,19 @@ export function ConversationSidebar({
   const [deleteProjectBusy, setDeleteProjectBusy] = useState(false);
   const [deleteProjectError, setDeleteProjectError] = useState<string | null>(null);
   const [projectAddMenuOpen, setProjectAddMenuOpen] = useState(false);
+  const [workModeMenuOpen, setWorkModeMenuOpen] = useState(false);
   const addMenuRef = useRef<HTMLDivElement>(null);
+  const workModeMenuRef = useRef<HTMLDivElement>(null);
   const previousProcessing = useRef<Record<string, boolean>>({});
+
+  useEffect(() => {
+    if (!pathDialogError || pathDialogOpen) return;
+    const timeoutId = window.setTimeout(() => setPathDialogError(null), 3000);
+    return () => window.clearTimeout(timeoutId);
+  }, [pathDialogError, pathDialogOpen]);
+
   const {
+    workMode,
     projects,
     projectSessions,
     projectSessionTotals,
@@ -630,7 +751,31 @@ export function ConversationSidebar({
     collapseSessions,
     pinSession,
     renameSession,
+    setWorkMode,
   } = useWorkspaceStore();
+
+  useEffect(() => {
+    if (!workModeMenuOpen) return;
+    const close = (event: MouseEvent) => {
+      if (!workModeMenuRef.current?.contains(event.target as Node)) setWorkModeMenuOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setWorkModeMenuOpen(false);
+    };
+    document.addEventListener('mousedown', close);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('mousedown', close);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [workModeMenuOpen]);
+
+  const switchWorkMode = async (nextMode: 'work' | 'code') => {
+    setWorkModeMenuOpen(false);
+    if (nextMode === workMode) return;
+    await setWorkMode(nextMode);
+    onNew();
+  };
 
   const cronJobs = useCronStore((s) => s.jobs);
   const loadCronJobs = useCronStore((s) => s.loadJobs);
@@ -639,6 +784,8 @@ export function ConversationSidebar({
   const cronSessions = useCronStore((s) => s.cronSessions);
   const cronSessionsLoading = useCronStore((s) => s.cronSessionsLoading);
   const loadCronSessions = useCronStore((s) => s.loadCronSessions);
+  const unreadCronJobs = useCronStore((s) => s.unreadCronJobs);
+  const clearCronJobUnread = useCronStore((s) => s.clearCronJobUnread);
 
   useEffect(() => {
     void loadCronJobs();
@@ -651,7 +798,7 @@ export function ConversationSidebar({
       const payload = event.payload as Record<string, unknown>;
       const inner = (payload?.tool_result as Record<string, unknown>) ?? payload;
       const toolName = String(inner?.tool_name ?? inner?.name ?? '');
-      if (toolName.startsWith(CRON_TOOL_PREFIX)) {
+      if (toolName === 'cron' || toolName.startsWith(CRON_TOOL_PREFIX)) {
         void loadCronJobs();
       }
     });
@@ -785,6 +932,14 @@ export function ConversationSidebar({
 
   async function handleRenameSession(sessionId: string, title: string) {
     await renameSession(sessionId, title);
+    // 重命名后刷新所有展开的定时任务触发列表，保证标题立即更新
+    for (const [groupId, isOpen] of Object.entries(expandedCronGroups)) {
+      if (!isOpen) continue;
+      const cronId = groupId.startsWith('cron-') ? groupId.slice(5) : groupId;
+      const job = cronJobs.find((j) => j.id === cronId);
+      if (!job) continue;
+      void loadCronSessions(job.project_id || 'default', cronId);
+    }
   }
 
   async function handleRenameSubmit(value: string) {
@@ -897,12 +1052,14 @@ export function ConversationSidebar({
     const cronExpanded = expandedCronGroups[cronGroupId] ?? false;
     const triggerSessions = cronSessions[job.id] || [];
     const isCronSessionsLoading = cronSessionsLoading[job.id] ?? false;
+    const isCronUnread = Boolean(unreadCronJobs[job.id]);
     return (
       <div key={`cron-wrapper-${job.id}`} className={`conversation-sidebar__session-wrapper${nested ? ' conversation-sidebar__session-wrapper--nested' : ''}`}>
         <div
           className={`conversation-sidebar__cron-row${cronExpanded ? ' is-expanded' : ''}`}
           onClick={() => {
             toggleCronGroup(cronGroupId);
+            if (isCronUnread) clearCronJobUnread(job.id);
             if (!cronExpanded) {
               void loadCronSessions(projectId, job.id);
             }
@@ -911,6 +1068,7 @@ export function ConversationSidebar({
         >
           <CronIcon className="conversation-sidebar__cron-row-icon" aria-hidden />
           <span className="conversation-sidebar__cron-row-name">{job.name}</span>
+          {isCronUnread && <span className="conversation-list-item__status-dot" aria-hidden="true" />}
           {cronExpanded ? <CollapseIcon className="conversation-sidebar__cron-row-chevron" aria-hidden /> : <ArrowRightIcon className="conversation-sidebar__cron-row-chevron" aria-hidden />}
         </div>
         {cronExpanded ? (
@@ -927,7 +1085,10 @@ export function ConversationSidebar({
                   nested={false}
                   unread={unreadSessions.has(ts.session_id)}
                   now={relativeTimeNow}
-                  onSelect={() => onSelect(ts)}
+                  onSelect={() => {
+                    clearCronJobUnread(job.id);
+                    onSelect(ts);
+                  }}
                   onDelete={() => onDelete(ts)}
                   onPin={() => void handlePinSession(ts)}
                   menuItems={getConversationMenuItems(Boolean(ts.pinned), t)}
@@ -992,6 +1153,7 @@ export function ConversationSidebar({
       <div key={project.project_id} className="conversation-sidebar__group">
         <ProjectEntityRow
           title={project.name}
+          path={project.project_dir || undefined}
           isExpanded={expanded}
           isPinned={project.pinned}
           hideActions={isDefaultProject(project)}
@@ -1033,7 +1195,50 @@ export function ConversationSidebar({
 
   return (
     <aside className="conversation-sidebar" aria-label={t('multiSession.conversations')}>
-      <div className="conversation-sidebar__title">{t('multiSession.title')}</div>
+      <div ref={workModeMenuRef} className="conversation-sidebar__mode">
+        <button
+          type="button"
+          className="conversation-sidebar__mode-trigger"
+          onClick={() => setWorkModeMenuOpen((open) => !open)}
+          aria-haspopup="menu"
+          aria-expanded={workModeMenuOpen}
+        >
+          <span>{workMode === 'code' ? t('codeMode.code') : t('codeMode.work')}</span>
+          <ChevronDown size={15} className={workModeMenuOpen ? 'is-open' : ''} />
+        </button>
+        {workModeMenuOpen ? (
+          <div className="conversation-sidebar__mode-menu" role="menu">
+            <button
+              type="button"
+              className={workMode === 'work' ? 'is-active' : ''}
+              onClick={() => void switchWorkMode('work')}
+              role="menuitemradio"
+              aria-checked={workMode === 'work'}
+            >
+              <Workflow size={17} />
+              <span>
+                <strong>{t('codeMode.work')}</strong>
+                <small>{t('codeMode.workDescription')}</small>
+              </span>
+              {workMode === 'work' ? <Check size={16} /> : null}
+            </button>
+            <button
+              type="button"
+              className={workMode === 'code' ? 'is-active' : ''}
+              onClick={() => void switchWorkMode('code')}
+              role="menuitemradio"
+              aria-checked={workMode === 'code'}
+            >
+              <Code2 size={17} />
+              <span>
+                <strong>{t('codeMode.code')}</strong>
+                <small>{t('codeMode.codeDescription')}</small>
+              </span>
+              {workMode === 'code' ? <Check size={16} /> : null}
+            </button>
+          </div>
+        ) : null}
+      </div>
       <div className="conversation-sidebar__operations">
         <button type="button" className="conversation-sidebar__new" onClick={() => {
           setSelectedProject(null);
@@ -1075,8 +1280,10 @@ export function ConversationSidebar({
           </div>
         ) : null}
         {pathDialogError && !pathDialogOpen ? (
-          <div className="conversation-sidebar__error" role="alert">
-            {pathDialogError}
+          <div className="app-toast-wrapper app-toast-wrapper--top-center">
+            <div className="app-session-toast" role="status" aria-live="polite">
+              {pathDialogError}
+            </div>
           </div>
         ) : null}
         <div className="conversation-sidebar__group conversation-sidebar__project-add" ref={addMenuRef}>

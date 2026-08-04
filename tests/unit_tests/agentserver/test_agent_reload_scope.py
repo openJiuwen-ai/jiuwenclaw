@@ -48,6 +48,11 @@ class FakeAgent:
         else:
             self.reload_calls.append(kwargs)
 
+    async def start_interaction(self, session_id: str) -> None:
+        """Match JiuWenSwarmDeepAdapter.start_interaction for session-pool tests."""
+        _ = session_id
+        return None
+
 
 class FailingReloadAgent(FakeAgent):
     async def reload_agent_config(self, *args, **kwargs):

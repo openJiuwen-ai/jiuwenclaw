@@ -1296,7 +1296,7 @@ class XiaoyiChannel(BaseChannel):
 
         # 将最近一次可回发的小艺身份写入 config.yaml，供 cron 推送时使用
         try:
-            from jiuwenswarm.common.config import update_channel_in_config
+            from jiuwenswarm.common.config import update_xiaoyi_runtime_in_config
 
             rpc_id = message.get("id")
             conf_update: dict[str, Any] = {
@@ -1304,10 +1304,14 @@ class XiaoyiChannel(BaseChannel):
                 "last_task_id": task_id or "",
                 "last_message_id": str(rpc_id) if rpc_id is not None else "",
             }
-            # V2: 首次收到非空 push_id 时持久化（webhook 推送 token，供 cron 推送兜底）
+            # V2: 收到非空 push_id 时同时写入顶层与 apps[].push_id（webhook 推送 token）
             if push_id:
                 conf_update["push_id"] = push_id
-            update_channel_in_config("xiaoyi", conf_update)
+            update_xiaoyi_runtime_in_config(
+                conf_update,
+                api_id=self.config.api_id,
+                agent_id=self.config.agent_id,
+            )
         except Exception as config_error:
             logger.warning(f"XiaoyiChannel 更新配置失败: {config_error}")
 

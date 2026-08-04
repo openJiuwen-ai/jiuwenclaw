@@ -86,11 +86,12 @@ JiuwenSwarm provides two automation mechanisms: **Scheduled Tasks (Cron)** and *
 
 **Steps:**
 
-1. Open JiuwenSwarm Web interface, click **"Scheduled Tasks"** in the left navigation
-2. Enter the scheduled tasks page, click **"Create"** button (highlighted in red box)
-3. Fill in the task configuration form:
+1. Open JiuwenSwarm Web interface, click **Work** in the left navigation
+2. In the sub-panel on the left side of the Work page, click **Scheduled Tasks**
+3. Enter the scheduled tasks page, click **Create** button
+4. Fill in the task configuration form:
 
-![Scheduled Task Creation Interface](../assets/images/cron/create_schedule_task.png)
+![Scheduled Tasks Page](../assets/images/current-ui-en/10-Scheduled-Tasks.png)
 
 | Field | Description | Example |
 |-------|-------------|---------|
@@ -98,11 +99,11 @@ JiuwenSwarm provides two automation mechanisms: **Scheduled Tasks (Cron)** and *
 | **Cron Expression** | Cron expression | `0 9 * * *` (every day at 9am) |
 | **Status** | Task status | Enable/Disable |
 | **Description** | Task content description | Generate today's work reminder |
-| **Wake Offset Seconds** | Wake-up advance seconds | `300` (5 minutes advance) |
+| **Wake Offset Seconds** | Wake-up advance seconds | `0` (default, no advance wake-up) |
 | **Delivery Channel** | Result delivery channel | `web`, `feishu`, `wechat`, `wecom`, `whatsapp`, `telegram`, etc. |
 | **Project Directory** | Project working directory (absolute path) for task归属 | `/home/user/my-project`; defaults to current session's project |
 
-4. Click **"Create"**, the task will take effect automatically
+5. Click **Create**, the task will take effect automatically
 
 **Project归属:**
 
@@ -118,8 +119,6 @@ Scheduled task configurations are saved at:
 ### Create via Chat
 
 When the Agent has the `cron_create_job` tool capability, you can create scheduled tasks directly through natural language conversation.
-
-![Create Scheduled Task via Chat](../assets/images/cron/chat_create_schedule_task.png)
 
 **Example Conversation:**
 
@@ -162,10 +161,6 @@ When a scheduled task triggers at the fixed time, a running conversation will ap
 ### View Execution Results
 
 The execution results of scheduled tasks can be viewed on the chat page.
-
-![Scheduled Task Execution](../assets/images/cron/schedule_task_demo1.png)
-
-![Scheduled Task Execution 2](../assets/images/cron/schedule_task_demo2.png)
 
 ---
 
@@ -278,7 +273,7 @@ Scheduled task execution results are:
 
 ### Q4: What does wake_offset_seconds do?
 
-`wake_offset_seconds` defines how early to wake up the Agent. For example:
+`wake_offset_seconds` defines how early to wake up the Agent (default `0`, i.e. no advance wake-up). For example, when set to `300` (5 minutes):
 - Task scheduled for 9:00 AM
 - `wake_offset_seconds: 300` (5 minutes)
 - Agent starts preparing at 8:55 AM to ensure execution at 9:00 AM sharp

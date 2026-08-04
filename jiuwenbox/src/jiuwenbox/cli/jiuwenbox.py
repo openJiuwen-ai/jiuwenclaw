@@ -371,11 +371,9 @@ class _CliClient:
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         stdin: str | None = None,
-        capture_output: bool = True,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "command": command,
-            "capture_output": capture_output,
         }
         if job_id is not None:
             body["job_id"] = job_id
@@ -725,7 +723,6 @@ def cmd_sandbox_bg_exec(args: argparse.Namespace, client: _CliClient) -> Any:
         cwd=args.cwd,
         env=env,
         stdin=stdin_text,
-        capture_output=not args.no_capture,
     )
     if not result.get("started"):
         raise _CliError(result.get("error_message") or "background exec failed")
@@ -1048,17 +1045,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="optional background job id (4-40 chars, [0-9a-z_-])",
     )
     p.add_argument(
-        "--no-capture",
-        action="store_true",
-        help="do not capture stdout/stderr",
-    )
-    p.add_argument(
         "command", nargs="*",
         help="command to run; place after `--`",
     )
     p.set_defaults(_handler=cmd_sandbox_bg_exec)
 
-    p = sandbox_subs.add_parser("bg-get", help="get background job status/output")
+    p = sandbox_subs.add_parser("bg-get", help="get background job status")
     _add_sandbox_id(p)
     p.add_argument("job_id", help="background job id")
     p.set_defaults(_handler=cmd_sandbox_bg_get)

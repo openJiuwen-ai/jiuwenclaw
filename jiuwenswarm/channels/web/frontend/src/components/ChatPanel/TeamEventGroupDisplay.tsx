@@ -104,7 +104,11 @@ function getTaskStatusLabel(status: ActivityStatus, t: Translate): string {
 }
 
 function isRunningTaskStatus(status: ActivityStatus): boolean {
-  return status === 'claimed' || status === 'in_progress' || status === 'plan_approved';
+  return (
+    status === 'in_progress' ||
+    status === 'planning' ||
+    status === 'in_review'
+  );
 }
 
 function getMemberName(memberId: string, members: TeamMemberLike[]): string {

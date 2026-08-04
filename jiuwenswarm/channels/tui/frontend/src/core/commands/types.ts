@@ -5,6 +5,11 @@ import type { FileAttachment } from "../protocol.js";
 import type { ConfigItemSchema } from "./builtins/config.js";
 import type { ClientMode } from "../modes.js";
 import type { SessionUsageSummary } from "../../app-state.js";
+import type {
+  CancelAndWaitOptions,
+  HandoffCheckResult,
+  HandoffTarget,
+} from "../supervision/protocol.js";
 
 export type ConnectionStatus = "idle" | "connecting" | "connected" | "reconnecting" | "auth_failed" | "message_too_big";
 
@@ -59,6 +64,8 @@ export interface CommandContext {
   clearBtwOverlay?: () => void;
   /** 设置 BTW 活动状态（加载中或 overlay 可见），用于 Esc 优先级判断 */
   setBtwActive?: (active: boolean) => void;
+  /** 设置 /btw 正在回答的问题；null 表示加载已结束。 */
+  setBtwPendingQuestion?: (question: string | null) => void;
   clearEntries: () => void;
   restoreHistory: (sessionId: string) => Promise<void>;
   exitApp: () => void;
@@ -105,7 +112,14 @@ export interface CommandContext {
     mode?: "edit" | "reset",
   ) => void;
   enterStatusView?: (tab?: StatusViewTab) => void;
-  openInEditor?: (filePath: string) => void;
+  /**
+   * Open a file in the user's external editor. Blocks (synchronously) until
+   * the editor window closes — the TUI is frozen (non-operable) for the
+   * duration, mirroring Claude Code's editFileInEditor. When the editor
+   * exits, onDone is called so the caller can emit the "Opened memory file
+   * at <path>" line exactly once, after the user is done editing.
+   */
+  openInEditor?: (filePath: string, onDone?: () => void) => void;
   /** Open a folder in system file explorer (Windows: explorer, macOS: open -R, Linux: xdg-open).
    * Returns true if an explorer was launched; false if no GUI explorer is
    * available (e.g. headless Linux server), so the caller can fall back to
@@ -120,6 +134,17 @@ export interface CommandContext {
   getStatusLineJsonInput?: () => Record<string, unknown>;
   /** Check if there are running team-related tasks that would be interrupted by mode switch */
   hasRunningTeamTasks?: () => boolean;
+
+  // ── /switch 公共契约端口（可选；JiuwenSwarm 独立运行时注入非托管实现） ──
+
+  /** HandoffPort 预检：校验托管标记、动作退出码和目标能力。 */
+  checkHandoff?: (target: HandoffTarget) => HandoffCheckResult;
+  /** HandoffPort 请求：二次校验后调用统一顶层关闭路径，输出 handoff JSON 到 stdout。 */
+  requestHandoff?: (target: HandoffTarget, switchContent: string) => Promise<void>;
+  /** TaskLifecyclePort：统一任务快照；/switch 用于判断是否需要询问中断。 */
+  hasServerTask?: () => boolean;
+  /** TaskLifecyclePort：等待型取消；只供 /switch 等生命周期动作使用。 */
+  cancelAndWaitForIdle?: (options?: CancelAndWaitOptions) => Promise<void>;
 }
 
 export interface SlashCommand {

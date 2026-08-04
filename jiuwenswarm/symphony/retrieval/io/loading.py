@@ -7,6 +7,7 @@ from typing import Dict, List, Sequence
 
 from models.retrieval import RetrieverItem, RetrieverNode, RetrieverChoice
 from shared.storage import is_s3_uri, materialize_s3_dir
+from shared.tags import normalize_tags
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,7 @@ class CatalogRecord:
     retrieval_text: str = ""
     branch_path: tuple[str, ...] = ()
     metadata: Dict[str, object] = field(default_factory=dict)
+    tags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -69,6 +71,9 @@ def load_catalog_records(path: str | Path) -> List[CatalogRecord]:
         if not text:
             continue
         payload = json.loads(text)
+        metadata = payload.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
         choice_id = str(payload.get("name") or payload.get("choice_id") or "").strip()
         candidate_payload = str(payload.get("cid") or payload.get("payload") or "").strip()
         if not choice_id or not candidate_payload:
@@ -88,7 +93,9 @@ def load_catalog_records(path: str | Path) -> List[CatalogRecord]:
                     "skill_path": str(payload.get("skill_path") or "").strip(),
                     "category": str(payload.get("category") or "").strip(),
                     "worker_id": str(payload.get("worker_id") or "").strip(),
+                    "tags": list(normalize_tags(payload.get("tags"), metadata.get("tags"))),
                 },
+                tags=normalize_tags(payload.get("tags"), metadata.get("tags")),
             )
         )
     records.sort(key=lambda item: (item.payload, item.choice_id))

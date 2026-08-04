@@ -1,3 +1,5 @@
+import type { AgentMode } from './index';
+
 /** 后端 cron.job.* 系列 RPC 实际收发的字段，对齐 jiuwenswarm/gateway/cron/models.py 的 CronJob.to_dict() */
 export interface CronJobDTO {
   id: string;
@@ -21,20 +23,6 @@ export interface CronJobDTO {
   model_name?: string;
 }
 
-/** create/update 请求体；project_dir 而非 project_id，见 CronController.create_job */
-export interface CronJobUpsertParams {
-  name: string;
-  cron_expr: string;
-  timezone: string;
-  enabled: boolean;
-  description: string;
-  targets: string;
-  wake_offset_seconds?: number;
-  model_name?: string;
-  project_dir?: string;
-  mode?: string;
-}
-
 /** UI 层展示用结构，来自 CronJobDTO 派生（见 cronJobToUI） */
 export interface CronTaskUI {
   id: string;
@@ -43,8 +31,12 @@ export interface CronTaskUI {
   projectName: string | null;
   description: string;
   modelName: string | null;
+  /** 执行模式：单Agent('agent')/集群('team')，从后端 mode 归一而来，见 CronPanel/index.tsx cronJobToUI */
+  mode: AgentMode;
   cronExpr: string;
   timezone: string;
+  /** 提前唤醒秒数：在计划推送时间前启动 Agent；0 表示到点执行 */
+  wakeOffsetSeconds: number;
   enabled: boolean;
   expired: boolean;
   deliveryChannel: string;
@@ -69,5 +61,7 @@ export interface CronSchedule {
   weekOfMonth?: number | 'L'; // monthlyWeekday 用：1-4，或 'L' 表示最后一周（不支持"第五周"，见 §2.3.8）
   month?: number; // 1-12，yearly 用
   date?: string; // YYYY-MM-DD，once 用
-  everyHours?: number; // interval 用；暂不限制取值范围/是否整数，交给 cron_expr 整体校验兜底（见 2026-07-14 progress.md）
+  intervalUnit?: 'hours' | 'minutes'; // interval 用：数字的单位，默认 'hours'（兼容旧数据/旧生成结果）
+  everyHours?: number; // interval 用，intervalUnit 为 'hours' 时的取值；只允许正整数（croniter 小时步长不支持小数）
+  everyMinutes?: number; // interval 用，intervalUnit 为 'minutes' 时的取值；只允许正整数且需整除 60
 }

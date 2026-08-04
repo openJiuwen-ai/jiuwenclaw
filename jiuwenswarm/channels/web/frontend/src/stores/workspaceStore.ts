@@ -1,17 +1,45 @@
 import { create } from 'zustand';
+import i18n from '../i18n';
 import { projectRegistryClient } from '../features/workspace/projectRegistryClient';
-import type { ProjectInfo, Session } from '../types';
+import type { ProjectInfo, Session, WorkMode } from '../types';
 import { useChatStore } from './chatStore';
 import { useSessionStore } from './sessionStore';
 
 export const PROJECT_SESSION_PAGE_SIZE = 10;
 const DEFAULT_PROJECT_ID = 'default';
+const DEFAULT_CODE_PROJECT_ID = 'default_code';
+const WORK_MODE_STORAGE_KEY = 'jiuwenswarm_work_mode';
+
+function readInitialWorkMode(): WorkMode {
+  if (typeof window === 'undefined') return 'work';
+  return window.localStorage.getItem(WORK_MODE_STORAGE_KEY) === 'code' ? 'code' : 'work';
+}
+
+function normalizeProject(project: ProjectInfo, fallbackWorkMode: WorkMode): ProjectInfo {
+  return {
+    ...project,
+    work_mode: project.work_mode === 'code' || project.work_mode === 'work'
+      ? project.work_mode
+      : fallbackWorkMode,
+    git: project.git ?? {
+      enabled: false,
+      repo_root: '',
+      initialized_by_jiuwenswarm: false,
+      detected_at: 0,
+      status: fallbackWorkMode === 'code' ? 'unknown' : 'disabled',
+      branch: '',
+      error: '',
+      is_dirty: false,
+    },
+  };
+}
 
 interface UpsertSessionOptions {
   isNew?: boolean;
 }
 
 interface WorkspaceState {
+  workMode: WorkMode;
   projects: ProjectInfo[];
   projectSessions: Record<string, Session[]>;
   projectSessionTotals: Record<string, number>;
@@ -21,6 +49,7 @@ interface WorkspaceState {
   expandedProjectIds: Record<string, boolean>;
   isLoadingProjects: boolean;
   error: string | null;
+  setWorkMode: (workMode: WorkMode) => Promise<void>;
   loadProjects: () => Promise<void>;
   loadProjectSessions: (projectId: string, limit?: number) => Promise<void>;
   showMoreSessions: (projectId: string) => Promise<void>;
@@ -44,7 +73,15 @@ function findProject(projects: ProjectInfo[], projectId: string): ProjectInfo | 
 }
 
 function isDefaultProject(project: ProjectInfo): boolean {
-  return project.is_default || project.project_id === DEFAULT_PROJECT_ID;
+  return project.is_default
+    || project.project_id === DEFAULT_PROJECT_ID
+    || project.project_id === DEFAULT_CODE_PROJECT_ID;
+}
+
+// 默认项目节点由后端按固定中文文案实时生成、不入库也不可重命名，
+// 因此按当前 UI 语言在展示层替换即可，不存在覆盖用户自定义名称的风险。
+export function getProjectDisplayName(project: ProjectInfo): string {
+  return isDefaultProject(project) ? i18n.t('multiSession.project.defaultProjectName') : project.name;
 }
 
 function findDefaultProjectId(projects: ProjectInfo[]): string {
@@ -207,6 +244,7 @@ function getProjectSessionListsAfterPin(
 }
 
 export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
+  workMode: readInitialWorkMode(),
   projects: [],
   projectSessions: {},
   projectSessionTotals: {},
@@ -217,11 +255,31 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   isLoadingProjects: false,
   error: null,
 
+  setWorkMode: async (workMode) => {
+    if (get().workMode === workMode) return;
+    window.localStorage.setItem(WORK_MODE_STORAGE_KEY, workMode);
+    set({
+      workMode,
+      projects: [],
+      projectSessions: {},
+      projectSessionTotals: {},
+      sessionVisibility: {},
+      pinnedSessions: [],
+      selectedProject: null,
+      error: null,
+    });
+    await get().loadProjects();
+  },
+
   loadProjects: async () => {
+    const requestedWorkMode = get().workMode;
     set({ isLoadingProjects: true, error: null });
     try {
-      const payload = await projectRegistryClient.list();
-      const projects = payload.projects || [];
+      const payload = await projectRegistryClient.list('all', requestedWorkMode);
+      if (get().workMode !== requestedWorkMode) return;
+      const projects = (payload.projects || []).map((project) => (
+        normalizeProject(project, requestedWorkMode)
+      ));
       set((state) => ({
         projects,
         selectedProject: state.selectedProject
@@ -277,7 +335,16 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
   loadPinnedSessions: async () => {
     const payload = await projectRegistryClient.pinnedSessions();
-    set({ pinnedSessions: mergeLocalSessionTitles(payload.sessions || []) });
+    const { workMode, projects } = get();
+    const visibleProjectIds = new Set(projects.map((project) => project.project_id));
+    set({
+      pinnedSessions: mergeLocalSessionTitles(payload.sessions || [])
+        .filter((session) => {
+          if (session.work_mode) return session.work_mode === workMode;
+          if (session.project_id) return visibleProjectIds.has(session.project_id);
+          return workMode === 'work';
+        }),
+    });
   },
 
   setSelectedProject: (project) => set({ selectedProject: project }),
@@ -289,7 +356,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   })),
 
   createProject: async (name, projectDir) => {
-    const { project_id: projectId } = await projectRegistryClient.create(name, projectDir);
+    const { project_id: projectId } = await projectRegistryClient.create(
+      name,
+      projectDir,
+      get().workMode,
+    );
     await get().loadProjects();
     const project = findProject(get().projects, projectId);
     if (!project) throw new Error('project.create returned a project that is missing from project.list');

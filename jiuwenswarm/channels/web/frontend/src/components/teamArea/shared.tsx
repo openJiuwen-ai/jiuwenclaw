@@ -2,6 +2,7 @@ import { Check, ChevronRight, Circle } from 'lucide-react';
 import i18n from '../../i18n';
 import { ParsedTeamEvent, parseTeamEventMessage } from '../ChatPanel/teamEventUtils';
 import type { Message, TodoItem } from '../../types';
+import type { ReactNode } from 'react';
 import type {
   TeamTask as SessionTeamTask,
   TeamMemberExecutionEvent,
@@ -32,6 +33,13 @@ export interface TeamTaskEvent {
   team_name?: string;
   title?: string;
   content?: string;
+  // Truncation observability flags — kept aligned with TeamTaskEvent in
+  // stores/sessionStore.ts and components/TeamTaskEvents.tsx so the event
+  // panel can surface them if needed (currently passthrough/observability only).
+  title_truncated?: boolean;
+  title_original_size?: number;
+  content_truncated?: boolean;
+  content_original_size?: number;
   updated_at?: number | string | null;
 }
 
@@ -63,6 +71,7 @@ export interface ProcessItem {
 interface BaseTeamAreaProps {
   members: TeamMember[];
   historyMessages?: Message[];
+  reviewPanel?: ReactNode;
 }
 
 export type TeamAreaProps = BaseTeamAreaProps & (
@@ -75,14 +84,16 @@ export type TeamAreaProps = BaseTeamAreaProps & (
     activeTab: TabType;
     activeDetailTab: TeamDetailTab;
     selectedMemberId?: string;
+    selectedArtifactId?: string;
     onTabChange: (tab: TabType) => void;
     onDetailTabChange: (tab: TeamDetailTab) => void;
     onMemberSelect?: (memberId: string) => void;
+    onArtifactSelect?: (artifactId: string) => void;
     onCollapse?: () => void;
   }
 );
 
-export type TabType = 'planning' | 'team' | 'artifacts';
+export type TabType = 'planning' | 'team' | 'artifacts' | 'review';
 export type TeamDetailTab = 'members' | 'group';
 export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'cancelled' | 'error';
 export type TaskColumnKey = 'waiting' | 'running' | 'completed' | 'cancelled';
@@ -124,8 +135,11 @@ export const BOARD_COLUMNS: Array<{
 const TASK_STATUS_TO_COLUMN: Record<TeamTaskStatus, TaskColumnKey> = {
   pending: 'waiting',
   blocked: 'waiting',
-  claimed: 'running',
-  plan_approved: 'running',
+  // Both optional gates (planning / in_review) and the execution state fold
+  // into the single "running" column per product decision.
+  planning: 'running',
+  in_progress: 'running',
+  in_review: 'running',
   completed: 'completed',
   cancelled: 'cancelled',
 };
@@ -139,8 +153,21 @@ export const getMemberDisplayName = (member: TeamMember | string): string => {
 
 export const normalizeTaskStatus = (status?: string, type?: string): TaskStatus => {
   const raw = `${status || ''} ${type || ''}`.toLowerCase();
-  if (raw.includes('completed') || raw.includes('done') || raw.includes('success')) return 'completed';
-  if (raw.includes('claimed') || raw.includes('progress') || raw.includes('running') || raw.includes('busy')) return 'in_progress';
+  if (raw.includes('completed') || raw.includes('done') || raw.includes('success') || raw.includes('verified')) return 'completed';
+  // Running family: the execution state plus the planning / in_review gates.
+  // Matches on either the status value or the event type substring (e.g. the
+  // "team.task.claimed" / "team.task.started" event types).
+  if (
+    raw.includes('claimed') ||
+    raw.includes('progress') ||
+    raw.includes('running') ||
+    raw.includes('busy') ||
+    raw.includes('planning') ||
+    raw.includes('review') ||
+    raw.includes('started')
+  ) {
+    return 'in_progress';
+  }
   if (raw.includes('cancel')) return 'cancelled';
   if (raw.includes('error') || raw.includes('fail')) return 'error';
   return 'pending';
@@ -149,8 +176,9 @@ export const normalizeTaskStatus = (status?: string, type?: string): TaskStatus 
 const normalizeTeamTaskStatus = (status?: string): TeamTaskStatus => {
   if (
     status === 'blocked' ||
-    status === 'claimed' ||
-    status === 'plan_approved' ||
+    status === 'planning' ||
+    status === 'in_progress' ||
+    status === 'in_review' ||
     status === 'completed' ||
     status === 'cancelled'
   ) {

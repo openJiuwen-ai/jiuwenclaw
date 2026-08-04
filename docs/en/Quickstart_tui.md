@@ -58,6 +58,49 @@ Suitable for users who manage their own Python environment. Follow these steps:
 
   You can run the command above in **multiple terminals** against the same Gateway (default `ws://127.0.0.1:19001/tui`) for parallel sessions in separate TUI windows. See the **Multi-window TUI** section in [TUI Usage Guide (zh)](../zh/TUI使用指南.md#多窗口-tui).
 
+### `--session`: resume or create a session by id
+
+`--session <id>` makes the TUI connect with a specific session id. After the connection is established, the TUI registers that id with AgentServer. This compatibility path deliberately bypasses the prewarm pool because the runtime identity was supplied externally.
+
+| id state | Startup behavior | Backend RPC |
+|------|------|------|
+| **exists** | AgentServer preserves the persisted project/mode binding, runs the switch lifecycle, and the TUI replays history | explicit-ID `session.create` + `history.get` + `session.rename` (title) |
+| **does not exist** | AgentServer validates the id, resolves the TUI project under a per-id lock, writes `metadata.json`, and starts with empty history without claiming a warm slot | explicit-ID `session.create` + `history.get` (empty) |
+
+The explicit-ID form of `session.create` is TUI-only and idempotent. AgentServer logs that this compatibility request bypasses prewarming. It is released by `app-state.ts` `initializeBootSession` after `connection.ack` and runs once on reconnect; normal startup, `/new`, and `/clear` omit `session_id` so AgentServer allocates a new one.
+
+**Examples**:
+
+```bash
+# First launch with an id → does not exist → created and persisted
+jiuwenswarm-tui --session tui_myproj_001
+# Chat a few turns in the TUI, then quit. The id is persisted to ~/.jiuwenswarm/agent/sessions/tui_myproj_001/
+
+# Launch again with the same id → exists → resume and replay history
+jiuwenswarm-tui --session tui_myproj_001
+```
+
+**Relationship with runtime `/resume`**: `--session` is the **startup-time** external-id compatibility entry and uses explicit-ID `session.create`; `/resume` is the **runtime** command for switching to an already persisted session and uses `session.switch`.
+
+**id naming constraints** (validated by the frontend before startup; invalid ids exit immediately without entering the TUI):
+
+| Constraint | Value | Reason |
+|------|------|------|
+| Max length | ≤ 128 chars | `session_id` is used directly as a directory name on disk (`~/.jiuwenswarm/agent/sessions/<id>/`); bounded by the filesystem's 255-char single-name limit, leaving headroom for the path prefix |
+| Allowed chars | `A-Z a-z 0-9 . _ -` | Same charset as `generateSessionId` output (`tui_<hex>_<hex>`) |
+| Forbidden chars | CJK / Unicode letters, spaces, `/ \ : * ? " < > |`, etc. | Prevents directory injection (`/` creates nested dirs → lost session) and cross-platform `mkdir` failures |
+
+Invalid examples:
+
+```bash
+jiuwenswarm-tui --session 测试会话        # CJK chars → exits: --session <id> contains invalid characters
+jiuwenswarm-tui --session "my session"    # space → same
+jiuwenswarm-tui --session a/b             # slash → same
+jiuwenswarm-tui --session "$(printf 'a%.0s' {1..200})"  # over 128 → length limit
+```
+
+**Without `--session`**: the frontend generates a random id (`generateSessionId` → `tui_<hex>_<hex>`), and the backend directory is lazily created only when the **first message writes history**. So launching without `--session` and quitting before sending any message leaves no backend directory and the id does not appear in `/sessions` (empty sessions do not pollute the list). Launching with `--session` creates the directory immediately, so **even without sending a message the id appears in the list** for next-time resume — a key behavioral difference.
+
 ## Method 2: Install from Source
 
 Suitable for users who perform custom development or adaptation based on JiuwenSwarm.
@@ -90,9 +133,9 @@ Suitable for users who perform custom development or adaptation based on JiuwenS
 
 - Install frontend dependencies
 
-  Navigate to the frontend directory `jiuwenswarm/channels/web/frontend` and install dependencies:
+  Enter the frontend directory `channels/web/frontend` to install dependencies:
   ```bash
-  cd jiuwenswarm/channels/web/frontend
+  cd channels/web/frontend
   npm install
   ```
 
@@ -103,14 +146,14 @@ Suitable for users who perform custom development or adaptation based on JiuwenS
   - Static frontend service (suitable for production deployment)
     ```bash
     npm run build
-    cd ../../
+    cd ../../../
     uv run jiuwenswarm-init
     uv run jiuwenswarm-start
     ```
 
   - Dynamic frontend service (suitable for development and debugging)
     ```bash
-    cd ../../
+    cd ../../../
     uv run jiuwenswarm-init
     uv run jiuwenswarm-start dev
     ```
@@ -118,9 +161,9 @@ Suitable for users who perform custom development or adaptation based on JiuwenS
   After running, you can access the JiuwenSwarm web UI.
 
 - Install TUI dependencies
-  Open one new erminal，navigate to the TUI directory `jiuwenswarm/channels/tui/frontend` and install dependencies:
+  Open one new terminal, navigate to the project root, then enter the TUI directory `channels/tui/frontend` and install dependencies:
   ```bash
-  cd jiuwenswarm/channels/tui/frontend
+  cd channels/tui/frontend
   npm install
   ```
 
@@ -154,9 +197,9 @@ Suitable for users who perform custom development or adaptation based on JiuwenS
 
 - Install frontend dependencies
 
-  Navigate to the frontend directory `jiuwenswarm/channels/web/frontend` and install dependencies:
+  Navigate to the frontend directory `channels/web/frontend` and install dependencies:
   ```bash
-  cd jiuwenswarm/channels/web/frontend
+  cd channels/web/frontend
   npm install
   ```
 
@@ -167,14 +210,14 @@ Suitable for users who perform custom development or adaptation based on JiuwenS
   - Static frontend service (suitable for production deployment)
     ```bash
     npm run build
-    cd ../../
+    cd ../../../
     jiuwenswarm-init
     jiuwenswarm-start
     ```
 
   - Dynamic frontend service (suitable for development and debugging)
     ```bash
-    cd ../../
+    cd ../../../
     # Start directly (without using uv run)
     jiuwenswarm-init
     jiuwenswarm-start dev
@@ -183,9 +226,9 @@ Suitable for users who perform custom development or adaptation based on JiuwenS
   After running, you can access the JiuwenSwarm web UI.
 
 - Install TUI dependencies
-  Open one new erminal，navigate to the TUI directory `jiuwenswarm/channels/tui/frontend` and install dependencies:
+  Open one new terminal, navigate to the project root, then enter the TUI directory `channels/tui/frontend` and install dependencies:
   ```bash
-  cd jiuwenswarm/channels/tui/frontend
+  cd channels/tui/frontend
   npm install
   ```
 

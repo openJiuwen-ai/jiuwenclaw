@@ -159,7 +159,10 @@ class ProactiveEngine:
         logger.info("[ProactiveEngine] config reloaded (enabled=%s, max_per_day=%d)",
                    new_enabled, new_max_per_day)
 
-    async def tick_now(self, target_channel: str | None = None) -> bool:
+    async def tick_now(
+        self,
+        target_channel: str | None = None,
+    ) -> bool:
         """Trigger a recommendation tick.
 
         This is the main API for external callers (CronScheduler, manual triggers).
@@ -287,6 +290,10 @@ class ProactiveEngine:
             return False
 
         # ── Step 5: Pick delivery target ───────────────────────
+        # 两种触发（cron 自然到点 / Cron 面板"立即执行"）统一：都用"最活跃会话"。
+        # find_session_for_channel / most_recent_active_session 的选法已修：不再要求历史
+        # 完整、_scan_sessions 走缓存拿最新 last_message_at，故刚发消息、assistant 还没
+        # 回完的当前会话也能被准确选为最活跃会话。
         if target_channel:
             target_session = report.find_session_for_channel(target_channel)
             if not target_session:

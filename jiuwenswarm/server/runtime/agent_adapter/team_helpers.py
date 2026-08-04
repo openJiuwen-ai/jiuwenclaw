@@ -7,20 +7,27 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator
 
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
-from openjiuwen.agent_teams.paths import get_agent_teams_home, team_home
+from openjiuwen.agent_teams.paths import (
+    get_agent_teams_home,
+    independent_member_workspace,
+    team_home,
+)
 from openjiuwen.agent_teams.runtime import RunActionKind
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.monitor import TeamStreamLogger
 from openjiuwen.core.runner import Runner
+from openjiuwen.core.common.logging import server_logger
 from openjiuwen.harness import DeepAgent
 
 from jiuwenswarm.agents.harness.team import TeamManager, get_team_manager
+from jiuwenswarm.common.log_preview import DEFAULT_PREVIEW_MAX_CHARS, preview_text
 from jiuwenswarm.common.cron_team_completion import (
     _cron_solo_harness_end_pending,
     _drain_cron_delegation_grace_events,
@@ -95,10 +102,21 @@ _STREAM_TRACE_ENV_KEY = "JIUWENSWARM_TEAM_STREAM_TRACE"
 # When set to "true", non-leader teammate frames are filtered out in team
 # streaming so the frontend only receives leader output.
 _HIDE_TEAMMATE_ENV_KEY = "JIUWENSWARM_TEAM_HIDE_TEAMMATE"
-_DEBUG_PREFIX = "/debug"
-_FOLLOWUP_INTERACT_RETRY_TIMEOUT_SEC = 1.0
-_FOLLOWUP_INTERACT_RACE_WAIT_TIMEOUT_SEC = 3.0
+# /debug 剥离原语与 Agent/Code 共享（debug_trace.directives），消除两份实现。
+# 别名保持 _DEBUG_PREFIX / _strip_directive 不变，_extract_query_directives 零改动。
+from jiuwenswarm.server.runtime.debug_trace.directives import (
+    DEBUG_PREFIX as _DEBUG_PREFIX,
+    strip_slash_directive as _strip_directive,
+)
+_FOLLOWUP_INTERACT_BOUNDARY_TIMEOUT_SEC = 10.0
 _FOLLOWUP_INTERACT_POLL_INTERVAL_SEC = 0.05
+
+
+def _safe_team_path_segment(value: str, fallback: str = "_") -> str:
+    """Sanitize a value into one path segment for team workspace paths."""
+    normalized = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "").strip())
+    normalized = normalized.strip("._-")
+    return normalized[:96] or fallback
 
 
 def _team_hide_teammate_enabled() -> bool:
@@ -235,51 +253,51 @@ def _build_logical_targets(event: dict) -> list[dict]:
 def _is_followup_delivery_boundary_reason(reason: str | None) -> bool:
     """Return whether follow-up delivery likely hit a runtime boundary."""
     normalized = str(reason or "")
-    if normalized in {"gate_closed", "not_active"}:
+    if normalized in {"agent_unavailable", "gate_closed", "not_active"}:
         return True
     return normalized.startswith("deliver_to_leader_failed:")
 
 
-async def _retry_followup_interact_until_ready(
+@dataclass(slots=True)
+class _FollowupInteractBoundaryResult:
+    """Result of delivering a follow-up across a runtime boundary."""
+
+    success: bool
+    reason: str | None
+    first_request_ready: bool
+
+
+async def _deliver_followup_interact_across_boundary(
     team_manager: Any,
     session_id: str,
     query: Any,
     *,
-    timeout_sec: float = _FOLLOWUP_INTERACT_RETRY_TIMEOUT_SEC,
+    initial_reason: str | None = None,
+    timeout_sec: float = _FOLLOWUP_INTERACT_BOUNDARY_TIMEOUT_SEC,
     poll_interval_sec: float = _FOLLOWUP_INTERACT_POLL_INTERVAL_SEC,
-) -> tuple[bool, str | None]:
-    """Retry follow-up interact while the runtime boundary may still settle."""
+) -> _FollowupInteractBoundaryResult:
+    """Deliver a follow-up until interact succeeds or the session becomes first-run ready."""
     deadline = time.monotonic() + max(0.0, timeout_sec)
     sleep_sec = max(0.01, poll_interval_sec)
-    last_reason: str | None = None
+    last_reason = initial_reason
     while time.monotonic() < deadline:
-        await asyncio.sleep(sleep_sec)
-        success, reason = await team_manager.interact(session_id, query)
-        if success:
-            return True, None
-        last_reason = reason
-        if not _is_followup_delivery_boundary_reason(reason):
-            return False, reason
-    return False, last_reason
-
-
-async def _wait_for_team_first_request_condition(
-    team_manager: Any,
-    session_id: str,
-    *,
-    timeout_sec: float = _FOLLOWUP_INTERACT_RACE_WAIT_TIMEOUT_SEC,
-    poll_interval_sec: float = _FOLLOWUP_INTERACT_POLL_INTERVAL_SEC,
-) -> bool:
-    """Wait until the canonical first-request condition becomes true."""
-    if not await _team_session_has_runtime(team_manager, session_id):
-        return True
-    deadline = time.monotonic() + max(0.0, timeout_sec)
-    sleep_sec = max(0.01, poll_interval_sec)
-    while time.monotonic() < deadline:
+        if not await _team_session_has_runtime(team_manager, session_id):
+            return _FollowupInteractBoundaryResult(success=False, reason=last_reason, first_request_ready=True)
         await asyncio.sleep(sleep_sec)
         if not await _team_session_has_runtime(team_manager, session_id):
-            return True
-    return not await _team_session_has_runtime(team_manager, session_id)
+            return _FollowupInteractBoundaryResult(success=False, reason=last_reason, first_request_ready=True)
+        success, reason = await team_manager.interact(session_id, query)
+        if success:
+            return _FollowupInteractBoundaryResult(success=True, reason=None, first_request_ready=False)
+        last_reason = reason
+        if not _is_followup_delivery_boundary_reason(reason):
+            return _FollowupInteractBoundaryResult(success=False, reason=reason, first_request_ready=False)
+    first_request_ready = not await _team_session_has_runtime(team_manager, session_id)
+    return _FollowupInteractBoundaryResult(
+        success=False,
+        reason=last_reason,
+        first_request_ready=first_request_ready,
+    )
 
 
 def _build_team_event_chunk_meta(event: Any) -> tuple[dict | None, dict]:
@@ -311,20 +329,6 @@ def _build_team_event_chunk_meta(event: Any) -> tuple[dict | None, dict]:
     fan_out = _build_logical_targets(event)
     metadata = {"fan_out_targets": fan_out} if fan_out else {}
     return agent_ref, metadata
-
-
-def _strip_directive(query: str, prefix: str) -> tuple[str, bool]:
-    """Strip a leading slash directive from a query string.
-
-    Returns the cleaned query and whether the directive was present.
-    """
-    stripped = query.lstrip()
-    if not stripped.startswith(prefix):
-        return query, False
-    remainder = stripped[len(prefix):]
-    if remainder and not remainder[0].isspace():
-        return query, False
-    return remainder.lstrip(), True
 
 
 def _extract_query_directives(query: str) -> tuple[str, bool, bool]:
@@ -515,10 +519,14 @@ def _resolve_request_language(request: Any) -> str:
     return "zh"
 
 
-def _safe_query_preview(query: Any, limit: int = 200) -> str:
-    if isinstance(query, str):
-        return query[:limit]
-    return str(query)[:limit]
+def _safe_query_preview(query: Any, limit: int = DEFAULT_PREVIEW_MAX_CHARS) -> str:
+    return preview_text(query, limit)
+
+
+# Parsed event types that carry text produced by a model, as opposed to the
+# framework control events (team.runtime_ready, tool.use, ...) that also travel
+# on the same stream.
+_MODEL_OUTPUT_EVENT_TYPES = frozenset({"chat.delta", "chat.final", "chat.reasoning"})
 
 
 def _normalize_team_query(query: Any, *, channel_id: str | None, language: str) -> Any:
@@ -967,6 +975,12 @@ async def _broadcast_team_state_snapshot(
                     "task_id": t["task_id"],
                     "status": t["status"],
                     "assignee": t.get("assignee"),
+                    "title": t.get("title"),
+                    "content": t.get("content"),
+                    "title_truncated": t.get("title_truncated"),
+                    "title_original_size": t.get("title_original_size"),
+                    "content_truncated": t.get("content_truncated"),
+                    "content_original_size": t.get("content_original_size"),
                 },
             }
             _persist_team_history_event(channel_id, session_id, event)
@@ -1153,7 +1167,7 @@ def ensure_team_evolution_watcher(
             source,
         )
         return
-    if not getattr(rail, "auto_scan", True) and not getattr(rail, "completion_followup_enabled", False):
+    if not rail.signal_trigger and not rail.review_trigger:
         logger.info(
             "[TeamHelpers] evolution monitor skipped because team evolution is disabled: "
             "channel_id=%s session_id=%s source=%s",
@@ -1242,6 +1256,107 @@ def _team_spec_skills_dir(team_spec: Any) -> str:
         return str(Path(root_path) / "skills")
     team_name = str(getattr(team_spec, "team_name", "") or "").strip()
     return str(team_home(team_name) / "team-workspace" / "skills")
+
+
+def _team_spec_monitor_roots(team_spec: Any, session_id: str | None = None) -> list[str]:
+    """Return team/member workspace roots where file-op history may be written."""
+    roots: list[str] = []
+
+    def add_root(value: Any) -> None:
+        raw = str(value or "").strip()
+        if not raw:
+            return
+        try:
+            root = str(Path(raw).expanduser().resolve())
+        except Exception:
+            root = raw
+        if root not in roots:
+            roots.append(root)
+
+    workspace = getattr(team_spec, "workspace", None)
+    root_path = str(getattr(workspace, "root_path", "") or "").strip()
+    team_name = str(getattr(team_spec, "team_name", "") or "").strip()
+    home = team_home(team_name)
+    add_root(root_path or str(home / "team-workspace"))
+    add_root(home / "workspaces")
+    if session_id and team_name:
+        # 与读取侧 get_session_extra_history_roots / team_session_worktrees_dir 对齐:
+        # 对 session_id 做 sanitize,避免含特殊字符时持久化"幽灵路径"
+        # (raw sid 未经 sanitize,与实际 worktree 目录不一致)。
+        # 此处用已 import 的 team_home(可被测试 patch)而非 team_session_worktrees_dir
+        # (后者内部调用 openjiuwen 自身的 team_home,无法被 monkeypatch)。
+        add_root(home / "sessions" / _safe_team_path_segment(session_id) / "worktrees")
+
+    agents = getattr(team_spec, "agents", None)
+    if isinstance(agents, dict):
+        for member_name, member_spec in agents.items():
+            member_workspace = getattr(member_spec, "workspace", None)
+            add_root(getattr(member_workspace, "root_path", None))
+            add_root(home / "workspaces" / f"{member_name}_workspace")
+            # 兜底: member 可能使用 independent_member_workspace(位于 team_home 之外,
+            # get_openjiuwen_home()/{member}_workspace),仅靠上面的 home/workspaces
+            # 无法覆盖,需显式补上,否则该 member 的 file_ops 不会被收集。
+            try:
+                add_root(str(independent_member_workspace(str(member_name))))
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "[TeamHelpers] failed to resolve independent member workspace: "
+                    "member=%s error=%s",
+                    member_name,
+                    exc,
+                )
+
+    return roots
+
+
+def _persist_team_file_monitor_roots(session_id: str, team_spec: Any) -> None:
+    roots = _team_spec_monitor_roots(team_spec, session_id=session_id)
+    if not roots:
+        return
+    try:
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            _enqueue_write,
+            _read_metadata,
+        )
+
+        metadata = _read_metadata(session_id, cache_bust=True)
+        if not metadata:
+            for _ in range(3):
+                time.sleep(0.05)
+                metadata = _read_metadata(session_id, cache_bust=True)
+                if metadata:
+                    break
+            if not metadata:
+                # metadata.json 尚未初始化: 此时无法持久化 team_file_monitor_roots。
+                # 读取侧 get_session_extra_history_roots 会基于 team_name 兜底推断标准
+                # 布局路径,功能不丢失,但记录 warning 便于排查 metadata 初始化时序问题。
+                logger.warning(
+                    "[TeamHelpers] cannot persist team_file_monitor_roots: "
+                    "metadata not initialized, session=%s",
+                    session_id,
+                )
+                return
+        existing = metadata.get("team_file_monitor_roots")
+        # 直接替换而非合并: team_spec 是当前 team 组成的权威来源,
+        # 合并旧 root 会导致已移除成员的 workspace 路径累积无法清理。
+        if roots == existing:
+            return
+        metadata["team_file_monitor_roots"] = roots
+        _enqueue_write(
+            session_id,
+            metadata,
+            preserve_pin_fields=True,
+            sync_write=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # 写盘失败会影响 last_turn 文件追踪(读取侧只能靠 team_name 兜底推断,
+        # 无法覆盖 independent_member_workspace 等非标准布局),升级为 warning
+        # 以便在日志中及时发现。
+        logger.warning(
+            "[TeamHelpers] failed to persist team file monitor roots: session=%s error=%s",
+            session_id,
+            exc,
+        )
 
 
 async def _start_team_stream_round(
@@ -1380,6 +1495,10 @@ async def process_team_message_stream(
             )
         if isinstance(getattr(request, "params", None), dict):
             request_metadata.setdefault("mode", request.params.get("mode"))
+            request_metadata.setdefault(
+                "supports_user_interaction",
+                request.params.get("supports_user_interaction") is not False,
+            )
         resolved_mode = str(request_metadata.get("mode") or "").strip()
         # Page-selected model name (from chat page model selector). Used as a
         # fallback for team members whose ``modes.team.agents.*.model`` is not
@@ -1402,6 +1521,7 @@ async def process_team_message_stream(
             request_metadata=request_metadata,
             requested_model_name=requested_model_name,
         )
+        _persist_team_file_monitor_roots(session_id, team_spec)
     except Exception as exc:
         logger.exception("[TeamHelpers] TeamAgent create failed: %s", exc)
         yield AgentResponseChunk(
@@ -1511,44 +1631,44 @@ async def process_team_message_stream(
                         reason,
                         _safe_query_preview(query),
                     )
+                    first_request_ready = False
                     if _is_followup_delivery_boundary_reason(reason):
-                        success, reason = await _retry_followup_interact_until_ready(
+                        boundary_result = await _deliver_followup_interact_across_boundary(
                             team_manager,
                             session_id,
                             query,
+                            initial_reason=reason,
                         )
-                    if not success and _is_followup_delivery_boundary_reason(reason):
-                        first_request_ready = await _wait_for_team_first_request_condition(
-                            team_manager,
-                            session_id,
+                        success = boundary_result.success
+                        reason = boundary_result.reason
+                        first_request_ready = boundary_result.first_request_ready
+                    if not success and first_request_ready:
+                        preparation = await _prepare_first_team_request(
+                            team_manager=team_manager,
+                            session_id=session_id,
+                            channel_id=channel_id,
+                            request_id=rid,
+                            query=query,
                         )
-                        if first_request_ready:
-                            preparation = await _prepare_first_team_request(
-                                team_manager=team_manager,
-                                session_id=session_id,
-                                channel_id=channel_id,
-                                request_id=rid,
-                                query=query,
+                        if preparation.error_chunks is not None:
+                            for chunk in preparation.error_chunks:
+                                yield chunk
+                            return
+                        is_first_request = not preparation.recovered_runtime
+                        if is_first_request:
+                            first_request_source = "follow-up fallback"
+                            query = preparation.query
+                            hide_dm = preparation.hide_dm
+                            debug = preparation.debug
+                            logger.info(
+                                "[TeamHelpers] follow-up interact reclassified by first-request condition: "
+                                "channel_id=%s session_id=%s reason=%s",
+                                _resolve_channel_id(channel_id),
+                                session_id,
+                                reason,
                             )
-                            if preparation.error_chunks is not None:
-                                for chunk in preparation.error_chunks:
-                                    yield chunk
-                                return
-                            is_first_request = not preparation.recovered_runtime
-                            if is_first_request:
-                                first_request_source = "follow-up fallback"
-                                query = preparation.query
-                                hide_dm = preparation.hide_dm
-                                debug = preparation.debug
-                                logger.info(
-                                    "[TeamHelpers] follow-up interact reclassified by first-request condition: "
-                                    "channel_id=%s session_id=%s reason=%s",
-                                    _resolve_channel_id(channel_id),
-                                    session_id,
-                                    reason,
-                                )
-                        else:
-                            reason = reason or "gate_closed"
+                    elif not success and _is_followup_delivery_boundary_reason(reason):
+                        reason = reason or "gate_closed"
                     if not success and not is_first_request:
                         final_reason = reason or ""
                         # gate_closed 是 shutdown race（leader stream 正在收尾），静默结束流
@@ -1810,6 +1930,7 @@ async def _consume_stream_with_query(
     _envs = envs or {}
     hide_dm: bool = bool(_envs.get("hide_dm", False))
     received_chunks = 0
+    first_model_output_at: float | None = None
     emitted_ask_user_request_ids: set[str] = set()
     # Reset the team-events flag at the start of a new round so chat.final
     # can correctly determine whether the team is active.
@@ -1845,6 +1966,16 @@ async def _consume_stream_with_query(
             traces_dir = get_agent_teams_home() / "traces"
             traces_dir.mkdir(parents=True, exist_ok=True)
             lg = TeamStreamLogger(file_path=str(traces_dir / f"dump-team-{session_id}.txt"))
+        # Last stop before the message enters the team runner streaming path.
+        server_logger.info(
+            "[AgentServer] team message entering runner streaming: channel_id=%s session_id=%s"
+            " round_id=%s query=%s",
+            _resolve_channel_id(channel_id),
+            session_id,
+            round_id,
+            _safe_query_preview(initial_query),
+        )
+        runner_entered_at = time.monotonic()
         async for chunk in Runner.run_agent_team_streaming(
             agent_team=team_spec,
             inputs={"query": initial_query},
@@ -1853,6 +1984,20 @@ async def _consume_stream_with_query(
             stream_logger=lg,
         ):
             received_chunks += 1
+            # First event of any kind from the runner — usually a framework
+            # control event (team.runtime_ready and friends), not model output.
+            # It marks how long team startup took before the stream came alive.
+            if received_chunks == 1:
+                server_logger.info(
+                    "[AgentServer] team runner streaming first event: channel_id=%s session_id=%s"
+                    " round_id=%s elapsed_ms=%.1f role=%s type=%s",
+                    _resolve_channel_id(channel_id),
+                    session_id,
+                    round_id,
+                    (time.monotonic() - runner_entered_at) * 1000,
+                    getattr(chunk, "role", None),
+                    getattr(chunk, "type", None),
+                )
             # 诊断：每 30 个 chunk 或首个 chunk 时打印进度
             if received_chunks == 1 or received_chunks % 30 == 0:
                 _role = getattr(chunk, "role", None)
@@ -1880,6 +2025,21 @@ async def _consume_stream_with_query(
                 continue
             parsed = parse_stream_chunk(chunk)
             if parsed is not None:
+                # Time to first token: the first frame actually produced by a
+                # model (reasoning counts — on a thinking model it comes first).
+                if first_model_output_at is None and parsed.get("event_type") in _MODEL_OUTPUT_EVENT_TYPES:
+                    first_model_output_at = time.monotonic()
+                    server_logger.info(
+                        "[AgentServer] team runner first model output: channel_id=%s session_id=%s"
+                        " round_id=%s elapsed_ms=%.1f received=%s event_type=%s role=%s",
+                        _resolve_channel_id(channel_id),
+                        session_id,
+                        round_id,
+                        (first_model_output_at - runner_entered_at) * 1000,
+                        received_chunks,
+                        parsed.get("event_type"),
+                        parsed.get("role") or getattr(chunk, "role", None),
+                    )
                 if not is_leader and parsed.get("event_type") == "chat.reasoning":
                     continue
                 if _is_duplicate_ask_user_question(parsed, emitted_ask_user_request_ids):
@@ -2005,7 +2165,15 @@ async def _consume_stream_with_query(
                 # is preserved.
                 if parsed.get("event_type") == "chat.final":
                     tm_ = get_team_manager(channel_id)
-                    if (not tm_.has_seen_team_events(session_id)) or tm_.is_workflow_completed(session_id):
+                    should_finish_round = (
+                        (not tm_.has_seen_team_events(session_id))
+                        or tm_.is_workflow_completed(session_id)
+                    )
+                    # Deliver the final content before announcing that the
+                    # round is complete. Clients may stop consuming the stream
+                    # as soon as processing_status(False) arrives.
+                    _broadcast_event(channel_id, session_id, parsed)
+                    if should_finish_round:
                         _broadcast_event(
                             channel_id,
                             session_id,
@@ -2017,6 +2185,7 @@ async def _consume_stream_with_query(
                                 "is_complete": True,
                             },
                         )
+                    continue
                 _broadcast_event(channel_id, session_id, parsed)
 
         # If stream ended without any chunks, broadcast an error event
@@ -2149,12 +2318,16 @@ async def _consume_monitor_events(
 #
 # member_id / task_id 均以 run_id 前缀做命名空间，避免与真实 teammate/task 冲突。
 
-_WF_PHASE_STATUS_TO_TASK_TYPE: dict[str, str] = {
-    "planned": "team.task.created",
-    "running": "team.task.claimed",
-    "completed": "team.task.completed",
-    "failed": "team.task.cancelled",
-    "stopped": "team.task.cancelled",
+# swarmflow phase status -> (web team.task event type, authoritative TeamTaskStatus).
+# The status is resolved here (server-side) so the web frontend consumes it
+# directly, consistent with TeamMonitorHandler's convergence. The event ``type``
+# only drives the activity-log label; ``status`` alone decides the board column.
+_WF_PHASE_STATUS_TO_TASK: dict[str, tuple[str, str]] = {
+    "planned": ("team.task.created", "pending"),
+    "running": ("team.task.claimed", "in_progress"),
+    "completed": ("team.task.completed", "completed"),
+    "failed": ("team.task.cancelled", "cancelled"),
+    "stopped": ("team.task.cancelled", "cancelled"),
 }
 
 
@@ -2198,8 +2371,9 @@ def _workflow_updated_to_team_events(
         task_id = f"{run_id}:{phase_id}"
         if seen_phase.get(task_id) != status:
             seen_phase[task_id] = status
-            task_type = _WF_PHASE_STATUS_TO_TASK_TYPE.get(status)
-            if task_type is not None:
+            mapping = _WF_PHASE_STATUS_TO_TASK.get(status)
+            if mapping is not None:
+                task_type, task_status = mapping
                 out.append(
                     _team_event_envelope(
                         "team.task",
@@ -2209,7 +2383,7 @@ def _workflow_updated_to_team_events(
                             "team_id": team_id,
                             "task_id": task_id,
                             "title": phase.get("name") or phase_id,
-                            "status": status,
+                            "status": task_status,
                         },
                     )
                 )
@@ -2483,7 +2657,7 @@ async def _watch_team_evolution_and_push(
             fallback_sec=TEAM_EVOLUTION_EVENT_TIMEOUT_SEC,
         )
         while True:
-            if not getattr(rail, "auto_scan", True):
+            if not rail.signal_trigger and not rail.review_trigger:
                 if active_cycle_request_id is not None:
                     await push_evolution_status(
                         push_context,

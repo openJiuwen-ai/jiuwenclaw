@@ -10,7 +10,14 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 
 
 class TeamSkillStoragePolicyRail(DeepAgentRail):
-    """Tell team members where skill authoring outputs must be stored."""
+    """Tell team members where skill authoring outputs must be stored.
+
+    The policy text is identical for every member of a team and stays in the
+    system prompt, so the whole team shares one cacheable prompt prefix. It
+    names only team-level paths; the member's own workspace is per-member and
+    is delivered by the team rail as part of the member's identity, together
+    with the rule that new skills must not be created there.
+    """
 
     priority = 5
     SECTION_NAME = "team_skill_storage_policy"
@@ -22,17 +29,15 @@ class TeamSkillStoragePolicyRail(DeepAgentRail):
         global_skills_dir: str,
         team_workspace_root: str | None = None,
         team_skills_dir: str | None = None,
-        member_workspace_root: str | None = None,
     ) -> None:
         super().__init__()
         self.system_prompt_builder = None
         self._global_skills_dir = global_skills_dir
         self._team_workspace_root = team_workspace_root
         self._team_skills_dir = team_skills_dir
-        self._member_workspace_root = member_workspace_root
 
     def init(self, agent) -> None:
-        """Capture the prompt builder owned by the current member."""
+        """Capture the prompt builder owned by the member."""
         self.system_prompt_builder = getattr(agent, "system_prompt_builder", None)
 
     def uninit(self, agent) -> None:
@@ -95,11 +100,13 @@ class TeamSkillStoragePolicyRail(DeepAgentRail):
         )
 
     def _format_forbidden_paths(self, language: str) -> str:
-        """Format known non-source workspace paths for the prompt."""
+        """Format the team-level non-source workspace paths for the prompt.
+
+        Only team-level paths belong here: they are identical for every member,
+        so they keep the prompt prefix shared. The member's own workspace is
+        per-member and is told to it by the team rail as part of its identity.
+        """
         lines: list[str] = []
-        if self._member_workspace_root:
-            label = "成员工作区" if language == "cn" else "Member workspace"
-            lines.append(f"- {label}：`{self._member_workspace_root}`\n")
         if self._team_workspace_root:
             label = "team 共享工作区" if language == "cn" else "Team shared workspace"
             lines.append(f"- {label}：`{self._team_workspace_root}`\n")
@@ -107,6 +114,5 @@ class TeamSkillStoragePolicyRail(DeepAgentRail):
             label = "team skills 共享视图" if language == "cn" else "Team skills shared view"
             lines.append(f"- {label}：`{self._team_skills_dir}`\n")
         return "".join(lines)
-
 
 __all__ = ["TeamSkillStoragePolicyRail"]

@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import ReactMarkdown from 'react-markdown';
 import {
   parseHistoryJsonFilePreviewMode,
-  parseHistoryJsonFileToPreviewMessages,
+  parseHistoryJsonFileToTimelinePreview,
 } from '../../features/historyRestore';
 import { isHistoryPreviewFile, parseHistoryFileContent } from '../../features/historyFilePreview';
 import { ChatTimelineList } from '../ChatPanel/MessageList';
@@ -115,19 +115,29 @@ export function FileViewer({ filePath, fileName, reloadNonce = 0 }: FileViewerPr
     }
   }, [isJson, isHistoryJson, content]);
 
-  const historyMessages = useMemo(() => {
+  const historyPreview = useMemo(() => {
     if (!isHistoryJson || !historyChatPreview || !Array.isArray(jsonParseResult.parsed)) {
-      return [] as ReturnType<typeof parseHistoryJsonFileToPreviewMessages>;
+      return null;
     }
-    return parseHistoryJsonFileToPreviewMessages(jsonParseResult.parsed, sessionIdFromAgentPath(filePath));
+    return parseHistoryJsonFileToTimelinePreview(
+      jsonParseResult.parsed,
+      sessionIdFromAgentPath(filePath)
+    );
   }, [isHistoryJson, historyChatPreview, jsonParseResult.parsed, filePath]);
 
+  const historyMessages = historyPreview?.messages ?? [];
+  const historyExecutions = historyPreview?.executions ?? [];
+  const historyReasoningSegments = historyPreview?.reasoningSegments ?? [];
+
   const historyPreviewMode = useMemo(() => {
+    if (historyPreview?.mode) {
+      return historyPreview.mode;
+    }
     if (!isHistoryJson || !Array.isArray(jsonParseResult.parsed)) {
       return null;
     }
     return parseHistoryJsonFilePreviewMode(jsonParseResult.parsed);
-  }, [isHistoryJson, jsonParseResult.parsed]);
+  }, [historyPreview?.mode, isHistoryJson, jsonParseResult.parsed]);
 
   const todoItems = useMemo(() => {
     if (!isTodoJson || !Array.isArray(jsonParseResult.parsed)) {
@@ -416,6 +426,9 @@ export function FileViewer({ filePath, fileName, reloadNonce = 0 }: FileViewerPr
               <div className="w-full min-h-[280px] rounded-lg border border-border bg-card p-3 chat-content">
                 <ChatTimelineList
                   messages={historyMessages}
+                  executions={historyExecutions}
+                  reasoningSegments={historyReasoningSegments}
+                  staticTimeline
                   mode={historyPreviewMode ?? undefined}
                   disableA2UIInteraction={true}
                 />

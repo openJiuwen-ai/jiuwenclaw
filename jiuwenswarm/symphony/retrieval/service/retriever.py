@@ -4,6 +4,9 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Sequence
 
+from shared.tags import normalize_tags
+
+from ..io.loading import LoadedRetrieverIndex, load_retriever_index
 from ..llm import (
     LLMClientCapabilities,
     LLMClientConfig,
@@ -17,6 +20,7 @@ from ..llm import (
     progressive_client_cache_key,
 )
 from ..llm.transformers_prefix_cached_generation import warmup_progressive_prefix_cache
+from ..tree.filtering import candidate_tags_match, count_retriever_items, filter_retriever_tree
 from ..tree.progressive import ProgressiveRetriever
 
 from .defaults import serialize_trace_event
@@ -27,8 +31,6 @@ from .models import (
     _RuntimeRetrieverConfig,
     runtime_retriever_config_from_config,
 )
-
-from ..io.loading import LoadedRetrieverIndex, load_retriever_index
 
 LOGGER = logging.getLogger("retriever")
 
@@ -68,12 +70,16 @@ class Retriever:
         self._before_llm_call_hook = before_llm_call_hook
         self._progressive_runtime_cache: dict[tuple[object, ...], ProgressiveLLMClient] = {}
         self._progressive_retriever_cache: dict[tuple[object, ...], ProgressiveRetriever] = {}
+        self._filtered_tree_cache: dict[tuple[str, ...], tuple[object, int]] = {}
+        self._prefix_warmed_roots: set[tuple[int, int, int]] = set()
         self._public_name_by_payload: dict[str, str] = {}
         self._public_name_by_choice_id: dict[str, str] = {}
         self._description_by_payload: dict[str, str] = {}
         self._description_by_choice_id: dict[str, str] = {}
         self._worker_id_by_payload: dict[str, str] = {}
         self._worker_id_by_choice_id: dict[str, str] = {}
+        self._tags_by_payload: dict[str, tuple[str, ...]] = {}
+        self._tags_by_choice_id: dict[str, tuple[str, ...]] = {}
         for record in self._loaded_index.catalog_records:
             payload = str(getattr(record, "payload", "") or getattr(record, "cid", "") or "").strip()
             choice_id = str(
@@ -88,16 +94,22 @@ class Retriever:
                 worker_id = str(metadata.get("worker_id") or "").strip()
             public_name = str(getattr(record, "name", "") or choice_id or payload).strip()
             description = str(getattr(record, "description", "") or "").strip()
+            tags = normalize_tags(
+                getattr(record, "tags", ()),
+                metadata.get("tags") if isinstance(metadata, dict) else (),
+            )
             if payload:
                 self._public_name_by_payload[payload] = public_name or payload
                 self._worker_id_by_payload[payload] = worker_id or payload
                 if description:
                     self._description_by_payload[payload] = description
+                self._tags_by_payload[payload] = tags
             if choice_id:
                 self._public_name_by_choice_id[choice_id] = public_name or choice_id
                 self._worker_id_by_choice_id[choice_id] = worker_id or choice_id
                 if description:
                     self._description_by_choice_id[choice_id] = description
+                self._tags_by_choice_id[choice_id] = tags
 
     def _record_debug_event(self, event: Dict[str, object]) -> None:
         if self._debug_event_hook is None:
@@ -176,6 +188,16 @@ class Retriever:
     def search(self, query: str, *, search_config: RequestConfig | None = None) -> List[str]:
         return list(self.search_details(query, search_config=search_config).payloads)
 
+    @property
+    def available_tags(self) -> tuple[str, ...]:
+        """Return the normalized tags present in the loaded offline catalog."""
+
+        available: set[str] = set()
+        for tags_by_key in (self._tags_by_payload, self._tags_by_choice_id):
+            for tags in tags_by_key.values():
+                available.update(tags)
+        return tuple(sorted(available))
+
     def close(self) -> None:
         clients: list[object] = list(self._progressive_runtime_cache.values())
         if self._llm is not None:
@@ -195,6 +217,8 @@ class Retriever:
                 LOGGER.exception("failed to close retriever llm client")
         self._progressive_runtime_cache.clear()
         self._progressive_retriever_cache.clear()
+        self._filtered_tree_cache.clear()
+        self._prefix_warmed_roots.clear()
 
     def search_details(
         self,
@@ -204,13 +228,70 @@ class Retriever:
     ) -> SearchResult:
         runtime_config = self._config
         request_top_k = _resolve_request_top_k(runtime_config=runtime_config, search_config=search_config)
-        _validate_search_request_config(runtime_config=runtime_config, request_top_k=request_top_k)
+        requested_tags = _resolve_request_tags(search_config)
+        _validate_search_request_config(
+            runtime_config=runtime_config,
+            request_top_k=request_top_k,
+        )
+        root, tag_filter_trace = self._root_for_tag_filter(
+            requested_tags=requested_tags,
+        )
+        if tag_filter_trace is not None and count_retriever_items(root) == 0:
+            return SearchResult(
+                method="progressive",
+                payloads=[],
+                candidate_records=[],
+                summary_lines=[],
+                selected_payload=None,
+                selected_rank=-1,
+                trace_events=[tag_filter_trace],
+            )
         result = self._search_progressive(
             query=query,
             top_k=request_top_k,
             runtime_config=runtime_config,
+            root=root,
         )
+        if tag_filter_trace is not None:
+            result.trace_events.insert(0, tag_filter_trace)
         return self._trim_public_search_result(self._publicize_search_result(result), top_k=request_top_k)
+
+    def _root_for_tag_filter(
+        self,
+        *,
+        requested_tags: tuple[str, ...],
+    ) -> tuple[object, Dict[str, object] | None]:
+        if not requested_tags:
+            return self._loaded_index.tree_root, None
+
+        cached = self._filtered_tree_cache.get(requested_tags)
+        if cached is None:
+            allowed_payloads: set[str] = set()
+            for record in self._loaded_index.catalog_records:
+                metadata = getattr(record, "metadata", {}) or {}
+                metadata_tags = metadata.get("tags") if isinstance(metadata, dict) else ()
+                candidate_tags = normalize_tags(getattr(record, "tags", ()), metadata_tags)
+                if candidate_tags_match(candidate_tags, requested_tags):
+                    allowed_payloads.add(str(record.payload))
+            filtered_root = filter_retriever_tree(
+                self._loaded_index.tree_root,
+                allowed_payloads=allowed_payloads,
+            )
+            cached = (filtered_root, count_retriever_items(filtered_root))
+            self._filtered_tree_cache[requested_tags] = cached
+
+        root, retained_count = cached
+        trace = {
+            "event_type": "tag_filter",
+            "node_id": "ROOT",
+            "depth": 0,
+            "detail": {
+                "requested_tags": list(requested_tags),
+                "catalog_count": len(self._loaded_index.catalog_records),
+                "retained_count": retained_count,
+            },
+        }
+        return root, trace
 
     def _can_run_progressive(self, runtime_config: _RuntimeRetrieverConfig | None = None) -> bool:
         return self._progressive_unavailable_reason(runtime_config) is None
@@ -258,6 +339,7 @@ class Retriever:
         query: str | Sequence[Dict[str, str]],
         top_k: int,
         runtime_config: _RuntimeRetrieverConfig,
+        root: object,
     ) -> SearchResult:
         backend_name = _progressive_search_backend_name(runtime_config.progressive)
         LOGGER.info(
@@ -287,15 +369,20 @@ class Retriever:
             raise RuntimeError(f"progressive runtime initialization failed: {exc}") from exc
         if progressive_client is None:
             progressive_client = _UnavailableProgressiveLLMClient()
+        self._ensure_prefix_cache_warmup(
+            progressive_client=progressive_client,
+            runtime_config=runtime_config,
+            root=root,
+        )
         retriever = self._get_progressive_retriever(
             progressive_client=progressive_client,
             runtime_config=runtime_config,
-            root=self._loaded_index.tree_root,
+            root=root,
         )
         result = retriever.search(
             model=_progressive_model_name(self._llm_model, runtime_config.progressive),
             query=query,
-            root=self._loaded_index.tree_root,
+            root=root,
             top_k=top_k,
             before_llm_call_hook=self._before_llm_call_hook,
         )
@@ -351,6 +438,25 @@ class Retriever:
         self._progressive_retriever_cache[cache_key] = retriever
         return retriever
 
+    def _ensure_prefix_cache_warmup(
+        self,
+        *,
+        progressive_client: ProgressiveLLMClient,
+        runtime_config: _RuntimeRetrieverConfig,
+        root: object,
+    ) -> None:
+        if not bool(progressive_client.capabilities.progressive_prefix_kv_cache):
+            return
+        cache_key = (id(progressive_client), id(root), int(runtime_config.progressive.top_k))
+        if cache_key in self._prefix_warmed_roots:
+            return
+        warmup_progressive_prefix_cache(
+            client=progressive_client,
+            root=root,
+            config=runtime_config.progressive,
+        )
+        self._prefix_warmed_roots.add(cache_key)
+
     def _get_progressive_client(self, runtime_config: _RuntimeRetrieverConfig) -> ProgressiveLLMClient | None:
         progressive = runtime_config.progressive
         cache_key = progressive_client_cache_key(progressive)
@@ -383,6 +489,7 @@ class Retriever:
                 root=self._loaded_index.tree_root,
                 config=progressive,
             )
+            self._prefix_warmed_roots.add((id(client), id(self._loaded_index.tree_root), int(progressive.top_k)))
             self._emit_runtime_event(
                 phase="prefix_cache_warmup_completed",
                 attempted=int(warmup_result.attempted),
@@ -443,6 +550,10 @@ class Retriever:
             or str(self._description_by_choice_id.get(choice_id, "")).strip()
             or str(record.get("description") or "").strip()
         )
+        tags = normalize_tags(
+            self._tags_by_payload.get(resolved_payload, ()),
+            self._tags_by_choice_id.get(choice_id, ()),
+        )
         if resolved_payload:
             public_record["resolved_cid"] = resolved_payload
             public_record["resolved_payload"] = worker_id
@@ -457,6 +568,7 @@ class Retriever:
             public_record["worker_id"] = worker_id
         if description:
             public_record["description"] = description
+        public_record["tags"] = list(tags)
         return public_record
 
     @staticmethod
@@ -598,7 +710,17 @@ def _resolve_request_top_k(*, runtime_config: _RuntimeRetrieverConfig, search_co
     return max(1, int(search_config.top_k))
 
 
-def _validate_search_request_config(*, runtime_config: _RuntimeRetrieverConfig, request_top_k: int) -> None:
+def _resolve_request_tags(search_config: RequestConfig | None) -> tuple[str, ...]:
+    if search_config is None:
+        return ()
+    return normalize_tags(search_config.tags)
+
+
+def _validate_search_request_config(
+    *,
+    runtime_config: _RuntimeRetrieverConfig,
+    request_top_k: int,
+) -> None:
     initialized_top_k = max(1, int(runtime_config.top_k))
     if request_top_k == initialized_top_k:
         return
