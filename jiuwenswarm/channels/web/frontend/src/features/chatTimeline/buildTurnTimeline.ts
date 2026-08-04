@@ -4,7 +4,10 @@
 import type { Message, ToolExecution } from '../../types';
 import type { ReasoningSegment } from '../../stores/chatStore';
 import { getMessageActor } from '../../components/ChatPanel/MessageItem';
-import { collectViewedSkillIds } from '../../components/ChatPanel/ToolGroupDisplay';
+import {
+  collectViewedSkillIds,
+  isToolExecutionFailed,
+} from '../../components/ChatPanel/ToolGroupDisplay';
 import { isTeamMemberCollaborationMessage } from '../../components/ChatPanel/teamEventUtils';
 import { isA2UIClientEventContent } from '../a2ui/a2uiContent';
 import { parseTimestampToMs } from '../../utils/timestamp';
@@ -347,49 +350,55 @@ export function buildRenderItems(items: TimelineItem[], isTeamMode: boolean, isP
     isTeamMode
   );
 
-  if (!isTeamMode) {
-    let clusterActive = false;
-    for (const renderItem of renderItemsWithNotices) {
-      if (renderItem.type === 'reasoning' || renderItem.type === 'toolGroup') {
-        renderItem.showAvatar = !clusterActive;
-        clusterActive = true;
-        continue;
-      }
-      if (renderItem.type === 'message') {
-        if (renderItem.message.role === 'assistant') {
-          renderItem.showAvatar = !clusterActive;
-          clusterActive = true;
-        } else {
-          renderItem.showAvatar = false;
-          clusterActive = false;
-        }
-      }
-    }
-    return insertTurnSummaries(renderItemsWithNotices, isProcessing);
-  }
-
-  let clusterBlockActive = false;
-  for (const renderItem of renderItemsWithNotices) {
-    if (renderItem.type === 'reasoning' || renderItem.type === 'toolGroup') {
-      renderItem.showAvatar = !clusterBlockActive;
-      clusterBlockActive = true;
-      continue;
-    }
-    if (renderItem.type !== 'message') {
-      continue;
-    }
-
-    const actor = getMessageActor(renderItem.message);
-    if (actor === 'team_leader') {
-      renderItem.showAvatar = !clusterBlockActive;
-      clusterBlockActive = true;
-      continue;
-    }
-
-    clusterBlockActive = false;
-  }
-
+  assignTurnTopAvatars(renderItemsWithNotices, isTeamMode);
   return insertTurnSummaries(renderItemsWithNotices, isProcessing);
+}
+
+/**
+ * 同一轮（同一 turnId）里，leader/助手/思考/工具只允许最顶部一颗头像。
+ * 成员气泡可保留自己的头像，但不得重置 leader 簇（否则同轮会冒出一串头像）。
+ */
+function assignTurnTopAvatars(items: RenderItem[], isTeamMode: boolean): void {
+  const claimedLeaderTurns = new Set<number>();
+
+  const claimLeaderAvatar = (turnId: number): boolean => {
+    if (claimedLeaderTurns.has(turnId)) {
+      return false;
+    }
+    claimedLeaderTurns.add(turnId);
+    return true;
+  };
+
+  for (const item of items) {
+    if (item.type === 'reasoning' || item.type === 'toolGroup') {
+      item.showAvatar = claimLeaderAvatar(item.turnId);
+      continue;
+    }
+
+    if (item.type !== 'message') {
+      continue;
+    }
+
+    if (item.message.role === 'user') {
+      item.showAvatar = false;
+      continue;
+    }
+
+    if (!isTeamMode) {
+      item.showAvatar =
+        item.message.role === 'assistant' ? claimLeaderAvatar(item.turnId) : false;
+      continue;
+    }
+
+    const actor = getMessageActor(item.message);
+    if (actor === 'team_leader' || item.message.role === 'assistant') {
+      item.showAvatar = claimLeaderAvatar(item.turnId);
+      continue;
+    }
+
+    // 其他成员：自己的头像；不影响本轮 leader 是否已占用顶部位
+    item.showAvatar = Boolean(actor);
+  }
 }
 
 function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): RenderItem[] {
@@ -458,7 +467,9 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
       }
     } else if (item.type === 'message') {
       hasActivity = true;
+      // timestamp：首包/落盘时间（排序用）；completedAt：chat.final 收尾（live 流式合并时才有）
       acc(toTimestampMs(item.message.timestamp), true);
+      acc(toTimestampMs(item.message.completedAt), true);
     } else if (item.type === 'reasoning') {
       hasActivity = true;
       hasWork = true;
@@ -477,6 +488,48 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
   return out;
 }
 
+/** 折叠芯片图标色：全成功绿勾 / 有失败但还有成功项→部分失败 / 全失败红叉 / 无工具中性绿 */
+export type WorkOutcomeTone = 'success' | 'partial' | 'error' | 'neutral';
+
+/**
+ * @param successCount 成功的工具数
+ * @param failedCount 失败/超时的工具数
+ * @param thinkingCount 已完成的思考段数（思考成功也算「有成功项」，避免「2 次思考 + 1 次工具失败」误标红叉）
+ */
+export function resolveWorkOutcomeTone(
+  successCount: number,
+  failedCount: number,
+  thinkingCount = 0
+): WorkOutcomeTone {
+  const hasSuccessWork = successCount > 0 || thinkingCount > 0;
+  if (failedCount <= 0) {
+    return hasSuccessWork ? 'success' : 'neutral';
+  }
+  if (!hasSuccessWork) {
+    return 'error';
+  }
+  return 'partial';
+}
+
+function accumulateToolOutcomes(
+  executions: ToolExecution[],
+  into: { toolSuccessCount: number; toolFailedCount: number }
+): void {
+  for (const execution of executions) {
+    if (isDeliverableToolName(execution.toolCall.name)) {
+      continue;
+    }
+    if (isExecutionRunning(execution)) {
+      continue;
+    }
+    if (isToolExecutionFailed(execution)) {
+      into.toolFailedCount += 1;
+    } else {
+      into.toolSuccessCount += 1;
+    }
+  }
+}
+
 export type TurnWorkMeta = {
   turnId: number;
   completed: boolean;
@@ -489,6 +542,9 @@ export type TurnWorkMeta = {
   showAvatar: boolean;
   thinkingCount: number;
   toolCount: number;
+  toolSuccessCount: number;
+  toolFailedCount: number;
+  outcomeTone: WorkOutcomeTone;
 };
 
 const DELIVERABLE_TOOL_NAMES = new Set(['send_file_to_user']);
@@ -523,6 +579,26 @@ function countToolsInGroup(item: Extract<RenderItem, { type: 'toolGroup' }>): nu
   return item.executions.filter((execution) => !isDeliverableToolName(execution.toolCall.name)).length;
 }
 
+function emptyTurnMeta(turnId: number, partial?: Partial<TurnWorkMeta>): TurnWorkMeta {
+  return {
+    turnId,
+    completed: false,
+    hasWork: false,
+    firstWorkKey: null,
+    startMs: Number.NaN,
+    endMs: Number.NaN,
+    workStartMs: Number.NaN,
+    workEndMs: Number.NaN,
+    showAvatar: true,
+    thinkingCount: 0,
+    toolCount: 0,
+    toolSuccessCount: 0,
+    toolFailedCount: 0,
+    outcomeTone: 'neutral',
+    ...partial,
+  };
+}
+
 export function buildTurnWorkMeta(items: RenderItem[], isProcessing: boolean): Map<number, TurnWorkMeta> {
   const map = new Map<number, TurnWorkMeta>();
   let lastTurnId = Number.NEGATIVE_INFINITY;
@@ -530,19 +606,24 @@ export function buildTurnWorkMeta(items: RenderItem[], isProcessing: boolean): M
     if (item.type === 'turnSummary') {
       lastTurnId = Math.max(lastTurnId, item.turnId);
       const prev = map.get(item.turnId);
-      map.set(item.turnId, {
-        turnId: item.turnId,
-        completed: !(item.isLastTurn && isProcessing),
-        hasWork: item.hasWork || Boolean(prev?.hasWork),
-        firstWorkKey: prev?.firstWorkKey ?? null,
-        startMs: item.startMs,
-        endMs: item.endMs,
-        workStartMs: item.workStartMs,
-        workEndMs: item.workEndMs,
-        showAvatar: prev?.showAvatar ?? true,
-        thinkingCount: prev?.thinkingCount ?? 0,
-        toolCount: prev?.toolCount ?? 0,
-      });
+      map.set(
+        item.turnId,
+        emptyTurnMeta(item.turnId, {
+          completed: !(item.isLastTurn && isProcessing),
+          hasWork: item.hasWork || Boolean(prev?.hasWork),
+          firstWorkKey: prev?.firstWorkKey ?? null,
+          startMs: item.startMs,
+          endMs: item.endMs,
+          workStartMs: item.workStartMs,
+          workEndMs: item.workEndMs,
+          showAvatar: prev?.showAvatar ?? true,
+          thinkingCount: prev?.thinkingCount ?? 0,
+          toolCount: prev?.toolCount ?? 0,
+          toolSuccessCount: prev?.toolSuccessCount ?? 0,
+          toolFailedCount: prev?.toolFailedCount ?? 0,
+          outcomeTone: prev?.outcomeTone ?? 'neutral',
+        })
+      );
       continue;
     }
     if (item.type !== 'reasoning' && item.type !== 'toolGroup') {
@@ -560,21 +641,20 @@ export function buildTurnWorkMeta(items: RenderItem[], isProcessing: boolean): M
         prev.thinkingCount += 1;
       } else {
         prev.toolCount += countToolsInGroup(item);
+        accumulateToolOutcomes(item.executions, prev);
       }
     } else {
-      map.set(item.turnId, {
-        turnId: item.turnId,
-        completed: false,
+      const next = emptyTurnMeta(item.turnId, {
         hasWork: true,
         firstWorkKey: item.key,
-        startMs: Number.NaN,
-        endMs: Number.NaN,
-        workStartMs: Number.NaN,
-        workEndMs: Number.NaN,
         showAvatar: item.showAvatar,
         thinkingCount: item.type === 'reasoning' ? 1 : 0,
         toolCount: item.type === 'toolGroup' ? countToolsInGroup(item) : 0,
       });
+      if (item.type === 'toolGroup') {
+        accumulateToolOutcomes(item.executions, next);
+      }
+      map.set(item.turnId, next);
     }
   }
   for (const meta of map.values()) {
@@ -583,8 +663,45 @@ export function buildTurnWorkMeta(items: RenderItem[], isProcessing: boolean): M
     }
     const isLast = Number.isFinite(lastTurnId) && meta.turnId === lastTurnId;
     meta.completed = !(isProcessing && isLast);
+    meta.outcomeTone = resolveWorkOutcomeTone(
+      meta.toolSuccessCount,
+      meta.toolFailedCount,
+      meta.thinkingCount
+    );
+    // 折叠条是该轮顶部锚点：只要本轮有可折叠工作，头像就归折叠条，避免被中间气泡抢走后整轮「没头像」。
+    if (meta.hasWork) {
+      meta.showAvatar = true;
+    }
   }
   return map;
+}
+
+/**
+ * 「已完成」折叠条应挂在该轮第一个可折叠项上。
+ * 若工具前还有 hideMeta 开场白，锚在那句上，避免展开后开场白跑到折叠条上面。
+ */
+export function buildTurnFoldAnchorKeys(
+  items: RenderItem[],
+  turnWorkMeta: Map<number, TurnWorkMeta>
+): Map<number, string> {
+  const anchors = new Map<number, string>();
+  for (const item of items) {
+    if (item.type === 'turnSummary' || item.turnId < 0 || anchors.has(item.turnId)) {
+      continue;
+    }
+    const meta = turnWorkMeta.get(item.turnId);
+    if (!meta?.completed || !meta.hasWork) {
+      continue;
+    }
+    if (item.type === 'message' && item.hideMeta) {
+      anchors.set(item.turnId, item.key);
+      continue;
+    }
+    if (item.type === 'reasoning' || item.type === 'toolGroup') {
+      anchors.set(item.turnId, item.key);
+    }
+  }
+  return anchors;
 }
 
 export type LiveWorkStreak = {
@@ -596,6 +713,9 @@ export type LiveWorkStreak = {
   keys: Set<string>;
   thinkingCount: number;
   toolCount: number;
+  toolSuccessCount: number;
+  toolFailedCount: number;
+  outcomeTone: WorkOutcomeTone;
   showAvatar: boolean;
 };
 
@@ -609,6 +729,9 @@ export function streakExpandKey(turnId: number, ordinal: number): string {
   return `streak-${turnId}-${ordinal}`;
 }
 
+/** 单轮耗时超过该阈值视为时间戳异常（历史脏数据/巡检污染），回退到更窄的 work 跨度。 */
+const MAX_PLAUSIBLE_TURN_MS = 24 * 60 * 60 * 1000;
+
 export function completedWorkDurationMs(meta: Pick<TurnWorkMeta, 'workStartMs' | 'workEndMs' | 'startMs' | 'endMs'>): number {
   // 从用户发话算到本轮最后一次工作活动，包含等待首包/思考的时间。
   // 不要用 workStart→workEnd：那会丢掉「发完后一直在想」的等待，出现思考 9s、已完成却只显示 3s。
@@ -617,7 +740,43 @@ export function completedWorkDurationMs(meta: Pick<TurnWorkMeta, 'workStartMs' |
   if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) {
     return 0;
   }
-  return Math.max(0, end - start);
+  let duration = Math.max(0, end - start);
+  if (duration <= MAX_PLAUSIBLE_TURN_MS) {
+    return duration;
+  }
+  // 用户时间戳异常偏旧时，退回纯工作活动跨度，避免「任务用时」飙到数小时/数天。
+  if (
+    Number.isFinite(meta.workStartMs) &&
+    Number.isFinite(meta.workEndMs) &&
+    meta.workEndMs >= meta.workStartMs
+  ) {
+    duration = Math.max(0, meta.workEndMs - meta.workStartMs);
+  }
+  if (duration > MAX_PLAUSIBLE_TURN_MS) {
+    return 0;
+  }
+  return duration;
+}
+
+/** TurnElapsed / CompletedWorkChip 共用：统一用同一套起止点，避免上下两处数字对不上。 */
+export function turnElapsedRangeMs(meta: Pick<TurnWorkMeta, 'workStartMs' | 'workEndMs' | 'startMs' | 'endMs'>): {
+  startMs: number;
+  endMs: number;
+} {
+  const start = Number.isFinite(meta.startMs) ? meta.startMs : meta.workStartMs;
+  const end = Number.isFinite(meta.workEndMs) ? meta.workEndMs : meta.endMs;
+  if (!Number.isFinite(start) || !Number.isFinite(end)) {
+    return {
+      startMs: Number.isFinite(meta.startMs) ? meta.startMs : 0,
+      endMs: Number.isFinite(meta.endMs) ? meta.endMs : 0,
+    };
+  }
+  const duration = completedWorkDurationMs(meta);
+  // 若走了异常回退，把展示区间收成与 duration 一致，避免 TurnElapsed 仍用脏 startMs。
+  if (duration > 0 && duration !== Math.max(0, end - start) && Number.isFinite(meta.workStartMs)) {
+    return { startMs: meta.workStartMs, endMs: meta.workStartMs + duration };
+  }
+  return { startMs: start, endMs: start + duration };
 }
 
 function isReasoningSettledForStreak(segment: ReasoningSegment, nowMs: number): boolean {
@@ -674,7 +833,7 @@ export function streakMapFingerprint(streaks: Map<string, LiveWorkStreak>): stri
   return [...streaks.values()]
     .map(
       (streak) =>
-        `${streak.id}:${streak.thinkingCount}:${streak.toolCount}:${[...streak.keys].join(',')}`
+        `${streak.id}:${streak.thinkingCount}:${streak.toolCount}:${streak.toolSuccessCount}:${streak.toolFailedCount}:${streak.outcomeTone}:${[...streak.keys].join(',')}`
     )
     .sort()
     .join('|');
@@ -727,9 +886,31 @@ export function buildLiveCompletedStreaks(
 
   const seal = () => {
     if (streak && streak.thinkingCount + streak.toolCount >= 2) {
+      streak.outcomeTone = resolveWorkOutcomeTone(
+        streak.toolSuccessCount,
+        streak.toolFailedCount,
+        streak.thinkingCount
+      );
       sealed.set(streak.firstKey, streak);
     }
     streak = null;
+  };
+
+  const startStreak = (item: Extract<RenderItem, { type: 'reasoning' | 'toolGroup' }>): LiveWorkStreak => {
+    const ordinal = nextOrdinal(item.turnId);
+    return {
+      id: streakExpandKey(item.turnId, ordinal),
+      turnId: item.turnId,
+      ordinal,
+      firstKey: item.key,
+      keys: new Set(),
+      thinkingCount: 0,
+      toolCount: 0,
+      toolSuccessCount: 0,
+      toolFailedCount: 0,
+      outcomeTone: 'neutral',
+      showAvatar: item.showAvatar,
+    };
   };
 
   for (const item of items) {
@@ -747,17 +928,7 @@ export function buildLiveCompletedStreaks(
         continue;
       }
       if (!streak) {
-        const ordinal = nextOrdinal(item.turnId);
-        streak = {
-          id: streakExpandKey(item.turnId, ordinal),
-          turnId: item.turnId,
-          ordinal,
-          firstKey: item.key,
-          keys: new Set(),
-          thinkingCount: 0,
-          toolCount: 0,
-          showAvatar: item.showAvatar,
-        };
+        streak = startStreak(item);
       }
       streak.keys.add(item.key);
       streak.thinkingCount += 1;
@@ -775,20 +946,11 @@ export function buildLiveCompletedStreaks(
       continue;
     }
     if (!streak) {
-      const ordinal = nextOrdinal(item.turnId);
-      streak = {
-        id: streakExpandKey(item.turnId, ordinal),
-        turnId: item.turnId,
-        ordinal,
-        firstKey: item.key,
-        keys: new Set(),
-        thinkingCount: 0,
-        toolCount: 0,
-        showAvatar: item.showAvatar,
-      };
+      streak = startStreak(item);
     }
     streak.keys.add(item.key);
     streak.toolCount += workToolCount;
+    accumulateToolOutcomes(item.executions, streak);
   }
   seal();
   return sealed;
@@ -797,8 +959,13 @@ export function buildLiveCompletedStreaks(
 export function formatStreakSummaryLabel(
   t: (key: string, options?: Record<string, unknown>) => string,
   thinkingCount: number,
-  toolCount: number
+  toolCount: number,
+  outcomeTone: WorkOutcomeTone = 'neutral'
 ): string {
+  // 工具全失败且无成功思考：文案用「失败」，不要「已完成」。
+  if (outcomeTone === 'error' && toolCount > 0 && thinkingCount <= 0) {
+    return t('chatUi.workFailedToolsNoDuration', { tools: toolCount });
+  }
   if (thinkingCount > 0 && toolCount > 0) {
     return t('chatUi.workCompletedBothNoDuration', { thinking: thinkingCount, tools: toolCount });
   }

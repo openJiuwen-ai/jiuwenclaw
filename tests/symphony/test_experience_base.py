@@ -419,7 +419,6 @@ def test_add_propagates_flush_exception_instead_of_dropping_pending(monkeypatch)
     builder._min_hits = 1
     builder._skill_cluster_num = None
     builder._min_cluster_size = 1
-    builder._cluster_max_examples = None
     builder._embedder = FakeEmbedder({"q": [1.0, 0.0]})
     builder._kb = FakeBank()
     builder._skills_info = None

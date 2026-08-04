@@ -97,7 +97,7 @@ IR 支持 `bands`、`groups`、`nodes/items` 和 `edges`。它适合结构能自
 | `addTextBlock` | 结构化文字区域 |
 | `addPanelList` | 带标题的列表区域 |
 | `addCardGrid` | 真实平级分组的卡片网格 |
-| `addIconCards` | 图标作为识别锚点的平级内容 |
+| `addIconCards` | 带识别锚点的平级内容；锚点默认是 `initial` 首字母徽标，本技能不内置图标库，需要图形时用 `svgToPng` 转自绘 SVG 传 `iconData` |
 | `addTimeline` | 有真实日期/时间的里程碑 |
 | `addFigurePanel` | 1–3 张论文图或证据图的等比排版 |
 | `addRegionHeading` | 可选区域标题 |

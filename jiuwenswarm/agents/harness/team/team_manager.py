@@ -20,6 +20,7 @@ from openjiuwen.agent_teams.runtime.pool import RuntimeState
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 from openjiuwen.core.runner import Runner
+from openjiuwen.core.common.logging import server_logger
 from openjiuwen.harness import DeepAgent
 from openjiuwen.harness.rails import (
     SkillEvolutionRail,
@@ -27,6 +28,7 @@ from openjiuwen.harness.rails import (
     TeamSkillEvolutionRail,
 )
 from jiuwenswarm.agents.harness.team.bootstrap import configure_agent_teams_home
+from jiuwenswarm.common.log_preview import preview_text
 from jiuwenswarm.common.utils import get_user_workspace_dir
 
 configure_agent_teams_home()
@@ -82,6 +84,24 @@ _PG_POST_START_READY_MAX_SLEEP = 2.0
 _PG_POST_START_READY_BACKOFF = 1.45
 _PG_POST_START_LOG_EVERY_SEC = 5.0
 _TEAM_STREAM_EXIT_GRACE_TIMEOUT_SEC = 1.5
+
+
+def _safe_payload_preview(payload: Any) -> str:
+    """Render an interact payload as a bounded single-line log fragment.
+
+    Args:
+        payload: Raw interact payload, either plain text or a team message
+            object (``GodViewMessage`` / ``HumanAgentMessage`` / ...).
+
+    Returns:
+        Clipped text of the payload body, prefixed with the payload type when
+        it is not a plain string.
+    """
+    if isinstance(payload, str):
+        return preview_text(payload)
+    body = getattr(payload, "body", None)
+    text = body if isinstance(body, str) else str(payload)
+    return f"<{type(payload).__name__}>{preview_text(text)}"
 
 # ── Team Observability ──────────────────────────────────────
 # Tracks whether observability is currently active so we can
@@ -1229,6 +1249,13 @@ class TeamManager:
                 )
                 return False, "not_active"
 
+            # Last stop before the message enters the team runner interact path.
+            server_logger.info(
+                "[AgentServer] team message entering runner interact: session_id=%s team=%s payload=%s",
+                session_id,
+                team_name,
+                _safe_payload_preview(user_input),
+            )
             result = await Runner.interact_agent_team(
                 user_input,
                 team_name=team_name,

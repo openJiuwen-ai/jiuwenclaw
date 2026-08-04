@@ -39,6 +39,9 @@ from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.rails import SkillUseRail
 
+from jiuwenswarm.agents.harness.common.browser_defaults import (
+    DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
+)
 from jiuwenswarm.common.config import (
     ASCEND_AFFINITY_PROVIDER,
     get_default_model_provider,
@@ -640,7 +643,13 @@ def _code_subagent_spec(
         react_cfg.get("subagents", {}) if isinstance(react_cfg, dict) else {}
     )
     sub_cfg = subagents_cfg.get(name) if isinstance(subagents_cfg, dict) else None
-    max_iterations = react_cfg.get("max_iterations", _DEFAULT_SUBAGENT_MAX_ITERATIONS)
+    if name == "browser_agent":
+        max_iterations = DEFAULT_BROWSER_AGENT_MAX_ITERATIONS
+    else:
+        max_iterations = react_cfg.get(
+            "max_iterations",
+            _DEFAULT_SUBAGENT_MAX_ITERATIONS,
+        )
     if isinstance(sub_cfg, dict) and sub_cfg.get("max_iterations"):
         max_iterations = sub_cfg["max_iterations"]
     return SubAgentSpec(

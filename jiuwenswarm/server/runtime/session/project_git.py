@@ -57,6 +57,8 @@ def _env_float(name: str, default: float, *, min_value: float = 0.1) -> float:
 # 写操作默认 10 秒超时,避免阻塞 watcher 主循环;可通过环境变量覆盖
 GIT_COMMAND_TIMEOUT_SEC: float = _env_float("JIUWEN_GIT_COMMAND_TIMEOUT_SEC", 10.0)
 GIT_DIFF_TIMEOUT_SEC: float = _env_float("JIUWEN_GIT_DIFF_TIMEOUT_SEC", 10.0)
+# push 涉及网络,默认 60 秒;可通过环境变量覆盖
+GIT_PUSH_TIMEOUT_SEC: float = _env_float("JIUWEN_GIT_PUSH_TIMEOUT_SEC", 60.0)
 
 # 输出截断上限(设计文档 §3.4 GitError: stdout/stderr ≤ 4000 字符)
 _GIT_OUTPUT_TRUNCATE = 4000
@@ -152,12 +154,16 @@ class GitProbeResult:
 
 @dataclass(slots=True)
 class GitOperationResult:
-    """``switch_branch()`` / ``create_branch()`` 等写操作的返回值。"""
+    """``switch_branch()`` / ``create_branch()`` / ``commit()`` / ``push()`` 等写操作的返回值。"""
 
     success: bool
     repo_status: GitRepoStatus
     previous_branch: str | None = None
     error: GitError | None = None
+    # commit 专用:新提交的短 hash
+    commit_hash: str | None = None
+    # push 专用:实际推送的远程名
+    pushed_remote: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -165,6 +171,8 @@ class GitOperationResult:
             "repo_status": self.repo_status.to_dict(),
             "previous_branch": self.previous_branch,
             "error": self.error.to_dict() if self.error else None,
+            "commit_hash": self.commit_hash,
+            "pushed_remote": self.pushed_remote,
         }
 
 
@@ -283,11 +291,16 @@ def _run_git(
     *,
     cwd: str,
     timeout: float = GIT_COMMAND_TIMEOUT_SEC,
+    stdin_input: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """执行 git 命令,禁止 ``shell=True``。
 
     使用 ``_find_git_executable()`` 返回的完整路径调用 git,避免仅依赖
     ``PATH`` 中的 ``"git"`` 字符串。
+
+    Args:
+        stdin_input: 非空时作为命令 stdin 传入(用于 commit message 通过 ``-F -`` 注入,
+            避免命令行长度限制与 shell 转义问题)。
 
     Raises:
         FileNotFoundError: git 可执行文件不存在
@@ -312,6 +325,7 @@ def _run_git(
         timeout=timeout,
         shell=False,
         check=False,  # 不抛 CalledProcessError,由调用方判断 returncode
+        input=stdin_input,
     )
 
 
@@ -1526,6 +1540,639 @@ class ProjectGitService:
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
         return None
+
+    @staticmethod
+    def commit(
+        project: Project,
+        message: str,
+        *,
+        stage_all: bool = False,
+        paths: list[str] | None = None,
+        amend: bool = False,
+        no_verify: bool = False,
+    ) -> GitOperationResult:
+        """提交当前工作区改动到当前分支(设计文档 §4.9 ``project.git.commit``)。
+
+        Args:
+            project: 项目实体
+            message: commit message,非空;支持多行(用 ``\\n`` 分隔)
+            stage_all: True 时先 ``git add -A`` 暂存全部改动(tracked+untracked);
+                与 ``paths`` 互斥。默认值的自动推导(未传 paths 时默认 True,
+                传 paths 时默认 False)由 handler 层 ``_strict_bool_param`` 的
+                ``default=(paths_param is None)`` 完成,service 层只接收明确的 bool。
+            paths: 显式指定暂存路径;与 ``stage_all`` 互斥
+            amend: True 时 ``git commit --amend``,覆盖最近一次提交
+            no_verify: True 时追加 ``--no-verify`` 跳过 hooks
+
+        Returns:
+            GitOperationResult: ``commit_hash`` 字段为新提交的短 hash;
+            ``previous_branch`` 未使用(保留为 None)。
+
+        错误码:
+          - ``GIT_TRANSIENT_STATE``: merge/rebase 等中间态
+          - ``NOTHING_TO_COMMIT``: 没有可提交的改动(amend=false 时)
+          - ``GIT_COMMAND_FAILED``: hooks 拒绝、签名失败等
+          - ``GIT_COMMAND_TIMEOUT``: 命令超时
+          - 共享前置: ``PROJECT_DIR_MISSING`` / ``GIT_NOT_FOUND`` / ``NOT_GIT_REPOSITORY``
+        """
+        # message 校验:空串/纯空白拒绝
+        if not message or not message.strip():
+            err = _make_repo_error(
+                "BAD_REQUEST",
+                "commit message is required",
+                project,
+                hint="请提供非空的 commit message",
+                retryable=False,
+            )
+            return GitOperationResult(
+                success=False,
+                repo_status=GitRepoStatus(error=err),
+                error=err,
+            )
+        # 互斥校验:stage_all 与 paths 不能同时传
+        if stage_all and paths:
+            err = _make_repo_error(
+                "BAD_REQUEST",
+                "stage_all and paths are mutually exclusive",
+                project,
+                hint="请只传 stage_all 或 paths 之一",
+                retryable=False,
+            )
+            return GitOperationResult(
+                success=False,
+                repo_status=GitRepoStatus(error=err),
+                error=err,
+            )
+
+        pre_status = _git_to_repo_status(project, persist=False)
+        if pre_status.error is not None:
+            return GitOperationResult(
+                success=False,
+                repo_status=pre_status,
+                error=pre_status.error,
+            )
+        if pre_status.transient:
+            err = _make_repo_error(
+                "GIT_TRANSIENT_STATE",
+                "git is in transient state (merge/rebase)",
+                project,
+                branch=pre_status.branch,
+                transient=True,
+                hint="请先解决中间状态(merge/rebase/cherry-pick)后重试",
+                retryable=False,
+            )
+            return GitOperationResult(
+                success=False,
+                repo_status=pre_status,
+                error=err,
+            )
+
+        project_dir = project.project_dir
+
+        # 防御性校验:paths 显式传了空 list 时拒绝。
+        # None 表示"不指定路径"(跳过 add);空 list 表示"指定了零个路径"(无效)。
+        # 区分两者是为了避免调用方传 paths=[] 后静默跳过 add,误提交预先暂存的其他改动。
+        if paths is not None and len(paths) == 0:
+            err = _make_repo_error(
+                "BAD_REQUEST",
+                "paths is empty; pass None to skip staging, or non-empty list",
+                project,
+                branch=pre_status.branch,
+                hint="请传非空 paths,或不传 paths 以使用已暂存内容",
+                retryable=False,
+            )
+            return GitOperationResult(
+                success=False,
+                repo_status=pre_status,
+                error=err,
+            )
+
+        # staging 之后的失败路径应返回暂存后的状态(而非 pre_status),
+        # 否则前端 UI 的 staged/dirty 状态会失真。未 staging 时保持 pre_status。
+        status_after_stage = pre_status
+
+        # 暂存阶段(可选)
+        if stage_all or paths:
+            if stage_all:
+                add_args = ["add", "-A"]
+            else:
+                # paths 元素以 "-" 开头会被 git 解析为选项(选项注入),显式拒绝
+                # 使用 "--" 隔离,确保后续参数被视为路径而非选项
+                safe_paths: list[str] = []
+                for p in paths or []:
+                    if not isinstance(p, str) or not p.strip():
+                        continue
+                    if p.startswith("-"):
+                        err = _make_repo_error(
+                            "BAD_REQUEST",
+                            f"invalid path: {p}",
+                            project,
+                            branch=pre_status.branch,
+                            hint="path 不能以 '-' 开头",
+                            retryable=False,
+                        )
+                        return GitOperationResult(
+                            success=False,
+                            repo_status=pre_status,
+                            error=err,
+                        )
+                    safe_paths.append(p.strip())
+                if not safe_paths:
+                    err = _make_repo_error(
+                        "BAD_REQUEST",
+                        "paths is empty after filtering",
+                        project,
+                        branch=pre_status.branch,
+                        hint="请提供至少一个有效路径",
+                        retryable=False,
+                    )
+                    return GitOperationResult(
+                        success=False,
+                        repo_status=pre_status,
+                        error=err,
+                    )
+                add_args = ["add", "--", *safe_paths]
+            try:
+                cp_add = _run_git(add_args, cwd=project_dir)
+            except FileNotFoundError:
+                err = _file_not_found_error(
+                    project, project_dir,
+                    branch=pre_status.branch,
+                    command="git " + " ".join(add_args),
+                )
+                return GitOperationResult(
+                    success=False,
+                    repo_status=pre_status,
+                    error=err,
+                )
+            except subprocess.TimeoutExpired:
+                err = _make_repo_error(
+                    "GIT_COMMAND_TIMEOUT",
+                    "git add timed out",
+                    project,
+                    command="git " + " ".join(add_args),
+                    branch=pre_status.branch,
+                    retryable=True,
+                )
+                return GitOperationResult(
+                    success=False,
+                    repo_status=pre_status,
+                    error=err,
+                )
+            if cp_add.returncode != 0:
+                err = _make_repo_error(
+                    "GIT_COMMAND_FAILED",
+                    "git add failed",
+                    project,
+                    command="git " + " ".join(add_args),
+                    exit_code=cp_add.returncode,
+                    stdout=cp_add.stdout,
+                    stderr=cp_add.stderr,
+                    branch=pre_status.branch,
+                    hint="请检查路径是否存在或权限是否正确",
+                    retryable=False,
+                )
+                return GitOperationResult(
+                    success=False,
+                    repo_status=pre_status,
+                    error=err,
+                )
+            # add 成功:index 已变,读一次最新状态供后续失败路径返回,
+            # 避免 commit 失败时前端 UI 的 staged/dirty 状态失真。
+            status_after_stage = _git_to_repo_status(project, persist=False)
+
+        # 空提交预判(amend=false 时):
+        # 用 ``git diff --cached --quiet`` 检查 staged 区是否为空,比匹配 commit
+        # 输出文案更可靠——git 的 "nothing to commit" / "no changes added to commit"
+        # / "nothing added to commit but untracked files present" 等文案因场景与
+        # 版本而异,容易漏判。``--quiet`` 退出码 0 表示无 staged 改动,非 0 表示有。
+        # amend=true 时跳过:amend 即使 staged 为空也能用新 message 覆盖上次提交。
+        if not amend:
+            try:
+                cp_staged = _run_git(
+                    ["diff", "--cached", "--quiet"], cwd=project_dir,
+                )
+            except FileNotFoundError:
+                err = _file_not_found_error(
+                    project, project_dir,
+                    branch=pre_status.branch,
+                    command="git diff --cached --quiet",
+                )
+                return GitOperationResult(
+                    success=False,
+                    repo_status=status_after_stage,
+                    error=err,
+                )
+            except subprocess.TimeoutExpired:
+                err = _make_repo_error(
+                    "GIT_COMMAND_TIMEOUT",
+                    "git diff --cached timed out",
+                    project,
+                    command="git diff --cached --quiet",
+                    branch=pre_status.branch,
+                    retryable=True,
+                )
+                return GitOperationResult(
+                    success=False,
+                    repo_status=status_after_stage,
+                    error=err,
+                )
+            # 退出码 0 = staged 区为空 → 无可提交内容
+            if cp_staged.returncode == 0:
+                err = _make_repo_error(
+                    "NOTHING_TO_COMMIT",
+                    "nothing to commit, staged area is empty",
+                    project,
+                    command="git diff --cached --quiet",
+                    exit_code=0,
+                    branch=pre_status.branch,
+                    hint=(
+                        "请先暂存改动(stage_all=true 或指定 paths);"
+                        "若改动仅未 track,需 git add 后再提交"
+                    ),
+                    retryable=False,
+                )
+                return GitOperationResult(
+                    success=False,
+                    repo_status=status_after_stage,
+                    error=err,
+                )
+
+        # 提交阶段:message 通过 stdin 传入(``-F -``),避免命令行长度限制与 shell 转义问题
+        commit_args = ["commit", "-F", "-"]
+        if amend:
+            commit_args.append("--amend")
+        if no_verify:
+            commit_args.append("--no-verify")
+        try:
+            cp_commit = _run_git(
+                commit_args, cwd=project_dir, stdin_input=message,
+            )
+        except FileNotFoundError:
+            err = _file_not_found_error(
+                project, project_dir,
+                branch=pre_status.branch,
+                command="git " + " ".join(commit_args),
+            )
+            return GitOperationResult(
+                success=False,
+                repo_status=status_after_stage,
+                error=err,
+            )
+        except subprocess.TimeoutExpired:
+            err = _make_repo_error(
+                "GIT_COMMAND_TIMEOUT",
+                "git commit timed out",
+                project,
+                command="git " + " ".join(commit_args),
+                branch=pre_status.branch,
+                hint="hooks 可能耗时过长,可尝试 no_verify=true 或检查仓库大小",
+                retryable=True,
+            )
+            return GitOperationResult(
+                success=False,
+                repo_status=status_after_stage,
+                error=err,
+            )
+        if cp_commit.returncode != 0:
+            # 空提交兜底检测:
+            # 非 amend 时,上方 ``git diff --cached --quiet`` 已预判并提前返回
+            # NOTHING_TO_COMMIT,正常不会走到这里。此处作为 defense-in-depth 兜底,
+            # 覆盖 amend=true 无新内容的场景,以及预判因竞态(暂存与提交间文件被
+            # 还原)漏掉的极端情况。匹配多种 git 文案变体,避免漏判。
+            combined_output = (
+                (cp_commit.stdout or "") + "\n" + (cp_commit.stderr or "")
+            ).lower()
+            nothing_markers = (
+                "nothing to commit",
+                "no changes added to commit",
+                "nothing added to commit",
+            )
+            if any(m in combined_output for m in nothing_markers):
+                err = _make_repo_error(
+                    "NOTHING_TO_COMMIT",
+                    "nothing to commit, working tree clean",
+                    project,
+                    command="git " + " ".join(commit_args),
+                    exit_code=cp_commit.returncode,
+                    stdout=cp_commit.stdout,
+                    stderr=cp_commit.stderr,
+                    branch=pre_status.branch,
+                    hint="请先暂存改动(stage_all=true 或指定 paths)",
+                    retryable=False,
+                )
+                return GitOperationResult(
+                    success=False,
+                    repo_status=status_after_stage,
+                    error=err,
+                )
+            err = _make_repo_error(
+                "GIT_COMMAND_FAILED",
+                "git commit failed",
+                project,
+                command="git " + " ".join(commit_args),
+                exit_code=cp_commit.returncode,
+                stdout=cp_commit.stdout,
+                stderr=cp_commit.stderr,
+                branch=pre_status.branch,
+                hint="请检查 hooks 输出或 commit message 是否合法",
+                retryable=False,
+            )
+            return GitOperationResult(
+                success=False,
+                repo_status=status_after_stage,
+                error=err,
+            )
+
+        # 读取新提交的短 hash
+        commit_hash: str | None = None
+        try:
+            cp_h = _run_git(["rev-parse", "--short", "HEAD"], cwd=project_dir)
+            if cp_h.returncode == 0:
+                commit_hash = cp_h.stdout.strip() or None
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+        post_status = _git_to_repo_status(project, persist=True)
+        return GitOperationResult(
+            success=True,
+            repo_status=post_status,
+            commit_hash=commit_hash,
+        )
+
+    @staticmethod
+    def push(
+        project: Project,
+        *,
+        remote: str = "origin",
+        branch: str | None = None,
+        set_upstream: bool = False,
+        force: bool = False,
+        delete: bool = False,
+    ) -> GitOperationResult:
+        """推送本地分支到远程(设计文档 §4.10 ``project.git.push``)。
+
+        Args:
+            project: 项目实体
+            remote: 远程名,默认 ``"origin"``;以 ``-`` 开头拒绝
+            branch: 本地分支;不传时用当前分支
+            set_upstream: True 时追加 ``-u``,建立远程 tracking 关系
+            force: True 时使用 ``--force-with-lease``(更安全的强推,非 ``--force``)
+            delete: True 时删除远程分支(``git push <remote> --delete <branch>``);
+                与 ``set_upstream`` / ``force`` 互斥
+
+        Returns:
+            GitOperationResult: ``pushed_remote`` 字段为实际推送的远程名。
+
+        错误码:
+          - ``BAD_REQUEST``: 参数互斥冲突
+          - ``GIT_TRANSIENT_STATE``: 中间态
+          - ``DETACHED_HEAD``: detached HEAD 且未传 ``branch``
+          - ``BRANCH_INVALID``: ``branch`` 非法
+          - ``REMOTE_NOT_FOUND``: ``remote`` 不存在
+          - ``PUSH_REJECTED``: 远程拒绝(non-fast-forward / protected / 权限)
+          - ``PUSH_NO_UPSTREAM``: 未设 upstream 且未传 ``branch``
+          - ``GIT_COMMAND_TIMEOUT``: push 超时(网络慢)
+          - ``GIT_COMMAND_FAILED``: 其他 push 失败
+        """
+        # 参数互斥校验
+        if delete and (set_upstream or force):
+            err = _make_repo_error(
+                "BAD_REQUEST",
+                "delete is mutually exclusive with set_upstream and force",
+                project,
+                hint="删除远程分支时不能同时 set_upstream 或 force",
+                retryable=False,
+            )
+            return GitOperationResult(
+                success=False,
+                repo_status=GitRepoStatus(error=err),
+                error=err,
+            )
+        # remote 校验:以 "-" 开头会被 git 解析为选项(选项注入)
+        if not remote or remote.startswith("-"):
+            err = _make_repo_error(
+                "BAD_REQUEST",
+                f"invalid remote: {remote}",
+                project,
+                hint="remote 不能为空且不能以 '-' 开头",
+                retryable=False,
+            )
+            return GitOperationResult(
+                success=False,
+                repo_status=GitRepoStatus(error=err),
+                error=err,
+            )
+
+        pre_status = _git_to_repo_status(project, persist=False)
+        if pre_status.error is not None:
+            return GitOperationResult(
+                success=False,
+                repo_status=pre_status,
+                error=pre_status.error,
+            )
+        if pre_status.transient:
+            err = _make_repo_error(
+                "GIT_TRANSIENT_STATE",
+                "git is in transient state (merge/rebase)",
+                project,
+                branch=pre_status.branch,
+                transient=True,
+                hint="请先解决中间状态(merge/rebase/cherry-pick)后重试",
+                retryable=False,
+            )
+            return GitOperationResult(
+                success=False,
+                repo_status=pre_status,
+                error=err,
+            )
+
+        project_dir = project.project_dir
+
+        # 确定要推送的分支
+        effective_branch = branch
+        if effective_branch:
+            # 显式传了 branch,走 _validate_branch_name 校验
+            try:
+                effective_branch = _validate_branch_name(effective_branch, project)
+            except GitOperationError as exc:
+                return GitOperationResult(
+                    success=False,
+                    repo_status=pre_status,
+                    error=exc.git_error,
+                )
+        else:
+            # 未传 branch:用当前分支
+            if pre_status.detached:
+                err = _make_repo_error(
+                    "DETACHED_HEAD",
+                    "detached HEAD, cannot push without explicit branch",
+                    project,
+                    branch=pre_status.branch,
+                    hint="请先切换到分支或显式传 branch 参数",
+                    retryable=False,
+                )
+                return GitOperationResult(
+                    success=False,
+                    repo_status=pre_status,
+                    error=err,
+                )
+            effective_branch = pre_status.branch
+            if not effective_branch:
+                err = _make_repo_error(
+                    "PUSH_NO_UPSTREAM",
+                    "no current branch and no branch specified",
+                    project,
+                    hint="请显式传 branch 参数",
+                    retryable=False,
+                )
+                return GitOperationResult(
+                    success=False,
+                    repo_status=pre_status,
+                    error=err,
+                )
+
+        # 远程存在性校验:git remote get-url <remote>
+        try:
+            cp_remote = _run_git(
+                ["remote", "get-url", remote], cwd=project_dir,
+            )
+        except FileNotFoundError:
+            err = _file_not_found_error(
+                project, project_dir,
+                branch=effective_branch,
+                command=f"git remote get-url {remote}",
+            )
+            return GitOperationResult(
+                success=False,
+                repo_status=pre_status,
+                error=err,
+            )
+        except subprocess.TimeoutExpired:
+            err = _make_repo_error(
+                "GIT_COMMAND_TIMEOUT",
+                "git remote get-url timed out",
+                project,
+                command=f"git remote get-url {remote}",
+                branch=effective_branch,
+                retryable=True,
+            )
+            return GitOperationResult(
+                success=False,
+                repo_status=pre_status,
+                error=err,
+            )
+        if cp_remote.returncode != 0:
+            err = _make_repo_error(
+                "REMOTE_NOT_FOUND",
+                f"remote not found: {remote}",
+                project,
+                command=f"git remote get-url {remote}",
+                exit_code=cp_remote.returncode,
+                stderr=cp_remote.stderr,
+                branch=effective_branch,
+                hint=f"请先添加远程: git remote add {remote} <url>",
+                retryable=False,
+            )
+            return GitOperationResult(
+                success=False,
+                repo_status=pre_status,
+                error=err,
+            )
+
+        # 构造 push 命令
+        if delete:
+            push_args = ["push", remote, "--delete", effective_branch]
+        else:
+            push_args = ["push"]
+            if set_upstream:
+                push_args.append("-u")
+            if force:
+                # --force-with-lease 比 --force 更安全:若远程有他人新提交会拒绝,
+                # 避免误覆盖;仍需前端二次确认
+                push_args.append("--force-with-lease")
+            push_args.extend([remote, effective_branch])
+
+        try:
+            cp_push = _run_git(
+                push_args,
+                cwd=project_dir,
+                timeout=GIT_PUSH_TIMEOUT_SEC,
+            )
+        except FileNotFoundError:
+            err = _file_not_found_error(
+                project, project_dir,
+                branch=effective_branch,
+                command="git " + " ".join(push_args),
+            )
+            return GitOperationResult(
+                success=False,
+                repo_status=pre_status,
+                error=err,
+            )
+        except subprocess.TimeoutExpired:
+            err = _make_repo_error(
+                "GIT_COMMAND_TIMEOUT",
+                "git push timed out",
+                project,
+                command="git " + " ".join(push_args),
+                branch=effective_branch,
+                hint="网络可能较慢,请检查远程仓库连通性或增大 JIUWEN_GIT_PUSH_TIMEOUT_SEC",
+                retryable=True,
+            )
+            return GitOperationResult(
+                success=False,
+                repo_status=pre_status,
+                error=err,
+            )
+        if cp_push.returncode != 0:
+            stderr_lower = (cp_push.stderr or "").lower()
+            # 远程拒绝:non-fast-forward / protected branch / 权限不足
+            if any(
+                token in stderr_lower
+                for token in ("rejected", "denied", "non-fast-forward", "failed to push")
+            ):
+                err = _make_repo_error(
+                    "PUSH_REJECTED",
+                    "git push rejected by remote",
+                    project,
+                    command="git " + " ".join(push_args),
+                    exit_code=cp_push.returncode,
+                    stdout=cp_push.stdout,
+                    stderr=cp_push.stderr,
+                    branch=effective_branch,
+                    hint="远程拒绝推送:可能是 non-fast-forward(需先 pull)或分支受保护或权限不足",
+                    retryable=False,
+                )
+                return GitOperationResult(
+                    success=False,
+                    repo_status=pre_status,
+                    error=err,
+                )
+            err = _make_repo_error(
+                "GIT_COMMAND_FAILED",
+                "git push failed",
+                project,
+                command="git " + " ".join(push_args),
+                exit_code=cp_push.returncode,
+                stdout=cp_push.stdout,
+                stderr=cp_push.stderr,
+                branch=effective_branch,
+                hint="请检查远程仓库配置与网络连通性",
+                retryable=False,
+            )
+            return GitOperationResult(
+                success=False,
+                repo_status=pre_status,
+                error=err,
+            )
+
+        post_status = _git_to_repo_status(project, persist=True)
+        return GitOperationResult(
+            success=True,
+            repo_status=post_status,
+            pushed_remote=remote,
+        )
 
 
 _service_instance: ProjectGitService | None = None

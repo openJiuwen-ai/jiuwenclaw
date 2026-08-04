@@ -177,7 +177,7 @@ node scripts/validate-execution-lock.js <project>/execution-lock.json --phase de
 
 ### 6. Hero 页精修
 
-全 deck 构建通过、几何硬错误清零后，对 design-spec 中标记 `Hero: yes` 的 1-2 页按 [workflows/create-deck.md](workflows/create-deck.md) 第 8 步做单页升格精修：打开该页渲染图与 `references/complex-slide.png` 及骨架参考图并排对比，列出差距后重构主区域，至多迭代两轮；改动同步回 `design-spec.md` 的该页 Composition。精修只动 hero 页，不回头重排其他页面。
+全 deck 构建通过、几何硬错误清零后，对 design-spec 中标记 `Hero: yes` 的 1-2 页按 [workflows/create-deck.md](workflows/create-deck.md) 第 8 步做单页升格精修：打开该页渲染图与 `references/complex-slide.jpg` 及骨架参考图并排对比，列出差距后重构主区域，至多迭代两轮；改动同步回 `design-spec.md` 的该页 Composition。精修只动 hero 页，不回头重排其他页面。
 
 ### 7. QA 与交付
 

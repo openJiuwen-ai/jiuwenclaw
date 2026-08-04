@@ -49,6 +49,9 @@ function computeTimeoutAt(baseIso: string): string {
 }
 
 function resolveExecutionStatus(result: ToolResult): ToolExecutionStatus {
+  if (result.timedOut) {
+    return 'timeout';
+  }
   return result.success ? 'completed' : 'error';
 }
 
@@ -255,7 +258,11 @@ interface ChatState {
   setInputValue: (sessionId: string, value: string) => void;
   setSessionError: (sessionId: string, error: string | null) => void;
   setUsageSummary: (sessionId: string, messageId: string, usage: UsageSummary) => void;
-  addFileItems: (sessionId: string, files: FileDownloadItem[]) => void;
+  addFileItems: (
+    sessionId: string,
+    files: FileDownloadItem[],
+    options?: { timestampIso?: string }
+  ) => void;
   setContextCompressionStatus: (
     sessionId: string,
     runtime?: ContextCompressionRuntime,
@@ -658,6 +665,7 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
         role: kind === 'team' ? 'system' : 'assistant',
         content: displayContent,
         timestamp: timestampIso,
+        completedAt: timestampIso,
         isStreaming: false,
       });
       return {
@@ -1195,23 +1203,35 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
       let changed = false;
       const nextExecutions = new Map(runtime.toolExecutions);
       for (const [toolCallId, execution] of nextExecutions) {
-        if (execution.status !== 'pending' && execution.status !== 'timeout') {
+        // 只结算仍 pending 的历史孤儿 tool_call。
+        // timeout/error 必须保留，否则刷新后失败/超时会被抹成「已完成」。
+        if (execution.status !== 'pending') {
           continue;
         }
-        // 无真实 result：按调用时刻结算，不引入 Date.now()
+        if (execution.result) {
+          const nextStatus = resolveExecutionStatus(execution.result);
+          if (nextStatus !== execution.status) {
+            changed = true;
+            nextExecutions.set(toolCallId, {
+              ...execution,
+              status: nextStatus,
+              updatedAt: execution.updatedAt || execution.startedAt,
+            });
+          }
+          continue;
+        }
+        // 无真实 result：按调用时刻结算为完成，不引入 Date.now()
         changed = true;
         nextExecutions.set(toolCallId, {
           ...execution,
           status: 'completed',
           updatedAt: execution.startedAt,
-          result:
-            execution.result ??
-            ({
-              toolName: execution.toolCall.name,
-              result: '',
-              success: true,
-              toolCallId,
-            } as ToolResult),
+          result: {
+            toolName: execution.toolCall.name,
+            result: '',
+            success: true,
+            toolCallId,
+          } as ToolResult,
         });
       }
       if (!changed) return state;
@@ -1530,16 +1550,24 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
     });
   },
 
-  addFileItems: (sessionId, files) => {
+  addFileItems: (sessionId, files, options) => {
     set((state) => {
       const runtime = state.runtimes[sessionId];
       if (!runtime) return state;
       const lastMessage = runtime.messages[runtime.messages.length - 1];
+      // 与历史 restore 一致：优先挂当前流；否则挂最近一条助手消息（不是下一条 final）。
       const targetId =
         runtime.currentStreamId ??
-        (lastMessage?.role === 'assistant' ? lastMessage.id : null);
+        (lastMessage?.role === 'assistant' ||
+        (lastMessage?.role === 'system' && lastMessage.id?.startsWith('team-leader-'))
+          ? lastMessage.id
+          : null);
+      const timestampIso =
+        typeof options?.timestampIso === 'string' && options.timestampIso.trim()
+          ? options.timestampIso.trim()
+          : new Date().toISOString();
       if (!targetId) {
-        const msgId = `file-${Date.now()}`;
+        const msgId = `file-${timestampIso}`;
         return {
           runtimes: {
             ...state.runtimes,
@@ -1551,7 +1579,7 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
                   id: msgId,
                   role: 'assistant',
                   content: '',
-                  timestamp: new Date().toISOString(),
+                  timestamp: timestampIso,
                   fileItems: files,
                 },
               ],

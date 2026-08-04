@@ -47,14 +47,14 @@
 
 ### `--session`：按 id 恢复或新建会话
 
-`--session <id>` 让 TUI 在启动时**以指定 session id 为身份**连接后端，并在连接建立后按 id 是否已存在走两条路径之一：
+`--session <id>` 让 TUI 在启动时**以指定 session id 为身份**连接后端。连接建立后，TUI 统一向 AgentServer 注册该 id；由于身份来自外部，这条兼容路径明确绕过预热池。
 
 | id 状态 | 启动行为 | 后端 RPC |
 |------|------|------|
-| **已存在** | 恢复该会话：触发 `session.switch` 生命周期（KV cache affinity / Team 状态迁移），前端按后端返回的 `mode` 对齐当前模式，随后拉取历史并回显到界面 | `session.switch` + `history.get` + `session.rename`（取标题） |
-| **不存在** | 新建并落盘该会话：触发 `session.create`（建目录 + 写 `metadata.json` + 生命周期初始化），界面为空会话。**已落盘即可下次恢复** | `session.create` + `history.get`（空）|
+| **已存在** | AgentServer 保留已落盘的项目与模式绑定，执行切换生命周期，随后前端拉取并回显历史 | 显式 ID 的 `session.create` + `history.get` + `session.rename`（取标题） |
+| **不存在** | AgentServer 校验 id，在该 id 的互斥锁内解析 TUI 项目并写入 `metadata.json`，以空历史启动且不领取预热实例 | 显式 ID 的 `session.create` + `history.get`（空）|
 
-判定方式为 **try-create-then-switch**：先尝试 `session.create(<id>)`，返回 `ALREADY_EXISTS` 则转 `session.switch` 恢复。该逻辑在连接收到 `connection.ack` 后由 `app-state.ts` 的 `resumeOrCreateBootSession` 驱动，仅执行一次（重连/重发幂等）。
+显式 ID 的 `session.create` 仅对 TUI 开放且保持幂等，AgentServer 会记录该兼容请求绕过预热。该逻辑在收到 `connection.ack` 后由 `app-state.ts` 的 `initializeBootSession` 放行，重连时只执行一次；普通启动、`/new` 和 `/clear` 不传 `session_id`，仍由 AgentServer 分配新 ID。
 
 **示例**：
 
@@ -67,7 +67,7 @@ jiuwenswarm-tui --session tui_myproj_001
 jiuwenswarm-tui --session tui_myproj_001
 ```
 
-**与运行时 `/resume` 的关系**：`--session` 是**启动时**的恢复/新建入口；`/resume` 是 TUI 已启动后**运行中**切换到另一会话的命令。两者调同一套后端 RPC（`session.switch`/`session.create`），但 `--session` 在握手首帧触发、`/resume` 在用户手动输入时触发。正常时序无冲突。
+**与运行时 `/resume` 的关系**：`--session` 是**启动时**的外部 id 兼容入口，调用显式 ID 的 `session.create`；`/resume` 是 TUI 已启动后切换到已有会话的命令，调用 `session.switch`。
 
 **id 命名约束**（前端在启动前校验，不合规直接报错退出，不进入 TUI）：
 
@@ -126,7 +126,7 @@ jiuwenswarm-tui --session "$(printf 'a%.0s' {1..200})"  # 超 128 → 长度超�
 
 当前 **已注册** 的顶层命令来自 `createBuiltinCommands()`（`registry.ts`），按名称排序如下表。
 
-> **与文档 [Slash命令表.md](Slash命令表.md) 的差异**：`jiuwenswarm/cli/src/core/commands/builtins/` 下另有 **`switch.ts`（`/switch`）**、**`cancel.ts`（`/cancel`）**、**`new.ts`（`/new` 独立建会话）**、**`sessions.ts`（会话列表 RPC）** 等实现，但 **当前 `registry.ts` 未注册**这些顶层命令，输入后会得到 `Unknown command`。中断任务请优先使用 **`Ctrl+C`**（第一次中断，连按两次退出）。Gateway 侧受控指令仍以 `jiuwenswarm/gateway/slash_command.py` 与 Slash命令表为准。
+> **与文档 [Slash命令表.md](Slash命令表.md) 的差异**：`jiuwenswarm/channels/tui/frontend/src/core/commands/builtins/` 下另有 `cancel.ts`、`new.ts`、`sessions.ts` 等实现文件，但当前没有把它们注册为独立顶层命令。`/new` 仍然可用，因为它是 `/clear` 的别名；默认构建没有独立 `/cancel`，中断任务请优先使用 **`Ctrl+C`**（第一次中断，连按两次退出）。`/switch` 仅在 `agentos-tui` 托管环境（`AGENTOS_TUI_SUPERVISED=1`）中注册，用于 `/switch claude`、`/switch list` 等第三方 TUI handoff；它不同于 Gateway 受控频道的模式切换指令。Gateway 侧行为仍以 `jiuwenswarm/gateway/slash_command.py` 与 Slash命令表为准。
 
 ### 命令总表
 
@@ -404,7 +404,7 @@ jiuwenswarm-tui --session "$(printf 'a%.0s' {1..200})"  # 超 128 → 长度超�
 
 - 别名：`/fork`。
 - 约束：当前会话忙时或无对话记录时拒绝执行。
-- 行为：生成新 `session_id` 并调用 `session.fork`；TUI 自动切换到新分支会话，清空 transcript 并恢复分支历史。提示用户可用 `/resume <原会话ID>` 返回原会话。
+- 行为：TUI 调用 `session.fork` 时发送当前 `source_session_id` 与可选标题，由 AgentServer 分配并返回新 `session_id`；随后 TUI 自动切换到新分支会话，清空 transcript 并恢复分支历史。提示用户可用 `/resume <原会话ID>` 返回原会话。
 - 示例：`/branch`、`/branch fix-login-bug`。
 
 #### `/btw`（旁路提问）
@@ -457,6 +457,7 @@ jiuwenswarm-tui --session "$(printf 'a%.0s' {1..200})"  # 超 128 → 长度超�
   - code mode：`memory_enabled`（记忆功能总开关）、`auto_coding_memory`（每轮对话后自动提取记忆（需总开关开启））、`memory_forbidden_enabled`（过滤敏感信息）。
   - 切换后若需重启会话生效会给出提示。
 - Tab 补全：`/memory edit ` 后显示文件列表（路径用 `getDisplayPath` 展示，去重）；`/memory toggle ` 后显示当前 mode 的 key 列表；均支持前缀过滤。
+- `/memory edit <path>` 只允许打开已存在且通过记忆目录路径校验的文件，不负责创建缺失文件；运行时 auto/coding memory 文件为只读。
 - 示例：`/memory`（打开控制台）、`/memory status`、`/memory toggle memory_enabled`、`/memory edit memory/MEMORY.md`。
 
 #### `/sandbox`（沙箱模式管理）
@@ -532,6 +533,8 @@ jiuwenswarm-tui --session "$(printf 'a%.0s' {1..200})"  # 超 128 → 长度超�
 #### `/clear` 与忙状态
 
 - 若 `session is busy`（正在处理），`/clear` 会拒绝执行，需先中断任务（**`Ctrl+C`** 第一次中断；默认构建无 `/cancel` 命令）。
+- `/clear` 会调用后端 `session.create` 创建全新会话，由 AgentServer 分配并返回新的 `session_id`，随后切换会话、清空 transcript 并恢复新会话的空历史；它不是只清理当前屏幕。
+- `/new`、`/reset` 是 `/clear` 的别名，执行相同的新建会话流程。若 `session.create` 失败，TUI 保持在原会话，不会先行切换到一个本地生成的 ID。
 
 ---
 

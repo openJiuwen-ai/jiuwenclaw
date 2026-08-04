@@ -87,6 +87,7 @@ from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools import (
 from jiuwenswarm.agents.harness.team.team_runtime_inheritance import TOOL_WHITELIST
 from jiuwenswarm.agents.swarm.context import SwarmBuildContext
 from jiuwenswarm.common.config import get_config
+from jiuwenswarm.common.tool_ownership import mark_stateless
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
 
 logger = logging.getLogger(__name__)
@@ -147,11 +148,7 @@ def _mark_stateless(tools: list[Any]) -> list[Any]:
     rather than agent-qualified. Without this flag the harness would treat them
     as agent-owned and rewrite the shared card id per member, corrupting it.
     """
-    for tool in tools:
-        card = getattr(tool, "card", None)
-        if card is not None:
-            card.stateless = True
-    return tools
+    return mark_stateless(tools)
 
 
 def _workspace_root(ctx: SwarmBuildContext) -> str | None:

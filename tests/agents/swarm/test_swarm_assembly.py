@@ -55,6 +55,9 @@ from openjiuwen.harness.prompts.builder import SystemPromptBuilder
 from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentManager
 from openjiuwen.harness.rails import SkillUseRail
 
+from jiuwenswarm.agents.harness.common.browser_defaults import (
+    DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
+)
 from jiuwenswarm.agents.swarm import (
     SwarmBuildContext,
     enrich_team_spec_for_swarm,
@@ -281,11 +284,12 @@ def test_runtime_prompt_rail_resolves_via_registry() -> None:
 
 @pytest.mark.asyncio
 async def test_team_skill_storage_policy_rail_resolves_and_injects_paths(tmp_path: Path) -> None:
-    """The team skill storage policy should inject concrete team/member paths.
+    """The team skill storage policy should inject concrete team-level paths.
 
-    Team-level paths stay in the system prompt (identical for every member, so
-    the team shares one cacheable prefix); the per-member workspace path is
-    delivered as a prompt attachment instead.
+    Only team-level paths belong here: they are identical for every member, so
+    the team shares one cacheable prefix. The member's own workspace is
+    per-member and openjiuwen's team rail tells the member about it as part of
+    its identity, so this rail must not carry it in any lane.
     """
     register_swarm_providers()
     global_skills_dir = str(tmp_path / "agent" / "workspace" / "skills")
@@ -323,57 +327,9 @@ async def test_team_skill_storage_policy_rail_resolves_and_injects_paths(tmp_pat
     assert team_ws_root in content
     assert team_skills_dir in content
     assert "skill-creator" not in content
-    # The per-member path is the only value that differs between members, so it
-    # must not land in the shared system-prompt prefix.
+    # The per-member path is not this rail's business any more.
     assert member_workspace_root not in content
-
-    items = await manager.list_by_filter(
-        session_id="sess-1",
-        section=rail.MEMBER_WORKSPACE_SECTION_NAME,
-    )
-    assert len(items) == 1
-    assert member_workspace_root in items[0].content
-    # The attachment renders in the member's language, not both at once.
-    assert "成员工作区" in items[0].content
-    assert "Member workspace" not in items[0].content
-
-
-@pytest.mark.asyncio
-async def test_team_skill_storage_policy_rail_renders_english_attachment(tmp_path: Path) -> None:
-    """An English member gets the member workspace attachment in English."""
-    register_swarm_providers()
-    global_skills_dir = str(tmp_path / "agent" / "workspace" / "skills")
-    member_workspace_root = str(
-        tmp_path / ".agent_teams" / "unit" / "workspaces" / "member_workspace"
-    )
-    fake_ctx = SwarmBuildContext(
-        language="en",
-        global_skills_dir=global_skills_dir,
-        workspace=types.SimpleNamespace(root_path=member_workspace_root),
-    )
-
-    rail = RailSpec(type=registry.TEAM_SKILL_STORAGE_POLICY).build(
-        language="en",
-        context=fake_ctx,
-    )
-    manager = PromptAttachmentManager()
-    rail.init(
-        types.SimpleNamespace(
-            system_prompt_builder=SystemPromptBuilder(language="en"),
-            prompt_attachment_manager=manager,
-        )
-    )
-
-    session = types.SimpleNamespace(get_session_id=lambda: "sess-en")
-    await rail.before_model_call(AgentCallbackContext(agent=None, inputs=None, session=session))
-
-    items = await manager.list_by_filter(
-        session_id="sess-en",
-        section=rail.MEMBER_WORKSPACE_SECTION_NAME,
-    )
-    assert len(items) == 1
-    assert "Member workspace" in items[0].content
-    assert "成员工作区" not in items[0].content
+    assert await manager.list_by_filter(session_id="sess-1") == []
 
 
 @pytest.mark.asyncio
@@ -1802,6 +1758,16 @@ def test_team_plan_leader_structured_ask_user_provider_builds() -> None:
     ).__name__ == "StructuredAskUserRail"
 
 
+def test_non_interactive_team_omits_structured_ask_user_provider() -> None:
+    context = SwarmBuildContext(
+        mode="team",
+        role="leader",
+        request_metadata={"supports_user_interaction": False},
+    )
+
+    assert code_rails.build_structured_ask_user({}, context) is None
+
+
 def test_structured_ask_user_language_uses_team_leader_preferred_language() -> None:
     team_leader = SwarmBuildContext(
         mode="team",
@@ -2280,6 +2246,31 @@ def test_browser_subagent_spec_included_when_enabled() -> None:
     subs = build_member_subagent_specs(config, "code.team", "leader")
     factory_names = [s.factory_name for s in subs]
     assert SWARM_BROWSER_AGENT in factory_names
+    browser_spec = next(s for s in subs if s.factory_name == SWARM_BROWSER_AGENT)
+    assert (
+        browser_spec.factory_kwargs["max_iterations"]
+        == DEFAULT_BROWSER_AGENT_MAX_ITERATIONS
+    )
+
+
+def test_browser_subagent_spec_honors_explicit_iteration_budget() -> None:
+    """An explicit browser budget wins over the generous browser default."""
+    config = {
+        "react": {
+            "max_iterations": 9,
+            "subagents": {
+                "browser_agent": {
+                    "enabled": True,
+                    "max_iterations": 23,
+                },
+            },
+        },
+    }
+
+    subs = build_member_subagent_specs(config, "code.team", "leader")
+    browser_spec = next(s for s in subs if s.factory_name == SWARM_BROWSER_AGENT)
+
+    assert browser_spec.factory_kwargs["max_iterations"] == 23
 
 
 def test_browser_subagent_spec_excluded_when_disabled() -> None:
@@ -2343,6 +2334,10 @@ def test_browser_subagent_provider_passes_correct_browser_key(
     assert result is not None
     assert len(captured) == 1
     assert captured[0]["browser_key"] == "sess42-browser-usd-sgd"
+    assert (
+        captured[0]["max_iterations"]
+        == DEFAULT_BROWSER_AGENT_MAX_ITERATIONS
+    )
 
 
 def test_browser_subagent_teammates_get_distinct_keys(

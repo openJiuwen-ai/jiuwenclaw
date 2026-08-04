@@ -78,6 +78,9 @@ _WEB_FULL_PAYLOAD_EVENT_TYPES = frozenset(
         "security.alert",
         "goal.snapshot",
         "goal.updated",
+        # Web 的 Plan 开关靠该事件在计划执行后自动复位，需要完整 payload
+        # 才能拿到退出后应回到的 mode。
+        "plan.mode_exited",
         "runtime.accepted",
         "execution.error",
         "proactive_recommendation",
@@ -547,7 +550,7 @@ class WebChannel(BaseWsChannel):
 
             ws_serve = websockets.serve
 
-        ws_max_size = 8 * 2**20  # 8 MB — matches AgentServer link
+        from jiuwenswarm.common.ws_limits import WEB_WS_MAX_MESSAGE_BYTES
 
         self._server = await ws_serve(
             self._connection_handler,
@@ -556,7 +559,7 @@ class WebChannel(BaseWsChannel):
             process_request=self._process_request,
             ping_interval=20,
             ping_timeout=60,
-            max_size=ws_max_size,
+            max_size=WEB_WS_MAX_MESSAGE_BYTES,
         )
         self._running = True
         logger.info(
