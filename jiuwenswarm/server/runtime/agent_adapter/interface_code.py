@@ -263,6 +263,7 @@ def _set_workspace_coding_memory_directory(
     if not callable(set_directory):
         return
 
+    effective_project_dir = project_dir or getattr(workspace, "root_path", None)
     # CodingMemoryRail uses this same app-owned directory for MEMORY.md.  The
     # coding-memory tools resolve individual memory files through the workspace
     # node, so the node must point at the absolute storage directory as well;
@@ -270,7 +271,7 @@ def _set_workspace_coding_memory_directory(
     # two locations.
     coding_memory_path = resolve_project_coding_memory_dir(
         agent_workspace_dir=agent_workspace_dir,
-        project_dir=project_dir,
+        project_dir=effective_project_dir,
     )
     set_directory(
         _build_coding_memory_directory_node(
@@ -478,7 +479,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         )
         _set_workspace_coding_memory_directory(
             workspace,
-            project_dir=self._project_dir,
+            project_dir=self._project_dir or self._workspace_dir,
             agent_workspace_dir=self._agent_workspace_dir,
             description="Coding Agent 记忆模块",
         )
@@ -768,7 +769,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
 
         try:
             coding_memory_rail = create_coding_memory_rail(
-                project_dir=self._project_dir,
+                project_dir=self._project_dir or self._workspace_dir,
                 agent_workspace_dir=self._agent_workspace_dir,
                 config=get_config(),
             )
