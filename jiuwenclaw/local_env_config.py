@@ -686,6 +686,19 @@ def export_agent_environ(
     return out
 
 
+def export_spawn_environ() -> dict[str, str]:
+    """Return only process/runtime variables safe for a child process env."""
+    out: dict[str, str] = {}
+    for k in SPAWN_ENV_KEYS:
+        if k in os.environ:
+            out[k] = os.environ[k]
+    for k in PROCESS_UNIQUE_ENV_KEYS:
+        if k in os.environ:
+            out[k] = os.environ[k]
+    _ensure_windows_platform_env(out)
+    return out
+
+
 def _ensure_windows_platform_env(out: dict[str, str]) -> None:
     """Pass through OS-level vars a Windows child process needs to function.
 
