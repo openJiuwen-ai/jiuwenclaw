@@ -87,6 +87,10 @@ def _stub_resource_mgr(monkeypatch: pytest.MonkeyPatch, captured: dict):
     resource_mgr.add_sys_operation.side_effect = _add
     resource_mgr.get_sys_operation.side_effect = _get
     resource_mgr.remove_sys_operation.side_effect = _remove
+    # 让 _get_registered_sys_operation_by_isolation_key 在 2640 行返回 None
+    # (避免 MagicMock 属性链自动返回非 None, 绕过 add 路径的复用守卫).
+    # 所有测试都断言走 add 路径 (added 非空), 故统一禁用复用守卫.
+    resource_mgr._resource_registry = None
     monkeypatch.setattr(mod.Runner, "resource_mgr", resource_mgr)
     return resource_mgr
 

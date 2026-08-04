@@ -16,6 +16,7 @@ import atexit
 import asyncio
 import logging
 import os
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -100,6 +101,8 @@ class _NopCronScheduler:
         return False
 
 
+
+
 async def _run(host: str, port: int) -> None:
     from openjiuwen.core.runner import Runner
     from jiuwenclaw.agentserver.agent_ws_server import AgentWebSocketServer
@@ -144,6 +147,9 @@ async def _run(host: str, port: int) -> None:
         ping_timeout=300.0,
     )
     await server.start()
+    # jiuwenbox-server 子进程的自动拉起已迁至 AgentWebSocketServer.start 的
+    # _bootstrap_internal_jiuwenbox (按 config.yaml::sandbox.startup_mode 判断)。
+    # 关停 box-server 子进程仍在下方 finally 段。
 
     logger.info("[AgentServer] ready: ws://%s:%s  Ctrl+C to stop", host, port)
 
@@ -176,9 +182,12 @@ async def _run(host: str, port: int) -> None:
             "request summary flush",
             lambda: flush_request_summary_writer(timeout=5.0),
         )
-        # jiuwenbox 服务端没有 idle TTL, 本进程退出后已创建的 sandbox 会在 jiuwenbox
-        # 一侧持续占用直到 jiuwenbox 自己重启。在此处主动 DELETE 掉本进程缓存里的
-        # sandbox 列表; 走线程是因为底层 httpx 是同步 API, 不能直接堵 event loop。
+        # jiuwenbox 关停顺序: 先 DELETE 远端沙箱, 再停 box-server 子进程。
+        # shutdown_jiuwenbox_sandboxes 是 HTTP DELETE 给 box-server (清本进程 provider
+        # 缓存里的 sandbox_id), 必须 box-server 还活着才能响应; 故它在 runner.stop()
+        # 之前。runner.stop() 再停 box-server 子进程 (external 模式下 no-op)。若反过来
+        # 先停子进程, DELETE 会全失败 (被 warning 吞不崩, 但沙箱没正常清理)。
+        # 走线程是因为底层 httpx 是同步 API, 不能直接堵 event loop。
         # cleanup 自身已经吞了所有异常并永不抛, 外层 try/except 只是再加一道防线,
         # 兜住 import 阶段 (例如 venv 损坏) 这种极端情况。
         try:
@@ -186,11 +195,32 @@ async def _run(host: str, port: int) -> None:
                 shutdown_jiuwenbox_sandboxes,
             )
 
-            await asyncio.to_thread(shutdown_jiuwenbox_sandboxes)
+            logger.info("[AgentServer][sandbox] step 1: DELETE 远端沙箱 (box-server 活着)")
+            released = await asyncio.to_thread(shutdown_jiuwenbox_sandboxes)
+            logger.info("[AgentServer][sandbox] step 1 done: released=%s", released)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "[AgentServer] jiuwenbox sandbox cleanup failed: %s", exc,
             )
+        # 停 internal 模式下由本 agent-server 拉起的 box-server 子进程。box-server
+        # 进程退出时其 FastAPI lifespan shutdown 会兜底调 shutdown_all_sandboxes
+        # (清上面 DELETE 漏网的沙箱)。失败不阻断后续 session_history flush。
+        # Windows 上 proc.terminate()=TerminateProcess 是即时强杀, 不给 uvicorn 跑
+        # lifespan shutdown 的机会 (Linux terminate()=SIGTERM 才 graceful) —— 有活
+        # sandbox 时可能成孤儿, 留 Windows 实测时定 (docs §8.1 Q4 / 实测收窄)。
+        try:
+            from jiuwenclaw.agentserver.jiuwenbox_runner import JiuwenBoxRunner
+
+            runner = JiuwenBoxRunner.instance()
+            owned = runner.get_owned_endpoint()
+            logger.info(
+                "[AgentServer][sandbox] step 2: stop box-server 子进程 (owned=%s)",
+                owned,
+            )
+            await runner.stop()
+            logger.info("[AgentServer][sandbox] step 2 done")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[AgentServer] jiuwenbox runner stop failed: %s", exc)
         # 落盘 session_history 缓冲层剩余数据（atexit 兜底的显式调用，确保 SIGTERM 退出前 flush）
         try:
             from jiuwenclaw.agentserver import session_history
