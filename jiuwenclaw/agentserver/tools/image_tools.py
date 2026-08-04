@@ -129,8 +129,17 @@ async def _invoke_openai_vision(src: str, q: str) -> str:
 
         async def _call():
             cli = OpenAI(api_key=api_key, base_url=api_base)
-            r = cli.chat.completions.create(model=model, messages=msgs)
-            txt = r.choices[0].message.content
+            stream = cli.chat.completions.create(
+                model=model, messages=msgs, stream=True,
+                stream_options={"include_usage": True},
+            )
+            pieces: list[str] = []
+            for chunk in stream:
+                if chunk.choices:
+                    delta = chunk.choices[0].delta
+                    if delta and delta.content:
+                        pieces.append(delta.content)
+            txt = "".join(pieces)
             if not txt or not txt.strip():
                 raise Exception("Response text is None or empty")
             return txt

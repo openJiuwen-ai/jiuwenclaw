@@ -214,7 +214,7 @@ async def audio_question_answering(audio_path_or_url: str, question: str) -> str
                 "Note: YouTube video URL is not supported."
             )
 
-        resp = client.chat.completions.create(
+        stream = client.chat.completions.create(
             model=audio_model,
             messages=[
                 {"role": "system", "content": "You are a helpful assistant specializing in audio analysis."},
@@ -226,8 +226,16 @@ async def audio_question_answering(audio_path_or_url: str, question: str) -> str
                     ],
                 },
             ],
+            stream=True,
+            stream_options={"include_usage": True},
         )
-        answer = resp.choices[0].message.content
+        pieces: list[str] = []
+        for chunk in stream:
+            if chunk.choices:
+                delta = chunk.choices[0].delta
+                if delta and delta.content:
+                    pieces.append(delta.content)
+        answer = "".join(pieces)
         return f"{answer}\n\nAudio duration: {duration} seconds"
     except Exception as err:
         return (

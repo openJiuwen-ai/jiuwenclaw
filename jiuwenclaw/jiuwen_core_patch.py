@@ -653,6 +653,40 @@ class RetryMixin:
         await self._notify_retry_end()
         raise last_error
 
+    async def _invoke_via_stream(self, stream_func, *args, **kwargs):
+        """用流式调用替代非流式 invoke，收集所有 chunk 后聚合为 AssistantMessage 返回。
+
+        底层 HTTP 使用 stream=True，保持 invoke 的返回类型和调用方接口不变。
+        覆盖上下文压缩、权限检查、技能演进等所有非流式调用点。
+        """
+        accumulated = None
+        final_usage = None
+        finish_reason = None
+        async for chunk in self._stream_with_retry(stream_func, *args, **kwargs):
+            if accumulated is None:
+                accumulated = chunk
+            else:
+                accumulated = accumulated + chunk
+            chunk_usage = getattr(chunk, "usage_metadata", None)
+            if chunk_usage:
+                final_usage = chunk_usage
+            chunk_finish = getattr(chunk, "finish_reason", None)
+            if chunk_finish and chunk_finish != "null":
+                finish_reason = chunk_finish
+
+        if accumulated is None:
+            accumulated = AssistantMessageChunk(content="", reasoning_content=None)
+
+        return AssistantMessage(
+            role="assistant",
+            content=getattr(accumulated, "content", None) or "",
+            tool_calls=getattr(accumulated, "tool_calls", None) or [],
+            usage_metadata=final_usage or getattr(accumulated, "usage_metadata", None),
+            finish_reason=finish_reason or getattr(accumulated, "finish_reason", None),
+            parser_content=getattr(accumulated, "parser_content", None),
+            reasoning_content=getattr(accumulated, "reasoning_content", None),
+        )
+
 
 def _sanitize_wire_tool_arguments(params: dict[str, Any]) -> None:
     messages = params.get("messages")
@@ -1220,8 +1254,10 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
         timeout=None,
         **kwargs,
     ):
-        return await self._invoke_with_retry(
-            _orig_invoke,
+        # 改为流式调用 + 收集聚合，底层 HTTP 使用 stream=True，
+        # 保持 invoke 的返回类型（AssistantMessage）和调用方接口不变。
+        return await self._invoke_via_stream(
+            _orig_stream,
             self,
             messages,
             tools=tools,
@@ -1231,7 +1267,7 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
             max_tokens=max_tokens,
             stop=stop,
             output_parser=output_parser,
-            timeout=timeout,
+            timeout=self._resolve_stream_timeout(timeout),
             **kwargs,
         )
 
@@ -1346,8 +1382,10 @@ class PatchSiliconFlowModelClient(RetryMixin, SiliconFlowModelClient):
         timeout=None,
         **kwargs,
     ):
-        return await self._invoke_with_retry(
-            _sf_orig_invoke,
+        # 改为流式调用 + 收集聚合，底层 HTTP 使用 stream=True，
+        # 保持 invoke 的返回类型（AssistantMessage）和调用方接口不变。
+        return await self._invoke_via_stream(
+            _sf_orig_stream,
             self,
             messages,
             tools=tools,
@@ -1357,7 +1395,7 @@ class PatchSiliconFlowModelClient(RetryMixin, SiliconFlowModelClient):
             max_tokens=max_tokens,
             stop=stop,
             output_parser=output_parser,
-            timeout=timeout,
+            timeout=self._resolve_stream_timeout(timeout),
             **kwargs,
         )
 
