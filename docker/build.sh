@@ -23,7 +23,7 @@ if [ -z "$build_version" ]; then
     exit 1
 fi
 
-IMAGE_NAME="jiuwen:${build_version}-py311-ubuntu22.04-${ARCH_TAG}"
+IMAGE_NAME="jiuwen:${build_version}-py312-ubuntu24.04-${ARCH_TAG}"
 echo "Building for ${BUILD_ARG_ARCH}, tagging as: ${IMAGE_NAME}"
 docker build --build-arg ARCH="${BUILD_ARG_ARCH}" -t "${IMAGE_NAME}" -f jiuwenclaw.dockerfile .
 echo "构建$build_type镜像完成！"
