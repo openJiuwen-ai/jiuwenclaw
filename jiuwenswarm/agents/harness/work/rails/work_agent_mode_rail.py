@@ -7,7 +7,7 @@ plan 的机械部分（进入/退出、计划文件、只读白名单、switch_m
 :class:`CodeAgentModeRail` 的实现，只替换构造参数：
 
 - 工具白名单换成 work 场景的只读集合（无代码型子 agent）。
-- 提示词换成通用工作版，不再要求调用 explore_agent / plan_agent。
+- 提示词换成通用工作版，不再要求调用 plan_agent。
 
 这样 work 与 code 共享同一套安全兜底，不会因为两份拷贝而出现行为漂移。
 """

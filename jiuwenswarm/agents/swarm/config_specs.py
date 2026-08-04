@@ -177,7 +177,7 @@ _CODE_TOOL_NAMES: tuple[str, ...] = (
     registry.SEND_FILE,
 )
 
-# code_agent sub-agents are always-on (explore / plan) or config-gated.
+# Code-mode sub-agents are either always-on (plan) or config-gated.
 _DEFAULT_SUBAGENT_MAX_ITERATIONS = 15
 
 
@@ -670,7 +670,7 @@ def build_member_subagent_specs(
 ) -> list[SubAgentSpec]:
     """Build the declarative code sub-agent specs (empty for non-code modes).
 
-    explore / plan are always present, while code / browser are config-gated via
+    plan is always present, while code / browser are config-gated via
     ``react.subagents.<name>.enabled``.
 
     Args:
@@ -689,7 +689,6 @@ def build_member_subagent_specs(
     language = _subagent_language(mode, role, config)
 
     specs: list[SubAgentSpec] = [
-        _code_subagent_spec("explore_agent", registry.EXPLORE_AGENT, react, language),
         _code_subagent_spec("plan_agent", registry.PLAN_AGENT, react, language),
     ]
     if isinstance(subagents_cfg, dict):
@@ -782,6 +781,18 @@ def build_member_deep_agent_spec(
 
     if subagent_specs or team_browser_spec:
         merged_subagents = list(base_spec.subagents or [])
+        if _is_code_mode(mode):
+            filtered = []
+            for spec in merged_subagents:
+                is_explore = (
+                    getattr(spec, "subagent_type", None) == "explore_agent"
+                    or getattr(spec, "factory_name", None) == registry.EXPLORE_AGENT
+                    or getattr(getattr(spec, "agent_card", None), "name", None)
+                    == "explore_agent"
+                )
+                if not is_explore:
+                    filtered.append(spec)
+            merged_subagents = filtered
         # Remove any browser_agent from base_spec to prevent the shared
         # playwright_official_stdio entry from co-existing with our isolated one.
         if team_browser_spec or any(

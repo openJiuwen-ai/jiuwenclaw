@@ -9,7 +9,7 @@
 
 Code 模式独占逻辑全部收敛于此：
 - LspRail、ProjectMemoryRail、CodingMemoryRail 等 code 专属 rail
-- code_agent / explore_agent subagent 配置
+- code_agent / plan_agent subagent 配置
 - code 模式下 rail 生命周期（保留 SubagentRail、补充 ProjectMemoryRail 等）
 """
 
@@ -38,7 +38,6 @@ from openjiuwen.harness.lsp import InitializeOptions
 from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.subagents.browser_agent import build_browser_agent_config
 from openjiuwen.harness.subagents.code_agent import build_code_agent_config
-from openjiuwen.harness.subagents.explore_agent import build_explore_agent_config
 from openjiuwen.harness.subagents.plan_agent import build_plan_agent_config
 from openjiuwen.harness.tools import WebFetchWebpageTool, WebFreeSearchTool, WebPaidSearchTool
 from openjiuwen.harness.tools.worktree import WorktreeConfig, WorktreeRail
@@ -131,7 +130,7 @@ You are now in **plan mode**. You must only plan — you must not make any modif
 - Read-only tools: read_file, grep, list_files, glob
 - Plan file tools: write_file, edit_file (only .plans/<slug>.md)
 - Interactive tools: ask_user
-- Sub-agent tool: task_tool (dispatch explore_agent / plan_agent)
+- Sub-agent tool: task_tool (dispatch plan_agent)
 - Control tools: exit_plan_mode
 - bash (read-only operations only; git write / mkdir / touch / rm are blocked)
 
@@ -147,8 +146,7 @@ You are now in **plan mode**. You must only plan — you must not make any modif
 #### Phase 1: Initial Understanding
 Goal: Gain a comprehensive understanding of the user's request by reading code and asking questions.
 1. Focus on understanding existing architecture and patterns; identify relevant files and dependencies
-2. Launch explore sub-agents via task_tool to efficiently explore the codebase
-3. Quality over quantity — use the fewest agents possible
+2. Use read-only tools directly and keep exploration focused on the requested scope
 
 #### Phase 2: Design
 Goal: Design the implementation approach.
@@ -353,7 +351,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
     - create_instance(): 统一使用 create_deep_agent()（completion_timeout 从配置读取）
     - _build_agent_rails(): 固定 Rails (含 LspRail/ProjectMemoryRail/CodingMemoryRail) + 从 config.yaml 读取动态 Rails
     - _get_tool_cards(): 从 config.yaml 读取动态 Tools
-    - _build_configured_subagents(): 固定 explore_agent/plan_agent + 按配置启用 code_agent/browser_agent
+    - _build_configured_subagents(): 固定 plan_agent + 按配置启用 code_agent/browser_agent
     - _update_rails_for_mode(): code 模式 rail 生命周期
     - _update_runtime_config(): 保留 ProjectMemoryRail 语言同步
     """
@@ -917,9 +915,9 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             config: dict[str, Any],
             config_base: dict[str, Any] | None = None,
     ) -> tuple[list[Any] | None, bool]:
-        """Build subagents for code mode: explore_agent + plan_agent + code_agent + browser_agent.
+        """Build subagents for code mode: plan_agent + code_agent + browser_agent.
 
-        explore_agent / plan_agent 固定挂载（Code 模式核心子代理）。
+        plan_agent 固定挂载（Code 模式核心子代理）。
         code_agent / browser_agent 按配置启用。
         """
         react_cfg = config if isinstance(config, dict) else {}
@@ -929,21 +927,6 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         workspace = self._workspace_dir or "./"
         subagents: list[Any] = []
         self._sync_browser_runtime_environment(config_base)
-
-        # ── 固定挂载：explore_agent（Code 模式核心子代理，始终启用）──
-        if not self._subagent_list_has_name(subagents, "explore_agent"):
-            explore_agent_cfg = subagents_cfg.get("explore_agent") if isinstance(subagents_cfg, dict) else None
-            explore_spec = build_explore_agent_config(
-                model=model,
-                workspace=workspace,
-                language=resolved_language,
-                max_iterations=parse_int(
-                    explore_agent_cfg.get("max_iterations") if isinstance(explore_agent_cfg, dict) else None,
-                    react_cfg.get("max_iterations", 15),
-                ),
-            )
-            explore_spec.factory_kwargs = {"auto_create_workspace": False}
-            subagents.append(explore_spec)
 
         # ── 固定挂载：plan_agent（Code 模式核心子代理，始终启用）──
         if not self._subagent_list_has_name(subagents, "plan_agent"):
@@ -1023,7 +1006,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         """Code 模式下的 rail 生命周期管理.
 
         code.normal / code.plan 等模式：
-        - 保留 SubagentRail（主 Agent 通过 task_tool 派发 explore/plan 子代理）
+        - 保留 SubagentRail（主 Agent 通过 task_tool 派发 plan 子代理）
         - 保留 ProjectMemoryRail（code 模式始终挂载）
         - 保留 CodingMemoryRail（code 模式始终挂载）
         - 卸载 TaskPlanningRail、SkillEvolutionRail
