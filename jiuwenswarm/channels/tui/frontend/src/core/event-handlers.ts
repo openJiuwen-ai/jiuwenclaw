@@ -174,6 +174,8 @@ export interface AppEventDelegate {
   pushHistoryEntry(entry: HistoryItem): void;
   scheduleHistoryFlush(): void;
   safeRestoreHistory(sessionId: string): void;
+  /** 放行统一启动屏障；普通启动分配 ID，`--session` 恢复或登记显式 ID。 */
+  initializeBootSession(): void;
   /** 报告 history.get 流返回的分页元数据（本页 page_idx / total_pages）。 */
   reportHistoryPageMeta(meta: { pageIdx?: number; totalPages?: number }): void;
   /** 某一页 history.get 流已结束（收到 `status: done` 帧），由 app-state 决定是否继续拉下一页。 */
@@ -448,12 +450,8 @@ function handleConnectionAck(delegate: AppEventDelegate, frame: EventFrame): boo
   if (frame.event !== "connection.ack") {
     return false;
   }
-  // session_id is determined at construction time; connection.ack is only
-  // used as a signal to restore history once connected.
-  const sessionId = delegate.getSessionId();
-  if (sessionId && delegate.getConnectionStatus() === "connected") {
-    delegate.safeRestoreHistory(sessionId);
-    delegate.safeFetchSessionTitle(sessionId);
+  if (delegate.getConnectionStatus() === "connected") {
+    delegate.initializeBootSession();
   }
   return true;
 }

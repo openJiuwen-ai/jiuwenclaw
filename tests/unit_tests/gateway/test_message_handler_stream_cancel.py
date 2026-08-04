@@ -59,6 +59,27 @@ class _HangingAgentClient:
             yield env
 
 
+class _FailedCancelAgentClient:
+    @staticmethod
+    async def send_request(env: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            request_id="interrupt-failed",
+            channel_id="tui",
+            ok=False,
+            payload={
+                "event_type": "chat.interrupt_result",
+                "success": False,
+                "error": "session runtime cleanup failed",
+            },
+            metadata=None,
+        )
+
+    @staticmethod
+    async def send_request_stream(env: object):
+        if False:
+            yield env
+
+
 class _TestMessageHandler(MessageHandler):
     @classmethod
     def create(cls) -> "_TestMessageHandler":
@@ -647,6 +668,17 @@ async def test_disconnect_cancel_marks_request_as_client_disconnect() -> None:
     assert len(_FakeAgentClient.sent_requests) == 1
     assert _FakeAgentClient.sent_requests[0].channel_context["_jiuwenswarm_cancel_source"] == "client_disconnect"
     assert "cancel_source" not in _FakeAgentClient.sent_requests[0].params
+
+
+@pytest.mark.asyncio
+async def test_disconnect_cancel_reports_agent_cleanup_failure() -> None:
+    handler = _TestMessageHandler.create_with_client(_FailedCancelAgentClient())
+
+    cleaned = await handler.cancel_agent_sessions_on_disconnect(
+        [("tui", "sess_cleanup_failed")],
+    )
+
+    assert cleaned is False
 
 
 @pytest.mark.asyncio

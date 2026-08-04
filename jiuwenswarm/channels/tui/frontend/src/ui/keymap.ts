@@ -23,8 +23,8 @@ export interface AppScreenKeymapDelegate {
    * to-exit" timer should be reset.
    */
   requestLocalInterrupt(): boolean;
-  /** Show a brief hint that pressing Ctrl+C again will exit */
-  showCtrlCExitHint(): void;
+  /** Show a brief hint that pressing the given key again will exit */
+  showExitHint(key: string): void;
   exitApp(): void;
   toggleTodos(): void;
   toggleTeamPanel(): void;
@@ -74,7 +74,7 @@ function runCtrlC(delegate: AppScreenKeymapDelegate): void {
     delegate.clearInput();
   }
 
-  delegate.showCtrlCExitHint();
+  delegate.showExitHint("ctrl+c");
   lastInterruptTime = now;
 }
 
@@ -86,7 +86,7 @@ function runCtrlD(delegate: AppScreenKeymapDelegate): void {
   }
   lastInterruptTime = now;
   delegate.interruptTask();
-  delegate.showCtrlCExitHint();
+  delegate.showExitHint("ctrl+d");
 }
 
 /**

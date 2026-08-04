@@ -133,7 +133,21 @@ Agent: Task list updated:
 
 ![Conversation page after inserting new task](../assets/images/conversation/dynamic_insert_new_task.png)
 
+### 1.4 Input Area Controls
 
+The input area at the bottom of the conversation page provides several controls to configure how the Agent processes your requests:
+
+![Input Area Controls](../assets/images/current-ui-en/14-Input-Area-Controls.png)
+
+| Control | Description |
+|---------|-------------|
+| **Add Image** | Attach images to your message for visual context |
+| **Mode Selector** | Switch between Agent mode and Cluster mode |
+| **Permission Selector** | Configure permission level for the Agent |
+| **Skills Selector** | Select which skills to enable for the current conversation |
+| **Model Selector** | Choose which AI model to use |
+
+These controls allow you to customize the Agent's behavior without memorizing commands. For advanced users, the same configurations can be achieved via CLI commands (see [§3 CLI Commands](#3-cli-commands)).
 
 ---
 
@@ -141,101 +155,52 @@ Agent: Task list updated:
 
 ### 2.1 Mode Overview
 
-JiuwenSwarm supports multiple execution modes. Different modes fit different scenarios, and you can choose based on task characteristics.
+JiuwenSwarm supports two execution modes in the Web frontend. Different modes fit different scenarios, and you can choose based on task characteristics.
 
-![Conversation page execution modes](../assets/images/conversation/chat_execution_modes.png)
+![Mode Selector](../assets/images/current-ui-en/02-Mode-Selector.png)
 
 **Mode Comparison**
 
 | Mode | How it runs | Best for | Characteristics |
 |:---|:---|:---|:---|
-| **Task Planning** | Decomposes requirements into concrete steps and executes by plan | Complex and multi-step tasks requiring progress tracking | Clear and controllable process; supports dynamic adjustment |
-| **Performance Mode** | Handles requests flexibly and supports parallel tasks | Clear goals where fast results are preferred | Fast response; efficiency-first |
-| **Cluster Mode** | Multi-agent collaborative execution | Large-scale tasks requiring specialized division of labor | Complementary capabilities; collaborative processing |
+| **Agent mode** | Single agent handles tasks independently, supports task planning and dynamic adjustment | Most daily tasks, Q&A, code generation, etc. | Simple and efficient; single agent handles everything |
+| **Cluster mode** | Multi-agent collaborative execution, with a Leader orchestrating multiple specialized agents | Large-scale tasks requiring specialized division of labor | Complementary capabilities; collaborative processing |
 
 **Mode Switching**
 
-You can switch execution modes in the following ways:
+You can switch execution modes using the **mode selector** at the bottom of the conversation page (in the input area controls).
 
-- **UI switch**: Select the execution mode at the bottom of the conversation page
-- **Command switch**: Use `/mode` or `/switch` (see [CLI Commands](#3-cli-commands))
+> **Note**: For IM controlled channels and TUI, you can also use `/mode` or `/switch` commands (see [CLI Commands](#3-cli-commands)) to switch to more granular modes.
 
 ---
 
-### 2.2 Task Planning Mode
+### 2.2 Agent Mode
 
 #### 2.2.1 Concept Overview
 
-**What is task planning?**
+**What is Agent mode?**
 
-Task planning is one of JiuwenSwarm's core capabilities. It gives the agent **structured task decomposition and dynamic management**. For complex or multi-step requests, the agent automatically parses them into executable subtasks and systematically records/tracks them through built-in todo tools.
+Agent mode is the default working mode of JiuwenSwarm. In this mode, a single agent handles your tasks independently, with the following capabilities:
 
-**Core Value**
-
-| Capability | Description |
-|:---|:---|
-| **Dynamic decomposition** | Automatically splits complex requests into executable subtask sequences |
-| **Real-time tracking** | Updates subtask status as each step completes, making progress visible and controllable |
-| **Flexible intervention** | Supports adding requirements or urgent insertions mid-execution without breaking the overall flow |
-| **Goal preservation** | Reduces goal drift and execution gaps in long-running tasks |
-
-**Applicable Scenarios**
-
-- Tasks with many steps that need phased completion
-- Tasks likely to change during execution
-- Tasks where process transparency is important
-- Tasks requiring confirmation at each stage
-
-![Conversation page after assigning task](../assets/images/conversation/dynamic_insert_task.png)
-
----
-
-### 2.3 Performance Mode
-
-#### 2.3.1 Concept Overview
-
-**What is performance mode?**
-
-Performance Mode (Fast Mode) is optimized for simple and clear tasks. In this mode, the agent will:
-
-- **Respond quickly**: Reduce planning overhead and execute directly
-- **Process in parallel**: Run multiple independent tasks at the same time
-- **Prioritize efficiency**: Complete work as fast as possible
+- **Task planning**: Complex requests are automatically decomposed into executable subtask sequences
+- **Dynamic adjustment**: Supports adding requirements or urgent insertions mid-execution
+- **Tool orchestration**: Automatically selects and combines suitable tools to complete tasks
+- **Real-time tracking**: Each subtask's status updates in real time, making progress visible and controllable
 
 **Applicable scenarios**
 
-- Tasks with clear goals and straightforward steps
-- Tasks where fast results are preferred
-- Tasks that do not require detailed process decomposition
-- Multiple simple tasks that need batch processing
+- Most daily tasks, Q&A, code generation
+- Tasks with many steps that need phased completion
+- Tasks likely to change during execution
+- Tasks where process transparency is important
 
-#### 2.3.2 Practical Example
-
-**Case: Batch document rewriting**
-
-```
-User: Rewrite the following two technical docs so they are easier for beginners:
-1. docs/api.md
-2. docs/architecture.md
-
-Agent: 🔍 Processing docs in parallel...
-
-  Rewriting completed! Both beginner-friendly versions are saved.
-
-  Original file                 Beginner version
-  ContextCompression.md         ContextCompression_Beginner.md
-  Heartbeat.md                  Heartbeat_Beginner.md
-
-  🎉 Both beginner-friendly docs are saved in the same directories as the originals. Want me to refine anything else?
-```
-
-![Performance mode diagram](../assets/images/conversation/performance_mode_demo.png)
+**Performance optimization**: For simple and clear tasks, the agent automatically reduces planning overhead and responds quickly, supporting parallel execution when appropriate. You don't need to manually switch to a separate "fast mode" — the agent adapts to task complexity automatically.
 
 ---
 
-### 2.4 Cluster Mode
+### 2.3 Cluster Mode
 
-#### 2.4.1 Concept Overview
+#### 2.3.1 Concept Overview
 
 **What is cluster mode?**
 
@@ -254,7 +219,7 @@ Cluster Mode (Team Mode) is JiuwenSwarm's multi-agent collaboration mode. Multip
 - Tasks requiring multiple professional skill sets
 - Tasks difficult for a single agent to complete alone
 
-#### 2.4.2 Practical Example
+#### 2.3.2 Practical Example
 
 **Case: Full-stack project development**
 
@@ -279,6 +244,7 @@ The screenshots below are ordered roughly as the conversation unfolds.
    Conversation UI where the Team Leader confirms scope and key details with the user before cluster startup.
 
 ![Cluster mode diagram 1](../assets/images/conversation/chat_cluster_mode_1.png)
+
 
 2. **Pickup and parallel start**  
    Conversation and status UI when specialized agents pick up subtasks and start work in parallel.
@@ -392,7 +358,7 @@ The TUI **does not** provide this gateway command. To start a new blank session 
 
 **What happens in the TUI for `/clear`**
 
-- If no task is running: generate a new `session_id`, attempt `session.create`, switch the active session, **clear the on-screen message list for this session**, fetch history for the new session, and show `Started a fresh conversation in <session_id>`.
+- If no task is running: call `session.create` with a `create_token` and let AgentServer allocate the new `session_id`; after a successful response, switch the active session, **clear the on-screen message list**, fetch the new session's empty history, and show `Started a fresh conversation in <session_id>`. If creation fails, TUI stays on the original session.
 
 **workspace/session/ example (written on demand)**
 
@@ -521,11 +487,11 @@ List all currently available skills.
 
 ---
 
-#### `/workspace_dir` — Set Workspace Path (TUI Only)
+#### `/workspace` — Manage Project Scope and Trusted Directories (TUI Only)
 
 **Purpose**
 
-Set the workspace path for terminal UI outbound requests. This command is only available in TUI.
+Manage the TUI project scope and the trusted directories available for file operations. This command is only available in TUI.
 
 **Channel scope**
 
@@ -534,14 +500,20 @@ Only available in the TUI (terminal) client; not available on other channels.
 **Usage**
 
 ```
-/workspace_dir get              # View current path
-/workspace_dir set C:\Projects  # Set path
-/workspace_dir clear            # Clear path
+/workspace get                  # View workspace, project scope, and trusted directories
+/workspace add C:\Shared         # Add a trusted directory to the current project
+/workspace set C:\Projects       # Switch project scope and trust that directory
+/workspace remove C:\Shared      # Remove a trusted directory
+/workspace clear                # Clear trusted directories for the current project
 ```
+
+Aliases: `/workspace_dir`, `/workspace-dir`.
 
 **Persistence**
 
-Stored in `~/.jiuwenswarm/tui-workspace-dir`.
+Trusted directories are stored per project in `~/.jiuwenswarm-tui/config.json`. A project-scope override selected with `/workspace set` lasts only for the current TUI process; after restart, the launch directory becomes the project scope again.
+
+TUI sends `trusted_dirs`, `project_dir`, and `cwd` with subsequent requests so Gateway and AgentServer can apply project context and file-access policy.
 
 📢 For a more detailed command reference, see [Slash Commands Reference](SlashCommands.md).
 
@@ -562,8 +534,7 @@ User Input → Intent Understanding → Mode Selection → Task Handling → Res
 1. **Intent understanding**: Parse natural language and identify real requirements
 2. **Mode selection**: Choose an execution strategy based on task traits and current mode
 3. **Task handling**:
-   - **Task planning mode**: Decompose into subtasks and execute by plan
-   - **Performance mode**: Execute quickly, with parallel support
+   - **Agent mode**: Single agent handles tasks, with automatic task planning and dynamic adjustment
    - **Cluster mode**: Delegate to multiple agents for collaboration
 4. **Result feedback**: Present results in a clear and understandable way
 

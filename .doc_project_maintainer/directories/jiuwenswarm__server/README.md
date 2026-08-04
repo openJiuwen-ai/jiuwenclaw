@@ -4,7 +4,7 @@ encoded: jiuwenswarm__server
 modules:
   - agentserver-runtime
 confidence: confirmed
-last_updated: 2026-07-15
+last_updated: 2026-08-01
 read_when: "Editing AgentServer entrypoints, WebSocket dispatch, runtime services, sandbox, hooks, or gateway push."
 ---
 
@@ -21,6 +21,7 @@ Contains the AgentServer process entrypoint, the WebSocket server used by Gatewa
 - `gateway_push/wire.py`: server-push E2A response wire encoder.
 - `gateway_push/transport.py`: default in-process transport that forwards push messages through the AgentServer singleton.
 - `runtime/agent_manager.py`: channel/session agent instance management and config reload boundary.
+- `runtime/agent_warm_pool.py`: lazy READY-slot reconciliation and foreground-priority session preparation.
 - `runtime/proactive_adapter.py`: proactive recommendation engine attachment.
 - `runtime/session/*`: session history and metadata support.
 - `sandbox/jiuwenbox_runner.py`: jiuwenbox process runner.
@@ -35,6 +36,7 @@ Contains the AgentServer process entrypoint, the WebSocket server used by Gatewa
 - `agentserver-plan-mode-exit`: checkpoint mode restoration and exit push.
 - `agentserver-schedule-auto-harness`: durable scheduled tasks and autonomous execution.
 - `agentserver-history-stream`: paged history storage-to-frontend reconstruction.
+- `session-prewarm-allocation`: AgentServer-owned IDs, foreground claims, and lazy background replenishment.
 
 ## Related Code Symbols
 

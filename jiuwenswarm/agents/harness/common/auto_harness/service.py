@@ -261,8 +261,17 @@ class AutoHarnessService:
         # Initialize scheduler components
         self._init_scheduler()
 
-    def update_agent_instance(self, agent: Any):
-        self._agent = agent.get_instance()
+    async def update_agent_instance(self, agent: Any):
+        """Bind the DeepAgent this service executes scheduled runs on.
+
+        Awaits ``ensure_instance`` rather than reading ``get_instance``: the
+        root adapter builds its DeepAgent lazily, so a plain accessor would hand
+        back None on any path that has not run a chat turn yet.
+
+        Args:
+            agent: The JiuWenSwarm agent wrapper owning the adapter.
+        """
+        self._agent = await agent.ensure_instance()
         try:
             stream_event_rail = JiuSwarmStreamEventRail()
             logger.info("[AutoHarnessService] JiuSwarmStreamEventRail create success")

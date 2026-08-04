@@ -27,12 +27,111 @@ class _TuiChannel:
 
 
 class _SuccessfulAgentClient:
-    def __init__(self) -> None:
+    def __init__(self, session_id: str = "tui_allocated") -> None:
+        self.session_id = session_id
         self.requests: list[object] = []
 
     async def send_request(self, request):
         self.requests.append(request)
-        return SimpleNamespace(ok=True, payload={})
+        is_external_create = bool(request.params.get("session_id"))
+        return SimpleNamespace(
+            ok=True,
+            payload={
+                "sessionId": self.session_id,
+                "session_id": self.session_id,
+                "projectId": "default_code",
+                "projectDir": "",
+                "workMode": "code",
+                "prewarm_hit": not is_external_create,
+                "prewarm_status": "bypassed" if is_external_create else "ready",
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_session_create_forwards_external_id_without_prewarm() -> None:
+    channel = _TuiChannel()
+    agent_client = _SuccessfulAgentClient("tui_external_001")
+    register_cli_handlers(
+        CliHandlersBindParams(channel=channel, agent_client=agent_client, path="/tui")
+    )
+
+    await channel.local_handlers["/tui"]["session.create"](
+        object(),
+        "register-tui",
+        {
+            "session_id": "tui_external_001",
+            "mode": "code.normal",
+        },
+        "tui_external_001",
+    )
+
+    assert len(agent_client.requests) == 1
+    request = agent_client.requests[0]
+    assert request.method == "session.create"
+    assert request.params["session_id"] == "tui_external_001"
+    assert channel.responses[-1]["ok"] is True
+    assert channel.responses[-1]["payload"]["prewarm_status"] == "bypassed"
+
+
+@pytest.mark.asyncio
+async def test_tui_session_create_resolves_project_before_agentserver(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    project_dir = str(tmp_path / "workspace")
+    agent_client = _SuccessfulAgentClient("tui_project_bound")
+    channel = _TuiChannel()
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.project_store.find_or_create_code_project_for_tui_params",
+        lambda _params: SimpleNamespace(
+            project_id="proj_code_tui",
+            project_dir=project_dir,
+            work_mode="code",
+        ),
+    )
+    register_cli_handlers(
+        CliHandlersBindParams(channel=channel, agent_client=agent_client, path="/tui")
+    )
+    await channel.local_handlers["/tui"]["session.create"](
+        object(),
+        "allocate-project",
+        {"project_dir": project_dir, "mode": "code.normal"},
+        "previous",
+    )
+
+    request = agent_client.requests[0]
+    assert request.params["project_id"] == "proj_code_tui"
+    assert request.params["project_dir"] == project_dir
+    assert request.params["work_mode"] == "code"
+    assert "session_id" not in request.params
+
+
+@pytest.mark.asyncio
+async def test_tui_explicit_session_create_leaves_project_resolution_to_agentserver(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    project_dir = str(tmp_path / "different-workspace")
+    channel = _TuiChannel()
+    agent_client = _SuccessfulAgentClient("tui_existing")
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.project_store.find_or_create_code_project_for_tui_params",
+        lambda _params: pytest.fail("Gateway must not own explicit-ID project binding"),
+    )
+    register_cli_handlers(
+        CliHandlersBindParams(channel=channel, agent_client=agent_client, path="/tui")
+    )
+
+    await channel.local_handlers["/tui"]["session.create"](
+        object(),
+        "register-existing",
+        {"session_id": "tui_existing", "project_dir": project_dir},
+        "tui_existing",
+    )
+
+    assert channel.responses[-1]["ok"] is True
+    assert agent_client.requests[0].params["session_id"] == "tui_existing"
+    assert agent_client.requests[0].params["project_dir"] == project_dir
+    assert "project_id" not in agent_client.requests[0].params
 
 
 def test_session_switch_is_forwarded_without_a_tui_local_handler() -> None:
@@ -47,13 +146,14 @@ def test_session_switch_is_forwarded_without_a_tui_local_handler() -> None:
 
 
 @pytest.mark.asyncio
-async def test_session_create_dispatches_previous_plan_root_offload(
+async def test_session_create_forwards_previous_plan_root_to_agentserver(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
     sessions_root = tmp_path / "sessions"
     sessions_root.mkdir()
     channel = _TuiChannel()
+    agent_client = _SuccessfulAgentClient("new-plan-root")
     calls: list[dict] = []
 
     monkeypatch.setattr("jiuwenswarm.common.utils.get_agent_sessions_dir", lambda: sessions_root)
@@ -74,26 +174,25 @@ async def test_session_create_dispatches_previous_plan_root_offload(
         lambda: True,
     )
     register_cli_handlers(
-        CliHandlersBindParams(channel=channel, agent_client=None, path="/tui")
+        CliHandlersBindParams(channel=channel, agent_client=agent_client, path="/tui")
     )
 
     await channel.local_handlers["/tui"]["session.create"](
         object(),
         "create-tui",
         {
-            "session_id": "new-plan-root",
             "previous_session_id": "old-plan-root",
+            "create_token": "tui-plan-create",
         },
         "old-plan-root",
     )
 
-    assert calls == [
-        {
-            "session_id": "old-plan-root",
-            "parent_session_id": "old-plan-root",
-        }
-    ]
-    assert (sessions_root / "new-plan-root").is_dir()
+    assert calls == []
+    assert len(agent_client.requests) == 1
+    assert agent_client.requests[0].method == "session.create"
+    assert agent_client.requests[0].params["previous_session_id"] == "old-plan-root"
+    assert "session_id" not in agent_client.requests[0].params
+    assert channel.responses[-1]["payload"]["session_id"] == "new-plan-root"
     assert channel.responses[-1]["ok"] is True
 
 
@@ -105,6 +204,7 @@ async def test_session_create_does_not_apply_plan_root_action_to_team_owner(
     sessions_root = tmp_path / "sessions"
     sessions_root.mkdir()
     channel = _TuiChannel()
+    agent_client = _SuccessfulAgentClient("new-team-root")
     calls: list[dict] = []
 
     monkeypatch.setattr("jiuwenswarm.common.utils.get_agent_sessions_dir", lambda: sessions_root)
@@ -125,20 +225,23 @@ async def test_session_create_does_not_apply_plan_root_action_to_team_owner(
         lambda: True,
     )
     register_cli_handlers(
-        CliHandlersBindParams(channel=channel, agent_client=None, path="/tui")
+        CliHandlersBindParams(channel=channel, agent_client=agent_client, path="/tui")
     )
 
     await channel.local_handlers["/tui"]["session.create"](
         object(),
         "create-tui-team-owner",
         {
-            "session_id": "new-plan-root",
             "previous_session_id": "old-team-root",
+            "mode": "team",
+            "create_token": "tui-team-create",
         },
         "old-team-root",
     )
 
     assert calls == []
+    assert agent_client.requests[0].method == "session.create"
+    assert agent_client.requests[0].params["mode"] == "team"
     assert channel.responses[-1]["ok"] is True
 
 
@@ -150,6 +253,7 @@ async def test_session_create_skips_kvc_metadata_when_affinity_disabled(
     sessions_root = tmp_path / "sessions"
     sessions_root.mkdir()
     channel = _TuiChannel()
+    agent_client = _SuccessfulAgentClient("new-plan-root")
 
     monkeypatch.setattr("jiuwenswarm.common.utils.get_agent_sessions_dir", lambda: sessions_root)
     monkeypatch.setattr(
@@ -169,20 +273,21 @@ async def test_session_create_skips_kvc_metadata_when_affinity_disabled(
         lambda **kwargs: pytest.fail("disabled affinity must not dispatch offload"),
     )
     register_cli_handlers(
-        CliHandlersBindParams(channel=channel, agent_client=None, path="/tui")
+        CliHandlersBindParams(channel=channel, agent_client=agent_client, path="/tui")
     )
 
     await channel.local_handlers["/tui"]["session.create"](
         object(),
         "create-tui-disabled",
         {
-            "session_id": "new-plan-root",
             "previous_session_id": "old-plan-root",
+            "create_token": "tui-affinity-disabled",
         },
         "old-plan-root",
     )
 
-    assert (sessions_root / "new-plan-root").is_dir()
+    assert not (sessions_root / "new-plan-root").exists()
+    assert agent_client.requests[0].method == "session.create"
     assert channel.responses[-1]["ok"] is True
 
 
@@ -194,6 +299,7 @@ async def test_session_create_contains_kvc_metadata_failure(
     sessions_root = tmp_path / "sessions"
     sessions_root.mkdir()
     channel = _TuiChannel()
+    agent_client = _SuccessfulAgentClient("new-plan-root")
 
     monkeypatch.setattr("jiuwenswarm.common.utils.get_agent_sessions_dir", lambda: sessions_root)
     monkeypatch.setattr(
@@ -209,20 +315,21 @@ async def test_session_create_contains_kvc_metadata_failure(
         lambda: True,
     )
     register_cli_handlers(
-        CliHandlersBindParams(channel=channel, agent_client=None, path="/tui")
+        CliHandlersBindParams(channel=channel, agent_client=agent_client, path="/tui")
     )
 
     await channel.local_handlers["/tui"]["session.create"](
         object(),
         "create-tui-kvc-failure",
         {
-            "session_id": "new-plan-root",
             "previous_session_id": "old-plan-root",
+            "create_token": "tui-kvc-failure",
         },
         "old-plan-root",
     )
 
-    assert (sessions_root / "new-plan-root").is_dir()
+    assert not (sessions_root / "new-plan-root").exists()
+    assert agent_client.requests[0].method == "session.create"
     assert channel.responses[-1]["ok"] is True
 
 
@@ -234,7 +341,7 @@ async def test_session_create_prefers_canonical_switch_owner_dispatch(
     sessions_root = tmp_path / "sessions"
     sessions_root.mkdir()
     channel = _TuiChannel()
-    agent_client = _SuccessfulAgentClient()
+    agent_client = _SuccessfulAgentClient("new-team-root")
 
     monkeypatch.setattr("jiuwenswarm.common.utils.get_agent_sessions_dir", lambda: sessions_root)
     monkeypatch.setattr(
@@ -253,19 +360,20 @@ async def test_session_create_prefers_canonical_switch_owner_dispatch(
         object(),
         "create-tui-forwarded",
         {
-            "session_id": "new-team-root",
             "previous_session_id": "old-team-root",
             "mode": "team",
             "previous_mode": "team",
+            "create_token": "tui-forwarded-team",
         },
         "old-team-root",
     )
 
     assert len(agent_client.requests) == 1
     request = agent_client.requests[0]
-    assert request.method == "session.switch"
-    assert request.params["session_id"] == "new-team-root"
+    assert request.method == "session.create"
+    assert "session_id" not in request.params
     assert request.params["previous_session_id"] == "old-team-root"
     assert request.params["mode"] == "team"
     assert request.params["previous_mode"] == "team"
     assert channel.responses[-1]["ok"] is True
+    assert channel.responses[-1]["payload"]["session_id"] == "new-team-root"

@@ -156,6 +156,15 @@ def test_latency_scenario_classifier_rejects_invalid_response() -> None:
         classifier.classify(fingerprint())
 
 
+def test_latency_scenario_classifier_rejects_malformed_json() -> None:
+    classifier = evaluation.LatencyScenarioClassifier(
+        FakeLLM("{'scenario': 'short_task', 'reason': 'not valid JSON'}")
+    )
+
+    with pytest.raises(json.JSONDecodeError):
+        classifier.classify(fingerprint())
+
+
 def test_latency_aggregation_reports_both_distributions_and_grades_p95() -> None:
     evaluator = evaluation.LatencyEvaluator("short_task")
     results = [
@@ -234,6 +243,39 @@ def test_llm_metrics_accept_only_binary_scores(
     assert "static_data" in llm.messages[0]["content"]
     assert "Use Celsius" in llm.messages[0]["content"]
     assert "call_weather" in llm.messages[0]["content"]
+    assert '"reference_time": "2026-07-18T00:00:00+00:00"' in llm.messages[0][
+        "content"
+    ]
+    assert '"reference_time_source": "event_time"' in llm.messages[0]["content"]
+
+
+def test_accuracy_prompt_treats_event_time_as_authoritative() -> None:
+    llm = FakeLLM('{"score": 1, "reason": "工具结果支持该回答。"}')
+
+    evaluation.AccuracyEvaluator(llm).evaluate(case())
+
+    prompt = llm.messages[0]["content"]
+    assert "reference_time 是本次评估的权威当前时间" in prompt
+    assert "即使它晚于模型训练截止时间" in prompt
+    assert "不得仅因电影、产品、功能或事件晚于模型训练时间" in prompt
+    assert "优先依据工具结果、对话上下文和回答的内部一致性判断" in prompt
+    assert "不得仅以模型不知道该信息为由判定 score=0" in prompt
+    assert "如果工具结果或上下文与回答矛盾" in prompt
+
+
+def test_llm_prompt_uses_current_evaluation_time_when_event_time_is_missing() -> None:
+    llm = FakeLLM('{"score": 1, "reason": "回答完整。"}')
+    before = datetime.now(timezone.utc)
+
+    evaluation.CompletenessEvaluator(llm).evaluate(case(event_time=None))
+
+    after = datetime.now(timezone.utc)
+    prompt = llm.messages[0]["content"]
+    payload = json.loads(prompt.split("Evaluation data:\n", maxsplit=1)[1])
+    reference_time = datetime.fromisoformat(payload["reference_time"])
+    assert payload["reference_time_source"] == "evaluation_time"
+    assert reference_time.tzinfo is not None
+    assert before <= reference_time.astimezone(timezone.utc) <= after
 
 
 @pytest.mark.parametrize(

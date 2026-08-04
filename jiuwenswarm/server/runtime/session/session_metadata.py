@@ -455,13 +455,19 @@ def init_session_metadata(
     title: str = "",
     mode: str = "unknown",
     team_name: str = "",
+    team_template_id: str = "",
     project_dir: str = "",
     project_id: str = "",
     model: str = "",
     cron_id: str = "",
     work_mode: str = "",
+    channel_metadata: dict[str, Any] | None = None,
 ) -> None:
-    """初始化会话元数据(同步写,确保创建后立即可读)"""
+    """初始化会话元数据(同步写,确保创建后立即可读)
+
+    ``channel_metadata`` 可选：TUI ``session.create`` 需在首条聊天前写入
+    ``cwd``/``project_dir``，供 ``/resume`` current-dir 过滤（见 Issue #2503）。
+    """
     # work_mode：未传时按 channel_id 推断默认值（tui→code，其他→work）
     resolved_work_mode = (
         normalize_work_mode(work_mode, default=default_work_mode_for_channel(channel_id))
@@ -478,6 +484,7 @@ def init_session_metadata(
         "message_count": 0,
         "mode": mode,
         "team_name": team_name,
+        "team_template_id": team_template_id,
         "round_id": 0,
         "project_dir": project_dir,
         "project_id": project_id,
@@ -489,6 +496,8 @@ def init_session_metadata(
         "status": "idle",
         "work_mode": resolved_work_mode,
     }
+    if isinstance(channel_metadata, dict) and channel_metadata:
+        metadata["channel_metadata"] = channel_metadata
     _write_metadata_sync(session_id, metadata)
 
 
@@ -505,6 +514,7 @@ def update_session_metadata(
     channel_metadata: dict[str, Any] | None = None,
     mode: str | None = None,
     team_name: str | None = None,
+    team_template_id: str | None = None,
     accent_color: str | None = None,
     project_dir: str | None = None,
     project_id: str | None = None,
@@ -514,6 +524,7 @@ def update_session_metadata(
     pin_order: int | None = None,
     touch_last_message_at: bool = True,
     cache_bust: bool = False,
+    sync: bool = False,
     sync_write: bool = False,
     work_mode: str | None = None,
 ) -> None:
@@ -576,6 +587,7 @@ def update_session_metadata(
             "message_count": 1 if increment_message_count else 0,
             "mode": mode if mode is not None else "unknown",
             "team_name": team_name or "",
+            "team_template_id": team_template_id or "",
             "round_id": 0,
             "project_dir": project_dir or "",
             "project_id": project_id or "",
@@ -600,6 +612,8 @@ def update_session_metadata(
             metadata["mode"] = mode
         if team_name is not None:
             metadata["team_name"] = team_name
+        if team_template_id is not None:
+            metadata["team_template_id"] = team_template_id
         if accent_color is not None:
             metadata["accent_color"] = accent_color
         # model：覆盖式——每次请求更新为本次模型
@@ -652,7 +666,7 @@ def update_session_metadata(
     _enqueue_write(
         session_id,
         metadata,
-        sync_write=sync_write,
+        sync_write=sync_write or sync,
         preserve_pin_fields=pinned is None and pin_order is None,
     )
 
@@ -740,6 +754,7 @@ def sync_session_request_metadata(
             "message_count": 0,
             "mode": mode if (mode is not None and explicit_mode_provided) else "unknown",
             "team_name": "",
+            "team_template_id": "",
             "round_id": 0,
             "project_dir": project_dir or "",
             "project_id": project_id or "",
@@ -826,15 +841,14 @@ def get_session_metadata(
     """
     metadata = _read_metadata(session_id, cache_bust)
     if isinstance(metadata, dict) and metadata:
-        # 统一兜底 + 惰性迁移:缺失字段补默认值,可推断字段(work_mode/project_id/
-        # last_user_message_at)做确定性推断并(可选)异步写盘。无法消歧的会话仍
-        # 按通道推断默认值兜底返回,不写盘。
         metadata = _apply_metadata_defaults_with_inference(
             session_id,
             metadata,
             session_dir=get_agent_sessions_dir() / session_id,
             enable_writeback=enable_writeback,
         )
+        metadata.setdefault("team_name", "")
+        metadata.setdefault("team_template_id", "")
     return metadata
 
 
@@ -1050,7 +1064,12 @@ def build_server_push_message(
 
 
 def remove_team_mode_session_dirs_at_startup() -> None:
-    """agentserver 启动时删除 metadata.json 中 mode 为 team 的会话目录。"""
+    """Remove only explicitly temporary team sessions at startup.
+
+    Stable team sessions are recoverable and must survive restarts. Older code
+    removed every ``mode=team`` session here, which prevents team session
+    restore once team entities are shared across sessions.
+    """
     sessions_dir = get_agent_sessions_dir()
     if not sessions_dir.is_dir():
         return
@@ -1067,7 +1086,12 @@ def remove_team_mode_session_dirs_at_startup() -> None:
         except Exception as exc:  # noqa: BLE001
             logger.warning("启动清理跳过会话 %s: 读取 metadata.json 失败: %s", session_dir.name, exc)
             continue
-        if not isinstance(raw, dict) or raw.get("mode") != "team":
+        if not isinstance(raw, dict):
+            continue
+        mode = str(raw.get("mode") or "").strip().lower()
+        if mode not in {"team", "team.plan", "code.team"}:
+            continue
+        if not bool(raw.get("temporary_team_session") or raw.get("team_temporary")):
             continue
 
         session_id = session_dir.name

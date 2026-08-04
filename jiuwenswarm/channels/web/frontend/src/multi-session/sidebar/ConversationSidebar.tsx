@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Check, ChevronDown, CircleAlert, Code2, LoaderCircle, Workflow } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useChatStore, type ChatRuntime } from '../../stores/chatStore';
@@ -307,6 +308,7 @@ function ConversationListItem({
 
 function ProjectEntityRow({
   title,
+  path,
   isExpanded,
   isPinned,
   hideActions = false,
@@ -318,6 +320,7 @@ function ProjectEntityRow({
   newLabel,
 }: {
   title: string;
+  path?: string;
   isExpanded: boolean;
   isPinned?: boolean;
   hideActions?: boolean;
@@ -330,7 +333,13 @@ function ProjectEntityRow({
 }) {
   const { t } = useTranslation();
   const rowRef = useRef<HTMLDivElement>(null);
+  const mainRef = useRef<HTMLButtonElement>(null);
+  const tooltipId = useId();
   const [menuOpen, setMenuOpen] = useState(false);
+  const [tooltipPos, setTooltipPos] = useState<{ left: number; top: number } | null>(null);
+  // 分别跟踪 hover 与 focus 状态：任一活跃即保持 tooltip，避免 mouseleave/blur 互相误清
+  const hoverRef = useRef(false);
+  const focusRef = useRef(false);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -348,9 +357,35 @@ function ProjectEntityRow({
     };
   }, [menuOpen]);
 
+  const showTooltip = (source: 'hover' | 'focus') => {
+    if (source === 'hover') hoverRef.current = true;
+    else focusRef.current = true;
+    if (!path || !mainRef.current) return;
+    const rect = mainRef.current.getBoundingClientRect();
+    setTooltipPos({ left: rect.left, top: rect.bottom + 6 });
+  };
+
+  const hideTooltip = (source: 'hover' | 'focus') => {
+    if (source === 'hover') hoverRef.current = false;
+    else focusRef.current = false;
+    if (hoverRef.current || focusRef.current) return;
+    setTooltipPos(null);
+  };
+
   return (
     <div ref={rowRef} className={`conversation-entity-row${menuOpen ? ' is-menu-open' : ''}`}>
-      <button type="button" className="conversation-entity-row__main" onClick={onToggle} title={title}>
+      <button
+        type="button"
+        ref={mainRef}
+        className="conversation-entity-row__main"
+        onClick={onToggle}
+        title={path ? undefined : title}
+        aria-describedby={path ? tooltipId : undefined}
+        onMouseEnter={() => showTooltip('hover')}
+        onMouseLeave={() => hideTooltip('hover')}
+        onFocus={() => showTooltip('focus')}
+        onBlur={() => hideTooltip('focus')}
+      >
         <span className="conversation-entity-row__icon">
           {isExpanded ? <FolderFoldIcon aria-hidden /> : <FolderIcon aria-hidden />}
         </span>
@@ -408,6 +443,84 @@ function ProjectEntityRow({
           }}
         />
       ) : null}
+      {tooltipPos && path
+        ? createPortal(
+            <ProjectPathTooltip id={tooltipId} title={title} path={path} anchor={tooltipPos} mainRef={mainRef} />,
+            document.body,
+          )
+        : null}
+    </div>
+  );
+}
+
+function ProjectPathTooltip({
+  id,
+  title,
+  path,
+  anchor,
+  mainRef,
+}: {
+  id: string;
+  title: string;
+  path: string;
+  anchor: { left: number; top: number };
+  mainRef: React.RefObject<HTMLButtonElement | null>;
+}) {
+  const tipRef = useRef<HTMLDivElement>(null);
+  const [placed, setPlaced] = useState<{ left: number; top: number } | null>(null);
+
+  useLayoutEffect(() => {
+    const tip = tipRef.current;
+    const main = mainRef.current;
+    if (!tip || !main) return;
+    const reposition = () => {
+      const tipRect = tip.getBoundingClientRect();
+      const mainRect = main.getBoundingClientRect();
+      const margin = 6;
+      let top = mainRect.bottom + margin;
+      // 下方空间不足则翻转到上方
+      if (top + tipRect.height > window.innerHeight) {
+        top = mainRect.top - tipRect.height - margin;
+      }
+      let left = mainRect.left;
+      // 右侧溢出则向左收
+      if (left + tipRect.width > window.innerWidth - margin) {
+        left = Math.max(margin, window.innerWidth - tipRect.width - margin);
+      }
+      setPlaced({ left, top });
+    };
+    reposition();
+    // 滚动/缩放/列表重排时按钮位置会变，需重算定位
+    window.addEventListener('scroll', reposition, true);
+    window.addEventListener('resize', reposition);
+    return () => {
+      window.removeEventListener('scroll', reposition, true);
+      window.removeEventListener('resize', reposition);
+    };
+  }, [mainRef]);
+
+  return (
+    <div
+      ref={tipRef}
+      id={id}
+      className="project-path-tooltip"
+      role="tooltip"
+      style={{
+        position: 'fixed',
+        left: placed ? placed.left : anchor.left,
+        top: placed ? placed.top : anchor.top,
+        opacity: placed ? 1 : 0,
+      }}
+    >
+      <div className="project-path-tooltip__row">
+        <FolderIcon className="project-path-tooltip__icon" aria-hidden />
+        <span className="project-path-tooltip__name">{title}</span>
+      </div>
+      <div className="project-path-tooltip__divider" />
+      <div className="project-path-tooltip__row project-path-tooltip__row--muted">
+        <FolderIcon className="project-path-tooltip__icon project-path-tooltip__icon--muted" aria-hidden />
+        <span className="project-path-tooltip__path" dir="ltr">{path}</span>
+      </div>
     </div>
   );
 }
@@ -1040,6 +1153,7 @@ export function ConversationSidebar({
       <div key={project.project_id} className="conversation-sidebar__group">
         <ProjectEntityRow
           title={project.name}
+          path={project.project_dir || undefined}
           isExpanded={expanded}
           isPinned={project.pinned}
           hideActions={isDefaultProject(project)}
@@ -1088,7 +1202,6 @@ export function ConversationSidebar({
           onClick={() => setWorkModeMenuOpen((open) => !open)}
           aria-haspopup="menu"
           aria-expanded={workModeMenuOpen}
-          disabled={Boolean(activeSessionId && runtimes[activeSessionId]?.isProcessing)}
         >
           <span>{workMode === 'code' ? t('codeMode.code') : t('codeMode.work')}</span>
           <ChevronDown size={15} className={workModeMenuOpen ? 'is-open' : ''} />

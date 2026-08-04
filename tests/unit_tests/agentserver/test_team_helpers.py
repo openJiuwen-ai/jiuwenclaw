@@ -3778,6 +3778,99 @@ async def test_broadcast_team_state_snapshot_noop_when_no_monitor(monkeypatch):
     assert broadcast_events == []
 
 
+@pytest.mark.anyio
+async def test_broadcast_team_state_snapshot_task_event_carries_title_content_and_flags(monkeypatch):
+    """The ``team.task.status_snapshot`` event must carry title/content and, when
+    the snapshot task dict carries truncation flags (added by
+    ``get_team_snapshot`` in T2.1), pass them through via ``t.get(...)`` so they
+    are present ONLY when the field was actually truncated (absent otherwise)."""
+    broadcast_events: list[dict] = []
+
+    long_title = "T" * 542  # > 512 → truncated
+    short_content = "do the research"  # ≤ 512 → not truncated
+
+    class _FakeMonitorHandler:
+        @staticmethod
+        async def get_team_snapshot():
+            # Mirror the shape produced by TeamMonitorHandler.get_team_snapshot
+            # after T2.1: title truncated + flags, content plain (no flags).
+            return {
+                "team_id": "team-snap-trunc",
+                "members": [],
+                "tasks": [
+                    {
+                        "task_id": "task-trunc",
+                        "team_name": "team-snap-trunc",
+                        "title": "T" * 512 + "…(truncated, total 542 chars)",
+                        "title_truncated": True,
+                        "title_original_size": 542,
+                        "content": short_content,
+                        "status": "in_progress",
+                        "assignee": "agent1",
+                        "updated_at": None,
+                    },
+                    {
+                        "task_id": "task-plain",
+                        "team_name": "team-snap-trunc",
+                        "title": "plain title",
+                        "content": "plain content",
+                        "status": "completed",
+                        "assignee": None,
+                        "updated_at": None,
+                    },
+                ],
+            }
+
+    class _FakeManager:
+        @staticmethod
+        def get_monitor_handler(session_id: str):
+            return _FakeMonitorHandler()
+
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
+    monkeypatch.setattr(
+        team_helpers,
+        "_broadcast_event",
+        lambda cid, sid, event: broadcast_events.append(event),
+    )
+    # _persist_team_history_event hits a real DB path; stub it to a no-op so
+    # the test stays isolated (production call unchanged).
+    monkeypatch.setattr(team_helpers, "_persist_team_history_event", lambda *args, **kwargs: None)
+
+    await team_helpers._broadcast_team_state_snapshot("web", "sess-snap-trunc")
+
+    task_events = [e for e in broadcast_events if e.get("event_type") == "team.task"]
+    assert len(task_events) == 2
+
+    # Truncated task: title/content ride along, flags ride along (present).
+    trunc_evt = task_events[0]["event"]
+    assert trunc_evt["type"] == "team.task.status_snapshot"
+    assert trunc_evt["task_id"] == "task-trunc"
+    assert trunc_evt["title"] == "T" * 512 + "…(truncated, total 542 chars)"
+    assert trunc_evt["content"] == short_content
+    assert trunc_evt["title_truncated"] is True
+    assert trunc_evt["title_original_size"] == 542
+    # content was NOT truncated in the source dict, so the source has no
+    # content_* flag keys. The broadcast uses ``t.get(...)`` (per spec) so
+    # the event carries them as ``None`` (falsy) — the frontend treats them
+    # as optional/truthy, so None is equivalent to "not truncated".
+    assert trunc_evt["content_truncated"] is None
+    assert trunc_evt["content_original_size"] is None
+    # Non-body fields still present.
+    assert trunc_evt["status"] == "in_progress"
+    assert trunc_evt["assignee"] == "agent1"
+
+    # Plain task: title/content ride along; flag keys present as None (t.get
+    # on a source dict that omits them). Frontend reads truthiness → falsy.
+    plain_evt = task_events[1]["event"]
+    assert plain_evt["task_id"] == "task-plain"
+    assert plain_evt["title"] == "plain title"
+    assert plain_evt["content"] == "plain content"
+    assert plain_evt["title_truncated"] is None
+    assert plain_evt["title_original_size"] is None
+    assert plain_evt["content_truncated"] is None
+    assert plain_evt["content_original_size"] is None
+
+
 # ---------------------------------------------------------------------------
 # swarmflow workflow.updated -> web team.member / team.task conversion
 # ---------------------------------------------------------------------------

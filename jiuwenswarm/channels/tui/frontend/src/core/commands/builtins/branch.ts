@@ -1,4 +1,3 @@
-import { generateSessionId } from "../../session-state.js";
 import { addCommandEcho, addError, addInfo } from "../helpers.js";
 import { CommandKind, type SlashCommand } from "../types.js";
 
@@ -40,16 +39,14 @@ export function createBranchCommand(): SlashCommand {
       }
 
       const customTitle = args.trim();
-      const targetId = generateSessionId();
-
       try {
         const payload = await ctx.request<SessionForkPayload>("session.fork", {
           source_session_id: ctx.sessionId,
-          target_session_id: targetId,
           title: customTitle || undefined,
         });
 
-        const forkSessionId = payload.session_id || targetId;
+        const forkSessionId = payload.session_id;
+        if (!forkSessionId) throw new Error("session.fork did not return a session id");
 
         const originalSessionId = ctx.sessionId;
         ctx.updateSession(forkSessionId);

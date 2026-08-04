@@ -23,9 +23,11 @@ from openjiuwen.agent_teams.runtime import RunActionKind
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.monitor import TeamStreamLogger
 from openjiuwen.core.runner import Runner
+from openjiuwen.core.common.logging import server_logger
 from openjiuwen.harness import DeepAgent
 
 from jiuwenswarm.agents.harness.team import TeamManager, get_team_manager
+from jiuwenswarm.common.log_preview import DEFAULT_PREVIEW_MAX_CHARS, preview_text
 from jiuwenswarm.common.cron_team_completion import (
     _cron_solo_harness_end_pending,
     _drain_cron_delegation_grace_events,
@@ -251,7 +253,7 @@ def _build_logical_targets(event: dict) -> list[dict]:
 def _is_followup_delivery_boundary_reason(reason: str | None) -> bool:
     """Return whether follow-up delivery likely hit a runtime boundary."""
     normalized = str(reason or "")
-    if normalized in {"gate_closed", "not_active"}:
+    if normalized in {"agent_unavailable", "gate_closed", "not_active"}:
         return True
     return normalized.startswith("deliver_to_leader_failed:")
 
@@ -517,10 +519,14 @@ def _resolve_request_language(request: Any) -> str:
     return "zh"
 
 
-def _safe_query_preview(query: Any, limit: int = 200) -> str:
-    if isinstance(query, str):
-        return query[:limit]
-    return str(query)[:limit]
+def _safe_query_preview(query: Any, limit: int = DEFAULT_PREVIEW_MAX_CHARS) -> str:
+    return preview_text(query, limit)
+
+
+# Parsed event types that carry text produced by a model, as opposed to the
+# framework control events (team.runtime_ready, tool.use, ...) that also travel
+# on the same stream.
+_MODEL_OUTPUT_EVENT_TYPES = frozenset({"chat.delta", "chat.final", "chat.reasoning"})
 
 
 def _normalize_team_query(query: Any, *, channel_id: str | None, language: str) -> Any:
@@ -969,6 +975,12 @@ async def _broadcast_team_state_snapshot(
                     "task_id": t["task_id"],
                     "status": t["status"],
                     "assignee": t.get("assignee"),
+                    "title": t.get("title"),
+                    "content": t.get("content"),
+                    "title_truncated": t.get("title_truncated"),
+                    "title_original_size": t.get("title_original_size"),
+                    "content_truncated": t.get("content_truncated"),
+                    "content_original_size": t.get("content_original_size"),
                 },
             }
             _persist_team_history_event(channel_id, session_id, event)
@@ -1483,6 +1495,10 @@ async def process_team_message_stream(
             )
         if isinstance(getattr(request, "params", None), dict):
             request_metadata.setdefault("mode", request.params.get("mode"))
+            request_metadata.setdefault(
+                "supports_user_interaction",
+                request.params.get("supports_user_interaction") is not False,
+            )
         resolved_mode = str(request_metadata.get("mode") or "").strip()
         # Page-selected model name (from chat page model selector). Used as a
         # fallback for team members whose ``modes.team.agents.*.model`` is not
@@ -1914,6 +1930,7 @@ async def _consume_stream_with_query(
     _envs = envs or {}
     hide_dm: bool = bool(_envs.get("hide_dm", False))
     received_chunks = 0
+    first_model_output_at: float | None = None
     emitted_ask_user_request_ids: set[str] = set()
     # Reset the team-events flag at the start of a new round so chat.final
     # can correctly determine whether the team is active.
@@ -1949,6 +1966,16 @@ async def _consume_stream_with_query(
             traces_dir = get_agent_teams_home() / "traces"
             traces_dir.mkdir(parents=True, exist_ok=True)
             lg = TeamStreamLogger(file_path=str(traces_dir / f"dump-team-{session_id}.txt"))
+        # Last stop before the message enters the team runner streaming path.
+        server_logger.info(
+            "[AgentServer] team message entering runner streaming: channel_id=%s session_id=%s"
+            " round_id=%s query=%s",
+            _resolve_channel_id(channel_id),
+            session_id,
+            round_id,
+            _safe_query_preview(initial_query),
+        )
+        runner_entered_at = time.monotonic()
         async for chunk in Runner.run_agent_team_streaming(
             agent_team=team_spec,
             inputs={"query": initial_query},
@@ -1957,6 +1984,20 @@ async def _consume_stream_with_query(
             stream_logger=lg,
         ):
             received_chunks += 1
+            # First event of any kind from the runner — usually a framework
+            # control event (team.runtime_ready and friends), not model output.
+            # It marks how long team startup took before the stream came alive.
+            if received_chunks == 1:
+                server_logger.info(
+                    "[AgentServer] team runner streaming first event: channel_id=%s session_id=%s"
+                    " round_id=%s elapsed_ms=%.1f role=%s type=%s",
+                    _resolve_channel_id(channel_id),
+                    session_id,
+                    round_id,
+                    (time.monotonic() - runner_entered_at) * 1000,
+                    getattr(chunk, "role", None),
+                    getattr(chunk, "type", None),
+                )
             # 诊断：每 30 个 chunk 或首个 chunk 时打印进度
             if received_chunks == 1 or received_chunks % 30 == 0:
                 _role = getattr(chunk, "role", None)
@@ -1984,6 +2025,21 @@ async def _consume_stream_with_query(
                 continue
             parsed = parse_stream_chunk(chunk)
             if parsed is not None:
+                # Time to first token: the first frame actually produced by a
+                # model (reasoning counts — on a thinking model it comes first).
+                if first_model_output_at is None and parsed.get("event_type") in _MODEL_OUTPUT_EVENT_TYPES:
+                    first_model_output_at = time.monotonic()
+                    server_logger.info(
+                        "[AgentServer] team runner first model output: channel_id=%s session_id=%s"
+                        " round_id=%s elapsed_ms=%.1f received=%s event_type=%s role=%s",
+                        _resolve_channel_id(channel_id),
+                        session_id,
+                        round_id,
+                        (first_model_output_at - runner_entered_at) * 1000,
+                        received_chunks,
+                        parsed.get("event_type"),
+                        parsed.get("role") or getattr(chunk, "role", None),
+                    )
                 if not is_leader and parsed.get("event_type") == "chat.reasoning":
                     continue
                 if _is_duplicate_ask_user_question(parsed, emitted_ask_user_request_ids):
