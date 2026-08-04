@@ -861,6 +861,19 @@ def apply_iptables_rules(
     _apply_ingress_rules(ingress_rules, namespace=namespace)
 
 
+def flush_filter_rules(namespace: str | None = None) -> None:
+    """Flush filter-table INPUT/OUTPUT chains inside a network namespace.
+
+    Resets chain policies to ACCEPT so a subsequent
+    :func:`setup_network_isolation` can rebuild rules from scratch.
+    Does not touch NAT/FORWARD or host-side uplink rules.
+    """
+    for chain in ("INPUT", "OUTPUT"):
+        _run_iptables_both(["-F", chain], namespace=namespace)
+        _run_iptables_both(["-P", chain, "ACCEPT"], namespace=namespace)
+    logger.info("Flushed filter INPUT/OUTPUT rules in namespace %s", namespace or "current")
+
+
 def setup_network_isolation(policy: NetworkPolicy, namespace: str | None = None) -> None:
     """Top-level entry point for network isolation setup.
 
@@ -874,3 +887,18 @@ def setup_network_isolation(policy: NetworkPolicy, namespace: str | None = None)
     egress_rules = build_network_rules(policy.egress)
     ingress_rules = build_network_rules(policy.ingress)
     apply_iptables_rules(egress_rules, ingress_rules, namespace=namespace)
+
+
+def replace_network_isolation(policy: NetworkPolicy, namespace: str | None = None) -> None:
+    """Replace egress/ingress iptables rules in an existing network namespace.
+
+    Flushes the current filter INPUT/OUTPUT chains, then reapplies rules
+    from ``policy`` the same way :func:`setup_network_isolation` does at
+    create time. Host-side NAT/uplink state is left untouched.
+    """
+    if policy.mode == NetworkMode.HOST:
+        logger.info("Network mode is 'host', skipping isolation replace")
+        return
+
+    flush_filter_rules(namespace=namespace)
+    setup_network_isolation(policy, namespace=namespace)

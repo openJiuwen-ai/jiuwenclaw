@@ -1248,6 +1248,498 @@ class TestPolicyAPI:
         assert SANDBOX_WORKSPACE in resp.json()["error"]
 
 
+class TestUpdatePolicyAPI:
+    """End-to-end coverage for ``PUT /policies`` and ``PUT /policies/{id}``.
+
+    Exercises real HTTP → policy merge/persist → live iptables replacement
+    inside isolated netns, following the same patterns as
+    ``TestPolicyEnforcement`` network tests.
+    """
+
+    @staticmethod
+    def _minimal_isolated_policy(**network_extra) -> dict:
+        network = {
+            "mode": "isolated",
+            "egress": {"default": "allow"},
+            "ingress": {"default": "allow"},
+        }
+        network.update(network_extra)
+        return {
+            "name": "update-policy-test",
+            "filesystem_policy": {
+                "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
+                "read_write": ["/tmp"],
+            },
+            "network": network,
+        }
+
+    @staticmethod
+    def test_put_policy_override_round_trips(client, create_sandbox_with_policy):
+        sandbox = create_sandbox_with_policy(
+            policy=TestUpdatePolicyAPI._minimal_isolated_policy(),
+        )
+        before = client.get(f"/api/v1/policies/{sandbox['id']}").json()
+
+        put_resp = client.put(f"/api/v1/policies/{sandbox['id']}", json={
+            "policy_mode": "override",
+            "policy": {
+                "network": {
+                    "egress": {
+                        "default": "deny",
+                        "allowed_domains": ["example.com"],
+                        "allowed_ips": ["198.51.100.10/32"],
+                        "allowed_ports": [443],
+                    },
+                    "ingress": {
+                        "default": "allow",
+                        "allowed_ports": [9090],
+                        "blocked_ports": [22],
+                    },
+                },
+            },
+        })
+        assert put_resp.status_code == 200, put_resp.text
+        put_data = put_resp.json()
+        assert put_data["network"]["egress"]["default"] == "deny"
+        assert put_data["network"]["egress"]["allowed_domains"] == ["example.com"]
+        assert put_data["network"]["egress"]["allowed_ips"] == ["198.51.100.10/32"]
+        assert put_data["network"]["egress"]["allowed_ports"] == [443]
+        assert put_data["network"]["ingress"]["allowed_ports"] == [9090]
+        assert put_data["network"]["ingress"]["blocked_ports"] == [22]
+        assert put_data["network"]["mode"] == "isolated"
+        assert put_data["filesystem_policy"] == before["filesystem_policy"]
+        assert put_data["name"] == before["name"]
+
+        get_resp = client.get(f"/api/v1/policies/{sandbox['id']}")
+        assert get_resp.status_code == 200
+        assert get_resp.json()["network"]["egress"] == put_data["network"]["egress"]
+        assert get_resp.json()["network"]["ingress"] == put_data["network"]["ingress"]
+
+    @staticmethod
+    def test_put_policy_append_merges_lists(client, create_sandbox_with_policy):
+        sandbox = create_sandbox_with_policy(
+            policy=TestUpdatePolicyAPI._minimal_isolated_policy(
+                egress={
+                    "default": "allow",
+                    "allowed_domains": ["baidu.com"],
+                    "allowed_ips": ["203.0.113.10/32"],
+                },
+                ingress={
+                    "default": "allow",
+                    "allowed_ports": [8080],
+                },
+            ),
+        )
+
+        put_resp = client.put(f"/api/v1/policies/{sandbox['id']}", json={
+            "policy_mode": "append",
+            "policy": {
+                "network": {
+                    "egress": {
+                        "default": "deny",
+                        "allowed_domains": ["example.com", "baidu.com"],
+                        "allowed_ips": ["198.51.100.10/32"],
+                    },
+                    "ingress": {
+                        "allowed_ports": [9090, 8080],
+                    },
+                },
+            },
+        })
+        assert put_resp.status_code == 200, put_resp.text
+        data = put_resp.json()
+        assert data["network"]["egress"]["default"] == "deny"
+        assert data["network"]["egress"]["allowed_domains"] == [
+            "baidu.com",
+            "example.com",
+        ]
+        assert data["network"]["egress"]["allowed_ips"] == [
+            "203.0.113.10/32",
+            "198.51.100.10/32",
+        ]
+        assert data["network"]["ingress"]["allowed_ports"] == [8080, 9090]
+
+    @staticmethod
+    def test_put_policy_live_egress_block_takes_effect(
+        client,
+        create_sandbox_with_policy,
+    ):
+        blocked_ip = socket.gethostbyname("www.baidu.com")
+        sandbox = create_sandbox_with_policy(
+            policy=TestUpdatePolicyAPI._minimal_isolated_policy(),
+        )
+
+        script = textwrap.dedent(
+            """
+            import sys
+            import socket
+
+            ip = sys.argv[1]
+            with socket.create_connection((ip, 443), timeout=10):
+                pass
+            print("connected-ok")
+            """
+        ).strip()
+        before = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec", json={
+            "command": ["python3", "-c", script, blocked_ip],
+            "timeout_seconds": 15,
+        })
+        assert before.status_code == 200
+        assert before.json()["exit_code"] == 0, before.json()
+        assert "connected-ok" in before.json()["stdout"]
+
+        put_resp = client.put(f"/api/v1/policies/{sandbox['id']}", json={
+            "policy_mode": "override",
+            "policy": {
+                "network": {
+                    "egress": {
+                        "default": "allow",
+                        "blocked_ips": [f"{blocked_ip}/32"],
+                    },
+                },
+            },
+        })
+        assert put_resp.status_code == 200, put_resp.text
+
+        after = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec", json={
+            "command": ["python3", "-c", script, blocked_ip],
+            "timeout_seconds": 15,
+        })
+        assert after.status_code == 200
+        data = after.json()
+        assert data["exit_code"] != 0, data
+        assert "connected-ok" not in data["stdout"]
+
+    @staticmethod
+    def test_put_policy_live_ingress_block_takes_effect(
+        client,
+        create_sandbox_with_policy,
+    ):
+        sandbox = create_sandbox_with_policy(
+            policy=TestUpdatePolicyAPI._minimal_isolated_policy(
+                ingress={
+                    "default": "deny",
+                    "allowed_ports": [18091],
+                },
+            ),
+        )
+
+        allow_resp = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec", json={
+            "command": [
+                "python3", "-c", _loopback_ingress_script(True), "18091",
+            ],
+            "timeout_seconds": 10,
+        })
+        assert allow_resp.status_code == 200
+        assert allow_resp.json()["exit_code"] == 0, allow_resp.json()
+        assert "ingress-ok" in allow_resp.json()["stdout"]
+
+        put_resp = client.put(f"/api/v1/policies/{sandbox['id']}", json={
+            "policy_mode": "override",
+            "policy": {
+                "network": {
+                    "ingress": {
+                        "default": "allow",
+                        "blocked_ports": [18091],
+                    },
+                },
+            },
+        })
+        assert put_resp.status_code == 200, put_resp.text
+
+        block_resp = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec", json={
+            "command": [
+                "python3", "-c", _loopback_ingress_script(False), "18091",
+            ],
+            "timeout_seconds": 10,
+        })
+        assert block_resp.status_code == 200
+        data = block_resp.json()
+        assert data["exit_code"] != 0, data
+        assert "unexpected-success" not in data["stdout"]
+
+    @staticmethod
+    def test_put_policy_stopped_sandbox_persists_until_start(
+        client,
+        create_sandbox_with_policy,
+    ):
+        blocked_ip = socket.gethostbyname("www.baidu.com")
+        sandbox = create_sandbox_with_policy(
+            policy=TestUpdatePolicyAPI._minimal_isolated_policy(),
+        )
+
+        stop_resp = client.post(f"/api/v1/sandboxes/{sandbox['id']}/stop")
+        assert stop_resp.status_code == 200, stop_resp.text
+        assert stop_resp.json()["phase"] == "stopped"
+
+        put_resp = client.put(f"/api/v1/policies/{sandbox['id']}", json={
+            "policy_mode": "override",
+            "policy": {
+                "network": {
+                    "egress": {
+                        "default": "allow",
+                        "blocked_ips": [f"{blocked_ip}/32"],
+                    },
+                },
+            },
+        })
+        assert put_resp.status_code == 200, put_resp.text
+        get_resp = client.get(f"/api/v1/policies/{sandbox['id']}")
+        assert get_resp.status_code == 200
+        assert get_resp.json()["network"]["egress"]["blocked_ips"] == [
+            f"{blocked_ip}/32",
+        ]
+
+        start_resp = client.post(f"/api/v1/sandboxes/{sandbox['id']}/start")
+        assert start_resp.status_code == 200, start_resp.text
+        assert start_resp.json()["phase"] == "ready"
+
+        script = textwrap.dedent(
+            """
+            import sys
+            import socket
+
+            ip = sys.argv[1]
+            with socket.create_connection((ip, 443), timeout=10):
+                pass
+            print("unexpected-success")
+            """
+        ).strip()
+        exec_resp = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec", json={
+            "command": ["python3", "-c", script, blocked_ip],
+            "timeout_seconds": 15,
+        })
+        assert exec_resp.status_code == 200
+        data = exec_resp.json()
+        assert data["exit_code"] != 0, data
+        assert "unexpected-success" not in data["stdout"]
+
+    @staticmethod
+    def test_put_policy_rejects_host_mode(client, create_sandbox_with_policy):
+        sandbox = create_sandbox_with_policy(
+            policy={
+                "name": "host-update-reject",
+                "filesystem_policy": {
+                    "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
+                    "read_write": ["/tmp"],
+                },
+                "network": {
+                    "mode": "host",
+                    "egress": {"default": "allow"},
+                },
+            },
+        )
+        before = client.get(f"/api/v1/policies/{sandbox['id']}").json()
+
+        put_resp = client.put(f"/api/v1/policies/{sandbox['id']}", json={
+            "policy": {
+                "network": {
+                    "egress": {"default": "deny"},
+                },
+            },
+        })
+        assert put_resp.status_code == 400, put_resp.text
+        assert put_resp.json()["error"] == (
+            f"Cannot update network rules for sandbox '{sandbox['id']}': "
+            "network.mode is 'host' "
+            "(only isolated sandboxes support dynamic network updates)"
+        )
+
+        after = client.get(f"/api/v1/policies/{sandbox['id']}").json()
+        assert after["network"]["egress"] == before["network"]["egress"]
+
+    @staticmethod
+    def test_put_policy_rejects_unsupported_fields(client, create_sandbox_with_policy):
+        sandbox = create_sandbox_with_policy(
+            policy=TestUpdatePolicyAPI._minimal_isolated_policy(),
+        )
+
+        fs_resp = client.put(f"/api/v1/policies/{sandbox['id']}", json={
+            "policy": {
+                "filesystem_policy": {"read_write": ["/tmp"]},
+                "network": {"egress": {"default": "allow"}},
+            },
+        })
+        assert fs_resp.status_code == 400, fs_resp.text
+        assert fs_resp.json()["error"] == (
+            "Only 'policy.network' updates are supported in this API; "
+            "unsupported fields: ['filesystem_policy']"
+        )
+
+        mode_resp = client.put(f"/api/v1/policies/{sandbox['id']}", json={
+            "policy": {
+                "network": {
+                    "mode": "host",
+                    "egress": {"default": "allow"},
+                },
+            },
+        })
+        assert mode_resp.status_code == 400, mode_resp.text
+        assert mode_resp.json()["error"] == (
+            "Only network.egress/ingress can be updated dynamically; "
+            "unsupported fields: ['mode']"
+        )
+
+        uplink_resp = client.put(f"/api/v1/policies/{sandbox['id']}", json={
+            "policy": {
+                "network": {
+                    "uplink": {"nat": True},
+                    "egress": {"default": "allow"},
+                },
+            },
+        })
+        assert uplink_resp.status_code == 400, uplink_resp.text
+        assert uplink_resp.json()["error"] == (
+            "Only network.egress/ingress can be updated dynamically; "
+            "unsupported fields: ['uplink']"
+        )
+
+        empty_resp = client.put(f"/api/v1/policies/{sandbox['id']}", json={
+            "policy": {"network": {}},
+        })
+        assert empty_resp.status_code == 400, empty_resp.text
+        assert empty_resp.json()["error"] == (
+            "At least one of network.egress or network.ingress is required"
+        )
+
+    @staticmethod
+    def test_put_policy_nonexistent_sandbox(client):
+        resp = client.put("/api/v1/policies/nonexistent-sb", json={
+            "policy": {
+                "network": {
+                    "egress": {"default": "allow"},
+                },
+            },
+        })
+        assert resp.status_code == 404
+        assert resp.json()["error"] == "Sandbox 'nonexistent-sb' not found"
+
+    @staticmethod
+    def test_put_policies_updates_all_isolated(
+        client,
+        create_sandbox_with_policy,
+    ):
+        blocked_ip = socket.gethostbyname("www.baidu.com")
+        sb1 = create_sandbox_with_policy(
+            policy=TestUpdatePolicyAPI._minimal_isolated_policy(),
+        )
+        sb2 = create_sandbox_with_policy(
+            policy=TestUpdatePolicyAPI._minimal_isolated_policy(),
+        )
+
+        put_resp = client.put("/api/v1/policies", json={
+            "policy_mode": "override",
+            "policy": {
+                "network": {
+                    "egress": {
+                        "default": "allow",
+                        "blocked_ips": [f"{blocked_ip}/32"],
+                    },
+                },
+            },
+        })
+        assert put_resp.status_code == 200, put_resp.text
+        result = put_resp.json()
+        assert set(result["updated"]) >= {sb1["id"], sb2["id"]}
+        assert result["failed"] == []
+
+        for sandbox_id in (sb1["id"], sb2["id"]):
+            get_resp = client.get(f"/api/v1/policies/{sandbox_id}")
+            assert get_resp.status_code == 200
+            assert get_resp.json()["network"]["egress"]["blocked_ips"] == [
+                f"{blocked_ip}/32",
+            ]
+
+        script = textwrap.dedent(
+            """
+            import sys
+            import socket
+
+            ip = sys.argv[1]
+            with socket.create_connection((ip, 443), timeout=10):
+                pass
+            print("unexpected-success")
+            """
+        ).strip()
+        exec_resp = client.post(f"/api/v1/sandboxes/{sb1['id']}/exec", json={
+            "command": ["python3", "-c", script, blocked_ip],
+            "timeout_seconds": 15,
+        })
+        assert exec_resp.status_code == 200
+        data = exec_resp.json()
+        assert data["exit_code"] != 0, data
+        assert "unexpected-success" not in data["stdout"]
+
+    @staticmethod
+    def test_put_policies_skips_host_mode(
+        client,
+        create_sandbox_with_policy,
+    ):
+        isolated = create_sandbox_with_policy(
+            policy=TestUpdatePolicyAPI._minimal_isolated_policy(),
+        )
+        host = create_sandbox_with_policy(
+            policy={
+                "name": "host-batch-skip",
+                "filesystem_policy": {
+                    "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
+                    "read_write": ["/tmp"],
+                },
+                "network": {
+                    "mode": "host",
+                    "egress": {"default": "allow"},
+                },
+            },
+        )
+        host_before = client.get(f"/api/v1/policies/{host['id']}").json()
+
+        put_resp = client.put("/api/v1/policies", json={
+            "policy_mode": "override",
+            "policy": {
+                "network": {
+                    "egress": {
+                        "default": "deny",
+                        "allowed_ips": ["127.0.0.1/32"],
+                    },
+                },
+            },
+        })
+        assert put_resp.status_code == 200, put_resp.text
+        result = put_resp.json()
+        assert isolated["id"] in result["updated"]
+        assert {
+            "sandbox_id": host["id"],
+            "reason": "network.mode is host",
+        } in result["skipped"]
+
+        isolated_after = client.get(f"/api/v1/policies/{isolated['id']}").json()
+        assert isolated_after["network"]["egress"]["default"] == "deny"
+        host_after = client.get(f"/api/v1/policies/{host['id']}").json()
+        assert host_after["network"]["egress"] == host_before["network"]["egress"]
+
+    @staticmethod
+    def test_put_policies_empty_when_no_sandboxes(client):
+        # Clean any tracked leftovers from prior assertions in this process
+        # so the batch endpoint sees an empty registry for this request.
+        list_resp = client.get("/api/v1/sandboxes")
+        assert list_resp.status_code == 200
+        for item in list_resp.json():
+            client.delete(f"/api/v1/sandboxes/{item['id']}")
+
+        put_resp = client.put("/api/v1/policies", json={
+            "policy": {
+                "network": {
+                    "egress": {"default": "allow"},
+                },
+            },
+        })
+        assert put_resp.status_code == 200, put_resp.text
+        result = put_resp.json()
+        assert result["updated"] == []
+        assert result["skipped"] == []
+        assert result["failed"] == []
+
+
 @pytest.fixture
 def restore_timeout(client):
     """Snapshot the server-level timeout config and restore it on teardown.

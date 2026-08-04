@@ -33,7 +33,7 @@ from typing import Any
 import yaml
 
 from jiuwenbox.logging_config import configure_logging
-from jiuwenbox.models.policy import NetworkMode, SecurityPolicy
+from jiuwenbox.models.policy import NetworkMode, NetworkPolicy, SecurityPolicy
 from jiuwenbox.models.sandbox import (
     BackgroundExecResult,
     BackgroundJobStatus,
@@ -2208,6 +2208,47 @@ class ProcessRuntime(RuntimeAdapter):
         if proc is None:
             return False
         return proc.poll() is None
+
+    async def update_network_policy(
+        self,
+        sandbox_id: str,
+        network_policy: NetworkPolicy,
+    ) -> None:
+        """Hot-replace egress/ingress iptables rules for a running sandbox.
+
+        Requires an existing named network namespace (``network.mode: isolated``).
+        Updates the in-memory runtime policy cache so subsequent restarts that
+        reload from disk stay consistent with the manager's written YAML.
+        """
+        if network_policy.mode != NetworkMode.ISOLATED:
+            raise RuntimeError(
+                f"Cannot hot-update network rules for sandbox '{sandbox_id}': "
+                f"network.mode is '{network_policy.mode.value}' (requires isolated)"
+            )
+
+        namespace = self._netns_names.get(
+            sandbox_id,
+            network_module.netns_name_for_sandbox(sandbox_id),
+        )
+        if not network_module.namespace_exists(namespace):
+            raise RuntimeError(
+                f"Cannot hot-update network rules for sandbox '{sandbox_id}': "
+                f"network namespace '{namespace}' does not exist"
+            )
+
+        cached = self._runtime_policies.get(sandbox_id)
+        if cached is not None:
+            self._runtime_policies[sandbox_id] = cached.model_copy(
+                update={"network": network_policy},
+            )
+
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None,
+            network_module.replace_network_isolation,
+            network_policy,
+            namespace,
+        )
 
     def get_exit_diagnostics(self, sandbox_id: str) -> str:
         """Return diagnostics for a sandbox whose lifecycle process is not running.

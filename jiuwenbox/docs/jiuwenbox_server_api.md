@@ -863,6 +863,98 @@ print(resp.json())
 }
 ```
 
+### 更新单个沙箱网络策略
+
+接口：`PUT /api/v1/policies/{sandbox_id}`
+
+用途：动态更新指定沙箱的 `network.egress` / `network.ingress`。
+请求体字段与创建沙箱一致（`policy` + `policy_mode`）。
+本期仅支持改 ingress/egress；`network.mode` / `uplink` 以及其它 policy 段会返回 400。
+对 `network.mode: isolated` 且正在运行的沙箱会热更新 netns 内 iptables；已停止的沙箱只落盘，下次 start 生效。`host` 模式返回 400。
+
+请求字段：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `policy` | object | 是 | 本期须含 `network`，且 `egress` / `ingress` 至少提供一个 |
+| `policy_mode` | string | 否 | `override`（默认）或 `append`，语义与创建沙箱相同 |
+
+Python 请求示例：
+
+```python
+import requests
+
+sandbox_id = "abc123def456"
+resp = requests.put(
+    f"http://127.0.0.1:8321/api/v1/policies/{sandbox_id}",
+    json={
+        "policy_mode": "override",
+        "policy": {
+            "network": {
+                "egress": {
+                    "default": "allow",
+                    "blocked_ips": ["198.51.100.10/32"],
+                },
+                "ingress": {
+                    "default": "allow",
+                    "blocked_ports": [8080],
+                },
+            },
+        },
+    },
+    timeout=30,
+)
+print(resp.status_code)
+print(resp.json())
+```
+
+成功时返回更新后的完整 `SecurityPolicy` JSON（与 `GET /policies/{sandbox_id}` 同形）。
+
+### 批量更新所有沙箱网络策略
+
+接口：`PUT /api/v1/policies`
+
+用途：对当前所有已注册沙箱应用与单沙箱接口相同的网络规则更新。
+不修改 server 默认 policy。请求体非法时整请求 400，不落任何沙箱。
+`host` 模式沙箱记入 `skipped`；单个沙箱热更新失败记入 `failed`，不阻断其余沙箱。
+
+请求体与 `PUT /api/v1/policies/{sandbox_id}` 相同。
+
+Python 请求示例：
+
+```python
+import requests
+
+resp = requests.put(
+    "http://127.0.0.1:8321/api/v1/policies",
+    json={
+        "policy_mode": "append",
+        "policy": {
+            "network": {
+                "egress": {
+                    "blocked_ips": ["203.0.113.50/32"],
+                },
+            },
+        },
+    },
+    timeout=30,
+)
+print(resp.status_code)
+print(resp.json())
+```
+
+响应示例：
+
+```json
+{
+  "updated": ["sb-1", "sb-2"],
+  "skipped": [
+    {"sandbox_id": "sb-host", "reason": "network.mode is host"}
+  ],
+  "failed": []
+}
+```
+
 ### 查询 timeout 配置
 
 接口：`GET /api/v1/timeout`
