@@ -805,6 +805,7 @@ class XiaoyiChannel(BaseChannel):
 
         content = ""
         cron_job_name = ""
+        cron_job_id = ""
         if isinstance(msg.payload, dict):
             content = msg.payload.get("content", "\n")
             if msg.event_type == EventType.CHAT_ERROR:
@@ -813,7 +814,10 @@ class XiaoyiChannel(BaseChannel):
             if isinstance(content, dict):
                 content = content.get("output", str(content))
             content = str(content)
-            cron_job_name = msg.payload.get("cron", {}).get("job_name", "")
+            cron_block = msg.payload.get("cron", {})
+            if isinstance(cron_block, dict):
+                cron_job_name = str(cron_block.get("job_name") or "")
+                cron_job_id = str(cron_block.get("job_id") or "")
         elif msg.payload:
             content = str(msg.payload)
 
@@ -827,7 +831,74 @@ class XiaoyiChannel(BaseChannel):
 
         # 推送消息发送
         if msg.id.startswith("cron-push"):
-            await self._send_push_notification(cron_job_name, content)
+            # 与 xy_channel cron-buffer.ts flushBufferedTexts + outbound.ts sendText 对齐：
+            # 1. 持久化全文到 pushData（客户端 Trigger 回查看全文，不受截断影响）
+            # 2. 经 push_broadcast 向所有已注册 pushId 广播（单 pushId 失败不影响其他）
+            # pushDataId 为空时回落 kind="text" 内联，行为同现状。
+            push_text = content[:1000] if len(content) > 1000 else content
+            title = content.split("\n")[0][:57] if content else ""
+            push_data_id = ""
+            try:
+                from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools.pushdata_manager import (
+                    save_push_data,
+                )
+                cron_meta = None
+                if cron_job_id or cron_job_name:
+                    cron_meta = {
+                        "cronJobId": cron_job_id,
+                        "cronTitle": cron_job_name,
+                    }
+                push_data_id = save_push_data(content, cron_meta)
+                logger.info(
+                    "[CRON-PUSH] Saved pushData: pushDataId=%s cronId=%s cronTitle=%s",
+                    push_data_id[:8] if push_data_id else "-",
+                    cron_job_id or "-",
+                    cron_job_name or "-",
+                )
+            except Exception as save_err:
+                logger.error(
+                    "[CRON-PUSH] Failed to save pushData: %s", save_err
+                )
+
+            try:
+                from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.xiaoyi_utils.push import (
+                    PushConfig as _PushConfig,
+                    push_broadcast,
+                )
+                push_config = _PushConfig(
+                    mode=self.config.mode,
+                    api_id=self.config.api_id,
+                    push_id=self.config.push_id,
+                    push_url=self.config.push_url,
+                    ak=self.config.ak,
+                    sk=self.config.sk,
+                    uid=self.config.uid,
+                    api_key=self.config.api_key,
+                )
+                result = await push_broadcast(
+                    config=push_config,
+                    text=push_text,
+                    title=title or cron_job_name or "任务已完成",
+                    to=str(session_id or ""),
+                    push_data_id=push_data_id,
+                    cron_job_id=cron_job_id or None,
+                    cron_title=cron_job_name or None,
+                )
+                logger.info(
+                    "[CRON-PUSH] push_broadcast done: success=%d failure=%d cronId=%s",
+                    result.success_count,
+                    result.failure_count,
+                    cron_job_id or "-",
+                )
+            except Exception as push_err:
+                logger.error(
+                    "[CRON-PUSH] push_broadcast failed, fallback to single push: %s",
+                    push_err,
+                )
+                # 回退到原有的单 pushId 推送，保证推送不丢
+                await self._send_push_notification(
+                    cron_job_name or title, content
+                )
             return
 
         # 如果禁用流式，总是作为完整消息发送
@@ -1291,6 +1362,123 @@ class XiaoyiChannel(BaseChannel):
         except Exception as exc:
             logger.warning("[XiaoyiChannel] CronQuery handling error: %s", exc)
 
+        # ── Cron Trigger detection (Common/Trigger, triggerType=event) ──
+        # 设备端 cron 到时间后，通过 WS 发来报文1（含 Common/Trigger 事件，
+        # payload.dataMap 含 cronId/cronTitle/pushDataId）。我们识别后触发
+        # 对应 cron job 执行，等结果产出，再通过 WS 回发正常 a2a 文本消息
+        # （kind: "text" 的 artifact-update），与普通消息流一致。
+        # 与 CronQuery 同层，在 _handle_message_stream 之前拦截。
+        try:
+            from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.cron_trigger_handler import (
+                extract_cron_trigger,
+            )
+            from jiuwenswarm.gateway.cron.controller import CronController
+
+            trigger_ctx = extract_cron_trigger(message)
+            if trigger_ctx is not None:
+                logger.info(
+                    "[XiaoyiChannel][CronTrigger_IN] cronId=%s cronTitle=%s "
+                    "pushDataId=%s session=%s conversation=%s agent=%s "
+                    "rpc_id=%s task_id=%s",
+                    trigger_ctx.cron_id,
+                    trigger_ctx.cron_title,
+                    trigger_ctx.push_data_id,
+                    trigger_ctx.session_id,
+                    trigger_ctx.conversation_id,
+                    trigger_ctx.agent_id,
+                    trigger_ctx.rpc_id,
+                    trigger_ctx.task_id,
+                )
+                try:
+                    cc = CronController.get_instance()
+                except RuntimeError:
+                    cc = None
+
+                result_text = ""
+                run_id = ""
+                if cc is not None:
+                    try:
+                        run_id, result_text = await cc.run_now_and_wait(
+                            trigger_ctx.cron_id
+                        )
+                        logger.info(
+                            "[XiaoyiChannel][CronTrigger_DONE] cronId=%s run_id=%s "
+                            "result_len=%d",
+                            trigger_ctx.cron_id,
+                            run_id,
+                            len(result_text or ""),
+                        )
+                    except Exception as run_exc:
+                        logger.warning(
+                            "[XiaoyiChannel][CronTrigger_RUN_ERROR] cronId=%s "
+                            "error=%s",
+                            trigger_ctx.cron_id,
+                            run_exc,
+                        )
+                        result_text = f"[cron] 任务执行失败: {run_exc}"
+
+                if not result_text:
+                    result_text = "[cron] 任务完成，但未返回可展示文本"
+
+                # 用正常 a2a 文本消息回发（kind: "text"），与 _send_text_response 一致
+                if url_key:
+                    try:
+                        await self._send_text_response(
+                            trigger_ctx.session_id,
+                            trigger_ctx.task_id,
+                            result_text,
+                            url_key,
+                        )
+                        logger.info(
+                            "[XiaoyiChannel][CronTrigger_SENT] cronId=%s "
+                            "session=%s result_len=%d",
+                            trigger_ctx.cron_id,
+                            trigger_ctx.session_id,
+                            len(result_text),
+                        )
+                    except Exception as send_err:
+                        logger.warning(
+                            "[XiaoyiChannel][CronTrigger_SEND_ERROR] cronId=%s "
+                            "error=%s",
+                            trigger_ctx.cron_id,
+                            send_err,
+                        )
+                return  # CronTrigger handled; do not fall through to message dispatch
+        except ImportError:
+            logger.debug("[XiaoyiChannel] cron_trigger_handler not available, skipping CronTrigger detection")
+        except Exception as exc:
+            logger.warning("[XiaoyiChannel] CronTrigger handling error: %s", exc)
+
+        # ── Common/Trigger detection (用户点击推送消息触发) ──────────
+        # 设备端用户点击定时任务的推送消息时，通过 WS 发来含 Common/Trigger
+        # 事件的报文（payload.dataMap 含 pushDataId）。识别后直接读取预存的
+        # pushData 内容，构造标准 a2a 文本消息（kind: "text" 的 artifact-update）
+        # 通过 WS 回发，不走正常 agent 流程。与 xy_channel bot.ts Trigger 分支
+        # + formatter.ts sendA2AResponse 对齐。与上方 CronTrigger（System/UnfinishedTask，
+        # 设备 cron 到点自动触发并执行 job）的区别：本分支是用户主动点击、
+        # 直接返回缓存内容、不执行 cron job。
+        try:
+            from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools.trigger_handler import (
+                handle_trigger_event,
+            )
+
+            async def _send_trigger_wrapper(wrapper: dict[str, Any]) -> None:
+                logger.info("url_key %s wrapper %s", url_key, json.dumps(wrapper))
+                if url_key:
+                    await self._safe_ws_send(url_key, wrapper)
+
+            handled = await handle_trigger_event(
+                message,
+                _send_trigger_wrapper,
+                agent_id=self.config.agent_id,
+            )
+            if handled:
+                return  # Common/Trigger handled; do not fall through to message dispatch
+        except ImportError:
+            logger.debug("[XiaoyiChannel] trigger_handler not available, skipping Common/Trigger detection")
+        except Exception as exc:
+            logger.warning("[XiaoyiChannel] Common/Trigger handling error: %s", exc)
+
         # MemoryQuery is a command data event (direct or wrapped A2A), not a
         # normal user message. Consume it before the generic data-event parser.
         from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.memory_query import (
@@ -1426,6 +1614,22 @@ class XiaoyiChannel(BaseChannel):
                 if isinstance(data, dict):
                     push_id = data.get("variables", {}).get("systemVariables", {}).get("push_id", "")
                     self.config.push_id = push_id if push_id else self.config.push_id
+                    # 持久化 pushId 到本地 pushIdList.json（异步，不阻塞主流程），
+                    # 供 pushBroadcast 向所有已注册 pushId 广播。对应 xy_channel
+                    # 的 utils/pushid-manager.ts addPushId 调用。
+                    if push_id:
+                        try:
+                            from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.xiaoyi_utils.pushid_manager import (
+                                add_push_id,
+                            )
+                            asyncio.ensure_future(
+                                asyncio.to_thread(add_push_id, push_id)
+                            )
+                            logger.info("XiaoYi: Extracted push_id from user message")
+                        except Exception as push_id_error:
+                            logger.warning(
+                                f"XiaoYi: Failed to persist pushId: {push_id_error}"
+                            )
         # =================================================================
 
         # Log summary of processed attachments
@@ -2993,4 +3197,5 @@ class XiaoyiChannel(BaseChannel):
                     )
 
         return None
+
 

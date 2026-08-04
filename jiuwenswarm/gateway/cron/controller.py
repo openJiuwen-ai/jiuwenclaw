@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from datetime import datetime, timedelta, timezone
@@ -291,6 +292,27 @@ class CronController:
     async def run_now(self, job_id: str) -> str:
         run_id = await self._scheduler.trigger_run_now(job_id)
         return run_id
+
+    async def run_now_and_wait(
+        self, job_id: str, *, timeout: float = 300.0, poll_interval: float = 0.2
+    ) -> tuple[str, str]:
+        """Trigger immediate run and wait for completion, returning (run_id, result_text).
+
+        Unlike ``run_now`` which only enqueues, this method polls the scheduler's
+        ``_runs`` dict until the run reaches a terminal status
+        (``succeeded`` / ``failed``), then returns the produced ``result_text``.
+        """
+        run_id = await self._scheduler.trigger_run_now(job_id)
+        runs = getattr(self._scheduler, "_runs", None)
+        if not isinstance(runs, dict):
+            return run_id, "[cron] 任务执行失败: scheduler runs dict unavailable"
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            state = runs.get(run_id)
+            if state is not None and state.status in ("succeeded", "failed"):
+                return run_id, str(state.result_text or "")
+            await asyncio.sleep(poll_interval)
+        return run_id, "[cron] 任务执行超时"
 
     # ── A2A CronQuery protocol methods ────────────────────────────────
 
@@ -1164,4 +1186,5 @@ class CronController:
                 func=self._preview_job_tool,
             ),
         ]
+
 
