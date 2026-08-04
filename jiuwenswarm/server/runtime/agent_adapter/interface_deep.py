@@ -6408,6 +6408,80 @@ class JiuWenSwarmDeepAdapter:
             project_dir=project_dir,
         )
 
+    @staticmethod
+    def _cron_session_has_context(inner_session: Any) -> bool:
+        """检测 AgentSession 的 global_state['context'] 是否已带 messages。
+
+        跨 channel（cron 写 / web 读）恢复前用来判断当前 web adapter 的 session 是否
+        已经持有 cron 历史——有则跳过 recover，无则强制从 checkpoint 重新恢复。
+        """
+        try:
+            _state = inner_session.state().get_state(copied=False)
+            if not isinstance(_state, dict):
+                return False
+            _ctx = (_state.get("global_state") or {}).get("context")
+            if not isinstance(_ctx, dict):
+                return False
+            for _cst in _ctx.values():
+                _msgs = _cst.get("messages") if isinstance(_cst, dict) else None
+                if _msgs:
+                    return True
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+
+    async def _persist_cron_checkpoint(self, session_id: str, request_id: str) -> None:
+        """非流式 cron 执行收尾补 commit：把 context_engine 内存 context 落盘到 checkpointer。
+
+        根因：cron 走非流式 ``_inner_invoke``，其 commit 挂在 ``need_cleanup`` 下；而 adapter 在
+        ``start_interaction`` 已提前绑定 session，``invoke`` 收到现成 session 致 ``need_cleanup=False``，
+        commit 被跳过，导致 ``cron_*`` 在 checkpointer 恒为空、web 恢复读不到历史。此处对齐流式路径
+        （``_inner_stream`` 的 ``is_agent_session`` 分支会自动 commit），显式补一次落盘。
+        姿势参照 ``session_ops_service.rewind_session_context`` 的 save_contexts + post_run。
+        """
+        try:
+            if self._instance is None:
+                return
+            react_agent = getattr(self._instance, "react_agent", None)
+            if react_agent is None:
+                return
+            context_engine = react_agent.context_engine
+            # 无可落盘的 context 则跳过，避免写空状态。
+            _ctx = context_engine.get_context(session_id=session_id)
+            if _ctx is None:
+                return
+            try:
+                _ctx_msg_count = len(list(_ctx.get_messages() or []))
+            except Exception:  # noqa: BLE001
+                _ctx_msg_count = 0
+            if _ctx_msg_count <= 0:
+                return
+            # 用运行中的 _interaction_session（而非新建 session）：
+            # save_contexts 内部 _save_state_to_session 会把 context messages 存回该 session 的
+            # global_state['context']，post_run 再落盘 checkpointer。跨 channel 的 web adapter
+            # 复用本会话时会通过上方的 re-recover 从 checkpoint 读回这些 messages。
+            session = getattr(self._instance, "_interaction_session", None)
+            if session is None:
+                logger.warning(
+                    "[CRON-CTX] cron checkpoint skip: no active _interaction_session "
+                    "session_id=%s request_id=%s",
+                    session_id, request_id,
+                )
+                return
+            await context_engine.save_contexts(session)
+            await session.post_run()  # → post_agent_execute → _agent_storage.save 落盘
+            logger.info(
+                "[CRON-CTX] cron checkpoint committed: session_id=%s request_id=%s "
+                "msg_count=%s",
+                session_id, request_id, _ctx_msg_count,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[CRON-CTX] cron checkpoint commit failed: session_id=%s "
+                "request_id=%s error=%s",
+                session_id, request_id, exc,
+            )
+
     async def stop_interaction(self) -> None:
         """Stop this adapter's DeepAgent interaction loop if it was started."""
         if self._instance is None:
@@ -8404,6 +8478,25 @@ class JiuWenSwarmDeepAdapter:
         query = request.params.get("query", "")
         mode = request.params.get("mode", "agent")
 
+        # [CRON-CTX] 非流式入口：与流式对称，跨 channel 时强制 recover cron 历史。
+        if str(session_id).startswith("cron_") and self._instance is not None:
+            _cron_sess = getattr(self._instance, "_interaction_session", None)
+            _cron_inner = getattr(_cron_sess, "_inner", None) if _cron_sess is not None else None
+            if _cron_inner is not None and not self._cron_session_has_context(_cron_inner):
+                try:
+                    await CheckpointerFactory.get_checkpointer().pre_agent_execute(_cron_inner, None)
+                    logger.info(
+                        "[CRON-CTX] cron session re-recover(non-stream): session_id=%s "
+                        "request_id=%s",
+                        session_id, request.request_id,
+                    )
+                except Exception as _e:  # noqa: BLE001
+                    logger.warning(
+                        "[CRON-CTX] cron session re-recover(non-stream) failed: "
+                        "session_id=%s error=%s request_id=%s",
+                        session_id, _e, request.request_id,
+                    )
+
         slash_result = await self._handle_slash_command(
             query,
             session_id,
@@ -8658,6 +8751,12 @@ class JiuWenSwarmDeepAdapter:
             cleanup_permission_context(token_perm)
             self._reset_runtime_cron_context(cron_context_tokens)
             self._unmark_session_active(session_id)
+            # [CRON-CTX] 非流式 cron 执行收尾补 commit：对齐流式路径的自动落盘。
+            # 根因：cron 走非流式 _inner_invoke，其 commit 挂在 need_cleanup 下，
+            # 而 adapter 提前绑定了 session 致 need_cleanup=False，commit 被跳过，
+            # cron_* 在 checkpointer 恒为空、web 恢复读不到历史。此处显式补一次。
+            if str(session_id).startswith("cron_"):
+                await self._persist_cron_checkpoint(session_id, request.request_id)
 
         content = "".join(collected_content) if collected_content else ""
 
@@ -8720,6 +8819,32 @@ class JiuWenSwarmDeepAdapter:
         cid = request.channel_id
         query = request.params.get("query", "")
         mode = request.params.get("mode", "agent")
+
+        # [CRON-CTX] 跨 channel（cron 写 / web 读）恢复：cron 与 web 是不同 channel_key，
+        # 各自持有独立 JiuWenSwarm → 独立 adapter → 独立 _session_adapters 缓存。web adapter
+        # 的 session 在 cron 执行前 pre_run 过、读的是旧 checkpoint；cron 落盘新 context 后
+        # web adapter HIT cache 复用、不重跑 pre_run，session.global_state 无 context。
+        # 此处检测到无 context 时强制重新 recover 一次，把 checkpoint 里 cron 的历史灌进
+        # 当前 session。姿势同 Session.pre_run 内部：直接调
+        # checkpointer.pre_agent_execute(_inner, None)，绕过 _pre_run_done 守卫。
+        # recover→_restore_state→set_state 会覆盖整个 global_state（本场景即所求：从 checkpoint
+        # 还原）。仅 cron_* session 触发，避免影响普通 web 会话。
+        if str(session_id).startswith("cron_") and self._instance is not None:
+            _cron_sess = getattr(self._instance, "_interaction_session", None)
+            _cron_inner = getattr(_cron_sess, "_inner", None) if _cron_sess is not None else None
+            if _cron_inner is not None and not self._cron_session_has_context(_cron_inner):
+                try:
+                    await CheckpointerFactory.get_checkpointer().pre_agent_execute(_cron_inner, None)
+                    logger.info(
+                        "[CRON-CTX] cron session re-recover: session_id=%s request_id=%s",
+                        session_id, request.request_id,
+                    )
+                except Exception as _e:  # noqa: BLE001
+                    logger.warning(
+                        "[CRON-CTX] cron session re-recover failed: session_id=%s "
+                        "error=%s request_id=%s",
+                        session_id, _e, request.request_id,
+                    )
 
         # Team 模式处理
         if mode in ("team", "team.plan", "code.team"):
