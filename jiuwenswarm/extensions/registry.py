@@ -9,7 +9,10 @@ from jiuwenswarm.extensions.sdk.crypto_utility import CryptoUtility
 from jiuwenswarm.extensions.sdk.third_agent import ThirdAgentExtension
 from jiuwenswarm.extensions.types import ExtensionConfig
 from jiuwenswarm.common.security.base_crypto import CryptoProvider
+from jiuwenswarm.extensions.agentos.auth.credential_authenticator import CredentialAuthenticator
 from jiuwenswarm.gateway.routing.third_agent import ThirdAgent
+
+from jiuwenswarm.extensions.agentos.auth.passthrough_authenticator import PassthroughAuthenticator
 
 
 class ExtensionRegistry:
@@ -25,6 +28,8 @@ class ExtensionRegistry:
         self._crypto_tool: CryptoUtility | None = None
         self._third_agent: ThirdAgentExtension | None = None
         self._rpc_handlers: dict[str, Callable] = {}
+        # 默认 passthrough；AgentOS 等实现由 agentos_router load_all_extensions  扩展按配置动态注册
+        self._authenticator: CredentialAuthenticator = PassthroughAuthenticator()
         self.callback_framework = callback_framework
         self._config = ExtensionConfig(config=config, logger=logger)
 
@@ -43,16 +48,28 @@ class ExtensionRegistry:
     ) -> "ExtensionRegistry":
         if cls._instance is not None:
             raise RuntimeError("ExtensionRegistry 已初始化，请勿重复调用 create_instance()")
+
+        # 不在此处实例化具体认证器；由 agentos_router 在 load_all_extensions 时按配置注册
         cls._instance = cls(
             callback_framework=callback_framework,
             config=config,
             logger=logger,
         )
+
         return cls._instance
 
     @classmethod
     def reset_instance(cls) -> None:
         cls._instance = None
+
+    # 3rd
+    def register_authenticator(self, authenticator: CredentialAuthenticator) -> None:
+        """注册认证器（替换默认的PassthroughAuthenticator）"""
+        self._authenticator = authenticator
+
+    def get_authenticator(self) -> CredentialAuthenticator:
+        """获取认证器"""
+        return self._authenticator
 
     def register_agent_server_client(self, extension: AgentServerClientExtension) -> None:
         self._agent_server_client = extension

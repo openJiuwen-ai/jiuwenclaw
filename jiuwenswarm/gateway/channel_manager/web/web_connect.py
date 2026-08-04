@@ -25,6 +25,7 @@ from websockets.exceptions import ConnectionClosed as WebSocketConnectionClosed
 
 from jiuwenswarm.common.utils import get_agent_workspace_dir
 from jiuwenswarm.gateway.channel_manager.base import ChannelMetadata, RobotMessageRouter
+from jiuwenswarm.extensions.agentos.auth.common import _handle_connect
 from jiuwenswarm.gateway.routing.base_ws_channel import BaseWsChannel
 from jiuwenswarm.gateway.routing.keys import AgentRef, RoutingKey
 from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
@@ -41,6 +42,9 @@ from jiuwenswarm.common.ws_diagnostics import (
     describe_ws_peer,
     format_ws_diagnostics,
 )
+
+from jiuwenswarm.gateway.auth.credential_authenticator import AuthContext
+from jiuwenswarm.gateway.app_gateway import get_auth_handler
 
 logger = logging.getLogger(__name__)
 
@@ -1024,6 +1028,9 @@ class WebChannel(BaseWsChannel):
                         describe_ws_exception(e),
                     ),
                 )
+        auth_result = await _handle_connect(ws, path)
+        if not auth_result:
+            return
 
         try:
             async for raw in ws:

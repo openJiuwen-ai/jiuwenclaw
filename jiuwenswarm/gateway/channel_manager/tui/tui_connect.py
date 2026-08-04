@@ -48,6 +48,7 @@ from jiuwenswarm.gateway.routing.agent_request_timeout import (
     resolve_agent_request_timeout_seconds,
     send_agent_request_with_timeout,
 )
+from jiuwenswarm.extensions.agentos.auth.common import _handle_connect
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +189,7 @@ def _update_auto_harness_gitcode_access_token(value: str) -> None:
         config["gitcode"] = {}
     config["gitcode"]["access_token"] = value
     _save_auto_harness_config(config)
+
 
 # ── 需要转发到 Agent 的方法集合 ──────────────────────────────
 
@@ -3349,6 +3351,10 @@ def build_cli_route_binding(bind: CliRouteBindParams) -> GatewayRouteBinding:
             return
         mh.cancel_scheduled_disconnect_cancel(channel_id, session_id)
 
+    async def _tui_connect_hook(ws, path):
+        """WS 建立后、业务消息前的简单鉴权。"""
+        return await _handle_connect(ws, path)
+
     return GatewayRouteBinding(
         path=bind.path,
         channel_id=bind.channel_id,
@@ -3358,4 +3364,5 @@ def build_cli_route_binding(bind: CliRouteBindParams) -> GatewayRouteBinding:
         disconnect_handler=_tui_disconnect,
         session_bind_handler=_tui_session_bound,
         ws_channel=bind.ws_channel,
+        connect_hook=_tui_connect_hook,
     )

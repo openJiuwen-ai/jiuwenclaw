@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
+﻿# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 """Standalone Gateway entrypoint (split deployment).
 
 This process starts:
@@ -52,6 +52,9 @@ from jiuwenswarm.common.utils import (
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenswarm.common.schema.message import ReqMethod, Message, Mode
 
+from jiuwenswarm.extensions.registry import ExtensionRegistry
+from jiuwenswarm.extensions.agentos.auth.credential_authenticator import CredentialAuthenticator
+
 # Ensure workspace initialized
 _workspace_dir = get_user_workspace_dir()
 _config_file = _workspace_dir / "config" / "config.yaml"
@@ -86,6 +89,14 @@ _FEISHU_DEFAULT_API_BASE = "https://open.feishu.cn"
 _DINGTALK_DEFAULT_API_BASE = "https://api.dingtalk.com"    # 新版 v1.0 接口域名
 _DINGTALK_DEFAULT_OAPI_BASE = "https://oapi.dingtalk.com"  # 旧版 media 接口域名
 _XIAOYI_DEFAULT_PUSH_URL = "https://hag.cloud.huawei.com/open-ability-agent/v1/agent-webhook"
+
+
+def _init_auth_handler() -> CredentialAuthenticator:
+    return ExtensionRegistry.get_instance().get_authenticator()
+
+def get_auth_handler() -> CredentialAuthenticator:
+    """始终从 ExtensionRegistry 读取，避免扩展注册前被错误缓存。"""
+    return _init_auth_handler()
 
 
 def _build_event_frame(msg) -> dict[str, Any]:
@@ -1036,6 +1047,29 @@ class GatewayServer:
             matched_path,
         )
 
+        # ── 新增：认证 ──
+        if route.connect_hook is not None:
+            try:
+                auth_ok = await route.connect_hook(ws, raw_path)
+                if not auth_ok:
+                    self._clients.discard(ws)
+                    await ws.close(code=1008, reason="unauthorized")
+                    return
+            except Exception:
+                logger.warning(
+                    "[Gateway] connect_hook auth failed: channel=%s path=%s",
+                    route.channel_id,
+                    matched_path,
+                    exc_info=True,
+                )
+                self._clients.discard(ws)
+                await ws.close(code=1008, reason="unauthorized")
+                return
+            # 鉴权成功时优先使用 AuthResult.user_id
+            auth_uid = getattr(ws, "user_id", None)
+            if auth_uid:
+                setattr(ws, "_gateway_user_id", str(auth_uid).strip() or ws_user_id)
+
         # connection.ack
         try:
             await ws.send(json.dumps({
@@ -1448,7 +1482,7 @@ async def _run(
         SlackChannelConfig
     from jiuwenswarm.gateway.channel_manager.im_platforms.wecom.wecom_connect import WecomChannel, WecomConfig
     from jiuwenswarm.gateway.channel_manager.protocol.ssh.ssh_connect import SshChannel, SshChannelConfig
-    from jiuwenswarm.common.config import get_config
+    from jiuwenswarm.common.config import get_config, resolve_env_vars
     from jiuwenswarm.common.cleanup import start_background_cleanup
     from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
     from jiuwenswarm.gateway.channel_manager.channel_manager import ChannelManager
@@ -1473,7 +1507,6 @@ async def _run(
     )
     from jiuwenswarm.gateway.channel_manager.tui.tui_channel import TuiChannel, TuiChannelConfig
     from jiuwenswarm.extensions.manager import ExtensionManager
-    from jiuwenswarm.extensions.registry import ExtensionRegistry
     from jiuwenswarm.common.updater import UpdaterService
     from openjiuwen.core.runner import Runner
 
@@ -1738,6 +1771,21 @@ async def _run(
     tui_channel = None
     web_config = WebChannelConfig(enabled=True, host=web_host, port=web_port, path=web_path)
     web_channel = WebChannel(web_config, _DummyBus())
+
+    # 注册 AgentOSAuthenticator（如果配置了 auth.type=agentos）
+    from jiuwenswarm.extensions.agentos.agentos_router.agentos_authenticator import AgentOSAuthenticator
+
+    auth_config = resolve_env_vars(get_config().get("auth", {}))
+    if isinstance(auth_config, dict) and str(auth_config.get("type", "")).strip().lower() == "agentos":
+        agentos_cfg = auth_config.get("agentos", {})
+        if isinstance(agentos_cfg, dict):
+            auth_service_url = str(agentos_cfg.get("auth_service_url", "")).strip()
+            if auth_service_url:
+                timeout = float(agentos_cfg.get("timeout", 10.0))
+                extension_registry.register_authenticator(
+                    AgentOSAuthenticator(auth_service_url=auth_service_url, timeout=timeout)
+                )
+                logger.info("AgentOSAuthenticator 已注册, auth_service_url=%s", auth_service_url)
 
     # 注入 Git diff 监控注册表(设计文档阶段10):
     # 1. 让 ``_mark_git_watcher_dirty`` 能通过 ``channel.git_watcher_registry`` 唤醒轮询
