@@ -405,7 +405,6 @@ from jiuwenclaw.agentserver.stream_content_sanitize import strip_inline_tool_pro
 from jiuwenclaw.agentserver.stream_utils import propagate_stream_source_id, tool_calls_payload_to_json_list
 from jiuwenclaw.agentserver.extensions import get_rail_manager
 from jiuwenclaw.gateway.cron.models import CronTargetChannel
-from jiuwenclaw.agentserver.team import get_team_manager
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenclaw.utils import (
     deep_merge_dicts,
@@ -10619,8 +10618,10 @@ class JiuWenClawDeepAdapter:
             if queue.qsize() > 0:
                 return True
 
-        # 检查 Team 模式下的流式任务和 monitors
+        # 检查 Team 模式下的流式任务和 monitors（懒加载，避免 Code 模式强依赖 team）
         try:
+            from jiuwenclaw.agentserver.team import get_team_manager
+
             team_manager = get_team_manager()
             for task in team_manager._stream_tasks.values():  # pylint: disable=protected-access
                 if task is not None and not task.done():

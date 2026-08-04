@@ -35,7 +35,7 @@ def get_plan_todo_session_id() -> str:
     v = PLAN_TODO_SESSION_ID.get() or "default"
     if v == "default":
         try:
-            from openjiuwen.agent_teams.spawn.context import get_session_id as _team_sid
+            from openjiuwen.agent_teams.context import get_session_id as _team_sid
 
             t: Optional[str] = _team_sid()
             if t:
