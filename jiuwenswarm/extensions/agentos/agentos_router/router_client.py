@@ -7,7 +7,7 @@ import logging
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Coroutine
 
 from jiuwenswarm.common.e2a.models import E2AEnvelope
 from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
@@ -21,6 +21,12 @@ from jiuwenswarm.extensions.agentos.agentos_router.agent_manager import (
     is_third_party_agent_type,
 )
 from jiuwenswarm.extensions.agentos.agentos_router.agentos_authenticator import AgentOSAuthenticator
+from jiuwenswarm.extensions.agentos.auth.common import (
+    extract_headers,
+    extract_token,
+    get_remote_addr,
+)
+from jiuwenswarm.extensions.agentos.auth.credential_authenticator import AuthContext, AuthResult
 from jiuwenswarm.extensions.agentos.agentos_router.config import (
     DEFAULT_AGENT_WORKSPACE_ROOT,
     SshChannelEndpoint,
@@ -120,6 +126,32 @@ class AgentOSRouterClient(AgentServerClient):
         self._current_agent_types: dict[str, str] = {}
         self._auth_client = auth_clinet
         # todo web_connect 的回调 tui_c 回调
+
+    async def on_web_connect(self, ws: Any, type: str) -> AuthResult | None:
+        if self._auth_client is None:
+            return AuthResult(
+                success=False,
+                user_id="",
+                error="No valid credentials",
+                extensions={"error_code": "UNSUPPORTED_CREDENTIAL"},
+            )
+        token = extract_token(ws)
+        headers = extract_headers(ws)
+        context = AuthContext(
+            channel_type=type,
+            credentials={"token": token} if token else {},
+            headers=headers,
+            remote_addr=get_remote_addr(ws),
+        )
+        result = await self._auth_client.authenticate(context)
+        if not result.success:
+            close = getattr(ws, "close", None)
+            if callable(close):
+                ret = close(code=1008, reason="unauthorized")
+                if hasattr(ret, "__await__"):
+                    await ret
+        return result
+
 
     def get_current_agent_type(self, user_id: str) -> str:
         """Return the user's current agent_type (default ``jiuwenswarm``)."""

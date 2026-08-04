@@ -1448,7 +1448,7 @@ async def _run(
         SlackChannelConfig
     from jiuwenswarm.gateway.channel_manager.im_platforms.wecom.wecom_connect import WecomChannel, WecomConfig
     from jiuwenswarm.gateway.channel_manager.protocol.ssh.ssh_connect import SshChannel, SshChannelConfig
-    from jiuwenswarm.common.config import get_config, resolve_env_vars
+    from jiuwenswarm.common.config import get_config
     from jiuwenswarm.common.cleanup import start_background_cleanup
     from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
     from jiuwenswarm.gateway.channel_manager.channel_manager import ChannelManager
@@ -1738,7 +1738,6 @@ async def _run(
     web_config = WebChannelConfig(enabled=True, host=web_host, port=web_port, path=web_path)
     web_channel = WebChannel(web_config, _DummyBus())
 
-    # 注册 AgentOSAuthenticator（如果配置了 auth.type=agentos）
     from jiuwenswarm.extensions.agentos.agentos_router.agentos_authenticator import AgentOSAuthenticator
 
     auth_config = resolve_env_vars(get_config().get("auth", {}))
@@ -1748,9 +1747,9 @@ async def _run(
             auth_service_url = str(agentos_cfg.get("auth_service_url", "")).strip()
             if auth_service_url:
                 timeout = float(agentos_cfg.get("timeout", 10.0))
-                extension_registry.register_authenticator(
-                    AgentOSAuthenticator(auth_service_url=auth_service_url, timeout=timeout)
-                )
+                _agentos_auth = AgentOSAuthenticator(auth_service_url=auth_service_url, timeout=timeout)
+                extension_registry.register_authenticator(_agentos_auth)
+                web_channel._agentos_auth_client = _agentos_auth
                 logger.info("AgentOSAuthenticator 已注册, auth_service_url=%s", auth_service_url)
 
     # 注入 Git diff 监控注册表(设计文档阶段10):
