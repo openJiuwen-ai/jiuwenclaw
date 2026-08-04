@@ -69,11 +69,19 @@ def _write_pushdata_list(items: List[Dict[str, str]]) -> None:
         raise
 
 
-def save_push_data(data_detail: str) -> str:
+def save_push_data(
+    data_detail: str,
+    cron_meta: Optional[Dict[str, str]] = None,
+) -> str:
     """保存推送数据，返回 pushDataId.
 
+    与 xy_channel ``savePushData(text, {cronJobId, cronTitle})`` 对齐：
+    持久化用全文 ``data_detail``（客户端 Trigger 回查看全文，不受截断影响）。
+
     Args:
-        data_detail: 推送内容详情
+        data_detail: 推送内容详情（全文，不做截断）。
+        cron_meta: 可选 cron 元数据，含 ``cronJobId`` / ``cronTitle``，
+            随条目一起持久化，便于后续按 jobId 检索。
 
     Returns:
         pushDataId (UUID)
@@ -81,23 +89,49 @@ def save_push_data(data_detail: str) -> str:
     push_data_id = str(uuid.uuid4())
     time_str = _format_beijing_time()
 
-    item = {
+    item: Dict[str, str] = {
         "pushDataId": push_data_id,
         "dataDetail": data_detail,
         "time": time_str,
     }
+    if cron_meta:
+        if cron_meta.get("cronJobId"):
+            item["cronId"] = str(cron_meta["cronJobId"])
+        if cron_meta.get("cronTitle"):
+            item["cronTitle"] = str(cron_meta["cronTitle"])
 
     items = _read_pushdata_list()
     items.append(item)
     _write_pushdata_list(items)
 
     logger.info(
-        "[PushDataManager] Saved pushData: id=%s, time=%s, detail_len=%s",
+        "[PushDataManager] Saved pushData: id=%s, time=%s, detail_len=%s, cronId=%s",
         push_data_id[:8],
         time_str,
         len(data_detail),
+        cron_meta.get("cronJobId") if cron_meta else "-",
     )
     return push_data_id
+
+
+def get_push_data_by_id(push_data_id: str) -> Optional[Dict[str, str]]:
+    """根据 pushDataId 获取推送数据（与 xy_channel getPushDataById 对齐）.
+
+    Args:
+        push_data_id: 推送数据 ID
+
+    Returns:
+        匹配的推送数据条目（含 pushDataId/dataDetail/time），未找到返回 None
+    """
+    items = _read_pushdata_list()
+    for item in items:
+        if item.get("pushDataId") == push_data_id:
+            logger.info(
+                "[PushDataManager] Found pushData: %s", push_data_id[:8]
+            )
+            return item
+    logger.warning("[PushDataManager] pushData not found: %s", push_data_id)
+    return None
 
 
 def _match_push_item(item: Dict[str, str], keyword: str) -> bool:
@@ -145,3 +179,4 @@ def clear_all_push_data() -> None:
     """清空所有推送数据."""
     _write_pushdata_list([])
     logger.info("[PushDataManager] Cleared all pushData")
+
