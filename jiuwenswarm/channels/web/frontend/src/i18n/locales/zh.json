@@ -2324,7 +2324,7 @@
       "directoryPickerUnsupported": "当前环境无法打开系统目录选择器，请手动填写项目名和路径",
       "directoryPickerFailed": "目录选择失败，请重试",
       "lockedProjectTitle": "已有会话的项目归属不可在输入框改写",
-      "clearProject": "不使用项目",
+      "clearProject": "不在项目中工作",
       "searchProject": "搜索项目",
       "noProjectMatches": "暂无匹配项目",
       "noProjects": "暂无项目",

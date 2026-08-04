@@ -2122,6 +2122,7 @@ export function InputArea({
                   type="button"
                   className="chat-work-select__clear"
                   aria-label={t('multiSession.project.clearProject')}
+                  data-tooltip={t('multiSession.project.clearProject')}
                   onClick={() => {
                     setSelectedProject(null);
                     setWorkMenuOpen(null);
