@@ -2,6 +2,7 @@ from typing import Any, Callable
 
 from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
 
+from jiuwenswarm.extensions.agentos.agentos_router.agentos_authenticator import AgentOSAuthenticator
 from jiuwenswarm.extensions.callback_compat import unregister_callback_sync
 from jiuwenswarm.gateway import AgentServerClient
 from jiuwenswarm.extensions.sdk.agent_server_client import AgentServerClientExtension
@@ -11,8 +12,6 @@ from jiuwenswarm.extensions.types import ExtensionConfig
 from jiuwenswarm.common.security.base_crypto import CryptoProvider
 from jiuwenswarm.extensions.agentos.auth.credential_authenticator import CredentialAuthenticator
 from jiuwenswarm.gateway.routing.third_agent import ThirdAgent
-
-from jiuwenswarm.extensions.agentos.auth.passthrough_authenticator import PassthroughAuthenticator
 
 
 class ExtensionRegistry:
@@ -29,7 +28,7 @@ class ExtensionRegistry:
         self._third_agent: ThirdAgentExtension | None = None
         self._rpc_handlers: dict[str, Callable] = {}
         # 默认 passthrough；AgentOS 等实现由 agentos_router load_all_extensions  扩展按配置动态注册
-        self._authenticator: CredentialAuthenticator = PassthroughAuthenticator()
+        self._authenticator: CredentialAuthenticator = AgentOSAuthenticator()
         self.callback_framework = callback_framework
         self._config = ExtensionConfig(config=config, logger=logger)
 

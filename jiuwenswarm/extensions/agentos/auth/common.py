@@ -145,7 +145,7 @@ async def authenticate_handshake(
         remote_addr: str = "",
 ) -> AuthResult:
     """在 WS upgrade 前执行鉴权。"""
-    from jiuwenswarm.gateway.app_gateway import get_auth_handler
+    from jiuwenswarm.extensions.agentos.auth.credential_authenticator import authenticate
 
     token = extract_token_from_path_and_headers(path, headers)
     context = AuthContext(
@@ -154,8 +154,7 @@ async def authenticate_handshake(
         headers=headers_to_dict(headers),
         remote_addr=remote_addr,
     )
-    authenticator = get_auth_handler()
-    return await authenticator.authenticate(context)
+    return await authenticate(context)
 
 # 链接建立后绑定身份
 async def bind_ws_auth_from_handshake(

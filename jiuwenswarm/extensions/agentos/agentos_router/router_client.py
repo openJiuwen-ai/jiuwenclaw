@@ -20,6 +20,7 @@ from jiuwenswarm.extensions.agentos.agentos_router.agent_manager import (
     AgentRuntime,
     is_third_party_agent_type,
 )
+from jiuwenswarm.extensions.agentos.agentos_router.agentos_authenticator import AgentOSAuthenticator
 from jiuwenswarm.extensions.agentos.agentos_router.config import (
     DEFAULT_AGENT_WORKSPACE_ROOT,
     SshChannelEndpoint,
@@ -85,6 +86,7 @@ def resolve_agent_workspace(user_id: str, *, workspace_root: str | None = None) 
 class AgentOSRouterClient(AgentServerClient):
     """AgentServerClient implementation backed by YuanRong and AgentManager."""
 
+
     def __init__(
         self,
         yuanrong: YuanrongFrontendAgentClient,
@@ -95,6 +97,7 @@ class AgentOSRouterClient(AgentServerClient):
         workspace_root: str = DEFAULT_AGENT_WORKSPACE_ROOT,
         sandbox_idle_timeout_seconds: float = 600.0,
         sandbox_idle_check_interval_seconds: float = 30.0,
+        auth_clinet: AgentOSAuthenticator | None = None,
     ) -> None:
         self._yuanrong = yuanrong
         self._registry = registry
@@ -115,6 +118,8 @@ class AgentOSRouterClient(AgentServerClient):
         self._closed = False
         # 用户当前 agent_type（3rdagent.switch 成功后更新）；SSH 接入跟随此值。
         self._current_agent_types: dict[str, str] = {}
+        self._auth_client = auth_clinet
+        # todo web_connect 的回调 tui_c 回调
 
     def get_current_agent_type(self, user_id: str) -> str:
         """Return the user's current agent_type (default ``jiuwenswarm``)."""

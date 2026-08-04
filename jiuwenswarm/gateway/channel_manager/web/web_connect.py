@@ -43,9 +43,6 @@ from jiuwenswarm.common.ws_diagnostics import (
     format_ws_diagnostics,
 )
 
-from jiuwenswarm.gateway.auth.credential_authenticator import AuthContext
-from jiuwenswarm.gateway.app_gateway import get_auth_handler
-
 logger = logging.getLogger(__name__)
 
 _WEB_CONNECTION_USER_ID_ATTR = "_web_connection_user_id"
