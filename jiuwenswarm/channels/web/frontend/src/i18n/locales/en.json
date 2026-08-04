@@ -187,10 +187,38 @@
     "count": "{{count}} item(s)",
     "empty": "No artifacts",
     "download": "Download",
+    "downloadFailed": "Could not download “{{name}}”. Check your connection and save location, then try again.",
+    "expandList": "Show artifact list",
+    "collapseList": "Hide artifact list",
+    "openPreview": "Open preview for {{name}}",
     "selectArtifact": "Select an artifact to preview",
-    "previewUnsupported": "Preview is only supported for Markdown files",
-    "previewMissingPath": "No readable local path is available for this artifact",
-    "previewFailed": "Failed to load Markdown preview"
+    "previewUnsupported": "This file type cannot be previewed yet. Download it to view it.",
+    "previewMissingPath": "No downloadable resource is available for this artifact preview",
+    "previewFailed": "Failed to load the file preview",
+    "docxPreviewFailed": "Failed to load the Word document preview",
+    "presentationPreviewFailed": "Failed to load the PowerPoint presentation preview",
+    "presentationResourceLimitExceeded": "The PowerPoint presentation content exceeds the browser preview limit. Download the file to view it.",
+    "presentationTooLarge": "PowerPoint presentations larger than {{size}} cannot be previewed in the browser. Download the file to view it.",
+    "presentationSlides": "Slides",
+    "presentationPage": "Slide {{current}} of {{total}}",
+    "presentationSlideIncomplete": "Slide {{page}} is only partially previewed",
+    "presentationStructureInvalid": "This presentation contains structurally invalid slides. Try downloading it to view.",
+    "presentationGoToSlide": "Go to slide {{index}}",
+    "presentationScrollThumbnailsPrevious": "Scroll slide thumbnails left",
+    "presentationScrollThumbnailsNext": "Scroll slide thumbnails right",
+    "presentationPreviousSlide": "Previous slide",
+    "presentationNextSlide": "Next slide",
+    "presentationZoomOut": "Zoom out",
+    "presentationZoomIn": "Zoom in",
+    "presentationZoomLevel": "{{percent}}% actual slide size",
+    "spreadsheetPreviewFailed": "Failed to load the Excel workbook preview",
+    "spreadsheetResourceLimitExceeded": "The Excel workbook content exceeds the browser preview limit. Download the file to view it.",
+    "spreadsheetTooLarge": "Excel workbooks larger than {{size}} cannot be previewed in the browser. Download the file to view it.",
+    "spreadsheetEmptyWorkbook": "This workbook contains no visible worksheets",
+    "spreadsheetEmptySheet": "This worksheet is empty",
+    "spreadsheetSheetTabsLabel": "Worksheets",
+    "spreadsheetTableLabel": "{{sheet}} worksheet preview",
+    "invalidJson": "The JSON or JSONL content is invalid"
   },
   "teams": {
     "title": "Team Management",
@@ -259,6 +287,9 @@
     "removeTask": "Remove task",
     "addImage": "Add image",
     "addImageDisabled": "Cannot add images while processing or recording",
+    "addFile": "Add file",
+    "addFileDisabled": "Cannot add files while processing or recording",
+    "addAttachment": "Add attachment",
     "removeImage": "Remove image",
     "sendTask": "Send message without interrupting model",
     "editTask": "Edit",
@@ -293,12 +324,19 @@
     "teamPauseHint": "After pausing a team, send the next message to continue",
     "teamBroadcastTarget": "@all",
     "contextCompressionCompleted": "Completed context compression {{count}} time(s) this turn",
+    "contextCompressionStarted": {
+      "dialogue": "Compacting earlier rounds…",
+      "currentRound": "Compacting current round…",
+      "roundLevel": "Full compaction…"
+    },
     "historyPager": {
       "loadedOfTotal": "Loaded {{loaded}} / {{total}} pages",
       "loadingMore": "Loading...",
       "clickOrScrollToLoadMore": "Click or scroll up to load more",
       "allLoaded": "All history loaded"
     },
+    "historyLoading": "Loading conversation history…",
+    "historyLoadMore": "Load more history",
     "config": {
       "mode": {
         "cluster": "Cluster",
@@ -422,6 +460,16 @@
     "pending": "Pending",
     "completed": "Completed"
   },
+  "plan": {
+    "toolbarTag": "Plan",
+    "closeTag": "Exit plan mode",
+    "approvalPrompt": "The plan is ready. Choose what to do next.",
+    "executePrompt": "The plan is approved. Start executing it.",
+    "approvalExecute": "Execute",
+    "approvalSkip": "Skip",
+    "approvalNext": "Next",
+    "approvalInputPlaceholder": "Add revision notes then click Next; leave empty and click Skip"
+  },
   "goal": {
     "formSubmit": "Confirm",
     "formCancel": "Cancel",
@@ -463,7 +511,7 @@
     "restore": "Restore session",
     "restoreDisabledNotConnected": "Disconnected: cannot restore session",
     "restoreDisabledProcessing": "Assistant is busy: wait until idle to restore a session",
-    "restoreDisabledUnsupported": "Only web frontend sessions (sess_) can be restored",
+    "restoreDisabledUnsupported": "Only Web frontend sessions (sess_ / web_) can be restored",
     "restoreEmpty": "This session has no restorable messages (empty or filtered). You can still chat from here.",
     "delete": "Delete session",
     "teamLabel": "Team: {{team}}",
@@ -916,6 +964,7 @@
       "modelsLoadFailed": "Failed to refresh OpenAI model list",
       "noModelsAvailable": "No OpenAI models were returned. Refresh after authorization completes.",
       "configuredModelUnavailable": "Configured model \"{{model}}\" is not in the OpenAI account model list.",
+      "needLoginForModel": "Please connect your OpenAI account first.",
       "modelNameUseDropdown": "Use the OpenAI model dropdown below",
       "apiBaseManaged": "Managed by the OAuth provider. No manual change is needed.",
       "autoSaving": "Login completed. Saving configuration...",
@@ -1451,7 +1500,11 @@
         "success": "Available ({{count}})",
         "error": "Unavailable",
         "skipped": "Not configured"
-      }
+      },
+      "sourceFilterHelp": "SkillNet and ClawHub are shown by default. Click a source chip to filter results; keep at least one source selected.",
+      "sourceFilterToggle": "Click to filter this source",
+      "sourceFilterKeepOne": "Keep at least one source selected",
+      "noFilteredResults": "No results for the current source filter. Select another source."
     },
     "actions": {
       "install": "Install",
@@ -1474,6 +1527,9 @@
       "local": "Local",
       "project": "Project",
       "builtin": "Built-in",
+      "clawhub": "ClawHub",
+      "skillnet": "SkillNet",
+      "teamskillshub": "TeamSkillsHub",
       "unknown": "Unknown"
     },
     "sourceLabel": "Source",
@@ -1902,6 +1958,44 @@
     "waitingTasks": "Waiting Tasks",
     "messageQueue": "Message Queue",
     "parallelProgress": "Parallel tasks running ({{completedCount}}/{{total}} complete)",
+    "turnRunning": "Running",
+    "turnElapsed": "Took",
+    "workCompleted": "Completed {{duration}}",
+    "workCompletedFallback": "Completed",
+    "workCompletedBoth": "Completed {{thinking}} thoughts, {{tools}} tool calls · {{duration}}",
+    "workCompletedBothNoDuration": "Completed {{thinking}} thoughts, {{tools}} tool calls",
+    "workCompletedThinking": "Completed {{thinking}} thoughts · {{duration}}",
+    "workCompletedThinkingNoDuration": "Completed {{thinking}} thoughts",
+    "workCompletedTools": "Completed {{tools}} tool calls · {{duration}}",
+    "workCompletedToolsNoDuration": "Completed {{tools}} tool calls",
+    "workFailedToolsNoDuration": "{{tools}} tool calls failed",
+    "workOutcomePartial": "Partial failure",
+    "reasoning": {
+      "thinking": "Thinking…",
+      "thought": "Thought"
+    },
+    "toolAction": {
+      "write": "Write",
+      "read": "Read",
+      "edit": "Edit",
+      "delete": "Delete",
+      "move": "Move",
+      "rename": "Rename",
+      "list": "List",
+      "search": "Search",
+      "glob": "Find",
+      "webSearch": "Web search",
+      "fetch": "Fetch",
+      "run": "Run",
+      "runCode": "Run code",
+      "upload": "Upload",
+      "sendFile": "Send file",
+      "todoCreate": "Create todos",
+      "todoModify": "Update todos",
+      "todoList": "List todos",
+      "todoGet": "Get todo",
+      "skill": "View skill"
+    },
     "subtask": {
       "starting": "Starting...",
       "toolCall": "Calling {{tool}} (#{{count}})",
@@ -1915,17 +2009,25 @@
       "failed": "failed",
       "timeout": "Execution timed out",
       "running": "Running...",
+      "toolName": "Tool name",
       "arguments": "Arguments",
       "result": "Result",
       "truncated": "result truncated"
     },
     "toolGroup": {
-      "executed": "{{totalPairs}} tool calls executed",
+      "running": "Running {{label}}",
+      "completed": "Completed {{label}}",
+      "failed": "{{label}} failed",
+      "category": {
+        "file": "file operations",
+        "search": "searches",
+        "code": "code executions",
+        "system": "system calls",
+        "other": "tool calls"
+      },
       "sessionExecuted": "{{count}} session tasks completed",
       "sessionCompleted": "Session task completed",
       "sessionFailed": "Session failed",
-      "pending": "{{pendingCount}} running",
-      "timeout": "{{timeoutCount}} timed out",
       "latest": "↓ Latest"
     },
     "teamActivity": {
@@ -2179,7 +2281,7 @@
     "workDescription": "Office, collaboration, and general tasks",
     "codeDescription": "Inspect and modify code in a project directory",
     "environment": "Environment",
-    "changes": "Current Turn Changes",
+    "changes": "Changes",
     "review": "Review"
   },
   "multiSession": {

@@ -187,10 +187,38 @@
     "count": "{{count}} 个产物",
     "empty": "暂无产物",
     "download": "下载",
+    "downloadFailed": "“{{name}}”下载失败，请检查网络和保存位置后重试。",
+    "expandList": "展开产物列表",
+    "collapseList": "收起产物列表",
+    "openPreview": "打开 {{name}} 的预览",
     "selectArtifact": "请选择一个产物预览",
-    "previewUnsupported": "仅支持 Markdown 文件预览",
-    "previewMissingPath": "当前产物没有可读取的本地路径",
-    "previewFailed": "Markdown 预览加载失败"
+    "previewUnsupported": "此文件类型暂不支持预览，请下载后查看",
+    "previewMissingPath": "当前产物没有可用于预览的下载资源",
+    "previewFailed": "文件预览加载失败",
+    "docxPreviewFailed": "Word 文档预览加载失败",
+    "presentationPreviewFailed": "PowerPoint 演示文稿预览加载失败",
+    "presentationResourceLimitExceeded": "PowerPoint 演示文稿内容规模超过浏览器预览上限，请下载后查看",
+    "presentationTooLarge": "超过 {{size}} 的 PowerPoint 演示文稿无法在浏览器中预览，请下载后查看",
+    "presentationSlides": "幻灯片",
+    "presentationPage": "第 {{current}} / {{total}} 页",
+    "presentationSlideIncomplete": "第 {{page}} 页部分内容无法预览",
+    "presentationStructureInvalid": "该演示文稿包含结构无效的页面，可尝试下载后查看",
+    "presentationGoToSlide": "跳转到第 {{index}} 页",
+    "presentationScrollThumbnailsPrevious": "向左滚动幻灯片缩略图",
+    "presentationScrollThumbnailsNext": "向右滚动幻灯片缩略图",
+    "presentationPreviousSlide": "上一页",
+    "presentationNextSlide": "下一页",
+    "presentationZoomOut": "缩小",
+    "presentationZoomIn": "放大",
+    "presentationZoomLevel": "幻灯片实际尺寸的 {{percent}}%",
+    "spreadsheetPreviewFailed": "Excel 工作簿预览加载失败",
+    "spreadsheetResourceLimitExceeded": "Excel 工作簿内容规模超过浏览器预览上限，请下载后查看",
+    "spreadsheetTooLarge": "超过 {{size}} 的 Excel 工作簿无法在浏览器中预览，请下载后查看",
+    "spreadsheetEmptyWorkbook": "此工作簿不包含可见工作表",
+    "spreadsheetEmptySheet": "此工作表为空",
+    "spreadsheetSheetTabsLabel": "工作表",
+    "spreadsheetTableLabel": "{{sheet}} 工作表预览",
+    "invalidJson": "JSON 或 JSONL 内容无效"
   },
   "teams": {
     "title": "团队管理",
@@ -260,6 +288,9 @@
     "removeTask": "移除任务",
     "addImage": "添加图片",
     "addImageDisabled": "处理中或录音中不可添加图片",
+    "addFile": "添加文件",
+    "addFileDisabled": "处理中或录音中不可添加文件",
+    "addAttachment": "添加附件",
     "removeImage": "移除图片",
     "sendTask": "发送消息，但不打断模型运行",
     "editTask": "编辑",
@@ -294,12 +325,19 @@
     "teamPauseHint": "团队暂停后，直接发送下一条消息即可继续",
     "teamBroadcastTarget": "@所有人",
     "contextCompressionCompleted": "本轮完成上下文压缩 {{count}} 次",
+    "contextCompressionStarted": {
+      "dialogue": "压缩过去轮消息中…",
+      "currentRound": "压缩当前轮…",
+      "roundLevel": "全量压缩…"
+    },
     "historyPager": {
       "loadedOfTotal": "历史已加载 {{loaded}} / {{total}} 页",
       "loadingMore": "加载中…",
       "clickOrScrollToLoadMore": "点击或向上滚动加载更多",
       "allLoaded": "历史已全部加载"
     },
+    "historyLoading": "历史数据加载中…",
+    "historyLoadMore": "加载更多历史消息",
     "config": {
       "mode": {
         "cluster": "集群模式",
@@ -423,6 +461,16 @@
     "pending": "待处理",
     "completed": "已完成"
   },
+  "plan": {
+    "toolbarTag": "计划",
+    "closeTag": "退出计划模式",
+    "approvalPrompt": "计划已生成，请选择下一步。",
+    "executePrompt": "计划已批准，请按计划开始执行。",
+    "approvalExecute": "执行",
+    "approvalSkip": "跳过",
+    "approvalNext": "下一步",
+    "approvalInputPlaceholder": "填写修改意见后点击「下一步」；留空点击「跳过」"
+  },
   "goal": {
     "formSubmit": "确定",
     "formCancel": "取消",
@@ -464,7 +512,7 @@
     "restore": "恢复会话",
     "restoreDisabledNotConnected": "连接断开，无法恢复会话",
     "restoreDisabledProcessing": "助手处理中，请结束当前任务后再恢复会话",
-    "restoreDisabledUnsupported": "仅支持恢复 web 前端会话（sess_）",
+    "restoreDisabledUnsupported": "仅支持恢复 Web 前端会话（sess_ / web_）",
     "restoreEmpty": "该会话没有可恢复的消息（为空或均被过滤）。仍可在此继续对话。",
     "delete": "删除会话",
     "teamLabel": "团队：{{team}}",
@@ -916,6 +964,7 @@
       "modelsLoadFailed": "刷新 OpenAI 模型列表失败",
       "noModelsAvailable": "未返回可用 OpenAI 模型，请在授权完成后刷新。",
       "configuredModelUnavailable": "当前配置的模型“{{model}}”不在 OpenAI 账号模型列表中。",
+      "needLoginForModel": "请先连接 OpenAI 账号。",
       "modelNameUseDropdown": "请使用下方 OpenAI 模型下拉框选择",
       "apiBaseManaged": "OAuth Provider 自动维护，无需手动修改",
       "autoSaving": "登录完成，正在自动保存配置...",
@@ -1452,7 +1501,11 @@
         "success": "可用（{{count}}）",
         "error": "不可用",
         "skipped": "未配置"
-      }
+      },
+      "sourceFilterHelp": "默认同时展示 SkillNet 与 ClawHub。点击源标签可筛选结果；至少保留一个源。",
+      "sourceFilterToggle": "点击筛选该源",
+      "sourceFilterKeepOne": "至少保留一个源",
+      "noFilteredResults": "当前筛选条件下没有结果，请重新选择源。"
     },
     "actions": {
       "install": "安装",
@@ -1475,6 +1528,9 @@
       "local": "本地",
       "project": "项目",
       "builtin": "内置",
+      "clawhub": "ClawHub",
+      "skillnet": "SkillNet",
+      "teamskillshub": "TeamSkillsHub",
       "unknown": "未知"
     },
     "sourceLabel": "来源",
@@ -1903,6 +1959,44 @@
     "waitingTasks": "等待任务",
     "messageQueue": "消息队列",
     "parallelProgress": "并行任务执行中 ({{completedCount}}/{{total}} 完成)",
+    "turnRunning": "任务执行",
+    "turnElapsed": "任务用时",
+    "workCompleted": "已完成 {{duration}}",
+    "workCompletedFallback": "已完成",
+    "workCompletedBoth": "已完成 {{thinking}} 次思考，{{tools}} 次工具调用 · {{duration}}",
+    "workCompletedBothNoDuration": "已完成 {{thinking}} 次思考，{{tools}} 次工具调用",
+    "workCompletedThinking": "已完成 {{thinking}} 次思考 · {{duration}}",
+    "workCompletedThinkingNoDuration": "已完成 {{thinking}} 次思考",
+    "workCompletedTools": "已完成 {{tools}} 次工具调用 · {{duration}}",
+    "workCompletedToolsNoDuration": "已完成 {{tools}} 次工具调用",
+    "workFailedToolsNoDuration": "{{tools}} 次工具调用失败",
+    "workOutcomePartial": "部分失败",
+    "reasoning": {
+      "thinking": "思考中…",
+      "thought": "已完成思考"
+    },
+    "toolAction": {
+      "write": "写入",
+      "read": "读取",
+      "edit": "编辑",
+      "delete": "删除",
+      "move": "移动",
+      "rename": "重命名",
+      "list": "列出",
+      "search": "搜索",
+      "glob": "查找",
+      "webSearch": "联网搜索",
+      "fetch": "抓取",
+      "run": "执行",
+      "runCode": "运行代码",
+      "upload": "上传",
+      "sendFile": "发送文件",
+      "todoCreate": "创建待办",
+      "todoModify": "更新待办",
+      "todoList": "查看待办",
+      "todoGet": "读取待办",
+      "skill": "查看技能"
+    },
     "subtask": {
       "starting": "启动中...",
       "toolCall": "调用 {{tool}} (#{{count}})",
@@ -1916,17 +2010,25 @@
       "failed": "失败",
       "timeout": "执行超时",
       "running": "执行中...",
+      "toolName": "工具名称",
       "arguments": "参数",
       "result": "结果",
       "truncated": "结果已截断"
     },
     "toolGroup": {
-      "executed": "已执行 {{totalPairs}} 次工具调用",
+      "running": "正在{{label}}",
+      "completed": "已完成{{label}}",
+      "failed": "{{label}}执行失败",
+      "category": {
+        "file": "文件操作",
+        "search": "搜索",
+        "code": "代码执行",
+        "system": "系统调用",
+        "other": "工具调用"
+      },
       "sessionExecuted": "{{count}} 个会话任务已完成",
       "sessionCompleted": "会话任务已完成",
       "sessionFailed": "会话失败",
-      "pending": "{{pendingCount}} 个执行中",
-      "timeout": "{{timeoutCount}} 个超时",
       "latest": "↓ 最新"
     },
     "teamActivity": {
@@ -2183,7 +2285,7 @@
     "workDescription": "处理办公、协作和通用任务",
     "codeDescription": "在项目目录中查看并修改代码",
     "environment": "环境信息",
-    "changes": "本轮变更",
+    "changes": "变更",
     "review": "审核"
   },
   "multiSession": {

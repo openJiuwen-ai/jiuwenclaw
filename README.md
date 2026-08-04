@@ -17,7 +17,7 @@
   ·
   <a href="docs/README_EN.md">Docs (EN)</a>
   ·
-  <a href="https://openjiuwen.com">Website</a>
+  <a href="https://openjiuwen.com/en/">Website</a>
   ·
   <a href="https://gitcode.com/openJiuwen/jiuwenswarm">GitCode</a>
 </p>
@@ -26,7 +26,7 @@
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-Apache--2.0-green.svg" alt="License" />
   </a>
-  <a href="https://gitcode.com/openJiuwen/jiuwenswarm/releases">
+  <a href="https://github.com/openJiuwen-ai/jiuwenswarm/releases">
     <img src="https://img.shields.io/pypi/v/jiuwenswarm.svg" alt="Release" />
   </a>
   <img src="https://img.shields.io/badge/python-%E2%89%A53.11-blue.svg" alt="Python Version" />
@@ -71,8 +71,8 @@
 
 | Platform | Download | Notes |
 | --- | --- | --- |
-| Windows | [Download Windows Version](https://openjiuwen.com/jiuwenswarm) | For Windows 10 / 11 |
-| macOS | [Download macOS Version](https://openjiuwen.com/jiuwenswarm) | For Intel / Apple Silicon |
+| Windows | [Download Windows Version](https://openjiuwen.com/en/jiuwenswarm) | For Windows 10 / 11 |
+| macOS | [Download macOS Version](https://openjiuwen.com/en/jiuwenswarm) | For Intel / Apple Silicon |
 
 Download and follow the installer prompts to get started.
 
@@ -190,24 +190,26 @@ For solutions to common issues, see: [FAQ](docs/en/FAQ.md).
 
 We welcome developers to contribute to JiuwenSwarm. You can contribute in the following ways:
 
-- Report bugs, feature requests, or usage issues: [Issues](https://gitcode.com/openJiuwen/jiuwenswarm/issues)
-- Submit code, documentation, or examples: [Pull Requests](https://gitcode.com/openJiuwen/jiuwenswarm/pulls)
+- Report bugs, feature requests, or usage issues: [Issues](https://github.com/openJiuwen-ai/jiuwenswarm/issues)
+- Submit code, documentation, or examples: [Pull Requests](https://github.com/openJiuwen-ai/jiuwenswarm/pulls)
 - Share Skills: [Swarm Skills Hub](https://swarmskills.openjiuwen.com/)
 
-Please read the [Contributing Guide](docs/en/Contributing.md) before contributing to understand the debugging workflow, code style, and commit conventions. For the contribution roadmap, see the [openJiuwen Contribution Page](https://openjiuwen.com/contribute).
+Please read the [Contributing Guide](docs/en/Contributing.md) before contributing to understand the debugging workflow, code style, and commit conventions. For the contribution roadmap, see the [openJiuwen Contribution Page](https://openjiuwen.com/en/contribute).
 
 ### Contributors
 
-Thanks to all developers who have contributed to JiuwenSwarm: [View Contributor List](https://gitcode.com/openJiuwen/jiuwenswarm/project_members)
+Thanks to all developers who have contributed to JiuwenSwarm: [View Contributor List](https://github.com/openJiuwen-ai/jiuwenswarm/graphs/contributors)
 
 ## Community
 
 | Channel | Purpose | Link |
 | --- | --- | --- |
-| Website | Product info, updates, and ecosystem | [Visit Website](https://openjiuwen.com) |
-| SIG | Technical roadmap, engineering practices, ecosystem building | [Join SIG](https://openjiuwen.com/community/sig-center) |
+| Website | Product info, updates, and ecosystem | [Visit Website](https://openjiuwen.com/en/) |
+| SIG | Technical roadmap, engineering practices, ecosystem building | [Join SIG](https://openjiuwen.com/en/community/sig-center) |
 | Swarm Skills Hub | Browse, publish, and reuse JiuwenSwarm Skills | [Visit Swarm Skills Hub](https://swarmskills.openjiuwen.com/) |
 
 ## License
 
 This project is licensed under [Apache License 2.0](LICENSE).
+
+This product serves solely as a workflow orchestration tool and does not embed any AI model capabilities. When users integrate AI models for specific business scenarios, they shall bear full responsibility for compliance obligations under the EU AI Act and other relevant regulatory frameworks.

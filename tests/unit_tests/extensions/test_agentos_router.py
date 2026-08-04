@@ -148,12 +148,8 @@ class FakeRegistryClient:
         self.list_user_images_calls.append(user_id)
         return [
             ImageInfo(
-                image_name="claude",
-                image_uri="registry://claude:latest",
-                metadata={"agent_type": "claude", "user_id": user_id},
-            ),
-            ImageInfo(
                 image_name="opencode",
+                image_uri="registry://opencode:latest",
                 metadata={"agent_type": "opencode", "user_id": user_id},
             ),
         ]
@@ -253,7 +249,7 @@ async def test_agent_switch_creates_without_forwarding_chat() -> None:
 
     response = await client.thirdagent_switch(
         user_id="u1",
-        agent_type="claude",
+        agent_type="opencode",
         session_id="sess-1",
     )
     await client.shutdown()
@@ -261,13 +257,13 @@ async def test_agent_switch_creates_without_forwarding_chat() -> None:
     assert response["ok"] is True
     assert yuanrong.create_calls == 1
     assert yuanrong.send_calls == 0
-    assert response["payload"]["agent_type"] == "claude"
+    assert response["payload"]["agent_type"] == "opencode"
     assert response["payload"]["sandbox_id"] == "sbx-1"
     assert response["payload"]["ssh_ip"] == "0.0.0.0"
     assert response["payload"]["ssh_port"] == 2222
     agents = await agent_manager.list_user_agents("u1")
     assert len(agents) == 1
-    assert agents[0].info.agent_type == "claude"
+    assert agents[0].info.agent_type == "opencode"
 
 
 @pytest.mark.asyncio
@@ -278,7 +274,7 @@ async def test_agent_switch_fails_without_ssh_endpoint() -> None:
 
     response = await client.thirdagent_switch(
         user_id="u1",
-        agent_type="claude",
+        agent_type="opencode",
         session_id="sess-1",
     )
     await client.shutdown()
@@ -308,10 +304,9 @@ async def test_agent_list_returns_registry_images_without_creating() -> None:
     assert registry.list_user_images_calls == ["u1"]
     assert response["payload"]["current_agent_type"] == "jiuwenswarm"
     assert [item["agent_type"] for item in response["payload"]["agents"]] == [
-        "claude",
         "opencode",
     ]
-    assert response["payload"]["agents"][0]["image_uri"] == "registry://claude:latest"
+    assert response["payload"]["agents"][0]["image_uri"] == "registry://opencode:latest"
     assert await agent_manager.list_user_agents("u1") == []
 
 
@@ -325,12 +320,12 @@ async def test_agent_switch_reuses_existing_agent() -> None:
 
     first = await client.thirdagent_switch(
         user_id="u1",
-        agent_type="claude",
+        agent_type="opencode",
         session_id="sess-1",
     )
     second = await client.thirdagent_switch(
         user_id="u1",
-        agent_type="claude",
+        agent_type="opencode",
         session_id="sess-1",
     )
     await client.shutdown()
@@ -353,10 +348,10 @@ async def test_chat_after_switch_reuses_agent() -> None:
 
     switch_resp = await client.thirdagent_switch(
         user_id="u1",
-        agent_type="claude",
+        agent_type="opencode",
         session_id="sess-1",
     )
-    chat_envelope = _envelope(agent_type="claude")
+    chat_envelope = _envelope(agent_type="opencode")
     chat_resp = await client.send_request(chat_envelope)
     await client.shutdown()
 
@@ -364,7 +359,7 @@ async def test_chat_after_switch_reuses_agent() -> None:
     assert yuanrong.create_calls == 1
     assert yuanrong.send_calls == 1
     assert chat_envelope.channel_context["agent_id"] == switch_resp["payload"]["agent_id"]
-    assert chat_envelope.channel_context["agent_type"] == "claude"
+    assert chat_envelope.channel_context["agent_type"] == "opencode"
 
 
 @pytest.mark.asyncio
@@ -586,7 +581,7 @@ async def test_unsupported_third_agent_returns_unsupported() -> None:
     third = get_unsupported_third_agent()
     listed = await third.thirdagent_list(user_id="u1", current_agent_type="jiuwenswarm")
     switched = await third.thirdagent_switch(
-        user_id="u1", agent_type="claude", session_id="s1"
+        user_id="u1", agent_type="opencode", session_id="s1"
     )
 
     assert listed["ok"] is False
@@ -611,17 +606,16 @@ async def test_agentos_third_agent_list_and_switch() -> None:
 
     listed = await third.thirdagent_list(user_id="u1", current_agent_type="jiuwenswarm")
     switched = await third.thirdagent_switch(
-        user_id="u1", agent_type="claude", session_id="sess-1"
+        user_id="u1", agent_type="opencode", session_id="sess-1"
     )
     await client.shutdown()
 
     assert listed["ok"] is True
     assert [item["agent_type"] for item in listed["payload"]["agents"]] == [
-        "claude",
         "opencode",
     ]
     assert switched["ok"] is True
-    assert switched["payload"]["agent_type"] == "claude"
+    assert switched["payload"]["agent_type"] == "opencode"
     assert switched["payload"]["ssh_ip"] == "0.0.0.0"
     assert switched["payload"]["ssh_port"] == 2223
     assert yuanrong.create_calls == 1
@@ -755,7 +749,7 @@ async def test_create_uses_configured_workspace_root() -> None:
     try:
         response = await client.thirdagent_switch(
             user_id="u1",
-            agent_type="claude",
+            agent_type="opencode",
             session_id="sess-1",
         )
         assert response["ok"] is True
