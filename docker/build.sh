@@ -25,6 +25,6 @@ fi
 
 IMAGE_NAME="jiuwen:${build_version}-py312-ubuntu24.04-${ARCH_TAG}"
 echo "Building for ${BUILD_ARG_ARCH}, tagging as: ${IMAGE_NAME}"
-docker build --build-arg ARCH="${BUILD_ARG_ARCH}" -t "${IMAGE_NAME}" -f jiuwenclaw.dockerfile .
+docker build --build-arg ARCH="${BUILD_ARG_ARCH}" --build-arg jiuwenclaw_version="${build_version}" -t "${IMAGE_NAME}" -f jiuwenclaw.dockerfile .
 echo "构建${build_version}镜像完成！"
 
