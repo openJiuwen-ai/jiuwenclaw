@@ -1,0 +1,360 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+
+"""PerfTraceRail - 性能定位日志 Rail。
+
+通过 DeepAgentRail 钩子在请求各阶段（invoke / model / tool / iter）打印 INFO 级日志，
+带统一 trace_id（request_id）和每阶段开始/结束/耗时，用于定位性能问题。
+
+不依赖 OTel 后端，不改 core，通过 AGENT_EXTRA_RAILS 挂载。
+
+用法::
+
+    export AGENT_EXTRA_RAILS=jiuwenclaw.agentserver.extensions.perf_trace_rail
+    # 可选关闭（默认开）
+    # export PERF_TRACE_ENABLED=false
+
+trace_id 来源：优先复用 TelemetryRail 的 _request_context.request_id（DeepAdapter 在
+invoke 前设置），回退 session_id，最后兜底生成。与 TelemetryRail 共存不冲突（priority
+不同：PerfTraceRail=5 早于 TelemetryRail=10）。
+
+skill 阶段：skill 执行走 skill_step / skill_complete tool，before/after_tool_call 自动
+捕获（tool_name=skill_step），无需专门 skill 钩子。
+
+日志样例（一次请求，2 轮 ReAct）::
+
+    [perf] trace_id=req_xxx phase=invoke start
+    [perf] trace_id=req_xxx phase=iter start iter=1
+    [perf] trace_id=req_xxx phase=model start iter=1
+    [perf] trace_id=req_xxx phase=model end iter=1 elapsed_ms=5547.8
+    [perf] trace_id=req_xxx phase=tool start tool=search_web
+    [perf] trace_id=req_xxx phase=tool end tool=search_web elapsed_ms=1230.5
+    [perf] trace_id=req_xxx phase=iter end iter=1 elapsed_ms=6790.3
+    [perf] trace_id=req_xxx phase=iter start iter=2
+    [perf] trace_id=req_xxx phase=model start iter=2
+    [perf] trace_id=req_xxx phase=model end iter=2 elapsed_ms=3201.1
+    [perf] trace_id=req_xxx phase=iter end iter=2 elapsed_ms=3205.4
+    [perf] trace_id=req_xxx phase=invoke end elapsed_ms=10002.7
+"""
+
+from __future__ import annotations
+
+import os
+import time
+from contextvars import ContextVar
+from typing import Any
+
+from openjiuwen.harness.rails.base import DeepAgentRail
+
+from jiuwenclaw.utils import logger
+
+# 请求级 trace_id（before_invoke 设置，整个请求生命周期内所有阶段日志共用）。
+# ContextVar 在 asyncio task 级别自动隔离，并发请求互不干扰。
+_trace_id: ContextVar[str] = ContextVar("perf_trace_id", default="")
+_session_id: ContextVar[str] = ContextVar("perf_session_id", default="")
+# 各阶段开始时间：key = "phase:call_id"，value = perf_counter。
+# 用 call_id 区分同一阶段并发的多次调用（如一轮多个 tool）。
+_starts: ContextVar[dict | None] = ContextVar("perf_starts", default=None)
+# 请求级迭代计数（before_task_iteration 递增）
+_iter: ContextVar[int] = ContextVar("perf_iter", default=0)
+
+_ENABLED = os.getenv("PERF_TRACE_ENABLED", "true").strip().lower() not in (
+    "false", "0", "no", "off",
+)
+# 是否打印请求/响应详情（messages / response / tool args / tool result）
+_DETAIL = os.getenv("PERF_TRACE_DETAIL", "true").strip().lower() not in (
+    "false", "0", "no", "off",
+)
+_MAX_DETAIL = int(os.getenv("PERF_TRACE_DETAIL_MAX", "2000"))
+
+
+def _resolve_trace_id(ctx: Any) -> str:
+    """拿请求级 trace_id。
+
+    优先复用 TelemetryRail 的 _request_context.request_id（DeepAdapter 在 invoke 前设置）；
+    回退到 ctx.inputs.conversation_id / session_id；最后兜底生成。
+    """
+    # 1. TelemetryRail 的 _request_context（默认挂载，invoke 前由 DeepAdapter 设置）
+    try:
+        from jiuwenclaw.telemetry.instrumentors.telemetry_rail import _request_context
+        rc = _request_context.get()
+        if rc and rc.get("request_id"):
+            return str(rc["request_id"])
+    except Exception:
+        pass
+    # 2. ctx.inputs.conversation_id / session_id（session 级兜底）
+    try:
+        inputs = getattr(ctx, "inputs", None)
+        if inputs is not None:
+            cid = (
+                getattr(inputs, "conversation_id", None)
+                or getattr(inputs, "session_id", None)
+            )
+            if cid:
+                return str(cid)
+    except Exception:
+        pass
+    # 3. 兜底
+    return f"perf_{time.monotonic_ns():x}"
+
+
+def _resolve_session_id(ctx: Any) -> str:
+    """拿会话级 session_id。优先 TelemetryRail 的 _request_context.session_id，
+    回退 ctx.inputs.conversation_id / session_id。"""
+    try:
+        from jiuwenclaw.telemetry.instrumentors.telemetry_rail import _request_context
+        rc = _request_context.get()
+        if rc and rc.get("session_id"):
+            return str(rc["session_id"])
+    except Exception:
+        pass
+    try:
+        inputs = getattr(ctx, "inputs", None)
+        if inputs is not None:
+            sid = (
+                getattr(inputs, "conversation_id", None)
+                or getattr(inputs, "session_id", None)
+            )
+            if sid:
+                return str(sid)
+    except Exception:
+        pass
+    return ""
+
+
+def _log_kv() -> str:
+    """返回日志前缀 key=value 串：trace_id=xxx session_id=yyy。"""
+    return f"trace_id={_trace_id.get()} session_id={_session_id.get()}"
+
+
+def _mark(phase: str, call_id: str = "") -> None:
+    """记录某阶段开始时间。"""
+    starts = _starts.get()
+    if starts is None:
+        starts = {}
+        _starts.set(starts)
+    starts[f"{phase}:{call_id}"] = time.perf_counter()
+
+
+def _elapsed(phase: str, call_id: str = "") -> float:
+    """取出并清除某阶段开始时间，返回耗时(ms)。找不到返回 -1.0。"""
+    starts = _starts.get() or {}
+    t0 = starts.pop(f"{phase}:{call_id}", None)
+    if t0 is None:
+        return -1.0
+    return (time.perf_counter() - t0) * 1000.0
+
+
+def _tool_info(ctx: Any) -> tuple[str, str]:
+    """从 ctx.inputs 取 (tool_name, tool_call_id)。"""
+    inputs = getattr(ctx, "inputs", None)
+    if inputs is None:
+        return "", ""
+    tc = getattr(inputs, "tool_call", None)
+    if tc is not None:
+        return str(getattr(tc, "name", "") or ""), str(getattr(tc, "id", "") or "")
+    return str(getattr(inputs, "tool_name", "") or ""), ""
+
+
+def _truncate(s: Any, max_len: int | None = None) -> str:
+    """截断长字符串，超长加 ...[+N] 标记。"""
+    if s is None:
+        return ""
+    s = str(s)
+    limit = max_len if max_len is not None else _MAX_DETAIL
+    if len(s) <= limit:
+        return s
+    return s[:limit] + f"...[+{len(s) - limit}]"
+
+
+def _msg_summary(messages: Any) -> str:
+    """提取 messages 摘要：[{role=...,content=...},...]，每条 content 截断到 300。"""
+    if not messages:
+        return "[]"
+    try:
+        parts = []
+        for msg in messages:
+            role = getattr(msg, "role", None)
+            if role is None and isinstance(msg, dict):
+                role = msg.get("role", "?")
+            content = getattr(msg, "content", None)
+            if content is None and isinstance(msg, dict):
+                content = msg.get("content", "")
+            parts.append(f"{{role={role},content={_truncate(content, 300)}}}")
+        return f"[{','.join(parts)}]" if len(parts) <= 8 else f"[{len(parts)} msgs]"
+    except Exception:
+        return "<unreadable>"
+
+
+def _response_summary(resp: Any) -> str:
+    """提取模型响应摘要：finish_reason + content + tool_calls + tokens。"""
+    if resp is None:
+        return "None"
+    try:
+        content = getattr(resp, "content", "") or ""
+        finish = getattr(resp, "finish_reason", "") or ""
+        tcs = getattr(resp, "tool_calls", None) or []
+        tc_names = [getattr(tc, "name", "?") for tc in tcs] if tcs else []
+        usage = getattr(resp, "usage_metadata", None)
+        tok = ""
+        if usage:
+            tok = f" tokens={{in={getattr(usage, 'input_tokens', '?')},out={getattr(usage, 'output_tokens', '?')}}}"
+        return f"finish={finish} content={_truncate(content)} tool_calls={tc_names}{tok}"
+    except Exception:
+        return "<unreadable>"
+
+
+def _tool_args(inputs: Any) -> str:
+    """提取 tool_call.arguments。"""
+    tc = getattr(inputs, "tool_call", None)
+    if tc is None:
+        return ""
+    args = getattr(tc, "arguments", None) or {}
+    return _truncate(str(args))
+
+
+def _tool_result_str(inputs: Any) -> str:
+    """提取 tool_result。"""
+    result = getattr(inputs, "tool_result", None)
+    if result is None:
+        return ""
+    return _truncate(str(result))
+
+
+class PerfTraceRail(DeepAgentRail):
+    """性能追踪 Rail：统一 trace_id + 各阶段耗时日志（INFO 级，不依赖 OTel 后端）。
+
+    priority=5，早于业务 rail（TelemetryRail=10），捕获完整时间线。
+    before/after 钩子共用同一个 ctx 对象，靠 setattr 传递 call_id。
+    """
+
+    priority = 5
+
+    # ------------------------------------------------------------------
+    # invoke - 请求端到端
+    # ------------------------------------------------------------------
+    async def before_invoke(self, ctx: Any) -> None:
+        if not _ENABLED:
+            return
+        tid = _resolve_trace_id(ctx)
+        _trace_id.set(tid)
+        _session_id.set(_resolve_session_id(ctx))
+        _starts.set({})
+        _iter.set(0)
+        _mark("invoke")
+        logger.info("[perf] %s phase=invoke start", _log_kv())
+
+    async def after_invoke(self, ctx: Any) -> None:
+        if not _ENABLED:
+            return
+        logger.info(
+            "[perf] %s phase=invoke end elapsed_ms=%.1f",
+            _log_kv(),_elapsed("invoke"),
+        )
+
+    # ------------------------------------------------------------------
+    # task_iteration - 每轮 ReAct 迭代
+    # ------------------------------------------------------------------
+    async def before_task_iteration(self, ctx: Any) -> None:
+        if not _ENABLED:
+            return
+        n = _iter.get() + 1
+        _iter.set(n)
+        _mark("iter", str(n))
+        logger.info("[perf] %s phase=iter start iter=%d", _log_kv(),n)
+
+    async def after_task_iteration(self, ctx: Any) -> None:
+        if not _ENABLED:
+            return
+        n = _iter.get()
+        logger.info(
+            "[perf] %s phase=iter end iter=%d elapsed_ms=%.1f",
+            _log_kv(),n, _elapsed("iter", str(n)),
+        )
+
+    # ------------------------------------------------------------------
+    # model_call - LLM 调用
+    # ------------------------------------------------------------------
+    async def before_model_call(self, ctx: Any) -> None:
+        if not _ENABLED:
+            return
+        n = _iter.get()
+        call_id = str(time.monotonic_ns())
+        setattr(ctx, "_perf_model_call_id", call_id)
+        _mark("model", call_id)
+        logger.info("[perf] %s phase=model start iter=%d", _log_kv(),n)
+        if _DETAIL:
+            inputs = getattr(ctx, "inputs", None)
+            msgs = getattr(inputs, "messages", None) if inputs else None
+            logger.info(
+                "[perf] %s phase=model req iter=%d messages=%s",
+                _log_kv(),n, _msg_summary(msgs),
+            )
+
+    async def after_model_call(self, ctx: Any) -> None:
+        if not _ENABLED:
+            return
+        call_id = getattr(ctx, "_perf_model_call_id", "")
+        logger.info(
+            "[perf] %s phase=model end iter=%d elapsed_ms=%.1f",
+            _log_kv(),_iter.get(), _elapsed("model", call_id),
+        )
+        if _DETAIL:
+            inputs = getattr(ctx, "inputs", None)
+            resp = getattr(inputs, "response", None) if inputs else None
+            logger.info(
+                "[perf] %s phase=model resp iter=%d %s",
+                _log_kv(),_iter.get(), _response_summary(resp),
+            )
+
+    # ------------------------------------------------------------------
+    # tool_call - 工具调用（含 skill_step / skill_complete）
+    # ------------------------------------------------------------------
+    async def before_tool_call(self, ctx: Any) -> None:
+        if not _ENABLED:
+            return
+        tool_name, tool_call_id = _tool_info(ctx)
+        call_id = tool_call_id or f"__{tool_name}_{time.monotonic_ns()}"
+        setattr(ctx, "_perf_tool_call_id", call_id)
+        setattr(ctx, "_perf_tool_name", tool_name)
+        _mark("tool", call_id)
+        logger.info(
+            "[perf] %s phase=tool start tool=%s",
+            _log_kv(),tool_name,
+        )
+        if _DETAIL:
+            inputs = getattr(ctx, "inputs", None)
+            logger.info(
+                "[perf] %s phase=tool req tool=%s args=%s",
+                _log_kv(),tool_name, _tool_args(inputs),
+            )
+
+    async def after_tool_call(self, ctx: Any) -> None:
+        if not _ENABLED:
+            return
+        call_id = getattr(ctx, "_perf_tool_call_id", "")
+        tool_name = getattr(ctx, "_perf_tool_name", "")
+        # Fallback：before 没设（orphan after，如 force_finish / streaming tool 路径
+        # 只触发 after 不触发 before，或 before/after 非同一 ctx），重新从 ctx.inputs 取
+        if not call_id:
+            tn, tcid = _tool_info(ctx)
+            tool_name = tool_name or tn
+            call_id = tcid
+        elapsed = _elapsed("tool", call_id)
+        if elapsed < 0:
+            # 没有对应 before（orphan after），不打 end 日志，避免 elapsed_ms=-1 误导
+            return
+        logger.info(
+            "[perf] %s phase=tool end tool=%s elapsed_ms=%.1f",
+            _log_kv(),tool_name, elapsed,
+        )
+        if _DETAIL:
+            inputs = getattr(ctx, "inputs", None)
+            logger.info(
+                "[perf] %s phase=tool resp tool=%s result=%s",
+                _log_kv(),tool_name, _tool_result_str(inputs),
+            )
+
+
+def register_rails() -> list[DeepAgentRail]:
+    """AGENT_EXTRA_RAILS 注册入口：返回要挂载的 Rail 实例列表。"""
+    return [PerfTraceRail()]
