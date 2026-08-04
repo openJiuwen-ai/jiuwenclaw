@@ -404,6 +404,9 @@ symphony:
       postprocess_max_passes: 1
       postprocess_min_skills: 6
       equivalence_enabled: true
+      equivalence_all_pairs_scope_limit: 12
+      equivalence_candidate_neighbors: 8
+      equivalence_max_pairwise_pairs: 10000
     retrieve:
       top_k: 8
       compact_codes_enabled: true
@@ -429,6 +432,9 @@ symphony:
                     "postprocess_max_passes": 4,
                     "postprocess_min_skills": 10,
                     "equivalence_enabled": False,
+                    "equivalence_all_pairs_scope_limit": 10,
+                    "equivalence_candidate_neighbors": 6,
+                    "equivalence_max_pairwise_pairs": 4096,
                 },
                 "retrieve": {
                     "top_k": 6,
@@ -452,6 +458,9 @@ symphony:
             "postprocess_max_passes": 4,
             "postprocess_min_skills": 10,
             "equivalence_enabled": False,
+            "equivalence_all_pairs_scope_limit": 10,
+            "equivalence_candidate_neighbors": 6,
+            "equivalence_max_pairwise_pairs": 4096,
         }
         assert section["retrieve"] == {
             "top_k": 6,

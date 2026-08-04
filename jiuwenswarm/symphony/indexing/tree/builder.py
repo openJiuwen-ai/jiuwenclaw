@@ -4,7 +4,6 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-import re
 import threading
 from time import perf_counter
 from typing import Optional
@@ -28,13 +27,13 @@ from .schema import (
     TreeNode,
 )
 from .expansion import TreeExpansionEngine as ExternalTreeExpansionEngine
+from .equivalence import EquivalenceNormalizer
 from .grouping import TreeGroupingEngine
 from .llm_runtime import TreeLLMRuntime as ExternalTreeLLMRuntime
 from .prompts import (
     GROUP_MERGE_PROMPT,
     GROUP_DISCOVERY_PROMPT,
     SKILL_ASSIGNMENT_PROMPT,
-    EQUIVALENCE_GROUPING_PROMPT,
     SKILL_PROFILE_PROMPT,
 )
 from .preset_writer import TreePresetWriter as ExternalTreePresetWriter
@@ -159,7 +158,31 @@ class TreeBuilder:
         self._postprocess_max_passes = max(0, int(build_cfg.postprocess_max_passes))
         self._postprocess_min_skills = max(2, int(build_cfg.postprocess_min_skills))
         self._equiv_grouping_enabled = bool(build_cfg.equiv_grouping_enabled)
+        self._equivalence_all_pairs_scope_limit = max(
+            1, int(getattr(build_cfg, "equivalence_all_pairs_scope_limit", 12))
+        )
+        self._equivalence_candidate_neighbors = max(
+            1, int(getattr(build_cfg, "equivalence_candidate_neighbors", 8))
+        )
+        self._equivalence_max_pairwise_pairs = max(
+            1, int(getattr(build_cfg, "equivalence_max_pairwise_pairs", 10000))
+        )
         self._discovery_seed = build_cfg.discovery_seed
+        # These options predate TreeBuildConfig wiring.  Initialize safe direct-
+        # builder defaults instead of relying on the service's compatibility patch.
+        self._skill_profiles_enabled = bool(getattr(build_cfg, "skill_profiles_enabled", False))
+        self._deterministic_prompts = bool(getattr(build_cfg, "deterministic_prompts", False))
+        self._cache_observability = bool(getattr(build_cfg, "cache_observability", False))
+        self._skill_profile_batch_size = max(1, int(getattr(build_cfg, "skill_profile_batch_size", 20)))
+        self._skill_profile_description_limit = max(
+            32, int(getattr(build_cfg, "skill_profile_description_limit", SKILL_DESCRIPTION_MAX_LENGTH))
+        )
+        self._skill_profile_rule_limit = max(
+            32, int(getattr(build_cfg, "skill_profile_rule_limit", SKILL_DESCRIPTION_MAX_LENGTH))
+        )
+        self._skill_profile_select_rules_enabled = bool(
+            getattr(build_cfg, "skill_profile_select_rules_enabled", False)
+        )
 
         self._llm_calls = 0
         self._retry_calls = 0
@@ -180,6 +203,7 @@ class TreeBuilder:
         self.max_consecutive_failures = 5
         self._llm_runtime = ExternalTreeLLMRuntime(self)
         self._preset_writer = ExternalTreePresetWriter(self)
+        self._equivalence_normalizer = EquivalenceNormalizer(self)
         self._expansion_engine = ExternalTreeExpansionEngine(self)
         self._repair_engine = ExternalTreeRepairEngine(self)
         self._grouping_engine = TreeGroupingEngine(self)
@@ -390,6 +414,10 @@ class TreeBuilder:
             console.print("\n[bold]Tree Structure:[/bold]")
             self._print_tree(tree_dict)
         return preset_dict
+
+    def _write_yaml(self, tree_dict: dict) -> None:
+        """Write the public tree artifact through the owned preset writer."""
+        self._preset_writer.write_yaml(tree_dict)
 
     def _print_build_summary(self) -> None:
         summary_lines = [f"[bold green]Done![/bold green] ({self._llm_calls} LLM calls)"]
@@ -762,135 +790,22 @@ class TreeBuilder:
         repair_engine = getattr(self, "_repair_engine", None) or _TreeRepairEngine(self)
         repair_engine.normalize_to_equivalence_groups(root, verbose)
 
-    @staticmethod
-    def _is_second_leaf_node(node: TreeNode) -> bool:
-        """Second-leaf node: has children and all children are leaf nodes."""
-        return _TreeRepairEngine.is_second_leaf_node(node)
-
-    def _split_second_leaf_node_into_equiv_groups(
+    def normalize_equivalence_scope(
         self,
-        parent_node: TreeNode,
-        second_leaf_node: TreeNode,
-        verbose: bool = False,
-    ) -> list[TreeNode]:
-        repair_engine = getattr(self, "_repair_engine", None) or _TreeRepairEngine(self)
-        return repair_engine.split_second_leaf_node_into_equiv_groups(parent_node, second_leaf_node, verbose)
-
-    def _discover_equivalence_groups(
-        self,
-        second_leaf_node: TreeNode,
-        leaf_children: list[TreeNode],
-        verbose: bool = False,
+        scope: TreeNode,
+        scope_path: str | tuple[str, ...],
+        *,
+        cached_state: dict | None = None,
+        max_pairwise_pairs: int | None = None,
     ) -> dict:
-        """Ask LLM to partition second-leaf children into equivalence groups."""
-        leaf_lines = []
-        for leaf in leaf_children:
-            sample_skill_ids = ", ".join(skill.id for skill in leaf.skills[:5]) or "(none)"
-            leaf_lines.append(
-                f"- id: {leaf.id}\n"
-                f"  name: {leaf.name}\n"
-                f"  description: {leaf.description or '(no description)'}\n"
-                f"  select_when: {leaf.select_when or ''}\n"
-                f"  dont_select_when: {leaf.dont_select_when or ''}\n"
-                f"  sample_skill_ids: {sample_skill_ids}"
-            )
-
-        prompt = EQUIVALENCE_GROUPING_PROMPT.format(
-            parent_id=second_leaf_node.id,
-            parent_name=second_leaf_node.name,
-            parent_description=second_leaf_node.description or "(no description)",
-            leaf_nodes="\n".join(leaf_lines),
+        """Public branch-local entry point used by incremental indexing."""
+        normalizer = EquivalenceNormalizer(self)
+        return normalizer.normalize_scope(
+            scope,
+            scope_path,
+            cached_state=cached_state,
+            max_pairwise_pairs=max_pairwise_pairs,
         )
-        result = self._call_llm_json(prompt)
-        groups = result.get("groups", {})
-        if not isinstance(groups, dict):
-            if verbose:
-                console.print(f"[yellow]  Equivalence grouping failed for '{second_leaf_node.id}'[/yellow]")
-            return {}
-        return groups
-
-    def _normalize_equivalence_groups(self, leaf_children: list[TreeNode], groups: dict) -> list[dict]:
-        """
-        Normalize and repair LLM equivalence groups.
-
-        Guarantees:
-        - Every original leaf appears in exactly one output group
-        - Unknown leaf IDs are ignored
-        - Empty groups are removed
-        """
-        leaf_map = {leaf.id: leaf for leaf in leaf_children}
-        assigned: set[str] = set()
-        normalized: list[dict] = []
-
-        for group_id, group_data in self._iter_group_items(groups):
-            if not isinstance(group_data, dict):
-                continue
-            raw_leaf_ids = group_data.get("leaf_ids", [])
-            if not isinstance(raw_leaf_ids, list):
-                raw_leaf_ids = []
-            leaf_nodes = []
-            for leaf_id in raw_leaf_ids:
-                lid = str(leaf_id).strip()
-                if not lid or lid in assigned:
-                    continue
-                leaf = leaf_map.get(lid)
-                if leaf is None:
-                    continue
-                assigned.add(lid)
-                leaf_nodes.append(leaf)
-            if not leaf_nodes:
-                continue
-            normalized.append(
-                {
-                    "id": self._build_equivalence_group_id(
-                        group_id=str(group_id).strip(),
-                        group_name=str(group_data.get("name") or "").strip(),
-                        fallback="equiv-group",
-                    ),
-                    "name": str(group_data.get("name") or group_id),
-                    "description": str(group_data.get("description") or ""),
-                    "select_when": str(group_data.get("select_when") or ""),
-                    "dont_select_when": str(group_data.get("dont_select_when") or ""),
-                    "leaf_nodes": leaf_nodes,
-                }
-            )
-
-        # Recovery: assign missing leaves conservatively.
-        missing = [leaf for leaf in leaf_children if leaf.id not in assigned]
-        for leaf in missing:
-            normalized.append(
-                {
-                    "id": f"equiv-{self._slug_term(leaf.id, fallback='leaf')}",
-                    "name": leaf.name or leaf.id,
-                    "description": leaf.description or "Equivalent capability group.",
-                    "select_when": leaf.select_when,
-                    "dont_select_when": leaf.dont_select_when,
-                    "leaf_nodes": [leaf],
-                }
-            )
-
-        # Keep deterministic order.
-        for item in normalized:
-            item["leaf_nodes"] = sorted(item["leaf_nodes"], key=lambda leaf: leaf.id)
-        normalized.sort(key=lambda item: str(item.get("id", "")))
-        return normalized
-
-    def _build_equivalence_group_id(self, *, group_id: str, group_name: str, fallback: str) -> str:
-        """
-        Build a stable, readable node id for equivalence groups.
-
-        LLMs often emit placeholder ids like G1/G2. We prefer semantic ids derived
-        from the group name and only fall back to the raw id when it is informative.
-        """
-        raw_name = str(group_name or "").strip()
-        raw_id = str(group_id or "").strip()
-        generic_id = bool(re.fullmatch(r"g\d+(?:-\d+)?", raw_id.lower()))
-
-        if raw_name:
-            return self._slug_term(raw_name, fallback=fallback)
-        if raw_id and not generic_id:
-            return self._slug_term(raw_id, fallback=fallback)
-        return self._slug_term(fallback, fallback="equiv-group")
 
     def _sorted_skills(self, skills: list[dict]) -> list[dict]:
         return self._grouping_engine.sorted_skills(skills)

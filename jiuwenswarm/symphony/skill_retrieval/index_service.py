@@ -18,9 +18,13 @@ from .config import SkillRetrievalSettings, load_settings
 from .dispatch_imports import dispatch_import_path
 from .inventory import SkillInventory, scan_skill_inventory
 from .markdown import render_build_failure, render_build_success, render_disabled
+from .taxonomy_config import root_categories_to_text
 
 TREE_INDEX_FILENAME = "tree_index.yaml"
 MANIFEST_FILENAME = "manifest.json"
+EQUIVALENCE_AUDIT_FILENAME = "equivalence_audit.jsonl"
+EQUIVALENCE_REPORT_FILENAME = "equivalence_report.json"
+INDEX_BUILD_METADATA_FILENAME = "build_metadata.json"
 STATE_FILENAME = "state.json"
 LOGGER = logging.getLogger(__name__)
 BUILD_LOG_LIMIT = 40
@@ -29,6 +33,7 @@ TREE_BUILD_PROGRESS_END = 0.85
 TREE_BUILD_PROGRESS_MIN_INTERVAL_SECONDS = 1.0
 TREE_BUILD_PROGRESS_MIN_DELTA = 0.01
 TREE_BUILD_PROGRESS_LLM_HINT_LIMIT = 0.12
+SKILL_INDEX_FINGERPRINT_VERSION = "skill-index/v2-terminal-equivalence"
 
 
 class SkillIndexBuildCancelled(RuntimeError):
@@ -37,6 +42,10 @@ class SkillIndexBuildCancelled(RuntimeError):
 
 class SkillIndexBuildTimeout(RuntimeError):
     pass
+
+
+class SkillIndexFullRebuildRequired(RuntimeError):
+    """Incremental inputs cannot safely represent the requested global change."""
 
 
 class SkillIndexService:
@@ -49,7 +58,10 @@ class SkillIndexService:
         index_dir = _index_dir(settings)
         state = _read_state(settings)
         expected = _expected_fingerprint(inventory, settings)
-        complete = _is_complete_index(index_dir)
+        complete = _is_complete_index(
+            index_dir,
+            settings=settings,
+        )
         manifest_matches = complete and _manifest_matches_inventory(index_dir, inventory)
         fresh = complete and manifest_matches and state.get("fingerprint") == expected
         build_state = _build_state_from_state(state)
@@ -79,6 +91,7 @@ class SkillIndexService:
             "build_started_at": build_state.get("started_at", ""),
             "build_finished_at": build_state.get("finished_at", ""),
             "build_elapsed_seconds": build_state.get("elapsed_seconds", 0.0),
+            "build_diagnostics_dir": build_state.get("diagnostics_dir", ""),
             "build_cancel_requested": bool(build_state.get("cancel_requested", False)),
             "build_logs": build_state.get("logs", []),
             "retrieval_top_k": settings.retrieve.top_k,
@@ -144,7 +157,13 @@ class SkillIndexService:
             )
         state = _read_state(settings)
         index_dir = _index_dir(settings)
-        index_complete = _is_complete_index(index_dir)
+        index_complete = _is_complete_index(
+            index_dir,
+            settings=settings,
+        )
+        preserve_previous_equivalence_index = bool(
+            settings.build.equivalence_enabled and index_complete
+        )
         manifest_matches = index_complete and _manifest_matches_inventory(index_dir, inventory)
         fingerprint_matches = state.get("fingerprint") == expected
         fresh_index_available = index_complete and manifest_matches and fingerprint_matches
@@ -172,7 +191,10 @@ class SkillIndexService:
             }
 
         if not settings.llm.model or not settings.llm.api_key:
-            if _is_stale_index(settings, inventory, expected):
+            if (
+                not preserve_previous_equivalence_index
+                and _is_stale_index(settings, inventory, expected)
+            ):
                 _cleanup_index(settings)
             error = (
                 "Offline skill tree build requires a model and API key. "
@@ -199,6 +221,7 @@ class SkillIndexService:
             _tmp_dir(settings) / f"build-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{time.time_ns()}"
         )
         build_index_dir = build_root / "index"
+        build_succeeded = False
         try:
             _write_build_state(
                 settings,
@@ -231,12 +254,32 @@ class SkillIndexService:
             elif index_complete and not fingerprint_matches:
                 LOGGER.info("[skill-index] stage=build status=running detail=Starting incremental rebuild.")
                 try:
-                    self.incremental_build(settings=settings, inventory=inventory, output_dir=build_index_dir)
-                except Exception as exc:
+                    self.incremental_build(
+                        settings=settings,
+                        inventory=inventory,
+                        output_dir=build_index_dir,
+                        previous_state=state,
+                    )
+                except SkillIndexFullRebuildRequired as exc:
                     LOGGER.info(
                         "[skill-index] stage=build status=running "
-                        "detail=Incremental rebuild failed; falling back to full rebuild. error=%s",
+                        "detail=Incremental state requires a full rebuild. reason=%s",
                         exc,
+                    )
+                    shutil.rmtree(build_index_dir, ignore_errors=True)
+                    build_index_dir.mkdir(parents=True, exist_ok=True)
+                    self._run_dispatch_build(settings=settings, inventory=inventory, output_dir=build_index_dir)
+                except Exception:
+                    if settings.build.equivalence_enabled:
+                        # A strict equivalence protocol/invariant failure must
+                        # remain visible. Rebuilding the whole tree could turn
+                        # the same invalid decision into an apparently valid
+                        # artifact and hide the root cause.
+                        raise
+                    LOGGER.info(
+                        "[skill-index] stage=build status=running "
+                        "detail=Legacy incremental rebuild failed; falling back to full rebuild.",
+                        exc_info=True,
                     )
                     shutil.rmtree(build_index_dir, ignore_errors=True)
                     build_index_dir.mkdir(parents=True, exist_ok=True)
@@ -245,8 +288,16 @@ class SkillIndexService:
                 LOGGER.info("[skill-index] stage=build status=running detail=Starting full rebuild.")
                 self._run_dispatch_build(settings=settings, inventory=inventory, output_dir=build_index_dir)
             self._check_cancel_or_timeout(settings, started, cancel_check, stage="publish")
-            if not _is_complete_index(build_index_dir):
+            if not _is_complete_index(
+                build_index_dir,
+                settings=settings,
+            ):
                 raise RuntimeError("skill index build finished without complete index artifacts")
+            _write_index_build_metadata(
+                build_index_dir,
+                fingerprint=expected,
+                inventory=inventory,
+            )
             _write_build_state(
                 settings,
                 status="running",
@@ -261,6 +312,7 @@ class SkillIndexService:
                 fingerprint=expected,
                 elapsed_seconds=time.monotonic() - started,
             )
+            build_succeeded = True
         except SkillIndexBuildCancelled as exc:
             _write_build_state(
                 settings,
@@ -272,10 +324,14 @@ class SkillIndexService:
                 elapsed_seconds=time.monotonic() - started,
                 inventory=inventory,
                 fingerprint=expected,
+                diagnostics_dir=str(build_root) if build_root.exists() else "",
             )
             return {"success": False, "result": render_build_failure(str(exc))}
         except SkillIndexBuildTimeout as exc:
-            if _is_stale_index(settings, inventory, expected):
+            if (
+                not preserve_previous_equivalence_index
+                and _is_stale_index(settings, inventory, expected)
+            ):
                 _cleanup_index(settings)
             _write_build_state(
                 settings,
@@ -288,10 +344,14 @@ class SkillIndexService:
                 elapsed_seconds=time.monotonic() - started,
                 inventory=inventory,
                 fingerprint=expected,
+                diagnostics_dir=str(build_root) if build_root.exists() else "",
             )
             return {"success": False, "result": render_build_failure(str(exc))}
         except Exception as exc:
-            if _is_stale_index(settings, inventory, expected):
+            if (
+                not preserve_previous_equivalence_index
+                and _is_stale_index(settings, inventory, expected)
+            ):
                 _cleanup_index(settings)
             error = _normalize_build_error(exc)
             failed_state = _build_state_from_state(_read_state(settings))
@@ -309,10 +369,11 @@ class SkillIndexService:
                 elapsed_seconds=time.monotonic() - started,
                 inventory=inventory,
                 fingerprint=expected,
+                diagnostics_dir=str(build_root) if build_root.exists() else "",
             )
             return {"success": False, "result": render_build_failure(error)}
         finally:
-            if _is_complete_index(_index_dir(settings)) and build_root.exists():
+            if build_succeeded and build_root.exists():
                 shutil.rmtree(build_root, ignore_errors=True)
 
         return {
@@ -361,6 +422,7 @@ class SkillIndexService:
         settings: SkillRetrievalSettings,
         inventory: SkillInventory,
         output_dir: Path,
+        previous_state: dict[str, Any] | None = None,
     ):
         existing_index = _index_dir(settings)
         manifest_path = existing_index / MANIFEST_FILENAME
@@ -371,9 +433,13 @@ class SkillIndexService:
         current_paths = {str(Path(p).expanduser().resolve()) for p in inventory.item_paths}
         added_paths = sorted(current_paths - existing_paths)
         removed_paths = sorted(existing_paths - current_paths)
+        changed_paths = _changed_inventory_paths(previous_state or {}, inventory)
+        added_paths = sorted(set(added_paths) | changed_paths)
 
         if not added_paths and not removed_paths:
-            raise RuntimeError("no changes detected despite fingerprint mismatch; falling back to full rebuild")
+            raise SkillIndexFullRebuildRequired(
+                "no inventory delta was found; build/model/taxonomy/protocol settings changed"
+            )
 
         add_index_path: Path | None = None
         try:
@@ -381,7 +447,6 @@ class SkillIndexService:
                 from indexing.tree.builder import TreeBuilder
                 from indexing.workflows.index_builder import IndexBuilder
 
-                _ensure_tree_builder_compat(TreeBuilder)
                 config = self._make_build_config(settings)
                 with _capture_tree_build_progress(TreeBuilder, settings=settings, inventory=inventory):
                     if added_paths:
@@ -421,7 +486,10 @@ class SkillIndexService:
         state = _read_state(settings)
         expected = _expected_fingerprint(inventory, settings)
         if (
-            not _is_complete_index(index_dir)
+            not _is_complete_index(
+                index_dir,
+                settings=settings,
+            )
             or not _manifest_matches_inventory(index_dir, inventory)
             or state.get("fingerprint") != expected
         ):
@@ -497,6 +565,9 @@ class SkillIndexService:
                     postprocess_max_passes=build.postprocess_max_passes,
                     postprocess_min_skills=build.postprocess_min_skills,
                     equivalence_enabled=build.equivalence_enabled,
+                    equivalence_all_pairs_scope_limit=build.equivalence_all_pairs_scope_limit,
+                    equivalence_candidate_neighbors=build.equivalence_candidate_neighbors,
+                    equivalence_max_pairwise_pairs=build.equivalence_max_pairwise_pairs,
                     max_skills_per_node=build.max_skills_per_node,
                     model_discovery_max_depth=build.model_discovery_max_depth,
                 ),
@@ -538,8 +609,6 @@ class SkillIndexService:
         with dispatch_import_path():
             from indexing.tree.builder import TreeBuilder
             from indexing.workflows.index_builder import IndexBuilder
-
-            _ensure_tree_builder_compat(TreeBuilder)
 
             config = SkillIndexService._make_build_config(settings)
             with _suppress_dispatch_console():
@@ -595,6 +664,9 @@ class SkillIndexService:
                             postprocess_max_passes=taxonomy.postprocess_max_passes,
                             postprocess_min_skills=taxonomy.postprocess_min_skills,
                             equiv_grouping_enabled=taxonomy.equivalence_enabled,
+                            equivalence_all_pairs_scope_limit=taxonomy.equivalence_all_pairs_scope_limit,
+                            equivalence_candidate_neighbors=taxonomy.equivalence_candidate_neighbors,
+                            equivalence_max_pairwise_pairs=taxonomy.equivalence_max_pairwise_pairs,
                             discovery_seed=execution.discovery_seed,
                         ),
                     ),
@@ -621,11 +693,23 @@ class SkillIndexService:
         inventory: SkillInventory,
         expected_fingerprint: str,
     ) -> bool:
-        if _is_complete_index(_index_dir(settings)):
+        if _is_complete_index(
+            _index_dir(settings),
+            settings=settings,
+        ):
             return False
         for candidate in _recovery_candidates(settings):
             try:
-                if not _is_complete_index(candidate):
+                if not _is_complete_index(
+                    candidate,
+                    settings=settings,
+                ):
+                    continue
+                if not _index_build_metadata_matches(
+                    candidate,
+                    expected_fingerprint=expected_fingerprint,
+                    inventory=inventory,
+                ):
                     continue
                 if not _manifest_matches_inventory(candidate, inventory):
                     continue
@@ -660,21 +744,25 @@ def _load_manifest_item_paths(manifest_path: Path) -> set[str] | None:
     return {str(Path(p).expanduser().resolve()) for p in raw}
 
 
-def _ensure_tree_builder_compat(tree_builder_cls: type) -> None:
-    default_attrs = {
-        "_skill_profiles_enabled": False,
-        "_cache_observability": False,
+def _changed_inventory_paths(previous_state: dict[str, Any], inventory: SkillInventory) -> set[str]:
+    """Return stable Skill paths whose semantic source content changed in place."""
+
+    previous_inventory = previous_state.get("inventory") if isinstance(previous_state, dict) else None
+    raw_items = previous_inventory.get("items") if isinstance(previous_inventory, dict) else None
+    if not isinstance(raw_items, list):
+        return set()
+    old_hash_by_worker = {
+        str(item.get("worker_id") or "").strip(): str(item.get("content_hash") or "").strip()
+        for item in raw_items
+        if isinstance(item, dict) and str(item.get("worker_id") or "").strip()
     }
-    for name, value in default_attrs.items():
-        if not hasattr(tree_builder_cls, name):
-            setattr(tree_builder_cls, name, value)
-    if not hasattr(tree_builder_cls, "_write_yaml"):
-        setattr(tree_builder_cls, "_write_yaml", _write_tree_yaml)
-
-
-def _write_tree_yaml(tree_builder: Any, tree_dict: dict[str, Any]) -> None:
-    writer = getattr(tree_builder, "_preset_writer")
-    writer.write_yaml(tree_dict)
+    return {
+        str(Path(item.skill_dir).expanduser().resolve())
+        for item in inventory.items
+        if item.worker_id in old_hash_by_worker
+        and old_hash_by_worker[item.worker_id]
+        and old_hash_by_worker[item.worker_id] != item.content_hash
+    }
 
 
 @contextmanager
@@ -806,10 +894,50 @@ def _state_file(settings: SkillRetrievalSettings) -> Path:
 def _expected_fingerprint(inventory: SkillInventory, settings: SkillRetrievalSettings) -> str:
     import hashlib
 
+    build = settings.build
+    taxonomy_text = root_categories_to_text(build.root_categories)
     payload = {
+        "version": SKILL_INDEX_FINGERPRINT_VERSION,
         "inventory": inventory.fingerprint,
+        "tree_protocol_sha256": _tree_protocol_source_hash(),
+        "taxonomy_sha256": hashlib.sha256(taxonomy_text.encode("utf-8")).hexdigest(),
+        "tree_semantics": {
+            "branching_factor": build.branching_factor,
+            "max_depth": build.max_depth,
+            "max_skills_per_node": build.max_skills_per_node,
+            "model_discovery_max_depth": build.model_discovery_max_depth,
+            "classification_batch_limit": build.classification_batch_limit,
+            "discovery_seed": build.discovery_seed,
+            "postprocess_enabled": build.postprocess_enabled,
+            "postprocess_max_passes": build.postprocess_max_passes,
+            "postprocess_min_skills": build.postprocess_min_skills,
+            "equivalence_enabled": build.equivalence_enabled,
+            "equivalence_all_pairs_scope_limit": build.equivalence_all_pairs_scope_limit,
+            "equivalence_candidate_neighbors": build.equivalence_candidate_neighbors,
+            "equivalence_max_pairwise_pairs": build.equivalence_max_pairwise_pairs,
+        },
+        "llm_semantics": {
+            "model": settings.llm.model,
+            "base_url": settings.llm.base_url,
+            "seed": settings.llm.seed,
+        },
     }
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _tree_protocol_source_hash() -> str:
+    import hashlib
+
+    tree_dir = Path(__file__).resolve().parents[1] / "indexing" / "tree"
+    digest = hashlib.sha256()
+    for filename in ("prompts.py", "equivalence.py", "schema.py"):
+        path = tree_dir / filename
+        digest.update(filename.encode("utf-8"))
+        digest.update(b"\0")
+        if path.is_file():
+            digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def expected_index_fingerprint(inventory: SkillInventory, settings: SkillRetrievalSettings) -> str:
@@ -826,6 +954,7 @@ def _stale_success_build_state() -> dict[str, Any]:
         "started_at": "",
         "finished_at": "",
         "elapsed_seconds": 0.0,
+        "diagnostics_dir": "",
         "cancel_requested": False,
         "logs": [],
     }
@@ -895,6 +1024,7 @@ def _write_build_state(
     cancel_requested: bool | None = None,
     inventory: SkillInventory | None = None,
     fingerprint: str | None = None,
+    diagnostics_dir: str | None = None,
     clear_error: bool = False,
     clear_logs: bool = False,
 ) -> None:
@@ -919,12 +1049,15 @@ def _write_build_state(
         next_build["finished_at"] = ""
         next_build["elapsed_seconds"] = 0.0
         next_build["cancel_requested"] = False
+        next_build["diagnostics_dir"] = ""
     if finished_at is not None:
         next_build["finished_at"] = finished_at
     if elapsed_seconds is not None:
         next_build["elapsed_seconds"] = float(elapsed_seconds)
     if cancel_requested is not None:
         next_build["cancel_requested"] = bool(cancel_requested)
+    if diagnostics_dir is not None:
+        next_build["diagnostics_dir"] = str(diagnostics_dir)
     logs = [] if clear_logs else next_build.get("logs", [])
     next_build["logs"] = _append_log(
         logs,
@@ -935,9 +1068,12 @@ def _write_build_state(
     state["schema_version"] = int(state.get("schema_version") or 1)
     if fingerprint and status == "success":
         state["fingerprint"] = fingerprint
-    if inventory is not None:
+    # Top-level inventory describes the index that is currently published.  A
+    # running or failed staging build must not replace it, otherwise an
+    # in-place Skill update becomes invisible to the next incremental retry.
+    if inventory is not None and status == "success":
         state["inventory"] = inventory.to_state_payload()
-        state["indexed_count"] = inventory.count if status == "success" else int(state.get("indexed_count") or 0)
+        state["indexed_count"] = inventory.count
     state["build"] = next_build
     _state_file(settings).write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
     LOGGER.info("[skill-index] stage=%s status=%s detail=%s", stage, status, message)
@@ -989,6 +1125,7 @@ def _build_state_from_state(state: dict[str, Any]) -> dict[str, Any]:
             "started_at": "",
             "finished_at": "",
             "elapsed_seconds": 0.0,
+            "diagnostics_dir": "",
             "cancel_requested": False,
             "logs": [],
         }
@@ -1000,6 +1137,7 @@ def _build_state_from_state(state: dict[str, Any]) -> dict[str, Any]:
     out["progress"] = _coerce_progress(out.get("progress", 0.0))
     out["started_at"] = str(out.get("started_at") or "")
     out["finished_at"] = str(out.get("finished_at") or "")
+    out["diagnostics_dir"] = str(out.get("diagnostics_dir") or "")
     try:
         out["elapsed_seconds"] = float(out.get("elapsed_seconds") or 0.0)
     except (TypeError, ValueError):
@@ -1043,7 +1181,10 @@ def _now_iso() -> str:
 
 def _is_stale_index(settings: SkillRetrievalSettings, inventory: SkillInventory, expected: str) -> bool:
     index_dir = _index_dir(settings)
-    if not _is_complete_index(index_dir):
+    if not _is_complete_index(
+        index_dir,
+        settings=settings,
+    ):
         return False
     state = _read_state(settings)
     return not _manifest_matches_inventory(index_dir, inventory) or state.get("fingerprint") != expected
@@ -1075,12 +1216,66 @@ def _missing_tree_markdown(language: str) -> str:
     )
 
 
-def _is_complete_index(path: Path) -> bool:
-    return (
+def _is_complete_index(
+    path: Path,
+    *,
+    equivalence_enabled: bool = False,
+    settings: SkillRetrievalSettings | None = None,
+) -> bool:
+    if settings is not None:
+        equivalence_enabled = bool(settings.build.equivalence_enabled)
+    core_complete = (
         (path / TREE_INDEX_FILENAME).is_file()
         and (path / CATALOG_FILENAME).is_file()
         and (path / MANIFEST_FILENAME).is_file()
     )
+    if not core_complete or not equivalence_enabled:
+        return core_complete
+    audit_path = path / EQUIVALENCE_AUDIT_FILENAME
+    report_path = path / EQUIVALENCE_REPORT_FILENAME
+    if not audit_path.is_file() or not report_path.is_file():
+        return False
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if settings is None:
+        return (
+            isinstance(report, dict)
+            and report.get("status") == "complete"
+            and bool(str(report.get("protocol_hash") or "").strip())
+        )
+    try:
+        with dispatch_import_path():
+            from indexing.tree.equivalence import (
+                read_last_equivalence_audit_event,
+                validate_equivalence_audit,
+                validate_equivalence_report,
+            )
+            from indexing.workflows.artifacts import resolve_build_config
+            from indexing.workflows.index_builder import (
+                _current_equivalence_protocol_hash,
+                _equivalence_incremental_signature,
+            )
+
+            resolved = resolve_build_config(config=SkillIndexService._make_build_config(settings))
+            protocol_hash = _current_equivalence_protocol_hash()
+            signature = _equivalence_incremental_signature(
+                resolved,
+                protocol_hash=protocol_hash,
+            )
+            validate_equivalence_report(
+                report,
+                expected_protocol_hash=protocol_hash,
+                expected_incremental_signature=signature,
+            )
+        validate_equivalence_audit(
+            [read_last_equivalence_audit_event(audit_path)],
+            report=report,
+        )
+    except Exception:
+        return False
+    return True
 
 
 def _publish_index(*, settings: SkillRetrievalSettings, candidate_dir: Path) -> None:
@@ -1122,6 +1317,48 @@ def _manifest_matches_inventory(index_dir: Path, inventory: SkillInventory) -> b
     expected = {str(Path(path).expanduser().resolve()) for path in inventory.item_paths}
     actual = {str(Path(str(path)).expanduser().resolve()) for path in raw_paths}
     return expected == actual
+
+
+def _write_index_build_metadata(
+    index_dir: Path,
+    *,
+    fingerprint: str,
+    inventory: SkillInventory,
+) -> None:
+    payload = {
+        "schema_version": 1,
+        "fingerprint": str(fingerprint),
+        "inventory_fingerprint": str(inventory.fingerprint),
+        "indexed_count": int(inventory.count),
+    }
+    path = index_dir / INDEX_BUILD_METADATA_FILENAME
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
+def _index_build_metadata_matches(
+    index_dir: Path,
+    *,
+    expected_fingerprint: str,
+    inventory: SkillInventory,
+) -> bool:
+    try:
+        payload = json.loads(
+            (index_dir / INDEX_BUILD_METADATA_FILENAME).read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(payload, dict)
+        and payload.get("schema_version") == 1
+        and str(payload.get("fingerprint") or "") == str(expected_fingerprint)
+        and str(payload.get("inventory_fingerprint") or "") == str(inventory.fingerprint)
+        and int(payload.get("indexed_count") or -1) == int(inventory.count)
+    )
 
 
 def _render_tree_outline(nodes: list[Any], *, max_nodes: int = 400) -> str:

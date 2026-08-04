@@ -419,7 +419,10 @@ Common settings:
 | `symphony.skill_retrieval.build.postprocess_enabled` | `true` | Whether to clean up unclear or too-small branches after build |
 | `symphony.skill_retrieval.build.postprocess_max_passes` | `1` | Maximum number of postprocess passes after build |
 | `symphony.skill_retrieval.build.postprocess_min_skills` | `6` | Minimum skill-count reference used by postprocess branch cleanup |
-| `symphony.skill_retrieval.build.equivalence_enabled` | `false` | Whether to merge semantically duplicate branches |
+| `symphony.skill_retrieval.build.equivalence_enabled` | `false` | Whether to normalize equivalent Skills inside terminal taxonomy branches |
+| `symphony.skill_retrieval.build.equivalence_all_pairs_scope_limit` | `12` | Maximum terminal-scope size for enumerating every Skill pair |
+| `symphony.skill_retrieval.build.equivalence_candidate_neighbors` | `8` | Maximum proposed neighbors per Skill in larger terminal scopes |
+| `symphony.skill_retrieval.build.equivalence_max_pairwise_pairs` | `10000` | Hard pairwise-validation budget; exceeding it fails the build instead of truncating work |
 | `symphony.skill_retrieval.retrieve.compact_codes_enabled` | `false` | Whether retrieval uses more compact node codes |
 | `symphony.skill_retrieval.retrieve.flatten_tree` | `false` | Whether retrieval flattens the skill tree |
 | `symphony.skill_retrieval.retrieve.max_exposure_depth` | `1` | Maximum tree depth exposed by one `skill_branch_explore` call |

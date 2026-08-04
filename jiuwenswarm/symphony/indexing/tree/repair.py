@@ -151,91 +151,9 @@ class TreeRepairEngine:
         return [skill_data for _, skill_data in self.collect_subtree_skill_locations(node)]
 
     def normalize_to_equivalence_groups(self, root: TreeNode, verbose: bool = False) -> None:
-        if root.is_leaf:
-            return
-        updated_children: list[TreeNode] = []
-        split_count = 0
-        for child in list(root.children):
-            self.normalize_to_equivalence_groups(child, verbose=verbose)
-            if root.id != "root" and self.is_second_leaf_node(child):
-                replacement_nodes = self.split_second_leaf_node_into_equiv_groups(root, child, verbose=verbose)
-                updated_children.extend(replacement_nodes)
-                if len(replacement_nodes) > 1 or replacement_nodes[0].id != child.id:
-                    split_count += 1
-            else:
-                updated_children.append(child)
-        root.children = updated_children
-        if verbose and split_count > 0:
-            console.print(
-                f"[dim]  Equivalence regrouping updated {split_count} second-leaf nodes under '{root.id}'[/dim]"
-            )
+        normalizer = getattr(self._builder, "_equivalence_normalizer", None)
+        if normalizer is None:
+            from .equivalence import EquivalenceNormalizer
 
-    @staticmethod
-    def is_second_leaf_node(node: TreeNode) -> bool:
-        if not node.children:
-            return False
-        return all(child.is_leaf for child in node.children)
-
-    def split_second_leaf_node_into_equiv_groups(
-        self,
-        parent_node: TreeNode,
-        second_leaf_node: TreeNode,
-        verbose: bool = False,
-    ) -> list[TreeNode]:
-        builder = self._builder
-        leaf_children = list(second_leaf_node.children)
-        if len(leaf_children) <= 1:
-            return [second_leaf_node]
-        groups = _builder_call(
-            builder,
-            "_discover_equivalence_groups",
-            second_leaf_node,
-            leaf_children,
-            verbose=verbose,
-        )
-        if not groups:
-            return [second_leaf_node]
-        normalized_groups = _builder_call(builder, "_normalize_equivalence_groups", leaf_children, groups)
-        if len(normalized_groups) <= 1:
-            only_group = normalized_groups[0]
-            second_leaf_node.name = only_group.get("name", second_leaf_node.name)
-            second_leaf_node.description = only_group.get("description", second_leaf_node.description)
-            second_leaf_node.select_when = only_group.get("select_when", second_leaf_node.select_when)
-            second_leaf_node.dont_select_when = only_group.get("dont_select_when", second_leaf_node.dont_select_when)
-            return [second_leaf_node]
-
-        used_ids = {child.id for child in parent_node.children}
-        replacement_nodes: list[TreeNode] = []
-        for idx, group in enumerate(normalized_groups, start=1):
-            base_id = _builder_call(
-                builder,
-                "_build_equivalence_group_id",
-                group_id=str(group.get("id") or "").strip(),
-                group_name=str(group.get("name") or "").strip(),
-                fallback=f"{second_leaf_node.id}-equiv-{idx}",
-            )
-            group_id = base_id
-            suffix = 2
-            while group_id in used_ids:
-                group_id = f"{base_id}-{suffix}"
-                suffix += 1
-            used_ids.add(group_id)
-            new_node = TreeNode(
-                id=group_id,
-                name=str(group.get("name") or group_id),
-                description=str(group.get("description") or second_leaf_node.description),
-                select_when=str(group.get("select_when") or ""),
-                dont_select_when=str(group.get("dont_select_when") or ""),
-                depth=second_leaf_node.depth,
-                parent_id=second_leaf_node.parent_id,
-            )
-            for leaf in group.get("leaf_nodes", []):
-                leaf.parent_id = new_node.id
-                leaf.depth = new_node.depth + 1
-                new_node.children.append(leaf)
-            replacement_nodes.append(new_node)
-        if verbose:
-            console.print(
-                f"[dim]  Split '{second_leaf_node.id}' into {len(replacement_nodes)} equivalence groups[/dim]"
-            )
-        return replacement_nodes
+            normalizer = EquivalenceNormalizer(self._builder)
+        normalizer.normalize(root, verbose=verbose)

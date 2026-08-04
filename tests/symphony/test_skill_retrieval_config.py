@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from jiuwenswarm.symphony.skill_retrieval.config import load_settings
+from jiuwenswarm.symphony.skill_retrieval.dispatch_imports import dispatch_import_path
 from jiuwenswarm.symphony.skill_retrieval.taxonomy_config import root_categories_to_text
 
 
@@ -31,6 +32,9 @@ def test_load_settings_reads_public_retrieve_config(monkeypatch) -> None:
                         "postprocess_max_passes": 3,
                         "postprocess_min_skills": 9,
                         "equivalence_enabled": False,
+                        "equivalence_all_pairs_scope_limit": 10,
+                        "equivalence_candidate_neighbors": 6,
+                        "equivalence_max_pairwise_pairs": 4096,
                     },
                     "retrieve": {
                         "top_k": 7,
@@ -59,11 +63,33 @@ def test_load_settings_reads_public_retrieve_config(monkeypatch) -> None:
     assert settings.build.postprocess_max_passes == 3
     assert settings.build.postprocess_min_skills == 9
     assert settings.build.equivalence_enabled is False
+    assert settings.build.equivalence_all_pairs_scope_limit == 10
+    assert settings.build.equivalence_candidate_neighbors == 6
+    assert settings.build.equivalence_max_pairwise_pairs == 4096
     assert settings.retrieve.top_k == 7
     assert settings.retrieve.compact_codes_enabled is True
     assert settings.retrieve.flatten_tree is True
     assert settings.retrieve.max_exposure_depth == 5
     assert settings.retrieve.max_branch_choices == 2
+
+
+def test_equivalence_defaults_are_opt_in() -> None:
+    settings = load_settings()
+
+    assert settings.build.equivalence_enabled is False
+    assert settings.build.equivalence_all_pairs_scope_limit == 12
+    assert settings.build.equivalence_candidate_neighbors == 8
+    assert settings.build.equivalence_max_pairwise_pairs == 10_000
+
+    with dispatch_import_path():
+        from indexing.workflows.artifacts import BuildConfig, resolve_build_config
+
+        taxonomy = resolve_build_config(config=BuildConfig()).taxonomy_config
+
+    assert taxonomy.equivalence_enabled is False
+    assert taxonomy.equivalence_all_pairs_scope_limit == 12
+    assert taxonomy.equivalence_candidate_neighbors == 8
+    assert taxonomy.equivalence_max_pairwise_pairs == 10_000
 
 
 def test_root_categories_panel_text_falls_back_from_unreadable_path() -> None:

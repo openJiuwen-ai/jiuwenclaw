@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import shutil
 import tempfile
@@ -10,6 +12,7 @@ from typing import Dict, Sequence
 
 from indexing.models import (
     CATALOG_FILENAME,
+    CatalogRecord,
     TREE_HTML_FILENAME,
     TREE_INDEX_FILENAME,
 )
@@ -21,12 +24,14 @@ from indexing.io.items_jsonl import (
     parse_jsonl_scanned_items,
 )
 from indexing.workflows.tree_ops import (
+    EquivalenceIncrementalStateError,
     align_leaf_nodes_with_catalog,
     build_catalog_records_from_existing,
     enrich_branch_descriptions,
     merge_added_skills_into_tree,
     prune_deleted_skills_from_tree,
     tree_nodes_to_tree_dict,
+    update_equivalence_scopes,
 )
 from indexing.tree.visualizer import generate_html as generate_tree_html
 
@@ -39,8 +44,14 @@ from indexing.io import (
     write_tree_preset,
 )
 from indexing.scanners import create_scanner, get_scanner_class, normalize_item_type
-from indexing.tree import DynamicTreeConfig, TreeBuildConfig, TreeManagerConfig
-from indexing.tree.builder import build_tree
+from indexing.tree import DynamicTreeConfig, Skill, TreeBuildConfig, TreeManagerConfig, TreeNode
+from indexing.tree.builder import TreeBuilder, build_tree
+from indexing.tree.equivalence import (
+    EquivalenceProtocolError,
+    read_last_equivalence_audit_event,
+    validate_equivalence_audit,
+    validate_equivalence_report,
+)
 from indexing.tree.schema import normalize_root_categories
 from shared.profiling import StageTimer
 from shared.storage import download_s3_object_to_path, is_s3_uri, materialize_s3_dir, upload_local_dir_to_s3
@@ -55,6 +66,9 @@ from .artifacts import (
 )
 
 LOGGER = logging.getLogger("index_builder")
+
+EQUIVALENCE_AUDIT_FILENAME = "equivalence_audit.jsonl"
+EQUIVALENCE_REPORT_FILENAME = "equivalence_report.json"
 
 
 @dataclass(frozen=True)
@@ -464,6 +478,7 @@ class _IndexBuildWorkflow:
                         ),
                         skill_entries=tree_skill_entries,
                     )
+                    self._finalize_full_equivalence_state(tree_output_path)
 
                 with timer.phase("build_catalog_and_tree_outputs"):
                     catalog_records = self._build_catalog_records(
@@ -559,6 +574,9 @@ class _IndexBuildWorkflow:
                     postprocess_max_passes=taxonomy_config.postprocess_max_passes,
                     postprocess_min_skills=taxonomy_config.postprocess_min_skills,
                     equiv_grouping_enabled=taxonomy_config.equivalence_enabled,
+                    equivalence_all_pairs_scope_limit=taxonomy_config.equivalence_all_pairs_scope_limit,
+                    equivalence_candidate_neighbors=taxonomy_config.equivalence_candidate_neighbors,
+                    equivalence_max_pairwise_pairs=taxonomy_config.equivalence_max_pairwise_pairs,
                     discovery_seed=execution_config.discovery_seed,
                 ),
             ),
@@ -586,6 +604,7 @@ class _IndexBuildWorkflow:
                 tree_output_path=tree_output_path,
                 skill_entries=list(pre_scanned_skills.values()),
             )
+            self._finalize_full_equivalence_state(tree_output_path)
 
         with timer.phase("build_catalog_and_tree_outputs"):
             catalog_records = self._build_catalog_records(
@@ -662,6 +681,101 @@ class _IndexBuildWorkflow:
             nodes=load_tree_preset(tree_output_path).get("nodes") or [], scanned_skills=scanned
         )
 
+    def _finalize_full_equivalence_state(self, tree_output_path: Path) -> None:
+        """Make a full-build equivalence report reusable by incremental builds."""
+
+        report_path = self._output_dir / EQUIVALENCE_REPORT_FILENAME
+        audit_path = self._output_dir / EQUIVALENCE_AUDIT_FILENAME
+        if not self._config.taxonomy_config.equivalence_enabled:
+            self._unlink_if_exists(report_path)
+            self._unlink_if_exists(audit_path)
+            return
+        if not report_path.exists() or not audit_path.exists():
+            raise RuntimeError(
+                "Equivalence normalization completed without its required report/audit sidecars."
+            )
+        report = _load_json_object(report_path)
+        if str(report.get("status") or "") != "complete":
+            raise RuntimeError("Equivalence report is not complete; refusing to publish the tree.")
+        protocol_hash = str(report.get("protocol_hash") or "").strip()
+        expected_protocol_hash = _current_equivalence_protocol_hash()
+        if not protocol_hash or protocol_hash != expected_protocol_hash:
+            raise RuntimeError(
+                "Equivalence report protocol hash does not match the running normalizer."
+            )
+
+        nodes = list(load_tree_preset(tree_output_path).get("nodes") or [])
+        leaf_cid_by_worker = {
+            str(node.get("worker_id") or "").strip(): str(node.get("cid") or "").strip()
+            for node in nodes
+            if isinstance(node, dict) and str(node.get("worker_id") or "").strip()
+        }
+        scopes = report.get("scopes")
+        if not isinstance(scopes, list) or not scopes:
+            raise RuntimeError("Equivalence report contains no terminal taxonomy scopes.")
+        finalized_scopes: list[dict] = []
+        for raw_scope in scopes:
+            if not isinstance(raw_scope, dict):
+                raise RuntimeError("Equivalence report contains a non-object scope.")
+            scope = dict(raw_scope)
+            member_ids = _equivalence_scope_worker_ids(scope)
+            scope_cids: set[str] = set()
+            for worker_id in member_ids:
+                leaf_cid = leaf_cid_by_worker.get(worker_id)
+                if not leaf_cid:
+                    raise RuntimeError(
+                        f"Equivalence report references Skill {worker_id!r} absent from the flat tree."
+                    )
+                group_cid = _parent_cid(leaf_cid)
+                scope_cid = _parent_cid(group_cid)
+                if not scope_cid:
+                    raise RuntimeError(
+                        f"Skill {worker_id!r} is not nested under an equivalence group and taxonomy scope."
+                    )
+                scope_cids.add(scope_cid)
+            if len(scope_cids) != 1:
+                raise RuntimeError(
+                    "One equivalence scope maps to multiple flat taxonomy CIDs: "
+                    f"{sorted(scope_cids)}"
+                )
+            scope["scope_cid"] = next(iter(scope_cids))
+            finalized_scopes.append(scope)
+
+        report["scopes"] = sorted(finalized_scopes, key=lambda item: str(item.get("scope_cid") or ""))
+        from indexing.tree.equivalence import summarize_equivalence_scopes
+
+        report.update(
+            summarize_equivalence_scopes(
+                report["scopes"],
+                status="complete",
+                expected_input_count=len(leaf_cid_by_worker),
+            )
+        )
+        invariants = report.get("invariants") or {}
+        if not all(
+            invariants.get(name) is True
+            for name in (
+                "validated",
+                "skill_coverage_complete",
+                "unique_skill_membership",
+                "complete_link_cliques",
+                "multi_member_groups_audited",
+            )
+        ):
+            raise RuntimeError("Equivalence report failed its finalized coverage/clique invariants.")
+        report["incremental_signature"] = _equivalence_incremental_signature(
+            self._config,
+            protocol_hash=protocol_hash,
+        )
+        from indexing.tree.equivalence import equivalence_build_complete_event
+
+        _write_jsonl_with_prefix_atomic(
+            audit_path,
+            prefix=audit_path.read_text(encoding="utf-8"),
+            events=[equivalence_build_complete_event(report)],
+        )
+        _write_json_atomic(report_path, report)
+
 
 class _IncrementalIndexBuildWorkflow(_IndexBuildWorkflow):
     def __init__(
@@ -709,6 +823,16 @@ class _IncrementalIndexBuildWorkflow(_IndexBuildWorkflow):
             if normalized_path in remaining_paths and normalized_path not in removed_path_set:
                 kept_catalog.append(record)
 
+        base_has_equivalence_state = (self._base_index_dir / EQUIVALENCE_REPORT_FILENAME).exists()
+        equivalence_enabled = self._config.taxonomy_config.equivalence_enabled
+        if equivalence_enabled or base_has_equivalence_state:
+            return self._build_with_equivalence_state(
+                existing_catalog=existing_catalog,
+                existing_nodes=existing_nodes,
+                kept_catalog=kept_catalog,
+                base_has_equivalence_state=base_has_equivalence_state,
+            )
+
         if self._added_paths:
             scanned_added = (
                 self._added_scanned_skills if self._added_scanned_skills is not None else self._scan_added_skills()
@@ -748,6 +872,394 @@ class _IncrementalIndexBuildWorkflow(_IndexBuildWorkflow):
         )
         return self._output_dir
 
+    def _build_with_equivalence_state(
+        self,
+        *,
+        existing_catalog,
+        existing_nodes: list[dict],
+        kept_catalog,
+        base_has_equivalence_state: bool,
+    ) -> Path:
+        """Apply add/delete/update to affected terminal taxonomy scopes only."""
+
+        if self._output_dir == self._base_index_dir:
+            raise ValueError(
+                "Equivalence-aware incremental build requires output_dir to differ from base_index_dir "
+                "so the last complete index remains available if normalization fails."
+            )
+        scanned_added = (
+            self._added_scanned_skills
+            if self._added_scanned_skills is not None
+            else (self._scan_added_skills() if self._added_paths else {})
+        )
+        scanned_added = {
+            str(worker_id).strip(): dict(skill)
+            for worker_id, skill in (scanned_added or {}).items()
+            if str(worker_id).strip()
+        }
+        removed_path_set = set(self._removed_paths)
+        removed_worker_ids = {
+            record.worker_id
+            for record in existing_catalog
+            if _normalize_manifest_item_path(record.skill_path) in removed_path_set
+        }
+        records_by_worker = {record.worker_id: record for record in kept_catalog}
+        skills_by_id = {
+            worker_id: _catalog_record_to_scanned_skill(record)
+            for worker_id, record in records_by_worker.items()
+        }
+        skills_by_id.update(scanned_added)
+        scanned_worker_ids = set(scanned_added)
+
+        # Turning equivalence off is a global protocol change.  Enabling it on
+        # a legacy index, or recovering a missing/corrupt state, also requires a
+        # full rebuild.  Normal incremental changes never take this path.
+        if not self._config.taxonomy_config.equivalence_enabled:
+            return self._full_rebuild_from_scanned(skills_by_id)
+        if not base_has_equivalence_state:
+            LOGGER.warning("Base index has no equivalence report; rebuilding the full tree once.")
+            return self._full_rebuild_from_scanned(skills_by_id)
+
+        report_path = self._base_index_dir / EQUIVALENCE_REPORT_FILENAME
+        audit_path = self._base_index_dir / EQUIVALENCE_AUDIT_FILENAME
+        try:
+            report = _load_json_object(report_path)
+            protocol_hash = _current_equivalence_protocol_hash()
+            expected_signature = _equivalence_incremental_signature(
+                self._config,
+                protocol_hash=protocol_hash,
+            )
+            validate_equivalence_report(
+                report,
+                expected_protocol_hash=protocol_hash,
+                expected_incremental_signature=expected_signature,
+            )
+            validate_equivalence_audit(
+                [read_last_equivalence_audit_event(audit_path)],
+                report=report,
+            )
+        except (
+            OSError,
+            ValueError,
+            json.JSONDecodeError,
+            EquivalenceIncrementalStateError,
+            EquivalenceProtocolError,
+        ) as exc:
+            LOGGER.warning("Base equivalence state is not reusable (%s); rebuilding the full tree once.", exc)
+            return self._full_rebuild_from_scanned(skills_by_id)
+
+        changed_worker_ids = _changed_equivalence_worker_ids(
+            report=report,
+            scanned_skills=scanned_added,
+        ) | (removed_worker_ids & scanned_worker_ids)
+
+        tree_builder = self._create_incremental_tree_builder(skill_entries=list(skills_by_id.values()))
+        normalization_started = False
+        core_audit_events: list[dict] = []
+        normalization_run_metrics: list[dict] = []
+
+        def normalize_scope(
+            scope_cid: str,
+            cached_state: dict,
+            scope_skills: list[dict],
+            remaining_pair_budget: int | None,
+        ) -> dict:
+            nonlocal normalization_started
+            normalization_started = True
+            scope_node_payload = next(
+                (
+                    dict(node)
+                    for node in existing_nodes
+                    if isinstance(node, dict) and str(node.get("cid") or "") == scope_cid
+                ),
+                {},
+            )
+            raw_scope_parts = cached_state.get("scope_path_parts")
+            scope_node_id = (
+                str(raw_scope_parts[-1]).strip()
+                if isinstance(raw_scope_parts, list) and raw_scope_parts
+                else scope_cid.rsplit(".", 1)[-1]
+            )
+            scope_node = TreeNode(
+                node_id=scope_node_id or scope_cid,
+                name=str(scope_node_payload.get("cid") or scope_cid).rsplit(".", 1)[-1],
+                description=str(scope_node_payload.get("description") or ""),
+                select_when=str(scope_node_payload.get("select_when") or ""),
+                dont_select_when=str(scope_node_payload.get("dont_select_when") or ""),
+                skills=[_skill_from_scanned(item) for item in scope_skills],
+            )
+            scope_path: str | tuple[str, ...]
+            if isinstance(raw_scope_parts, list) and raw_scope_parts:
+                scope_path = tuple(str(item) for item in raw_scope_parts)
+            else:
+                scope_path = str(cached_state.get("scope_path") or scope_cid)
+            state = tree_builder.normalize_equivalence_scope(
+                scope_node,
+                scope_path,
+                cached_state=cached_state,
+                max_pairwise_pairs=remaining_pair_budget,
+            )
+            if not isinstance(state, dict):
+                raise RuntimeError(f"Equivalence normalizer returned invalid state for {scope_cid!r}.")
+            state = dict(state)
+            raw_events = state.pop("audit_events", [])
+            if isinstance(raw_events, list):
+                core_audit_events.extend(dict(item) for item in raw_events if isinstance(item, dict))
+            raw_metrics = state.pop("run_metrics", {})
+            if isinstance(raw_metrics, dict):
+                normalization_run_metrics.append(dict(raw_metrics))
+            state["scope_cid"] = scope_cid
+            return state
+
+        def route_skill(skill: dict, scopes: Sequence[dict], nodes: Sequence[object]) -> str:
+            return self._route_skill_to_taxonomy_scope(
+                tree_builder=tree_builder,
+                skill=skill,
+                scopes=scopes,
+                nodes=nodes,
+            )
+
+        try:
+            result = update_equivalence_scopes(
+                nodes=existing_nodes,
+                report=report,
+                skills_by_id=skills_by_id,
+                added_worker_ids=changed_worker_ids,
+                removed_worker_ids=removed_worker_ids,
+                normalize_scope=normalize_scope,
+                route_skill=route_skill,
+                max_pairwise_pairs=self._config.taxonomy_config.equivalence_max_pairwise_pairs,
+            )
+        except EquivalenceIncrementalStateError:
+            # Before the first model-backed scope update, this means the base
+            # report/catalog contract is corrupt and a full rebuild is safe.
+            # Once normalization started, propagate the error so a protocol or
+            # invariant failure cannot be disguised as a successful fallback.
+            if not normalization_started:
+                LOGGER.warning("Base equivalence scope state is inconsistent; rebuilding the full tree once.")
+                return self._full_rebuild_from_scanned(skills_by_id)
+            raise
+
+        # Equivalence normalization may move an unchanged Skill to a newly
+        # formed group.  The normalized tree is therefore authoritative for
+        # every leaf CID, not only for newly scanned Skills.  Reusing an old
+        # CatalogRecord here would overwrite the new CID and leave the leaf
+        # detached from its equivalence group.
+        nodes, catalog_records = _rebuild_equivalence_catalog(
+            nodes=result.nodes,
+            skills_by_id=skills_by_id,
+        )
+
+        write_tree_preset({"nodes": nodes}, self._output_dir / TREE_INDEX_FILENAME)
+        if self._config.output_config.generate_html:
+            generate_tree_html(
+                tree_nodes_to_tree_dict(nodes, catalog_records),
+                self._output_dir / TREE_HTML_FILENAME,
+            )
+        else:
+            self._unlink_if_exists(self._output_dir / TREE_HTML_FILENAME)
+        write_catalog(catalog_records, self._output_dir / CATALOG_FILENAME)
+        write_manifest(
+            self._output_dir,
+            self._manifest_item_paths,
+            catalog_records,
+            mode="incremental",
+            item_type=self._item_type,
+        )
+
+        updated_report = dict(result.report)
+        metrics = dict(updated_report.get("metrics") or {})
+        incremental_llm_calls = int(getattr(tree_builder, "_llm_calls", 0) or 0)
+        metrics["llm_calls"] = int(metrics.get("llm_calls") or 0) + incremental_llm_calls
+        metrics["last_incremental_llm_calls"] = incremental_llm_calls
+        additive_metrics = (
+            "audit_calls",
+            "audit_conflicts",
+            "audit_reclusters",
+            "pairwise_cache_hits",
+            "correction_attempts",
+            "protocol_validation_errors",
+        )
+        last_normalization_metrics = {
+            name: sum(int(item.get(name) or 0) for item in normalization_run_metrics)
+            for name in additive_metrics
+        }
+        last_normalization_metrics["llm_calls"] = sum(
+            int(item.get("llm_calls") or 0) for item in normalization_run_metrics
+        )
+        last_normalization_metrics["elapsed_ms"] = round(
+            sum(float(item.get("elapsed_ms") or 0.0) for item in normalization_run_metrics),
+            3,
+        )
+        for name in additive_metrics:
+            metrics[name] = int(metrics.get(name) or 0) + int(last_normalization_metrics[name])
+        metrics["elapsed_ms"] = round(
+            float(metrics.get("elapsed_ms") or 0.0)
+            + float(last_normalization_metrics["elapsed_ms"]),
+            3,
+        )
+        metrics["last_incremental_equivalence"] = last_normalization_metrics
+        updated_report["metrics"] = metrics
+        updated_report["incremental_signature"] = _equivalence_incremental_signature(
+            self._config,
+            protocol_hash=str(updated_report.get("protocol_hash") or ""),
+        )
+        base_audit_text = audit_path.read_text(encoding="utf-8")
+        from indexing.tree.equivalence import equivalence_build_complete_event
+
+        audit_events = [
+            *core_audit_events,
+            *result.audit_events,
+            equivalence_build_complete_event(updated_report),
+        ]
+        _write_jsonl_with_prefix_atomic(
+            self._output_dir / EQUIVALENCE_AUDIT_FILENAME,
+            prefix=base_audit_text,
+            events=audit_events,
+        )
+        # Publish the complete report last.  A failed update therefore leaves
+        # the base index untouched and never presents a partial output as valid.
+        _write_json_atomic(self._output_dir / EQUIVALENCE_REPORT_FILENAME, updated_report)
+        return self._output_dir
+
+    def _full_rebuild_from_scanned(self, skills_by_id: Dict[str, dict]) -> Path:
+        workflow = _IndexBuildWorkflow(
+            item_paths=self._manifest_item_paths,
+            output_dir=self._output_dir,
+            resolved_config=self._config,
+            item_type=self._item_type,
+            pre_scanned_skills=skills_by_id,
+            manifest_item_paths=self._manifest_item_paths,
+        )
+        return workflow.build()
+
+    def _create_incremental_tree_builder(self, *, skill_entries: list[dict]) -> TreeBuilder:
+        llm_config = self._config.llm_config
+        taxonomy_config = self._config.taxonomy_config
+        execution_config = self._config.execution_config
+        root_categories = normalize_root_categories(taxonomy_config.root_categories)
+        return TreeBuilder(
+            skills_dir=self._output_dir,
+            output_path=self._output_dir / TREE_INDEX_FILENAME,
+            config=DynamicTreeConfig(
+                branching_factor=taxonomy_config.branching_factor,
+                max_depth=taxonomy_config.max_depth,
+                max_skills_per_node_override=taxonomy_config.max_skills_per_node,
+                model_discovery_max_depth=taxonomy_config.model_discovery_max_depth,
+                root_categories=root_categories,
+            ),
+            manager_config=TreeManagerConfig(
+                branching_factor=taxonomy_config.branching_factor,
+                max_depth=taxonomy_config.max_depth,
+                root_categories=root_categories,
+                build=TreeBuildConfig(
+                    max_workers=execution_config.max_workers,
+                    num_retries=execution_config.max_retries,
+                    timeout=execution_config.request_timeout_seconds,
+                    classify_batch_cap=execution_config.classification_batch_limit,
+                    postprocess_enabled=taxonomy_config.postprocess_enabled,
+                    postprocess_max_passes=taxonomy_config.postprocess_max_passes,
+                    postprocess_min_skills=taxonomy_config.postprocess_min_skills,
+                    equiv_grouping_enabled=True,
+                    equivalence_all_pairs_scope_limit=taxonomy_config.equivalence_all_pairs_scope_limit,
+                    equivalence_candidate_neighbors=taxonomy_config.equivalence_candidate_neighbors,
+                    equivalence_max_pairwise_pairs=taxonomy_config.equivalence_max_pairwise_pairs,
+                    discovery_seed=execution_config.discovery_seed,
+                ),
+            ),
+            client=llm_config.client,
+            model=llm_config.model,
+            api_key=llm_config.api_key,
+            base_url=llm_config.base_url,
+            llm_seed=llm_config.seed,
+            max_workers=execution_config.max_workers,
+            skill_entries=skill_entries,
+        )
+
+    @staticmethod
+    def _route_skill_to_taxonomy_scope(
+        *,
+        tree_builder: TreeBuilder,
+        skill: dict,
+        scopes: Sequence[dict],
+        nodes: Sequence[object],
+    ) -> str:
+        """Route one Skill level-by-level, stopping before equivalence groups."""
+
+        scope_cids = {str(scope.get("scope_cid") or "").strip() for scope in scopes}
+        scope_cids.discard("")
+        branch_by_cid = {
+            str(node.get("cid") or "").strip(): dict(node)
+            for node in nodes
+            if isinstance(node, dict)
+            and str(node.get("type") or "") == "branch"
+            and str(node.get("cid") or "").strip()
+        }
+        if not scope_cids or not scope_cids <= set(branch_by_cid):
+            raise EquivalenceIncrementalStateError(
+                "Equivalence scopes do not map to terminal taxonomy branches."
+            )
+        scope_sizes = {
+            str(scope.get("scope_cid") or ""): len(scope.get("skills") or [])
+            for scope in scopes
+        }
+        current = ""
+        while current not in scope_cids:
+            candidates = [
+                cid
+                for cid in branch_by_cid
+                if _parent_cid(cid) == current
+                and any(scope_cid == cid or scope_cid.startswith(cid + ".") for scope_cid in scope_cids)
+            ]
+            candidates.sort()
+            if not candidates:
+                raise EquivalenceIncrementalStateError(
+                    f"No taxonomy route from {current or 'ROOT'} to a terminal equivalence scope."
+                )
+            if len(candidates) == 1:
+                current = candidates[0]
+                continue
+
+            alias_to_cid = {f"c{index:04d}": cid for index, cid in enumerate(candidates, start=1)}
+            groups = {
+                alias: {
+                    "name": cid.rsplit(".", 1)[-1],
+                    "description": str(branch_by_cid[cid].get("description") or ""),
+                    "select_when": str(branch_by_cid[cid].get("select_when") or ""),
+                    "dont_select_when": str(branch_by_cid[cid].get("dont_select_when") or ""),
+                }
+                for alias, cid in alias_to_cid.items()
+            }
+            aliased_skill = {
+                "id": "s000001",
+                "name": str(skill.get("name") or skill.get("id") or "Skill"),
+                "description": str(skill.get("description") or ""),
+            }
+            assignment = tree_builder._classify_skills_single(
+                [aliased_skill],
+                groups,
+                verbose=False,
+                is_retry=True,
+            )
+            selected_alias = assignment.get("s000001")
+            selected_cid = alias_to_cid.get(str(selected_alias or ""))
+            if selected_cid is None:
+                # Preserve the existing taxonomy builder's documented recovery:
+                # an unusable assignment falls back to the largest child.
+                selected_cid = max(
+                    candidates,
+                    key=lambda cid: (
+                        sum(
+                            size
+                            for scope_cid, size in scope_sizes.items()
+                            if scope_cid == cid or scope_cid.startswith(cid + ".")
+                        ),
+                        cid,
+                    ),
+                )
+            current = selected_cid
+        return current
+
     def _scan_added_skills(self) -> dict[str, dict]:
         scanned: dict[str, dict] = {}
         with tempfile.TemporaryDirectory(prefix="retriever-index-added-items-") as tmpdir:
@@ -767,6 +1279,219 @@ class _IncrementalIndexBuildWorkflow(_IndexBuildWorkflow):
                             scanned[skill_dir.name]["path"] = item.source_path
                         break
         return scanned
+
+
+def _rebuild_equivalence_catalog(
+    *,
+    nodes: Sequence[object],
+    skills_by_id: Dict[str, dict],
+) -> tuple[list[Dict[str, object]], list[CatalogRecord]]:
+    """Rebuild catalog metadata from equivalence-normalized leaf CIDs.
+
+    An incremental equivalence update can change the group (and therefore CID)
+    of an existing Skill.  Rebuilding every record from the canonical Skill
+    inventory keeps tree nodes, catalog categories, and retrieval text aligned.
+    """
+
+    normalized_nodes = [dict(node) for node in nodes if isinstance(node, dict)]
+    catalog_records = build_catalog_records_from_nodes(
+        nodes=normalized_nodes,
+        scanned_skills=skills_by_id,
+    )
+    expected_worker_ids = set(skills_by_id)
+    actual_worker_ids = [record.worker_id for record in catalog_records]
+    if len(actual_worker_ids) != len(set(actual_worker_ids)) or set(actual_worker_ids) != expected_worker_ids:
+        raise EquivalenceIncrementalStateError(
+            "Equivalence tree/catalog coverage mismatch after incremental normalization."
+        )
+    enriched_nodes = enrich_branch_descriptions(
+        normalized_nodes,
+        catalog_records=catalog_records,
+    )
+    return enriched_nodes, catalog_records
+
+
+def _catalog_record_to_scanned_skill(record) -> dict:
+    metadata = dict(record.metadata or {})
+    return {
+        "id": record.worker_id,
+        "name": record.name or record.worker_id,
+        "description": record.description,
+        "content": str(metadata.get("content") or ""),
+        "path": record.skill_path,
+        "skill_path": record.skill_path,
+        "source_description": str(metadata.get("source_description") or ""),
+        "select_when": str(metadata.get("select_when") or ""),
+        "dont_select_when": str(metadata.get("dont_select_when") or ""),
+        "tags": list(record.tags),
+    }
+
+
+def _skill_from_scanned(payload: dict) -> Skill:
+    return Skill(
+        item_id=str(payload.get("id") or "").strip(),
+        name=str(payload.get("name") or payload.get("id") or "Skill").strip(),
+        description=str(payload.get("description") or "").strip(),
+        path=str(payload.get("path") or ""),
+        skill_path=str(payload.get("skill_path") or payload.get("path") or ""),
+        content=str(payload.get("content") or ""),
+        select_when=str(payload.get("select_when") or ""),
+        dont_select_when=str(payload.get("dont_select_when") or ""),
+        source_description=str(payload.get("source_description") or ""),
+        author=str(payload.get("author") or ""),
+    )
+
+
+def _changed_equivalence_worker_ids(*, report: dict, scanned_skills: Dict[str, dict]) -> set[str]:
+    from indexing.tree.equivalence import equivalence_skill_hash
+
+    old_hashes: dict[str, str] = {}
+    for scope in report.get("scopes") or []:
+        if not isinstance(scope, dict):
+            continue
+        raw_hashes = scope.get("skill_hashes")
+        if isinstance(raw_hashes, dict):
+            old_hashes.update(
+                {
+                    str(worker_id): str(content_hash)
+                    for worker_id, content_hash in raw_hashes.items()
+                    if str(worker_id)
+                }
+            )
+    return {
+        worker_id
+        for worker_id, payload in scanned_skills.items()
+        if old_hashes.get(worker_id) != equivalence_skill_hash(_skill_from_scanned(payload))
+    }
+
+
+def _current_equivalence_protocol_hash() -> str:
+    from indexing.tree.equivalence import EQUIVALENCE_PROTOCOL_HASH
+
+    protocol_hash = str(EQUIVALENCE_PROTOCOL_HASH or "").strip()
+    if not protocol_hash:
+        raise RuntimeError("Equivalence normalizer exposes an empty protocol hash.")
+    return protocol_hash
+
+
+def _equivalence_incremental_signature(
+    config: ResolvedBuildConfig,
+    *,
+    protocol_hash: str,
+) -> str:
+    taxonomy = config.taxonomy_config
+    execution = config.execution_config
+    llm = config.llm_config
+    payload = {
+        "protocol_hash": str(protocol_hash),
+        "tree_source_hash": _tree_protocol_source_hash(),
+        "model": str(llm.model or ""),
+        "base_url": str(llm.base_url or ""),
+        "llm_seed": llm.seed,
+        "branching_factor": taxonomy.branching_factor,
+        "max_depth": taxonomy.max_depth,
+        "root_categories": taxonomy.root_categories,
+        "max_skills_per_node": taxonomy.max_skills_per_node,
+        "model_discovery_max_depth": taxonomy.model_discovery_max_depth,
+        "postprocess_enabled": taxonomy.postprocess_enabled,
+        "postprocess_max_passes": taxonomy.postprocess_max_passes,
+        "postprocess_min_skills": taxonomy.postprocess_min_skills,
+        "equivalence_enabled": taxonomy.equivalence_enabled,
+        "equivalence_all_pairs_scope_limit": taxonomy.equivalence_all_pairs_scope_limit,
+        "equivalence_candidate_neighbors": taxonomy.equivalence_candidate_neighbors,
+        "equivalence_max_pairwise_pairs": taxonomy.equivalence_max_pairwise_pairs,
+        "classification_batch_limit": execution.classification_batch_limit,
+        "discovery_seed": execution.discovery_seed,
+    }
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _tree_protocol_source_hash() -> str:
+    tree_dir = Path(__file__).resolve().parents[1] / "tree"
+    digest = hashlib.sha256()
+    for filename in ("prompts.py", "equivalence.py", "schema.py"):
+        path = tree_dir / filename
+        digest.update(filename.encode("utf-8"))
+        digest.update(b"\0")
+        if path.is_file():
+            digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _equivalence_scope_worker_ids(scope: dict) -> list[str]:
+    raw_skills = scope.get("skills")
+    if not isinstance(raw_skills, list) or not raw_skills:
+        raise RuntimeError("Equivalence scope has no Skills.")
+    worker_ids: list[str] = []
+    for item in raw_skills:
+        if isinstance(item, dict):
+            worker_id = str(item.get("skill_id") or "").strip()
+        else:
+            worker_id = str(item).strip()
+        if not worker_id:
+            raise RuntimeError("Equivalence scope contains an empty Skill id.")
+        worker_ids.append(worker_id)
+    if len(worker_ids) != len(set(worker_ids)):
+        raise RuntimeError("Equivalence scope contains duplicate Skill ids.")
+    return worker_ids
+
+
+def _parent_cid(cid: str) -> str:
+    normalized = str(cid or "").strip()
+    return normalized.rsplit(".", 1)[0] if "." in normalized else ""
+
+
+def _load_json_object(path: Path) -> dict:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected a JSON object in {path}.")
+    return payload
+
+
+def _write_json_atomic(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+        temporary_path = Path(handle.name)
+    temporary_path.replace(path)
+
+
+def _write_jsonl_with_prefix_atomic(
+    path: Path,
+    *,
+    prefix: str,
+    events: Sequence[dict],
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    normalized_prefix = str(prefix or "")
+    if normalized_prefix and not normalized_prefix.endswith("\n"):
+        normalized_prefix += "\n"
+    event_text = "".join(
+        json.dumps(dict(event), ensure_ascii=False, sort_keys=True) + "\n"
+        for event in events
+        if isinstance(event, dict)
+    )
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        handle.write(normalized_prefix)
+        handle.write(event_text)
+        temporary_path = Path(handle.name)
+    temporary_path.replace(path)
 
 
 __all__ = ["IndexBuilder", "_IndexBuildWorkflow", "_IncrementalIndexBuildWorkflow"]

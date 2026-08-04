@@ -63,6 +63,9 @@ symphony:
       postprocess_max_passes: 1
       postprocess_min_skills: 6
       equivalence_enabled: false
+      equivalence_all_pairs_scope_limit: 12
+      equivalence_candidate_neighbors: 8
+      equivalence_max_pairwise_pairs: 10000
     retrieve:
       compact_codes_enabled: false
       flatten_tree: false
