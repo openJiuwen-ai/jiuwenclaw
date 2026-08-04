@@ -54,6 +54,31 @@ In JiuwenSwarm, an **Agent** is a digital assistant that can act on its own. It 
 
 ---
 
+## Web frontend Agent page
+
+In the web frontend, the **Agent** page is a **workspace file browser** for viewing the agent's workspace files and memory content.
+
+![Agent Management page](../assets/images/current-ui-en/03-Agent-Management.png)
+
+### Page features
+
+| Feature | Description |
+|---------|-------------|
+| **Workspace browsing** | Browse the agent workspace directory structure, view files and directories |
+| **File preview** | Preview the content of previewable files in the workspace |
+| **Refresh** | Refresh the workspace file list |
+
+### How to use
+
+1. Click **Agent** in the left navigation bar
+2. The left side of the page shows the workspace directory structure (e.g. `workspace/`)
+3. Click a directory to expand and view the file list
+4. Click a previewable file to display its content preview on the right
+
+> **Tip:** The Agent page is mainly for viewing workspace files. To modify configuration, go to **More** → **Configuration**.
+
+---
+
 ## Structure
 
 ### What an agent is made of

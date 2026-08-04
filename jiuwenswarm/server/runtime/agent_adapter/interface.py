@@ -980,6 +980,26 @@ class JiuWenSwarm:
             asyncio.create_task(adapter.try_start_dreaming(
                 busy_checker=lambda: sm.has_active_tasks(),))
 
+    async def prepare_session(
+        self,
+        *,
+        session_id: str,
+        channel_id: str,
+        mode: str,
+        project_dir: str | None = None,
+    ) -> None:
+        """Initialize and start the session-owned DeepAgent without sending input."""
+        adapter = self._ensure_adapter(mode="code" if mode.startswith("code") else "agent")
+        prepare = getattr(adapter, "prepare_session", None)
+        if not callable(prepare):
+            raise RuntimeError("active adapter does not support session prewarming")
+        await prepare(
+            session_id=session_id,
+            channel_id=channel_id,
+            mode=mode,
+            project_dir=project_dir,
+        )
+
     def build_inputs(self, request: AgentRequest) -> Tuple[dict[str, Any], str, str]:
         """构建 adapter 所需的 inputs 字典（公共接口）."""
         return self._build_inputs(request)
@@ -1100,6 +1120,9 @@ class JiuWenSwarm:
             "query": final_query,
             "channel": channel,
             "language": language,
+            # Only an explicit false disables interactive tools. Existing
+            # clients that omit this capability remain backward compatible.
+            "supports_user_interaction": params.get("supports_user_interaction") is not False,
         }
         if _request_debug:
             inputs["_request_debug"] = True
@@ -1298,10 +1321,15 @@ class JiuWenSwarm:
                             else:
                                 answer_value = custom_input
                         elif len(cleaned_options) == 1:
-                            answer_value = cleaned_options[0]
+                            # Bare "Other" without custom text is incomplete (#2330).
+                            sole = cleaned_options[0]
+                            answer_value = "" if sole == "Other" else sole
                         elif cleaned_options:
-                            # Multi-select: preserve the full list of selections.
-                            answer_value = cleaned_options
+                            # Multi-select: preserve real choices; drop placeholder-only Other.
+                            normal_options = [
+                                option for option in cleaned_options if option != "Other"
+                            ]
+                            answer_value = normal_options if normal_options else ""
                         else:
                             answer_value = ""
                     elif custom_input:
@@ -1847,6 +1875,12 @@ class JiuWenSwarm:
                     if ok and str(action or "").strip().lower() == "set":
                         objective = str(params.get("objective") or "").strip()
                         if objective:
+                            goal_obj = goal_result.get("goal")
+                            goal_id = (
+                                str(goal_obj.get("goal_id") or "").strip() or None
+                                if isinstance(goal_obj, dict)
+                                else None
+                            )
                             append_history_record(
                                 session_id=session_id,
                                 request_id=request.request_id,
@@ -1856,6 +1890,10 @@ class JiuWenSwarm:
                                 timestamp=time.time(),
                                 channel_metadata=request.metadata,
                                 mode=params.get("mode", "unknown"),
+                                extra={
+                                    "goal_id": goal_id,
+                                    "is_goal_objective_message": True,
+                                },
                             )
                     # Keep message for callers that read payload.message; also
                     # mirror into error on failure so Gateway top-level error
@@ -2744,6 +2782,22 @@ class JiuWenSwarm:
 
     def get_instance(self):
         return self._adapter._instance
+
+    async def ensure_instance(self):
+        """Return the adapter's DeepAgent, building the root one on first use.
+
+        ``get_instance`` stays a plain accessor and may return None before the
+        root DeepAgent has been built; callers that need a live handle outside
+        the chat path should await this instead.
+
+        Returns:
+            The DeepAgent instance, or None when there is no adapter yet (the
+            stateless-RPC fallback wrapper never calls ``create_instance``) or
+            the adapter cannot build one.
+        """
+        if self._adapter is None:
+            return None
+        return await self._adapter.ensure_instance()
 
     async def apply_package_change_to_session_adapters(
         self,

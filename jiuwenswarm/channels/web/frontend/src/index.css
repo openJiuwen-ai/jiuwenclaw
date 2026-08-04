@@ -98,6 +98,21 @@ select {
   background: var(--color-border-strong);
 }
 
+.resize-divider--workspace::after {
+  position: absolute;
+  inset: 0 -2px;
+  content: '';
+}
+
+body.workspace-resize-active {
+  cursor: col-resize;
+  user-select: none;
+}
+
+body.workspace-resize-active iframe {
+  pointer-events: none;
+}
+
 /* ===========================================
    Animations
    =========================================== */
@@ -949,12 +964,15 @@ select {
     width: min(var(--chat-page-max-width), calc(100% - 16px));
     margin-inline: auto;
     padding-top: 4px;
+    position: relative;
+    z-index: 5;
   }
 
   .chat-panel-shell {
     --chat-page-max-width: 920px;
     --chat-page-gutter: clamp(12px, 3vw, 40px);
     --chat-content-width: min(var(--chat-page-max-width), calc(100% - (var(--chat-page-gutter) * 2)));
+    position: relative;
   }
 
   .chat-scroll {
@@ -1298,7 +1316,7 @@ select {
     display: flex;
     flex-direction: column;
     gap: 8px;
-    view-transition-name: chat-timeline;
+    position: relative;
   }
 
   .chat-timeline > * {
@@ -1306,21 +1324,9 @@ select {
     margin-bottom: 0;
   }
 
-  @keyframes timeline-fold-in {
-    from {
-      opacity: 0;
-      transform: translateY(6px);
-    }
-    to {
-      opacity: 1;
-      transform: translateY(0);
-    }
-  }
-
   /* ====== Tool Tree ====== */
   .tool-group-frame {
     margin: 0;
-    animation: timeline-fold-in 0.22s ease both;
   }
 
   .tool-group-frame:not(.tool-group-frame--team) {
@@ -1351,7 +1357,7 @@ select {
   .tool-tree {
     margin: 0;
     padding: 0;
-    --tool-muted: color-mix(in srgb, var(--color-text-secondary) 72%, var(--color-surface-elevated));
+    --tool-muted: rgba(var(--color-text-secondary-rgb), 0.72);
     --tool-muted-strong: var(--color-text-secondary);
   }
 
@@ -1451,7 +1457,7 @@ select {
     margin: 0;
     padding: 0 2px 0 42px;
     font-size: var(--font-size-2xs, 11px);
-    color: color-mix(in srgb, var(--color-text-secondary) 72%, var(--color-surface-elevated));
+    color: rgba(var(--color-text-secondary-rgb), 0.72);
   }
 
   /* team：与 920px 居中栅格的内容列（36 + 12 = 48px）对齐。 */
@@ -1488,7 +1494,6 @@ select {
     gap: 10px;
     align-items: flex-start;
     margin: 2px 0;
-    animation: timeline-fold-in 0.28s ease both;
   }
 
   .completed-work-row__avatar {
@@ -1508,27 +1513,11 @@ select {
 
   .completed-work-row--nested {
     margin-left: 0;
-    animation: timeline-fold-in 0.24s ease both;
-  }
-
-  @keyframes timeline-streak-enter {
-    from {
-      opacity: 0;
-      transform: translateY(10px) scale(0.98);
-    }
-    to {
-      opacity: 1;
-      transform: translateY(0) scale(1);
-    }
-  }
-
-  .completed-work-row--streak-enter {
-    animation: timeline-streak-enter 0.42s cubic-bezier(0.22, 1, 0.36, 1) both;
   }
 
   .completed-work-row--nested .completed-work-chip--streak {
     font-size: var(--font-size-2xs, 11px);
-    color: color-mix(in srgb, var(--color-text-secondary) 72%, transparent);
+    color: rgba(var(--color-text-secondary-rgb), 0.72);
   }
 
   .completed-work-chip {
@@ -1540,7 +1529,7 @@ select {
     padding: 2px 4px 2px 0;
     border: 0;
     background: transparent;
-    color: color-mix(in srgb, var(--color-text-secondary) 88%, transparent);
+    color: rgba(var(--color-text-secondary-rgb), 0.88);
     font-size: var(--font-size-sm, 13px);
     line-height: 1.4;
     cursor: pointer;
@@ -1557,7 +1546,15 @@ select {
     width: 16px;
     height: 16px;
     flex-shrink: 0;
-    color: color-mix(in srgb, var(--color-success, #16a34a) 80%, var(--color-text-secondary));
+    color: var(--color-feedback-success);
+  }
+
+  .completed-work-chip__icon.is-partial {
+    color: var(--color-feedback-warning);
+  }
+
+  .completed-work-chip__icon.is-error {
+    color: var(--color-feedback-danger);
   }
 
   .completed-work-chip__icon svg {
@@ -1571,6 +1568,21 @@ select {
     transition: opacity 0.28s ease, transform 0.28s ease;
   }
 
+  .completed-work-chip__badge {
+    flex-shrink: 0;
+    padding: 0;
+    margin-left: 2px;
+    border-radius: 0;
+    font-size: var(--font-size-2xs, 11px);
+    font-weight: 500;
+    line-height: inherit;
+  }
+
+  .completed-work-chip__badge.is-partial {
+    background: transparent;
+    color: var(--color-feedback-warning);
+  }
+
   .completed-work-chip .tool-tree-item__disclosure {
     opacity: 0.7;
     transition: transform 0.22s ease, opacity 0.18s ease;
@@ -1578,7 +1590,6 @@ select {
 
   .reasoning-row {
     margin: 0;
-    animation: timeline-fold-in 0.22s ease both;
   }
 
   .reasoning-row:not(.reasoning-row--team) {
@@ -1603,7 +1614,7 @@ select {
   }
 
   .reasoning-panel {
-    --tool-muted: color-mix(in srgb, var(--color-text-secondary) 78%, transparent);
+    --tool-muted: rgba(var(--color-text-secondary-rgb), 0.78);
     display: flex;
     flex-direction: column;
   }
@@ -1613,17 +1624,20 @@ select {
   }
 
   /* 思考正文：用 grid rows 做高度过渡，避免 open 切换时硬切跳变。 */
-  .reasoning-panel__collapse {
+  .reasoning-panel__collapse,
+  .timeline-collapse {
     display: grid;
     grid-template-rows: 0fr;
     transition: grid-template-rows 0.3s ease;
   }
 
-  .reasoning-panel__collapse.is-open {
+  .reasoning-panel__collapse.is-open,
+  .timeline-collapse.is-open {
     grid-template-rows: 1fr;
   }
 
-  .reasoning-panel__collapse-inner {
+  .reasoning-panel__collapse-inner,
+  .timeline-collapse-inner {
     overflow: hidden;
     min-height: 0;
   }
@@ -1633,8 +1647,8 @@ select {
     padding: 6px 10px;
     max-height: 220px;
     overflow-y: auto;
-    border-left: 2px solid color-mix(in srgb, var(--color-text-secondary) 22%, transparent);
-    color: color-mix(in srgb, var(--color-text-secondary) 82%, transparent);
+    border-left: 2px solid rgba(var(--color-text-secondary-rgb), 0.22);
+    color: rgba(var(--color-text-secondary-rgb), 0.82);
     font-size: var(--font-size-2xs, 11px);
     line-height: 1.55;
     white-space: pre-wrap;
@@ -1647,6 +1661,53 @@ select {
   .reasoning-panel__collapse.is-open .reasoning-panel__body {
     opacity: 1;
     transform: translateY(0);
+  }
+
+  /*
+   * 时间线折叠：收起时必须脱离文档流，否则 chat-timeline 的 gap 会在每个 0 高节点上累加，
+   * 出现「没展开的内容之间空白巨大」。展开时再进流并做与思考一致的下拉。
+   */
+  .timeline-collapse:not(.is-open) {
+    position: absolute;
+    width: 1px;
+    height: 0;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    visibility: hidden;
+    pointer-events: none;
+  }
+
+  .timeline-collapse.is-open {
+    position: relative;
+    width: auto;
+    visibility: visible;
+    pointer-events: auto;
+    animation: timeline-collapse-open 0.3s ease;
+  }
+
+  .timeline-collapse.is-open > .timeline-collapse-inner > * {
+    animation: timeline-collapse-drop 0.22s ease;
+  }
+
+  @keyframes timeline-collapse-open {
+    from {
+      grid-template-rows: 0fr;
+    }
+    to {
+      grid-template-rows: 1fr;
+    }
+  }
+
+  @keyframes timeline-collapse-drop {
+    from {
+      opacity: 0;
+      transform: translateY(-4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
   }
 
   /* 执行中：不转圈，改用一条明亮窄带从左到右扫过灰字（对比更强、更明显）。 */
@@ -1754,15 +1815,37 @@ select {
     transform: rotate(90deg);
   }
 
-  /* 详情内联展开：在流内占位、把后续内容顶下去（会话列表式展开），宽度铺满工具组。 */
+  /* 详情内联展开：与思考面板同一套 grid 高度下拉，避免挂载闪一下。 */
+  .tool-tree-item__collapse {
+    display: grid;
+    grid-template-rows: 0fr;
+    transition: grid-template-rows 0.3s ease;
+  }
+
+  .tool-tree-item__collapse.is-open {
+    grid-template-rows: 1fr;
+  }
+
+  .tool-tree-item__collapse-inner {
+    overflow: hidden;
+    min-height: 0;
+  }
+
   .tool-tree-item__detail-wrap {
     width: 100%;
     margin: 2px 0 4px;
     padding: 10px 12px;
-    background: color-mix(in srgb, var(--color-surface-elevated) 60%, transparent);
-    border: 1px solid color-mix(in srgb, var(--color-border-default) 70%, transparent);
+    background: rgba(var(--color-surface-card-rgb), 0.6);
+    border: 1px solid rgba(var(--color-border-default-rgb), 0.7);
     border-radius: 8px;
-    animation: detailReveal 0.2s ease;
+    opacity: 0;
+    transform: translateY(-4px);
+    transition: opacity 0.22s ease, transform 0.22s ease;
+  }
+
+  .tool-tree-item__collapse.is-open .tool-tree-item__detail-wrap {
+    opacity: 1;
+    transform: translateY(0);
   }
 
   .tool-tree-item__detail {
@@ -1774,17 +1857,6 @@ select {
   /* 展开详情里的状态图标也统一为灰色，不用彩色区分。 */
   .tool-tree-item__detail-wrap .tool-status-icon {
     color: var(--color-text-secondary);
-  }
-
-  @keyframes detailReveal {
-    from {
-      opacity: 0;
-      transform: translateY(-2px);
-    }
-    to {
-      opacity: 1;
-      transform: translateY(0);
-    }
   }
 
   .tool-tree-item__detail-block {
@@ -1807,12 +1879,42 @@ select {
   }
 
   .tool-tree-item__detail-badge {
-    padding: 0 5px;
+    padding: 1px 6px;
     border-radius: 4px;
     font-size: var(--font-size-2xs);
-    font-weight: 500;
+    font-weight: 600;
+    letter-spacing: 0.02em;
     background: var(--color-surface-muted);
     color: var(--color-text-secondary);
+  }
+
+  .tool-tree-item__detail-badge.is-success {
+    background: var(--color-feedback-success-subtle, rgba(22, 163, 74, 0.12));
+    color: var(--color-feedback-success);
+  }
+
+  .tool-tree-item__detail-badge.is-error,
+  .tool-tree-item__detail-badge.is-timeout {
+    background: rgba(220, 38, 38, 0.08);
+    color: rgba(185, 28, 28, 0.88);
+    font-weight: 500;
+  }
+
+  .tool-tree__header-line-text.is-failed {
+    color: rgba(185, 28, 28, 0.78);
+  }
+
+  .tool-tree-item__detail-pre.is-failed {
+    border-color: rgba(220, 38, 38, 0.14);
+  }
+
+  .tool-tree-item__detail-pre--name {
+    font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+    font-weight: 600;
+  }
+
+  .tool-tree-item__detail-status.is-error {
+    color: rgba(185, 28, 28, 0.78);
   }
 
   .tool-tree-item__detail-pre {
@@ -1961,17 +2063,24 @@ select {
   @media (prefers-reduced-motion: reduce) {
     .chat-timeline,
     .completed-work-row,
-    .completed-work-row--streak-enter,
     .reasoning-row,
     .tool-group-frame,
     .reasoning-panel__collapse,
+    .timeline-collapse,
     .reasoning-panel__body,
+    .timeline-collapse.is-open,
+    .timeline-collapse.is-open > .timeline-collapse-inner > *,
     .tool-tree-item__disclosure,
+    .tool-tree-item__collapse,
     .tool-tree-item__detail-wrap,
     .completed-work-chip,
     .completed-work-chip__label {
       animation: none !important;
       transition: none !important;
+    }
+
+    .timeline-collapse:not(.is-open) {
+      display: none !important;
     }
   }
 }
@@ -1991,49 +2100,6 @@ select {
 /* Animation utilities */
 .animate-rise {
   animation: rise 0.35s var(--ease-out) backwards;
-}
-
-::view-transition-old(chat-timeline),
-::view-transition-new(chat-timeline) {
-  animation-duration: 0.4s;
-  animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-::view-transition-old(chat-timeline) {
-  animation-name: timeline-vt-fade-out;
-}
-
-::view-transition-new(chat-timeline) {
-  animation-name: timeline-vt-fade-in;
-}
-
-@keyframes timeline-vt-fade-out {
-  from {
-    opacity: 1;
-    transform: translateY(0);
-  }
-  to {
-    opacity: 0;
-    transform: translateY(-4px);
-  }
-}
-
-@keyframes timeline-vt-fade-in {
-  from {
-    opacity: 0;
-    transform: translateY(8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  ::view-transition-old(chat-timeline),
-  ::view-transition-new(chat-timeline) {
-    animation: none !important;
-  }
 }
 
 /* Voice recording pulse */

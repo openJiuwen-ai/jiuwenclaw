@@ -29,6 +29,7 @@ import {
   shouldDropToolResult,
 } from './toolResultLifecycle';
 import { mergeFileDownloadItems } from '../utils/fileDownloadDedup';
+import { parseTimestampToMs } from '../utils/timestamp';
 
 const TOOL_TIMEOUT_MS = 12_000_000;
 const EVOLUTION_STATUS_END_VISIBLE_MS = 3_000;
@@ -48,6 +49,9 @@ function computeTimeoutAt(baseIso: string): string {
 }
 
 function resolveExecutionStatus(result: ToolResult): ToolExecutionStatus {
+  if (result.timedOut) {
+    return 'timeout';
+  }
   return result.success ? 'completed' : 'error';
 }
 
@@ -239,6 +243,8 @@ interface ChatState {
   updateToolProgress: (sessionId: string, toolCallId: string, progress: Partial<ToolResult>) => void;
   addToolResult: (sessionId: string, toolResult: ToolResult, options?: { updatedAt?: string }) => void;
   markTimedOutExecutions: (sessionId: string) => void;
+  /** 历史回放常只有 tool_call、无 tool_result：把仍 pending 的工具按 startedAt 结算，避免超时巡检用 now 污染耗时 */
+  settleHistoricalToolExecutions: (sessionId: string) => void;
   updateSubtask: (sessionId: string, payload: SubtaskUpdatePayload) => void;
   clearSubtasks: (sessionId: string) => void;
   clearMessages: (sessionId: string) => void;
@@ -252,7 +258,11 @@ interface ChatState {
   setInputValue: (sessionId: string, value: string) => void;
   setSessionError: (sessionId: string, error: string | null) => void;
   setUsageSummary: (sessionId: string, messageId: string, usage: UsageSummary) => void;
-  addFileItems: (sessionId: string, files: FileDownloadItem[]) => void;
+  addFileItems: (
+    sessionId: string,
+    files: FileDownloadItem[],
+    options?: { timestampIso?: string }
+  ) => void;
   setContextCompressionStatus: (
     sessionId: string,
     runtime?: ContextCompressionRuntime,
@@ -479,10 +489,14 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
         const text = item.text?.trim();
         if (!text || seen.has(text)) return;
         seen.add(text);
-        const parsed = Date.parse(item.at);
+        const parsed = parseTimestampToMs(item.at);
         // 历史里思考与同一步 final/tool_call 共用落盘时间；减 1ms 仅补齐缺失的独立时间戳，
         // 使时间线能分出「先思考、后动作」，不做跨步骤重排。
-        const startedAt = Number.isFinite(parsed) ? parsed - 1 : index;
+        // 解析失败时跳过该段，勿用 index 当 epoch（会让 startMs≈0，耗时爆炸）
+        if (!Number.isFinite(parsed)) {
+          return;
+        }
+        const startedAt = parsed - 1;
         segments.push({
           id: `hist-rsn-${sessionId}-${index}-${createReasoningSegmentId()}`,
           text,
@@ -651,6 +665,7 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
         role: kind === 'team' ? 'system' : 'assistant',
         content: displayContent,
         timestamp: timestampIso,
+        completedAt: timestampIso,
         isStreaming: false,
       });
       return {
@@ -1164,11 +1179,59 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
           continue;
         }
         changed = true;
+        // timedOutAt = 巡检发现时刻；updatedAt 保持事件时间（startedAt/原值），避免把「已完成」耗时撑到 now。
         nextExecutions.set(toolCallId, {
           ...execution,
           status: 'timeout',
           timedOutAt: new Date(now).toISOString(),
-          updatedAt: new Date(now).toISOString(),
+        });
+      }
+      if (!changed) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, toolExecutions: nextExecutions },
+        },
+      };
+    });
+  },
+
+  settleHistoricalToolExecutions: (sessionId) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime || runtime.isProcessing) return state;
+      let changed = false;
+      const nextExecutions = new Map(runtime.toolExecutions);
+      for (const [toolCallId, execution] of nextExecutions) {
+        // 只结算仍 pending 的历史孤儿 tool_call。
+        // timeout/error 必须保留，否则刷新后失败/超时会被抹成「已完成」。
+        if (execution.status !== 'pending') {
+          continue;
+        }
+        if (execution.result) {
+          const nextStatus = resolveExecutionStatus(execution.result);
+          if (nextStatus !== execution.status) {
+            changed = true;
+            nextExecutions.set(toolCallId, {
+              ...execution,
+              status: nextStatus,
+              updatedAt: execution.updatedAt || execution.startedAt,
+            });
+          }
+          continue;
+        }
+        // 无真实 result：按调用时刻结算为完成，不引入 Date.now()
+        changed = true;
+        nextExecutions.set(toolCallId, {
+          ...execution,
+          status: 'completed',
+          updatedAt: execution.startedAt,
+          result: {
+            toolName: execution.toolCall.name,
+            result: '',
+            success: true,
+            toolCallId,
+          } as ToolResult,
         });
       }
       if (!changed) return state;
@@ -1487,16 +1550,24 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
     });
   },
 
-  addFileItems: (sessionId, files) => {
+  addFileItems: (sessionId, files, options) => {
     set((state) => {
       const runtime = state.runtimes[sessionId];
       if (!runtime) return state;
       const lastMessage = runtime.messages[runtime.messages.length - 1];
+      // 与历史 restore 一致：优先挂当前流；否则挂最近一条助手消息（不是下一条 final）。
       const targetId =
         runtime.currentStreamId ??
-        (lastMessage?.role === 'assistant' ? lastMessage.id : null);
+        (lastMessage?.role === 'assistant' ||
+        (lastMessage?.role === 'system' && lastMessage.id?.startsWith('team-leader-'))
+          ? lastMessage.id
+          : null);
+      const timestampIso =
+        typeof options?.timestampIso === 'string' && options.timestampIso.trim()
+          ? options.timestampIso.trim()
+          : new Date().toISOString();
       if (!targetId) {
-        const msgId = `file-${Date.now()}`;
+        const msgId = `file-${timestampIso}`;
         return {
           runtimes: {
             ...state.runtimes,
@@ -1508,7 +1579,7 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
                   id: msgId,
                   role: 'assistant',
                   content: '',
-                  timestamp: new Date().toISOString(),
+                  timestamp: timestampIso,
                   fileItems: files,
                 },
               ],

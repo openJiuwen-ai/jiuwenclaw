@@ -84,9 +84,11 @@ export type TeamAreaProps = BaseTeamAreaProps & (
     activeTab: TabType;
     activeDetailTab: TeamDetailTab;
     selectedMemberId?: string;
+    selectedArtifactId?: string;
     onTabChange: (tab: TabType) => void;
     onDetailTabChange: (tab: TeamDetailTab) => void;
     onMemberSelect?: (memberId: string) => void;
+    onArtifactSelect?: (artifactId: string) => void;
     onCollapse?: () => void;
   }
 );

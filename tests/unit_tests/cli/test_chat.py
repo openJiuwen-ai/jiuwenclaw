@@ -137,6 +137,22 @@ class TestBuildRequest:
         assert req["params"]["cwd"].endswith("test_cwd")
         assert req["params"]["project_dir"].endswith("test_cwd")
         assert req["params"]["session_id"].startswith("cli-")
+        assert req["params"]["supports_user_interaction"] is False
+
+    @staticmethod
+    def test_repl_request_supports_user_interaction(monkeypatch):
+        monkeypatch.setattr(os, "getcwd", lambda: "/tmp/test_cwd")
+        args = argparse.Namespace(
+            mode="code.normal",
+            session=None,
+            cwd=None,
+            project_dir=None,
+            trusted_dir=None,
+        )
+
+        req = _build_request(args, "hello", supports_user_interaction=True)
+
+        assert req["params"]["supports_user_interaction"] is True
 
     @staticmethod
     def test_with_session(monkeypatch):
@@ -785,6 +801,41 @@ class TestInteractiveLoop:
         }
         code = await _run_interactive_loop(client, renderer, request)
         assert code == 1
+
+    @pytest.mark.asyncio
+    async def test_non_interactive_request_rejects_ask_user_event(self):
+        messages = [
+            {
+                "type": "event",
+                "event": "chat.ask_user_question",
+                "payload": {
+                    "question": "A or B?",
+                    "options": [{"label": "A"}, {"label": "B"}],
+                },
+            },
+        ]
+
+        from jiuwenswarm.cli.chat import _run_interactive_loop
+
+        client = await self._make_connected_client(messages)
+        renderer = HumanRenderer()
+        request = {
+            "type": "req",
+            "id": "r1",
+            "method": "chat.send",
+            "is_stream": True,
+            "params": {
+                "session_id": "s1",
+                "content": "hi",
+                "query": "hi",
+                "mode": "code.normal",
+                "supports_user_interaction": False,
+            },
+        }
+
+        code = await _run_interactive_loop(client, renderer, request)
+
+        assert code == 4
 
     @pytest.mark.asyncio
     async def test_keepalive_final_does_not_terminate(self):

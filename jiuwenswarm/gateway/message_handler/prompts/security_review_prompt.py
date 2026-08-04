@@ -118,7 +118,7 @@ SECURITY CATEGORIES TO EXAMINE:
 - Certificate validation bypasses
 
 **Injection & Code Execution:**
-- Remote code execution via deseralization
+- Remote code execution via deserialization
 - Pickle injection in Python
 - YAML deserialization vulnerabilities
 - Eval injection in dynamic code execution

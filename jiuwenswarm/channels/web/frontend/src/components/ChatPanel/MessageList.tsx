@@ -1,5 +1,4 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { flushSync } from 'react-dom';
 import clsx from 'clsx';
 import { LoaderCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -14,6 +13,7 @@ import {
   buildTimelineItems,
   buildRenderItems,
   buildTurnWorkMeta,
+  buildTurnFoldAnchorKeys,
   buildLiveCompletedStreaks,
   buildStreakInputSignature,
   isSettlingForStreak,
@@ -21,25 +21,13 @@ import {
   formatStreakSummaryLabel,
   messageHasDeliverable,
   filterDeliverableExecutions,
+  turnElapsedRangeMs,
   REASONING_COLLAPSE_DELAY_MS,
   STREAK_FOLD_TRANSITION_DELAY_MS,
   type LiveWorkStreak,
 } from '../../features/chatTimeline/buildTurnTimeline';
 
 const EMPTY_REASONING: ReasoningSegment[] = [];
-
-function runTimelineTransition(update: () => void) {
-  const doc = document as Document & {
-    startViewTransition?: (updateCallback: () => void) => { finished: Promise<unknown> };
-  };
-  if (typeof doc.startViewTransition === 'function') {
-    doc.startViewTransition(() => {
-      flushSync(update);
-    });
-    return;
-  }
-  update();
-}
 
 interface MessageListProps {
   messages: Message[];
@@ -70,6 +58,9 @@ function formatElapsedCoarse(ms: number): string {
   return `${minutes}m${seconds.toString().padStart(2, '0')}s`;
 }
 
+/** 与 buildTurnTimeline 中异常回退阈值一致：超过则视为 startMs 脏数据。 */
+const MAX_PLAUSIBLE_TURN_MS = 24 * 60 * 60 * 1000;
+
 function TurnElapsed({
   startMs,
   endMs,
@@ -86,20 +77,28 @@ function TurnElapsed({
   const active = isLastTurn && isProcessing;
   const now = useNow(active);
   const end = active ? now : endMs;
-  const elapsed = Math.max(0, end - startMs);
-  if (!active && elapsed <= 0) {
+  const rawElapsed = Math.max(0, end - startMs);
+  // 进行中若 startMs 异常偏旧，停用实时计时，避免一直飙到数小时。
+  const elapsed =
+    active && rawElapsed > MAX_PLAUSIBLE_TURN_MS
+      ? Math.max(0, endMs - startMs) > MAX_PLAUSIBLE_TURN_MS
+        ? 0
+        : Math.max(0, endMs - startMs)
+      : rawElapsed;
+  const showActive = active && rawElapsed <= MAX_PLAUSIBLE_TURN_MS;
+  if (!showActive && elapsed <= 0) {
     return null;
   }
   return (
-    <div className={clsx('turn-elapsed', teamLayout && 'turn-elapsed--team', active && 'is-active')}>
-      {active && (
+    <div className={clsx('turn-elapsed', teamLayout && 'turn-elapsed--team', showActive && 'is-active')}>
+      {showActive && (
         <LoaderCircle className="turn-elapsed__spinner" size={12} strokeWidth={2.2} aria-hidden="true" />
       )}
       <span className="turn-elapsed__label">
-        {active ? t('chatUi.turnRunning') : t('chatUi.turnElapsed')}
+        {showActive ? t('chatUi.turnRunning') : t('chatUi.turnElapsed')}
       </span>
       <span className="turn-elapsed__value">
-        {active ? formatElapsedCoarse(elapsed) : formatDurationPrecise(elapsed)}
+        {showActive ? formatElapsedCoarse(elapsed) : formatDurationPrecise(elapsed)}
       </span>
     </div>
   );
@@ -109,7 +108,7 @@ function CompletedWorkChip({
   variant,
   thinkingCount = 0,
   toolCount = 0,
-  durationMs = 0,
+  outcomeTone = 'neutral',
   expanded,
   onToggle,
   showAvatar,
@@ -118,19 +117,29 @@ function CompletedWorkChip({
   variant: 'turn' | 'streak';
   thinkingCount?: number;
   toolCount?: number;
-  durationMs?: number;
+  outcomeTone?: 'success' | 'partial' | 'error' | 'neutral';
   expanded: boolean;
   onToggle: () => void;
   showAvatar: boolean;
   teamLayout: boolean;
 }) {
   const { t } = useTranslation();
+  // 耗时统一由底部 TurnElapsed 展示，避免「已完成」在上、「任务用时」在下两套位置互相打架。
   const label =
     variant === 'turn'
-      ? t('chatUi.workCompleted', {
-          duration: formatDurationPrecise(Math.max(0, durationMs)),
-        })
-      : formatStreakSummaryLabel(t, thinkingCount, toolCount);
+      ? t('chatUi.workCompletedFallback')
+      : formatStreakSummaryLabel(t, thinkingCount, toolCount, outcomeTone);
+  // 最外层「已完成」始终绿勾；展开后的 streak：全成功绿勾 / 部分失败黄勾+标签 / 全失败红叉。
+  const applyOutcome = variant === 'streak';
+  const showErrorIcon = applyOutcome && outcomeTone === 'error';
+  const showPartialBadge = applyOutcome && outcomeTone === 'partial';
+  const toneClass = !applyOutcome
+    ? 'is-success'
+    : outcomeTone === 'error'
+      ? 'is-error'
+      : outcomeTone === 'partial'
+        ? 'is-partial'
+        : 'is-success';
 
   const chip = (
     <button
@@ -138,18 +147,31 @@ function CompletedWorkChip({
       className={clsx(
         'completed-work-chip',
         variant === 'streak' && 'completed-work-chip--streak',
-        expanded && 'is-expanded'
+        expanded && 'is-expanded',
+        toneClass
       )}
       onClick={onToggle}
       aria-expanded={expanded}
     >
-      <span className="completed-work-chip__icon" aria-hidden="true">
-        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-          <circle cx="10" cy="10" r="6.5" />
-          <path d="m7.2 10.1 1.8 1.8 3.8-3.8" />
-        </svg>
+      <span className={clsx('completed-work-chip__icon', toneClass)} aria-hidden="true">
+        {showErrorIcon ? (
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="10" cy="10" r="6.5" />
+            <path d="m7.6 7.6 4.8 4.8M12.4 7.6l-4.8 4.8" />
+          </svg>
+        ) : (
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="10" cy="10" r="6.5" />
+            <path d="m7.2 10.1 1.8 1.8 3.8-3.8" />
+          </svg>
+        )}
       </span>
       <span className="completed-work-chip__label">{label}</span>
+      {showPartialBadge ? (
+        <span className="completed-work-chip__badge is-partial">
+          {t('chatUi.workOutcomePartial')}
+        </span>
+      ) : null}
       <span className={clsx('tool-tree-item__disclosure', expanded && 'is-open')} aria-hidden="true">
         <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8">
           <path strokeLinecap="round" strokeLinejoin="round" d="m8 6 4 4-4 4" />
@@ -164,8 +186,7 @@ function CompletedWorkChip({
         className={clsx(
           'completed-work-row',
           'completed-work-row--team',
-          variant === 'streak' && 'completed-work-row--nested',
-          variant === 'streak' && 'completed-work-row--streak-enter'
+          variant === 'streak' && 'completed-work-row--nested'
         )}
       >
         <div className="pt-0.5">{showAvatar ? <TeamMemberAvatar member="team_leader" /> : null}</div>
@@ -178,8 +199,7 @@ function CompletedWorkChip({
     <div
       className={clsx(
         'completed-work-row',
-        variant === 'streak' && 'completed-work-row--nested',
-        variant === 'streak' && 'completed-work-row--streak-enter'
+        variant === 'streak' && 'completed-work-row--nested'
       )}
     >
       <div className="completed-work-row__avatar">
@@ -244,7 +264,7 @@ function ReasoningSegmentBlock({
         className="tool-tree__header"
         onClick={() => {
           userToggledRef.current = true;
-          runTimelineTransition(() => setOpen((current) => !current));
+          setOpen((current) => !current);
         }}
         aria-expanded={open}
       >
@@ -322,6 +342,10 @@ export function ChatTimelineList({
   const turnWorkMeta = useMemo(
     () => buildTurnWorkMeta(renderItems, isProcessing),
     [renderItems, isProcessing]
+  );
+  const turnFoldAnchorKeys = useMemo(
+    () => buildTurnFoldAnchorKeys(renderItems, turnWorkMeta),
+    [renderItems, turnWorkMeta]
   );
   const streakInputSig = useMemo(
     () => buildStreakInputSignature(renderItems, streakNowMs),
@@ -404,10 +428,8 @@ export function ChatTimelineList({
       return;
     }
     const timer = window.setTimeout(() => {
-      runTimelineTransition(() => {
-        displayedStreakFpRef.current = liveStreakFp;
-        setDisplayedStreaksByFirstKey(nextMap);
-      });
+      displayedStreakFpRef.current = liveStreakFp;
+      setDisplayedStreaksByFirstKey(nextMap);
     }, STREAK_FOLD_TRANSITION_DELAY_MS);
     return () => window.clearTimeout(timer);
   }, [liveStreakFp, liveStreaksByFirstKey, staticTimeline]);
@@ -417,41 +439,67 @@ export function ChatTimelineList({
   }
 
   const toggleTurn = (turnId: number) => {
-    runTimelineTransition(() => {
-      setExpandedTurns((prev) => ({ ...prev, [turnId]: !prev[turnId] }));
-    });
+    setExpandedTurns((prev) => ({ ...prev, [turnId]: !prev[turnId] }));
   };
 
   const toggleStreak = (streakId: string) => {
-    runTimelineTransition(() => {
-      setExpandedStreaks((prev) => ({ ...prev, [streakId]: !prev[streakId] }));
-    });
+    setExpandedStreaks((prev) => ({ ...prev, [streakId]: !prev[streakId] }));
   };
 
   return (
     <div className="chat-timeline">
       {renderItems.map((item) => {
         if (item.type === 'message') {
-          if (item.hideMeta && item.turnId >= 0) {
-            const meta = turnWorkMeta.get(item.turnId);
-            if (meta?.completed && meta.hasWork && !expandedTurns[item.turnId]) {
-              if (!messageHasDeliverable(item.message)) {
-                return null;
-              }
-              return (
-                <Fragment key={item.key}>
-                  <MessageItem
-                    message={{ ...item.message, content: '' }}
-                    showAvatar={false}
-                    hideMeta
-                    disableA2UIInteraction={disableA2UIInteraction}
-                    enableAssistantAvatar={!isTeamMode}
+          const meta = item.turnId >= 0 ? turnWorkMeta.get(item.turnId) : undefined;
+          const turnFoldable = Boolean(meta?.completed && meta.hasWork && item.hideMeta);
+          const turnOpen = !turnFoldable || Boolean(expandedTurns[item.turnId]);
+          const isFoldAnchor = turnFoldAnchorKeys.get(item.turnId) === item.key;
+
+          if (turnFoldable) {
+            const hasDeliverable = messageHasDeliverable(item.message);
+            return (
+              <Fragment key={item.key}>
+                {/* 工具前的开场白若可折叠，折叠条锚在这里，展开后不会跑到「已完成」上面 */}
+                {isFoldAnchor && meta ? (
+                  <CompletedWorkChip
+                    key={`completed-work-${item.turnId}`}
+                    variant="turn"
+                    outcomeTone={meta.outcomeTone}
+                    expanded={turnOpen}
+                    onToggle={() => toggleTurn(item.turnId)}
+                    showAvatar
+                    teamLayout={isTeamMode}
                   />
-                  {renderAfterMessage?.(item.message)}
-                </Fragment>
-              );
-            }
+                ) : null}
+                {/* 折叠态：交付物与代码变更卡需留在文档流内，不能放进被 absolute 隐藏的 collapse */}
+                {!turnOpen && hasDeliverable ? (
+                  <>
+                    <MessageItem
+                      message={{ ...item.message, content: '' }}
+                      showAvatar={false}
+                      hideMeta
+                      disableA2UIInteraction={disableA2UIInteraction}
+                      enableAssistantAvatar={!isTeamMode}
+                    />
+                    {renderAfterMessage?.(item.message)}
+                  </>
+                ) : null}
+                <div className={clsx('timeline-collapse', turnOpen && 'is-open')}>
+                  <div className="timeline-collapse-inner">
+                    <MessageItem
+                      message={item.message}
+                      showAvatar={item.showAvatar}
+                      hideMeta={item.hideMeta}
+                      disableA2UIInteraction={disableA2UIInteraction}
+                      enableAssistantAvatar={!isTeamMode}
+                    />
+                    {turnOpen ? renderAfterMessage?.(item.message) : null}
+                  </div>
+                </div>
+              </Fragment>
+            );
           }
+
           return (
             <Fragment key={item.key}>
               <MessageItem
@@ -468,159 +516,95 @@ export function ChatTimelineList({
 
         if (item.type === 'reasoning' || item.type === 'toolGroup') {
           const meta = turnWorkMeta.get(item.turnId);
-          const collapsed = Boolean(meta?.completed && meta.hasWork && !expandedTurns[item.turnId]);
-          if (collapsed) {
-            const nodes: ReactNode[] = [];
-            const shouldAnchorChip =
-              Boolean(meta) &&
-              (meta!.firstWorkKey === item.key ||
-                (!meta!.firstWorkKey && !chipAnchoredTurns.current.has(item.turnId)));
-            if (shouldAnchorChip && meta) {
-              chipAnchoredTurns.current.add(item.turnId);
-              nodes.push(
-                <CompletedWorkChip
-                  key={`completed-work-${item.turnId}`}
-                  variant="turn"
-                  durationMs={
-                    Number.isFinite(meta.endMs) && Number.isFinite(meta.startMs)
-                      ? Math.max(0, meta.endMs - meta.startMs)
-                      : 0
-                  }
-                  expanded={false}
-                  onToggle={() => toggleTurn(item.turnId)}
-                  showAvatar={meta.showAvatar}
-                  teamLayout={isTeamMode}
-                />
-              );
-            }
-            if (item.type === 'toolGroup') {
-              const deliverables = filterDeliverableExecutions(item.executions);
-              if (deliverables.length > 0) {
-                nodes.push(
-                  <ToolGroupDisplay
-                    key={`${item.key}-deliverable`}
-                    executions={deliverables}
-                    notices={[]}
-                    showAvatar={false}
-                    teamLayout={isTeamMode}
-                    collapseSkillTreeWhenContentStarts={false}
-                    viewedSkillIds={[]}
-                  />
-                );
-              }
-            }
-            if (nodes.length === 0) {
-              return null;
-            }
-            return nodes.length === 1 ? nodes[0] : <Fragment key={`collapsed-work-${item.key}`}>{nodes}</Fragment>;
-          }
-
-          const turnExpanded = Boolean(meta?.completed && meta.hasWork && expandedTurns[item.turnId]);
+          const turnFoldable = Boolean(meta?.completed && meta.hasWork);
+          const turnOpen = !turnFoldable || Boolean(expandedTurns[item.turnId]);
           const streak = liveStreakByItemKey.get(item.key);
-          const streakExpanded = streak ? Boolean(expandedStreaks[streak.id]) : false;
-          if (streak && !streakExpanded) {
-            const nodes: ReactNode[] = [];
-            if (turnExpanded && meta && meta.firstWorkKey === item.key) {
-              nodes.push(
-                <CompletedWorkChip
-                  key={`completed-work-${item.turnId}`}
-                  variant="turn"
-                  durationMs={
-                    Number.isFinite(meta.endMs) && Number.isFinite(meta.startMs)
-                      ? Math.max(0, meta.endMs - meta.startMs)
-                      : 0
-                  }
-                  expanded
-                  onToggle={() => toggleTurn(item.turnId)}
-                  showAvatar={meta.showAvatar}
-                  teamLayout={isTeamMode}
-                />
-              );
-            }
-            if (streak.firstKey === item.key) {
-              nodes.push(
-                <CompletedWorkChip
-                  key={streak.id}
-                  variant="streak"
-                  thinkingCount={streak.thinkingCount}
-                  toolCount={streak.toolCount}
-                  expanded={false}
-                  onToggle={() => toggleStreak(streak.id)}
-                  showAvatar={turnExpanded ? false : streak.showAvatar}
-                  teamLayout={isTeamMode}
-                />
-              );
-            }
-            if (item.type === 'toolGroup') {
-              const deliverables = filterDeliverableExecutions(item.executions);
-              if (deliverables.length > 0) {
-                nodes.push(
-                  <ToolGroupDisplay
-                    key={`${item.key}-deliverable`}
-                    executions={deliverables}
-                    notices={[]}
-                    showAvatar={false}
-                    teamLayout={isTeamMode}
-                    collapseSkillTreeWhenContentStarts={false}
-                    viewedSkillIds={[]}
-                  />
-                );
-              }
-            }
-            if (nodes.length === 0) {
-              return null;
-            }
-            return nodes.length === 1 ? nodes[0] : <Fragment key={`streak-collapsed-${item.key}`}>{nodes}</Fragment>;
+          const streakOpen = !streak || Boolean(expandedStreaks[streak.id]);
+          const contentOpen = turnOpen && streakOpen;
+          const isFoldAnchor = turnFoldAnchorKeys.get(item.turnId) === item.key;
+          const isTurnAnchor =
+            Boolean(meta) &&
+            (isFoldAnchor ||
+              (!turnFoldAnchorKeys.has(item.turnId) &&
+                (meta!.firstWorkKey === item.key ||
+                  (!meta!.firstWorkKey && !chipAnchoredTurns.current.has(item.turnId)))));
+          if (isTurnAnchor && meta) {
+            chipAnchoredTurns.current.add(item.turnId);
           }
 
           const nodes: ReactNode[] = [];
-          if (turnExpanded && meta && meta.firstWorkKey === item.key) {
+
+          if (turnFoldable && isTurnAnchor && meta) {
             nodes.push(
               <CompletedWorkChip
                 key={`completed-work-${item.turnId}`}
                 variant="turn"
-                durationMs={
-                  Number.isFinite(meta.endMs) && Number.isFinite(meta.startMs)
-                    ? Math.max(0, meta.endMs - meta.startMs)
-                    : 0
-                }
-                expanded
+                outcomeTone={meta.outcomeTone}
+                expanded={turnOpen}
                 onToggle={() => toggleTurn(item.turnId)}
-                showAvatar={meta.showAvatar}
+                // 折叠条就是该轮视觉顶部：头像必须挂在这里，不能跟 meta/内容区抢来抢去。
+                showAvatar
                 teamLayout={isTeamMode}
               />
             );
           }
-          if (streak && streakExpanded && streak.firstKey === item.key) {
+
+          // 轮次展开后才露出 streak chip；内容仍可按 streak 再折一层
+          // 整轮只有最顶部一颗头像：turn 折叠条 > 该轮第一条 streak > 首条内容
+          const isTopStreakInTurn = Boolean(streak && streak.ordinal === 0);
+          if (turnOpen && streak && streak.firstKey === item.key) {
             nodes.push(
               <CompletedWorkChip
                 key={streak.id}
                 variant="streak"
                 thinkingCount={streak.thinkingCount}
                 toolCount={streak.toolCount}
-                expanded
+                outcomeTone={streak.outcomeTone}
+                expanded={streakOpen}
                 onToggle={() => toggleStreak(streak.id)}
-                showAvatar={turnExpanded ? false : streak.showAvatar}
+                // 仅当这条 streak 本身吃到了本轮顶部头像时才画；后续 streak 一律不画
+                showAvatar={!turnFoldable && isTopStreakInTurn && streak.showAvatar}
                 teamLayout={isTeamMode}
               />
             );
           }
 
-          const hideAvatar = Boolean(turnExpanded || (streak && streakExpanded));
+          // 折叠时交付物仍可见（不参与收起动画）
+          if (!contentOpen && item.type === 'toolGroup') {
+            const deliverables = filterDeliverableExecutions(item.executions);
+            if (deliverables.length > 0) {
+              nodes.push(
+                <ToolGroupDisplay
+                  key={`${item.key}-deliverable`}
+                  executions={deliverables}
+                  notices={[]}
+                  showAvatar={false}
+                  teamLayout={isTeamMode}
+                  collapseSkillTreeWhenContentStarts={false}
+                  viewedSkillIds={[]}
+                />
+              );
+            }
+          }
 
-          if (item.type === 'reasoning') {
-            nodes.push(
+          // 头像已挂在 turn/顶部 streak 上时，展开内容不再重复画。
+          const turnChipOwnsAvatar = turnFoldable;
+          const streakChipOwnsAvatar = Boolean(
+            !turnFoldable && isTopStreakInTurn && streak?.showAvatar
+          );
+          const hideAvatar = Boolean(
+            (turnChipOwnsAvatar && turnOpen) || (streakChipOwnsAvatar && streakOpen)
+          );
+
+          const body =
+            item.type === 'reasoning' ? (
               <ReasoningSegmentBlock
-                key={item.key}
                 segment={item.segment}
                 showAvatar={hideAvatar ? false : item.showAvatar}
                 teamLayout={isTeamMode}
               />
-            );
-          } else {
-            nodes.push(
+            ) : (
               <ToolGroupDisplay
-                key={item.key}
                 executions={item.executions}
                 notices={item.notices}
                 showAvatar={hideAvatar ? false : item.showAvatar}
@@ -629,21 +613,39 @@ export function ChatTimelineList({
                 viewedSkillIds={item.viewedSkillIds}
               />
             );
+
+          // 可折叠时内容常驻 DOM，用与思考相同的 grid 高度过渡
+          if (turnFoldable || streak) {
+            nodes.push(
+              <div
+                key={`${item.key}-collapse`}
+                className={clsx('timeline-collapse', contentOpen && 'is-open')}
+              >
+                <div className="timeline-collapse-inner">{body}</div>
+              </div>
+            );
+          } else {
+            nodes.push(<Fragment key={item.key}>{body}</Fragment>);
           }
 
-          return nodes.length === 1 ? nodes[0] : <Fragment key={`work-${item.key}`}>{nodes}</Fragment>;
+          return nodes.length === 1 ? (
+            nodes[0]
+          ) : (
+            <Fragment key={`work-${item.key}`}>{nodes}</Fragment>
+          );
         }
 
         if (item.type === 'turnSummary') {
           const meta = turnWorkMeta.get(item.turnId);
-          if (meta?.completed && meta.hasWork) {
-            return null;
-          }
+          // 有折叠工作的回合也始终在底部展示耗时，与无工具回合位置一致。
+          const range = meta
+            ? turnElapsedRangeMs(meta)
+            : { startMs: item.startMs, endMs: item.hasWork ? item.workEndMs : item.endMs };
           return (
             <TurnElapsed
               key={item.key}
-              startMs={item.startMs}
-              endMs={item.endMs}
+              startMs={range.startMs}
+              endMs={range.endMs}
               isLastTurn={item.isLastTurn}
               teamLayout={isTeamMode}
             />

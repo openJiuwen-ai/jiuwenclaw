@@ -510,7 +510,7 @@ Swarm Skills 采用标准化的结构定义（5 文件规范），具备跨框�
 
 **阶段二：专家评估（并行）**
 
-![专家评估](../assets/images/jiuwenswarm专家评估.png)
+
 
 ```
 [internist] 评估内科方面：
@@ -540,7 +540,7 @@ Swarm Skills 采用标准化的结构定义（5 文件规范），具备跨框�
 
 **阶段四：输出结果**
 
-![医疗会诊报告概览](../assets/images/jiuwenswarm医疗就诊案例.png)
+
 
 ```markdown
 # 会诊报告 #2024-001
@@ -577,7 +577,7 @@ Swarm Skills 采用标准化的结构定义（5 文件规范），具备跨框�
 
 以下截图展示了医疗会诊 Swarm Skill 在 JiuwenSwarm 中的实际执行结果，包括已完成的任务列表和生成的会诊报告文件：
 
-![医疗会诊执行结果](../assets/images/jiuwenswarm医疗报告生成.png)
+
 
 #### Swarm Skills 的优势体现
 

@@ -12,6 +12,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -394,8 +395,8 @@ class _WindowApi:
     def install_update(self, installer_path: str) -> bool:
         return self._runtime.install_update(installer_path)
 
-    def download_file(self, url: str, filename: str) -> bool:
-        """通过 webview 下载文件，解决 exe 中无法使用 <a> 标签下载的问题。"""
+    def download_file(self, url: str, filename: str) -> DesktopSaveResult:
+        """通过 webview 下载文件，解决桌面端无法使用 <a> 标签下载的问题。"""
         # 如果是相对路径，拼接完整的 URL（使用前端 web server 端口）
         if url.startswith("/"):
             full_url = f"http://{self._runtime.frontend_host}:{self._runtime.frontend_port}{url}"
@@ -497,41 +498,48 @@ class DesktopRuntime:
         threading.Thread(target=_delayed_destroy, daemon=True).start()
         return True
 
-    def download_file(self, url: str, filename: str) -> bool:
-        """下载文件到用户下载目录（异步执行，避免阻塞 UI）。"""
-        def _download() -> None:
-            try:
-                import urllib.request
+    def download_file(self, url: str, filename: str) -> DesktopSaveResult:
+        """选择保存位置并在实际写入完成后返回结果。"""
+        try:
+            target_path = self._select_save_path(filename, ())
+        except (OSError, RuntimeError, ValueError) as exc:
+            logger.error("[desktop] failed to select download path: %s", exc)
+            return _desktop_save_result(False)
 
-                # 获取下载目录
-                download_dir = Path.home() / "Downloads"
-                if not download_dir.exists():
-                    download_dir.mkdir(parents=True, exist_ok=True)
+        if target_path is None:
+            logger.info("[desktop] file download cancelled by user")
+            return _desktop_save_result(False, cancelled=True)
 
-                safe_name = Path(filename).name
-                if not safe_name:
-                    raise ValueError("empty_filename")
+        temp_path: Path | None = None
+        try:
+            import urllib.request
 
-                # 处理文件名冲突
-                target_path = download_dir / safe_name
-                if target_path.exists():
-                    base, ext = Path(safe_name).stem, Path(safe_name).suffix
-                    counter = 1
-                    while target_path.exists():
-                        target_path = download_dir / f"{base} ({counter}){ext}"
-                        counter += 1
+            temp_fd, temp_name = tempfile.mkstemp(
+                dir=target_path.parent,
+                prefix=f".{target_path.name}.",
+                suffix=".part",
+            )
+            os.close(temp_fd)
+            temp_path = Path(temp_name)
+            urllib.request.urlretrieve(url, temp_path)
+            os.replace(temp_path, target_path)
+            temp_path = None
+            logger.info("[desktop] file downloaded to: %s", target_path)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[desktop] download failed: %s", exc)
+            if temp_path is not None:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError as cleanup_exc:
+                    logger.warning(
+                        "[desktop] failed to remove partial download %s: %s",
+                        temp_path,
+                        cleanup_exc,
+                    )
+            return _desktop_save_result(False)
 
-                # 下载文件
-                urllib.request.urlretrieve(url, target_path)
-                logger.info("[desktop] file downloaded to: %s", target_path)
-
-                # 下载完成后提醒用户并打开文件
-                self._show_download_complete(str(target_path))
-            except Exception as exc:  # noqa: BLE001
-                logger.error("[desktop] download failed: %s", exc)
-
-        threading.Thread(target=_download, daemon=True).start()
-        return True
+        self._show_download_complete(str(target_path))
+        return _desktop_save_result(True)
 
     @staticmethod
     def _sanitize_filename(filename: str) -> str:

@@ -14,7 +14,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from jiuwenswarm.server.runtime.session.project_git import GitError, GitOperationError
 from jiuwenswarm.server.utils.diff_service import get_diff_service
@@ -291,7 +291,7 @@ def _convert_stats(raw_stats: dict[str, Any] | None) -> DiffStats:
 
 
 def get_session_extra_history_roots(session_id: str | None) -> list[str]:
-    """Return team/member/worktree roots recorded for file history monitoring."""
+    """Return team/member/worktree/sub-agent roots for file history monitoring."""
     sid = str(session_id or "").strip()
     if not sid:
         return []
@@ -343,8 +343,6 @@ def get_session_extra_history_roots(session_id: str | None) -> list[str]:
             try:
                 path = Path(raw.strip()).expanduser()
                 parts = path.parts
-                # 使用最后一次出现的位置,避免路径中 team_name 多次出现时
-                # 定位到错误的层级(深层路径更可能是实际 team 目录)。
                 idx = -1
                 for i in range(len(parts) - 1, -1, -1):
                     if parts[i] == team_name:
@@ -377,7 +375,42 @@ def get_session_extra_history_roots(session_id: str | None) -> list[str]:
                 add_root(str(independent_member_workspace(member_name)))
         except Exception:  # noqa: BLE001
             pass
+
+    _discover_sub_agent_workspaces(sid, add_root)
+
     return roots
+
+
+def _discover_sub_agent_workspaces(session_id: str, add_root: Callable[[Any], None]) -> None:
+    """Scan workspace/sub_agents for sub-agent dirs belonging to *session_id*.
+
+    In single-agent mode the parent session has no ``team_name`` and no
+    ``team_file_monitor_roots`` metadata, so the normal team-root inference
+    in ``get_session_extra_history_roots`` produces nothing.  Sub-agent
+    workspaces live under ``<agent_workspace>/sub_agents/<sub_session_id>/``
+    with ``sub_session_id = <session_id>_sub_<type>_<suffix>``.  We enumerate
+    matching directories here and add them as extra history roots so that
+    ``_read_agent_history`` can pick up the sub-agent's ``.agent_history``
+    entries.
+    """
+    from jiuwenswarm.common.utils import get_agent_workspace_dir
+
+    sub_agents_dir = get_agent_workspace_dir() / "sub_agents"
+    if not sub_agents_dir.is_dir():
+        return
+    prefix = f"{session_id}_sub_"
+    try:
+        children = list(sub_agents_dir.iterdir())
+    except OSError:
+        return
+    for child in children:
+        try:
+            if not child.is_dir():
+                continue
+        except OSError:
+            continue
+        if child.name.startswith(prefix):
+            add_root(str(child))
 
 
 def _convert_hunks(raw_hunks: list[dict[str, Any]] | None) -> list[DiffHunk]:
@@ -658,6 +691,7 @@ class DiffStatusService:
         session_id: str | None = None,
         include_files: bool = False,
         include_hunks: bool = False,
+        hunk_paths: list[str] | set[str] | tuple[str, ...] | None = None,
     ) -> ProjectGitDiffStatus:
         """聚合当前工作区 diff 和上一轮对话 diff(设计文档 §4.1.16)。
 
@@ -717,7 +751,12 @@ class DiffStatusService:
         if repo_is_git and not repo_is_transient:
             diff_service = get_diff_service()
             try:
-                raw_diff = diff_service.get_git_diff(project_dir)
+                raw_diff = diff_service.get_git_diff(
+                    project_dir,
+                    include_files=effective_include_files,
+                    include_hunks=include_hunks,
+                    hunk_paths=hunk_paths,
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "[DiffStatus] get_git_diff failed (project=%s dir=%s): %s",

@@ -4,7 +4,7 @@
  * 应用主布局，整合所有组件
  */
 
-import { useState, useCallback, useEffect, useRef, Component, ReactNode, useMemo } from 'react';
+import { useState, useCallback, useEffect, useRef, Component, ReactNode, useMemo, type PointerEvent as ReactPointerEvent } from 'react';
 import { ChatPanel } from './components/ChatPanel';
 import { SessionSidebar } from './components/SessionSidebar';
 import { SkillPanel } from './components/SkillPanel';
@@ -34,6 +34,7 @@ import {
   type HistoryHarnessReplayItem,
   type FetchHistoryPageResult,
 } from './features/historyRestore';
+import { prefetchHistoryPages } from './features/historyPagination';
 import {
   normalizeToolCallPayload,
   normalizeToolResultPayload,
@@ -87,6 +88,16 @@ import { isSetupGuideEnabled } from './features/modelSetupGuide/modelSetupGuideS
 import './App.css';
 
 const TEAM_SESSION_MODES = new Set(['team', 'team.plan', 'code.team']);
+const CHAT_PANEL_DEFAULT_WIDTH_PCT = 33.33;
+const CHAT_PANEL_MIN_WIDTH_PCT = 20;
+const CHAT_PANEL_MAX_WIDTH_PCT = 70;
+
+type ChatPanelResizeDrag = {
+  pointerId: number;
+  startX: number;
+  startPct: number;
+  containerWidth: number;
+};
 const PREVIEW_MODEL_SETUP_GUIDE = import.meta.env.DEV
   && new URLSearchParams(window.location.search).get('modelSetupGuide') === '1';
 
@@ -232,12 +243,6 @@ function ErrorFallback({ error }: { error: Error | null }) {
   );
 }
 
-function generateSessionId(): string {
-  const ts = Date.now().toString(16);
-  const rand = generateUuidV4().replaceAll('-', '').slice(0, 12);
-  return `sess_${ts}_${rand}`;
-}
-
 function downloadDataUrl(dataUrl: string, filename: string): void {
   const link = document.createElement('a');
   link.href = dataUrl;
@@ -345,9 +350,13 @@ function AppContent() {
   const hasChangesRef = useRef(false);
   const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
   const [historyPrepending, setHistoryPrepending] = useState(false);
+  const [historyRetrySessions, setHistoryRetrySessions] = useState<ReadonlySet<string>>(
+    () => new Set()
+  );
   /** 仅用于强制重跑「首屏 history」effect：从会话列表恢复时若 sessionId 未变，也要重新拉 history 并恢复 historyPagerMeta */
   const [historyBootstrapKey, setHistoryBootstrapKey] = useState(0);
   const sessionIdRef = useRef(sessionId);
+  const sessionRestoreQueueRef = useRef<Promise<void>>(Promise.resolve());
   const historyLoadingSessionsRef = useRef(new Set<string>());
   const historyRestoreHandlesRef = useRef(new Map<string, HistoryRestoreHandle>());
   const historyPageHandlesRef = useRef(new Map<string, HistoryRestoreHandle>());
@@ -369,6 +378,20 @@ function AppContent() {
   const historyRestoreFromPanelHintRef = useRef(false);
   const { loadProjects, setSelectedProject } = useWorkspaceStore();
 
+  const setHistoryRetryAvailable = useCallback((sid: string, available: boolean) => {
+    setHistoryRetrySessions((current) => {
+      if (current.has(sid) === available) {
+        return current;
+      }
+      const next = new Set(current);
+      if (available) {
+        next.add(sid);
+      } else {
+        next.delete(sid);
+      }
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     sessionIdRef.current = sessionId;
@@ -381,10 +404,12 @@ function AppContent() {
     teamAreaActiveTab,
     teamAreaActiveDetailTab,
     teamAreaSelectedMemberId,
+    teamAreaSelectedArtifactId,
     setTeamAreaExpanded,
     setTeamAreaActiveTab,
     setTeamAreaActiveDetailTab,
     setTeamAreaSelectedMemberId,
+    setTeamAreaSelectedArtifactId,
   } = useTeamPanelState();
 
   useEffect(() => {
@@ -451,7 +476,8 @@ function AppContent() {
   const teamTaskEvents = useSessionStore((s) => s.runtimes[sessionId]?.teamTaskEvents ?? []);
   const teamTasks = useSessionStore((s) => s.runtimes[sessionId]?.teamTasks ?? []);
   const teamMembers = useSessionStore((s) => s.runtimes[sessionId]?.teamMembers ?? []);
-  const [chatPanelWidthPct, setChatPanelWidthPct] = useState(33.33);
+  const [chatPanelWidthPct, setChatPanelWidthPct] = useState(CHAT_PANEL_DEFAULT_WIDTH_PCT);
+  const chatPanelResizeDragRef = useRef<ChatPanelResizeDrag | null>(null);
   const [codeReviewTarget, setCodeReviewTarget] = useState<CodeReviewTarget | null>(null);
 
   useEffect(() => {
@@ -471,34 +497,56 @@ function AppContent() {
     setTeamAreaExpanded(true);
   }, [setTeamAreaActiveTab, setTeamAreaExpanded]);
 
-  const handleDividerMouseDown = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startPct = chatPanelWidthPct;
-    const container = (e.currentTarget as HTMLElement).parentElement;
+  const handleDividerPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || chatPanelResizeDragRef.current) return;
+    const container = event.currentTarget.parentElement;
     if (!container) return;
     const containerWidth = container.getBoundingClientRect().width;
+    if (containerWidth <= 0) return;
 
-    const onMouseMove = (ev: MouseEvent) => {
-      const dx = ev.clientX - startX;
-      const newPct = Math.min(70, Math.max(20, startPct + (dx / containerWidth) * 100));
-      setChatPanelWidthPct(newPct);
+    event.preventDefault();
+    document.body.classList.add('workspace-resize-active');
+    event.currentTarget.setPointerCapture(event.pointerId);
+    chatPanelResizeDragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startPct: chatPanelWidthPct,
+      containerWidth,
     };
-
-    const onMouseUp = () => {
-      document.removeEventListener('mousemove', onMouseMove);
-      document.removeEventListener('mouseup', onMouseUp);
-    };
-
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', onMouseUp);
   }, [chatPanelWidthPct]);
+
+  const handleDividerPointerMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = chatPanelResizeDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const dx = event.clientX - drag.startX;
+    const nextWidthPct = drag.startPct + (dx / drag.containerWidth) * 100;
+    const clampedWidthPct = Math.min(
+      CHAT_PANEL_MAX_WIDTH_PCT,
+      Math.max(CHAT_PANEL_MIN_WIDTH_PCT, nextWidthPct),
+    );
+    setChatPanelWidthPct(clampedWidthPct);
+  }, []);
+
+  const clearChatPanelResize = useCallback((pointerId?: number): boolean => {
+    if (pointerId !== undefined && chatPanelResizeDragRef.current?.pointerId !== pointerId) return false;
+    chatPanelResizeDragRef.current = null;
+    document.body.classList.remove('workspace-resize-active');
+    return true;
+  }, []);
+
+  const finishDividerResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!clearChatPanelResize(event.pointerId)) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  }, [clearChatPanelResize]);
 
   const clearMessages = useChatStore((s) => s.clearMessages);
   const clearSubtasks = useChatStore((s) => s.clearSubtasks);
   const addMessage = useChatStore((s) => s.addMessage);
   const addToolCall = useChatStore((s) => s.addToolCall);
   const addToolResult = useChatStore((s) => s.addToolResult);
+  const settleHistoricalToolExecutions = useChatStore((s) => s.settleHistoricalToolExecutions);
   const prependMessages = useChatStore((s) => s.prependMessages);
   const isProcessing = useChatStore((s) => s.runtimes[sessionId]?.isProcessing ?? false);
   const isPaused = useChatStore((s) => s.runtimes[sessionId]?.isPaused ?? false);
@@ -534,6 +582,7 @@ function AppContent() {
       const prevToken = historyBackgroundPrefetchTokensRef.current.get(targetSid) ?? 0;
       historyBackgroundPrefetchTokensRef.current.set(targetSid, prevToken + 1);
       historyLoadingSessionsRef.current.delete(targetSid);
+      setHistoryRetryAvailable(targetSid, false);
       if (targetSid === sessionIdRef.current) {
         setHistoryPrepending(false);
         setHistoryLoadingMore(false);
@@ -563,7 +612,7 @@ function AppContent() {
     ])) {
       cancelSession(targetSid);
     }
-  }, [setLoadingHistory]);
+  }, [setHistoryRetryAvailable, setLoadingHistory]);
 
   useEffect(() => () => disposeInFlightHistoryHandles(), [disposeInFlightHistoryHandles]);
   const todos = useTodoStore((s) => s.runtimes[sessionId]?.todos ?? []);
@@ -594,6 +643,7 @@ function AppContent() {
     isConnected,
     request,
     persistMedia,
+    persistDocuments,
     sendMessage,
     sendStructuredChatContent,
     pause,
@@ -621,7 +671,10 @@ function AppContent() {
   });
 
   const applyHistoryPageResult = useCallback((sid: string, result: FetchHistoryPageResult) => {
-    prependMessages(sid, result.messages);
+    // 只 stamp 徽章：merge 完成卡只适合整页 replace（首次 history 恢复）。
+    // 这里若再 merge，localStorage 里的完成卡不在本页 messages 里就会被再次注入，
+    // prepend 又不按 id 去重，导致完成卡重复。
+    prependMessages(sid, stampGoalObjectiveMessages(sid, result.messages));
     for (const item of result.toolReplay) {
       if (item.kind === 'tool_call') {
         const n = normalizeToolCallPayload(item.payload);
@@ -649,11 +702,14 @@ function AppContent() {
             toolCallId: n.toolCallId,
             summary: n.summary,
             skillTree: n.skillTree,
+            ...(n.timedOut ? { timedOut: true } : {}),
+            ...(n.beamSearch ? { beamSearch: n.beamSearch } : {}),
           },
           { updatedAt: item.at }
         );
       }
     }
+    settleHistoricalToolExecutions(sid);
 
     const harnessStore = useHarnessStore.getState();
     const harnessRuntime = harnessStore.getRuntime(sid);
@@ -703,7 +759,7 @@ function AppContent() {
       }));
       store.restoreReasoningSegments(sid, [...result.reasoningReplay, ...currentItems]);
     }
-  }, [addToolCall, addToolResult, prependMessages]);
+  }, [addToolCall, addToolResult, prependMessages, settleHistoricalToolExecutions]);
 
   const fetchHistoryPageResult = useCallback(async (
     sid: string,
@@ -773,43 +829,48 @@ function AppContent() {
   }, [applyHistoryPageResult, setHistoryPagerMeta]);
 
   const startBackgroundHistoryPrefetch = useCallback((sid: string, initialLoadedPages: number, initialTotalPages: number) => {
-    if (initialLoadedPages >= initialTotalPages) return;
+    if (initialLoadedPages >= initialTotalPages || historyLoadingSessionsRef.current.has(sid)) {
+      return;
+    }
     const token = (historyBackgroundPrefetchTokensRef.current.get(sid) ?? 0) + 1;
     historyBackgroundPrefetchTokensRef.current.set(sid, token);
+    historyLoadingSessionsRef.current.add(sid);
+    setHistoryRetryAvailable(sid, false);
+    if (sessionIdRef.current === sid) {
+      setHistoryPrepending(true);
+    }
 
     void (async () => {
-      let loadedPages = initialLoadedPages;
-      let totalPages = initialTotalPages;
-      while (
-        token === historyBackgroundPrefetchTokensRef.current.get(sid) &&
-        loadedPages < totalPages
-      ) {
-        if (historyLoadingSessionsRef.current.has(sid)) {
-          return;
+      try {
+        const outcome = await prefetchHistoryPages({
+          initialLoadedPages,
+          initialTotalPages,
+          isCurrent: () => token === historyBackgroundPrefetchTokensRef.current.get(sid),
+          fetchPage: (pageIdx, totalPages) =>
+            fetchHistoryPageResult(sid, pageIdx, totalPages),
+          applyPage: (page) => {
+            applyLoadedHistoryPage(sid, page);
+          },
+          waitForNextPaint,
+        });
+        if (
+          outcome === 'failed' &&
+          token === historyBackgroundPrefetchTokensRef.current.get(sid)
+        ) {
+          setHistoryRetryAvailable(sid, true);
         }
-        const nextPage = loadedPages + 1;
-        historyLoadingSessionsRef.current.add(sid);
-        if (sessionIdRef.current === sid) {
-          setHistoryPrepending(true);
-        }
-        const page = await fetchHistoryPageResult(sid, nextPage, totalPages);
+      } finally {
         historyLoadingSessionsRef.current.delete(sid);
         if (sessionIdRef.current === sid) {
           setHistoryPrepending(false);
         }
-        if (
-          page == null ||
-          token !== historyBackgroundPrefetchTokensRef.current.get(sid)
-        ) {
-          return;
-        }
-        applyLoadedHistoryPage(sid, page);
-        loadedPages = nextPage;
-        totalPages = page.totalPages;
-        await waitForNextPaint();
       }
     })();
-  }, [applyLoadedHistoryPage, fetchHistoryPageResult]);
+  }, [
+    applyLoadedHistoryPage,
+    fetchHistoryPageResult,
+    setHistoryRetryAvailable,
+  ]);
 
   const upsertSessionMetadata = useCallback((session: Session, options: { setCurrent?: boolean } = {}) => {
     const sessionStore = useSessionStore.getState();
@@ -1393,11 +1454,14 @@ function AppContent() {
                 toolCallId: n.toolCallId,
                 summary: n.summary,
                 skillTree: n.skillTree,
+                ...(n.timedOut ? { timedOut: true } : {}),
+                ...(n.beamSearch ? { beamSearch: n.beamSearch } : {}),
               },
               { updatedAt: item.at }
             );
           }
         }
+        settleHistoricalToolExecutions(sessionId);
       },
       onHarnessReplay: (items: HistoryHarnessReplayItem[]) => {
         const harnessStore = useHarnessStore.getState();
@@ -1488,6 +1552,7 @@ function AppContent() {
     addMessage,
     addToolCall,
     addToolResult,
+    settleHistoricalToolExecutions,
     clearMessages,
     clearSubtasks,
     disposeInFlightHistoryHandles,
@@ -1590,7 +1655,6 @@ function AppContent() {
       if (creatingSessionRef.current) return;
       creatingSessionRef.current = true;
       useChatStore.getState().setProcessing(NEW_CONVERSATION_ID, true);
-      const newSid = generateSessionId();
       const newRuntime = useSessionStore.getState().getRuntime(NEW_CONVERSATION_ID);
       const runtimeSettings = {
         mode: newRuntime?.mode ?? mode,
@@ -1606,8 +1670,9 @@ function AppContent() {
       };
       try {
         const createParams: Record<string, unknown> = {
-          session_id: newSid,
+          create_token: generateUuidV4(),
           mode: runtimeSettings.mode,
+          is_swarm: runtimeSettings.mode === 'team',
           title: createConversationTitle(content).slice(0, 100),
           work_mode: workContext.work_mode,
         };
@@ -1617,7 +1682,7 @@ function AppContent() {
           createParams.previous_mode = previousSession.mode;
         }
         if (runtimeSettings.selectedModelName) {
-          createParams.model = runtimeSettings.selectedModelName;
+          createParams.model_name = runtimeSettings.selectedModelName;
         }
         if (workContext.project_id) {
           createParams.project_id = workContext.project_id;
@@ -1625,7 +1690,8 @@ function AppContent() {
         if (workContext.project_dir) {
           createParams.project_dir = workContext.project_dir;
         }
-        const created = await createConversationSession(request, createParams, newSid);
+        const created = await createConversationSession(request, createParams);
+        const newSid = created.session_id;
         const createdSession = registerCreatedConversation(
           created.session_id,
           runtimeSettings,
@@ -1700,6 +1766,14 @@ function AppContent() {
     }
     return persistMedia(content, currentSessionId, mediaItems);
   }, [persistMedia]);
+
+  const handlePersistDocuments = useCallback((content: string, mediaItems: MediaItem[]) => {
+    const currentSessionId = sessionIdRef.current;
+    if (!currentSessionId || currentSessionId === NEW_CONVERSATION_ID) {
+      return Promise.reject(new Error('会话未就绪，请稍后重试'));
+    }
+    return persistDocuments(content, currentSessionId, mediaItems);
+  }, [persistDocuments]);
 
   useEffect(() => {
     return setA2UIActionHandler((message) => {
@@ -1776,23 +1850,40 @@ function AppContent() {
     const nextPage = historyPagerMeta.loadedPages + 1;
     const fallbackTotal = historyPagerMeta.totalPages;
     const prevToken = historyBackgroundPrefetchTokensRef.current.get(sid) ?? 0;
-    historyBackgroundPrefetchTokensRef.current.set(sid, prevToken + 1);
+    const token = prevToken + 1;
+    historyBackgroundPrefetchTokensRef.current.set(sid, token);
     historyLoadingSessionsRef.current.add(sid);
+    setHistoryRetryAvailable(sid, false);
     setHistoryLoadingMore(true);
     setLoadingHistory(sid, true);
-    const page = await fetchHistoryPageResult(sid, nextPage, fallbackTotal);
-    if (page) {
-      applyLoadedHistoryPage(sid, page);
-      startBackgroundHistoryPrefetch(sid, page.pageIdx, page.totalPages);
+    let page: LoadedHistoryPage | null = null;
+    try {
+      page = await fetchHistoryPageResult(sid, nextPage, fallbackTotal);
+      if (
+        page &&
+        token === historyBackgroundPrefetchTokensRef.current.get(sid)
+      ) {
+        applyLoadedHistoryPage(sid, page);
+      }
+    } finally {
+      historyLoadingSessionsRef.current.delete(sid);
+      setHistoryLoadingMore(false);
+      setLoadingHistory(sid, false);
     }
-    historyLoadingSessionsRef.current.delete(sid);
-    setHistoryLoadingMore(false);
-    setLoadingHistory(sid, false);
+    if (token !== historyBackgroundPrefetchTokensRef.current.get(sid)) {
+      return;
+    }
+    if (!page) {
+      setHistoryRetryAvailable(sid, true);
+      return;
+    }
+    startBackgroundHistoryPrefetch(sid, page.pageIdx, page.totalPages);
   }, [
     applyLoadedHistoryPage,
     fetchHistoryPageResult,
     historyPagerMeta,
     sessionId,
+    setHistoryRetryAvailable,
     setLoadingHistory,
     startBackgroundHistoryPrefetch,
   ]);
@@ -1804,6 +1895,7 @@ function AppContent() {
       totalPages: historyPagerMeta.totalPages,
       loadingMore: historyLoadingMore,
       prepending: historyPrepending,
+      retryAvailable: historyRetrySessions.has(sessionId),
       onLoadMore: handleLoadMoreHistory,
     };
   }, [
@@ -1811,18 +1903,23 @@ function AppContent() {
     historyLoadingMore,
     historyPagerMeta,
     historyPrepending,
+    historyRetrySessions,
+    sessionId,
   ]);
 
-  const handleRestoreSession = useCallback(
+  const performSessionRestore = useCallback(
     async (targetSessionId: string, targetMode?: string, targetSession?: Session, options?: { skipHistoryLoad?: boolean }) => {
-      const resolvedMode = targetMode ?? targetSession?.mode ?? mode;
+      const previousSessionId = sessionIdRef.current;
+      const previousMode =
+        useSessionStore.getState().getRuntime(previousSessionId)?.mode ?? mode;
+      const resolvedMode = targetMode ?? targetSession?.mode ?? previousMode;
       disposeInFlightHistoryHandles(targetSessionId);
-      if (sessionId && sessionId !== targetSessionId) {
+      if (previousSessionId && previousSessionId !== targetSessionId) {
         try {
           await request('session.switch', {
             session_id: targetSessionId,
-            previous_session_id: sessionId,
-            previous_mode: mode,
+            previous_session_id: previousSessionId,
+            previous_mode: previousMode,
             mode: resolvedMode,
           });
         } catch (error) {
@@ -1899,10 +1996,33 @@ function AppContent() {
       setProcessing,
       setSessionId,
       setThinking,
-      sessionId,
       t,
       upsertSessionMetadata,
     ]
+  );
+
+  const handleRestoreSession = useCallback(
+    (
+      targetSessionId: string,
+      targetMode?: string,
+      targetSession?: Session,
+      options?: { skipHistoryLoad?: boolean },
+    ): Promise<void> => {
+      // WebSocket requests are processed concurrently by AgentServer. Queue
+      // navigation here so rapid A -> B -> C clicks cannot race and let an
+      // older response overwrite the latest selected session.
+      const queuedRestore = sessionRestoreQueueRef.current
+        .catch(() => undefined)
+        .then(() => performSessionRestore(
+          targetSessionId,
+          targetMode,
+          targetSession,
+          options,
+        ));
+      sessionRestoreQueueRef.current = queuedRestore.catch(() => undefined);
+      return queuedRestore;
+    },
+    [performSessionRestore],
   );
 
   const requestSessionNavigation = useCallback((target: Session | 'new', options?: NewConversationOptions) => {
@@ -2095,8 +2215,16 @@ function AppContent() {
     && missingSessionId === routeSessionId
     && isConversationMissing(routeSessionId, true, sessions);
   const showConversationNotFound = route.kind === 'not-found' || routeSessionMissing;
+  const showWorkspaceDivider = isTeamAreaExpanded && !showConversationNotFound;
   const isNewSessionPromotion = Boolean(sessionId && promotedFromNewSessionIdsRef.current.has(sessionId));
   const composerFocusKey = showConversationNotFound ? null : `${sessionId}:${composerFocusNonce}`;
+
+  useEffect(() => {
+    if (!showWorkspaceDivider) clearChatPanelResize();
+    return () => {
+      clearChatPanelResize();
+    };
+  }, [clearChatPanelResize, showWorkspaceDivider]);
 
   return (
     <div
@@ -2171,6 +2299,7 @@ function AppContent() {
                     <ChatPanel
                       onSendMessage={handleSendMessage}
                       onPersistMedia={handlePersistMedia}
+                      onPersistDocuments={handlePersistDocuments}
                       onInterrupt={handleInterrupt}
                       onCancel={handleCancel}
                       onSwitchMode={handleSwitchMode}
@@ -2201,10 +2330,18 @@ function AppContent() {
                 </div>
 
                 {/* 可拖拽分割线 */}
-                {isTeamAreaExpanded && !showConversationNotFound && (
+                {showWorkspaceDivider && (
                   <div
-                    className="resize-divider"
-                    onMouseDown={handleDividerMouseDown}
+                    className="resize-divider resize-divider--workspace touch-none select-none"
+                    role="separator"
+                    aria-orientation="vertical"
+                    onPointerDown={handleDividerPointerDown}
+                    onPointerMove={handleDividerPointerMove}
+                    onPointerUp={finishDividerResize}
+                    onPointerCancel={finishDividerResize}
+                    onLostPointerCapture={(event) => {
+                      clearChatPanelResize(event.pointerId);
+                    }}
                   />
                 )}
 
@@ -2219,11 +2356,13 @@ function AppContent() {
                     teamAreaActiveDetailTab={teamAreaActiveDetailTab}
                     teamAreaSelectedMemberId={teamAreaSelectedMemberId}
                     codeReviewTarget={codeReviewTarget}
+                    teamAreaSelectedArtifactId={teamAreaSelectedArtifactId}
                     setTeamAreaExpanded={setTeamAreaExpanded}
                     setTeamAreaActiveTab={setTeamAreaActiveTab}
                     setTeamAreaActiveDetailTab={setTeamAreaActiveDetailTab}
                     setTeamAreaSelectedMemberId={setTeamAreaSelectedMemberId}
                     setCodeReviewTarget={setCodeReviewTarget}
+                    setTeamAreaSelectedArtifactId={setTeamAreaSelectedArtifactId}
                   />
                 )}
               </div>

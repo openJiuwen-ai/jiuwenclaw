@@ -672,6 +672,9 @@ def _build_multi_questions(questions_data: list) -> list:
     questions = []
     for q in questions_data:
         raw_options = q.get("options", [])
+        # Non-array options (e.g. "a,b") must not be iterated as characters (#2331).
+        if not isinstance(raw_options, list):
+            raw_options = []
         if raw_options:
             options = [_normalize_question_option(opt) for opt in raw_options if isinstance(opt, dict)]
             options.append({"label": "Other", "description": "Custom input"})

@@ -46,12 +46,17 @@ from openjiuwen.harness.workspace.workspace import Workspace
 
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
     JiuWenSwarmDeepAdapter,
+    _AGENT_CARD_ID,
     _CRON_TOOL_CHANNEL_ID,
+    _RailBuildInfo,
     _agent_def_to_subagent_config,
     _deep_agent_kv_cache_affinity_config,
     parse_int,
 )
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import build_permission_rail
+from jiuwenswarm.agents.harness.common.browser_defaults import (
+    DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
+)
 from jiuwenswarm.agents.harness.code.prompt.code_prompt_builder import (
     build_code_system_prompt,
 )
@@ -63,12 +68,13 @@ from jiuwenswarm.agents.harness.common.rails import (
     ProjectMemoryRail,
     StructuredAskUserRail,
 )
-from jiuwenswarm.agents.harness.common.memory.config import get_memory_mode, is_memory_enabled
+from jiuwenswarm.agents.harness.common.memory.config import is_memory_enabled
 from jiuwenswarm.agents.harness.common.tools import (
     SkillToolkit,
 )
 from jiuwenswarm.agents.harness.common.tools.acp_chat import acp_chat
 from jiuwenswarm.common.config import get_config
+from jiuwenswarm.common.tool_ownership import mark_stateless, register_tool
 from jiuwenswarm.common.coding_memory_paths import (
     resolve_project_coding_memory_dir,
     resolve_project_coding_memory_workspace_path,
@@ -216,17 +222,6 @@ _TOOL_BUILD_NAMES: dict[str, str] = {
 }
 
 
-@dataclass
-class _RailBuildInfo:
-    """Rail 构建信息 — 统一固定和动态 Rails 的构建流程."""
-    attr_name: str
-    build_func: Callable
-    params: dict = None
-
-    def __post_init__(self):
-        self.params = self.params or {}
-
-
 def _resolve_coding_memory_dir(
     *,
     project_dir: str | None,
@@ -362,6 +357,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         "LspRail", "ProjectMemoryRail", "PermissionInterruptRail",
         "ContextProcessorRail",
         "SysOperationRail", "CodingMemoryRail",
+        "MemoryForbiddenRail",
         "AgentModeRail", "StructuredAskUserRail", "ConfirmInterruptRail",
         "FileSystemRail",  # 别名
     })
@@ -453,10 +449,13 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
 
         self._dreaming_mode = "code"
 
-        model = self._create_model(config_base)
-        agent_card = AgentCard(name=self._agent_name, id='jiuwenswarm')
+        if self._skip_own_instance_build():
+            return
 
-        tool_cards = await self._get_tool_cards(agent_card.id)
+        model = self._create_model(config_base)
+        agent_card = AgentCard(name=self._agent_name, id=_AGENT_CARD_ID)
+
+        tool_cards = await self._get_tool_cards(self._tool_owner_id())
         self._tool_cards = tool_cards
 
         # 权限护栏由 openjiuwen PermissionInterruptRail + ToolPermissionHost 接管；
@@ -486,6 +485,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         self._instance = create_deep_agent(
             model=model,
             card=agent_card,
+            tool_owner_id=self._tool_owner_id(),
             system_prompt=build_code_system_prompt(),
             tools=tool_cards if tool_cards else [],
             subagents=configured_subagents,
@@ -495,7 +495,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             workspace=workspace,
             sys_operation=sys_operation,
             language=self._resolve_runtime_language(),
-            enable_read_image_multimodal=False,
+            enable_read_image_multimodal=self._resolve_enable_read_image_multimodal(config),
             kv_cache_affinity_config=_deep_agent_kv_cache_affinity_config(config, model),
             auto_create_workspace=False,
             completion_timeout=config.get("completion_timeout", 3600.0),
@@ -553,6 +553,9 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         # code 模式不传: vision_model_config, audio_model_config,
         # context_engine_config（completion_timeout 已从配置读取传入）
 
+        # Cron tools belong to the agent's standing toolset, not to any one
+        # request; build them here so the first turn does not pay for it either.
+        self._ensure_cron_tools_registered(self._parent_session_id)
         self._registered_mcp_server_ids.clear()
         self._registered_mcp_servers.clear()
         await self._register_mcp_servers_from_config(config_base, tag="code")
@@ -595,6 +598,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             ),
             _RailBuildInfo("_code_filesystem_rail", self._build_filesystem_rail),
             _RailBuildInfo("_coding_memory_rail", self._build_coding_memory_rail),
+            _RailBuildInfo("_memory_forbidden_rail", self._build_memory_forbidden_rail),
             _RailBuildInfo("_code_agent_mode_rail", self._build_agent_mode_rail),
             _RailBuildInfo("_code_ask_user_rail", self._build_structured_ask_user_rail),
             _RailBuildInfo(
@@ -647,57 +651,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                 rail_name,
             )
 
-        # 统一构建并注册
-        rails_list = []
-        for info in rail_infos:
-            logger.info(
-                "[JiuwenSwarmCodeAdapter] Building rail: %s with params: %s",
-                info.attr_name, info.params,
-            )
-            rail_instance = info.build_func(**info.params)
-            if rail_instance is not None:
-                setattr(self, info.attr_name, rail_instance)
-                rails_list.append(rail_instance)
-                logger.info(
-                    "[JiuwenSwarmCodeAdapter] Rail %s built successfully",
-                    info.attr_name,
-                )
-            else:
-                logger.warning(
-                    "[JiuwenSwarmCodeAdapter] Rail %s build returned None",
-                    info.attr_name,
-                )
-        logger.info(
-            "[JiuwenSwarmCodeAdapter] Total rails built: %d, rail names: %s",
-            len(rails_list),
-            [type(r).__name__ for r in rails_list],
-        )
-        # 用户配置的 hooks（UserHookRail）
-        try:
-            hooks_config = load_hooks_config(config_base)
-            if hooks_config.events:
-                user_hook_rail = UserHookRail(hooks_config)
-                rails_list.append(user_hook_rail)
-                logger.info(
-                    "[JiuwenSwarmCodeAdapter] UserHookRail loaded with %d event types",
-                    len(hooks_config.events),
-                )
-        except Exception as e:
-            logger.warning("[JiuwenSwarmCodeAdapter] Failed to load UserHookRail: %s", e)
-        # Observability rail: opens an agent-layer span (agent.<name>.task_iteration.<n>
-        # for task-loop runs, or agent.<name>.invoke for single-round) under the root
-        # run span per iteration/round. It is the only thing that creates the
-        # task_iteration / invoke spans that llm.call + tool.* nest under. It
-        # self-disables (before_* returns early when get_team_span() is None), so
-        # attaching it unconditionally is safe and also adapts to runtime
-        # enable/disable of agent_observability without rebuilding the agent.
-        try:
-            from openjiuwen.agent_teams.observability.rail import ObservabilityRail
-            rails_list.append(ObservabilityRail())
-            logger.info("[JiuwenSwarmCodeAdapter] ObservabilityRail attached")
-        except Exception as e:
-            logger.warning("[JiuwenSwarmCodeAdapter] Failed to attach ObservabilityRail: %s", e)
-        return rails_list
+        return self._instantiate_rails(rail_infos, config_base)
 
     # ─── Code 专属 Rail 构建 ────────────────
 
@@ -1037,7 +991,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                     language=resolved_language,
                     max_iterations=parse_int(
                         browser_agent_cfg.get("max_iterations") if isinstance(browser_agent_cfg, dict) else None,
-                        react_cfg.get("max_iterations", 15),
+                        DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
                     )
                 )
                 browser_spec.factory_kwargs = {"auto_create_workspace": False}
@@ -1051,6 +1005,9 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         return subagents or None, False
 
     # ─── Rail 生命周期(mode切换) ───────────────────
+
+    def _user_interaction_rail_attribute(self) -> str:
+        return "_code_ask_user_rail"
 
     async def _update_rails_for_mode(self, mode: str) -> None:
         """Code 模式下的 rail 生命周期管理.
@@ -1217,6 +1174,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
 
         # code 模式始终走 _update_rails_for_mode 的 code 逻辑
         await self._update_rails_for_mode(runtime_config.mode)
+        await self._set_user_interaction_enabled(runtime_config.supports_user_interaction)
         await self._update_tools_for_mode(runtime_config.mode, runtime_config.session_id, runtime_config.request_id)
         await self._update_session_tools(
             runtime_config.session_id,
@@ -1241,8 +1199,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             _set_user_todo_workspace(self._agent_workspace_dir)
             _set_user_todo_channel_id(_CRON_TOOL_CHANNEL_ID.get())
             for tool in _get_user_todo_tools():
-                if not Runner.resource_mgr.get_tool(tool.card.id):
-                    Runner.resource_mgr.add_tool(tool)
+                self._register_shared_tool(tool)
                 self._instance.ability_manager.add(tool.card)
         except ImportError:
             pass
@@ -1253,8 +1210,21 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         return self.build_code_tool_cards(agent_id)
 
     def build_code_tool_cards(self, agent_id: str) -> list[Any]:
-        """Get tool cards for code mode — from config.yaml::modes.code.tools."""
+        """Get tool cards for code mode — from config.yaml::modes.code.tools.
 
+        ``modes.code.tools`` is an open extension point, so ownership is read
+        off each card rather than guessed from the build func: a card that does
+        not declare itself shared is treated as agent-owned, which is the safe
+        default (a shared instance registered per agent costs an extra object;
+        an agent-owned instance registered as shared would pin the first
+        session's state for the whole process).
+
+        Args:
+            agent_id: Owner id this adapter registers its own instances under.
+
+        Returns:
+            The cards of every successfully registered configured tool.
+        """
         tool_cards = []
 
         config_base = get_config()
@@ -1271,12 +1241,10 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                 continue
             if isinstance(result, list):
                 for tool_instance in result:
-                    if not Runner.resource_mgr.get_tool(tool_instance.card.id):
-                        Runner.resource_mgr.add_tool(tool_instance)
+                    register_tool(tool_instance, agent_id)
                     tool_cards.append(tool_instance.card)
             else:
-                if not Runner.resource_mgr.get_tool(result.card.id):
-                    Runner.resource_mgr.add_tool(result)
+                register_tool(result, agent_id)
                 tool_cards.append(result.card)
             logger.info(
                 "[JiuwenSwarmCodeAdapter] Tool %s registered from config",
@@ -1343,14 +1311,20 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             return None
 
     def _build_skill_toolkit(self, agent_id: str) -> list[Any] | None:
-        """构建 SkillToolkit 工具（不注册到 Runner，由 _get_tool_cards 统一注册）."""
+        """构建 SkillToolkit 工具（不注册到 Runner，由 _get_tool_cards 统一注册）.
+
+        Declared shared for the same reason as the deep adapter's path: skill
+        install/status is a process-wide conversation, so one toolkit instance
+        has to serve every adapter.
+        """
         try:
             skill_toolkit = SkillToolkit(manager=self._skill_manager)
+            tools = mark_stateless(skill_toolkit.get_tools())
             logger.info(
                 "[JiuwenSwarmCodeAdapter] SkillToolkit built: tools=%s",
-                [t.card.name for t in skill_toolkit.get_tools()],
+                [t.card.name for t in tools],
             )
-            return skill_toolkit.get_tools()
+            return tools
         except Exception as exc:
             logger.warning("[JiuwenSwarmCodeAdapter] skill_toolkit build failed: %s", exc)
             return None

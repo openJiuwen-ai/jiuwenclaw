@@ -35,7 +35,9 @@ class FakeAgentManager:
         self.session_id = session_id
         self.client_capabilities = client_capabilities or {}
         self.initialize_calls = []
-        self.create_session_calls = []
+        self.claim_session_calls = []
+        self.activated_sessions = []
+        self.released_sessions = []
 
     async def initialize(self, channel_id="", extra_config=None):
         self.initialize_calls.append(
@@ -43,9 +45,22 @@ class FakeAgentManager:
         )
         return self.capabilities
 
-    async def create_session(self, channel_id="", session_id=None):
-        self.create_session_calls.append({"channel_id": channel_id, "session_id": session_id})
-        return session_id or self.session_id
+    async def claim_prewarmed_session(self, **kwargs):
+        self.claim_session_calls.append(kwargs)
+        eligible = bool(kwargs.get("prewarm_eligible")) and not bool(
+            kwargs.get("is_swarm")
+        )
+        return types.SimpleNamespace(
+            session_id=self.session_id,
+            prewarm_hit=eligible,
+            prewarm_status="ready" if eligible else "bypassed",
+        )
+
+    def activate_session_prewarm(self, session_id):
+        self.activated_sessions.append(session_id)
+
+    async def release_session_prewarm_claim(self, session_id):
+        self.released_sessions.append(session_id)
 
     def get_client_capabilities(self, channel_id=""):
         return dict(self.client_capabilities)
@@ -716,8 +731,6 @@ async def test_handle_initialize_uses_agent_manager_capabilities(monkeypatch):
             "ok": True,
         }
     ]
-
-
 @pytest.mark.asyncio
 async def test_handle_initialize_falls_back_to_default_capabilities(monkeypatch):
     server = AgentWebSocketServerHarness()
@@ -768,12 +781,14 @@ async def test_handle_session_create_returns_session_id(monkeypatch, tmp_path):
         request_id="req-session-create",
         channel_id="acp",
         req_method=ReqMethod.SESSION_CREATE,
-        params={},
+        params={"create_token": "create-acp-001"},
     )
 
     await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
 
-    assert fake_manager.create_session_calls == [{"channel_id": "acp", "session_id": None}]
+    assert len(fake_manager.claim_session_calls) == 1
+    assert fake_manager.claim_session_calls[0]["channel_id"] == "acp"
+    assert fake_manager.claim_session_calls[0]["create_token"] == "create-acp-001"
     metadata = json.loads((sessions_root / "acp_session_001" / "metadata.json").read_text(encoding="utf-8"))
     assert metadata["mode"] == "agent"
     assert fake_ws.sent == [
@@ -785,6 +800,8 @@ async def test_handle_session_create_returns_session_id(monkeypatch, tmp_path):
                 "projectId": "default",
                 "projectDir": "",
                 "workMode": "work",
+                "prewarm_hit": True,
+                "prewarm_status": "ready",
             },
             "ok": True,
         }
@@ -792,7 +809,7 @@ async def test_handle_session_create_returns_session_id(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_handle_session_create_returns_explicit_session_id(monkeypatch, tmp_path):
+async def test_handle_session_create_rejects_explicit_session_id(monkeypatch, tmp_path):
     server = AgentWebSocketServerHarness()
     fake_manager = FakeAgentManager(session_id="unused-default")
     server.set_agent_manager_for_test(fake_manager)
@@ -810,27 +827,330 @@ async def test_handle_session_create_returns_explicit_session_id(monkeypatch, tm
         request_id="req-session-create-explicit",
         channel_id="acp",
         req_method=ReqMethod.SESSION_CREATE,
-        params={"session_id": "sess_explicit_001"},
+        params={
+            "session_id": "sess_explicit_001",
+            "create_token": "create-explicit-001",
+        },
     )
 
     await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
 
-    assert fake_manager.create_session_calls == [
-        {"channel_id": "acp", "session_id": "sess_explicit_001"}
-    ]
+    assert fake_manager.claim_session_calls == []
     assert fake_ws.sent == [
         {
             "response_id": "req-session-create-explicit",
             "payload": {
-                "sessionId": "sess_explicit_001",
-                "session_id": "sess_explicit_001",
-                "projectId": "default",
-                "projectDir": "",
-                "workMode": "work",
+                "error": (
+                    "session.create no longer accepts session_id; "
+                    "use session.switch to restore"
+                ),
             },
-            "ok": True,
+            "ok": False,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_handle_tui_session_create_accepts_explicit_id_without_prewarm(
+    monkeypatch, tmp_path
+):
+    """TUI callers may supply an external ID to session.create without prewarming it."""
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="must-not-be-used")
+    server.set_agent_manager_for_test(fake_manager)
+    fake_ws = FakeWebSocket()
+    sessions_root = tmp_path / "sessions"
+    warning_messages: list[str] = []
+    monkeypatch.setattr(
+        agent_ws_server_module.logger,
+        "warning",
+        lambda message, *args: warning_messages.append(message % args),
+    )
+
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    patch_session_roots(monkeypatch, sessions_root)
+    project_dir = str(tmp_path / "tui-project")
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.project_store.find_or_create_code_project_for_tui_params",
+        lambda _params: types.SimpleNamespace(
+            project_id="proj_tui_external",
+            project_dir=project_dir,
+            work_mode="code",
+        ),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.project_store.resolve_session_project_binding",
+        lambda project_id, resolved_dir: (project_id, resolved_dir, None, None),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.project_store.get_project_by_id",
+        lambda project_id, cache_bust=True: types.SimpleNamespace(work_mode="code"),
+    )
+
+    request = AgentRequest(
+        request_id="req-tui-register-explicit",
+        channel_id="tui",
+        req_method=ReqMethod.SESSION_CREATE,
+        params={
+            "session_id": "tui_external_001",
+            "create_token": "legacy-tui-explicit-001",
+            "mode": "code.normal",
+            "cwd": project_dir,
+            "project_dir": project_dir,
+        },
+    )
+
+    await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
+
+    assert fake_manager.claim_session_calls == []
+    metadata = json.loads(
+        (sessions_root / "tui_external_001" / "metadata.json").read_text(encoding="utf-8")
+    )
+    assert metadata["session_id"] == "tui_external_001"
+    assert metadata["channel_id"] == "tui"
+    assert metadata["project_id"] == "proj_tui_external"
+    assert metadata["project_dir"] == project_dir
+    assert fake_ws.sent[0]["ok"] is True
+    assert fake_ws.sent[0]["payload"]["session_id"] == "tui_external_001"
+    assert fake_ws.sent[0]["payload"]["prewarm_hit"] is False
+    assert fake_ws.sent[0]["payload"]["prewarm_status"] == "bypassed"
+    assert any(
+        "bypassing prewarm compatibility path" in message
+        for message in warning_messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_handle_tui_explicit_session_create_is_idempotent_and_bypasses_prewarm(
+    monkeypatch, tmp_path
+):
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="must-not-be-used")
+    server.set_agent_manager_for_test(fake_manager)
+    sessions_root = tmp_path / "sessions"
+    patch_session_roots(monkeypatch, sessions_root)
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+
+    async def register(request_id: str):
+        ws = FakeWebSocket()
+        request = AgentRequest(
+            request_id=request_id,
+            channel_id="tui",
+            req_method=ReqMethod.SESSION_CREATE,
+            params={"session_id": "tui_external_idempotent", "mode": "code.normal"},
+        )
+        await server.handle_session_create_for_test(ws, request, asyncio.Lock())
+        return ws.sent[0]
+
+    first, second = await asyncio.gather(register("register-1"), register("register-2"))
+
+    assert fake_manager.claim_session_calls == []
+    assert {first["payload"]["created"], second["payload"]["created"]} == {True, False}
+    for response in (first, second):
+        assert response["ok"] is True
+        assert response["payload"]["session_id"] == "tui_external_idempotent"
+        assert response["payload"]["prewarm_status"] == "bypassed"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_tui_explicit_create_waiter_does_not_release_owner_lock(
+    monkeypatch, tmp_path
+):
+    server = AgentWebSocketServerHarness()
+    server.set_agent_manager_for_test(FakeAgentManager(session_id="must-not-be-used"))
+    patch_session_roots(monkeypatch, tmp_path / "sessions")
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    owner_entered = asyncio.Event()
+    release_owner = asyncio.Event()
+    prepare_calls = 0
+
+    async def hold_owner(**_kwargs):
+        nonlocal prepare_calls
+        prepare_calls += 1
+        owner_entered.set()
+        await release_owner.wait()
+        return False, "code.normal", None, None, None
+
+    server._prepare_session_switch_owner = hold_owner
+
+    async def register(request_id: str):
+        ws = FakeWebSocket()
+        request = AgentRequest(
+            request_id=request_id,
+            channel_id="tui",
+            req_method=ReqMethod.SESSION_CREATE,
+            params={"session_id": "tui_cancelled_waiter", "mode": "code.normal"},
+        )
+        await server.handle_session_create_for_test(ws, request, asyncio.Lock())
+        return ws.sent
+
+    owner = asyncio.create_task(register("register-owner"))
+    await owner_entered.wait()
+    waiter = asyncio.create_task(register("register-cancelled"))
+    await asyncio.sleep(0)
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+
+    successor = asyncio.create_task(register("register-successor"))
+    await asyncio.sleep(0)
+    assert prepare_calls == 1
+    assert not successor.done()
+
+    release_owner.set()
+    await owner
+    await successor
+    assert prepare_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_handle_tui_explicit_create_preserves_existing_project_binding(
+    monkeypatch, tmp_path
+):
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="must-not-be-used")
+    server.set_agent_manager_for_test(fake_manager)
+    sessions_root = tmp_path / "sessions"
+    patch_session_roots(monkeypatch, sessions_root)
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    original_project_dir = str(tmp_path / "original-project")
+    from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata
+
+    init_session_metadata(
+        session_id="tui_binding_stable",
+        channel_id="tui",
+        mode="code.normal",
+        project_id="proj_original",
+        project_dir=original_project_dir,
+        work_mode="code",
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.project_store.find_or_create_code_project_for_tui_params",
+        lambda _params: pytest.fail("existing explicit ID must not create or rebind a project"),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.project_store.resolve_session_project_binding",
+        lambda project_id, project_dir: (project_id, project_dir, None, None),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.project_store.get_project_by_id",
+        lambda project_id, cache_bust=True: types.SimpleNamespace(work_mode="code"),
+    )
+
+    async def register(request_id: str, project_dir: str):
+        ws = FakeWebSocket()
+        request = AgentRequest(
+            request_id=request_id,
+            channel_id="tui",
+            req_method=ReqMethod.SESSION_CREATE,
+            params={
+                "session_id": "tui_binding_stable",
+                "mode": "code.normal",
+                "project_dir": project_dir,
+                "cwd": project_dir,
+            },
+        )
+        await server.handle_session_create_for_test(ws, request, asyncio.Lock())
+        return ws.sent[0]
+
+    second = await register("binding-second", str(tmp_path / "other-project"))
+
+    assert second["ok"] is True, second
+    assert second["payload"]["created"] is False
+    assert second["payload"]["projectId"] == "proj_original"
+    assert second["payload"]["projectDir"] == original_project_dir
+    metadata = json.loads(
+        (sessions_root / "tui_binding_stable" / "metadata.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert metadata["project_id"] == "proj_original"
+    assert metadata["project_dir"] == original_project_dir
+    assert fake_manager.claim_session_calls == []
+
+
+@pytest.mark.asyncio
+async def test_handle_tui_explicit_create_rejects_id_owned_by_another_channel(
+    monkeypatch, tmp_path
+):
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="must-not-be-used")
+    server.set_agent_manager_for_test(fake_manager)
+    sessions_root = tmp_path / "sessions"
+    patch_session_roots(monkeypatch, sessions_root)
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata
+
+    init_session_metadata(session_id="web_owned", channel_id="web", mode="agent")
+    fake_ws = FakeWebSocket()
+    request = AgentRequest(
+        request_id="register-owned",
+        channel_id="tui",
+        req_method=ReqMethod.SESSION_CREATE,
+        params={"session_id": "web_owned"},
+    )
+
+    await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
+
+    assert fake_ws.sent[0]["ok"] is False
+    assert "owned by another channel" in fake_ws.sent[0]["payload"]["error"]
+    assert fake_manager.claim_session_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("channel_id", "session_id", "error"),
+    [
+        ("web", "web_external_001", "no longer accepts session_id"),
+        ("tui", "../unsafe", "invalid session_id"),
+        ("tui", "a" * 129, "invalid session_id"),
+    ],
+)
+async def test_handle_explicit_session_create_rejects_unsupported_identity(
+    monkeypatch, tmp_path, channel_id, session_id, error
+):
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="must-not-be-used")
+    server.set_agent_manager_for_test(fake_manager)
+    fake_ws = FakeWebSocket()
+    patch_session_roots(monkeypatch, tmp_path / "sessions")
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    request = AgentRequest(
+        request_id="register-invalid",
+        channel_id=channel_id,
+        req_method=ReqMethod.SESSION_CREATE,
+        params={"session_id": session_id},
+    )
+
+    await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
+
+    assert fake_manager.claim_session_calls == []
+    assert fake_ws.sent[0]["ok"] is False
+    assert error in fake_ws.sent[0]["payload"]["error"]
 
 
 @pytest.mark.asyncio
@@ -881,6 +1201,7 @@ async def test_handle_session_create_injected_default_work_mode_does_not_mismatc
             "project_id": "proj_code",
             "work_mode": "work",
             "_work_mode_explicit": False,
+            "create_token": "create-code-project",
         },
     )
 
@@ -895,17 +1216,25 @@ async def test_handle_session_create_injected_default_work_mode_does_not_mismatc
                 "projectId": "proj_code",
                 "projectDir": code_project.project_dir,
                 "workMode": "code",
+                "prewarm_hit": True,
+                "prewarm_status": "ready",
             },
             "ok": True,
         }
     ]
+    assert request.params["mode"] == "code.normal"
+    from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+
+    metadata = get_session_metadata("sess_code_project", cache_bust=True)
+    assert metadata["mode"] == "code.normal"
+    assert metadata["work_mode"] == "code"
 
 
 @pytest.mark.asyncio
 async def test_handle_session_create_acks_before_async_kvc(monkeypatch, tmp_path):
     """session.create 在 team prepare 后回包；可选 KVC 异步，避免拖慢前端超时窗口。"""
     server = AgentWebSocketServerHarness()
-    fake_manager = FakeAgentManager(session_id="unused-default")
+    fake_manager = FakeAgentManager(session_id="sess_async_kvc_001")
     server.set_agent_manager_for_test(fake_manager)
     fake_ws = FakeWebSocket()
     prepare_calls = []
@@ -935,7 +1264,7 @@ async def test_handle_session_create_acks_before_async_kvc(monkeypatch, tmp_path
         request_id="req-session-create-async-kvc",
         channel_id="web",
         req_method=ReqMethod.SESSION_CREATE,
-        params={"session_id": "sess_async_kvc_001", "mode": "agent"},
+        params={"mode": "agent", "create_token": "create-async-kvc"},
     )
 
     create_task = asyncio.create_task(
@@ -954,6 +1283,8 @@ async def test_handle_session_create_acks_before_async_kvc(monkeypatch, tmp_path
                 "projectId": "default",
                 "projectDir": "",
                 "workMode": "work",
+                "prewarm_hit": True,
+                "prewarm_status": "ready",
             },
             "ok": True,
         }
@@ -970,7 +1301,7 @@ async def test_handle_session_create_acks_before_async_kvc(monkeypatch, tmp_path
 async def test_handle_session_create_prepares_team_before_ack(monkeypatch, tmp_path):
     """team prepare 必须在 create 成功回包前完成，避免与首条 chat.send 竞态。"""
     server = AgentWebSocketServerHarness()
-    fake_manager = FakeAgentManager(session_id="unused-default")
+    fake_manager = FakeAgentManager(session_id="team_sess_001")
     fake_team_manager = FakeTeamManager()
     server.set_agent_manager_for_test(fake_manager)
     fake_ws = FakeWebSocket()
@@ -1001,7 +1332,7 @@ async def test_handle_session_create_prepares_team_before_ack(monkeypatch, tmp_p
         request_id="req-session-create-team",
         channel_id="web",
         req_method=ReqMethod.SESSION_CREATE,
-        params={"mode": "team", "session_id": "team_sess_001"},
+        params={"mode": "team", "create_token": "create-team-001"},
     )
 
     create_task = asyncio.create_task(
@@ -1021,13 +1352,15 @@ async def test_handle_session_create_prepares_team_before_ack(monkeypatch, tmp_p
                 "projectId": "default",
                 "projectDir": "",
                 "workMode": "work",
+                "prewarm_hit": False,
+                "prewarm_status": "bypassed",
             },
             "ok": True,
         }
     ]
-    assert fake_manager.create_session_calls == [
-        {"channel_id": "web", "session_id": "team_sess_001"}
-    ]
+    assert len(fake_manager.claim_session_calls) == 1
+    assert fake_manager.claim_session_calls[0]["channel_id"] == "web"
+    assert fake_manager.claim_session_calls[0]["prewarm_eligible"] is False
     assert fake_team_manager.prepare_session_switch_calls == [
         {"session_id": "team_sess_001", "reason": "session.create switch: "}
     ]
@@ -1188,7 +1521,7 @@ async def test_handle_team_binding_generate_uses_tiny_agent_result_for_name(monk
         generation_prompts.append(description)
         assert config_base is config
         assert template_id == "research"
-        return "team_setup_task"
+        return "team-setup-task"
 
     monkeypatch.setattr(team_module, "generate_team_name", fake_generate_team_name)
     monkeypatch.setattr(
@@ -1210,8 +1543,8 @@ async def test_handle_team_binding_generate_uses_tiny_agent_result_for_name(monk
     await server.handle_team_binding_generate_for_test(fake_ws, request, asyncio.Lock())
 
     assert fake_ws.sent[0]["ok"] is True
-    assert fake_ws.sent[0]["payload"]["team"]["team_name"] == "team_setup_task"
-    assert binding_store.get("team_setup_task") is not None
+    assert fake_ws.sent[0]["payload"]["team"]["team_name"] == "team-setup-task"
+    assert binding_store.get("team-setup-task") is not None
     assert generation_prompts == ["新建一个team_name为123的team"]
 
     duplicate_request = AgentRequest(
@@ -1223,8 +1556,8 @@ async def test_handle_team_binding_generate_uses_tiny_agent_result_for_name(monk
     await server.handle_team_binding_generate_for_test(fake_ws, duplicate_request, asyncio.Lock())
 
     assert fake_ws.sent[1]["ok"] is True
-    assert fake_ws.sent[1]["payload"]["team"]["team_name"] == "team_setup_task_2"
-    assert binding_store.get("team_setup_task_2") is not None
+    assert fake_ws.sent[1]["payload"]["team"]["team_name"] == "team-setup-task_2"
+    assert binding_store.get("team-setup-task_2") is not None
 
 
 @pytest.mark.asyncio
@@ -1508,11 +1841,15 @@ async def test_handle_session_switch_delegates_product_lifecycle(
 ):
     server = AgentWebSocketServerHarness()
     fake_ws = FakeWebSocket()
-    lifecycle_calls = []
+    prepare_calls = []
+    kvc_calls = []
 
-    async def _apply_session_switch(**kwargs):
-        lifecycle_calls.append(kwargs)
-        return is_team, resolved_mode
+    async def _prepare_session_switch(**kwargs):
+        prepare_calls.append(kwargs)
+        return is_team, resolved_mode, object(), None, object()
+
+    async def _dispatch_kvc(**kwargs):
+        kvc_calls.append(kwargs)
 
     monkeypatch.setattr(
         agent_ws_server_module,
@@ -1521,9 +1858,10 @@ async def test_handle_session_switch_delegates_product_lifecycle(
     )
     monkeypatch.setattr(
         server,
-        "_apply_session_switch_lifecycle",
-        _apply_session_switch,
+        "_prepare_session_switch_owner",
+        _prepare_session_switch,
     )
+    monkeypatch.setattr(server, "_dispatch_session_switch_kvc", _dispatch_kvc)
 
     request = AgentRequest(
         request_id="req-session-switch",
@@ -1542,7 +1880,7 @@ async def test_handle_session_switch_delegates_product_lifecycle(
         asyncio.Lock(),
     )
 
-    assert lifecycle_calls == [
+    assert prepare_calls == [
         {
             "channel_id": "web",
             "target_session_id": "sess_002",
@@ -1560,6 +1898,156 @@ async def test_handle_session_switch_delegates_product_lifecycle(
         },
         "ok": True,
     }
+    await asyncio.sleep(0)
+    assert len(kvc_calls) == 1
+    assert kvc_calls[0]["target_session_id"] == "sess_002"
+    assert kvc_calls[0]["previous_session_id"] == "sess_001"
+
+
+@pytest.mark.asyncio
+async def test_handle_session_switch_acks_before_async_kvc(monkeypatch):
+    """A slow optional affinity signal must not hold the UI switch response."""
+    server = AgentWebSocketServerHarness()
+    fake_ws = FakeWebSocket()
+    kvc_started = asyncio.Event()
+    kvc_release = asyncio.Event()
+
+    async def _prepare_session_switch(**_kwargs):
+        return False, "agent.plan", object(), None, object()
+
+    async def _slow_kvc(**_kwargs):
+        kvc_started.set()
+        await kvc_release.wait()
+
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    monkeypatch.setattr(
+        server,
+        "_prepare_session_switch_owner",
+        _prepare_session_switch,
+    )
+    monkeypatch.setattr(server, "_dispatch_session_switch_kvc", _slow_kvc)
+
+    request = AgentRequest(
+        request_id="req-session-switch-async-kvc",
+        channel_id="web",
+        req_method=ReqMethod.SESSION_SWITCH,
+        params={
+            "mode": "agent.plan",
+            "session_id": "sess_002",
+            "previous_session_id": "sess_001",
+        },
+    )
+
+    await server.handle_session_switch_for_test(
+        fake_ws,
+        request,
+        asyncio.Lock(),
+    )
+    await asyncio.wait_for(kvc_started.wait(), timeout=1.0)
+
+    assert fake_ws.sent == [
+        {
+            "response_id": "req-session-switch-async-kvc",
+            "payload": {
+                "session_id": "sess_002",
+                "mode": "agent.plan",
+                "switched": True,
+            },
+            "ok": True,
+        }
+    ]
+
+    kvc_release.set()
+    await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_handle_session_switch_serializes_reentrant_requests(monkeypatch):
+    """Rapid switches on one WebSocket must not overlap owner preparation."""
+    server = AgentWebSocketServerHarness()
+    fake_ws = FakeWebSocket()
+    first_prepare_started = asyncio.Event()
+    release_first_prepare = asyncio.Event()
+    prepare_order = []
+    active_prepares = 0
+    max_active_prepares = 0
+
+    async def _prepare_session_switch(**kwargs):
+        nonlocal active_prepares, max_active_prepares
+        target_session_id = kwargs["target_session_id"]
+        prepare_order.append(target_session_id)
+        active_prepares += 1
+        max_active_prepares = max(max_active_prepares, active_prepares)
+        if target_session_id == "sess_002":
+            first_prepare_started.set()
+            await release_first_prepare.wait()
+        active_prepares -= 1
+        return False, "agent.plan", None, None, None
+
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    monkeypatch.setattr(
+        server,
+        "_prepare_session_switch_owner",
+        _prepare_session_switch,
+    )
+
+    first_request = AgentRequest(
+        request_id="req-session-switch-first",
+        channel_id="web",
+        req_method=ReqMethod.SESSION_SWITCH,
+        params={
+            "mode": "agent.plan",
+            "session_id": "sess_002",
+            "previous_session_id": "sess_001",
+        },
+    )
+    second_request = AgentRequest(
+        request_id="req-session-switch-second",
+        channel_id="web",
+        req_method=ReqMethod.SESSION_SWITCH,
+        params={
+            "mode": "agent.plan",
+            "session_id": "sess_003",
+            "previous_session_id": "sess_002",
+        },
+    )
+
+    first_task = asyncio.create_task(
+        server.handle_session_switch_for_test(
+            fake_ws,
+            first_request,
+            asyncio.Lock(),
+        )
+    )
+    await asyncio.wait_for(first_prepare_started.wait(), timeout=1.0)
+    second_task = asyncio.create_task(
+        server.handle_session_switch_for_test(
+            fake_ws,
+            second_request,
+            asyncio.Lock(),
+        )
+    )
+    await asyncio.sleep(0)
+
+    assert prepare_order == ["sess_002"]
+    assert fake_ws.sent == []
+
+    release_first_prepare.set()
+    await asyncio.gather(first_task, second_task)
+
+    assert prepare_order == ["sess_002", "sess_003"]
+    assert max_active_prepares == 1
+    assert [
+        response["payload"]["session_id"] for response in fake_ws.sent
+    ] == ["sess_002", "sess_003"]
 
 
 @pytest.mark.asyncio
