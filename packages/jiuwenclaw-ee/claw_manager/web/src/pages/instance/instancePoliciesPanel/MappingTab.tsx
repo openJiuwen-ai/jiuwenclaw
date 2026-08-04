@@ -27,6 +27,7 @@ import {
 import { toast } from '../../../stores/uiStore';
 import { formatTime, truncate } from '../../../utils/format';
 import { TEMPLATE_REF_SLOTS } from '../../../utils/templateRef';
+import { HintTooltip } from '../../../components/HintTooltip';
 
 /** 与 Manager / Gateway 默认模板映射允许的 template_type 一致 */
 const MAPPING_TEMPLATE_SLOTS = TEMPLATE_REF_SLOTS;
@@ -317,12 +318,19 @@ export function MappingTab({ instanceId }: { instanceId: string }) {
                   />
                 </th>
                 <th>
-                  <TableColumnSort
-                    label={t('policies.mapping.priority')}
-                    value={sortBy === 'priority' ? sortOrder : ''}
-                    options={sortOptions}
-                    onChange={(value) => handleSortChange('priority', value)}
-                  />
+                  <div className="th-filter">
+                    <span className="th-filter__label inline-flex items-center gap-1">
+                      {t('policies.mapping.priority')}
+                      <HintTooltip text={t('policies.priorityHint')} />
+                    </span>
+                    <TableColumnSort
+                      iconOnly
+                      label={t('policies.mapping.priority')}
+                      value={sortBy === 'priority' ? sortOrder : ''}
+                      options={sortOptions}
+                      onChange={(value) => handleSortChange('priority', value)}
+                    />
+                  </div>
                 </th>
                 <th>
                   <TableColumnSort
@@ -543,7 +551,10 @@ export function MappingTab({ instanceId }: { instanceId: string }) {
               />
             </div>
             <div className="min-w-0">
-              <FieldLabel required>{t('policies.mapping.priority')}</FieldLabel>
+              <div className="flex items-center gap-1">
+                <FieldLabel required>{t('policies.mapping.priority')}</FieldLabel>
+                <HintTooltip text={t('policies.priorityHint')} />
+              </div>
               <input
                 className="input w-full"
                 type="number"

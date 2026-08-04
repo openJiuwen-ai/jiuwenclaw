@@ -9,6 +9,7 @@ import { ChatPanel } from './components/ChatPanel';
 import { SessionSidebar } from './components/SessionSidebar';
 import { ToolPanel } from './components/ToolPanel';
 import { StatusBar } from './components/StatusBar';
+import CronPanel from './components/CronPanel';
 import { HeartbeatMessageModal } from './features/HeartbeatMessageModal';
 import { FEATURE_HEARTBEAT_UI } from './featureFlags';
 import {
@@ -25,6 +26,8 @@ import {
 } from './features/tool-events/toolEventNormalizer';
 import { useWebSocket } from './hooks';
 import { webRequest } from './services/webClient';
+import { fetchSessions as fetchDbSessions, fetchSessionDetail, type HistorySession } from './services/api';
+import { setToolResultDisplayMaxChars } from './utils/formatters';
 import { AgentMode, UserAnswer, ChatSendFile, ModelEntry } from './types';
 import {
   useSessionStore,
@@ -36,9 +39,10 @@ import {
 } from './stores';
 import { useTranslation } from 'react-i18next';
 import i18n from './i18n';
+import { getProductName } from './utils/env';
 import './App.css';
 
-type MainNavKey = 'chat';
+type MainNavKey = 'chat' | 'cron';
 
 // 错误边界组件
 interface ErrorBoundaryState {
@@ -259,6 +263,7 @@ function AppContent() {
     totalPages: number;
   } | null>(null);
   const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
+  const [dbSessions, setDbSessions] = useState<HistorySession[]>([]);
   const sessionIdRef = useRef(sessionId);
   const historyRestoreHandleRef = useRef<HistoryRestoreHandle | null>(null);
   const historyPageHandleRef = useRef<HistoryRestoreHandle | null>(null);
@@ -266,6 +271,9 @@ function AppContent() {
   const historyRestoreFromPanelHintRef = useRef(false);
   /** 用户已开始实时对话后，禁止后台 history.get 覆盖当前消息 */
   const historyRestoreSuppressedRef = useRef(false);
+  /** 点击会话列表恢复时置 true，驱动 historyRestore effect 拉历史；新建/刷新页面不拉 */
+  const restoreRequestedRef = useRef(false);
+  const restoreSeqRef = useRef(0);
   /** extSettings 路由字段变更后，待 WS 重连完成再 session.create */
   const pendingRoutingSessionResetRef = useRef(false);
 
@@ -413,6 +421,10 @@ function AppContent() {
     await fetchModels();
   }, [request, t, fetchModels]);
 
+  useEffect(() => {
+    setToolResultDisplayMaxChars(serverConfig?.tool_result_display_max_chars);
+  }, [serverConfig?.tool_result_display_max_chars]);
+
   const clearRestartAutoCloseTimer = useCallback(() => {
     if (restartAutoCloseTimerRef.current != null) {
       window.clearTimeout(restartAutoCloseTimerRef.current);
@@ -550,12 +562,17 @@ function AppContent() {
 
   // 页面加载或切换会话时尝试恢复历史；用户开始实时对话后不再自动恢复
   useEffect(() => {
+    // 改用 DB 恢复（handleRestoreSession → /api/sessions/{id}），不再走 WS historyRestore
+    return;
+
     if (!isConnected || !sessionId || sessionId === 'new') return;
 
     // 仅处理以 sess_ 开头的会话 ID
     if (!sessionId.startsWith('sess_')) return;
 
     if (historyRestoreSuppressedRef.current) return;
+    // 仅"点击会话列表恢复"时拉历史；新建/刷新页面不主动拉（保留原禁用意图）
+    if (!restoreRequestedRef.current) return;
     if (useChatStore.getState().messages.length > 0) {
       historyRestoreSuppressedRef.current = true;
       return;
@@ -585,6 +602,7 @@ function AppContent() {
       sessionId: sessionId,
       requestId: historyRequestId,
       onReady: (messages, totalPages) => {
+        restoreRequestedRef.current = false;
         if (historyRestoreSuppressedRef.current) {
           logHistoryRestore('onReady.suppressed', { sessionId });
           return;
@@ -614,6 +632,7 @@ function AppContent() {
         });
       },
       onEmpty: (emptyTotalPages) => {
+        restoreRequestedRef.current = false;
         if (historyRestoreSuppressedRef.current) {
           logHistoryRestore('onEmpty.suppressed', { sessionId });
           return;
@@ -747,7 +766,60 @@ function AppContent() {
   }, [isConnected, sessionId, request, disposeInFlightHistoryHandles]);
 
   // 新建会话：立即生成可用的 session_id，避免停留在 'new' 导致无法发送消息
+  const loadDbSessions = useCallback(async () => {
+    try {
+      setDbSessions(await fetchDbSessions(50, 0, extUserId || undefined));
+    } catch (e) {
+      console.error('loadDbSessions failed', e);
+    }
+  }, [extUserId]);
+
+  useEffect(() => {
+    void loadDbSessions();
+  }, [loadDbSessions]);
+
+  const handleNavigate = useCallback((nav: MainNavKey) => {
+    setActiveNav(nav);
+  }, []);
+
+  const handleRestoreSession = useCallback(
+    async (sid: string) => {
+      if (!sid) return;
+      setActiveNav('chat');
+      restoreSeqRef.current += 1;
+      const seq = restoreSeqRef.current;
+      clearMessages();
+      clearTodos();
+      setHistoryPagerMeta(null);
+      setHistoryLoadingMore(false);
+      setProcessing(false);
+      setThinking(false);
+      setPaused(false);
+      try {
+        const detail = await fetchSessionDetail(sid, extUserId || undefined);
+        if (seq !== restoreSeqRef.current) return; // 期间又点了别的会话，丢弃本次旧请求
+        if (detail && detail.messages) {
+          const chatStore = useChatStore.getState();
+          for (const m of detail.messages) {
+            chatStore.addMessage({
+              id: m.request_id || `hist-${sid}-${m.timestamp}`,
+              role: m.role,
+              content: m.content,
+              timestamp: new Date(m.timestamp * 1000).toISOString(),
+            });
+          }
+        }
+      } catch (e) {
+        console.error('handleRestoreSession failed', e);
+      }
+      setSessionId(sid);
+      storeSessionId(sid);
+    },
+    [extUserId, clearMessages, clearTodos],
+  );
+
   const handleNewSession = useCallback(async () => {
+    restoreRequestedRef.current = false;
     disposeInFlightHistoryHandles();
     setHistoryPagerMeta(null);
     setHistoryLoadingMore(false);
@@ -777,6 +849,7 @@ function AppContent() {
         }
       }
       await fetchSessions();
+      void loadDbSessions();
     } catch (error) {
       console.error('Failed to create session:', error);
       return;
@@ -793,6 +866,7 @@ function AppContent() {
     clearTodos,
     disposeInFlightHistoryHandles,
     fetchSessions,
+    loadDbSessions,
     mode,
     request,
     setCurrentSession,
@@ -878,9 +952,10 @@ function AppContent() {
       setHistoryLoadingMore(false);
       const sid = await ensureSessionForSend();
       if (!sid) return;
-      await sendMessage(content, sid, files);
+      await sendMessage(content, sid, files, extUserId || undefined);
+      void loadDbSessions();
     })();
-  }, [disposeInFlightHistoryHandles, ensureSessionForSend, sendMessage]);
+  }, [disposeInFlightHistoryHandles, ensureSessionForSend, sendMessage, extUserId, loadDbSessions]);
 
   const handleInterrupt = useCallback((newInput?: string, files?: ChatSendFile[]) => {
     if (!sessionId || sessionId === 'new') return;
@@ -915,8 +990,8 @@ function AppContent() {
     if (historyLoadingMore || historyPagerMeta.loadedPages >= historyPagerMeta.totalPages) return;
 
     const sid = sessionId;
-    const nextPage = historyPagerMeta.loadedPages + 1;
-    const fallbackTotal = historyPagerMeta.totalPages;
+    const nextPage = historyPagerMeta!.loadedPages + 1;
+    const fallbackTotal = historyPagerMeta!.totalPages;
 
     setHistoryLoadingMore(true);
     const pageRequestId = `history-page-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
@@ -1025,10 +1100,6 @@ function AppContent() {
     sessionId,
   ]);
 
-  const handleNavigate = useCallback((nav: MainNavKey) => {
-    setActiveNav(nav);
-  }, []);
-
   const heartbeatToastPreviewRaw = heartbeatToastMessage.replace(/\s+/g, ' ').trim();
   const heartbeatToastPreview = heartbeatToastPreviewRaw.length > 120
     ? `${heartbeatToastPreviewRaw.slice(0, 120)}...`
@@ -1042,7 +1113,7 @@ function AppContent() {
           <div className="brand">
             <img src="/logo.png" alt="OpenJiuwen" className="brand-logo-img" />
             <div className="brand-text">
-              <span className="brand-title">JiuwenClaw</span>
+              <span className="brand-title">{getProductName()}</span>
               <span className="brand-sub">AI Assistant</span>
             </div>
           </div>
@@ -1067,6 +1138,10 @@ function AppContent() {
 
       {/* Navigation Sidebar */}
       <SessionSidebar
+        sessions={dbSessions}
+        currentSessionId={sessionId}
+        onSelect={handleRestoreSession}
+        onNewSession={handleNewSession}
         activeNav={activeNav}
         onNavigate={handleNavigate}
         appVersion={typeof serverConfig?.app_version === 'string' ? serverConfig.app_version : '0.1.7'}
@@ -1122,6 +1197,12 @@ function AppContent() {
               <ToolPanel />
             </div>
           </>
+        )}
+
+        {activeNav === 'cron' && (
+          <div className="flex-1 min-h-0 overflow-auto p-4">
+            <CronPanel sessionId={sessionId} />
+          </div>
         )}
       </main>
 

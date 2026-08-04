@@ -1,6 +1,9 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
+ARG AGENT_RUNTIME_REPOS
+ARG AGENT_RUNTIME_BRANCH
+
 RUN apt-get update && apt-get install -y --no-install-recommends yq
 
 WORKDIR /app/jiuwenclaw
@@ -8,9 +11,13 @@ COPY . /app/jiuwenclaw/
 
 ENV PATH=$PATH:/home/app/.local/bin
 
-RUN pip install -e ".[all]" \
-    git+https://gitcode.com/openJiuwen/agent-runtime.git@develop#subdirectory=foundation \
-    git+https://gitcode.com/openJiuwen/agent-runtime.git@develop#subdirectory=management \
+RUN sed -i '/openjiuwen_runtime_foundation/d' pyproject.toml
+RUN sed -i '/openjiuwen_runtime_foundation/d' packages/jiuwenclaw-ee/claw_manager/pyproject.toml
+RUN sed -i '/openjiuwen_runtime_management/d' packages/jiuwenclaw-ee/gateway/extensions/runtime_management_extension/pyproject.toml
+
+RUN pip install -e . \
+    git+${AGENT_RUNTIME_REPOS}@${AGENT_RUNTIME_BRANCH}#subdirectory=foundation \
+    git+${AGENT_RUNTIME_REPOS}@${AGENT_RUNTIME_BRANCH}#subdirectory=management \
     kubernetes==35.0.0 \
     kubernetes_asyncio==35.0.0 \
     "websockets>=12.0,<16" \

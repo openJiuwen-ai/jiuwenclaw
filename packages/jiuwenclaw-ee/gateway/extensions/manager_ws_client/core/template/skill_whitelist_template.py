@@ -12,7 +12,7 @@ from openjiuwen_runtime.foundation.db.handler import DBHandler
 from ...infrastructure.db import ensure_db_handler
 from ...infrastructure.utils import get_jiuwenclaw_id, parse_iso_datetime, utc_now
 from ...models.template_models import SKILL_WHITELIST_TEMPLATE_TABLE_DEF
-from ...schemas.template_schemas import SkillWhitelistTemplateUpdateRequest
+from ...schemas.template_schemas import SkillWhitelistTemplateUpdateRequest, _validate_http_url
 
 _TABLE = SKILL_WHITELIST_TEMPLATE_TABLE_DEF.table_name
 logger = logging.getLogger(__name__)
@@ -51,7 +51,7 @@ def _normalize_skill_source(value: str) -> str:
         raise ValueError("skill_source is required")
     if len(normalized) > 2048:
         raise ValueError("skill_source must be at most 2048 characters")
-    return normalized
+    return _validate_http_url(normalized)
 
 
 def _template_pk(jiuwenclaw_id: str, template_id: str) -> dict[str, str]:
@@ -204,12 +204,12 @@ async def apply_skill_whitelist_template(
         template = payload.get("template")
         if not isinstance(template, dict):
             raise ValueError("skill_whitelist_templates.create requires template object")
-        now = utc_now()
-        row_data = _build_row_from_template(
-            template, jiuwenclaw_id=jiuwenclaw_id, now=now
+        await _upsert_skill_whitelist_template_from_sync(
+            handler, template, jiuwenclaw_id=jiuwenclaw_id
         )
-        await handler.create(_TABLE, row_data)
-        result: dict[str, Any] | None = {"template_id": row_data["template_id"]}
+        result: dict[str, Any] | None = {
+            "template_id": _normalize_template_id(template.get("template_id")),
+        }
 
     elif op == "update":
         template_id = payload.get("template_id")
@@ -233,9 +233,7 @@ async def apply_skill_whitelist_template(
         if template_id is None:
             raise ValueError("skill_whitelist_templates.delete requires template_id")
         tid = _normalize_template_id(template_id)
-        deleted = await delete_skill_whitelist_template(handler, tid)
-        if not deleted:
-            raise ValueError(f"skill whitelist template template_id={tid!r} not found")
+        await delete_skill_whitelist_template(handler, tid)
         result = None
 
     elif op == "sync":

@@ -81,3 +81,4 @@ write_env_to_file() {
     done
     success "Generated config file : ${env_file}"
 }
+

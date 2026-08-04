@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Phase-1 ``file_guard``：``workspace`` / ``global`` / ``trusted_exec_directory`` 三轴文件权限。
+"""Phase-1 ``file_guard``：``workspace`` / ``global`` 文件权限。
 
 替换旧 ``ExternalDirectoryChecker``。本模块只做"按轴判定 + 持久化"，**不**抽路径——
 路径来源由两条独立通道提供：
@@ -8,6 +8,16 @@
     ``file_path`` / ``path`` 等字段，得到 ``(Path, action, "tool_arg")``；
  2. **命令意图通道**（``command_intent``）：L1 shlex + L3-Cmd LLM 输出 ``CommandIntent[]``，
     由 ``evaluate_command_intents`` 转成判定结果。
+
+``file_guard.global[path]`` 使用三态字段::
+
+    {read: allow|deny|ask, write: allow|deny|ask, exec: allow|deny|ask}
+
+缺省未写的 ``read`` / ``write`` / ``exec`` 视为 ``ask``。仍兼容旧 ``*_enable`` bool
+（``true→allow``，``false→ask``）；新旧并存时新字段优先。
+``global`` 的 ``read``/``write`` deny 可穿透 workspace；``allow`` / ``ask`` 不覆盖 workspace。
+``exec`` 不走 workspace 放行，仅看 ``global[path].exec``。
+``global`` 相对路径相对 workspace 再 ``resolve(strict=False)``。
 """
 
 from __future__ import annotations
@@ -46,6 +56,10 @@ _VERB_CN = {"read": "读取", "write": "写入", "exec": "执行"}
 # ``FileOperation.source`` 合法取值。命中以外的来源（异常路径 / 未来扩展）统一回退到 ``"shlex"``。
 _VALID_OP_SOURCES = ("tool_arg", "shlex", "script_scan", "llm")
 
+_ACCESS_MODES = frozenset({"allow", "deny", "ask"})
+_ACCESS_ACTIONS = frozenset({"read", "write", "exec"})
+AccessMode = Literal["allow", "deny", "ask"]
+
 # Phase-1：用于"加载期 ERROR"的 path 类工具集合。任何 ``rules[*].tools`` 命中其中之一，
 # 且 ``pattern`` 像路径（含 ``/`` / ``\\`` / 通配符 ``**`` 等），就视为残留 path-class 规则。
 _PATH_CLASS_TOOLS = frozenset({
@@ -75,6 +89,9 @@ def merged_file_guard_config(permissions: dict[str, Any]) -> dict[str, Any]:
     fg: dict[str, Any] = {}
     if isinstance(raw_fg, dict):
         for k, v in raw_fg.items():
+            if k == "trusted_exec_directory":
+                # 已废弃：不再读取 / 保留该键。
+                continue
             if isinstance(v, dict):
                 fg[k] = dict(v)
             elif isinstance(v, list):
@@ -97,17 +114,15 @@ def merged_file_guard_config(permissions: dict[str, Any]) -> dict[str, Any]:
             if not key_norm or key_norm in global_map:
                 continue
             if v == "allow":
-                global_map[key_norm] = {"read_enable": True, "write_enable": True}
+                global_map[key_norm] = {"read": "allow", "write": "allow"}
             elif v in ("ask", "deny"):
-                global_map[key_norm] = {"read_enable": False, "write_enable": False}
+                # 旧 external_directory 的 deny 实际等价于 ASK，保持行为不变。
+                global_map[key_norm] = {"read": "ask", "write": "ask"}
     fg["global"] = global_map
 
     ws = fg.get("workspace")
     if not isinstance(ws, dict):
         fg["workspace"] = {"rw_enabled": True, "description": ""}
-    ted = fg.get("trusted_exec_directory")
-    if not isinstance(ted, list):
-        fg["trusted_exec_directory"] = []
     return fg
 
 
@@ -116,35 +131,91 @@ def _expand_path_str(s: str) -> str:
 
 
 def _resolve_path_str(raw: str, workspace: Path) -> Path | None:
+    """解析路径：相对路径接到 ``workspace`` 上再 ``resolve(strict=False)``。
+
+    使用 ``strict=False``，配置中尚未落盘的路径仍可参与前缀匹配，避免规则被静默跳过。
+    """
     raw = raw.strip().strip('"').strip("'")
     if not raw:
         return None
+    p = Path(_expand_path_str(raw))
+    if not p.is_absolute():
+        p = workspace / p
     try:
-        p = Path(_expand_path_str(raw))
-        if not p.is_absolute():
-            p = (workspace / p).resolve()
-        else:
-            p = p.resolve()
-        return p
+        return p.resolve(strict=False)
     except (OSError, RuntimeError):
-        return None
+        # 极端情况下仍保留逻辑路径，行为对齐旧版 _posix_str 回退。
+        return p
 
 
 def _posix_str(p: Path) -> str:
     try:
-        return p.resolve().as_posix()
+        return p.resolve(strict=False).as_posix()
     except (OSError, RuntimeError):
         return p.as_posix()
 
 
-def _longest_prefix_match(abs_posix: str, global_map: dict[str, Any]) -> dict[str, Any] | None:
+def _normalize_access_mode(value: Any) -> AccessMode | None:
+    if not isinstance(value, str):
+        return None
+    mode = value.strip().lower()
+    if mode in _ACCESS_MODES:
+        return mode
+    return None
+
+
+def _action_mode(entry: dict[str, Any], action: str) -> AccessMode:
+    """解析 global entry 的 read/write/exec 模式；缺省未写视为 ``ask``。
+
+    新字段优先；``read``/``write`` 否则回退旧 ``*_enable`` bool
+    （``true→allow``，``false→ask``）。
+    """
+    if action not in _ACCESS_ACTIONS:
+        return "ask"
+
+    if action in entry:
+        raw = entry.get(action)
+        mode = _normalize_access_mode(raw)
+        if mode is not None:
+            return mode
+        logger.warning(
+            "[file_guard] global entry invalid %s=%r (expected allow|deny|ask); treating as ask",
+            action,
+            raw,
+        )
+        return "ask"
+
+    if action == "read" and ("read_enable" in entry or "read_enabled" in entry):
+        enabled = bool(entry.get("read_enable", entry.get("read_enabled")))
+        return "allow" if enabled else "ask"
+    if action == "write" and ("write_enable" in entry or "write_enabled" in entry):
+        enabled = bool(entry.get("write_enable", entry.get("write_enabled")))
+        return "allow" if enabled else "ask"
+    return "ask"
+
+
+def _mode_to_level(mode: AccessMode) -> PermissionLevel:
+    """将 allow/ask 转为 PermissionLevel。deny 由 ``_check_one`` 提前处理。"""
+    if mode == "allow":
+        return PermissionLevel.ALLOW
+    return PermissionLevel.ASK
+
+
+def _longest_prefix_match(
+    abs_posix: str,
+    global_map: dict[str, Any],
+    workspace: Path,
+) -> dict[str, Any] | None:
     best: tuple[int, dict[str, Any]] | None = None
     for key, entry in global_map.items():
         if not isinstance(key, str) or key == "*":
             continue
         if not isinstance(entry, dict):
             continue
-        prefix = _posix_str(Path(_expand_path_str(key)))
+        resolved = _resolve_path_str(key, workspace)
+        if resolved is None:
+            continue
+        prefix = _posix_str(resolved)
         if abs_posix == prefix or abs_posix.startswith(prefix + "/"):
             ln = len(prefix)
             if best is None or ln > best[0]:
@@ -152,29 +223,11 @@ def _longest_prefix_match(abs_posix: str, global_map: dict[str, Any]) -> dict[st
     return best[1] if best else None
 
 
-def _trusted_matches(abs_posix: str, trusted_list: list[Any]) -> bool:
-    for raw in trusted_list:
-        if not isinstance(raw, str) or not raw.strip():
-            continue
-        prefix = _posix_str(Path(_expand_path_str(raw.strip())))
-        if abs_posix == prefix or abs_posix.startswith(prefix + "/"):
-            return True
-    return False
-
-
-def _read_flag(entry: dict[str, Any]) -> bool:
-    return bool(entry.get("read_enable", entry.get("read_enabled", False)))
-
-
-def _write_flag(entry: dict[str, Any]) -> bool:
-    return bool(entry.get("write_enable", entry.get("write_enabled", False)))
-
-
 # ---------- FileGuardChecker ----------
 
 
 class FileGuardChecker:
-    """三轴文件权限判定：``read`` / ``write`` 走 workspace+global，``exec`` 走 trusted_exec_directory。"""
+    """文件权限判定：``read`` / ``write`` / ``exec`` 均走 ``file_guard.global`` 三态。"""
 
     def __init__(self, permissions: dict[str, Any], workspace_root: Path | None = None):
         self._permissions = permissions
@@ -240,31 +293,24 @@ class FileGuardChecker:
         g = self._fg.get("global")
         return g if isinstance(g, dict) else {}
 
-    def _trusted_list(self) -> list[Any]:
-        t = self._fg.get("trusted_exec_directory")
-        return t if isinstance(t, list) else []
-
     def _check_one(self, abs_path: Path, action: str) -> PermissionLevel:
         abs_posix = _posix_str(abs_path)
         ws = self.workspace_root()
         in_ws = contains_path(ws, abs_path)
 
-        if action == "exec":
-            if _trusted_matches(abs_posix, self._trusted_list()):
-                return PermissionLevel.ALLOW
-            return PermissionLevel.ASK
+        entry = _longest_prefix_match(abs_posix, self._global_map(), ws)
+        mode: AccessMode | None = _action_mode(entry, action) if entry is not None else None
 
-        if in_ws and self._workspace_rw_enabled():
+        # global deny：read/write 可穿透 workspace；exec 本身不受 workspace 放行。
+        if mode == "deny":
+            return PermissionLevel.DENY
+
+        if action in ("read", "write") and in_ws and self._workspace_rw_enabled():
             return PermissionLevel.ALLOW
 
-        entry = _longest_prefix_match(abs_posix, self._global_map())
-        if entry is None:
+        if mode is None:
             return PermissionLevel.ASK
-        if action == "read":
-            return PermissionLevel.ALLOW if _read_flag(entry) else PermissionLevel.ASK
-        if action == "write":
-            return PermissionLevel.ALLOW if _write_flag(entry) else PermissionLevel.ASK
-        return PermissionLevel.ASK
+        return _mode_to_level(mode)
 
     # ----- 路径来源（仅注册表通道） -----
 
@@ -433,13 +479,16 @@ def _ensure_file_guard_dict(permissions: dict[str, Any]) -> dict[str, Any]:
         fg["global"] = gm
     if "workspace" not in fg or not isinstance(fg["workspace"], dict):
         fg["workspace"] = {"rw_enabled": True, "description": ""}
-    if "trusted_exec_directory" not in fg or not isinstance(fg["trusted_exec_directory"], list):
-        fg["trusted_exec_directory"] = []
+    fg.pop("trusted_exec_directory", None)
     return fg
 
 
 def _filter_persistable(operations: list[FileOperation]) -> list[FileOperation]:
-    """``source=llm + action=exec`` 不允许永久化，按设计静默降级到 ``allow_once``。"""
+    """``source=llm + action=exec`` 不允许永久化，按设计静默降级到 ``allow_once``。
+
+    其余来源（``tool_arg`` / ``shlex`` / ``script_scan``）的 ``exec`` 可写入
+    ``file_guard.global[path].exec=allow``。
+    """
     out: list[FileOperation] = []
     for op in operations:
         if op.source == "llm" and op.action == "exec":
@@ -457,7 +506,7 @@ def persist_file_operations_allow(
     *,
     session_id: str | None = None,
 ) -> None:
-    """落地用户的 ``allow_always`` 决策到 ``file_guard.global`` / ``trusted_exec_directory``。"""
+    """落地用户的 ``allow_always`` 决策到 ``file_guard.global``（含 ``exec``）。"""
     if not operations:
         return
     persistable = _filter_persistable(list(operations))
@@ -468,23 +517,15 @@ def persist_file_operations_allow(
     def mutate(permissions: dict[str, Any]) -> None:
         fg = _ensure_file_guard_dict(permissions)
         gm: dict[str, Any] = fg["global"]  # type: ignore[assignment]
-        ted: list[Any] = fg["trusted_exec_directory"]  # type: ignore[assignment]
 
         for op in persistable:
             path_norm = op.path.replace("\\", "/").rstrip("/")
-            if op.action == "exec":
-                norm_set = {str(x).replace("\\", "/").rstrip("/") for x in ted}
-                if path_norm and path_norm not in norm_set:
-                    ted.append(path_norm)
+            if op.action not in ("read", "write", "exec"):
                 continue
             cur = gm.get(path_norm)
             if not isinstance(cur, dict):
                 cur = {}
-            if op.action == "read":
-                cur = {**cur, "read_enable": True}
-            elif op.action == "write":
-                cur = {**cur, "write_enable": True}
-            gm[path_norm] = cur
+            gm[path_norm] = {**cur, op.action: "allow"}
 
     _yaml_update_permissions(mutate, session_id=session_id)
     logger.info("[file_guard] persist_file_operations_allow count=%s", len(persistable))
@@ -505,14 +546,13 @@ def persist_legacy_external_allow_paths(paths: list[str]) -> None:
 
 
 def apply_cli_trusted_to_permissions_dict(permissions: dict[str, Any], dir_norm: str) -> None:
-    """供 ``persist_cli_trusted_directory`` 使用：在内存 ``permissions`` 中追加信任目录。"""
+    """供 ``persist_cli_trusted_directory`` 使用：在内存 ``permissions`` 中信任目录读写执行。"""
     fg = _ensure_file_guard_dict(permissions)
     gm: dict[str, Any] = fg["global"]  # type: ignore[assignment]
-    ted: list[Any] = fg["trusted_exec_directory"]  # type: ignore[assignment]
-    gm[dir_norm] = {"read_enable": True, "write_enable": True}
-    norm_ted = {str(x).replace("\\", "/").rstrip("/") for x in ted}
-    if dir_norm not in norm_ted:
-        ted.append(dir_norm)
+    cur = gm.get(dir_norm)
+    if not isinstance(cur, dict):
+        cur = {}
+    gm[dir_norm] = {**cur, "read": "allow", "write": "allow", "exec": "allow"}
 
 
 def _looks_like_path_pattern(pattern: str) -> bool:
@@ -566,7 +606,7 @@ def report_legacy_path_rules_at_load(permissions: dict[str, Any]) -> list[str]:
         logger.error(
             "[file_guard] permissions.rules.path_class_legacy id=%s tools=%s pattern=%r "
             "hint=请把该条目改写到 permissions.file_guard.global['<path>'] = "
-            "{read_enable: bool, write_enable: bool}（exec 类放 trusted_exec_directory）",
+            "{read: allow|deny|ask, write: allow|deny|ask, exec: allow|deny|ask}",
             rid or "<no-id>",
             path_tool_hits,
             pattern,

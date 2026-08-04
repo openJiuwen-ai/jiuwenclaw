@@ -53,18 +53,21 @@ def _make_handler(
     create_row: object | None = None,
     update_row: object | None = None,
     delete_ok: bool = True,
+    list_rows: list[object] | None = None,
 ) -> AsyncMock:
     handler = AsyncMock()
     handler.get = AsyncMock(return_value=get_row)
     handler.create = AsyncMock(return_value=create_row)
     handler.update = AsyncMock(return_value=update_row)
     handler.delete = AsyncMock(return_value=delete_ok)
+    handler.list_records = AsyncMock(return_value=list_rows if list_rows is not None else [])
     return handler
 
 
 def _row_obj(**kwargs: object) -> SimpleNamespace:
     defaults = {
         "id": 1,
+        "jiuwenclaw_id": "test-jid",
         "channel_id": "feishu-1",
         "channel_name": "Feishu",
         "channel_type": "feishu",
@@ -90,6 +93,11 @@ async def test_ws_sync_create_triggers_active_reload(channel_config_sync_module)
             channel_config_sync_module,
             "ensure_db_handler",
             AsyncMock(return_value=handler),
+        ),
+        patch.object(
+            channel_config_sync_module,
+            "get_jiuwenclaw_id",
+            return_value="test-jid",
         ),
         patch.object(channel_config_sync_module, "maybe_trigger_channel_config_reload", reload),
     ):
@@ -128,6 +136,11 @@ async def test_ws_sync_deactivate_triggers_remove_reload(channel_config_sync_mod
             "ensure_db_handler",
             AsyncMock(return_value=handler),
         ),
+        patch.object(
+            channel_config_sync_module,
+            "get_jiuwenclaw_id",
+            return_value="test-jid",
+        ),
         patch.object(channel_config_sync_module, "maybe_trigger_channel_config_reload", reload),
     ):
         result = await apply_channel_config(
@@ -152,6 +165,11 @@ async def test_ws_sync_delete_triggers_remove_reload(channel_config_sync_module)
             "ensure_db_handler",
             AsyncMock(return_value=handler),
         ),
+        patch.object(
+            channel_config_sync_module,
+            "get_jiuwenclaw_id",
+            return_value="test-jid",
+        ),
         patch.object(channel_config_sync_module, "maybe_trigger_channel_config_reload", reload),
     ):
         result = await apply_channel_config(
@@ -161,3 +179,69 @@ async def test_ws_sync_delete_triggers_remove_reload(channel_config_sync_module)
     assert result is None
     change = reload.await_args.args[0]
     assert change.op == "remove"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("empty_jid", [None, ""])
+async def test_ws_sync_raises_when_jiuwenclaw_id_unset(
+    channel_config_sync_module,
+    empty_jid,
+):
+    apply_channel_config = channel_config_sync_module.apply_channel_config
+    ensure_db = AsyncMock()
+
+    with (
+        patch.object(channel_config_sync_module, "ensure_db_handler", ensure_db),
+        patch.object(
+            channel_config_sync_module,
+            "get_jiuwenclaw_id",
+            return_value=empty_jid,
+        ),
+    ):
+        with pytest.raises(ValueError, match="jiuwenclaw_id is not set"):
+            await apply_channel_config(
+                {"op": "create", "channel": {"channel_id": "feishu-1"}},
+            )
+
+    ensure_db.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_list_active_channel_config_rows_filters_by_jiuwenclaw_id(
+    channel_config_sync_module,
+):
+    list_active = channel_config_sync_module.list_active_channel_config_rows
+    table = channel_config_sync_module._TABLE
+    active = _row_obj(channel_id="feishu-1", status="active")
+    inactive = _row_obj(id=2, channel_id="feishu-2", status="inactive")
+    handler = _make_handler(list_rows=[active, inactive])
+
+    with patch.object(
+        channel_config_sync_module,
+        "get_jiuwenclaw_id",
+        return_value="test-jid",
+    ):
+        result = await list_active(handler)
+
+    handler.list_records.assert_awaited_once_with(table, {"jiuwenclaw_id": "test-jid"})
+    assert len(result) == 1
+    assert result[0]["channel_id"] == "feishu-1"
+    assert result[0]["status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_list_active_channel_config_rows_empty_jiuwenclaw_id_skips_db(
+    channel_config_sync_module,
+):
+    list_active = channel_config_sync_module.list_active_channel_config_rows
+    handler = _make_handler(list_rows=[_row_obj()])
+
+    with patch.object(
+        channel_config_sync_module,
+        "get_jiuwenclaw_id",
+        return_value=None,
+    ):
+        result = await list_active(handler)
+
+    assert result == []
+    handler.list_records.assert_not_awaited()

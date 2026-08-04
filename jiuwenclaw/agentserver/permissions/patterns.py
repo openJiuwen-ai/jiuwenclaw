@@ -562,7 +562,7 @@ def persist_external_directory_allow(paths: list[str]) -> None:
 def persist_cli_trusted_directory(raw_path: str) -> dict[str, Any]:
     """CLI ``command.add_dir``：全局信任目录子树。
 
-    Phase-1 起：路径维度写入 ``permissions.file_guard.global / trusted_exec_directory``
+    Phase-1 起：路径维度写入 ``permissions.file_guard.global``（含 ``exec``）
     （读 / 写 / 执行均放行），并在 ``tiered_policy`` 下追加 ``approval_overrides`` 让 shell
     命令字符串里出现该路径时也直接放行。
 
@@ -609,7 +609,7 @@ def persist_cli_trusted_directory(raw_path: str) -> dict[str, Any]:
 
         persist_permissions_mutate(mutate, persist_scope="base")
         logger.info(
-            "[PermissionEngine] permission.persist.cli_add_dir.file_guard.write path=%s targets=global+trusted_exec",
+            "[PermissionEngine] permission.persist.cli_add_dir.file_guard.write path=%s targets=global.read+write+exec",
             dir_norm,
         )
         logger.info(

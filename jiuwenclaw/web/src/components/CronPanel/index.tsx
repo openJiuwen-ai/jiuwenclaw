@@ -43,6 +43,9 @@ interface CronJob {
   compat_mode?: string;
   created_at: number | string | null;
   updated_at: number | string | null;
+  group_id?: string;
+  bot_id?: string;
+  user_id?: string;
 }
 
 interface CronPreviewItem {

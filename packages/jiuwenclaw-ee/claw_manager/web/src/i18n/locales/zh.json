@@ -41,7 +41,7 @@
     "daysAgo": "{{count}}d 前"
   },
   "brand": {
-    "title": "JiuwenClaw",
+    "title": "{{productName}}",
     "sub": "Claw Manager"
   },
   "nav": {
@@ -50,6 +50,7 @@
     "instances": "实例管理",
     "config": "全局配置",
     "modelTemplates": "模型模板",
+    "embeddingTemplates": "Embedding 模板",
     "extensionTemplates": "扩展配置模板",
     "skillWhitelistTemplates": "Skill 白名单模板",
     "serviceConfigTemplates": "服务配置模板",
@@ -74,7 +75,7 @@
   },
   "topology": {
     "title": "实例管理",
-    "subtitle": "管理 JiuwenClaw 实例",
+    "subtitle": "管理 {{productName}} 实例",
     "createInstance": "新建实例",
     "provisionLocal": "本地一键拉起",
     "instanceStatus": "实例状态",
@@ -128,7 +129,9 @@
   "instanceConfig": {
     "tabs": {
       "channel": "Channel",
-      "logMasking": "日志脱敏"
+      "logMasking": "日志脱敏",
+      "logging": "日志级别",
+      "permissions": "权限配置"
     },
     "channel": {
       "register": "注册 Channel",
@@ -148,12 +151,74 @@
       "new": "新建脱敏规则",
       "edit": "编辑脱敏规则",
       "ruleName": "规则名称",
-      "pattern": "匹配正则",
+      "ruleDescription": "规则描述",
+      "pattern": "匹配正则表达式",
+      "patternPlaceholder": "例如 (?i)(api[_-]?key)\\s*[:=]\\s*\\S+",
       "replacement": "替换文本",
       "priority": "优先级",
+      "priorityHint": "按优先级从大到小依次应用脱敏规则。",
+      "priorityInvalid": "请填写有效的优先级",
       "source": "来源",
+      "source_builtin": "内置",
+      "source_custom": "自定义",
       "data": "扩展数据 (JSON, 可选)",
-      "deleteConfirm": "确认删除该日志脱敏规则？将同步通知 Gateway。"
+      "updatedAt": "修改时间",
+      "searchPlaceholder": "搜索规则ID、名称、描述、匹配正则表达式、替换文本、优先级、来源",
+      "fieldRequired": "请填写{{field}}",
+      "deleteConfirm": "确认删除该日志脱敏规则？"
+    },
+    "logging": {
+      "intro": "对应 config.yaml 的 logging 段。保存后写入 Manager DB 并下发至 Gateway 热更新；未托管时使用实例本地 config.yaml。",
+      "managed": "Manager 托管",
+      "yamlFallback": "使用 config.yaml",
+      "resetToYaml": "删除托管配置",
+      "deleteConfirm": "确认删除 Manager 托管的 logging 配置？Gateway 将回退到 config.yaml。",
+      "deleted": "已删除托管配置，Gateway 将回退到 config.yaml",
+      "level": "默认级别 (level)",
+      "levelHint": "未单独指定各日志文件级别时使用",
+      "consoleLevel": "控制台级别 (console_level)",
+      "consoleLevelHint": "控制台输出；省略时沿用 level",
+      "gateway": "Gateway 日志 (gateway)",
+      "channel": "Channel 日志 (channel)",
+      "agentServer": "AgentServer 日志 (agent_server)",
+      "full": "汇总日志 (full)",
+      "fullHint": "full.log 汇总输出级别"
+    },
+    "permissions": {
+      "sections": {
+        "general": "基础设置",
+        "tools": "工具权限",
+        "rules": "Shell 规则",
+        "fileGuard": "文件路径",
+        "advanced": "高级"
+      },
+      "resetToYaml": "删除托管配置",
+      "deleteConfirm": "确认删除 Manager 托管的 permissions 配置？Gateway 将回退到 config.yaml。",
+      "deleted": "已删除托管配置，Gateway 将回退到 config.yaml",
+      "enabled": "启用权限管控",
+      "defaults": "未列明工具的默认动作",
+      "defaultsHint": "allow / ask / deny，对 tools 中未单独配置的工具生效",
+      "denyGuidanceMessage": "拒绝提示文案",
+      "denyGuidanceMessageHint": "工具被拒绝时展示给用户的说明（可选）",
+      "toolName": "工具名称",
+      "action": "动作",
+      "newTool": "添加工具权限",
+      "editTool": "编辑工具权限",
+      "toolsHint": "整工具级 allow / ask / deny，优先级高于 Shell 规则",
+      "ruleId": "规则 ID",
+      "rulePattern": "匹配模式",
+      "newRule": "添加 Shell 规则",
+      "editRule": "编辑 Shell 规则",
+      "rulesHint": "仅匹配 shell 命令文本；action 为 allow 或 deny",
+      "fileGuardWorkspace": "Workspace",
+      "fileGuardRwEnabled": "Workspace 内默认放行读写",
+      "fileGuardGlobal": "Global 白名单 (JSON)",
+      "fileGuardTrustedExec": "可信执行目录 (JSON 数组)",
+      "fileGuardToolBindings": "Tool Bindings (JSON)",
+      "exampleTag": "示例模板",
+      "commandIntent": "命令意图抽取",
+      "commandIntentEnabled": "启用命令意图抽取",
+      "commandIntentTimeout": "超时（秒）"
     }
   },
   "modelTemplate": {
@@ -181,9 +246,34 @@
     "searchPlaceholder": "搜索模板 ID、模板名称、模板描述、Provider、模型ID、模型类型、API Base",
     "updatedAt": "修改时间",
     "fieldRequired": "请填写{{field}}",
+    "apiBaseInvalid": "API Base 须为合法的 http(s) URL，例如 https://api.example.com/v1",
     "timeoutMin": "超时需大于 0",
     "retryCountMin": "重试次数不能小于 0",
+    "unsafeText": "{{field}} 含有非法 HTML/脚本或疑似 SQL 注入内容，请修改后重试",
     "deleteConfirm": "确认删除该模型模板？该模板可能被多个实例策略引用，请确认无副作用。"
+  },
+  "embeddingTemplate": {
+    "title": "Embedding 模板",
+    "subtitle": "维护可复用的向量模型配置",
+    "new": "新建 Embedding 模板",
+    "edit": "编辑 Embedding 模板",
+    "templateName": "模板名称",
+    "templateDescription": "模板描述",
+    "embedTags": "Embedding 标签",
+    "embedTagsHint": "逗号分隔，例如 memory,task_memory",
+    "apiBase": "API Base",
+    "apiKey": "API Key",
+    "modelId": "模型 ID",
+    "modelProvider": "Provider",
+    "parameters": "请求参数",
+    "clientConfig": "客户端配置",
+    "data": "扩展数据",
+    "updatedAt": "修改时间",
+    "searchPlaceholder": "搜索模板 ID、名称、描述、Provider、模型 ID 或 API Base",
+    "fieldRequired": "请填写{{field}}",
+    "apiBaseInvalid": "API Base 须为合法的 http(s) URL，例如 https://api.example.com/v1",
+    "unsafeText": "{{field}} 含有非法 HTML/脚本或疑似 SQL 注入内容，请修改后重试",
+    "deleteConfirm": "确认删除该 Embedding 模板？该模板可能被多个实例策略引用，请确认无副作用。"
   },
   "extensionTemplate": {
     "title": "扩展配置模板",
@@ -202,7 +292,8 @@
     "hookParams": "params",
     "hookParamsHint": "传入钩子函数的静态参数 (JSON)",
     "hookSchedule": "schedule",
-    "hookScheduleHint": "仅钩子类型为 schedule 时必填；cron 或间隔表达式，如 0 */5 * * *",
+    "hookScheduleHint": "仅钩子类型为 schedule 时必填；cron 表达式，如 0 */5 * * *",
+    "hookScheduleInvalid": "schedule 须为合法 cron（5/6/7 段且字段取值在有效范围内，如 0 */5 * * *）",
     "hookData": "data",
     "hookDataHint": "单条钩子扩展配置 (JSON)",
     "customConfig": "自定义配置",
@@ -210,6 +301,7 @@
     "updatedAt": "修改时间",
     "searchPlaceholder": "搜索模板 ID、模板名称、模板描述、目标组件、钩子类型",
     "fieldRequired": "请填写{{field}}",
+    "unsafeText": "{{field}} 含有非法 HTML/脚本或疑似 SQL 注入内容，请修改后重试",
     "deleteConfirm": "确认删除该扩展模板？"
   },
   "skillWhitelistTemplate": {
@@ -228,6 +320,8 @@
     "filterSkillId": "按 Skill ID 筛选",
     "filterSkillSource": "按 Skill来源筛选",
     "fieldRequired": "请填写{{field}}",
+    "skillSourceInvalid": "Skill来源须为合法的 http(s) URL，例如 https://skillhub.example.com/",
+    "unsafeText": "{{field}} 含有非法 HTML/脚本或疑似 SQL 注入内容，请修改后重试",
     "deleteConfirm": "确认删除该 Skill 白名单模板？该模板可能被多个实例策略引用，请确认无副作用。"
   },
   "serviceConfigTemplate": {
@@ -238,9 +332,14 @@
     "templateName": "模板名称",
     "templateDescription": "模板描述",
     "fieldRequired": "请填写{{field}}",
+    "numberOutOfRange": "{{field}} 须在 {{min}}–{{max}} 之间",
+    "poolRangeInvalid": "最小空闲服务数不能大于最大服务数",
+    "cpuQuantityInvalid": "{{field}} 须为合法 K8s CPU 规格，如 500m、2、0.5",
+    "memoryQuantityInvalid": "{{field}} 须为带单位的内存规格（Ki/Mi/Gi/K/M/G），如 512Mi、2Gi",
+    "pathInvalid": "{{field}} 须为合法绝对路径，如 / 或 /data/nfs",
+    "unsafeText": "{{field}} 含有非法 HTML/脚本或疑似 SQL 注入内容，请修改后重试",
     "searchPlaceholder": "搜索模板 ID、模板名称、模板描述、AgentServer镜像",
     "agentImage": "AgentServer镜像",
-    "namespace": "Namespace",
     "podName": "Pod名称",
     "containerName": "容器名称",
     "containerPort": "容器端口",
@@ -274,7 +373,6 @@
     "sessionTtl": "会话TTL（秒）",
     "poolRange": "空闲/最大",
     "updatedAt": "修改时间",
-    "filterNamespace": "按 Namespace 筛选",
     "sectionContainer": "容器与K8S",
     "sectionReadiness": "就绪探针",
     "sectionNfs": "NFS存储",
@@ -318,6 +416,7 @@
       "searchPlaceholder": "搜索策略 ID、策略名称、策略描述或优先级"
     },
     "fieldRequired": "请填写{{field}}",
+    "priorityHint": "按优先级从大到小匹配，同优先级按修改时间从大到小匹配。只取第一条匹配到的策略应用。",
     "templateRef": {
       "title": "模板引用",
       "slot": "槽位",
@@ -346,6 +445,7 @@
         "video_model": "视频模型 (video_model)",
         "audio_model": "音频模型 (audio_model)",
         "vision_model": "视觉模型 (vision_model)",
+        "embedding_model": "Embedding 模型 (embedding_model)",
         "skill_whitelist": "Skill 白名单 (skill_whitelist)",
         "extension_config": "扩展配置 (extension_config)",
         "service_config": "服务配置 (service_config)"
@@ -381,6 +481,7 @@
       "rawHint": "当前表达式无法解析为可视化条件，可继续编辑原文或重置为可视化编辑。",
       "resetToVisual": "重置为可视化编辑",
       "invalid": "请至少填写一条匹配条件的值",
+      "invalidSyntax": "匹配表达式不符合规范：仅支持 user_id / group_id / bot_id 与 == / != / and / or；全匹配请留空",
       "fields": {
         "group_id": "group_id",
         "user_id": "user_id",

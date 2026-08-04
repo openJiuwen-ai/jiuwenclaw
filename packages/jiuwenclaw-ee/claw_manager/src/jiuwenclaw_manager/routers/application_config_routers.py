@@ -1,4 +1,4 @@
-"""应用配置 API：channel 注册与管理、logging 配置、embed 配置（针对特定 Gateway 实例的配置）。"""
+"""应用配置 API：channel 注册与管理及实例级应用配置。"""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ from openjiuwen_runtime.foundation.db.handler import DBHandler
 from pydantic import BaseModel, Field
 
 from jiuwenclaw_manager.core.application_config.channel_config import ChannelConfigService
-from jiuwenclaw_manager.core.application_config.embed_config import EmbedConfigService
 from jiuwenclaw_manager.core.application_config.task_memory_config import (TaskMemoryConfigService,
                                                                            TaskMemoryUpsertParams)
 
@@ -18,10 +17,12 @@ from jiuwenclaw_manager.core.application_config.log_masking_rule import (
 )
 from jiuwenclaw_manager.schemas.application_config_schemas import (
     LogMaskingRuleCreateBody,
+    LogMaskingRuleListQuery,
     LogMaskingRuleUpdateBody,
 )
 
 from jiuwenclaw_manager.core.application_config.logging_config import LoggingConfigService
+from jiuwenclaw_manager.core.application_config.memory_config import MemoryConfigService
 from jiuwenclaw_manager.core.application_config.permissions_config import PermissionsConfigService
 
 from jiuwenclaw_manager.infrastructure.db import get_db_handler
@@ -32,10 +33,6 @@ application_config_router = APIRouter()
 
 def _channel_config_svc(handler: DBHandler) -> ChannelConfigService:
     return ChannelConfigService(handler)
-
-
-def _embed_config_svc(handler: DBHandler) -> EmbedConfigService:
-    return EmbedConfigService(handler)
 
 
 def _task_memory_config_svc(handler: DBHandler) -> TaskMemoryConfigService:
@@ -52,6 +49,10 @@ def _logging_config_svc(handler: DBHandler) -> LoggingConfigService:
 
 def _permissions_config_svc(handler: DBHandler) -> PermissionsConfigService:
     return PermissionsConfigService(handler)
+
+
+def _memory_config_svc(handler: DBHandler) -> MemoryConfigService:
+    return MemoryConfigService(handler)
 
 
 class ChannelRegisterRequest(BaseModel):
@@ -182,11 +183,11 @@ async def delete_channel(
 async def list_log_masking_rules(
     jiuwenclaw_id: str,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
-    enabled: bool | None = Query(default=None),
+    query: Annotated[LogMaskingRuleListQuery, Query()],
 ):
     svc = _log_masking_rule_svc(handler)
     try:
-        data = await svc.list(jiuwenclaw_id, enabled=enabled)
+        data = await svc.list(jiuwenclaw_id, query)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ResponseModel(code=200, message="success", data=data)
@@ -331,67 +332,6 @@ async def delete_logging_config(
     return ResponseModel(code=200, message="success")
 
 
-class EmbedUpsertRequest(BaseModel):
-    embed_api_key: str = Field(default="", max_length=512)
-    embed_base_url: str = Field(default="", max_length=1024)
-    embed_model: str = Field(default="", max_length=128)
-
-
-@application_config_router.put(
-    "/{jiuwenclaw_id}/embed", response_model=ResponseModel
-)
-async def upsert_embed(
-    jiuwenclaw_id: str,
-    body: EmbedUpsertRequest,
-    handler: Annotated[DBHandler, Depends(get_db_handler)],
-):
-    svc = _embed_config_svc(handler)
-    try:
-        data = await svc.upsert(
-            jiuwenclaw_id=jiuwenclaw_id,
-            embed_api_key=body.embed_api_key,
-            embed_base_url=body.embed_base_url,
-            embed_model=body.embed_model,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return ResponseModel(code=200, message="success", data=data)
-
-
-@application_config_router.get(
-    "/{jiuwenclaw_id}/embed", response_model=ResponseModel
-)
-async def get_embed(
-    jiuwenclaw_id: str,
-    handler: Annotated[DBHandler, Depends(get_db_handler)],
-):
-    svc = _embed_config_svc(handler)
-    try:
-        data = await svc.get(jiuwenclaw_id=jiuwenclaw_id)
-    except ValueError as exc:
-        if "not found" in str(exc):
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return ResponseModel(code=200, message="success", data=data)
-
-
-@application_config_router.delete(
-    "/{jiuwenclaw_id}/embed", response_model=ResponseModel
-)
-async def delete_embed(
-    jiuwenclaw_id: str,
-    handler: Annotated[DBHandler, Depends(get_db_handler)],
-):
-    svc = _embed_config_svc(handler)
-    try:
-        await svc.delete(jiuwenclaw_id=jiuwenclaw_id)
-    except ValueError as exc:
-        if "not found" in str(exc):
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return ResponseModel(code=200, message="success")
-
-
 class TaskMemoryUpsertRequest(BaseModel):
     enabled: bool = Field(default=False)
     llm_model: str = Field(default="", max_length=256)
@@ -505,6 +445,63 @@ async def delete_permissions_config(
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _permissions_config_svc(handler)
+    try:
+        await svc.delete(jiuwenclaw_id=jiuwenclaw_id)
+    except ValueError as exc:
+        if "not found" in str(exc):
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResponseModel(code=200, message="success")
+
+
+class MemoryConfigUpsertRequest(BaseModel):
+    body: dict = Field(
+        ...,
+        description=(
+            "memory 段配置，结构与 config.yaml::memory 一致（mode/engine/"
+            "forbidden_memory_definition/external）"
+        ),
+    )
+
+
+@application_config_router.put(
+    "/{jiuwenclaw_id}/memory", response_model=ResponseModel
+)
+async def upsert_memory_config(
+    jiuwenclaw_id: str,
+    body: MemoryConfigUpsertRequest,
+    handler: Annotated[DBHandler, Depends(get_db_handler)],
+):
+    svc = _memory_config_svc(handler)
+    try:
+        data = await svc.upsert(jiuwenclaw_id=jiuwenclaw_id, body=body.body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResponseModel(code=200, message="success", data=data)
+
+
+@application_config_router.get(
+    "/{jiuwenclaw_id}/memory", response_model=ResponseModel
+)
+async def get_memory_config(
+    jiuwenclaw_id: str,
+    handler: Annotated[DBHandler, Depends(get_db_handler)],
+):
+    svc = _memory_config_svc(handler)
+    data = await svc.get(jiuwenclaw_id=jiuwenclaw_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="memory config not found")
+    return ResponseModel(code=200, message="success", data=data)
+
+
+@application_config_router.delete(
+    "/{jiuwenclaw_id}/memory", response_model=ResponseModel
+)
+async def delete_memory_config(
+    jiuwenclaw_id: str,
+    handler: Annotated[DBHandler, Depends(get_db_handler)],
+):
+    svc = _memory_config_svc(handler)
     try:
         await svc.delete(jiuwenclaw_id=jiuwenclaw_id)
     except ValueError as exc:

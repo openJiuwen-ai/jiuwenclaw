@@ -228,7 +228,7 @@ def encode_agent_response_for_wire(
             return _fallback_wire_unary_from_legacy(
                 asdict(resp), response_id=response_id, sequence=sequence, exc=te
             )
-        logger.info(
+        logger.debug(
             "[E2A][wire][out] unary request_id=%s response_id=%s response_kind=%s legacy_stashed=false",
             rid,
             response_id,
@@ -283,7 +283,7 @@ def encode_agent_chunk_for_wire(
                 exc=te,
                 is_stream=is_stream,
             )
-        logger.info(
+        logger.debug(
             (
                 "[E2A][wire][out] chunk request_id=%s response_id=%s seq=%s response_kind=%s "
                 "is_final=%s legacy_stashed=false"

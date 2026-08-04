@@ -46,6 +46,9 @@ spec:
       containers:
         - name: <<POSTGRES_NAME>>
           image: <<POSTGRES_IMAGE>>
+          args:
+            - -c
+            - max_connections=<<POSTGRES_MAX_CONNECTION>>
           env:
             - name: POSTGRES_PASSWORD
               value: "<<POSTGRES_PASSWORD>>"
@@ -73,6 +76,11 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 2
+          resources:
+            requests:
+              memory: "<<POSTGRES_MEMORY_REQUEST>>"
+            limits:
+              memory: "<<POSTGRES_MEMORY_LIMIT>>"
       volumes:
         - name: <<POSTGRES_NAME>>-data
           persistentVolumeClaim:
@@ -94,7 +102,7 @@ spec:
   storageClassName: ""
   nfs:
     server: <<NFS_SERVER_ADDR>>
-    path: <<POSTGRES_NFS_PATH>>
+    path: <<NFS_SHARE_PATH>>/<<POSTGRES_NAME>>
     readOnly: false
   mountOptions:
     - nfsvers=4

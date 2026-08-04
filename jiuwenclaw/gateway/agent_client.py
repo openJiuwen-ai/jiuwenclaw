@@ -254,7 +254,15 @@ class WebSocketAgentServerClient(AgentServerClient):
                     meta = data.get("metadata")
                     if isinstance(meta, dict) and meta.get(E2A_WIRE_SERVER_PUSH_KEY):
                         if self._on_server_push is not None:
-                            asyncio.create_task(self._on_server_push(data))
+                            async def _run_server_push(data=data):
+                                try:
+                                    await self._on_server_push(data)
+                                except Exception:
+                                    logger.exception(
+                                        "[WebSocketAgentServerClient] server_push 处理失败"
+                                    )
+
+                            asyncio.create_task(_run_server_push())
                         else:
                             logger.warning(
                                 "[WebSocketAgentServerClient] 收到 server_push 但未注册 handler，已丢弃: "
@@ -477,12 +485,18 @@ class WebSocketAgentServerClient(AgentServerClient):
 
         等待一段时间后清理，确保 AgentServer 的残余消息能够被静默丢弃而不打印日志。
         """
-        # 等待足够时间让 AgentServer 的残余消息被接收和丢弃
-        await asyncio.sleep(2.0)  # 2秒应该足够
-        async with self._queue_lock:
-            self._cancelled_request_ids.discard(rid)
-            logger.debug(
-                "[WebSocketAgentServerClient] 已取消标记已清理: request_id=%s",
+        try:
+            # 等待足够时间让 AgentServer 的残余消息被接收和丢弃
+            await asyncio.sleep(2.0)  # 2秒应该足够
+            async with self._queue_lock:
+                self._cancelled_request_ids.discard(rid)
+                logger.debug(
+                    "[WebSocketAgentServerClient] 已取消标记已清理: request_id=%s",
+                    rid,
+                )
+        except Exception:
+            logger.exception(
+                "[WebSocketAgentServerClient] 清理已取消标记失败: request_id=%s",
                 rid,
             )
 

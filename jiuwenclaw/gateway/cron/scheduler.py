@@ -384,6 +384,13 @@ class CronSchedulerService:
             state.started_at = self._now_fn()
             try:
                 ts = format(int(time.time() * 1000), "x")
+                routing: dict[str, str] = {}
+                if job.group_id:
+                    routing["group_id"] = job.group_id
+                if job.bot_id:
+                    routing["bot_id"] = job.bot_id
+                if job.user_id:
+                    routing["user_id"] = job.user_id
                 envelope = e2a_from_agent_fields(
                     request_id=f"cron-{run_id}",
                     channel_id="__cron__",
@@ -393,6 +400,7 @@ class CronSchedulerService:
                         "content": job.description,
                         "query": job.description,
                         "mode": job.mode or "agent",
+                        **routing,
                         "cron": {
                             "job_id": job.id,
                             "job_name": job.name,
@@ -403,7 +411,10 @@ class CronSchedulerService:
                     },
                     is_stream=False,
                     timestamp=self._now_fn(),
-                    metadata={"cron": {"job_id": job.id, "run_id": run_id}},
+                    metadata={
+                        "cron": {"job_id": job.id, "run_id": run_id},
+                        **routing,
+                    },
                 )
                 resp = await self._agent_client.send_request(envelope)
                 text = _extract_text_from_agent_payload(resp.payload)

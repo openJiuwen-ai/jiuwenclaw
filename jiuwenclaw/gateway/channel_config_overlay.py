@@ -19,6 +19,10 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from jiuwenclaw.deployment_mode import (
+    VALID_DEPLOYMENT_MODES,
+    channel_config_overlay_default,
+)
 from jiuwenclaw.gateway.channel_config_db import load_active_channel_config_rows
 from jiuwenclaw.utils import logger
 
@@ -94,13 +98,13 @@ async def trigger_channel_config_reload(
 
 def _deployment_mode_from_env() -> str | None:
     raw = os.getenv("DEPLOYMENT_MODE", "").strip().lower()
-    if raw in ("standalone", "active-standby"):
+    if raw in VALID_DEPLOYMENT_MODES:
         return raw
     return None
 
 
 def _gateway_deployment_mode() -> str:
-    """读取 ``gateway.deployment_mode``（``standalone`` | ``active-standby``）。"""
+    """读取 ``gateway.deployment_mode``（``standalone`` | ``active-standby`` | ``distributed``）。"""
     mode = ""
     try:
         from jiuwenclaw.config import get_config
@@ -126,7 +130,7 @@ def _gateway_deployment_mode() -> str:
 
     if not mode:
         mode = _deployment_mode_from_env() or "standalone"
-    if mode not in ("standalone", "active-standby"):
+    if mode not in VALID_DEPLOYMENT_MODES:
         logger.warning(
             "[channel_config_overlay] invalid gateway.deployment_mode=%r; defaulting to standalone",
             mode,
@@ -139,10 +143,10 @@ def channel_config_overlay_enabled() -> bool:
     """是否用 ``channel_config`` 表作为运行时 ``channels`` 的唯一来源。
 
     与 ``gateway.deployment_mode`` 对齐：
-    - ``standalone``：仅 ``config.yaml`` 的 ``channels``；
+    - ``standalone`` / ``distributed``：仅 ``config.yaml`` 的 ``channels``；
     - ``active-standby``：企业/K8s 部署，仅 DB（``channel_config`` active 行）。
     """
-    return _gateway_deployment_mode() == "active-standby"
+    return channel_config_overlay_default(_gateway_deployment_mode())
 
 
 async def fetch_active_channel_config_rows() -> list[dict[str, Any]]:

@@ -44,6 +44,48 @@ export interface ModelTemplateCreateBody {
 
 export type ModelTemplateUpdateBody = Partial<ModelTemplateCreateBody>;
 
+export interface EmbeddingTemplate {
+  id: number;
+  template_id: string;
+  template_name: string;
+  description?: string | null;
+  embed_tags?: string[] | null;
+  api_base: string;
+  api_key: string;
+  model_id: string;
+  model_provider: string;
+  parameters?: Record<string, unknown> | null;
+  client_config?: Record<string, unknown> | null;
+  enabled: boolean;
+  data?: Record<string, unknown> | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface EmbeddingTemplateCreateBody {
+  template_name: string;
+  description?: string;
+  embed_tags?: string[];
+  api_base: string;
+  api_key: string;
+  model_id: string;
+  model_provider: string;
+  parameters?: Record<string, unknown>;
+  client_config?: Record<string, unknown>;
+  enabled?: boolean;
+  data?: Record<string, unknown>;
+}
+
+export type EmbeddingTemplateUpdateBody = Partial<EmbeddingTemplateCreateBody>;
+
+/** 与设计文档 hook_config 字段说明一致 */
+export interface HookConfig {
+  handler: string;
+  params?: Record<string, unknown>;
+  schedule?: string;
+  data?: Record<string, unknown>;
+}
+
 export interface ExtensionConfigTemplate {
   id: number;
   template_id: string;
@@ -51,7 +93,7 @@ export interface ExtensionConfigTemplate {
   description?: string | null;
   component: string;
   hook_type: string;
-  hook_config: Record<string, unknown>;
+  hook_config: HookConfig;
   custom_config?: Record<string, unknown> | null;
   enabled: boolean;
   data?: Record<string, unknown> | null;
@@ -64,7 +106,7 @@ export interface ExtensionConfigTemplateCreateBody {
   description?: string;
   component: string;
   hook_type: string;
-  hook_config: Record<string, unknown>;
+  hook_config: HookConfig;
   custom_config?: Record<string, unknown>;
   enabled?: boolean;
   data?: Record<string, unknown>;
@@ -146,7 +188,7 @@ export interface ServiceConfigTemplateCreateBody {
   template_name: string;
   description?: string;
   agent_image: string;
-  namespace: string;
+  namespace?: string;
   pod_name?: string;
   container_name: string;
   container_port: number;

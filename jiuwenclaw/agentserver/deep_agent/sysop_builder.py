@@ -6,12 +6,17 @@
 - ``create_sandbox_sysop_card``: 构造 jiuwenbox 沙箱模式 SysOperationCard
 - ``create_local_sysop_card``: 构造本地模式 SysOperationCard
 - ``build_filesystem_policy``: 组装沙箱 filesystem policy（agent 工作区 + 用户自定义）
+- ``build_process_policy``: 获取当前进程的有效用户名与用户组名
 
 """
 
 from __future__ import annotations
 
+import grp
+import json
 import logging
+import os
+import pwd
 from pathlib import Path
 from typing import Any, Literal
 
@@ -52,44 +57,6 @@ def _normalize_fs_entry(entry: Any, default_permissions: str) -> dict[str, Any] 
     return None
 
 
-def _relax_workspace_perms(root: Path) -> None:
-    """递归把工作区放权到 sandbox uid 可写, 兜底 bwrap userns 不能映射 owner 的场景.
-
-    """
-    try:
-        if root.is_symlink():
-            return
-        is_dir = root.is_dir()
-    except OSError as exc:
-        logger.debug("[sysop_builder] cannot stat %s: %s; skip chmod", root, exc)
-        return
-    extra = 0o007 if is_dir else 0o006
-    try:
-        st_mode = root.stat().st_mode & 0o7777
-    except OSError as exc:
-        logger.debug("[sysop_builder] cannot read mode of %s: %s; skip chmod", root, exc)
-    else:
-        new_mode = st_mode | extra
-        if new_mode != st_mode:
-            try:
-                root.chmod(new_mode)
-            except OSError as exc:
-                logger.warning(
-                    "[sysop_builder] could not relax perms on %s (%s -> %s): %s; "
-                    "sandbox writes through bind mount may still hit Permission denied",
-                    root, oct(st_mode), oct(new_mode), exc,
-                )
-    if not is_dir:
-        return
-    try:
-        children = list(root.iterdir())
-    except OSError as exc:
-        logger.debug("[sysop_builder] cannot list %s: %s; skip recurse", root, exc)
-        return
-    for child in children:
-        _relax_workspace_perms(child)
-
-
 def _resolve_shared_dir(shared_dir: str | Path | None) -> Path | None:
     """Resolve and ensure the deep agent shared dir exists & is sandbox-writable."""
     if not shared_dir:
@@ -118,7 +85,6 @@ def _resolve_shared_dir(shared_dir: str | Path | None) -> Path | None:
             resolved,
         )
         return None
-    _relax_workspace_perms(resolved)
     return resolved
 
 
@@ -222,6 +188,30 @@ def build_filesystem_policy(
     return {"filesystem_policy": fs_policy}, upload_list
 
 
+def build_process_policy() -> dict[str, Any]:
+    """获取当前进程的有效用户名与用户组名。
+
+    使用 ``geteuid`` / ``getegid`` 解析有效身份；若 passwd/group 中无对应条目,
+    则回退为 UID/GID 的字符串形式。
+    """
+    uid = os.geteuid()
+    gid = os.getegid()
+    try:
+        username = pwd.getpwuid(uid).pw_name
+    except KeyError:
+        username = str(uid)
+    try:
+        groupname = grp.getgrgid(gid).gr_name
+    except KeyError:
+        groupname = str(gid)
+
+    process_policy: dict[str, Any] = {
+        "run_as_user": username,
+        "run_as_group": groupname,
+    }
+    return process_policy
+
+
 def create_sandbox_sysop_card(
     sandbox_url: str,
     sandbox_type: str,
@@ -250,6 +240,7 @@ def create_sandbox_sysop_card(
             files_runtime,
             shared_dir=shared_dir,
         )
+        policy['process'] = build_process_policy()
         extra_params: dict[str, Any] = {
             "policy": policy,
             "policy_mode": "append",
@@ -288,7 +279,6 @@ def create_sandbox_sysop_card(
             gateway_config=gateway_config,
         )
 
-        fs_policy = policy.get("filesystem_policy", {}) if isinstance(policy, dict) else {}
         logger.info(
             "[sysop_builder] sandbox SysOperationCard created:\n"
             "  base_url=%s sandbox_type=%s\n"
@@ -296,11 +286,7 @@ def create_sandbox_sysop_card(
             "  idle_ttl=%s idle_check_interval=%s\n"
             "  preserve_file_sharing_mode=%s\n"
             "  excluded_commands(%d)=%s\n"
-            "  filesystem_policy.files(%d)=%s\n"
-            "  filesystem_policy.directories(%d)=%s\n"
-            "  filesystem_policy.bind_mounts(%d)=%s\n"
-            "  filesystem_policy.read_write(%d)=%s\n"
-            "  filesystem_policy.read_only(%d)=%s\n"
+            "  policy=%s\n"
             "  preserve_files_upload(%d)=%s\n"
             "  policy_mode=%s",
             sandbox_url,
@@ -311,16 +297,7 @@ def create_sandbox_sysop_card(
             _PRESERVE_FILE_SHARING_MODE,
             len(extra_params["excluded_commands"]),
             extra_params["excluded_commands"] or "[]",
-            len(fs_policy.get("files") or []),
-            fs_policy.get("files") or [],
-            len(fs_policy.get("directories") or []),
-            fs_policy.get("directories") or [],
-            len(fs_policy.get("bind_mounts") or []),
-            fs_policy.get("bind_mounts") or [],
-            len(fs_policy.get("read_write") or []),
-            fs_policy.get("read_write") or [],
-            len(fs_policy.get("read_only") or []),
-            fs_policy.get("read_only") or [],
+            json.dumps(policy, ensure_ascii=False, indent=2),
             len(upload_list),
             upload_list or [],
             extra_params["policy_mode"],
@@ -356,6 +333,7 @@ def create_local_sysop_card(work_dir: str | None = None) -> SysOperationCard:
 __all__ = [
     "PreserveFileSharingMode",
     "build_filesystem_policy",
+    "build_process_policy",
     "create_sandbox_sysop_card",
     "create_local_sysop_card",
 ]

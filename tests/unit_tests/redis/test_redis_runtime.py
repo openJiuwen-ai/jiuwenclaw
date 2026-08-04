@@ -63,6 +63,53 @@ async def test_active_standby_without_redis_package_degrades(restore_import):
 
 
 @pytest.mark.asyncio
+async def test_distributed_without_redis_package_degrades(restore_import):
+    from jiuwenclaw.extensions.redis import (
+        get_declared_deployment_mode,
+        get_effective_distributed_redis_active,
+        init_gateway_redis_from_config,
+    )
+
+    builtins.__import__ = _block_redis_import
+
+    await init_gateway_redis_from_config({
+        "gateway": {"deployment_mode": "distributed"},
+        "redis": {"host": "127.0.0.1", "port": 6379},
+    })
+    assert get_declared_deployment_mode() == "distributed"
+    assert not get_effective_distributed_redis_active()
+
+
+@pytest.mark.asyncio
+async def test_distributed_generates_instance_id(restore_import):
+    from jiuwenclaw.extensions.redis import init_gateway_redis_from_config
+    from jiuwenclaw.extensions.redis.redis_runtime import get_gateway_instance_id
+
+    builtins.__import__ = _block_redis_import
+
+    await init_gateway_redis_from_config({
+        "gateway": {"deployment_mode": "distributed"},
+        "redis": {"host": "127.0.0.1", "port": 6379},
+    })
+    assert get_gateway_instance_id()
+
+
+@pytest.mark.asyncio
+async def test_invalid_mode_falls_back_to_standalone(restore_import):
+    from jiuwenclaw.extensions.redis import (
+        get_declared_deployment_mode,
+        get_effective_distributed_redis_active,
+        init_gateway_redis_from_config,
+    )
+
+    builtins.__import__ = _block_redis_import
+
+    await init_gateway_redis_from_config({"gateway": {"deployment_mode": "cluster"}})
+    assert get_declared_deployment_mode() == "standalone"
+    assert not get_effective_distributed_redis_active()
+
+
+@pytest.mark.asyncio
 async def test_active_standby_unreachable_server_degrades(restore_import):
     from jiuwenclaw.extensions.redis import (
         get_declared_deployment_mode,

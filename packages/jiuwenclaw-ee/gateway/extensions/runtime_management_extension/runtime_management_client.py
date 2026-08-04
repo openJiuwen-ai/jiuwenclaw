@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import importlib
 import uuid as uuid_mod
@@ -27,6 +28,7 @@ from openjiuwen_runtime.management.session.interfaces import (
     ISessionRequest,
 )
 from openjiuwen_runtime.management.session.k8s_service_handler import (
+    ConfigMapMount,
     ContainerSpec,
     HostPathMount,
     K8sDeployController,
@@ -192,8 +194,7 @@ def _coalesce_loaded_invoke_ids(
 
     loader_mod = import_manager_ws_client_module("core.enterprise_config.loader")
     ctx = loader_mod.routing_context_from_request(request)
-    default_svc = f"{ctx.group_id}{ctx.bot_id}"
-    default_ag = f"{ctx.group_id}{ctx.bot_id}{ctx.user_id}"
+    default_svc, default_ag = _default_invoke_ids(ctx.group_id, ctx.bot_id, ctx.user_id)
     return service_id or default_svc, agent_id or default_ag
 
 
@@ -256,6 +257,38 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _agent_bot_id_group_num() -> int:
+    """AGENT_BOT_ID_GROUP_NUM：>0 时对 bot_id 做稳定 hash 分桶后再拼默认 service_id/agent_id。"""
+    raw = os.getenv("AGENT_BOT_ID_GROUP_NUM", "0").strip()
+    try:
+        n = int(raw)
+    except ValueError:
+        logger.warning(
+            "[RuntimeManagementAgentClient] invalid AGENT_BOT_ID_GROUP_NUM=%r, fallback to 0",
+            raw,
+        )
+        return 0
+    return n if n > 0 else 0
+
+
+def _routing_bot_id(bot_id: str, group_num: int | None = None) -> str:
+    """Hash bot_id with SHA-256 and bucket; returns ``b{0..N-1}`` or raw bot_id when N<=0."""
+    n = _agent_bot_id_group_num() if group_num is None else group_num
+    if n <= 0:
+        return bot_id
+    digest = hashlib.sha256(bot_id.encode("utf-8")).hexdigest()
+    bucket = int(digest, 16) % n
+    return f"b{bucket}"
+
+
+def _default_invoke_ids(group_id: str, bot_id: str, user_id: str) -> tuple[str, str]:
+    """企业策略未配置 service_id/agent_id 时的默认拼接（bot_id 可按 env 分桶）。"""
+    routed_bot = _routing_bot_id(bot_id)
+    default_svc = f"{group_id}{routed_bot}"
+    default_ag = f"{group_id}{routed_bot}{user_id}"
+    return default_svc, default_ag
+
+
 class _SessionRequest(ISessionRequest):
     """ISessionRequest 实现。"""
 
@@ -289,7 +322,7 @@ class _SessionRequest(ISessionRequest):
         self._envelope.agent_id = ag or None
 
     @property
-    def session_id(self) -> str:
+    def service_id(self) -> str:
         return self._service_id
 
     @property
@@ -305,7 +338,10 @@ class _SessionRequest(ISessionRequest):
 
     @property
     def session_ttl(self) -> int:
-        # 优先使用 service_template 中的值，缺失时回退到环境变量
+        # 优先级：request.params.session_ttl > service_template > 环境变量
+        val = (self._req.params or {}).get("session_ttl")
+        if val is not None:
+            return int(val)
         cfg = self._service_template or {}
         val = cfg.get("session_ttl")
         if val is not None:
@@ -319,6 +355,16 @@ class _SessionRequest(ISessionRequest):
     @property
     def request_id(self) -> Optional[str]:
         return self._req.request_id
+
+    @property
+    def channel_id(self) -> str:
+        # 与 AgentServer 同源：直接取 AgentRequest.channel_id（由 e2a_to_agent_request 从 envelope.channel 写入）
+        return str(self._req.channel_id or "")
+
+    @property
+    def session_id(self) -> Optional[str]:
+        # chat_session 亲和：返回 AgentRequest.session_id（page session 或 IM 聊天会话标识）
+        return self._req.session_id
 
     @property
     def raw_msg(self) -> Any:
@@ -355,7 +401,20 @@ class E2aEnvelopResponseParser(IResponseParser):
         if is_e2a_response_wire_dict(data):
             try:
                 e2a = E2AResponse.from_dict(dict(data))
-                return bool(e2a.is_final)
+                if e2a.is_final:
+                    return True
+                # HITL 暂停帧（chat.invocation_paused / awaiting_user_input=True）：
+                # AgentServer 端故意以 is_final=False + e2a.chunk 下发，避免客户端
+                # 误判为“任务成功完成”。但对 Gateway 的流式传输而言，该帧表示
+                # 本次请求的流式会话已结束（等待用户答复会以新 request_id 恢复），
+                # 必须视为 completed，否则 Access.send_message 会一直挂起、
+                # inflight 不释放，直到 message_timeout(300s) 才超时。
+                body = e2a.body if isinstance(e2a.body, dict) else {}
+                if body.get("awaiting_user_input") is True:
+                    return True
+                if body.get("event_type") == "chat.invocation_paused":
+                    return True
+                return False
             except Exception:
                 return False
         return bool(data.get("is_complete"))
@@ -378,6 +437,10 @@ class RuntimeManagementAgentClient(AgentServerClient):
         self.gateway_id = uuid_mod.uuid4().hex[:8]
         self.namespace = os.getenv("NAMESPACE")
         self.kubeconfig = os.getenv("AGENT_SERVER_KUBECONFIG") or None
+        # 指向 gateway 自身 Pod 的 ownerReference：agentserver pod 设置后，
+        # gateway pod 被删除时 k8s GC 自动级联清理，避免 graceful shutdown
+        # 失败时遗留孤儿 agentserver pod。依赖 downward API 注入 POD_NAME/POD_UID。
+        self.owner_reference = self._build_gateway_pod_owner_reference()
         timezone = os.getenv("TZ", "Asia/Shanghai")
 
         agent_image = os.getenv("AGENT_SERVER_IMAGE")
@@ -388,6 +451,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
         agent_readiness_initial_delay = int(os.getenv("AGENT_SERVER_READINESS_INITIAL_DELAY", "10"))
         agent_readiness_period = int(os.getenv("AGENT_SERVER_READINESS_PERIOD", "5"))
         agent_custom_envs = os.getenv("AGENT_SERVER_CUSTOM_ENVS")
+        agent_server_home = os.getenv("AGENT_SERVER_HOME")
 
         container_name = os.getenv("AGENT_SERVER_CONTAINER_NAME", "agentserver")
         container_port = int(os.getenv("AGENT_SERVER_PORT", "8080"))
@@ -398,45 +462,65 @@ class RuntimeManagementAgentClient(AgentServerClient):
         service_concurrency = int(os.getenv("AGENT_SERVER_SERVICE_CONCURRENCY", "30"))
         service_ttl = int(os.getenv("AGENT_SERVER_SERVICE_TTL", "180"))
         autoscale_interval = float(os.getenv("AGENT_SERVER_AUTOSCALE_INTERVAL", "5"))
-        nfs_server = os.getenv("AGENT_SERVER_NFS_SERVER", "")
-        nfs_path = os.getenv("AGENT_SERVER_NFS_PATH", "/")
-        nfs_mount_path = os.getenv("AGENT_SERVER_NFS_MOUNT_PATH")
         claw_code_path = os.getenv("CLAW_CODE_PATH")
         claw_code_pod_path = os.getenv("CLAW_CODE_POD_PATH")
         runtime_code_path = os.getenv("RUNTIME_CODE_PATH")
         runtime_code_pod_path = os.getenv("RUNTIME_CODE_POD_PATH")
+        core_code_path = os.getenv("CORE_CODE_PATH")
+        core_code_pod_path = os.getenv("CORE_CODE_POD_PATH")
+        configmap_name = os.getenv("AGENT_SERVER_CONFIGMAP_NAME", "")
 
         agent_host_mounts: list[HostPathMount] = []
-        # 只有当 claw_code_path 和 claw_code_pod_path 都配置时，才添加挂载
-        if claw_code_path and claw_code_pod_path:
-            agent_host_mounts.append(
-                HostPathMount(
-                    host_path=claw_code_path,
-                    mount_path=claw_code_pod_path,
-                    read_only=False,
-                    host_path_type="Directory"
-                )
-            )
-        # 只有当 runtime_code_path 和 runtime_code_pod_path 都配置时，才添加挂载
-        if runtime_code_path and runtime_code_pod_path:
-            agent_host_mounts.append(
-                HostPathMount(
-                    host_path=runtime_code_path+"/management/openjiuwen_runtime/management",
-                    mount_path=runtime_code_pod_path+"/management",
-                    read_only=False,
-                    host_path_type="Directory"
-                )
-            )
-            agent_host_mounts.append(
-                HostPathMount(
-                    host_path=runtime_code_path+"/foundation/openjiuwen_runtime/foundation",
-                    mount_path=runtime_code_pod_path+"/foundation",
-                    read_only=False,
-                    host_path_type="Directory"
-                )
-            )
-
         mode = os.getenv("MODE")
+        if mode == "dev":
+            # 只有当 claw_code_path 和 claw_code_pod_path 都配置时，才添加挂载
+            if claw_code_path and claw_code_pod_path:
+                agent_host_mounts.append(
+                    HostPathMount(
+                        host_path=claw_code_path,
+                        mount_path=claw_code_pod_path,
+                        read_only=False,
+                        host_path_type="Directory"
+                    )
+                )
+            # 只有当 runtime_code_path 和 runtime_code_pod_path 都配置时，才添加挂载
+            if runtime_code_path and runtime_code_pod_path:
+                agent_host_mounts.append(
+                    HostPathMount(
+                        host_path=runtime_code_path+"/management/openjiuwen_runtime/management",
+                        mount_path=runtime_code_pod_path+"/management",
+                        read_only=False,
+                        host_path_type="Directory"
+                    )
+                )
+                agent_host_mounts.append(
+                    HostPathMount(
+                        host_path=runtime_code_path+"/foundation/openjiuwen_runtime/foundation",
+                        mount_path=runtime_code_pod_path+"/foundation",
+                        read_only=False,
+                        host_path_type="Directory"
+                    )
+                )
+            # 只有当 core_code_path 和 core_code_pod_path 都配置时，才添加挂载
+            if core_code_path and core_code_pod_path:
+                agent_host_mounts.append(
+                    HostPathMount(
+                        host_path=core_code_path+"/openjiuwen",
+                        mount_path=core_code_pod_path,
+                        read_only=False,
+                        host_path_type="Directory"
+                    )
+                )
+        agent_configmap_mounts: list[ConfigMapMount] = []
+        if configmap_name:
+            agent_configmap_mounts.append(
+                ConfigMapMount(
+                    config_map_name=configmap_name,
+                    mount_path=agent_server_home+"/.jiuwenclaw/config/config.yaml",
+                    sub_path="config.yaml",
+                    items=[("config.yaml", "config.yaml")],
+                )
+            )
         node_name = os.getenv("NODE_NAME")
         ready_timeout = int(os.getenv("AGENT_SERVER_READY_TIMEOUT", "300"))
         ready_poll_interval = int(os.getenv("AGENT_SERVER_READY_POLL_INTERVAL", "5"))
@@ -465,15 +549,28 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     host_path_type="Directory",
                 )
             )
+        if mode == "dev":
+            jiuwenbox_code_pod_path = os.getenv("JIUWENBOX_CODE_POD_PATH")
+            if claw_code_path and jiuwenbox_code_pod_path:
+                jiuwenbox_host_mounts.append(
+                    HostPathMount(
+                        host_path=claw_code_path+"/jiuwenbox/src/jiuwenbox",
+                        mount_path=jiuwenbox_code_pod_path,
+                        read_only=False,
+                        host_path_type="Directory"
+                    )
+                )
 
         def _agent_env_vars() -> dict[str, str]:
+            home = agent_server_home or "/root"
             base: dict[str, str] = {
                 "AGENT_SERVER_HOST": "0.0.0.0",
                 "TZ": timezone,
+                "HOME": home,
+                "LOG_ROOT_PATH": home + "/.logs"
             }
 
             for key, value in (
-                ("HOME", os.getenv("AGENT_SERVER_HOME")),
                 ("AGENT_RUNTIME", os.getenv("AGENT_RUNTIME")),
                 ("MODEL_PROVIDER", os.getenv("MODEL_PROVIDER")),
                 ("MODEL_NAME", os.getenv("MODEL_NAME")),
@@ -487,12 +584,28 @@ class RuntimeManagementAgentClient(AgentServerClient):
                 ("GATEWAY_DB_PASSWORD", os.getenv("GATEWAY_DB_PASSWORD")),
                 ("GATEWAY_DB_NAME", os.getenv("GATEWAY_DB_NAME")),
                 ("GATEWAY_PG_SCHEMA", os.getenv("GATEWAY_PG_SCHEMA")),
+                ("RUNTIME_DB_POOL_SIZE", os.getenv("RUNTIME_DB_POOL_SIZE")),
+                ("RUNTIME_DB_MAX_OVERFLOW", os.getenv("RUNTIME_DB_MAX_OVERFLOW")),
+                ("RUNTIME_DB_POOL_TIMEOUT", os.getenv("RUNTIME_DB_POOL_TIMEOUT")),
                 ("JIUWENCLAW_ID", os.getenv("JIUWENCLAW_ID")),
                 ("LLM_SSL_VERIFY", os.getenv("LLM_SSL_VERIFY")),
                 ("PYTHONPATH", os.getenv("PYTHONPATH")),
                 ("AGENT_SERVER_LOG_FILE", os.getenv("AGENT_SERVER_LOG_FILE")),
                 ("CLAW_LINK_AUTH_MODE", os.getenv("CLAW_LINK_AUTH_MODE")),
                 ("CLAW_LINK_TOKEN_TTL", os.getenv("CLAW_LINK_TOKEN_TTL")),
+                ("LOG_MASK_ENABLED", os.getenv("LOG_MASK_ENABLED")),
+                ("LOG_TO_FILE_ENABLED", os.getenv("LOG_TO_FILE_ENABLED")),
+                ("STREAMING_TOOL_WAIT_TIMEOUT_S", os.getenv("STREAMING_TOOL_WAIT_TIMEOUT_S")),
+                ("JINA_READER_ENDPOINT", os.getenv("JINA_READER_ENDPOINT")),
+                ("HTTP_PROXY", os.getenv("HTTP_PROXY")),
+                ("http_proxy", os.getenv("HTTP_PROXY")),
+                ("HTTPS_PROXY", os.getenv("HTTPS_PROXY")),
+                ("https_proxy", os.getenv("HTTPS_PROXY")),
+                ("NO_PROXY", os.getenv("NO_PROXY")),
+                ("no_proxy", os.getenv("NO_PROXY")),
+                ("FETCH_WEBPAGE_TIMEOUT", os.getenv("FETCH_WEBPAGE_TIMEOUT")),
+                ("FETCH_WEBPAGE_TOTAL_TIMEOUT", os.getenv("FETCH_WEBPAGE_TOTAL_TIMEOUT")),
+                ("AGENT_EXTRA_RAILS", os.getenv("AGENT_EXTRA_RAILS")),
             ):
                 if value is not None:
                     base[key] = value
@@ -511,11 +624,6 @@ class RuntimeManagementAgentClient(AgentServerClient):
                         "JIUWENBOX_FALLBACK_ON_FAILURE": _env_bool("JIUWENBOX_FALLBACK_ON_FAILURE", False),
                     }
                 )
-
-            if mode == "dev":
-                base["LOG_ROOT_PATH"] = "/root/.logs"
-            else:
-                base["LOG_ROOT_PATH"] = "/home/app/.logs"
 
             if agent_custom_envs and agent_custom_envs.strip():
                 try:
@@ -583,6 +691,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                         image_pull_policy=cfg.get("image_pull_policy") or image_pull_policy,
                         env_vars=_agent_env_vars(),
                         host_path_mounts=agent_host_mounts,
+                        configmap_mounts=agent_configmap_mounts,
                         allow_privilege_escalation=True if mode == "dev" else None,
                         run_as_non_root=False if mode == "dev" else None,
                         run_as_user=0 if mode == "dev" else None,
@@ -637,14 +746,17 @@ class RuntimeManagementAgentClient(AgentServerClient):
                             **RuntimeManagementAgentClient.POD_LABEL,
                             RuntimeManagementAgentClient.GATEWAY_ID_LABEL_KEY: _client.gateway_id,
                         },
+                        owner_reference=_client.owner_reference,
                         kubeconfig=cfg.get("kubeconfig") or _client.kubeconfig,
                         ready_timeout=(int(cfg["ready_timeout"])
                                        if cfg.get("ready_timeout") is not None else ready_timeout),
                         ready_poll_interval=(int(cfg["ready_poll_interval"])
                                              if cfg.get("ready_poll_interval") is not None else ready_poll_interval),
-                        nfs_server=cfg.get("nfs_server") or nfs_server,
-                        nfs_path=cfg.get("nfs_path") or nfs_path,
-                        nfs_mount_path=cfg.get("nfs_mount_path") or nfs_mount_path,
+                        mount_type=os.getenv("CLAW_MOUNT_TYPE"),
+                        pvc=os.getenv("CLAW_PVC"),
+                        nfs_server=cfg.get("nfs_server") or os.getenv("CLAW_NFS_SERVER", ""),
+                        nfs_path=cfg.get("nfs_path") or os.getenv("CLAW_NFS_PATH", "/"),
+                        mount_path=cfg.get("nfs_mount_path") or agent_server_home+"/.jiuwenclaw",
                         mode=cfg.get("mode") or mode,
                         node_name=cfg.get("node_name") or node_name,
                     )
@@ -678,14 +790,17 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     target_container=target_container,
                     invoke_path="",
                     ws_use_tls=False,
+                    ws_ping_interval=float(os.getenv("GATEWAY_CLAW_WS_PING_INTERVAL", "20.0")),
+                    ws_ping_timeout=float(os.getenv("GATEWAY_CLAW_WS_PING_TIMEOUT", "20.0")),
                     **_ch_kwargs,
                 )
 
-                # 从 service_template 中提取 service_id，如果存在则使用，否则让 ServiceHandler 自动生成 UUID
-                handler_service_id = cfg.get("service_id") if "service_id" in cfg else None
-
+                # Pod 实例 id 必须全局唯一（UUID），绝不复用业务逻辑 service_id：
+                # 同 scope 二次冷启动会与池中已有实例撞号 → _evacuate_same_id_locked 挤出正在干活的 Pod
+                # （叠加持锁扩容即为死锁导火索）。业务 service_id 仍保留在 service_template 里供
+                # deploy_controller / 日志使用，但不进入 ServiceHandler.id / endpoint_id。
                 return ServiceHandler(
-                    service_id=handler_service_id,
+                    service_id=None,
                     total_concurrency=(
                         int(cfg["service_concurrency"])
                         if cfg.get("service_concurrency") is not None
@@ -722,11 +837,54 @@ class RuntimeManagementAgentClient(AgentServerClient):
         self._create_service_manager = create_service_manager
         self._access: Any = Access(create_service_manager)
         self._connected = False
+        self._stream_abort_events: dict[str, asyncio.Event] = {}
+        self._stream_access_gens: dict[str, AsyncIterator[Any]] = {}
         # 防抖：短时间内多次 config.push 只触发一次 update_config
         self._config_update_handle: Optional[asyncio.TimerHandle] = None
         self._config_update_debounce_seconds: float = float(
             os.getenv("RUNTIME_CONFIG_UPDATE_DEBOUNCE_SECONDS", "2.0")
         )
+
+    @staticmethod
+    def _build_gateway_pod_owner_reference() -> Optional[Any]:
+        """构建指向 gateway 自身 Pod 的 ownerReference。
+
+        agentserver pod 设置此后，gateway pod 被删除时 k8s GC 会自动级联清理
+        其创建的 agentserver pod，避免 graceful shutdown 失败时遗留孤儿。
+        依赖 downward API 注入 POD_NAME / POD_UID；缺失则返回 None（不设置 owner，
+        回退到原有由 ServiceManager.stop() 显式清理的行为）。
+        """
+        pod_name = os.getenv("POD_NAME")
+        pod_uid = os.getenv("POD_UID")
+        pod_namespace = os.getenv("POD_NAMESPACE") or os.getenv("NAMESPACE")
+        # 打印 downward API 注入的原始值，便于核对是否为当前 gateway pod 的真实身份
+        # （可与 `kubectl get pod <name> -o jsonpath='{.metadata.uid}'` 对照）
+        logger.info(
+            "[RuntimeManagementAgentClient] gateway pod identity from downward API: "
+            "POD_NAME=%r POD_UID=%r POD_NAMESPACE=%r",
+            pod_name, pod_uid, pod_namespace,
+        )
+        if not pod_name or not pod_uid:
+            logger.warning(
+                "[RuntimeManagementAgentClient] POD_NAME/POD_UID missing "
+                "(downward API not configured); agentserver pods will have no ownerReference, "
+                "fallback to ServiceManager.stop() cleanup"
+            )
+            return None
+        from kubernetes_asyncio import client
+        ref = client.V1OwnerReference(
+            api_version="v1",
+            kind="Pod",
+            name=pod_name,
+            uid=pod_uid,
+            controller=True,
+        )
+        logger.info(
+            "[RuntimeManagementAgentClient] agentserver pods ownerReference -> gateway Pod: "
+            "api_version=%s kind=%s name=%s uid=%s controller=%s namespace=%s",
+            ref.api_version, ref.kind, ref.name, ref.uid, ref.controller, pod_namespace,
+        )
+        return ref
 
     @property
     def server_ready(self) -> bool:
@@ -1095,14 +1253,53 @@ class RuntimeManagementAgentClient(AgentServerClient):
                 metadata={},
             )
 
+    async def _release_access_stream(
+        self,
+        rid: str,
+        access_gen: AsyncIterator[Any],
+    ) -> None:
+        """关闭 Access.send_message 生成器，触发其 finally 设置 cancel 以释放 WSS 在途槽位。"""
+        self._stream_access_gens.pop(rid, None)
+        with contextlib.suppress(Exception):
+            await access_gen.aclose()
+
+    def abort_request_stream(self, request_id: str) -> None:
+        """终止 Access/WSS 层流式 pull，配合 Gateway process_stream task.cancel() 使用。
+
+        openjiuwen_runtime Access 在 ``send_message`` 内用 ``ScopeRequestWrapper.cancel``
+        与 WSS ``await wrapper.cancel`` 联动；须 aclose 生成器才能在用户 cancel 时尽快释放
+        服务实例并发，否则 WSS 会一直等到流自然结束。
+        """
+        rid = _wire_request_id_key(request_id)
+        abort_ev = self._stream_abort_events.get(rid)
+        if abort_ev is not None and not abort_ev.is_set():
+            abort_ev.set()
+        access_gen = self._stream_access_gens.get(rid)
+        if access_gen is None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(
+            self._release_access_stream(rid, access_gen),
+            name=f"gw-access-aclose-{rid[:24]}",
+        )
+
     async def send_request_stream(self, envelope: E2AEnvelope) -> AsyncIterator[AgentResponseChunk]:
         """发送流式请求。"""
         self._ensure_connected()
         request = e2a_to_agent_request(envelope)
+        rid = _wire_request_id_key(request.request_id)
+        abort_ev = asyncio.Event()
+        self._stream_abort_events[rid] = abort_ev
 
         # 加载服务配置
         service_template = None
         loaded = await load_effective_service_config_for_request(request)
+        if abort_ev.is_set():
+            self._stream_abort_events.pop(rid, None)
+            raise asyncio.CancelledError()
         if loaded is not None:
             entities = loaded.service_config or []
             if entities:
@@ -1141,12 +1338,16 @@ class RuntimeManagementAgentClient(AgentServerClient):
             service_template=service_template,
         )
 
+        access_gen = self._access.send_message(session_request)
+        self._stream_access_gens[rid] = access_gen
         try:
             # 企业版空闲超时机制：跟踪最后一个真实业务 chunk 的时间
             last_real_chunk_time = asyncio.get_event_loop().time()
             chunk_count = 0
-            
-            async for chunk in self._access.send_message(session_request):
+
+            async for chunk in access_gen:
+                if abort_ev.is_set():
+                    raise asyncio.CancelledError()
                 chunk_count += 1
                 
                 # 检查是否是真实业务 chunk（排除 keepalive）
@@ -1168,15 +1369,17 @@ class RuntimeManagementAgentClient(AgentServerClient):
                         "已 %.1f 秒无真实业务输出，共收到 %d 个 chunk",
                         request.request_id, idle_duration, chunk_count,
                     )
-                    raise TimeoutError(
-                        f"Stream idle timeout after {idle_duration:.1f}s without real business chunks"
+                    # 静默结束流：不向用户页下发内部超时文案，由 Gateway 识别终止哨兵并收尾
+                    yield AgentResponseChunk(
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        payload={"is_complete": True},
+                        is_complete=True,
                     )
-                
+                    return
+
                 yield chunk
-                
-        except TimeoutError:
-            # 重新抛出超时异常，让上层处理
-            raise
+
         except Exception as exc:
             logger.exception("[RuntimeManagementAgentClient] send_request_stream failed: %s", exc)
             yield AgentResponseChunk(
@@ -1185,3 +1388,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                 payload={"error": str(exc)},
                 is_complete=True,
             )
+        finally:
+            self._stream_abort_events.pop(rid, None)
+            if rid in self._stream_access_gens:
+                await self._release_access_stream(rid, access_gen)

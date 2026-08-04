@@ -1,3 +1,6 @@
+from jiuwenclaw_manager.core.template.embedding_template import (
+    EmbeddingTemplateService,
+)
 from jiuwenclaw_manager.core.template.extension_config_template import (
     ExtensionConfigTemplateService,
 )
@@ -11,6 +14,7 @@ from jiuwenclaw_manager.core.template.skill_whitelist_template import (
 
 __all__ = (
     "ModelTemplateService",
+    "EmbeddingTemplateService",
     "ExtensionConfigTemplateService",
     "SkillWhitelistTemplateService",
     "ServiceConfigTemplateService",

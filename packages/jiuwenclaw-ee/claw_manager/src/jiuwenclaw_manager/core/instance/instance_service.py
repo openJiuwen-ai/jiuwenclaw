@@ -158,37 +158,6 @@ async def bootstrap_gateway_log_masking(
         )
 
 
-async def bootstrap_gateway_templates(
-    handler: DBHandler,
-    jiuwenclaw_id: str,
-) -> None:
-    """Gateway WS 注册：将配置生效策略引用的模板 bulk push 到 GDB（``op=sync``）。"""
-    jid = str(jiuwenclaw_id or "").strip()
-    if not jid:
-        return
-    try:
-        from jiuwenclaw_manager.core.template.push_template_to_gateway import (
-            rebuild_jid_template_ref_for_gateway,
-            sync_referenced_templates_to_gateway,
-        )
-
-        acks = await sync_referenced_templates_to_gateway(handler, jid)
-        await rebuild_jid_template_ref_for_gateway(handler, jid)
-        for name, ack in acks.items():
-            logger.info(
-                "[Instance] %s sync on gateway register jiuwenclaw_id=%s revision=%s",
-                name,
-                jid,
-                ack.get("revision"),
-            )
-    except Exception:
-        logger.warning(
-            "[Instance] template bootstrap failed for %s",
-            jid,
-            exc_info=True,
-        )
-
-
 async def register_gateway_via_ws(
     handler: DBHandler,
     payload: dict[str, Any],
@@ -452,6 +421,9 @@ class InstanceService:
         )
 
     async def delete(self, jiuwenclaw_id: str) -> bool:
+        from jiuwenclaw_manager.core.instance.instance_data_lifecycle import (
+            purge_instance_all_data,
+        )
         from jiuwenclaw_manager.core.instance.instance_provisioner import (
             terminate_local_if_present,
         )
@@ -460,6 +432,14 @@ class InstanceService:
         if row is None:
             return False
         await terminate_local_if_present(self._handler, jiuwenclaw_id)
+        try:
+            await purge_instance_all_data(self._handler, jiuwenclaw_id)
+        except Exception:
+            logger.warning(
+                "[Instance] purge instance data failed for %s",
+                jiuwenclaw_id,
+                exc_info=True,
+            )
         await delete_instance_row(self._handler, jiuwenclaw_id)
         return True
 

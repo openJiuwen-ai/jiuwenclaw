@@ -351,7 +351,7 @@ task_memory:
   summary_algo: ACE
 
 # ========== Redis（分布式 Gateway：状态存储 / Pub/Sub / Leader；standalone 下不连接）==========
-# 通过 gateway.deployment_mode 控制：standalone（不连接）/ active-standby（连接 Redis）
+# 通过 gateway.deployment_mode 控制：standalone（不连接）/ active-standby、distributed（连接 Redis）
 redis:
   # standalone | cluster
   mode: ${REDIS_MODE:-standalone}            # standalone | cluster
@@ -388,7 +388,10 @@ gateway:
   # 分机部署时请设置为 remote，否则 session.list 将读取网关本机目录（通常为空）。
   web_session_storage: local
 
-  # ========== 主备部署（standalone：默认；active-standby：连接 Redis + 选主）==========
+  # ========== 部署模式 ==========
+  # standalone（默认）：单机，不连 Redis
+  # active-standby：主备，连接 Redis + LeaderElection 选主
+  # distributed：多副本同时在线，连接 Redis 共享 session（无选主；cron 默认关闭；仅 web/tui 通道）
   deployment_mode: ${DEPLOYMENT_MODE:-standalone}
   # 分布式下用于实例标识；空则启动时自动生成（见 gateway-reliability-enhancement-design §3.2）
   instance_id: ${GATEWAY_INSTANCE_ID:-}
@@ -661,18 +664,17 @@ permissions:
       thinking:
         type: disabled
 
-  # Phase-1: 文件路径三轴权限（read / write / exec）。
-  # - workspace: agent workspace 内的读写默认放行（rw_enabled=false 时所有内部读写也要审批）
-  # - global:    workspace 外的读写白名单（最长前缀匹配）；
-  #              entry 形如 {read_enable: true, write_enable: false}
-  # - trusted_exec_directory: 允许「通过解释器执行」的脚本目录前缀列表
+  # Phase-1: 文件路径权限（read / write / exec 均在 global 三态）。
+  # - workspace: agent workspace 内的读写默认放行（rw_enabled=false 时内部读写也要审批）；不影响 exec
+  # - global:    最长前缀匹配；entry 形如
+  #              {read: allow|deny|ask, write: allow|deny|ask, exec: allow|deny|ask}
+  #              缺省未写视为 ask；read/write 的 deny 可穿透 workspace；相对路径相对 workspace。
   # - tool_bindings: 在不改代码的情况下把额外工具的某个参数注册为 read / write / exec
   file_guard:
     workspace:
       rw_enabled: true
       description: "Agent workspace 内默认放行 read / write"
     global: {}
-    trusted_exec_directory: []
     tool_bindings: {}
 
   # 兼容键：旧 external_directory 在加载时会被自动迁移到 file_guard.global，

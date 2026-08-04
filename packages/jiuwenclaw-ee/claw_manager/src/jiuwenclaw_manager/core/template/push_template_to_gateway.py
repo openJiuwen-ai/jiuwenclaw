@@ -31,12 +31,14 @@ from jiuwenclaw_manager.models.jid_template_ref_models import (
     JID_TEMPLATE_REF_TABLE_DEF,
 )
 from jiuwenclaw_manager.models.template_models import (
+    EMBEDDING_TEMPLATE_TABLE_DEF,
     EXTENSION_CONFIG_TEMPLATE_TABLE_DEF,
     MODEL_TEMPLATE_TABLE_DEF,
     SERVICE_CONFIG_TEMPLATE_TABLE_DEF,
     SKILL_WHITELIST_TEMPLATE_TABLE_DEF,
 )
 from jiuwenclaw_manager.schemas.template_slot_schemas import (
+    EMBEDDING_MODEL_SLOT,
     EXTENSION_CONFIG_SLOT,
     MODEL_TEMPLATE_SLOTS,
     SERVICE_CONFIG_SLOT,
@@ -77,6 +79,11 @@ TEMPLATE_KIND_SPECS: dict[str, TemplateKindSpec] = {
         table_name=MODEL_TEMPLATE_TABLE_DEF.table_name,
         slot_keys=MODEL_TEMPLATE_SLOTS,
     ),
+    "embedding_templates": TemplateKindSpec(
+        config_section="embedding_templates",
+        table_name=EMBEDDING_TEMPLATE_TABLE_DEF.table_name,
+        slot_keys=frozenset({EMBEDDING_MODEL_SLOT}),
+    ),
     "skill_whitelist_templates": TemplateKindSpec(
         config_section="skill_whitelist_templates",
         table_name=SKILL_WHITELIST_TEMPLATE_TABLE_DEF.table_name,
@@ -98,6 +105,7 @@ TEMPLATE_KIND_ORDER: tuple[str, ...] = tuple(TEMPLATE_KIND_SPECS.keys())
 
 _ROW_TO_OUT_MODULES: dict[str, str] = {
     "model_templates": "jiuwenclaw_manager.core.template.model_template",
+    "embedding_templates": "jiuwenclaw_manager.core.template.embedding_template",
     "skill_whitelist_templates": "jiuwenclaw_manager.core.template.skill_whitelist_template",
     "extension_config_templates": "jiuwenclaw_manager.core.template.extension_config_template",
     "service_config_templates": "jiuwenclaw_manager.core.template.service_config_template",
@@ -557,7 +565,11 @@ async def _apply_slot_pair_delta(
     removed: set[tuple[str, str]],
     skip_runtime_update: bool = False,
 ) -> None:
-    """更新 ``jid_template_ref``，并按合计引用数差异向 Gateway 增量 create / delete。"""
+    """按合计引用数差异向 Gateway 增量 create / delete，成功后更新 ``jid_template_ref``。
+
+    Gateway 推送置于 Manager 引用计数更新之前：若推送失败则引用计数不变，重试时仍会
+    触发 create/delete，避免「Manager 已记账、Gateway 缺模板」的不一致。
+    """
     jid = str(jiuwenclaw_id or "").strip()
     if not jid or (not added and not removed):
         return
@@ -566,12 +578,6 @@ async def _apply_slot_pair_delta(
     before_totals = await _snapshot_template_totals(
         handler, jid, affected_template_ids
     )
-
-    now = utc_now()
-    for slot, tid in removed:
-        await _adjust_ref_count(handler, jid, slot, tid, -1, now=now)
-    for slot, tid in added:
-        await _adjust_ref_count(handler, jid, slot, tid, 1, now=now)
 
     tid_delta: Counter[str] = Counter()
     for _, tid in added:
@@ -604,6 +610,12 @@ async def _apply_slot_pair_delta(
                 jid, kind, "delete", template_id=tid,
                 skip_runtime_update=skip_runtime_update,
             )
+
+    now = utc_now()
+    for slot, tid in removed:
+        await _adjust_ref_count(handler, jid, slot, tid, -1, now=now)
+    for slot, tid in added:
+        await _adjust_ref_count(handler, jid, slot, tid, 1, now=now)
 
 
 async def sync_gateway_templates_after_template_ref_change(

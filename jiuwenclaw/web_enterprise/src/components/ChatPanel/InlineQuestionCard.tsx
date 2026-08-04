@@ -196,10 +196,7 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
                 }
               >
                 {/* 问题正文 */}
-                <div
-                  className="px-4 pt-3 pb-2 text-sm prose prose-sm max-w-none prose-headings:font-semibold prose-headings:text-sm prose-ul:my-1 prose-li:my-0 prose-li:pl-1"
-                  style={{ color: 'var(--text)' }}
-                >
+                <div className="px-4 pt-3 pb-2 text-sm chat-text max-w-none">
                   <ReactMarkdown remarkPlugins={[remarkGfm]}>
                     {question.question}
                   </ReactMarkdown>

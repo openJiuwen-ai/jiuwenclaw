@@ -5,17 +5,19 @@ export const TEMPLATE_REF_SLOTS = [
   'video_model',
   'audio_model',
   'vision_model',
+  'embedding_model',
   'skill_whitelist',
   'extension_config',
   'service_config',
 ] as const;
 
-/** 各槽位至多一条引用：默认/视频/音频/视觉模型、服务配置。 */
+/** 各槽位至多一条引用：默认/视频/音频/视觉/Embedding 模型、服务配置。 */
 export const SINGLE_VALUE_TEMPLATE_REF_SLOTS = new Set<string>([
   'default_model',
   'video_model',
   'audio_model',
   'vision_model',
+  'embedding_model',
   'service_config',
 ]);
 

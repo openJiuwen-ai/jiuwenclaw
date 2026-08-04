@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
+_ALLOWED_WS_ORIGIN_HOSTS = {"127.0.0.1", "localhost"}
 _DEFAULT_ALLOWED_WS_ORIGIN_HOSTS = {"127.0.0.1", "localhost"}
 _FORBIDDEN_BODY = b"Forbidden: Origin not allowed\n"
 _UNAUTHORIZED_BODY = b"Unauthorized: link token invalid\n"
@@ -80,10 +81,13 @@ def _get_ws_origin_check_enabled() -> bool:
     return True
 
 
+
+
+
 def _get_allowed_ws_origin_hosts() -> set[str]:
     """返回允许的浏览器 Origin hostname 集合（带缓存）。
 
-    默认含 ``127.0.0.1`` / ``localhost``；可通过环境变量 ``WS_ALLOWED_WS_ORIGINS``
+    默认含 ``127.0.0.1`` / ``localhost``；可通过环境变量 ``WS_ALLOWED_ORIGINS``
     追加，逗号分隔、精确匹配（大小写不敏感），如 ``bff-svc,bff.internal``。
     """
     global _allowed_ws_origin_hosts_cache
@@ -91,7 +95,7 @@ def _get_allowed_ws_origin_hosts() -> set[str]:
         return _allowed_ws_origin_hosts_cache
 
     hosts = set(_DEFAULT_ALLOWED_WS_ORIGIN_HOSTS)
-    extra = os.getenv("WS_ALLOWED_WS_ORIGINS", "").strip()
+    extra = os.getenv("WS_ALLOWED_ORIGINS", "").strip()
     if extra:
         for host in extra.split(","):
             host = host.strip().lower()
@@ -102,6 +106,8 @@ def _get_allowed_ws_origin_hosts() -> set[str]:
 
 
 def clear_ws_origin_check_cache() -> None:
+    """清除 WebSocket Origin 校验开关配置缓存。"""
+    global _ws_origin_check_enabled_cache
     """清除 WebSocket Origin 校验开关与白名单缓存。"""
     global _ws_origin_check_enabled_cache, _allowed_ws_origin_hosts_cache
     _ws_origin_check_enabled_cache = None
@@ -137,6 +143,7 @@ def is_allowed_browser_origin(origin: str | None) -> bool:
     except ValueError:
         return False
 
+    return parsed.hostname in _ALLOWED_WS_ORIGIN_HOSTS
     hostname = parsed.hostname.lower() if parsed.hostname else ""
     return hostname in _get_allowed_ws_origin_hosts()
 

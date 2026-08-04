@@ -69,7 +69,6 @@ def _materialize_instance_config(
     template_path: Path,
     rest_port: int,
     agent_sqlite: Path,
-    gateway_extensions_dir: Path,
 ) -> None:
     instance_dir.mkdir(parents=True, exist_ok=True)
     cfg_dir = instance_dir / "config"
@@ -81,7 +80,8 @@ def _materialize_instance_config(
     if not isinstance(ext, dict):
         ext = {}
         raw["extensions"] = ext
-    ext["extension_dirs"] = str(gateway_extensions_dir.resolve())
+    # 由子进程环境变量 EXTENSION_DIRS 决定；Gateway 在 base_env 中注入路径，AgentServer 置空不加载扩展
+    ext["extension_dirs"] = "${EXTENSION_DIRS}"
     ac = ext.get("agent_client_rest")
     if not isinstance(ac, dict):
         ac = {}
@@ -191,7 +191,6 @@ async def provision_local_jiuwenclaw(
         template_path=tpl,
         rest_port=rest_port,
         agent_sqlite=agent_db,
-        gateway_extensions_dir=gateway_ext,
     )
 
     management_api_base = f"http://127.0.0.1:{rest_port}"
@@ -243,6 +242,8 @@ async def provision_local_jiuwenclaw(
     env_as = dict(base_env)
     env_as["AGENT_SERVER_HOST"] = "127.0.0.1"
     env_as["AGENT_SERVER_PORT"] = str(agent_port)
+    # AgentServer 不加载 Gateway 扩展（如 manager_ws_client），避免与 Gateway 争抢 Manager WS 连接
+    env_as["EXTENSION_DIRS"] = ""
     # 与 Gateway 共用同一 REST 端口时，仅由 Gateway 挂载 agent_client_rest，避免双进程抢端口导致 62160 无监听
     env_as["AGENT_CLIENT_REST_ENABLED"] = "false"
 

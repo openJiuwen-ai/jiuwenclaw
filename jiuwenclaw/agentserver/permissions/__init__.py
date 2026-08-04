@@ -15,7 +15,7 @@ JiuwenClaw 细粒度权限管控系统（Phase-1）。
 
 - ``deny`` 绝对否决：任何匹配到的 ``deny`` 规则都不会被覆盖。
 - 子线 A 命令 / 参数规则按 ``approval_overrides → rules → builtin`` 顺序查找 ``allow``。
-- 子线 B 文件路径走 ``file_guard``（``workspace`` / ``global`` / ``trusted_exec_directory``）。
+- 子线 B 文件路径走 ``file_guard``（``workspace`` / ``global`` 三态 read/write/exec）。
 - 二者结果按 ``strictest`` 合并到 ``PermissionResult``。
 
 使用示例::

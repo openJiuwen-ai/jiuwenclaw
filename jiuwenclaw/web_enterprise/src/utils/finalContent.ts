@@ -12,8 +12,8 @@ function decodeQuotedPythonLikeString(raw: string): string {
     .replace(/\\\\/g, '\\');
 }
 
-function normalizeFinalDisplayText(text: string): string {
-  return text.replace(/^(?:\r?\n)+/, '');
+export function normalizeFinalDisplayText(text: string): string {
+  return text.replace(/^(?:\r?\n)+/, '').replace(/(?:\r?\n)+$/, '');
 }
 
 export function normalizeFinalContent(payload: Record<string, unknown>): string {

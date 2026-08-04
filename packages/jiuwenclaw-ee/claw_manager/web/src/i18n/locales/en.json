@@ -41,7 +41,7 @@
     "daysAgo": "{{count}}d ago"
   },
   "brand": {
-    "title": "JiuwenClaw",
+    "title": "{{productName}}",
     "sub": "Claw Manager"
   },
   "nav": {
@@ -50,6 +50,7 @@
     "instances": "Instance Management",
     "config": "Global Config",
     "modelTemplates": "Model Templates",
+    "embeddingTemplates": "Embedding Templates",
     "extensionTemplates": "Extension Templates",
     "skillWhitelistTemplates": "Skill Whitelist Templates",
     "serviceConfigTemplates": "Service Config Templates",
@@ -74,7 +75,7 @@
   },
   "topology": {
     "title": "Instance Management",
-    "subtitle": "Manage JiuwenClaw instances",
+    "subtitle": "Manage {{productName}} instances",
     "createInstance": "Create Instance",
     "provisionLocal": "Provision Locally",
     "instanceStatus": "Status",
@@ -128,7 +129,9 @@
   "instanceConfig": {
     "tabs": {
       "channel": "Channel",
-      "logMasking": "Log Masking"
+      "logMasking": "Log Masking",
+      "logging": "Log Levels",
+      "permissions": "Permissions"
     },
     "channel": {
       "register": "Register Channel",
@@ -148,12 +151,74 @@
       "new": "New Rule",
       "edit": "Edit Rule",
       "ruleName": "Rule Name",
-      "pattern": "Pattern (regex)",
+      "ruleDescription": "Description",
+      "pattern": "Match Regex Pattern",
+      "patternPlaceholder": "e.g. (?i)(api[_-]?key)\\s*[:=]\\s*\\S+",
       "replacement": "Replacement",
       "priority": "Priority",
+      "priorityHint": "Masking rules are applied in descending priority order.",
+      "priorityInvalid": "Please enter a valid priority",
       "source": "Source",
+      "source_builtin": "Builtin",
+      "source_custom": "Custom",
       "data": "Extra Data (JSON, optional)",
-      "deleteConfirm": "Delete this log masking rule? Gateway will be notified."
+      "updatedAt": "Updated",
+      "searchPlaceholder": "Search rule ID, name, description, match regex pattern, replacement, priority, or source",
+      "fieldRequired": "Please fill in {{field}}",
+      "deleteConfirm": "Delete this log masking rule?"
+    },
+    "logging": {
+      "intro": "Maps to config.yaml logging. Saving writes to Manager DB and hot-reloads Gateway; without managed config the instance uses local config.yaml.",
+      "managed": "Manager managed",
+      "yamlFallback": "Using config.yaml",
+      "resetToYaml": "Remove managed config",
+      "deleteConfirm": "Remove Manager-managed logging config? Gateway will fall back to config.yaml.",
+      "deleted": "Managed config removed; Gateway will fall back to config.yaml",
+      "level": "Default level (level)",
+      "levelHint": "Used when a log file level is not set separately",
+      "consoleLevel": "Console level (console_level)",
+      "consoleLevelHint": "Console output; falls back to level if omitted",
+      "gateway": "Gateway log (gateway)",
+      "channel": "Channel log (channel)",
+      "agentServer": "AgentServer log (agent_server)",
+      "full": "Full log (full)",
+      "fullHint": "Level for full.log aggregate output"
+    },
+    "permissions": {
+      "sections": {
+        "general": "General",
+        "tools": "Tool Permissions",
+        "rules": "Shell Rules",
+        "fileGuard": "File Guard",
+        "advanced": "Advanced"
+      },
+      "resetToYaml": "Remove managed config",
+      "deleteConfirm": "Remove Manager-managed permissions? Gateway will fall back to config.yaml.",
+      "deleted": "Managed config removed; Gateway will fall back to config.yaml",
+      "enabled": "Enable permission control",
+      "defaults": "Default action for unlisted tools",
+      "defaultsHint": "allow / ask / deny for tools not listed below",
+      "denyGuidanceMessage": "Deny guidance message",
+      "denyGuidanceMessageHint": "Optional message shown when a tool is denied",
+      "toolName": "Tool name",
+      "action": "Action",
+      "newTool": "Add tool permission",
+      "editTool": "Edit tool permission",
+      "toolsHint": "Tool-level allow / ask / deny; overrides shell rules",
+      "ruleId": "Rule ID",
+      "rulePattern": "Match pattern",
+      "newRule": "Add shell rule",
+      "editRule": "Edit shell rule",
+      "rulesHint": "Matches shell command text only; action is allow or deny",
+      "fileGuardWorkspace": "Workspace",
+      "fileGuardRwEnabled": "Allow read/write inside workspace by default",
+      "fileGuardGlobal": "Global whitelist (JSON)",
+      "fileGuardTrustedExec": "Trusted exec directories (JSON array)",
+      "fileGuardToolBindings": "Tool bindings (JSON)",
+      "exampleTag": "Example",
+      "commandIntent": "Command intent",
+      "commandIntentEnabled": "Enable command intent extraction",
+      "commandIntentTimeout": "Timeout (seconds)"
     }
   },
   "modelTemplate": {
@@ -181,9 +246,34 @@
     "searchPlaceholder": "Search template ID, name, description, provider, model ID, type, or API base",
     "updatedAt": "UPDATED AT",
     "fieldRequired": "Please fill in {{field}}",
+    "apiBaseInvalid": "API Base must be a valid http(s) URL, e.g. https://api.example.com/v1",
     "timeoutMin": "Timeout must be greater than 0",
     "retryCountMin": "Retry count cannot be negative",
+    "unsafeText": "{{field}} contains illegal HTML/script or suspected SQL injection content",
     "deleteConfirm": "Delete this model template? It may be referenced by instance policies."
+  },
+  "embeddingTemplate": {
+    "title": "Embedding Templates",
+    "subtitle": "Maintain reusable embedding model configurations",
+    "new": "New Embedding Template",
+    "edit": "Edit Embedding Template",
+    "templateName": "Template Name",
+    "templateDescription": "Template Description",
+    "embedTags": "Embedding Tags",
+    "embedTagsHint": "Comma-separated, e.g. memory,task_memory",
+    "apiBase": "API Base",
+    "apiKey": "API Key",
+    "modelId": "Model ID",
+    "modelProvider": "Provider",
+    "parameters": "Request Parameters",
+    "clientConfig": "Client Config",
+    "data": "Extra Data",
+    "updatedAt": "UPDATED AT",
+    "searchPlaceholder": "Search template ID, name, description, provider, model ID, or API base",
+    "fieldRequired": "Please fill in {{field}}",
+    "apiBaseInvalid": "API Base must be a valid http(s) URL, e.g. https://api.example.com/v1",
+    "unsafeText": "{{field}} contains illegal HTML/script or suspected SQL injection content",
+    "deleteConfirm": "Delete this embedding template? It may be referenced by instance policies."
   },
   "extensionTemplate": {
     "title": "Extension Templates",
@@ -202,7 +292,8 @@
     "hookParams": "params",
     "hookParamsHint": "Static parameters passed to the hook (JSON)",
     "hookSchedule": "schedule",
-    "hookScheduleHint": "Required when hook type is schedule; cron or interval, e.g. 0 */5 * * *",
+    "hookScheduleHint": "Required when hook type is schedule; cron expression, e.g. 0 */5 * * *",
+    "hookScheduleInvalid": "schedule must be a valid cron (5/6/7 fields with in-range values, e.g. 0 */5 * * *)",
     "hookData": "data",
     "hookDataHint": "Per-hook extension config (JSON)",
     "customConfig": "Custom Config",
@@ -210,6 +301,7 @@
     "updatedAt": "UPDATED AT",
     "searchPlaceholder": "Search template ID, name, description, component, or hook type",
     "fieldRequired": "Please fill in {{field}}",
+    "unsafeText": "{{field}} contains illegal HTML/script or suspected SQL injection content",
     "deleteConfirm": "Delete this extension template?"
   },
   "skillWhitelistTemplate": {
@@ -228,6 +320,8 @@
     "filterSkillId": "Filter by Skill ID",
     "filterSkillSource": "Filter by Skill Source",
     "fieldRequired": "Please fill in {{field}}",
+    "skillSourceInvalid": "Skill Source must be a valid http(s) URL, e.g. https://skillhub.example.com/",
+    "unsafeText": "{{field}} contains illegal HTML/script or suspected SQL injection content",
     "deleteConfirm": "Delete this skill whitelist template? It may be referenced by instance policies."
   },
   "serviceConfigTemplate": {
@@ -238,9 +332,14 @@
     "templateName": "Template Name",
     "templateDescription": "Template Description",
     "fieldRequired": "Please fill in {{field}}",
+    "numberOutOfRange": "{{field}} must be between {{min}} and {{max}}",
+    "poolRangeInvalid": "min idle services cannot exceed max services",
+    "cpuQuantityInvalid": "{{field}} must be a valid Kubernetes CPU quantity, e.g. 500m, 2, 0.5",
+    "memoryQuantityInvalid": "{{field}} must include a unit (Ki/Mi/Gi/K/M/G), e.g. 512Mi, 2Gi",
+    "pathInvalid": "{{field}} must be a valid absolute path, e.g. / or /data/nfs",
+    "unsafeText": "{{field}} contains illegal HTML/script or suspected SQL injection content",
     "searchPlaceholder": "Search template ID, name, description, AgentServer image",
     "agentImage": "AgentServer Image",
-    "namespace": "Namespace",
     "podName": "Pod Name",
     "containerName": "Container Name",
     "containerPort": "Container Port",
@@ -274,7 +373,6 @@
     "sessionTtl": "Session TTL (s)",
     "poolRange": "Idle / Max",
     "updatedAt": "UPDATED AT",
-    "filterNamespace": "Filter by namespace",
     "sectionContainer": "Container & K8s",
     "sectionReadiness": "Readiness Probe",
     "sectionNfs": "NFS Storage",
@@ -318,6 +416,7 @@
       "searchPlaceholder": "Search policy ID, name, description, or priority"
     },
     "fieldRequired": "Please fill in {{field}}",
+    "priorityHint": "Match in descending order of priority, and for the same priority, match in descending order of updated time. Only apply the first matching policy.",
     "templateRef": {
       "title": "Template References",
       "slot": "Slot",
@@ -346,6 +445,7 @@
         "video_model": "Video model (video_model)",
         "audio_model": "Audio model (audio_model)",
         "vision_model": "Vision model (vision_model)",
+        "embedding_model": "Embedding model (embedding_model)",
         "skill_whitelist": "Skill whitelist (skill_whitelist)",
         "extension_config": "Extension config (extension_config)",
         "service_config": "Service config (service_config)"
@@ -381,6 +481,7 @@
       "rawHint": "This expression cannot be parsed visually. Edit the raw text or reset to visual mode.",
       "resetToVisual": "Reset to visual editor",
       "invalid": "Fill in at least one condition value",
+      "invalidSyntax": "Match expression is invalid: only user_id / group_id / bot_id with == / != / and / or are allowed; leave empty for always-match",
       "fields": {
         "group_id": "group_id",
         "user_id": "user_id",

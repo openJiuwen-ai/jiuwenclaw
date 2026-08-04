@@ -10,6 +10,7 @@ import { SessionSidebar } from './components/SessionSidebar';
 import { SkillPanel } from './components/SkillPanel';
 import { AgentPanel } from './components/AgentPanel/index';
 import { SessionsPanel } from './components/SessionsPanel';
+import { HistoryPanel } from './components/HistoryPanel';
 import { HeartbeatPanel } from './components/HeartbeatPanel';
 import CronPanel from './components/CronPanel';
 import { ToolPanel } from './components/ToolPanel';
@@ -41,7 +42,7 @@ import { useTranslation } from 'react-i18next';
 import i18n from './i18n';
 import './App.css';
 
-type MainNavKey = 'chat' | 'skills' | 'agents' | 'sessions' | 'heartbeat' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'logspanel' | 'browserpanel' | 'updatepanel';
+type MainNavKey = 'chat' | 'skills' | 'agents' | 'sessions' | 'history' | 'heartbeat' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'logspanel' | 'browserpanel' | 'updatepanel';
 
 // 错误边界组件
 interface ErrorBoundaryState {
@@ -1091,6 +1092,11 @@ function AppContent() {
                 serverConfig.gateway_web_session_storage.trim().toLowerCase() === 'remote'
               }
             />
+          </div>
+        )}
+        {activeNav === 'history' && (
+          <div className="app-section">
+            <HistoryPanel />
           </div>
         )}
         {activeNav === 'heartbeat' && (

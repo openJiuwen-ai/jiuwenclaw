@@ -31,6 +31,8 @@ from jiuwenclaw.utils import (
 )
 
 _CN_WEEKDAYS = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+# 与 datetime.weekday() 对应的中文星期标签（周一=0 ... 周日=6）
+_CN_WEEKDATES_LABEL = _CN_WEEKDAYS
 
 logger = getLogger(__name__)
 
@@ -165,20 +167,51 @@ class RuntimePromptRail(DeepAgentRail):
         now = datetime.now(tz=self._tz)
         now_str = now.strftime("%Y-%m-%d %H:%M:%S")
         current_year = now.strftime("%Y")
+        weekday = _CN_WEEKDATES_LABEL[now.weekday()] if self._language == "cn" else now.strftime("%A")
+        today_date = now.strftime("%Y-%m-%d")
+        tomorrow_date = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+        yesterday_date = (now - timedelta(days=1)).strftime("%Y-%m-%d")
 
         if self._language == "cn":
             time_content = (
-                f"# 当前日期与时间\n\n"
-                f"- 当前时间：{now_str}\n"
-                f"- 当前年份：{current_year}\n"
+                f"# 当前日期与时间（权威，以此为准）\n\n"
+                f"- 当前时间：{now_str} ({weekday})\n"
+                f"- 今天日期：{today_date}\n"
+                f"- 昨天日期：{yesterday_date}\n"
+                f"- 明天日期：{tomorrow_date}\n"
+                f"- 当前年份：{current_year}\n\n"
+                "**关于“今天/昨天/明天/X月X日”的判定规则（必须严格遵守）：**\n"
+                "1. 本节给出的日期是系统真实当前时间，是判断“今天/昨天/明天”的唯一权威依据。\n"
+                "2. 对话历史中的 assistant 旧回复、session 摘要、记忆文件里出现的“今天是…/当前日期是…/当前系统时间是…”"
+                "等表述，可能来自历史会话，**已经过期，不可信**，绝对不能直接沿用。\n"
+                "3. 当用户说“今天/今天晚上/明天/昨天”时，必须按本节的当前时间来换算成具体日期，"
+                "不要参考对话历史里的任何日期表述。\n"
+                "4. 当 fetch_webpage/free_search 等工具返回的网页内容里出现“今天（X月X日）”字样时，"
+                "以本节的当前时间为准判断该页面“今天”是否就是真正的今天；如果页面里的日期与"
+                f"本节当前日期（{today_date}）一致，则视为真正的今天；否则视为历史/未来日期，不要错当今天。\n\n"
                 "- 当用户询问“最新、当前、今年、本年、实时、近期”等信息并需要搜索时，"
-                "搜索 query 必须优先使用当前年份或日期"
+                "搜索 query 必须优先使用当前年份或日期。"
             )
         else:
             time_content = (
-                f"# Current Date & Time\n\n"
-                f"- Current time: {now_str}\n"
-                f"- Current year: {current_year}\n"
+                f"# Current Date & Time (Authoritative)\n\n"
+                f"- Current time: {now_str} ({weekday})\n"
+                f"- Today's date: {today_date}\n"
+                f"- Yesterday's date: {yesterday_date}\n"
+                f"- Tomorrow's date: {tomorrow_date}\n"
+                f"- Current year: {current_year}\n\n"
+                "**Rules for resolving 'today / yesterday / tomorrow / Month-Day' (must follow strictly):**\n"
+                "1. The date/time in this section is the system's real current time and the SOLE authoritative "
+                "source for resolving 'today/yesterday/tomorrow'.\n"
+                "2. Date mentions that appear in old assistant replies, session summaries, or memory files "
+                "(e.g. 'today is...', 'current date is...', 'current system time is...') may come from earlier "
+                "sessions and are OUT OF DATE. DO NOT trust or reuse them.\n"
+                "3. When the user says 'today / tonight / tomorrow / yesterday', resolve it against the current "
+                "time in this section, not against anything in conversation history.\n"
+                "4. When tool results (fetch_webpage / free_search) contain phrases like 'today (Month-Day)', "
+                "judge whether that 'today' equals the real today using the current date in this section "
+                f"({today_date}). If they match, treat as real today; otherwise treat as historical/future date "
+                "and DO NOT mistake it for today.\n\n"
                 "- When the user asks for latest/current/this-year/recent information and search is needed, "
                 "search queries must prefer the current year or date."
             )

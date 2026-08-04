@@ -225,6 +225,7 @@ _CONFIG_SET_ENV_MAP = {
     "free_search_ddg_enabled": "FREE_SEARCH_DDG_ENABLED",
     "free_search_bing_enabled": "FREE_SEARCH_BING_ENABLED",
     "free_search_proxy_url": "FREE_SEARCH_PROXY_URL",
+    "tool_result_display_max_chars": "TOOL_RESULT_DISPLAY_MAX_CHARS",
     "deepsearch_llm_model_name": "LLM_MODEL_NAME",
     "deepsearch_llm_model_type": "LLM_MODEL_TYPE",
     "deepsearch_llm_base_url": "LLM_BASE_URL",
@@ -238,6 +239,24 @@ _CONFIG_SET_ENV_MAP = {
 CONFIG_KEYS = tuple(_CONFIG_SET_ENV_MAP.keys())
 
 # 来自 config.yaml 的配置项（前端 param 名 -> config.yaml 路径）
+_TOOL_RESULT_DISPLAY_MAX_CHARS_DEFAULT = "500"
+_TOOL_RESULT_DISPLAY_MAX_CHARS_LIMIT = 100_000
+
+
+def _normalize_tool_result_display_max_chars(raw: object) -> str | None:
+    """Return normalized char limit string, or None when invalid."""
+    stripped = str(raw).strip()
+    if not stripped:
+        return _TOOL_RESULT_DISPLAY_MAX_CHARS_DEFAULT
+    try:
+        parsed = int(stripped)
+    except (TypeError, ValueError):
+        return None
+    if parsed < 0 or parsed > _TOOL_RESULT_DISPLAY_MAX_CHARS_LIMIT:
+        return None
+    return str(parsed)
+
+
 _CONFIG_YAML_KEYS = frozenset({
     "context_engine_enabled",
     "kv_cache_affinity_enabled",
@@ -452,6 +471,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 payload["free_search_ddg_enabled"] = "true"
             if not payload.get("free_search_bing_enabled"):
                 payload["free_search_bing_enabled"] = "true"
+            if not payload.get("tool_result_display_max_chars"):
+                payload["tool_result_display_max_chars"] = _TOOL_RESULT_DISPLAY_MAX_CHARS_DEFAULT
             deepsearch_defaults = [
                 ("deepsearch_web_search_engine_name", "tavily"),
                 ("deepsearch_execution_method", "dependency_driving"),
@@ -471,6 +492,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload.setdefault("memory_forbidden_description", "")
             payload.setdefault("free_search_ddg_enabled", "true")
             payload.setdefault("free_search_bing_enabled", "true")
+            payload.setdefault(
+                "tool_result_display_max_chars",
+                _TOOL_RESULT_DISPLAY_MAX_CHARS_DEFAULT,
+            )
             payload.setdefault("deepsearch_web_search_engine_name", "tavily")
             payload.setdefault("deepsearch_execution_method", "dependency_driving")
             payload.setdefault("disabled_tools", [])
@@ -523,6 +548,22 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             if param_key not in params:
                 continue
             val = params[param_key]
+            if param_key == "tool_result_display_max_chars":
+                normalized = _normalize_tool_result_display_max_chars(val)
+                if normalized is None:
+                    await channel.send_response(
+                        ws,
+                        req_id,
+                        ok=False,
+                        error=(
+                            "tool_result_display_max_chars must be an integer between 0 and "
+                            f"{_TOOL_RESULT_DISPLAY_MAX_CHARS_LIMIT} (0 = no truncation)"
+                        ),
+                        code="BAD_REQUEST",
+                    )
+                    return
+                env_updates[env_key] = normalized
+                continue
             if param_key.endswith("_provider") and val and val not in available_model_providers:
                 await channel.send_response(
                     ws, req_id, ok=False,
@@ -1943,8 +1984,15 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if cc is None:
             await channel.send_response(ws, req_id, ok=False, error="cron not available", code="INTERNAL_ERROR")
             return
-        jobs = await cc.list_jobs()
-        await channel.send_response(ws, req_id, ok=True, payload={"jobs": jobs})
+        try:
+            jobs = await cc.list_jobs(params if isinstance(params, dict) else None)
+            await channel.send_response(ws, req_id, ok=True, payload={"jobs": jobs})
+        except ValueError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="BAD_REQUEST")
+        except PermissionError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="FORBIDDEN")
+        except Exception as e:  # noqa: BLE001
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
     async def _cron_job_get(ws, req_id, params, session_id):
         cc = _get_cron()
@@ -1958,7 +2006,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if not job_id:
             await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
             return
-        job = await cc.get_job(job_id)
+        from jiuwenclaw.gateway.cron.enterprise_gate import extract_routing_triple
+
+        g, b, u = extract_routing_triple(params)
+        job = await cc.get_job(job_id, group_id=g, bot_id=b, user_id=u)
         if job is None:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
             return
@@ -1975,6 +2026,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         try:
             job = await cc.create_job(params)
             await channel.send_response(ws, req_id, ok=True, payload={"job": job})
+        except PermissionError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="FORBIDDEN")
         except Exception as e:  # noqa: BLE001
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="BAD_REQUEST")
 
@@ -1994,11 +2047,16 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if not isinstance(patch, dict):
             await channel.send_response(ws, req_id, ok=False, error="patch must be object", code="BAD_REQUEST")
             return
+        from jiuwenclaw.gateway.cron.enterprise_gate import extract_routing_triple
+
+        g, b, u = extract_routing_triple(params)
         try:
-            job = await cc.update_job(job_id, patch)
+            job = await cc.update_job(job_id, patch, group_id=g, bot_id=b, user_id=u)
             await channel.send_response(ws, req_id, ok=True, payload={"job": job})
         except KeyError:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+        except PermissionError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="FORBIDDEN")
         except Exception as e:  # noqa: BLE001
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="BAD_REQUEST")
 
@@ -2014,7 +2072,17 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if not job_id:
             await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
             return
-        deleted = await cc.delete_job(job_id)
+        from jiuwenclaw.gateway.cron.enterprise_gate import extract_routing_triple
+
+        g, b, u = extract_routing_triple(params)
+        try:
+            deleted = await cc.delete_job(job_id, group_id=g, bot_id=b, user_id=u)
+        except PermissionError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="FORBIDDEN")
+            return
+        except KeyError:
+            await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+            return
         if not deleted:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
             return
@@ -2036,11 +2104,16 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if enabled is None:
             await channel.send_response(ws, req_id, ok=False, error="enabled is required", code="BAD_REQUEST")
             return
+        from jiuwenclaw.gateway.cron.enterprise_gate import extract_routing_triple
+
+        g, b, u = extract_routing_triple(params)
         try:
-            job = await cc.toggle_job(job_id, bool(enabled))
+            job = await cc.toggle_job(job_id, bool(enabled), group_id=g, bot_id=b, user_id=u)
             await channel.send_response(ws, req_id, ok=True, payload={"job": job})
         except KeyError:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+        except PermissionError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="FORBIDDEN")
 
     async def _cron_job_preview(ws, req_id, params, session_id):
         cc = _get_cron()
@@ -2055,8 +2128,17 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if not job_id:
             await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
             return
+        from jiuwenclaw.gateway.cron.enterprise_gate import extract_routing_triple
+
+        g, b, u = extract_routing_triple(params)
         try:
-            next_runs = await cc.preview_job(job_id, int(count) if count is not None else 5)
+            next_runs = await cc.preview_job(
+                job_id,
+                int(count) if count is not None else 5,
+                group_id=g,
+                bot_id=b,
+                user_id=u,
+            )
             await channel.send_response(ws, req_id, ok=True, payload={"next": next_runs})
         except KeyError:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
@@ -2075,8 +2157,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if not job_id:
             await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
             return
+        from jiuwenclaw.gateway.cron.enterprise_gate import extract_routing_triple
+
+        g, b, u = extract_routing_triple(params)
         try:
-            run_id = await cc.run_now(job_id)
+            run_id = await cc.run_now(job_id, group_id=g, bot_id=b, user_id=u)
             await channel.send_response(ws, req_id, ok=True, payload={"run_id": run_id})
         except KeyError:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")

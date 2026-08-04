@@ -66,16 +66,21 @@ async def _create_log_masking_rule_record(
     if dup is not None:
         raise ValueError(f"rule_id already exists: {rule_id!r}")
 
+    source = normalize_source(request.source)
     now = utc_now()
     row_data: dict[str, Any] = {
         "jiuwenclaw_id": jiuwenclaw_id,
         "rule_id": rule_id,
         "rule_name": request.rule_name,
         "description": request.description,
-        "pattern": validate_pattern(request.pattern),
+        "pattern": validate_pattern(
+            request.pattern,
+            check_structure=False,
+            check_performance=False,
+        ),
         "replacement": normalize_replacement(request.replacement),
         "priority": int(request.priority),
-        "source": normalize_source(request.source),
+        "source": source,
         "enabled": bool(request.enabled),
         "data": request.data,
         "created_at": now,
@@ -109,7 +114,11 @@ async def _update_log_masking_rule_record(
         raise ValueError("updates must not be empty")
 
     if "pattern" in updates and updates["pattern"] is not None:
-        updates["pattern"] = validate_pattern(updates["pattern"])
+        updates["pattern"] = validate_pattern(
+            updates["pattern"],
+            check_structure=False,
+            check_performance=False,
+        )
     if "replacement" in updates:
         updates["replacement"] = normalize_replacement(updates.get("replacement"))
     if "source" in updates and updates["source"] is not None:
@@ -150,15 +159,20 @@ async def _upsert_log_masking_rule_record(
     )
 
     rid = normalize_rule_id(request.rule_id)
+    source = normalize_source(request.source)
     row_data: dict[str, Any] = {
         "jiuwenclaw_id": jiuwenclaw_id,
         "rule_id": rid,
         "rule_name": request.rule_name,
         "description": request.description,
-        "pattern": validate_pattern(request.pattern),
+        "pattern": validate_pattern(
+            request.pattern,
+            check_structure=False,
+            check_performance=False,
+        ),
         "replacement": normalize_replacement(request.replacement),
         "priority": int(request.priority),
-        "source": normalize_source(request.source),
+        "source": source,
         "enabled": bool(request.enabled),
         "data": request.data,
     }
@@ -278,7 +292,7 @@ async def apply_log_masking_rule(payload: dict[str, Any]) -> dict[str, Any] | No
     else:
         raise ValueError(f"unsupported log_masking_rule.op: {op!r}")
 
-    await LogMaskingEngine.reload_log_masking_from_gateway_db()
+    await LogMaskingEngine.reload_log_masking_rule(db_authoritative=True)
 
     logger.info(
         "[ManagerWsClient] log_masking_rule sync op=%s rule_id=%s",

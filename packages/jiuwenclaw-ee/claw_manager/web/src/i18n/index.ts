@@ -4,6 +4,9 @@ import LanguageDetector from 'i18next-browser-languagedetector';
 
 import zh from './locales/zh.json';
 import en from './locales/en.json';
+import { getProductName } from '../utils/env';
+
+const productName = getProductName();
 
 void i18n
   .use(LanguageDetector)
@@ -15,7 +18,7 @@ void i18n
     },
     fallbackLng: 'zh',
     supportedLngs: ['zh', 'en'],
-    interpolation: { escapeValue: false },
+    interpolation: { escapeValue: false, defaultVariables: { productName } },
   });
 
 export default i18n;

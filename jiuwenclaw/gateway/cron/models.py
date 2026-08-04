@@ -178,6 +178,10 @@ class CronJob:
     mode: str = "agent"
     # 执行一次后自动删除（用于提醒类任务）
     delete_after_run: bool = False
+    # 企业路由身份（与 targets / SessionMap 语义独立；空值兼容非企业旧任务）
+    group_id: str | None = None
+    bot_id: str | None = None
+    user_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -201,6 +205,12 @@ class CronJob:
             d["mode"] = self.mode
         if self.delete_after_run:
             d["delete_after_run"] = bool(self.delete_after_run)
+        if self.group_id:
+            d["group_id"] = self.group_id
+        if self.bot_id:
+            d["bot_id"] = self.bot_id
+        if self.user_id:
+            d["user_id"] = self.user_id
         return d
 
     @staticmethod
@@ -273,6 +283,10 @@ class CronJob:
 
         delete_after_run = bool(data.get("delete_after_run", False))
 
+        def _opt_id(key: str) -> str | None:
+            raw = data.get(key, None)
+            return str(raw).strip() if isinstance(raw, str) and str(raw).strip() else None
+
         return CronJob(
             id=job_id,
             name=name,
@@ -289,6 +303,9 @@ class CronJob:
             chat_type=job_chat_type,
             mode=job_mode,
             delete_after_run=delete_after_run,
+            group_id=_opt_id("group_id"),
+            bot_id=_opt_id("bot_id"),
+            user_id=_opt_id("user_id"),
         )
 
 

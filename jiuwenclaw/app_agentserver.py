@@ -26,6 +26,7 @@ except ImportError:
     # Fallback for environments where interface_deep dependencies are not available.
     # The module will be imported lazily when needed in _run().
     pass
+from jiuwenclaw.infrastructure.tiktoken_warmup import warmup_tiktoken
 from jiuwenclaw.jiuwen_core_patch import (
     apply_openai_model_client_patch,
     configure_openjiuwen_logging_under_jiuwenclaw,
@@ -60,11 +61,16 @@ else:
     _new_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
 _old_workspace = _workspace_dir / "agent" / "workspace"
 
+_enterprise_runtime = bool(os.getenv("AGENT_RUNTIME", "").strip())
+
 # Initialize if config doesn't exist, or if legacy workspace exists but new doesn't (migration)
 if not _config_file.exists() or (_old_workspace.exists() and not _new_workspace.exists()):
     prepare_workspace(overwrite=False)
 else:
-    update_config()
+    # 企业级多 Pod 共享 PVC：各 AgentServer 启动时 merge 写 config.yaml 会与并发读竞态。
+    # 配置由部署侧/init 写入 PVC，运行时经 Gateway reload_config 热更新，不在此 merge。
+    if not _enterprise_runtime:
+        update_config()
     cleanup_legacy_flat_agent_dir(_workspace_dir)
 
 configure_openjiuwen_logging_under_jiuwenclaw()
@@ -105,6 +111,9 @@ async def _run(host: str, port: int) -> None:
 
     logger.info("[AgentServer] starting: ws://%s:%s", host, port)
 
+    # ready 前同步预热，避免首请求在事件循环上同步 get_encoding
+    warmup_tiktoken()
+
     from jiuwenclaw.agentserver.session_metadata import remove_team_mode_session_dirs_at_startup
 
     remove_team_mode_session_dirs_at_startup()
@@ -125,19 +134,10 @@ async def _run(host: str, port: int) -> None:
     try:
         from jiuwenclaw.infrastructure.log_masking.engine import LogMaskingEngine
 
-        await LogMaskingEngine.reload_log_masking_from_gateway_db()
+        await LogMaskingEngine.reload_log_masking_rule()
         logger.info("[AgentServer] log masking rules loaded from Gateway DB (if any)")
     except Exception:  # noqa: BLE001
         logger.warning("[AgentServer] log_masking_rule cold load skipped", exc_info=True)
-
-    if os.getenv("AGENT_RUNTIME", "").strip():
-        try:
-            from jiuwenclaw.agentserver.memory.config import reload_embed_config_from_gateway_db
-
-            await reload_embed_config_from_gateway_db()
-            logger.info("[AgentServer] embed_config loaded from Gateway DB (if any)")
-        except Exception:  # noqa: BLE001
-            logger.warning("[AgentServer] embed_config cold load skipped", exc_info=True)
 
     if os.getenv("AGENT_RUNTIME", "").strip():
         try:
@@ -147,6 +147,15 @@ async def _run(host: str, port: int) -> None:
             logger.info("[AgentServer] task_memory_config loaded from Gateway DB (if any)")
         except Exception:  # noqa: BLE001
             logger.warning("[AgentServer] task_memory_config cold load skipped", exc_info=True)
+
+    if os.getenv("AGENT_RUNTIME", "").strip():
+        try:
+            from jiuwenclaw.agentserver.memory.config import reload_memory_config_from_gateway_db
+
+            await reload_memory_config_from_gateway_db()
+            logger.info("[AgentServer] memory_config loaded from Gateway DB (if any)")
+        except Exception:  # noqa: BLE001
+            logger.warning("[AgentServer] memory_config cold load skipped", exc_info=True)
 
     if os.getenv("AGENT_RUNTIME", "").strip():
         try:

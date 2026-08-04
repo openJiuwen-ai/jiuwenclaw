@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import importlib
 import os
@@ -71,7 +72,10 @@ from openjiuwen.harness.tools import (
 )
 from openjiuwen.harness.tools.todo import TodoStatus, TodoModifyTool
 from openjiuwen.harness.workspace.workspace import Workspace, WorkspaceNode
-
+from jiuwenclaw.agentserver.deep_agent.rails.concurrent_safe_rails import (
+    ConcurrentSafeFileSystemRail,
+    ConcurrentSafeTaskPlanningRail,
+)
 from jiuwenclaw.agentserver.deep_agent.cron_runtime import CronRuntimeBridge
 from jiuwenclaw.agentserver.deep_agent.ask_user_question_registry import (
     ASK_REQUEST_PREFIX,
@@ -110,8 +114,18 @@ from jiuwenclaw.agentserver.deep_agent.permissions.owner_scopes import (
 )
 from jiuwenclaw.agentserver.permissions.core import init_permission_engine
 from jiuwenclaw.agentserver.memory import clear_memory_manager_cache
-from jiuwenclaw.agentserver.memory.config import (clear_config_cache, get_memory_mode, is_memory_enabled,
-                                                  is_proactive_memory, clear_embed_config_db_cache)
+from jiuwenclaw.agentserver.memory.config import (
+    clear_config_cache,
+    clear_embed_config_db_cache,
+    clear_memory_config_db_cache,
+    get_embed_config,
+    get_memory_mode,
+    is_memory_enabled,
+    is_proactive_memory,
+    merge_memory_config_into_config,
+    reload_memory_config_from_gateway_db,
+    set_embed_config_db_cache,
+)
 from jiuwenclaw.agentserver.permissions.checker import TOOL_PERMISSION_CHANNEL_ID
 from jiuwenclaw.agentserver.permissions.config_loader import (
     reset_permissions_session_scope,
@@ -127,6 +141,9 @@ from jiuwenclaw.agentserver.tools.multimodal_config import (
 )
 from jiuwenclaw.agentserver.tools.video_tools import video_understanding
 from jiuwenclaw.agentserver.tools.harness_named_web_tools import build_jiuwen_harness_named_web_tools
+from jiuwenclaw.agentserver.tool_registration import (
+    ensure_tool_registered as _ensure_tool_registered,
+)
 
 from jiuwenclaw.agentserver.tools import SendFileToolkit, SkillToolkit
 from jiuwenclaw.agentserver.tools.ask_user_question_tool import get_ask_user_question_tool
@@ -183,7 +200,7 @@ from jiuwenclaw.agentserver.deep_agent.sysop_builder import (
 from jiuwenclaw.agentserver.stream_content_sanitize import strip_inline_tool_protocol
 from jiuwenclaw.agentserver.stream_utils import tool_calls_payload_to_json_list
 from jiuwenclaw.agentserver.extensions import get_rail_manager
-from jiuwenclaw.agentserver.cron_tool_context import (
+from jiuwenclaw.agentserver.tools.cron_tool_context import (
     CRON_TOOL_CHANNEL_ID,
     CRON_TOOL_METADATA,
     CRON_TOOL_MODE,
@@ -208,8 +225,6 @@ from jiuwenclaw.utils import (
     get_tenant_agent_skills_dirs,
 )
 from jiuwenclaw.local_env_config import set_local_config
-from openjiuwen_runtime.foundation.db.mysql_handler import MySQLHandler
-from openjiuwen_runtime.foundation.db.postgresql_handler import PostgreSQLHandler
 
 load_dotenv(dotenv_path=get_env_file())
 
@@ -646,35 +661,55 @@ def _patch_compiler_for_on_conflict():
 
 _patch_compiler_for_on_conflict()
 
+_checkpoint_singleton_lock: asyncio.Lock | None = None
+_shared_checkpoint_checkpointer: Any = None
+
+
+def _get_checkpoint_singleton_lock() -> asyncio.Lock:
+    global _checkpoint_singleton_lock
+    if _checkpoint_singleton_lock is None:
+        _checkpoint_singleton_lock = asyncio.Lock()
+    return _checkpoint_singleton_lock
+
+
+def reset_shared_checkpoint_for_tests() -> None:
+    """Reset process-wide checkpoint singleton (tests only)."""
+    global _shared_checkpoint_checkpointer, _checkpoint_singleton_lock
+    _shared_checkpoint_checkpointer = None
+    _checkpoint_singleton_lock = None
+
+
+async def _get_shared_gateway_db_engine():
+    """复用 GatewayDb 单例的 AsyncEngine（不新建连接池）。"""
+    from jiuwenclaw.infrastructure.module_importer import (
+        import_manager_ws_client_module,
+    )
+
+    db_mod = import_manager_ws_client_module("infrastructure.db")
+    handler = await db_mod.ensure_db_handler(log_prefix="checkpoint")
+    engine = handler.get_engine()
+    if engine is None:
+        raise RuntimeError("GatewayDb handler has no engine")
+    return engine
+
 
 async def _build_mysql_handler_engine():
-    """构建 checkpoint MySQL AsyncEngine，使用 openjiuwen_runtime SDK.
+    """获取 checkpoint MySQL AsyncEngine，复用 GatewayDb 连接池.
 
-    连接参数从 GATEWAY_DB_* 环境变量读取。
-    未配置 GATEWAY_DB_HOST 时返回 None，checkpoint 回退到 SQLite。
+    未配置 GATEWAY_DB_HOST 时返回 None，由调用方决定是否回退到 SQLite。
+    配置了 GATEWAY_DB_HOST 但连接/初始化失败时抛出异常，避免静默回退到 SQLite。
+    注意：SQLite不扛并发，并发时会报：(sqlite3.OperationalError) disk I/O error
     """
     db_host = os.getenv("GATEWAY_DB_HOST", "").strip()
     if not db_host:
         return None
     try:
-        db_port = int(os.getenv("GATEWAY_DB_PORT", "3306").strip())
-        db_user = os.getenv("GATEWAY_DB_USER", "root").strip()
-        db_password = os.getenv("GATEWAY_DB_PASSWORD", "").strip()
         db_name = os.getenv("GATEWAY_DB_NAME", "openjiuwen_gateway").strip()
-
-        handler = MySQLHandler(
-            host=db_host,
-            port=db_port,
-            user=db_user,
-            password=db_password,
-            database=db_name,
-        )
-        await handler.init_database()
-        await handler.connect()
-        engine = handler.get_engine()
+        engine = await _get_shared_gateway_db_engine()
         logger.info(
-            "[JiuWenClawDeepAdapter] checkpoint MySQL engine created via SDK: %s:%s/%s",
-            db_host, db_port, db_name,
+            "[JiuWenClawDeepAdapter] checkpoint MySQL engine reused from GatewayDb: %s/%s",
+            db_host,
+            db_name,
         )
 
         # 确保 kv_store.value 列为 LONGTEXT，避免 checkpoint 序列化数据被截断
@@ -708,40 +743,29 @@ async def _build_mysql_handler_engine():
             "[JiuWenClawDeepAdapter] failed to create checkpoint MySQL engine: %s",
             exc,
         )
-        return None
+        raise
 
 
 async def _build_postgresql_handler_engine():
-    """构建 checkpoint PostgreSQL AsyncEngine，使用 openjiuwen_runtime SDK.
+    """获取 checkpoint PostgreSQL AsyncEngine，复用 GatewayDb 连接池.
 
-    连接参数从 GATEWAY_DB_* 环境变量读取。
-    未配置 GATEWAY_DB_HOST 时返回 None，checkpoint 回退到 SQLite。
-    支持通过 GATEWAY_PG_SCHEMA 环境变量配置 schema。
+    未配置 GATEWAY_DB_HOST 时返回 None，由调用方决定是否回退到 SQLite。
+    配置了 GATEWAY_DB_HOST 但连接/初始化失败时抛出异常，避免静默回退到 SQLite。
+    注意：SQLite不扛并发，并发时会报：(sqlite3.OperationalError) disk I/O error
     """
     db_host = os.getenv("GATEWAY_DB_HOST", "").strip()
     if not db_host:
         return None
     try:
-        db_port = int(os.getenv("GATEWAY_DB_PORT", "5432").strip())
-        db_user = os.getenv("GATEWAY_DB_USER", "postgres").strip()
-        db_password = os.getenv("GATEWAY_DB_PASSWORD", "").strip()
         db_name = os.getenv("GATEWAY_DB_NAME", "openjiuwen_gateway").strip()
         db_schema = os.getenv("GATEWAY_PG_SCHEMA", "public").strip()
-
-        handler = PostgreSQLHandler(
-            host=db_host,
-            port=db_port,
-            user=db_user,
-            password=db_password,
-            database=db_name,
-            schema=db_schema,
-        )
-        await handler.init_database()
-        await handler.connect()
-        engine = handler.get_engine()
+        engine = await _get_shared_gateway_db_engine()
         logger.info(
-            "[JiuWenClawDeepAdapter] checkpoint PostgreSQL engine created via SDK: %s:%s/%s schema=%s",
-            db_host, db_port, db_name, db_schema,
+            "[JiuWenClawDeepAdapter] checkpoint PostgreSQL engine reused from GatewayDb: "
+            "%s/%s schema=%s",
+            db_host,
+            db_name,
+            db_schema,
         )
         # 确保 kv_store.value 列为 TEXT，避免 checkpoint 序列化数据被截断
         async with engine.begin() as conn:
@@ -773,7 +797,7 @@ async def _build_postgresql_handler_engine():
             "[JiuWenClawDeepAdapter] failed to create checkpoint PostgreSQL engine: %s",
             exc,
         )
-        return None
+        raise
 
 
 class _RuntimeCronToolContext:
@@ -814,6 +838,8 @@ class JiuWenClawDeepAdapter:
     - Deep interrupt / user_answer 处理
     """
 
+    _sysop_cache: dict[str, tuple[str, "SysOperation"]] = {}
+
     def __init__(
         self,
         workspace_dir: str | None = None,
@@ -829,6 +855,7 @@ class JiuWenClawDeepAdapter:
         self._vision_tools_registered: bool = False
         self._audio_tools_registered: bool = False
         self._video_tool_registered: bool = False
+        self._send_file_toolkit: SendFileToolkit | None = None
         self._model: Model | None = None
         self._model_client_config: ModelClientConfig | None = None
         self._model_request_config: ModelRequestConfig | None = None
@@ -846,6 +873,7 @@ class JiuWenClawDeepAdapter:
         self._skill_compliance_rail: SkillComplianceRail | None = None
         self._security_rail: SecurityRail | None = None
         self._memory_rail: MemoryRail | None = None
+        self._last_runtime_mode: str = "agent.plan"
         self._external_memory_rail: Any = None
         self._external_memory_rail_registered: bool = False
         self._lsp_rail: LspRail | None = None
@@ -1394,7 +1422,11 @@ class JiuWenClawDeepAdapter:
 
     @staticmethod
     async def set_checkpoint():
-        try:
+        global _shared_checkpoint_checkpointer
+        async with _get_checkpoint_singleton_lock():
+            if _shared_checkpoint_checkpointer is not None:
+                CheckpointerFactory.set_default_checkpointer(_shared_checkpoint_checkpointer)
+                return
             PersistenceCheckpointerProvider()
             checkpoint_path = get_checkpoint_dir()
             conf = {"db_type": "sqlite", "db_path": f"{checkpoint_path}/checkpoint"}
@@ -1413,9 +1445,8 @@ class JiuWenClawDeepAdapter:
             checkpointer = await CheckpointerFactory.create(
                 CheckpointerConfig(type="persistence", conf=conf)
             )
+            _shared_checkpoint_checkpointer = checkpointer
             CheckpointerFactory.set_default_checkpointer(checkpointer)
-        except Exception as e:
-            logger.error("[JiuWenClawDeepAdapter] fail to setup checkpoint due to: %s", e)
 
 
     @staticmethod
@@ -1571,6 +1602,20 @@ class JiuWenClawDeepAdapter:
             if sysop_card is None:
                 logger.warning("[JiuWenClawDeepAdapter] add sys_operation failed: sysop_card is None")
                 return None
+
+            cache_key = self._agent_id or sysop_card.id
+            cached = JiuWenClawDeepAdapter._sysop_cache.get(cache_key)
+            if cached is not None:
+                cached_id, cached_sysop = cached
+                existing = Runner.resource_mgr.get_sys_operation(cached_id)
+                if existing is not None:
+                    logger.info(
+                        "[JiuWenClawDeepAdapter] reuse cached sys_operation: id=%s agent_id=%s",
+                        cached_id, cache_key,
+                    )
+                    return existing
+                JiuWenClawDeepAdapter._sysop_cache.pop(cache_key, None)
+
             result = Runner.resource_mgr.add_sys_operation(sysop_card)
             if result.is_err():
                 error_msg = result.msg()
@@ -1602,7 +1647,10 @@ class JiuWenClawDeepAdapter:
                             )
                 
                 return None
-            return Runner.resource_mgr.get_sys_operation(sysop_card.id)
+            sysop_obj = Runner.resource_mgr.get_sys_operation(sysop_card.id)
+            if sysop_obj is not None:
+                JiuWenClawDeepAdapter._sysop_cache[cache_key] = (sysop_card.id, sysop_obj)
+            return sysop_obj
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] add sys_operation failed: %s", exc)
             return None
@@ -1610,7 +1658,7 @@ class JiuWenClawDeepAdapter:
     def _build_filesystem_rail(self) -> FileSystemRail | None:
         """Build FileSystemRail."""
         try:
-            fs_rail = FileSystemRail()
+            fs_rail = ConcurrentSafeFileSystemRail()
             logger.info("[JiuWenClawDeepAdapter] FileSystemRail create success")
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] FileSystemRail create failed: %s", exc)
@@ -1784,7 +1832,7 @@ class JiuWenClawDeepAdapter:
     def _build_task_planning_rail(self) -> TaskPlanningRail | None:
         """Build TaskPlanningRail."""
         try:
-            task_planning_rail = TaskPlanningRail()
+            task_planning_rail = ConcurrentSafeTaskPlanningRail()
             logger.info("[JiuWenClawDeepAdapter] TaskPlanningRail create success")
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] TaskPlanningRail create failed: %s", exc)
@@ -1814,8 +1862,7 @@ class JiuWenClawDeepAdapter:
 
     def _build_memory_rail(self, mode: str) -> MemoryRail | None:
         try:
-            from jiuwenclaw.agentserver.memory.config import get_embed_config
-            config = get_config()
+            config = self._startup_config_base
             embed_config = get_embed_config()
             has_api_key = embed_config.get("api_key") if isinstance(embed_config, dict) else None
             has_base_url = embed_config.get("base_url") if isinstance(embed_config, dict) else None
@@ -1844,8 +1891,7 @@ class JiuWenClawDeepAdapter:
             CodingMemoryRail 实例，失败返回 None
         """
         try:
-            from jiuwenclaw.agentserver.memory.config import get_embed_config
-            config = get_config()
+            config = self._startup_config_base
             embed_config = get_embed_config()
 
             # 检查 embedding 配置
@@ -2282,8 +2328,8 @@ class JiuWenClawDeepAdapter:
                 agent_id=agent_id,
                 language=self._resolve_runtime_language(),
         ):
-            Runner.resource_mgr.add_tool(tool)
-            tool_cards.append(tool.card)
+            registered = _ensure_tool_registered(tool)
+            tool_cards.append(registered.card)
 
         # 付费搜索工具：有任意一个付费 key 就注册
         if any(
@@ -2291,18 +2337,18 @@ class JiuWenClawDeepAdapter:
                 for key in ("BOCHA_API_KEY", "PERPLEXITY_API_KEY", "SERPER_API_KEY", "JINA_API_KEY")
         ):
             self._paid_search_tool = WebPaidSearchTool(language=self._resolve_runtime_language(), agent_id=agent_id)
-            Runner.resource_mgr.add_tool(self._paid_search_tool)
-            tool_cards.append(self._paid_search_tool.card)
+            registered = _ensure_tool_registered(self._paid_search_tool)
+            self._paid_search_tool = registered
+            tool_cards.append(registered.card)
             self._paid_search_registered = True
 
         self._petal_search_tools = []
         self._petal_search_registered = False
         if enable_petal_search():
             try:
-                if not Runner.resource_mgr.get_tool(mcp_petal_search.card.id):
-                    Runner.resource_mgr.add_tool(mcp_petal_search)
-                tool_cards.append(mcp_petal_search.card)
-                self._petal_search_tools = [mcp_petal_search]
+                registered = _ensure_tool_registered(mcp_petal_search)
+                tool_cards.append(registered.card)
+                self._petal_search_tools = [registered]
                 self._petal_search_registered = True
             except Exception as exc:
                 logger.warning(
@@ -2319,9 +2365,9 @@ class JiuWenClawDeepAdapter:
                         vision_model_config=self._vision_model_config,
                         agent_id=agent_id
                 ):
-                    Runner.resource_mgr.add_tool(tool)
-                    tool_cards.append(tool.card)
-                    self._vision_tools.append(tool)
+                    registered = _ensure_tool_registered(tool)
+                    tool_cards.append(registered.card)
+                    self._vision_tools.append(registered)
                 self._vision_tools_registered = bool(self._vision_tools)
             except Exception as exc:
                 self._vision_tools = []
@@ -2333,10 +2379,12 @@ class JiuWenClawDeepAdapter:
         self._audio_tools = []
         self._audio_tools_registered = False
         try:
-            self._audio_tools = self._iter_runtime_audio_tools(agent_id)
-            for tool in self._audio_tools:
-                Runner.resource_mgr.add_tool(tool)
-                tool_cards.append(tool.card)
+            audio_tools = self._iter_runtime_audio_tools(agent_id)
+            self._audio_tools = []
+            for tool in audio_tools:
+                registered = _ensure_tool_registered(tool)
+                tool_cards.append(registered.card)
+                self._audio_tools.append(registered)
             self._audio_tools_registered = bool(self._audio_tools)
         except Exception as exc:
             self._audio_tools = []
@@ -2348,8 +2396,8 @@ class JiuWenClawDeepAdapter:
         self._video_tool_registered = False
         if self._video_model_config:
             try:
-                Runner.resource_mgr.add_tool(video_understanding)
-                tool_cards.append(video_understanding.card)
+                registered = _ensure_tool_registered(video_understanding)
+                tool_cards.append(registered.card)
                 self._video_tool_registered = True
             except Exception as exc:
                 logger.warning(
@@ -2382,8 +2430,8 @@ class JiuWenClawDeepAdapter:
             ]
             try:
                 for xt in _xiaoyi_tools:
-                    Runner.resource_mgr.add_tool(xt)
-                    tool_cards.append(xt.card)
+                    registered = _ensure_tool_registered(xt)
+                    tool_cards.append(registered.card)
                 self._xiaoyi_phone_tools_registered = True
                 logger.info(
                     "[JiuWenClawDeepAdapter] %d xiaoyi phone tools registered", len(_xiaoyi_tools)
@@ -2397,10 +2445,9 @@ class JiuWenClawDeepAdapter:
             skill_toolkit = SkillToolkit(manager=self._skill_manager)
             skill_tool_names: list[str] = []
             for tool in skill_toolkit.get_tools():
-                if not Runner.resource_mgr.get_tool(tool.card.id):
-                    Runner.resource_mgr.add_tool(tool)
-                tool_cards.append(tool.card)
-                skill_tool_names.append(tool.card.name)
+                registered = _ensure_tool_registered(tool)
+                tool_cards.append(registered.card)
+                skill_tool_names.append(registered.card.name)
             logger.info(
                 "[JiuWenClawDeepAdapter] SkillToolkit registered: tools=%s",
                 skill_tool_names,
@@ -2411,9 +2458,8 @@ class JiuWenClawDeepAdapter:
         # AskUserQuestion 工具：用于 LLM 主动结构化追问并等待用户回答
         try:
             ask_tool = get_ask_user_question_tool()
-            if not Runner.resource_mgr.get_tool(ask_tool.card.id):
-                Runner.resource_mgr.add_tool(ask_tool)
-            tool_cards.append(ask_tool.card)
+            registered = _ensure_tool_registered(ask_tool)
+            tool_cards.append(registered.card)
             logger.info("[JiuWenClawDeepAdapter] AskUserQuestion tool registered")
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] AskUserQuestion tool registration failed: %s", exc)
@@ -2421,8 +2467,8 @@ class JiuWenClawDeepAdapter:
         # DeepResearch 执行工具
         try:
             for tool in get_deepresearch_tools():
-                Runner.resource_mgr.add_tool(tool)
-                tool_cards.append(tool.card)
+                registered = _ensure_tool_registered(tool)
+                tool_cards.append(registered.card)
             logger.info(
                 "[JiuWenClawDeepAdapter] deepresearch tools registered successfully",
             )
@@ -2532,6 +2578,7 @@ class JiuWenClawDeepAdapter:
     ) -> dict[str, Any]:
         """若已加载 ``_enterprise_config``，将其模型槽位覆盖到 config 快照上。"""
         if self._enterprise_config is None:
+            clear_embed_config_db_cache()
             return config_base
         from jiuwenclaw.agentserver.enterprise_config.apply_models import (
             apply_enterprise_models_to_config,
@@ -2539,6 +2586,9 @@ class JiuWenClawDeepAdapter:
 
         merged, applied = apply_enterprise_models_to_config(
             config_base, self._enterprise_config
+        )
+        set_embed_config_db_cache(
+            getattr(self._enterprise_config, "embedding", None)
         )
         if applied:
             self._model_config_source = "enterprise_policy"
@@ -2582,6 +2632,13 @@ class JiuWenClawDeepAdapter:
             list(loaded.models),
         )
 
+    def _runtime_agent_scope_id(self) -> str:
+        agent_id = str(self._agent_id or "").strip()
+        service_id = str(self._service_id or "").strip()
+        if service_id and agent_id:
+            return f"{service_id}_{agent_id}"
+        return agent_id or "jiuwenclaw"
+
     async def create_instance(self, config: dict[str, Any] | None = None, *, mode: str = "agent.plan") -> None:
         """初始化 DeepAgent 实例.
 
@@ -2602,6 +2659,7 @@ class JiuWenClawDeepAdapter:
         bootstrap_request = self._instance_overrides.pop("request", None)
         if bootstrap_request is not None:
             await self._load_enterprise_config(bootstrap_request)
+        config_base = merge_memory_config_into_config(config_base)
         config_base = self._merge_enterprise_models_into_config(config_base)
         self._refresh_multimodal_configs(config_base)
         self._startup_config_base = config_base
@@ -2641,9 +2699,10 @@ class JiuWenClawDeepAdapter:
                 exc,
             )
             raise
-        agent_card = AgentCard(name=self._agent_name, id='jiuwenclaw')
+        agent_card = AgentCard(name=self._agent_name, id=self._runtime_agent_scope_id())
 
         tool_cards = await self._get_tool_cards(agent_card.id, mode=mode)
+        logger.info("[JiuWenClawDeepAdapter] Agent card id: %s", agent_card.id)
         self._tool_cards = tool_cards
 
         from jiuwenclaw.agentserver.permissions.config_loader import get_effective_permissions_config
@@ -2747,19 +2806,13 @@ class JiuWenClawDeepAdapter:
             )
 
             # Register fork_agent tool (ignore if already exists)
-            try:
+            if not RunnerClass.resource_mgr.get_tool(fork_agent.card.id):
                 RunnerClass.resource_mgr.add_tool(fork_agent)
-            except Exception as e:
-                if "already exist" not in str(e):
-                    logger.warning("[JiuWenClawDeepAdapter] Failed to register fork_agent tool: %s", e)
             self._instance.ability_manager.add(fork_agent.card)
 
             # Register spawn_subagent tool (ignore if already exists)
-            try:
+            if not RunnerClass.resource_mgr.get_tool(spawn_subagent.card.id):
                 RunnerClass.resource_mgr.add_tool(spawn_subagent)
-            except Exception as e:
-                if "already exist" not in str(e):
-                    logger.warning("[JiuWenClawDeepAdapter] Failed to register spawn_subagent tool: %s", e)
             self._instance.ability_manager.add(spawn_subagent.card)
 
             logger.info("[JiuWenClawDeepAdapter] Fork agent and spawn_subagent tools initialized")
@@ -2808,7 +2861,17 @@ class JiuWenClawDeepAdapter:
             raise RuntimeError("JiuWenClawDeepAdapter 未初始化，请先调用 create_instance()")
         clear_config_cache()
         clear_embed_config_db_cache()
+        clear_memory_config_db_cache()
         clear_memory_manager_cache()
+
+        if os.getenv("AGENT_RUNTIME", "").strip():
+            try:
+                await reload_memory_config_from_gateway_db()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] reload_memory_config_from_gateway_db failed: %s",
+                    exc,
+                )
 
         if env_overrides is not None:
             if not isinstance(env_overrides, dict):
@@ -2823,6 +2886,8 @@ class JiuWenClawDeepAdapter:
         else:
             config_base = resolve_env_vars(config_base)
 
+        config_base = merge_memory_config_into_config(config_base)
+
         # 同步扩展配置到 ExtensionRegistry
          # Gateway 已解密 extension_security_configs，AgentServer 直接使用明文
         try:
@@ -2835,6 +2900,7 @@ class JiuWenClawDeepAdapter:
 
         config_base = self._merge_enterprise_models_into_config(config_base)
         self._refresh_multimodal_configs(config_base)
+        self._startup_config_base = config_base
 
         config = config_base.get('react', {}).copy()
         self._config_cache = config.copy()
@@ -2867,6 +2933,18 @@ class JiuWenClawDeepAdapter:
         )
         self._instance.configure(deep_cfg)
 
+        try:
+            current_mode = str(getattr(self, "_last_runtime_mode", "") or "agent.plan")
+            await self._handle_memory_rail_by_config(
+                "plan" if current_mode == "agent.plan" else "fast"
+            )
+            await self._handle_external_memory_rail_by_config()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[JiuWenClawDeepAdapter] memory rail refresh after reload failed: %s",
+                exc,
+            )
+
         logger.info("[JiuWenClawDeepAdapter] 配置已热更新（configure），未重启进程")
 
     def _bind_runtime_cron_context(
@@ -2877,8 +2955,10 @@ class JiuWenClawDeepAdapter:
             metadata: dict[str, Any] | None,
             request_id: str | None,
             mode: str | None,
+            params: dict[str, Any] | None = None,
     ) -> tuple[Token[str], Token[str | None], Token[dict[str, Any] | None], Token[str | None], Any]:
         from jiuwenclaw.agentserver import plan_todo_context as _plan_todo
+        from jiuwenclaw.gateway.cron.enterprise_gate import extract_routing_triple
 
         normalized_channel = str(channel_id or "").strip() or CronTargetChannel.WEB.value
         normalized_mode = str(mode).strip() if isinstance(mode, str) and mode.strip() else None
@@ -2887,6 +2967,14 @@ class JiuWenClawDeepAdapter:
             normalized_metadata = {}
         if isinstance(request_id, str) and request_id.strip():
             normalized_metadata["request_id"] = request_id.strip()
+        # 企业三元组：params → metadata → metadata.query（与 enterprise_config 同源）
+        g, b, u = extract_routing_triple(params or {}, normalized_metadata)
+        if g:
+            normalized_metadata["group_id"] = g
+        if b:
+            normalized_metadata["bot_id"] = b
+        if u:
+            normalized_metadata["user_id"] = u
         # 设置 DeepResearch 路由上下文
         dr_token = push_deepresearch_route(
             request_id=request_id or "",
@@ -2919,6 +3007,7 @@ class JiuWenClawDeepAdapter:
 
     async def _update_rails_for_mode(self, mode: str) -> None:
         """按 mode 注册或卸载 rails。"""
+        self._last_runtime_mode = mode
         if mode == "agent.plan":
             await self._update_plan_mode_rails()
         else:
@@ -3132,19 +3221,33 @@ class JiuWenClawDeepAdapter:
         send_file_channel_allowed = send_file_enabled or channel == "officeclaw"
         has_send_file_request_context = bool(request_id and session_id)
         if send_file_channel_allowed and has_send_file_request_context:
-            # 先卸载上一次请求遗留的 send_file 工具
+            # send_file_to_user 工具用稳定 id 注册一次即可；每次请求只刷新 per-request 上下文。
+            # send_file 在执行时从 contextvar（_bind_runtime_cron_context 设置）读取
+            # request_id/session_id/channel_id/metadata，并发安全，不会串话。
+            if self._send_file_toolkit is None:
+                self._send_file_toolkit = SendFileToolkit(
+                    request_id=request_id,
+                    session_id=session_id,
+                    channel_id=get_cron_tool_channel_id(),
+                    metadata=get_cron_tool_metadata(),
+                )
+                for sf_tool in self._send_file_toolkit.get_tools(tool_id="send_file_to_user"):
+                    if not Runner.resource_mgr.get_tool(sf_tool.card.id):
+                        Runner.resource_mgr.add_tool(sf_tool)
+                    self._instance.ability_manager.add(sf_tool.card)
+            else:
+                # 后续请求：只刷新 toolkit 的 fallback 上下文，不重建/不重注册，消除并发竞态
+                self._send_file_toolkit.update_runtime_context(
+                    request_id=request_id,
+                    session_id=session_id,
+                    channel_id=get_cron_tool_channel_id(),
+                    metadata=get_cron_tool_metadata(),
+                )
+        else:
+            # 当前 channel 不允许 send_file：卸载本 agent 上遗留的 send_file 工具卡
             for existing in list(self._instance.ability_manager.list() or []):
                 if getattr(existing, "name", "").startswith("send_file_to_user"):
                     self._instance.ability_manager.remove(existing.name)
-            send_file_toolkit = SendFileToolkit(
-                request_id=request_id,
-                session_id=session_id,
-                channel_id=get_cron_tool_channel_id(),
-                metadata=get_cron_tool_metadata(),
-            )
-            for sf_tool in send_file_toolkit.get_tools():
-                Runner.resource_mgr.add_tool(sf_tool)
-                self._instance.ability_manager.add(sf_tool.card)
 
     def _refresh_acp_runtime_tools(
             self,
@@ -3378,7 +3481,7 @@ class JiuWenClawDeepAdapter:
         - pause: 暂停循环（不取消任务）
         - resume: 恢复已暂停的循环
         - cancel: 取消所有运行中的任务
-        - supplement: 取消当前任务但保留 todo
+        - supplement: 取消当前任务并清空 todo / task_plan，再启动新任务
 
         Args:
             request: AgentRequest，params 中可包含：
@@ -3415,7 +3518,7 @@ class JiuWenClawDeepAdapter:
             message = "任务已恢复"
 
         elif intent == "supplement":
-            # supplement: 停止当前执行，但保留 todo（新任务会根据 todo 待办继续执行）
+            # supplement: 停止当前执行并清空 todo / task_plan，避免 TaskScheduler 续跑旧计划
             # 1. 通过 rail abort 在 checkpoint 抛 CancelledError，打断当前内层执行
             if self._stream_event_rail is not None:
                 self._stream_event_rail.abort()
@@ -3425,13 +3528,18 @@ class JiuWenClawDeepAdapter:
             # 3. 取消当前会话关联的 MultiSessionToolkit 子任务（按 request 跟踪，避免误停其它会话）
             await self._cancel_session_toolkits(request.session_id, "interrupt(supplement): ")
             AskUserQuestionRegistry.get_instance().cancel_for_session(str(request.session_id or ""))
-            await self._clear_session_persisted_interrupt_state(
+            # 4. 标记未完成的 todo 为 cancelled 并清空 todo.json（与 cancel 一致）
+            if request.session_id:
+                try:
+                    updated_todos = await self._cancel_pending_todos(request.session_id)
+                except Exception as exc:
+                    logger.warning("[JiuWenClawDeepAdapter] supplement 标记 todo cancelled 失败: %s", exc)
+            await self._release_session_persistence_checkpoint(
                 request.session_id,
                 reason="interrupt(supplement)",
             )
-            # 4. 不清理 todo — 保留给新任务继续
             logger.info(
-                "[JiuWenClawDeepAdapter] interrupt(supplement): 已停止执行 request_id=%s",
+                "[JiuWenClawDeepAdapter] interrupt(supplement): 已停止执行并清空 todo/task_plan request_id=%s",
                 request.request_id,
             )
             message = "任务已切换"
@@ -3450,17 +3558,17 @@ class JiuWenClawDeepAdapter:
                 f"interrupt(cancel) request_id={request.request_id}: ",
             )
             AskUserQuestionRegistry.get_instance().cancel_for_session(str(request.session_id or ""))
-            await self._clear_session_persisted_interrupt_state(
-                request.session_id,
-                reason="interrupt(cancel)",
-            )
-            # 4. 将未完成的 todo 项标记为 cancelled，并获取更新后的 todo 列表
+            # 4. 标记未完成的 todo 为 cancelled（通知前端），并清空 todo.json
             updated_todos = None
             if request.session_id:
                 try:
                     updated_todos = await self._cancel_pending_todos(request.session_id)
                 except Exception as exc:
                     logger.warning("[JiuWenClawDeepAdapter] 标记 todo cancelled 失败: %s", exc)
+            await self._release_session_persistence_checkpoint(
+                request.session_id,
+                reason="interrupt(cancel)",
+            )
 
             logger.info(
                 "[JiuWenClawDeepAdapter] interrupt(cancel): 已停止执行 request_id=%s",
@@ -3482,7 +3590,7 @@ class JiuWenClawDeepAdapter:
             payload["new_input"] = new_input
 
         # cancel 后附带更新的 todo 列表，通知前端刷新
-        if intent not in ("pause", "resume", "supplement") and updated_todos is not None:
+        if intent not in ("pause", "resume") and updated_todos is not None:
             payload["todos"] = updated_todos
 
         return AgentResponse(
@@ -3517,20 +3625,57 @@ class JiuWenClawDeepAdapter:
         session_id: str | None,
         *,
         reason: str,
+        clear_interrupt: bool = False,
+        clear_task_plan: bool = False,
+        clear_task_plan_if_todo_empty: bool = False,
     ) -> None:
-        if not session_id:
+        """Clear persisted session checkpoint state (interrupt / TaskPlan) in one pre_run."""
+        if not session_id or self._instance is None:
             return
-        if self._instance is None:
+
+        should_clear_plan = clear_task_plan
+        if clear_task_plan_if_todo_empty and not should_clear_plan:
+            try:
+                deep_config = self._instance.deep_config
+                modify_tool = TodoModifyTool(
+                    operation=deep_config.sys_operation,
+                    workspace=str(deep_config.workspace.get_node_path(WorkspaceNode.TODO)),
+                    language=self._resolve_runtime_language(),
+                )
+                file_path = modify_tool.file_path_for_session(session_id)
+                if not os.path.isfile(file_path):
+                    should_clear_plan = True
+                else:
+                    with open(file_path, encoding="utf-8") as f:
+                        data = json.load(f)
+                    should_clear_plan = not isinstance(data, list) or len(data) == 0
+            except Exception:
+                should_clear_plan = True
+
+        if not clear_interrupt and not should_clear_plan:
             return
 
         try:
             session = create_agent_session(session_id=session_id, card=self._instance.card)
             await session.pre_run(inputs=None)
-            clear_session_interrupt_state(session)
+            if clear_interrupt:
+                clear_session_interrupt_state(session)
+            if should_clear_plan:
+                state = self._instance.load_state(session)
+                if state.task_plan is not None:
+                    state.task_plan = None
+                    self._instance.save_state(session, state)
+                    session.update_state({"deep_agent_state": state.to_session_dict()})
             await session.post_run()
+            cleared = []
+            if clear_interrupt:
+                cleared.append("interrupt")
+            if should_clear_plan:
+                cleared.append("task_plan")
             logger.info(
-                "[JiuWenClawDeepAdapter] %s: cleared persisted interrupt state session_id=%s",
+                "[JiuWenClawDeepAdapter] %s: cleared %s session_id=%s",
                 reason,
+                "+".join(cleared),
                 session_id,
             )
         except Exception as exc:
@@ -3539,6 +3684,67 @@ class JiuWenClawDeepAdapter:
                 reason,
                 session_id,
                 exc,
+            )
+
+    async def _release_session_persistence_checkpoint(
+        self,
+        session_id: str | None,
+        *,
+        reason: str,
+    ) -> None:
+        """Release persistence checkpointer blobs for one session.
+
+        After ``chat.interrupt(cancel|supplement)``, the next ``chat.send`` must not
+        ``recover()`` an in-flight turn (tool calls / permission ASK) from KV storage.
+        """
+        sid = (session_id or "").strip()
+        if not sid:
+            return
+        get_fn = getattr(CheckpointerFactory, "get_checkpointer", None)
+        if not callable(get_fn):
+            return
+        try:
+            checkpointer = get_fn()
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] %s: get checkpointer failed session_id=%s error=%s",
+                reason,
+                sid,
+                exc,
+            )
+            return
+        if checkpointer is None:
+            return
+        release_fn = getattr(checkpointer, "release", None)
+        if not callable(release_fn):
+            return
+
+        agent_id = None
+        if self._instance is not None:
+            card = getattr(self._instance, "card", None)
+            if card is not None:
+                agent_id = (getattr(card, "id", None) or "").strip() or None
+
+        try:
+            if agent_id:
+                await release_fn(sid, agent_id)
+            else:
+                await release_fn(sid)
+            logger.info(
+                "[JiuWenClawDeepAdapter] %s: persistence checkpoint released "
+                "session_id=%s agent_id=%s",
+                reason,
+                sid,
+                agent_id or "all",
+            )
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] %s: persistence checkpoint release failed "
+                "session_id=%s error=%s",
+                reason,
+                sid,
+                exc,
+                exc_info=True,
             )
 
     async def abort_on_gateway_disconnect(self) -> None:
@@ -4138,7 +4344,7 @@ class JiuWenClawDeepAdapter:
         try:
             tool_card = self._instance.ability_manager.get("todo_modify")
             registered_tool = Runner.resource_mgr.get_tool(tool_card.id)
-            if registered_tool is not None:
+            if isinstance(registered_tool, TodoModifyTool):
                 modify_tool = registered_tool
         except Exception:
             pass
@@ -4151,10 +4357,19 @@ class JiuWenClawDeepAdapter:
                 language=self._resolve_runtime_language(),
             )
 
-        modify_tool.set_file(session_id)
+        file_path = modify_tool.file_path_for_session(session_id)
 
         try:
-            todos = await modify_tool.load_todos()
+            try:
+                todos = await modify_tool.load_todos(file_path)
+            except Exception as load_exc:
+                logger.debug(
+                    "[JiuWenClawDeepAdapter] session %s 无 todo 文件或加载失败: %s",
+                    session_id,
+                    load_exc,
+                )
+                return None
+
             if not todos:
                 return None
 
@@ -4169,17 +4384,30 @@ class JiuWenClawDeepAdapter:
                     ids_to_cancel.append(todo.id)
 
             if ids_to_cancel:
-                await modify_tool._cancel_todos(ids_to_cancel, todos)
+                await modify_tool.invoke(
+                    {"action": "cancel", "ids": ids_to_cancel},
+                    session_id=session_id,
+                )
                 logger.info(
                     "[JiuWenClawDeepAdapter] 已将 session %s 的未完成任务标记为 cancelled",
                     session_id,
                 )
 
-            # 重新加载并返回前端格式的 todo 列表
-            updated_todos = await modify_tool.load_todos()
+            # 重新加载并返回前端格式的 todo 列表，然后清空文件避免 TaskScheduler 续跑
+            updated_todos = await modify_tool.load_todos(file_path)
+            frontend = None
             if updated_todos and self._stream_event_rail is not None:
-                return self._stream_event_rail._format_todos_for_frontend(updated_todos)
-            return None
+                frontend = JiuClawStreamEventRail.format_todos_for_frontend(updated_todos)
+            try:
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write("[]\n")
+            except Exception as clear_exc:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] 清空 session %s todo 文件失败: %s",
+                    session_id,
+                    clear_exc,
+                )
+            return frontend
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] 标记 todo cancelled 失败: %s", exc)
             return None
@@ -4216,6 +4444,8 @@ class JiuWenClawDeepAdapter:
             await self._clear_session_persisted_interrupt_state(
                 session_id,
                 reason="plain_user_message_before_agent_run",
+                clear_interrupt=True,
+                clear_task_plan_if_todo_empty=True,
             )
 
         token_trace_sid = _LLM_TRACE_SESSION_ID.set(session_id)
@@ -4246,7 +4476,8 @@ class JiuWenClawDeepAdapter:
             session_id=request.session_id,
             metadata=request.metadata,
             request_id=request.request_id,
-            mode=mode
+            mode=mode,
+            params=request.params if isinstance(request.params, dict) else None,
         )
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         token_perm = setup_permission_context(request)
@@ -4383,6 +4614,8 @@ class JiuWenClawDeepAdapter:
             await self._clear_session_persisted_interrupt_state(
                 session_id,
                 reason="plain_user_message_before_agent_run",
+                clear_interrupt=True,
+                clear_task_plan_if_todo_empty=True,
             )
 
         has_streamed_content = False
@@ -4406,6 +4639,7 @@ class JiuWenClawDeepAdapter:
             metadata=request.metadata,
             request_id=request.request_id,
             mode=mode,
+            params=request.params if isinstance(request.params, dict) else None,
         )
 
         # Set telemetry context for OpenTelemetry span creation
@@ -5137,7 +5371,7 @@ class JiuWenClawDeepAdapter:
         return None
 
     async def _handle_memory_rail_by_config(self, mode: str):
-        config = get_config()
+        config = self._startup_config_base
         if get_memory_mode(config) == "local":
             # 引擎门禁：memory.engine 未放行内置时，等同于禁用
             builtin_on = is_builtin_memory_allowed(config) and is_memory_enabled(mode, config)

@@ -9,7 +9,7 @@ import { FEATURE_APP_UPDATER_UI } from '../../featureFlags';
 import { OffloadFilesWidget } from './OffloadFilesWidget';
 import './SessionSidebar.css';
 
-type MainNavKey = 'chat' | 'skills' | 'agents' | 'sessions' | 'heartbeat' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'logspanel' | 'browserpanel' | 'updatepanel';
+type MainNavKey = 'chat' | 'skills' | 'agents' | 'sessions' | 'history' | 'heartbeat' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'logspanel' | 'browserpanel' | 'updatepanel';
 
 interface SessionSidebarProps {
   activeNav: MainNavKey;
@@ -63,6 +63,15 @@ export function SessionSidebar({
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v12m6-6H6m9-9h3a2.25 2.25 0 012.25 2.25v3M9 3H6a2.25 2.25 0 00-2.25 2.25v3m0 6v3A2.25 2.25 0 006 19.75h3m6 0h3a2.25 2.25 0 002.25-2.25v-3" />
           </svg>
           {t('nav.sessions')}
+        </button>
+        <button
+          onClick={() => onNavigate('history')}
+          className={`nav-item w-full ${activeNav === 'history' ? 'active' : ''}`}
+        >
+          <svg className="w-4 h-4 nav-item__icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M3 3v5h5M3.05 13A9 9 0 1 0 6 5.3L3 8" />
+          </svg>
+          {t('nav.history')}
         </button>
         <button
           onClick={() => onNavigate('heartbeat')}

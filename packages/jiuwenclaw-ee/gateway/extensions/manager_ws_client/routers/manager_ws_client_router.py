@@ -7,11 +7,12 @@ import logging
 from typing import Any
 
 from ..core.application_config.channel_config import apply_channel_config
-from ..core.application_config.embed_config import apply_embed_config
 from ..core.application_config.log_masking_rule import apply_log_masking_rule
 from ..core.application_config.logging_config import apply_logging_config
 from ..core.application_config.task_memory_config import apply_task_memory_config
 from ..core.application_config.permissions_config import apply_permissions_config
+from ..core.application_config.memory_config import apply_memory_config
+from ..core.instance import apply_instance_data_lifecycle
 from ..infrastructure.utils import assert_jiuwenclaw_id_matches
 from ..core.config_effective_policy.config_default_template_mapping import (
     apply_config_default_template_mapping,
@@ -28,6 +29,7 @@ from ..core.config_effective_policy.config_effective_service_policy import (
 from ..core.template.extension_config_template import (
     apply_extension_config_template,
 )
+from ..core.template.embedding_template import apply_embedding_template
 from ..core.template.model_template import apply_model_template
 from ..core.template.service_config_template import apply_service_config_template
 from ..core.template.skill_whitelist_template import apply_skill_whitelist_template
@@ -83,19 +85,26 @@ async def apply_config_push(
     channel_config = config.get("channel_config")
     log_masking_rule = config.get("log_masking_rule")
     logging_config = config.get("logging_config")
-    embed_config = config.get("embed_config")
     task_memory_config = config.get("task_memory_config")
     permissions_config = config.get("permissions_config")
+    memory_config = config.get("memory_config")
     extension_config_templates = config.get("extension_config_templates")
     skill_whitelist_templates = config.get("skill_whitelist_templates")
     service_config_templates = config.get("service_config_templates")
     model_templates = config.get("model_templates")
+    embedding_templates = config.get("embedding_templates")
     template_mappings = config.get("config_default_template_mappings")
     agent_policies = config.get("config_effective_agent_policies")
     global_policies = config.get("config_effective_global_policies")
     service_policies = config.get("config_effective_service_policies")
+    instance_data_lifecycle = config.get("instance_data_lifecycle")
 
-    if isinstance(channel_config, dict) and channel_config.get("op"):
+    if isinstance(instance_data_lifecycle, dict) and instance_data_lifecycle.get("op"):
+        matched_payload = instance_data_lifecycle
+        skip_runtime_update = True
+        result = await apply_instance_data_lifecycle(instance_data_lifecycle)
+
+    elif isinstance(channel_config, dict) and channel_config.get("op"):
         matched_payload = channel_config
         skip_runtime_update = True
         result = await apply_channel_config(channel_config)
@@ -108,10 +117,6 @@ async def apply_config_push(
         matched_payload = logging_config
         result = await apply_logging_config(logging_config)
 
-    elif isinstance(embed_config, dict) and embed_config.get("op"):
-        matched_payload = embed_config
-        result = await apply_embed_config(embed_config)
-
     elif isinstance(task_memory_config, dict) and task_memory_config.get("op"):
         matched_payload = task_memory_config
         result = await apply_task_memory_config(task_memory_config)
@@ -119,6 +124,10 @@ async def apply_config_push(
     elif isinstance(permissions_config, dict) and permissions_config.get("op"):
         matched_payload = permissions_config
         result = await apply_permissions_config(permissions_config)
+
+    elif isinstance(memory_config, dict) and memory_config.get("op"):
+        matched_payload = memory_config
+        result = await apply_memory_config(memory_config)
 
     elif isinstance(extension_config_templates, dict) and extension_config_templates.get("op"):
         matched_payload = extension_config_templates
@@ -135,6 +144,10 @@ async def apply_config_push(
     elif isinstance(model_templates, dict) and model_templates.get("op"):
         matched_payload = model_templates
         result = await apply_model_template(model_templates)
+
+    elif isinstance(embedding_templates, dict) and embedding_templates.get("op"):
+        matched_payload = embedding_templates
+        result = await apply_embedding_template(embedding_templates)
 
     elif isinstance(template_mappings, dict) and template_mappings.get("op"):
         matched_payload = template_mappings

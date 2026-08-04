@@ -129,7 +129,7 @@ class LogMaskingIntegrationHarness:
             import jiuwenclaw.infrastructure.module_importer.manager_ws_client_importer as importer
 
             importer.import_manager_ws_client_module = _import_module  # type: ignore[method-assign]
-            await LogMaskingEngine.reload_log_masking_from_gateway_db()
+            await LogMaskingEngine.reload_log_masking_rule()
         finally:
             importer.import_manager_ws_client_module = original  # type: ignore[method-assign]
 

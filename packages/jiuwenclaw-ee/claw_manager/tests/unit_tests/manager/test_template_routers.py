@@ -7,6 +7,7 @@ import pytest
 
 from conftest import ManagerApiHarness
 from demo_payloads import (
+    embedding_templates,
     extension_config_templates,
     model_templates,
     service_config_templates,
@@ -17,6 +18,7 @@ pytestmark = pytest.mark.unit
 
 _TEMPLATE_CASES = [
     ("/model-templates", model_templates()[0][1]),
+    ("/embedding-templates", embedding_templates()[0][1]),
     ("/extension-config-templates", extension_config_templates()[0][1]),
     ("/skill-whitelist-templates", skill_whitelist_templates()[0][1]),
     ("/service-config-templates", service_config_templates()[0][1]),

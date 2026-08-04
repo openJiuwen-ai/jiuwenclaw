@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, ClassVar
 
 from openjiuwen_runtime.foundation.security.link_auth import NonceCache, InMemoryPinStore, build_token
+from openjiuwen_runtime.foundation.db.handler import DBHandler
 from sqlalchemy.exc import SQLAlchemyError
 
 from jiuwenclaw_manager.infrastructure.config import settings
@@ -39,8 +41,6 @@ from jiuwenclaw_manager.security.keys import (
     store_instance_enc_pubkey,
 )
 from jiuwenclaw_manager.core.instance.instance_service import (
-    bootstrap_gateway_log_masking,
-    bootstrap_gateway_templates,
     apply_gateway_ws_heartbeat,
     mark_instance_offline,
     register_gateway_via_ws,
@@ -62,6 +62,8 @@ from jiuwenclaw_manager.manager_ws_server.pod_status_cache import (
 )
 
 logger = get_logger(__name__)
+
+GatewayRegisterCallback = Callable[[DBHandler, str], Awaitable[None]]
 
 
 @dataclass
@@ -102,17 +104,20 @@ class ManagerWsServer:
         manager_id: str = "default",
         ping_interval: float | None = 30.0,
         ping_timeout: float | None = 300.0,
+        on_gateway_register: GatewayRegisterCallback | None = None,
     ) -> None:
         self._host = host
         self._port = port
         self._manager_id = manager_id
         self._ping_interval = ping_interval
         self._ping_timeout = ping_timeout
+        self._on_gateway_register = on_gateway_register
         self._server: Any = None
         self._clients: dict[int, _ConnectedClient] = {}
         # jiuwenclaw_id -> 当前活跃 WS 的 id(ws)
         self._jiuwenclaw_id_ws_id_map: dict[str, int] = {}
         self._clients_lock = asyncio.Lock()
+        self._on_gateway_register_locks: dict[str, asyncio.Lock] = {}
         self._pending_acks: dict[str, _PendingConfigAck] = {}
         self._pending_acks_lock = asyncio.Lock()
         # link-auth: 防重放 nonce 缓存 + Gateway 公钥指纹固定表（仅当 CLAW_LINK_AUTH_MODE != off 时生效）
@@ -620,6 +625,29 @@ class ManagerWsServer:
             status_data.get("total"),
         )
 
+    async def _run_on_gateway_register(
+        self,
+        handler: DBHandler,
+        jiuwenclaw_id: str,
+    ) -> None:
+        """串行化同一 ``jiuwenclaw_id`` 的注册后回调，避免并发 rebuild 索引。"""
+        if self._on_gateway_register is None:
+            return
+        jid = str(jiuwenclaw_id or "").strip()
+        if not jid:
+            return
+        lock = self._on_gateway_register_locks.setdefault(jid, asyncio.Lock())
+        async with lock:
+            try:
+                await self._on_gateway_register(handler, jid)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[ManagerWsServer] on_gateway_register failed jiuwenclaw_id=%s: %s",
+                    jid,
+                    exc,
+                    exc_info=True,
+                )
+
     async def _handle_register(self, ws: Any, key: int, data: dict[str, Any]) -> None:
         payload = data.get("payload")
         if not isinstance(payload, dict):
@@ -719,12 +747,8 @@ class ManagerWsServer:
         )
         # 勿在 register 帧处理栈内 await push/ack：会阻塞同连接读循环，导致 config.ack 假超时。
         asyncio.create_task(
-            bootstrap_gateway_log_masking(get_db_handler(), jiuwenclaw_id),
-            name=f"log_masking_bootstrap:{jiuwenclaw_id}",
-        )
-        asyncio.create_task(
-            bootstrap_gateway_templates(get_db_handler(), jiuwenclaw_id),
-            name=f"template_bootstrap:{jiuwenclaw_id}",
+            self._run_on_gateway_register(handler, jiuwenclaw_id),
+            name=f"on_gateway_register:{jiuwenclaw_id}",
         )
 
 

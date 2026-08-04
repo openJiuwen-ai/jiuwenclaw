@@ -71,6 +71,7 @@ async def push_config_default_template_mapping_op(
     mapping: dict[str, Any] | None = None,
     row_id: int | None = None,
     updates: dict[str, Any] | None = None,
+    mappings: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """推送默认模板映射变更（``config.config_default_template_mappings``），返回 config.ack payload。"""
     payload: dict[str, Any] = {"op": op}
@@ -80,9 +81,38 @@ async def push_config_default_template_mapping_op(
         payload["id"] = row_id
     if updates is not None:
         payload["updates"] = updates
+    if mappings is not None:
+        payload["mappings"] = mappings
     return await push_config_op(
         jiuwenclaw_id,
         {"config_default_template_mappings": payload},
+    )
+
+
+async def push_template_mappings_sync_to_gateway(
+    handler: DBHandler,
+    jiuwenclaw_id: str,
+) -> dict[str, Any]:
+    """Gateway 注册后：将 MDB 中该实例全部默认模板映射 bulk push 到 GDB（``op=sync``）。"""
+    jid = str(jiuwenclaw_id or "").strip()
+    if not jid:
+        raise ValueError("jiuwenclaw_id is required")
+    rows = await handler.list_records(
+        _TEMPLATE_MAPPING_TABLE,
+        {"jiuwenclaw_id": jid},
+        limit=_LIST_ALL_CAP,
+        offset=0,
+    )
+    mappings = [_row_to_out(row).model_dump(mode="json") for row in rows]
+    return await push_config_op(
+        jid,
+        {
+            "config_default_template_mappings": {
+                "op": "sync",
+                "mappings": mappings,
+                "skip_runtime_update": True,
+            }
+        },
     )
 
 

@@ -54,17 +54,27 @@ def model_entity_to_config_entry(entity: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def embedding_entity_to_config_section(entity: dict[str, Any]) -> dict[str, str]:
+    """将 ``embedding_template`` 行转为 ``config.yaml`` 的 ``embed`` 配置段。"""
+    return {
+        "embed_api_key": str(entity.get("api_key") or "").strip(),
+        "embed_base_url": str(entity.get("api_base") or "").strip(),
+        "embed_model": str(entity.get("model_id") or "").strip(),
+    }
+
+
 def apply_enterprise_models_to_config(
     config_base: dict[str, Any],
     enterprise: EffectiveEnterpriseConfig,
 ) -> tuple[dict[str, Any], bool]:
-    """深拷贝 ``config_base`` 并写入企业模型槽位；返回 ``(merged, applied_any)``。
+    """深拷贝 ``config_base`` 并写入企业模型与 Embedding 槽位。
 
     ``template_ref`` 各槽位可解析出多个 ``template_id``，但写入 ``config.yaml`` 兼容结构时，
     **每个模型槽位仅取列表首项**（第一个有效模板）写入 ``SLOT_TO_CONFIG_KEY`` 对应的 config 键
     （如 ``default_model`` → ``models.default``）。其余 ``template_id`` 不在此函数中展开。
     """
-    if not enterprise.models:
+    embedding_entities = getattr(enterprise, "embedding", None)
+    if not enterprise.models and not embedding_entities:
         return config_base, False
 
     merged = copy.deepcopy(config_base)
@@ -123,6 +133,19 @@ def apply_enterprise_models_to_config(
             mco = default_entry.get("model_config_obj")
             if isinstance(mco, dict) and mco:
                 react["model_config_obj"] = dict(mco)
+
+    if isinstance(embedding_entities, dict):
+        embedding_entities = [embedding_entities]
+    if isinstance(embedding_entities, list):
+        for entity in embedding_entities:
+            if not isinstance(entity, dict):
+                continue
+            embed_section = embedding_entity_to_config_section(entity)
+            if not all(embed_section.values()):
+                continue
+            merged["embed"] = embed_section
+            applied = True
+            break
 
     return merged, applied
 

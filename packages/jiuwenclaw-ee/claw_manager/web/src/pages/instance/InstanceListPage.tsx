@@ -16,6 +16,7 @@ import {
 } from '../../components/TableColumnSort';
 import { TableColumnFilter } from '../../components/TableColumnFilter';
 import { formatTime, relativeTime } from '../../utils/format';
+import { getAllowLocalProvision } from '../../utils/env';
 import { toast } from '../../stores/uiStore';
 import { ApiError } from '../../services/api';
 import { CreateInstanceModal } from './modal/CreateInstanceModal';
@@ -366,6 +367,8 @@ export function InstanceListPage() {
   const apiSortOrder =
     viewMode === 'brief' ? 'desc' : sortBy ? sortOrder : undefined;
 
+  const allowLocalProvision = getAllowLocalProvision();
+
   const instances = useAsync(
     () =>
       InstanceApi.list({
@@ -411,9 +414,11 @@ export function InstanceListPage() {
             <button className="btn sm" onClick={refresh}>
               {t('common.refresh')}
             </button>
-            <button className="btn sm" onClick={() => setProvisionOpen(true)}>
-              {t('topology.provisionLocal')}
-            </button>
+            {allowLocalProvision && (
+              <button className="btn sm" onClick={() => setProvisionOpen(true)}>
+                {t('topology.provisionLocal')}
+              </button>
+            )}
             <button className="btn primary sm" onClick={() => setCreateOpen(true)}>
               + {t('topology.createInstance')}
             </button>
@@ -472,14 +477,16 @@ export function InstanceListPage() {
           refresh();
         }}
       />
-      <ProvisionLocalModal
-        open={provisionOpen}
-        onClose={() => setProvisionOpen(false)}
-        onProvisioned={() => {
-          setProvisionOpen(false);
-          refresh();
-        }}
-      />
+      {allowLocalProvision && (
+        <ProvisionLocalModal
+          open={provisionOpen}
+          onClose={() => setProvisionOpen(false)}
+          onProvisioned={() => {
+            setProvisionOpen(false);
+            refresh();
+          }}
+        />
+      )}
     </>
   );
 }

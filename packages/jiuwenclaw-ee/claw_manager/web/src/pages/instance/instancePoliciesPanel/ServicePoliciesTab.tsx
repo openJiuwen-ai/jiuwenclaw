@@ -23,10 +23,10 @@ import { toast } from '../../../stores/uiStore';
 import { formatTime, truncate } from '../../../utils/format';
 import {
   findSingleValueTemplateRefViolation,
-  hasTemplateRefContent,
   normalizeTemplateRefFromApi,
   type TemplateRefMap,
 } from '../../../utils/templateRef';
+import { HintTooltip } from '../../../components/HintTooltip';
 import { validateRoutingId } from '../../../utils/routingId';
 import { validateMatchExprModel, parseMatchExpr } from '../../../utils/matchExpr';
 
@@ -160,7 +160,12 @@ export function ServicePoliciesTab({ instanceId }: { instanceId: string }) {
 
     const matchExprErr = validateMatchExprModel(parseMatchExpr(form.match_expr));
     if (matchExprErr) {
-      toast('warn', t('policies.matchExpr.invalid'));
+      toast(
+        'warn',
+        matchExprErr === 'match_expr_invalid_syntax'
+          ? t('policies.matchExpr.invalidSyntax')
+          : t('policies.matchExpr.invalid'),
+      );
       return;
     }
 
@@ -176,10 +181,6 @@ export function ServicePoliciesTab({ instanceId }: { instanceId: string }) {
       {
         label: t('policies.global.priority'),
         invalid: !Number.isInteger(form.priority),
-      },
-      {
-        label: t('policies.global.templateRef'),
-        invalid: !hasTemplateRefContent(form.template_ref),
       },
     ];
     const missing = requiredChecks.find((item) => item.invalid);
@@ -320,12 +321,19 @@ export function ServicePoliciesTab({ instanceId }: { instanceId: string }) {
                   />
                 </th>
                 <th>
-                  <TableColumnSort
-                    label={t('policies.global.priority')}
-                    value={sortBy === 'priority' ? sortOrder : ''}
-                    options={sortOptions}
-                    onChange={(value) => handleSortChange('priority', value)}
-                  />
+                  <div className="th-filter">
+                    <span className="th-filter__label inline-flex items-center gap-1">
+                      {t('policies.global.priority')}
+                      <HintTooltip text={t('policies.priorityHint')} />
+                    </span>
+                    <TableColumnSort
+                      iconOnly
+                      label={t('policies.global.priority')}
+                      value={sortBy === 'priority' ? sortOrder : ''}
+                      options={sortOptions}
+                      onChange={(value) => handleSortChange('priority', value)}
+                    />
+                  </div>
                 </th>
                 <th>
                   <TableColumnSort
@@ -489,7 +497,10 @@ export function ServicePoliciesTab({ instanceId }: { instanceId: string }) {
               />
             </div>
             <div className="min-w-0">
-              <FieldLabel required>{t('policies.global.priority')}</FieldLabel>
+              <div className="flex items-center gap-1">
+                <FieldLabel required>{t('policies.global.priority')}</FieldLabel>
+                <HintTooltip text={t('policies.priorityHint')} />
+              </div>
               <input
                 className="input w-full"
                 type="number"
@@ -531,7 +542,6 @@ export function ServicePoliciesTab({ instanceId }: { instanceId: string }) {
             <TemplateRefEditor
               key={editing ? String(editing.id) : 'new'}
               label={t('policies.global.templateRef')}
-              required
               value={form.template_ref}
               onChange={(v) => update('template_ref', v)}
             />

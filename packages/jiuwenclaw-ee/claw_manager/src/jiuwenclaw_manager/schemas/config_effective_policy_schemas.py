@@ -44,7 +44,7 @@ class ConfigEffectiveAgentPolicyCreateBody(BaseModel):
         default_factory=dict,
         description="槽位名 -> template_id 数组；元素可为 UUID 或 ${user::…}/${group::…} or <template_id>",
     )
-    send_file_allowed: bool = False
+    send_file_allowed: bool = True
     enabled: bool = True
     data: dict[str, Any] | None = None
 

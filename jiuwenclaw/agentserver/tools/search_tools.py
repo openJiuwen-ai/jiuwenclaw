@@ -21,6 +21,8 @@ from jiuwenclaw.agentserver.tools.ssl_config import get_requests_verify
 
 logger = logging.getLogger(__name__)
 
+_JINA_READER_ENDPOINT = os.getenv("JINA_READER_ENDPOINT", "https://r.jina.ai").rstrip("/")
+
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -149,7 +151,7 @@ def _search_duckduckgo_sync(
 def _search_duckduckgo_via_jina_sync(
     query: str, max_results: int, timeout_seconds: int
 ) -> list[dict[str, str]]:
-    url = f"https://r.jina.ai/http://duckduckgo.com/html/?q={quote_plus(query)}"
+    url = f"{_JINA_READER_ENDPOINT}/http://duckduckgo.com/html/?q={quote_plus(query)}"
     response = _http_request(
         "GET", url, headers=_REQUEST_HEADERS, timeout=timeout_seconds
     )

@@ -337,3 +337,56 @@ async def test_rest_delete_then_get_404(manager_api: ManagerApiHarness):
 
     missing_resp = await h.http.get(_log_masking_url(h, f"/{rule_id}"))
     assert missing_resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_rest_list_search_source_and_sort(manager_api: ManagerApiHarness):
+    """列表：search / source / sort_by 由后端处理。"""
+    h = manager_api
+    await _bootstrap_builtin_rules(h)
+
+    create_resp = await h.http.post(
+        _log_masking_url(h),
+        json={
+            "rule_name": "订单号脱敏",
+            "description": "REST 列表筛选验证",
+            "pattern": r"ORD-[0-9]{10,}",
+            "replacement": "******",
+            "priority": 60,
+            "enabled": True,
+        },
+    )
+    assert create_resp.status_code == 200
+
+    builtin_resp = await h.http.get(_log_masking_url(h), params={"source": "builtin"})
+    assert builtin_resp.status_code == 200
+    builtin_items = builtin_resp.json()["data"]["items"]
+    assert builtin_items
+    assert all(item["source"] == "builtin" for item in builtin_items)
+    assert "builtin_email" in {item["rule_id"] for item in builtin_items}
+
+    custom_resp = await h.http.get(_log_masking_url(h), params={"source": "custom"})
+    assert custom_resp.status_code == 200
+    custom_items = custom_resp.json()["data"]["items"]
+    assert custom_items
+    assert all(item["source"] == "custom" for item in custom_items)
+    assert any(item["rule_name"] == "订单号脱敏" for item in custom_items)
+
+    search_resp = await h.http.get(_log_masking_url(h), params={"search": "订单号"})
+    assert search_resp.status_code == 200
+    search_items = search_resp.json()["data"]["items"]
+    assert len(search_items) == 1
+    assert search_items[0]["rule_name"] == "订单号脱敏"
+
+    priority_resp = await h.http.get(_log_masking_url(h), params={"search": "60"})
+    assert priority_resp.status_code == 200
+    priority_items = priority_resp.json()["data"]["items"]
+    assert any(item["rule_name"] == "订单号脱敏" for item in priority_items)
+
+    sort_resp = await h.http.get(
+        _log_masking_url(h),
+        params={"sort_by": "rule_name", "sort_order": "asc"},
+    )
+    assert sort_resp.status_code == 200
+    sort_names = [item["rule_name"] for item in sort_resp.json()["data"]["items"]]
+    assert sort_names == sorted(sort_names, key=str.lower)

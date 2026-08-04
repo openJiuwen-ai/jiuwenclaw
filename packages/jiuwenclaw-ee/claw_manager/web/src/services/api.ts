@@ -13,6 +13,9 @@ import type {
   ConfigEffectiveServicePolicyCreateBody,
   ConfigEffectiveServicePolicyUpdateBody,
   CreateInstanceBody,
+  EmbeddingTemplate,
+  EmbeddingTemplateCreateBody,
+  EmbeddingTemplateUpdateBody,
   ExtensionConfigTemplate,
   ExtensionConfigTemplateCreateBody,
   ExtensionConfigTemplateUpdateBody,
@@ -37,6 +40,9 @@ import type {
   LogMaskingRuleCreateBody,
   LogMaskingRuleUpdateBody,
   ListItemsResult,
+  LoggingConfig,
+  LoggingConfigUpsertBody,
+  PermissionsConfig,
 } from '../types';
 
 const API_BASE = (import.meta.env.VITE_API_BASE ?? '/api').replace(/\/$/, '');
@@ -211,6 +217,38 @@ export const ModelTemplateApi = {
     }),
 };
 
+export const EmbeddingTemplateApi = {
+  list: (params?: {
+    page?: number;
+    page_size?: number;
+    enabled?: boolean;
+    model_provider?: string;
+    search?: string;
+    sort_by?:
+      | 'template_name'
+      | 'description'
+      | 'model_provider'
+      | 'model_id'
+      | 'api_base'
+      | 'updated_at';
+    sort_order?: 'asc' | 'desc';
+  }) => http<PageResult<EmbeddingTemplate>>('/v1/embedding-templates', { query: params }),
+  get: (id: string) =>
+    http<EmbeddingTemplate>(`/v1/embedding-templates/${encodeURIComponent(id)}`),
+  create: (body: EmbeddingTemplateCreateBody) =>
+    http<EmbeddingTemplate>('/v1/embedding-templates', { method: 'POST', body }),
+  update: (id: string, body: EmbeddingTemplateUpdateBody) =>
+    http<EmbeddingTemplate>(`/v1/embedding-templates/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body,
+    }),
+  remove: (id: string) =>
+    http<{ deleted: boolean; template_id: string }>(
+      `/v1/embedding-templates/${encodeURIComponent(id)}`,
+      { method: 'DELETE' }
+    ),
+};
+
 export const ExtensionTemplateApi = {
   list: (params?: {
     page?: number;
@@ -276,7 +314,6 @@ export const ServiceConfigTemplateApi = {
     page?: number;
     page_size?: number;
     enabled?: boolean;
-    namespace?: string;
     search?: string;
     sort_by?: 'template_name' | 'description' | 'agent_image' | 'updated_at';
     sort_order?: 'asc' | 'desc';
@@ -487,7 +524,16 @@ export const ChannelApi = {
 };
 
 export const LogMaskingRuleApi = {
-  list: (instanceId: string, params?: { enabled?: boolean }) =>
+  list: (
+    instanceId: string,
+    params?: {
+      enabled?: boolean;
+      source?: string;
+      search?: string;
+      sort_by?: string;
+      sort_order?: 'asc' | 'desc';
+    },
+  ) =>
     http<ListItemsResult<LogMaskingRule>>(`${instanceBase(instanceId)}/log-masking-rules`, {
       query: params,
     }),
@@ -506,4 +552,23 @@ export const LogMaskingRuleApi = {
     http<void>(`${instanceBase(instanceId)}/log-masking-rules/${encodeURIComponent(ruleId)}`, {
       method: 'DELETE',
     }),
+};
+
+export const PermissionsApi = {
+  get: (instanceId: string) => http<PermissionsConfig>(`${instanceBase(instanceId)}/permissions`),
+  upsert: (instanceId: string, body: Record<string, unknown>) =>
+    http<PermissionsConfig>(`${instanceBase(instanceId)}/permissions`, {
+      method: 'PUT',
+      body: { body },
+    }),
+  remove: (instanceId: string) =>
+    http<void>(`${instanceBase(instanceId)}/permissions`, { method: 'DELETE' }),
+};
+
+export const LoggingApi = {
+  get: (instanceId: string) => http<LoggingConfig>(`${instanceBase(instanceId)}/logging`),
+  upsert: (instanceId: string, body: LoggingConfigUpsertBody) =>
+    http<LoggingConfig>(`${instanceBase(instanceId)}/logging`, { method: 'PUT', body }),
+  remove: (instanceId: string) =>
+    http<void>(`${instanceBase(instanceId)}/logging`, { method: 'DELETE' }),
 };

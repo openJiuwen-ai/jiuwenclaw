@@ -24,6 +24,11 @@ DEK_ALG = "X25519-HKDF-SHA256+AES-256-GCM"
 # section 名 -> 敏感字段路径列表（支持 ``a.b`` 嵌套与 ``a[].b`` 数组通配）。
 SENSITIVE_FIELDS: dict[str, list[str]] = {
     "model_templates": ["template.api_key", "template.parameters"],
+    "embedding_templates": [
+        "template.api_key",
+        "templates[].api_key",
+        "updates.api_key",
+    ],
     "service_config_templates": ["template.kubeconfig"],
     "extension_config_templates": ["template.hook_config", "template.custom_config"],
     "channel_config": ["channel.config"],

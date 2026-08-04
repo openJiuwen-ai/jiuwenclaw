@@ -1,4 +1,5 @@
 import { useTranslation } from 'react-i18next';
+import { isExamplePrefixed, jsonContentForValidation } from '../utils/jsonExample';
 
 interface JsonFieldProps {
   label: string;
@@ -10,23 +11,31 @@ interface JsonFieldProps {
 }
 
 export function JsonField({ label, hint, value, onChange, placeholder, rows = 6 }: JsonFieldProps) {
+  const { t } = useTranslation();
+  const jsonText = jsonContentForValidation(value);
   let error: string | null = null;
-  const v = value.trim();
-  if (v) {
+  if (jsonText) {
     try {
-      JSON.parse(v);
+      JSON.parse(jsonText);
     } catch (e) {
       error = (e as Error).message;
     }
   }
+  const showExampleTag = isExamplePrefixed(value);
+
   return (
     <div>
-      <div className="flex items-center justify-between mb-1">
-        <label className="label !mb-0">{label}</label>
+      <div className="flex items-center justify-between gap-2 mb-1 flex-wrap">
+        <div className="flex items-center gap-2 min-w-0">
+          <label className="label !mb-0">{label}</label>
+          {showExampleTag && (
+            <span className="pill sm muted shrink-0">{t('instanceConfig.permissions.exampleTag')}</span>
+          )}
+        </div>
         {hint && <span className="text-[11px] text-muted">{hint}</span>}
       </div>
       <textarea
-        className={`textarea ${error ? '!border-danger' : ''}`}
+        className={`textarea mono text-xs ${error ? '!border-danger' : ''}`}
         rows={rows}
         value={value}
         onChange={(e) => onChange(e.target.value)}
@@ -51,9 +60,10 @@ export function tryParseJson<T = unknown>(text: string, fallback: T): T {
 export function useInvalidJsonChecker() {
   const { t } = useTranslation();
   return (text: string) => {
-    if (!text.trim()) return null;
+    const v = jsonContentForValidation(text);
+    if (!v) return null;
     try {
-      JSON.parse(text);
+      JSON.parse(v);
       return null;
     } catch (e) {
       return t('errors.invalidJson', { detail: (e as Error).message });

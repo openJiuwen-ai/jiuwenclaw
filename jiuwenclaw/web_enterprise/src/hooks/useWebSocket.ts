@@ -52,6 +52,8 @@ import {
 import { shouldHandleRequestEvent } from './requestEventFilter';
 
 const WS_RECONNECT_EVENT = 'jiuwenclaw:ws-reconnect-request';
+/** 后端 tts.synthesize 未实现前关闭自动朗读 */
+const AUTO_TTS_ENABLED = false;
 const BACKEND_PROBE_INTERVAL_MS = 10_000;
 const BACKEND_PROBE_TIMEOUT_MS = 8_000;
 
@@ -79,7 +81,7 @@ interface UseWebSocketReturn {
     params?: Record<string, unknown>,
     options?: WebRequestOptions
   ) => Promise<T>;
-  sendMessage: (content: string, sessionId: string, files?: ChatSendFile[]) => Promise<void>;
+  sendMessage: (content: string, sessionId: string, files?: ChatSendFile[], user?: string) => Promise<void>;
   interrupt: (
     sessionId: string,
     intent: InterruptIntent,
@@ -135,6 +137,11 @@ function makeClientRequestId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
 }
 
+/** 流式 chat.send / supplement 在网关侧使用的 request_id 形态 */
+function isActiveStreamRequestId(requestId: string): boolean {
+  return requestId.startsWith('req_') || requestId.startsWith('chat-');
+}
+
 export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const {
     activeSessionId,
@@ -164,6 +171,15 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const activeRequestIdRef = useRef<string | null>(null);
   /** 本会话实例发出的 interrupt 请求的 ws req id（用于识别属于本 tab 的 interrupt_result） */
   const pendingInterruptRequestIdsRef = useRef<Set<string>>(new Set());
+  /** 已 cancel 的 chat.send request_id，用于丢弃取消后仍滞留在网关队列中的流式事件 */
+  const suppressedChatRequestIdsRef = useRef<Set<string>>(new Set());
+  /** 用户点击暂停后立即生效，暂停期间收到的流式事件写入暂存区 */
+  const pauseHoldActiveRef = useRef(false);
+  /** 被暂停的那条 chat.send 的 request_id，仅暂存与之匹配的事件 */
+  const pausedStreamRequestIdRef = useRef<string | null>(null);
+  const pausedEventsRef = useRef<WsEvent[]>([]);
+  /** supplement 后待认领的新流 request_id（后端形如 req_{hex}_{interruptId}） */
+  const pendingSupplementInterruptIdRef = useRef<string | null>(null);
 
   // Stores
   const {
@@ -203,6 +219,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
   const handleTtsPlayback = useCallback(
     (messageId: string, content: string) => {
+      if (!AUTO_TTS_ENABLED) {
+        return;
+      }
       const sanitized = sanitizeTtsText(content);
       if (!sanitized || sanitized.startsWith('[任务已中断]')) {
         return;
@@ -265,6 +284,106 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     });
   }, []);
 
+  const clearPauseBuffer = useCallback(() => {
+    pauseHoldActiveRef.current = false;
+    pausedStreamRequestIdRef.current = null;
+    pausedEventsRef.current = [];
+  }, []);
+
+  const tryAdoptSupplementStreamRequestId = useCallback((eventRequestId: string): boolean => {
+    const pendingInterruptId = pendingSupplementInterruptIdRef.current;
+    if (!pendingInterruptId || !eventRequestId) {
+      return false;
+    }
+    if (!eventRequestId.includes(pendingInterruptId)) {
+      return false;
+    }
+    // 仅认领 supplement 流式 chat.send（req_ 前缀）；忽略 interrupt_result 附带的 interrupt id
+    if (!eventRequestId.startsWith('req_')) {
+      return false;
+    }
+    activeRequestIdRef.current = eventRequestId;
+    pendingSupplementInterruptIdRef.current = null;
+    if (pauseHoldActiveRef.current) {
+      pausedStreamRequestIdRef.current = eventRequestId;
+    }
+    return true;
+  }, []);
+
+  const bindStreamRequestIdFromEvent = useCallback((eventRequestId: string) => {
+    if (!isActiveStreamRequestId(eventRequestId)) {
+      return;
+    }
+    const current = activeRequestIdRef.current?.trim() ?? '';
+    if (!current || current.startsWith('interrupt-')) {
+      activeRequestIdRef.current = eventRequestId;
+    }
+  }, []);
+
+  const enterPauseHold = useCallback(() => {
+    pauseHoldActiveRef.current = true;
+    const activeRid = activeRequestIdRef.current?.trim() ?? '';
+    pausedStreamRequestIdRef.current =
+      activeRid && isActiveStreamRequestId(activeRid) ? activeRid : null;
+    setPaused(true);
+    setProcessing(false);
+    setThinking(false);
+    stopAllTts();
+    const { currentStreamId } = useChatStore.getState();
+    if (currentStreamId) {
+      updateMessage(currentStreamId, { isStreaming: false });
+    }
+  }, [setPaused, setProcessing, setThinking, updateMessage]);
+
+  const exitPauseHoldForNewTurn = useCallback(
+    (options?: { interruptRequestId?: string; suppressPausedStream?: boolean }) => {
+      const pausedRid = pausedStreamRequestIdRef.current ?? activeRequestIdRef.current;
+      if (options?.suppressPausedStream !== false && pausedRid) {
+        suppressedChatRequestIdsRef.current.add(pausedRid);
+      }
+      clearPauseBuffer();
+      setPaused(false);
+      stopStreaming();
+      activeRequestIdRef.current = null;
+      if (options?.interruptRequestId) {
+        pendingSupplementInterruptIdRef.current = options.interruptRequestId;
+      }
+    },
+    [clearPauseBuffer, setPaused, stopStreaming]
+  );
+
+  const flushPausedEvents = useCallback(() => {
+    pauseHoldActiveRef.current = false;
+    const events = pausedEventsRef.current.splice(0);
+    for (const event of events) {
+      webClient.replayBufferedEvent(event);
+    }
+  }, []);
+
+  useEffect(() => {
+    webClient.setStreamEventFilter((event) => {
+      const rid = typeof event.request_id === 'string' ? event.request_id.trim() : '';
+      if (!rid) {
+        return true;
+      }
+      const name = event.event;
+      if (!name.startsWith('chat.') && !name.startsWith('context.')) {
+        return true;
+      }
+      return !suppressedChatRequestIdsRef.current.has(rid);
+    });
+    webClient.setPauseBufferHook({
+      isActive: () => pauseHoldActiveRef.current,
+      onBuffer: (event) => {
+        pausedEventsRef.current.push(event);
+      },
+    });
+    return () => {
+      webClient.setStreamEventFilter(null);
+      webClient.setPauseBufferHook(null);
+    };
+  }, []);
+
   const handleConnectionAck = useCallback(
     (payload: Record<string, unknown>) => {
       const ackPayload = payload as unknown as ConnectionAckPayload;
@@ -295,13 +414,15 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
   // 发送聊天消息
   const sendMessage = useCallback(
-    async (content: string, sessionId: string, files?: ChatSendFile[]) => {
+    async (content: string, sessionId: string, files?: ChatSendFile[], user?: string) => {
       const trimmed = content.trim();
       const hasFiles = Boolean(files && files.length > 0);
       if (!trimmed && !hasFiles) return;
 
       userInputVersionRef.current += 1;
       stopAllTts();
+      clearPauseBuffer();
+      pendingSupplementInterruptIdRef.current = null;
 
       const displayContent =
         trimmed ||
@@ -361,6 +482,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               }
             : {}),
           ...extSettingsToRoutingParams(ext),
+          ...(user ? { user } : {}),
         }, { requestId });
       } catch (error) {
         const webError = error as WebError;
@@ -378,7 +500,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         });
       }
     },
-    [addMessage, request, setProcessing, setThinking]
+    [addMessage, clearPauseBuffer, request, setProcessing, setThinking]
   );
 
   // 存储sendMessage函数到ref
@@ -426,6 +548,24 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       }
       const interruptRequestId = makeClientRequestId('interrupt');
       pendingInterruptRequestIdsRef.current.add(interruptRequestId);
+      if (intent === 'cancel') {
+        clearPauseBuffer();
+        pendingSupplementInterruptIdRef.current = null;
+        const rid = activeRequestIdRef.current;
+        if (rid) {
+          suppressedChatRequestIdsRef.current.add(rid);
+        }
+        setProcessing(false);
+        setThinking(false);
+        stopStreaming();
+        activeRequestIdRef.current = null;
+        setPendingQuestion(null);
+        setPaused(false);
+      } else if (intent === 'pause') {
+        enterPauseHold();
+      } else if (intent === 'supplement') {
+        exitPauseHoldForNewTurn({ interruptRequestId: interruptRequestId });
+      }
       try {
         const params: Record<string, unknown> = {
           session_id: sessionId,
@@ -445,12 +585,30 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         await request('chat.interrupt', params, { requestId: interruptRequestId });
       } catch (error) {
         pendingInterruptRequestIdsRef.current.delete(interruptRequestId);
+        if (intent === 'pause') {
+          clearPauseBuffer();
+          setPaused(false);
+        } else if (intent === 'supplement') {
+          pendingSupplementInterruptIdRef.current = null;
+        }
         const webError = error as WebError;
         setConnectionStats({ lastError: webError.message });
         onErrorRef.current?.(webError.message || i18n.t('network.interruptFailed'));
       }
     },
-    [addMessage, request, setConnectionStats]
+    [
+      addMessage,
+      clearPauseBuffer,
+      enterPauseHold,
+      exitPauseHoldForNewTurn,
+      request,
+      setConnectionStats,
+      setPaused,
+      setPendingQuestion,
+      setProcessing,
+      setThinking,
+      stopStreaming,
+    ]
   );
 
   // 暂停 - 显式暂停当前任务
@@ -498,14 +656,13 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     async (sessionId: string) => {
       try {
         await interrupt(sessionId, 'resume');
-        setPaused(false);
       } catch (error) {
         const webError = error as WebError;
         setConnectionStats({ lastError: webError.message });
         onErrorRef.current?.(webError.message || i18n.t('network.resumeFailed'));
       }
     },
-    [interrupt, setConnectionStats, setPaused]
+    [interrupt, setConnectionStats]
   );
 
   // 切换模式
@@ -619,9 +776,18 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       webClient.on('hello', ({ payload }) => {
         handleConnectionAck(payload);
       }),
-      webClient.on('chat.delta', ({ payload }) => {
+      webClient.on('chat.delta', (event: WsEvent) => {
+        if (pauseHoldActiveRef.current) {
+          return;
+        }
+        const { payload } = event;
         if (!shouldHandleSessionEvent(payload)) return;
-        
+        const eventRid = typeof event.request_id === 'string' ? event.request_id.trim() : '';
+        if (eventRid) {
+          tryAdoptSupplementStreamRequestId(eventRid);
+          bindStreamRequestIdFromEvent(eventRid);
+        }
+
         const currentMode = useSessionStore.getState().mode;
         const content = typeof payload.content === 'string' ? payload.content : '';
         
@@ -683,9 +849,13 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         appendStreamContent(content);
       }),
       webClient.on('chat.final', ({ payload }) => {
+        if (pauseHoldActiveRef.current) return;
         if (!shouldHandleSessionEvent(payload)) return;
 
         const finishActiveStream = () => {
+          if (useChatStore.getState().pendingQuestion) {
+            return false;
+          }
           const { currentStreamId, isProcessing } = useChatStore.getState();
           if (currentStreamId) {
             stopStreaming();
@@ -741,9 +911,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (streamId && payloadSessionId) {
           updateMessage(streamId, { ...(content ? { content } : {}), isStreaming: false });
           stopStreaming();
-          setProcessing(false);
-          setThinking(false);
-          activeRequestIdRef.current = null;
+          if (!useChatStore.getState().pendingQuestion) {
+            setProcessing(false);
+            setThinking(false);
+            activeRequestIdRef.current = null;
+          }
           if (content && !content.includes('MEDIA:')) {
             handleTtsPlayback(streamId, content);
           }
@@ -877,6 +1049,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         addPendingFiles(files);
       }),
       webClient.on('chat.tool_call', ({ payload }) => {
+        if (pauseHoldActiveRef.current) return;
         if (!shouldHandleSessionEvent(payload)) return;
         if (shouldDropDuplicatedEvent('chat.tool_call', payload)) return;
         setThinking(false);
@@ -898,6 +1071,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         });
       }),
       webClient.on('chat.tool_result', ({ payload }) => {
+        if (pauseHoldActiveRef.current) return;
         if (!shouldHandleSessionEvent(payload)) return;
         if (shouldDropDuplicatedEvent('chat.tool_result', payload)) return;
         const standalone = tryDeepResearchStandaloneAssistantTurn(
@@ -1051,15 +1225,35 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       }),
       webClient.on('chat.processing_status', (event: WsEvent) => {
         if (!shouldHandleSessionEvent(event.payload)) return;
+        if (shouldDropDuplicatedEvent('chat.processing_status', event.payload)) return;
         const isProcessingNow = Boolean(event.payload.is_processing);
+        const eventRid = typeof event.request_id === 'string' ? event.request_id.trim() : '';
+        if (eventRid) {
+          tryAdoptSupplementStreamRequestId(eventRid);
+        }
         // 仅在本 tab 已发起 chat.send 后才进入「处理中」；其它流式请求（如 history.get）忽略
         if (isProcessingNow) {
-          if (!activeRequestIdRef.current) return;
+          if (!activeRequestIdRef.current) {
+            const pendingInterruptId = pendingSupplementInterruptIdRef.current;
+            if (
+              !eventRid ||
+              !pendingInterruptId ||
+              !eventRid.startsWith('req_') ||
+              !eventRid.includes(pendingInterruptId)
+            ) {
+              return;
+            }
+            activeRequestIdRef.current = eventRid;
+            pendingSupplementInterruptIdRef.current = null;
+          }
           if (!shouldHandleCurrentRequestEvent(event)) return;
         } else if (activeRequestIdRef.current && !shouldHandleCurrentRequestEvent(event)) {
           return;
         }
-        if (shouldDropDuplicatedEvent('chat.processing_status', event.payload)) return;
+        if (!isProcessingNow && useChatStore.getState().pendingQuestion) {
+          setThinking(false);
+          return;
+        }
         setProcessing(isProcessingNow);
         if (!isProcessingNow) {
           setThinking(false);
@@ -1113,22 +1307,45 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         setInterruptResult(resultPayload);
         if (resultPayload.intent === 'pause') {
           if (resultPayload.success) {
+            pauseHoldActiveRef.current = true;
+            const activeRid = activeRequestIdRef.current?.trim() ?? '';
+            if (!pausedStreamRequestIdRef.current) {
+              pausedStreamRequestIdRef.current =
+                activeRid && isActiveStreamRequestId(activeRid) ? activeRid : null;
+            }
             setPaused(true, resultPayload.paused_task);
+          } else {
+            clearPauseBuffer();
+            setPaused(false);
           }
           setProcessing(false);
           setThinking(false);
-          activeRequestIdRef.current = null;
+          // 保留 activeRequestIdRef，恢复后 stream 事件仍能对齐原 chat.send
         } else if (resultPayload.intent === 'resume') {
           if (resultPayload.success) {
             setPaused(false);
+            setProcessing(true);
+            flushPausedEvents();
+            const { currentStreamId } = useChatStore.getState();
+            if (currentStreamId) {
+              updateMessage(currentStreamId, { isStreaming: true });
+            }
           }
         } else if (resultPayload.intent === 'cancel') {
+          clearPauseBuffer();
           setPaused(false);
           setProcessing(false);
           setThinking(false);
           activeRequestIdRef.current = null;
         } else if (resultPayload.intent === 'supplement') {
-          setPaused(false);
+          if (resultPayload.success) {
+            clearPauseBuffer();
+            setPaused(false);
+            setProcessing(true);
+            setThinking(true);
+          } else {
+            pendingSupplementInterruptIdRef.current = null;
+          }
         }
         const irid = typeof event.request_id === 'string' ? event.request_id.trim() : '';
         if (irid) {
@@ -1144,6 +1361,13 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       webClient.on('chat.ask_user_question', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;
         setPendingQuestion(payload as unknown as AskUserQuestionPayload);
+        setProcessing(true);
+        setThinking(false);
+      }),
+      webClient.on('chat.invocation_paused', ({ payload }) => {
+        if (!shouldHandleSessionEvent(payload)) return;
+        setProcessing(true);
+        setThinking(false);
       }),
       // 同时监听 session_result 事件，以处理后端可能发送的不同格式
       webClient.on('session_result', ({ payload }) => {
@@ -1319,7 +1543,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     addToolCall,
     addToolResult,
     appendStreamContent,
+    clearPauseBuffer,
     clearSubtasks,
+    flushPausedEvents,
     handleConnectionAck,
     handleTtsPlayback,
     setMode,
@@ -1336,6 +1562,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     shouldHandleSessionEvent,
     shouldHandleCurrentRequestEvent,
     shouldDropDuplicatedEvent,
+    bindStreamRequestIdFromEvent,
+    tryAdoptSupplementStreamRequestId,
     startStreaming,
     stopStreaming,
     updateMessage,

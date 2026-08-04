@@ -58,6 +58,20 @@ is_port_occupied() {
 #   1. If port is already configured in DEPLOY_VARS, check if it's available
 #   2. If no port configured, auto-allocate from START_PORT ~ END_PORT
 ensure_available_port() {
+    if [ "${DEPLOY_VARS["NO_CHECK_PORTS"]}" == "true" ]; then
+        for port_name in "$@"; do
+            if [ "${DEPLOY_VARS["IS_UP_MANAGER_WEB"]}" == "false" ]; then
+                if [ "${port_name}" == "MANAGER_WEB_NODE_PORT" ]; then
+                    continue
+                fi
+            fi
+            if [ -z "${DEPLOY_VARS["${port_name}"]:-}" ]; then
+                error "Please define ${port_name} in .env.custom"
+            fi
+        done
+        return
+    fi
+
     local start_port=${CONFIG["START_PORT"]}
     local end_port=${CONFIG["END_PORT"]}
 

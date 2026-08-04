@@ -17,6 +17,7 @@ CHANNEL_CONFIG_TABLE_DEF = TableDefinition(
             autoincrement=True,
             nullable=False,
         ),
+        ColumnDefinition("jiuwenclaw_id", "string", length=64, nullable=False),
         ColumnDefinition("channel_id", "string", length=64, nullable=False),
         ColumnDefinition("channel_name", "string", length=128, nullable=False),
         ColumnDefinition("channel_type", "string", length=32, nullable=False),
@@ -27,7 +28,7 @@ CHANNEL_CONFIG_TABLE_DEF = TableDefinition(
         ColumnDefinition("updated_at", "datetime", nullable=False),
     ],
     indexes=[
-        IndexDefinition(["channel_id"], unique=True),
+        IndexDefinition(["jiuwenclaw_id", "channel_id"], unique=True),
     ],
 )
 
@@ -89,27 +90,7 @@ LOGGING_CONFIG_TABLE_DEF = TableDefinition(
         IndexDefinition(["jiuwenclaw_id"], unique=True),
     ],
 )
-EMBED_CONFIG_TABLE_DEF = TableDefinition(
-    table_name="embed_config",
-    columns=[
-        ColumnDefinition(
-            "id",
-            "integer",
-            primary_key=True,
-            autoincrement=True,
-            nullable=False,
-        ),
-        ColumnDefinition("jiuwenclaw_id", "string", length=64, nullable=False),
-        ColumnDefinition("embed_api_key", "string", length=512, nullable=True),
-        ColumnDefinition("embed_base_url", "string", length=1024, nullable=True),
-        ColumnDefinition("embed_model", "string", length=128, nullable=True),
-        ColumnDefinition("created_at", "datetime", nullable=False),
-        ColumnDefinition("updated_at", "datetime", nullable=False),
-    ],
-    indexes=[
-        IndexDefinition(["jiuwenclaw_id"], unique=False),
-    ],
-)
+
 TASK_MEMORY_CONFIG_TABLE_DEF = TableDefinition(
     table_name="task_memory_config",
     columns=[
@@ -138,6 +119,28 @@ TASK_MEMORY_CONFIG_TABLE_DEF = TableDefinition(
 
 PERMISSIONS_CONFIG_TABLE_DEF = TableDefinition(
     table_name="permissions_config",
+    columns=[
+        ColumnDefinition(
+            "id",
+            "integer",
+            primary_key=True,
+            autoincrement=True,
+            nullable=False,
+        ),
+        ColumnDefinition("jiuwenclaw_id", "string", length=64, nullable=False),
+        ColumnDefinition("body", "json", nullable=True),
+        ColumnDefinition("source", "string", length=16, nullable=False, default="manager"),
+        ColumnDefinition("revision", "integer", nullable=False, default=1),
+        ColumnDefinition("created_at", "datetime", nullable=False),
+        ColumnDefinition("updated_at", "datetime", nullable=False),
+    ],
+    indexes=[
+        IndexDefinition(["jiuwenclaw_id"], unique=True),
+    ],
+)
+
+MEMORY_CONFIG_TABLE_DEF = TableDefinition(
+    table_name="memory_config",
     columns=[
         ColumnDefinition(
             "id",

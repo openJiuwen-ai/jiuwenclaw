@@ -137,6 +137,7 @@ class ManagerApiHarness:
     async def post_json(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         if path.startswith((
             "/model-templates",
+            "/embedding-templates",
             "/extension-config-templates",
             "/skill-whitelist-templates",
             "/service-config-templates",
@@ -151,6 +152,7 @@ class ManagerApiHarness:
     async def get_json(self, path: str, **params: Any) -> dict[str, Any]:
         if path.startswith((
             "/model-templates",
+            "/embedding-templates",
             "/extension-config-templates",
             "/skill-whitelist-templates",
             "/service-config-templates",
@@ -165,6 +167,7 @@ class ManagerApiHarness:
     async def patch_json(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         if path.startswith((
             "/model-templates",
+            "/embedding-templates",
             "/extension-config-templates",
             "/skill-whitelist-templates",
             "/service-config-templates",
@@ -179,6 +182,7 @@ class ManagerApiHarness:
     async def delete_ok(self, path: str) -> None:
         if path.startswith((
             "/model-templates",
+            "/embedding-templates",
             "/extension-config-templates",
             "/skill-whitelist-templates",
             "/service-config-templates",
@@ -193,6 +197,7 @@ class ManagerApiHarness:
 _PUSH_CONFIG_OP_MODULES = (
     "jiuwenclaw_manager.manager_ws_server.server",
     "jiuwenclaw_manager.core.template.model_template",
+    "jiuwenclaw_manager.core.template.embedding_template",
     "jiuwenclaw_manager.core.template.extension_config_template",
     "jiuwenclaw_manager.core.template.skill_whitelist_template",
     "jiuwenclaw_manager.core.template.service_config_template",

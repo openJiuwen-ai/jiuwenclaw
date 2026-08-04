@@ -12,21 +12,12 @@ parse_args() {
                 CMD="${args[$i]}"
                 i=$((i+1))
                 ;;
-            #nfs|rabbitmq|yr_claw|gateway|web|manager)
-            nfs|rabbitmq|mysql|redis|postgresql|minio|gateway|web|manager)
+            nfs|nfs-sc|rabbitmq|mysql|redis|postgresql|minio|log|jina|gateway|web|manager)
                 MODULES+=("${args[$i]^^}")
                 i=$((i+1))
                 ;;
             -n)
                 DEPLOY_VARS["NAMESPACE"]="${args[$((i+1))]}"
-                i=$((i+2))
-                ;;
-            --web-port)
-                DEPLOY_VARS["WEB_NODE_PORT"]="${args[$((i+1))]}"
-                i=$((i+2))
-                ;;
-            --manager-web-port)
-                DEPLOY_VARS["MANAGER_WEB_NODE_PORT"]="${args[$((i+1))]}"
                 i=$((i+2))
                 ;;
             --render-only)
@@ -60,10 +51,7 @@ parse_args() {
 }
 
 process_modules() {
-    MODULES=("GATEWAY")
-    if [ "${DEPLOY_VARS["AGENT_RUNTIME"]}" == "yuanrong" ]; then
-        MODULES+=("YR_CLAW")
-    fi
+    MODULES=("GATEWAY" "WEB" "MANAGER")
 }
 
 # Print help info and exit
@@ -82,20 +70,19 @@ Modules (Optional):
   mysql     MySQL module (deploys to default namespace, ignores -n parameter)
   redis     Redis module (deploys to default namespace, ignores -n parameter)
   minio     Minio module (deploys to default namespace, ignores -n parameter)
+  log       Log module (deploys to default namespace, ignores -n parameter)
+  jina      Jina module (deploys to default namespace, ignores -n parameter)
   gateway   Gateway service module
   web       Web frontend module
   manager   CLAW Manager module
 
 Options:
   -n NAMESPACE              Specify Kubernetes namespace (defaults to default if unspecified)
-  --web-port PORT           Set host port for web service （range: 30000-32767）
-  --manager-web-port PORT   Set host port for manager web UI （range: 30000-32767）
   --render-only             Only render and output YAML manifests to conf directory
   -h, --help                Display this help message and exit
 
 Examples:
   ./$(basename "$0") up                                # Deploy default modules in default namespace
-  ./$(basename "$0") up web --web-port 30000 -n myns   # Deploy web module with host port 30000 in myns namespace
   ./$(basename "$0") up nfs                            # Deploy NFS (always uses default namespace, ignores -n parameter)
   ./$(basename "$0") down                              # Uninstall default modules in default namespace
   ./$(basename "$0") restart                           # Restart default modules in default namespace

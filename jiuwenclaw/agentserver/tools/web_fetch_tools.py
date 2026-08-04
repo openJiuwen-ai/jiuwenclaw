@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 from html import unescape
 from typing import Any
@@ -19,6 +20,8 @@ from openjiuwen.core.foundation.tool import ToolCard, tool
 from jiuwenclaw.agentserver.tools.ssl_config import get_requests_verify
 
 logger = logging.getLogger(__name__)
+
+_JINA_READER_ENDPOINT = os.getenv("JINA_READER_ENDPOINT", "https://r.jina.ai").rstrip("/")
 
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -259,7 +262,8 @@ def _fetch_direct_sync(url: str, timeout_seconds: int) -> dict[str, Any] | None:
 def _fetch_via_jina_sync(url: str, timeout_seconds: int) -> dict[str, Any] | None:
     """Fetch via Jina Reader proxy."""
     try:
-        reader_url = f"https://r.jina.ai/{url}"
+        logger.info(f"JINA_READER_ENDPOINT={_JINA_READER_ENDPOINT}")
+        reader_url = f"{_JINA_READER_ENDPOINT}/{url}"
         response = _http_get(
             reader_url, headers=_REQUEST_HEADERS, timeout=timeout_seconds
         )
@@ -279,8 +283,12 @@ def _fetch_via_jina_sync(url: str, timeout_seconds: int) -> dict[str, Any] | Non
             "content": content,
             "provider": "jina",
         }
-    except Exception:
-        logger.warning("Jina proxy webpage fetch failed", exc_info=True)
+    except Exception as exc:
+        logger.warning(
+            "Jina proxy webpage fetch failed: %s: %s",
+            type(exc).__name__,
+            str(exc),
+        )
         return None
 
 
@@ -295,6 +303,11 @@ async def _fetch_webpage_async(
       - If direct failed (4xx/5xx or no content): wait for jina
       - If direct succeeded: wait for jina up to 3s, use jina if available, else direct
     """
+
+    # 环境变量优先，其次是传入的参数
+    timeout_seconds = int(os.getenv("FETCH_WEBPAGE_TIMEOUT", timeout_seconds))
+    overall_timeout = int(os.getenv("FETCH_WEBPAGE_TOTAL_TIMEOUT", overall_timeout))
+    logger.info(f"timeout_seconds={timeout_seconds}, overall_timeout={overall_timeout}")
 
     async def fetch_direct():
         return await asyncio.to_thread(_fetch_direct_sync, url, timeout_seconds)

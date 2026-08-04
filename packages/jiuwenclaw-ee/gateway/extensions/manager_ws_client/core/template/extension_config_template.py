@@ -12,7 +12,11 @@ from openjiuwen_runtime.foundation.db.handler import DBHandler
 from ...infrastructure.db import ensure_db_handler
 from ...infrastructure.utils import get_jiuwenclaw_id, parse_iso_datetime, utc_now
 from ...models.template_models import EXTENSION_CONFIG_TEMPLATE_TABLE_DEF
-from ...schemas.template_schemas import ExtensionConfigTemplateUpdateRequest
+from ...schemas.template_schemas import (
+    ExtensionConfigTemplateUpdateRequest,
+    HookConfig,
+    normalize_hook_schedule,
+)
 
 _TABLE = EXTENSION_CONFIG_TEMPLATE_TABLE_DEF.table_name
 _ALLOWED_COMPONENTS = frozenset({"gateway", "agent_server"})
@@ -47,17 +51,23 @@ def _validate_hook_type(value: str) -> str:
     return normalized
 
 
-def _validate_hook_config(hook_config: dict[str, Any], *, hook_type: str) -> dict[str, Any]:
-    if not isinstance(hook_config, dict):
-        raise ValueError("hook_config must be an object")
-    handler = str(hook_config.get("handler") or "").strip()
-    if not handler:
-        raise ValueError("hook_config.handler is required")
-    if hook_type == "schedule":
-        schedule = str(hook_config.get("schedule") or "").strip()
-        if not schedule:
-            raise ValueError("hook_config.schedule is required when hook_type=schedule")
-    return hook_config
+def _validate_hook_config(
+    hook_config: HookConfig | dict[str, Any], *, hook_type: str
+) -> dict[str, Any]:
+    cfg = (
+        hook_config
+        if isinstance(hook_config, HookConfig)
+        else HookConfig.model_validate(hook_config)
+    )
+    schedule = normalize_hook_schedule(
+        cfg.schedule, required=(hook_type == "schedule")
+    )
+    data = cfg.model_dump(exclude_none=True)
+    if schedule is None:
+        data.pop("schedule", None)
+    else:
+        data["schedule"] = schedule
+    return data
 
 
 def _template_pk(jiuwenclaw_id: str, template_id: str) -> dict[str, str]:
@@ -222,12 +232,12 @@ async def apply_extension_config_template(
         template = payload.get("template")
         if not isinstance(template, dict):
             raise ValueError("extension_config_templates.create requires template object")
-        now = utc_now()
-        row_data = _build_row_from_template(
-            template, jiuwenclaw_id=jiuwenclaw_id, now=now
+        await _upsert_extension_config_template_from_sync(
+            handler, template, jiuwenclaw_id=jiuwenclaw_id
         )
-        await handler.create(_TABLE, row_data)
-        result: dict[str, Any] | None = {"template_id": row_data["template_id"]}
+        result: dict[str, Any] | None = {
+            "template_id": _normalize_template_id(template.get("template_id")),
+        }
 
     elif op == "update":
         template_id = payload.get("template_id")
@@ -251,9 +261,7 @@ async def apply_extension_config_template(
         if template_id is None:
             raise ValueError("extension_config_templates.delete requires template_id")
         tid = _normalize_template_id(template_id)
-        deleted = await delete_extension_config_template(handler, tid)
-        if not deleted:
-            raise ValueError(f"extension config template template_id={tid!r} not found")
+        await delete_extension_config_template(handler, tid)
         result = None
 
     elif op == "sync":
