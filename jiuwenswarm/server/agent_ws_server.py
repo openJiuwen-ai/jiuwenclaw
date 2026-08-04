@@ -58,6 +58,7 @@ from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import 
 from jiuwenswarm.agents.harness.common.rails.permissions.permissions_persist import persist_cli_trusted_directory
 from jiuwenswarm.extensions.hooks_context import AgentServerChatHookContext
 from jiuwenswarm.server.runtime.agent_manager import AgentManager, ACP_DEFAULT_CAPABILITIES
+from jiuwenswarm.server.runtime.agent_warm_pool import WarmClaim
 from jiuwenswarm.server.runtime.session.session_metadata import get_all_sessions_metadata, remove_session_metadata_cache
 from jiuwenswarm.server.runtime.session.session_history import (
     append_compact_history_records,
@@ -111,6 +112,12 @@ from jiuwenswarm.common.security.ws_origin import (
 )
 from jiuwenswarm.agents.harness.code.prompt.plan_approval import (
     PLAN_MODE_EXITED_EVENT_TYPE,
+    PLAN_REMINDER_ORIGINAL_QUERY_KEY,
+)
+from jiuwenswarm.common.mode_matrix import (
+    ResolvedMode,
+    is_plan_mode,
+    resolve_request_mode,
 )
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.common.log_preview import preview_text
@@ -206,6 +213,20 @@ _session_team_binding_locks: WeakValueDictionary[str, asyncio.Lock] = (
 # Set by _check_post_process_plan_exit, consumed by _ensure_code_mode_state
 # to prevent TUI-race re-entrance to plan mode.
 _plan_exited_sessions: set[str] = set()
+
+# 本进程内曾进入过 plan 的 work 单 agent 会话。work 的准入面覆盖 IM / 定时任务 /
+# CLI / Web work 的每一条普通消息，而其中绝大多数会话从未开过 Plan；有这个标记
+# 才需要去同步 plan 状态。跨重启的情况另有一道判据（会话 metadata 里上一轮的
+# canonical mode），见 ``_session_may_hold_plan_state``。
+_plan_active_sessions: set[str] = set()
+
+# 上一轮写盘前的会话 canonical mode，由 ``_prepare_code_mode_chat_turn`` 在覆盖
+# metadata 之前捎带到 params 里，给 ``_ensure_code_mode_state`` 当跨重启判据。
+_SESSION_PREVIOUS_MODE_KEY = "_session_previous_mode"
+
+# ``plan_entry_source`` 的合法取值，表示"用户这一条消息明确要求进入 plan"。
+# 一次性字段：TUI 的 ``/plan`` 命令、Web 用户手动打开 Plan 开关后的第一条消息。
+_PLAN_ENTRY_SOURCES = frozenset({"slash_command", "plan_toggle"})
 
 _CODE_MODE_SYNC_METHODS = frozenset({
     ReqMethod.CHAT_SEND,
@@ -628,17 +649,29 @@ def resolve_agent_request_mode(
     return mode, sub_mode, canonical_mode
 
 
+def resolve_request_runtime_mode(
+    request: AgentRequest,
+    *,
+    work_mode: Any = None,
+) -> ResolvedMode:
+    """解析请求的运行模式（Web 组合 mode + work_mode；其余走历史解析）。"""
+    params = request.params if isinstance(request.params, dict) else {}
+    return resolve_request_mode(
+        params,
+        resolve_agent_request_mode,
+        work_mode=work_mode,
+    )
+
+
 def _apply_resolved_mode_to_request(
     request: AgentRequest,
     *,
     work_mode: Any = None,
 ) -> tuple[str, str | None]:
-    mode, sub_mode, canonical_mode = resolve_agent_request_mode(
-        request.params.get("mode", "agent"),
-        work_mode=work_mode,
-    )
-    request.params["mode"] = canonical_mode
-    return mode, sub_mode
+    resolved = resolve_request_runtime_mode(request, work_mode=work_mode)
+    if isinstance(request.params, dict):
+        request.params["mode"] = resolved.canonical_mode
+    return resolved.manager_mode, resolved.sub_mode
 
 
 def _payload_to_request(data: dict[str, Any]) -> AgentRequest:
@@ -808,6 +841,8 @@ def _inject_plan_mode_activation_reminder(request: AgentRequest) -> None:
     )
     if isinstance(request.params, dict):
         query = request.params.get("query") or ""
+        # 提醒只面向模型；把用户原文留一份，供会话历史与前端回显使用。
+        request.params[PLAN_REMINDER_ORIGINAL_QUERY_KEY] = query
         request.params["query"] = reminder + query
         logger.info(
             "[_ensure_code_mode_state] Injected plan mode activation reminder "
@@ -1812,6 +1847,9 @@ class AgentWebSocketServer:
             # locks are weakly cached and disappear automatically after their
             # last active/waiting user releases them.
             _plan_exited_sessions.discard(session_id)
+            # 同理：内存标记不留给已断开的会话。真在 plan 里的会话靠 metadata
+            # 那道判据继续被识别，不依赖这个集合。
+            _plan_active_sessions.discard(session_id)
 
     async def _trigger_before_chat_request_hook(self, request: AgentRequest) -> None:
         if not self._should_trigger_before_chat_request_hook(request):
@@ -1957,9 +1995,20 @@ class AgentWebSocketServer:
 
     @staticmethod
     def _is_explicit_plan_entry_request(request: AgentRequest) -> bool:
+        """本次请求是否为"用户明确要求进入 plan"。
+
+        只认一次性的 ``plan_entry_source``：TUI 的 ``/plan`` 发
+        ``slash_command``，Web 在用户手动打开 Plan 开关的那一条消息上发
+        ``plan_toggle``（开关本身是持续状态，但"刚被打开"只发生一次）。
+
+        不能因为"这是一条 Web 的 plan 请求"就当成显式进入——那样
+        ``_plan_exited_sessions`` 与 ``plan_slug`` 两道防重入闸门对 Web 就永远
+        不生效：``plan.mode_exited`` 一旦丢包（网络抖动、页面刷新），开关不复位，
+        用户的下一条消息会静默把会话重新拖回 plan。
+        """
         if not isinstance(request.params, dict):
             return False
-        return request.params.get("plan_entry_source") == "slash_command"
+        return request.params.get("plan_entry_source") in _PLAN_ENTRY_SOURCES
 
     @staticmethod
     def _session_mode_sync_lock(session_id: str) -> asyncio.Lock:
@@ -1977,17 +2026,32 @@ class AgentWebSocketServer:
             _session_team_binding_locks[session_id] = lock
         return lock
 
-    async def _push_plan_mode_exited(self, request: AgentRequest) -> None:
-        """Notify the client that plan mode ended after user approval."""
+    async def _push_plan_mode_exited(
+        self,
+        request: AgentRequest,
+        *,
+        exit_mode: str | None = None,
+    ) -> None:
+        """Notify the client that plan mode ended after user approval.
+
+        ``mode`` 保持 TUI 已消费的语义：退出 plan 后应回到的普通模式。code 单
+        agent 仍是 ``code.normal``；work 单 agent / 集群按各自 profile 动态计算。
+        """
         session_id = request.session_id
         if not session_id:
             return
+        if not exit_mode:
+            # ``normal_mode`` 对非 plan 的 canonical 模式原样返回，所以这里不需要
+            # 分情况：plan 请求得到它的退出目标，普通请求得到它自己。别写死
+            # "code.normal"——最常走的这条路径（plan→normal 恢复后回调）恰好是
+            # 普通请求，写死会把 code 的模式推给 work 会话。
+            exit_mode = resolve_request_runtime_mode(request).normal_mode
         await self.send_push({
             "channel_id": request.channel_id or "default",
             "session_id": session_id,
             "payload": {
                 "event_type": PLAN_MODE_EXITED_EVENT_TYPE,
-                "mode": "code.normal",
+                "mode": exit_mode,
             },
         })
 
@@ -2017,21 +2081,25 @@ class AgentWebSocketServer:
         session_id = request.session_id
         if not session_id:
             return
-        mode, sub_mode = _apply_resolved_mode_to_request(request)
-        if mode != "code" or sub_mode != "plan":
+        resolved = resolve_request_runtime_mode(request)
+        if isinstance(request.params, dict):
+            request.params["mode"] = resolved.canonical_mode
+        # 只检查"本轮确实运行在单 agent plan"的请求：plan→normal 只可能发生在
+        # 这类请求里。集群 plan 的退出由 team runtime 自己处理，普通请求不检查，
+        # 否则每个 code.normal 背景 RPC 都会误判。
+        if resolved.is_team or not resolved.is_plan:
             return
 
-        from openjiuwen.core.single_agent import create_agent_session
-        deep_agent = await agent.ensure_instance()
-        session = create_agent_session(
-            session_id=session_id,
-            card=deep_agent.card,
+        # 读运行中的那个 session：exit_plan_mode 是在它上面恢复模式的，落盘要等本轮
+        # 结束，这里用一次性 session 读 checkpointer 有可能读到退出前的旧值。
+        deep_agent, session, _live = await self._open_plan_state_session(
+            agent, session_id
         )
-        await session.pre_run(inputs=None)
         state = deep_agent.load_state(session)
         if state.plan_mode.mode == "normal":
             _plan_exited_sessions.add(session_id)
-            await self._push_plan_mode_exited(request)
+            _plan_active_sessions.discard(session_id)
+            await self._push_plan_mode_exited(request, exit_mode=resolved.normal_mode)
             logger.info(
                 "[_check_post_process_plan_exit] Detected plan→normal after "
                 "tool execution for session=%s",
@@ -2129,6 +2197,16 @@ class AgentWebSocketServer:
                 if isinstance(session_metadata, dict)
                 else None
             )
+            # 下面的 sync 会把本轮 canonical mode 覆盖进 metadata，所以在覆盖前
+            # 先把上一轮的值捎带给 _ensure_code_mode_state：它据此判断这个会话是
+            # 不是可能还停在 plan 里（跨进程重启依然有效）。
+            stored_session_mode = (
+                session_metadata.get("mode")
+                if isinstance(session_metadata, dict)
+                else None
+            )
+            if isinstance(stored_session_mode, str) and stored_session_mode.strip():
+                params[_SESSION_PREVIOUS_MODE_KEY] = stored_session_mode.strip()
             if isinstance(stored_work_mode, str) and stored_work_mode.strip().lower() in {
                 "code",
                 "work",
@@ -2196,6 +2274,61 @@ class AgentWebSocketServer:
 
         return mode, sub_mode, agent
 
+    @staticmethod
+    def _session_may_hold_plan_state(request: AgentRequest, session_id: str) -> bool:
+        """会话是否可能还停在 plan 里，需要同步 plan 状态。
+
+        两道判据：本进程内的 ``_plan_active_sessions`` 标记（精确），以及会话
+        metadata 里上一轮的 canonical mode（跨重启仍然有效——服务重启后一个停在
+        plan 里的会话，下一条普通消息依然能被切回 normal 并通知前端复位）。
+
+        Args:
+            request: 当前请求（读其中捎带的上一轮 canonical mode）。
+            session_id: 会话 ID。
+
+        Returns:
+            ``True`` 表示需要继续做 plan 状态同步。
+        """
+        if session_id in _plan_active_sessions:
+            return True
+        params = request.params if isinstance(request.params, dict) else {}
+        return is_plan_mode(params.get(_SESSION_PREVIOUS_MODE_KEY))
+
+    @staticmethod
+    async def _open_plan_state_session(
+        agent: Any,
+        session_id: str | None,
+    ) -> tuple[Any, Any, bool]:
+        """Return ``(deep_agent, session, is_live)`` for reading/writing plan state.
+
+        ``DeepAgent.load_state`` caches its snapshot on the Session object, and a
+        chat turn keeps reusing the one ``start_interaction`` bound. Writing plan
+        state through a throwaway session therefore only reaches the
+        checkpointer: the running conversation would keep the pre-switch snapshot
+        and the user's Plan toggle would do nothing until the agent instance is
+        rebuilt.
+
+        A live session exists from the session's second turn on. On the first
+        turn there is none yet, so we fall back to a throwaway session — the
+        checkpointer is authoritative there, because ``start_interaction`` reads
+        it when it creates the session.
+        """
+        from openjiuwen.core.single_agent import create_agent_session
+        from jiuwenswarm.agents.harness.common.session_ops_service import (
+            resolve_live_agent_session,
+        )
+
+        live_deep_agent = agent.get_live_session_instance(session_id)
+        if live_deep_agent is not None:
+            live_session = resolve_live_agent_session(live_deep_agent, session_id or "default")
+            if live_session is not None:
+                return live_deep_agent, live_session, True
+
+        deep_agent = await agent.ensure_instance()
+        session = create_agent_session(session_id=session_id, card=deep_agent.card)
+        await session.pre_run(inputs=None)  # 从 checkpointer 加载历史 state
+        return deep_agent, session, False
+
     async def _ensure_code_mode_state(
         self,
         request: AgentRequest,
@@ -2217,10 +2350,37 @@ class AgentWebSocketServer:
         (via ``restore_mode_after_plan_exit``), so this method no longer needs
         to gate plan→normal transitions with an approval flag.
 
+        work 单 agent（Web ``agent`` / ``agent.plan``）复用同一套编排：Adapter 不同，
+        但 plan 状态都存放在 ``DeepAgentState.plan_mode``。集群的 plan 由 team
+        runtime 负责，不走这里。
+
         Returns:
             ``True`` if plan mode was restored to normal (mode sync occurred).
         """
-        if mode != "code" or sub_mode == "team":
+        resolved = resolve_request_runtime_mode(request)
+        if resolved.is_team:
+            return False
+        is_code_single = mode == "code" and sub_mode != "team"
+        is_work_single_plan_capable = (
+            resolved.from_web_composition and resolved.manager_mode == "agent"
+        )
+        if not (is_code_single or is_work_single_plan_capable):
+            return False
+        # 目标 plan 状态由 canonical mode 决定：code 单 agent 沿用 sub_mode，
+        # work 单 agent 的 sub_mode 只有 None / "plan"。
+        target_plan_state = "plan" if resolved.is_plan else "normal"
+        session_id = request.session_id or "default"
+        # work 的准入面覆盖 IM / 定时任务 / CLI / Web work 的每一条普通消息
+        # （``work_mode`` 总会被 session metadata 补齐），而这些会话绝大多数从未
+        # 开过 Plan。打开 plan 状态 session 在会话首轮还没有 live session 时会强制
+        # 构建 root DeepAgent（重跑工具注册、rail 装配、MCP 注册），代价不小。
+        # 所以普通请求先看这个会话有没有 plan 痕迹，没有就直接返回。
+        # code 单 agent 不走这条捷径，保持既有行为。
+        if (
+            not is_code_single
+            and target_plan_state == "normal"
+            and not self._session_may_hold_plan_state(request, session_id)
+        ):
             return False
         if not self._should_sync_code_mode_state(request):
             return False
@@ -2233,25 +2393,24 @@ class AgentWebSocketServer:
             )
             return False
 
-        session_id = request.session_id or "default"
         restored_after_approval = False
         async with self._session_mode_sync_lock(session_id):
-            from openjiuwen.core.single_agent import create_agent_session
-            deep_agent = await agent.ensure_instance()
-            session = create_agent_session(
-                session_id=request.session_id, card=deep_agent.card
+            deep_agent, session, live = await self._open_plan_state_session(
+                agent, request.session_id
             )
-            await session.pre_run(inputs=None)  # 从 checkpointer 加载历史 state
             state = deep_agent.load_state(session)
+            # switch_mode 会就地改写这个 state 对象（load_state 返回的是 session 上
+            # 缓存的同一个实例），所以切换前先把原模式记下来。
+            previous_plan_state = state.plan_mode.mode
             # 仅在目标模式与当前模式不同时执行模式切换
             mode_changed_to_plan = False
-            if state.plan_mode.mode != sub_mode:
+            if state.plan_mode.mode != target_plan_state:
                 # Guard: block stale normal→plan switches when plan was already exited.
                 # Explicit user /plan requests bypass this guard and start a fresh plan.
                 # Two mechanisms:
                 #   1. _plan_exited_sessions flag (precise — set by _check_post_process_plan_exit)
                 #   2. plan_slug fallback (defense-in-depth — plan exists but mode is normal)
-                if state.plan_mode.mode == "normal" and sub_mode == "plan":
+                if state.plan_mode.mode == "normal" and target_plan_state == "plan":
                     blocked = False
                     explicit_plan_entry = self._is_explicit_plan_entry_request(request)
                     if explicit_plan_entry:
@@ -2269,7 +2428,7 @@ class AgentWebSocketServer:
                         # Clear slug so this guard is one-shot.
                         state.plan_mode.plan_slug = None
                         deep_agent.save_state(session, state)
-                        await session.post_run()
+                        await session.commit()
                         blocked = True
                         logger.info(
                             "[_ensure_code_mode_state] Blocked stale plan re-entry via "
@@ -2277,33 +2436,43 @@ class AgentWebSocketServer:
                             session_id,
                         )
                     if blocked:
+                        exit_mode = resolved.normal_mode
                         if isinstance(request.params, dict):
-                            request.params["mode"] = "code.normal"
-                        await self._push_plan_mode_exited(request)
+                            request.params["mode"] = exit_mode
+                        await self._push_plan_mode_exited(request, exit_mode=exit_mode)
                         return False
-                deep_agent.switch_mode(session=session, mode=sub_mode)
-                if state.plan_mode.mode == "plan" and sub_mode == "normal":
+                deep_agent.switch_mode(session=session, mode=target_plan_state)
+                if previous_plan_state == "plan" and target_plan_state == "normal":
                     restored_after_approval = True
+                    _plan_active_sessions.discard(session_id)
                     logger.info(
                         "[_ensure_code_mode_state] Synced plan→normal for session=%s",
                         session_id,
                     )
-                if sub_mode == "plan":
+                if target_plan_state == "plan":
                     mode_changed_to_plan = True
+                    _plan_active_sessions.add(session_id)
                     # Clear stale plan_slug from previous plan session so
                     # enter_plan_mode creates a fresh plan file.
                     state = deep_agent.load_state(session)
                     if state.plan_mode.plan_slug:
                         state.plan_mode.plan_slug = None
                         deep_agent.save_state(session, state)
-                # switch_mode 内部已通过 save_state 写入 "deepagent" key，
-                # 只需 post_run 持久化到 checkpointer
-                await session.post_run()
+                # switch_mode 内部已通过 save_state 写入 "deepagent" key，这里只需
+                # 落盘。用 commit 而不是 post_run：live session 还要继续跑这一轮，
+                # post_run 会关掉输出流并把它标记成已结束。
+                await session.commit()
+                logger.info(
+                    "[_ensure_code_mode_state] plan state -> %s for session=%s (live=%s)",
+                    target_plan_state,
+                    session_id,
+                    live,
+                )
 
             # 切换到 plan 模式时注入 <system-reminder> 告知 LLM 调用 enter_plan_mode。
             # 使用 mode_changed_to_plan 而非 plan_slug 判断，因为 restore_mode_after_plan_exit
             # 不清除 plan_slug，导致后续 /plan 时提醒被错误跳过。
-            if sub_mode == "plan" and mode_changed_to_plan:
+            if target_plan_state == "plan" and mode_changed_to_plan:
                 _inject_plan_mode_activation_reminder(request)
 
         return restored_after_approval
@@ -3636,6 +3805,7 @@ class AgentWebSocketServer:
                     else:
                         shutil.rmtree(session_dir)
                         _plan_exited_sessions.discard(target)
+                        _plan_active_sessions.discard(target)
                         remove_session_metadata_cache(target)
                         if is_team_mode:
                             try:
@@ -7537,20 +7707,20 @@ class AgentWebSocketServer:
     async def _handle_session_create(
             self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
     ) -> None:
-        """处理 session.create 方法.
+        """Handle AgentServer-owned creation and TUI external-ID compatibility.
 
-        调用 AgentManager.create_session 创建会话，返回 session_id。
-        同时将 project_dir/project_id 等字段写入会话元数据(metadata.json)并落盘。
-        project_id / project_dir 绑定规则(详见
-        project_store.resolve_session_project_binding):两者皆空→默认项目;
-        仅传 project_id→自动补齐 path;同时传→校验一致性;仅传 path→拒绝。
+        Normal creation validates project identity before claiming a server-owned
+        warm or fresh Session. TUI callers may supply a compatibility ID through
+        this same method; AgentServer validates and serializes it, restores or
+        persists its binding, and always bypasses prewarming.
 
         Args:
             ws: WebSocket 连接
             request: AgentRequest
             send_lock: 发送锁
         """
-        logger.info("[AgentServer] session.create: request_id=%s", request.request_id)
+        operation = "session.create"
+        logger.info("[AgentServer] %s: request_id=%s", operation, request.request_id)
 
         try:
             channel_id = request.channel_id or "default"
@@ -7558,10 +7728,79 @@ class AgentWebSocketServer:
             mode, _, canonical_mode = resolve_agent_request_mode(params.get("mode", "agent"))
             explicit_session_id = params.get("session_id")
             previous_session_id = str(params.get("previous_session_id") or "").strip()
-            if isinstance(explicit_session_id, str) and explicit_session_id.strip():
+            requested_session_id = (
+                explicit_session_id.strip()
+                if isinstance(explicit_session_id, str)
+                else ""
+            )
+            external_tui_session = bool(
+                requested_session_id
+                and request.req_method == ReqMethod.SESSION_CREATE
+                and channel_id.strip().lower() == "tui"
+            )
+            existing_metadata: dict[str, Any] | None = None
+            if requested_session_id and not external_tui_session:
                 raise ValueError(
                     "session.create no longer accepts session_id; use session.switch to restore"
                 )
+            external_id_lock: asyncio.Lock | None = None
+            external_id_lock_acquired = False
+            if external_tui_session:
+                logger.warning(
+                    "[AgentServer] TUI supplied session_id via session.create; "
+                    "bypassing prewarm compatibility path: session_id=%s",
+                    requested_session_id,
+                )
+                from jiuwenswarm.server.runtime.prompt_attachment_loader import (
+                    sanitize_session_id,
+                )
+                if (
+                    sanitize_session_id(requested_session_id) != requested_session_id
+                    or len(requested_session_id) > 128
+                ):
+                    raise ValueError("invalid session_id")
+
+                lock_key = f"external-create:{requested_session_id}"
+                external_id_lock = _session_switch_locks.get(lock_key)
+                if external_id_lock is None:
+                    external_id_lock = asyncio.Lock()
+                    _session_switch_locks[lock_key] = external_id_lock
+                await external_id_lock.acquire()
+                external_id_lock_acquired = True
+
+                # Existing TUI metadata is authoritative. The frontend injects its
+                # current cwd into every RPC, which must not rebind a restored session
+                # when `--session` is launched from another directory.
+                from jiuwenswarm.server.runtime.session.session_metadata import (
+                    get_session_metadata,
+                )
+                existing_metadata = get_session_metadata(requested_session_id)
+                if existing_metadata:
+                    existing_channel = str(
+                        existing_metadata.get("channel_id") or ""
+                    ).strip().lower()
+                    if existing_channel not in {"", "tui"}:
+                        raise ValueError("session_id is already owned by another channel")
+                    for field in ("project_id", "project_dir", "work_mode", "mode"):
+                        value = existing_metadata.get(field)
+                        if isinstance(value, str) and value.strip():
+                            params[field] = value.strip()
+                    mode, _, canonical_mode = resolve_agent_request_mode(
+                        params.get("mode", "agent")
+                    )
+                else:
+                    # Resolve a new external TUI id while holding the per-id lock.
+                    # This keeps concurrent windows from rebinding the same id to
+                    # different projects before metadata becomes visible.
+                    from jiuwenswarm.server.runtime.session.project_store import (
+                        find_or_create_code_project_for_tui_params,
+                    )
+
+                    project = find_or_create_code_project_for_tui_params(params)
+                    if project is not None:
+                        params["project_id"] = project.project_id
+                        params["project_dir"] = project.project_dir
+                        params["work_mode"] = project.work_mode
             # Step 1: 归一化 work_mode / project_id / project_dir 三元组
             # (与 web _session_create 共用同一 helper，保持主路径/fallback 一致)
             from jiuwenswarm.server.runtime.session.work_mode import resolve_session_work_mode_params
@@ -7676,24 +7915,31 @@ class AgentWebSocketServer:
                 and canonical_mode in {"agent", "code", "code.normal"}
             )
             create_token = str(params.get("create_token") or "").strip()
-            if not create_token:
-                raise ValueError("create_token is required")
-            claim = await self._agent_manager.claim_prewarmed_session(
-                channel_id=channel_id,
-                project_id=project_id,
-                project_dir=project_dir,
-                work_mode=final_work_mode,
-                is_swarm=is_swarm,
-                prewarm_eligible=prewarm_eligible,
-                create_token=create_token,
-            )
+            if external_tui_session:
+                claim = WarmClaim(
+                    session_id=requested_session_id,
+                    prewarm_hit=False,
+                    prewarm_status="bypassed",
+                )
+            else:
+                if not create_token:
+                    raise ValueError("create_token is required")
+                claim = await self._agent_manager.claim_prewarmed_session(
+                    channel_id=channel_id,
+                    project_id=project_id,
+                    project_dir=project_dir,
+                    work_mode=final_work_mode,
+                    is_swarm=is_swarm,
+                    prewarm_eligible=prewarm_eligible,
+                    create_token=create_token,
+                )
             session_id = claim.session_id
 
             # 会话目录已存在则拒绝,避免覆盖既有会话元数据(与 web 本地 handler 一致)
             session_dir = get_agent_sessions_dir() / session_id
             if (session_dir / "metadata.json").is_file():
-                self._agent_manager.activate_session_prewarm(session_id)
-                if create_token:
+                if not external_tui_session:
+                    self._agent_manager.activate_session_prewarm(session_id)
                     resp = AgentResponse(
                         request_id=request.request_id,
                         channel_id=request.channel_id,
@@ -7714,36 +7960,41 @@ class AgentWebSocketServer:
                     async with send_lock:
                         await send_wire_payload(ws, wire)
                     return
-                resp = AgentResponse(
-                    request_id=request.request_id,
-                    channel_id=request.channel_id,
-                    ok=False,
-                    payload={"error": "session already exists", "code": "ALREADY_EXISTS"},
-                )
-                wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-                async with send_lock:
-                    await send_wire_payload(ws, wire)
-                return
+                session_created = False
+            else:
+                session_created = True
 
             # 初始化会话元数据(同步写盘),将 project_dir/project_id 等字段落盘
-            from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata
-            init_session_metadata(
-                session_id=session_id,
-                channel_id=channel_id,
-                user_id=params.get("user_id", ""),
-                title=params.get("title", ""),
-                mode=canonical_mode,
-                project_dir=project_dir,
-                project_id=project_id,
-                work_mode=final_work_mode,
-                cron_id=str(params.get("cron_id") or "").strip(),
-            )
-            self._agent_manager.activate_session_prewarm(session_id)
+            if session_created:
+                from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata
+                channel_metadata = None
+                if channel_id.strip().lower() == "tui":
+                    workspace = str(params.get("cwd") or project_dir or "").strip()
+                    if workspace:
+                        channel_metadata = {
+                            "cwd": workspace,
+                            "project_dir": project_dir or workspace,
+                        }
+                init_session_metadata(
+                    session_id=session_id,
+                    channel_id=channel_id,
+                    user_id=params.get("user_id", ""),
+                    title=params.get("title", ""),
+                    mode=canonical_mode,
+                    project_dir=project_dir,
+                    project_id=project_id,
+                    work_mode=final_work_mode,
+                    cron_id=str(params.get("cron_id") or "").strip(),
+                    channel_metadata=channel_metadata,
+                )
+                if not external_tui_session:
+                    self._agent_manager.activate_session_prewarm(session_id)
 
             # team prepare 必须在 ack 前完成，避免首条 chat.send 与分布式切换竞态；
             # 可选 KVC 信号放到回包后异步，避免拖慢 create RPC。
             lifecycle_params = dict(params)
             lifecycle_params["mode"] = canonical_mode
+            lifecycle_reason = "session.create switch: "
             (
                 _target_is_team,
                 _resolved_mode,
@@ -7755,7 +8006,7 @@ class AgentWebSocketServer:
                 target_session_id=session_id,
                 previous_session_id=previous_session_id,
                 params=lifecycle_params,
-                reason="session.create switch: ",
+                reason=lifecycle_reason,
             )
 
             resp = AgentResponse(
@@ -7770,13 +8021,18 @@ class AgentWebSocketServer:
                     "workMode": final_work_mode,
                     "prewarm_hit": claim.prewarm_hit,
                     "prewarm_status": claim.prewarm_status,
+                    **(
+                        {"created": session_created, "mode": canonical_mode}
+                        if external_tui_session
+                        else {}
+                    ),
                 },
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
             async with send_lock:
                 await send_wire_payload(ws, wire)
 
-            logger.info("[AgentServer] session.create completed: session_id=%s", session_id)
+            logger.info("[AgentServer] %s completed: session_id=%s", operation, session_id)
 
             if switch_context is not None and dispatch_signals is not None:
                 kvc_task = asyncio.create_task(
@@ -7784,7 +8040,7 @@ class AgentWebSocketServer:
                         channel_id=channel_id,
                         target_session_id=session_id,
                         previous_session_id=previous_session_id,
-                        reason="session.create switch: ",
+                        reason=lifecycle_reason,
                         context=switch_context,
                         team_manager=team_manager,
                         dispatch_signals=dispatch_signals,
@@ -7796,10 +8052,11 @@ class AgentWebSocketServer:
                 kvc_task.add_done_callback(_log_background_session_kvc_failure)
 
         except Exception as e:
-            logger.exception("[AgentServer] session.create failed: %s", e)
-            await self._agent_manager.release_session_prewarm_claim(
-                locals().get("session_id")
-            )
+            logger.exception("[AgentServer] %s failed: %s", operation, e)
+            if not locals().get("external_tui_session", False):
+                await self._agent_manager.release_session_prewarm_claim(
+                    locals().get("session_id")
+                )
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -7809,6 +8066,13 @@ class AgentWebSocketServer:
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
             async with send_lock:
                 await send_wire_payload(ws, wire)
+        finally:
+            external_id_lock = locals().get("external_id_lock")
+            if (
+                external_id_lock is not None
+                and locals().get("external_id_lock_acquired", False)
+            ):
+                external_id_lock.release()
 
     async def _handle_session_fork(
             self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock

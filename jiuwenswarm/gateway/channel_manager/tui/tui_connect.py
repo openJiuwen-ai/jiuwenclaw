@@ -1497,8 +1497,22 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         from jiuwenswarm.common.schema.message import ReqMethod
 
         create_params = dict(params)
-        create_params.pop("session_id", None)
-        create_params.setdefault("create_token", secrets.token_hex(16))
+        requested_session_id = str(create_params.get("session_id") or "").strip()
+        if requested_session_id:
+            # TUI --session compatibility: preserve the supplied ID and let
+            # AgentServer resolve/persist its authoritative project binding.
+            create_params["session_id"] = requested_session_id
+        else:
+            create_params.pop("session_id", None)
+            from jiuwenswarm.server.runtime.session.project_store import (
+                find_or_create_code_project_for_tui_params,
+            )
+            project = find_or_create_code_project_for_tui_params(create_params)
+            if project is not None:
+                create_params["project_id"] = project.project_id
+                create_params["project_dir"] = project.project_dir
+                create_params["work_mode"] = project.work_mode
+            create_params.setdefault("create_token", secrets.token_hex(16))
         env = e2a_from_agent_fields(
             request_id=req_id,
             channel_id="tui",

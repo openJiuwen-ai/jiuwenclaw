@@ -215,7 +215,7 @@ models:
         # 流式：等待首个分片的最大时间（秒）。放宽以兼容 reasoning/思考模型思考期的静默
         stream_first_chunk_timeout: 300
         # 流式：分片之间的最大空闲等待时间（秒）
-        stream_idle_timeout: 60
+        stream_idle_timeout: 120
         verify_ssl: true
         custom_headers: {}
       model_config_obj:
