@@ -2,15 +2,6 @@
 import pytest
 import httpx
 import respx
-from unittest.mock import MagicMock
-
-# 在导入任何 jiuwenswarm 模块之前，先 mock 掉循环导入链
-import jiuwenswarm.gateway
-jiuwenswarm.gateway.AgentServerClient = MagicMock()
-
-import jiuwenswarm.gateway.channel_manager.web.web_connect
-jiuwenswarm.gateway.channel_manager.web.web_connect.get_auth_handler = MagicMock()
-
 # 然后再导入测试目标
 from jiuwenswarm.extensions.agentos.agentos_router.agentos_authenticator import (
     AgentOSAuthenticator,

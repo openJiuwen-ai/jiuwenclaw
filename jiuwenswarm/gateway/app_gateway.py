@@ -1473,6 +1473,7 @@ async def _run(
     )
     from jiuwenswarm.gateway.channel_manager.tui.tui_channel import TuiChannel, TuiChannelConfig
     from jiuwenswarm.extensions.manager import ExtensionManager
+    from jiuwenswarm.extensions.registry import ExtensionRegistry
     from jiuwenswarm.common.updater import UpdaterService
     from openjiuwen.core.runner import Runner
 
@@ -1737,20 +1738,6 @@ async def _run(
     tui_channel = None
     web_config = WebChannelConfig(enabled=True, host=web_host, port=web_port, path=web_path)
     web_channel = WebChannel(web_config, _DummyBus())
-
-    from jiuwenswarm.extensions.agentos.agentos_router.agentos_authenticator import AgentOSAuthenticator
-
-    auth_config = resolve_env_vars(get_config().get("auth", {}))
-    if isinstance(auth_config, dict) and str(auth_config.get("type", "")).strip().lower() == "agentos":
-        agentos_cfg = auth_config.get("agentos", {})
-        if isinstance(agentos_cfg, dict):
-            auth_service_url = str(agentos_cfg.get("auth_service_url", "")).strip()
-            if auth_service_url:
-                timeout = float(agentos_cfg.get("timeout", 10.0))
-                _agentos_auth = AgentOSAuthenticator(auth_service_url=auth_service_url, timeout=timeout)
-                extension_registry.register_authenticator(_agentos_auth)
-                web_channel._agentos_auth_client = _agentos_auth
-                logger.info("AgentOSAuthenticator 已注册, auth_service_url=%s", auth_service_url)
 
     # 注入 Git diff 监控注册表(设计文档阶段10):
     # 1. 让 ``_mark_git_watcher_dirty`` 能通过 ``channel.git_watcher_registry`` 唤醒轮询

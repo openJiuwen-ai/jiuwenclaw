@@ -22,6 +22,7 @@ from openjiuwen.core.foundation.llm.schema.config import (
     ModelRequestConfig,
 )
 from openjiuwen.auto_harness.schema import load_auto_harness_config
+from sqlalchemy import false
 
 from jiuwenswarm.common.config import (
     get_config,
@@ -188,7 +189,6 @@ def _update_auto_harness_gitcode_access_token(value: str) -> None:
         config["gitcode"] = {}
     config["gitcode"]["access_token"] = value
     _save_auto_harness_config(config)
-
 
 # ── 需要转发到 Agent 的方法集合 ──────────────────────────────
 
@@ -3355,7 +3355,7 @@ def build_cli_route_binding(bind: CliRouteBindParams) -> GatewayRouteBinding:
         ac = bind.agent_client
         if hasattr(ac, "on_auth_connect"):
             return await ac.on_auth_connect(ws, "tui")
-        return None
+        return False
 
     return GatewayRouteBinding(
         path=bind.path,
