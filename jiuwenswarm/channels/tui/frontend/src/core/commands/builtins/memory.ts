@@ -6,9 +6,9 @@ import { CommandKind, type SlashCommand } from "../types.js";
 import { getEditorInfo } from "../../utils/editor.js";
 import { isTeamMode } from "../../modes.js";
 import {
-  findGitRoot,
   formatMemoryPathForDisplay,
   getDisplayPath,
+  findGitRoot,
   isAncestorOrSelfDir,
 } from "./memory-path-utils.js";
 
