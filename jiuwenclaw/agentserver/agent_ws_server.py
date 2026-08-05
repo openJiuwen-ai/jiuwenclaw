@@ -287,10 +287,24 @@ class AgentWebSocketServer:
             from jiuwenclaw.config import (
                 DEFAULT_SANDBOX_POLICY_FILE,
                 get_sandbox_endpoint,
+                get_sandbox_runtime,
                 get_sandbox_startup_mode_explicit,
                 resolve_sandbox_policy_path,
                 update_sandbox_endpoint,
             )
+
+            # sandbox.enabled 门控: false 时整个跳过 (不拉起 box-server, 不触发 install/
+            # 创建 jbx-sandbox 用户). 优先级高于 startup_mode — enabled=false 即使用户配了
+            # startup_mode=internal 也不拉起. 默认 false: shipped 模板 enabled=false, 用户
+            # 不显式写 sandbox.enabled: true 就不拉起 (opt-in, 避免开箱即 install + 建进程).
+            sandbox_runtime = get_sandbox_runtime()
+            if not sandbox_runtime.get("enabled"):
+                logger.info(
+                    "[AgentWebSocketServer] sandbox.enabled=false, "
+                    "skipping jiuwenbox auto-start (不拉起 box-server, 不创建沙箱用户). "
+                    "如需沙箱, 在 config.yaml 设 sandbox.enabled: true + startup_mode: internal"
+                )
+                return
 
             explicit_mode = get_sandbox_startup_mode_explicit()
             if explicit_mode is None:

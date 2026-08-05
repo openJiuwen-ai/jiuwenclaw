@@ -463,7 +463,7 @@ def _get_fwpuclnt() -> ctypes.WinDLL:
         #   entries 是 FwpmFilter0** (BFE 分配, FwpmFreeMemory0 释放).
         _fwpuclnt.FwpmFilterEnum0.argtypes = [
             wintypes.HANDLE, wintypes.HANDLE,
-            ctypes.POINTER(wintypes.UINT32),
+            ctypes.POINTER(wintypes.UINT),
             ctypes.POINTER(ctypes.POINTER(FwpmFilter0)),
         ]
         _fwpuclnt.FwpmFilterEnum0.restype = wintypes.DWORD
@@ -843,7 +843,7 @@ def _enumerate_sublayer_filters(engine) -> "list[str]":
     keys: list[str] = []
     try:
         while True:
-            num_entries = wintypes.UINT32(0)
+            num_entries = wintypes.UINT(0)
             entries_ptr = ctypes.POINTER(FwpmFilter0)()
             hr = fwpu.FwpmFilterEnum0(
                 engine, enum_handle, ctypes.byref(num_entries),
