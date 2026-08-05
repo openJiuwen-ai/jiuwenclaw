@@ -1684,7 +1684,6 @@ export class AppScreen implements Component, Focusable {
   private statusViewState: StatusViewState | null = null;
   private mvController: MemoryViewController | null = null;
   private swarmWorkflowsViewState: SwarmWorkflowsViewState | null = null;
-  private collapsedWorkflowPhaseKeys = new Set<string>();
   private shownBudgetExhaustedWorkflowKeys = new Set<string>();
   private workflowUiSessionId = "";
   /** Currently-active swarmflow human reply input (null = not replying). */
@@ -3667,16 +3666,7 @@ export class AppScreen implements Component, Focusable {
     const snapshot = this.state.getSnapshot();
     if (snapshot.sessionId !== this.workflowUiSessionId) {
       this.workflowUiSessionId = snapshot.sessionId;
-      this.collapsedWorkflowPhaseKeys.clear();
       this.shownBudgetExhaustedWorkflowKeys.clear();
-    }
-    const currentPhaseKeys = new Set(
-      snapshot.workflowRuns.flatMap((workflow) =>
-        (workflow.phases ?? []).map((phase) => this.workflowPhaseUiKey(workflow.id, phase.id)),
-      ),
-    );
-    for (const key of this.collapsedWorkflowPhaseKeys) {
-      if (!currentPhaseKeys.has(key)) this.collapsedWorkflowPhaseKeys.delete(key);
     }
     const currentWorkflowKeys = new Set(
       snapshot.workflowRuns.map((workflow) => `${snapshot.sessionId}:${workflow.id}`),
@@ -5578,46 +5568,13 @@ export class AppScreen implements Component, Focusable {
     ];
   }
 
-  private workflowPhaseUiKey(workflowId: string, phaseId: string): string {
-    return `${workflowId}:${phaseId}`;
-  }
-
-  private swarmActionKeyLabel(action: "swarm:budget" | "swarm:toggleChildPhase"): string {
+  private swarmActionKeyLabel(action: "swarm:budget"): string {
     const key = getContextBindings("SwarmWorkflows").find(
       (binding) => binding.action === action,
     )?.key;
-    if (!key) return action === "swarm:budget" ? "B" : "Space";
+    if (!key) return "B";
     if (key === "shift+b") return "B";
-    if (key === "space") return "Space";
     return key;
-  }
-
-  private isWorkflowPhaseCollapsed(workflowId: string, phaseId: string): boolean {
-    return this.collapsedWorkflowPhaseKeys.has(this.workflowPhaseUiKey(workflowId, phaseId));
-  }
-
-  private toggleSelectedChildPhase(
-    state: Extract<SwarmWorkflowsViewState, { phase: "workflow" }>,
-  ): void {
-    const workflow = this.state
-      .getSnapshot()
-      .workflowRuns.find((item) => item.id === state.workflowId);
-    const phase = workflow?.phases.find((item) => item.id === state.selectedPhaseId);
-    if (!phase || phase.phase_type !== "child") return;
-
-    const key = this.workflowPhaseUiKey(state.workflowId, phase.id);
-    if (this.collapsedWorkflowPhaseKeys.has(key)) {
-      this.collapsedWorkflowPhaseKeys.delete(key);
-    } else {
-      this.collapsedWorkflowPhaseKeys.add(key);
-    }
-    this.swarmWorkflowsViewState = this.buildSwarmWorkflowDetailState(
-      state.workflowId,
-      phase.id,
-      "phases",
-      state.agentList.getSelectedItem()?.value,
-    );
-    this.tui.requestRender();
   }
 
   private workflowIdForBudgetView(): string | null {
@@ -6167,10 +6124,6 @@ export class AppScreen implements Component, Focusable {
     const action = resolveAction("SwarmWorkflows", data);
     if (action === "swarm:budget") {
       void this.openSwarmWorkflowBudget();
-      return;
-    }
-    if (state.phase === "workflow" && action === "swarm:toggleChildPhase") {
-      this.toggleSelectedChildPhase(state);
       return;
     }
     if (action === "swarm:back") {

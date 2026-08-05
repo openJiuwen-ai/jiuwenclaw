@@ -48,6 +48,13 @@ def _agent_completed(phase: str, label: str, agent_id: str, tokens: int | None =
     return WorkflowProgress(kind="agent_completed", run_id=_DEFAULT_RUN_ID, phase=phase, label=label, agent_id=agent_id, outcome="ok", tokens=tokens)
 
 
+def _agent_failed(phase: str, label: str, agent_id: str, message: str = "boom") -> WorkflowProgress:
+    return WorkflowProgress(
+        kind="agent_failed", run_id=_DEFAULT_RUN_ID, phase=phase, label=label,
+        agent_id=agent_id, text=message,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Scenario 1: Concurrent same-name sub-workflows
 # ---------------------------------------------------------------------------
@@ -644,3 +651,44 @@ def test_child_seal_delta_includes_child_and_parent():
     assert child_delta["completed_agent_count"] == 1
     assert parent_delta["status"] == "completed"
     assert parent_delta["completed_agent_count"] == 1
+
+
+def test_failed_agent_does_not_bump_phase_or_run_completed_count():
+    """completed_agent_count counts only status=completed, not failed/stopped."""
+    r = WorkflowRunState()
+    r.apply(_make_progress("workflow_started", workflow_name="review"))
+    r.apply(_agent_started("review", "a1", "k1"))
+    r.apply(_agent_started("review", "a2", "k2"))
+    r.apply(_agent_completed("review", "a1", "k1"))
+    r.apply(_agent_failed("review", "a2", "k2"))
+
+    phase = next(p for p in r.phases if p.name == "review")
+    assert phase.agents[0].status == "completed"
+    assert phase.agents[1].status == "failed"
+    assert phase.completed_agent_count == 1
+    assert phase.agent_count == 2
+    assert r.completed_agent_count == 1
+    assert r.agent_count == 2
+
+
+def test_child_phase_seals_when_all_agents_terminal_including_failed():
+    """Child seals on all agents terminal; completed count excludes failed."""
+    child = "\u25b8 intro #0"
+    r = WorkflowRunState()
+    r.apply(_make_progress("workflow_started", workflow_name="launch", phases=[
+        {"title": "Prep", "detail": ""},
+    ]))
+    r.apply(_make_progress(
+        "phase", phase="intro", phase_type="child",
+        nested_phase=child, parent_phase="Prep",
+    ))
+    r.apply(_agent_started(child, "w1", "k1"))
+    r.apply(_agent_started(child, "w2", "k2"))
+    r.apply(_agent_completed(child, "w1", "k1"))
+    r.apply(_agent_failed(child, "w2", "k2"))
+
+    child_phase = next(p for p in r.phases if p.phase_type == "child")
+    assert child_phase.status == "completed"
+    assert child_phase.completed_agent_count == 1
+    assert child_phase.agent_count == 2
+    assert r.completed_agent_count == 1

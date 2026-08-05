@@ -76,7 +76,6 @@ export const KEYBINDING_ACTIONS = [
   "swarm:viewOutcome",
   "swarm:viewError",
   "swarm:budget",
-  "swarm:toggleChildPhase",
   "swarm:refresh",
   // StatusView (tab navigation; search/text entry stays hardcoded)
   "status:close",
@@ -132,7 +131,6 @@ export const KEYBINDING_ACTION_DESCRIPTIONS: Record<KeybindingAction, string> = 
   "swarm:viewOutcome": "查看 agent outcome",
   "swarm:viewError": "查看 agent error",
   "swarm:budget": "查看 Team Budget",
-  "swarm:toggleChildPhase": "展开/折叠 child phase",
   "swarm:refresh": "刷新工作流视图",
   "status:close": "关闭状态/配置视图",
   "status:prevTab": "上一个标签页",

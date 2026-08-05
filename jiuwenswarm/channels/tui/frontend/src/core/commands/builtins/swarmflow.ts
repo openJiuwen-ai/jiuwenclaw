@@ -124,6 +124,11 @@ export function createSwarmflowCommand(): SlashCommand {
         return;
       }
 
+      if (budget !== null && budget <= 0) {
+        ctx.addItem(addError(ctx.sessionId, "Budget must be a positive integer (e.g. /swarmflow on --budget 500000)"));
+        return;
+      }
+
       if (!sub) {
         const modeLabel = ctx.mode ?? "unknown";
         const payload = await ctx
