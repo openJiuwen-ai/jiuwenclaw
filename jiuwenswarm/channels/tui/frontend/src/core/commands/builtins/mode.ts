@@ -2,7 +2,52 @@ import type { AutocompleteItem } from "@mariozechner/pi-tui";
 import type { ClientMode } from "../../modes.js";
 import { isTeamMode } from "../../modes.js";
 import { makeItem } from "../helpers.js";
-import { CommandKind, type SlashCommand } from "../types.js";
+import { CommandKind, type CommandContext, type SlashCommand } from "../types.js";
+
+/** Switch mode while preserving the team-task interruption confirmation. */
+export async function switchMode(
+  ctx: CommandContext,
+  nextMode: ClientMode,
+  options: { announce?: boolean } = {},
+): Promise<boolean> {
+  const currentMode = ctx.mode;
+  if (currentMode !== nextMode && isTeamMode(currentMode) && ctx.hasRunningTeamTasks?.()) {
+    const answers = await ctx.askQuestions(
+      [
+        {
+          header: "模式切换",
+          question: `当前有 team 任务正在运行，切换到 ${nextMode} 模式会中断这些任务。`,
+          options: [
+            { label: "中断任务并切换", description: "停止当前任务，切换到新模式" },
+            { label: "取消切换", description: "继续执行当前任务" },
+          ],
+        },
+      ],
+      "mode_switch_confirm",
+    );
+
+    const selected = answers[0]?.selected_options?.[0];
+    if (selected !== "中断任务并切换") {
+      ctx.addItem(makeItem(ctx.sessionId, "info", "模式切换已取消", "m"));
+      return false;
+    }
+    ctx.sendEventOnly("chat.interrupt", { intent: "cancel", mode: currentMode });
+  }
+
+  // Update locally before the async round-trip so an immediately following
+  // message is dispatched with the new mode. The backend call remains
+  // best-effort because chat.send also carries the active mode.
+  ctx.setMode(nextMode);
+  if (options.announce !== false) {
+    ctx.addItem(makeItem(ctx.sessionId, "info", `Mode set to ${nextMode}`, "m"));
+  }
+  try {
+    await ctx.request("mode.set", { mode: nextMode });
+  } catch {
+    // Some backends still accept mode only on chat.send.
+  }
+  return true;
+}
 
 /** TUI `/mode` 树形展示；分组行 value 与 modeAlias 默认一致，不修改 pi-tui。 */
 export function buildModeAutocompleteItems(): AutocompleteItem[] {
@@ -83,44 +128,7 @@ export function createModeCommand(): SlashCommand {
         return;
       }
 
-      // Check if switching mode with running team tasks
-      const currentMode = ctx.mode;
-      if (currentMode !== nextMode && isTeamMode(currentMode) && ctx.hasRunningTeamTasks?.()) {
-        const answers = await ctx.askQuestions(
-          [
-            {
-              header: "模式切换",
-              question: `当前有 team 任务正在运行，切换到 ${nextMode} 模式会中断这些任务。`,
-              options: [
-                { label: "中断任务并切换", description: "停止当前任务，切换到新模式" },
-                { label: "取消切换", description: "继续执行当前任务" },
-              ],
-            },
-          ],
-          "mode_switch_confirm",
-        );
-
-        const selected = answers[0]?.selected_options?.[0];
-        if (selected !== "中断任务并切换") {
-          ctx.addItem(makeItem(ctx.sessionId, "info", "模式切换已取消", "m"));
-          return;
-        }
-        // User confirmed interrupt, send cancel request
-        ctx.sendEventOnly("chat.interrupt", { intent: "cancel", mode: currentMode });
-      }
-
-      // Optimistically update this.mode BEFORE the async mode.set round-trip.
-      // Otherwise a message sent immediately after /mode (e.g. /debug) reads
-      // the stale mode in sendMessage and is dispatched with the old mode.
-      // mode.set is best-effort: many backends carry the mode per chat.send, so
-      // a failed mode.set is ignored (matching prior behavior — no rollback).
-      ctx.setMode(nextMode);
-      ctx.addItem(makeItem(ctx.sessionId, "info", `Mode set to ${nextMode}`, "m"));
-      try {
-        await ctx.request("mode.set", { mode: nextMode });
-      } catch {
-        // Some backends still accept mode only on chat.send.
-      }
+      await switchMode(ctx, nextMode);
     },
   };
 }

@@ -10,6 +10,8 @@ import {
   type SlashCommand as TuiSlashCommand,
   TUI,
   matchesKey,
+  isKeyRelease,
+  isKeyRepeat,
   decodeKittyPrintable,
   truncateToWidth,
   visibleWidth,
@@ -2633,6 +2635,22 @@ export class AppScreen implements Component, Focusable {
     ) {
       this.transientNotice = null;
       this.interruptTask();
+      this.tui.requestRender();
+      return;
+    }
+
+    if (
+      pendingQuestion &&
+      (pendingQuestion.source === "harmonyos_dev_install_confirm" ||
+        pendingQuestion.source === "harmonyos_dev_update_confirm" ||
+        pendingQuestion.source === "harmonyos_knowledge_mcp_confirm") &&
+      (isKeyRepeat(data) || isKeyRelease(data)) &&
+      matchesKey(data, "enter")
+    ) {
+      // The Enter used to submit /harmonyos-dev-init can still emit Kitty
+      // repeat/release events after the confirmation becomes visible. Ignore
+      // those residual events, but keep the first option selected so a new
+      // Enter press explicitly confirms installation/configuration.
       this.tui.requestRender();
       return;
     }

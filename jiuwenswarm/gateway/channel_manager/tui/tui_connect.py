@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import logging
 import os
@@ -51,6 +52,43 @@ from jiuwenswarm.gateway.routing.agent_request_timeout import (
 )
 
 logger = logging.getLogger(__name__)
+
+_HARMONYOS_DEV_INIT_TASKS_ATTR = "_jiuwenswarm_harmonyos_dev_init_tasks"
+
+
+def _get_harmonyos_dev_init_tasks(
+    ws: Any, *, create: bool
+) -> set[asyncio.Task[Any]] | None:
+    """Return the Dev Init tasks owned by a websocket."""
+    tasks = getattr(ws, _HARMONYOS_DEV_INIT_TASKS_ATTR, None)
+    if isinstance(tasks, set):
+        return tasks
+    if not create:
+        return None
+    tasks = set()
+    try:
+        setattr(ws, _HARMONYOS_DEV_INIT_TASKS_ATTR, tasks)
+    except Exception:
+        logger.debug(
+            "[harmonyos.dev_init] websocket does not support task tracking",
+            exc_info=True,
+        )
+        return None
+    return tasks
+
+
+async def _cancel_harmonyos_dev_init_tasks(ws: Any) -> None:
+    """Cancel and drain Dev Init tasks owned by a websocket."""
+    tracked = _get_harmonyos_dev_init_tasks(ws, create=False)
+    if tracked is None:
+        return
+    tasks = [task for task in tracked if isinstance(task, asyncio.Task)]
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    tracked.clear()
 
 
 class _ModelOpError(Exception):
@@ -795,6 +833,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
     from jiuwenswarm.gateway.routing.third_agent import get_unsupported_third_agent
 
     third_agent = bind.third_agent if bind.third_agent is not None else get_unsupported_third_agent()
+    harmonyos_dev_init_tasks: dict[tuple[int, str], asyncio.Task[Any]] = {}
 
     async def _config_get(ws, req_id, params, session_id):
         payload = {
@@ -2206,6 +2245,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
     async def _tui_disconnect_request(ws, req_id, params, session_id):
+        await _cancel_harmonyos_dev_init_tasks(ws)
         payload = {"accepted": True, "session_id": session_id}
         try:
             await channel.send_response(ws, req_id, ok=True, payload=payload)
@@ -2265,6 +2305,174 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             if "page_idx" in params:
                 payload["page_idx"] = params.get("page_idx")
         await channel.send_response(ws, req_id, ok=True, payload=payload)
+
+    async def _harmonyos_dev_init(ws, req_id, params, session_id):
+        if not isinstance(params, dict):
+            await channel.send_response(
+                ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST"
+            )
+            return
+        raw_operation_id = params.get("operationId")
+        operation_id = str(raw_operation_id or req_id).strip()
+        if (
+            not operation_id
+            or len(operation_id) > 128
+            or not all(char.isalnum() or char in "-_." for char in operation_id)
+        ):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="invalid HarmonyOS Dev Init operationId",
+                code="BAD_REQUEST",
+            )
+            return
+
+        task_key = (id(ws), operation_id)
+        existing = harmonyos_dev_init_tasks.get(task_key)
+        if existing is not None and not existing.done():
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=f"HarmonyOS Dev Init operation is already running: {operation_id}",
+                code="CONFLICT",
+            )
+            return
+
+        run_params = dict(params)
+        run_params.pop("operationId", None)
+        tracked_tasks = _get_harmonyos_dev_init_tasks(ws, create=True)
+        if tracked_tasks is None:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="websocket does not support HarmonyOS Dev Init task tracking",
+                code="INTERNAL_ERROR",
+            )
+            return
+
+        async def _run_harmonyos_dev_init_operation() -> None:
+            try:
+                from jiuwenswarm.gateway.channel_manager.tui.harmonyos_dev import (
+                    run_harmonyos_dev_init,
+                )
+
+                payload = await run_harmonyos_dev_init(run_params)
+                await channel.send_response(ws, req_id, ok=True, payload=payload)
+            except asyncio.CancelledError:
+                logger.info(
+                    "[harmonyos.dev_init] cancelled: operation_id=%s", operation_id
+                )
+                with contextlib.suppress(Exception):
+                    await channel.send_response(
+                        ws,
+                        req_id,
+                        ok=False,
+                        error="HarmonyOS Dev Init operation was cancelled",
+                        code="CANCELLED",
+                    )
+                raise
+            except Exception as exc:
+                logger.warning("[harmonyos.dev_init] failed: %s", exc)
+                with contextlib.suppress(Exception):
+                    await channel.send_response(
+                        ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR"
+                    )
+            finally:
+                current = asyncio.current_task()
+                if harmonyos_dev_init_tasks.get(task_key) is current:
+                    harmonyos_dev_init_tasks.pop(task_key, None)
+
+        task = asyncio.create_task(
+            _run_harmonyos_dev_init_operation(),
+            name=f"harmonyos-dev-init:{operation_id}",
+        )
+        harmonyos_dev_init_tasks[task_key] = task
+
+        def _forget_task(done_task: asyncio.Task[Any]) -> None:
+            if harmonyos_dev_init_tasks.get(task_key) is done_task:
+                harmonyos_dev_init_tasks.pop(task_key, None)
+
+        task.add_done_callback(_forget_task)
+        tracked_tasks.add(task)
+        task.add_done_callback(tracked_tasks.discard)
+
+    async def _harmonyos_dev_init_cancel(ws, req_id, params, session_id):
+        del session_id
+        if not isinstance(params, dict):
+            await channel.send_response(
+                ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST"
+            )
+            return
+        operation_id = str(params.get("operationId") or "").strip()
+        if (
+            not operation_id
+            or len(operation_id) > 128
+            or not all(char.isalnum() or char in "-_." for char in operation_id)
+        ):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="invalid HarmonyOS Dev Init operationId",
+                code="BAD_REQUEST",
+            )
+            return
+
+        task = harmonyos_dev_init_tasks.get((id(ws), operation_id))
+        if task is None or task.done():
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=True,
+                payload={
+                    "operationId": operation_id,
+                    "cancelRequested": False,
+                    "cancelled": bool(task and task.cancelled()),
+                },
+            )
+            return
+
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await channel.send_response(
+            ws,
+            req_id,
+            ok=True,
+            payload={
+                "operationId": operation_id,
+                "cancelRequested": True,
+                "cancelled": task.cancelled(),
+            },
+        )
+
+    async def _harmonyos_project_init(ws, req_id, params, session_id):
+        if not isinstance(params, dict):
+            await channel.send_response(
+                ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST"
+            )
+            return
+        try:
+            from jiuwenswarm.gateway.channel_manager.tui.harmonyos_project import (
+                HarmonyOSProjectError,
+            )
+            from jiuwenswarm.gateway.channel_manager.tui.harmonyos_dev import (
+                run_harmonyos_project_init,
+            )
+
+            payload = await run_harmonyos_project_init(params)
+            await channel.send_response(ws, req_id, ok=True, payload=payload)
+        except HarmonyOSProjectError as exc:
+            await channel.send_response(
+                ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST"
+            )
+        except Exception as exc:
+            logger.warning("[harmonyos.project_init] failed: %s", exc)
+            await channel.send_response(
+                ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR"
+            )
 
     async def _command_model(ws, req_id, params, session_id, user_id=None):
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
@@ -2978,6 +3186,11 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
     channel.register_local_handler(path, "chat.user_answer", _chat_user_answer)
     channel.register_local_handler(path, "chat.swarmflow_reply", _chat_swarmflow_reply)
     channel.register_local_handler(path, "history.get", _history_get)
+    channel.register_local_handler(path, "harmonyos.dev_init", _harmonyos_dev_init)
+    channel.register_local_handler(
+        path, "harmonyos.dev_init_cancel", _harmonyos_dev_init_cancel
+    )
+    channel.register_local_handler(path, "harmonyos.project_init", _harmonyos_project_init)
     channel.register_local_handler(path, "command.model", _command_model)
 
     # ── Hooks RPC handlers ─────────────────────────────────────────────
@@ -3332,6 +3545,7 @@ def build_cli_route_binding(bind: CliRouteBindParams) -> GatewayRouteBinding:
         stale_session_keys: list[tuple[str, str]],
         stale_request_keys: list[tuple[str, str]] | None = None,
     ) -> None:
+        await _cancel_harmonyos_dev_init_tasks(_ws)
         if bool(getattr(_ws, "_jiuwenswarm_tui_user_exit", False)):
             return
         mh = bind.message_handler
