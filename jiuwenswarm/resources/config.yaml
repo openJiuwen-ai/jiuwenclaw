@@ -629,6 +629,8 @@ gateway:
       user_template: "yr:instance:{instance}"
       connect_timeout_s: 30
       client_keys_dir: "/root/.ssh"
+    auth_service_url: ${AGENTOS_AUTH_SERVICE_URL:-http://iam-agentos:8080}
+    timeout: ${AGENTOS_AUTH_TIMEOUT:-10}
 
 heartbeat:
   # 心跳间隔（秒），默认 3600
@@ -1047,15 +1049,6 @@ extensions:
   # 扩展包搜索目录（字符串），用 ';' 分割多个目录：
   # EXTENSION_DIRS="E:/a;D:/b"
   extension_dirs: ${EXTENSION_DIRS:-jiuwenswarm/extensions}
-
-# Gateway 认证：默认 passthrough。仅当 agentos_router 生效且 type=agentos 时，
-# 由 agentos_router 注册 AgentOSAuthenticator（依赖第三方 IAM）。
-auth:
-  type: passthrough # passthrough | agentos
-  agentos:
-    auth_service_url: ${AGENTOS_AUTH_SERVICE_URL:-http://iam-agentos:8080}
-    timeout: ${AGENTOS_AUTH_TIMEOUT:-10}
-
 
 # ============================================================
 # Hooks 配置

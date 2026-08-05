@@ -130,15 +130,8 @@ def load_router_config(config: dict[str, Any]) -> RouterConfig:
             "are required in agentos_router mode"
         )
 
-    auth = config.get("auth") if isinstance(config, dict) else {}
-    if not isinstance(auth, dict):
-        auth = {}
-    agentos_auth = auth.get("agentos")
-    if not isinstance(agentos_auth, dict):
-        agentos_auth = {}
-
-    auth_service_url = str(agentos_auth.get("auth_service_url") or "").strip()
-    timeout = float(agentos_auth.get("timeout") or 10)
+    auth_service_url = str(agentos.get("auth_service_url") or "").strip()
+    timeout = float(agentos.get("timeout") or 10)
 
     # Env wins over yaml (incl. explicit 0 to disable), same as vibeskill.
     idle_timeout_env = _read_float_env(SANDBOX_IDLE_TIMEOUT_ENV)
