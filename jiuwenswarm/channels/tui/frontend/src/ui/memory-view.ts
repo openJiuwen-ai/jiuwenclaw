@@ -82,6 +82,8 @@ export class MemoryViewController {
   private statusMessage: string | null = null;
   /** 上一次 open 的目录绝对路径；Ctrl+O 切换时据此重算 statusMessage 的显示格式 */
   private lastOpenedPath: string | null = null;
+  /** 最近一次在 edit 页签中确认选择的文件；重新打开面板时恢复光标位置。 */
+  private lastSelectedEditFilePath: string | null = null;
   /**
    * 外部编辑器打开期间置为 true:此时 MemoryView 进入“不可操作态”
    * (吞掉所有按键,渲染一条 Editing… 提示行)。
@@ -397,7 +399,20 @@ export class MemoryViewController {
       minPrimaryColumnWidth: 20,
       maxPrimaryColumnWidth: 50,
     });
+    const lastSelectedEditFilePath = this.lastSelectedEditFilePath;
+    if (tab === "edit" && lastSelectedEditFilePath) {
+      const selectedIndex = items.findIndex(
+        (item) =>
+          item.value !== "__display__" && memoryPathKey(item.value) === memoryPathKey(lastSelectedEditFilePath),
+      );
+      if (selectedIndex >= 0) {
+        list.setSelectedIndex(selectedIndex);
+      }
+    }
     list.onSelect = (item: SelectItem) => {
+      if (tab === "edit" && item.value && item.value !== "__display__") {
+        this.lastSelectedEditFilePath = item.value;
+      }
       this.handleSelect(tab, item, mode, projectDir);
     };
     list.onCancel = () => {
