@@ -657,9 +657,22 @@ export function buildTurnWorkMeta(items: RenderItem[], isProcessing: boolean): M
       map.set(item.turnId, next);
     }
   }
+  // 收集含主动推荐消息的 turnId：proactive 消息是系统插入的推荐（带
+  // isProactiveRecommendation 标记），不该和用户那轮混在一起触发 turn 折叠——
+  // 否则 proactive 触发的主 agent 这轮（带工具/思考）会让用户上一轮回复被收起。
+  // 把含 proactive 的 turn 的 hasWork 置 false，让它不 foldable，上一轮回复保持展开。
+  const proactiveTurnIds = new Set<number>();
+  for (const item of items) {
+    if (item.type === 'message' && item.message?.isProactiveRecommendation) {
+      proactiveTurnIds.add(item.turnId);
+    }
+  }
   for (const meta of map.values()) {
     if (meta.thinkingCount > 0 || meta.toolCount > 0) {
       meta.hasWork = true;
+    }
+    if (proactiveTurnIds.has(meta.turnId)) {
+      meta.hasWork = false;
     }
     const isLast = Number.isFinite(lastTurnId) && meta.turnId === lastTurnId;
     meta.completed = !(isProcessing && isLast);
