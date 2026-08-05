@@ -138,7 +138,7 @@ class AgentOSRouterClient(AgentServerClient):
         if tui_channel:
             tui_channel.on_connect(self.on_connect)
 
-    async def on_connect(self, ws: Any) -> AuthResult | None: #todo
+    async def on_connect(self, ws: Any) -> AuthResult | None:
         if self._auth_client is None:
             return AuthResult(
                 success=False,

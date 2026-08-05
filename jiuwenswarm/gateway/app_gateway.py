@@ -1041,21 +1041,24 @@ class GatewayServer(WSBaseChannel):
             matched_path,
         )
 
-        # 触发连接钩子（如发送 connection.ack）
-        for hook in self._connect_hooks:
-            try:
-                result = hook(ws)
-                if inspect.isawaitable(result):
-                    await result
-            except Exception as e:  # pragma: no cover
-                logger.warning(
-                    "WebChannel on_connect hook error: %s",
-                    format_ws_diagnostics(
-                        {"remote": remote, "path": request_path},
-                        describe_ws_peer(ws),
-                        describe_ws_exception(e),
-                    ),
-                )
+        # 触发外部 ws_channel 的连接钩子（如 TuiChannel 的认证钩子）
+        ws_channel = getattr(route, "ws_channel", None)
+        if ws_channel is not None:
+            for hook in getattr(ws_channel, "_connect_hooks", []):
+                try:
+                    result = hook(ws)
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception as e:
+                    logger.warning(
+                        "%s TUI on_connect hook error: %s",
+                        type(ws_channel).__name__,
+                        format_ws_diagnostics(
+                            {"remote": remote, "path": request_path},
+                            describe_ws_peer(ws),
+                            describe_ws_exception(e),
+                        )
+                    )
 
         # connection.ack
         try:
