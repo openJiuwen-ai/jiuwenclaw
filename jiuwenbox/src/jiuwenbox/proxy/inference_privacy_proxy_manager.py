@@ -76,6 +76,13 @@ def _resolve_basic_credentials(basic_auth) -> tuple[str, str, str]:
                 f"basic_auth.password_file is not readable: {password_file}"
             ) from exc
         password = _strip_trailing_newline(content)
+        if not password:
+            # An empty or newline-only file reduces to "" which has no CR/LF,
+            # NUL or control chars and would otherwise pass the injection
+            # checks below. Reject it: otherwise the route reports
+            # password_configured=True while injecting ``Basic base64(user:)``
+            # (empty password) and the upstream returns 401.
+            raise ValueError("basic_auth.password_file is empty")
         # Non-blocking permission warning: do not reject 0640/0644 (K8s/Docker
         # Secret defaults); only flag group/other access as a hardening nudge.
         try:

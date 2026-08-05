@@ -34,13 +34,19 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
+import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 import httpx
+
+# E2E progress goes to stdout as clean lines (consumed by humans/CI); using the
+# logging module satisfies G.LOG.02 without changing the observable output.
+logging.basicConfig(stream=sys.stdout, level=logging.INFO, format="%(message)s")
 
 API = os.environ.get("E2E_API", "http://127.0.0.1:18341")
 PROXY_HOST = os.environ.get("E2E_PROXY_HOST", "127.0.0.1")
@@ -72,18 +78,24 @@ REPORT: list[str] = []
 
 
 def log(msg: str) -> None:
-    print(msg, flush=True)
+    logging.info(msg)
     REPORT.append(msg)
+
+
+class E2EFailure(Exception):
+    """Raised by fail() to abort the run; caught in main() to set the exit code."""
 
 
 def fail(msg: str) -> None:
     log(f"FAIL: {msg}")
-    sys.exit(1)
+    raise E2EFailure(msg)
 
 
 def resolve_password() -> str:
-    """Return the real password. Real mode reads it from the 0600 file; standin
-    mode uses the test fixture (and writes that file itself)."""
+    """
+    Return the real password. Real mode reads it from the 0600 file; standin
+    mode uses the test fixture (and writes that file itself).
+    """
     if UPSTREAM_MODE == "real":
         f = os.environ.get("E2E_PASSWORD_FILE", PW_FILE)
         try:
@@ -98,11 +110,13 @@ def ensure_dirs() -> None:
 
 
 def write_password_files(password: str) -> None:
-    """Write the 0600 secret files used by the proxy routes.
+    """
+    Write the 0600 secret files used by the proxy routes.
 
     In real mode the correct-password file already exists (created by the
     Neo4j setup); we only (re)write the bad file. In standin mode we write both
-    (the stand-in uses the same fixture password)."""
+    (the stand-in uses the same fixture password).
+    """
     if UPSTREAM_MODE != "real":
         p = Path(PW_FILE)
         p.write_text(password + "\n")
@@ -126,6 +140,7 @@ def start_upstream(password: str) -> subprocess.Popen | None:
         [sys.executable, str(HERE / "upstream_basic.py")],
         env=env, stdout=logf, stderr=logf, stdin=subprocess.DEVNULL,
     )
+    logf.close()  # Popen dup'd the fd into the child; parent no longer needs it
     time.sleep(1.0)
     if proc.poll() is not None:
         fail("stand-in upstream exited early")
@@ -176,8 +191,10 @@ def sandbox_exec(client: httpx.Client, sandbox_id: str, script: str) -> tuple[in
 
 
 def curl_in_sandbox(path: str, extra_headers: str = "") -> str:
-    """Credential-free curl from sandbox through the proxy. --noproxy bypasses
-    the 205 corporate http_proxy env so the host proxy is reached directly."""
+    """
+    Credential-free curl from sandbox through the proxy. --noproxy bypasses
+    the 205 corporate http_proxy env so the host proxy is reached directly.
+    """
     hdrs = f"-H 'Content-Type: application/json' {extra_headers}".strip()
     return (
         f"curl -s --noproxy '*' --max-time 10 -X POST "
@@ -186,7 +203,17 @@ def curl_in_sandbox(path: str, extra_headers: str = "") -> str:
     )
 
 
-def main() -> None:
+def main() -> int:
+    """Run the E2E suite; return 0 on PASS, 1 on any FAIL/abort."""
+    try:
+        _run_e2e()
+    except E2EFailure:
+        # fail() already logged the FAIL line via log().
+        return 1
+    return 0
+
+
+def _run_e2e() -> None:
     ensure_dirs()
     password = resolve_password()
     write_password_files(password)
@@ -265,7 +292,8 @@ def main() -> None:
         audit_r = api(client, "GET", f"/api/v1/sandboxes/{sandbox_id}/logs")
         check("sandbox audit", audit_r.text)
 
-        ps = subprocess.run(["ps", "-eo", "args"], capture_output=True, text=True).stdout
+        ps_bin = shutil.which("ps") or "/usr/bin/ps"
+        ps = subprocess.run([ps_bin, "-eo", "args"], capture_output=True, text=True).stdout
         check("process argv (ps)", ps)
 
         log(f"[redact] full Basic base64 that must NOT leak: {full_basic}")
@@ -312,4 +340,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

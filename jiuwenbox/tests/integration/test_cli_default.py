@@ -856,7 +856,8 @@ class TestCliProxyBasicAuth:
         assert "password" not in detail["route"]["basic_auth"]
         assert secret not in proc.stdout.decode("utf-8")
 
-    def test_cli_proxy_basic_password_sources_mutually_exclusive(self, server_url):
+    @staticmethod
+    def test_cli_proxy_basic_password_sources_mutually_exclusive(server_url):
         secret = "leakcheck-value-XYZ"
         proc = _run_cli(
             ["proxy", "create", "--prefix", "/mux1", "--target", "http://up:7474",
@@ -868,7 +869,8 @@ class TestCliProxyBasicAuth:
         assert "mutually exclusive" in err
         assert secret not in err  # rejected password value is not echoed
 
-    def test_cli_proxy_basic_password_and_stdin_mutually_exclusive(self, server_url):
+    @staticmethod
+    def test_cli_proxy_basic_password_and_stdin_mutually_exclusive(server_url):
         proc = _run_cli(
             ["proxy", "create", "--prefix", "/mux2", "--target", "http://up:7474",
              "--username", "u", "--password", "p", "--password-stdin"],
@@ -878,7 +880,8 @@ class TestCliProxyBasicAuth:
         assert proc.returncode != 0
         assert "mutually exclusive" in proc.stderr.decode("utf-8")
 
-    def test_cli_proxy_basic_username_required(self, server_url):
+    @staticmethod
+    def test_cli_proxy_basic_username_required(server_url):
         proc = _run_cli(
             ["proxy", "create", "--prefix", "/nouser", "--target", "http://up:7474",
              "--password", "p"],
@@ -887,7 +890,8 @@ class TestCliProxyBasicAuth:
         assert proc.returncode != 0
         assert "username" in proc.stderr.decode("utf-8").lower()
 
-    def test_cli_proxy_basic_password_source_required(self, server_url):
+    @staticmethod
+    def test_cli_proxy_basic_password_source_required(server_url):
         proc = _run_cli(
             ["proxy", "create", "--prefix", "/nosrc", "--target", "http://up:7474",
              "--username", "u"],
@@ -896,7 +900,8 @@ class TestCliProxyBasicAuth:
         assert proc.returncode != 0
         assert "one of --password, --password-file or --password-stdin" in proc.stderr.decode("utf-8")
 
-    def test_cli_proxy_basic_api_key_mutex(self, server_url):
+    @staticmethod
+    def test_cli_proxy_basic_api_key_mutex(server_url):
         proc = _run_cli(
             ["proxy", "create", "--prefix", "/keymux", "--target", "http://up:7474",
              "--api-key", "sk", "--username", "u", "--password", "p"],
@@ -932,7 +937,8 @@ class TestCliProxyBasicAuth:
         assert "password" not in detail["route"]["basic_auth"]
         assert secret not in proc.stdout.decode("utf-8")
 
-    def test_cli_proxy_help_documents_basic_options(self):
+    @staticmethod
+    def test_cli_proxy_help_documents_basic_options():
         """Help lists Basic options and the --password dev/test warning."""
         proc = _run_cli(["proxy", "create", "--help"], base_url="http://127.0.0.1:8321")
         assert proc.returncode == 0, proc.stderr

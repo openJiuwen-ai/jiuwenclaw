@@ -1927,50 +1927,36 @@ class TestModelValidation:
 
     @staticmethod
     def test_listen_port_out_of_range_rejected():
-        from jiuwenbox.models.policy import InferencePrivacyProxyPolicy
-        
         with pytest.raises(ValueError, match="listen_port must be between"):
             InferencePrivacyProxyPolicy(listen_port=70000, listen_host="0.0.0.0")
 
     @staticmethod
     def test_listen_port_negative_rejected():
-        from jiuwenbox.models.policy import InferencePrivacyProxyPolicy
-        
         with pytest.raises(ValueError, match="listen_port must be between"):
             InferencePrivacyProxyPolicy(listen_port=-1, listen_host="0.0.0.0")
 
     @staticmethod
     def test_listen_port_valid_accepted():
-        from jiuwenbox.models.policy import InferencePrivacyProxyPolicy
-        
         policy = InferencePrivacyProxyPolicy(listen_port=8080, listen_host="127.0.0.1")
         assert policy.listen_port == 8080
 
     @staticmethod
     def test_path_prefix_empty_rejected():
-        from jiuwenbox.models.policy import ProxyRouteEntry
-        
         with pytest.raises(ValueError, match="path_prefix cannot be empty"):
             ProxyRouteEntry(path_prefix="", target_endpoint="https://api.openai.com")
 
     @staticmethod
     def test_path_prefix_with_crlf_rejected():
-        from jiuwenbox.models.policy import ProxyRouteEntry
-        
         with pytest.raises(ValueError, match="invalid characters"):
             ProxyRouteEntry(path_prefix="/test\r\nbad", target_endpoint="https://api.openai.com")
 
     @staticmethod
     def test_path_prefix_with_control_chars_rejected():
-        from jiuwenbox.models.policy import ProxyRouteEntry
-        
         with pytest.raises(ValueError, match="invalid characters"):
             ProxyRouteEntry(path_prefix="/test\x01bad", target_endpoint="https://api.openai.com")
 
     @staticmethod
     def test_api_key_with_crlf_rejected():
-        from jiuwenbox.models.policy import ProxyRouteEntry
-        
         with pytest.raises(ValueError, match="invalid characters"):
             ProxyRouteEntry(
                 path_prefix="/test",
@@ -1980,8 +1966,6 @@ class TestModelValidation:
 
     @staticmethod
     def test_api_key_with_control_chars_rejected():
-        from jiuwenbox.models.policy import ProxyRouteEntry
-        
         with pytest.raises(ValueError, match="invalid characters"):
             ProxyRouteEntry(
                 path_prefix="/test",
@@ -1991,52 +1975,38 @@ class TestModelValidation:
 
     @staticmethod
     def test_target_endpoint_invalid_scheme_rejected():
-        from jiuwenbox.models.policy import ProxyRouteEntry
-        
         with pytest.raises(ValueError, match="http or https"):
             ProxyRouteEntry(path_prefix="/test", target_endpoint="ftp://example.com")
 
     @staticmethod
     def test_target_endpoint_empty_rejected():
-        from jiuwenbox.models.policy import ProxyRouteEntry
-        
         with pytest.raises(ValueError, match="target_endpoint cannot be empty"):
             ProxyRouteEntry(path_prefix="/test", target_endpoint="")
 
     @staticmethod
     def test_target_endpoint_with_crlf_rejected():
-        from jiuwenbox.models.policy import ProxyRouteEntry
-        
         with pytest.raises(ValueError, match="invalid characters"):
             ProxyRouteEntry(path_prefix="/test", target_endpoint="https://api.openai.com\r\nbad")
 
     @staticmethod
     def test_listen_host_invalid_ip_rejected():
-        from jiuwenbox.models.policy import InferencePrivacyProxyPolicy
-        
         with pytest.raises(ValueError, match="valid IP address"):
             InferencePrivacyProxyPolicy(listen_port=8080, listen_host="invalid-host")
 
     @staticmethod
     def test_listen_host_ipv6_accepted():
-        from jiuwenbox.models.policy import InferencePrivacyProxyPolicy
-        
         policy = InferencePrivacyProxyPolicy(listen_port=8080, listen_host="::1")
         assert policy.listen_host == "::1"
 
     @staticmethod
     def test_path_prefix_root_rejected():
         """Root path '/' should be rejected to prevent catch-all blocking other routes."""
-        from jiuwenbox.models.policy import ProxyRouteEntry
-        
         with pytest.raises(ValueError, match="root path"):
             ProxyRouteEntry(path_prefix="/", target_endpoint="http://example.com")
 
     @staticmethod
     def test_path_prefix_multi_level_rejected():
         """Path prefix with internal slashes should be rejected (single-level only)."""
-        from jiuwenbox.models.policy import ProxyRouteEntry
-        
         invalid_prefixes = [
             "/api/v1",
             "/openai/chat",
@@ -2051,8 +2021,6 @@ class TestModelValidation:
     @staticmethod
     def test_path_prefix_single_level_accepted():
         """Single-level path prefix should be accepted."""
-        from jiuwenbox.models.policy import ProxyRouteEntry
-        
         valid_prefixes = [
             "/api",
             "/api-v2",
@@ -2536,7 +2504,6 @@ class TestBasicAuthResolution:
 
     @staticmethod
     def _entry(**kw):
-        from jiuwenbox.models.policy import ProxyRouteEntry
         from jiuwenbox.proxy.inference_privacy_proxy_manager import build_proxy_route
 
         base = {"path_prefix": "/neo4j", "target_endpoint": "http://upstream:7474"}
@@ -2606,6 +2573,25 @@ class TestBasicAuthResolution:
         route = build(entry)
         assert route.basic_password == "p w:rd"
 
+    def test_password_file_empty_rejected(self, tmp_path):
+        """An empty or newline-only password_file must be rejected.
+
+        ``_strip_trailing_newline`` reduces both ``""`` and ``"\\n"`` to ``""``,
+        which passes the CR/LF/NUL and control-char checks (an empty string
+        contains none); without this guard the route reports
+        ``password_configured: true`` while injecting ``Basic base64(user:)``
+        (empty password), so the upstream 401s and the route looks configured
+        but is unusable.
+        """
+        for content in ("", "\n"):
+            f = tmp_path / ("empty" if not content else "newline")
+            f.write_text(content)
+            build, entry = self._entry(
+                basic_auth={"username": "u", "password_file": str(f)}
+            )
+            with pytest.raises(ValueError, match="password_file is empty"):
+                build(entry)
+
     def test_valid_inline_and_file_resolve(self, tmp_path):
         f = tmp_path / "secret"
         f.write_text("filepw\n")
@@ -2629,8 +2615,6 @@ class TestBasicAuthYamlLoad:
 
     @pytest.mark.asyncio
     async def test_load_from_policy_inline_basic(self, manager, proxy_listen_port):
-        from jiuwenbox.models.policy import InferencePrivacyProxyPolicy, ProxyBasicAuth
-
         policy = InferencePrivacyProxyPolicy(
             listen_port=proxy_listen_port,
             listen_host="127.0.0.1",
@@ -2656,8 +2640,6 @@ class TestBasicAuthYamlLoad:
 
     @pytest.mark.asyncio
     async def test_load_from_policy_password_file(self, manager, proxy_listen_port, tmp_path):
-        from jiuwenbox.models.policy import InferencePrivacyProxyPolicy, ProxyBasicAuth
-
         f = tmp_path / "neo4j_pw"
         f.write_text("file-pw\n")
         policy = InferencePrivacyProxyPolicy(
@@ -2685,8 +2667,6 @@ class TestBasicAuthYamlLoad:
 
     @pytest.mark.asyncio
     async def test_load_from_policy_bad_password_file_does_not_crash(self, manager, proxy_listen_port, tmp_path):
-        from jiuwenbox.models.policy import InferencePrivacyProxyPolicy, ProxyBasicAuth
-
         policy = InferencePrivacyProxyPolicy(
             listen_port=proxy_listen_port,
             listen_host="127.0.0.1",

@@ -27,10 +27,15 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import re
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# The parent E2E driver redirects this process's stderr to upstream.log; using
+# the logging module satisfies G.LOG.02 without changing where output lands.
+logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(message)s")
 
 USERNAME = os.environ.get("E2E_UPSTREAM_USERNAME", "neo4j")
 PASSWORD = os.environ.get("E2E_UPSTREAM_PASSWORD", "")
@@ -90,7 +95,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             out = {"results": [{"columns": [], "data": []}],
                    "notifications": [], "errors": []}
-        self._send(200, json.dumps(out, separators=(",",":")).encode())
+        self._send(200, json.dumps(out, separators=(",", ":")).encode())
 
     def do_GET(self) -> None:  # noqa: N802
         if not self._check_auth():
@@ -104,13 +109,13 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, b'{"neo4j_version":"e2e-standin","bolt_direct":"bolt://disabled"}')
 
     def log_message(self, fmt: str, *args) -> None:  # noqa: A003
-        sys.stderr.write("[upstream] %s - %s\n" % (self.address_string(), fmt % args))
+        logging.info("[upstream] %s - %s", self.address_string(), fmt % args)
 
 
 if __name__ == "__main__":
     if not PASSWORD:
-        print("E2E_UPSTREAM_PASSWORD env var required", file=sys.stderr)
+        logging.error("E2E_UPSTREAM_PASSWORD env var required")
         sys.exit(2)
     srv = ThreadingHTTPServer(LISTEN, Handler)
-    print(f"[upstream] listening on {LISTEN[0]}:{LISTEN[1]} (Basic user={USERNAME})", file=sys.stderr)
+    logging.info("[upstream] listening on %s:%s (Basic user=%s)", LISTEN[0], LISTEN[1], USERNAME)
     srv.serve_forever()
