@@ -1,17 +1,22 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Routing tokens stay outside the rendered envelope so @member still routes."""
+"""Only team-wide input gets the user-message envelope.
+
+Member-addressed messages already travel inside the team's own
+``<team-inbound from=... type=...>`` envelope, so they must reach the member
+verbatim — nesting the user-input envelope inside that one puts two
+contradicting headers on the same message.
+"""
 
 from __future__ import annotations
 
 import json
 
 import pytest
-from openjiuwen.agent_teams.interaction.router import parse_interact_str
 
 from jiuwenswarm.server.runtime.agent_adapter.team_helpers import (
     _deliverable,
-    _split_team_routing_prefix,
+    _is_member_addressed,
 )
 from jiuwenswarm.server.runtime.agent_adapter.user_turn import UserTurn
 
@@ -30,69 +35,57 @@ def _envelope(rendered: str) -> dict:
 
 
 @pytest.mark.parametrize(
-    ("text", "prefix", "body"),
+    "text",
     [
-        ("@reviewer 看一下", "@reviewer ", "看一下"),
-        ("$human-reporter @coder 改一下", "$human-reporter @coder ", "改一下"),
-        ("# 大家注意", "# ", "大家注意"),
-        ("普通消息", "", "普通消息"),
+        "$human-member-1 @member-1 hello",
+        "@member-1 看一下",
+        "@all 停一下",
+        "$human-reporter 我来说两句",
     ],
 )
-def test_split_routing_prefix(text: str, prefix: str, body: str):
-    assert _split_team_routing_prefix(text) == (prefix, body)
+def test_member_addressed_messages_are_delivered_verbatim(text: str):
+    assert _is_member_addressed(text) is True
+    assert _deliverable(_turn(), text) == text
 
 
-def test_mention_still_routes_to_the_member():
-    """Regression: folding @member into the envelope made every message god-view.
+@pytest.mark.parametrize(
+    "text",
+    [
+        "hello 团队",
+        "# 大家注意",
+        # A bare @name without the trailing space is god-view per openjiuwen's
+        # own grammar, so it stays team-wide input here too.
+        "@reviewer",
+    ],
+)
+def test_team_wide_input_gets_the_envelope(text: str):
+    assert _is_member_addressed(text) is False
 
-    The leader then had to read the text and re-dispatch by hand instead of the
-    runtime delivering straight to the named member.
-    """
-    delivered = _deliverable(_turn(), "@reviewer 看一下这个文档")
+    envelope = _envelope(_deliverable(_turn(), text))
 
-    payloads = parse_interact_str(delivered)
-
-    assert len(payloads) == 1
-    assert type(payloads[0]).__name__ == "OperatorMessage"
-    assert payloads[0].target == "reviewer"
-
-
-def test_human_agent_prefix_keeps_sender_and_target():
-    delivered = _deliverable(_turn(), "$human-reporter @coder 改一下")
-
-    payload = parse_interact_str(delivered)[0]
-
-    assert type(payload).__name__ == "HumanAgentMessage"
-    assert payload.sender == "human-reporter"
-    assert payload.target == "coder"
-
-
-def test_broadcast_prefix_is_preserved():
-    delivered = _deliverable(_turn(), "@all 停一下")
-
-    payload = parse_interact_str(delivered)[0]
-
-    assert type(payload).__name__ == "OperatorMessage"
-    assert payload.target is None
-
-
-def test_routed_body_is_the_full_envelope():
-    delivered = _deliverable(_turn(), "@reviewer 看一下这个文档")
-
-    envelope = _envelope(parse_interact_str(delivered)[0].body)
-
-    assert envelope["content"] == "看一下这个文档"
+    assert envelope["content"] == text
     assert "需求.md" in envelope["files_updated_by_user"]
 
 
-def test_plain_message_renders_without_a_prefix():
-    delivered = _deliverable(_turn(), "总结一下")
+def test_direct_message_keeps_its_own_wording():
+    """Regression: the inner envelope contradicted the team-inbound header.
 
-    assert delivered.startswith("你收到一条消息：")
-    assert _envelope(delivered)["content"] == "总结一下"
+    A member received ``<team-inbound from="human-member-1">`` wrapping a
+    ``{"source": "web", "type": "user input"}`` payload whose timestamp and
+    files fields meant nothing on that channel.
+    """
+    delivered = _deliverable(_turn(), "$human-member-1 @member-1 hello")
+
+    assert delivered == "$human-member-1 @member-1 hello"
+    assert "你收到一条消息" not in delivered
+    assert "files_updated_by_user" not in delivered
 
 
 def test_non_text_payload_passes_through():
     marker = object()
 
     assert _deliverable(_turn(), marker) is marker
+
+
+def test_empty_text_is_treated_as_team_wide():
+    assert _is_member_addressed("") is False

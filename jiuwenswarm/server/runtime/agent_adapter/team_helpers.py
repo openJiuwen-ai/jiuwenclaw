@@ -602,42 +602,39 @@ def _request_trusted_dirs(request: Any) -> list[str]:
     return dirs
 
 
-def _split_team_routing_prefix(text: str) -> tuple[str, str]:
-    """Split leading routing tokens (``#`` / ``$sender`` / ``@target``) from the body.
+def _is_member_addressed(text: str) -> bool:
+    """Whether ``text`` is addressed to specific members rather than the team.
 
-    openjiuwen resolves routing by running ``parse_interact_str`` over the text
-    it is handed, so the tokens have to stay in front of the rendered envelope
-    instead of ending up inside its ``content``. The split is delegated to that
-    same parser rather than re-implementing its syntax here, so the two cannot
-    drift apart.
+    Mirrors openjiuwen's own split (``TeamAgent._initial_leader_route_payloads``):
+    anything that parses to a non-god-view payload — ``@member``, ``$sender``,
+    ``@all`` — is delivered by the team's message system instead of becoming
+    the leader's user input.
 
     Args:
         text: User text, possibly starting with routing tokens.
 
     Returns:
-        ``(prefix, body)``. ``prefix`` is empty when the text carries no
-        routing tokens, in which case ``body`` is ``text`` unchanged.
+        True when the team message system owns delivery.
     """
+    from openjiuwen.agent_teams.interaction.payload import GodViewMessage
     from openjiuwen.agent_teams.interaction.router import parse_interact_str
 
     payloads = parse_interact_str(text)
-    if not payloads:
-        return "", text
-    body = getattr(payloads[0], "body", None)
-    # The parser only ever strips a prefix, so the body must be a suffix of the
-    # input; anything else means the syntax moved and the split is not safe.
-    if not isinstance(body, str) or not text.endswith(body):
-        return "", text
-    return text[: len(text) - len(body)], body
+    return bool(payloads) and any(not isinstance(p, GodViewMessage) for p in payloads)
 
 
 def _deliverable(turn: UserTurn, text: Any) -> Any:
     """Render ``text`` into the payload delivered to the team runtime.
 
-    Routing tokens are kept outside the envelope: ``@reviewer <envelope>``
-    reaches that member directly, while ``<envelope>`` alone reaches the
-    leader. Folding them into the envelope would make every message read as
-    plain god-view text and force the leader to re-dispatch by hand.
+    Only messages that become the leader's *user input* get the envelope, which
+    is exactly the case a single agent handles — that is what the two modes must
+    agree on. Member-addressed messages travel a different channel: the team
+    message system wraps them in its own ``<team-inbound from=... type=...>``
+    envelope carrying sender, message id, time and reply hint. Rendering the
+    user-input envelope inside that one would nest two conflicting headers (the
+    inner ``source: web`` / ``type: user input`` contradicting the outer
+    ``from``), so those pass through untouched. Attachment paths still reach
+    them: the composer inlines the 【上传文档】 block into the message text.
 
     Args:
         turn: The turn carrying this request's context (files, skills, sender).
@@ -645,17 +642,14 @@ def _deliverable(turn: UserTurn, text: Any) -> Any:
             rewriting.
 
     Returns:
-        The rendered envelope, matching what a single agent would receive,
-        prefixed by any routing tokens the user typed.
+        The rendered envelope for team-wide input, or ``text`` unchanged when
+        the team message system owns delivery.
     """
     if not isinstance(text, str):
         return turn.with_text(text).render()
-
-    prefix, body = _split_team_routing_prefix(text)
-    rendered = turn.with_text(body).render()
-    if not prefix or not isinstance(rendered, str):
-        return rendered
-    return prefix + rendered
+    if _is_member_addressed(text):
+        return text
+    return turn.with_text(text).render()
 
 
 async def _team_session_has_runtime(team_manager: TeamManager, session_id: str) -> bool:

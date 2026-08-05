@@ -463,16 +463,15 @@ def _evolution_record(content: str, *, score: float = 1.0) -> dict:
 def _delivered_content(payload: Any) -> Any:
     """Return the user text carried by a team delivery.
 
-    A delivery is ``<routing prefix><JSON envelope>`` (see ``_deliverable``):
-    the prefix keeps ``@member`` / ``$sender`` routable by openjiuwen, and the
-    envelope is what a single agent would receive. Both halves are recombined
-    here so assertions read as the user's own words.
+    Team-wide input arrives as the same JSON envelope a single agent receives
+    (see ``UserTurn.render``), so the user's own words are unwrapped for the
+    assertion. Member-addressed messages are delivered verbatim and need no
+    unwrapping.
     """
     if not isinstance(payload, str) or "{" not in payload:
         return payload
-    prefix, body = team_helpers._split_team_routing_prefix(payload)
     try:
-        return prefix + json.loads(body[body.index("{"):])["content"]
+        return json.loads(payload[payload.index("{"):])["content"]
     except (ValueError, KeyError):
         return payload
 
