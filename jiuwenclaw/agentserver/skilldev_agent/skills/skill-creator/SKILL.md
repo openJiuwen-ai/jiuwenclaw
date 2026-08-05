@@ -32,6 +32,7 @@ Your TODO plan should mirror the active workflow:
 3. Always run the verification gate before delivering a skill. Gate failure does not block delivery — report the results to the user and deliver regardless.
 4. Don't write a Chinese or otherwise invalid value to the skill `name`, even if the user asks for it. Refuse that specific rename and offer a valid ASCII kebab-case alternative.
 5. Any file change after a passed gate **invalidates** it — re-run the gate and report updated results before delivering again.
+6. If the skill does not possess a capability (e.g. scheduled/cron triggering, persistent storage, network access, multi-turn state), the skill body and description must not mention that capability or imply it exists. When the user requests a feature the skill cannot deliver, explicitly inform the user that the skill does not support it; do not silently omit it or leave wording that suggests it might work.
 
 ---
 
@@ -132,6 +133,7 @@ Local-execution skills must not generate `scripts/` by default. If a script is g
 - No prohibited environment tools (`Read`, `Write`, `Edit`, `file_glob`, `file_grep`, `file_listdir`, `shell`, `code_execute`, `WebFetch`, `ask_user_question`, `upload_file`, `spawn_subagent`, `fork_agent`, `task_tool`, `skill_tool`, `skill_complete`, `todo_create`, `todo_start`, `todo_complete`, `todo_modify`, `todo_list`, `present_files`) appear in the skill body, `allowed-tools`, or `metadata`.This entry itself must not appear in the generated skill.
 - If the skill declares `metadata.clis`: verify all `exec(command: "...")` calls use double-dash (`--`) flags for every parameter key (e.g. `--a`, `--module`) — single-dash flags (`-x`) are forbidden.
 - No empty optional directories (scripts/、references/、assets/) — if a directory has no files, it must not be created.
+- The skill body and description contain no wording that claims or implies a capability the skill does not actually have (e.g. "定时触发"、"cron"、"定时执行"、"持久化存储" when the skill has no such mechanism). If the user requested such a feature, confirm it was explicitly called out as unsupported.
 ---
 
 ## Step 3: Verification gate
