@@ -328,22 +328,31 @@ def close_agent_run_span(handle: Any, *, session_id: str = "") -> None:
         #      ActiveSpanTracker). The single-agent runner opens LLM spans inside
         #      its own child context, so their ContextVar state is not visible
         #      here; the tracker closes them by trace_id regardless of context.
-        # Must run BEFORE handle.end()/clear_team_span(): flush_child_spans reads
-        # the team span ContextVar to resolve this trace's id, and scopes the
-        # close to our trace only (flush_spans_for_trace), so concurrent runs are
-        # not affected.
+        # Both must run BEFORE clear_team_span(): flush_child_spans reads the
+        # team span ContextVar to resolve this trace's id, and scopes the close
+        # to our trace only (flush_spans_for_trace), so concurrent runs are not
+        # affected.
+        #
+        # Ordering note — the root span is ended BETWEEN the two nets, not after
+        # them: ``flush_spans_for_trace`` spares only spans whose name starts
+        # with ``team.`` (Team mode's root), so our ``agent.<mode>.<sid>`` root
+        # would otherwise be swept up as a leaked child — reported as an ORPHAN
+        # warning, force-ended by the tracker, and then re-ended here ("Calling
+        # end() on an ended span"). Ending it first makes it non-recording, which
+        # the tracker skips, so the root keeps its own end time and status while
+        # the net still catches genuinely leaked children.
         try:
             cascade_close_children()
         except Exception as exc:
             logger.debug("[AgentObservability] cascade_close_children failed: %s", exc)
         try:
-            flush_child_spans()
-        except Exception as exc:
-            logger.debug("[AgentObservability] flush_child_spans failed: %s", exc)
-        try:
             handle.end()
         except Exception as exc:
             logger.debug("[AgentObservability] end root span failed: %s", exc)
+        try:
+            flush_child_spans()
+        except Exception as exc:
+            logger.debug("[AgentObservability] flush_child_spans failed: %s", exc)
         clear_team_span()
     except Exception as exc:
         logger.warning("[AgentObservability] close root span failed: %s", exc)
