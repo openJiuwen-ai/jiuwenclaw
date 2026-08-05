@@ -390,6 +390,52 @@ def test_llm_span_lookup_falls_back_to_root_span():
         sc.set_active_span_tracker(previous_tracker)
 
 
+def test_run_output_is_stamped_on_the_root_span():
+    """The final answer lands on the root span as the trace-level output.
+
+    The rail only fills this for a team LEADER, so a single-agent trace would
+    otherwise show an empty output at its top level.
+    """
+    import jiuwenswarm.agents.harness.agent_observability as obs
+
+    stamped: dict[str, str] = {}
+    span = SimpleNamespace(set_attribute=lambda key, value: stamped.update({key: value}))
+
+    obs._stamp_run_output(span, "final answer")
+
+    assert stamped == {"langfuse.observation.output": "final answer"}
+
+
+def test_run_output_stamp_skips_empty_answer():
+    """An aborted / errored run leaves the output attribute unset."""
+    import jiuwenswarm.agents.harness.agent_observability as obs
+
+    def _fail(key, value):
+        raise AssertionError(f"must not stamp {key}={value}")
+
+    obs._stamp_run_output(SimpleNamespace(set_attribute=_fail), "")
+
+
+def test_assemble_run_answer_does_not_double_count_the_repeated_final():
+    """An ``answer`` chunk re-sends the whole reply the deltas already carried."""
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+        _assemble_run_answer,
+    )
+
+    assert _assemble_run_answer(["hello ", "world"], "hello world") == "hello world"
+
+
+def test_assemble_run_answer_keeps_a_flushed_tail():
+    """A cut-short round flushes only its tail as chat.final — keep both parts."""
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+        _assemble_run_answer,
+    )
+
+    assert _assemble_run_answer(["hello "], "world") == "hello world"
+    assert _assemble_run_answer([], "only final") == "only final"
+    assert _assemble_run_answer([], "") == ""
+
+
 # ── truncation / redaction ─────────────────────────────────────────────────
 class TestTruncationAndRedaction:
     def test_tool_args_truncated(self, tmp_path):

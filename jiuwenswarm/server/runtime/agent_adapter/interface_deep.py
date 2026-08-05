@@ -704,6 +704,34 @@ def _clean_heartbeat_content(content: str) -> str:
     return "\n".join(cleaned_lines)
 
 
+def _assemble_run_answer(deltas: list[str], final: str) -> str:
+    """Join a streaming run's assistant text into its final answer.
+
+    Used for the OTel trace-level output. The two sources overlap in one case
+    and not in the other, so neither alone is right:
+
+    * An ``answer`` chunk re-sends the **whole** reply as ``chat.final`` after
+      the deltas that already carried it — concatenating would double it.
+    * A round cut short (pause / clear) never reaches that chunk; the pending
+      buffer is flushed as ``chat.final`` carrying only the **tail** — dropping
+      the deltas would lose the head.
+
+    Containment tells the two apart: a final already present in the joined
+    deltas is the duplicate form.
+
+    Args:
+        deltas: ``chat.delta`` contents, in emission order.
+        final: Content of the last ``chat.final``; empty when none was emitted.
+
+    Returns:
+        The final answer text, empty when the run produced no assistant output.
+    """
+    joined = "".join(deltas)
+    if final and final not in joined:
+        return joined + final
+    return joined or final
+
+
 def init_permission_engine(*_args: Any, **_kwargs: Any) -> None:
     """Legacy shim for tests/older call sites.
 
@@ -8907,7 +8935,11 @@ class JiuWenSwarmDeepAdapter:
             logger.error("[JiuWenSwarmDeepAdapter] Agent 任务执行异常: %s", e)
             raise
         finally:
-            close_agent_run_span(_run_span, session_id=session_id)
+            close_agent_run_span(
+                _run_span,
+                session_id=session_id,
+                output="".join(collected_content),
+            )
             if image_files_token is not None:
                 from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
                     reset_current_multimodal_image_files,
@@ -9258,6 +9290,10 @@ class JiuWenSwarmDeepAdapter:
             "total_cost": 0.0,
         }
         emitted_ask_user_request_ids: set[str] = set()
+        # The run's final answer for the OTel trace output, kept as the streamed
+        # deltas plus the terminal chat.final — see ``_assemble_run_answer``.
+        run_answer_deltas: list[str] = []
+        run_answer_final = ""
 
         def should_skip_duplicate_ask_user(parsed: dict | None) -> bool:
             if not isinstance(parsed, dict):
@@ -9274,6 +9310,7 @@ class JiuWenSwarmDeepAdapter:
 
         def note_chat_payload(payload: dict[str, Any]) -> dict[str, Any]:
             nonlocal had_assistant_output, emitted_terminal_chat_final
+            nonlocal run_answer_final
             event_type = payload.get("event_type")
             if event_type in ("chat.delta", "chat.reasoning", "chat.final"):
                 had_assistant_output = True
@@ -9283,6 +9320,16 @@ class JiuWenSwarmDeepAdapter:
                 self._note_round_visible_text(str(payload.get("content") or ""))
             if event_type == "chat.final":
                 emitted_terminal_chat_final = True
+            # Assemble the run's final answer for the OTel trace output. This is
+            # the one choke point every assistant-visible payload passes through,
+            # so collecting it here needs no change at the yield sites.
+            if event_type in ("chat.delta", "chat.final"):
+                text = payload.get("content")
+                if isinstance(text, str) and text:
+                    if event_type == "chat.delta":
+                        run_answer_deltas.append(text)
+                    else:
+                        run_answer_final = text
             # Persist goal-completed cards at the stream yield choke point so
             # every goal.updated path (typed chunk / dict chunk) is covered once
             # without touching the pure payload parser.
@@ -10000,7 +10047,11 @@ class JiuWenSwarmDeepAdapter:
             # goal set 因 lease 被占而早退时，chat 流还在，不能在这里落盘。
             if not self._session_has_other_running_agent_tasks(session_id):
                 self._flush_pending_goal_objective_history(session_id)
-            close_agent_run_span(_run_span, session_id=session_id)
+            close_agent_run_span(
+                _run_span,
+                session_id=session_id,
+                output=_assemble_run_answer(run_answer_deltas, run_answer_final),
+            )
             if _debug_logger is not None:
                 _debug_logger.flush()
             if _debug_trace_token is not None:

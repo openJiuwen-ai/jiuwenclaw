@@ -81,6 +81,14 @@ class _RootSpanFallbackContextVar:
     span is ContextVar-visible, so the fallback never triggers there. A single
     active single-agent run is assumed (multi-session concurrency: last-opened
     wins).
+
+    Upstream now offers the same seam as a supported API
+    (``span_context.set_ambient_team_span`` / ``clear_ambient_team_span``,
+    which also spares the root span from the flush by identity rather than by
+    a ``team.`` name prefix). This stand-in keeps working either way; once the
+    pinned ``openjiuwen`` release carries that API, replace it with those two
+    calls in :func:`open_agent_run_span` / :func:`close_agent_run_span` and the
+    end-before-flush ordering there becomes unnecessary.
     """
 
     def __init__(self, inner: ContextVar) -> None:
@@ -327,8 +335,42 @@ def open_agent_run_span(*, session_id: str = "", mode: str = "") -> Any:
         return None
 
 
-def close_agent_run_span(handle: Any, *, session_id: str = "") -> None:
-    """End the root span opened by :func:`open_agent_run_span` and clear it."""
+def _stamp_run_output(handle: Any, output: str) -> None:
+    """Write the run's final answer onto the root span as the trace output.
+
+    Team mode fills the equivalent attribute on its ``team.<name>`` span from
+    the leader's iteration result (``ObservabilityRail.after_task_iteration``),
+    which keys off ``TeamRole.LEADER`` and therefore never fires for a single
+    agent — leaving the Langfuse trace with an empty top-level output. The
+    single-agent counterpart is the run's final answer, stamped here.
+
+    Redaction follows the active ``ObservabilityConfig`` so ``redact_completions``
+    covers this attribute exactly as it covers llm/agent span outputs.
+
+    Args:
+        handle: The still-recording root span.
+        output: Final answer text; empty means nothing to stamp.
+    """
+    if not output:
+        return
+    from openjiuwen.agent_teams.observability.redaction import redact_completion
+    from openjiuwen.agent_teams.observability.semconv import LANGFUSE_OBSERVATION_OUTPUT
+    from openjiuwen.agent_teams.observability.setup import get_config
+
+    config = get_config()
+    text = redact_completion(output, config) if config else output
+    handle.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, text)
+
+
+def close_agent_run_span(handle: Any, *, session_id: str = "", output: str = "") -> None:
+    """End the root span opened by :func:`open_agent_run_span` and clear it.
+
+    Args:
+        handle: Opaque handle from :func:`open_agent_run_span`; None is a no-op.
+        session_id: Session the run belonged to (kept for symmetry / logging).
+        output: The run's final answer, stamped as the trace-level output.
+            Empty (aborted / errored run) leaves the attribute unset.
+    """
     # Clear the global fallback span (harmless if already None).
     global _CURRENT_ROOT_SPAN
     _CURRENT_ROOT_SPAN = None
@@ -340,6 +382,11 @@ def close_agent_run_span(handle: Any, *, session_id: str = "") -> None:
             clear_team_span,
             flush_child_spans,
         )
+
+        try:
+            _stamp_run_output(handle, output)
+        except Exception as exc:
+            logger.debug("[AgentObservability] stamp run output failed: %s", exc)
 
         # End any still-open child LLM/tool spans (e.g. run aborted mid-call).
         # Two nets are needed for the single-agent path:
