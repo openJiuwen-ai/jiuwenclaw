@@ -107,6 +107,36 @@ def _exit_plan_rail(plan_mode: str = "plan"):
 
 
 @pytest.mark.asyncio
+async def test_after_enter_does_not_register_disallowed_task_tool() -> None:
+    rail = CodeAgentModeRail(allowed_tools=["exit_plan_mode"])
+    rail._agent = MagicMock()
+    rail._register_task_tool = MagicMock()
+    ctx = SimpleNamespace(
+        inputs=SimpleNamespace(tool_name="enter_plan_mode", tool_result=None),
+        extra={},
+    )
+
+    await rail.after_tool_call(ctx)
+
+    rail._register_task_tool.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_after_enter_registers_allowed_task_tool() -> None:
+    rail = CodeAgentModeRail(allowed_tools=["task_tool"])
+    rail._agent = MagicMock()
+    rail._register_task_tool = MagicMock()
+    ctx = SimpleNamespace(
+        inputs=SimpleNamespace(tool_name="enter_plan_mode", tool_result=None),
+        extra={},
+    )
+
+    await rail.after_tool_call(ctx)
+
+    rail._register_task_tool.assert_called_once_with(rail._agent)
+
+
+@pytest.mark.asyncio
 async def test_after_tool_call_drops_echoed_plan_body() -> None:
     """The tool echoes the whole plan back; only the header + reminder survive.
 

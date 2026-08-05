@@ -359,13 +359,13 @@ class TestCodeModeIntegration:
 
 
 # =====================================================================
-# 4. Explore Agent Disabled Integration
+# 4. Default Subagents Disabled Integration
 # =====================================================================
 
-class TestExploreAgentSubagentIntegration:
-    """explore_agent is not mounted by CodeAdapter in the temporary release."""
+class TestDefaultSubagentIntegration:
+    """explore_agent and plan_agent are not mounted in the temporary release."""
 
-    def test_explore_agent_not_mounted(self, monkeypatch):
+    def test_default_subagents_not_mounted(self, monkeypatch):
         from openjiuwen.core.foundation.llm import (
             Model,
             ModelClientConfig,
@@ -393,12 +393,16 @@ class TestExploreAgentSubagentIntegration:
 
         subagents, _should_add_general = adapter._build_configured_subagents(
             model,
-            {"max_iterations": 8, "subagents": {"explore_agent": {"enabled": True}}},
+            {
+                "max_iterations": 8,
+                "subagents": {
+                    "explore_agent": {"enabled": True},
+                    "plan_agent": {"enabled": True},
+                },
+            },
             {},
         )
-        assert subagents is not None
-        names = [s.agent_card.name for s in subagents]
-        assert names == ["plan_agent"]
+        assert subagents is None
 
 
 # =====================================================================
