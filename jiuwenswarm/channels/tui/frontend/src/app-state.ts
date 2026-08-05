@@ -1,5 +1,11 @@
 import { addError, addInfo } from "./core/commands/helpers.js";
 import type { CommandContext, PreferredLanguage } from "./core/commands/types.js";
+import type {
+  HandoffPort,
+  TaskLifecyclePort,
+  UiLifecyclePort,
+} from "./core/supervision/protocol.js";
+import type { ReauthenticationPort } from "./core/supervision/protocol.js";
 import {
   computeTimeoutAt,
   isIgnorableHistoryRestoreError,
@@ -14,7 +20,6 @@ import {
   mergeHistoryMessagesForRestore,
   parseHistoryFrame,
 } from "./core/history-parser.js";
-import { generateSessionId } from "./core/session-state.js";
 import { getToolGroupIds } from "./core/transcript-timeline.js";
 import {
   handleIncomingFrame,
@@ -62,7 +67,23 @@ import {
   getCurrentCwd,
 } from "./core/tui-trusted-dirs-store.js";
 import { loadTuiConfig } from "./core/tui-config-store.js";
-import { applyWorkflowUpdate, normalizeWorkflowRun, type WorkflowRun } from "./core/workflows.js";
+import { generateCreateToken } from "./core/session-state.js";
+import {
+  applyWorkflowUpdate,
+  collectWaitingForHuman,
+  countWaitingForHuman,
+  findWorkflowAgent,
+  isHumanPromptTruncated,
+  mergeHumanPromptText,
+  mergeWorkflowRun,
+  normalizeWorkflowRun,
+  isSessionNode,
+  phaseLocalTurnNumber,
+  sessionTurnLabelNumber,
+  shouldShowTurnInDetailOrReply,
+  type WorkflowRun,
+} from "./core/workflows.js";
+import type { PendingHumanPrompt } from "./core/event-handlers.js";
 import { execFile, spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
@@ -123,6 +144,7 @@ export interface AppSnapshot {
   teamTaskEvents: TeamTaskEvent[];
   teamMessageEvents: TeamMessageEvent[];
   workflowRuns: WorkflowRun[];
+  pendingHumanPrompts: Map<string, PendingHumanPrompt>;
   evolutionStatus: "idle" | "running";
   contextCompression: ContextCompressionStats | null;
   contextWindowLimit: number | null;
@@ -151,6 +173,8 @@ export interface AppSnapshot {
   btwOverlayTotal: number;
   /** BTW 是否处于活动状态（加载中或 overlay 可见），Esc 优先消费 */
   btwActive: boolean;
+  /** /btw 正在回答的问题；非空时显示加载动画。 */
+  btwPendingQuestion: string | null;
 }
 
 function formatElapsed(ms: number): string {
@@ -230,6 +254,9 @@ function probeTcp(host: string, port: number, timeoutMs: number): Promise<boolea
 }
 
 async function hasExternalNetwork(): Promise<boolean> {
+  if (process.env.JIUWENSWARM_SKIP_NETWORK_CHECK === "1" || process.env.JIUWENSWARM_SKIP_NETWORK_CHECK === "true") {
+    return true;
+  }
   const probes = [
     probeTcp("223.5.5.5", 53, 1500),
     probeTcp("114.114.114.114", 53, 1500),
@@ -299,6 +326,20 @@ export class CliPiAppState {
   private connectionStatus: ConnectionStatus = "idle";
   private sessionId: string;
   private sessionTitle: string = "";
+  /**
+   * `--session <id>` 启动时传入的目标 session id；为 null 表示用户未显式指定，
+   * 此时由 AgentServer 分配新 ID 并尝试领取预热实例。显式 ID 则通过同一个
+   * `session.create` 原子恢复或登记，并明确绕过预热。
+   */
+  private bootSessionId: string | null = null;
+  /** 幂等守卫：boot session creation 只在首次 connection.ack 触发一次（重连/重发不重试）。 */
+  private bootSessionHandled = false;
+  /** connection.ack 到来时放行启动会话创建；构造期即存在，避免 connected 回调抢跑。 */
+  private bootSessionStart: (() => void) | null = null;
+  /** 启动会话创建完成前，后续命令与 chat 帧统一排队到该 Promise。 */
+  private bootSessionCreation: Promise<void> | null = null;
+  /** 普通启动的幂等创建 token；重连期间保持稳定。 */
+  private readonly bootCreateToken = generateCreateToken();
   private mode: ClientMode = "code.normal";
   private themeName: ThemeName = getCurrentThemeName();
   private accentColor: AccentColorName = getCurrentAccentColor();
@@ -319,6 +360,7 @@ export class CliPiAppState {
   private teamTaskEvents: TeamTaskEvent[] = [];
   private teamMessageEvents: TeamMessageEvent[] = [];
   private workflowRuns: WorkflowRun[] = [];
+  private pendingHumanPrompts: Map<string, PendingHumanPrompt> = new Map();
   private evolutionStatus: "idle" | "running" = "idle";
   private contextCompression: ContextCompressionStats | null = null;
   private contextWindowLimit: number | null = null;
@@ -377,6 +419,8 @@ export class CliPiAppState {
   private btwOverlayIndex = -1;
   /** BTW 是否处于活动状态（加载中或 overlay 可见），用于 Esc 优先级判断 */
   private _btwActive = false;
+  /** /btw 正在回答的问题；与回答 overlay 的可见状态分离。 */
+  private btwPendingQuestion: string | null = null;
   /** 本地中断请求标志，cancel() 调用时立即置 true，用于 long-running 命令的中断检测。 */
   private interruptRequested = false;
   /** 是否有一个 cancel interrupt 在途（已发送但未收到 interrupt_result 确认）。
@@ -415,6 +459,24 @@ export class CliPiAppState {
   private harnessActivateInteraction: HarnessActivateInteraction | null = null;
   private deferTranscriptFrames = false;
   private deferredTranscriptFrames: EventFrame[] = [];
+
+  // ── /switch 公共契约端口（可选；由 index.ts 注入） ──
+  /** HandoffPort；未注入时 /switch 通过 CommandContext 回退到 NOT_SUPERVISED。 */
+  private handoffPort: HandoffPort | null = null;
+  /** TaskLifecyclePort；未注入时回退到 hasServerTask()/cancel()。 */
+  private taskLifecycle: TaskLifecyclePort | null = null;
+  /** ReauthenticationPort；由 ws-client 在权威认证过期时调用。 */
+  private reauthPort: ReauthenticationPort | null = null;
+  /** UiLifecyclePort；统一顶层关闭路径。 */
+  private uiLifecycle: UiLifecyclePort | null = null;
+  /** interrupt_result 事件订阅器；等待型取消按 requestId 关联。 */
+  private interruptResultListeners = new Set<
+    (requestId: string, sessionId: string, success: boolean, message?: string) => void
+  >();
+  /** WebSocket 断开订阅器；等待型取消按 CONNECTION_LOST reject。 */
+  private connectionLostListeners = new Set<() => void>();
+  /** AppState.stop 订阅器；等待型取消按 STATE_STOPPED reject。 */
+  private stopListeners = new Set<() => void>();
   private readonly eventDelegate: AppEventDelegate = {
     getConnectionStatus: () => this.connectionStatus,
     getSessionId: () => this.sessionId,
@@ -456,6 +518,9 @@ export class CliPiAppState {
     },
     applyWorkflowUpdate: (workflow) => {
       this.applyWorkflowUpdate(workflow);
+    },
+    setPendingHumanPrompts: (prompts) => {
+      this.setPendingHumanPrompts(prompts);
     },
     setEvolutionStatus: (status) => {
       this.evolutionStatus = status;
@@ -501,6 +566,9 @@ export class CliPiAppState {
     },
     safeFetchSessionTitle: (sessionId) => {
       this.safeFetchSessionTitle(sessionId);
+    },
+    initializeBootSession: () => {
+      this.initializeBootSession();
     },
     getSuppressInterruptResult: () => this.suppressInterruptResult,
     clearSuppressInterruptResult: () => {
@@ -558,18 +626,48 @@ export class CliPiAppState {
         true,
       );
     },
+    notifyInterruptResult: (requestId, sessionId, success, message) => {
+      this.notifyInterruptResult(requestId, sessionId, success, message);
+    },
   };
 
   constructor(
     private readonly wsClient: WsClient,
     cliSession?: string,
+    supervision?: {
+      handoffPort?: HandoffPort | null;
+      taskLifecycle?: TaskLifecyclePort | null;
+      reauthPort?: ReauthenticationPort | null;
+      uiLifecycle?: UiLifecyclePort | null;
+    },
   ) {
-    this.sessionId = cliSession || generateSessionId();
+    this.sessionId = cliSession || "new";
+    this.bootSessionId = cliSession ? cliSession : null;
+    const startGate = new Promise<void>((resolve) => {
+      this.bootSessionStart = resolve;
+    });
+    const bootCreation = (async () => {
+      await startGate;
+      await this.createBootSession();
+    })();
+    this.bootSessionCreation = bootCreation;
+    void bootCreation
+      .catch(() => undefined)
+      .finally(() => {
+        if (this.bootSessionCreation === bootCreation) {
+          this.bootSessionCreation = null;
+        }
+      });
     const config = loadTuiConfig();
     if (config.theme) {
       setCurrentThemeName(config.theme);
       this.themeName = config.theme;
     }
+    // 注入 /switch 公共契约端口（可选；未注入时回退到非托管实现）。
+    this.handoffPort = supervision?.handoffPort ?? null;
+    this.taskLifecycle = supervision?.taskLifecycle ?? null;
+    this.reauthPort = supervision?.reauthPort ?? null;
+    this.uiLifecycle = supervision?.uiLifecycle ?? null;
   }
 
   start(): void {
@@ -596,6 +694,16 @@ export class CliPiAppState {
   }
 
   stop(): void {
+    // 通知所有 stop 订阅器（等待型取消按 STATE_STOPPED reject）。
+    for (const listener of this.stopListeners) {
+      try {
+        listener();
+      } catch {
+        // ignore — 进程即将退出
+      }
+    }
+    this.stopListeners.clear();
+
     if (this.localPendingQuestion) {
       this.localPendingQuestion.reject(new Error("app stopped while awaiting input"));
       this.localPendingQuestion = null;
@@ -850,6 +958,15 @@ export class CliPiAppState {
           ? "Backend connection failed authentication. Stopped waiting for the current response."
           : "Backend closed the connection because the message was too large. Stopped waiting for the current response.",
       );
+      // 通知连接丢失订阅器（等待型取消按 CONNECTION_LOST reject）。
+      for (const listener of this.connectionLostListeners) {
+        try {
+          listener();
+        } catch {
+          // ignore
+        }
+      }
+      this.connectionLostListeners.clear();
     }
   }
 
@@ -986,6 +1103,7 @@ export class CliPiAppState {
           })),
         })),
       })),
+      pendingHumanPrompts: new Map(this.pendingHumanPrompts),
       evolutionStatus: this.evolutionStatus,
       contextCompression: this.contextCompression ? { ...this.contextCompression } : null,
       contextWindowLimit: this.contextWindowLimit,
@@ -1004,6 +1122,7 @@ export class CliPiAppState {
       btwOverlayIndex: this.btwOverlayIndex,
       btwOverlayTotal: this.btwHistory.length,
       btwActive: this._btwActive,
+      btwPendingQuestion: this.btwPendingQuestion,
     };
   }
 
@@ -1070,6 +1189,7 @@ export class CliPiAppState {
       setBtwOverlay: this.setBtwOverlay,
       clearBtwOverlay: this.clearBtwOverlay,
       setBtwActive: this.setBtwActive,
+      setBtwPendingQuestion: this.setBtwPendingQuestion,
       clearEntries: this.clearEntries,
       restoreHistory: this.restoreHistory,
       exitApp: () => {
@@ -1124,6 +1244,20 @@ export class CliPiAppState {
         return snapshot.cancellableWork;
       },
       setRunningCommand: (name: string | null) => this.setRunningCommand(name),
+      // ── /switch 公共契约端口 ──
+      checkHandoff: (target) => this.handoffPort?.checkHandoff(target)
+        ?? {
+          ok: false,
+          code: "NOT_SUPERVISED",
+          message: "Running outside agentos-tui launcher; start via `agentos-tui` to use /switch",
+        },
+      requestHandoff: (target, switchContent) => this.handoffPort
+        ? this.handoffPort.requestHandoff(target, switchContent)
+        : Promise.reject(new Error("Handoff port not available (not supervised)")),
+      hasServerTask: () => this.taskLifecycle?.hasServerTask() ?? this.hasServerTask(),
+      cancelAndWaitForIdle: (opts) => this.taskLifecycle
+        ? this.taskLifecycle.cancelAndWaitForIdle(opts)
+        : Promise.reject(new Error("Task lifecycle port not available")),
     };
   }
 
@@ -1194,36 +1328,122 @@ export class CliPiAppState {
     this._getInputValueRef = ref;
   }
 
+  // ── TaskLifecyclePort 订阅接口 ──
+
+  /**
+   * 订阅 interrupt_result 事件；按 requestId + sessionId 关联。
+   * 返回取消订阅函数。迟到事件（waiter 已清除）由 listener 自行过滤。
+   */
+  onInterruptResult(
+    handler: (requestId: string, sessionId: string, success: boolean, message?: string) => void,
+  ): () => void {
+    this.interruptResultListeners.add(handler);
+    return () => {
+      this.interruptResultListeners.delete(handler);
+    };
+  }
+
+  /** 订阅 WebSocket 断开或认证失败。 */
+  onConnectionLost(handler: () => void): () => void {
+    this.connectionLostListeners.add(handler);
+    return () => {
+      this.connectionLostListeners.delete(handler);
+    };
+  }
+
+  /** 订阅 AppState.stop（进程退出前清理）。 */
+  onStop(handler: () => void): () => void {
+    this.stopListeners.add(handler);
+    return () => {
+      this.stopListeners.delete(handler);
+    };
+  }
+
+  /**
+   * 由 event-handlers 在收到 chat.interrupt_result 时调用；
+   * 通知所有订阅器，按 requestId + sessionId 关联。
+   */
+  notifyInterruptResult(
+    requestId: string,
+    sessionId: string,
+    success: boolean,
+    message?: string,
+  ): void {
+    for (const listener of this.interruptResultListeners) {
+      try {
+        listener(requestId, sessionId, success, message);
+      } catch {
+        // ignore — listener 错误不应影响其他订阅器或 UI 处理
+      }
+    }
+  }
+
+  /**
+   * 由 index.ts 在 AppState 构造后回填监督端口。
+   * TaskLifecyclePort、HandoffPort、ReauthenticationPort 依赖 AppState 方法，
+   * 无法在构造函数中直接创建。
+   */
+  setSupervisionPorts(ports: {
+    handoffPort: HandoffPort | null;
+    taskLifecycle: TaskLifecyclePort | null;
+    reauthPort: ReauthenticationPort | null;
+    uiLifecycle: UiLifecyclePort | null;
+  }): void {
+    this.handoffPort = ports.handoffPort;
+    this.taskLifecycle = ports.taskLifecycle;
+    this.reauthPort = ports.reauthPort;
+    this.uiLifecycle = ports.uiLifecycle;
+  }
+
+  /** 测试/外部用：获取 ReauthenticationPort（由 ws-client 在权威认证过期时调用）。 */
+  getReauthPort(): ReauthenticationPort | null {
+    return this.reauthPort;
+  }
+
   readonly sendEventOnly = (
     method: string,
     params: Record<string, unknown>,
     isStream = false,
   ): string => {
     const id = `tui_${Date.now().toString(16)}_${Math.random().toString(36).slice(2, 6)}`;
-    const trustedDirs = getTrustedDirs();
-    const projectDir = getCurrentProjectDir() || process.cwd();
-    const cwd = getCurrentCwd() || projectDir;
-    this.wsClient.send({
-      type: "req",
-      id,
-      method,
-      ...(isStream ? { is_stream: true } : {}),
-      params: {
-        ...params,
-        session_id: (params.session_id as string | undefined) ?? this.sessionId,
-        ...(trustedDirs.length > 0 ? { trusted_dirs: trustedDirs } : {}),
-        ...(projectDir ? { project_dir: projectDir } : {}),
-        ...(cwd ? { cwd } : {}),
-      },
-    });
+    const send = () => {
+      const trustedDirs = getTrustedDirs();
+      const projectDir = getCurrentProjectDir() || process.cwd();
+      const cwd = getCurrentCwd() || projectDir;
+      this.wsClient.send({
+        type: "req",
+        id,
+        method,
+        ...(isStream ? { is_stream: true } : {}),
+        params: {
+          ...params,
+          ...(method === "session.create" && params.session_id === undefined
+            ? {}
+            : { session_id: (params.session_id as string | undefined) ?? this.sessionId }),
+          ...(trustedDirs.length > 0 ? { trusted_dirs: trustedDirs } : {}),
+          ...(projectDir ? { project_dir: projectDir } : {}),
+          ...(cwd ? { cwd } : {}),
+        },
+      });
+    };
+    const bootCreation = this.bootSessionCreation;
+    if (bootCreation) {
+      void bootCreation.then(send).catch(() => undefined);
+    } else {
+      send();
+    }
     return id;
   };
 
-  readonly request = async <T = Record<string, unknown>>(
+  private requestAgentServer = async <T = Record<string, unknown>>(
     method: string,
     params: Record<string, unknown>,
-    timeoutMs?: number,
+    timeoutMs: number | undefined,
+    waitForBootSession: boolean,
   ): Promise<T> => {
+    if (waitForBootSession && this.bootSessionCreation) {
+      await this.bootSessionCreation;
+    }
     const id = `tui_${Date.now().toString(16)}_${Math.random().toString(36).slice(2, 6)}`;
     // 记录当前命令请求 ID，以便 Ctrl+C 时能立即取消 WS 请求
     this.activeCommandRequestId = id;
@@ -1236,7 +1456,9 @@ export class CliPiAppState {
         method,
         {
           ...params,
-          session_id: params.session_id ?? this.sessionId,
+          ...(method === "session.create" && params.session_id === undefined
+            ? {}
+            : { session_id: params.session_id ?? this.sessionId }),
           ...(trustedDirs.length > 0 ? { trusted_dirs: trustedDirs } : {}),
           ...(projectDir ? { project_dir: projectDir } : {}),
           ...(cwd ? { cwd } : {}),
@@ -1251,6 +1473,12 @@ export class CliPiAppState {
       }
     }
   };
+
+  readonly request = async <T = Record<string, unknown>>(
+    method: string,
+    params: Record<string, unknown>,
+    timeoutMs?: number,
+  ): Promise<T> => this.requestAgentServer<T>(method, params, timeoutMs, true);
 
   readonly notifyDisconnectBeforeExit = async (reason = "user_exit"): Promise<void> => {
     if (this.connectionStatus !== "connected") {
@@ -1278,40 +1506,190 @@ export class CliPiAppState {
       type?: string;
       workflows?: unknown[];
       session_id?: string;
+      total?: number;
+      truncated?: boolean;
     }>(
       "command.workflows",
       {
         action: "list",
         session_id: sessionId,
       },
-      10000,
+      // Align with get / get_human_prompt. 10s was too tight when the Gateway
+      // outbound writer is busy with workflow.updated / chat stream frames
+      // (list itself finishes in ms on AgentServer).
+      30000,
     );
     this.applyWorkflowSnapshotPayload(payload);
+  };
+
+  readonly loadWorkflowDetail = async (
+    workflowId: string,
+    sessionId = this.sessionId,
+  ): Promise<void> => {
+    const payload = await this.request<{
+      type?: string;
+      workflow?: unknown;
+      truncated?: boolean;
+    }>(
+      "command.workflows",
+      {
+        action: "get",
+        workflow_id: workflowId,
+        session_id: sessionId,
+      },
+      30000,
+    );
+    if (
+      payload.type === "workflow_run_detail" &&
+      payload.workflow &&
+      typeof payload.workflow === "object" &&
+      !Array.isArray(payload.workflow) &&
+      "id" in payload.workflow
+    ) {
+      const workflow = payload.workflow as WorkflowRun;
+      if (payload.truncated === true) {
+        workflow.truncated = true;
+      }
+      this.applyWorkflowUpdate(workflow);
+    }
+  };
+
+  readonly loadHumanPrompt = async (
+    workflowId: string,
+    agentId: string,
+    sessionId = this.sessionId,
+  ): Promise<string> => {
+    const payload = await this.request<{
+      type?: string;
+      human_prompt?: unknown;
+      agent_id?: unknown;
+      error?: unknown;
+    }>(
+      "command.workflows",
+      {
+        action: "get_human_prompt",
+        workflow_id: workflowId,
+        agent_id: agentId,
+        session_id: sessionId,
+      },
+      30000,
+    );
+    if (payload.error) {
+      throw new Error(String(payload.error));
+    }
+    const prompt = typeof payload.human_prompt === "string" ? payload.human_prompt.trim() : "";
+    if (!prompt) return "";
+
+    const existing = this.workflowRuns.find((item) => item.id === workflowId);
+    if (!existing) return prompt;
+
+    const updatedPhases = (existing.phases ?? []).map((phase) => ({
+      ...phase,
+      agents: (phase.agents ?? []).map((agent) =>
+        agent.id === agentId
+          ? { ...agent, human_prompt: mergeHumanPromptText(agent.human_prompt, prompt) }
+          : agent,
+      ),
+    }));
+    this.applyWorkflowUpdate({ ...existing, phases: updatedPhases });
+    return prompt;
+  };
+
+  readonly ensureHumanPromptLoaded = async (
+    workflowId: string,
+    agentId: string,
+  ): Promise<void> => {
+    const lookup = findWorkflowAgent(this.workflowRuns, workflowId, agentId);
+    const current = lookup?.agent.human_prompt?.trim() ?? "";
+    if (current && !isHumanPromptTruncated(current)) return;
+    try {
+      await this.loadHumanPrompt(workflowId, agentId);
+    } catch {
+      // Best-effort — pending list still shows whatever partial text we have.
+    }
   };
 
   readonly applyWorkflowSnapshotPayload = (payload: {
     type?: unknown;
     workflows?: unknown;
+    total?: unknown;
+    truncated?: unknown;
     [key: string]: unknown;
   }): void => {
     const workflows = Array.isArray(payload.workflows) ? payload.workflows : [];
     if (payload.type !== "workflow_run_snapshot" && workflows.length === 0) {
       return;
     }
-    this.setWorkflowRuns(
-      workflows.filter((item): item is WorkflowRun =>
-        Boolean(item && typeof item === "object" && !Array.isArray(item) && "id" in item),
-      ),
+    const incoming = workflows.filter((item): item is WorkflowRun =>
+      Boolean(item && typeof item === "object" && !Array.isArray(item) && "id" in item),
     );
+    const merged = incoming.map((workflow) => {
+      const existing = this.workflowRuns.find((item) => item.id === workflow.id);
+      return normalizeWorkflowRun(mergeWorkflowRun(existing, workflow));
+    });
+    const incomingIds = new Set(incoming.map((workflow) => workflow.id));
+    const preserved = this.workflowRuns.filter((workflow) => !incomingIds.has(workflow.id));
+    this.setWorkflowRuns([...merged, ...preserved]);
   };
 
   readonly setWorkflowRuns = (workflows: WorkflowRun[]): void => {
     this.workflowRuns = workflows.map((workflow) => normalizeWorkflowRun(workflow));
+    this.recomputePendingHumanPrompts();
     this.emitChange();
   };
 
   readonly applyWorkflowUpdate = (workflow: WorkflowRun): void => {
     this.workflowRuns = applyWorkflowUpdate(this.workflowRuns, workflow);
+    this.recomputePendingHumanPrompts();
+    this.emitChange();
+  };
+
+  /** Recompute the pending-human-prompt map from the full workflow snapshot. */
+  private recomputePendingHumanPrompts(): void {
+    // Preserve reply summaries from the previous map for entries that are no
+    // longer waiting (replied -> running) so the list can dim them briefly.
+    const next = new Map<string, PendingHumanPrompt>();
+    for (const wf of this.workflowRuns) {
+      const waiting = collectWaitingForHuman(wf);
+      for (const { phase, agent } of waiting) {
+        const key = `${wf.id}:${agent.correlation_id ?? agent.id}`;
+        const turn = phaseLocalTurnNumber(agent, phase.agents ?? []) ?? 0;
+        const prev = this.pendingHumanPrompts.get(key);
+        next.set(key, {
+          workflow_run_id: wf.id,
+          workflow_id: wf.id,
+          workflow_name: wf.name,
+          agent_id: agent.id,
+          correlation_id: agent.correlation_id ?? "",
+          prompt: mergeHumanPromptText(prev?.prompt, agent.human_prompt ?? ""),
+          label: agent.name,
+          is_session: isSessionNode(agent),
+          turn,
+          // Carry forward a prior reply summary if this entry was replied then
+          // somehow re-listed (defensive — normally a replied turn won't wait again).
+          replied: prev?.replied,
+          answer: prev?.answer,
+        });
+      }
+      // Dim entries that were waiting and are now replied (status moved off
+      // waiting_for_human but human_reply was just set).
+      for (const phase of wf.phases ?? []) {
+        for (const agent of phase.agents ?? []) {
+          if (agent.status !== "waiting_for_human" && agent.human_reply) {
+            const key = `${wf.id}:${agent.correlation_id ?? agent.id}`;
+            const prev = this.pendingHumanPrompts.get(key);
+            if (prev && !prev.replied) {
+              next.set(key, { ...prev, replied: true, answer: agent.human_reply });
+            }
+          }
+        }
+      }
+    }
+    this.pendingHumanPrompts = next;
+  }
+
+  readonly setPendingHumanPrompts = (prompts: Map<string, PendingHumanPrompt> | null): void => {
+    this.pendingHumanPrompts = prompts ?? new Map();
     this.emitChange();
   };
 
@@ -1321,10 +1699,12 @@ export class CliPiAppState {
     this.usageByModel.clear();
     this.resetCurrentUsageTokens();
     this.workflowRuns = [];
+    this.pendingHumanPrompts = new Map();
     this.btwOverlay = null;
     this.btwHistory = [];
     this.btwOverlayIndex = -1;
     this._btwActive = false;
+    this.btwPendingQuestion = null;
     this.pendingPlanEntrySource = null;
     if (this.accentColor !== "default") {
       this.accentColor = "default";
@@ -1362,11 +1742,16 @@ export class CliPiAppState {
     if (item.kind === "user") {
       this.autoRecapState = "idle";
       // 用户发送新消息时自动清除 /btw overlay（含历史）
-      if (this.btwOverlay !== null || this.btwHistory.length > 0) {
+      if (
+        this.btwOverlay !== null ||
+        this.btwHistory.length > 0 ||
+        this.btwPendingQuestion !== null
+      ) {
         this.btwOverlay = null;
         this.btwHistory = [];
         this.btwOverlayIndex = -1;
         this._btwActive = false;
+        this.btwPendingQuestion = null;
       }
     }
     this.emitChange();
@@ -1374,6 +1759,7 @@ export class CliPiAppState {
 
   /** 设置 /btw 侧问题覆盖层（独立于 transcript 渲染，不受滚动影响） */
   readonly setBtwOverlay = (question: string, answer: string): void => {
+    this.btwPendingQuestion = null;
     this.btwOverlay = { question, answer };
     this.btwHistory.push({ question, answer });
     this.btwOverlayIndex = this.btwHistory.length - 1;
@@ -1382,19 +1768,35 @@ export class CliPiAppState {
 
   /** 设置 BTW 活动状态（加载中或 overlay 可见），用于 Esc 优先级判断 */
   readonly setBtwActive = (active: boolean): void => {
-    if (this._btwActive !== active) {
+    const pendingChanged = !active && this.btwPendingQuestion !== null;
+    if (this._btwActive !== active || pendingChanged) {
       this._btwActive = active;
+      if (!active) {
+        this.btwPendingQuestion = null;
+      }
+      this.emitChange();
+    }
+  };
+
+  readonly setBtwPendingQuestion = (question: string | null): void => {
+    if (this.btwPendingQuestion !== question) {
+      this.btwPendingQuestion = question;
       this.emitChange();
     }
   };
 
   /** 清除 /btw 侧问题覆盖层（同时清空历史，Esc 视为放弃这批侧问） */
   readonly clearBtwOverlay = (): void => {
-    if (this.btwOverlay !== null || this.btwHistory.length > 0) {
+    if (
+      this.btwOverlay !== null ||
+      this.btwHistory.length > 0 ||
+      this.btwPendingQuestion !== null
+    ) {
       this.btwOverlay = null;
       this.btwHistory = [];
       this.btwOverlayIndex = -1;
       this._btwActive = false;
+      this.btwPendingQuestion = null;
       this.emitChange();
     }
   };
@@ -1419,6 +1821,7 @@ export class CliPiAppState {
       this.btwOverlay = null;
       this.btwOverlayIndex = -1;
       this._btwActive = false;
+      this.btwPendingQuestion = null;
     } else {
       this.btwOverlayIndex = Math.min(this.btwOverlayIndex, len - 1);
       this.btwOverlay = this.btwHistory[this.btwOverlayIndex];
@@ -1471,6 +1874,7 @@ export class CliPiAppState {
     this.btwHistory = [];
     this.btwOverlayIndex = -1;
     this._btwActive = false;
+    this.btwPendingQuestion = null;
     this.setStreamingStateInternal(StreamingState.Idle);
     this.collapsedToolGroupIds.clear();
     this.activeSubtasks.clear();
@@ -2948,5 +3352,70 @@ export class CliPiAppState {
         this.emitChange();
       }
     })();
+  }
+
+  /** connection.ack 放行一次构造期启动屏障；实际创建统一在 createBootSession 中完成。 */
+  private initializeBootSession(): void {
+    if (this.bootSessionHandled) return;
+    if (this.connectionStatus !== "connected") return;
+    this.bootSessionHandled = true;
+    const start = this.bootSessionStart;
+    this.bootSessionStart = null;
+    start?.();
+  }
+
+  /**
+   * 普通启动不传 session_id，由 AgentServer 分配并领取预热实例；`--session <id>`
+   * 传入显式 ID，走 TUI 兼容的非预热恢复/登记路径。两者共享同一个启动 Promise。
+   */
+  private async createBootSession(): Promise<void> {
+    const target = this.bootSessionId;
+    const previousMode = this.mode;
+    try {
+      const res = await this.requestAgentServer<{
+        session_id?: string;
+        mode?: string;
+        created?: boolean;
+      }>(
+        "session.create",
+        {
+          ...(target ? { session_id: target } : { create_token: this.bootCreateToken }),
+          previous_session_id: "",
+          previous_mode: previousMode,
+          mode: previousMode,
+        },
+        undefined,
+        false,
+      );
+      const createdId = res?.session_id;
+      if (typeof createdId !== "string" || !createdId) {
+        throw new Error("session.create did not return a session id");
+      }
+      const placeholderId = this.sessionId;
+      const pendingVisibleRequest = this.lastVisibleUserRequest;
+      this.updateSession(createdId);
+      if (target === null && placeholderId === "new") {
+        this.entries = this.entries.map((entry) =>
+          entry.sessionId === placeholderId ? { ...entry, sessionId: createdId } : entry,
+        );
+        if (pendingVisibleRequest?.sessionId === placeholderId) {
+          this.lastVisibleUserRequest = { ...pendingVisibleRequest, sessionId: createdId };
+        }
+        this.emitChange();
+      }
+      const resolvedMode = res?.mode;
+      if (typeof resolvedMode === "string" && resolvedMode) {
+        this.setMode(resolvedMode as ClientMode);
+      }
+      if (target !== null) {
+        this.safeRestoreHistory(createdId);
+        this.safeFetchSessionTitle(createdId);
+      }
+    } catch (createErr) {
+      const message = createErr instanceof Error ? createErr.message : String(createErr);
+      this.lastError = `session.create failed: ${message}`;
+      this.emitChange();
+      throw createErr;
+    }
   }
 }

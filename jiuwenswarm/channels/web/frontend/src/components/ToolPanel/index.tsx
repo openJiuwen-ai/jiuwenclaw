@@ -20,6 +20,8 @@ import type { ProjectInfo, TodoItem, TodoStatus } from '../../types';
 import teamProcessIcon from '../../assets/team-process.svg';
 import { CodeEnvironmentPanel } from '../../features/code-mode/CodeEnvironmentPanel';
 import { CodeReviewPanel } from '../../features/code-mode/CodeReviewPanel';
+import type { CodeReviewTarget } from '../../features/code-mode/types';
+import { useCodeGitDiffWatch } from '../../features/code-mode/useCodeGitDiffWatch';
 import './ToolPanel.css';
 
 /** 规划/性能模式下把 TodoItem 降级映射为 TeamTask，复用 TaskPlanningPanel 紧凑态样式 */
@@ -48,10 +50,14 @@ interface ToolPanelProps {
   teamAreaActiveTab: TabType;
   teamAreaActiveDetailTab: TeamDetailTab;
   teamAreaSelectedMemberId?: string;
+  codeReviewTarget?: CodeReviewTarget | null;
+  teamAreaSelectedArtifactId?: string;
   setTeamAreaExpanded: (expanded: boolean) => void;
   setTeamAreaActiveTab: (tab: TabType) => void;
   setTeamAreaActiveDetailTab: (detailTab: TeamDetailTab) => void;
   setTeamAreaSelectedMemberId: (memberId: string) => void;
+  setCodeReviewTarget?: (target: CodeReviewTarget | null) => void;
+  setTeamAreaSelectedArtifactId: (artifactId: string) => void;
 }
 
 function isEmptyValue(value: unknown): boolean {
@@ -92,6 +98,8 @@ function ExpandedSingleAgentArea({
   onTabChange,
   onCollapse,
   reviewPanel,
+  selectedArtifactId,
+  onArtifactSelect,
 }: {
   activeTab: TabType;
   tasks: TeamTask[];
@@ -101,10 +109,17 @@ function ExpandedSingleAgentArea({
   onTabChange: (tab: TabType) => void;
   onCollapse: () => void;
   reviewPanel?: ReactNode;
+  selectedArtifactId?: string;
+  onArtifactSelect: (artifactId: string) => void;
 }) {
   const { t } = useTranslation();
   const artifactsCount = useSessionArtifactsCount();
-  const resolvedTab = activeTab === 'artifacts' ? 'artifacts' : activeTab === 'review' && reviewPanel ? 'review' : 'planning';
+  const resolvedTab =
+    activeTab === 'artifacts' && artifactsCount > 0
+      ? 'artifacts'
+      : activeTab === 'review' && reviewPanel
+        ? 'review'
+        : 'planning';
   const tabs = [
     {
       key: 'planning',
@@ -112,12 +127,14 @@ function ExpandedSingleAgentArea({
       count: `${completedTasks}/${totalTasks}`,
       icon: <img src={teamProcessIcon} width={16} height={16} aria-hidden="true" />,
     },
-    {
-      key: 'artifacts',
-      label: t('artifacts.tab'),
-      count: artifactsCount,
-      icon: <FileText size={16} />,
-    },
+    ...(artifactsCount > 0
+      ? [{
+          key: 'artifacts' as const,
+          label: t('artifacts.tab'),
+          count: artifactsCount,
+          icon: <FileText size={16} />,
+        }]
+      : []),
     ...(reviewPanel ? [{ key: 'review' as const, label: t('codeMode.review'), icon: <FileCheck2 size={16} /> }] : []),
   ];
 
@@ -153,7 +170,7 @@ function ExpandedSingleAgentArea({
       <div className="flex min-h-0 flex-1 overflow-hidden">
         {resolvedTab === 'artifacts' ? (
           <div className="flex min-w-0 flex-1 overflow-hidden">
-            <ArtifactsPanel />
+            <ArtifactsPanel selectedArtifactId={selectedArtifactId} onSelectArtifact={onArtifactSelect} />
           </div>
         ) : resolvedTab === 'review' && reviewPanel ? (
           <div className="flex min-w-0 flex-1 overflow-hidden">{reviewPanel}</div>
@@ -180,10 +197,14 @@ export function ToolPanel({
   teamAreaActiveTab,
   teamAreaActiveDetailTab,
   teamAreaSelectedMemberId,
+  codeReviewTarget = null,
+  teamAreaSelectedArtifactId,
   setTeamAreaExpanded,
   setTeamAreaActiveTab,
   setTeamAreaActiveDetailTab,
   setTeamAreaSelectedMemberId,
+  setCodeReviewTarget,
+  setTeamAreaSelectedArtifactId,
 }: ToolPanelProps) {
   const { t } = useTranslation();
   const { isConnected, memoryUsage, setMemoryUsage } = useSessionStore();
@@ -197,6 +218,7 @@ export function ToolPanel({
   const setTeamMembers = useSessionStore((s) => s.setTeamMembers);
   const setTeamTaskEvents = useSessionStore((s) => s.setTeamTaskEvents);
   const setTeamTasks = useSessionStore((s) => s.setTeamTasks);
+  const mergeTeamTaskProgressBaseline = useSessionStore((s) => s.mergeTeamTaskProgressBaseline);
   const setTeamMemberExecutionEvents = useSessionStore((s) => s.setTeamMemberExecutionEvents);
   const setTeamHistoryMessages = useSessionStore((s) => s.setTeamHistoryMessages);
   const setTeamHumanShareCommands = useSessionStore((s) => s.setTeamHumanShareCommands);
@@ -206,8 +228,13 @@ export function ToolPanel({
   const todos = useTodoStore((s) => s.runtimes[activeSessionId ?? '']?.todos ?? []);
   const codeProject = project?.work_mode === 'code' && !project.is_default ? project : null;
   const canReviewCode = Boolean(codeProject && sessionId && sessionId !== 'new');
+  const codeGitDiffWatch = useCodeGitDiffWatch({
+    projectId: canReviewCode && codeProject ? codeProject.project_id : null,
+    sessionId: canReviewCode && sessionId ? sessionId : null,
+    enabled: canReviewCode,
+  });
   const codeReviewPanel = canReviewCode && codeProject && sessionId
-    ? <CodeReviewPanel project={codeProject} sessionId={sessionId} />
+    ? <CodeReviewPanel project={codeProject} sessionId={sessionId} target={codeReviewTarget} diffWatch={codeGitDiffWatch} />
     : undefined;
   const todoTeamTasks = useMemo(() => todos.map(todoItemToTeamTask), [todos]);
   const todoCompletedTasks = useMemo(
@@ -262,7 +289,12 @@ export function ToolPanel({
   }, [isConnected, setMemoryUsage]);
 
   useEffect(() => {
-    if (mode !== 'team' || !isConnected || !sessionId?.startsWith('sess_')) {
+    if (
+      mode !== 'team'
+      || !isConnected
+      || !sessionId
+      || !(sessionId.startsWith('sess_') || sessionId.startsWith('web_'))
+    ) {
       if (sessionId) setTeamHistoryMessages(sessionId, []);
       hydratedTeamHistorySessionRef.current = null;
       loadingTeamHistorySessionRef.current = null;
@@ -305,18 +337,25 @@ export function ToolPanel({
           current?.teamTaskEvents ?? [],
           (event) => event.task_id
         );
-        if (mergedTaskEvents.length > 0) {
-          setTeamTaskEvents(sessionId, mergedTaskEvents);
-        }
+        // Always apply — an empty restored list must clear stale events too.
+        setTeamTaskEvents(sessionId, mergedTaskEvents);
 
+        // History/snapshot is the authoritative board after restore. Never import
+        // live-only task_ids (LLM `id` orphans left in the waiting column from
+        // a prior optimistic upsert). Always setTeamTasks — including [] — so
+        // an empty restore actually clears those orphans instead of leaving
+        // the previous store contents untouched.
+        const restoredTaskIds = new Set(historyState.tasks.map((task) => task.task_id));
+        const liveTasksForMerge = (current?.teamTasks ?? []).filter((task) =>
+          restoredTaskIds.has(task.task_id)
+        );
         const mergedTasks = mergeById(
           historyState.tasks,
-          current?.teamTasks ?? [],
+          liveTasksForMerge,
           (task) => task.task_id
         );
-        if (mergedTasks.length > 0) {
-          setTeamTasks(sessionId, mergedTasks);
-        }
+        setTeamTasks(sessionId, mergedTasks);
+        mergeTeamTaskProgressBaseline(sessionId, historyState.taskProgressBaseline);
 
         const mergedExecutionEvents = mergeById(
           historyState.executionEvents,
@@ -349,7 +388,7 @@ export function ToolPanel({
     return () => {
       controller.abort();
     };
-  }, [isConnected, isNewSessionPromotion, mode, sessionId, setTeamHistoryMessages, setTeamHumanShareCommands, setTeamMemberExecutionEvents, setTeamMembers, setTeamTaskEvents, setTeamTasks]);
+  }, [isConnected, isNewSessionPromotion, mergeTeamTaskProgressBaseline, mode, sessionId, setTeamHistoryMessages, setTeamHumanShareCommands, setTeamMemberExecutionEvents, setTeamMembers, setTeamTaskEvents, setTeamTasks]);
 
   const memoryDisplay =
     memoryUsage.rssMb == null
@@ -409,6 +448,8 @@ export function ToolPanel({
               onTabChange={setTeamAreaActiveTab}
               onCollapse={() => setTeamAreaExpanded(false)}
               reviewPanel={codeReviewPanel}
+              selectedArtifactId={teamAreaSelectedArtifactId}
+              onArtifactSelect={setTeamAreaSelectedArtifactId}
             />
           </div>
         </div>
@@ -429,9 +470,11 @@ export function ToolPanel({
             activeTab={teamAreaActiveTab}
             activeDetailTab={teamAreaActiveDetailTab}
             selectedMemberId={teamAreaSelectedMemberId}
+            selectedArtifactId={teamAreaSelectedArtifactId}
             onTabChange={setTeamAreaActiveTab}
             onDetailTabChange={setTeamAreaActiveDetailTab}
             onMemberSelect={setTeamAreaSelectedMemberId}
+            onArtifactSelect={setTeamAreaSelectedArtifactId}
             onCollapse={() => {
               setTeamAreaExpanded(false);
               setTeamAreaSelectedMemberId('');
@@ -498,9 +541,10 @@ export function ToolPanel({
         {canReviewCode && codeProject && sessionId ? (
           <CodeEnvironmentPanel
             project={codeProject}
-            sessionId={sessionId}
             isProcessing={isProcessing}
+            diffWatch={codeGitDiffWatch}
             onReview={() => {
+              setCodeReviewTarget?.({ source: 'working_tree' });
               setTeamAreaActiveTab('review');
               setTeamAreaExpanded(true);
             }}

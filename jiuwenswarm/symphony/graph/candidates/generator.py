@@ -9,7 +9,7 @@ from typing import Dict, Iterable, List, MutableMapping, Set, Tuple
 from jiuwenswarm.symphony.fingerprint.models import (
     ArtifactSpec,
     ParameterSpec,
-    SkillFingerprint,
+    Fingerprint,
 )
 from jiuwenswarm.symphony.fingerprint.normalize.data_type_vocab import (
     DataTypeVocabulary,
@@ -186,7 +186,7 @@ class CandidateGenerator:
 
     def _add_semantic_overlap_candidates(
         self,
-        skills: List[SkillFingerprint],
+        skills: List[Fingerprint],
         skill_terms: Dict[str, Set[str]],
         candidates: MutableMapping[Tuple[str, str], RelationCandidate],
     ) -> None:
@@ -245,7 +245,7 @@ class CandidateGenerator:
 
     def _add_textual_coercion_candidates(
         self,
-        skills: List[SkillFingerprint],
+        skills: List[Fingerprint],
         skill_terms: Dict[str, Set[str]],
         candidates: MutableMapping[Tuple[str, str], RelationCandidate],
     ) -> None:
@@ -373,7 +373,7 @@ class CandidateIndexes:
         )
 
     @classmethod
-    def from_skills(cls, skills: Iterable[SkillFingerprint]) -> "CandidateIndexes":
+    def from_skills(cls, skills: Iterable[Fingerprint]) -> "CandidateIndexes":
         indexes = cls()
         for skill in skills:
             for output in skill.outputs:
@@ -603,7 +603,7 @@ def _debug_candidate_generated(
 _DATA_TYPE_VOCAB = DataTypeVocabulary.default()
 
 
-def _skill_terms(skill: SkillFingerprint) -> Set[str]:
+def _skill_terms(skill: Fingerprint) -> Set[str]:
     terms: Set[str] = set()
     chunks = [skill.id, skill.name, skill.description]
     chunks.extend(item.name for item in skill.inputs)

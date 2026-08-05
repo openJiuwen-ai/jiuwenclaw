@@ -60,6 +60,9 @@ class ChatSendParams(TypedDict, total=False):
     workspace_dir: NotRequired[str]
     """工作空间目录。"""
 
+    supports_user_interaction: NotRequired[bool]
+    """客户端是否能处理 ask_user 等用户交互。缺省为 True，兼容现有客户端。"""
+
     plan_entry_source: NotRequired[str]
     """plan 模式入口来源（internal use）。"""
 

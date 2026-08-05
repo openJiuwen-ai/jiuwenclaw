@@ -1,5 +1,5 @@
 import { webRequest } from '../../services/webClient';
-import type { GitRepoStatus, ProjectGitDiffStatus } from './types';
+import type { GitRepoStatus, GitTurnDiff, GitTurnDiffList, ProjectGitDiffStatus } from './types';
 
 export const gitClient = {
   status: (projectId: string) =>
@@ -49,5 +49,27 @@ export const gitClient = {
       session_id: sessionId,
       include_files: options.includeFiles ?? false,
       include_hunks: options.includeHunks ?? false,
+    }),
+
+  turnDiffList: (projectId: string, sessionId: string, options: { limit?: number; cursor?: number } = {}) =>
+    webRequest<GitTurnDiffList>('project.git.turn_diff_list', {
+      project_id: projectId,
+      session_id: sessionId,
+      limit: options.limit ?? 50,
+      cursor: options.cursor ?? 0,
+    }),
+
+  turnDiff: (
+    projectId: string,
+    sessionId: string,
+    target: { changeSetId?: string; turnIndex?: number },
+    options: { includeFiles?: boolean; includeHunks?: boolean } = {}
+  ) =>
+    webRequest<GitTurnDiff>('project.git.turn_diff', {
+      project_id: projectId,
+      session_id: sessionId,
+      ...(target.changeSetId ? { change_set_id: target.changeSetId } : { turn_index: target.turnIndex }),
+      include_files: options.includeFiles ?? true,
+      include_hunks: options.includeHunks ?? true,
     }),
 };

@@ -13,6 +13,13 @@ from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
+# Fallback names when an event carries no ``phase`` / ``label`` — placeholder
+# values, not real author-written ones. Kind-aware so a label-less ``human()``
+# node surfaces as "unnamed human" instead of the misleading "agent".
+_UNNAMED_PHASE = "unnamed phase"
+_UNNAMED_HUMAN = "unnamed human"
+_UNNAMED_AGENT = "unnamed agent"
+
 
 # ---------------------------------------------------------------------------
 # Input model — mirrors WorkflowProgressTeamEvent fields
@@ -45,6 +52,14 @@ class WorkflowProgress(BaseModel):
       outcome        -> outcome
       text           -> text  (free narration text; term phrase on
                                workflow_started/completed, e.g. "Workflow started")
+      correlation_id -> correlation_id  (session turn id on AGENT_STARTED for
+                           agent_session / human_session / human; NOT plain agent())
+      node_type      -> node_type  (AGENT_STARTED only:
+                           agent/agent_session/human/human_session;
+                           sole source of node kind — kind derives:
+                           node_type in {human, human_session} -> human)
+      agent_id       -> agent_id  (AGENT_*: deterministic resume-stable node id)
+      answer         -> answer  (HUMAN_REPLIED: the person's raw reply text)
 
     """
 
@@ -59,6 +74,10 @@ class WorkflowProgress(BaseModel):
     outcome: Optional[str] = None
     text: Optional[str] = None
     phases: Optional[list[PhasePlan]] = None
+    correlation_id: Optional[str] = None
+    node_type: Optional[str] = None
+    agent_id: Optional[str] = None
+    answer: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +108,10 @@ class WorkflowAgentActivity(BaseModel):
     activity is written. Tool-call activity (type="tool_call" /
     "tool_result") requires upstream structured data which is not yet
     available. ``activity`` on ``WorkflowAgentState`` is always empty.
+
+    Human nodes never produce activity (their question/answer live on
+    ``human_prompt`` / ``human_reply``); only agent nodes' tool_call /
+    tool_result activity is recorded here.
     """
 
     timestamp: str  # required — every entry must be timestamped
@@ -105,7 +128,7 @@ class WorkflowAgentState(BaseModel):
 
     id: str
     name: str
-    status: str = "running"  # running / completed / failed
+    status: str = "running"  # running / completed / failed / waiting_for_human
     model: Optional[str] = None
     prompt: Optional[str] = None
     activity: list[WorkflowAgentActivity] = []
@@ -116,6 +139,11 @@ class WorkflowAgentState(BaseModel):
     # reserved — pending upstream token accounting
     token_count: Optional[int] = None
     duration_ms: Optional[int] = None
+    kind: str = "agent"  # "agent" | "human" — derived: node_type in {"human","human_session"} -> "human"
+    node_type: Optional[str] = None
+    correlation_id: Optional[str] = None
+    human_prompt: Optional[str] = None
+    human_reply: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict for event payload."""
@@ -180,6 +208,8 @@ class WorkflowRunState(BaseModel):
         "agent_started": "_on_agent_started",
         "agent_completed": "_on_agent_completed",
         "agent_failed": "_on_agent_failed",
+        "human_prompt": "_on_human_prompt",
+        "human_replied": "_on_human_replied",
         "workflow_completed": "_on_workflow_completed",
         "workflow_failed": "_on_workflow_failed",
         "log": "_on_log",
@@ -213,9 +243,39 @@ class WorkflowRunState(BaseModel):
 
     @staticmethod
     def _find_agent_in_phase(phase: WorkflowPhaseState, agent_label: str) -> Optional[WorkflowAgentState]:
-        """Find an agent by its label within a phase."""
+        """Fallback locator: last same-label agent not yet terminal.
+
+        Main path resolves by ``agent_id`` / ``correlation_id`` (see
+        ``_resolve_agent``); this only handles legacy events without those ids.
+        Returning the *last* non-terminal match (rather than the first) lands a
+        late completion on the currently-running instance — e.g. the 2nd
+        iteration of a same-label loop, not the already-completed 1st.
+        """
+        last_running: Optional[WorkflowAgentState] = None
         for agent in phase.agents:
-            if agent.name == agent_label:
+            if agent.name == agent_label and agent.status not in (
+                "completed", "failed", "stopped", "waiting_for_human",
+            ):
+                last_running = agent
+        return last_running
+
+    @staticmethod
+    def _find_completed_agent_needing_outcome(
+            phase: WorkflowPhaseState, agent_label: str,
+    ) -> Optional[WorkflowAgentState]:
+        """Last same-label agent sealed ``completed`` without an outcome yet.
+
+        Phase switches and workflow teardown can mark still-running agents as
+        ``completed`` before ``agent_completed`` arrives. When ``agent_id`` is
+        missing or mismatched, fall back to the most recent outcome-less
+        completed instance with the same label.
+        """
+        for agent in reversed(phase.agents):
+            if (
+                    agent.name == agent_label
+                    and agent.status == "completed"
+                    and not agent.outcome
+            ):
                 return agent
         return None
 
@@ -253,9 +313,14 @@ class WorkflowRunState(BaseModel):
             self.duration_ms = self._calc_duration_ms(self.started_at, self.completed_at)
 
     def _finalize_running_agents(self, phase: WorkflowPhaseState, terminal_status: str) -> None:
-        """Finalize any still-running agents in ``phase`` to ``terminal_status``."""
+        """Finalize any still-running agents in ``phase`` to ``terminal_status``.
+
+        A node left ``waiting_for_human`` at teardown (the run was torn down
+        while a human_session turn was pending) is also closed — otherwise the
+        frontend would spin forever on a reply that will never arrive.
+        """
         for agent in phase.agents:
-            if agent.status == "running":
+            if agent.status in ("running", "waiting_for_human"):
                 self._stamp_agent_terminal(agent, terminal_status)
 
     def _finalize_running_phases(self, terminal_status: str) -> None:
@@ -325,6 +390,14 @@ class WorkflowRunState(BaseModel):
         ``running`` — is finalized to ``completed`` together with its
         still-running agents.
 
+        Same-name phase cards are **reused** (one card per phase name, not per
+        iteration): the found card is flipped back to ``running`` regardless of
+        its prior status (planned/running/completed/failed) so the state may
+        jump forward and back across iterations. Agents and counters keep
+        accumulating on that same card — ``agent_count`` /
+        ``completed_agent_count`` are phase-level running totals, not
+        per-iteration.
+
         Returns ``(target_phase, sealed_phase_or_None)``.
         """
         target = self._find_phase_by_name(phase_name)
@@ -333,12 +406,21 @@ class WorkflowRunState(BaseModel):
             target = WorkflowPhaseState(id=phase_id, name=phase_name, status="running")
             self.phases.append(target)
             logger.warning("[WF_DBG WorkflowRunState] phase %s not in plan, created on the fly", phase_name)
-        elif not self._is_terminal_status(target.status):
+        else:
+            # Reuse the same-name card; flip it back to running so the state may
+            # jump (e.g. completed -> running on a later iteration). Agents and
+            # counters keep accumulating on this card.
             target.status = "running"
 
         sealed: Optional[WorkflowPhaseState] = None
         prev = self._last_phase
-        if prev is not None and prev.name != phase_name and prev.status == "running":
+        can_seal_prev = (
+            prev is not None
+            and prev is not target
+            and prev.name != phase_name
+            and prev.status == "running"
+        )
+        if can_seal_prev:
             prev.status = "completed"
             self._finalize_running_agents(prev, "completed")
             sealed = prev
@@ -349,15 +431,37 @@ class WorkflowRunState(BaseModel):
         return target, sealed
 
     def _resolve_agent(
-            self, phase_name: str, agent_label: str
+            self,
+            phase_name: str,
+            agent_label: str,
+            *,
+            agent_id: Optional[str] = None,
+            correlation_id: Optional[str] = None,
     ) -> tuple[Optional[WorkflowPhaseState], Optional[WorkflowAgentState]]:
-        """Locate an agent by label, preferring its named phase.
+        """Locate an agent node by priority: agent_id -> correlation_id -> label fallback.
 
-        Falls back to scanning every phase when the named phase is missing or
-        does not contain the agent — this tolerates phase-name drift between
-        ``agent_started`` and ``agent_completed`` / ``agent_failed``. Logs a
-        warning when nothing matches so the drop is visible, not silent.
+        1. ``agent_id`` — exact match across all phases (AGENT_COMPLETED /
+           AGENT_FAILED). The only sound way to disambiguate same-label nodes
+           in for-loops, multi-turn sessions, and ``parallel``.
+        2. ``correlation_id`` — cross-phase match (HUMAN_PROMPT /
+           HUMAN_REPLIED carry no ``phase``, so this scans every phase).
+        3. Fallback — label + last non-terminal instance within the named
+           phase, then every phase. Only for legacy events without ids.
+
+        Late ``agent_completed`` after a phase seal (node already ``completed``
+        with no outcome, and ``agent_id`` may not match) is handled by
+        ``_resolve_sealed_agent_for_outcome_backfill``, not here.
         """
+        if agent_id:
+            for phase in self.phases:
+                for agent in phase.agents:
+                    if agent.id == agent_id:
+                        return phase, agent
+        if correlation_id:
+            for phase in self.phases:
+                for agent in phase.agents:
+                    if agent.correlation_id == correlation_id:
+                        return phase, agent
         phase = self._find_phase_by_name(phase_name)
         if phase is not None:
             agent = self._find_agent_in_phase(phase, agent_label)
@@ -367,10 +471,60 @@ class WorkflowRunState(BaseModel):
             agent = self._find_agent_in_phase(candidate, agent_label)
             if agent is not None:
                 return candidate, agent
-        logger.warning(
-            "[WF_DBG WorkflowRunState] agent %r in phase %r not found; known phases=%s",
-            agent_label, phase_name, [p.name for p in self.phases],
+        return None, None
+
+    def _resolve_agent_for_finalize(
+            self,
+            progress: WorkflowProgress,
+            *,
+            status: str,
+            outcome: Optional[str],
+    ) -> tuple[Optional[WorkflowPhaseState], Optional[WorkflowAgentState]]:
+        """Resolve the node targeted by a terminal agent_completed / agent_failed.
+
+        Tries the normal id/label path first. When a late ``agent_completed``
+        carries an outcome but primary resolve misses (phase seal already
+        stamped the node completed, and agent_id may be absent/mismatched),
+        falls back to ``_resolve_sealed_agent_for_outcome_backfill``.
+        """
+        phase_name = progress.phase or _UNNAMED_PHASE
+        agent_label = progress.label or ""
+        phase, agent = self._resolve_agent(
+            phase_name, agent_label,
+            agent_id=progress.agent_id, correlation_id=progress.correlation_id,
         )
+        need_outcome_backfill = (
+            (phase is None or agent is None)
+            and status == "completed"
+            and outcome is not None
+        )
+        if need_outcome_backfill:
+            phase, agent = self._resolve_sealed_agent_for_outcome_backfill(
+                phase_name, agent_label,
+            )
+        return phase, agent
+
+    def _resolve_sealed_agent_for_outcome_backfill(
+            self,
+            phase_name: str,
+            agent_label: str,
+    ) -> tuple[Optional[WorkflowPhaseState], Optional[WorkflowAgentState]]:
+        """Find a phase-sealed completed node still missing an outcome.
+
+        Used when primary ``_resolve_agent`` misses because phase switch /
+        teardown already stamped the node ``completed`` (so the non-terminal
+        label fallback skips it) and ``agent_id`` is absent or mismatched.
+        Prefers the named phase, then scans every phase.
+        """
+        phase = self._find_phase_by_name(phase_name)
+        if phase is not None:
+            agent = self._find_completed_agent_needing_outcome(phase, agent_label)
+            if agent is not None:
+                return phase, agent
+        for candidate in self.phases:
+            agent = self._find_completed_agent_needing_outcome(candidate, agent_label)
+            if agent is not None:
+                return candidate, agent
         return None, None
 
     def _stamp_agent_terminal(self, agent: WorkflowAgentState, terminal_status: str) -> None:
@@ -389,9 +543,44 @@ class WorkflowRunState(BaseModel):
             error: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
         """Resolve agent from progress, mark terminal, bump counters, return phase delta."""
-        phase, agent = self._resolve_agent(progress.phase or "?", progress.label or "")
+        phase, agent = self._resolve_agent_for_finalize(
+            progress, status=status, outcome=outcome,
+        )
         if phase is None or agent is None:
+            logger.warning(
+                "[WF_DBG WorkflowRunState] finalize %s dropped: phase=%r label=%r agent_id=%r",
+                status, progress.phase, progress.label, progress.agent_id,
+            )
             return None
+
+        already_terminal = agent.status in ("completed", "failed", "stopped")
+        if already_terminal:
+            if status == "completed" and agent.status == "completed":
+                updated = False
+                if outcome is not None and not agent.outcome:
+                    agent.outcome = outcome
+                    updated = True
+                if error is not None and not agent.error:
+                    agent.error = error
+                    updated = True
+                if updated:
+                    # Phase seal / workflow teardown can mark agents completed
+                    # without bumping counters; do it on the first real completion.
+                    if phase.completed_agent_count < phase.agent_count:
+                        phase.completed_agent_count += 1
+                        self.completed_agent_count += 1
+                    logger.info(
+                        "[WF_DBG WorkflowRunState] backfilled outcome for agent %s, phase=%s",
+                        agent.name, phase.name,
+                    )
+                    return self._build_phase_delta(phase)
+                return None
+            if status == "failed" and agent.status == "failed":
+                if error is not None and not agent.error:
+                    agent.error = error
+                    return self._build_phase_delta(phase)
+                return None
+
         self._stamp_agent_terminal(agent, status)
         if outcome is not None:
             agent.outcome = outcome
@@ -400,8 +589,9 @@ class WorkflowRunState(BaseModel):
         phase.completed_agent_count += 1
         self.completed_agent_count += 1
         logger.info(
-            "[WF_DBG WorkflowRunState] agent %s -> %s, phase=%s",
+            "[WF_DBG WorkflowRunState] agent %s -> %s, phase=%s outcome_len=%s",
             agent.name, status, phase.name,
+            len(outcome) if isinstance(outcome, str) else 0,
         )
         return self._build_phase_delta(phase)
 
@@ -445,7 +635,7 @@ class WorkflowRunState(BaseModel):
         (see ``_switch_to_phase``), not by explicit PHASE events.
         """
         logger.info("[WF_DBG WorkflowRunState] id=%s name=%s phase event: %s (ignored, state unchanged)",
-                    self.id, self.name, progress.phase or "?")
+                    self.id, self.name, progress.phase or _UNNAMED_PHASE)
         return None
 
     def _on_agent_started(self, progress: WorkflowProgress) -> dict[str, Any]:
@@ -455,10 +645,22 @@ class WorkflowRunState(BaseModel):
         this agent's phase differs from the last observed phase, the previous
         running phase is finalized — see ``_switch_to_phase``.
         """
-        target_phase, sealed_phase = self._switch_to_phase(progress.phase or "?")
+        target_phase, sealed_phase = self._switch_to_phase(progress.phase or _UNNAMED_PHASE)
 
-        agent_label = progress.label or "agent"
-        agent_id = self._generate_agent_id(agent_label)
+        # No user-facing label provided — fall back to a kind-aware placeholder.
+        if progress.label:
+            agent_label = progress.label
+        elif progress.node_type in ("human", "human_session"):
+            agent_label = _UNNAMED_HUMAN
+        else:
+            agent_label = _UNNAMED_AGENT
+        if not progress.agent_id:
+            logger.warning(
+                "[WF_DBG WorkflowRunState] agent_started missing agent_id for %r; "
+                "generated slug may not match later agent_completed",
+                agent_label,
+            )
+        agent_id = progress.agent_id or self._generate_agent_id(agent_label)
         agent_state = WorkflowAgentState(
             id=agent_id,
             name=agent_label,
@@ -466,6 +668,9 @@ class WorkflowRunState(BaseModel):
             prompt=progress.prompt,
             model=progress.model,
             started_at=self._now_iso(),
+            kind="human" if progress.node_type in ("human", "human_session") else "agent",
+            node_type=progress.node_type,
+            correlation_id=progress.correlation_id,
         )
         target_phase.agents.append(agent_state)
         target_phase.agent_count += 1
@@ -490,8 +695,46 @@ class WorkflowRunState(BaseModel):
         return self._finalize_agent(
             progress,
             status="failed",
-            error=progress.outcome or progress.text or "agent failed",
+            error=progress.text or progress.outcome or "agent failed",
         )
+
+    def _on_human_prompt(self, progress: WorkflowProgress) -> Optional[dict[str, Any]]:
+        """A human turn is now waiting for the person's reply.
+
+        Resolve the node by ``correlation_id`` (HUMAN_PROMPT carries no phase),
+        stamp it ``waiting_for_human`` and store the question. No activity is
+        appended — the question/answer live on the node itself.
+        """
+        phase, agent = self._resolve_agent(
+            progress.phase or _UNNAMED_PHASE, progress.label or "",
+            correlation_id=progress.correlation_id,
+        )
+        if phase is None or agent is None:
+            return None
+        agent.status = "waiting_for_human"
+        agent.correlation_id = progress.correlation_id
+        agent.human_prompt = progress.prompt
+        logger.info(
+            "[WF_DBG WorkflowRunState] agent %s -> waiting_for_human, phase=%s",
+            agent.name, phase.name,
+        )
+        return self._build_phase_delta(phase)
+
+    def _on_human_replied(self, progress: WorkflowProgress) -> Optional[dict[str, Any]]:
+        """The person replied to a pending human turn — clear waiting, store answer."""
+        phase, agent = self._resolve_agent(
+            progress.phase or _UNNAMED_PHASE, progress.label or "",
+            correlation_id=progress.correlation_id,
+        )
+        if phase is None or agent is None:
+            return None
+        agent.status = "running"
+        agent.human_reply = progress.answer
+        logger.info(
+            "[WF_DBG WorkflowRunState] agent %s -> replied, phase=%s",
+            agent.name, phase.name,
+        )
+        return self._build_phase_delta(phase)
 
     def _on_workflow_completed(self, progress: WorkflowProgress) -> dict[str, Any]:
         """Mark workflow as completed (terminal state) and finalize all running phases/agents.

@@ -588,3 +588,94 @@ def test_resolve_workspace_path_falls_back_when_workspace_missing():
 
 def test_module_exports_project_memory_rail():
     assert hasattr(_rail_mod, "ProjectMemoryRail")
+
+
+@pytest.mark.asyncio
+async def test_pm1_defect_a_no_marker_skips_project_layer(monkeypatch):
+    """find_project_root 返回 None 时 project 层零扫描。
+
+    files.py:242 ``if project_root is not None:`` 整块跳过，workspace 自身的
+    JIUWENSWARM.md 永远不进 _scan_relative_files。修后 fallback 到
+    workspace_key，walk 退化为单层，文件能被发现。
+    """
+    monkeypatch.setattr(_files_mod, "find_project_root", lambda *_args, **_kw: None)
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        _touch(root, "JIUWENSWARM.md", "NO-MARKER-RULE\n")
+
+        rail = ProjectMemoryRail(workspace=str(root), language="en")
+        agent = _make_agent_with_builder()
+        rail.init(agent)
+        await rail.before_model_call(ctx=_make_ctx(agent))
+
+        body = await _project_memory_body(agent, "en")
+        assert "NO-MARKER-RULE" in body, (
+            "find_project_root 返回 None 时 workspace 自身的 JIUWENSWARM.md "
+            "仍应被加载（PM-1 缺陷 A，files.py fallback 后转绿）"
+        )
+
+
+@pytest.mark.asyncio
+async def test_pm1_defect_a_no_marker_skips_rules_glob_and_local(monkeypatch):
+    """不只丢 JIUWENSWARM.md：.jiuwen/rules/*.md 与 JIUWENSWARM.local.md
+    同在 files.py:242 的 if 块内，project_root is None 时一并静默丢失。
+    修复后 fallback 走 _scan_relative_globs / LOCAL_MEMORY_FILES，应一并加载。
+    """
+    monkeypatch.setattr(_files_mod, "find_project_root", lambda *_args, **_kw: None)
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        _touch(root, ".jiuwen/rules/01_style.md", "STYLE-NO-MARKER\n")
+        _touch(root, ".jiuwen/rules/02_test.md", "TEST-NO-MARKER\n")
+        _touch(root, "JIUWENSWARM.local.md", "LOCAL-NO-MARKER\n")
+
+        rail = ProjectMemoryRail(workspace=str(root), language="en")
+        agent = _make_agent_with_builder()
+        rail.init(agent)
+        await rail.before_model_call(ctx=_make_ctx(agent))
+
+        body = await _project_memory_body(agent, "en")
+        assert "STYLE-NO-MARKER" in body, (
+            ".jiuwen/rules/*.md 在 find_project_root=None 时应仍被加载（PM-1 缺陷 A）"
+        )
+        assert "TEST-NO-MARKER" in body
+        assert "LOCAL-NO-MARKER" in body, (
+            "JIUWENSWARM.local.md 在 find_project_root=None 时应仍被加载（PM-1 缺陷 A）"
+        )
+
+
+@pytest.mark.asyncio
+async def test_pm1_defect_a_plus_b_cache_misses_newly_added_md(monkeypatch):
+    """
+    find_project_root 强制 None：
+      - 首次空目录：project 层整块跳过 → files=[]，且 watch_paths 不含
+        workspace（files.py:267 的 watch_paths.add 在 if 块内）→ 缓存空结果
+        且 snapshot 为空。
+      - 新增 JIUWENSWARM.md 后再调用：命中缓存，snapshot 比对为空视为未变
+        → 直接返回缓存的空 files，永不重扫。
+    修后 fallback 使 workspace 进 watch_paths，新增文件触发父目录 mtime 变化，
+    缓存正常失效，下一轮读到。
+    """
+    monkeypatch.setattr(_files_mod, "find_project_root", lambda *_args, **_kw: None)
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        rail = ProjectMemoryRail(workspace=str(root), language="en")
+        agent = _make_agent_with_builder()
+        rail.init(agent)
+
+        # 首次：空目录，写空缓存
+        await rail.before_model_call(ctx=_make_ctx(agent))
+        assert await _project_memory_section(agent) is None
+
+        # 用户在启动目录手动新增 JIUWENSWARM.md
+        _touch(root, "JIUWENSWARM.md", "LATE-ADDED-RULE\n")
+
+        # 下一轮：缓存应失效（或 project 层被扫到），读到新增文件
+        await rail.before_model_call(ctx=_make_ctx(agent))
+        body = await _project_memory_body(agent, "en")
+        assert "LATE-ADDED-RULE" in body, (
+            "无 marker 目录新增 JIUWENSWARM.md 后，下一轮 before_model_call 应能读到"
+            "（PM-1 缺陷 A+B，files.py fallback + watch_paths 含 workspace 后转绿）"
+        )

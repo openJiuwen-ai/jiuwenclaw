@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from jiuwenswarm.symphony.fingerprint.models import SkillFingerprint
+from jiuwenswarm.symphony.fingerprint.models import Fingerprint
 from jiuwenswarm.symphony.graph.models import LLMMatch, RelationCandidate, SkillRegistry
 
 
@@ -29,7 +29,7 @@ class CachedOntologyMatcher:
         matcher: Any,
         cache_path: str | Path,
         *,
-        fingerprints: Iterable[SkillFingerprint],
+        fingerprints: Iterable[Fingerprint],
     ) -> None:
         self.matcher = matcher
         self.cache = RelationMatchCache(
@@ -60,8 +60,10 @@ class CachedOntologyMatcher:
         resolved_by_index: dict[int, list[LLMMatch]] = {}
         diagnostics: list[Any] = []
         if misses:
-            for chunk in _chunked(misses, _matcher_batch_size(self.matcher)):
-                miss_candidates = [candidate for _, candidate in chunk]
+            # Preserve the wrapped matcher's worker-level concurrency while
+            # retaining cache flush boundaries for resumable graph builds.
+            for window in _chunked(misses, _matcher_window_size(self.matcher)):
+                miss_candidates = [candidate for _, candidate in window]
                 resolved_matches = list(
                     await self.matcher.match(registry, miss_candidates)
                 )
@@ -69,7 +71,7 @@ class CachedOntologyMatcher:
                     miss_candidates,
                     resolved_matches,
                 )
-                for index, candidate in chunk:
+                for index, candidate in window:
                     matches = resolved_by_candidate.get(candidate.key, [])
                     resolved_by_index[index] = matches
                     self.cache.store(candidate, matches)
@@ -125,12 +127,12 @@ class RelationMatchCache:
         path: str | Path,
         *,
         matcher_signature: dict[str, Any],
-        fingerprints: Iterable[SkillFingerprint],
+        fingerprints: Iterable[Fingerprint],
     ) -> None:
         self.path = Path(path).resolve()
         self.matcher_signature = matcher_signature
         self.fingerprint_hashes = {
-            item.id: _stable_sha256(item.to_dict())
+            item.id: _stable_sha256(item.graph_identity_dict())
             for item in fingerprints
         }
         self._records = self._load()
@@ -231,6 +233,17 @@ def _matcher_batch_size(matcher: Any) -> int:
         return max(1, int(getattr(matcher, "batch_size", 0) or 0))
     except (TypeError, ValueError):
         return 1
+
+
+def _matcher_max_workers(matcher: Any) -> int:
+    try:
+        return max(1, int(getattr(matcher, "max_workers", 0) or 0))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _matcher_window_size(matcher: Any) -> int:
+    return _matcher_batch_size(matcher) * _matcher_max_workers(matcher)
 
 
 def _chunked(values: list[Any], size: int) -> list[list[Any]]:

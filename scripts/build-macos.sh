@@ -210,6 +210,9 @@ if [[ ! -d "$APP_PATH" ]]; then
   exit 1
 fi
 
+printf 'Verifying frozen A2UI v0.8 bundle...\n'
+"$APP_PATH/Contents/MacOS/jiuwenswarm" "$PROJECT_ROOT/scripts/verify_a2ui_bundle.py"
+
 if [[ -n "$TUI_BINARY" && -f "$TUI_BINARY" ]]; then
   printf 'Copying TUI binary into app bundle...\n'
   cp "$TUI_BINARY" "$APP_PATH/Contents/MacOS/jiuwenswarm-tui"

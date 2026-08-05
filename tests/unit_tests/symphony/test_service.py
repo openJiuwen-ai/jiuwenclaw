@@ -5,6 +5,7 @@ import pytest
 from jiuwenswarm.symphony.config import SymphonyOrchestrationConfig
 from jiuwenswarm.symphony.orchestration import service
 from jiuwenswarm.symphony.orchestration.artifacts import ScoreArtifacts
+from jiuwenswarm.symphony.orchestration.planning.fast import FastOneShotPlanner
 
 
 class _FakeLLMClient:
@@ -118,10 +119,12 @@ async def test_plan_from_score_fast_uses_one_shot_planner(monkeypatch, tmp_path)
             mode="fast",
             min_edge_confidence=0.7,
         ),
+        language="en",
     )
 
     assert len(llm.calls) == 1
     assert result["planning_mode"] == "one_shot_fast"
+    assert result["language"] == "en"
     assert result["llm_call_count"] == 1
     assert result["recommended_plans"][0]["title"] == "Fast plan"
     assert result["recommended_plans"][0]["steps"][0]["inputs"] == [
@@ -134,6 +137,14 @@ async def test_plan_from_score_fast_uses_one_shot_planner(monkeypatch, tmp_path)
 
     prompt_payload = json.loads(llm.calls[0]["user_content"])
     assert set(prompt_payload) == {"query", "skills", "can_feed_edges"}
+    assert "language" not in prompt_payload
+    assert "planning_instructions" not in prompt_payload
+    assert "Write all user-visible natural-language fields in English" in (
+        llm.calls[0]["system_prompt"]
+    )
+    assert "Keep Skill IDs, original Skill names, status values" in (
+        llm.calls[0]["system_prompt"]
+    )
     assert prompt_payload["can_feed_edges"] == [
         {
             "source_id": "skill-a",
@@ -467,6 +478,76 @@ async def test_plan_from_score_fast_without_candidates_uses_default_subgraph(
     }
 
 
+async def test_plan_from_score_resolves_unique_skill_names(
+    monkeypatch,
+    tmp_path,
+):
+    artifacts = _artifacts(tmp_path)
+    llm = _FakeLLMClient(
+        {
+            "title": "Named candidate plan",
+            "status": "ready",
+            "steps": [{"skill_id": "skill-b", "reason": "Named seed."}],
+            "can_feed_edges": [],
+        }
+    )
+    monkeypatch.setattr(service, "load_score_artifacts", lambda score_dir: artifacts)
+
+    result = await service.plan_from_score(
+        tmp_path,
+        "use beta",
+        llm_client=llm,
+        orchestration_config=SymphonyOrchestrationConfig(mode="fast"),
+        candidate_skill_ids=["Beta Skill", "skill-a", "Beta Skill"],
+    )
+
+    assert result["skill_retrieval"]["candidate_skill_ids"] == [
+        "skill-b",
+        "skill-a",
+    ]
+
+
+async def test_plan_from_score_does_not_guess_ambiguous_skill_names(
+    monkeypatch,
+    tmp_path,
+):
+    artifacts = _artifacts(tmp_path)
+    artifacts.skills.append(
+        {
+            "id": "skill-beta-copy",
+            "name": "Beta Skill",
+            "description": "Another skill with the same display name.",
+            "inputs": [],
+            "outputs": [],
+        }
+    )
+    llm = _FakeLLMClient(
+        {
+            "title": "Fallback plan",
+            "status": "ready",
+            "steps": [{"skill_id": "skill-a", "reason": "Fallback."}],
+            "can_feed_edges": [],
+        }
+    )
+    monkeypatch.setattr(service, "load_score_artifacts", lambda score_dir: artifacts)
+
+    result = await service.plan_from_score(
+        tmp_path,
+        "use beta",
+        llm_client=llm,
+        orchestration_config=SymphonyOrchestrationConfig(mode="fast"),
+        candidate_skill_ids=["Beta Skill"],
+    )
+
+    assert result["skill_retrieval"] == {
+        "source": "input",
+        "used": False,
+        "candidate_skill_ids": [],
+        "candidate_count": 0,
+        "fallback_reason": "candidate_skill_ids did not match current score",
+    }
+
+
 @pytest.mark.parametrize(
     ("candidate_skill_ids", "fallback_reason"),
     [
@@ -518,16 +599,60 @@ async def test_plan_from_score_fast_falls_back_for_empty_or_unknown_candidates(
     }
 
 
-async def test_plan_from_score_rejects_non_fast_mode(monkeypatch, tmp_path):
+async def test_plan_from_score_beam_uses_bidirectional_planner(monkeypatch, tmp_path):
+    artifacts = _artifacts(tmp_path)
+    seen = {}
+
+    class FakeBeamPlanner:
+        def __init__(self, artifacts_arg, **kwargs):
+            seen["artifacts"] = artifacts_arg
+            seen["kwargs"] = kwargs
+
+        async def plan(self, query):
+            seen["query"] = query
+            return {
+                "planning_mode": "bidirectional_beam",
+                "recommended_plans": [],
+                "plans": [],
+                "status": "no_plan",
+            }
+
+    monkeypatch.setattr(service, "load_score_artifacts", lambda score_dir: artifacts)
+    monkeypatch.setattr(service, "BidirectionalBeamPlanner", FakeBeamPlanner)
+
+    result = await service.plan_from_score(
+        tmp_path,
+        "beam plan",
+        llm_client=object(),
+        orchestration_config=SymphonyOrchestrationConfig(
+            mode="beam",
+            top_k=2,
+            max_depth=3,
+            min_edge_confidence=0.7,
+        ),
+        candidate_skill_ids=["skill-a", "unknown"],
+    )
+
+    assert result["planning_mode"] == "bidirectional_beam"
+    assert result["execution_graph"]["nodes"] == []
+    assert result["skill_retrieval"]["candidate_skill_ids"] == ["skill-a"]
+    assert seen["artifacts"] is artifacts
+    assert seen["query"] == "beam plan"
+    assert seen["kwargs"]["top_k"] == 2
+    assert seen["kwargs"]["max_depth"] == 3
+    assert seen["kwargs"]["candidate_skill_ids"] == ("skill-a",)
+
+
+async def test_plan_from_score_rejects_unknown_mode(monkeypatch, tmp_path):
     artifacts = _artifacts(tmp_path)
     monkeypatch.setattr(service, "load_score_artifacts", lambda score_dir: artifacts)
 
     with pytest.raises(ValueError, match="Unsupported orchestration mode"):
         await service.plan_from_score(
             tmp_path,
-            "beam plan",
+            "graph plan",
             llm_client=object(),
-            orchestration_config=SymphonyOrchestrationConfig(mode="beam"),
+            orchestration_config=SymphonyOrchestrationConfig(mode="graph"),
         )
 
 
@@ -837,8 +962,6 @@ async def test_fast_plan_rejects_invalid_inferred_edges(
 
     assert result["success"] is False
     assert detail in result["detail"]
-
-
 async def test_fast_plan_drops_single_step_self_loop_edge(monkeypatch, tmp_path):
     artifacts = _artifacts(tmp_path)
     llm = _FakeLLMClient(
@@ -889,3 +1012,140 @@ async def test_fast_plan_drops_self_loop_and_keeps_valid_edge(monkeypatch, tmp_p
     assert [(edge["source_id"], edge["target_id"]) for edge in edges] == [
         ("skill-a", "skill-b")
     ]
+
+
+def _dynamic_planner(artifacts, overlay, *, candidate_skill_ids=None):
+    return FastOneShotPlanner(
+        artifacts,
+        llm_config=None,
+        llm_client=object(),
+        min_edge_confidence=0.7,
+        candidate_skill_ids=candidate_skill_ids,
+        dynamic_overlay=overlay,
+    )
+
+
+def test_dynamic_overlay_reorders_query_relevant_static_edges(tmp_path):
+    planner = _dynamic_planner(
+        _artifacts(tmp_path),
+        {
+            "edges": {
+                "skill-b->skill-c:can_feed": {
+                    "source_id": "skill-b",
+                    "target_id": "skill-c",
+                    "relation_type": "can_feed",
+                    "runtime_weight": 1.5,
+                    "success_count": 10,
+                    "failure_count": 0,
+                    "attempt_count": 10,
+                    "representative_queries": ["publish the gamma report"],
+                }
+            }
+        },
+    )
+
+    edges = planner._sorted_eligible_edges("publish the gamma report")
+
+    assert (edges[0]["source"], edges[0]["target"]) == ("skill-b", "skill-c")
+    assert edges[0]["runtime_weight"] == 1.5
+    assert edges[0]["effective_score"] == pytest.approx(0.88 * 1.5)
+
+
+def test_dynamic_overlay_downranks_explicitly_failed_static_edge(tmp_path):
+    planner = _dynamic_planner(
+        _artifacts(tmp_path),
+        {
+            "edges": {
+                "skill-a->skill-b:can_feed": {
+                    "source_id": "skill-a",
+                    "target_id": "skill-b",
+                    "relation_type": "can_feed",
+                    "runtime_weight": 0.4,
+                    "success_count": 0,
+                    "failure_count": 12,
+                    "attempt_count": 12,
+                    "representative_queries": ["review the alpha draft"],
+                }
+            }
+        },
+    )
+
+    edges = planner._sorted_eligible_edges("review the alpha draft")
+
+    assert [(edge["source"], edge["target"]) for edge in edges[:2]] == [
+        ("skill-b", "skill-c"),
+        ("skill-a", "skill-b"),
+    ]
+    assert edges[1]["runtime_evidence"]["failure_count"] == 12
+
+
+@pytest.mark.parametrize("success_count", [1, 2])
+def test_runtime_only_edge_requires_repeated_clean_success(tmp_path, success_count):
+    planner = _dynamic_planner(
+        _artifacts(tmp_path),
+        {
+            "edges": {
+                "skill-c->skill-a:can_feed": {
+                    "source_id": "skill-c",
+                    "target_id": "skill-a",
+                    "relation_type": "can_feed",
+                    "runtime_weight": 1.1,
+                    "success_count": success_count,
+                    "failure_count": 0,
+                    "attempt_count": success_count,
+                }
+            }
+        },
+        candidate_skill_ids=["skill-c"],
+    )
+
+    edges = planner._sorted_eligible_edges("create an alpha draft from gamma")
+    runtime_edges = [edge for edge in edges if edge.get("runtime_only")]
+
+    assert bool(runtime_edges) is (success_count >= 2)
+
+
+def test_dynamic_overlay_is_neutral_for_unrelated_query(tmp_path):
+    planner = _dynamic_planner(
+        _artifacts(tmp_path),
+        {
+            "edges": {
+                "skill-a->skill-b:can_feed": {
+                    "source_id": "skill-a",
+                    "target_id": "skill-b",
+                    "relation_type": "can_feed",
+                    "runtime_weight": 2.0,
+                    "success_count": 20,
+                    "failure_count": 0,
+                    "attempt_count": 20,
+                    "representative_queries": ["verify an invoice"],
+                }
+            }
+        },
+    )
+
+    edges = planner._sorted_eligible_edges("show tomorrow's weather")
+
+    assert edges[0].get("runtime_evidence") is None
+    assert edges[0]["confidence"] == 0.91
+
+
+async def test_disabled_dynamic_graph_does_not_load_overlay(monkeypatch, tmp_path):
+    artifacts = _artifacts(tmp_path)
+    llm = _FakeLLMClient({"status": "no_plan", "steps": []})
+    monkeypatch.setattr(service, "load_score_artifacts", lambda score_dir: artifacts)
+
+    def fail_if_loaded(score_dir):
+        raise AssertionError(f"overlay should not be loaded from {score_dir}")
+
+    monkeypatch.setattr(service, "load_dynamic_overlay", fail_if_loaded)
+
+    result = await service.plan_from_score(
+        tmp_path,
+        "static only",
+        llm_client=llm,
+        dynamic_graph_enabled=False,
+    )
+
+    assert result["dynamic_graph_enabled"] is False
+    assert result["dynamic_overlay_used"] is False

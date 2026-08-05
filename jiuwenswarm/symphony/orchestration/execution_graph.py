@@ -39,8 +39,13 @@ def build_execution_graph(
     decision = planning_result.get("decision")
     if isinstance(decision, dict):
         diagnostics.append({"source": "decision", **decision})
+    runtime_scoring = planning_result.get("runtime_scoring_summary")
+    if isinstance(runtime_scoring, dict):
+        diagnostics.append({"source": "runtime_scoring", **runtime_scoring})
 
     return {
+        "plan_id": planning_result.get("plan_id"),
+        "dynamic_overlay_used": bool(planning_result.get("dynamic_overlay_used")),
         "nodes": [
             _project_skill(artifacts.skill_by_id[skill_id])
             for skill_id in skill_ids

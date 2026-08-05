@@ -411,6 +411,8 @@ def build_structured_ask_user(params: dict[str, Any], ctx: SwarmBuildContext) ->
     from jiuwenswarm.agents.harness.common.rails import StructuredAskUserRail
 
     try:
+        if (ctx.request_metadata or {}).get("supports_user_interaction") is False:
+            return None
         inp = StructuredAskUserInput.resolve(params, ctx)
         return StructuredAskUserRail(language=inp.language)
     except Exception as exc:

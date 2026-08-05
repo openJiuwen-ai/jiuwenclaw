@@ -79,6 +79,9 @@ CONTROL_MESSAGE_TEXTS: frozenset[str] = frozenset(
     }
 )
 
+# /join、/exit 的 session_ref 格式：team_<name>_session_<id>
+_SESSION_REF_RE: re.Pattern[str] = re.compile(r'^team_[\w-]+_session_[\w-]+$')
+
 
 class ParsedControlAction(str, Enum):
     """parse_channel_control_text 的判定结果。"""

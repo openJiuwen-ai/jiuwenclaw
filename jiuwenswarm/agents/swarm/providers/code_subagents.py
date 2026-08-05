@@ -40,6 +40,9 @@ from openjiuwen.agent_teams.harness.manifest import (
 from openjiuwen.harness.subagents.browser_agent import build_browser_agent_config
 from openjiuwen.harness.subagents.code_agent import build_code_agent_config
 
+from jiuwenswarm.agents.harness.common.browser_defaults import (
+    DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
+)
 from jiuwenswarm.agents.swarm.context import SwarmBuildContext
 from jiuwenswarm.agents.swarm.providers.code_rails import (
     code_runtime_language,
@@ -122,7 +125,7 @@ class BrowserAgentInput(ConstructionInput):
     """Construction inputs for the swarm browser sub-agent."""
 
     max_iterations: int = param_field(
-        default=_DEFAULT_MAX_ITERATIONS,
+        default=DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
         description="Maximum task-loop iterations for the sub-agent.",
     )
     workspace_root: str | None = context_field(
