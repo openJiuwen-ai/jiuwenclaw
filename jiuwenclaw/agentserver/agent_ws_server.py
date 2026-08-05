@@ -523,8 +523,9 @@ class AgentWebSocketServer:
                     request = e2a_to_agent_request(env)
 
         logger.info(
-            "[AgentWebSocketServer] 收到请求: request_id=%s channel_id=%s is_stream=%s",
+            "[AgentWebSocketServer] 收到请求: request_id=%s request_method=%s channel_id=%s is_stream=%s",
             request.request_id,
+            request.req_method,
             request.channel_id,
             request.is_stream,
             extra={'user_visible': 'critical'}
@@ -657,6 +658,18 @@ class AgentWebSocketServer:
                 logger.info(f"[AgentWebSocketServer] 处理 config.cache_clear: request_id={request.request_id}",
                             extra={'user_visible': 'progress'})
                 await self._handle_config_cache_clear(ws, request, send_lock)
+                return
+            if (
+                request.req_method == ReqMethod.SYNC_AGENTS_CONFIGS
+                and isinstance(request.params, dict)
+                and "teams" in request.params
+            ):
+                logger.info(
+                    "[AgentWebSocketServer] 处理 team sync_agents_configs: request_id=%s",
+                    request.request_id,
+                    extra={"user_visible": "progress"},
+                )
+                await self._handle_agents_sync_configs(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.AGENT_RELOAD_CONFIG:
                 logger.info(f"[AgentWebSocketServer] 处理 agent.reload_config: request_id={request.request_id}",
@@ -1667,6 +1680,76 @@ class AgentWebSocketServer:
                 channel_id=request.channel_id,
                 ok=False,
                 payload={"error": str(e)},
+            )
+
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await ws.send(json.dumps(wire, ensure_ascii=False))
+
+    async def _handle_agents_sync_configs(
+        self,
+        ws: Any,
+        request: AgentRequest,
+        send_lock: asyncio.Lock,
+    ) -> None:
+        """Apply the agent-team catalog sent by relay-claw.
+
+        ``teams`` is optional: relay-claw omits it when the catalog has no
+        managed team configuration, in which case an existing hand-written
+        team configuration must remain untouched.
+        """
+        from dataclasses import asdict as dataclass_asdict
+        import json as _json
+
+        params = request.params if isinstance(request.params, dict) else {}
+        revision = str(params.get("revision") or "").strip()
+        service_id = str(params.get("service_id") or "").strip()
+        teams_applied = False
+        team_names: list[str] = []
+        agent_names: list[str] = []
+
+        try:
+            if "teams" in params:
+                teams_payload = params.get("teams")
+                if not isinstance(teams_payload, dict):
+                    raise ValueError("teams must be an object")
+
+                from jiuwenclaw.config import sync_agents_configs_in_config
+
+                sync_result = sync_agents_configs_in_config(teams_payload)
+                teams_applied = True
+                team_names = sync_result["team_names"]
+                agent_names = sync_result["agent_names"]
+
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload={
+                    "revision": revision,
+                    "service_id": service_id,
+                    "team_names": team_names,
+                    "agent_names": agent_names,
+                    "teams_applied": teams_applied,
+                },
+                metadata=request.metadata,
+            )
+        except (OSError, ValueError) as exc:
+            logger.exception(
+                "[AgentWebSocketServer] sync_agents_configs failed: %s",
+                exc,
+            )
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={
+                    "revision": revision,
+                    "service_id": service_id,
+                    "teams_applied": False,
+                    "error": str(exc),
+                },
+                metadata=request.metadata,
             )
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
