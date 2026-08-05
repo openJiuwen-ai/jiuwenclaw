@@ -756,6 +756,17 @@ def _run(mode: str) -> int:
         if _sync_default_env_ports(cmd.config.ports) is not None:
             return 1
 
+    # Warn (don't block) when no default model is configured. This process
+    # does not load the workspace .env itself, so load it non-destructively
+    # before checking.
+    from dotenv import load_dotenv
+    from jiuwenswarm.common.model_config_validation import default_model_preflight_error
+
+    load_dotenv(dotenv_path=get_env_file(), override=False)
+    preflight = default_model_preflight_error()
+    if preflight:
+        logging.info(f"[start_services] WARNING: {preflight}")
+
     commands = _build_commands(mode)
     if not commands:
         logging.info(f"[start_services] no commands to run for mode: {mode}")

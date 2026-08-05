@@ -34,7 +34,6 @@ import yaml
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
-from openjiuwen.core.foundation.llm.utils.provider_utils import is_openai_account_provider
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
 from openjiuwen.core.foundation.tool import ToolCard, McpServerConfig
 from openjiuwen.core.common.logging import server_logger
@@ -197,7 +196,7 @@ from jiuwenswarm.agents.harness.common.memory.config import (
     is_proactive_memory,
 )
 from jiuwenswarm.agents.harness.common.memory.external_memory_config import is_builtin_memory_allowed
-from jiuwenswarm.common.model_config_validation import is_placeholder_api_base
+from jiuwenswarm.common.model_config_validation import is_model_client_config_usable
 from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context import TOOL_PERMISSION_CHANNEL_ID
 from jiuwenswarm.server.runtime.session.session_metadata import build_server_push_message
 from jiuwenswarm.server.runtime.session.session_history import append_history_record, load_history_records
@@ -710,17 +709,7 @@ def init_permission_engine(*_args: Any, **_kwargs: Any) -> None:
 
 def _mcc_looks_usable(mcc: dict) -> bool:
     """检查 model_client_config 是否包含有效的 API 凭据。"""
-    api_base = str(mcc.get("api_base", "") or "").strip()
-    if not api_base or is_placeholder_api_base(api_base):
-        return False
-
-    provider = mcc.get("client_provider", "")
-    provider = getattr(provider, "value", provider)
-    if is_openai_account_provider(str(provider or "")):
-        return True
-
-    api_key = str(mcc.get("api_key", "") or "").strip()
-    return bool(api_key)
+    return is_model_client_config_usable(mcc)
 
 
 def parse_int(value: Any, default: int) -> int:

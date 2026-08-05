@@ -145,8 +145,15 @@ async def _run(host: str, port: int) -> None:
     from jiuwenswarm.extensions.manager import ExtensionManager
     from jiuwenswarm.extensions.registry import ExtensionRegistry
     from jiuwenswarm.common.config import get_config
+    from jiuwenswarm.common.model_config_validation import default_model_preflight_error
 
     logger.info("[AgentServer] starting: ws://%s:%s", host, port)
+
+    # Warn (don't block) when no default model is configured: the Web config
+    # panel is the remediation path and needs running services.
+    preflight = default_model_preflight_error()
+    if preflight:
+        logger.warning("[AgentServer] %s", preflight)
 
     # ---------- 扩展系统初始化 ----------
     callback_framework = Runner.callback_framework
