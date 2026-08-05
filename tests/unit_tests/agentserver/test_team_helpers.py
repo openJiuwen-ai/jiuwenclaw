@@ -461,16 +461,18 @@ def _evolution_record(content: str, *, score: float = 1.0) -> dict:
 
 
 def _delivered_content(payload: Any) -> Any:
-    """Return the user content carried by a team delivery.
+    """Return the user text carried by a team delivery.
 
-    Team deliveries carry the same JSON envelope a single agent receives
-    (see ``UserTurn.render``), so assertions compare the user's own words
-    rather than the rendered wrapper.
+    A delivery is ``<routing prefix><JSON envelope>`` (see ``_deliverable``):
+    the prefix keeps ``@member`` / ``$sender`` routable by openjiuwen, and the
+    envelope is what a single agent would receive. Both halves are recombined
+    here so assertions read as the user's own words.
     """
     if not isinstance(payload, str) or "{" not in payload:
         return payload
+    prefix, body = team_helpers._split_team_routing_prefix(payload)
     try:
-        return json.loads(payload[payload.index("{"):])["content"]
+        return prefix + json.loads(body[body.index("{"):])["content"]
     except (ValueError, KeyError):
         return payload
 
