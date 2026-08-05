@@ -65,7 +65,7 @@ _iter: ContextVar[int] = ContextVar("perf_iter", default=0)
 _ENABLED = os.getenv("PERF_TRACE_ENABLED", "true").strip().lower() not in (
     "false", "0", "no", "off",
 )
-# 是否打印请求/响应详情（messages / response / tool args / tool result）
+# 是否打印请求/响应详情（user query / response / tool args / tool result）
 # 默认关：详情会打印用户原文，生产环境慎开；且敏感模式下强制不打印。
 _DETAIL = os.getenv("PERF_TRACE_DETAIL", "false").strip().lower() not in (
     "false", "0", "no", "off",
@@ -202,26 +202,34 @@ def _truncate(s: Any, max_len: int | None = None) -> str:
     return s[:limit] + f"...[+{len(s) - limit}]"
 
 
-def _msg_summary(messages: Any) -> str:
-    """提取 messages 摘要：[{role=...,content=...},...]，每条 content 截断到 300。"""
+def _last_user_text(messages: Any) -> str:
+    """提取最后一条 role=user 消息的文本（当前用户提问），跳过 system/历史/tool。
+
+    content 为多模态 list 时只拼 text 部分；无 user 消息返回 ""。
+    """
     if not messages:
-        return "[]"
+        return ""
     try:
-        msgs = list(messages)
-        if len(msgs) > 8:
-            return f"[{len(msgs)} msgs]"
-        parts = []
-        for msg in msgs:
+        text = ""
+        for msg in messages:
             role = getattr(msg, "role", None)
             if role is None and isinstance(msg, dict):
-                role = msg.get("role", "?")
+                role = msg.get("role", "")
+            if role != "user":
+                continue
             content = getattr(msg, "content", None)
             if content is None and isinstance(msg, dict):
                 content = msg.get("content", "")
-            parts.append(f"{{role={role},content={_truncate(content, 300)}}}")
-        return f"[{','.join(parts)}]"
+            if isinstance(content, list):
+                text = "".join(
+                    str(p.get("text", "")) if isinstance(p, dict) else str(p)
+                    for p in content
+                )
+            else:
+                text = str(content) if content is not None else ""
+        return text
     except Exception:
-        return "<unreadable>"
+        return ""
 
 
 def _response_summary(resp: Any) -> str:
@@ -373,8 +381,8 @@ class PerfTraceRail(DeepAgentRail):
             inputs = getattr(ctx, "inputs", None)
             msgs = getattr(inputs, "messages", None) if inputs else None
             logger.info(
-                "[perf] %s phase=model req iter=%d messages=%s",
-                _log_kv(), n, _msg_summary(msgs),
+                "[perf] %s phase=model req iter=%d msgs=%d last_user=%s",
+                _log_kv(), n, len(msgs) if msgs else 0, _truncate(_last_user_text(msgs)),
             )
 
     @_hook_safe
