@@ -251,13 +251,6 @@ class WebChannel(BaseWsChannel):
         """
         self._method_handlers[method] = handler
 
-    def on_disconnect(self, callback: ConnectHook) -> None:
-        """注册连接断开钩子，客户端断连时依次调用.
-
-        callback 签名: ``async def callback(ws, session_ids: set[str]) -> None``
-        """
-        self._disconnect_hooks.append(callback)
-
     def on_message(self, callback: Callable[[Message], None]) -> None:
         """注册消息接收回调（替代默认的 router.publish_user_messages）。"""
         self._on_message_cb = callback

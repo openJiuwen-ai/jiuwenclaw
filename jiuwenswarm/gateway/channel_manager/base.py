@@ -211,17 +211,13 @@ class BaseChannel(ABC):
         return self._running
 
 
-class WSBaseChannel(BaseChannel):
+class BaseWebChannel(BaseChannel):
 
     def __init__(self, config: Any, router: RobotMessageRouter):
         """
         初始化Channel
         """
         super().__init__(config, router)
-        self.config = config
-        self.bus = router
-        self._running = False
-        self.start_task: Any = None
         self._connect_hooks: list[ConnectHook] = []
         self._disconnect_hooks: list[ConnectHook] = []
 

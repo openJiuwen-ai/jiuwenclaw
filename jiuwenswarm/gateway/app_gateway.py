@@ -33,7 +33,7 @@ from websockets.exceptions import ConnectionClosed, ConnectionClosedError
 from jiuwenswarm.common.ws_diagnostics import format_ws_diagnostics, describe_ws_peer, describe_ws_exception
 # --- Early --dotenv parsing (before jiuwenswarm imports) ---
 from jiuwenswarm.dotenv_early import parse_dotenv_early, load_dotenv_runtime
-from jiuwenswarm.gateway.channel_manager.base import WSBaseChannel
+from jiuwenswarm.gateway.channel_manager.base import BaseWebChannel
 
 parse_dotenv_early("jiuwenswarm-gateway")
 
@@ -434,7 +434,7 @@ class _LocalHandlerContext:
     user_id: str | None
 
 
-class GatewayServer(WSBaseChannel):
+class GatewayServer(BaseWebChannel):
     """通用多路路由 WebSocket Gateway Server。
 
     支持多个路径（如 /acp、/cli），每条路径可以有独立的 channel_id 和本地 handler。
