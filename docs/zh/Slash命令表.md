@@ -79,14 +79,15 @@
 |---|---|
 | `/workspace` 或 `/workspace get` | 查看系统默认工作空间与当前可信目录列表 |
 | `/workspace add [path]` | 添加可信目录（默认为当前目录，路径不存在时提示错误） |
-| `/workspace set <path>` | 重置可信目录为单个路径（已有可信目录时需确认） |
+| `/workspace set <path>` | 切换当前项目作用域，并把该路径加入对应项目的可信目录 |
 | `/workspace remove <path>` | 移除指定可信目录 |
 | `/workspace clear` | 清空所有可信目录（仅使用默认工作空间） |
 
 #### 概念说明
 
-- **系统默认工作空间（workspace）**：固定路径 `~/.jiuwenswarm/agent/jiuwenswarm_workspace`，始终可用
+- **系统默认工作空间（workspace）**：固定路径 `~/.jiuwenswarm/agent/workspace`，始终可用
 - **可信目录（trusted_dirs）**：用户授权的可访问目录，由 TUI 管理，传递给后端 Agent
+- **项目作用域（project scope）**：用于选择对应的可信目录集合，并填充请求中的 `project_dir` / `cwd`
 
 #### 控制逻辑
 
@@ -94,9 +95,9 @@
    - 选择「信任」：将当前目录添加为可信目录
    - 选择「不信任」：仅使用默认工作空间
 
-2. **会话级管理**：可信目录会持久化到./jiuwenswarm-tui/config.json文件里
+2. **按项目持久化**：可信目录以规范化后的项目路径为键，保存到 `~/.jiuwenswarm-tui/config.json`。`/workspace set` 对项目作用域的切换仅在当前 TUI 进程中有效；重启后重新以启动目录作为项目作用域。
 
-3. **后端传递**：TUI 通过请求参数 `trusted_dirs` 传递可信目录列表，Agent 据此限制文件操作范围
+3. **后端传递**：TUI 通过请求参数传递 `trusted_dirs`、`project_dir` 和 `cwd`，Agent 据此限制文件操作范围并解析项目上下文
 
 4. **路径限制**：Agent 收到可信目录后，文件操作需限制在可信目录范围内；超出范围需向用户确认
 
@@ -372,7 +373,7 @@
   - 当前会话正在处理中（`session is busy`）时拒绝执行；
   - 当前会话无对话记录时拒绝执行。
 - 行为：
-  1. 生成新 `session_id`，向后端发送 `session.fork` RPC（携带 `source_session_id`、`target_session_id` 与可选标题）。
+  1. 向后端发送 `session.fork` RPC，只携带 `source_session_id` 与可选标题；AgentServer 分配目标 `session_id` 并在响应中返回。
   2. TUI 自动切换到新分支会话，清空当前 transcript 并恢复分支的历史记录。
   3. 提示用户已在新分支，并告知可用 `/resume <原会话ID>` 返回原会话。
 - 示例：
@@ -383,7 +384,7 @@
 
 - 用法：`/rewind [turn_number]`。
 - 别名：`/checkpoint`。
-- 功能：将当前会话回退到指定轮次之前，支持仅回退对话、仅恢复文件、或两者同时恢复。
+- 功能：围绕指定轮次回退或压缩当前会话，支持仅回退对话、仅恢复文件、两者同时恢复，或摘要部分历史。
 - 约束：
   - 当前会话正在处理中（`session is busy`）时拒绝执行；
   - 无对话轮次时拒绝执行。
@@ -393,12 +394,17 @@
      - **Restore conversation and code** — 截断对话并恢复文件到该轮次之前的状态；
      - **Restore conversation only** — 仅截断对话，文件保持不变；
      - **Restore code only** — 仅恢复文件，对话保持不变（仅当目标轮次有文件变更时显示）；
+     - **Summarize from here** — 保留更早的消息，把所选轮次及之后的内容替换为压缩摘要；
+     - **Summarize up to here** — 摘要所选轮次之前的消息，保留所选轮次及之后的内容；
      - **Cancel** — 取消操作。
   3. 根据选择调用对应后端 RPC：
      - `both` → `session.rewind_and_restore`
      - `conversation` → `session.rewind`
      - `code` → `session.restore_files`
+     - `summarize` → `command.rewind_compact`，`direction=from`
+     - `summarize_up_to` → `command.rewind_compact`，`direction=up_to`
 - 回退后：TUI 清空 transcript 并重新加载历史；若回退内容包含用户输入，会自动填入输入框。
+- 仅恢复文件时，如果没有需要还原的文件，会明确显示 `No file changes to restore`；若部分文件恢复失败，会逐项列出失败文件并保持这些文件不变，不再统一报告为成功。
 - 局限：回退不影响通过 bash 命令或手动编辑的文件。
 - 示例：
   - `/rewind` — 交互式选择轮次并确认恢复方式
@@ -419,6 +425,11 @@
 | `/memory toggle` | 打开页签控制台并选中 toggle 页签 |
 | `/memory toggle <key>` | 直接切换指定记忆系统开关 |
 | `/memory open` | 打开页签控制台并选中 open 页签 |
+
+- 编辑安全边界：
+  - 目标文件必须已经存在并位于允许的记忆目录中；`/memory edit` 不负责新建文件。
+  - 运行时 auto/coding memory 文件为只读，禁止手动编辑。
+  - 项目目录或其祖先目录中的 `JIUWENSWARM.md` / `JIUWENSWARM.local.md` 只有在文件已存在且通过路径校验时才能打开。
 
 - 页签控制台：无参数或仅指定子命令（不带操作对象）时打开，包含 edit / status / toggle / open 四个页签。
   - ←/→ 切换页签；
@@ -1000,14 +1011,17 @@ hooks:
 |---|---|
 | `/statusline` 或 `/statusline get` | 查看当前状态栏配置 |
 | `/statusline set <shell-command>` | 设置状态栏命令（命令输出将显示在 TUI 底部） |
+| `/statusline padding <number>` | 设置左右 padding；参数必须为非负整数，且需要先配置状态栏命令 |
 | `/statusline clear` | 清除状态栏配置（底部栏将不再显示） |
 | `/statusline help` | 显示使用指南（含写法模式、实用示例、字段列表） |
 | `/statusline json` | 显示当前实际的 JSON 数据值（方便调试 jq 表达式） |
+| `/statusline <prompt>` | 根据自然语言描述让 Agent 自动生成并配置状态栏脚本 |
 
 #### 概念说明
 
 - **状态栏（StatusLine）**：TUI 底部的文字区域，实时显示用户自定义的动态信息，支持多行输出。配置了自定义状态栏后，内置状态栏会自动隐藏，避免信息冗余。
 - **Shell 命令**：用户配置的 shell 命令每 2 秒自动执行一次，其 stdout 输出渲染为状态栏文字。
+- **Agent 自动生成模式**：非空参数若不是已知子命令（`set`、`padding`、`clear`、`help`、`json`、`get`），TUI 会将其交给 Agent，并使用 `script-creator` skill 生成配置。例如：`/statusline 显示模式、模型和剩余上下文`。无参数 `/statusline` 仍然只查看当前配置。
 - **JSON 输入**：每次执行时，系统将当前会话信息以 JSON 格式传入命令，用户可在命令中用 `jq` 等工具解析。POSIX（Linux/macOS）通过 stdin 管道传入；Windows 上因 MSYS2 管道继承限制，系统自动将 JSON 写入临时文件，并将命令中的 `$(cat)` 替换为 `$(cat "文件路径")`，用户无需修改命令格式。
 - **前置依赖**：需要 `jq`（https://stedolan.github.io/jq/）用于解析 JSON；Windows 用户还需将 Git Bash 的 `usr\bin` 目录加入系统 PATH（如 `E:\Git\usr\bin`）。
 

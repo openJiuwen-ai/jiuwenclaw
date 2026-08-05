@@ -4,6 +4,8 @@ import react from '@vitejs/plugin-react'
 import svgr from 'vite-plugin-svgr'
 import { spawnSync } from 'child_process'
 import { createHash } from 'node:crypto'
+import { createHmac, timingSafeEqual } from 'node:crypto'
+import type { ServerResponse } from 'http'
 import path from 'path'
 import fs from 'fs'
 
@@ -216,7 +218,20 @@ function decodeFileContent(raw: Buffer, requestedEncoding: string): { content: s
   throw new Error('Unable to decode file with any known encoding')
 }
 
-const RAW_FILE_CONTENT_TYPES: Record<string, string> = {
+const DOWNLOAD_CONTENT_TYPES: Record<string, string> = {
+  '.md': 'text/markdown; charset=utf-8',
+  '.markdown': 'text/markdown; charset=utf-8',
+  '.txt': 'text/plain; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.jsonl': 'application/x-ndjson; charset=utf-8',
+  '.csv': 'text/csv; charset=utf-8',
+  '.html': 'text/html; charset=utf-8',
+  '.htm': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.ts': 'text/plain; charset=utf-8',
+  '.tsx': 'text/plain; charset=utf-8',
+  '.py': 'text/plain; charset=utf-8',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
@@ -225,10 +240,69 @@ const RAW_FILE_CONTENT_TYPES: Record<string, string> = {
   '.svg': 'image/svg+xml',
   '.bmp': 'image/bmp',
   '.avif': 'image/avif',
+  '.pdf': 'application/pdf',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
 }
 
-function rawFileContentType(filePath: string): string {
-  return RAW_FILE_CONTENT_TYPES[path.extname(filePath).toLowerCase()] || 'application/octet-stream'
+function downloadContentType(filePath: string): string {
+  return DOWNLOAD_CONTENT_TYPES[path.extname(filePath).toLowerCase()] || 'application/octet-stream'
+}
+
+function handleFileStreamError(res: ServerResponse, error: NodeJS.ErrnoException): void {
+  if (res.headersSent) {
+    res.destroy(error)
+    return
+  }
+
+  res.statusCode = error.code === 'EACCES' || error.code === 'EPERM' ? 403 : 500
+  res.removeHeader('content-length')
+  res.removeHeader('content-disposition')
+  res.removeHeader('accept-ranges')
+  res.removeHeader('content-range')
+  res.setHeader('content-type', 'application/json; charset=utf-8')
+  res.end(JSON.stringify({
+    error: res.statusCode === 403 ? 'file_access_denied' : 'file_read_failed',
+  }))
+}
+
+function resolveFileDownloadSecret(): string | null {
+  const envSecret = process.env.JIUWENSWARM_FILE_DOWNLOAD_SECRET
+  if (envSecret && envSecret.length >= 32) return envSecret
+
+  const workspace = process.env.JIUWENSWARM_WORKSPACE || path.join(process.env.HOME || process.env.USERPROFILE || '', '.jiuwenswarm')
+  const secretPath = path.join(workspace, 'config', '.file_download_secret')
+  try {
+    const secret = fs.readFileSync(secretPath, 'utf8').trim()
+    return secret.length >= 32 ? secret : null
+  } catch {
+    return null
+  }
+}
+
+function validateFileDownloadToken(token: string): { path: string } | null {
+  const parts = token.split('.')
+  if (parts.length !== 2) return null
+  const [payloadBase64, signature] = parts
+
+  const secret = resolveFileDownloadSecret()
+  if (!secret) return null
+  const expected = createHmac('sha256', secret).update(payloadBase64).digest('hex')
+  const actual = Buffer.from(signature, 'hex')
+  const expectedBuffer = Buffer.from(expected, 'hex')
+  if (actual.length !== expectedBuffer.length || !timingSafeEqual(actual, expectedBuffer)) return null
+
+  try {
+    const payload = JSON.parse(Buffer.from(payloadBase64, 'base64url').toString('utf8')) as Record<string, unknown>
+    if (
+      typeof payload.path !== 'string' ||
+      !payload.path ||
+      typeof payload.sid !== 'string'
+    ) return null
+    return { path: payload.path }
+  } catch {
+    return null
+  }
 }
 
 /** WS proxy 中常见的、可安全忽略的 socket 错误码（跨平台） */
@@ -650,6 +724,95 @@ function devFileContentApi(): Plugin {
         }
       })
 
+      server.middlewares.use('/file-api/download', (req, res) => {
+        if (req.method !== 'GET' && req.method !== 'HEAD') {
+          res.statusCode = 405
+          res.setHeader('content-type', 'application/json; charset=utf-8')
+          res.end(JSON.stringify({ error: 'method_not_allowed' }))
+          return
+        }
+
+        const url = new URL(req.url || '/file-api/download', 'http://localhost')
+        const token = url.searchParams.get('token') || ''
+        const payload = validateFileDownloadToken(token)
+        if (!payload) {
+          res.statusCode = 403
+          res.setHeader('content-type', 'application/json; charset=utf-8')
+          res.end(JSON.stringify({ error: 'invalid_or_expired_token' }))
+          return
+        }
+
+        let stat: fs.Stats
+        try {
+          stat = fs.statSync(payload.path)
+        } catch {
+          res.statusCode = 404
+          res.setHeader('content-type', 'application/json; charset=utf-8')
+          res.end(JSON.stringify({ error: 'file_not_found' }))
+          return
+        }
+        if (!stat.isFile()) {
+          res.statusCode = 404
+          res.setHeader('content-type', 'application/json; charset=utf-8')
+          res.end(JSON.stringify({ error: 'file_not_found' }))
+          return
+        }
+
+        const fileSize = stat.size
+        let start = 0
+        let end = Math.max(0, fileSize - 1)
+        let partial = false
+        const range = req.headers.range
+        if (range) {
+          if (!range.startsWith('bytes=') || range.includes(',') || fileSize === 0) {
+            res.statusCode = 416
+            res.setHeader('content-range', `bytes */${fileSize}`)
+            res.end()
+            return
+          }
+          const [startText, endText] = range.slice(6).split('-', 2)
+          try {
+            if (startText) {
+              start = Number(startText)
+              end = endText ? Number(endText) : end
+            } else {
+              const suffixLength = Number(endText)
+              if (!Number.isInteger(suffixLength) || suffixLength <= 0) throw new Error('invalid_suffix')
+              start = Math.max(0, fileSize - suffixLength)
+            }
+            if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || start >= fileSize || end < start) throw new Error('invalid_range')
+            end = Math.min(end, fileSize - 1)
+            partial = true
+          } catch {
+            res.statusCode = 416
+            res.setHeader('content-range', `bytes */${fileSize}`)
+            res.end()
+            return
+          }
+        }
+
+        const contentLength = fileSize === 0 ? 0 : end - start + 1
+        const inline = ['1', 'true'].includes((url.searchParams.get('inline') || '').toLowerCase())
+        const fileName = path.basename(payload.path)
+        res.statusCode = partial ? 206 : 200
+        res.setHeader('content-type', downloadContentType(payload.path))
+        res.setHeader('content-length', String(contentLength))
+        res.setHeader('accept-ranges', 'bytes')
+        res.setHeader('content-disposition', `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(fileName)}`)
+        res.setHeader('cache-control', 'no-store')
+        if (partial) res.setHeader('content-range', `bytes ${start}-${end}/${fileSize}`)
+        if (req.method === 'HEAD') {
+          res.end()
+          return
+        }
+        const fileStream = fs.createReadStream(payload.path, fileSize === 0 ? undefined : { start, end })
+        fileStream.once('error', (error) => {
+          server.config.logger.error(`[file-api] Failed to read ${payload.path}: ${(error as Error).message}`)
+          handleFileStreamError(res, error)
+        })
+        fileStream.pipe(res)
+      })
+
       server.middlewares.use('/file-api/raw-file', (req, res) => {
         if (req.method !== 'GET' && req.method !== 'HEAD') {
           res.statusCode = 405
@@ -683,13 +846,18 @@ function devFileContentApi(): Plugin {
           }
 
           res.statusCode = 200
-          res.setHeader('content-type', rawFileContentType(fullPath))
+          res.setHeader('content-type', downloadContentType(fullPath))
           res.setHeader('cache-control', 'no-store')
           if (req.method === 'HEAD') {
             res.end()
             return
           }
-          fs.createReadStream(fullPath).pipe(res)
+          const fileStream = fs.createReadStream(fullPath)
+          fileStream.once('error', (error) => {
+            server.config.logger.error(`[file-api] Failed to read ${fullPath}: ${(error as Error).message}`)
+            handleFileStreamError(res, error)
+          })
+          fileStream.pipe(res)
         } catch (error) {
           res.statusCode = 500
           res.setHeader('content-type', 'application/json; charset=utf-8')
@@ -832,23 +1000,35 @@ function devFileContentApi(): Plugin {
 }
 
 // https://vitejs.dev/config/
+function portFromEnv(name: string, fallback: number): number {
+  const value = Number.parseInt(process.env[name] ?? '', 10)
+  return Number.isInteger(value) && value > 0 && value <= 65535 ? value : fallback
+}
+
+const frontendPort = portFromEnv('FRONTEND_PORT', 5173)
+const webPort = portFromEnv('WEB_PORT', 19000)
+const webTarget = `http://127.0.0.1:${webPort}`
+
 export default defineConfig({
   plugins: [suppressWsProxySocketErrors(), devWsTrafficLogger(), devFileContentApi(), react(), svgr()],
+  optimizeDeps: {
+    include: ['exceljs', 'jszip', 'saxes', 'ssf'],
+  },
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
     },
   },
   server: {
-    port: 5173,  // 默认端口
-    strictPort: true,  // 强制使用 5173 端口
+    port: frontendPort,
+    strictPort: true,
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:19000',
+        target: webTarget,
         changeOrigin: true,
       },
       '/ws': {
-        target: 'http://127.0.0.1:19000',
+        target: webTarget,
         ws: true,
         changeOrigin: true,
         configure: (proxy) => {

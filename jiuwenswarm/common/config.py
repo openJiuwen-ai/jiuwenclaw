@@ -135,12 +135,64 @@ def _normalize_config(config: dict[str, Any] | None) -> None:
             _ch_conf["send_file_allowed"] = True
 
 
+# Parsed YAML per file path, keyed on the file's identity so an edit — by this
+# process or any other — invalidates it. Only the parse is cached: reading and
+# parsing config.yaml costs ~11 ms while everything downstream of it (env
+# resolution, normalization) costs ~0.3 ms, and ``get_config`` sits on every
+# request path. Deliberately not caching past the parse keeps env var changes
+# (``load_dotenv_runtime`` runs with override=True before some reads) taking
+# effect immediately, so this needs no explicit invalidation hook.
+_YAML_PARSE_CACHE: dict[str, tuple[tuple[int, int], dict[str, Any]]] = {}
+_YAML_PARSE_CACHE_LOCK = threading.Lock()
+
+
+def _yaml_file_stamp(filepath: Path) -> tuple[int, int] | None:
+    """Return the identity a cached parse of this file is keyed on.
+
+    Args:
+        filepath: YAML file to stamp.
+
+    Returns:
+        ``(mtime_ns, size)``, or None when the file cannot be stat'd — in which
+        case the caller must not use or populate the cache.
+    """
+    try:
+        stat_result = filepath.stat()
+    except OSError:
+        return None
+    return stat_result.st_mtime_ns, stat_result.st_size
+
+
 def _read_with_retry(filepath: Path, max_attempts: int = 3) -> dict[str, Any]:
-    """读取 YAML，遇解析错误重试（应对跨进程写竞态）。"""
+    """读取 YAML，遇解析错误重试（应对跨进程写竞态）。
+
+    解析结果按文件身份（mtime + size）缓存；调用方会就地修改返回值
+    （``_normalize_config`` 即是），故命中与写入缓存时都做深拷贝，
+    保证各调用方拿到互不影响的副本。
+
+    Args:
+        filepath: 待读取的 YAML 文件路径。
+        max_attempts: 解析失败时的最大尝试次数。
+
+    Returns:
+        解析后的字典；文件为空时返回空字典。
+    """
+    stamp = _yaml_file_stamp(filepath)
+    cache_key = str(filepath)
+    if stamp is not None:
+        with _YAML_PARSE_CACHE_LOCK:
+            cached = _YAML_PARSE_CACHE.get(cache_key)
+        if cached is not None and cached[0] == stamp:
+            return deepcopy(cached[1])
+
     for attempt in range(max_attempts):
         try:
             with open(filepath, "r", encoding="utf-8") as f:
-                return yaml.safe_load(f) or {}
+                parsed = yaml.safe_load(f) or {}
+            if stamp is not None:
+                with _YAML_PARSE_CACHE_LOCK:
+                    _YAML_PARSE_CACHE[cache_key] = (stamp, deepcopy(parsed))
+            return parsed
         except yaml.YAMLError:
             if attempt < max_attempts - 1:
                 time.sleep(0.05 * (attempt + 1))
@@ -2104,11 +2156,36 @@ _VALID_SANDBOX_STARTUP_MODES = ("internal", "external")
 _DEFAULT_SANDBOX_STARTUP_MODE = "internal"
 _DEFAULT_SANDBOX_POLICY_FILE = "code-agent-policy.yaml"
 
+# YuanRong sandbox knobs under flat ``sandbox:`` (see get_sandbox_endpoint).
+_VALID_YUANRONG_EXECUTORS = ("default", "docker")
+_DEFAULT_YUANRONG_EXECUTOR = "docker"
+_DEFAULT_YUANRONG_URL = "http://yuanrong.local"
+_YUANRONG_ENDPOINT_OPTIONAL_KEYS: tuple[str, ...] = (
+    "image",
+    "workdir",
+    "mounts",
+    "cpu",
+    "cpu_limit",
+    "memory",
+    "mem_limit",
+    "rootfs",
+)
+
 # Public re-exports for callers that need to fall back to / advertise defaults
 # (e.g. agent_ws_server 把缺省值持久化到 config.yaml, 让重启后 get_sandbox_endpoint
 # 能直接读到, 而不必每次再走一遍 fallback 逻辑)。
 DEFAULT_SANDBOX_STARTUP_MODE = _DEFAULT_SANDBOX_STARTUP_MODE
 DEFAULT_SANDBOX_POLICY_FILE = _DEFAULT_SANDBOX_POLICY_FILE
+DEFAULT_YUANRONG_SANDBOX_URL = _DEFAULT_YUANRONG_URL
+DEFAULT_YUANRONG_EXECUTOR = _DEFAULT_YUANRONG_EXECUTOR
+
+
+def _normalize_yuanrong_executor(value: Any) -> str:
+    """归一化 ``sandbox.executor``; 非法或空值回落到默认 ``docker``."""
+    text = str(value or "").strip().lower()
+    if text not in _VALID_YUANRONG_EXECUTORS:
+        return _DEFAULT_YUANRONG_EXECUTOR
+    return text
 
 
 def _normalize_sandbox_startup_mode(value: Any) -> str:
@@ -2270,11 +2347,17 @@ def update_sandbox_policy_file(value: str) -> str:
 
 def get_sandbox_endpoint() -> dict[str, Any]:
     """返回 ``sandbox.url`` / ``sandbox.type`` / ``sandbox.preserve_file_sharing_mode``
-    / ``sandbox.startup_mode`` / ``sandbox.policy_file``.
+    / ``sandbox.startup_mode`` / ``sandbox.policy_file``, 以及 yuanrong 可选 knobs。
 
     ``preserve_file_sharing_mode`` 缺省或为空时返回空串, 由调用方决定默认值
     (当前只有 ``"mount"``)。 ``startup_mode`` 未配置时回落到 ``internal``;
     ``policy_file`` 未配置时返回空串 (由调用方决定默认 policy)。
+
+    当 ``type=yuanrong`` 时额外返回:
+    - ``executor`` (缺省 ``docker``)
+    - 若 yaml 中存在: ``image`` / ``workdir`` / ``mounts`` / ``cpu`` /
+      ``cpu_limit`` / ``memory`` / ``mem_limit`` / ``rootfs``
+    - ``url`` 为空时回落占位 ``http://yuanrong.local`` (仅作 cache key)
 
     Raises:
         ValueError: yaml 里 ``preserve_file_sharing_mode`` 写了非法值时, 直接
@@ -2284,13 +2367,22 @@ def get_sandbox_endpoint() -> dict[str, Any]:
     cfg = get_config() or {}
     sandbox = cfg.get("sandbox") or {}
     mode = _normalize_preserve_file_sharing_mode(sandbox.get("preserve_file_sharing_mode"))
-    return {
-        "url": str(sandbox.get("url") or "").strip(),
-        "type": str(sandbox.get("type") or "").strip(),
+    sandbox_type = str(sandbox.get("type") or "").strip()
+    url = str(sandbox.get("url") or "").strip()
+    result: dict[str, Any] = {
+        "url": url,
+        "type": sandbox_type,
         "preserve_file_sharing_mode": mode or "",
         "startup_mode": _normalize_sandbox_startup_mode(sandbox.get("startup_mode")),
         "policy_file": str(sandbox.get("policy_file") or "").strip(),
     }
+    if sandbox_type == "yuanrong":
+        result["url"] = url or _DEFAULT_YUANRONG_URL
+        result["executor"] = _normalize_yuanrong_executor(sandbox.get("executor"))
+        for key in _YUANRONG_ENDPOINT_OPTIONAL_KEYS:
+            if key in sandbox:
+                result[key] = sandbox[key]
+    return result
 
 
 def update_sandbox_endpoint(
@@ -2300,10 +2392,20 @@ def update_sandbox_endpoint(
     preserve_file_sharing_mode: str | None = None,
     startup_mode: str | None = None,
     policy_file: str | None = None,
+    executor: str | None = None,
+    image: str | None = None,
+    workdir: str | None = None,
+    mounts: list | None = None,
+    cpu: int | None = None,
+    cpu_limit: int | None = None,
+    memory: int | None = None,
+    mem_limit: int | None = None,
+    rootfs: dict | None = None,
 ) -> dict[str, Any]:
     """写入 ``sandbox.url`` / ``sandbox.type`` 以及可选的
     ``preserve_file_sharing_mode`` / ``startup_mode`` / ``policy_file``
-    到 config.yaml; 返回实际写入的字段集合 (没有改动的字段不在返回里)。
+    / yuanrong knobs 到 config.yaml; 返回实际写入的字段集合
+    (没有改动的字段不在返回里)。
 
     所有 ``None`` 入参表示"本次不修改该字段, 保留 config.yaml 中既有值",
     以方便 ``_handle_sandbox_enable`` 在不同阶段分批落盘。
@@ -2331,6 +2433,10 @@ def update_sandbox_endpoint(
             raise ValueError("policy_file must be non-empty when provided")
         policy_value = policy_text
 
+    executor_value: str | None = None
+    if executor is not None:
+        executor_value = _normalize_yuanrong_executor(executor)
+
     data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
     if "sandbox" not in data or not isinstance(data.get("sandbox"), dict):
         data["sandbox"] = {}
@@ -2342,6 +2448,33 @@ def update_sandbox_endpoint(
         data["sandbox"]["startup_mode"] = startup_value
     if policy_value is not None:
         data["sandbox"]["policy_file"] = policy_value
+    if executor_value is not None:
+        data["sandbox"]["executor"] = executor_value
+
+    optional_writes: dict[str, Any] = {}
+    if image is not None:
+        optional_writes["image"] = str(image).strip()
+    if workdir is not None:
+        optional_writes["workdir"] = str(workdir).strip()
+    if mounts is not None:
+        if not isinstance(mounts, list):
+            raise ValueError("mounts must be a list")
+        optional_writes["mounts"] = mounts
+    if cpu is not None:
+        optional_writes["cpu"] = int(cpu)
+    if cpu_limit is not None:
+        optional_writes["cpu_limit"] = int(cpu_limit)
+    if memory is not None:
+        optional_writes["memory"] = int(memory)
+    if mem_limit is not None:
+        optional_writes["mem_limit"] = int(mem_limit)
+    if rootfs is not None:
+        if not isinstance(rootfs, dict):
+            raise ValueError("rootfs must be a dict")
+        optional_writes["rootfs"] = rootfs
+    for key, value in optional_writes.items():
+        data["sandbox"][key] = value
+
     _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)
     result: dict[str, Any] = {"url": url_value, "type": type_value}
     if mode_value is not None:
@@ -2350,6 +2483,9 @@ def update_sandbox_endpoint(
         result["startup_mode"] = startup_value
     if policy_value is not None:
         result["policy_file"] = policy_value
+    if executor_value is not None:
+        result["executor"] = executor_value
+    result.update(optional_writes)
     return result
 
 

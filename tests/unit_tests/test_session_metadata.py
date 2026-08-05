@@ -6,7 +6,6 @@ import json
 import threading
 import time
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -134,6 +133,23 @@ class TestInitSessionMetadata:
         data = _read_json(sessions_dir / "sess_def" / "metadata.json")
         assert data["project_dir"] == ""
         assert data["model"] == ""
+
+    @staticmethod
+    def test_team_binding_fields(sessions_dir):
+        from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata
+
+        init_session_metadata(
+            session_id="sess_team",
+            mode="team.plan",
+            team_name="custom_team",
+            team_template_id="default",
+        )
+        data = _read_json(sessions_dir / "sess_team" / "metadata.json")
+
+        assert data["mode"] == "team.plan"
+        assert data["team_name"] == "custom_team"
+        assert data["team_template_id"] == "default"
+        assert "team_template_snapshot" not in data
 
 
 # ===========================================================================
@@ -326,6 +342,30 @@ class TestUpdateSessionMetadata:
         assert data["model"] == "glm-5"
         assert data["last_user_message_at"] == 2000.0
         assert data["status"] == "idle"
+
+    @staticmethod
+    def test_update_team_binding_fields(sessions_dir):
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            update_session_metadata,
+            _METADATA_QUEUE,
+        )
+
+        init_session_metadata(session_id="sess_bind", mode="agent")
+
+        update_session_metadata(
+            session_id="sess_bind",
+            mode="code.team",
+            team_name="research_team",
+            team_template_id="research",
+        )
+        _METADATA_QUEUE.join()
+
+        data = _read_json(sessions_dir / "sess_bind" / "metadata.json")
+        assert data["mode"] == "code.team"
+        assert data["team_name"] == "research_team"
+        assert data["team_template_id"] == "research"
+        assert "team_template_snapshot" not in data
 
 
 # ===========================================================================
@@ -2058,3 +2098,46 @@ class TestSetSessionPinnedQueuedWriteRace:
         assert data["model"] == "old-queued-write"
         assert data["pinned"] is True
         assert data["pin_order"] == 1
+
+
+def test_remove_team_mode_session_dirs_at_startup_keeps_stable_team_sessions(
+    sessions_dir,
+):
+    from jiuwenswarm.server.runtime.session.session_metadata import (
+        _write_metadata_sync,
+        remove_team_mode_session_dirs_at_startup,
+    )
+
+    _write_metadata_sync("stable_team", {"session_id": "stable_team", "mode": "team"})
+    _write_metadata_sync(
+        "stable_plan",
+        {"session_id": "stable_plan", "mode": "team.plan"},
+    )
+    _write_metadata_sync(
+        "stable_code",
+        {"session_id": "stable_code", "mode": "code.team"},
+    )
+    _write_metadata_sync(
+        "temp_team",
+        {
+            "session_id": "temp_team",
+            "mode": "team.plan",
+            "temporary_team_session": True,
+        },
+    )
+    _write_metadata_sync(
+        "agent_temp",
+        {
+            "session_id": "agent_temp",
+            "mode": "agent",
+            "temporary_team_session": True,
+        },
+    )
+
+    remove_team_mode_session_dirs_at_startup()
+
+    assert (sessions_dir / "stable_team").exists()
+    assert (sessions_dir / "stable_plan").exists()
+    assert (sessions_dir / "stable_code").exists()
+    assert not (sessions_dir / "temp_team").exists()
+    assert (sessions_dir / "agent_temp").exists()

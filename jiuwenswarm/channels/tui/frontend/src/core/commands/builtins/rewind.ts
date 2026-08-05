@@ -332,8 +332,17 @@ export function createRewindCommand(): SlashCommand {
           const restoredFiles = restorePayload.restored_files ?? [];
           const deletedFiles = restorePayload.deleted_files ?? [];
           const restoreErrors = restorePayload.restore_errors ?? [];
-
-          let msg = `Restored files to state before turn ${selectedTurnIndex}:`;
+          // 不要在实际什么都没还原（或有文件失败）时报告纯成功——用户会据此
+ 	      // 误判工作区状态。标题按结果分级，失败文件逐个列出。
+ 	      const anyRestored = restoredFiles.length > 0 || deletedFiles.length > 0;
+ 	      let msg: string;
+ 	      if (!anyRestored && restoreErrors.length === 0) {
+            msg = `No file changes to restore before turn ${selectedTurnIndex}.`;
+ 	      } else if (restoreErrors.length > 0) {
+            msg = `Partially restored files to state before turn ${selectedTurnIndex}:`;
+ 	      } else {
+            msg = `Restored files to state before turn ${selectedTurnIndex}:`;
+ 	      }
           if (restoredFiles.length > 0) {
             msg += `\n  Written back: ${restoredFiles.length} file(s)`;
           }
@@ -341,13 +350,14 @@ export function createRewindCommand(): SlashCommand {
             msg += `\n  Deleted: ${deletedFiles.length} file(s)`;
           }
           if (restoreErrors.length > 0) {
-            msg += `\n  Failed: ${restoreErrors.length} file(s)`;
-          }
-          if (restoredFiles.length === 0 && deletedFiles.length === 0) {
-            msg += "\n  No file changes found to restore.";
-          }
+            msg += `\n  Failed to restore ${restoreErrors.length} file(s):`;
+ 	        for (const e of restoreErrors) {
+ 	          msg += `\n    - ${e.file}: ${e.error}`;
+ 	        }
+            msg += "\n  These files still hold the agent's changes.";
+ 	      }
 
-          ctx.addItem(addInfo(ctx.sessionId, msg, "i"));
+ 	      ctx.addItem(addInfo(ctx.sessionId, msg, restoreErrors.length > 0 ? "w" : "i"));
         } else if (optionValue === "summarize") {
           ctx.addItem(
             addInfo(ctx.sessionId, "Messages after this point will be summarized.", "i", { view: "dim" }),

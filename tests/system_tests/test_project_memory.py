@@ -1,9 +1,9 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""System tests for /init feature: ProjectMemoryRail + explore_agent + code-mode logic.
+"""System tests for /init feature: ProjectMemoryRail + code-mode logic.
 
 Tests the end-to-end integration of project memory discovery, rail lifecycle,
-code-mode registration, and explore_agent default-enabled behavior.
+and code-mode registration.
 """
 from __future__ import annotations
 
@@ -359,13 +359,13 @@ class TestCodeModeIntegration:
 
 
 # =====================================================================
-# 4. Explore Agent Default-Enabled Integration
+# 4. Explore Agent Disabled Integration
 # =====================================================================
 
 class TestExploreAgentSubagentIntegration:
-    """explore_agent default-enabled behavior with CodeAdapter._build_configured_subagents."""
+    """explore_agent is not mounted by CodeAdapter in the temporary release."""
 
-    def test_explore_agent_default_enabled_when_no_config(self, monkeypatch):
+    def test_explore_agent_not_mounted(self, monkeypatch):
         from openjiuwen.core.foundation.llm import (
             Model,
             ModelClientConfig,
@@ -391,88 +391,14 @@ class TestExploreAgentSubagentIntegration:
             model_config=ModelRequestConfig(model_name="mock-model"),
         )
 
-        # Config without subagents key — explore_agent should be default-enabled
-        subagents, _should_add_general = adapter._build_configured_subagents(model, {"max_iterations": 8}, {})
-        assert subagents is not None
-        names = [s.agent_card.name for s in subagents]
-        assert any(n.lower() == "explore" or n == "explore_agent" for n in names)
-
-    def test_explore_agent_always_enabled(self, monkeypatch):
-        """explore_agent 是 Code 模式核心子代理，始终启用，enabled: False 被忽略。"""
-        from openjiuwen.core.foundation.llm import (
-            Model,
-            ModelClientConfig,
-            ModelRequestConfig,
-        )
-
-        adapter = JiuwenSwarmCodeAdapter()
-        adapter._workspace_dir = "/tmp/test-workspace"
-        adapter._project_dir = "/tmp/test-workspace"
-        monkeypatch.setattr(
-            JiuwenSwarmCodeAdapter,
-            "_browser_runtime_enabled",
-            staticmethod(lambda: False),
-        )
-
-        model = Model(
-            model_client_config=ModelClientConfig(
-                client_provider="OpenAI",
-                api_key="test-key",
-                api_base="https://example.invalid/v1",
-                verify_ssl=False,
-            ),
-            model_config=ModelRequestConfig(model_name="mock-model"),
-        )
-
-        # explore_agent 的 enabled: False 被忽略，仍然挂载
         subagents, _should_add_general = adapter._build_configured_subagents(
             model,
-            {"max_iterations": 8, "subagents": {"explore_agent": {"enabled": False}}},
+            {"max_iterations": 8, "subagents": {"explore_agent": {"enabled": True}}},
             {},
         )
         assert subagents is not None
         names = [s.agent_card.name for s in subagents]
-        assert "explore_agent" in names
-
-    def test_explore_agent_with_custom_max_iterations(self, monkeypatch):
-        from openjiuwen.core.foundation.llm import (
-            Model,
-            ModelClientConfig,
-            ModelRequestConfig,
-        )
-
-        adapter = JiuwenSwarmCodeAdapter()
-        adapter._workspace_dir = "/tmp/test-workspace"
-        adapter._project_dir = "/tmp/test-workspace"
-        monkeypatch.setattr(
-            JiuwenSwarmCodeAdapter,
-            "_browser_runtime_enabled",
-            staticmethod(lambda: False),
-        )
-
-        model = Model(
-            model_client_config=ModelClientConfig(
-                client_provider="OpenAI",
-                api_key="test-key",
-                api_base="https://example.invalid/v1",
-                verify_ssl=False,
-            ),
-            model_config=ModelRequestConfig(model_name="mock-model"),
-        )
-
-        # Config with explore_agent having custom max_iterations
-        subagents, _should_add_general = adapter._build_configured_subagents(
-            model,
-            {"max_iterations": 8, "subagents": {"explore_agent": {"max_iterations": 5}}},
-            {},
-        )
-        assert subagents is not None
-        explore_subagent = [
-            s for s in subagents
-            if s.agent_card.name.lower() == "explore" or s.agent_card.name == "explore_agent"
-        ]
-        assert len(explore_subagent) == 1
-        assert explore_subagent[0].max_iterations == 5
+        assert names == ["plan_agent"]
 
 
 # =====================================================================

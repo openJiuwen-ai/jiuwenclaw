@@ -131,6 +131,30 @@ def _mask_secrets(value: Any) -> Any:
     return value
 
 
+def _mask_arguments(value: Any) -> Any:
+    """Mask secret keys inside tool-call arguments, tolerating JSON-string shape.
+
+    LLM-emitted tool calls usually deliver ``arguments`` as a JSON *string*
+    (e.g. ``'{"api_key": "sk-..."}'``), not a structured dict. ``_mask_secrets``
+    only recurses dict/list values, so a JSON-string value would pass through
+    unchanged. Parse it, mask, and re-serialise so secrets are masked in both
+    the string and dict shapes; non-JSON strings are returned verbatim.
+    """
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith("{") or stripped.startswith("["):
+            try:
+                parsed = json.loads(value)
+            except ValueError:  # JSONDecodeError is a ValueError subclass
+                return value
+            if isinstance(parsed, (dict, list)):
+                return _stringify(_mask_secrets(parsed))
+        return value
+    if isinstance(value, (dict, list)):
+        return _stringify(_mask_secrets(value))
+    return value
+
+
 def _extract_content(payload: Any) -> str:
     if isinstance(payload, dict):
         return payload.get("content", "") or payload.get("output", "") or ""
@@ -311,7 +335,14 @@ class DebugTraceLogger:
         except Exception as exc:  # never break the stream
             self._safe_warn(f"feed error: {exc!r}")
 
-    def end_run(self, *, status: str, error: BaseException | None = None) -> None:
+    def end_run(
+        self,
+        *,
+        status: str,
+        error: BaseException | None = None,
+        error_type: str | None = None,
+        error_message: str | None = None,
+    ) -> None:
         if self._disabled or self._ended:
             return
         self._ended = True
@@ -332,6 +363,14 @@ class DebugTraceLogger:
             if error is not None:
                 lines.append(f"error_type={type(error).__name__}")
                 lines.append(f"error={error}")
+            elif error_type is not None or error_message is not None:
+                # Non-exception failure surfaced as an in-stream event
+                # (e.g. controller task_failed): record the same error_type /
+                # error lines so run-end status reflects it.
+                if error_type:
+                    lines.append(f"error_type={error_type}")
+                if error_message:
+                    lines.append(f"error={error_message}")
             self._write_raw("\n".join(lines))
         except Exception as exc:
             self._safe_warn(f"end_run error: {exc!r}")
@@ -436,6 +475,9 @@ class DebugTraceLogger:
         args_raw = info.get("arguments") or info.get("args") or info.get("tool_args") or ""
         if not self._settings.include_tool_args:
             args_raw = "<redacted>"
+        else:
+            # arguments often arrive as a JSON string; mask secrets inside it.
+            args_raw = _mask_arguments(args_raw)
         args = _truncate(_stringify(args_raw), args_limit)
         return f"tool_name={name} tool_call_id={call_id}\narguments={args}"
 
@@ -468,7 +510,13 @@ class DebugTraceLogger:
         name = update.get("tool_name") or update.get("name") or ""
         status = update.get("status", "")
         call_id = update.get("tool_call_id") or update.get("id") or ""
-        args = _truncate(_stringify(update.get("arguments", "")), args_limit)
+        args_raw = update.get("arguments", "")
+        if not self._settings.include_tool_args:
+            args_raw = "<redacted>"
+        else:
+            # arguments often arrive as a JSON string; mask secrets inside it.
+            args_raw = _mask_arguments(args_raw)
+        args = _truncate(_stringify(args_raw), args_limit)
         return f"tool_name={name} status={status} tool_call_id={call_id}\narguments={args}"
 
     def _usage_summary(self, payload: Any) -> str:

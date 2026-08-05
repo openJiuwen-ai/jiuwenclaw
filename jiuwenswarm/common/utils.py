@@ -1473,12 +1473,6 @@ def get_default_project_session_workspace_dir(session_id: str | None = None) -> 
     return workspace
 
 
-def get_prompt_attachment_dir() -> Path:
-    """Get the jiuwenswarm prompt attachment directory path."""
-
-    return get_agent_workspace_dir() / "prompt_attachment"
-
-
 def get_agent_root_dir() -> Path:
     return get_user_workspace_dir() / "agent"
 

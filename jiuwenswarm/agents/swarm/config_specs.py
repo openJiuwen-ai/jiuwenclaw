@@ -39,6 +39,9 @@ from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.rails import SkillUseRail
 
+from jiuwenswarm.agents.harness.common.browser_defaults import (
+    DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
+)
 from jiuwenswarm.common.config import (
     ASCEND_AFFINITY_PROVIDER,
     get_default_model_provider,
@@ -174,7 +177,7 @@ _CODE_TOOL_NAMES: tuple[str, ...] = (
     registry.SEND_FILE,
 )
 
-# code_agent sub-agents are always-on (explore / plan) or config-gated.
+# Code-mode sub-agents are either always-on (plan) or config-gated.
 _DEFAULT_SUBAGENT_MAX_ITERATIONS = 15
 
 
@@ -640,7 +643,13 @@ def _code_subagent_spec(
         react_cfg.get("subagents", {}) if isinstance(react_cfg, dict) else {}
     )
     sub_cfg = subagents_cfg.get(name) if isinstance(subagents_cfg, dict) else None
-    max_iterations = react_cfg.get("max_iterations", _DEFAULT_SUBAGENT_MAX_ITERATIONS)
+    if name == "browser_agent":
+        max_iterations = DEFAULT_BROWSER_AGENT_MAX_ITERATIONS
+    else:
+        max_iterations = react_cfg.get(
+            "max_iterations",
+            _DEFAULT_SUBAGENT_MAX_ITERATIONS,
+        )
     if isinstance(sub_cfg, dict) and sub_cfg.get("max_iterations"):
         max_iterations = sub_cfg["max_iterations"]
     return SubAgentSpec(
@@ -661,7 +670,7 @@ def build_member_subagent_specs(
 ) -> list[SubAgentSpec]:
     """Build the declarative code sub-agent specs (empty for non-code modes).
 
-    explore / plan are always present, while code / browser are config-gated via
+    plan is always present, while code / browser are config-gated via
     ``react.subagents.<name>.enabled``.
 
     Args:
@@ -680,7 +689,6 @@ def build_member_subagent_specs(
     language = _subagent_language(mode, role, config)
 
     specs: list[SubAgentSpec] = [
-        _code_subagent_spec("explore_agent", registry.EXPLORE_AGENT, react, language),
         _code_subagent_spec("plan_agent", registry.PLAN_AGENT, react, language),
     ]
     if isinstance(subagents_cfg, dict):
@@ -773,6 +781,18 @@ def build_member_deep_agent_spec(
 
     if subagent_specs or team_browser_spec:
         merged_subagents = list(base_spec.subagents or [])
+        if _is_code_mode(mode):
+            filtered = []
+            for spec in merged_subagents:
+                is_explore = (
+                    getattr(spec, "subagent_type", None) == "explore_agent"
+                    or getattr(spec, "factory_name", None) == registry.EXPLORE_AGENT
+                    or getattr(getattr(spec, "agent_card", None), "name", None)
+                    == "explore_agent"
+                )
+                if not is_explore:
+                    filtered.append(spec)
+            merged_subagents = filtered
         # Remove any browser_agent from base_spec to prevent the shared
         # playwright_official_stdio entry from co-existing with our isolated one.
         if team_browser_spec or any(

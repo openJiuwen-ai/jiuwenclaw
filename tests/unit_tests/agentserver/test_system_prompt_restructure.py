@@ -14,6 +14,9 @@ from openjiuwen.harness.prompts.prompt_attachment_manager import (
 )
 from openjiuwen.harness.prompts import PromptSection, SystemPromptBuilder
 
+from jiuwenswarm.agents.harness.common.browser_defaults import (
+    DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
+)
 from jiuwenswarm.common import utils as _utils_mod
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep as interface_module
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
@@ -50,6 +53,17 @@ class _FakeAgent:
     def __init__(self, builder: SystemPromptBuilder) -> None:
         self.system_prompt_builder = builder
         self.prompt_attachment_manager = PromptAttachmentManager()
+
+
+class _FakeLiveModeAgent(_FakeAgent):
+    def __init__(self, builder: SystemPromptBuilder, mode: str) -> None:
+        super().__init__(builder)
+        self.mode = mode
+
+    def load_state(self, session):
+        return SimpleNamespace(
+            plan_mode=SimpleNamespace(mode=self.mode),
+        )
 
 
 class _FakeAbilityManager:
@@ -91,7 +105,14 @@ class _FakeResourceManager:
         self.added: list[str] = []
         self.removed: list[str] = []
 
-    def add_tool(self, tool: SimpleNamespace) -> None:
+    def add_tool(
+        self,
+        tool: SimpleNamespace,
+        *,
+        tag: object | None = None,
+        refresh: bool = False,
+        skip_if_exists: bool = False,
+    ) -> None:
         self.added.append(tool.card.name)
 
     def remove_tool(self, tool_id: str) -> None:
@@ -377,6 +398,7 @@ def test_deep_adapter_syncs_symphony_tools_from_config_snapshot(monkeypatch):
     fake_instance = _FakeRuntimeInstance()
     adapter = object.__new__(JiuWenSwarmDeepAdapter)
     adapter._instance = fake_instance
+    adapter._is_session_scoped_adapter = False
     adapter._tool_cards = []
     adapter._symphony_tools = []
     adapter._symphony_tools_registered = False
@@ -420,12 +442,15 @@ def test_deep_adapter_syncs_symphony_tools_from_config_snapshot(monkeypatch):
     assert adapter._symphony_tools == []
     assert adapter._symphony_tools_registered is False
     assert adapter._tool_cards == []
-    assert fake_resource.removed == [
+    # Symphony tools are shared across adapters, so disabling them here detaches
+    # them from this agent only; the process-global registration stays for any
+    # sibling adapter still running on it.
+    assert fake_resource.removed == []
+    assert fake_instance.ability_manager.removed == [
         "symphony_read_score",
         "symphony_refresh_score",
         "symphony_compose_score",
     ]
-    assert fake_instance.ability_manager.removed == fake_resource.removed
 
 
 @pytest.mark.asyncio
@@ -487,18 +512,12 @@ async def test_runtime_dynamic_sections_go_to_prompt_attachment_when_manager_ava
     assert "# Runtime State" not in prompt
     assert "# Language" in prompt
     assert "# Browser Tool Policy" in prompt
-    assert "browser_preflight_submit" in prompt
-    assert "hotel_option_select" in prompt
-    assert "hotel_payment_confirm" in prompt
-    assert "gmail_email_select" in prompt
-    assert "gmail_cleanup_confirm" in prompt
-    assert "social_post_draft_select" in prompt
-    assert "social_post_confirm" in prompt
-    assert "Do not use plain natural-language questions or `ask_user`" in prompt
-    assert "Mandatory Web A2UI account-action gate" in prompt
-    assert "`todo_create`, `todo_modify`, `memory_search`" in prompt
-    assert "`task_tool`, plain text, Markdown, or `ask_user`" in prompt
-    assert "show final A2UI confirmation before any" in prompt
+    assert "browser_preflight_submit" not in prompt
+    assert "hotel_option_select" not in prompt
+    assert "gmail_email_select" not in prompt
+    assert "social_post_draft_select" not in prompt
+    assert "Mandatory Web A2UI account-action gate" not in prompt
+    assert 'subagent_type` set to `"browser_agent"`' in prompt
     assert "# Environment" in prompt
 
     items = await agent.prompt_attachment_manager.collect_for_session("sess1")
@@ -507,6 +526,44 @@ async def test_runtime_dynamic_sections_go_to_prompt_attachment_when_manager_ava
     assert "model-x" in rendered
     assert "Always respond in English" in prompt
     assert "# Browser Tool Policy" in prompt
+
+
+@pytest.mark.asyncio
+async def test_runtime_attachment_tracks_live_code_agent_mode(tmp_path, monkeypatch):
+    monkeypatch.setattr(_utils_mod, "get_config_dir", lambda: tmp_path)
+    runtime_state = tmp_path / "runtime_state" / "default.yaml"
+    runtime_state.parent.mkdir(parents=True, exist_ok=True)
+    runtime_state.write_text(
+        "model: model-x\n"
+        "available_models:\n"
+        "  - model-x\n"
+        "mode: code.normal\n",
+        encoding="utf-8",
+    )
+    builder = SystemPromptBuilder(language="en")
+    agent = _FakeLiveModeAgent(builder, mode="plan")
+    runtime_rail = RuntimePromptRail(language="en", channel="tui")
+    runtime_rail.init(agent)
+    ctx = AgentCallbackContext(
+        # Inner ReactAgent callbacks do not expose DeepAgent.load_state().
+        agent=SimpleNamespace(),
+        inputs=None,
+        session=_FakeSession(),
+        extra={},
+    )
+
+    await runtime_rail.before_model_call(ctx)
+    items = await agent.prompt_attachment_manager.collect_for_session("sess1")
+    rendered = agent.prompt_attachment_manager.render(items)
+    assert "Current mode: code.plan" in rendered
+    assert "Current mode: code.normal" not in rendered
+
+    agent.mode = "normal"
+    await runtime_rail.before_model_call(ctx)
+    items = await agent.prompt_attachment_manager.collect_for_session("sess1")
+    rendered = agent.prompt_attachment_manager.render(items)
+    assert "Current mode: code.normal" in rendered
+    assert "Current mode: code.plan" not in rendered
 
 
 @pytest.mark.asyncio
@@ -1083,7 +1140,7 @@ def test_resolve_enable_task_loop_preserves_false_without_enforcers(monkeypatch)
 
 
 # DeepAdapter only builds research_agent + browser_agent (agent mode).
-# code_agent / explore_agent belong to CodeAdapter.
+# code_agent belongs to CodeAdapter.
 
 def test_deep_adapter_subagents_includes_optional_browser_and_configured_research():
     adapter = _TestableJiuWenSwarmDeepAdapter()
@@ -1149,4 +1206,9 @@ def test_deep_adapter_subagents_omits_research_without_explicit_enable():
     # DeepAdapter: no research_agent configured, browser enabled
     assert subagents == ["browser_spec"]
     mock_research.assert_not_called()
-    mock_browser.assert_called_once()
+    mock_browser.assert_called_once_with(
+        model,
+        workspace="/tmp/jiuwenswarm-workspace",
+        language="cn",
+        max_iterations=DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
+    )

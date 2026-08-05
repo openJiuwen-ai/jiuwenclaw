@@ -8,23 +8,22 @@
 
 ## Overall layout
 
-The JiuwenSwarm web app uses a classic three-column layout—common in professional tools and dev platforms—so information stays organized and actions are easy to reach.
+The JiuwenSwarm web app uses a two-column layout: an icon-based navigation bar on the left and the main workspace on the right. The design is clean and efficient.
 
 ### Layout at a glance
 
 | Area | Position | Main purpose |
 |------|----------|--------------|
-| Left navigation | Left edge | Feature menu, version info |
-| Main workspace | Center | Chat, task execution, controls |
-| Right info panel | Right edge | Status, task list, system info |
+| Left navigation | Left edge | Icon-based feature menu, new conversation, settings |
+| Main workspace | Center and right | Chat, task execution, feature management |
 
-![JiuwenSwarm web UI: three-column layout](../assets/images/jiuwenswarm布局概览.png) 
+![JiuwenSwarm web UI: Work page](../assets/images/current-ui-en/01-Work-Page.png)
 
 ### Layout notes
 
-1. **Responsive design:** Regions resize with screen width.
-2. **Collapsible sidebars:** You can fold the left and right areas to give the center more room.
-3. **Layered information:** Core interaction is in the center; supporting details on the right.
+1. **Icon navigation:** The left side uses compact icon-based navigation to save space.
+2. **Centralized information:** Core interaction features and auxiliary information are both in the main workspace.
+3. **Responsive design:** The page adjusts automatically based on screen width.
 
 > **Tip:** A wide display (e.g. 1920×1080 or higher) works best.
 
@@ -32,34 +31,38 @@ The JiuwenSwarm web app uses a classic three-column layout—common in professio
 
 ## Left navigation
 
-The left bar is the main entry to features.
+The left navigation bar is the main entry point for JiuwenSwarm features, using an icon-based design with three areas: **main navigation**, **more menu**, and **bottom buttons**.
 
-### Menu items
+### Main navigation
+
+These items are always visible in the navigation bar:
 
 | Item | What it is | When to use it |
 |------|------------|----------------|
-| **Chat** | AI conversation: text in, multi-turn context | Q&A, tasks, code help, day-to-day use |
-| **Agents** | Agent setup: switch personas, create custom agents, tune parameters | When you need a different style or domain expert |
-| **Sessions** | Session list: history, restore context, new session | When continuing or finding past chats |
-| **Team** | Team workspace management: create teams, view team directories, manage team sessions, share team resources (skills, artifacts, workspaces, etc.) | Multi-user collaboration, resource sharing, team project management |
-| **Heartbeat** | Heartbeat / health: runtime checks, scheduled job signals | To confirm the system and cron-style work are healthy |
-| **Scheduled tasks** | Cron-style jobs: create, edit, delete | Recurring work (e.g. daily reports, reminders) |
+| **Work** | Main entry for chat and task execution, including session management, scheduled tasks, and project management | Daily Q&A, task execution, code generation, etc. |
 | **Skills** | Skills library: browse, install, configure extensions | Extra capabilities (e.g. deep search, PPT) |
 | **Channels** | Outbound channels: Feishu, WeChat, Telegram, etc. | Push AI messages to other apps |
-| **Harness** | Harness Package management: select Agent runtime mode, import/export extension packages, manage different version configurations | Switching native/extended mode, customizing Agent capabilities |
+| **Agent** | View agent workspace files and memory content | When you need to inspect agent files or memory |
+
+### More menu
+
+Click the **More** button to expand additional settings:
+
+| Item | What it is | When to use it |
+|------|------------|----------------|
 | **Configuration** | System and model settings | Change behavior or switch models |
-| **Browser** | Browser automation | When the agent should drive a real browser |
-| **Logs** | Application logs and traces | Debug issues and audit what happened |
-| **Update** | App updates: check for new versions, download, install and restart | When upgrading to the latest version |
+| **Harness** | Harness Package management: select Agent runtime mode, import/export extension packages | Switching native/extended mode, customizing Agent capabilities |
+
+### Bottom buttons
+
+- **Setup guide**: Step-by-step configuration wizard
+- **More Settings**: Additional settings and preferences
+
+![More menu expanded](../assets/images/current-ui-en/06-More-Menu.png)
 
 ### Version info
 
-- **Where:** **bottom-left** of the nav
-
-![JiuwenSwarm version in the web UI](../assets/images/jiuwenswarm版本号.png)
-
-- **What:** current JiuwenSwarm version
-- **Why:** identify builds when reporting issues or checking compatibility
+Version information is available in the **More Settings** panel at the bottom of the navigation bar.
 
 > **Note:** Some advanced features need the right permissions or config.
 
@@ -83,26 +86,25 @@ The primary surface for talking to JiuwenSwarm.
 - **AI reply:** final answer and intermediate steps when shown
 - **Tool calls:** tools the agent used and their results
 
-![JiuwenSwarm chat: messages, reply, and tools](../assets/images/jiuwenswarm显示内容.png)
+![JiuwenSwarm chat: messages, reply, and tools](../assets/images/current-ui-en/01-Work-Page.png)
 
 ### 2. Execution modes
 
-JiuwenSwarm offers three execution modes. Pick the one that fits the task. Names in the app follow the UI (English strings are typically *Planning mode*, *Performance mode*, and *Cluster mode* in `en.json`).
+JiuwenSwarm offers two execution modes. Pick the one that fits the task.
 
 > **Scope of this page:** only switching modes **in the app**. It does not cover changing config files or environment variables; for that, see [Configuration](Configuration.md).
 
 | Mode (UI) | How it works | When to use it |
 |------|------------|----------------|
-| **Planning mode** | Breaks the request into steps and runs them in order | Complex work, step-by-step review, when you need to confirm each step |
-| **Performance mode** | More flexible, can run parallel work | Simpler tasks, faster responses, when parallel helps |
+| **Agent mode** | Single agent handles the task with full tool access | Most tasks, when you need a single agent to work autonomously |
 | **Cluster mode** | Multi-agent: a leader coordinates specialists; subtasks in parallel; leader merges the output | Large jobs (e.g. PPT, deep research) that need many roles |
 
 **Switching modes**
 
-- Choose the mode in the **input area** of the main chat.
+- Choose the mode in the **input area** of the main chat using the mode dropdown.
 - Modes change how the agent plans and runs; in **Cluster mode** you can usually see how work is split and parallel work (as the UI shows).
 
-![Execution mode selector](../assets/images/jiuwenswarm执行模式.png)
+![Execution mode selector](../assets/images/current-ui-en/02-Mode-Selector.png)
 
 ### 3. Task control bar
 
@@ -115,38 +117,19 @@ While a task is **running**, you can often **manually** control the current run 
 
 > 💡 **Tip**: In Cluster mode, clicking Stop pauses the current execution and you can resume it.
 
-**Running (example)**  
-![Task running](../assets/images/jiuwenswarm处理中.png)
+### 4. Input area controls
 
-**Stopped (example)**  
-![Task stopped](../assets/images/jiuwenswarm取消.png)
+The input area at the bottom of the chat page provides several controls:
 
----
+| Control | What it does |
+|---------|--------------|
+| **Add image** | Attach an image to your message |
+| **Agent/Cluster** | Switch execution mode |
+| **Full Access/Default** | Switch permission level for tool access |
+| **Skills** | Select skills to use for this conversation |
+| **Model** | Switch the AI model (e.g. GLM-5.2) |
 
-## Right info area
-
-The right side shows system status and supporting context.
-
-### 1. Top status row
-
-| Item | What it shows |
-|------|---------------|
-| **Connection** | Backend link state (connected / disconnected / reconnecting) |
-| **Language** | UI language (e.g. Chinese / English) |
-| **Theme** | Light / dark / system |
-
-![Status and auxiliary area](../assets/images/jiuwenswarm辅助信息展示.png)
-
-### 2. Info panel
-
-| Block | What it is | Why it helps |
-|-------|------------|--------------|
-| **Task list** | Current and queued work | See progress and queue |
-| **Context compression** | Context compression state and compression ratio | Understand long threads |
-| **Memory usage** | Current system memory consumption | Monitor resource usage |
-| **Heartbeat** | System heartbeat status | Monitor system health |
-
-> **Tip:** The info panel content updates in real time; you usually do not need to refresh manually.
+![Input area with controls](../assets/images/current-ui-en/14-Input-Area-Controls.png)
 
 ---
 

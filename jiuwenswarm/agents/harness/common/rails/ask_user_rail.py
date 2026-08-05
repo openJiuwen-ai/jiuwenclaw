@@ -56,7 +56,7 @@ _QUESTIONS_ITEM_SCHEMA: dict[str, Any] = {
         },
         "header": {
             "type": "string",
-            "description": "A short label displayed as a chip/tag (max 12 chars).",
+            "description": "A short label displayed as a chip/tag.",
         },
         "options": {
             "type": "array",
@@ -415,6 +415,14 @@ class StructuredAskUserRail(AskUserRail):
                         value_text = selected if isinstance(selected, str) else ", ".join(selected)
                         answer_parts.append(f"{q_text}: {value_text}")
                 answer_text = "\n".join(answer_parts) if answer_parts else ""
+                if not answer_text.strip():
+                    # Empty resume (e.g. bare Other) must not look like a valid answer (#2330).
+                    return self.reject(
+                        tool_result=(
+                            "[INVALID_ARGUMENT] answers must include at least "
+                            "one non-empty response."
+                        )
+                    )
                 logger.info(
                     "[StructuredAskUserRail] Resolved structured answer: %s",
                     answer_text,

@@ -168,7 +168,18 @@ class SkillToolkit:
             if source == "skillnet" and local_source == "skillnet" and origin == target:
                 return self._build_installed_item(name, "skillnet")
             if source == "clawhub" and local_source == "clawhub":
-                if origin == f"clawhub:{target}" or origin == target or name == target:
+                # target 可为 owner/slug 或旧版纯 slug；禁止用展示名匹配，避免同名误判
+                # 磁盘按 slug 唯一，故 owner/slug ↔ slug / 旧 origin 需互通，否则
+                # Agent 纯 slug 安装会从 already_installed 退化为 download 失败。
+                origin_cf = origin.casefold()
+                target_cf = target.casefold()
+                if origin_cf == f"clawhub:{target_cf}" or origin_cf == target_cf:
+                    return self._build_installed_item(name, "clawhub")
+                slug_cf = target_cf.rsplit("/", 1)[-1]
+                if slug_cf and (
+                    origin_cf == f"clawhub:{slug_cf}"
+                    or origin_cf.endswith(f"/{slug_cf}")
+                ):
                     return self._build_installed_item(name, "clawhub")
             if source == "teamskillshub" and local_source == "teamskillshub":
                 if (
@@ -185,8 +196,7 @@ class SkillToolkit:
             marketplace = str(plugin.get("marketplace", "")).strip()
             plugin_source = str(plugin.get("source", "")).strip()
             normalized_source = plugin_source or marketplace
-            if source == "clawhub" and normalized_source == "clawhub" and name == target:
-                return self._build_installed_item(name, "clawhub")
+            # ClawHub 不按插件名匹配：同名不同发布者会误判已安装
             if source == "skillnet" and normalized_source == "skillnet" and name == target:
                 return self._build_installed_item(name, "skillnet")
             if source == "teamskillshub" and normalized_source == "teamskillshub" and name == target:
@@ -295,10 +305,17 @@ class SkillToolkit:
         skill_dir = str(meta.get("skill_dir", ""))
         skill_file = str(meta.get("skill_file", ""))
         identifier = ""
+        display_name = ""
         for item in self._manager.get_local_skills():
             if item.get("name") == name:
                 identifier = str(item.get("origin", "")).strip()
+                display_name = str(item.get("display_name") or "").strip()
                 break
+        if not display_name:
+            for plugin in self._manager.get_installed_plugins():
+                if plugin.get("name") == name:
+                    display_name = str(plugin.get("display_name") or "").strip()
+                    break
         out_source = source
         if out_source == "clawhub" and identifier.startswith("clawhub:"):
             identifier = identifier.split(":", 1)[1].strip()
@@ -306,6 +323,7 @@ class SkillToolkit:
             identifier = identifier.split(":", 1)[1].strip()
         return {
             "name": name,
+            "display_name": display_name or name,
             "description": description,
             "source": out_source,
             "identifier": identifier or name,
@@ -316,6 +334,26 @@ class SkillToolkit:
             "skill_dir": skill_dir,
             "skill_file": skill_file,
         }
+
+    @staticmethod
+    def _match_installed_item(items: list[dict[str, Any]], query: str) -> dict[str, Any] | None:
+        """按内部名 / 展示名匹配已安装技能（大小写不敏感）。
+
+        UI 可能展示 ClawHub 的 ``Weather``，而磁盘规范名是 ``weather``；
+        Agent 也可能任一侧传入。必须同时覆盖，否则会误报未安装。
+        """
+        needle = str(query or "").strip()
+        if not needle:
+            return None
+        needle_cf = needle.casefold()
+        for item in items:
+            name = str(item.get("name") or "").strip()
+            display_name = str(item.get("display_name") or "").strip()
+            if name == needle or display_name == needle:
+                return item
+            if name.casefold() == needle_cf or display_name.casefold() == needle_cf:
+                return item
+        return None
 
     async def search_skill(self, query: str, source: str = _DEFAULT_SOURCE, limit: int = 10) -> dict[str, Any]:
         """Search skills from SkillNet, ClawHub, and/or TeamSkillsHub with a unified response."""
@@ -510,7 +548,8 @@ class SkillToolkit:
                 clawhub_owner = ""
                 if "/" in target:
                     clawhub_owner, _, clawhub_slug = target.partition("/")
-                r = self._check_already_installed(clawhub_slug, resolved_source)
+                check_id = f"{clawhub_owner}/{clawhub_slug}" if clawhub_owner else clawhub_slug
+                r = self._check_already_installed(check_id, resolved_source)
                 if r is not None:
                     return r
                 payload = await self._manager.handle_skills_clawhub_download(
@@ -587,11 +626,10 @@ class SkillToolkit:
                     "detail": str(installed_payload.get("detail", "")).strip() or "failed to inspect installed skills",
                 }
 
-            installed_item = None
-            for item in installed_payload.get("items", []):
-                if item.get("name") == skill_name:
-                    installed_item = item
-                    break
+            installed_item = self._match_installed_item(
+                list(installed_payload.get("items") or []),
+                skill_name,
+            )
             if installed_item is None:
                 return {
                     "success": False,
@@ -600,7 +638,9 @@ class SkillToolkit:
                     "detail": f"Skill `{skill_name}` is not installed.",
                 }
 
-            payload = await self._manager.handle_skills_uninstall({"name": skill_name})
+            # 实际卸载必须用磁盘规范名，避免展示名大小写导致删不到目录
+            canonical_name = str(installed_item.get("name") or skill_name).strip()
+            payload = await self._manager.handle_skills_uninstall({"name": canonical_name})
         except Exception as exc:  # noqa: BLE001
             logger.exception("uninstall_skill failed")
             return {
@@ -621,9 +661,10 @@ class SkillToolkit:
         return {
             "success": True,
             "removed": True,
-            "name": skill_name,
+            "name": canonical_name,
+            "display_name": str(installed_item.get("display_name") or canonical_name),
             "source": installed_item.get("source", "") if installed_item else "",
-            "detail": f"Skill `{skill_name}` uninstalled successfully.",
+            "detail": f"Skill `{canonical_name}` uninstalled successfully.",
         }
 
     async def _list_installed_skills(self) -> dict[str, Any]:

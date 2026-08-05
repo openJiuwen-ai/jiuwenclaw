@@ -3,20 +3,28 @@
 // 管理 /memory 的四个页签（edit/status/toggle/open）的交互、渲染和状态。
 // app-screen.ts 通过持有 MemoryViewController 实例并委托调用其方法来使用。
 
-import * as fs from "node:fs";
-import * as path from "node:path";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { type TUI, type SelectItem, SelectList } from "@mariozechner/pi-tui";
 import { addError, addInfo } from "../core/commands/helpers.js";
 import type { CliPiAppState } from "../app-state.js";
 import { isTeamMode } from "../core/modes.js";
 import { openFileInEditor as openInExternalEditor, openFolderInExplorer, getEditorInfo } from "../core/utils/editor.js";
 import { collectOrderedMemoryFiles, type MemoryFile } from "../core/commands/builtins/memory.js";
-import { getDisplayPath } from "../core/commands/builtins/memory-path-utils.js";
+import {
+  formatMemoryPathForDisplay,
+  getDisplayPath,
+} from "../core/commands/builtins/memory-path-utils.js";
 import { palette, selectListTheme } from "./theme.js";
 import { padToWidth } from "./rendering/text.js";
 import { resolveAction } from "../core/keybindings/resolver.js";
 
 // ── 类型定义 ──
+
+function memoryPathKey(filePath: string): string {
+  const resolved = resolve(filePath);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
 
 export type MemoryViewTab = "edit" | "status" | "toggle" | "open";
 
@@ -349,7 +357,7 @@ export class MemoryViewController {
     const projectDir = this.state.projectDir ?? "";
     const gitRoot = this.state.gitRoot ?? null;
     const displayPath = this.showFullPath
-      ? this.lastOpenedPath.replace(/\\/g, "/")
+      ? formatMemoryPathForDisplay(this.lastOpenedPath).replace(/\\/g, "/")
       : getDisplayPath(this.lastOpenedPath, projectDir, gitRoot);
     // 保留原有 "Opened:" / "No GUI explorer detected. ..." 前缀,只替换显示路径
     if (this.statusMessage?.startsWith("Opened: ")) {
@@ -411,7 +419,9 @@ export class MemoryViewController {
   private buildEditItems(files: MVFile[], projectDir: string, gitRoot: string | null): SelectItem[] {
     return files.map((f) => {
       const label = this.fileLabel(f);
-      const dp = this.showFullPath ? f.path.replace(/\\/g, "/") : getDisplayPath(f.path, projectDir, gitRoot);
+      const dp = this.showFullPath
+        ? formatMemoryPathForDisplay(f.path).replace(/\\/g, "/")
+        : getDisplayPath(f.path, projectDir, gitRoot);
       const isGitTracked = gitRoot && f.kind !== "local" && f.kind !== "user";
       const desc = label === dp ? undefined : isGitTracked ? `Checked in at ${dp}` : `Saved in ${dp}`;
       return { value: f.path, label, description: desc };
@@ -457,7 +467,9 @@ export class MemoryViewController {
     const cat = this.modeCategory(mode);
     const projectDir = this.state?.projectDir ?? "";
     const gitRoot = this.state?.gitRoot ?? null;
-    const fmt = (p: string) => (this.showFullPath ? p : getDisplayPath(p, projectDir, gitRoot));
+    const fmt = (p: string) => (
+      this.showFullPath ? formatMemoryPathForDisplay(p) : getDisplayPath(p, projectDir, gitRoot)
+    );
     const items: SelectItem[] = [];
     if (cat === "agent") items.push({ value: openP.memory_dir, label: "Memory Dir", description: fmt(openP.memory_dir) });
     if (cat === "code" && openP.coding_memory_dir) items.push({ value: openP.coding_memory_dir, label: "Coding Memory Dir", description: fmt(openP.coding_memory_dir) });
@@ -469,12 +481,31 @@ export class MemoryViewController {
   private async handleSelect(tab: MemoryViewTab, item: SelectItem, mode: string, _projectDir: string): Promise<void> {
     if (tab === "edit" && item.value && item.value !== "__display__") {
       const filePath = item.value;
-      if (!fs.existsSync(filePath)) {
+      if (!existsSync(filePath)) {
+        const selectedFile = this.state?.files.find(
+          (file) => memoryPathKey(file.path) === memoryPathKey(filePath),
+        );
+        // Any missing file shown by the edit panel may be created. Paths that
+        // were not supplied by the panel remain subject to the existing rejection.
+        const isCreatablePanelFile = selectedFile?.exists !== undefined;
+
+        if (!isCreatablePanelFile) {
+          this.statusMessage = "Cannot edit: memory file does not exist.";
+          this.tui.requestRender();
+          return;
+        }
+
         try {
-          fs.mkdirSync(path.dirname(filePath), { recursive: true });
-          fs.writeFileSync(filePath, "", "utf-8");
-        } catch {
-          // 创建失败仍尝试打开，让编辑器报错
+          mkdirSync(dirname(filePath), { recursive: true });
+          writeFileSync(filePath, "", { encoding: "utf-8", flag: "wx" });
+        } catch (err) {
+          // If another process created the selected placeholder concurrently,
+          // continue opening it; otherwise preserve the existing failure behavior.
+          if (!existsSync(filePath)) {
+            this.statusMessage = `Cannot create memory file: ${err instanceof Error ? err.message : String(err)}`;
+            this.tui.requestRender();
+            return;
+          }
         }
       }
       // 打开编辑器前先冻结列表(进入不可操作态)。编辑器关闭后由 onExit 退出列表
@@ -526,7 +557,7 @@ export class MemoryViewController {
       const projectDir = this.state?.projectDir ?? "";
       const gitRoot = this.state?.gitRoot ?? null;
       const displayPath = this.showFullPath
-        ? item.value.replace(/\\/g, "/")
+        ? formatMemoryPathForDisplay(item.value).replace(/\\/g, "/")
         : getDisplayPath(item.value, projectDir, gitRoot);
       if (opened) {
         this.statusMessage = `Opened: ${displayPath}`;
@@ -583,7 +614,7 @@ export class MemoryViewController {
     const cat = this.modeCategory(mode);
     const all = [
       { key: "memory_enabled", label: "Memory", cats: ["agent", "code"], desc: "记忆功能总开关", read: (s: MVStatus) => s.enabled },
-      { key: "memory_proactive", label: "Proactive memory", cats: ["agent"], desc: "对话中自动搜索和记录", read: (s: MVStatus) => s.proactive },
+      // { key: "memory_proactive", label: "Proactive memory", cats: ["agent"], desc: "对话中自动搜索和记录", read: (s: MVStatus) => s.proactive },
       { key: "auto_coding_memory", label: "Auto coding memory", cats: ["code"], desc: "每轮对话后自动提取记忆（需总开关开启）", read: (s: MVStatus) => s.auto_coding_memory ?? false },
       { key: "memory_forbidden_enabled", label: "Forbidden filter", cats: ["agent", "code"], desc: "过滤敏感信息", read: (s: MVStatus) => s.forbidden_enabled },
     ];
@@ -591,7 +622,7 @@ export class MemoryViewController {
   }
 
   private fileLabel(f: MVFile): string {
-    const p = f.path.replace(/\\/g, "/");
+    const p = formatMemoryPathForDisplay(f.path).replace(/\\/g, "/");
     if (f.kind === "user") return "User memory";
     if (f.kind === "local") return "Local memory";
     if (f.kind === "project" && p.endsWith("JIUWENSWARM.md") && !p.endsWith("JIUWENSWARM.local.md")) return "Project memory";

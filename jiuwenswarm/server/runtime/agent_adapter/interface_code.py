@@ -9,7 +9,7 @@
 
 Code 模式独占逻辑全部收敛于此：
 - LspRail、ProjectMemoryRail、CodingMemoryRail 等 code 专属 rail
-- code_agent / explore_agent subagent 配置
+- code_agent / plan_agent subagent 配置
 - code 模式下 rail 生命周期（保留 SubagentRail、补充 ProjectMemoryRail 等）
 """
 
@@ -38,7 +38,6 @@ from openjiuwen.harness.lsp import InitializeOptions
 from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.subagents.browser_agent import build_browser_agent_config
 from openjiuwen.harness.subagents.code_agent import build_code_agent_config
-from openjiuwen.harness.subagents.explore_agent import build_explore_agent_config
 from openjiuwen.harness.subagents.plan_agent import build_plan_agent_config
 from openjiuwen.harness.tools import WebFetchWebpageTool, WebFreeSearchTool, WebPaidSearchTool
 from openjiuwen.harness.tools.worktree import WorktreeConfig, WorktreeRail
@@ -46,12 +45,18 @@ from openjiuwen.harness.workspace.workspace import Workspace
 
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
     JiuWenSwarmDeepAdapter,
+    _AGENT_CARD_ID,
     _CRON_TOOL_CHANNEL_ID,
+    _RailBuildInfo,
     _agent_def_to_subagent_config,
+    _deep_agent_context_engine_config,
     _deep_agent_kv_cache_affinity_config,
     parse_int,
 )
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import build_permission_rail
+from jiuwenswarm.agents.harness.common.browser_defaults import (
+    DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
+)
 from jiuwenswarm.agents.harness.code.prompt.code_prompt_builder import (
     build_code_system_prompt,
 )
@@ -63,12 +68,13 @@ from jiuwenswarm.agents.harness.common.rails import (
     ProjectMemoryRail,
     StructuredAskUserRail,
 )
-from jiuwenswarm.agents.harness.common.memory.config import get_memory_mode, is_memory_enabled
+from jiuwenswarm.agents.harness.common.memory.config import is_memory_enabled
 from jiuwenswarm.agents.harness.common.tools import (
     SkillToolkit,
 )
 from jiuwenswarm.agents.harness.common.tools.acp_chat import acp_chat
 from jiuwenswarm.common.config import get_config
+from jiuwenswarm.common.tool_ownership import mark_stateless, register_tool
 from jiuwenswarm.common.coding_memory_paths import (
     resolve_project_coding_memory_dir,
     resolve_project_coding_memory_workspace_path,
@@ -124,7 +130,7 @@ You are now in **plan mode**. You must only plan — you must not make any modif
 - Read-only tools: read_file, grep, list_files, glob
 - Plan file tools: write_file, edit_file (only .plans/<slug>.md)
 - Interactive tools: ask_user
-- Sub-agent tool: task_tool (dispatch explore_agent / plan_agent)
+- Sub-agent tool: task_tool (dispatch plan_agent)
 - Control tools: exit_plan_mode
 - bash (read-only operations only; git write / mkdir / touch / rm are blocked)
 
@@ -140,8 +146,7 @@ You are now in **plan mode**. You must only plan — you must not make any modif
 #### Phase 1: Initial Understanding
 Goal: Gain a comprehensive understanding of the user's request by reading code and asking questions.
 1. Focus on understanding existing architecture and patterns; identify relevant files and dependencies
-2. Launch explore sub-agents via task_tool to efficiently explore the codebase
-3. Quality over quantity — use the fewest agents possible
+2. Use read-only tools directly and keep exploration focused on the requested scope
 
 #### Phase 2: Design
 Goal: Design the implementation approach.
@@ -176,13 +181,20 @@ ask_user is only for clarifying requirements — do not use it for approval ques
 # Plan mode exit notification appended to exit_plan_mode tool_result.
 # Explicitly tells the model it can now edit files. Without this, the model only sees
 # MODE_INSTRUCTIONS removed from system prompt but receives no explicit signal.
+# The tool_result this is appended to carries the whole plan text, so a mild
+# "proceed with the plan" wording loses to that blob and the model just echoes the
+# plan back and asks whether to start. Hence the explicit do-NOT-restate wording.
 # ---------------------------------------------------------------------------
 
 _EXIT_PLAN_MODE_NOTIFICATION = """\
 <system-reminder>
-Plan mode has ended. You are now in normal mode. You can edit files,
-run write operations, and make changes to the system. Proceed with
-implementing the approved plan.
+The user approved this plan. Plan mode has ended and you are now in normal mode:
+you can edit files, run write operations, and make changes to the system.
+
+Start executing the first step now. Do NOT restate the plan and do NOT ask again
+whether to begin — the user has already read and approved it. This turn's output
+should be the work itself and its results. Use ask_user only if execution is
+genuinely blocked.
 </system-reminder>"""
 
 
@@ -214,17 +226,6 @@ _TOOL_BUILD_NAMES: dict[str, str] = {
     "skill_retrieval": "_build_skill_retrieval_toolkit",
     "acp_chat": "_build_acp_chat_tool",
 }
-
-
-@dataclass
-class _RailBuildInfo:
-    """Rail 构建信息 — 统一固定和动态 Rails 的构建流程."""
-    attr_name: str
-    build_func: Callable
-    params: dict = None
-
-    def __post_init__(self):
-        self.params = self.params or {}
 
 
 def _resolve_coding_memory_dir(
@@ -347,10 +348,10 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
     """Code 模式适配器 — 配置驱动注册 rails/tools.
 
     继承 JiuWenSwarmDeepAdapter，只重写：
-    - create_instance(): 统一使用 create_deep_agent()，不传多模态/上下文引擎参数（completion_timeout 从配置读取）
+    - create_instance(): 统一使用 create_deep_agent()（completion_timeout 从配置读取）
     - _build_agent_rails(): 固定 Rails (含 LspRail/ProjectMemoryRail/CodingMemoryRail) + 从 config.yaml 读取动态 Rails
     - _get_tool_cards(): 从 config.yaml 读取动态 Tools
-    - _build_configured_subagents(): 固定 explore_agent/plan_agent + 按配置启用 code_agent/browser_agent
+    - _build_configured_subagents(): 固定 plan_agent + 按配置启用 code_agent/browser_agent
     - _update_rails_for_mode(): code 模式 rail 生命周期
     - _update_runtime_config(): 保留 ProjectMemoryRail 语言同步
     """
@@ -362,6 +363,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         "LspRail", "ProjectMemoryRail", "PermissionInterruptRail",
         "ContextProcessorRail",
         "SysOperationRail", "CodingMemoryRail",
+        "MemoryForbiddenRail",
         "AgentModeRail", "StructuredAskUserRail", "ConfirmInterruptRail",
         "FileSystemRail",  # 别名
     })
@@ -415,7 +417,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         """初始化 DeepAgent 实例（code 模式）.
 
         统一使用 create_deep_agent()，不传 vision_model_config /
-        audio_model_config / context_engine_config。
+        audio_model_config。
         completion_timeout 从配置读取，可在 react / modes.code 中自定义。
         """
         # Propagate create params to per-session child adapters (see
@@ -453,10 +455,13 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
 
         self._dreaming_mode = "code"
 
-        model = self._create_model(config_base)
-        agent_card = AgentCard(name=self._agent_name, id='jiuwenswarm')
+        if self._skip_own_instance_build():
+            return
 
-        tool_cards = await self._get_tool_cards(agent_card.id)
+        model = self._create_model(config_base)
+        agent_card = AgentCard(name=self._agent_name, id=_AGENT_CARD_ID)
+
+        tool_cards = await self._get_tool_cards(self._tool_owner_id())
         self._tool_cards = tool_cards
 
         # 权限护栏由 openjiuwen PermissionInterruptRail + ToolPermissionHost 接管；
@@ -486,6 +491,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         self._instance = create_deep_agent(
             model=model,
             card=agent_card,
+            tool_owner_id=self._tool_owner_id(),
             system_prompt=build_code_system_prompt(),
             tools=tool_cards if tool_cards else [],
             subagents=configured_subagents,
@@ -495,7 +501,8 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             workspace=workspace,
             sys_operation=sys_operation,
             language=self._resolve_runtime_language(),
-            enable_read_image_multimodal=False,
+            enable_read_image_multimodal=self._resolve_enable_read_image_multimodal(config),
+            context_engine_config=_deep_agent_context_engine_config(config),
             kv_cache_affinity_config=_deep_agent_kv_cache_affinity_config(config, model),
             auto_create_workspace=False,
             completion_timeout=config.get("completion_timeout", 3600.0),
@@ -550,9 +557,12 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             initial_workspace,
         )
 
-        # code 模式不传: vision_model_config, audio_model_config,
-        # context_engine_config（completion_timeout 已从配置读取传入）
+        # code 模式不传: vision_model_config, audio_model_config
+        #（context_engine_config / completion_timeout 已从配置读取传入）
 
+        # Cron tools belong to the agent's standing toolset, not to any one
+        # request; build them here so the first turn does not pay for it either.
+        self._ensure_cron_tools_registered(self._parent_session_id)
         self._registered_mcp_server_ids.clear()
         self._registered_mcp_servers.clear()
         await self._register_mcp_servers_from_config(config_base, tag="code")
@@ -571,7 +581,8 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
     ) -> list[Any]:
         """Build rails for code mode: fixed rails + dynamic rails from config.
 
-        Code 模式固定包含 LspRail、ProjectMemoryRail、CodingMemoryRail。
+        Code 模式固定包含 LspRail、ProjectMemoryRail、CodingMemoryRail。plan 相关
+        的 rails 同样固定挂载，不按子模式分叉。
         """
         # 固定 Rails — code 模式特有
         rail_infos = [
@@ -595,6 +606,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             ),
             _RailBuildInfo("_code_filesystem_rail", self._build_filesystem_rail),
             _RailBuildInfo("_coding_memory_rail", self._build_coding_memory_rail),
+            _RailBuildInfo("_memory_forbidden_rail", self._build_memory_forbidden_rail),
             _RailBuildInfo("_code_agent_mode_rail", self._build_agent_mode_rail),
             _RailBuildInfo("_code_ask_user_rail", self._build_structured_ask_user_rail),
             _RailBuildInfo(
@@ -647,57 +659,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                 rail_name,
             )
 
-        # 统一构建并注册
-        rails_list = []
-        for info in rail_infos:
-            logger.info(
-                "[JiuwenSwarmCodeAdapter] Building rail: %s with params: %s",
-                info.attr_name, info.params,
-            )
-            rail_instance = info.build_func(**info.params)
-            if rail_instance is not None:
-                setattr(self, info.attr_name, rail_instance)
-                rails_list.append(rail_instance)
-                logger.info(
-                    "[JiuwenSwarmCodeAdapter] Rail %s built successfully",
-                    info.attr_name,
-                )
-            else:
-                logger.warning(
-                    "[JiuwenSwarmCodeAdapter] Rail %s build returned None",
-                    info.attr_name,
-                )
-        logger.info(
-            "[JiuwenSwarmCodeAdapter] Total rails built: %d, rail names: %s",
-            len(rails_list),
-            [type(r).__name__ for r in rails_list],
-        )
-        # 用户配置的 hooks（UserHookRail）
-        try:
-            hooks_config = load_hooks_config(config_base)
-            if hooks_config.events:
-                user_hook_rail = UserHookRail(hooks_config)
-                rails_list.append(user_hook_rail)
-                logger.info(
-                    "[JiuwenSwarmCodeAdapter] UserHookRail loaded with %d event types",
-                    len(hooks_config.events),
-                )
-        except Exception as e:
-            logger.warning("[JiuwenSwarmCodeAdapter] Failed to load UserHookRail: %s", e)
-        # Observability rail: opens an agent-layer span (agent.<name>.task_iteration.<n>
-        # for task-loop runs, or agent.<name>.invoke for single-round) under the root
-        # run span per iteration/round. It is the only thing that creates the
-        # task_iteration / invoke spans that llm.call + tool.* nest under. It
-        # self-disables (before_* returns early when get_team_span() is None), so
-        # attaching it unconditionally is safe and also adapts to runtime
-        # enable/disable of agent_observability without rebuilding the agent.
-        try:
-            from openjiuwen.agent_teams.observability.rail import ObservabilityRail
-            rails_list.append(ObservabilityRail())
-            logger.info("[JiuwenSwarmCodeAdapter] ObservabilityRail attached")
-        except Exception as e:
-            logger.warning("[JiuwenSwarmCodeAdapter] Failed to attach ObservabilityRail: %s", e)
-        return rails_list
+        return self._instantiate_rails(rail_infos, config_base)
 
     # ─── Code 专属 Rail 构建 ────────────────
 
@@ -953,9 +915,9 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             config: dict[str, Any],
             config_base: dict[str, Any] | None = None,
     ) -> tuple[list[Any] | None, bool]:
-        """Build subagents for code mode: explore_agent + plan_agent + code_agent + browser_agent.
+        """Build subagents for code mode: plan_agent + code_agent + browser_agent.
 
-        explore_agent / plan_agent 固定挂载（Code 模式核心子代理）。
+        plan_agent 固定挂载（Code 模式核心子代理）。
         code_agent / browser_agent 按配置启用。
         """
         react_cfg = config if isinstance(config, dict) else {}
@@ -965,21 +927,6 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         workspace = self._workspace_dir or "./"
         subagents: list[Any] = []
         self._sync_browser_runtime_environment(config_base)
-
-        # ── 固定挂载：explore_agent（Code 模式核心子代理，始终启用）──
-        if not self._subagent_list_has_name(subagents, "explore_agent"):
-            explore_agent_cfg = subagents_cfg.get("explore_agent") if isinstance(subagents_cfg, dict) else None
-            explore_spec = build_explore_agent_config(
-                model=model,
-                workspace=workspace,
-                language=resolved_language,
-                max_iterations=parse_int(
-                    explore_agent_cfg.get("max_iterations") if isinstance(explore_agent_cfg, dict) else None,
-                    react_cfg.get("max_iterations", 15),
-                ),
-            )
-            explore_spec.factory_kwargs = {"auto_create_workspace": False}
-            subagents.append(explore_spec)
 
         # ── 固定挂载：plan_agent（Code 模式核心子代理，始终启用）──
         if not self._subagent_list_has_name(subagents, "plan_agent"):
@@ -1037,7 +984,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                     language=resolved_language,
                     max_iterations=parse_int(
                         browser_agent_cfg.get("max_iterations") if isinstance(browser_agent_cfg, dict) else None,
-                        react_cfg.get("max_iterations", 15),
+                        DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
                     )
                 )
                 browser_spec.factory_kwargs = {"auto_create_workspace": False}
@@ -1052,11 +999,14 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
 
     # ─── Rail 生命周期(mode切换) ───────────────────
 
+    def _user_interaction_rail_attribute(self) -> str:
+        return "_code_ask_user_rail"
+
     async def _update_rails_for_mode(self, mode: str) -> None:
         """Code 模式下的 rail 生命周期管理.
 
         code.normal / code.plan 等模式：
-        - 保留 SubagentRail（主 Agent 通过 task_tool 派发 explore/plan 子代理）
+        - 保留 SubagentRail（主 Agent 通过 task_tool 派发 plan 子代理）
         - 保留 ProjectMemoryRail（code 模式始终挂载）
         - 保留 CodingMemoryRail（code 模式始终挂载）
         - 卸载 TaskPlanningRail、SkillEvolutionRail
@@ -1217,6 +1167,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
 
         # code 模式始终走 _update_rails_for_mode 的 code 逻辑
         await self._update_rails_for_mode(runtime_config.mode)
+        await self._set_user_interaction_enabled(runtime_config.supports_user_interaction)
         await self._update_tools_for_mode(runtime_config.mode, runtime_config.session_id, runtime_config.request_id)
         await self._update_session_tools(
             runtime_config.session_id,
@@ -1241,8 +1192,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             _set_user_todo_workspace(self._agent_workspace_dir)
             _set_user_todo_channel_id(_CRON_TOOL_CHANNEL_ID.get())
             for tool in _get_user_todo_tools():
-                if not Runner.resource_mgr.get_tool(tool.card.id):
-                    Runner.resource_mgr.add_tool(tool)
+                self._register_shared_tool(tool)
                 self._instance.ability_manager.add(tool.card)
         except ImportError:
             pass
@@ -1253,8 +1203,21 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         return self.build_code_tool_cards(agent_id)
 
     def build_code_tool_cards(self, agent_id: str) -> list[Any]:
-        """Get tool cards for code mode — from config.yaml::modes.code.tools."""
+        """Get tool cards for code mode — from config.yaml::modes.code.tools.
 
+        ``modes.code.tools`` is an open extension point, so ownership is read
+        off each card rather than guessed from the build func: a card that does
+        not declare itself shared is treated as agent-owned, which is the safe
+        default (a shared instance registered per agent costs an extra object;
+        an agent-owned instance registered as shared would pin the first
+        session's state for the whole process).
+
+        Args:
+            agent_id: Owner id this adapter registers its own instances under.
+
+        Returns:
+            The cards of every successfully registered configured tool.
+        """
         tool_cards = []
 
         config_base = get_config()
@@ -1271,12 +1234,10 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                 continue
             if isinstance(result, list):
                 for tool_instance in result:
-                    if not Runner.resource_mgr.get_tool(tool_instance.card.id):
-                        Runner.resource_mgr.add_tool(tool_instance)
+                    register_tool(tool_instance, agent_id)
                     tool_cards.append(tool_instance.card)
             else:
-                if not Runner.resource_mgr.get_tool(result.card.id):
-                    Runner.resource_mgr.add_tool(result)
+                register_tool(result, agent_id)
                 tool_cards.append(result.card)
             logger.info(
                 "[JiuwenSwarmCodeAdapter] Tool %s registered from config",
@@ -1343,14 +1304,20 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             return None
 
     def _build_skill_toolkit(self, agent_id: str) -> list[Any] | None:
-        """构建 SkillToolkit 工具（不注册到 Runner，由 _get_tool_cards 统一注册）."""
+        """构建 SkillToolkit 工具（不注册到 Runner，由 _get_tool_cards 统一注册）.
+
+        Declared shared for the same reason as the deep adapter's path: skill
+        install/status is a process-wide conversation, so one toolkit instance
+        has to serve every adapter.
+        """
         try:
             skill_toolkit = SkillToolkit(manager=self._skill_manager)
+            tools = mark_stateless(skill_toolkit.get_tools())
             logger.info(
                 "[JiuwenSwarmCodeAdapter] SkillToolkit built: tools=%s",
-                [t.card.name for t in skill_toolkit.get_tools()],
+                [t.card.name for t in tools],
             )
-            return skill_toolkit.get_tools()
+            return tools
         except Exception as exc:
             logger.warning("[JiuwenSwarmCodeAdapter] skill_toolkit build failed: %s", exc)
             return None

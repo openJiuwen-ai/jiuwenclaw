@@ -1,11 +1,19 @@
-import { existsSync, mkdirSync, readdirSync, statSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, statSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, parse, relative } from "node:path";
 import { addError, addInfo, makeItem } from "../helpers.js";
 import { CommandKind, type SlashCommand } from "../types.js";
 import { getEditorInfo } from "../../utils/editor.js";
+
+import { getEditorInfo } from "../../utils/editor.js";
 import { isTeamMode } from "../../modes.js";
-import { getDisplayPath, findGitRoot, isAncestorOrSelfDir } from "./memory-path-utils.js";
+import {
+  formatMemoryPathForDisplay,
+  getDisplayPath,
+  findGitRoot,
+  isAncestorOrSelfDir,
+} from "./memory-path-utils.js";
+
 
 export interface MemoryFile {
   path: string;
@@ -483,24 +491,27 @@ async function editMemoryByPath(
 
     if (isAncestorMemFile) {
       const displayPath = getDisplayPath(path, projectDir);
-      // 文件不存在则先创建(与后端 handle_memory_edit 的 touch 行为对齐)
       if (!existsSync(path)) {
-        mkdirSync(dirname(path), { recursive: true });
-        writeFileSync(path, "");
+        ctx.addItem(addError(ctx.sessionId, `Cannot edit: ${path} — memory file does not exist.`));
+        return;
       }
       if (ctx.openInEditor) {
-        ctx.openInEditor(path);
         const { source, value } = getEditorInfo();
         const editorHint = source !== "default"
           ? `(${source}="${value}")`
           : "(default: vi)";
-        ctx.addItem(
-          addInfo(
-            ctx.sessionId,
-            `Opened memory file at ${displayPath} ${editorHint}`,
-            "m",
-          ),
-        );
+        // openInEditor blocks until the editor window closes (TUI frozen in
+        // the meantime). Emit the "Opened…" line in onDone, i.e. AFTER the
+        // editor exits — matches CC's editFileInEditor → onDone("Opened…").
+        ctx.openInEditor(path, () => {
+          ctx.addItem(
+            addInfo(
+              ctx.sessionId,
+              `Opened memory file at ${displayPath} ${editorHint}`,
+              "m",
+            ),
+          );
+        });
       } else {
         ctx.addItem(
           addInfo(
@@ -527,8 +538,6 @@ async function editMemoryByPath(
     }
 
     if (ctx.openInEditor) {
-      ctx.openInEditor(payload.path);
-
       const projectDir = ctx.getCurrentProjectDir();
       const displayPath = getDisplayPath(payload.path, projectDir);
       const { source, value } = getEditorInfo();
@@ -536,13 +545,18 @@ async function editMemoryByPath(
         ? `(${source}="${value}")`
         : "(default: vi)";
 
-      ctx.addItem(
-        addInfo(
-          ctx.sessionId,
-          `Opened memory file at ${displayPath} ${editorHint}`,
-          "m",
-        ),
-      );
+      // openInEditor blocks until the editor window closes (TUI frozen in
+      // the meantime). Emit the "Opened…" line in onDone, AFTER the editor
+      // exits — matches CC's editFileInEditor → onDone("Opened…").
+      ctx.openInEditor(payload.path, () => {
+        ctx.addItem(
+          addInfo(
+            ctx.sessionId,
+            `Opened memory file at ${displayPath} ${editorHint}`,
+            "m",
+          ),
+        );
+      });
     } else {
       const projectDir = ctx.getCurrentProjectDir();
       const displayPath = getDisplayPath(payload.path, projectDir);
@@ -622,7 +636,7 @@ async function showMemoryStatus(
       if (payload.project_memory.project_dir) {
         items.push({
           label: "Project Dir",
-          value: payload.project_memory.project_dir,
+          value: formatMemoryPathForDisplay(payload.project_memory.project_dir),
         });
       }
     }
@@ -640,7 +654,7 @@ async function showMemoryStatus(
       if (payload.coding_memory.dir) {
         items.push({
           label: "Coding Memory Dir",
-          value: payload.coding_memory.dir,
+          value: formatMemoryPathForDisplay(payload.coding_memory.dir),
         });
       }
     }
@@ -658,7 +672,7 @@ async function showMemoryStatus(
       if (payload.auto_memory.dir) {
         items.push({
           label: "Auto Memory Dir",
-          value: payload.auto_memory.dir,
+          value: formatMemoryPathForDisplay(payload.auto_memory.dir),
         });
       }
     }
@@ -686,7 +700,7 @@ async function showMemoryStatus(
 
 // ---- MemoryActionRegistry: 单一数据源（按 mode 过滤）----
 // 消除 TOGGLE_KEYS(4) 与 toggle completion(3) 漂移；开关集合按 mode 自适应。
-// agent mode: memory_enabled / memory_proactive / memory_forbidden_enabled
+// agent mode: memory_enabled / memory_forbidden_enabled
 // code mode:  memory_enabled / auto_coding_memory / memory_forbidden_enabled
 
 type MemoryModeCategory = "agent" | "code";
@@ -708,13 +722,13 @@ const TOGGLE_DEFS: ToggleDef[] = [
       mode === "code" ? "modes.code.memory.enabled" : `modes.agent.${mode}.memory.enabled`,
     readValue: (p) => p.enabled,
   },
-  {
-    key: "memory_proactive",
-    label: "Proactive memory",
-    modes: ["agent"],
-    getConfigPath: (mode) => `modes.agent.${mode}.memory.is_proactive`,
-    readValue: (p) => p.proactive,
-  },
+      // {
+      //   key: "memory_proactive",
+      //   label: "Proactive memory",
+      //   modes: ["agent"],
+      //   getConfigPath: (mode) => `modes.agent.${mode}.memory.is_proactive`,
+      //   readValue: (p) => p.proactive,
+      // },
   {
     key: "auto_coding_memory",
     label: "Auto coding memory",
@@ -862,7 +876,10 @@ async function openMemoryDir(
           {
             header: "Memory open",
             question: "Select a directory to open:",
-            options: options.map((o) => ({ label: o.label, description: o.value })),
+            options: options.map((o) => ({
+              label: o.label,
+              description: formatMemoryPathForDisplay(o.value),
+            })),
           },
         ],
         "local_command_memory_open",
@@ -882,23 +899,24 @@ async function openMemoryDir(
 
     // 优先调系统文件管理器打开；不支持时(无 GUI 或未注入回调)显示可复制路径提示
     const opened = ctx.openFolder?.(selectedValue);
+    const displayValue = formatMemoryPathForDisplay(selectedValue);
     if (opened) {
-      ctx.addItem(addInfo(ctx.sessionId, `Opened memory folder: ${selectedValue}`, "m"));
+      ctx.addItem(addInfo(ctx.sessionId, `Opened memory folder: ${displayValue}`, "m"));
     } else {
       // 无 GUI explorer(如无头 Linux 服务器)或未注入 openFolder 回调:
       // 显示可复制路径 + 平台命令,避免误导用户以为文件夹已打开。
       let cmd: string;
       if (process.platform === "win32") {
-        cmd = `explorer "${selectedValue}"`;
+        cmd = `explorer "${displayValue}"`;
       } else if (process.platform === "darwin") {
-        cmd = `open "${selectedValue}"`;
+        cmd = `open "${displayValue}"`;
       } else {
-        cmd = `xdg-open "${selectedValue}"`;
+        cmd = `xdg-open "${displayValue}"`;
       }
       ctx.addItem(
         addInfo(
           ctx.sessionId,
-          `No GUI explorer detected. Path: ${selectedValue}\nOpen with:  ${cmd}`,
+          `No GUI explorer detected. Path: ${displayValue}\nOpen with:  ${cmd}`,
           "i",
         ),
       );
@@ -977,7 +995,7 @@ export function createMemoryCommand(): SlashCommand {
       },
       {
         name: "toggle",
-        description: "Toggle memory settings (memory_enabled, memory_proactive, memory_forbidden_enabled)",
+        description: "Toggle memory settings (memory_enabled, memory_forbidden_enabled)",
         usage: "/memory toggle [key]",
         example: "/memory toggle memory_enabled",
         kind: CommandKind.BUILT_IN,

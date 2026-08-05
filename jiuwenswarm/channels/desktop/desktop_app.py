@@ -12,6 +12,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -21,12 +22,18 @@ from logging.handlers import RotatingFileHandler
 import webview
 
 from jiuwenswarm.common.utils import get_user_workspace_dir, get_logs_dir, wait_for_pid_exit, wait_for_tcp_port
+from jiuwenswarm.instance_manager.config import (
+    BASE_PORTS,
+    PORT_TYPES,
+    find_available_ports,
+)
 
 
 BACKEND_HOST = "127.0.0.1"
-BACKEND_PORT = 19000
+BACKEND_PORT = int(BASE_PORTS["web"])
 FRONTEND_HOST = "127.0.0.1"
-FRONTEND_PORT = 5173
+FRONTEND_PORT = int(BASE_PORTS["frontend"])
+DESKTOP_PORT_SCAN_RANGE = 10
 APP_CHILD_FLAG = "--desktop-run-app"
 WEB_CHILD_FLAG = "--desktop-run-web"
 UPDATE_HELPER_FLAG = "--desktop-install-update"
@@ -83,6 +90,54 @@ def _setup_logger() -> logging.Logger:
 logger = _setup_logger()
 
 
+def _format_ports_for_log(ports: dict[str, int]) -> str:
+    return ", ".join(f"{name}={ports.get(name, 0)}" for name in PORT_TYPES)
+
+
+def resolve_desktop_ports(
+    host: str = "127.0.0.1",
+    scan_range: int = DESKTOP_PORT_SCAN_RANGE,
+) -> dict[str, int]:
+    """Pick a free port group for this desktop session (no config persistence).
+
+    Reuses ``find_available_ports`` (base + index * 1000). Result lives only in
+    process memory / child env for this launch.
+    """
+    if scan_range < 1:
+        raise RuntimeError(
+            f"invalid desktop port scan_range={scan_range}; must be >= 1"
+        )
+
+    result = find_available_ports(
+        base_index=0,
+        host=host,
+        scan_range=scan_range,
+    )
+    if result is None:
+        logger.error(
+            "[desktop] no free port group within scan_range=%s "
+            "(tried indices 0..%s on %s). Free ports or raise "
+            "JIUWENSWARM_*_PORT base overrides, then retry.",
+            scan_range,
+            scan_range - 1,
+            host,
+        )
+        raise RuntimeError(
+            f"No available desktop port group within scan_range={scan_range}"
+        )
+
+    ports, index = result
+    if index == 0:
+        logger.info("[desktop] using ports: %s", _format_ports_for_log(ports))
+    else:
+        logger.warning(
+            "[desktop] default ports busy; using alternate group index=%s: %s",
+            index,
+            _format_ports_for_log(ports),
+        )
+    return ports
+
+
 def _cleanup_stale_update_artifacts() -> None:
     updates_dir = get_user_workspace_dir() / ".updates"
     if not updates_dir.is_dir():
@@ -134,19 +189,43 @@ def _build_child_command(name: str, extra_args: list[str] | None = None) -> list
     return base
 
 
-def _build_child_env(name: str) -> dict[str, str]:
+def _build_child_env(name: str, ports: dict[str, int]) -> dict[str, str]:
     env = os.environ.copy()
     env[DESKTOP_ENV_FLAG] = "1"
-    if name == "app":
-        env["WEB_HOST"] = BACKEND_HOST
-        env["WEB_PORT"] = str(BACKEND_PORT)
+    # Inject the full session port group so app → agent/gateway and web agree.
+    # load_dotenv_runtime preserves these under JIUWENSWARM_DESKTOP=1.
+    env["WEB_HOST"] = BACKEND_HOST
+    env["WEB_PORT"] = str(ports["web"])
+    env["GATEWAY_PORT"] = str(ports["gateway"])
+    env["AGENT_SERVER_PORT"] = str(ports["agent_server"])
+    env["AGENT_PORT"] = str(ports["agent_server"])
+    env["FRONTEND_PORT"] = str(ports["frontend"])
+    # Gateway prefers AGENT_SERVER_URL over AGENT_SERVER_PORT; drop any stale
+    # URL from the parent shell so the remapped port is used.
+    env.pop("AGENT_SERVER_URL", None)
+    if name == "web":
+        logger.info(
+            "[desktop] web child ports: frontend=%s proxy=http://%s:%s",
+            ports["frontend"],
+            BACKEND_HOST,
+            ports["web"],
+        )
+    elif name == "app":
+        logger.info(
+            "[desktop] app child ports: %s",
+            _format_ports_for_log(ports),
+        )
     return env
 
 
-def _start_process(name: str, command: list[str]) -> subprocess.Popen[bytes]:
+def _start_process(
+    name: str,
+    command: list[str],
+    ports: dict[str, int],
+) -> subprocess.Popen[bytes]:
     logger.info("[desktop] starting %s: %s", name, command)
     kwargs: dict[str, object] = {
-        "env": _build_child_env(name),
+        "env": _build_child_env(name, ports),
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.DEVNULL,
     }
@@ -263,7 +342,13 @@ def _wait_for_port_release(host: str, port: int, timeout: float = 15.0) -> bool:
     return wait_for_tcp_port(host, port, timeout=timeout, target_state="disconnected")
 
 
-def _launch_windows_installer_helper(installer_path: str, app_executable: str, parent_pid: int = 0) -> None:
+def _launch_windows_installer_helper(
+    installer_path: str,
+    app_executable: str,
+    parent_pid: int = 0,
+    backend_port: int = BACKEND_PORT,
+    frontend_port: int = FRONTEND_PORT,
+) -> None:
     target = Path(installer_path).expanduser().resolve()
 
     logger.info("[update-helper] starting, target=%s, parent_pid=%d", target, parent_pid)
@@ -271,10 +356,16 @@ def _launch_windows_installer_helper(installer_path: str, app_executable: str, p
     wait_pid = parent_pid if parent_pid else os.getppid()
     logger.info("[update-helper] waiting for process %d to exit", wait_pid)
     wait_for_pid_exit(wait_pid)
-    logger.info("[update-helper] parent process %d has exited, waiting for ports to release", wait_pid)
+    logger.info(
+        "[update-helper] parent process %d has exited, waiting for ports "
+        "backend=%s frontend=%s to release",
+        wait_pid,
+        backend_port,
+        frontend_port,
+    )
 
-    _wait_for_port_release(BACKEND_HOST, BACKEND_PORT, timeout=15.0)
-    _wait_for_port_release(FRONTEND_HOST, FRONTEND_PORT, timeout=15.0)
+    _wait_for_port_release(BACKEND_HOST, backend_port, timeout=15.0)
+    _wait_for_port_release(FRONTEND_HOST, frontend_port, timeout=15.0)
     logger.info("[update-helper] ports released, proceeding with install")
 
     try:
@@ -304,8 +395,8 @@ class _WindowApi:
     def install_update(self, installer_path: str) -> bool:
         return self._runtime.install_update(installer_path)
 
-    def download_file(self, url: str, filename: str) -> bool:
-        """通过 webview 下载文件，解决 exe 中无法使用 <a> 标签下载的问题。"""
+    def download_file(self, url: str, filename: str) -> DesktopSaveResult:
+        """通过 webview 下载文件，解决桌面端无法使用 <a> 标签下载的问题。"""
         # 如果是相对路径，拼接完整的 URL（使用前端 web server 端口）
         if url.startswith("/"):
             full_url = f"http://{self._runtime.frontend_host}:{self._runtime.frontend_port}{url}"
@@ -325,11 +416,12 @@ class _WindowApi:
 
 class DesktopRuntime:
     def __init__(
-        self, frontend_host: str, frontend_port: int, backend_port: int
+        self, frontend_host: str, ports: dict[str, int]
     ) -> None:
         self.frontend_host = frontend_host
-        self.frontend_port = frontend_port
-        self.backend_port = backend_port
+        self.ports = dict(ports)
+        self.frontend_port = int(ports["frontend"])
+        self.backend_port = int(ports["web"])
         self.processes: dict[str, subprocess.Popen[bytes]] = {}
         self.window = None
         self._lock = threading.Lock()
@@ -342,7 +434,9 @@ class DesktopRuntime:
     def start_services(self) -> None:
         # 先起后台预读, 与后续子进程拉起/端口等待并行, 不阻塞 start_services.
         _warmup_page_cache_background()
-        self.processes["app"] = _start_process("app", _build_child_command("app"))
+        self.processes["app"] = _start_process(
+            "app", _build_child_command("app"), self.ports
+        )
         _ensure_process_running("app", self.processes["app"])
         _wait_for_tcp(
             BACKEND_HOST,
@@ -362,7 +456,7 @@ class DesktopRuntime:
                 f"http://{BACKEND_HOST}:{self.backend_port}",
             ],
         )
-        self.processes["web"] = _start_process("web", web_command)
+        self.processes["web"] = _start_process("web", web_command, self.ports)
         _ensure_process_running("web", self.processes["web"])
         _wait_for_http(
             self.frontend_host,
@@ -404,41 +498,48 @@ class DesktopRuntime:
         threading.Thread(target=_delayed_destroy, daemon=True).start()
         return True
 
-    def download_file(self, url: str, filename: str) -> bool:
-        """下载文件到用户下载目录（异步执行，避免阻塞 UI）。"""
-        def _download() -> None:
-            try:
-                import urllib.request
+    def download_file(self, url: str, filename: str) -> DesktopSaveResult:
+        """选择保存位置并在实际写入完成后返回结果。"""
+        try:
+            target_path = self._select_save_path(filename, ())
+        except (OSError, RuntimeError, ValueError) as exc:
+            logger.error("[desktop] failed to select download path: %s", exc)
+            return _desktop_save_result(False)
 
-                # 获取下载目录
-                download_dir = Path.home() / "Downloads"
-                if not download_dir.exists():
-                    download_dir.mkdir(parents=True, exist_ok=True)
+        if target_path is None:
+            logger.info("[desktop] file download cancelled by user")
+            return _desktop_save_result(False, cancelled=True)
 
-                safe_name = Path(filename).name
-                if not safe_name:
-                    raise ValueError("empty_filename")
+        temp_path: Path | None = None
+        try:
+            import urllib.request
 
-                # 处理文件名冲突
-                target_path = download_dir / safe_name
-                if target_path.exists():
-                    base, ext = Path(safe_name).stem, Path(safe_name).suffix
-                    counter = 1
-                    while target_path.exists():
-                        target_path = download_dir / f"{base} ({counter}){ext}"
-                        counter += 1
+            temp_fd, temp_name = tempfile.mkstemp(
+                dir=target_path.parent,
+                prefix=f".{target_path.name}.",
+                suffix=".part",
+            )
+            os.close(temp_fd)
+            temp_path = Path(temp_name)
+            urllib.request.urlretrieve(url, temp_path)
+            os.replace(temp_path, target_path)
+            temp_path = None
+            logger.info("[desktop] file downloaded to: %s", target_path)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[desktop] download failed: %s", exc)
+            if temp_path is not None:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError as cleanup_exc:
+                    logger.warning(
+                        "[desktop] failed to remove partial download %s: %s",
+                        temp_path,
+                        cleanup_exc,
+                    )
+            return _desktop_save_result(False)
 
-                # 下载文件
-                urllib.request.urlretrieve(url, target_path)
-                logger.info("[desktop] file downloaded to: %s", target_path)
-
-                # 下载完成后提醒用户并打开文件
-                self._show_download_complete(str(target_path))
-            except Exception as exc:  # noqa: BLE001
-                logger.error("[desktop] download failed: %s", exc)
-
-        threading.Thread(target=_download, daemon=True).start()
-        return True
+        self._show_download_complete(str(target_path))
+        return _desktop_save_result(True)
 
     @staticmethod
     def _sanitize_filename(filename: str) -> str:
@@ -581,8 +682,7 @@ class DesktopRuntime:
         self.close_window()
         return True
 
-    @staticmethod
-    def _launch_macos_install_helper(target: Path, app_executable: Path) -> bool:
+    def _launch_macos_install_helper(self, target: Path, app_executable: Path) -> bool:
         parent_pid = os.getpid()
         updates_dir = get_user_workspace_dir() / ".updates"
         updates_dir.mkdir(parents=True, exist_ok=True)
@@ -606,6 +706,8 @@ class DesktopRuntime:
             install_target = "/Applications/JiuwenSwarm.app"
 
         log_file = get_logs_dir() / "update_helper.log"
+        backend_port = self.backend_port
+        frontend_port = self.frontend_port
 
         # shlex.quote all external paths to prevent shell injection if the
         # release API serves a malicious asset name.
@@ -647,8 +749,8 @@ wait_port_release() {{
     done
     echo "[helper] warning: port $port ($name) still in use after 15s, proceeding anyway"
 }}
-wait_port_release {BACKEND_PORT} backend
-wait_port_release {FRONTEND_PORT} frontend
+wait_port_release {backend_port} backend
+wait_port_release {frontend_port} frontend
 
 # Mount the DMG at a controlled mount point
 MOUNT_POINT="/tmp/jiuwenswarm_dmg_{parent_pid}"
@@ -790,8 +892,7 @@ nohup {q_executable} >/dev/null 2>&1 &
         logger.info("[desktop] Linux install helper launched, target=%s", target)
         return True
 
-    @staticmethod
-    def _launch_windows_install_helper(target: Path, app_executable: Path) -> bool:
+    def _launch_windows_install_helper(self, target: Path, app_executable: Path) -> bool:
         detached_flags = (
             getattr(subprocess, "DETACHED_PROCESS", 0)
             | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
@@ -806,6 +907,10 @@ nohup {q_executable} >/dev/null 2>&1 &
                 str(app_executable),
                 "--parent-pid",
                 str(os.getpid()),
+                "--backend-port",
+                str(self.backend_port),
+                "--frontend-port",
+                str(self.frontend_port),
             ],
         )
         logger.info("[desktop] launching update helper: %s", helper_cmd)
@@ -1084,6 +1189,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--installer-path", default="", help=argparse.SUPPRESS)
     parser.add_argument("--app-executable", default="", help=argparse.SUPPRESS)
     parser.add_argument("--parent-pid", type=int, default=0, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--backend-port", type=int, default=BACKEND_PORT, help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--frontend-port", type=int, default=FRONTEND_PORT, help=argparse.SUPPRESS
+    )
     return parser.parse_args()
 
 
@@ -1116,16 +1227,27 @@ def _setup_tui_path() -> None:
 def main() -> None:
     args = _parse_args()
     if getattr(args, "desktop_install_update", False):
-        _launch_windows_installer_helper(args.installer_path, args.app_executable, args.parent_pid)
+        _launch_windows_installer_helper(
+            args.installer_path,
+            args.app_executable,
+            args.parent_pid,
+            backend_port=args.backend_port,
+            frontend_port=args.frontend_port,
+        )
         return
 
     _cleanup_stale_update_artifacts()
     _setup_tui_path()
 
+    try:
+        ports = resolve_desktop_ports()
+    except RuntimeError as exc:
+        logger.error("[desktop] port resolution failed: %s", exc)
+        raise SystemExit(1) from exc
+
     runtime = DesktopRuntime(
         frontend_host=FRONTEND_HOST,
-        frontend_port=FRONTEND_PORT,
-        backend_port=BACKEND_PORT,
+        ports=ports,
     )
     try:
         runtime.run(

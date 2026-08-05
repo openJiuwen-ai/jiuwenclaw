@@ -35,6 +35,9 @@ def _make_channel() -> DingTalkChannel:
         max_download_size=20 * 1024 * 1024,
         download_timeout=60,
         workspace_dir="",
+        # 模拟 app_gateway 从 config.yaml 加载并兜底官方域名
+        api_base="https://api.dingtalk.com",
+        oapi_base="https://oapi.dingtalk.com",
     )
     router = MagicMock(spec=RobotMessageRouter)
     ch = DingTalkChannel(config, router)
@@ -175,6 +178,9 @@ async def test_handle_picture_message_disabled():
         client_secret="test_client_secret",
         allow_from=["test_user"],
         enable_file_download=False,  # Download disabled
+        # 模拟 app_gateway 从 config.yaml 加载并兜底官方域名
+        api_base="https://api.dingtalk.com",
+        oapi_base="https://oapi.dingtalk.com",
     )
     router = MagicMock(spec=RobotMessageRouter)
     ch = DingTalkChannel(config, router)
