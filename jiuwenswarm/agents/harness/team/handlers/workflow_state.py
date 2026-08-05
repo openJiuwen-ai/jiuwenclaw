@@ -78,6 +78,11 @@ class WorkflowProgress(BaseModel):
     node_type: Optional[str] = None
     agent_id: Optional[str] = None
     answer: Optional[str] = None
+    # Verification-aware planning (veriMAP): acceptance criteria attached to the
+    # node at plan time, and the inline verifier's verdict on completion.
+    verification_criteria: Optional[str] = None
+    verification_status: Optional[str] = None  # "passed" | "failed" | "skipped"
+    verification_reason: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +149,12 @@ class WorkflowAgentState(BaseModel):
     correlation_id: Optional[str] = None
     human_prompt: Optional[str] = None
     human_reply: Optional[str] = None
+    # Verification-aware planning (veriMAP): the node's acceptance criteria and
+    # the inline verifier verdict. All optional so ``exclude_none`` keeps the
+    # payload unchanged when verification is disabled.
+    verification_criteria: Optional[str] = None
+    verification_status: Optional[str] = None  # "passed" | "failed" | "skipped"
+    verification_reason: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict for event payload."""
@@ -546,6 +557,24 @@ class WorkflowRunState(BaseModel):
         phase, agent = self._resolve_agent_for_finalize(
             progress, status=status, outcome=outcome,
         )
+        verification_changed = False
+        if agent is not None:
+            # Record the inline verification verdict (veriMAP) when present. Track
+            # whether it actually changed so an already-terminal agent still emits
+            # a state delta for a verification-only update (avoids silently losing
+            # the verdict when outcome/error need no backfilling).
+            if (
+                progress.verification_status is not None
+                and agent.verification_status != progress.verification_status
+            ):
+                agent.verification_status = progress.verification_status
+                verification_changed = True
+            if (
+                progress.verification_reason is not None
+                and agent.verification_reason != progress.verification_reason
+            ):
+                agent.verification_reason = progress.verification_reason
+                verification_changed = True
         if phase is None or agent is None:
             logger.warning(
                 "[WF_DBG WorkflowRunState] finalize %s dropped: phase=%r label=%r agent_id=%r",
@@ -556,14 +585,14 @@ class WorkflowRunState(BaseModel):
         already_terminal = agent.status in ("completed", "failed", "stopped")
         if already_terminal:
             if status == "completed" and agent.status == "completed":
-                updated = False
+                backfilled = False
                 if outcome is not None and not agent.outcome:
                     agent.outcome = outcome
-                    updated = True
+                    backfilled = True
                 if error is not None and not agent.error:
                     agent.error = error
-                    updated = True
-                if updated:
+                    backfilled = True
+                if backfilled:
                     # Phase seal / workflow teardown can mark agents completed
                     # without bumping counters; do it on the first real completion.
                     if phase.completed_agent_count < phase.agent_count:
@@ -573,11 +602,17 @@ class WorkflowRunState(BaseModel):
                         "[WF_DBG WorkflowRunState] backfilled outcome for agent %s, phase=%s",
                         agent.name, phase.name,
                     )
+                # Emit a delta when outcome/error was backfilled OR when only the
+                # verification verdict changed, so the update is never lost.
+                if backfilled or verification_changed:
                     return self._build_phase_delta(phase)
                 return None
             if status == "failed" and agent.status == "failed":
+                changed = False
                 if error is not None and not agent.error:
                     agent.error = error
+                    changed = True
+                if changed or verification_changed:
                     return self._build_phase_delta(phase)
                 return None
 
@@ -671,6 +706,7 @@ class WorkflowRunState(BaseModel):
             kind="human" if progress.node_type in ("human", "human_session") else "agent",
             node_type=progress.node_type,
             correlation_id=progress.correlation_id,
+            verification_criteria=progress.verification_criteria,
         )
         target_phase.agents.append(agent_state)
         target_phase.agent_count += 1
