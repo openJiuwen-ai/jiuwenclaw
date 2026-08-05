@@ -764,6 +764,7 @@ function AppContent() {
 
   // 新建会话：立即生成可用的 session_id，避免停留在 'new' 导致无法发送消息
   const handleNewSession = useCallback(async () => {
+    setActiveNav('chat');
     disposeInFlightHistoryHandles();
     setHistoryPagerMeta(null);
     setHistoryLoadingMore(false);
