@@ -2903,6 +2903,92 @@ async def test_consume_stream_with_query_broadcasts_leader_and_teammate_outputs(
 
 
 @pytest.mark.anyio
+async def test_consume_stream_with_query_reports_team_idle_as_round_end(monkeypatch):
+    """A team.idle marker ends the round for clients, just like team.completed."""
+    broadcasted: list[dict] = []
+
+    async def _fake_stream(**kwargs):
+        yield SimpleNamespace(
+            type="answer",
+            payload={"output": {"output": "leader answer"}, "result_type": "answer"},
+            role=TeamRole.LEADER,
+        )
+        yield SimpleNamespace(
+            type="message",
+            payload={
+                "event_type": "team.idle",
+                "member_count": 3,
+                "members": {"leader": "ready", "analyst": "ready", "writer": "paused"},
+            },
+            role=TeamRole.LEADER,
+        )
+
+    class _FakeRunner:
+        run_agent_team_streaming = staticmethod(_fake_stream)
+
+        @staticmethod
+        async def get_agent_team_monitor(team_name: str, session_id: str, hide_dm: bool = False):
+            return None
+
+    class _FakeManager(_InactiveTeamRuntimeManagerMixin):
+        @staticmethod
+        def clear_pending_runtime(session_id: str) -> None:
+            pass
+
+        @staticmethod
+        def pop_stream_task(session_id: str) -> None:
+            pass
+
+        @staticmethod
+        def get_monitor(session_id: str):
+            return None
+
+        @staticmethod
+        def resolve_team_agent(session_id: str):
+            return None
+
+        @staticmethod
+        def get_workflow_handler(session_id: str):
+            return None
+
+        @staticmethod
+        def register_workflow_handler(session_id: str, handler: object) -> None:
+            pass
+
+    monkeypatch.setattr(team_helpers, "Runner", _FakeRunner)
+    fake_mgr = _FakeManager()
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: fake_mgr)
+    monkeypatch.setattr(
+        team_helpers,
+        "_broadcast_event",
+        _broadcast_recorder(broadcasted, fake_mgr),
+    )
+    monkeypatch.setattr(team_helpers, "ensure_team_evolution_watcher", lambda *args, **kwargs: None)
+    monkeypatch.setattr(team_helpers, "get_session_metadata", lambda session_id: {})
+    monkeypatch.setattr(team_helpers, "update_session_metadata", lambda **kwargs: None)
+
+    await _TeamHelpersTestApi.consume_stream_with_query(
+        "web",
+        "sess-team-idle",
+        SimpleNamespace(team_name="demo-team"),
+        "hello",
+    )
+
+    # The marker never reaches clients on its own — it is translated into the
+    # same round-end signal team.completed produces.
+    assert "team.idle" not in [event["event_type"] for event in broadcasted]
+    idle_status = [
+        event
+        for event in broadcasted
+        if event["event_type"] == "chat.processing_status" and event.get("member_count") == 3
+    ]
+    assert len(idle_status) == 1
+    assert idle_status[0]["is_processing"] is False
+    assert idle_status[0]["is_complete"] is True
+    assert idle_status[0]["rid"] == 1
+
+
+@pytest.mark.anyio
 async def test_cancelled_stream_does_not_block_on_full_waiter_queue(monkeypatch):
     from jiuwenswarm.agents.harness.team.team_manager import TeamManager
 

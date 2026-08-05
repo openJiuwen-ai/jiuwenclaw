@@ -1137,11 +1137,12 @@ def _is_leader_output(chunk: Any) -> bool:
     """Return whether a team OutputSchema chunk should be shown to claw users."""
     chunk_type = getattr(chunk, "type", None)
     payload = getattr(chunk, "payload", None)
-    # team.runtime_ready and team.completed are leader-level control events
-    # that carry no per-member content but must be forwarded to the frontend.
+    # team.runtime_ready / team.completed / team.idle are leader-level control
+    # events that carry no per-member content but must be forwarded to the
+    # frontend.
     if chunk_type == "message" and isinstance(payload, dict):
         event_type_str = payload.get("event_type")
-        if event_type_str in ("team.runtime_ready", "team.completed"):
+        if event_type_str in ("team.runtime_ready", "team.completed", "team.idle"):
             return True
     if chunk_type == "team.runtime_ready":
         return True
@@ -2262,6 +2263,33 @@ async def _consume_stream_with_query(
                             "is_complete": True,
                             "member_count": parsed.get("member_count"),
                             "task_count": parsed.get("task_count"),
+                        },
+                    )
+                    continue
+                elif parsed.get("event_type") == "team.idle":
+                    # Every member has been at rest for the framework's debounce
+                    # window: nothing is producing output any more, even though
+                    # the leader stream deliberately stays open in case the team
+                    # gets woken again. Clients should stop showing the round as
+                    # running, so this is reported exactly like team.completed —
+                    # the difference (stream still open) is invisible to them,
+                    # and later output re-opens the running state on its own.
+                    logger.info(
+                        "[TeamHelpers] team went idle: channel_id=%s session_id=%s member_count=%s",
+                        _resolve_channel_id(channel_id),
+                        session_id,
+                        parsed.get("member_count"),
+                    )
+                    await _broadcast_event(
+                        channel_id,
+                        session_id,
+                        {
+                            "event_type": "chat.processing_status",
+                            "session_id": session_id,
+                            "rid": round_id,
+                            "is_processing": False,
+                            "is_complete": True,
+                            "member_count": parsed.get("member_count"),
                         },
                     )
                     continue
