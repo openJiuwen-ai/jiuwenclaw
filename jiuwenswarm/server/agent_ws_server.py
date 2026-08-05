@@ -61,6 +61,7 @@ from jiuwenswarm.server.runtime.agent_manager import AgentManager, ACP_DEFAULT_C
 from jiuwenswarm.server.runtime.session.session_metadata import get_all_sessions_metadata, remove_session_metadata_cache
 from jiuwenswarm.server.runtime.session.session_history import (
     append_compact_history_records,
+    enrich_history_messages_session_id,
     history_exists,
     load_history_records,
     read_member_history_records,
@@ -7435,9 +7436,12 @@ class AgentWebSocketServer:
         ordered = list(reversed(restorable))
         start = (page_idx - 1) * page_size
         end = start + page_size
+        resolved_sid = session_id.strip()
+        page_slice = ordered[start:end]
+        messages_out = enrich_history_messages_session_id(page_slice, resolved_sid)
         page_messages = [
             _sanitize_history_record_for_wire(item)
-            for item in ordered[start:end]
+            for item in messages_out
         ]
         logger.debug(
             "[history.get] session_id=%s page_idx=%s raw_total=%s restorable_total=%s total_pages=%s returned=%s",

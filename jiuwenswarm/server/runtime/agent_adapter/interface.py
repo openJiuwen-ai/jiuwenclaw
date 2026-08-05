@@ -506,6 +506,20 @@ _SKILL_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.SKILLS_EVOLUTION_SAVE: "handle_skills_evolution_save",
 }
 
+# Preserve cross-service context-size hints if they are present in request.params.
+_CONTEXT_SIZE_HINT_KEYS: tuple[str, ...] = (
+    "context_size",
+    "context_window_size",
+    "context_window",
+    "max_context",
+    "max_context_size",
+    "max_context_message_num",
+    "max_input_tokens",
+    "max_prompt_tokens",
+    "n_ctx",
+    "ctx_len",
+)
+
 _PLUGIN_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.PLUGINS_LIST: "handle_plugins_list",
     ReqMethod.PLUGINS_INSTALL: "handle_plugins_install",
@@ -1144,6 +1158,11 @@ class JiuWenSwarm:
         run = params.get("run")
         if run:
             inputs["run"] = run
+
+        for key in _CONTEXT_SIZE_HINT_KEYS:
+            value = params.get(key)
+            if value is not None:
+                inputs[key] = value
 
         # 处理 cron 字段：将 params.cron 转换为 run 结构
         # scheduler 使用 params.cron 标识定时任务，需要转换为 run.kind="cron"
