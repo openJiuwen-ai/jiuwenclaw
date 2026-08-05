@@ -275,19 +275,11 @@ async def lifespan(_application: FastAPI):
         )
     else:
         # Windows 平台: 先做一次性环境准备 (用户创建 + WFP filter + 读 ACL
-        # 预装), 并启动出站代理 asyncio task. 仅 win32 走此分支, Linux 完全
-        # 不动 (docs/window沙箱.md 6.9 lifespan 改动).
+        # 预装), 并启动出站代理 asyncio task. 仅 win32 走此分支, Linux 完全不动
         if sys.platform == "win32":
             from jiuwenbox.supervisor import win_proxy, win_setup
-            # 根 policy 的 read_acl_preinstall + proxy 端口范围 作为首次安装参数
-            # (review MAJOR #7: WFP Permit 端口必须与 win_proxy 监听端口一致).
             try:
                 _root_policy = policy_reader.load_policy()
-                # preinstall = read_acl_preinstall + tool_paths 展开, 用
-                # collect_preinstall_paths 与 _create_windows (process.py) 算同一
-                # 集合, 保证 lifespan install 记录的 REG_VALUE_PREINSTALLED_PATHS
-                # 和后续创建沙箱时比对的集合一致 → 不因 tool_paths "新增" 而每次
-                # 创建沙箱都弹 UAC (实测问题).
                 _preinstall = win_setup.collect_preinstall_paths(_root_policy)
                 _proxy_start = _root_policy.windows.proxy.port_range_start
                 _proxy_end = _root_policy.windows.proxy.port_range_end

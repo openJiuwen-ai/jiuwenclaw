@@ -83,11 +83,7 @@ def _resolve_project_dir(override: str | Path | None) -> Path | None:
 
 
 def _sandbox_isolation_custom_id(project_dir: str | Path | None) -> str:
-    """Stable SysOperation isolation key suffix for per-project sandbox sharing.
-
-    同一 project_dir 的多个 agent 共享同一个 sandbox isolation key (摘要形式),
-    不同 project_dir 隔离。project_dir 无法解析时回落到固定占位 ``project_default``。
-    """
+    """Stable SysOperation isolation key suffix for per-project sandbox sharing."""
     resolved = _resolve_project_dir(project_dir)
     if resolved is None:
         return "project_default"
@@ -307,20 +303,6 @@ def create_sandbox_sysop_card(
         )
 
     try:
-        # Windows/Linux 共用 build_filesystem_policy: 把 agent_root (shared_dir) 注入
-        # filesystem_policy.read_write + bind_mounts(rw), files_runtime.allow/deny 同样
-        # 注入. box-server process.py:_create_windows 从 read_write + bind_mounts.sandbox_path
-        # 提取路径加进 allow_write_paths, apply_sandbox_acl 精确 grant Write.
-        #
-        # 历史: Windows 曾空 policy, agent 业务目录 (agent_root/jiuwenclaw_workspace 含
-        # AGENT.md/memory/skills/output_dir) 不进 read_write, 全靠 win_acl 对 ~/.office-claw
-        # 整树递归 grant Write 兜底 → 跨沙箱互写 + deny_write 失效 + 副本可篡改. 现补注入,
-        # 配合 win_acl 整树 grant 收窄为只 Read (P0-3).
-        #
-        # Windows 不用 bind mount (直接路径), 但 process.py 从 bind_mounts.sandbox_path +
-        # read_write 两处提取, 都能消费. build_filesystem_policy 内 _resolve_shared_dir 会
-        # mkdir(exist_ok=True) + _relax_workspace_perms(chmod), Windows 上 chmod 无实际作用
-        # 但无害 (OSError 容错). agent_root 已由 agent-server 创建, mkdir 幂等.
         policy, upload_list = build_filesystem_policy(
             files_runtime,
             shared_dir=shared_dir,

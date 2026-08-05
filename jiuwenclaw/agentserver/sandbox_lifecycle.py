@@ -152,17 +152,7 @@ def shutdown_jiuwenbox_sandboxes() -> int:
 
 
 async def recreate_all_sandboxes() -> int:
-    """销毁本进程已知的所有 jiuwenbox 沙箱, 让下次 exec 按需 lazy 建新沙箱.
-
-    用途: ``sandbox.files.set`` 后, 旧沙箱 ACL 已施加无法热改, 必须销毁重建才能让
-    新文件白/黑名单生效 (新沙箱创建时读运行时副本的新 ACL). 网络 (egress) 配置变更
-    靠重启 box-server 自动清沙箱, 不走这里 (见 sandbox_config_rpc._apply_sandbox_change).
-
-    实现复用 :func:`shutdown_jiuwenbox_sandboxes` (弹缓存 id + DELETE), 走
-    ``asyncio.to_thread`` 避免阻塞 event loop. 失败只 warning, 不抛 (best-effort).
-
-    Returns: 实际回收的沙箱数.
-    """
+    """销毁本进程已知的所有 jiuwenbox 沙箱, 让下次 exec 按需 lazy 建新沙箱."""
     try:
         return await asyncio.to_thread(shutdown_jiuwenbox_sandboxes)
     except Exception as exc:  # noqa: BLE001

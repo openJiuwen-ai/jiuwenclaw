@@ -38,9 +38,7 @@ from typing import Any
 
 import yaml
 
-# Windows 平台下的 ctypes / wintypes 仅在 win32 分支使用. 顶层 import
-# 不触发任何 win32 API 调用 (ctypes / wintypes 在 Linux 也可 import, 是
-# 纯 Python 定义). 真正的 dll 加载延迟到 win_*.py 模块函数体内.
+
 if sys.platform == "win32":
     import ctypes  # noqa: F401
     from ctypes import wintypes  # noqa: F401
@@ -158,14 +156,7 @@ PYTHON_EXECUTABLE = "python3"
 
 
 def _alloc_loopback_port() -> int:
-    """分配一个空闲 TCP loopback 端口 (OS 自动选, bind 后立即 close).
-
-    给 box-server 与 runner 的 TCP 控制通道用: box-server 分配端口, env 注入给
-    runner, runner bind 同端口做 server, box-server 每次 exec connect.
-    端口在 spawn runner 之间分配, 短暂 close 后 runner resume 时 bind 同端口
-    (TIME_WAIT 风险低, SO_REUSEADDR 兜底). 极小概率端口被抢占, runner bind
-    失败会退出, box-server 检测到 runner 退出报错.
-    """
+    """分配一个空闲 TCP loopback 端口 (OS 自动选, bind 后立即 close)."""
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         s.bind(("127.0.0.1", 0))
@@ -175,19 +166,11 @@ def _alloc_loopback_port() -> int:
 
 
 def _osfhandle_to_fd(kernel32, handle: int) -> int:
-    """把 Windows HANDLE 包装成 C 文件描述符 (供 os.fdopen 使用).
-
-    仅在 win32 调用. 通过 msvcrt.open_osfhandle 把内核句柄转成 fd, 再由
-    Python 文件对象接管读写. fd 在关闭文件对象时被 Python 回收, 但底层
-    HANDLE 不会被自动关, 由调用方管理 handle 生命周期.
-    """
+    """把 Windows HANDLE 包装成 C 文件描述符 (供 os.fdopen 使用)."""
     if sys.platform != "win32":
         raise RuntimeError("_osfhandle_to_fd 仅在 Windows 平台可用")
     import msvcrt  # type: ignore[import-not-found]
     import os as _os
-    # O_RDONLY | O_BINARY for read handles; for write handles caller passes
-    # appropriate flags. 这里简化: 根据 handle 用途由调用方决定, 默认读写都行
-    # (匿名管道是单向的, 错误方向会 EBADF).
     flags = _os.O_BINARY
     return msvcrt.open_osfhandle(handle, flags)
 
@@ -635,22 +618,12 @@ class ProcessRuntime(RuntimeAdapter):
             os.cpu_count(),
             len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None,
         )
-        # Windows 沙箱 per-sandbox state. 仅在 win32 分支写入; Linux 路径
-        # 完全不动这些字典 (文档 6.9: 在 ProcessRuntime 层新增 Windows 分支).
-        # runner pipe 句柄 + Job handle + ACL workspace + runner pid/handle.
         self._win_runners: dict[str, dict] = {}
         self._win_job_handles: dict[str, int] = {}
         self._win_acl_paths: dict[str, list[str]] = {}
         self._win_policies: dict[str, SecurityPolicy] = {}
         self._win_exec_sem: asyncio.Semaphore | None = None
-        # 每个 sandbox 的 runner pipe 是单连接同步通道: 同一时刻只能有一个
-        # roundtrip 在用, 否则多并发 exec 的请求帧会在 stdin 上交错. 用 per-
-        # sandbox asyncio.Lock 串行化 roundtrip.
         self._win_pipe_locks: dict[str, asyncio.Lock] = {}
-        # Windows runner 日志长连读取线程 + 停止信号. runner 在 jbx-sandbox
-        # 受限 token 下跑, CREATE_NO_WINDOW 导致 stderr 无落盘, 早期异常静默
-        # 退出无法定位. box-server 创建 sandbox 后主动 connect control_port 发
-        # subscribe_log 握手帧, 起后台线程持续读 runner push 的 log 帧并打印.
         self._win_log_threads: dict[str, threading.Thread] = {}
         self._win_log_stops: dict[str, threading.Event] = {}
 
@@ -1492,11 +1465,6 @@ class ProcessRuntime(RuntimeAdapter):
         from a signal context outside asyncio because it allocates and
         logs, which Python signal handlers must avoid.
         """
-        # Windows 无僵尸回收概念: os.waitpid/WNOHANG 是 Unix 专属, Windows 的 os
-        # 模块无 WNOHANG 属性 (访问即 AttributeError). Windows 沙箱子进程由 Job
-        # Object 的 KILL_ON_JOB_CLOSE 在 Job 关闭时内核强杀清理, 不需要 reap.
-        # 这里 short-circuit 避免 AttributeError (periodic reaper 仍会定时调用
-        # 本方法, 所以必须守卫).
         if not hasattr(os, "WNOHANG"):
             return
         tracked_popens = self._iter_tracked_popens()
@@ -1640,11 +1608,6 @@ class ProcessRuntime(RuntimeAdapter):
     def _install_sigchld_handler(self, loop: asyncio.AbstractEventLoop) -> bool:
         if self._sigchld_loop is loop:
             return True
-        # SIGCHLD 是 Unix 专属信号, Windows 的 signal 模块无此属性.
-        # 直接访问 signal.SIGCHLD 会 AttributeError (非 ValueError/RuntimeError,
-        # 旧版 except 捕不住, 会被外层 app.py 的 except Exception 兜底但留下
-        # 噪音 traceback). Windows 走 Job Object KILL_ON_JOB_CLOSE 清理子进程,
-        # 不需要 SIGCHLD 僵尸回收, 直接 short-circuit.
         if not hasattr(signal, "SIGCHLD"):
             logger.info(
                 "SIGCHLD fast-path reaper unavailable (platform=%s 无 SIGCHLD); "
@@ -2792,9 +2755,7 @@ class ProcessRuntime(RuntimeAdapter):
         return sem
 
     # ------------------------------------------------------------------
-    # Windows 沙箱实现. 仅 win32 时被入口分支调用, Linux 不走这里.
-    # 委托 supervisor/win_*.py 完成 ACL/两跳启动/Job/runner-pipe IPC.
-    # 对外返回 ExecResult/RuntimeFileOpResult, 上层无需感知平台差异.
+    # Windows 沙箱实现. 仅 win32 时被入口分支调用
     # ------------------------------------------------------------------
     def _ensure_win_exec_semaphore(self) -> asyncio.Semaphore:
         sem = self._win_exec_sem
@@ -2805,18 +2766,7 @@ class ProcessRuntime(RuntimeAdapter):
 
     @staticmethod
     def _win_workspace_for(policy: SecurityPolicy, sandbox_id: str) -> str:
-        """沙箱 workspace 真实路径 (Windows): ~/.office-claw/.jiuwenclaw/jiuwenbox/workspace/<id>.
-
-        与 agent-server 同根 (~/.office-claw/.jiuwenclaw), box-server 进程
-        (xxx) 天然是该目录 owner → 改 DACL 不会 WinError 5, 子目录继承
-        ACL 顺. 旧版用 ~/.jiuwenbox/workspace 时该目录可能 owner 非当前用户
-        或 ACL 被 revoke 残留 → upload/list 频繁 Permission denied.
-
-        policy 里 allow_write[0] 写的是 ``{{ workspace }}`` 占位 (静态语义,
-        不是本机路径), ``os.path.expandvars`` 只认 ``%VAR%`` 不认 Jinja 风格,
-        展不开. 占位语义留在配置, 真实路径代码算. _create_windows 会把
-        ``{{ workspace }}`` 模板替换成本方法返回值再传 apply_sandbox_acl.
-        """
+        """沙箱 workspace 真实路径 (Windows): ~/.office-claw/.jiuwenclaw/jiuwenbox/workspace/<id>."""
         return str(WIN_SANDBOX_WORKSPACE_ROOT / sandbox_id)
 
     async def _create_windows(
@@ -2829,14 +2779,7 @@ class ProcessRuntime(RuntimeAdapter):
             win_acl, win_exec, win_setup, win_constants as const,
         )
 
-        # 传入 policy 的代理端口范围 (WFP Permit 须与 win_proxy 监听端口一致).
         policy_pre = self._load_policy(policy_path)
-        # ensure_windows_setup 同步: 幂等检查, 必要时阻塞跑 UAC 提权子进程. 用命名 Event 同步等 install
-        # 跑完所有步骤 (用户/密码/installed/PREINSTALLED_PATHS 就位) 后 SetEvent 才返回 — 否则读到半成品,
-        # CreateProcessWithLogonW 会 1326. 此调用阻塞本协程数十秒是预期 (沙箱创建前须等 install 就绪).
-        # tool_paths 读 ACL 在 install 阶段 (管理员) 预装: 运行时普通用户对 D:\Files\Git 等 owner=Administrators
-        # 目录无 WRITE_DAC 权限. 用 collect_preinstall_paths 算 preinstall 集合 (与 app.py lifespan 同集合),
-        # install 一次性预装并记进 REG_VALUE_PREINSTALLED_PATHS, 后续创建沙箱差集为空不再弹 UAC.
         _read_preinstall = win_setup.collect_preinstall_paths(policy_pre)
         win_setup.ensure_windows_setup(
             preinstall_paths=_read_preinstall or None,
@@ -2846,8 +2789,6 @@ class ProcessRuntime(RuntimeAdapter):
         policy = policy_pre
         self._win_policies[sandbox_id] = policy
         workspace = self._win_workspace_for(policy, sandbox_id)
-        # 确保 workspace 及其根目录存在: apply_sandbox_acl 对不存在路径会跳过 ACL → 受限 token 写不了 → Permission denied.
-        # workspace 根 (~/.office-claw) 是 agent-server 创建, owner=当前用户, makedirs 无权限问题.
         try:
             os.makedirs(workspace, exist_ok=True)
         except OSError as exc:
@@ -2856,15 +2797,6 @@ class ProcessRuntime(RuntimeAdapter):
                 sandbox_id, workspace, exc,
             )
 
-        # 1. 施加文件 ACL (读控制 deny-then-allow + workspace 默认 Allow Read). 返回 ACE 路径清单, 存供 stop 时撤销.
-        #
-        # 动态路径注入 (docs §4.3): 打包 python 目录 + venv 目录是每机器/每用户不同的运行时路径, 不能写死在 policy yaml,
-        # 由 agent-server 拉起本进程时经 env 注入:
-        #   JIUWENBOX_BUNDLED_PYTHON = officeAce 打包 embeddable python 目录 (tools/python/), 授 allow_read (含 Execute);
-        #   JIUWENBOX_VENV_DIR       = 宿主机 isolation_venv 目录, 授 allow_write (pip 写 site-packages). 未注入则跳过.
-        # shell 目录 (System32/Git) 已在 read_acl_preinstall 预装, 此处不重复.
-        # policy 里 allow_write/deny_write 写的是 ``{{ workspace }}`` 占位,
-        # 这里展开成真实 workspace 路径 (os.path.expandvars 不认 Jinja 风格).
         def _expand_ws(path: str) -> str:
             return path.replace("{{ workspace }}", workspace)
 
@@ -2878,8 +2810,6 @@ class ProcessRuntime(RuntimeAdapter):
         venv_dir = (os.environ.get("JIUWENBOX_VENV_DIR") or "").strip()
         if venv_dir:
             allow_write_paths.append(venv_dir)
-        # 业务产物路径 (read_write / bind_mounts 的 sandbox_path): agent-server 把 output_dir 等业务可写目录放这里.
-        # 这些路径通常 owner=当前用户, 运行时改 DACL 不会 WinError 5 (区别于工具目录需 install 预装). 未列入则受限 token 写不了.
         for _rw in (policy.filesystem_policy.read_write or []):
             if _rw and _rw not in allow_write_paths:
                 allow_write_paths.append(_rw)
@@ -2887,8 +2817,6 @@ class ProcessRuntime(RuntimeAdapter):
             _sp = getattr(_mount, "sandbox_path", None)
             if _sp and _sp not in allow_write_paths:
                 allow_write_paths.append(_sp)
-        # read_write/bind_mounts 路径可能尚未创建 (如 pptx-craft output_dir 由 skill generate-timestamp-dir 创建).
-        # apply_sandbox_acl 对不存在路径会跳过 → 受限 token 写不了, 这里先 makedirs ensure 存在.
         for _p in allow_write_paths:
             if _p in (policy.filesystem_policy.read_write or []):
                 try:
@@ -2896,8 +2824,6 @@ class ProcessRuntime(RuntimeAdapter):
                 except OSError as _e:
                     logger.warning("[SandboxWin] %s 创建产物目录失败 %s: %s",
                                    sandbox_id, _p, _e)
-        # Windows 工具路径 (windows.filesystem.tool_paths): 非默认安装路径的 Git/Node/Python 目录.
-        # 读 ACL 由 install 预装, 运行时不改这些目录 DACL (普通用户无 WRITE_DAC, 会 WinError 5). 这里只拼进 PATH.
         tool_paths = policy.windows.filesystem.tool_paths
         win_tool_dirs: list[str] = []
         for _dir_attr, _name in (
@@ -2909,35 +2835,25 @@ class ProcessRuntime(RuntimeAdapter):
             if not _d:
                 continue
             win_tool_dirs.append(_d)
-            # Git 安装根含 usr/bin/bash.exe, 把子目录也纳入 PATH.
             if _name == "git_dir":
                 win_tool_dirs.append(os.path.join(_d, "usr", "bin"))
                 win_tool_dirs.append(os.path.join(_d, "bin"))
         _bash_path = (tool_paths.bash_path or "").strip()
-        # 把工具目录拼进 runner env 的 PATH (前置, 优先于系统 PATH).
         if win_tool_dirs:
             env = dict(env) if env else {}
             existing_path = env.get("PATH", os.environ.get("PATH", ""))
             extra = os.pathsep.join(win_tool_dirs)
             env["PATH"] = f"{extra}{os.pathsep}{existing_path}" if existing_path else extra
-            # SystemRoot 也带上 (CreateProcessAsUserW 子进程基本依赖).
             env.setdefault("SystemRoot", os.environ.get("SystemRoot", ""))
             logger.debug(
                 "[SandboxWin] %s windows toolpaths injected: dirs=%s bash_path=%s "
                 "PATH_prefix=%s (read ACL 由 install 预装, 运行时仅拼 PATH)",
                 sandbox_id, win_tool_dirs, _bash_path or "<未配置>", extra,
             )
-        # 沙箱可写临时区注入: 受限 token 写不了宿主 %TEMP% → Playwright mkdtemp EPERM.
-        # TEMP/TMP 指向 jbx-sandbox profile 下每沙箱隔离子目录 (<profile>\AppData\Local\Temp\jiuwenbox\<sandbox_id>).
-        # profile 根用标准路径 C:\Users\jbx-sandbox (同名残留建 .000 后缀, 第一跳没 token 无法 API 解析, 用 env 的 USERPROFILE 或标准名).
-        # ms-playwright 安装目录跨沙箱共用不重下, 不设 PLAYWRIGHT_BROWSERS_PATH.
         env = dict(env) if env else {}
         _sandbox_sub = sandbox_id
-        # profile 根: 优先用 env 里已有的 USERPROFILE (调用方注入), 否则标准路径.
         _profile_root = (env.get("USERPROFILE") or "").strip()
         if not _profile_root:
-            # SystemDrive 值形如 "C:" (无尾部分隔符), os.path.join("C:", "Users") 得 "C:Users" (drive-relative, 丢分隔符).
-            # 补 "\\" 让 join 正确拼成 "C:\\Users\\jbx-sandbox".
             _sys_drive = os.environ.get("SystemDrive", r"C:").rstrip("\\") + "\\"
             _profile_root = os.path.join(_sys_drive, "Users", "jbx-sandbox")
         win_tmp_dir = os.path.join(
@@ -2952,8 +2868,7 @@ class ProcessRuntime(RuntimeAdapter):
             )
         env.setdefault("TEMP", win_tmp_dir)
         env.setdefault("TMP", win_tmp_dir)
-        # 补 profile 变量 (第一跳 runner env 缺这些, profile 加载只在不传 env
-        # block 时自动填; 我们传了 env block → 需显式补, 否则 child 继承不到).
+        # 补 profile 变量
         env.setdefault("USERPROFILE", _profile_root)
         env.setdefault("LOCALAPPDATA", os.path.join(_profile_root, "AppData", "Local"))
         env.setdefault("APPDATA", os.path.join(_profile_root, "AppData", "Roaming"))
@@ -2961,9 +2876,6 @@ class ProcessRuntime(RuntimeAdapter):
             "[SandboxWin] %s sandbox-writable temp injected: TEMP=%s",
             sandbox_id, win_tmp_dir,
         )
-        # jbx-sandbox 真实 SID: 第一跳 runner 进程用它且 token 未受限,
-        # 合成 SID 的 ACE 对它不生效, apply_sandbox_acl 会对 allow_read 路径
-        # 给真实 SID 也 grant Allow Read, 否则 runner 读不了 venv python.
         sandbox_user_sid = win_setup.get_sandbox_user_sid()
         acl_paths = win_acl.apply_sandbox_acl(
             workspace,
@@ -2994,15 +2906,7 @@ class ProcessRuntime(RuntimeAdapter):
             )
         proxy_start = policy.windows.proxy.port_range_start
         proxy_end = policy.windows.proxy.port_range_end
-        # 分配 TCP loopback 控制端口 (OS 自动分配空闲端口), env 注入给 runner,
-        # runner bind 做 server, box-server 每次 exec connect. 对齐 Linux AF_UNIX.
         control_port = _alloc_loopback_port()
-        # P0-6: 分配随机鉴权 token, 每次 exec 帧校验. 防本机任意进程 connect
-        # control_port 越权 exec (loopback 全端口放开后跨沙箱串扰面扩大, token
-        # 校验是必要防线).
-        # review #2: token 不再经命令行传 (WMI/PEB 泄露), 改走匿名 pipe + hStdInput.
-        # two_hop_spawn_and_authorize 封装 CREATE_SUSPENDED → 写 token 进 pipe →
-        # CloseHandle 写端 → resume thread 全流程, 返回 (pid, process_handle).
         import secrets as _secrets
         control_token = _secrets.token_urlsafe(32)
         runner_pid, proc_handle = win_exec.two_hop_spawn_and_authorize(
@@ -3023,20 +2927,12 @@ class ProcessRuntime(RuntimeAdapter):
         )
         self._win_runners[sandbox_id] = {
             "pid": runner_pid,
-            "control_port": control_port,  # TCP loopback, 每次 exec connect
-            "control_token": control_token,  # P0-6 鉴权 token
+            "control_port": control_port,
+            "control_token": control_token,
             "process_handle": proc_handle,
             "workspace": workspace,
         }
 
-        # 3. Job Object 资源限制 (memory/cpu/进程数) 当前禁用: 跨用户 OpenProcess 拿不到
-        # PROCESS_SET_QUOTA → WinError 5; 隔离核心 (ACL + WFP) 不依赖 Job. 隔离核心不依赖 Job.
-        # resource 配置保留在 policy 但运行时忽略. 恢复路径: 用 two_hop_spawn 返回的 proc_handle 直接 assign 绕过跨用户 ACL.
-        # review #2: thread_handle 已在 two_hop_spawn_and_authorize 内 resume + CloseHandle,
-        # 不再在此单独 resume.
-
-        # 启动 runner 日志长连读取线程. runner resume 后才 bind+listen, 此处 connect 可能赶在 bind 前; 线程内自带重试.
-        # runner 在 CREATE_NO_WINDOW 下 stderr 无落盘, 早期异常靠这条长连发回本进程打印.
         stop_evt = threading.Event()
         log_thread = threading.Thread(
             target=self._win_log_reader_blocking,
@@ -3056,57 +2952,39 @@ class ProcessRuntime(RuntimeAdapter):
 
         runner = self._win_runners.pop(sandbox_id, None)
         if runner is not None:
-            # 1. 发 shutdown 让 runner 优雅退出 (它内部会停掉所有受限 token child).
             await self._send_runner_shutdown(sandbox_id, runner)
-            # 1.5 join 日志读取线程: runner 收 shutdown 退出前会 push 最后一帧
-            # "runner 退出", 此处短 timeout 等它读出打印. set stop 让线程主动退.
             stop_evt = self._win_log_stops.pop(sandbox_id, None)
             log_thread = self._win_log_threads.pop(sandbox_id, None)
             if stop_evt is not None:
                 stop_evt.set()
             if log_thread is not None:
                 log_thread.join(timeout=2.0)
-            # 2. TerminateProcess 兜底 (runner 没响应 shutdown).
             try:
                 win_exec.stop_runner(runner["pid"], runner["process_handle"])
             except Exception:  # noqa: BLE001
                 logger.debug(
                     "停止 runner 失败 sandbox=%s", sandbox_id, exc_info=True,
                 )
-            # 3. 关 Job: KILL_ON_JOB_CLOSE 内核强杀所有残留成员 (含
-            #    runner 未及回收的受限 child). 放在 terminate 之后确保 child
-            #    也被清理; 若放前面, Job kill 后 runner handle 失效.
             job = self._win_job_handles.pop(sandbox_id, None)
             if job is not None:
                 win_job.teardown(job)
-            # 4. 关闭持久化 pipe 文件对象 + 底层 fd/handle.
             self._close_win_pipe_handles(runner)
         else:
-            # runner 已不在, 仍需清 Job.
             job = self._win_job_handles.pop(sandbox_id, None)
             if job is not None:
                 win_job.teardown(job)
 
-        # 5. 撤销文件 ACL (按 apply 时返回的施加路径清单撤销, review MAJOR #6).
         acl_paths = self._win_acl_paths.pop(sandbox_id, None)
         if acl_paths:
             try:
                 win_acl.revoke_sandbox_acl(acl_paths)
             except Exception:  # noqa: BLE001
                 logger.debug("撤销 ACL 失败 sandbox=%s", sandbox_id, exc_info=True)
-        # 清理 per-sandbox pipe lock.
         self._win_pipe_locks.pop(sandbox_id, None)
 
     @staticmethod
     def _close_win_pipe_handles(runner: dict) -> None:
-        """关闭 _create_windows 持久化资源.
-
-        改 TCP loopback 后不再有 pipe 文件对象/HANDLE (runner dict 只存
-        control_port/process_handle/thread_handle). 保留方法占位供
-        _stop_windows 调用, 实际无 pipe 要关.
-        """
-        # process_handle/thread_handle 由 _stop_windows 直接调 win_exec.stop_runner
-        # + CloseHandle 处理, 不在此.
+        """关闭 _create_windows 持久化资源."""
         return
 
     async def _is_running_windows(self, sandbox_id: str) -> bool:
@@ -3166,9 +3044,6 @@ class ProcessRuntime(RuntimeAdapter):
         sandbox_id: str,
         request: RuntimeBackgroundExecRequest,
     ) -> BackgroundExecResult:
-        # Windows 后台 exec 复用前台 exec 路径, 以 runner 起 child (runner 内部
-        # 不等待 child 退出). 这里简化: 直接走 _exec_windows 并标记 started.
-        # 完整后台语义 (日志文件/独立 job) 留待 Windows 实跑环境验证后补全.
         logger.warning(
             "Windows exec_background 降级为同步 exec (sandbox=%s)", sandbox_id,
         )
@@ -3274,26 +3149,13 @@ class ProcessRuntime(RuntimeAdapter):
         read_timeout: float | None = None,
         control_token: str | None = None,
     ) -> "tuple[dict[str, Any] | None, bytes]":
-        """同步执行一次 runner TCP roundtrip (在 executor 线程调用).
-
-        每次 exec/file-op 新建一条 TCP 连接: connect 127.0.0.1:control_port
-        -> 发 header 帧 (+可选 body 帧) -> 读响应帧 (->可选 body 帧) -> close.
-        对齐 Linux AF_UNIX 的 _connect_daemon_socket (一连接一请求).
-
-        control_token: box-server 分配的随机 token (P0-6 鉴权). runner 首帧校验
-        header["token"] == control_token, 不匹配拒绝. 防本机任意进程越权 exec.
-        """
-        # P0-6: 注入鉴权 token 到 header payload (runner 首帧校验).
+        """同步执行一次 runner TCP roundtrip (在 executor 线程调用)."""
         if control_token:
             payload = {**payload, "token": control_token}
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(DAEMON_CONNECT_TIMEOUT_SECONDS)
         try:
             sock.connect(("127.0.0.1", control_port))
-            # connect 用短超时 (2s 够 loopback), 但读响应须长超时: runner 起子命令 (bash/node) 可能跑几十秒,
-            # 整个 roundtrip 用 2s 会导致 socket.timeout → 关连接 → runner 发响应抛异常退出 → 后续全 409.
-            # exec 读响应超时须长于 runner 端 WAIT_BUDGET_MS (120s): runner 强杀 child 后还要读 stdout+发响应,
-            # 总响应可能晚于 120s, box-server 设同值会先关连接致结果丢失. 默认 130s (120s + 10s 余量).
             if request_type == REQUEST_TYPE_EXEC:
                 _exec_read_timeout = 130.0
                 if read_timeout is not None:
@@ -3323,11 +3185,7 @@ class ProcessRuntime(RuntimeAdapter):
         body_bytes: bytes | None,
         read_timeout: float | None = None,
     ) -> dict[str, Any] | None:
-        """发送请求帧 + (可选) body 帧, 读回单个响应帧 (JSON).
-
-        用 per-sandbox asyncio.Lock 串行化: 同一 sandbox 的 runner pipe
-        是单连接, 并发 roundtrip 会让请求帧在 stdin 上交错.
-        """
+        """发送请求帧 + (可选) body 帧, 读回单个响应帧 (JSON)."""
         lock = self._win_pipe_lock(sandbox_id)
         loop = asyncio.get_running_loop()
         async with lock:
@@ -3406,7 +3264,6 @@ class ProcessRuntime(RuntimeAdapter):
                 if _ct:
                     payload["token"] = _ct
                 send_frame(sock, encode_request(request_type=REQUEST_TYPE_SHUTDOWN, payload=payload))
-                # runner 收 shutdown 后会回 {"ok": True} 并退出, 读一下 drain.
                 try:
                     recv_frame(sock, DAEMON_MAX_RESPONSE_BYTES)
                 except (OSError, ValueError):
@@ -3421,24 +3278,12 @@ class ProcessRuntime(RuntimeAdapter):
         sandbox_id: str, control_port: int, stop_evt: threading.Event,
         control_token: str | None = None,
     ) -> None:
-        """后台线程: connect control_port 发 subscribe_log 握手, 持续读 runner
-        push 的 log 帧并打印到 box-server 日志.
-
-        runner resume 后才进 runner_main 去 bind+listen, 此处 connect 可能
-        赶在 bind 前 (ConnectionRefused); 内部带有限重试. 握手成功后阻塞读,
-        直到 stop_evt 触发或 runner 退出导致连接断开.
-
-        runner 在受限 token 下 CREATE_NO_WINDOW, stderr 无落盘, 早期异常
-        (_create_restricted_token 失败等) 静默退出无法定位; 这条长连把 runner
-        任意阶段的 log/error/traceback 发回本进程, 由 box-server 主日志打印.
-        """
+        """后台线程: connect control_port 发 subscribe_log 握手, 持续读 runner push 的 log 帧并打印到 box-server 日志."""
         prefix = f"[win-runner][sandbox={sandbox_id}]"
-        # P0-6: subscribe_log 握手帧也带鉴权 token (runner 首帧校验).
         _sub_payload: dict[str, Any] = {}
         if control_token:
             _sub_payload["token"] = control_token
         sock: socket.socket | None = None
-        # 握手重试: runner bind 可能晚于此处 connect (resume -> runner_main 有延迟).
         for _attempt in range(50):
             if stop_evt.is_set():
                 return
@@ -3447,12 +3292,9 @@ class ProcessRuntime(RuntimeAdapter):
                 sock.settimeout(DAEMON_CONNECT_TIMEOUT_SECONDS)
                 sock.connect(("127.0.0.1", control_port))
                 send_frame(sock, encode_request(request_type=REQUEST_TYPE_SUBSCRIBE_LOG, payload=_sub_payload))
-                # runner 收到 subscribe_log 后不回响应, 直接把该连接入订阅集;
-                # 此处不读响应, 把 sock 转长读模式.
-                sock.settimeout(None)  # 阻塞读, 直到有帧或连接断开.
+                sock.settimeout(None)
                 break
             except OSError:
-                # bind 未就绪 / 连接拒绝, 关掉重试.
                 if sock is not None:
                     try:
                         sock.close()
@@ -3473,7 +3315,6 @@ class ProcessRuntime(RuntimeAdapter):
                 try:
                     blob = recv_frame(sock, MAX_HEADER_BYTES)
                 except (OSError, ValueError):
-                    # runner 退出或 shutdown: 连接断开, 正常结束.
                     break
                 try:
                     entry = json.loads(blob.decode("utf-8"))

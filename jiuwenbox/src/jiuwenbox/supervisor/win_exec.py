@@ -67,7 +67,7 @@ _local_log_lock = _threading.Lock()
 def _init_local_log(sandbox_id: str) -> None:
     """初始化本地落盘日志文件 (runner 启动时调一次). 失败降级为只回传."""
     global _local_log_path, _local_log_file
-    import os as _os  # noqa: A004 - 别名访问, 避免与函数内局部变量 os 重名
+    import os as _os
     try:
         # runner env 可能缺 USERPROFILE, 多路兜底拿 profile 根: env / API / 标准路径.
         home = _os.environ.get("USERPROFILE") or ""
@@ -130,14 +130,13 @@ def _push_log(level: str, msg: str, exc: str | None = None) -> None:
     for sock in subs:
         try:
             send_frame(sock, blob)
-        except (OSError, ValueError):  # ConnectionError 是 OSError 子类, 不重复捕获
+        except (OSError, ValueError):
             dead.append(sock)
     if dead:
         with _log_sub_lock:
             for sock in dead:
                 if sock in _log_subscribers:
                     _log_subscribers.remove(sock)
-    # 本地也记一份 (与 push 同时, 方便有 console 的场景).
     try:
         if level == "ERROR":
             logger.error("[runner] %s", msg)
@@ -147,7 +146,7 @@ def _push_log(level: str, msg: str, exc: str | None = None) -> None:
             logger.info("[runner] %s", msg)
     except Exception:  # noqa: BLE001
         pass
-    # 落盘到本地日志文件 (不依赖回传链, control_port 断/卡死时仍可查过程).
+    # 落盘到本地日志文件
     _local_log(level, msg, exc)
 
 
@@ -371,27 +370,7 @@ def _build_runner_command(
 
     用 ``python -m jiuwenbox.supervisor.win_exec runner --sandbox-id ...``.
     control_port 经命令行参数传 (而非 env), 避开 CreateProcessWithLogonW
-    传 env 块时 WinError 87 (ctypes 传 c_wchar_Array 给 c_void_p 参数报错).
-
-    review #2: 鉴权 control_token 不再拼进命令行 (旧版 ``--control-token <token>``
-    会被本机任意进程经 WMI Win32_Process.CommandLine / NtQueryInformationProcess
-    读 PEB 命令行泄露, 越权 exec). 改走匿名 pipe + STARTUPINFO.hStdInput:
-    box-server CreatePipe, 把读端经 hStdInput 传 runner, runner 启动后从 stdin
-    读 [4 字节长度][token 字节], 关 stdin 再切 socket accept. token 只存在于
-    进程内存, 不暴露给其他进程的 PEB/WMI.
-
-    runner python 用标准 CPython (非 uv trampoline/venv launcher):
-    jbx-sandbox 对 uv 缓存/AppData 无读权限, 任何 uv 体系 venv python (`.venv`
-    / isolation_venv / uv 全局) 第一跳 CreateProcessWithLogonW 都报 WinError 5
-    或 trampoline spawn child permission denied. 必须用自包含的标准 CPython
-    (jbx-sandbox grant RX 到安装目录即可跑).
-
-    优先级: ``JIUWENBOX_RUNNER_PYTHON`` env (显式指定) > 默认系统 python 路径.
-    dev 实测设 ``JIUWENBOX_RUNNER_PYTHON`` 指向系统 CPython 安装;
-    打包环境设 tools/python/python.exe. 系统 python 需先装 jiuwenbox_dev.pth
-    指向源码 (否则 ``-m jiuwenbox...`` 找不到) + pip install uvicorn
-    (logging_config 触发).
-    """
+    传 env 块时 WinError 87 (ctypes 传 c_wchar_Array 给 c_void_p 参数报错)."""
     py = (os.environ.get("JIUWENBOX_RUNNER_PYTHON") or "").strip()
     if not py or not os.path.isfile(py):
         py = sys.executable or "python"
@@ -405,10 +384,6 @@ def _build_runner_command(
         "--proxy-port-end", str(proxy_port_end),
         "--control-port", str(control_port),
     ]
-    # review #2: --control-token 不再拼进命令行 (token 走 pipe). runner 端
-    # argparse 仍保留 --control-token 默认空串, 兼容旧 CLI 调用.
-    # P2-18: 用 subprocess.list2cmdline 正确转义命令行 (修复旧版只加外层引号不
-    # 转义内部双引号的 bug). runner 参数一般不含双引号, 但防御性统一处理.
     import subprocess as _sp
     return _sp.list2cmdline(parts)
 
@@ -425,20 +400,7 @@ def two_hop_spawn(
     env: dict[str, str] | None = None,
     control_token: str | None = None,
 ) -> "tuple[int, int, int, int]":
-    """第一跳: 以 jbx-sandbox 身份启动 runner (CREATE_SUSPENDED).
-
-    调用方在 assign Job 后 resume thread_handle. 返回
-    (pid, process_handle, thread_handle, token_write_handle):
-    thread_handle 供 resume 后 CloseHandle; token_write_handle 是 box-server
-    持有的 pipe 写端 (runner 通过继承的读端 hStdInput 读 token), 调用方需在
-    resume thread 前 write_control_token 写入 token 并 CloseHandle 此写端
-    (或直接用 two_hop_spawn_and_authorize 一步完成).
-
-    review #2: control_token 不再经命令行传 (WMI/PEB 泄露), 改走匿名 pipe +
-    STARTUPINFO.hStdInput: 本函数建 pipe (读端继承给 runner, 写端 box-server
-    持有不继承), 把读端经 hStdInput 传 runner. resume 前 buffer 里写好 token,
-    runner resume 后从 stdin 读 token 再切 socket accept.
-    """
+    """第一跳: 以 jbx-sandbox 身份启动 runner (CREATE_SUSPENDED)."""
     _require_windows()
     advapi32 = _get_advapi32()
     kernel32 = get_kernel32()
@@ -448,7 +410,6 @@ def two_hop_spawn(
         control_token=control_token,
     )
 
-    # review #2: 建匿名 pipe 传 control_token (读端继承给 runner, 写端 box-server 持有).
     token_write_handle = 0
     token_read_handle = wintypes.HANDLE()
     token_write_h = wintypes.HANDLE()
@@ -461,8 +422,7 @@ def two_hop_spawn(
             ctypes.byref(sa), 0,
         ):
             raise ctypes.WinError(ctypes.get_last_error())
-        # 写端关闭继承 (box-server 持有, 不让 runner 拿到副本 → 否则 runner
-        # 读 stdin 后不 EOF, 无法切 socket accept).
+        # 写端关闭继承 (box-server 持有, 不让 runner 拿到副本 → 否则 runner 读 stdin 后不 EOF, 无法切 socket accept).
         _clear_inherit(int(token_write_h.value))
         token_write_handle = int(token_write_h.value)
 
@@ -477,16 +437,8 @@ def two_hop_spawn(
         startup.dwFlags = 0  # noqa: N815
     pi = ProcessInfo()
 
-    # dwLogonFlags 不能为 0 (WinError 87); LOGON_NETCREDENTIALS_ONLY 会用调用方
-    # 凭据跑破坏隔离, 故只能 logon_with_profile (加载 profile 是其代价).
     logon_with_profile = 0x00000001  # noqa: N806 - Win32 SDK 常量风格
-    # CREATE_SUSPENDED: 调用方 assign Job 后再 ResumeThread. CREATE_UNICODE_ENVIRONMENT: 传 env 块必须带.
-    # bInheritHandles 必须为 True: pipe 读端需继承到 runner 子进程 (CreateProcessWithLogonW
-    # 的第 9 参是 lpEnvironment, 第 8 参是 dwCreationFlags, 句柄继承由 STARTUPINFO + USESTDHANDLE 驱动,
-    # 但 CreateProcessWithLogonW 不像 CreateProcess 有显式 bInheritHandles 形参 — 它默认继承可继承句柄,
-    # 故 SECURITY_ATTRIBUTES.bInheritHandle=True 的 pipe 读端会被继承).
     creation_flags = const.CREATE_NO_WINDOW | const.CREATE_SUSPENDED
-    # env 块含 box-server 拼好的 PATH (tool_paths), runner 必须继承, 否则起 child 时 WinError 2.
     # env_block_buf 须存活到调用返回 (悬垂指针防护).
     env_block_buf = None
     env_block_ptr = None
@@ -516,7 +468,6 @@ def two_hop_spawn(
             f"两跳第一跳 CreateProcessWithLogonW 失败 (sandbox_id={sandbox_id}): {err}"
         )
 
-    # CreateProcessWithLogonW 后 runner 已继承 pipe 读端, box-server 持有的读端副本可关.
     if token_read_handle.value:
         kernel32.CloseHandle(token_read_handle)
 
@@ -544,13 +495,7 @@ def stop_runner(pid: int, process_handle: int, timeout_ms: int = 5000) -> None:
 
 
 def _write_token_to_pipe(write_handle: int, token: str) -> None:
-    """把 control_token 写入匿名 pipe 写端, 协议 [4 字节大端长度][token 字节].
-
-    review #2: token 经 pipe 传 (避命令行/env 泄露). 写完不在此 CloseHandle —
-    由调用方在 resume thread 前关写端, runner 读到 EOF 后切 socket accept.
-    CREATE_SUSPENDED 状态下 runner 还没跑, pipe buffer 缓存 token, resume 后
-    runner 从 stdin 读到 [len][token] 再 EOF.
-    """
+    """把 control_token 写入匿名 pipe 写端, 协议 [4 字节大端长度][token 字节]."""
     _require_windows()
     kernel32 = get_kernel32()
     data = token.encode("utf-8")
@@ -585,14 +530,13 @@ def two_hop_spawn_and_authorize(
     env: dict[str, str] | None = None,
     control_token: str | None = None,
 ) -> "tuple[int, int]":
-    """两跳拉起 runner + 写 token + resume 主线程 (一站式, review #2).
+    """两跳拉起 runner + 写 token + resume 主线程 .
 
     封装 two_hop_spawn (CREATE_SUSPENDED) → _write_token_to_pipe → CloseHandle
     写端 → resume_process → CloseHandle thread_handle 全流程, 调用方只拿
     (pid, process_handle). 避免 process.py 直接管理 pipe 句柄时序.
 
-    返回 (runner_pid, process_handle); thread_handle / token_write_handle
-    在内部 resume + CloseHandle 后已释放.
+    返回 (runner_pid, process_handle); thread_handle / token_write_handle 在内部 resume + CloseHandle 后已释放.
     """
     _require_windows()
     from jiuwenbox.supervisor import win_job
@@ -609,10 +553,6 @@ def two_hop_spawn_and_authorize(
     )
     kernel32 = get_kernel32()
     try:
-        # 1. resume 前 (CREATE_SUSPENDED) 把 token 写进 pipe, 关写端让 runner 读到 EOF.
-        # review #2 安全关键: token 写入失败必须终止 spawn, 否则 runner 以空 token
-        # 跑起来后 accept 循环的 control_token 为空会跳过鉴权 (runner_main 里
-        # `if control_token:` 为空时直接放行), 本机任意进程可越权 exec.
         token_write_ok = True
         if control_token and token_write_handle:
             try:
@@ -653,8 +593,6 @@ def two_hop_spawn_and_authorize(
     except RuntimeError:
         raise
     except Exception:  # noqa: BLE001
-        # 未预期异常: 关 process_handle 防泄漏, runner 已起但 resume 异常时
-        # 会被 box-server 当作起不来清理 (调用方负责 stop_runner).
         try:
             kernel32.CloseHandle(wintypes.HANDLE(proc_handle))
         except Exception:  # noqa: BLE001
@@ -666,8 +604,6 @@ def two_hop_spawn_and_authorize(
 # ---------------------------------------------------------------------------
 # runner 侧: 第二跳 (运行在 jbx-sandbox 上下文).
 # ---------------------------------------------------------------------------
-# 以下三个 SID helper 已内联进 _create_restricted_token 并修复旧版悬垂指针/
-# padding 错位/nSubAuthorityCount 漏 21 的缺陷. P2-25 删除死代码 (需恢复见 git 5f841f7a).
 
 
 def _create_restricted_token() -> int:
@@ -691,8 +627,6 @@ def _create_restricted_token() -> int:
     ):
         raise ctypes.WinError(ctypes.get_last_error())
     try:
-        # 内联构造 SID buffer 并持有引用直到 CreateRestrictedToken 返回 (防悬垂指针 → WinError 998).
-        # Everyone SID (CreateWellKnownSid, 持久 buffer).
         everyone_buf = (ctypes.c_byte * 64)()
         everyone_size = wintypes.DWORD(64)
         if not advapi32.CreateWellKnownSid(
@@ -757,9 +691,9 @@ def _create_restricted_token() -> int:
         )
         ok = advapi32.CreateRestrictedToken(
             h_token, const.RESTRICTED_TOKEN_FLAGS,
-            0, None,       # disabling sids (空)
-            0, None,       # deleting privileges (空)
-            len(entries), restricting,  # restricting sids (PSID_AND_ATTRIBUTES, 数组对象自动转指针)
+            0, None,
+            0, None,
+            len(entries), restricting,
             ctypes.byref(restricted),
         )
         if not ok:
@@ -793,7 +727,6 @@ def _get_runner_primary_token() -> int:
     return int(h_token.value)
 
 
-# userenv.dll: GetUserProfileDirectoryW (拿 jbx-sandbox profile 路径).
 _userenv: ctypes.WinDLL | None = None
 
 
@@ -812,13 +745,7 @@ def _get_userenv() -> ctypes.WinDLL:
 
 
 def get_sandbox_profile_dir() -> str | None:
-    """拿 jbx-sandbox 的 profile 目录 (如 C:\\Users\\jbx-sandbox).
-
-    用 runner primary token (jbx-sandbox 身份) 调 GetUserProfileDirectoryW,
-    返回 profile 根目录. 失败返回 None (调用方降级). 比 hardcode
-    C:\\Users\\jbx-sandbox 稳: 同名残留 profile 会建 .000 后缀, 路径不固定,
-    必须 API 拿真实路径. token 用完即关.
-    """
+    """拿 jbx-sandbox 的 profile 目录 (如 C:\\Users\\jbx-sandbox)."""
     kernel32 = get_kernel32()
     try:
         token = _get_runner_primary_token()
@@ -827,7 +754,6 @@ def get_sandbox_profile_dir() -> str | None:
     try:
         userenv = _get_userenv()
         size = wintypes.DWORD(0)
-        # 第一次探 size (传 NULL buf, 返回所需 WCHAR 数含末尾 NUL).
         userenv.GetUserProfileDirectoryW(wintypes.HANDLE(token), None, ctypes.byref(size))
         if size.value == 0:
             return None
@@ -857,32 +783,19 @@ def _create_process_as_user(  # pylint: disable=huawei-too-many-arguments
     Returns: (child_pid, child_process_handle).
     """
     advapi32 = _get_advapi32()
-    # P2-18: 用 subprocess.list2cmdline 正确转义命令行. 旧版 " ".join 只对含空格参数加外层双引号不转义内部 ",
-    # command 形如 ['bash','-lc','python -c "print("ok")"'] 时 bash 收到的双引号被 Windows CRT 当边界 → argv 错位 → SyntaxError.
-    # list2cmdline 按 MSVCRT argv 规则把内部 " 转义为 \".
     import subprocess as _sp
     cmd_line = _sp.list2cmdline(command)
-    # CreateProcessAsUserW 的 lpCommandLine 需可变 buffer (Windows 原地修改),
-    # 不能直接传 str (ctypes 转 c_wchar_p 只读, 修改触发段错误).
     cmd_line_buf = ctypes.create_unicode_buffer(cmd_line)
-    # 始终构造 env block (env=None 回退 os.environ). 不能传 NULL 给 CreateProcessAsUserW
-    # (空环境无 PATH → WinError 2). 自动注入 HTTP(S)_PROXY 指向代理端口 (文档 §6.6).
     env_block_buf = None
     env_block_ptr = None
     if env is None:
         env = dict(os.environ)
     else:
         env = dict(env)
-    # 兜底补齐 DLL 加载/子进程运行所需基本变量: 缺 SystemRoot 等会 STATUS_DLL_INIT_FAILED (0xC0000142).
-    # box-server 端 _build_windows_exec_env 已补一次, 经 IPC 序列化后调用方 env 可能残缺, 第二跳再补 (setdefault 不覆盖).
     for _var in ("SystemRoot", "windir", "PATHEXT", "COMSPEC"):
         _val = os.environ.get(_var)
         if _val:
             env.setdefault(_var, _val)
-    # 沙箱可写临时区 + profile 变量补全: child env 来自 header 不带 profile 变量,
-    # 用 runner token 拿 jbx-sandbox profile 目录, TEMP 指向每沙箱隔离子目录
-    # (<profile>\AppData\Local\Temp\jiuwenbox\<sandbox_id>\). ms-playwright 安装目录跨沙箱共用不重下.
-    # 降级: 拿不到 profile → 回落 workspace/.tmp.
     _sandbox_id = os.path.basename(workspace.rstrip("\\/")) if workspace else None
     if _sandbox_id:
         _profile_dir = get_sandbox_profile_dir()
@@ -897,7 +810,7 @@ def _create_process_as_user(  # pylint: disable=huawei-too-many-arguments
             if _child_tmp:
                 env["TEMP"] = _child_tmp
                 env["TMP"] = _child_tmp
-                # 补全 profile 变量 (header env 不带).
+                # 补全 profile 变量.
                 env.setdefault("USERPROFILE", _profile_dir)
                 env.setdefault("LOCALAPPDATA", os.path.join(_profile_dir, "AppData", "Local"))
                 env.setdefault("APPDATA", os.path.join(_profile_dir, "AppData", "Roaming"))
@@ -915,8 +828,7 @@ def _create_process_as_user(  # pylint: disable=huawei-too-many-arguments
             _val = os.environ.get(_var)
             if _val:
                 env.setdefault(_var, _val)
-    # 自动注入代理 env (文档 §6.6): 即使调用方没传, 也让遵守代理协议的程序
-    # (pip/git/curl/node 等) 走 win_proxy, WFP 兜底拦截不走代理的出网.
+    # 自动注入代理 env
     proxy_url = f"http://127.0.0.1:{_proxy_port_start}"
     env.setdefault("HTTP_PROXY", proxy_url)
     env.setdefault("HTTPS_PROXY", proxy_url)
@@ -925,9 +837,6 @@ def _create_process_as_user(  # pylint: disable=huawei-too-many-arguments
     env.setdefault("ALL_PROXY", proxy_url)
     # NO_PROXY 放行 loopback 自身 (代理 → 代理 不该再走代理).
     env.setdefault("NO_PROXY", "127.0.0.1,localhost,::1")
-    # JIUWENBOX_INJECT_ENV 通用约定键: 调用方把"子进程需要的额外 env"以 JSON 编码塞进此键,
-    # 沙箱解析后 setdefault 注入子进程, 再删该键本身 (不泄漏). 沙箱不认识工具语义,
-    # 新工具只改调用方. 解析失败只 warning 不阻断.
     _inject_raw = env.pop("JIUWENBOX_INJECT_ENV", None)
     if _inject_raw:
         try:
@@ -942,12 +851,11 @@ def _create_process_as_user(  # pylint: disable=huawei-too-many-arguments
                 f"JIUWENBOX_INJECT_ENV 解析失败, 已忽略: {_e} raw_len={len(_inject_raw)}",
             )
         if _injected:
-            # P1-17: 注入键黑名单 — 防代码注入类键 (LD_PRELOAD/PYTHONPATH/PATH 等) 绕过沙箱. 纵深防御.
             forbidden_inject_keys = frozenset({  # noqa: N806 - Win32 SDK 常量风格
                 "LD_PRELOAD", "LD_LIBRARY_PATH",
                 "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONSAFEPATH",
                 "NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS",
-                "PATH",  # 覆盖 PATH 可劫持可执行解析
+                "PATH",
                 "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH",
             })
             _injected_keys = []
@@ -990,8 +898,6 @@ def _create_process_as_user(  # pylint: disable=huawei-too-many-arguments
     startup.hStdError = wintypes.HANDLE(stdout_fd)  # noqa: N815
     pi = ProcessInfo()
 
-    # env block 始终构造 (env=None 回退 os.environ), 故必须带 UNICODE flag,
-    # 否则 CreateProcessAsUserW 按 ANSI 解析 env block → WinError 87.
     creation_flags = (
         const.CREATE_NO_WINDOW
         | const.CREATE_NEW_PROCESS_GROUP
@@ -1011,8 +917,6 @@ def _create_process_as_user(  # pylint: disable=huawei-too-many-arguments
         ctypes.byref(startup), ctypes.byref(pi),
     )
     if not ok:
-        # 诊断: CreateProcessAsUserW 失败区分"PATH 找不到" vs "ACL 读不了" (WinError 2 常见).
-        # 打印 command[0]/PATH 片段/目标存在性+可读性, 经日志长连发回 box-server.
         _cmd0 = str(command[0]) if command else "<empty>"
         _path_val = env.get("PATH", "") if isinstance(env, dict) else ""
         _path_segs = (_path_val or "").split(os.pathsep)[:8]
@@ -1038,21 +942,11 @@ def _create_process_as_user(  # pylint: disable=huawei-too-many-arguments
 
 
 def _read_control_token_from_stdin(fallback: str) -> str:
-    """从 stdin pipe 读 control_token (review #2).
-
-    协议 [4 字节大端长度][token 字节]. box-server 在 resume runner 前把 token
-    写进 pipe 并 CloseHandle 写端, runner resume 后从 stdin 读到 [len][token]
-    再 EOF. 读到非空 token 则用之; 读不到 (无 pipe / 格式错 / EOF) 回退
-    fallback (命令行 --control-token, 兼容旧调用).
-
-    读完后 CloseHandle(stdin) 释放 pipe 读端, 再让 runner 切到 socket accept
-    (避免 stdin 残留影响后续).
-    """
+    """从 stdin pipe 读 control_token"""
     import msvcrt  # type: ignore[import-not-found]
     kernel32 = get_kernel32()
     stdin_handle = kernel32.GetStdHandle(-10)  # STD_INPUT_HANDLE = -10  # noqa: N806
     if not stdin_handle:
-        # 无 stdin handle (非 pipe 启动), 用 fallback.
         _push_log("DEBUG", f"control_token 用命令行回退 (无 stdin handle): {bool(fallback)}")
         return fallback
     fd = -1
@@ -1086,11 +980,8 @@ def _read_control_token_from_stdin(fallback: str) -> str:
         _push_log("INFO", "control_token 从 stdin pipe 读取成功")
         return token
     except OSError:
-        # stdin 不是 pipe (普通空 stdin) → read 立即 EOF 或报错, 用 fallback.
         return fallback
     finally:
-        # os.close(fd) 会同时关闭底层 Win32 stdin handle (open_osfhandle 绑定),
-        # 切勿再单独 CloseHandle(stdin_handle) — 否则双重关闭报 ERROR_INVALID_HANDLE.
         if fd >= 0:
             try:
                 os.close(fd)
@@ -1099,15 +990,7 @@ def _read_control_token_from_stdin(fallback: str) -> str:
 
 
 def runner_main(argv: list[str]) -> int:
-    """runner 入口 (运行在 jbx-sandbox 上下文, 由 broker 第一跳拉起).
-
-    职责:
-      1. 创建 Write-Restricted Token.
-      2. 循环从 stdin 读长度前缀帧 (exec / write_file / read_file /
-         list_dir / shutdown).
-      3. 对每个 exec 请求, 以受限 token CreateProcessAsUserW 起子命令,
-         收集 stdout/stderr/exit, 写回 stdout 帧.
-    """
+    """runner 入口 (运行在 jbx-sandbox 上下文, 由 broker 第一跳拉起)."""
     import argparse
 
     parser = argparse.ArgumentParser(prog="win_exec-runner")
@@ -1116,10 +999,6 @@ def runner_main(argv: list[str]) -> int:
     parser.add_argument("--proxy-port-start", type=int, default=const.DEFAULT_PROXY_PORT_RANGE_START)
     parser.add_argument("--proxy-port-end", type=int, default=const.DEFAULT_PROXY_PORT_RANGE_END)
     parser.add_argument("--control-port", type=int, required=True)
-    # P0-6: 鉴权 token (box-server 分配, 首帧校验). 旧版 runner 无鉴权, 本机任意
-    # 进程可 connect control_port 越权 exec; 现要求首帧 header["token"] 匹配.
-    # review #2: token 优先从 stdin pipe 读 (避命令行 WMI/PEB 泄露), --control-token
-    # 保留为兼容回退 (默认空串). pipe 读不到时用命令行值.
     parser.add_argument("--control-token", default="")
     args = parser.parse_args(argv)
     control_token = _read_control_token_from_stdin(args.control_token)
@@ -1134,15 +1013,12 @@ def runner_main(argv: list[str]) -> int:
         "runner 启动: sandbox_id=%s workspace=%s control_port=%s",
         args.sandbox_id, args.workspace, args.control_port,
     )
-    # 初始化本地落盘日志, 必须在 _push_log 之前 (之后 _push_log 自动落盘一份).
+    # 初始化本地落盘日志
     _init_local_log(args.sandbox_id)
     _push_log("INFO", f"runner 启动: sandbox_id={args.sandbox_id} "
                f"workspace={args.workspace} control_port={args.control_port}"
                f" local_log={_local_log_path}")
 
-    # 受限 token 当前未被 exec 消费 (exec 用 _get_runner_primary_token 起 child, 因受限 token
-    # 会让 child 0xC0000142). 保留构造为未来恢复双重写检查留底: 改 _handle_exec_request 内
-    # _self_token 取值回入参 restricted_token 即可. 构造失败降级 best-effort, 不杀 runner.
     restricted_token: int | None = None
     try:
         restricted_token = _create_restricted_token()
@@ -1157,9 +1033,6 @@ def runner_main(argv: list[str]) -> int:
     if restricted_token is not None:
         _push_log("INFO", f"restricted token 创建成功: handle={restricted_token}")
 
-    # TCP loopback 控制端口 (box-server 分配, 命令行参数传入). runner bind + listen,
-    # box-server 每次 exec connect 一条新连接, 发一帧请求读一帧响应后 close.
-    # 对齐 Linux AF_UNIX 模型 (Windows 不能传 fd, 改传端口号).
     import socket
     port = args.control_port
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1179,8 +1052,7 @@ def runner_main(argv: list[str]) -> int:
             conn, _ = listener.accept()
             try:
                 header_frame = recv_frame(conn, MAX_HEADER_BYTES)
-            except (OSError, ValueError):  # ConnectionError 是 OSError 子类, 不重复捕获
-                # client 连上后立刻断开 (探活/异常), 直接关连接等下一个.
+            except (OSError, ValueError):
                 conn.close()
                 continue
             try:
@@ -1190,9 +1062,6 @@ def runner_main(argv: list[str]) -> int:
                 conn.close()
                 continue
 
-            # P0-6: 鉴权 token 校验 (首帧). control_token 非空时, header 必须带
-            # 匹配的 "token"; 不匹配/缺失则拒绝 (防本机任意进程越权 exec).
-            # control_token 为空 (旧版兼容/未传) 时跳过校验.
             if control_token:
                 _req_token = header.get("token")
                 if not _req_token or not _hmac_compare(str(_req_token), control_token):
@@ -1206,9 +1075,6 @@ def runner_main(argv: list[str]) -> int:
                     continue
 
             req_type = header.get("type")
-            # 日志订阅长连: box-server 创建 sandbox 后主动 connect 发此帧.
-            # runner 把该连接存入订阅集保持, 之后任何阶段往里 push log 帧.
-            # 不 close, 不回响应 (订阅是单向 push), 回 accept 等下一条短连.
             if req_type == REQUEST_TYPE_SUBSCRIBE_LOG:
                 try:
                     conn.setblocking(True)
@@ -1227,11 +1093,8 @@ def runner_main(argv: list[str]) -> int:
                 _send_response(conn, {"ok": True})
                 conn.close()
                 break
-            # 每个 request handler 独立 try/except: 单连接 OSError (box-server 读超时 close 后 runner 发响应抛异常) 不应杀整个 runner —
-            # 旧版冒泡到 accept 循环 → runner 退出 → 后续 exec 全 timeout (409). 捕获后只 close 该连接, 继续 accept.
             try:
                 if req_type == "exec":
-                    # exec 请求的 stdin body 帧 (紧跟 header), 从同一连接读.
                     stdin_size = int(header.get("stdin_size", 0))
                     stdin_bytes = recv_frame(conn, MAX_STDIN_BYTES) if stdin_size > 0 else b""
                     _handle_exec_request(
@@ -1264,7 +1127,6 @@ def runner_main(argv: list[str]) -> int:
                   f"runner accept 循环异常 (sandbox_id={args.sandbox_id})", exc=tb)
     finally:
         _push_log("INFO", f"runner 退出 (sandbox_id={args.sandbox_id})")
-        # P2-26: 显式关闭本地落盘日志文件.
         if _local_log_file is not None:
             try:
                 _local_log_file.close()
@@ -1273,7 +1135,6 @@ def runner_main(argv: list[str]) -> int:
         kernel32 = get_kernel32()
         kernel32.CloseHandle(wintypes.HANDLE(restricted_token))
         listener.close()
-        # 关闭所有日志订阅连接, 通知订阅方 runner 已退出.
         with _log_sub_lock:
             subs = list(_log_subscribers)
             _log_subscribers.clear()
@@ -1293,9 +1154,6 @@ def _send_error_response(stream, detail: str) -> None:
     _send_response(stream, {"ok": False, "error": "io_error", "detail": detail})
 
 
-# 匹配双引号包围的片段 (不含内部双引号). 用于规整 bash -lc script 中双引号内的
-# Windows 路径反斜杠, 把 \ 替换为 / (bash 双引号内会吞掉非特殊反斜杠, 详见
-# _handle_exec_request 注释). 单引号/双引号外内容不动, 避免误伤 shell 元字符.
 _DQ_SEGMENT_RE = re.compile(r'"[^"]*"')
 
 
@@ -1319,7 +1177,6 @@ def _normalize_bash_script_backslashes(command: list) -> list | None:
 
     def _norm_dq(m: "re.Match[str]") -> str:
         seg = m.group(0)
-        # seg 形如 "...", 把内部的反斜杠换成正斜杠 (Windows/node 能正确解析).
         inner = seg[1:-1].replace("\\", "/")
         return f'"{inner}"'
 
@@ -1342,13 +1199,10 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
     if not command:
         _send_error_response(stream, "exec requires non-empty command")
         return
-    # 归一化裸名 python3/python3.x → python (venv\Scripts 只有 python.exe). 只改裸名, 不碰带路径的.
     _c0 = str(command[0])
     if _c0 in ("python3", "python3.13", "python3.12", "python3.11") or _c0.startswith("python3."):
         if "\\" not in _c0 and "/" not in _c0:
             command[0] = "python"
-    # bash -lc 双引号段内反斜杠规整为正斜杠: bash 双引号内会吞掉路径反斜杠致 MODULE_NOT_FOUND.
-    # 只动双引号内, 不碰单引号/双引号外, 避免误伤 shell 元字符. 只对 ["bash"|"sh","-lc"|" -c",script,...] 生效.
     _norm_command = _normalize_bash_script_backslashes(command)
     if _norm_command is not None:
         command = _norm_command
@@ -1370,12 +1224,8 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
         ctypes.byref(child_in_read), ctypes.byref(child_in_write),
         ctypes.byref(sa), 0,
     )
-    # runner 持有的写端/读端关闭继承, 防 child 拿到.
     _clear_inherit(int(child_in_write.value))
-    _clear_inherit(int(child_out_read.value))  # P2-29: 防 child 继承 stdout 读端
-    # review #3: 为本次 exec 创建专用 ephemeral Job (KILL_ON_JOB_CLOSE), child
-    # 起后立即 assign 进 Job, 超时/正常退出时 close_job 一次性杀整个进程树
-    # (含孙进程). 旧版只 TerminateProcess 杀 child, 孙进程继续占用端口/资源.
+    _clear_inherit(int(child_out_read.value))
     from jiuwenbox.supervisor import win_job
     exec_job_handle = 0
     try:
@@ -1385,8 +1235,6 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
     try:
         workdir = header.get("workdir")
         env = header.get("env")
-        # 用受限 token 起 child 会 0xC0000142 (desktop/全局对象机制硬限制, 非 ACL/env),
-        # 故 exec 用 runner 自身未受限 primary token. 代价: 失去双重写检查, 写控制只剩 ACL.
         _self_token = _get_runner_primary_token()
         try:
             pid, proc_handle = _create_process_as_user(
@@ -1397,15 +1245,6 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
             )
         finally:
             get_kernel32().CloseHandle(wintypes.HANDLE(_self_token))
-        # child 起后立即 assign 进 ephemeral Job (按 pid). 此后 child 起的孙进程
-        # 自动继承进 Job; 超时 close_job 一次性杀整树. assign 失败降级 (Job 创建
-        # 已成功但 assign 失败的概率极低, 失败则保留旧 TerminateProcess 兜底).
-        # 注: child 用 CreateProcessAsUserW 非 SUSPENDED 起的, assign 赶在 child
-        # spawn 第一跳孙进程前执行 (微秒级 vs child 加载+解析命令的毫秒级),
-        # race 窗口极小但非零 — 极端情况下 child 在 assign 前已 spawn 的孙进程
-        # 逃逸 Job (close_job 杀不到). 完全消除需改 CREATE_SUSPENDED+assign+resume,
-        # 改动 child 起动时序影响面大, 暂不取; 当前实现已实质性改善 (旧版完全不
-        # 杀孙进程).
         if exec_job_handle:
             try:
                 win_job.assign_process_by_pid(exec_job_handle, pid)
@@ -1417,7 +1256,7 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
         # runner 不再需要 child 端的写端/读端副本.
         kernel32.CloseHandle(child_in_read)
         kernel32.CloseHandle(child_out_write)
-        # 透传 stdin (若有).
+        # 透传 stdin
         if stdin_bytes:
             import msvcrt  # type: ignore[import-not-found]
             in_write_fd = msvcrt.open_osfhandle(
@@ -1468,16 +1307,16 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
         if _caller_timeout_s <= 0:
             _caller_timeout_s = 120
         wait_budgets = _caller_timeout_s * 1000  # noqa: N806 - Win32 SDK 常量风格
-        _child_killed = False  # child 是否被超时强杀 (强杀后 stdout pipe 可能不 EOF)
+        _child_killed = False
         _last_heartbeat_ms = 0
         while True:
             result = kernel32.WaitForSingleObject(
                 wintypes.HANDLE(proc_handle), wait_timeout,
             )
-            if result == 0:  # wait_obj_0: child 已退出
+            if result == 0:
                 break
             deadline_waited_ms += wait_timeout
-            # 每 30s 打一次心跳, 记录 child 仍在跑.
+            # 每 30s 打一次心跳, 记录 child
             if deadline_waited_ms - _last_heartbeat_ms >= 30000:
                 _last_heartbeat_ms = deadline_waited_ms
                 _push_log("INFO",
@@ -1485,9 +1324,6 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
                           f"{wait_budgets}ms stdout_buf={len(out_buf)}B "
                           f"cmd={command[:3] if command else []!r}")
             if deadline_waited_ms >= wait_budgets:
-                # child 长时间不退出, 强杀整个进程树. review #3: 优先 close_job
-                # 触发 KILL_ON_JOB_CLOSE 杀 child + 所有孙进程 (旧版只 TerminateProcess
-                # 杀 child, 孙进程继续占用端口/资源). Job 失败兜底 TerminateProcess.
                 if exec_job_handle:
                     try:
                         win_job.close_job(exec_job_handle)
@@ -1526,8 +1362,6 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
             wintypes.HANDLE(proc_handle), ctypes.byref(exit_code),
         )
         kernel32.CloseHandle(wintypes.HANDLE(proc_handle))
-        # review #3: child 已退出, 关闭 ephemeral Job 杀掉残留孙进程 (child 起的
-        # node server / playwright 进程等), 释放端口/资源, 防 EADDRINUSE + 句柄泄漏.
         if exec_job_handle:
             try:
                 win_job.close_job(exec_job_handle)
@@ -1544,7 +1378,7 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
             "exit_code": ec,
             "stdout": out_text,
             "stderr": "",
-            "killed": _child_killed,  # P2-28: 回传超时强杀标志
+            "killed": _child_killed,
         })
         # 上报 exec 结果: command 摘要 + exit + 输出前缀经日志长连发回 box-server. 输出截断防撑爆日志帧.
         cmd_summary = " ".join(str(c) for c in (header.get("command") or []))[:200]
@@ -1575,7 +1409,7 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
     except Exception as exc:  # noqa: BLE001
         import traceback as _tb
         tb = _tb.format_exc()
-        # 连接已断时发 error response 会再抛 ConnectionAbortedError, 兜底吞掉 — 不让单个 exec 连接异常杀整个 runner (见上方 accept 循环注释).
+        # 连接已断时发 error response 会再抛 ConnectionAbortedError, 兜底吞掉 — 不让单个 exec 连接异常杀整个 runner
         try:
             _send_error_response(stream, f"exec failed: {exc}")
         except OSError:
@@ -1587,7 +1421,6 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
             kernel32.CloseHandle(child_in_write)
         except Exception:  # noqa: BLE001 - 清理句柄兜底, 不抛
             pass
-        # review #3: 异常时也关 ephemeral Job 杀残留孙进程 (best-effort).
         if exec_job_handle:
             try:
                 win_job.close_job(exec_job_handle)
@@ -1675,7 +1508,7 @@ def _handle_list_dir_request(stream, header) -> None:
 
 
 if __name__ == "__main__":  # pragma: no cover - runner 入口
-    sys.argv.pop(0)  # 去掉脚本名
+    sys.argv.pop(0)
     if sys.argv and sys.argv[0] == RUNNER_SUBCOMMAND:
         sys.argv.pop(0)
         raise SystemExit(runner_main(sys.argv))

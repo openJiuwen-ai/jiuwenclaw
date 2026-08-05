@@ -22,16 +22,7 @@ def _effective_user_home() -> Path:
         return Path.home()
 
 
-# Windows: JIUWENBOX_HOME 与 agent-server (jiuwenclaw) 同根, 放在 <workspace>/jiuwenbox 下.
-# agent-server 启动时设 JIUWENCLAW_DATA_DIR (~/.office-claw/.jiuwenclaw), box-server 继承该 env.
-# 同根保证 box-server 天然是目录 owner → 改 DACL 不会 WinError 5. 旧版用 ~/.jiuwenbox 时 owner
-# 可能非当前用户或 ACL 被 revoke 残留 → upload/list Permission denied.
-# Linux 不变 (~/.jiuwenbox).
-#
-# OFFICE_CLAW_DATA_ROOT: 上游产品数据根 (~/.office-claw),
-# 与 relay-claw 同算法 (env OFFICE_CLAW_DATA_DIR > fallback ~/.office-claw).
-# 沙箱 workspace/venv/产物都在该根子树, 受限 token 访问子路径需该根 traverse,
-# 默认 ACL 不含 jbx-sandbox/合成 SID → lstat EPERM, apply_sandbox_acl 对该根施加非递归 traverse read 解决. 见 win_acl.py.
+
 if sys.platform == "win32":
     _win_root_env = os.environ.get("JIUWENCLAW_DATA_DIR", "").strip()
     JIUWENCLAW_DATA_DIR_PATH = (
