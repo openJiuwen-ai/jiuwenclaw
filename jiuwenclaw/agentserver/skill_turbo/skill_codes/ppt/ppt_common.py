@@ -9,6 +9,7 @@ from jiuwenclaw.agentserver.skill_turbo.plan_node import AbortError
 
 _JSON_FENCE_PATTERN = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
 _CAT_N_PREFIX_RE = re.compile(r"^[ \t]*\d+[ \t]", re.MULTILINE)
+_OUTLINE_PAGE_HEADING_RE = re.compile(r"^### P(\d+):", re.MULTILINE)
 
 # ──────────────────────── 节点显示名映射 ────────────────────────
 # 将内部 plan_name（如 p0_pipeline_init）映射为界面上展示的中文名称。
@@ -210,3 +211,37 @@ class PptCommon:
                 raise
             raise error_type(f"写入 {label} 失败: {path}: {exc}") from exc
         return path
+
+    @staticmethod
+    def resolve_total_pages(
+        *,
+        page_count: int = 0,
+        total_pages: int | None = None,
+        outline_text: str = "",
+        outline_pages: dict[int, str] | None = None,
+        default_structural_pages: int = 2,
+    ) -> int:
+        """从 outline 页码、上下文 total_pages 与 page_count 兜底推算总页数。
+
+        含 agenda 等额外结构页时，``page_count + 2`` 会低估总页数；优先取 outline 最大页码。
+        """
+        candidates: list[int] = []
+        if total_pages is not None:
+            try:
+                parsed = int(total_pages)
+                if parsed > 0:
+                    candidates.append(parsed)
+            except (TypeError, ValueError):
+                pass
+        if outline_pages:
+            candidates.append(max(outline_pages))
+        if outline_text.strip():
+            page_nums = [
+                int(match.group(1))
+                for match in _OUTLINE_PAGE_HEADING_RE.finditer(outline_text)
+            ]
+            if page_nums:
+                candidates.append(max(page_nums))
+        if page_count > 0:
+            candidates.append(page_count + default_structural_pages)
+        return max(candidates) if candidates else 0

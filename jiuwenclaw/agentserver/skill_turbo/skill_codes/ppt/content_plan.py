@@ -99,6 +99,7 @@ _P43_COMMON_RULES = """大纲格式要求（必须严格遵守）：
 4. 内容页数（研究需求：✅）必须等于 page_count。封面（cover）、结束页（ending）及用户明确要求的结构页（section/agenda/transition/conclusion 等）标 ❌，其余页必须标 ✅。
    禁止自行添加 section/transition/agenda 等结构页；仅当用户明确要求时才添加，且为额外页（总页数 = page_count + 2 + 结构页数），不得占用内容页额度。
    **页面顺序**：cover 必须是 P1（首页），ending 必须是末页（P{总页数}）。
+   **ending 页约束**：标题优先「感谢聆听」或 ≤16 字简短收束语；全文总结、数据回响、趋势展望必须放在最后一个内容页（✅），不得把长总结句写入 ending 页标题；ending 页内容概要只描述结束页展示（感谢语、可选一句总结语、汇报人/日期），不得复制正文页大纲。
    **agenda 页内容**：内容概要只列内容页（✅）章节标题与导航，不得列入 cover/ending/agenda 等结构页本身。
 5. 基于给定素材与搜索结果，不编造不存在的趋势或数据。
 6. 只输出 Markdown 正文，不要 JSON，不要代码围栏。"""
@@ -965,7 +966,7 @@ async def _run_p43_outline_gen(node: PlanNode, inputs: dict[str, Any]) -> None:
     _validate_outline_markdown_basic(outline_text, topic=topic, page_count=inputs.get("page_count"))
 
     _all_page_nums = [int(m.group(1)) for m in _PAGE_HEADING_PATTERN.finditer(outline_text)]
-    inputs["total_pages"] = len(_all_page_nums)
+    inputs["total_pages"] = max(_all_page_nums) if _all_page_nums else 0
 
     outline_path = await _write_outline(
         node,
