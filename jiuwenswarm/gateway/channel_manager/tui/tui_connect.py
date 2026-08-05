@@ -3357,6 +3357,10 @@ def build_cli_route_binding(bind: CliRouteBindParams) -> GatewayRouteBinding:
             return await ac.on_auth_connect(ws, "tui")
         return False
 
+    _tui_channel = bind.ws_channel
+    if _tui_channel is not None and hasattr(_tui_channel, "on_connect"):
+        _tui_channel.on_connect(_tui_connect_hook)
+
     return GatewayRouteBinding(
         path=bind.path,
         channel_id=bind.channel_id,
@@ -3366,5 +3370,4 @@ def build_cli_route_binding(bind: CliRouteBindParams) -> GatewayRouteBinding:
         disconnect_handler=_tui_disconnect,
         session_bind_handler=_tui_session_bound,
         ws_channel=bind.ws_channel,
-        connect_hook=_tui_connect_hook,
     )

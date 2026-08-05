@@ -135,12 +135,12 @@ class AgentOSRouterClient(AgentServerClient):
         tui_channel = channel_manager.get_channel(ChannelType.CLI)
 
         if web_channel:
-            web_channel.on_connect = self.on_connect
+            web_channel.on_connect(self.on_connect)
         if tui_channel:
-            tui_channel.on_connect = self.on_connect
+            tui_channel.on_connect(self.on_connect)
 
 
-    async def on_connect(self, ws: Any, type: str) -> AuthResult | None:
+    async def on_connect(self, ws: Any) -> AuthResult | None: #todo
         if self._auth_client is None:
             return AuthResult(
                 success=False,
@@ -151,7 +151,7 @@ class AgentOSRouterClient(AgentServerClient):
         token = extract_token(ws)
         headers = extract_headers(ws)
         context = AuthContext(
-            channel_type=type,
+            channel_type="",
             credentials={"token": token} if token else {},
             headers=headers,
             remote_addr=get_remote_addr(ws),
@@ -164,7 +164,6 @@ class AgentOSRouterClient(AgentServerClient):
                 if hasattr(ret, "__await__"):
                     await ret
         return result
-
 
     def get_current_agent_type(self, user_id: str) -> str:
         """Return the user's current agent_type (default ``jiuwenswarm``)."""

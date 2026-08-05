@@ -20,4 +20,3 @@ class GatewayRouteBinding:
     install: Callable[[Any], None] | None = None
     # V2: 委托 ws 注册的外部 Channel（tui 的 TuiChannel）。None = 不委托。
     ws_channel: Any = None
-    connect_hook: Callable[[Any, str], Awaitable[bool]] | None = None

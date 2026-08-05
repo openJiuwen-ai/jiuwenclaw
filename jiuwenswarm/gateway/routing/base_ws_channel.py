@@ -15,7 +15,7 @@ import uuid
 from abc import abstractmethod
 from typing import Any
 
-from jiuwenswarm.gateway.channel_manager.base import BaseChannel
+from jiuwenswarm.gateway.channel_manager.base import WSBaseChannel
 from jiuwenswarm.gateway.routing.keys import DeliveryTarget, RoutingKey
 from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
 
@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 _BROADCAST_FALLBACK_CHANNEL_IDS: frozenset[str] = frozenset()
 
 
-class BaseWsChannel(BaseChannel):
+class BaseWsChannel(WSBaseChannel):
     """WebSocket 通道共享基类。
 
     继承 BaseChannel，提供 _clients_by_key (5 维 RoutingKey → list[ws]) 双向索引，

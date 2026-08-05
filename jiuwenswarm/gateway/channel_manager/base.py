@@ -9,6 +9,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Callable, Awaitable
 
 from jiuwenswarm.common.schema.message import Message
+from jiuwenswarm.gateway.channel_manager.web.web_connect import ConnectHook
 from jiuwenswarm.gateway.routing.keys import DeliveryTarget
 from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
 
@@ -209,3 +210,23 @@ class BaseChannel(ABC):
         """Check if the channel_id is running."""
         return self._running
 
+
+class WSBaseChannel(BaseChannel):
+
+    def __init__(self, config: Any, router: RobotMessageRouter):
+        """
+        初始化Channel
+        """
+        super().__init__(config, router)
+        self.config = config
+        self.bus = router
+        self._running = False
+        self.start_task: Any = None
+        self._connect_hooks: list[ConnectHook] = []
+        self._disconnect_hooks: list[ConnectHook] = []
+
+    def on_connect(self, callback: ConnectHook) -> None:
+        self._connect_hooks.append(callback)
+
+    def on_disconnect(self, callback: ConnectHook) -> None:
+        self._disconnect_hooks.append(callback)
