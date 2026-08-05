@@ -31,6 +31,7 @@ Shared-provider caveat (important):
 from __future__ import annotations
 
 import logging
+import sys
 from typing import Any
 
 from jiuwenswarm.common.config import get_config
@@ -57,8 +58,15 @@ _CURRENT_ROOT_SPAN: Any = None
 # calls stay idempotent without stamping an attribute on the function object.
 _team_span_patched: set[Any] = set()
 
+_TEAM_SPAN_CONSUMER_MODULES = (
+    "openjiuwen.agent_teams.observability.callback_handler",
+    "openjiuwen.agent_teams.observability.rail",
+    "openjiuwen.agent_teams.observability.monitor_handler",
+)
+_OBSERVABILITY_SETUP_MODULE = "openjiuwen.agent_teams.observability.setup"
 
-def _install_team_span_global_fallback() -> None:
+
+def _install_team_span_global_fallback(*, load_modules: bool = False) -> None:
     """Patch get_team_span in EVERY consumer module to fall back to _CURRENT_ROOT_SPAN.
 
     Each SDK consumer did ``from span_context import get_team_span``, so each has
@@ -72,17 +80,22 @@ def _install_team_span_global_fallback() -> None:
     Team mode is unaffected: its team_span is ContextVar-visible, so the original
     lookup returns non-None and the fallback never triggers. Single active
     single-agent run assumed (multi-session concurrency: last-opened wins).
+    The default path only patches modules that are already loaded. Importing
+    the SDK observability modules during application/module import can create
+    exporter resources before observability is enabled, so callers that need
+    the complete patch set must opt into ``load_modules=True`` after startup.
+
     Best-effort, idempotent, never raises.
     """
     import importlib
 
-    for mod_path in (
-        "openjiuwen.agent_teams.observability.callback_handler",
-        "openjiuwen.agent_teams.observability.rail",
-        "openjiuwen.agent_teams.observability.monitor_handler",
-    ):
+    for mod_path in _TEAM_SPAN_CONSUMER_MODULES:
+        mod = sys.modules.get(mod_path)
+        if mod is None and not load_modules:
+            continue
         try:
-            mod = importlib.import_module(mod_path)
+            if mod is None:
+                mod = importlib.import_module(mod_path)
         except Exception as exc:
             logger.debug(
                 "[AgentObservability] skip team-span fallback patch for %s: %s",
@@ -116,6 +129,56 @@ _agent_owns_provider: bool = False
 # config-gated path (agent_observability.enabled hot-reload) is unaffected
 # unless force was ever used.
 _force_ever_enabled: bool = False
+
+
+def _observability_provider_is_active() -> bool:
+    """Check the shared provider without importing SDK observability modules."""
+    setup_module = sys.modules.get(_OBSERVABILITY_SETUP_MODULE)
+    if setup_module is not None:
+        is_initialized = getattr(setup_module, "is_initialized", None)
+        if callable(is_initialized):
+            try:
+                return bool(is_initialized())
+            except Exception as exc:
+                logger.debug("[AgentObservability] provider state check failed: %s", exc)
+                return False
+    return _agent_observability_active
+
+
+def maybe_agent_observability_rail() -> Any:
+    """Return the agent observability rail only after observability is active.
+
+    Keeping this guard in JiuwenSwarm avoids importing the SDK rail module while
+    ordinary agent construction runs with observability disabled. The provider
+    check also covers a team-owned provider shared with an agent run.
+    """
+    if not _observability_provider_is_active():
+        return None
+    try:
+        from openjiuwen.agent_teams.observability.rail import ObservabilityRail
+
+        return ObservabilityRail()
+    except Exception as exc:
+        logger.debug("[AgentObservability] create rail failed: %s", exc)
+        return None
+
+
+def ensure_agent_observability_rail(agent: Any) -> None:
+    """Attach the observability rail to an already-built agent when enabled."""
+    rail = maybe_agent_observability_rail()
+    if rail is None:
+        return
+    try:
+        from openjiuwen.agent_teams.observability.rail import ObservabilityRail
+
+        configured = agent.configured_rails() if hasattr(agent, "configured_rails") else []
+        if any(isinstance(item, ObservabilityRail) for item in configured):
+            return
+        add_rail = getattr(agent, "add_rail", None)
+        if callable(add_rail):
+            add_rail(rail)
+    except Exception as exc:
+        logger.debug("[AgentObservability] attach rail failed: %s", exc)
 
 
 def sync_agent_observability(*, force: bool = False) -> None:
@@ -155,6 +218,7 @@ def sync_agent_observability(*, force: bool = False) -> None:
                 # Another subsystem (e.g. team) already owns the provider.
                 # Reuse it so the global OtelCallbackHandler keeps emitting
                 # LLM/tool spans for this single agent too — do NOT re-init.
+                _install_team_span_global_fallback(load_modules=True)
                 _agent_observability_active = True
                 _agent_owns_provider = False
                 logger.info(
@@ -178,6 +242,7 @@ def sync_agent_observability(*, force: bool = False) -> None:
                 file_retention_days=cfg.get("file_retention_days", 7),
             )
             init_observability(obs_cfg)
+            _install_team_span_global_fallback(load_modules=True)
             _agent_observability_active = True
             _agent_owns_provider = True
             if obs_cfg.exporter == "file":

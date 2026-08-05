@@ -4614,15 +4614,19 @@ class JiuWenSwarmDeepAdapter:
 
         # Observability rail: opens an agent-layer span (agent.<name>.task_iteration.<n>
         # for task-loop runs, or agent.<name>.invoke for single-round) under the root
-        # run span per iteration/round. It is the only thing that creates the
-        # task_iteration / invoke spans that llm.call + tool.* nest under. It
-        # self-disables (before_* returns early when get_team_span() is None), so
-        # attaching it unconditionally is safe and also adapts to runtime
-        # enable/disable of agent_observability without rebuilding the agent.
+        # run span per iteration/round. Construct it only after JiuwenSwarm has
+        # enabled observability; importing the SDK rail while it is disabled can
+        # create exporter resources that outlive the request/test process. If
+        # observability is enabled after this agent was built, the request path
+        # attaches the rail just before execution.
         try:
-            from openjiuwen.agent_teams.observability.rail import ObservabilityRail
+            from jiuwenswarm.agents.harness.agent_observability import (
+                maybe_agent_observability_rail,
+            )
 
-            rails_list.append(ObservabilityRail())
+            observability_rail = maybe_agent_observability_rail()
+            if observability_rail is not None:
+                rails_list.append(observability_rail)
         except Exception as exc:
             logger.warning("%s Failed to attach ObservabilityRail: %s", log_prefix, exc)
         stage_timer.mark("observability_rail")
@@ -8610,10 +8614,12 @@ class JiuWenSwarmDeepAdapter:
             # has a parent for LLM/tool spans (see streaming path for details).
             from jiuwenswarm.agents.harness.agent_observability import (
                 close_agent_run_span,
+                ensure_agent_observability_rail,
                 open_agent_run_span,
                 sync_agent_observability,
             )
             sync_agent_observability()
+            ensure_agent_observability_rail(self._instance)
             _run_span = open_agent_run_span(session_id=session_id, mode=mode)
             attach_goal = self._wants_attach_goal(request.params)
             dispatch_mode = self._resolve_input_dispatch_mode(request.params)
@@ -9117,10 +9123,12 @@ class JiuWenSwarmDeepAdapter:
             # before running.
             from jiuwenswarm.agents.harness.agent_observability import (
                 close_agent_run_span,
+                ensure_agent_observability_rail,
                 open_agent_run_span,
                 sync_agent_observability,
             )
             sync_agent_observability(force=_dbg_settings.otel_enabled)
+            ensure_agent_observability_rail(self._instance)
             _run_span = open_agent_run_span(session_id=session_id, mode=mode)
             _otel_trace_id = ""
             _otel_span_id = ""

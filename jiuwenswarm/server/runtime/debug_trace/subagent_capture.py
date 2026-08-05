@@ -22,9 +22,31 @@ lifetime, see ``interface_deep.JiuWenSwarmDeepAdapter``.
 from __future__ import annotations
 
 import logging
+import sys
 from typing import Any
 
 _logger = logging.getLogger(__name__)
+
+_OBSERVABILITY_RAIL_MODULE = "openjiuwen.agent_teams.observability.rail"
+
+
+def _maybe_observability_rail() -> Any:
+    """Get a rail without importing the SDK observability module when unused."""
+    # Team observability loads this module before it initializes the provider.
+    # Reuse that path when it is already present so team subagents retain their
+    # existing behavior. For ordinary agents, the JiuwenSwarm helper imports
+    # the SDK only after the agent provider has been enabled.
+    rail_module = sys.modules.get(_OBSERVABILITY_RAIL_MODULE)
+    if rail_module is not None:
+        factory = getattr(rail_module, "maybe_observability_rail", None)
+        if callable(factory):
+            return factory()
+
+    from jiuwenswarm.agents.harness.agent_observability import (
+        maybe_agent_observability_rail,
+    )
+
+    return maybe_agent_observability_rail()
 
 
 def _ensure_observability_rail(subagent: Any) -> None:
@@ -38,8 +60,8 @@ def _ensure_observability_rail(subagent: Any) -> None:
 
     Build-time attachment on the spec is unreliable: the parent agent is
     constructed once, typically *before* observability is initialized, so
-    ``maybe_observability_rail()`` would return ``None``. At run time (here,
-    inside a request) observability is already up, so we attach via
+    the provider is not initialized yet. At run time (here, inside a request)
+    observability is already up, so we attach via
     ``add_rail``; the subagent's upcoming ``stream()/invoke()`` ->
     ``_ensure_initialized()`` registers it before ``before_invoke`` fires.
 
@@ -47,14 +69,11 @@ def _ensure_observability_rail(subagent: Any) -> None:
     DeepAgent rail API. Best-effort: never raises.
     """
     try:
-        from openjiuwen.agent_teams.observability.rail import (
-            ObservabilityRail,
-            maybe_observability_rail,
-        )
-
-        rail = maybe_observability_rail()
+        rail = _maybe_observability_rail()
         if rail is None:
             return  # observability not initialized -> nothing to trace
+        from openjiuwen.agent_teams.observability.rail import ObservabilityRail
+
         configured = subagent.configured_rails() if hasattr(subagent, "configured_rails") else []
         if any(isinstance(r, ObservabilityRail) for r in configured):
             return  # already attached (e.g. build-time succeeded) — don't double-add
