@@ -529,6 +529,8 @@ interface UseWebSocketOptions {
   onDisconnect?: () => void;
   onError?: (error: string) => void;
   onConfigChanged?: (updatedKeys?: string[]) => void;
+  /** cron 最终结果（非占位）广播到达后触发，用于自动跳转到执行会话并加载完整历史 */
+  onCronResultArrived?: (sessionId: string, jobId: string) => void;
 }
 
 interface UseWebSocketReturn {
@@ -819,6 +821,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     onDisconnect,
     onError,
     onConfigChanged,
+    onCronResultArrived,
   } = options;
 
   // 同步更新 ref，避免竞态条件
@@ -835,6 +838,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const onDisconnectRef = useRef(onDisconnect);
   const onErrorRef = useRef(onError);
   const onConfigChangedRef = useRef(onConfigChanged);
+  const onCronResultArrivedRef = useRef(onCronResultArrived);
   const sendMessageRef = useRef<typeof sendMessage>();
   // 标记本地 sendMessage 刚发起但后端尚未确认 processing_status=true 的 session。
   // 用于区分"旧任务被打断的 false"和"任务正常结束的 false"——前者应跳过自动排空，
@@ -1913,7 +1917,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     onDisconnectRef.current = onDisconnect;
     onErrorRef.current = onError;
     onConfigChangedRef.current = onConfigChanged;
-  }, [onConfigChanged, onConnect, onDisconnect, onError]);
+    onCronResultArrivedRef.current = onCronResultArrived;
+  }, [onConfigChanged, onConnect, onCronResultArrived, onDisconnect, onError]);
 
   const shouldDropDuplicatedEvent = useCallback(
     (eventName: string, payload: Record<string, unknown>): boolean => {
@@ -2001,7 +2006,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         payload.rid,
         payload.request_id,
         Date.now()
-      );
+      );  
       teamMemberOutputEventRef.current.set(key, id);
       return id;
     },
@@ -2270,6 +2275,13 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           }
         }
         if (!sessionId) return;
+        // cron 最终结果（非占位）广播到达：自动跳转到执行会话，加载完整历史
+        // （含用户消息、agent 回复、session 标题），避免用户手动点击左侧 session。
+        // handleRestoreSession 通过队列异步执行，不会干扰当前消息处理。
+        if (cronMeta && typeof cronMeta === 'object' && cronMeta.is_placeholder !== true) {
+          const cronJobIdForNav = typeof cronMeta.job_id === 'string' ? cronMeta.job_id.trim() : '';
+          onCronResultArrivedRef.current?.(sessionId, cronJobIdForNav);
+        }
         flushPendingStreamDelta(sessionId);
 
         const memberAction = pickString(payload.member_action);
