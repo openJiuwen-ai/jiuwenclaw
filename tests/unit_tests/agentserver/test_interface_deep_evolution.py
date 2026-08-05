@@ -777,6 +777,12 @@ async def test_handle_skills_evolution_rebuild_rejects_empty_registered_dirs(
         "_registered_skill_dirs_for_rail",
         lambda: [],
     )
+    # Union path also consults live resolve; isolate empty-dirs branch from host env.
+    monkeypatch.setattr(
+        interface_deep_module,
+        "resolve_agent_registered_skill_dirs",
+        lambda: [],
+    )
     monkeypatch.setattr(
         JiuWenClawDeepAdapter,
         "_guard_bootstrap_skill",
