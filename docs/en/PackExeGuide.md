@@ -7,6 +7,7 @@ This guide explains how to build a desktop app with **uv**, **PyInstaller**, and
 - **uv**: Python package manager used by the project
 - **Node.js**: **Build-time only** for the web UI; the shipped app does not require Node at runtime
 - **Windows**: `onedir` output for Inno Setup installers
+- **WebView2**: the Windows installer bundles the x64 Fixed Version Runtime, so the target machine does not need a system WebView2 installation or network access
 - **macOS**: `.app` bundle and `.dmg`
 
 ## Files
@@ -32,7 +33,17 @@ From the repo root:
 
 Or double-click `scripts\build-exe.bat`.
 
-The script installs deps, builds the frontend, and runs PyInstaller.
+The script installs deps, builds the frontend, copies the Fixed Version WebView2 Runtime, and builds the Inno Setup installer.
+
+By default, the script automatically locates the x64 WebView2 Runtime installed on the build machine
+and copies it into the application directory. If WebView2 is not installed on the build machine,
+extract a Fixed Version Runtime into `vendor/webview2-fixed/` (this directory is ignored by Git),
+or supply an extracted Runtime directory explicitly. The Runtime root must directly contain
+`msedgewebview2.exe` and `msedge.dll`:
+
+```powershell
+.\scripts\build-exe.ps1 -WebView2RuntimeDir "D:\packages\WebView2FixedRuntime"
+```
 
 ### Option B: manual
 
@@ -91,6 +102,8 @@ Output: `dist/jiuwenswarm/`, main binary `dist/jiuwenswarm/jiuwenswarm.exe`.
 
 - Package the whole `dist/jiuwenswarm/` directory.
 - Entry point: `dist/jiuwenswarm/jiuwenswarm.exe`.
+- The installer ships `runtime\webview2\`; the app uses this Fixed Version Runtime before checking any system WebView2 installation.
+- The installer grants the Fixed Runtime read/execute permissions required by the Windows 10 AppContainer.
 - Run `jiuwenswarm.exe init` from the installer finish page if needed.
 - User data lives under `%USERPROFILE%\.jiuwenswarm` — do not delete on uninstall by default.
 - Share one `.ico` between `jiuwenswarm.spec` and Inno Setup if you add an icon.
@@ -119,12 +132,19 @@ Produces `dist/JiuwenSwarm.app` and `dist/JiuwenSwarm-<version>.dmg`.
 
 - **Python**: Bundled by PyInstaller; end users do not install Python.
 - **pywebview**: Loads local `http://127.0.0.1:5173`.
+- **WebView2**: Windows frozen builds use `dist/jiuwenswarm/runtime/webview2/` and do not depend on the system Runtime.
+- **WebView2 updates**: Fixed Version does not update automatically; download a newer Runtime and rebuild when upgrading.
 - **Node**: Only for building the React app; runtime uses static files.
 - **Workspace**: Same as pip install — `~/.jiuwenswarm`.
 - **Inno**: Ship the full `dist/jiuwenswarm/` tree, not a single exe only.
 - **DMG**: Script may include an **Applications** shortcut for drag install.
 
 ## Troubleshooting
+
+### Fixed Version Runtime not found
+
+Make sure the directory passed to `-WebView2RuntimeDir` directly contains
+`msedgewebview2.exe` and `msedge.dll`; do not pass the downloaded archive or an outer version directory.
 
 ### Missing `web/dist`
 
@@ -135,6 +155,8 @@ Run `cd jiuwenswarm/channels/web/frontend && npm run build`.
 Add missing modules to `hiddenimports` in `scripts/jiuwenswarm.spec` and rebuild.
 
 ### Large bundle
+
+The Fixed Version Runtime adds more than 250 MB because it contains the complete Chromium runtime.
 
 `onedir` is intentional. Trim further via `excludes` in the spec.
 

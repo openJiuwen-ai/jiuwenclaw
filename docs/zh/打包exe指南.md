@@ -7,6 +7,7 @@
 - **uv**：项目使用的 Python 包管理器
 - **Node.js**：仅用于**构建时**编译前端，最终桌面程序不依赖 Node.js
 - **Windows**：支持 `onedir` 分发目录，适合继续交给 Inno Setup 制作安装包
+- **WebView2**：Windows 安装包会内置 x64 Fixed Version Runtime，目标机器无需联网或预装系统 WebView2
 - **macOS**：支持生成 `.app` 与 `.dmg`
 
 ## 打包相关文件位置
@@ -35,7 +36,16 @@
 
 或双击运行 `scripts\build-exe.bat`。
 
-脚本会自动完成：安装依赖 → 构建前端 → 执行 PyInstaller 打包。
+脚本会自动完成：安装依赖 → 构建前端 → 执行 PyInstaller 打包 → 复制 Fixed Version WebView2 Runtime → 生成 Inno Setup 安装包。
+
+脚本默认会自动读取构建机已安装的 x64 WebView2 Runtime，并复制到应用目录。
+如果构建机没有安装，也可以将 Fixed Version Runtime 解压到
+`vendor/webview2-fixed/`（该目录已加入 `.gitignore`），或显式指定 Runtime 目录。
+Runtime 根目录必须直接包含 `msedgewebview2.exe` 和 `msedge.dll`：
+
+```powershell
+.\scripts\build-exe.ps1 -WebView2RuntimeDir "D:\packages\WebView2FixedRuntime"
+```
 
 ### 方式二：手动执行
 
@@ -100,6 +110,8 @@ uv run pyinstaller scripts/jiuwenswarm.spec
 
 - 安装源目录使用整个 `dist/jiuwenswarm/`
 - 主程序入口使用 `dist/jiuwenswarm/jiuwenswarm.exe`
+- 安装包会直接携带 `runtime\webview2\`，启动时优先使用内置 Fixed Version Runtime
+- 安装过程会为 Windows 10 AppContainer 配置 Fixed Runtime 的读取权限
 - 首次初始化可由安装完成页触发 `jiuwenswarm.exe init`
 - 用户配置与运行数据位于 `%USERPROFILE%\.jiuwenswarm`，卸载时通常不建议默认删除
 - 若后续增加应用图标，请同时给 `scripts/jiuwenswarm.spec` 和 Inno Setup 脚本引用同一份 `.ico`
@@ -143,6 +155,8 @@ chmod +x scripts/build-macos.sh
 
 - **Python 运行时**：PyInstaller 将 Python 解释器及依赖打包进桌面分发目录，目标机器无需安装 Python。
 - **桌面窗口**：pywebview 负责加载本地 `http://127.0.0.1:5173` 页面。
+- **WebView2**：Windows 冻结包使用 `dist/jiuwenswarm/runtime/webview2/` 中的 Fixed Version Runtime，不依赖目标机的系统 WebView2。
+- **WebView2 更新**：Fixed Version 不会自动更新，需要重新下载新版本 Runtime 并重新打包发布。
 - **Node.js**：前端在构建阶段用 Node 编译，运行时只使用静态文件。
 - **工作区路径**：与 pip 安装一致，使用 `~/.jiuwenswarm` 作为配置与工作区根目录。
 - **安装包制作**：后续使用 Inno Setup 时，请将整个 `dist/jiuwenswarm/` 目录作为安装源，而不是只取单个 exe。
@@ -158,11 +172,18 @@ chmod +x scripts/build-macos.sh
 
 在 `scripts/jiuwenswarm.spec` 的 `hiddenimports` 中补充缺失模块，然后重新打包。
 
-### 3. exe 体积过大
+### 3. Fixed Version Runtime 找不到
 
-当前已经使用 `onedir` 模式，便于桌面应用拉起子进程并方便 Inno Setup 安装。若仍需继续缩减体积，可在 `scripts/jiuwenswarm.spec` 的 `excludes` 中排除未用模块。
+确认 `-WebView2RuntimeDir` 指向的目录根部直接包含 `msedgewebview2.exe` 和 `msedge.dll`，
+不要只提供下载压缩包或外层版本目录。
 
-### 4. 杀毒软件误报
+### 4. exe 体积过大
+
+Fixed Version Runtime 会额外增加 250 MB 以上，这是其完整 Chromium 运行时的正常体积。
+当前已经使用 `onedir` 模式，便于桌面应用拉起子进程并方便 Inno Setup 安装。若仍需继续缩减体积，
+可在 `scripts/jiuwenswarm.spec` 的 `excludes` 中排除未用模块。
+
+### 5. 杀毒软件误报
 
 PyInstaller 生成的 exe 可能被误报，可尝试：
 - 添加排除规则

@@ -963,8 +963,28 @@ nohup {q_executable} >/dev/null 2>&1 &
             shutil.rmtree(cache_dir)
             logger.info("[desktop] cleared WKWebView HTTP cache: %s", cache_dir)
 
+    @staticmethod
+    def _configure_fixed_webview_runtime() -> None:
+        """Use the WebView2 runtime shipped beside a frozen Windows app."""
+        if os.name != "nt" or not getattr(sys, "frozen", False):
+            return
+
+        runtime_dir = Path(sys.executable).resolve().parent / "runtime" / "webview2"
+        required_files = ("msedgewebview2.exe", "msedge.dll")
+        if all((runtime_dir / filename).is_file() for filename in required_files):
+            # pywebview maps this setting to WebView2's BrowserExecutableFolder.
+            webview.settings["WEBVIEW2_RUNTIME_PATH"] = str(runtime_dir)
+            logger.info("[desktop] using bundled WebView2 runtime: %s", runtime_dir)
+        else:
+            logger.warning(
+                "[desktop] bundled WebView2 runtime is incomplete: %s; "
+                "falling back to the system runtime",
+                runtime_dir,
+            )
+
     def run(self, window_title: str, width: int, height: int, debug: bool) -> None:
         self._clear_wkwebview_system_cache()
+        self._configure_fixed_webview_runtime()
 
         storage_path = get_user_workspace_dir() / "tmp" / "webview"
         if storage_path.exists():
