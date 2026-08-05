@@ -819,6 +819,7 @@ function AppContent() {
   );
 
   const handleNewSession = useCallback(async () => {
+    setActiveNav('chat');
     restoreRequestedRef.current = false;
     disposeInFlightHistoryHandles();
     setHistoryPagerMeta(null);

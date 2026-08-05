@@ -35,7 +35,13 @@ export function SessionSidebar({
   return (
     <aside className="nav flex flex-col">
       <div className="p-2 border-b border-border">
-        <button onClick={onNewSession} className="nav-item w-full justify-center font-medium">
+        <button
+          onClick={() => {
+            onNavigate('chat');
+            onNewSession();
+          }}
+          className="nav-item w-full justify-center font-medium"
+        >
           + {t('history.newSession')}
         </button>
         <button
