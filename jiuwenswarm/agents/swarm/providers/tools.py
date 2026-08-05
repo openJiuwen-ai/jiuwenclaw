@@ -101,6 +101,7 @@ IMAGE_GEN = "swarm.image_gen"
 XIAOYI_PHONE = "swarm.xiaoyi_phone"
 SYMPHONY_TOOLKIT = "swarm.symphony_toolkit"
 CODE_EXTRA_TOOLS = "swarm.code_extra_tools"
+SEARCH_AGENT_RUN = "swarm.search_agent_run"
 _CODE_MODES = frozenset({"code.team", "team.plan"})
 
 # xiaoyi phone tool objects, gated by ``channels.xiaoyi.phone_tools_enabled``.
@@ -533,6 +534,71 @@ def build_code_extra_tools(params: dict[str, Any], ctx: SwarmBuildContext) -> li
         return []
 
 
+class SearchAgentToolInput(ConstructionInput):
+    """Construction inputs for the swarm SearchAgent dispatch tool."""
+
+    enabled: bool = param_field(default=False, description="Mount the SearchAgent tool only when configured.")
+    model_name: str = param_field(default="", description="Dedicated search model name (from models.search).")
+    api_key: str = param_field(default="", description="Search model API key.")
+    api_base: str = param_field(default="", description="Search model API base URL.")
+    system_prompt_name: str = param_field(
+        default="SYSTEM_TEMPLATE_XIAOHAN0319",
+        description="System prompt template name (see prompts.SYSTEM_TEMPLATES).",
+    )
+    query_prompt_name: str = param_field(
+        default="QUERY_TEMPLATE",
+        description="Query prompt template name (see prompts.QUERY_TEMPLATES).",
+    )
+    tool_names: list = param_field(
+        default_factory=lambda: [
+            "web_search",
+            "web_fetch_and_summary",
+            "python_code_interpreter",
+            "check_confidence_gate",
+        ],
+        description="Tool subset exposed to the SearchAgent's ReAct loop.",
+    )
+    max_iterations: int = param_field(default=15, description="Max ReAct iterations for the SearchAgent.")
+
+
+@harness_element(
+    kind=ElementKind.TOOL,
+    name=SEARCH_AGENT_RUN,
+    description="Dispatch tool that runs an isolated ReAct SearchAgent with a dedicated search model (web_search + web_fetch_and_summary).",
+    input_model=SearchAgentToolInput,
+)
+def build_search_agent_tool(params: dict[str, Any], ctx: SwarmBuildContext) -> list[Any]:
+    """Build the SearchAgent dispatch tool from the config source.
+
+    Returns ``[]`` (tool not mounted) when ``enabled`` is false or the
+    dedicated search model is not configured.
+    """
+    inp = SearchAgentToolInput.resolve(params, ctx)
+    if not inp.enabled or not inp.model_name:
+        return []
+    try:
+        from jiuwenswarm.agents.harness.search.agent.nlp_react_agent import AgentConfig
+        from jiuwenswarm.agents.harness.search.tool import SearchAgentTool, build_search_agent_tool_card
+
+        agent_config = AgentConfig(
+            model_name=inp.model_name,
+            api_key=inp.api_key,
+            base_url=inp.api_base,
+            system_prompt_name=inp.system_prompt_name,
+            query_prompt_name=inp.query_prompt_name,
+            tool_names=inp.tool_names,
+            max_iterations=inp.max_iterations,
+            timeout=None,
+            tokenizer_name=None,
+        )
+        agent_id = getattr(ctx, "member_name", None) or "search"
+        card = build_search_agent_tool_card(agent_id=agent_id)
+        return [SearchAgentTool(card=card, agent_config=agent_config, logger=logger)]
+    except Exception as exc:
+        logger.warning("[swarm.search_agent_run] SearchAgent tool construction failed: %s", exc, exc_info=True)
+        return []
+
+
 __all__ = [
     "SKILL_TOOLKIT",
     "SKILL_RETRIEVAL",
@@ -542,9 +608,11 @@ __all__ = [
     "XIAOYI_PHONE",
     "SYMPHONY_TOOLKIT",
     "CODE_EXTRA_TOOLS",
+    "SEARCH_AGENT_RUN",
     "vision_model_config_params",
     "audio_dedicated_configured",
     "audio_model_config_params",
     "build_symphony_toolkit",
     "build_code_extra_tools",
+    "build_search_agent_tool",
 ]

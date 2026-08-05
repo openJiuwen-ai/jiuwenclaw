@@ -290,6 +290,16 @@ models:
         timeout: 1800
       model_config_obj:
         temperature: 0.95
+  search:                           # SearchAgent 专用搜索模型（独立于主模型；react.subagents.search_agent.enabled=true 时生效）
+      model_client_config:
+        api_base: ${SEARCH_API_BASE}
+        api_key: ${SEARCH_API_KEY}
+        model_name: ${SEARCH_MODEL_NAME:-qwen/...}   # 含 "qwen" 走 QwenClient，否则 OpenAIClient
+        client_provider: ${SEARCH_PROVIDER}
+        verify_ssl: false
+        timeout: 1800
+      model_config_obj:
+        temperature: 0.3
 
 # 外接 ACP Agent（stdio），供工具 acp_chat 使用。按需取消注释并填写；command/args 可指向任意兼容 ACP 的包（与 VS Code formulahendry.acp-client 预置列表一致）。
 acp_agents:
@@ -483,9 +493,15 @@ react:
       enabled: false
       # max_iterations: 15
     browser_agent:
-      enabled: true
+      enabled: false
       # Browser Agent 独立轮次预算；未配置时默认 100。
       # max_iterations: 100
+    search_agent:                   # 独立搜索子 agent（自有 ReAct loop + web_search/web_fetch_and_summary + 独立搜索模型 models.search）；默认关，配好 models.search 后显式开
+      enabled: true
+      # max_iterations: 15
+      # system_prompt_name: SYSTEM_TEMPLATE_XIAOHAN0319
+      # query_prompt_name: QUERY_TEMPLATE
+      # tool_names: [web_search, web_fetch_and_summary, python_code_interpreter, check_confidence_gate]
   answer_chunk_size: 500
   stream_chunk_threshold: 50
   stream_character_threshold: 2000
@@ -1152,6 +1168,7 @@ modes:
       - user_todos
       - skill_toolkit
       - skill_retrieval
+      - search_agent_run
 
     embedding_config:
       model_name: null

@@ -174,6 +174,7 @@ _CODE_TOOL_NAMES: tuple[str, ...] = (
     registry.CODE_EXTRA_TOOLS,
     registry.CRON_TOOLS,
     registry.SEND_FILE,
+    registry.SEARCH_AGENT_RUN,
 )
 
 # code_agent sub-agents are always-on (explore / plan) or config-gated.
@@ -382,11 +383,48 @@ def _audio_tool_params(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _search_agent_tool_params(config: dict[str, Any]) -> dict[str, Any]:
+    """Bake the SearchAgent dispatch tool's dedicated-model + tuning params.
+
+    Reads ``models.search`` (dedicated search model) and
+    ``react.subagents.search_agent`` (tuning knobs). Returns ``enabled=False``
+    when no dedicated search model is configured, so the provider factory
+    skips mounting the tool.
+    """
+    models = config.get("models") if isinstance(config, dict) else None
+    search_model = models.get("search") if isinstance(models, dict) else None
+    mcc = (search_model or {}).get("model_client_config") or {}
+    sa_cfg: dict[str, Any] = {}
+    react = config.get("react") if isinstance(config, dict) else None
+    subagents = react.get("subagents") if isinstance(react, dict) else None
+    if isinstance(subagents, dict):
+        sa = subagents.get("search_agent")
+        if isinstance(sa, dict):
+            sa_cfg = sa
+    model_name = mcc.get("model_name", "")
+    return {
+        "enabled": bool(sa_cfg.get("enabled")) and bool(model_name),
+        "model_name": model_name,
+        "api_key": mcc.get("api_key", ""),
+        "api_base": mcc.get("api_base", ""),
+        "system_prompt_name": sa_cfg.get("system_prompt_name", "SYSTEM_TEMPLATE_XIAOHAN0319"),
+        "query_prompt_name": sa_cfg.get("query_prompt_name", "QUERY_TEMPLATE"),
+        "tool_names": sa_cfg.get("tool_names") or [
+            "web_search",
+            "web_fetch_and_summary",
+            "python_code_interpreter",
+            "check_confidence_gate",
+        ],
+        "max_iterations": int(sa_cfg.get("max_iterations", 15)),
+    }
+
+
 _TOOL_PARAM_BUILDERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     registry.SEND_FILE: lambda c: {"channels_config": _config_section(c, "channels")},
     registry.CODE_EXTRA_TOOLS: lambda c: {"acp_enabled": _acp_enabled(c)},
     registry.VISION: _vision_tool_params,
     registry.AUDIO: _audio_tool_params,
+    registry.SEARCH_AGENT_RUN: _search_agent_tool_params,
 }
 
 

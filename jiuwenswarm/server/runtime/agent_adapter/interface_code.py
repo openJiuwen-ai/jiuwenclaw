@@ -290,6 +290,7 @@ _TOOL_BUILD_NAMES: dict[str, str] = {
     "skill_toolkit": "_build_skill_toolkit",
     "skill_retrieval": "_build_skill_retrieval_toolkit",
     "acp_chat": "_build_acp_chat_tool",
+    "search_agent_run": "_build_search_agent_tool",
 }
 
 
@@ -1439,6 +1440,27 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         return WebFetchWebpageTool(
             language=self._resolve_runtime_language(), agent_id=agent_id
         )
+
+    def _build_search_agent_tool(self, agent_id: str) -> Any | None:
+        """构建 search_agent_run 工具（独立搜索模型 + 自研 ReAct loop）。
+
+        无 ``models.search`` 配置时不挂载（返回 None）。需在
+        ``config.modes.code.tools`` 列表里加入 ``search_agent_run`` 才会装配。
+        """
+        from jiuwenswarm.agents.harness.search.config_adapter import (
+            build_search_agent_config_from_jiuwenswarm,
+        )
+        from jiuwenswarm.agents.harness.search.tool import (
+            SearchAgentTool,
+            build_search_agent_tool_card,
+        )
+
+        agent_config = build_search_agent_config_from_jiuwenswarm(get_config(), logger=logger)
+        if agent_config is None:
+            logger.info("[JiuwenSwarmCodeAdapter] search_agent skipped: no models.search configured")
+            return None
+        card = build_search_agent_tool_card(agent_id=agent_id)
+        return SearchAgentTool(card=card, agent_config=agent_config, logger=logger)
 
     def _build_paid_search_tool(self, agent_id: str) -> WebPaidSearchTool | None:
         """条件注册付费搜索工具：有任意一个付费 API Key 才注册."""

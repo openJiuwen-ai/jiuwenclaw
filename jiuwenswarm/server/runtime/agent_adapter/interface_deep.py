@@ -5112,6 +5112,26 @@ class JiuWenSwarmDeepAdapter:
             self._register_agent_owned_tool(tool_instance, agent_id)
             tool_cards.append(tool_instance.card)
 
+        # SearchAgent dispatch tool (optional; needs models.search configured).
+        try:
+            from jiuwenswarm.agents.harness.search.config_adapter import (
+                build_search_agent_config_from_jiuwenswarm,
+            )
+            from jiuwenswarm.agents.harness.search.tool import (
+                SearchAgentTool,
+                build_search_agent_tool_card,
+            )
+            from jiuwenswarm.common.config import get_config as _get_jws_config
+
+            sa_config = build_search_agent_config_from_jiuwenswarm(_get_jws_config(), logger=logger)
+            if sa_config is not None:
+                sa_card = build_search_agent_tool_card(agent_id=agent_id)
+                sa_tool = SearchAgentTool(card=sa_card, agent_config=sa_config, logger=logger)
+                Runner.resource_mgr.add_tool(sa_tool)
+                tool_cards.append(sa_tool.card)
+        except Exception as exc:
+            logger.warning("[JiuWenSwarmDeepAdapter] search_agent tool registration failed: %s", exc, exc_info=True)
+
         self._vision_tools = []
         self._vision_tools_registered = False
         if self._vision_model_config is not None:
