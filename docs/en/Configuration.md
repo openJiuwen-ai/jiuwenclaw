@@ -363,7 +363,7 @@ The configuration panel exposes two related switches:
 | Switch | Config key | Default | Purpose |
 | --- | --- | --- | --- |
 | **Enable Skill Retrieval** | `symphony.skill_retrieval.enabled` | `false` | Registers skill-tree retrieval tools such as `skill_branch_explore`, `skill_branch_peek`, and `skill_index_build` |
-| **Enable Skill Symphony** | `symphony.enabled` | `false` | Registers skill score and orchestration tools such as `symphony_read_score`, `symphony_refresh_score`, and `symphony_compose_score` |
+| **Enable Skill Symphony** | `symphony.enabled` | `false` | Registers skill score and orchestration tools such as `symphony_read_graph`, `symphony_refresh_graph`, and `symphony_compose_graph` |
 
 The two switches are independent. Skill Retrieval answers "how to find candidate skills"; Skill Symphony answers "how to orchestrate candidate skills into a route". If only Skill Retrieval is enabled, the system only gets skill-tree retrieval. If only Skill Symphony is enabled, the system can read and refresh the skill score, but candidate skills do not automatically come from Skill Retrieval.
 
@@ -374,9 +374,9 @@ Related pages are under **Skills** in the left sidebar:
 | Page | Purpose |
 | --- | --- |
 | **Skill Index** | Builds the local installed-skill tree index used for step-by-step retrieval |
-| **Skill Graph** | Builds and displays connectable relationships between skills for orchestration |
+| **Skill Score** | Builds and displays connectable relationships between skills for orchestration |
 
-After installing, uninstalling, or heavily modifying skills, rebuild the skill index. If the skill changes affect relationships between skills, also run an incremental build or full rebuild on the Skill Graph page.
+After installing, uninstalling, or heavily modifying skills, rebuild the skill index. If the skill changes affect relationships between skills, also run an incremental build or full rebuild on the Skill Score page.
 
 ### 9.3 Symphony settings in the main config
 
@@ -391,7 +391,7 @@ Common settings:
 | Setting | Default | Description |
 | --- | --- | --- |
 | `symphony.paths.skills_root` | Empty string | Skill source directory; empty means the runtime default is used |
-| `symphony.paths.score_dir` | Empty string | Skill score artifact directory; empty means the runtime default is used |
+| `symphony.paths.graph_dir` | Empty string | Skill score artifact directory; empty means the runtime default is used |
 | `symphony.fingerprint.scan.max_depth` | Empty | Maximum skill-file scan depth; empty means the runtime default is used |
 | `symphony.fingerprint.extraction.workers` | `4` | Skill fingerprint extraction concurrency |
 | `symphony.fingerprint.extraction.batch_size` | `2` | Skill fingerprint extraction batch size |

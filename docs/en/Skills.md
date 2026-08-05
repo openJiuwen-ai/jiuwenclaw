@@ -70,7 +70,7 @@ JiuwenSwarm supports multiple sources:
 
 ### Skill installation
 
-Whether skills come from built-in packages, SkillNet, ClawHub, or a local folder, **installation and activation are done in the web UI under Skills**. The Skills page has four top tabs: **My Skills**, **Skill Marketplace**, **Skill Graph**, and **Skill Index**. Online installation happens in **Skill Marketplace**, while installed skills are managed under **My Skills**. The sections below list prerequisites and paths by source.
+Whether skills come from built-in packages, SkillNet, ClawHub, or a local folder, **installation and activation are done in the web UI under Skills**. The Skills page has four top tabs: **My Skills**, **Skill Marketplace**, **Skill Score**, and **Skill Index**. Online installation happens in **Skill Marketplace**, while installed skills are managed under **My Skills**. The sections below list prerequisites and paths by source.
 
 #### Built-in skills
 
@@ -184,7 +184,7 @@ The Skills management page is the main place to manage and browse all skills. Op
 |--------|------|
 | **My Skills** | Browse and search installed skills, filter by "All / Enabled / Disabled", toggle skills on/off, and open details |
 | **Skill Marketplace** | Install new skills; contains three sub-pages: **Built-in**, **SwarmSkills online search**, and **Skills online search** (SkillNet / ClawHub) |
-| **Skill Graph** | Visualize capability relationships among installed skills; see [Symphony](symphony.md) |
+| **Skill Score** | Visualize capability relationships among installed skills; see [Symphony](symphony.md) |
 | **Skill Index** | Build a local skill retrieval index and find matching skills by task need; see [Symphony](symphony.md) |
 
 ![Skills management page](../assets/images/current-ui-en/04-Skills-Page.png)
@@ -215,9 +215,9 @@ In the list, use **View skill experience** to browse evolution entries for that 
 
 > **Why it helps:** Skill experience reflects self-evolution and improvements from real use, so you can judge ongoing usefulness and maintainers get actionable input.
 
-#### Skill graph and skill index
+#### Skill score and skill index
 
-The **Skill Graph** and **Skill Index** tabs are part of Symphony. The skill index helps the agent find candidate skills from a large installed-skill set, while the skill graph uses `can_feed` relationships to show whether skills can connect. For multi-skill orchestration, graph building, graph reading, and chat usage, see [Symphony: Skill Orchestration and Dispatch](symphony.md).
+The **Skill Score** and **Skill Index** tabs are part of Symphony. The skill index helps the agent find candidate skills from a large installed-skill set, while the skill score uses `can_feed` relationships to show whether skills can connect. For multi-skill orchestration, score building, score reading, and chat usage, see [Symphony: Skill Orchestration and Dispatch](symphony.md).
 
 ---
 
