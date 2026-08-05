@@ -9,8 +9,6 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Callable, Awaitable
 
 from jiuwenswarm.common.schema.message import Message
-from jiuwenswarm.gateway.channel_manager.web.web_connect import ConnectHook
-from jiuwenswarm.gateway.routing.keys import DeliveryTarget
 from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
 
 
@@ -18,6 +16,8 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     pass
 
+# 连接钩子签名: (ws) -> None | Awaitable[None]
+ConnectHook = Callable[..., Any]
 
 class ChannelType(str, Enum):
     """Channel 类型枚举."""

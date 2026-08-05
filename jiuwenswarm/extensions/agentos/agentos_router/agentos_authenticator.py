@@ -45,7 +45,6 @@ class AgentOSAuthenticator(CredentialAuthenticator):
                 error="缺少 token",
                 extensions={"error_code": "MISSING_TOKEN"},
             )
-        # resource_id/action_id 为 IAM 契约必填字段；本阶段仅做身份门禁，填占位值并忽略 authorized
 
         # 2. 构建 HTTP 验证：合并自定义 header，只验证身份是否合法，不验证资源权限
         headers = {
@@ -85,9 +84,6 @@ class AgentOSAuthenticator(CredentialAuthenticator):
                 },
             )
         return AuthResult(
-            success=False,
-            error=str(data.get("error") or "Token 无效或已过期"),
-        )
             success=False,
             error=str(data.get("error") or "Token 无效或已过期"),
         )

@@ -9,7 +9,7 @@ from http import HTTPStatus
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from jiuwenswarm.extensions.agentos.auth.credential_authenticator import AuthContext, AuthResult
+from jiuwenswarm.extensions.agentos.auth.credential_authenticator import AuthResult
 
 _UNAUTHORIZED_BODY = b"Unauthorized\n"
 _HANDSHAKE_AUTH_TTL_S = 60.0
@@ -87,13 +87,6 @@ def get_remote_addr(ws: Any) -> str:
 def _handshake_cache_key(path: str, headers: Any) -> str:
     token = extract_token_from_path_and_headers(path, headers) or ""
     return f"{path}|{token}"
-
-# 缓存鉴权结果
-def cache_handshake_auth(path: str, headers: Any, result: AuthResult) -> None:
-    _handshake_auth_cache[_handshake_cache_key(path, headers)] = (
-        time.monotonic(),
-        result,
-    )
 
 
 def take_handshake_auth(path: str, headers: Any) -> AuthResult | None:

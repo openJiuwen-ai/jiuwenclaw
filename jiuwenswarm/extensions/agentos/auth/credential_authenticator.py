@@ -10,6 +10,14 @@ class AuthContext:
     headers: dict = field(default_factory=dict)
     remote_addr: str = ""
 
+    def __repr__(self) -> str:
+        return (
+            f"AuthContext(channel_type={self.channel_type!r}, "
+            f"credentials=<redacted>, "
+            f"headers=<redacted>, "
+            f"remote_addr={self.remote_addr!r})"
+        )
+
 
 # 认证结果
 @dataclass

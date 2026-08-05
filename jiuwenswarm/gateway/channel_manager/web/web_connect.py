@@ -24,7 +24,7 @@ import aiohttp
 from websockets.exceptions import ConnectionClosed as WebSocketConnectionClosed
 
 from jiuwenswarm.common.utils import get_agent_workspace_dir
-from jiuwenswarm.gateway.channel_manager.base import ChannelMetadata, RobotMessageRouter
+from jiuwenswarm.gateway.channel_manager.base import ChannelMetadata, RobotMessageRouter, ConnectHook
 from jiuwenswarm.gateway.routing.base_ws_channel import BaseWsChannel
 from jiuwenswarm.gateway.routing.keys import AgentRef, RoutingKey
 from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
@@ -90,8 +90,6 @@ _WEB_FULL_PAYLOAD_EVENT_TYPES = frozenset(
 # ── 类型别名 ──────────────────────────────────────────────
 # 方法处理器签名: (ws, req_id, params, session_id) -> None
 MethodHandler = Callable[..., Awaitable[None]]
-# 连接钩子签名: (ws) -> None | Awaitable[None]
-ConnectHook = Callable[..., Any]
 
 
 @dataclass(frozen=True)
