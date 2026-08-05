@@ -67,14 +67,9 @@ class RailManager:
         if hasattr(self, "_initialized"):
             return
 
-        # 多租户路径：service_default/agent_default/agent/jiuwenclaw_workspace/extensions
-        workspace = get_multi_tenant_user_workspace_dir("default", "default")
-        if workspace:
-            self._extensions_dir = workspace / "agent" / "jiuwenclaw_workspace" / "extensions"
-        else:
-            # Fallback
-            home_dir = Path.home()
-            self._extensions_dir = home_dir / ".jiuwenclaw" / "agent" / "jiuwenclaw_workspace" / "extensions"
+        # 多租户路径：workspace_default/agent/jiuwenclaw_workspace/extensions
+        workspace = get_multi_tenant_user_workspace_dir(workspace_key="default")
+        self._extensions_dir = workspace / "agent" / "jiuwenclaw_workspace" / "extensions"
         self._config_file = self._extensions_dir / "extensions_config.json"
 
         # 确保目录存在

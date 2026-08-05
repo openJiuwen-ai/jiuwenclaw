@@ -27,7 +27,6 @@ from jiuwenclaw.utils import (
     get_agent_workspace_dir,
     get_deepagent_todo_dir,
     get_deepagent_soul_md_path,
-    get_multi_tenant_user_workspace_dir,
 )
 
 _CN_WEEKDAYS = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
@@ -136,20 +135,17 @@ class RuntimePromptRail(DeepAgentRail):
 
     def _get_workspace_dirs(self) -> dict[str, str]:
         """获取工作空间目录路径，支持多租户。"""
-        if self._agent_id and self._service_id:
-            # 多租户模式
-            base_workspace = get_multi_tenant_user_workspace_dir(self._service_id, self._agent_id)
-            if base_workspace:
-                workspace_root = base_workspace / "agent" / "jiuwenclaw_workspace"
-                return {
-                    "config": str(base_workspace / "config"),
-                    "workspace": self._workspace_dir or str(workspace_root), # 优先使用请求中的 workspace_dir
-                    "memory": str(workspace_root / "memory"),
-                    "skills": ", ".join(str(d) for d in get_shared_agent_skills_dirs())
-                    if get_shared_agent_skills_dirs() else str(workspace_root / "skills"),
-                    "todo": str(workspace_root / "todo"),
-                }
-        
+        if self._workspace_dir:
+            workspace_root = Path(self._workspace_dir)
+            base_workspace = workspace_root.parent.parent
+            return {
+                "config": str(base_workspace / "config"),
+                "workspace": str(workspace_root),
+                "memory": str(workspace_root / "memory"),
+                "skills": ", ".join(str(d) for d in get_shared_agent_skills_dirs())
+                if get_shared_agent_skills_dirs() else str(workspace_root / "skills"),
+                "todo": str(workspace_root / "todo"),
+            }
         # 单租户模式
         return {
             "config": str(get_user_workspace_dir() / "config"),

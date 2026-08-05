@@ -28,12 +28,14 @@ import {
   type TemplateRefMap,
 } from '../../../utils/templateRef';
 import { HintTooltip } from '../../../components/HintTooltip';
+import { validateRoutingId } from '../../../utils/routingId';
 
 /** 与 config_effective_agent_policy 表 ColumnDefinition length 一致 */
 const FIELD_MAX_LENGTH = {
   policy_name: 128,
   policy_desc: 512,
   agent_id: 512,
+  workspace_dir: 512,
 } as const;
 
 function FieldLabel({ children, required }: { children: ReactNode; required?: boolean }) {
@@ -49,6 +51,7 @@ interface FormState {
   policy_name: string;
   policy_desc: string;
   agent_id: string;
+  workspace_dir: string;
   service_policy_id: string;
   priority: number;
   match_expr: string;
@@ -60,6 +63,7 @@ const emptyForm: FormState = {
   policy_name: '',
   policy_desc: '',
   agent_id: '',
+  workspace_dir: '',
   service_policy_id: '',
   priority: 0,
   match_expr: '',
@@ -74,6 +78,7 @@ type AgentSortField =
   | 'priority'
   | 'match_expr'
   | 'agent_id'
+  | 'workspace_dir'
   | 'updated_at';
 
 export function AgentPoliciesTab({ instanceId }: { instanceId: string }) {
@@ -148,6 +153,7 @@ export function AgentPoliciesTab({ instanceId }: { instanceId: string }) {
         policy_name: editing.policy_name ?? '',
         policy_desc: editing.policy_desc ?? '',
         agent_id: editing.agent_id,
+        workspace_dir: editing.workspace_dir ?? '',
         service_policy_id: editing.service_policy_id,
         priority: editing.priority,
         match_expr: editing.match_expr ?? '',
@@ -200,6 +206,18 @@ export function AgentPoliciesTab({ instanceId }: { instanceId: string }) {
       toast('warn', t('policies.fieldRequired', { field: t('policies.agent.agentId') }));
       return;
     }
+    const agentIdErr = validateRoutingId(form.agent_id);
+    if (agentIdErr) {
+      toast('warn', t('policies.agent.routingIdInvalid'));
+      return;
+    }
+    if (form.workspace_dir.trim()) {
+      const workspaceDirErr = validateRoutingId(form.workspace_dir);
+      if (workspaceDirErr) {
+        toast('warn', t('policies.agent.routingIdInvalid'));
+        return;
+      }
+    }
     if (!form.service_policy_id.trim()) {
       toast('warn', t('policies.fieldRequired', { field: t('policies.agent.servicePolicyId') }));
       return;
@@ -231,6 +249,7 @@ export function AgentPoliciesTab({ instanceId }: { instanceId: string }) {
       policy_name: form.policy_name.trim(),
       policy_desc: form.policy_desc.trim() || undefined,
       agent_id: form.agent_id.trim(),
+      workspace_dir: form.workspace_dir.trim() || null,
       service_policy_id: form.service_policy_id.trim(),
       priority: form.priority,
       match_expr: form.match_expr.trim() || undefined,
@@ -395,6 +414,14 @@ export function AgentPoliciesTab({ instanceId }: { instanceId: string }) {
                   />
                 </th>
                 <th>
+                  <TableColumnSort
+                    label={t('policies.agent.workspaceDir')}
+                    value={sortBy === 'workspace_dir' ? sortOrder : ''}
+                    options={sortOptions}
+                    onChange={(value) => handleSortChange('workspace_dir', value)}
+                  />
+                </th>
+                <th>
                   <TableColumnFilter
                     label={t('policies.agent.sendFileAllowed')}
                     value={sendFileAllowedFilter}
@@ -439,7 +466,7 @@ export function AgentPoliciesTab({ instanceId }: { instanceId: string }) {
             <tbody>
               {items.length === 0 ? (
                 <tr>
-                  <td colSpan={11}>
+                  <td colSpan={12}>
                     <Empty text={t('common.empty')} />
                   </td>
                 </tr>
@@ -480,6 +507,12 @@ export function AgentPoliciesTab({ instanceId }: { instanceId: string }) {
                     </td>
                     <td className="mono text-xs min-w-[10rem] max-w-[18rem] break-all align-top" title={row.agent_id}>
                       {row.agent_id}
+                    </td>
+                    <td
+                      className="mono text-xs min-w-[10rem] max-w-[18rem] break-all align-top"
+                      title={row.workspace_dir ?? undefined}
+                    >
+                      {row.workspace_dir || '—'}
                     </td>
                     <td className="whitespace-nowrap">
                       <Switch
@@ -630,16 +663,24 @@ export function AgentPoliciesTab({ instanceId }: { instanceId: string }) {
               onChange={(v) => update('match_expr', v)}
             />
           </div>
-          <div className="md:col-span-2 grid grid-cols-1 md:grid-cols-[3fr_1fr] gap-3">
-            <div className="min-w-0">
-              <FieldLabel required>{t('policies.agent.agentId')}</FieldLabel>
-              <LimitedTextInput
-                value={form.agent_id}
-                maxLength={FIELD_MAX_LENGTH.agent_id}
-                onChange={(v) => update('agent_id', v)}
-              />
-              <div className="text-[11px] text-muted mt-1">{t('policies.agent.agentIdHint')}</div>
-            </div>
+          <div className="md:col-span-2">
+            <FieldLabel required>{t('policies.agent.agentId')}</FieldLabel>
+            <LimitedTextInput
+              value={form.agent_id}
+              maxLength={FIELD_MAX_LENGTH.agent_id}
+              onChange={(v) => update('agent_id', v)}
+            />
+            <div className="text-[11px] text-muted mt-1">{t('policies.agent.agentIdHint')}</div>
+          </div>
+          <div className="md:col-span-2">
+            <FieldLabel>{t('policies.agent.workspaceDir')}</FieldLabel>
+            <LimitedTextInput
+              value={form.workspace_dir}
+              maxLength={FIELD_MAX_LENGTH.workspace_dir}
+              onChange={(v) => update('workspace_dir', v)}
+              placeholder="${group_id}${bot_id}${user_id}"
+            />
+            <div className="text-[11px] text-muted mt-1">{t('policies.agent.workspaceDirHint')}</div>
           </div>
           <div className="md:col-span-2 border-b border-[var(--border)] pb-3 mb-1">
             <FieldLabel>{t('policies.agent.sendFileAllowed')}</FieldLabel>

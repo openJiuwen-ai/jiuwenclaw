@@ -363,14 +363,14 @@ class TestTenantAgentPool(TestCase):
         async def first_request():
             """第一次请求（第一个事件循环）."""
             pool = TenantAgentPool.get_instance()
-            manager = await pool._ensure_agent_manager("test_agent", "test_service")
+            manager = await pool._ensure_agent_manager("test_agent", "test_service", "test_workspace")
             self.assertIsNotNone(manager)
             return True
 
         async def second_request():
             """第二次请求（新的事件循环），应该能正常获取锁."""
             pool = TenantAgentPool.get_instance()
-            manager = await pool._ensure_agent_manager("test_agent", "test_service")
+            manager = await pool._ensure_agent_manager("test_agent", "test_service", "test_workspace")
             self.assertIsNotNone(manager)
             return True
 
@@ -398,7 +398,7 @@ class TestTenantAgentPool(TestCase):
 
             tasks = []
             for i in range(5):
-                task = pool._ensure_agent_manager(f"agent_{i}", f"service_{i}")
+                task = pool._ensure_agent_manager(f"agent_{i}", f"service_{i}", f"workspace_{i}")
                 tasks.append(task)
 
             results = await asyncio.gather(*tasks)
@@ -468,7 +468,7 @@ class TestTenantAgentPool(TestCase):
             tasks = []
             for i in range(3):
                 task = asyncio.create_task(
-                    pool._ensure_agent_manager("shared_agent", "shared_service")
+                    pool._ensure_agent_manager("shared_agent", "shared_service", "shared_workspace")
                 )
                 tasks.append(task)
             # 等待一小段时间，确保有些任务在等待锁
@@ -484,7 +484,7 @@ class TestTenantAgentPool(TestCase):
         # 第二个事件循环 - 应该能正常处理新请求
         async def second_loop():
             pool = TenantAgentPool.get_instance()
-            manager = await pool._ensure_agent_manager("shared_agent", "shared_service")
+            manager = await pool._ensure_agent_manager("shared_agent", "shared_service", "shared_workspace")
             self.assertIsNotNone(manager)
 
         asyncio.run(second_loop())

@@ -453,9 +453,12 @@
     },
     "agent": {
       "new": "新建 Agent 策略",
-      "searchPlaceholder": "搜索策略 ID、策略名称、策略描述、Agent ID、关联服务策略、优先级或匹配表达式",
+      "searchPlaceholder": "搜索策略 ID、策略名称、策略描述、Agent ID、工作空间目录、关联服务策略、优先级或匹配表达式",
       "agentId": "Agent ID",
       "agentIdHint": "用于路由到 Agent 实例。可填固定 Agent ID（如 default_agent_id），或使用占位符 ${user_id}/${group_id}/${bot_id}拼接（如 agent_${user_id}）。",
+      "workspaceDir": "工作空间目录",
+      "workspaceDirHint": "决定Agent数据落盘目录。可填固定值（如 default_workspace），或使用占位符 ${user_id}/${group_id}/${bot_id}拼接（如${group_id}${bot_id}${user_id}）。留空则默认 ${group_id}${bot_id}${user_id}。",
+      "routingIdInvalid": "路由标识占位符不合法，仅允许 ${user_id}/${group_id}/${bot_id}",
       "servicePolicyId": "关联服务策略",
       "pickServicePolicy": "请选择服务策略",
       "loadingServicePolicies": "正在加载服务策略…",

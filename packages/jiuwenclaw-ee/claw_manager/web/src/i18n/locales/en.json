@@ -453,9 +453,12 @@
     },
     "agent": {
       "new": "New Agent Policy",
-      "searchPlaceholder": "Search policy ID, name, description, Agent ID, linked service policy, priority, or match expression",
+      "searchPlaceholder": "Search policy ID, name, description, Agent ID, workspace directory, linked service policy, priority, or match expression",
       "agentId": "Agent ID",
       "agentIdHint": "Routes requests to an Agent instance. Use a fixed Agent ID (e.g. default_agent_id), or concatenate placeholders ${user_id}/${group_id}/${bot_id} (e.g. agent_${user_id}).",
+      "workspaceDir": "Workspace directory",
+      "workspaceDirHint": "Determines the Agent data directory. Use a fixed value (e.g. default_workspace), or concatenate placeholders ${user_id}/${group_id}/${bot_id} (e.g. ${group_id}${bot_id}${user_id}). Leave empty to default to ${group_id}${bot_id}${user_id}.",
+      "routingIdInvalid": "Invalid routing id placeholder; only ${user_id}/${group_id}/${bot_id} are allowed",
       "servicePolicyId": "Service Policy",
       "pickServicePolicy": "Select a service policy",
       "loadingServicePolicies": "Loading service policies…",

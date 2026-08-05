@@ -80,6 +80,7 @@ class EffectiveEnterpriseConfig:
     global_policy_id: int | None = None
     service_id: str | None = None
     agent_id: str | None = None
+    workspace_dir: str | None = None
     send_file_allowed: bool = True
     service_policy: dict[str, Any] | None = None
     agent_policy: dict[str, Any] | None = None
@@ -98,6 +99,7 @@ class EffectiveEnterpriseConfig:
             "global_policy_id": self.global_policy_id,
             "service_id": self.service_id,
             "agent_id": self.agent_id,
+            "workspace_dir": self.workspace_dir,
             "send_file_allowed": self.send_file_allowed,
             "service_policy": self.service_policy,
             "agent_policy": self.agent_policy,

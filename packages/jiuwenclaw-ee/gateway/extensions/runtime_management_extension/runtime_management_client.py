@@ -178,24 +178,38 @@ async def load_all_service_configs() -> list[dict[str, Any]]:
 def _coalesce_loaded_invoke_ids(
     request: AgentRequest,
     loaded: Any | None,
-) -> tuple[str, str]:
-    """优先使用 loaded 中的 id，缺失时用入参拼接默认值。"""
+) -> tuple[str, str, str]:
+    """优先使用 loaded 中的 id，缺失时用入参拼接默认值。
+
+    Returns:
+        (service_id, agent_id, workspace_dir) 逻辑字符串（尚未 MD5）。
+        workspace_dir 未配置时默认拼接 ``{group}{bot}{user}``（不做 bot_id hash 分桶）。
+    """
     service_id: str | None = None
     agent_id: str | None = None
+    workspace_dir: str | None = None
     if loaded is not None:
         raw_svc = getattr(loaded, "service_id", None)
         raw_ag = getattr(loaded, "agent_id", None)
+        raw_ws = getattr(loaded, "workspace_dir", None)
         if raw_svc and str(raw_svc).strip():
             service_id = str(raw_svc).strip()
         if raw_ag and str(raw_ag).strip():
             agent_id = str(raw_ag).strip()
+        if raw_ws and str(raw_ws).strip():
+            workspace_dir = str(raw_ws).strip()
 
     from jiuwenclaw.infrastructure.module_importer import import_manager_ws_client_module
 
     loader_mod = import_manager_ws_client_module("core.enterprise_config.loader")
     ctx = loader_mod.routing_context_from_request(request)
     default_svc, default_ag = _default_invoke_ids(ctx.group_id, ctx.bot_id, ctx.user_id)
-    return service_id or default_svc, agent_id or default_ag
+    default_ws = f"{ctx.group_id}{ctx.bot_id}{ctx.user_id}".strip()
+    return (
+        service_id or default_svc,
+        agent_id or default_ag,
+        workspace_dir or default_ws,
+    )
 
 
 def _resolve_invoke_ids_from_request(msg: AgentRequest) -> tuple[str, str | None]:
@@ -307,23 +321,31 @@ class _SessionRequest(ISessionRequest):
         self._service_template = service_template
         svc = str(msg.service_id or "").strip() or "default_service_id"
         ag = str(msg.agent_id or "").strip() or "default_agent_id"
+        ws = str(msg.workspace_dir or "").strip() or "default_workspace_dir"
         logger.info(
-            "[RuntimeManagementAgentClient] resolved SessionRequest ids: service_id=%s agent_id=%s",
+            "[RuntimeManagementAgentClient] resolved SessionRequest ids: "
+            "service_id=%s agent_id=%s workspace_dir=%s",
             svc,
             ag,
+            ws,
         )
         svc = hashlib.md5(svc.encode("utf-8")).hexdigest()
         ag = hashlib.md5(ag.encode("utf-8")).hexdigest()
+        ws = hashlib.md5(ws.encode("utf-8")).hexdigest()
         logger.info(
-            "[RuntimeManagementAgentClient] resolved SessionRequest hash ids: service_id=%s agent_id=%s",
+            "[RuntimeManagementAgentClient] resolved SessionRequest hash ids: "
+            "service_id=%s agent_id=%s workspace_dir=%s",
             svc,
             ag,
+            ws,
         )
         self._service_id = svc
         self._req.service_id = svc
         self._req.agent_id = ag
+        self._req.workspace_dir = ws
         self._envelope.service_id = svc
         self._envelope.agent_id = ag or None
+        self._envelope.workspace_dir = ws
 
     @property
     def session_id(self) -> str:
@@ -1197,18 +1219,21 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     ext_config,
                 )
 
-        service_id, agent_id = _coalesce_loaded_invoke_ids(request, loaded)
+        service_id, agent_id, workspace_dir = _coalesce_loaded_invoke_ids(request, loaded)
         logger.info(
-            "[RuntimeManagementAgentClient] resolved config: service_id=%s agent_id=%s",
+            "[RuntimeManagementAgentClient] resolved config: service_id=%s agent_id=%s workspace_dir=%s",
             service_id,
             agent_id,
+            workspace_dir,
         )
         if service_template is None:
             service_template = {}
         request.service_id = service_id
         request.agent_id = agent_id
+        request.workspace_dir = workspace_dir
         service_template["service_id"] = service_id
         service_template["agent_id"] = agent_id
+        service_template["workspace_dir"] = workspace_dir
 
         session_request = _SessionRequest(
             request,
@@ -1313,18 +1338,21 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     ext_config,
                 )
 
-        service_id, agent_id = _coalesce_loaded_invoke_ids(request, loaded)
+        service_id, agent_id, workspace_dir = _coalesce_loaded_invoke_ids(request, loaded)
         logger.info(
-            "[RuntimeManagementAgentClient] resolved config: service_id=%s agent_id=%s",
+            "[RuntimeManagementAgentClient] resolved config: service_id=%s agent_id=%s workspace_dir=%s",
             service_id,
             agent_id,
+            workspace_dir,
         )
         if service_template is None:
             service_template = {}
         request.service_id = service_id
         request.agent_id = agent_id
+        request.workspace_dir = workspace_dir
         service_template["service_id"] = service_id
         service_template["agent_id"] = agent_id
+        service_template["workspace_dir"] = workspace_dir
 
         session_request = _SessionRequest(
             request,
