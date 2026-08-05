@@ -366,10 +366,6 @@ class WebChannel(BaseWsChannel):
         text = str(uid).strip()
         return text or None
 
-    def _extract_ws_user_id(self, ws: Any) -> str:
-        """WebChannel: 从 ws 提取连接级 user_id。"""
-        return self._connection_user_id(ws) or ""
-
     @staticmethod
     def _routing_key_user_id(connection_user_id: str | None, remote: Any) -> str:
         if connection_user_id:

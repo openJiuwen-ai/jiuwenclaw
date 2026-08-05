@@ -47,7 +47,7 @@ class RouterConfig:
     sandbox_idle_check_interval_seconds: float = 30.0
     ssh: YuanrongSshSettings = YuanrongSshSettings()
     ssh_channel: SshChannelEndpoint | None = None
-    auth_service_url:str = None
+    auth_service_url:str = ""
     timeout:float = 10.0
 
 
