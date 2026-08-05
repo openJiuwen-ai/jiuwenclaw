@@ -32,7 +32,11 @@ class AgentOSAuthenticator(CredentialAuthenticator):
 
         # 1. 如果 extra_headers 中有 Authorization header，优先从中提取 token, 如果token为空直接返回失败
         if extra_headers:
-            auth_header = extra_headers.get("Authorization", "")
+            lower_headers = {k.lower(): v for k, v in extra_headers.items()}
+            auth_header = lower_headers.get("authorization", "")
+            # header拿不到，降级使用传入的token参数
+            if not auth_header:
+                auth_header = token
             if auth_header.startswith("Bearer "):
                 token = auth_header[7:]  # 覆盖 token 参数
 
@@ -111,9 +115,3 @@ class AgentOSAuthenticator(CredentialAuthenticator):
             error="No valid credentials",
             extensions={"error_code": "UNSUPPORTED_CREDENTIAL"},
         )
-
-
-
-
-
-

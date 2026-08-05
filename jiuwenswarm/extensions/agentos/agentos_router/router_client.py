@@ -42,6 +42,8 @@ from jiuwenswarm.extensions.yuanrong_frontend_client import (
     AgentRuntimeSpec,
     YuanrongFrontendAgentClient,
 )
+from jiuwenswarm.gateway import ChannelManager
+from jiuwenswarm.gateway.channel_manager.base import ChannelType
 from jiuwenswarm.gateway.routing.agent_client import AgentServerClient
 
 
@@ -103,7 +105,7 @@ class AgentOSRouterClient(AgentServerClient):
         workspace_root: str = DEFAULT_AGENT_WORKSPACE_ROOT,
         sandbox_idle_timeout_seconds: float = 600.0,
         sandbox_idle_check_interval_seconds: float = 30.0,
-        auth_clinet: AgentOSAuthenticator | None = None,
+        auth_client: AgentOSAuthenticator | None = None, #TODO
     ) -> None:
         self._yuanrong = yuanrong
         self._registry = registry
@@ -124,10 +126,21 @@ class AgentOSRouterClient(AgentServerClient):
         self._closed = False
         # 用户当前 agent_type（3rdagent.switch 成功后更新）；SSH 接入跟随此值。
         self._current_agent_types: dict[str, str] = {}
-        self._auth_client = auth_clinet
-        # todo web_connect 的回调 tui_c 回调
+        self._auth_client = auth_client
 
-    async def on_auth_connect(self, ws: Any, type: str) -> AuthResult | None:
+
+    def set_channel_manager(self, channel_manager: ChannelManager) -> None:
+        """订阅 web channel和 tui channel 的连接事件和断开。"""
+        web_channel = channel_manager.get_channel(ChannelType.WEB)
+        tui_channel = channel_manager.get_channel(ChannelType.CLI)
+
+        if web_channel:
+            web_channel.on_connect = self.on_connect
+        if tui_channel:
+            tui_channel.on_connect = self.on_connect
+
+
+    async def on_connect(self, ws: Any, type: str) -> AuthResult | None:
         if self._auth_client is None:
             return AuthResult(
                 success=False,
