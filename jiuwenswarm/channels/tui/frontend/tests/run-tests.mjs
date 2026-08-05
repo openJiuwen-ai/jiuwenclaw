@@ -717,9 +717,8 @@ const mergedWorkflowUsage = mergeWorkflowRun(
         id: "child",
         name: "▸ child",
         status: "running",
-        kind: "child",
-        nested_ordinal: 0,
-        nested_name: "child",
+        phase_type: "child",
+        parent_phase: "parent",
         agents: [],
       },
     ],
@@ -734,8 +733,8 @@ const mergedWorkflowUsage = mergeWorkflowRun(
 );
 assert.deepEqual(mergedWorkflowUsage.budget, lowBudget);
 assert.equal(mergedWorkflowUsage.token_count, 12_700);
-assert.equal(mergedWorkflowUsage.phases[0]?.kind, "child");
-assert.equal(mergedWorkflowUsage.phases[0]?.nested_name, "child");
+assert.equal(mergedWorkflowUsage.phases[0]?.phase_type, "child");
+assert.equal(mergedWorkflowUsage.phases[0]?.parent_phase, "parent");
 
 assert.deepEqual(
   planSwarmflowToggle({ target: "on", currentEnabled: true, mode: "team" }),

@@ -53,12 +53,10 @@ export interface WorkflowPhase {
   agent_count?: number;
   completed_agent_count?: number;
   agents: WorkflowAgent[];
-  /** Synthesized phase for an inline nested workflow. */
-  kind?: "child" | null;
-  /** Workflow ordinal from the engine path; not globally unique. */
-  nested_ordinal?: number | null;
-  /** Original nested workflow name before display disambiguation. */
-  nested_name?: string | null;
+  /** "child" for sub-workflow cards, null/undefined for author phases. */
+  phase_type?: "child" | null;
+  /** Parent author phase name (set on child phase declarations). */
+  parent_phase?: string | null;
 }
 
 export interface WorkflowRun {
@@ -287,16 +285,63 @@ export function workflowStatusBannerText(status: WorkflowStatus): string | null 
   return WORKFLOW_STATUS_BANNER[status] ?? null;
 }
 
-export function countWorkflowAgents(workflow: WorkflowRun): number {
-  return (workflow.phases ?? []).reduce((total, phase) => total + (phase.agents ?? []).length, 0);
+/** Child sub-workflow cards belonging to an author phase. */
+export function childPhasesOf(workflow: WorkflowRun, parent: WorkflowPhase): WorkflowPhase[] {
+  return (workflow.phases ?? []).filter(
+    (phase) => phase.phase_type === "child" && phase.parent_phase === parent.name,
+  );
 }
 
-export function countCompletedWorkflowAgents(workflow: WorkflowRun): number {
-  return (workflow.phases ?? []).reduce(
-    (total, phase) =>
-      total + (phase.agents ?? []).filter((agent) => agent.status === "completed").length,
-    0,
-  );
+/** Flat phase list for ↑/↓ selection — parent rows then indented child rows. */
+export interface WorkflowPhaseSelectEntry {
+  phaseId: string;
+  name: string;
+  status: WorkflowStatus;
+  completed: number;
+  total: number;
+  isChild: boolean;
+}
+
+export function workflowPhaseSelectEntries(workflow: WorkflowRun): WorkflowPhaseSelectEntry[] {
+  const childrenByParent = new Map<string, WorkflowPhase[]>();
+  const orderedParents: WorkflowPhase[] = [];
+  for (const phase of workflow.phases ?? []) {
+    if (phase.phase_type === "child") {
+      const parentName = phase.parent_phase || "";
+      if (!childrenByParent.has(parentName)) childrenByParent.set(parentName, []);
+      childrenByParent.get(parentName)!.push(phase);
+    } else {
+      orderedParents.push(phase);
+    }
+  }
+
+  const entries: WorkflowPhaseSelectEntry[] = [];
+  const appendPhase = (phase: WorkflowPhase, isChild: boolean) => {
+    entries.push({
+      phaseId: phase.id,
+      name: phase.name,
+      status: phase.status,
+      completed: phase.completed_agent_count ?? 0,
+      total: phase.agent_count ?? 0,
+      isChild,
+    });
+  };
+
+  for (const parent of orderedParents) {
+    appendPhase(parent, false);
+    for (const child of childrenByParent.get(parent.name) ?? []) {
+      appendPhase(child, true);
+    }
+  }
+
+  for (const [parentName, children] of childrenByParent) {
+    if (orderedParents.some((parent) => parent.name === parentName)) continue;
+    for (const child of children) {
+      appendPhase(child, true);
+    }
+  }
+
+  return entries;
 }
 
 export function findWorkflowAgent(

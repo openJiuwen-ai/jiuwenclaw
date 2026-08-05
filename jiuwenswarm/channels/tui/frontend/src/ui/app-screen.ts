@@ -58,9 +58,7 @@ import { MemoryViewController, type MemoryViewTab } from "./memory-view.js";
 import { PIPELINE_VALUES, PIPELINE_OPTIONS, INTERVAL_VALUES, INTERVAL_OPTIONS, FLAG_OPTIONS } from "../core/commands/builtins/auto-harness.js";
 import { isClientMode, isTeamMode } from "../core/modes.js";
 import {
-  countCompletedWorkflowAgents,
   countWaitingForHuman,
-  countWorkflowAgents,
   sessionTurnLabelNumber,
   canOpenSessionHistory,
   isSessionNode,
@@ -84,8 +82,10 @@ import {
   workflowStatusBannerText,
   workflowStatusIcon,
   workflowBudgetUsedPercent,
+  workflowPhaseSelectEntries,
   type WorkflowAgent,
   type WorkflowNodeType,
+  type WorkflowPhase,
   type WorkflowRun,
   type WorkflowStatus,
 } from "../core/workflows.js";
@@ -5603,7 +5603,7 @@ export class AppScreen implements Component, Focusable {
       .getSnapshot()
       .workflowRuns.find((item) => item.id === state.workflowId);
     const phase = workflow?.phases.find((item) => item.id === state.selectedPhaseId);
-    if (!phase || phase.kind !== "child") return;
+    if (!phase || phase.phase_type !== "child") return;
 
     const key = this.workflowPhaseUiKey(state.workflowId, phase.id);
     if (this.collapsedWorkflowPhaseKeys.has(key)) {
@@ -5917,8 +5917,8 @@ export class AppScreen implements Component, Focusable {
   ): SwarmWorkflowsViewState {
     const workflows = this.state.getSnapshot().workflowRuns;
     const items: SelectItem[] = workflows.map((workflow) => {
-      const total = workflow.agent_count ?? countWorkflowAgents(workflow);
-      const completed = workflow.completed_agent_count ?? countCompletedWorkflowAgents(workflow);
+      const total = workflow.agent_count ?? 0;
+      const completed = workflow.completed_agent_count ?? 0;
       const progress = workflow.status === "running" ? `${completed}/${total}` : `${total}`;
       const tokens = formatTokenCount(workflow.token_count);
       const budget = formatWorkflowBudgetInline(workflow.budget);
@@ -6035,29 +6035,23 @@ export class AppScreen implements Component, Focusable {
   ): SwarmWorkflowsViewState {
     const workflow = this.state.getSnapshot().workflowRuns.find((item) => item.id === workflowId);
     if (!workflow) return this.buildSwarmWorkflowsListState(false, workflowId);
+    const phaseEntries = workflowPhaseSelectEntries(workflow);
+    const resolvedPhaseId =
+      selectedPhaseId && phaseEntries.some((entry) => entry.phaseId === selectedPhaseId)
+        ? selectedPhaseId
+        : (phaseEntries[0]?.phaseId ?? "");
     const selectedPhaseIndex = Math.max(
       0,
-      workflow.phases.findIndex((phase) => phase.id === selectedPhaseId),
+      phaseEntries.findIndex((entry) => entry.phaseId === resolvedPhaseId),
     );
-    const selectedPhase = workflow.phases[selectedPhaseIndex] ?? workflow.phases[0];
+    const selectedPhase =
+      workflow.phases.find((phase) => phase.id === resolvedPhaseId) ?? workflow.phases[0];
     const activePhaseId = selectedPhase?.id ?? "";
-    const phaseItems: SelectItem[] = workflow.phases.map((phase) => {
-      const phaseTotal = phase.agent_count ?? phase.agents.length;
-      const phaseCompleted =
-        phase.completed_agent_count ??
-        phase.agents.filter((agent) => agent.status === "completed").length;
-      const isChild = phase.kind === "child";
-      const disclosure = isChild
-        ? this.isWorkflowPhaseCollapsed(workflow.id, phase.id)
-          ? "▶ "
-          : "▼ "
-        : "";
-      return {
-        value: phase.id,
-        label: `${disclosure}${formatWorkflowStatus(phase.status)} ${phase.name}`,
-        description: `${phaseCompleted}/${phaseTotal}${isChild ? " · child" : ""}`,
-      };
-    });
+    const phaseItems: SelectItem[] = phaseEntries.map((entry) => ({
+      value: entry.phaseId,
+      label: `${formatWorkflowStatus(entry.status)} ${entry.isChild ? `  ${entry.name}` : entry.name}`,
+      description: `${entry.completed}/${entry.total}`,
+    }));
     const phaseList = new SelectList(
       phaseItems,
       Math.min(Math.max(phaseItems.length, 1), 8),
@@ -6963,14 +6957,13 @@ export class AppScreen implements Component, Focusable {
       .getSnapshot()
       .workflowRuns.find((item) => item.id === state.workflowId);
     if (!workflow) return [padToWidth(palette.status.error("Workflow not found"), width)];
-    const total = workflow.agent_count ?? countWorkflowAgents(workflow);
-    const completed = workflow.completed_agent_count ?? countCompletedWorkflowAgents(workflow);
+    const total = workflow.agent_count ?? 0;
+    const completed = workflow.completed_agent_count ?? 0;
     const statusBanner = workflowStatusBannerText(workflow.status);
     const selectedPhase =
       workflow.phases.find((phase) => phase.id === state.selectedPhaseId) ?? workflow.phases[0];
     const workflowSummary = workflow.summary.trim();
     const budgetKey = this.swarmActionKeyLabel("swarm:budget");
-    const toggleChildKey = this.swarmActionKeyLabel("swarm:toggleChildPhase");
     const runTokens = formatTokenCount(workflow.token_count);
     const budgetDetail = formatWorkflowBudgetDetail(workflow.budget);
     const usageParts: string[] = [];
@@ -7031,8 +7024,8 @@ export class AppScreen implements Component, Focusable {
       "",
       padToWidth(
         state.focus === "phases"
-          ? palette.text.accent("Details")
-          : palette.text.secondary("Details"),
+          ? palette.text.accent("Phases")
+          : palette.text.secondary("Phases"),
         width,
       ),
     ];
@@ -7052,8 +7045,8 @@ export class AppScreen implements Component, Focusable {
       padToWidth(
         palette.text.secondary(
           state.focus === "phases"
-            ? `↑/↓ select phase · ${toggleChildKey} expand/collapse child · Enter/→ show agents · Esc/← back`
-            : `↑/↓ select · Enter/→ detail/session · Tab reply (human) · ${budgetKey} budget · ← phases · Esc/← back`,
+            ? `↑/↓ select phase · Enter/→ show agents · Esc/← back`
+            : `↑/↓ select · Enter/→ show detail or session · Tab reply (human) · Esc/← back to phases`,
         ),
         width,
       ),
@@ -7071,16 +7064,44 @@ export class AppScreen implements Component, Focusable {
     }
 
     const lines: string[] = [];
+    const childrenByParent = new Map<string, WorkflowPhase[]>();
+    const orderedParents: WorkflowPhase[] = [];
     for (const phase of workflow.phases) {
-      const selected = phase.id === selectedPhaseId;
+      if (phase.phase_type === "child") {
+        const parent = phase.parent_phase || "";
+        if (!childrenByParent.has(parent)) childrenByParent.set(parent, []);
+        childrenByParent.get(parent)!.push(phase);
+      } else {
+        orderedParents.push(phase);
+      }
+    }
+
+    for (const parent of orderedParents) {
+      const selected = parent.id === selectedPhaseId;
       const marker = selected ? palette.text.accent("›") : " ";
-      const isChild = phase.kind === "child";
-      const collapsed = isChild && this.isWorkflowPhaseCollapsed(workflow.id, phase.id);
-      const disclosure = collapsed ? "▶" : "▼";
-      const childLabel = isChild ? palette.text.dim(" · child") : "";
-      lines.push(padToWidth(`${marker} ${disclosure} ${phase.name}${childLabel}`, width));
-      if (!collapsed && phase.agents.length > 0) {
-        lines.push(...this.renderSwarmWorkflowAgentRows(phase.agents, width));
+      const children = childrenByParent.get(parent.name) ?? [];
+      const pDone = parent.completed_agent_count ?? 0;
+      const pTotal = parent.agent_count ?? 0;
+      lines.push(padToWidth(`${marker} ${formatWorkflowStatus(parent.status)} ${parent.name} ${palette.text.dim(`${pDone}/${pTotal}`)}`, width));
+
+      for (const child of children) {
+        const cSelected = child.id === selectedPhaseId;
+        const cMarker = cSelected ? palette.text.accent("›") : " ";
+        const cTotal = child.agent_count ?? 0;
+        const cDone = child.completed_agent_count ?? 0;
+        lines.push(padToWidth(`  ${cMarker} ${formatWorkflowStatus(child.status)} ${child.name} ${palette.text.dim(`${cDone}/${cTotal}`)}`, width));
+      }
+    }
+
+    // orphan children (no matching parent)
+    for (const [parentName, children] of childrenByParent) {
+      if (orderedParents.some((p) => p.name === parentName)) continue;
+      for (const child of children) {
+        const cSelected = child.id === selectedPhaseId;
+        const cMarker = cSelected ? palette.text.accent("›") : " ";
+        const cTotal = child.agent_count ?? 0;
+        const cDone = child.completed_agent_count ?? 0;
+        lines.push(padToWidth(`  ${cMarker} ${formatWorkflowStatus(child.status)} ${child.name} ${palette.text.dim(`${cDone}/${cTotal}`)}`, width));
       }
     }
     return lines;
@@ -7108,18 +7129,47 @@ export class AppScreen implements Component, Focusable {
     selectedPhaseId: string,
     width: number,
   ): string[] {
-    return workflow.phases.map((phase) => {
-      const marker =
-        phase.id === selectedPhaseId ? palette.text.accent("›") : palette.text.dim(" ");
-      const isChild = phase.kind === "child";
-      const disclosure = isChild
-        ? this.isWorkflowPhaseCollapsed(workflow.id, phase.id)
-          ? "▶"
-          : "▼"
-        : "▼";
-      const childLabel = isChild ? palette.text.dim(" · child") : "";
-      return padToWidth(`${marker} ${disclosure} ${phase.name}${childLabel}`, width);
-    });
+    const childrenByParent = new Map<string, WorkflowPhase[]>();
+    const orderedParents: WorkflowPhase[] = [];
+    for (const phase of workflow.phases) {
+      if (phase.phase_type === "child") {
+        const parent = phase.parent_phase || "";
+        if (!childrenByParent.has(parent)) childrenByParent.set(parent, []);
+        childrenByParent.get(parent)!.push(phase);
+      } else {
+        orderedParents.push(phase);
+      }
+    }
+
+    const lines: string[] = [];
+    for (const parent of orderedParents) {
+      const selected = parent.id === selectedPhaseId;
+      const marker = selected ? palette.text.accent("›") : palette.text.dim(" ");
+      const children = childrenByParent.get(parent.name) ?? [];
+      const pDone = parent.completed_agent_count ?? 0;
+      const pTotal = parent.agent_count ?? 0;
+      lines.push(padToWidth(`${marker} ${formatWorkflowStatus(parent.status)} ${parent.name} ${palette.text.dim(`${pDone}/${pTotal}`)}`, width));
+
+      for (const child of children) {
+        const cSelected = child.id === selectedPhaseId;
+        const cMarker = cSelected ? palette.text.accent("›") : palette.text.dim(" ");
+        const cTotal = child.agent_count ?? 0;
+        const cDone = child.completed_agent_count ?? 0;
+        lines.push(padToWidth(`  ${cMarker} ${formatWorkflowStatus(child.status)} ${child.name} ${palette.text.dim(`${cDone}/${cTotal}`)}`, width));
+      }
+    }
+
+    for (const [parentName, children] of childrenByParent) {
+      if (orderedParents.some((p) => p.name === parentName)) continue;
+      for (const child of children) {
+        const cSelected = child.id === selectedPhaseId;
+        const cMarker = cSelected ? palette.text.accent("›") : palette.text.dim(" ");
+        const cTotal = child.agent_count ?? 0;
+        const cDone = child.completed_agent_count ?? 0;
+        lines.push(padToWidth(`  ${cMarker} ${formatWorkflowStatus(child.status)} ${child.name} ${palette.text.dim(`${cDone}/${cTotal}`)}`, width));
+      }
+    }
+    return lines;
   }
 
   /** Phase-local 0-based turn label (see ``phaseLocalTurnNumber`` in workflows.ts). */
@@ -7784,7 +7834,7 @@ export class AppScreen implements Component, Focusable {
       state.returnTo?.kind === "pending-list"
         ? "Esc/← back to pending list"
         : "Esc/← back to agents";
-    lines.push(padToWidth(palette.text.secondary(`${budgetKey} budget · ${backHint}`), width));
+    lines.push(padToWidth(palette.text.secondary(backHint), width));
     return lines;
   }
 
