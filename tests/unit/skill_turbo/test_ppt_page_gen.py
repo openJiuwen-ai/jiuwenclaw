@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -1065,3 +1066,34 @@ def test_extract_backup_timestamp() -> None:
     assert ppg._extract_backup_timestamp(
         "D:/pages/_backup/20260803065245/page-17.pptx.html"
     ) == "20260803065245"
+
+
+def test_validate_chart_height_chain_rejects_page5_badcase() -> None:
+    path = (
+        "优化skill turbo/0803验证PPTs/45-双碳目标下的能源转型与产业机遇"
+        "/pages/page-5.pptx.html"
+    )
+    html = Path(path).read_text(encoding="utf-8")
+    assert not ppg._validate_chart_height_chain(html)
+
+
+def test_validate_chart_height_chain_accepts_page4_goodcase() -> None:
+    path = (
+        "优化skill turbo/0803验证PPTs/45-双碳目标下的能源转型与产业机遇"
+        "/pages/page-4.pptx.html"
+    )
+    html = Path(path).read_text(encoding="utf-8")
+    assert ppg._validate_chart_height_chain(html)
+
+
+def test_validate_chart_height_chain_accepts_page8_ending_chart() -> None:
+    path = (
+        "优化skill turbo/0803验证PPTs/45-双碳目标下的能源转型与产业机遇"
+        "/pages/page-8.pptx.html"
+    )
+    html = Path(path).read_text(encoding="utf-8")
+    assert ppg._validate_chart_height_chain(html)
+
+
+def test_validate_chart_height_chain_skips_non_chart_page() -> None:
+    assert ppg._validate_chart_height_chain(_GOOD_CONTENT_HTML)

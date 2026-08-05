@@ -515,6 +515,8 @@ _DESIGN_RULES_DIGEST = (
     "4.2 图表最小高度（强制）：图表容器实际渲染高度必须 ≥ 160px（防塌缩下限），"
     "用 `min-h-[160px]` 或 `flex-1` 确保图表区域能初始化渲染；"
     "建议图表可读高度 ≥ 300px，由页面预算保证\n"
+    "4.2.1 图表高度链（强制）：图表外层卡片须 `flex-1 min-h-0 flex flex-col`（或 `flex-[N] min-h-0 flex flex-col`），"
+    "内层 `#xxx-chart` 用 `flex-1 min-h-0 w-full`；禁止在无 `min-h-0`/`flex-1` 的 flex-col 父容器内单独给 chart div 加 `flex-1`\n"
     "4.3 图表颜色（强制）：图表数据系列颜色必须来自风格文件的图表配色表，禁止使用相近色；"
     "坐标轴标签用深色，分割线用浅色\n"
     "4.4 图表标签防重叠：建议为 ECharts series 设置 `labelLayout:{moveOverlap:'shiftY'}` 防止同系列标签重叠；"
@@ -966,6 +968,43 @@ def _validate_slide_dom(html: str) -> bool:
 def _is_slide_exportable(html: str) -> bool:
     """P8.2 fix 后校验：仅确认导出边界内的结构未被破坏。"""
     return _main_inside_ppt_slide(html)
+
+
+_CHART_DIV_RE = re.compile(
+    r'<div\b[^>]*\bid="[^"]*chart[^"]*"[^>]*>',
+    re.IGNORECASE,
+)
+_FLEX_COL_DIV_RE = re.compile(
+    r'<div\b[^>]*\bclass="[^"]*\bflex-col\b[^"]*"[^>]*>',
+    re.IGNORECASE,
+)
+_CHART_WRAPPER_HEIGHT_RE = re.compile(
+    r"\bmin-h-0\b|\bflex-1\b|\bflex-\[\d+\]",
+    re.IGNORECASE,
+)
+
+
+def _chart_wrapper_has_height_chain(wrapper_tag: str) -> bool:
+    """designer.md 图表高度链：包装器须参与纵向高度分配（min-h-0 或 flex-1/flex-[N]）。"""
+    return bool(_CHART_WRAPPER_HEIGHT_RE.search(wrapper_tag))
+
+
+def _validate_chart_height_chain(html: str) -> bool:
+    """P8.1 写盘前校验：ECharts 图表外层 flex-col 卡片须具备高度分配类。
+
+    仅拦截高置信坏案（如 page-5：包装器只有 flex flex-col、无 min-h-0/flex-1）；
+    无法定位包装器时不拦截，避免误伤。
+    """
+    if "echarts.init" not in html.lower():
+        return True
+    for chart_match in _CHART_DIV_RE.finditer(html):
+        before = html[max(0, chart_match.start() - 2000):chart_match.start()]
+        wrappers = list(_FLEX_COL_DIV_RE.finditer(before))
+        if not wrappers:
+            continue
+        if not _chart_wrapper_has_height_chain(wrappers[-1].group(0)):
+            return False
+    return True
 
 
 def _extract_backup_timestamp(path: str) -> str:
@@ -3133,6 +3172,9 @@ class PageWorkerNode(PlanNode):
         html = _strip_unsupported_fullpage_overlays(html)
         if not _validate_slide_dom(html):
             logger.warning("[P8.1] 页面 %d DOM 结构校验失败", ctx.page_num)
+            return ""
+        if not _validate_chart_height_chain(html):
+            logger.warning("[P8.1] 页面 %d 图表容器高度链校验失败", ctx.page_num)
             return ""
         return html
 
