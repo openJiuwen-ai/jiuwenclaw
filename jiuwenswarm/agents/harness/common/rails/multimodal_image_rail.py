@@ -12,6 +12,7 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
     current_multimodal_image_files,
     ensure_multimodal_image_window_mutator,
+    remove_multimodal_image_window_mutator,
     strip_image_content_from_model_context,
 )
 from jiuwenswarm.common.utils import logger
@@ -55,6 +56,8 @@ class MultimodalImageRail(DeepAgentRail):
                 )
             return
 
+        # read_image is disabled, remove the mutator
+        remove_multimodal_image_window_mutator(ctx.context)
         removed = strip_image_content_from_model_context(ctx.context)
         if removed:
             logger.info(
