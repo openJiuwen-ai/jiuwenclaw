@@ -117,6 +117,64 @@ def test_get_team_manager_is_singleton() -> None:
 
 
 @pytest.mark.asyncio
+async def test_broadcast_event_applies_backpressure_to_full_waiter_queue() -> None:
+    manager = TeamManager()
+    queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+    manager.add_waiter("sess-backpressure", "req-1", queue)
+
+    await manager.broadcast_event("sess-backpressure", {"seq": 1})
+    blocked_broadcast = asyncio.create_task(
+        manager.broadcast_event("sess-backpressure", {"seq": 2})
+    )
+    await asyncio.sleep(0)
+
+    assert blocked_broadcast.done() is False
+    assert await queue.get() == {"seq": 1}
+    await asyncio.wait_for(blocked_broadcast, timeout=1.0)
+    assert await queue.get() == {"seq": 2}
+
+
+@pytest.mark.asyncio
+async def test_broadcast_event_unblocks_when_full_waiter_is_removed() -> None:
+    manager = TeamManager()
+    queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+    manager.add_waiter("sess-disconnect", "req-1", queue)
+    await queue.put({"seq": 1})
+
+    blocked_broadcast = asyncio.create_task(
+        manager.broadcast_event("sess-disconnect", {"seq": 2})
+    )
+    await asyncio.sleep(0)
+    assert blocked_broadcast.done() is False
+
+    manager.remove_waiter("sess-disconnect", "req-1")
+
+    await asyncio.wait_for(blocked_broadcast, timeout=1.0)
+    assert manager.has_waiters("sess-disconnect") is False
+    assert await queue.get() == {"seq": 1}
+
+
+@pytest.mark.asyncio
+async def test_full_waiter_does_not_block_delivery_to_other_waiters() -> None:
+    manager = TeamManager()
+    slow_queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+    fast_queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+    manager.add_waiter("sess-multi", "req-slow", slow_queue)
+    manager.add_waiter("sess-multi", "req-fast", fast_queue)
+    await slow_queue.put({"seq": 0})
+
+    broadcast = asyncio.create_task(
+        manager.broadcast_event("sess-multi", {"seq": 1})
+    )
+
+    assert await asyncio.wait_for(fast_queue.get(), timeout=1.0) == {"seq": 1}
+    assert broadcast.done() is False
+
+    manager.remove_waiter("sess-multi", "req-slow")
+    await asyncio.wait_for(broadcast, timeout=1.0)
+
+
+@pytest.mark.asyncio
 async def test_update_evolution_config_updates_member_skill_evolution_signal_trigger(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -745,6 +803,41 @@ async def test_local_lifecycle_operations_are_serialized_per_session(
 
 
 @pytest.mark.asyncio
+async def test_finalize_runtime_cleanup_releases_session_markers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _TeamManagerHarness()
+    session_id = "sess-terminal-cleanup"
+    manager.commit_runtime_ready(session_id, "team-terminal")
+    manager.mark_seen_team_events(session_id)
+    manager.mark_workflow_completed(session_id)
+    manager.setdefault_cron_completion(session_id, {"round_id": 1})
+    getattr(manager, "_pending_team_evolution_watcher_sessions").add(session_id)
+
+    async def fake_cleanup(
+        _session_id: str,
+        *,
+        finalize_workflows: bool = True,
+    ) -> None:
+        _ = _session_id, finalize_workflows
+        manager._clear_team_rail_registries(session_id)
+
+    monkeypatch.setattr(manager, "_cleanup_runtime_locals", fake_cleanup)
+
+    await manager._finalize_runtime_cleanup(session_id, "test")
+
+    assert manager.is_runtime_active(session_id) is False
+    assert manager.is_session_initialized(session_id) is False
+    assert manager.has_seen_team_events(session_id) is False
+    assert manager.is_workflow_completed(session_id) is False
+    assert manager.get_cron_completion(session_id) is None
+    assert session_id not in getattr(
+        manager,
+        "_pending_team_evolution_watcher_sessions",
+    )
+
+
+@pytest.mark.asyncio
 async def test_cancel_all_stream_tasks_uses_per_session_lifecycle_locks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -907,6 +1000,10 @@ async def test_stop_session_runtime_stops_runner_owned_team_runtime(
     manager = _TeamManagerHarness()
     manager.set_active_runtime_for_test("sess-1", "demo-team")
     manager.set_active_runtime_for_test("sess-2", "other-team")
+    getattr(manager, "_initialized_sessions").add("sess-1")
+    manager.mark_seen_team_events("sess-1")
+    manager.mark_workflow_completed("sess-1")
+    manager.mark_team_evolution_watcher_deferred("sess-1")
 
     stop_calls: list[tuple[str, str]] = []
 
@@ -925,6 +1022,30 @@ async def test_stop_session_runtime_stops_runner_owned_team_runtime(
     assert stop_calls == [("demo-team", "sess-1")]
     assert manager.is_runtime_active("sess-1") is False
     assert manager.get_active_team_name("sess-2") == "other-team"
+    assert manager.is_session_initialized("sess-1") is False
+    assert manager.has_seen_team_events("sess-1") is False
+    assert manager.is_workflow_completed("sess-1") is False
+    assert manager.consume_team_evolution_watcher_deferred("sess-1") is False
+
+
+@pytest.mark.asyncio
+async def test_stop_session_runtime_clears_stale_markers_without_live_runtime() -> None:
+    manager = _TeamManagerHarness()
+    session_id = "sess-stale-markers"
+    getattr(manager, "_initialized_sessions").add(session_id)
+    manager.mark_seen_team_events(session_id)
+    manager.mark_workflow_completed(session_id)
+    manager.mark_team_evolution_watcher_deferred(session_id)
+    manager.setdefault_cron_completion(session_id, {"round_id": 1})
+
+    stopped = await manager.stop_session_runtime(session_id)
+
+    assert stopped is False
+    assert manager.is_session_initialized(session_id) is False
+    assert manager.has_seen_team_events(session_id) is False
+    assert manager.is_workflow_completed(session_id) is False
+    assert manager.consume_team_evolution_watcher_deferred(session_id) is False
+    assert manager.get_cron_completion(session_id) is None
 
 
 @pytest.mark.asyncio
@@ -933,6 +1054,10 @@ async def test_pause_session_runtime_pauses_runner_owned_team_runtime(
 ) -> None:
     manager = _TeamManagerHarness()
     manager.set_active_runtime_for_test("sess-1", "demo-team")
+    getattr(manager, "_initialized_sessions").add("sess-1")
+    manager.mark_seen_team_events("sess-1")
+    manager.mark_workflow_completed("sess-1")
+    manager.mark_team_evolution_watcher_deferred("sess-1")
 
     pause_calls: list[tuple[str, str]] = []
 
@@ -957,6 +1082,10 @@ async def test_pause_session_runtime_pauses_runner_owned_team_runtime(
     assert paused is True
     assert pause_calls == [("demo-team", "sess-1")]
     assert manager.is_runtime_active("sess-1") is False
+    assert manager.is_session_initialized("sess-1") is True
+    assert manager.has_seen_team_events("sess-1") is True
+    assert manager.is_workflow_completed("sess-1") is True
+    assert manager.consume_team_evolution_watcher_deferred("sess-1") is True
 
 
 @pytest.mark.asyncio
@@ -1435,6 +1564,175 @@ def test_resolve_session_team_name_returns_none_when_metadata_missing(
     team_name = manager.resolve_session_team_name_for_test("sess-missing")
 
     assert team_name is None
+
+
+@pytest.mark.asyncio
+async def test_get_swarm_enriched_team_spec_uses_bound_stable_team_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _TeamManagerHarness()
+    load_calls: list[dict] = []
+    enrich_calls: list[dict] = []
+
+    class _Spec:
+        team_name = "template_team"
+
+    async def fake_ensure_postgresql(self, config_base: dict) -> None:
+        _ = self, config_base
+
+    def fake_load_team_spec(session_id: str, **kwargs):
+        load_calls.append({"session_id": session_id, **kwargs})
+        return _Spec()
+
+    def fake_enrich(spec, **kwargs) -> None:
+        enrich_calls.append({"team_name": spec.team_name, **kwargs})
+
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.get_config",
+        lambda: {},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.get_session_metadata",
+        lambda _session_id, cache_bust=False: {
+            "team_name": "custom_team",
+            "team_template_id": "beta_template",
+        },
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.team_binding_store.get_team_binding_store",
+        lambda: SimpleNamespace(get=lambda _team_name: None),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.team_entity_store.ensure_team_entity",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(TeamManager, "_ensure_postgresql_for_leader", fake_ensure_postgresql)
+    monkeypatch.setattr(TeamManager, "_load_team_spec", staticmethod(fake_load_team_spec))
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.swarm.enrich_team_spec_for_swarm",
+        fake_enrich,
+    )
+
+    spec = await manager.get_swarm_enriched_team_spec(
+        "sess-bound",
+        mode="team",
+        request_metadata={"mode": "team"},
+    )
+
+    assert spec.team_name == "custom_team"
+    assert load_calls == [
+        {
+            "session_id": "sess-bound",
+            "template_id": "beta_template",
+            "strict_template": True,
+        }
+    ]
+    assert enrich_calls[0]["team_name"] == "custom_team"
+
+
+@pytest.mark.asyncio
+async def test_get_swarm_enriched_team_spec_uses_bound_team_entity_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _TeamManagerHarness()
+    load_calls: list[dict] = []
+
+    class _Spec:
+        team_name = "template_team"
+
+    async def fake_ensure_postgresql(self, config_base: dict) -> None:
+        _ = self, config_base
+
+    def fake_load_team_spec(session_id: str, **kwargs):
+        load_calls.append({"session_id": session_id, **kwargs})
+        return _Spec()
+
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.get_config",
+        lambda: {},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.get_session_metadata",
+        lambda _session_id, cache_bust=False: {
+            "team_name": "custom_team",
+            "team_template_id": "deleted_template",
+        },
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.team_binding_store.get_team_binding_store",
+        lambda: SimpleNamespace(get=lambda _team_name: None),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.team_entity_store.ensure_team_entity",
+        lambda **_kwargs: SimpleNamespace(
+            template_id="deleted_template",
+            template_snapshot={
+                "team_name": "template_team",
+                "leader": {"member_name": "snapshot_leader"},
+            },
+        ),
+    )
+    monkeypatch.setattr(TeamManager, "_ensure_postgresql_for_leader", fake_ensure_postgresql)
+    monkeypatch.setattr(TeamManager, "_load_team_spec", staticmethod(fake_load_team_spec))
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.swarm.enrich_team_spec_for_swarm",
+        lambda spec, **kwargs: None,
+    )
+
+    spec = await manager.get_swarm_enriched_team_spec(
+        "sess-bound",
+        mode="team",
+        request_metadata={"mode": "team"},
+    )
+
+    assert spec.team_name == "custom_team"
+    assert load_calls == [
+        {
+            "session_id": "sess-bound",
+            "template_id": "deleted_template",
+            "strict_template": False,
+            "template_snapshot": {
+                "team_name": "template_team",
+                "leader": {"member_name": "snapshot_leader"},
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_get_swarm_enriched_team_spec_keeps_legacy_session_scoped_team_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _TeamManagerHarness()
+
+    class _Spec:
+        team_name = "template_team"
+
+    async def fake_ensure_postgresql(self, config_base: dict) -> None:
+        _ = self, config_base
+
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.get_config",
+        lambda: {},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.get_session_metadata",
+        lambda _session_id, cache_bust=False: {},
+    )
+    monkeypatch.setattr(TeamManager, "_ensure_postgresql_for_leader", fake_ensure_postgresql)
+    monkeypatch.setattr(TeamManager, "_load_team_spec", staticmethod(lambda _session_id: _Spec()))
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.swarm.enrich_team_spec_for_swarm",
+        lambda spec, **kwargs: None,
+    )
+
+    spec = await manager.get_swarm_enriched_team_spec(
+        "sess-legacy",
+        mode="team",
+        request_metadata={"mode": "team"},
+    )
+
+    assert spec.team_name == "template_team_sess-legacy"
 
 
 def test_register_workflow_handler() -> None:

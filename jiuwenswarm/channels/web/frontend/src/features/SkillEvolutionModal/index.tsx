@@ -27,6 +27,23 @@ type EvolutionGetResponse = {
 
 type LoadState = "idle" | "loading" | "success" | "error";
 
+const SECTION_LABEL_KEYS: Record<string, string> = {
+  Instructions: "skills.evolution.values.section.instructions",
+  Examples: "skills.evolution.values.section.examples",
+  Troubleshooting: "skills.evolution.values.section.troubleshooting",
+  Workflow: "skills.evolution.values.section.workflow",
+  Constraints: "skills.evolution.values.section.constraints",
+  Roles: "skills.evolution.values.section.roles",
+  Collaboration: "skills.evolution.values.section.collaboration",
+  Scripts: "skills.evolution.values.section.scripts",
+};
+
+const TARGET_LABEL_KEYS: Record<string, string> = {
+  description: "skills.evolution.values.target.description",
+  body: "skills.evolution.values.target.body",
+  script: "skills.evolution.values.target.script",
+};
+
 interface SkillEvolutionModalProps {
   open: boolean;
   sessionId: string;
@@ -246,24 +263,32 @@ export function SkillEvolutionModal({
                   className="rounded-lg border border-border bg-panel p-4"
                 >
                   <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0 text-xs text-text-muted space-y-1">
-                      <div>
-                        {t("skills.evolution.fields.id")}: {entry.id}
+                    <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-2">
+                      <div className="rounded-md bg-card px-2 py-1 text-sm">
+                        <span className="text-text-muted">
+                          {t("skills.evolution.fields.section")}:
+                        </span>{" "}
+                        <span className="font-medium text-text">
+                          {entry.change?.section
+                            ? SECTION_LABEL_KEYS[entry.change.section]
+                              ? t(SECTION_LABEL_KEYS[entry.change.section])
+                              : entry.change.section
+                            : "-"}
+                        </span>
                       </div>
-                      <div>
-                        {t("skills.evolution.fields.source")}: {entry.source || "-"}
+                      <div className="rounded-md bg-card px-2 py-1 text-sm">
+                        <span className="text-text-muted">
+                          {t("skills.evolution.fields.target")}:
+                        </span>{" "}
+                        <span className="font-medium text-text">
+                          {entry.change?.target
+                            ? TARGET_LABEL_KEYS[entry.change.target]
+                              ? t(TARGET_LABEL_KEYS[entry.change.target])
+                              : entry.change.target
+                            : "-"}
+                        </span>
                       </div>
-                      <div>
-                        {t("skills.evolution.fields.section")}: {entry.change?.section || "-"}
-                      </div>
-                      <div>
-                        {t("skills.evolution.fields.target")}: {entry.change?.target || "-"}
-                      </div>
-                      <div>
-                        {t("skills.evolution.fields.applied")}: {String(Boolean(entry.applied))}
-                      </div>
-                      <div>
-                        {t("skills.evolution.fields.timestamp")}:{" "}
+                      <div className="ml-auto whitespace-nowrap text-xs text-text-muted">
                         {entry.timestamp
                           ? new Date(entry.timestamp).toLocaleString(i18n.language)
                           : "-"}
@@ -282,10 +307,8 @@ export function SkillEvolutionModal({
                   </div>
 
                   <div className="mt-3">
-                    <div className="text-sm font-medium text-text mb-2">
-                      {t("skills.evolution.fields.content")}
-                    </div>
                     <textarea
+                      aria-label={t("skills.evolution.fields.content")}
                       value={entry.change?.content || ""}
                       onChange={(event) => handleChangeContent(entry.id, event.target.value)}
                       className="w-full min-h-28 px-3 py-2 rounded-md bg-card border border-border text-sm text-text placeholder:text-text-muted"

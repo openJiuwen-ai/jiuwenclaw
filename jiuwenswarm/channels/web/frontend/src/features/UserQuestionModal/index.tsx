@@ -26,6 +26,7 @@ export function UserQuestionModal({ onSubmit }: UserQuestionModalProps) {
       setAnswers((prev) => {
         const newAnswers = new Map(prev);
         const current = newAnswers.get(questionIndex) || {
+          question: pendingQuestion?.questions[questionIndex]?.question,
           selected_options: [],
         };
 
@@ -50,7 +51,7 @@ export function UserQuestionModal({ onSubmit }: UserQuestionModalProps) {
         return newAnswers;
       });
     },
-    []
+    [pendingQuestion]
   );
 
   // 处理自定义输入
@@ -59,6 +60,7 @@ export function UserQuestionModal({ onSubmit }: UserQuestionModalProps) {
       setAnswers((prev) => {
         const newAnswers = new Map(prev);
         const current = newAnswers.get(questionIndex) || {
+          question: pendingQuestion?.questions[questionIndex]?.question,
           selected_options: [],
         };
         newAnswers.set(questionIndex, {
@@ -68,7 +70,7 @@ export function UserQuestionModal({ onSubmit }: UserQuestionModalProps) {
         return newAnswers;
       });
     },
-    []
+    [pendingQuestion]
   );
 
   // 提交回答
@@ -79,10 +81,11 @@ export function UserQuestionModal({ onSubmit }: UserQuestionModalProps) {
       (q, index) => {
         const answer = answers.get(index);
         if (answer) {
-          return answer;
+          return { ...answer, question: answer.question ?? q.question };
         }
         // 默认选择第一个选项
         return {
+          question: q.question,
           selected_options: q.options.length > 0 ? [q.options[0].label] : [],
         };
       }

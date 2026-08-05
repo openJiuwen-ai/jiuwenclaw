@@ -613,3 +613,138 @@ class TestRewindSessionContextInjectsSummaries:
         from openjiuwen.core.foundation.llm.schema.message import UserMessage
         user_contents = [m.content for m in history_messages if isinstance(m, UserMessage)]
         assert "Summarized 2 messages up to this point." in user_contents
+
+
+class TestRewindSessionContextLiveSession:
+    @pytest.mark.asyncio
+    async def test_reuses_interaction_session_and_commits(self, tmp_path, monkeypatch):
+        """Live DeepAgent session must be updated in-place (commit, not post_run)."""
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+
+        history = [
+            {
+                "role": "user", "id": "u1", "request_id": "r1",
+                "content": "10以内最大的质数", "timestamp": 1.0,
+            },
+            {
+                "role": "assistant", "content": "7",
+                "event_type": "chat.final", "timestamp": 1.5,
+            },
+        ]
+        _write_history((sessions_dir / "live1" / "history.jsonl"), history)
+
+        monkeypatch.setattr(
+            "jiuwenswarm.agents.harness.common.session_ops_service.get_agent_sessions_dir",
+            lambda: sessions_dir,
+        )
+        monkeypatch.setattr(
+            "jiuwenswarm.server.runtime.session.session_history.get_agent_sessions_dir",
+            lambda: sessions_dir,
+        )
+
+        from unittest.mock import AsyncMock, MagicMock
+
+        mock_context_engine = MagicMock()
+        mock_context_engine.get_context.return_value = None
+        mock_context_engine.clear_context = AsyncMock()
+        mock_context_engine.create_context = AsyncMock()
+        mock_context_engine.save_contexts = AsyncMock()
+
+        mock_react_agent = MagicMock()
+        mock_react_agent.context_engine = mock_context_engine
+
+        live_session = MagicMock()
+        live_session.get_session_id.return_value = "live1"
+        live_session.pre_run = AsyncMock()
+        live_session.post_run = AsyncMock()
+        live_session.commit = AsyncMock()
+        live_session.update_state = MagicMock()
+
+        mock_deep_agent = MagicMock()
+        mock_deep_agent.react_agent = mock_react_agent
+        mock_deep_agent.card = MagicMock()
+        mock_deep_agent.save_state = MagicMock()
+        mock_deep_agent._interaction_session = live_session
+        mock_deep_agent._loop_session = live_session
+
+        create_session = MagicMock()
+        with patch(
+            "openjiuwen.core.single_agent.create_agent_session",
+            create_session,
+        ):
+            from jiuwenswarm.agents.harness.common.session_ops_service import rewind_session_context
+
+            result = await rewind_session_context(
+                deep_agent=mock_deep_agent,
+                session_id="live1",
+                turn_index=2,
+            )
+
+        assert result is True
+        create_session.assert_not_called()
+        live_session.pre_run.assert_not_called()
+        live_session.post_run.assert_not_called()
+        live_session.commit.assert_awaited()
+        mock_context_engine.create_context.assert_called_once()
+        _, kwargs = mock_context_engine.create_context.call_args
+        assert kwargs["session"] is live_session
+        history_messages = kwargs["history_messages"]
+        from openjiuwen.core.foundation.llm.schema.message import UserMessage, AssistantMessage
+        assert any(isinstance(m, UserMessage) and "质数" in m.content for m in history_messages)
+        assert any(isinstance(m, AssistantMessage) and m.content == "7" for m in history_messages)
+
+    @pytest.mark.asyncio
+    async def test_empty_history_still_clears_live_context(self, tmp_path, monkeypatch):
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+        (sessions_dir / "empty1").mkdir()
+        (sessions_dir / "empty1" / "history.jsonl").write_text("", encoding="utf-8")
+
+        monkeypatch.setattr(
+            "jiuwenswarm.agents.harness.common.session_ops_service.get_agent_sessions_dir",
+            lambda: sessions_dir,
+        )
+        monkeypatch.setattr(
+            "jiuwenswarm.server.runtime.session.session_history.get_agent_sessions_dir",
+            lambda: sessions_dir,
+        )
+
+        from unittest.mock import AsyncMock, MagicMock
+
+        mock_context_engine = MagicMock()
+        mock_context_engine.get_context.return_value = None
+        mock_context_engine.clear_context = AsyncMock()
+        mock_context_engine.create_context = AsyncMock()
+        mock_context_engine.save_contexts = AsyncMock()
+
+        mock_react_agent = MagicMock()
+        mock_react_agent.context_engine = mock_context_engine
+
+        live_session = MagicMock()
+        live_session.get_session_id.return_value = "empty1"
+        live_session.commit = AsyncMock()
+        live_session.post_run = AsyncMock()
+        live_session.update_state = MagicMock()
+
+        mock_deep_agent = MagicMock()
+        mock_deep_agent.react_agent = mock_react_agent
+        mock_deep_agent.card = MagicMock()
+        mock_deep_agent.save_state = MagicMock()
+        mock_deep_agent._interaction_session = live_session
+
+        from jiuwenswarm.agents.harness.common.session_ops_service import rewind_session_context
+
+        result = await rewind_session_context(
+            deep_agent=mock_deep_agent,
+            session_id="empty1",
+            turn_index=1,
+        )
+
+        assert result is True
+        mock_context_engine.clear_context.assert_awaited()
+        mock_context_engine.create_context.assert_called_once()
+        _, kwargs = mock_context_engine.create_context.call_args
+        assert kwargs["history_messages"] == []
+        live_session.commit.assert_awaited()
+        live_session.post_run.assert_not_called()

@@ -19,6 +19,7 @@ so openjiuwen builds the member from the merged spec. Two modes are supported:
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import (
     Any,
@@ -32,12 +33,18 @@ from openjiuwen.agent_teams.schema.deep_agent_spec import (
     SubAgentSpec,
 )
 from openjiuwen.agent_teams.rails.builtin_elements import SKILL_USE as CORE_SKILL_USE
+from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.rails import SkillUseRail
 
+from jiuwenswarm.agents.harness.common.browser_defaults import (
+    DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
+)
 from jiuwenswarm.common.config import (
+    ASCEND_AFFINITY_PROVIDER,
+    get_default_model_provider,
     get_evolution_auto_save_enabled,
     get_evolution_auto_scan_enabled,
     get_evolution_review_trigger_enabled,
@@ -53,6 +60,29 @@ from jiuwenswarm.agents.swarm.providers import tools as _tools
 
 # Modes that route to the code adapter and get the code member profile.
 _CODE_MODES: frozenset[str] = frozenset({"code.team", "team.plan"})
+logger = logging.getLogger(__name__)
+
+
+def _kv_cache_affinity_config(config: dict[str, Any]) -> KVCacheAffinityConfig:
+    react = config.get("react")
+    react = react if isinstance(react, dict) else {}
+    raw = react.get("kv_cache_affinity_config")
+    raw = raw if isinstance(raw, dict) else {}
+    affinity_enabled = bool(raw.get("enable_kv_cache_affinity", False))
+    if affinity_enabled:
+        provider = get_default_model_provider(config)
+        if provider != ASCEND_AFFINITY_PROVIDER:
+            logger.warning(
+                "Team KV cache affinity failed closed: default provider=%s requires=%s",
+                provider or "<empty>",
+                ASCEND_AFFINITY_PROVIDER,
+            )
+            affinity_enabled = False
+    return KVCacheAffinityConfig(
+        enable_kv_cache_release=bool(raw.get("enable_kv_cache_release", False)),
+        enable_kv_cache_affinity=affinity_enabled,
+    )
+
 
 # Rails common to both roles, in mount order. Each entry is a ``swarm.*``
 # provider name re-exported from the registry (no hard-coded strings).
@@ -147,7 +177,7 @@ _CODE_TOOL_NAMES: tuple[str, ...] = (
     registry.SEND_FILE,
 )
 
-# code_agent sub-agents are always-on (explore / plan) or config-gated.
+# Code-mode sub-agents are either always-on (plan) or config-gated.
 _DEFAULT_SUBAGENT_MAX_ITERATIONS = 15
 
 
@@ -382,6 +412,29 @@ def _tool_params(name: str, config: dict[str, Any]) -> dict[str, Any]:
     return builder(config) if builder else {}
 
 
+def _team_common_rail_names(role: str) -> tuple[str, ...]:
+    """Shared chat-team rails; leaders omit harness todo planning."""
+    if role == "leader":
+        return tuple(name for name in _COMMON_RAIL_NAMES if name != registry.TASK_PLANNING)
+    return _COMMON_RAIL_NAMES
+
+
+def _code_base_rail_names(role: str) -> tuple[str, ...]:
+    """Code-profile rails minus permission interrupt; leaders omit code todo planning.
+
+    ``PERMISSION_INTERRUPT`` is excluded for all team members: it relies on a
+    frontend user response that headless teammates cannot provide, and even the
+    leader's interrupt path is unreliable in a team context.
+    """
+    names = tuple(
+        name for name in _CODE_RAIL_NAMES
+        if name != registry.PERMISSION_INTERRUPT
+    )
+    if role == "leader":
+        return tuple(name for name in names if name != registry.CODE_TASK_PLANNING)
+    return names
+
+
 def _role_evolution_rails(config: dict[str, Any], role: str) -> list[RailSpec]:
     """Return the role-specific skill-evolution rails (shared by both profiles)."""
     if role == "leader":
@@ -412,7 +465,7 @@ def _build_team_capability_specs(
     """Build the chat-team profile rail/tool specs for a member."""
     rails_specs: list[RailSpec] = [
         RailSpec(type=name, params=_rail_params(name, config))
-        for name in _COMMON_RAIL_NAMES
+        for name in _team_common_rail_names(role)
     ]
     if role == "leader":
         rails_specs.append(RailSpec(type=registry.STRUCTURED_ASK_USER))
@@ -479,18 +532,9 @@ def _build_code_capability_specs(
     """
     is_team_plan_leader = mode == "team.plan" and role == "leader"
 
-    # Exclude PERMISSION_INTERRUPT from code-profile rails for team members.
-    # It relies on a frontend user response that headless teammates cannot
-    # provide, and even the leader's interrupt path is unreliable in a team
-    # context (TOOL_PERMISSION_CHANNEL_ID is never set).
-    base_rail_names = [
-        name for name in _CODE_RAIL_NAMES
-        if name != registry.PERMISSION_INTERRUPT
-    ]
-
     rails_specs: list[RailSpec] = [
         RailSpec(type=name, params=_rail_params(name, config))
-        for name in base_rail_names
+        for name in _code_base_rail_names(role)
     ]
 
     if is_team_plan_leader:
@@ -599,7 +643,13 @@ def _code_subagent_spec(
         react_cfg.get("subagents", {}) if isinstance(react_cfg, dict) else {}
     )
     sub_cfg = subagents_cfg.get(name) if isinstance(subagents_cfg, dict) else None
-    max_iterations = react_cfg.get("max_iterations", _DEFAULT_SUBAGENT_MAX_ITERATIONS)
+    if name == "browser_agent":
+        max_iterations = DEFAULT_BROWSER_AGENT_MAX_ITERATIONS
+    else:
+        max_iterations = react_cfg.get(
+            "max_iterations",
+            _DEFAULT_SUBAGENT_MAX_ITERATIONS,
+        )
     if isinstance(sub_cfg, dict) and sub_cfg.get("max_iterations"):
         max_iterations = sub_cfg["max_iterations"]
     return SubAgentSpec(
@@ -620,7 +670,7 @@ def build_member_subagent_specs(
 ) -> list[SubAgentSpec]:
     """Build the declarative code sub-agent specs (empty for non-code modes).
 
-    explore / plan are always present, while code / browser are config-gated via
+    plan is always present, while code / browser are config-gated via
     ``react.subagents.<name>.enabled``.
 
     Args:
@@ -639,7 +689,6 @@ def build_member_subagent_specs(
     language = _subagent_language(mode, role, config)
 
     specs: list[SubAgentSpec] = [
-        _code_subagent_spec("explore_agent", registry.EXPLORE_AGENT, react, language),
         _code_subagent_spec("plan_agent", registry.PLAN_AGENT, react, language),
     ]
     if isinstance(subagents_cfg, dict):
@@ -700,7 +749,13 @@ def build_member_deep_agent_spec(
         "rails": merged_rails,
         "tools": merged_tools,
         "mcps": merged_mcps,
+        "kv_cache_affinity_config": _kv_cache_affinity_config(config),
     }
+    if role == "leader":
+        # Leaders use the team task board (create_task / view_task / update_task).
+        # Force off agent-core's enable_task_planning auto-inject path so a YAML
+        # base spec cannot re-mount harness todo rails via resolve_deep_agent_parts.
+        update["enable_task_planning"] = False
     if not _is_code_mode(mode):
         update["enable_skill_discovery"] = not retrieval_enabled
 
@@ -726,6 +781,18 @@ def build_member_deep_agent_spec(
 
     if subagent_specs or team_browser_spec:
         merged_subagents = list(base_spec.subagents or [])
+        if _is_code_mode(mode):
+            filtered = []
+            for spec in merged_subagents:
+                is_explore = (
+                    getattr(spec, "subagent_type", None) == "explore_agent"
+                    or getattr(spec, "factory_name", None) == registry.EXPLORE_AGENT
+                    or getattr(getattr(spec, "agent_card", None), "name", None)
+                    == "explore_agent"
+                )
+                if not is_explore:
+                    filtered.append(spec)
+            merged_subagents = filtered
         # Remove any browser_agent from base_spec to prevent the shared
         # playwright_official_stdio entry from co-existing with our isolated one.
         if team_browser_spec or any(

@@ -4,37 +4,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { webRequest } from "../../services/webClient";
+import { getSkillAvatar } from "../../utils/skillAvatar";
 
 /** 与后端 TEAM_SKILLS_HUB_BASE_URL 默认值一致（info 请求失败时的回退） */
 const DEFAULT_TEAMSKILLS_HUB_BASE_URL = "https://teamskills.openjiuwen.com";
 
 type LoadState = "idle" | "loading" | "success" | "error";
-
-const avatarColors = [
-  "bg-red-500",
-  "bg-orange-500",
-  "bg-amber-500",
-  "bg-yellow-500",
-  "bg-lime-500",
-  "bg-green-500",
-  "bg-emerald-500",
-  "bg-teal-500",
-  "bg-cyan-500",
-  "bg-sky-500",
-  "bg-blue-500",
-  "bg-indigo-500",
-  "bg-violet-500",
-  "bg-purple-500",
-  "bg-fuchsia-500",
-  "bg-pink-500",
-  "bg-rose-500",
-];
-
-const getSkillAvatar = (name: string) => {
-  const firstChar = name.charAt(0).toUpperCase();
-  const colorIndex = name.charCodeAt(0) % avatarColors.length;
-  return { firstChar, color: avatarColors[colorIndex] };
-};
 
 type TeamSkillsHubSkillItem = {
   asset_id: string;

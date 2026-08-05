@@ -63,6 +63,10 @@
 .goal-bar__status--paused { color: var(--color-feedback-warning); }
 .goal-bar__status--completed { color: var(--color-feedback-success); }
 .goal-bar__status--blocked { color: var(--color-feedback-danger); }
+/* disconnected/unknown 是前端专属展示态（真实环境联调方案），用中性色区分于 blocked 的
+   danger 色——断联/查询失败不是"目标出错了"，不该带上出错的观感。 */
+.goal-bar__status--disconnected { color: var(--color-text-secondary); }
+.goal-bar__status--unknown { color: var(--color-text-secondary); }
 
 .goal-bar__objective {
   min-width: 0;

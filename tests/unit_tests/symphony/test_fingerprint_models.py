@@ -34,6 +34,20 @@ def test_fingerprint_round_trip_preserves_unified_fields():
     assert Fingerprint.from_dict(fingerprint.to_dict()) == fingerprint
 
 
+@pytest.mark.parametrize("legacy_type", ["missing", None, ""])
+def test_fingerprint_from_dict_defaults_legacy_empty_type_to_skill(legacy_type):
+    payload = _fingerprint().to_dict()
+    if legacy_type == "missing":
+        payload.pop("type")
+    else:
+        payload["type"] = legacy_type
+
+    fingerprint = Fingerprint.from_dict(payload)
+
+    assert fingerprint.type == "skill"
+    assert fingerprint.to_dict()["type"] == "skill"
+
+
 def test_fingerprint_rejects_unknown_type():
     with pytest.raises(ValueError, match="agent.*skill"):
         _fingerprint(type="workflow")

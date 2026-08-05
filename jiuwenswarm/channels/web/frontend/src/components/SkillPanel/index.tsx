@@ -11,8 +11,10 @@ import { SourceManagerModal } from "../../features/SourceManagerModal";
 import { SkillNetSearchModal } from "../../features/SkillNetSearchModal";
 import { ClawHubSearchModal } from "../../features/ClawHubSearchModal";
 import { TeamSkillsHubModal } from "../../features/TeamSkillsHubModal";
+import { OnlineSkillSearchPanel } from "../../features/OnlineSkillSearchPanel";
 import { SkillEvolutionModal } from "../../features/SkillEvolutionModal";
 import { normalizeSkillNetUrl } from "../../utils/skillNetUrl";
+import { getSkillAvatar } from "../../utils/skillAvatar";
 import { SkillGraphPanel, type SkillGraphPanelHandle } from "../SkillGraphPanel";
 import { MarkdownRenderer } from "../MarkdownRenderer";
 import { Switch } from "../Switch";
@@ -24,24 +26,10 @@ const SKILL_RETRIEVAL_RUNNING_POLL_MS = 10_000;
 const SKILL_RETRIEVAL_IDLE_POLL_MS = 5 * 60_000;
 const GRAPH_READING_MIN_VISIBLE_MS = 500;
 
-/** 在线技能源存储 key */
-const ONLINE_SOURCE_STORAGE_KEY = "jiuwen:online_source";
-
-/** 获取保存的在线源 */
-function getSavedOnlineSource(): "skillnet" | "clawhub" {
-  try {
-    const saved = localStorage.getItem(ONLINE_SOURCE_STORAGE_KEY);
-    if (saved === "skillnet" || saved === "clawhub") {
-      return saved;
-    }
-  } catch {
-    /* ignore */
-  }
-  return "skillnet";
-}
-
 type SkillItem = {
   name: string;
+  /** 展示名（保留安装来源的原始大小写，如 ClawHub 的 Weather）；缺省回退到 name */
+  display_name?: string;
   description: string;
   source: string;
   version: string;
@@ -154,6 +142,9 @@ function getSourceLabel(source: string, t: (key: string) => string, isBuiltinSou
   if (source === "local") return t('skills.source.local');
   if (source === "project") return t('skills.source.project');
   if (source === "builtin") return t('skills.source.builtin');
+  if (source === "clawhub") return t('skills.source.clawhub');
+  if (source === "skillnet") return t('skills.source.skillnet');
+  if (source === "teamskillshub") return t('skills.source.teamskillshub');
   return source || t('skills.source.unknown');
 }
 
@@ -585,7 +576,6 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   const [activeTab, setActiveTab] = useState<"my" | "marketplace" | "index" | "graph">("my");
   const [mySkillsSubTab, setMySkillsSubTab] = useState<"all" | "enabled" | "disabled">("all");
   const [marketplaceSubTab, setMarketplaceSubTab] = useState<"builtin" | "swarmskills" | "online">("builtin");
-  const [onlineSource, setOnlineSource] = useState<"skillnet" | "clawhub">(getSavedOnlineSource);
   const [searchTrigger, setSearchTrigger] = useState(0);
   const [skills, setSkills] = useState<SkillItem[]>([]);
   const [plugins, setPlugins] = useState<InstalledPluginItem[]>([]);
@@ -744,6 +734,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
     return result.filter((skill) => {
       const haystack = [
         skill.name,
+        skill.display_name,
         skill.description,
         skill.author,
         coerceStringList(skill.tags).join(" "),
@@ -1222,32 +1213,6 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
     },
     [fetchSkills, handleBackToList, t, withSession]
   );
-
-  const avatarColors = [
-    "bg-red-500",
-    "bg-orange-500",
-    "bg-amber-500",
-    "bg-yellow-500",
-    "bg-lime-500",
-    "bg-green-500",
-    "bg-emerald-500",
-    "bg-teal-500",
-    "bg-cyan-500",
-    "bg-sky-500",
-    "bg-blue-500",
-    "bg-indigo-500",
-    "bg-violet-500",
-    "bg-purple-500",
-    "bg-fuchsia-500",
-    "bg-pink-500",
-    "bg-rose-500",
-  ];
-
-  const getSkillAvatar = (name: string) => {
-    const firstChar = name.charAt(0).toUpperCase();
-    const colorIndex = name.charCodeAt(0) % avatarColors.length;
-    return { firstChar, color: avatarColors[colorIndex] };
-  };
 
   const renderActionButton = (skill: SkillItem) => {
     const plugin = installedSkillMap.get(skill.name);
@@ -1970,9 +1935,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                       ? t("skills.searchPlaceholder")
                       : marketplaceSubTab === "swarmskills"
                       ? t("skills.swarmskills.searchPlaceholder")
-                      : onlineSource === "skillnet"
-                      ? t("skills.skillNet.searchPlaceholder")
-                      : t("skills.clawhub.searchPlaceholder")
+                      : t("skills.onlineSearch.searchPlaceholder")
                   }
                   className="w-full px-3 py-1.5 rounded-lg text-sm bg-secondary border border-border text-text placeholder:text-text-muted"
                 />
@@ -1994,6 +1957,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                   {listState === "success" && builtinSkills.length > 0 && (
                     builtinSkills.map((skill) => {
                       const avatar = getSkillAvatar(skill.name);
+                      const displayName = skill.display_name || skill.name;
                       const isDisabled = skill.enabled === false;
                       const isToggling = actionTarget === `toggle:${skill.name}`;
                       const isInstalled = installedSkillMap.has(skill.name) || skill.source === "local";
@@ -2013,7 +1977,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                                 </div>
                                 <div className="min-w-0">
                                   <div className="text-base font-semibold text-text-strong">
-                                    {skill.name}
+                                    {displayName}
                                   </div>
                                   <div className="text-sm text-text-muted mt-1 line-clamp-3">
                                     {skill.description || t('skills.noDescription')}
@@ -2049,7 +2013,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                                 </div>
                                 <div className="min-w-0 flex-1">
                                   <div className="text-sm font-semibold text-text-strong truncate">
-                                    {skill.name}
+                                    {displayName}
                                   </div>
                                   <div className="text-xs text-text-muted mt-1 line-clamp-2">
                                     {skill.description || t('skills.noDescription')}
@@ -2095,35 +2059,14 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                 </div>
               )}
 
-              {marketplaceSubTab === "online" && onlineSource === "skillnet" && (
-                <div className="h-full" key={`skillnet-${searchTrigger}`}>
-                  <SkillNetSearchModal
-                    open={true}
-                    embedded={true}
+              {marketplaceSubTab === "online" && (
+                <div className="h-full" key={`online-${searchTrigger}`}>
+                  <OnlineSkillSearchPanel
                     sessionId={sessionId}
                     externalSearchQuery={debouncedSearch}
                     installedSkillNames={installedSkillNames}
                     installedSkillOrigins={installedSkillOrigins}
                     viewMode={viewMode}
-                    onClose={() => {}}
-                    onInstalled={(_skillName: string) => {
-                      void fetchSkills();
-                    }}
-                  />
-                </div>
-              )}
-
-              {marketplaceSubTab === "online" && onlineSource === "clawhub" && (
-                <div className="h-full" key={`clawhub-${searchTrigger}`}>
-                  <ClawHubSearchModal
-                    open={true}
-                    embedded={true}
-                    sessionId={sessionId}
-                    externalSearchQuery={debouncedSearch}
-                    installedSkillNames={installedSkillNames}
-                    installedSkillOrigins={installedSkillOrigins}
-                    viewMode={viewMode}
-                    onClose={() => {}}
                     onInstalled={(_skillName: string) => {
                       void fetchSkills();
                     }}
@@ -2164,7 +2107,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                       </div>
                       <div>
                         <div className="text-lg font-semibold text-text-strong">
-                          {selectedSkill.name}
+                          {selectedSkill.display_name || selectedSkill.name}
                         </div>
                         <div className="text-sm text-text-muted mt-1">
                           {selectedSkill.description || t('skills.noDescription')}
@@ -2296,6 +2239,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                   {listState === "success" &&
                     getMySkillsFiltered().map((skill) => {
                       const avatar = getSkillAvatar(skill.name);
+                      const displayName = skill.display_name || skill.name;
                       const isDisabled = skill.enabled === false;
                       const isToggling = actionTarget === `toggle:${skill.name}`;
                       return (
@@ -2313,7 +2257,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                                 </div>
                                 <div className="min-w-0">
                                   <div className="text-base font-semibold text-text-strong">
-                                    {skill.name}
+                                    {displayName}
                                   </div>
                                   <div className="text-sm text-text-muted mt-1 line-clamp-3">
                                     {skill.description || t('skills.noDescription')}
@@ -2347,7 +2291,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                                 </div>
                                 <div className="min-w-0 flex-1">
                                   <div className="text-sm font-semibold text-text-strong truncate">
-                                    {skill.name}
+                                    {displayName}
                                   </div>
                                   <div className="text-xs text-text-muted mt-1 line-clamp-2">
                                     {skill.description || t('skills.noDescription')}
@@ -2389,15 +2333,6 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
         open={sourceModalOpen}
         sessionId={sessionId}
         onClose={() => setSourceModalOpen(false)}
-        currentSource={onlineSource}
-        onSourceChange={(source) => {
-          setOnlineSource(source);
-          try {
-            localStorage.setItem(ONLINE_SOURCE_STORAGE_KEY, source);
-          } catch {
-            /* ignore */
-          }
-        }}
         onNavigateToConfig={() => {
           setSourceModalOpen(false);
           onNavigateToConfig?.();

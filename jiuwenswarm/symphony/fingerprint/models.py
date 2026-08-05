@@ -176,7 +176,7 @@ class Fingerprint:
     def from_dict(cls, payload: Dict[str, Any]) -> "Fingerprint":
         if not isinstance(payload, dict):
             raise ValueError("Fingerprint payload must be a dictionary.")
-        raw_type = str(payload.get("type") or "")
+        raw_type = str(payload.get("type") or "skill")
         if raw_type not in {"agent", "skill"}:
             raise ValueError("Fingerprint type must be 'agent' or 'skill'.")
         raw_inputs = payload.get("inputs", [])

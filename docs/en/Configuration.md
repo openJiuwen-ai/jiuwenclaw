@@ -8,22 +8,15 @@ This document details each configuration option in the JiuwenSwarm frontend pane
 
 ## 1. Configuration Entry
 
-Open **Configuration** from the left navigation bar to view and edit settings for models, third-party services, free search, and more. Click **Save** after changes; whether you need to wait for services to become ready depends on your deployment.
+Click **More** → **Configuration** in the left navigation bar to view and edit settings for models, third-party services, free search, and more. Click **Save** after changes; whether you need to wait for services to become ready depends on your deployment.
 
-![Configuration Panel](../assets/images/config.png)
+![Configuration Panel](../assets/images/current-ui-en/07-Configuration-Model-Tab.png)
 
-The configuration panel contains the following main sections:
+The configuration panel is organized into three tabs:
 
-- **Model Configuration**: Default chat model, video/audio/vision models (see [2. Model Configuration](#2-model-configuration))
-- **Embedding Configuration**: Vector embedding service (see [3. Embedding Configuration](#3-embedding-configuration))
-- **Third-Party Services**: Jina, Bocha, Serper, Perplexity, GitHub, etc. (see [4. Third-Party Service Configuration](#4-third-party-service-configuration))
-- **Self-Evolution Configuration**: Automatic skill improvement (see [5. Self-Evolution Configuration](#5-self-evolution-configuration))
-- **Context Compression**: Dialogue history management (see [6. Context Compression](#6-context-compression))
-- **Tool Security Guardrails**: Tool invocation permission checks (see [7. Tool Security Guardrails](#7-tool-security-guardrails))
-- **Memory Sensitive-Info Filtering**: Memory system privacy protection settings (see [8. Memory Sensitive-Info Filtering](#8-memory-sensitive-info-filtering))
-- **Skill Symphony and Skill Retrieval**: Skill-tree retrieval, skill score, and skill orchestration settings (see [9. Skill Symphony and Skill Retrieval Configuration](#9-skill-symphony-and-skill-retrieval-configuration))
-
-The panel also includes **Free Search Engine Configuration**, **Multi-Agent / Team Configuration**, **A2UI**, and **Email Configuration** sections. Configure them as needed.
+- **Model**: Default chat model, video/audio/vision models, Embedding configuration (see [2. Model Configuration](#2-model-configuration))
+- **Security**: Tool security guardrails, sensitive-info filtering (see [7. Tool Security Guardrails](#7-tool-security-guardrails))
+- **Other**: Third-party services, self-evolution, context compression, skill symphony, etc.
 
 > 💡 **Tip**: Model configuration (`api_base`, `api_key`, `model`, `model_provider`) is required; all other configurations are optional.
 
@@ -51,16 +44,18 @@ JiuwenSwarm supports multiple model types to meet diverse scenario requirements:
 
 Each model type supports the following parameters:
 
-| Field              | Description                  | Remarks                                                                                      |
-| ------------------ | ---------------------------- | -------------------------------------------------------------------------------------------- |
-| `api_base`         | Base URL for model API        | Use the provider's API endpoint; **do not include `/chat/completions`**; appended automatically |
-| `api_key`          | Model API key                | Obtained from the model provider; keep confidential                                           |
-| `model`            | Model identifier             | Use exact model ID such as `gpt-4o`, `claude-3-opus`, `deepseek-chat`                                         |
-| `model_provider`   | Model provider type          | Supports `OpenAI`, `DeepSeek`, `DashScope`, `SiliconFlow`, `InferenceAffinity`, `OpenRouter` for API format adaptation; video/audio/vision models currently support `OpenAI` only |
+| Field (frontend) | Backend field (config.yaml) | Description                  | Remarks                                                                                      |
+| ---------------- | --------------------------- | ---------------------------- | -------------------------------------------------------------------------------------------- |
+| `api_base`       | `api_base`                  | Base URL for model API        | Use the provider's API endpoint; **do not include `/chat/completions`**; appended automatically |
+| `api_key`        | `api_key`                   | Model API key                | Obtained from the model provider; keep confidential                                           |
+| `model`          | `model_name`                | Model identifier             | Use exact model ID such as `gpt-4o`, `claude-3-opus`, `deepseek-chat`                                         |
+| `model_provider` | `client_provider`           | Model provider type          | Supports `OpenAI`, `DeepSeek`, `DashScope`, `SiliconFlow`, `InferenceAffinity`, `OpenRouter` for API format adaptation; video/audio/vision models currently support `OpenAI` only |
+
+> 💡 **Field Mapping**: The frontend panel uses `model` / `model_provider` as display field names; when saved to `config.yaml` they are mapped to backend fields `model_name` / `client_provider`. Both refer to the same thing, only the naming in the config file differs.
 
 > 💡 **Test Function**: The configuration panel provides a **Test button**. After filling in the model configuration, you can click "Test" to verify the API connection. The system will send a simple test request and display "Test Successful" if successful, or show error information otherwise.
 
-![Model Test Configuration Example](../assets/images/config_model_connect_test.png)
+![Model Configuration Tab](../assets/images/current-ui-en/07-Configuration-Model-Tab.png)
 
 #### Configuration Examples
 
@@ -73,6 +68,24 @@ model: gpt-4o
 model_provider: OpenAI
 ```
 
+**DeepSeek**
+
+```
+api_base: https://api.deepseek.com/v1
+api_key: sk-your-deepseek-api-key
+model: deepseek-chat
+model_provider: DeepSeek
+```
+
+**SiliconFlow**
+
+```
+api_base: https://api.siliconflow.cn/v1
+api_key: sk-your-siliconflow-api-key
+model: Qwen/Qwen2.5-72B-Instruct
+model_provider: SiliconFlow
+```
+
 > 💡 **Tip**: Most model providers offer OpenAI-compatible APIs. You can adjust `api_base` and `model` parameters based on your actual provider.
 
 ### 2.3 Multi-Model Management and Aliases
@@ -81,14 +94,14 @@ The **Model List** section in the configuration panel supports maintaining multi
 
 Each model entry contains the following fields:
 
-| Field | Required | Description |
-|------|---------|------|
-| `model_name` | Yes | Model name at the API layer (e.g., `gpt-4o`, `deepseek-chat`) |
-| `api_base` | Yes | API endpoint for this model |
-| `api_key` | Yes | API key for this model |
-| `model_provider` | Yes | Provider (e.g., `OpenAI`, `DeepSeek`) |
-| `reasoning_level` | No | Reasoning intensity; optional `off` / `low` / `medium` / `high`; leave empty to unset |
-| `temperature` | No | Sampling temperature, default `0.95` |
+| Field (frontend) | Backend field (config.yaml) | Required | Description |
+|------|---------|---------|------|
+| `model_name` | `model_name` | Yes | Model name at the API layer (e.g., `gpt-4o`, `deepseek-chat`) |
+| `api_base` | `api_base` | Yes | API endpoint for this model |
+| `api_key` | `api_key` | Yes | API key for this model |
+| `model_provider` | `client_provider` | Yes | Provider (e.g., `OpenAI`, `DeepSeek`) |
+| `reasoning_level` | `reasoning_level` | No | Reasoning intensity; optional `off` / `low` / `medium` / `high`; leave empty to unset |
+| `temperature` | `temperature` | No | Sampling temperature, default `0.95` |
 
 **`alias` Rules**:
 - If empty, it automatically defaults to `model_name` when saved;
@@ -169,13 +182,15 @@ Embedding models convert text into vector representations and form the core of J
 
 > 💡 **Tip**: Embedding configuration is optional. If not set, the system uses a mock provider for basic retrieval. Configuring an embedding model improves semantic search precision. See the [Memory](Memory.md) documentation for details.
 
+> 💡 **Frontend Fields and Environment Variables**: The frontend fields below are saved to the `embed` section of `config.yaml`; if not set via the frontend, they can also be injected via environment variables, which take precedence over the config file. Mapping: `embed_api_key` ↔ `EMBED_API_KEY`, `embed_api_base` ↔ `EMBED_API_BASE` (field name in config.yaml is `embed_base_url`), `embed_model` ↔ `EMBED_MODEL`.
+
 ### 3.2 Configuration Fields
 
-| Field              | Description                     | Reference Format                        | Remarks                                   |
-| ------------------ | ------------------------------- | --------------------------------------- | ----------------------------------------- |
-| `embed_api_base`   | Base URL for embedding API      | `https://api.siliconflow.cn/v1`         | Embedding service API endpoint            |
-| `embed_api_key`    | Embedding service API key       | `sk-xxxxxxxxxxxxxxxx`                   | Obtained from the service provider        |
-| `embed_model`      | Embedding model name            | `BAAI/xxx`                              | Chinese-optimized embedding recommended   |
+| Field (frontend) | Backend field (config.yaml) | Description                     | Reference Format                        | Remarks                                   |
+| ---------------- | --------------------------- | ------------------------------- | --------------------------------------- | ----------------------------------------- |
+| `embed_api_base` | `embed_base_url`            | Base URL for embedding API      | `https://api.siliconflow.cn/v1`         | Embedding service API endpoint            |
+| `embed_api_key`  | `embed_api_key`             | Embedding service API key       | `sk-xxxxxxxxxxxxxxxx`                   | Obtained from the service provider        |
+| `embed_model`    | `embed_model`               | Embedding model name            | `BAAI/xxx`                              | Chinese-optimized embedding recommended   |
 
 ---
 
@@ -209,10 +224,15 @@ Self-evolution controls the automatic improvement of JiuwenSwarm's Skills.
 
 ### Toggles
 
-The frontend shows two options under **Self-Evolution Configuration**:
+The frontend shows the following options under **Self-Evolution Configuration**:
 
-- **Auto-detect evolution signals**: disabled by default. When enabled, the system scans failures, corrections, and other evolution signals after chat and tool execution. This maps to `react.evolution.auto_scan`; env `EVOLUTION_AUTO_SCAN` takes precedence.
-- **Auto-suggest new skill creation**: disabled by default. When enabled, the system can propose creating a new Skill when no suitable Skill exists. This maps to `react.evolution.skill_create`; env `SKILL_CREATE` takes precedence.
+| Switch | Config key | Default | Purpose |
+| --- | --- | --- | --- |
+| **Enable Skills Self-Evolution** (master switch) | `react.evolution.enabled` | `true` | Master switch for self-evolution. When off, the entire self-evolution chain (including the `/evolve` manual command) is unavailable |
+| **Auto-detect evolution signals** | `react.evolution.auto_scan` | `false` | When enabled, the system scans failures, corrections, and other evolution signals after chat and tool execution. Env `EVOLUTION_AUTO_SCAN` takes precedence |
+| **Auto-suggest new skill creation** | `react.evolution.skill_create` | `false` | When enabled, the system can propose creating a new Skill when no suitable Skill exists. Env `SKILL_CREATE` takes precedence |
+
+> 💡 **Note**: `react.evolution.enabled` is the master switch (on by default, determines whether self-evolution is available), `auto_scan` / `skill_create` are sub-switches (off by default, determine whether to trigger automatically). Even with the master switch on, `auto_scan` only controls automatic scanning of failure/correction signals; `skill_create` independently controls whether to auto-suggest new skill creation. When both are off, the system only responds to manual `/evolve` commands.
 
 > 📖 For details on the self-evolution mechanism, see [Skill Self-Evolution](SkillSelfEvolution.md).
 
@@ -242,7 +262,7 @@ When enabled, the system will:
 
 **Compute Affinity (KV Release)** is an advanced optimization feature of context compression for managing GPU memory usage.
 
-- **Field**: `context_engine.kv_release_enabled`
+- **Field**: `react.context_engine_config.enable_kv_cache_release`
 - **Default**: `false` (disabled)
 - **Purpose**: When enabled, the system dynamically releases KV Cache (key-value cache) that is no longer needed during conversations, saving GPU memory and allowing longer dialogue contexts.
 
@@ -310,9 +330,11 @@ Memory sensitive-info filtering protects user privacy by preventing sensitive in
 
 ### Toggle
 
-- **Field**: `memory.filter_enabled`
-- **Default**: `true` (enabled)
-- **Purpose**: When enabled, the system automatically detects and filters sensitive information before writing to memory.
+- **Field**: `memory.forbidden_memory_definition.enabled`
+- **Default**: `false` (disabled)
+- **Purpose**: When enabled, the system automatically detects and filters sensitive information before writing to memory, matching against `memory.forbidden_memory_definition.patterns`.
+
+> 💡 **Note**: This switch is off by default and must be enabled manually. When enabled, the system matches sensitive information according to `forbidden_memory_definition.patterns`; the `description` field records the filter policy description text (Chinese/English).
 
 ### Filtered Content Types
 
@@ -408,7 +430,11 @@ Common settings:
 
 ## 10. Advanced Configuration
 
-Beyond the **Configuration** page, the product may use a **main configuration** for timeouts, temperature, heartbeat interval, context thresholds, and toggles that work together with **context compression**, **permissions**, **memory restrictions**, and similar UI switches. **This document does not state where those files live on disk**; for offline edits or bulk rollout, contact your administrator.
+Beyond the **Configuration** page, the product may use a **main configuration** for timeouts, temperature, heartbeat interval, context thresholds, and toggles that work together with **context compression**, **permissions**, **memory restrictions**, and similar UI switches. The main config file is typically located at:
+
+```text
+~/.jiuwenswarm/config/config.yaml
+```
 
 ### 10.1 Common logical keys (conceptual paths)
 
@@ -451,5 +477,25 @@ A: Model information is displayed on the configuration panel. You may also check
 ### Q: Are multimodal models required?
 
 A: No. Video, audio, and vision models are optional and only required for their respective multimodal functions.
+
+### Q: Does `api_base` need the `/chat/completions` suffix?
+
+A: No. `api_base` only needs to go up to the version level (e.g., `https://api.openai.com/v1`); the system appends `/chat/completions` automatically. Adding the suffix manually may cause duplicate request paths and errors. Use the "Test" button to verify connectivity after configuration.
+
+### Q: What to do when `alias` conflicts in the model list?
+
+A: `alias` must be globally unique across all configured models and cannot duplicate another model's `alias` or `model_name`. When left empty, the system auto-assigns it as `model_name`. On conflict, manually assign a different `alias`; when switching models (Web dropdown or `/model <name>`), either `alias` or `model_name` can be used as the identifier.
+
+### Q: What happens if Embed configuration is not filled in?
+
+A: No critical impact. Embed is optional; when unset, the system uses a Mock Provider for basic retrieval. Configuring it provides more precise semantic search and better memory recall. Chinese-optimized embedding models are recommended.
+
+### Q: Is Tool Security Guardrails enabled by default?
+
+A: No. Tool Security Guardrails corresponds to `permissions.enabled`, which defaults to `false` (disabled). When enabled, the system checks permission rules before sensitive tool operations (such as `bash`, `write_file`) and resolves to `allow`/`ask`/`deny`, prompting a confirmation dialog for `ask`.
+
+### Q: How to apply changes after directly editing `~/.jiuwenswarm/config/config.yaml`?
+
+A: The system automatically detects and hot-reloads the file after saving (most settings take effect immediately; a few require a process restart). If changes do not apply after a long time, check the YAML format or re-save via the Web configuration panel to trigger a refresh.
 
 ---

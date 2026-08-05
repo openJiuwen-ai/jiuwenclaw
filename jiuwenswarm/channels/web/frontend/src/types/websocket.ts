@@ -159,6 +159,11 @@ export interface AskUserQuestionPayload {
  * 用户回答
  */
 export interface UserAnswer {
+  /**
+   * 服务端下发的原始问题文本。
+   * ask_user_interrupt 场景必填，后端据此把答案归属到对应问题。
+   */
+  question?: string;
   selected_options: string[];
   custom_input?: string;
 }

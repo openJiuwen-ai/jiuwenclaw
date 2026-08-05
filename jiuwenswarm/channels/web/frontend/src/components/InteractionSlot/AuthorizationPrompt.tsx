@@ -25,8 +25,8 @@ interface AuthorizationPromptProps {
   onSubmit: (requestId: string, answers: UserAnswer[], source?: string) => void;
 }
 
-/** 动作按钮的显示顺序：跳过(reject) → 总是允许 → 授权单次(allow-once)。 */
-const ACTION_ORDER: AuthSemantic[] = ['reject', 'allow-always', 'allow-once'];
+/** 动作按钮的显示顺序：跳过(reject) → 永久记住 → 会话内记住 → 授权单次(allow-once)。 */
+const ACTION_ORDER: AuthSemantic[] = ['reject', 'allow-always', 'session-allow', 'allow-once'];
 
 /** 与旧版 InlineQuestionCard 一致的 Tailwind Typography 类，保证正文渲染观感。 */
 const PROSE_CLS =
