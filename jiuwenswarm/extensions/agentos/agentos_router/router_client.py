@@ -94,7 +94,6 @@ def resolve_agent_workspace(user_id: str, *, workspace_root: str | None = None) 
 class AgentOSRouterClient(AgentServerClient):
     """AgentServerClient implementation backed by YuanRong and AgentManager."""
 
-
     def __init__(
         self,
         yuanrong: YuanrongFrontendAgentClient,
@@ -105,7 +104,7 @@ class AgentOSRouterClient(AgentServerClient):
         workspace_root: str = DEFAULT_AGENT_WORKSPACE_ROOT,
         sandbox_idle_timeout_seconds: float = 600.0,
         sandbox_idle_check_interval_seconds: float = 30.0,
-        auth_client: AgentOSAuthenticator | None = None, #TODO
+        auth_client: AgentOSAuthenticator | None = None,
     ) -> None:
         self._yuanrong = yuanrong
         self._registry = registry
@@ -138,7 +137,6 @@ class AgentOSRouterClient(AgentServerClient):
             web_channel.on_connect(self.on_connect)
         if tui_channel:
             tui_channel.on_connect(self.on_connect)
-
 
     async def on_connect(self, ws: Any) -> AuthResult | None: #todo
         if self._auth_client is None:

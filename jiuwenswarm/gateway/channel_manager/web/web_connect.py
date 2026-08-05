@@ -251,10 +251,6 @@ class WebChannel(BaseWsChannel):
         """
         self._method_handlers[method] = handler
 
-    def on_connect(self, callback: ConnectHook) -> None:
-        """注册连接建立钩子，新客户端接入时依次调用."""
-        self._connect_hooks.append(callback) #TODO
-
     def on_disconnect(self, callback: ConnectHook) -> None:
         """注册连接断开钩子，客户端断连时依次调用.
 

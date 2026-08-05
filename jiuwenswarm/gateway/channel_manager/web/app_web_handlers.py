@@ -1608,11 +1608,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
     async def _on_connect(ws):
         ac = _resolve(agent_client)
-        if hasattr(ac, "on_auth_connect"):
-            auth_result = await ac.on_auth_connect(ws, "web")
-            if auth_result and not auth_result.success:
-                logger.debug("[_on_connect] 鉴权失败，关闭连接: %s", getattr(auth_result, "error", ""))
-                return
         if ac is None or not getattr(ac, "server_ready", False):
             logger.debug("[_on_connect] Agent 未就绪，跳过 connection.ack")
             return

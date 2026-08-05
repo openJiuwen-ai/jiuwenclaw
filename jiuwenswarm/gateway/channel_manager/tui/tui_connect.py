@@ -3359,17 +3359,6 @@ def build_cli_route_binding(bind: CliRouteBindParams) -> GatewayRouteBinding:
             return
         mh.cancel_scheduled_disconnect_cancel(channel_id, session_id)
 
-    async def _tui_connect_hook(ws, path):
-        """WS 建立后、业务消息前的简单鉴权。"""
-        ac = bind.agent_client
-        if hasattr(ac, "on_auth_connect"):
-            return await ac.on_auth_connect(ws, "tui")
-        return False
-
-    _tui_channel = bind.ws_channel
-    if _tui_channel is not None and hasattr(_tui_channel, "on_connect"):
-        _tui_channel.on_connect(_tui_connect_hook)
-
     return GatewayRouteBinding(
         path=bind.path,
         channel_id=bind.channel_id,
