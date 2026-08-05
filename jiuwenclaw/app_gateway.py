@@ -46,7 +46,7 @@ from jiuwenclaw.utils import (
     prepare_workspace,
     cleanup_legacy_flat_agent_dir,
     update_config,
-    get_multi_tenant_user_workspace_dir,
+    get_tenant_agent_jiuwenclaw_workspace_dir,
 )
 from jiuwenclaw.extensions.extension_config_sync import decrypt_extensions_sensitive_for_agent
 from jiuwenclaw.local_env_config import decrypt
@@ -63,12 +63,8 @@ for _stream in (sys.stdout, sys.stderr):
 # Ensure workspace initialized
 _workspace_dir = get_user_workspace_dir()
 _config_file = _workspace_dir / "config" / "config.yaml"
-# 多租户路径：service_default/agent_default/agent/jiuwenclaw_workspace
-_multi_tenant_workspace = get_multi_tenant_user_workspace_dir("default", "default")
-if _multi_tenant_workspace:
-    _new_workspace = _multi_tenant_workspace / "agent" / "jiuwenclaw_workspace"
-else:
-    _new_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
+# 多租户路径：workspace_default/agent/jiuwenclaw_workspace
+_new_workspace = get_tenant_agent_jiuwenclaw_workspace_dir(workspace_key="default")
 _old_workspace = _workspace_dir / "agent" / "workspace"
 
 # Initialize if config doesn't exist, or if legacy workspace exists but new doesn't (migration)

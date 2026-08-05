@@ -827,8 +827,10 @@ class AgentWebSocketServer:
         from jiuwenclaw.agentserver.session_metadata import get_session_metadata
 
         # extract_ids 现在总是返回有效值（默认或指定的 tenant ID）
-        agent_id, service_id = TenantAgentPool.extract_ids(request)
-        sessions_dir = get_multi_tenant_user_workspace_dir(service_id, agent_id) / "agent" / "sessions"
+        _, _, workspace_key = TenantAgentPool.extract_ids(request)
+        sessions_dir = get_multi_tenant_user_workspace_dir(
+            workspace_key=workspace_key
+        ) / "agent" / "sessions"
         sessions = []
 
         try:
@@ -905,8 +907,10 @@ class AgentWebSocketServer:
         session_id = params.get("session_id")
         page_idx = params.get("page_idx")
         if os.getenv("AGENT_RUNTIME", "").strip():
-            agent_id, service_id = TenantAgentPool.extract_ids(request)
-            sessions_dir = get_multi_tenant_user_workspace_dir(service_id, agent_id) / "agent" / "sessions"
+            _, _, workspace_key = TenantAgentPool.extract_ids(request)
+            sessions_dir = get_multi_tenant_user_workspace_dir(
+                workspace_key=workspace_key
+            ) / "agent" / "sessions"
         else:
             sessions_dir = get_agent_sessions_dir()
         data = self.get_conversation_history(sessions_dir, session_id=session_id, page_idx=page_idx)
@@ -933,8 +937,10 @@ class AgentWebSocketServer:
         session_id = params.get("session_id")
         page_idx = params.get("page_idx")
         if os.getenv("AGENT_RUNTIME", "").strip():
-            agent_id, service_id = TenantAgentPool.extract_ids(request)
-            sessions_dir = get_multi_tenant_user_workspace_dir(service_id, agent_id) / "agent" / "sessions"
+            _, _, workspace_key = TenantAgentPool.extract_ids(request)
+            sessions_dir = get_multi_tenant_user_workspace_dir(
+                workspace_key=workspace_key
+            ) / "agent" / "sessions"
         else:
             sessions_dir = get_agent_sessions_dir()
         data = self.get_conversation_history(sessions_dir, session_id=session_id, page_idx=page_idx)

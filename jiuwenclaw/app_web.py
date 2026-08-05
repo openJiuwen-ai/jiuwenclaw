@@ -76,9 +76,7 @@ def _generate_agent_data(project_root: Path) -> None:
     Note: project_root parameter is ignored; uses default multi-tenant path instead.
     """
     # 使用默认多租户路径（单租户作为多租户的默认特例）
-    default_workspace = get_multi_tenant_user_workspace_dir("default", "default")
-    if default_workspace is None:
-        raise FileNotFoundError("default multi-tenant workspace not found")
+    default_workspace = get_multi_tenant_user_workspace_dir(workspace_key="default")
     agent_root = (default_workspace / "agent").resolve()
     workspace_root = (agent_root / "jiuwenclaw_workspace").resolve()
     output_path = (workspace_root / "agent-data.json").resolve()
@@ -571,10 +569,7 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 self._write_json(400, {"error": "missing_dir"})
                 return
             # 使用默认多租户路径（单租户作为多租户的默认特例）
-            base_dir = get_multi_tenant_user_workspace_dir("default", "default")
-            if base_dir is None:
-                self._write_json(500, {"error": "default_workspace_not_found"})
-                return
+            base_dir = get_multi_tenant_user_workspace_dir(workspace_key="default")
             full_dir = (base_dir / dir_arg).resolve()
             if not self._is_path_under_allowed_root(full_dir):
                 self._write_json(403, {"error": "forbidden_dir"})
@@ -601,10 +596,7 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 self._write_json(400, {"error": "missing_dir"})
                 return
             # 使用默认多租户路径（单租户作为多租户的默认特例）
-            base_dir = get_multi_tenant_user_workspace_dir("default", "default")
-            if base_dir is None:
-                self._write_json(500, {"error": "default_workspace_not_found"})
-                return
+            base_dir = get_multi_tenant_user_workspace_dir(workspace_key="default")
             full_dir = (base_dir / dir_arg).resolve()
             if not self._is_path_under_allowed_root(full_dir):
                 self._write_json(403, {"error": "forbidden_dir"})
@@ -644,10 +636,7 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 base_dir = get_service_root_dir()
             else:
                 # .checkpoint/ 和其他路径都使用默认多租户路径
-                base_dir = get_multi_tenant_user_workspace_dir("default", "default")
-                if base_dir is None:
-                    self._write_json(500, {"error": "default_workspace_not_found"})
-                    return
+                base_dir = get_multi_tenant_user_workspace_dir(workspace_key="default")
             full_path = (base_dir / file_arg).resolve()
             if not self._is_path_under_allowed_root(full_path):
                 self._write_json(403, {"error": "forbidden_path"})
@@ -856,10 +845,7 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
 
         if parsed.path == "/file-api/rebuild-agent-data":
             try:
-                base_dir = get_multi_tenant_user_workspace_dir("default", "default")
-                if base_dir is None:
-                    self._write_json(500, {"error": "default_workspace_not_found"})
-                    return
+                base_dir = get_multi_tenant_user_workspace_dir(workspace_key="default")
                 _generate_agent_data(base_dir)
             except Exception as exc:  # noqa: BLE001
                 self._write_json(500, {"error": "rebuild_failed", "detail": str(exc)})
@@ -887,10 +873,7 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 return
 
             # 使用默认多租户路径（单租户作为多租户的默认特例）
-            base_dir = get_multi_tenant_user_workspace_dir("default", "default")
-            if base_dir is None:
-                self._write_json(500, {"error": "default_workspace_not_found"})
-                return
+            base_dir = get_multi_tenant_user_workspace_dir(workspace_key="default")
             full_path = (base_dir / request_path).resolve()
             if not self._is_path_under_allowed_root(full_path):
                 self._write_json(403, {"error": "forbidden_path"})
@@ -1150,9 +1133,7 @@ def main() -> None:
 
     project_root = default_project_root
     # 多租户架构：workspace_root 指向默认多租户路径
-    workspace_root = get_multi_tenant_user_workspace_dir("default", "default")
-    if workspace_root is None:
-        workspace_root = project_root
+    workspace_root = get_multi_tenant_user_workspace_dir(workspace_key="default")
     logs_root = get_logs_dir().resolve()
     logger = _setup_logger(logs_root, args.log_level)
 

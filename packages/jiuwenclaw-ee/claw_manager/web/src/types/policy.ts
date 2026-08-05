@@ -92,6 +92,7 @@ export interface ConfigEffectiveAgentPolicy {
   policy_name: string;
   policy_desc?: string | null;
   agent_id: string;
+  workspace_dir?: string | null;
   service_policy_id: string;
   priority: number;
   match_expr?: string | null;
@@ -107,6 +108,7 @@ export interface ConfigEffectiveAgentPolicyCreateBody {
   policy_name: string;
   policy_desc?: string;
   agent_id: string;
+  workspace_dir?: string | null;
   service_policy_id: string;
   priority?: number;
   match_expr?: string;
