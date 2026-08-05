@@ -516,26 +516,98 @@ def _start_process(
             }
         )
         env.pop("AGENT_SERVER_URL", None)
-    return subprocess.Popen(cmd, cwd=str(cwd), env=env)
+
+    # Put the child in its own process group / session to prevent them from being reparented
+    # which would prevent app.py:_terminate_all to execute correctly
+
+    if sys.platform == "win32":
+        group_kwargs: dict = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    else:
+        group_kwargs = {"start_new_session": True}
+    return subprocess.Popen(cmd, cwd=str(cwd), env=env, **group_kwargs)
+
+
+def _snapshot_descendants(proc: subprocess.Popen[bytes]) -> list:
+    """Return a child's live descendants, captured *before* it is signalled.
+
+    Order matters: once the intermediate process dies its children are
+    re-parented to init and the parent->child link is gone, so a tree walk
+    performed after termination finds nothing.
+    """
+    try:
+        import psutil
+    except ImportError:  # psutil is a hard dep, but never fail teardown on it
+        return []
+    try:
+        return psutil.Process(proc.pid).children(recursive=True)
+    except Exception:  # NoSuchProcess / AccessDenied / platform quirks
+        return []
+
+
+def _signal_group(proc: subprocess.Popen[bytes], sig: int) -> bool:
+    """Signal the child's whole process group. False if not supported here."""
+    if sys.platform == "win32":
+        return False  # no killpg; descendants are handled from the snapshot
+    try:
+        os.killpg(os.getpgid(proc.pid), sig)
+        return True
+    except (OSError):
+        return False
+
+
+def _reap_descendants(trees: dict[str, list], *, force: bool) -> None:
+    """Terminate/kill descendants that outlived their parent."""
+    for name, descendants in trees.items():
+        for child in descendants:
+            try:
+                if not child.is_running():
+                    continue
+                verb = "killing" if force else "terminating"
+                logging.info(
+                    f"[start_services] {verb} orphaned {name} child (pid={child.pid})"
+                )
+                child.kill() if force else child.terminate()
+            except Exception:
+                continue  # already gone, or not ours to signal
 
 
 def _terminate_processes(processes: dict[str, subprocess.Popen[bytes]]) -> None:
-    """Terminate all running processes gracefully."""
+    """Terminate all running processes and every descendant they spawned.
+
+    Signalling only the direct children leaks grandchildren: ``app`` spawns
+    agent_server and gateway itself, so terminating ``app`` alone leaves them
+    running under init, still holding 18092/19000/19001. We signal the whole
+    process group (POSIX) and sweep a pre-captured descendant snapshot as a
+    backstop for Windows and for children that create their own session.
+    """
+    trees = {
+        name: _snapshot_descendants(proc)
+        for name, proc in processes.items()
+        if proc.poll() is None
+    }
+
     for name, proc in processes.items():
         if proc.poll() is None:
             logging.info(f"[start_services] terminating {name} (pid={proc.pid})")
-            proc.terminate()
+            if not _signal_group(proc, signal.SIGTERM):
+                proc.terminate()
+                _reap_descendants({name: trees.get(name, [])}, force=False)
 
     deadline = time.time() + 8
     while time.time() < deadline:
         if all(proc.poll() is not None for proc in processes.values()):
-            return
+            break
         time.sleep(0.2)
 
     for name, proc in processes.items():
         if proc.poll() is None:
             logging.info(f"[start_services] killing {name} (pid={proc.pid})")
-            proc.kill()
+            if not _signal_group(proc, signal.SIGKILL):
+                proc.kill()
+            proc.poll()
+
+    # Anything still breathing escaped the group (or we are on Windows).
+    _reap_descendants(trees, force=True)
 
 
 def _resolve_runtime_ports() -> dict[str, int]:

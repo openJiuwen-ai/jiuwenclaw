@@ -6,6 +6,9 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
+import subprocess
+import sys
 import time
 from unittest.mock import MagicMock, patch
 
@@ -14,6 +17,7 @@ import pytest
 from jiuwenswarm.start_services import (
     _resolve_runtime_ports,
     _start_process,
+    _terminate_processes,
     _wait_for_services_ready,
 )
 
@@ -91,8 +95,8 @@ def test_start_process_passes_resolved_ports_to_child(
 
     captured: dict[str, object] = {}
 
-    def fake_popen(cmd, *, cwd, env):
-        captured.update({"cmd": cmd, "cwd": cwd, "env": env})
+    def fake_popen(cmd, *, cwd, env, **kwargs):
+        captured.update({"cmd": cmd, "cwd": cwd, "env": env, "kwargs": kwargs})
         return MagicMock()
 
     monkeypatch.setattr("jiuwenswarm.start_services.subprocess.Popen", fake_popen)
@@ -361,7 +365,7 @@ def test_cli_injected_ports_survive_stale_dotenv_override(
 
     captured: dict[str, object] = {}
 
-    def fake_popen(cmd, *, cwd, env):
+    def fake_popen(cmd, *, cwd, env, **kwargs):
         captured["env"] = env
         return MagicMock()
 
@@ -399,3 +403,98 @@ def test_cli_injected_ports_survive_stale_dotenv_override(
     assert os.environ["WEB_PORT"] == "19000"
     assert os.environ["AGENT_SERVER_PORT"] == "18092"
     assert os.environ["FRONTEND_PORT"] == "5173"
+
+
+# --- Orphaned-grandchild teardown (agent_server/gateway surviving `app`) ---
+
+
+def test_start_process_isolates_child_in_own_process_group(monkeypatch, tmp_path):
+    """Children must get their own group so teardown can signal the whole tree.
+
+    Without this, terminating `app` leaves the agent_server/gateway it spawned
+    running under init, still holding 18092/19000/19001.
+    """
+    captured: dict = {}
+
+    def fake_popen(cmd, *, cwd, env, **kwargs):
+        captured.update(kwargs)
+        return MagicMock()
+
+    monkeypatch.setattr("jiuwenswarm.start_services.subprocess.Popen", fake_popen)
+    _start_process("app", ["python", "-m", "jiuwenswarm.app"], tmp_path)
+
+    if sys.platform == "win32":
+        assert captured["creationflags"] & subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        assert captured["start_new_session"] is True
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
+def test_terminate_processes_signals_whole_group(monkeypatch):
+    """SIGTERM must go to the process group, not just the direct child."""
+    killed: list[tuple[int, int]] = []
+
+    proc = MagicMock()
+    proc.pid = 4242
+    proc.poll.side_effect = [None, None] + [0] * 20  # alive, then reaped
+
+    monkeypatch.setattr("jiuwenswarm.start_services.os.getpgid", lambda pid: pid)
+    monkeypatch.setattr(
+        "jiuwenswarm.start_services.os.killpg",
+        lambda pgid, sig: killed.append((pgid, sig)),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.start_services._snapshot_descendants", lambda _p: []
+    )
+
+    _terminate_processes({"app": proc})
+
+    assert (4242, signal.SIGTERM) in killed
+    proc.terminate.assert_not_called()  # group signal replaces the direct hit
+
+
+def test_terminate_processes_reaps_surviving_descendants(monkeypatch):
+    """Grandchildren that outlive the group signal are still force-killed."""
+    grandchild = MagicMock()
+    grandchild.pid = 913
+    grandchild.is_running.return_value = True
+
+    proc = MagicMock()
+    proc.pid = 910
+    proc.poll.return_value = 0  # direct child already dead
+
+    monkeypatch.setattr(
+        "jiuwenswarm.start_services._snapshot_descendants", lambda _p: [grandchild]
+    )
+    # poll() is 0 up front, so nothing is snapshotted unless we force it.
+    proc.poll.side_effect = [None] + [0] * 20
+
+    _terminate_processes({"app": proc})
+
+    grandchild.kill.assert_called_once()
+
+
+def test_snapshot_taken_before_termination(monkeypatch):
+    """The descendant walk must happen before signalling, or the link is lost.
+
+    Once the intermediate dies its children re-parent to init and a post-hoc
+    psutil tree walk returns nothing — which is how the orphans escaped.
+    """
+    order: list[str] = []
+
+    proc = MagicMock()
+    proc.pid = 910
+    proc.poll.side_effect = [None, None] + [0] * 20
+    proc.terminate.side_effect = lambda: order.append("terminate")
+
+    monkeypatch.setattr(
+        "jiuwenswarm.start_services._snapshot_descendants",
+        lambda _p: (order.append("snapshot"), [])[1],
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.start_services._signal_group", lambda _p, _s: False
+    )
+
+    _terminate_processes({"app": proc})
+
+    assert order.index("snapshot") < order.index("terminate")

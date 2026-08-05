@@ -8,6 +8,7 @@ Supports ``--dotenv <path>`` for multi-instance isolation.
 """
 
 from __future__ import annotations
+import signal
 import subprocess
 import sys
 import time
@@ -110,6 +111,23 @@ def main() -> None:
 
     procs: list[subprocess.Popen] = [agent] + ([gateway] if gateway else [])
 
+    # Errors on jiuwenswarm-start result in sending a SIGTERM.
+    # The default behavior is to directly kill the interpreter.
+    # We capture the signals to correctly terminate child processes. 
+    _stopping: list[int] = []
+
+    def _on_shutdown_signal(signum: int, _frame: object) -> None:
+        _stopping.append(signum)
+
+    for _sig_name in ("SIGTERM", "SIGHUP", "SIGBREAK"):
+        _sig = getattr(signal, _sig_name, None)
+        if _sig is None:
+            continue  # SIGHUP is POSIX-only, SIGBREAK is Windows-only
+        try:
+            signal.signal(_sig, _on_shutdown_signal)
+        except (ValueError, OSError):
+            continue  # not the main thread, or unsupported on this platform
+
     def _terminate_all() -> None:
         for p in procs:
             if p.poll() is None:
@@ -126,6 +144,9 @@ def main() -> None:
     exit_code = 0
     try:
         while True:
+            if _stopping:
+                exit_code = 128 + _stopping[0]
+                break
             if agent.poll() is not None:
                 exit_code = agent.returncode or 0
                 break
