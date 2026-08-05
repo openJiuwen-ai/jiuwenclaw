@@ -88,6 +88,9 @@ class AgentOSAuthenticator(CredentialAuthenticator):
             success=False,
             error=str(data.get("error") or "Token 无效或已过期"),
         )
+            success=False,
+            error=str(data.get("error") or "Token 无效或已过期"),
+        )
 
     async def authenticate(self, context: AuthContext) -> AuthResult:
         """支持Token、API-KEY、SSH证书等多种认证方式"""
