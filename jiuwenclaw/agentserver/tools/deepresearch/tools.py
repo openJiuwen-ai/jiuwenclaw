@@ -52,6 +52,14 @@ _DEEPRESEARCH_DEPENDENCY = "openjiuwen_deepsearch"
 _REPORT_PUBLICATION_ATTEMPTS = 8
 _DEEPRESEARCH_CONFIG_PROTOCOL_VERSION = 1
 _DEEPRESEARCH_CONFIG_MAX_BYTES = 64 * 1024
+_DEEPRESEARCH_PROXY_ENV_KEYS = (
+    "HTTP_PROXY",
+    "http_proxy",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "NO_PROXY",
+    "no_proxy",
+)
 
 
 @dataclass
@@ -1510,6 +1518,10 @@ def _build_deepresearch_child_env(
     del service_id, agent_id
     config = runtime_config or {}
     env = export_spawn_environ()
+    for key in _DEEPRESEARCH_PROXY_ENV_KEYS:
+        value = os.environ.get(key, "")
+        if value:
+            env[key] = value
     env["DEEPSEARCH_HITL"] = "true" if interactive_ask else "false"
     env["LLM_SSL_VERIFY"] = config.get("LLM_SSL_VERIFY", "false")
     env["TOOL_SSL_VERIFY"] = config.get("TOOL_SSL_VERIFY", "false")

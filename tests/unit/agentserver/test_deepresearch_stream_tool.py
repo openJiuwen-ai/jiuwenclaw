@@ -3206,6 +3206,32 @@ async def test_start_returns_explicit_error_marker():
 
 
 @pytest.mark.asyncio
+async def test_start_preserves_web_search_proxy_error_marker():
+    lines = [
+        json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),
+        json.dumps({
+            "__deepsearch_status__": "error",
+            "conversation_id": "C1",
+            "error_code": "web_search_proxy_error",
+            "error": "Web Search could not connect through the configured proxy",
+        }),
+    ]
+    patches = _patch_env(lines)
+    for p in patches:
+        p.start()
+    try:
+        result = await dt.deepresearch_stream._func(action="start", query="X", file_name="r")
+    finally:
+        for p in patches:
+            p.stop()
+
+    out = json.loads(result)
+    assert out["status"] == "error"
+    assert out["error_code"] == "web_search_proxy_error"
+    assert out["error"] == "Web Search could not connect through the configured proxy"
+
+
+@pytest.mark.asyncio
 async def test_ufp_marker_injects_accumulated_report():
     # UFP 中断:marker 不带 report(report 不在 key 列表),tool 注入累积 report_parts[:6000]
     lines = [
@@ -3670,6 +3696,11 @@ def test_build_deepresearch_config_empty_value_not_set():
 
 
 def test_child_env_enables_hitl_for_interactive_request(monkeypatch):
+    for key in (
+        "HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy",
+        "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy",
+    ):
+        monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr(dt, "export_spawn_environ", lambda: {"PATH": "/usr/bin"})
 
     assert dt._build_deepresearch_child_env(interactive_ask=True) == {
@@ -3680,6 +3711,43 @@ def test_child_env_enables_hitl_for_interactive_request(monkeypatch):
         "PYTHONUNBUFFERED": "1",
         "PYTHONUTF8": "1",
     }
+
+
+def test_child_env_copies_standard_proxy_variables_but_ignores_all_proxy(monkeypatch):
+    proxy_env = {
+        "HTTP_PROXY": "http://upper-http.proxy:8080",
+        "http_proxy": "http://lower-http.proxy:8080",
+        "HTTPS_PROXY": "http://upper-https.proxy:8443",
+        "https_proxy": "http://lower-https.proxy:8443",
+        "NO_PROXY": "localhost,.internal.example",
+        "no_proxy": "127.0.0.1,.lower.internal.example",
+    }
+    for key, value in proxy_env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("ALL_PROXY", "socks5://upper-all.proxy:1080")
+    monkeypatch.setenv("all_proxy", "socks5://lower-all.proxy:1080")
+    monkeypatch.setenv("UNRELATED_SECRET", "must-not-enter-child")
+    monkeypatch.setattr(dt, "export_spawn_environ", lambda: {"PATH": "/usr/bin"})
+
+    env = dt._build_deepresearch_child_env(interactive_ask=False)
+
+    assert {key: env[key] for key in proxy_env} == proxy_env
+    assert "ALL_PROXY" not in env
+    assert "all_proxy" not in env
+    assert "UNRELATED_SECRET" not in env
+
+
+def test_child_env_omits_empty_deepresearch_proxy_variables(monkeypatch):
+    for key in (
+        "HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy",
+        "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy",
+    ):
+        monkeypatch.setenv(key, "")
+    monkeypatch.setattr(dt, "export_spawn_environ", lambda: {})
+
+    env = dt._build_deepresearch_child_env(interactive_ask=False)
+
+    assert not any(key.lower().endswith("proxy") for key in env)
 
 
 def test_child_env_disables_hitl_and_overrides_stale_parent(monkeypatch):
