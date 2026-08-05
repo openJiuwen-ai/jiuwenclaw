@@ -85,6 +85,13 @@ _INTERRUPT_RESUME_SOURCES = frozenset({
     "evolution_interrupt",
 })
 _A2UI_OPEN_TAG_MARKER = "<a2ui-json>"
+# Shown when a channel with streaming disabled asks for a team round. The team
+# runtime streams member events as they happen and has no non-streaming entry
+# point, so the request is refused rather than silently downgraded.
+_NON_STREAM_TEAM_NOTICE = (
+    "集群模式需要开启流式输出才能运行（成员协作事件是流式下发的）。"
+    "请在该通道配置中开启 enable_streaming，或改用单 Agent 模式。"
+)
 _DELIVERY_IDENTITY_METADATA_KEYS = frozenset({
     "app_id",
     "chat_type",
@@ -508,6 +515,56 @@ class MessageHandler(ABC):
         if not isinstance(msg.params, dict):
             return False
         return ChannelMode.is_team_mode(str(msg.params.get("mode") or ""))
+
+    @classmethod
+    def _is_unsupported_non_stream_team_send(cls, msg: "Message") -> bool:
+        """Whether this is a team ``chat.send`` on a non-streaming channel.
+
+        Team rounds only exist on the streaming path: ``process_message_impl``
+        has no team branch, so a non-streaming request would silently run as a
+        single agent. Rejecting at the gateway keeps that surprise out of the
+        conversation instead of answering as the wrong runtime.
+
+        Args:
+            msg: The inbound message, after ``_apply_channel_state`` injected mode.
+
+        Returns:
+            True when the request must be refused.
+        """
+        if getattr(msg, "enable_streaming", True):
+            return False
+        return cls._is_chat_send_message(msg) and cls._is_team_chat_send(msg)
+
+    async def _reject_non_stream_team_send(self, msg: "Message") -> None:
+        """Answer a non-streaming team request with an explanation."""
+        from jiuwenswarm.common.schema.message import EventType, Message
+
+        metadata = msg.metadata if isinstance(msg.metadata, dict) else None
+        out = Message(
+            id=msg.id,
+            type="event",
+            channel_id=msg.channel_id,
+            session_id=msg.session_id,
+            params={},
+            timestamp=time.time(),
+            ok=True,
+            payload={
+                "event_type": EventType.CHAT_FINAL.value,
+                "content": _NON_STREAM_TEAM_NOTICE,
+                "is_complete": True,
+            },
+            event_type=EventType.CHAT_FINAL,
+            metadata=metadata,
+            enable_streaming=False,
+        )
+        await self.publish_robot_messages(out)
+        logger.warning(
+            "[MessageHandler] rejected non-streaming team chat.send: "
+            "channel_id=%s session_id=%s mode=%s",
+            msg.channel_id,
+            msg.session_id,
+            (msg.params or {}).get("mode") if isinstance(msg.params, dict) else None,
+        )
 
     @classmethod
     def _is_interrupt_resume_chat_send(cls, msg: "Message") -> bool:
@@ -3427,6 +3484,14 @@ class MessageHandler(ABC):
                 ):
                     state = self.get_or_create_channel_state(msg)
                     msg.session_id = await self._allocate_channel_session(msg, state)
+
+                # mode is only known after _apply_channel_state, so the team /
+                # non-streaming combination is refused here — before GodView
+                # registration, which would otherwise subscribe for a round
+                # that never runs.
+                if self._is_unsupported_non_stream_team_send(msg):
+                    await self._reject_non_stream_team_send(msg)
+                    continue
 
                 # V2: _apply_channel_state has resolved msg.session_id to the real team
                 # session_id and injected params.mode; register GodView now so it lands
