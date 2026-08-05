@@ -444,6 +444,38 @@ react:
   max_iterations: 100
   model_name: ${MODEL_NAME}
   skill_mode: all
+  # ProgressiveToolRail: 工具延迟加载，固定 eager_tools schema，deferred 工具通过
+  # tools_search → invoke_tool 间接调用，最大化 prefix cache 命中率。
+  tool_lazy_load:
+    enabled: false                  # 总开关，默认关闭
+    eager_tools:                    # 常驻可见工具列表
+      - tools_search
+      - invoke_tool
+      - web_search
+      - fetch_webpage
+      - ask_user_question
+      - list_files
+      - read_file
+      - write_file
+      - edit_file
+      - glob
+      - grep
+      - bash
+      - code
+      - skill_tool
+      - skill_complete
+      - todo_create
+      - todo_list
+      - todo_modify
+    enable_for_models:             # 模型白名单（空=全部启用）
+      - glm
+    subagents:                      # 子 agent 延迟加载配置
+      enabled: false                # 子 agent 总开关，默认关闭
+      inherit_parent_eager_tools: true  # 继承父 agent 的 eager 列表
+      # eager_tools:                 # 或自定义子 agent eager 列表（不继承时使用）
+      #   - tools_search
+      #   - invoke_tool
+      #   - web_search
   # code_agent / research_agent 默认不启用；只有显式配置 enabled: true 才会显示并可被 task_tool 调用
   # browser_agent: code.team 路径通过此 key 门控（单 agent 路径仍由 browser runtime 开关决定）
   subagents:

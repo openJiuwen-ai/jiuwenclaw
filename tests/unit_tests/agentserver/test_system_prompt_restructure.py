@@ -1171,12 +1171,14 @@ def test_deep_adapter_subagents_includes_optional_browser_and_configured_researc
         workspace="/tmp/jiuwenswarm-workspace",
         language="cn",
         max_iterations=9,
+        rails=None,
     )
     mock_browser.assert_called_once_with(
         model,
         workspace="/tmp/jiuwenswarm-workspace",
         language="cn",
         max_iterations=7,
+        rails=None,
     )
 
 
