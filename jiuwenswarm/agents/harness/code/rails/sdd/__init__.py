@@ -11,7 +11,7 @@ one namespace:
   * (future) ``implement_rail`` — ImplementRail (reads design_rail's RDS).
   * (future) ``project_analysis_rail`` — ProjectAnalysisRail (independent).
 
-Each rail owns its own ``ADVANCE_TOOL`` + ``STAGES`` + ``SKILLS_DIR``;
+Each rail owns its own ``ADVANCE_TOOL`` + ``stages`` + ``SKILLS_DIR``;
 they share the IMPLEMENTATION PATTERN via ``RailStateMachineBase`` (not a
 shared tool or state machine).
 """

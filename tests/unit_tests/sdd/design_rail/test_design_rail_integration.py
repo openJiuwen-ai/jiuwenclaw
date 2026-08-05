@@ -102,19 +102,20 @@ def test_full_chain_artifacts_gate_blocks_without_ras(tmp_path: Path) -> None:
     declared artifact before allowing the forward transition.
     """
     rail = DesignRail(rail_pkg_dir=_RAIL_PKG_DIR, project_dir=tmp_path, priority=60)
-    rail._stage = "analysis"  # needs .aet/feature/<name>/design/requirements-analysis.md
+    rail._stage = "analysis"  # needs .aet/features/<name>/design/requirements-analysis.md
 
-    # No feature dir created -> artifacts not ready
+    # No feature dir created -> artifacts gate blocks with detailed error
     result = rail._handle_advance({"stage": "analysis_review"})
     assert result["ok"] is False
-    assert "artifacts not ready" in result["error"]
+    assert "Cannot advance from 'analysis'" in result["error"]
+    assert "requirements-analysis.md" in result["error"]
     assert rail._stage == "analysis"  # unchanged
 
 
 def test_full_chain_artifacts_gate_passes_after_ras_created(tmp_path: Path) -> Path:
     """After the LLM creates requirements-analysis.md, the artifacts gate passes."""
     # Set up a feature dir with the RAS artifact
-    feature_dir = tmp_path / ".aet" / "feature" / "test-feat" / "design"
+    feature_dir = tmp_path / ".aet" / "features" / "test-feat" / "design"
     feature_dir.mkdir(parents=True)
     (feature_dir / "requirements-analysis.md").write_text("# RAS\n", encoding="utf-8")
 

@@ -122,17 +122,20 @@ def test_sdd_advance_rejects_invalid_next(tmp_path: Path) -> None:
 
 def test_sdd_advance_blocks_when_artifacts_missing(tmp_path: Path) -> None:
     """sdd_advance from analysis (needs requirements-analysis.md) is blocked
-    when the artifact is absent."""
+    when the artifact is absent. Error message includes the missing artifact
+    name and actionable guidance."""
     builder = _make_builder()
     agent = _make_agent(builder)
     rail = _make_rail(tmp_path)
     rail.init(agent)
-    rail._stage = "analysis"  # needs .aet/feature/<name>/design/requirements-analysis.md
+    rail._stage = "analysis"  # needs .aet/features/<name>/design/requirements-analysis.md
 
     result = rail._handle_advance({"stage": "analysis_review"})
 
     assert result["ok"] is False
-    assert "artifacts not ready" in result["error"]
+    assert "Cannot advance from 'analysis'" in result["error"]
+    assert "requirements-analysis.md" in result["error"]
+    assert "sdd_advance" in result["error"]
     assert rail._stage == "analysis"  # unchanged
 
 
@@ -215,8 +218,10 @@ async def test_before_model_call_injects_bootstrap_at_init(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_after_tool_call_ask_user_approve_advances(tmp_path: Path) -> None:
-    """ask_user with an approve answer -> advance to next stage."""
+async def test_after_tool_call_ask_user_approve_does_not_auto_advance(tmp_path: Path) -> None:
+    """ask_user with an approve answer does NOT auto-advance — the agent
+    must call sdd_advance explicitly (R4 step). This prevents double-advance
+    (after_tool_call transitions + agent calls sdd_advance → error)."""
     builder = _make_builder()
     agent = _make_agent(builder)
     rail = _make_rail(tmp_path)
@@ -230,7 +235,8 @@ async def test_after_tool_call_ask_user_approve_advances(tmp_path: Path) -> None
     )
     await rail.after_tool_call(ctx)
 
-    assert rail._stage == "design"
+    # Stage unchanged — agent must call sdd_advance to advance
+    assert rail._stage == "analysis_review"
 
 
 @pytest.mark.asyncio
@@ -300,7 +306,7 @@ async def test_after_tool_call_ask_user_in_production_stage_no_transition(
 
 
 def test_transition_to_rejects_invalid_stage(tmp_path: Path) -> None:
-    """F2: _transition_to refuses to set an invalid stage name (not in STAGES),
+    """F2: _transition_to refuses to set an invalid stage name (not in stages),
     so typos in _REWORK_TARGETS / config next don't silently stall the machine."""
     builder = _make_builder()
     agent = _make_agent(builder)
@@ -316,7 +322,7 @@ def test_transition_to_rejects_invalid_stage(tmp_path: Path) -> None:
 def test_sdd_advance_done_reset_with_feature_name_creates_feature_dir(
     tmp_path: Path,
 ) -> None:
-    """F3: done-reset with feature_name creates .aet/feature/<name>/design/
+    """F3: done-reset with feature_name creates .aet/features/<name>/design/
     so the new flow resolves to that feature — the feature_name param is
     functional (not a dead parameter)."""
     builder = _make_builder()
@@ -331,7 +337,7 @@ def test_sdd_advance_done_reset_with_feature_name_creates_feature_dir(
 
     assert result["ok"] is True
     assert rail._stage == "analysis"
-    feature_design_dir = tmp_path / ".aet" / "feature" / "new-feat" / "design"
+    feature_design_dir = tmp_path / ".aet" / "features" / "new-feat" / "design"
     assert feature_design_dir.exists()  # feature dir created → param is functional
 
 
@@ -351,7 +357,7 @@ def test_sdd_advance_done_reset_ignores_unsafe_feature_name(
             {"stage": "analysis", "feature_name": malicious}
         )
         # reset happened, but no escaped dir created
-        assert not (tmp_path / ".aet" / "feature" / "escape").exists()
+        assert not (tmp_path / ".aet" / "features" / "escape").exists()
         assert not (tmp_path / "escape").exists()
 
 

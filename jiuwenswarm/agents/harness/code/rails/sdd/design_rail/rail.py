@@ -3,7 +3,7 @@
 
 Inherits ``RailStateMachineBase`` (shared state-machine + advance-tool +
 skill-injection pattern). DesignRail contributes:
-  * STAGES = the 6-stage SDD flow (init -> analysis -> analysis_review ->
+  * stages = the 6-stage SDD flow (init -> analysis -> analysis_review ->
     design -> design_review -> done), loaded from ``config.yaml``.
   * SKILLS_DIR = ``skills/`` (embedded aet-req-analysis/review/design).
   * ``ask_user`` review handling (approve -> forward, reject -> rework).
@@ -40,7 +40,7 @@ _REJECT_KEYWORDS = ("返工", "拒绝", "reject", "rework")
 # Pre-compiled word-boundary patterns for ASCII keywords (prevents "project"
 # matching "reject"). Chinese keywords use substring matching (no \b in CJK).
 _REJECT_PATTERNS = tuple(
-    re.compile(r"\b" + re.escape(kw) + r"\b", re.IGNORECASE)
+    re.compile(fr"\b{re.escape(kw)}\b", re.IGNORECASE)
     for kw in _REJECT_KEYWORDS
     if kw.isascii()
 )
@@ -88,7 +88,7 @@ class DesignRail(RailStateMachineBase):
             raise ValueError(
                 f"DesignRail config validation failed: {result.errors}"
             )
-        self.STAGES = cfg.get("stages") or {}
+        self.stages = cfg.get("stages") or {}
         self._priority = int(cfg.get("priority", priority))
 
     # ------------------------------------------------------------------
@@ -138,12 +138,15 @@ class DesignRail(RailStateMachineBase):
                     "[DesignRail] review rejected -> rework to %s", target
                 )
         else:
-            target = self._next_stage(stage)
-            if target is not None:
-                self._transition_to(target)
-                logger.info(
-                    "[DesignRail] review approved -> advance to %s", target
-                )
+            # Approve: do NOT auto-transition here. The SKILL.md R4 step
+            # instructs the agent to call sdd_advance explicitly. Auto-
+            # transitioning would cause a double-advance (after_tool_call
+            # transitions + agent calls sdd_advance → "not a valid next"
+            # error because already in the next stage).
+            logger.info(
+                "[DesignRail] review approved; waiting for agent to call "
+                "sdd_advance to advance"
+            )
 
     # ------------------------------------------------------------------
     # Helpers (design-specific; base provides the shared ones)
@@ -165,8 +168,19 @@ class DesignRail(RailStateMachineBase):
             elif isinstance(answers, str) and answers:
                 return answers
         tool_result = getattr(ctx, "tool_result", None)
-        if isinstance(tool_result, str):
+        if isinstance(tool_result, str) and tool_result:
             return tool_result
+        # Fallback: check ctx.inputs for tool_result
+        inputs = getattr(ctx, "inputs", None)
+        if inputs is not None:
+            inputs_tr = getattr(inputs, "tool_result", None)
+            if isinstance(inputs_tr, str) and inputs_tr:
+                return inputs_tr
+            inputs_tr_dict = getattr(inputs, "tool_result", None)
+            if isinstance(inputs_tr_dict, dict):
+                for v in inputs_tr_dict.values():
+                    if isinstance(v, str) and v:
+                        return v
         return ""
 
     def _is_reject(self, answer: str) -> bool:
@@ -180,7 +194,7 @@ class DesignRail(RailStateMachineBase):
         return False
 
     def _next_stage(self, current: str) -> Optional[str]:
-        stage_cfg = self.STAGES.get(current)
+        stage_cfg = self.stages.get(current)
         if not isinstance(stage_cfg, dict):
             return None
         nxt = stage_cfg.get("next") or []

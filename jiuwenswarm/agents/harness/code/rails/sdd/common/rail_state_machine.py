@@ -11,13 +11,13 @@ the IMPLEMENTATION PATTERN via this base:
   * ``before_model_call`` skill-methodology injection (self-contained frame:
     strip front-matter + tell the LLM to follow inline, no skill toolkit).
   * Artifacts presence check (gate transitions on declared artifact files).
-  * Feature-name resolution (latest-modified ``.aet/feature/`` subdir —
+  * Feature-name resolution (latest-modified ``.aet/features/`` subdir —
     supports multi-flow).
 
 Subclass contract (class attrs):
   ADVANCE_TOOL : str   — the tool name the LLM calls to advance (e.g.
                          ``"sdd_advance"``, ``"implement_advance"``).
-  STAGES       : dict  — stage definitions; each value is a dict with
+  stages       : dict  — stage definitions; each value is a dict with
                          optional ``skill`` / ``artifacts`` / ``next``.
   SKILLS_DIR   : str   — subdirectory under ``rail_pkg_dir`` holding the
                          embedded skill methodologies (``<skill>/SKILL.md``).
@@ -52,7 +52,7 @@ class RailStateMachineBase(DeepAgentRail):
 
     # ── subclass contract (class attributes) ──
     ADVANCE_TOOL: str = ""
-    STAGES: dict = {}
+    stages: dict = {}
     SKILLS_DIR: str = ""
     SECTION_NAME: str = "rail_skill"
     _STAGE_LABELS: dict = {}
@@ -110,7 +110,7 @@ class RailStateMachineBase(DeepAgentRail):
         self._system_prompt_builder.remove_section(self.SECTION_NAME)
 
         stage = self._stage or "init"
-        if stage not in self.STAGES:
+        if stage not in self.stages:
             return
 
         content = self._load_skill_methodology(stage)
@@ -216,7 +216,7 @@ class RailStateMachineBase(DeepAgentRail):
         rail_name = type(self).__name__
         tool = self.ADVANCE_TOOL
         domain = self._domain_description()
-        init_next = (self.STAGES.get("init") or {}).get("next") or []
+        init_next = (self.stages.get("init") or {}).get("next") or []
         first_stage = repr(init_next[0]) if init_next else "the first stage"
         return (
             f"Advance the {rail_name} state machine to the next stage. "
@@ -228,7 +228,7 @@ class RailStateMachineBase(DeepAgentRail):
         )
 
     def _advance_tool_input_params(self) -> dict:
-        init_next = (self.STAGES.get("init") or {}).get("next") or []
+        init_next = (self.stages.get("init") or {}).get("next") or []
         reset_hint = (
             repr(init_next[0]) if init_next
             else "a stage listed in init.next"
@@ -246,7 +246,7 @@ class RailStateMachineBase(DeepAgentRail):
                     "type": "string",
                     "description": "Optional feature name for a new flow "
                     "(only used when resetting from 'done'); the system "
-                    "creates the .aet/feature/<name>/design/ dir for it.",
+                    "creates the .aet/features/<name>/design/ dir for it.",
                 },
             },
             "required": ["stage"],
@@ -260,7 +260,7 @@ class RailStateMachineBase(DeepAgentRail):
         """
         try:
             target = kwargs.get("stage")
-            if not isinstance(target, str) or target not in self.STAGES:
+            if not isinstance(target, str) or target not in self.stages:
                 return {"ok": False, "error": f"invalid stage: {target!r}"}
 
             current = self._stage or "init"
@@ -269,9 +269,9 @@ class RailStateMachineBase(DeepAgentRail):
             # If current is "done" and target is a valid init-next (e.g.
             # "analysis"), allow the reset (new flow). When feature_name is
             # provided, pre-create the feature dir so the new flow resolves
-            # to it (otherwise latest-modified .aet/feature/ subdir is used).
+            # to it (otherwise latest-modified .aet/features/ subdir is used).
             if current == "done":
-                init_next = (self.STAGES.get("init") or {}).get("next") or []
+                init_next = (self.stages.get("init") or {}).get("next") or []
                 if target in init_next:
                     feature_name = kwargs.get("feature_name")
                     if isinstance(feature_name, str) and feature_name.strip():
@@ -295,15 +295,42 @@ class RailStateMachineBase(DeepAgentRail):
                         f"init-next {init_next} is allowed (new flow)"}
 
             # Normal forward: target must be a valid next from current.
-            valid_next = (self.STAGES.get(current) or {}).get("next") or []
+            valid_next = (self.stages.get(current) or {}).get("next") or []
             if target not in valid_next:
                 return {"ok": False, "error": f"{target} is not a valid next "
                         f"from {current} (valid: {valid_next})"}
 
             # Artifacts gate: current stage's declared artifacts must exist.
             if not self._check_artifacts(current):
-                return {"ok": False, "error": f"artifacts not ready for "
-                        f"stage={current} (produce them first)"}
+                feature = self._resolve_feature_name()
+                declared = (self.stages.get(current) or {}).get("artifacts") or []
+                if not feature:
+                    return {
+                        "ok": False,
+                        "error": (
+                            f"Cannot advance from '{current}' to '{target}': "
+                            f"no feature directory found under .aet/features/. "
+                            f"Ask the user for a feature name, create the "
+                            f"directory via write_file, then produce the "
+                            f"artifacts {declared} before calling "
+                            f"{self.ADVANCE_TOOL} again."
+                        ),
+                    }
+                design_dir = self._project_dir / ".aet" / "features" / feature / "design"
+                missing = [
+                    str(f) for f in declared
+                    if not (design_dir / Path(str(f)).name).exists()
+                ]
+                return {
+                    "ok": False,
+                    "error": (
+                        f"Cannot advance from '{current}' to '{target}': "
+                        f"missing artifacts {missing}. "
+                        f"Produce them at .aet/features/{feature}/design/ "
+                        f"by following the '{current}' stage methodology, "
+                        f"then call {self.ADVANCE_TOOL}(stage={target}) again."
+                    ),
+                }
 
             self._stage = target
             logger.info(
@@ -324,13 +351,13 @@ class RailStateMachineBase(DeepAgentRail):
         """Direct state transition (used by subclass after_tool_call, e.g.
         ask_user approve/reject handling).
 
-        Validates ``stage in STAGES`` so typos in rework maps / config next
+        Validates ``stage in stages`` so typos in rework maps / config next
         don't silently set an invalid state (which would stall the machine:
         before_model_call returns early, _handle_advance rejects every target).
         """
-        if stage not in self.STAGES:
+        if stage not in self.stages:
             logger.warning(
-                "[%s] _transition_to invalid stage=%r (not in STAGES); skip",
+                "[%s] _transition_to invalid stage=%r (not in stages); skip",
                 type(self).__name__,
                 stage,
             )
@@ -346,21 +373,21 @@ class RailStateMachineBase(DeepAgentRail):
         Vacuous (no declared artifacts) -> True regardless of feature_name.
         Declared artifacts but feature_name unknown -> False.
         """
-        declared = (self.STAGES.get(stage) or {}).get("artifacts") or []
+        declared = (self.stages.get(stage) or {}).get("artifacts") or []
         if not declared:
             return True
         feature = self._resolve_feature_name()
         if not feature:
             return False
-        design_dir = self._project_dir / ".aet" / "feature" / feature / "design"
+        design_dir = self._project_dir / ".aet" / "features" / feature / "design"
         for filename in declared:
             if not (design_dir / Path(str(filename)).name).exists():
                 return False
         return True
 
     def _resolve_feature_name(self) -> Optional[str]:
-        """Return the most-recently-modified ``.aet/feature/`` subdir name."""
-        feature_root = self._project_dir / ".aet" / "feature"
+        """Return the most-recently-modified ``.aet/features/`` subdir name."""
+        feature_root = self._project_dir / ".aet" / "features"
         try:
             if not feature_root.exists():
                 return None
@@ -381,13 +408,13 @@ class RailStateMachineBase(DeepAgentRail):
         return max(subdirs, key=lambda p: p.stat().st_mtime).name
 
     def _ensure_feature_dir(self, feature_name: str) -> None:
-        """Best-effort create ``.aet/feature/<name>/design/`` for a new flow.
+        """Best-effort create ``.aet/features/<name>/design/`` for a new flow.
 
         Lets the LLM start a new flow for a specific feature in one
         ``sdd_advance(stage=..., feature_name=...)`` call (otherwise the
         LLM must create the dir via write_file before advancing).
         """
-        design_dir = self._project_dir / ".aet" / "feature" / feature_name / "design"
+        design_dir = self._project_dir / ".aet" / "features" / feature_name / "design"
         try:
             design_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -433,7 +460,7 @@ class RailStateMachineBase(DeepAgentRail):
 
     def _build_skill_methodology(self, stage: str) -> Optional[str]:
         """Load + frame the skill methodology for ``stage`` (uncached)."""
-        stage_cfg = self.STAGES.get(stage) or {}
+        stage_cfg = self.stages.get(stage) or {}
         skill_name = stage_cfg.get("skill")
         if not isinstance(skill_name, str) or not skill_name.strip():
             return None
@@ -477,9 +504,9 @@ class RailStateMachineBase(DeepAgentRail):
         if has_artifacts:
             artifact_file = artifacts[0]
             stage_intro = (
-                f"Output file path: .aet/feature/<feature-name>/design/{artifact_file}\n"
+                f"Output file path: .aet/features/<feature-name>/design/{artifact_file}\n"
                 f"(<feature-name> is resolved from the latest-modified subdirectory "
-                f"under .aet/feature/; if none exists, ask the user for a feature "
+                f"under .aet/features/; if none exists, ask the user for a feature "
                 f"name and create the directory)\n\n"
             )
             advance_hint = "After producing the file, "
@@ -487,10 +514,10 @@ class RailStateMachineBase(DeepAgentRail):
             prev_artifact = self._find_previous_stage_artifact(stage)
             review_target = prev_artifact or "<previous-stage-artifact>"
             stage_intro = (
-                f"Review target: .aet/feature/<feature-name>/design/{review_target}"
+                f"Review target: .aet/features/<feature-name>/design/{review_target}"
                 f" (the file produced by the previous stage)\n"
                 f"(<feature-name> is resolved from the latest-modified subdirectory "
-                f"under .aet/feature/)\n\n"
+                f"under .aet/features/)\n\n"
             )
             advance_hint = "After completing the review, "
 
@@ -528,9 +555,9 @@ class RailStateMachineBase(DeepAgentRail):
 
         Review stages have no ``artifacts`` of their own — they review the
         file produced by the preceding production stage (found by scanning
-        ``STAGES`` for a ``next`` entry containing *current*).
+        ``stages`` for a ``next`` entry containing *current*).
         """
-        for _stage_name, stage_cfg in self.STAGES.items():
+        for _stage_name, stage_cfg in self.stages.items():
             next_list = stage_cfg.get("next") or []
             if current in next_list:
                 prev_artifacts = stage_cfg.get("artifacts") or []
@@ -624,7 +651,7 @@ class RailStateMachineBase(DeepAgentRail):
         if stage == "done":
             return None  # done — plain agent mode, no injection
         rail_name = type(self).__name__
-        stage_cfg = self.STAGES.get(stage) or {}
+        stage_cfg = self.stages.get(stage) or {}
         next_stages = stage_cfg.get("next") or []
         next_hint = ""
         if isinstance(next_stages, list) and next_stages:

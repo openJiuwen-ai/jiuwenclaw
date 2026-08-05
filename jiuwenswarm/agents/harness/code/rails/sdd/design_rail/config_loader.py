@@ -77,7 +77,7 @@ def validate(
     if not isinstance(stages, dict) or not stages:
         errors.append("missing_or_empty_stages")
         # Cannot meaningfully run the remaining stage-level rules; fall through
-        # to intent_keywords + reachability checks which will also flag.
+        # to init/done presence + reachability checks which will also flag.
         stages = {}
 
     stage_names = set(stages.keys())

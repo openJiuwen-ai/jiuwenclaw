@@ -29,13 +29,13 @@ metadata:
 ### [R1] SubAgent Gate
 
 - Validate input completeness by confirming path existence ONLY — DO NOT read the content.
-- Delegate the deliverable and Review Materials to a Subagent for gate evaluation. Use `subagent_type="general-purpose"` when calling `task_tool` — other types (e.g. `explore_agent`) may not be available. (Reference the prompt template in <example>).
+- Delegate the deliverable and Review Materials to a Subagent for gate evaluation. Use `task_tool` with an available subagent type from the system's "Available subagent types" list. (Reference the prompt template in <example>).
 - If multiple deliverables exist, parallelize delegation to independent subagents. Final routing decisions MUST follow the worst-case result principle.
 
 ### [R2] Deliverable Revision (via Subagent)
 
 - CRITICAL: Do NOT read the deliverable content yourself — delegate the revision to a Subagent to avoid context explosion from large file reads.
-- Delegate to a Subagent (use `subagent_type="general-purpose"` when calling `task_tool`), providing:
+- Delegate to a Subagent (use `task_tool` with an available subagent type), providing:
   - The gate results from R1 (issue list with severity and location)
   - The deliverable file absolute path
   - Instructions: read the deliverable, address each gate issue sequentially, apply fixes via `write_file` (in-place overwrite), and return a brief revision summary.
