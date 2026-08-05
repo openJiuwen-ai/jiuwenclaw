@@ -983,12 +983,27 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
 
         plan_agent 固定挂载（Code 模式核心子代理）。
         code_agent / browser_agent 按配置启用。
+
+        每个 spec 都带上主 Agent 的 ``sys_operation``：子 Agent 必须和父 Agent 处在
+        同一个文件系统边界里。若留空，``DeepAgent.create_subagent`` 会给子 Agent
+        新建一个 ``OperationMode.LOCAL`` 的 SysOperation，并按
+        ``spec.restrict_to_work_dir or deep_config.restrict_to_work_dir``（父侧默认
+        True）打开 ``restrict_to_sandbox``，于是两个方向同时出错：
+
+        - 本地模式（用户选「完全访问」）下子 Agent 反而被锁死在 workspace 里，
+          读父 Agent 能读的项目路径会报 "Access denied: Path ... outside sandbox"；
+        - sandbox 模式下子 Agent 却拿到 LOCAL SysOperation，直接落到宿主机上跑，
+          绕过了整个沙箱。
+
+        注意 ``create_subagent`` 只有在 ``spec.workspace`` 也非空时才采纳
+        ``spec.sys_operation``，这里三个 spec 都显式传了 workspace，条件成立。
         """
         react_cfg = config if isinstance(config, dict) else {}
         subagents_cfg = react_cfg.get("subagents")
 
         resolved_language = self._resolve_runtime_language()
         workspace = self._workspace_dir or "./"
+        sys_operation = self._sys_operation
         subagents: list[Any] = []
         self._sync_browser_runtime_environment(config_base)
 
@@ -998,6 +1013,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             plan_spec = build_plan_agent_config(
                 model=model,
                 workspace=workspace,
+                sys_operation=sys_operation,
                 language=resolved_language,
                 max_iterations=parse_int(
                     plan_agent_cfg.get("max_iterations") if isinstance(plan_agent_cfg, dict) else None,
@@ -1021,6 +1037,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                 code_spec = build_code_agent_config(
                     model,
                     workspace=workspace,
+                    sys_operation=sys_operation,
                     language=resolved_language,
                     rails=code_agent_rails,
                     max_iterations=parse_int(
@@ -1045,6 +1062,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                 browser_spec = build_browser_agent_config(
                     model,
                     workspace=workspace,
+                    sys_operation=sys_operation,
                     language=resolved_language,
                     max_iterations=parse_int(
                         browser_agent_cfg.get("max_iterations") if isinstance(browser_agent_cfg, dict) else None,
@@ -1519,8 +1537,15 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         deep_config = getattr(agent, "deep_config", None)
         if deep_config is not None and getattr(deep_config, "model", None) is None:
             deep_config.model = model
-        if deep_config is not None and getattr(deep_config, "sys_operation", None) is None:
-            deep_config.sys_operation = self._create_sys_operation()
+        if deep_config is not None:
+            # Keep ``self._sys_operation`` in sync with the member agent's config:
+            # _build_configured_subagents() below hands it to every subagent spec so
+            # the subagents stay inside the member's filesystem boundary.
+            inherited_sys_operation = getattr(deep_config, "sys_operation", None)
+            if inherited_sys_operation is None:
+                inherited_sys_operation = self._create_sys_operation()
+                deep_config.sys_operation = inherited_sys_operation
+            self._sys_operation = inherited_sys_operation
         tool_cards = self.build_code_tool_cards(agent_id)
         added_tools = _merge_tool_cards(agent, tool_cards)
 

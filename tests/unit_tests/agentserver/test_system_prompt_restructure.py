@@ -1323,15 +1323,19 @@ def test_deep_adapter_subagents_includes_optional_browser_and_configured_researc
         subagents, _ = adapter.build_configured_subagents(model, config)
 
     assert subagents == ["research_spec", "browser_spec"]
+    # sys_operation is forwarded so the subagent shares the parent's filesystem
+    # boundary; this bare adapter has none configured.
     mock_research.assert_called_once_with(
         model,
         workspace="/tmp/jiuwenswarm-workspace",
+        sys_operation=None,
         language="cn",
         max_iterations=9,
     )
     mock_browser.assert_called_once_with(
         model,
         workspace="/tmp/jiuwenswarm-workspace",
+        sys_operation=None,
         language="cn",
         max_iterations=7,
     )
@@ -1363,6 +1367,7 @@ def test_deep_adapter_subagents_omits_research_without_explicit_enable():
     mock_browser.assert_called_once_with(
         model,
         workspace="/tmp/jiuwenswarm-workspace",
+        sys_operation=None,
         language="cn",
         max_iterations=DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
     )

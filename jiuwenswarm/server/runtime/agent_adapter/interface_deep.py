@@ -2261,12 +2261,19 @@ class JiuWenSwarmDeepAdapter:
         config: dict[str, Any],
         config_base: dict[str, Any] | None = None,
     ) -> tuple[list[Any] | None, bool]:
-        """Build configured research + browser subagents (agent 模式)."""
+        """Build configured research + browser subagents (agent 模式).
+
+        每个 spec 都带上主 Agent 的 ``sys_operation``，让子 Agent 与父 Agent 共享同一
+        个文件系统边界；留空时 ``DeepAgent.create_subagent`` 会另建一个受
+        ``restrict_to_sandbox`` 约束的 LOCAL SysOperation，本地模式下把子 Agent 锁死在
+        workspace 内、sandbox 模式下又让它逃出沙箱落到宿主机。
+        """
         react_cfg = config if isinstance(config, dict) else {}
         subagents_cfg = react_cfg.get("subagents")
 
         resolved_language = self._resolve_runtime_language()
         workspace = self._workspace_dir or "./"
+        sys_operation = self._sys_operation
         subagents: list[Any] = []
         should_add_general_purpose = False
 
@@ -2281,6 +2288,7 @@ class JiuWenSwarmDeepAdapter:
                     build_research_agent_config(
                         model,
                         workspace=workspace,
+                        sys_operation=sys_operation,
                         language=resolved_language,
                         max_iterations=parse_int(
                             research_agent_cfg.get("max_iterations"),
@@ -2309,6 +2317,7 @@ class JiuWenSwarmDeepAdapter:
                 build_browser_agent_config(
                     model,
                     workspace=workspace,
+                    sys_operation=sys_operation,
                     language=resolved_language,
                     max_iterations=parse_int(
                         (
@@ -2336,6 +2345,7 @@ class JiuWenSwarmDeepAdapter:
                 _load_custom_subagents(
                     self._workspace_dir, subagents_cfg, model, workspace,
                     __name__, model_cache=self._model_cache,
+                    sys_operation=sys_operation,
                 )
             )
         except Exception:
@@ -11696,6 +11706,7 @@ def _agent_def_to_subagent_config(
     model: Any,
     workspace: str,
     model_cache: dict[str, Any] | None = None,
+    sys_operation: SysOperation | None = None,
 ) -> SubAgentConfig:
     """将 AgentDefinition 转换为 SubAgentConfig，用于 SubagentRail 注册。
 
@@ -11704,6 +11715,10 @@ def _agent_def_to_subagent_config(
         model: 父 agent 的 Model 实例（作为默认模型）
         workspace: 工作空间路径
         model_cache: 模型缓存字典（用于按名称查找指定模型）
+        sys_operation: 父 agent 的 SysOperation，子 agent 沿用它以保持同一文件系统
+            边界。``DeepAgent.create_subagent`` 只在 ``spec.workspace`` 同时非空时
+            才采纳 ``spec.sys_operation``，所以 workspace 也要一并写进 spec；否则子
+            agent 会拿到一个受 ``restrict_to_sandbox`` 约束的新 LOCAL SysOperation。
     """
     from openjiuwen.harness.schema.config import SubAgentConfig
 
@@ -11734,6 +11749,8 @@ def _agent_def_to_subagent_config(
         system_prompt=agent_def.prompt,
         tools=tools,
         model=resolved_model,
+        workspace=workspace,
+        sys_operation=sys_operation,
         skills=agent_def.skills,
         max_iterations=agent_def.max_iterations,
         enable_task_loop=True,
@@ -11746,7 +11763,8 @@ def _load_custom_subagents(
     model: Any,
     workspace: str,
     logger_name: str,
-    **kwargs: Any,
+    model_cache: dict[str, Any] | None = None,
+    sys_operation: SysOperation | None = None,
 ) -> list[Any]:
     """从 AgentConfigService 加载自定义 agent 并转换为 SubAgentConfig 列表。
 
@@ -11758,13 +11776,14 @@ def _load_custom_subagents(
         model: 模型配置
         workspace: 工作空间路径
         logger_name: 日志记录器名称
-        **kwargs: 额外参数，支持 model_cache 等
+        model_cache: 模型缓存字典（用于按名称查找指定模型）
+        sys_operation: 父 agent 的 SysOperation，自定义子 agent 沿用它以保持同一文件
+            系统边界
     """
     from jiuwenswarm.server.runtime.agent_config_service import AgentConfigService
 
     _logger = logging.getLogger(logger_name)
     agent_service = AgentConfigService(workspace_dir)
-    model_cache: dict | None = kwargs.get("model_cache")
     result: list[Any] = []
     for agent_def in agent_service.list_agents():
         if agent_def.source == "builtin":
@@ -11773,7 +11792,13 @@ def _load_custom_subagents(
         # 只有显式 enabled: true 才加载
         if not (isinstance(subagent_cfg, dict) and bool(subagent_cfg.get("enabled", False))):
             continue
-        custom_spec = _agent_def_to_subagent_config(agent_def, model, workspace, model_cache)
+        custom_spec = _agent_def_to_subagent_config(
+            agent_def,
+            model,
+            workspace,
+            model_cache,
+            sys_operation,
+        )
         custom_spec.factory_kwargs = {"auto_create_workspace": False}
         result.append(custom_spec)
         _logger.info("loaded custom agent '%s' from %s", agent_def.name, agent_def.source)
