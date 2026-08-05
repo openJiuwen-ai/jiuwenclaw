@@ -2,311 +2,340 @@
 
 ## 1. 背景
 
-Skill 集合中存在大量功能相同或高度可替代的实现，例如多个 PPT 生成、网页内容抓取或中文润色 Skill。
-如果离线构建阶段不处理这些重复能力，最终能力树会把同一功能拆成多个终端节点，带来三个直接问题：
+Skill 集合中存在大量功能相同或高度可替代的实现，例如多个 PPT 生成 Skill、多个网页内容抓取 Skill、多个中文润色 Skill。如果离线构建阶段不处理这些重复能力，最终技能树会把同一功能拆成多个叶子，导致候选冗余、结构不稳定，也不利于后续能力治理。
 
-- 检索候选重复，后续仍需在一组同质 Skill 中反复选择；
-- 上层分类和底层等价关系混在一次 LLM 分组中，树的粒度不稳定；
-- 新增或删除一个同类 Skill 时，容易引起无关分支漂移，也无法解释两个 Skill 为什么被合并。
+等价群归一的目标是在离线构建阶段，把执行同一单一功能的多个 Skill 归并到一个等价群中。最终构建产物仍保留原始上层分类，但最后一层固定为等价群节点；具体 Skill 作为等价群成员保留。
 
-本方案在原有 taxonomy 构建完成后，增加一次**终端分支内的等价群归一**：保留上层分类，只把最后一层统一整理为 equivalence group，原始 Skill 作为 group 下的叶子继续保留。
+## 2. 目标
 
-## 2. 目标与边界
-
-### 2.1 目标
-
-1. 每个 equivalence group 只表达一个明确、可独立调用的功能。
-2. 多成员 group 内任意两个 Skill 都能完成同一个代表性请求，即满足两两可替代。
-3. 所有原始 Skill 必须且只能进入一个 group；没有等价对象时形成 singleton group。
-4. 等价归一只在同一原始 taxonomy 终端分支内进行，不跨上层分类合并。
-5. 构建过程可审计，可以回溯候选 pair、pairwise 判断、拆分原因和最终成员。
-6. 支持 branch-local add/delete/update，单个 Skill 变化不触发全量重建。
-
-### 2.2 非目标
-
-- 不重新设计上层 taxonomy，也不在本阶段修正历史分类错误。
-- 不做跨分支全局去重；真实等价但位于不同分支的 Skill 当前会保守地保持分离。
-- 不根据下载量、stars、provider 或成本选择“最佳 Skill”；group 只描述可替代关系。
-- 不把局部相似、父子功能、上下游步骤或不同最终产物归为等价。
+1. 在离线构建阶段生成高质量等价群。
+2. 每个等价群只表达一个明确、可独立调用的功能。
+3. 同一等价群内任意两个 Skill 都能完成同一个代表性请求。
+4. 所有原始 Skill 都必须被分配到某个等价群；无法与其他 Skill 合并时，形成单成员等价群。
+5. 等价群构建只在同一原始树分支内进行，不跨上层分类合并。
+6. 构建过程可审计，保留模型输入、原始输出、两两校验结果、拆分结果和最终分组。
+7. 支持分支内的新增、删除和更新，单个 Skill 变化不触发全量重建。
 
 ## 3. 等价定义
 
-两个 Skill 只有同时满足以下条件时才判定为 `equivalent`：
+一个等价群中的 Skill 应同时满足：
 
-- **主任务一致**：解决同一类用户意图，而不只是属于同一领域；
-- **主产物一致**：最终产物类型和使用方式一致；
-- **交互预期一致**：关键输入、调用方式和完成路径没有本质差异；
-- **可双向替代**：存在一个具体请求，两个 Skill 都能独立、完整地完成。
+- **主功能一致**：解决同一类用户任务，不只是处于同一领域。
+- **主产物一致**：最终产物类型和使用方式一致，例如都是 PPT、都是 URL 内容提取结果、都是图片 prompt。
+- **交互预期一致**：关键输入、调用路径和完成方式没有本质差异。
+- **可互相替代**：存在一个具体请求，群内任意两个 Skill 都能独立、完整地完成。
 
-允许存在 provider、实现后端、质量、速度、价格、模板和运行入口等差异，只要这些差异不改变用户可见的主功能和主产物。
+允许存在的差异：
 
-以下情况必须拆分：
+- 服务提供方或实现后端不同。
+- 质量、速度、模板和成本不同。
+- 描述长短不同，但名称和上下文能明确指向同一功能。
+- 运行入口不同，但不改变主功能和主产物。
 
-| 关系 | 示例 | 原因 |
+必须拆分的情况：
+
+| 关系 | 示例 | 拆分原因 |
 |---|---|---|
-| 产物不同 | 图片 prompt 生成 vs. 图片生成 | 一个输出 prompt，一个输出图片 |
-| 专用能力与通用能力 | 学术海报 PPT vs. 通用 PPT 生成 | 专用布局和输入约束不可互换 |
-| 上下游关系 | 网页搜索 vs. 网页正文抽取 | 分属不同工作阶段 |
-| 指导与执行 | PPT 制作指南 vs. PPT 生成 | 一个给方法，一个产出文件 |
-| 部分重叠 | 文档编辑 vs. 格式转换 | 只共享部分处理对象 |
-| 宽泛能力集合 | 行情查询 vs. 选股筛选 | 主任务和决策结果不同 |
-
-本方案宁可把边界不清的 Skill 保持为 singleton，也不以压缩率换取错误合并。
+| 产物不同 | 图片 prompt 生成与图片生成 | 一个输出 prompt，一个输出图片 |
+| 通用与专用功能 | 通用 PPT 生成与学术海报 PPT | 专用布局和输入约束无法互相替代 |
+| 上下游能力 | 网页搜索与网页正文提取 | 分属不同工作阶段 |
+| 指导与执行 | PPT 制作指南与 PPT 生成 | 一个给方法，一个产出文件 |
+| 部分重叠 | 文档编辑与格式转换 | 只共享部分处理对象 |
+| 宽泛功能集合 | 行情查询与选股筛选 | 主任务和结果不同 |
 
 ## 4. 总体方案
 
-整体采用“**树优先、分支内归一、pairwise 判定、clique 收口**”的两阶段方案。
+当前采用“**树优先、分支内归一、两两保守校验**”的离线构建方案。
 
 ```mermaid
 flowchart LR
-    A["Skill catalog"] --> B["阶段 A：构建 taxonomy"]
-    B --> C["按 terminal scope 收集 Skill"]
-    C --> D["召回候选 pair"]
-    D --> E["Pairwise 三态判断"]
-    E --> F["Complete-link clique 划分"]
+    A["Skill 元数据表"] --> B["构建原始技能树"]
+    B --> C["按原始树分支收集 Skill"]
+    C --> D["生成候选 Skill 对"]
+    D --> E["两两等价校验"]
+    E --> F["按群内成员两两等价的规则分组"]
     F --> G["单一功能审计"]
-    G --> H["重写终端树并写出审计产物"]
+    G --> H["重建技能树并写出审计记录"]
 ```
 
-### 4.1 阶段 A：构建上层 taxonomy
+整体分为两个阶段。
 
-阶段 A 只回答“Skill 属于哪类能力、应路由到哪条分支”，不做 equivalence 合并。一个 terminal leaf 可以承载一个或多个 individual Skill，阶段 B 再按 scope 收集这些 Skill。
+### 4.1 构建原始技能树
 
-只有在 `equivalence_enabled=true` 时，taxonomy prompt 才切换为纯分类语义；开关关闭时继续使用原 PR 的单阶段 near-substitute prompt，保持原有行为。
+先构建完整技能树，确定每个 Skill 的上层分类和所在分支。本阶段只处理“属于哪类能力”，不判断两个 Skill 是否能互相替代。
 
-### 4.2 阶段 B：终端 equivalence 归一
+只有显式开启等价群归一时，原始树构建才使用纯分类提示词；功能关闭时继续使用原 PR 的构建逻辑，保持原有行为。
 
-阶段 B 只回答“同一终端分支内哪些 Skill 可以互相替代”。它不改变上层分类，只把原终端层改写为：
+### 4.2 分支内等价群归一
 
-```text
-taxonomy scope
-├── equivalence group A
-│   ├── skill-1
-│   └── skill-2
-└── equivalence group B
-    └── skill-3
-```
+对原始技能树中的每一个末端分支：
 
-`scope` 是一次等价判断的边界：原 taxonomy 中直接拥有 terminal Skill leaf 的分类父节点，以及这些 sibling leaf 下全部 Skill 的并集。synthetic root 永远不能成为 scope，两个不同 scope 之间也不会生成候选 pair。包含 `uncategorized` 的分支保守地下钻处理，不把它和 sibling leaf 强行合成一个 scope。
+1. 收集该分支同级叶子节点中的全部 Skill。
+2. 找出可能互相替代的候选 Skill 对。
+3. 对候选 Skill 对逐对做等价校验。
+4. 按“群内任意两个成员都已确认等价”的规则形成等价群。
+5. 对多成员等价群做单一功能审计。
+6. 保留原始上层分类，把最后一层替换为等价群节点，原始 Skill 作为等价群成员写入节点元数据。
 
-### 4.3 关键设计决策与取舍
-
-| 初版思路 | 当前设计 | 调整原因 |
-|---|---|---|
-| LLM 先生成候选 partition | LLM 只负责候选 pair 召回 | partition 容易把过宽分组提前固化 |
-| 二值等价判断 | `equivalent / not_equivalent / insufficient_evidence` 三态 | 描述不足不能被误判为明确不等价或等价 |
-| 缺失成员做确定性修复 | 协议 correction 一次，仍非法则失败 | 伪造 singleton 或补分组会掩盖模型/协议问题 |
-| 未定义增量行为 | 只重算旧、新受影响 scope | 避免单个 Skill 变化触发全树重建 |
-| 模型回显原始 Skill ID | 每次请求使用 `s000001` 短引用 | 避免长 ID 消耗 context 和 output token |
+一次等价群归一的边界是“原始树中直接拥有末端 Skill 叶子的分类父节点，以及这些同级叶子下的全部 Skill”。虚拟根节点不能作为归一边界，不同原始树分支之间也不会生成候选 Skill 对。
 
 ## 5. 算法设计
 
-### 5.1 全量构建流程
+### 5.1 离线等价群归一流程
 
-**Algorithm 1：终端 Skill 等价群归一**
+**输入：**
+
+- 已构建完成的技能树；
+- Skill 元数据表。
+
+**输出：**
+
+- 最后一层固定为等价群节点的构建树；
+- 最终等价群集合；
+- 构建审计记录。
+
+**处理流程：**
 
 ```text
-Input:
-  已构建完成的 taxonomy tree；
-  canonical Skill catalog。
-
-Output:
-  scope -> equivalence group -> Skill 的构建树；
-  equivalence report；
-  完整审计事件。
-
-1. 从 taxonomy tree 中收集所有 terminal scope。
-2. 对每个 scope：
-   2.1 为 Skill 建立本次请求内的稳定短引用 s000001...。
-   2.2 召回可能等价的 candidate pairs。
-   2.3 对每个 candidate pair 做严格三态判断。
-   2.4 仅以 equivalent pair 建立无向图中的正边。
-   2.5 使用 deterministic complete-link 生成 clique groups。
-   2.6 对每个多成员 group 做单一功能审计。
-   2.7 如果审计发现冲突 pair，删除对应正边并重新聚类；最多两轮。
-3. 校验 Skill 覆盖、唯一性、clique 和审计不变量。
-4. 保留上层 taxonomy，把每个 scope 的终端层替换为 equivalence groups。
-5. 原子写出 tree、catalog、report 和 audit。
+1. 收集已构建技能树中的所有叶子 Skill，并保留每个 Skill 的元数据。
+2. 按叶子 Skill 所在的原始树分支进行分桶。
+3. 初始化最终等价群集合为空。
+4. 处理每一个原始树分支桶：
+   4.1 找出该分支内需要做两两校验的候选 Skill 对。
+   4.2 调用模型逐对判断“等价、不等价、证据不足”。
+   4.3 每个 Skill 初始各自形成一个单成员等价群。
+   4.4 按固定顺序尝试合并两个群；只有两个群之间的所有 Skill 都已被判定为两两等价时，才允许合并。
+   4.5 对每个多成员等价群做单一功能审计。
+   4.6 如果审计发现冲突 Skill 对，将这些组合从可合并关系中移除，保留原始判断和审计拒绝原因，然后重新分组；最多处理两轮。
+   4.7 将通过校验和审计的分组加入最终等价群集合。
+5. 检查所有 Skill 是否都且只被分配了一次。
+6. 保留原始上层分类，把最后一层重建为等价群节点。
+7. 写出构建树、Skill 元数据、等价群构建报告和构建审计记录。
 ```
 
-### 5.2 候选 pair 生成
+### 5.2 具体示例：“演示文稿制作”分支
 
-候选阶段只负责召回，不直接决定合并：
+假设原始技能树已经把下面 4 个 Skill 放在同一个“演示文稿制作”分支：
 
-- scope 大小不超过 `equivalence_all_pairs_scope_limit`（默认 12）时，枚举全部无序 pair；
-- 更大的 scope 由 LLM 为每个 Skill 提议最多 `equivalence_candidate_neighbors`（默认 8）个邻居；
-- 名称规范化后完全相同的 Skill 额外补充为候选；
-- 所有候选去重并稳定排序；全局 pair 数超过硬上限时构建失败，不静默截断。
+| 代号 | Skill | 能力描述 |
+|---|---|---|
+| A | `ai-ppt-generator` | 根据主题、大纲和资料生成可编辑的 PPTX 演示文稿 |
+| B | `pptx-maker` | 根据主题、大纲或资料生成可编辑的 PowerPoint 演示文稿 |
+| C | `academic-poster` | 根据论文内容制作单页学术海报，并导出为 PPTX |
+| D | `ppt-outline-writer` | 生成 PPT 大纲和逐页文案，但不生成 PPTX 文件 |
 
-小 scope 的 pairwise 成本为：
+**第一步：列出需要核对的 Skill 组合**
+
+该分支只有 4 个 Skill，不超过默认阈值 12，因此会直接列出全部 6 种组合：`A-B`、`A-C`、`A-D`、`B-C`、`B-D`、`C-D`。这一步只是确定需要核对的对象，还没有决定谁和谁等价。
+
+对于超过 12 个 Skill 的大分支，实现会先让模型为每个 Skill 找出可能互相替代的若干对象，避免所有 Skill 全部两两比较。
+
+**第二步：逐对判断是否可以互相替代**
+
+| 组合 | 判断 | 原因 |
+|---|---|---|
+| A-B | 等价 | 都能完成“把这份产品介绍做成 10 页可编辑 PPT” |
+| A-C | 不等价 | A 生成普通多页演示文稿，C 生成单页学术海报 |
+| A-D | 不等价 | A 生成 PPTX，D 只生成大纲和文案 |
+| B-C | 不等价 | 普通演示文稿与学术海报不能互相替代 |
+| B-D | 不等价 | 一个生成最终文件，一个只生成文字内容 |
+| C-D | 不等价 | 一个生成学术海报文件，一个只生成演示文稿大纲 |
+
+因此，只有 `A-B` 被确认可以放在一起。
+
+如果该分支还有一个 Skill 只写着“帮你制作更好的演示文稿”，却没有说明是输出 PPTX、大纲还是制作建议，那么仅凭当前描述无法证明它与 A 或 B 可以互相替代，对应结果就是“证据不足”。该结果不会产生等价关系。
+
+**第三步：形成等价群**
+
+实现一开始把每个 Skill 都看作一个独立群，然后按固定顺序尝试合并。只有两个群之间的所有 Skill 都已确认等价时，才会合并。本例的结果是：
+
+```text
+演示文稿制作
+├── 通用演示文稿生成
+│   └── 成员：A、B
+├── academic-poster
+│   └── 成员：C
+└── ppt-outline-writer
+    └── 成员：D
+```
+
+多成员等价群的名称由单一功能审计生成；单成员等价群直接沿用该 Skill 的名称和描述。
+
+这条规则不会把等价关系简单地当作可传递关系。例如，即使 `A-B` 和 `A-C` 被判定为等价，只要 `B-C` 没有通过，`A、B、C` 就不能进入同一等价群。
+
+**第四步：整体复核多成员等价群**
+
+`A、B` 形成多成员等价群后，模型会再从整体上检查：这两个成员是否确实只表达一个共同功能，能否用一个清晰的名称和描述概括。如果复核通过，可将该群命名为“通用演示文稿生成”。单成员等价群不需要再调用模型复核。
+
+整体复核是对前面两两判断的第二道检查。例如，如果前面误把 `A-C`、`B-C` 也判定为等价，初步就会形成 `{A、B、C}`。假设整体复核发现 C 的产物是单页学术海报，并同时指出 `A-C`、`B-C` 两个冲突组合，实现会将这两个组合从可合并关系中移除，保留原始判断和审计拒绝原因，再重新得到 `{A、B}`、`{C}`、`{D}`，并再次复核仍然包含多个成员的 `{A、B}`。最多处理两轮；第二轮后仍无法得到合法结果时，构建直接失败。
+
+### 5.3 候选 Skill 对生成与成本
+
+候选阶段只负责找出“需要继续核对”的 Skill 对，不直接决定合并：
+
+- 分支内 Skill 数量不超过 `equivalence_all_pairs_scope_limit`（默认 12）时，列出全部两两组合。
+- 更大的分支由模型为每个 Skill 提议最多 `equivalence_candidate_neighbors`（默认 8）个可能等价的 Skill。
+- 名称标准化后完全相同的 Skill 额外加入候选。
+- 候选 Skill 对去重后按固定顺序处理；总数超过硬上限时构建失败，不静默截断。
+
+小分支的两两组合数为：
 
 ```text
 n × (n - 1) / 2
 ```
 
-大 scope 通过候选邻居把待判断 pair 控制在接近 `O(n × k)`，其中 `k` 为邻居上限。该优化降低成本，但可能漏召回，因此内部实验必须单独评估 candidate recall。
+大分支通过“每个 Skill 只找若干可能等价对象”控制成本，但可能漏掉真实等价对，因此内部实验需要单独评估候选召回率。
 
-### 5.3 Pairwise 三态判断
+没有进入候选的两个 Skill 不会继续做等价校验，也不会被放入同一个多成员等价群；因此大分支的候选生成需要优先保证找全可能等价的组合。
 
-每个候选 pair 必须返回：
-
-- `equivalent`：证据充分，两个 Skill 可双向替代；
-- `not_equivalent`：存在明确的主任务、主产物、输入或能力边界差异；
-- `insufficient_evidence`：当前名称、描述或 SKILL.md 摘要不足以证明可替代。
-
-只有 `equivalent` 产生正边。正向判断还必须给出一个两个 Skill 都能完成的具体共同请求；负向判断必须给出区分请求或明确边界。
-
-### 5.4 Complete-link 与单一功能审计
-
-Pairwise 的 `equivalent` 关系不直接按传递闭包合并。最终多成员 group 必须是 clique：群内任意两个成员之间都有已验证的正边。
-
-实现从 singleton cluster 开始，按稳定顺序反复合并两个 cluster；只有当两个 cluster 之间的全部 cross-pair 都有正边时才允许合并。
-
-每个多成员 clique 还要通过一次单一功能审计：
-
-- `pass`：生成 provider-neutral 的 group 名称、描述和路由边界；
-- `conflict`：返回至少一个冲突 member pair。实现删除冲突边、重新聚类并再次审计，不允许模型直接另造 partition。
-
-singleton 是正常算法结果，不需要 LLM 审计。
-
-### 5.5 构建不变量与失败策略
+### 5.4 结果检查与失败处理
 
 完成构建必须同时满足：
 
-1. 输入 Skill 和最终 group 成员集合完全相等；
-2. 每个 Skill 恰好出现一次，不存在 unknown、duplicate 或 missing Skill；
-3. 每个多成员 group 都满足 clique；
-4. 每个多成员 group 都有通过的单一功能审计；
-5. tree leaf、catalog CID 和 report 中的 scope/group 映射一致。
+1. 输入 Skill 与最终等价群成员完全一致。
+2. 每个 Skill 只出现一次，不存在未知、重复或缺失成员。
+3. 每个多成员等价群内的成员都已两两判定为等价。
+4. 每个多成员等价群都已通过单一功能审计。
+5. 构建树、Skill 元数据和等价群构建报告中的分支、等价群和 Skill 映射一致。
 
-候选、pairwise 或审计输出为空、截断、字段类型错误或违反覆盖协议时，代码会把具体错误反馈给模型并执行一次 correction retry。第二次仍非法则整个等价阶段失败。
+候选生成、两两校验或单一功能审计的模型输出为空、被截断、字段类型错误或违反完整性要求时，会把具体错误原因反馈给模型并重试一次。第二次仍不合法时，等价群归一失败。
 
-这里需要区分两类行为：
+原始树构建阶段已有的最大分组和 `uncategorized` 兜底处理保持不变；新增的等价群归一阶段不使用兜底分组，不会把协议失败伪装成成功构建。
 
-- 原 taxonomy 阶段已有的最大分组和 `uncategorized` 恢复逻辑保持不变；
-- 新 equivalence 阶段不使用 fallback，不能把协议失败伪装成 singleton 或“成功构建”。
+## 6. 提示词设计
 
-## 6. Branch-local 增量构建
+提示词的核心目标是减少过度合并：
 
-增量设计的核心约束是：一个 Skill 的变化最多影响其旧 scope 和新 scope，无关分支不能被改写。
+- 强调两个 Skill 必须能够完整地互相替代，不能只是局部重叠。
+- 正向判断必须给出一个具体共同请求，两个 Skill 都能完整满足。
+- 负向判断必须给出区分请求或明确的功能边界。
+- 当名称、描述或 SKILL.md 信息不足以支持判断时，返回“证据不足”，不生成等价关系。
+- 明确拒绝部分重叠、父子功能、上下游能力、指导与执行混合、不同最终产物混合。
+- 单一功能审计只能指出冲突成员，不允许模型另外生成一套分组。
 
-`equivalence_report.json` 持久化 Skill semantic hash、scope/group 映射、pairwise decision、审计通过结果和协议签名，用于判断哪些结果可以安全复用。
+正反例覆盖 PPT 生成、图片 prompt 生成、图片生成、学术海报、文档编辑、格式转换、行情查询和选股筛选等边界。
 
-| 操作 | 处理方式 | 预期 LLM 成本 |
+## 7. 分支内增量构建
+
+增量构建的核心约束是：一个 Skill 的变化最多影响它变化前和变化后所在的原始树分支，无关分支不能被改写。
+
+`equivalence_report.json` 保留 Skill 语义哈希、分支与等价群映射、两两校验结果和审计结果，用于判断哪些历史结果可以安全复用。
+
+| 操作 | 处理方式 | 预期模型调用成本 |
 |---|---|---|
-| Add | 路由到新 scope，只补新 Skill 相关 candidate/pair，并重算该 scope | 与目标 scope 大小相关 |
-| Delete | 从原 group 和 pair cache 中移除 Skill，保留旧 group 的非空子集 | 通常为 0 |
-| Update（非语义字段） | 只更新 catalog 元数据 | 0 |
-| Update（语义字段） | 按 delete old + add new 处理；必要时同时更新旧、新 scope | 两个受影响 scope |
+| 新增 | 将新 Skill 分配到目标分支，只补充与新 Skill 相关的候选和两两校验，并重新计算该分支 | 与目标分支大小相关 |
+| 删除 | 从原等价群和两两校验缓存中移除 Skill，保留原等价群中未删除的成员 | 通常为 0 |
+| 更新非语义字段 | 只更新 Skill 元数据 | 0 |
+| 更新语义字段 | 按“删除旧 Skill + 新增更新后 Skill”处理，必要时同时更新旧、新分支 | 与受影响分支大小相关 |
 
-只有以下全局变化才触发 full rebuild：
+只有以下情况转为全量重建：
 
-- taxonomy 根分类、层级或全局分配协议变化；
-- 模型、prompt、等价定义、schema 或 canonicalization 变化；
-- 候选和 pairwise 关键阈值变化；
-- 持久状态缺失、损坏、版本不兼容或覆盖校验失败；
-- 用户显式请求 full rebuild。
+- 根分类、技能树层级或全局分配协议发生变化。
+- 模型、提示词、等价定义或输出格式发生变化。
+- 候选生成和两两校验的关键阈值发生变化。
+- 持久化状态缺失、损坏、版本不兼容或完整性检查失败。
+- 用户显式请求全量重建。
 
-增量失败时不覆盖上一版完整索引，也不发布半更新的 tree/report。失败 staging 和诊断信息会保留，便于定位协议错误。
+增量构建失败时，不覆盖上一版完整索引，也不发布部分更新的技能树和构建报告。失败的临时构建结果和诊断信息会被保留。
 
-## 7. 构建产物与配置
+## 8. 构建产物与配置
 
-### 7.1 构建产物
+### 8.1 构建产物
 
 | 文件 | 说明 |
 |---|---|
-| `tree_index.yaml` | 完整能力树，终端结构为 scope → equivalence group → Skill |
-| `catalog.jsonl` | 原始 Skill catalog，CID 与最终树一致 |
-| `equivalence_report.json` | scope/group/Skill 映射、统计、不变量和增量 cache |
-| `equivalence_audit.jsonl` | prompt、raw response、pairwise、clique、审计和 correction 事件 |
+| `tree_index.yaml` | 完整技能树；最后一层为等价群节点，原始 Skill 作为等价群成员保留 |
+| `catalog.jsonl` | 原始 Skill 元数据 |
+| `equivalence_report.json` | 原始树分支、等价群和 Skill 映射，以及统计、完整性检查和增量缓存 |
+| `equivalence_audit.jsonl` | 提示词、模型原始输出、候选 Skill 对、两两校验、分组、审计和重试记录 |
 
-Group ID 由稳定 scope 路径和排序后的成员 Skill ID 计算。成员集合不变时 ID 保持稳定；成员变化时生成新 ID。
+等价群 ID 由原始树分支路径和排序后的成员 Skill ID 计算。成员集合不变时 ID 保持稳定；成员变化时生成新 ID。
 
-审计文件可能包含内部 Skill 描述和模型原始响应，必须按内部数据处理，不记录 API key 或 Authorization header。
+审计文件可能包含内部 Skill 描述和模型原始输出，必须按内部数据处理，不得记录 API 密钥或鉴权请求头。
 
-### 7.2 配置
+### 8.2 配置
 
 | 配置 | 默认值 | 含义 |
 |---|---:|---|
-| `equivalence_enabled` | `false` | 是否启用终端等价归一 |
-| `equivalence_all_pairs_scope_limit` | `12` | 小 scope 全量枚举 pair 的最大 Skill 数 |
-| `equivalence_candidate_neighbors` | `8` | 大 scope 中每个 Skill 的候选邻居上限 |
-| `equivalence_max_pairwise_pairs` | `10000` | 单次构建允许的 pair 总上限 |
+| `equivalence_enabled` | `false` | 是否启用最后一层等价群归一 |
+| `equivalence_all_pairs_scope_limit` | `12` | 小分支列出全部 Skill 两两组合的最大 Skill 数 |
+| `equivalence_candidate_neighbors` | `8` | 大分支中每个 Skill 最多召回的可能等价 Skill 数 |
+| `equivalence_max_pairwise_pairs` | `10000` | 单次构建允许做两两校验的 Skill 对总上限 |
 
-功能默认关闭，避免未显式启用时改变原 PR 的树结构、构建成本和增量行为。
+功能默认关闭，避免未显式启用时改变原 PR 的技能树结构、构建成本和增量行为。
 
-## 8. 实验设计与当前结果
+## 9. 实验设计与当前结果
 
-### 8.1 本地 GLM-5.2 discovery
+### 9.1 本地 GLM-5.2 方案探索
 
-本机没有内部约 1000 个 Skill 的完整数据。本地只使用用户提供的 18 个样例 Skill，输入仅包含 `skillName/skillDesc`，不包含 SKILL.md；实验定位为 discovery，不做 train/test 划分，也不用于证明生产质量收益。
+本机没有内部约 1000 个 Skill 的完整数据。本地只使用用户提供的 18 个样例 Skill，输入仅包含 `skillName/skillDesc`，不包含 SKILL.md；实验定位为方案探索，不用于证明生产质量收益。
 
-共同配置：关闭 postprocess，固定相同模型与 seed，`branching_factor=4`、`max_depth=4`、`max_skills_per_node=3`、`model_discovery_max_depth=3`、`workers=2`。
+共同配置：关闭后处理，固定相同模型与随机种子，`branching_factor=4`、`max_depth=4`、`max_skills_per_node=3`、`model_discovery_max_depth=3`、`workers=2`。
 
 | 方案 | 构建耗时 | 结果 |
 |---|---:|---|
-| A：taxonomy-only 中间实验版本 | 72.544s | 18/18 覆盖，9 个 terminal bucket |
-| B：原一次性 terminal partition | 55.619s | 18/18 覆盖，11 个 bucket；出现若干偏宽合并 |
-| C：严格 equivalence | 233.972s | 5 scopes、38 pairs、15 groups |
+| A：只构建原始树的中间实验版本 | 72.544s | 18/18 覆盖，9 个末端分类 |
+| B：原一次性末端分组 | 55.619s | 18/18 覆盖，11 个分组；出现若干偏宽合并 |
+| C：新等价群归一 | 233.972s | 5 个原始树分支、38 个候选 Skill 对、15 个等价群 |
 
-C 方案的 equivalence 阶段耗时约 172.446s：
+C 方案的等价群归一阶段耗时约 172.446s：
 
-- 3 个 `equivalent` pair，35 个 `not_equivalent` pair；
-- 3 个多成员 group、12 个 singleton group；
-- 3 次 group audit，0 conflict，0 correction retry；
-- 覆盖、唯一性、clique 和审计不变量全部通过。
+- 3 个 Skill 对判定为等价，35 个判定为不等价。
+- 形成 3 个多成员等价群、12 个单成员等价群。
+- 完成 3 次单一功能审计，没有发现冲突，也没有发生格式重试。
+- Skill 覆盖、成员唯一、群内两两等价和多成员群审计全部通过。
 
-观察到的多成员结果包括 Tavily 搜索、浏览器自动化和 Humanizer 三组相近 Skill。它们说明协议和树改写链路能够工作，但没有人工 gold label，不能据此计算 precision/recall。
+观察到的多成员结果包括 Tavily 搜索、浏览器自动化和 Humanizer 三组相近 Skill。这些结果说明协议校验和技能树重建链路可以运行，但没有人工标准标注，不能据此计算精确率和召回率。
 
-另外，即使设置相同 seed，当前 OpenAI-compatible endpoint 的 taxonomy 仍有随机漂移；A 也是开发过程中的中间实验版本，不能简单等同于当前代码的 `equivalence_enabled=false`。因此 A/B/C 不是严格 paired 实验，当前只能得出以下结论：
+另外，即使设置相同随机种子，当前 OpenAI 兼容模型接口的原始树分类结果仍有随机漂移；A 也是开发过程中的中间实验版本，不能简单等同于当前代码中关闭 `equivalence_enabled` 的行为。因此 A/B/C 不是严格使用同一份原始树产物的对照实验，当前只能得出：
 
-- 新方案的结构协议和失败语义已验证可运行；
-- 新方案明显增加构建耗时；
-- 是否降低误合并、是否值得该成本，仍需内部标注数据验证。
+- 新方案的结构校验和失败处理已验证可运行。
+- 新方案明显增加构建耗时。
+- 是否降低错误合并、是否值得该成本，仍需要内部标注数据验证。
 
-### 8.2 内部约 1000 Skill 验证方案
+### 9.2 内部约 1000 个 Skill 验证方案
 
-内部实验必须冻结同一份 Skill 数据和 taxonomy artifact，再对 A/B/C 各独立运行至少 3 次，避免把 taxonomy 漂移误判为 equivalence 效果。
+内部实验必须固定同一份 Skill 数据和原始技能树产物，再对 A/B/C 各独立运行至少 3 次，避免把原始树分类漂移误当成等价群归一效果。
 
-标注按 scope、领域和已知等价 family 分层拆分：
+标注数据按原始树分支、业务领域和已知等价 Skill 类别分层拆分：
 
-- **discovery**：归纳失败类别和完善诊断；
-- **development**：选择候选邻居、pair 上限等成本参数；
-- **held-out**：方案冻结后只做最终审计，不根据结果继续修改生产逻辑。
+- **方案探索集**：归纳系统性失败类别并完善诊断。
+- **开发调参集**：选择每个 Skill 的候选数、Skill 对上限等成本参数。
+- **最终留出评估集**：方案冻结后只做最终审计，不根据结果继续修改生产逻辑。
 
 评估指标分为四组：
 
 | 类型 | 指标 |
 |---|---|
-| 结构正确性 | 100% 覆盖；unknown/duplicate/missing 为 0；clique violation 为 0；未审计多成员 group 为 0 |
-| 候选与判断 | candidate recall；pairwise precision/recall/F1；`insufficient_evidence` 比例 |
-| 聚类质量 | B³ precision/recall/F1；over-merge；fragmentation；人工单功能通过率 |
-| 成本与稳定性 | LLM calls/tokens；wall-clock；scope p50/p95；重复运行成员一致率；增量无关分支 diff |
+| 结构正确性 | Skill 100% 覆盖；未知、重复、缺失为 0；群内两两等价违反为 0；未审计多成员群为 0 |
+| 候选与两两判断 | 候选召回率；两两判断精确率、召回率和 F1；“证据不足”比例 |
+| 分组质量 | B³ 精确率、召回率和 F1；错误合并；过度拆分；人工单一功能通过率 |
+| 成本与稳定性 | 模型调用次数与 Token 数；总耗时；分支处理耗时 p50/p95；重复运行成员一致率；增量构建的无关分支差异 |
 
-如果后续具备真实 query，再增加 terminal group Top-K recall 和候选冗余率。聚类指标改善不能直接表述为真实端到端 dispatch 收益。
+如果后续具备真实用户查询，再增加最后一层等价群的 Top-K 召回率和候选冗余率。离线分组指标改善不能直接表述为真实端到端调度收益。
 
-## 9. 风险与后续
+## 10. 风险与后续
 
 | 风险 | 当前处理 | 后续方向 |
 |---|---|---|
-| taxonomy 分类错误导致真实等价 Skill 位于不同 scope | 不跨分支合并，接受保守漏召回 | 对高置信跨分支候选做独立二阶段评估 |
-| 大 scope 候选漏召回 | LLM 邻居召回 + 同名补充 | 引入 embedding/lexical 多路候选 union |
-| LLM pairwise 漂移 | 严格 schema、一次 correction、保留原始证据 | 对高风险正向 pair 增加反例二审 |
-| Pairwise 和 audit 成本高 | scope-local、pair hard cap、增量 cache | 在稳定输出顺序下并行 scope/batch |
-| 超大 prompt 或 group audit 超 context | 明确失败并保留 diagnostics | 分批成员审计和冲突 pair 回查 |
-| complete-link 不是最小 clique cover | 优先保证确定性和等价 precision | 在不降低 precision 的前提下评估其他图分解 |
+| 原始技能树分类错误，导致真实等价 Skill 位于不同分支 | 不跨分支合并 | 对高置信跨分支候选做独立评估 |
+| 大分支候选漏召回 | 模型候选召回 + 同名补充 | 引入向量检索和关键词检索的多路候选合并 |
+| 模型两两校验结果漂移 | 严格输出格式、带错误原因重试一次、保留原始证据 | 对高风险正向 Skill 对增加反例二次检查 |
+| 两两校验和单一功能审计成本高 | 限定在原始树分支内处理、设置 Skill 对硬上限、复用增量缓存 | 在输出顺序稳定的前提下并行处理不同分支和批次 |
+| 提示词或审计输入超出模型上下文 | 明确失败并保留诊断信息 | 分批审计成员并回查冲突 Skill 对 |
+| 当前分组方式不保证等价群数量最少 | 优先保证结果稳定和群内成员两两等价 | 在不降低等价精确率的前提下评估其他分组方法 |
 
-后续优先完成三件事：在内部标注集上冻结质量与成本阈值；为高风险正向 pair 增加反例二审；为大 scope 引入 embedding/lexical 多路召回并并行安全的 scope/batch。
+后续优先完成三件事：在内部标注集上固定质量与成本阈值；为高风险正向 Skill 对增加反例二次检查；为大分支引入向量检索和关键词检索的多路候选召回。
 
-本阶段的优先级是：**等价 precision > 覆盖可审计 > 构建成本 > 压缩率**。任何扩大召回或提高压缩率的优化，都不能破坏 scope 边界、clique 和单一功能三个核心约束。
+本阶段的优先级是：**等价精确率 > 覆盖可审计 > 构建成本 > 等价群压缩率**。
 
 ## 附录 A：模块职责
 
 | 模块 | 职责 |
 |---|---|
-| `indexing/tree/builder.py` | 编排 taxonomy、可选 postprocess 和可选 equivalence 阶段 |
-| `indexing/tree/equivalence.py` | scope 收集、短引用、候选、pairwise、clique、审计和 report |
-| `indexing/tree/prompts.py` | taxonomy 与 equivalence 的独立 prompt 协议 |
-| `indexing/workflows/tree_ops.py` | scope 子树替换及 branch-local 增量状态更新 |
-| `indexing/workflows/index_builder.py` | 全量/增量 workflow、catalog 对齐和产物写出 |
-| `skill_retrieval/index_service.py` | 构建状态、原子发布、失败诊断和恢复校验 |
+| `indexing/tree/builder.py` | 编排原始技能树构建、可选后处理和可选等价群归一 |
+| `indexing/tree/equivalence.py` | 收集分支 Skill、生成候选 Skill 对、两两校验、分组、审计和生成报告 |
+| `indexing/tree/prompts.py` | 保存原始树分类和等价群归一的独立提示词 |
+| `indexing/workflows/tree_ops.py` | 替换分支子树并更新分支内增量状态 |
+| `indexing/workflows/index_builder.py` | 全量与增量构建流程、Skill 元数据对齐和产物写出 |
+| `skill_retrieval/index_service.py` | 构建状态、原子发布、失败诊断和恢复检查 |
