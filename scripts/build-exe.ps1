@@ -3,6 +3,7 @@
 
 param(
     [string]$NodeDir = "",
+    [switch]$BundleWebView2,
     [string]$WebView2RuntimeDir = ""
 )
 
@@ -190,16 +191,11 @@ function Resolve-WebView2RuntimeDir {
     return $resolved
 }
 
-function Copy-WebView2Runtime {
-    param(
-        [string]$SourceDir,
-        [string]$DistDir
-    )
-
+function Remove-BundledWebView2Runtime {
+    param([string]$DistDir)
     $distResolved = (Resolve-Path -LiteralPath $DistDir -ErrorAction Stop).Path
     $runtimeDir = Join-Path $distResolved "runtime"
     $target = Join-Path $runtimeDir "webview2"
-
     if (Test-Path -LiteralPath $target) {
         $targetResolved = (Resolve-Path -LiteralPath $target).Path
         if (-not $targetResolved.StartsWith($distResolved, [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -207,6 +203,16 @@ function Copy-WebView2Runtime {
         }
         Remove-Item -LiteralPath $targetResolved -Recurse -Force
     }
+    return $target
+}
+
+function Copy-WebView2Runtime {
+    param(
+        [string]$SourceDir,
+        [string]$DistDir
+    )
+
+    $target = Remove-BundledWebView2Runtime -DistDir $DistDir
 
     New-Item -ItemType Directory -Path $target -Force | Out-Null
     Get-ChildItem -LiteralPath $SourceDir -Force | Copy-Item -Destination $target -Recurse -Force
@@ -269,7 +275,14 @@ function Copy-NodeRuntime {
     Write-Host "[runtime] Bundled Node $nodeVersion into $target" -ForegroundColor Green
 }
 
-$WebView2RuntimeSource = Resolve-WebView2RuntimeDir -ExplicitPath $WebView2RuntimeDir
+if ($WebView2RuntimeDir -and -not $BundleWebView2) {
+    throw "-WebView2RuntimeDir requires -BundleWebView2."
+}
+
+$WebView2RuntimeSource = $null
+if ($BundleWebView2) {
+    $WebView2RuntimeSource = Resolve-WebView2RuntimeDir -ExplicitPath $WebView2RuntimeDir
+}
 
 if (Test-Truthy $BundleNode) {
     $NodeSource = Resolve-NodeRuntimeDir `
@@ -317,10 +330,15 @@ if (Test-Truthy $BundleNode) {
     Write-Host "`n[3.5/5] Skipping bundled Node.js runtime (BUNDLE_NODE=$BundleNode)" -ForegroundColor Yellow
 }
 
-# 4. Bundle Fixed Version WebView2 Runtime
-Write-Host "`n[4/5] Bundling Fixed Version WebView2 Runtime..." -ForegroundColor Yellow
-$DistDir = Join-Path $ProjectRoot "dist\jiuwenswarm"
-Copy-WebView2Runtime -SourceDir $WebView2RuntimeSource -DistDir $DistDir
+# 4. Bundle Fixed Version WebView2 Runtime when requested
+if ($BundleWebView2) {
+    Write-Host "`n[4/5] Bundling Fixed Version WebView2 Runtime..." -ForegroundColor Yellow
+    $DistDir = Join-Path $ProjectRoot "dist\jiuwenswarm"
+    Copy-WebView2Runtime -SourceDir $WebView2RuntimeSource -DistDir $DistDir
+} else {
+    Write-Host "`n[4/5] Skipping bundled WebView2 Runtime (use -BundleWebView2 to enable)..." -ForegroundColor Yellow
+    Remove-BundledWebView2Runtime -DistDir (Join-Path $ProjectRoot "dist\jiuwenswarm") | Out-Null
+}
 
 # Verify the actual frozen runtime, including bundled WebView2 resources.
 $FrozenExe = Join-Path $ProjectRoot "dist\jiuwenswarm\jiuwenswarm.exe"
