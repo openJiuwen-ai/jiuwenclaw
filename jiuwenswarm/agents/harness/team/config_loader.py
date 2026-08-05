@@ -525,6 +525,9 @@ def load_team_spec_dict(
     spec_dict["spawn_mode"] = team_raw.get("spawn_mode", "inprocess")
     spec_dict["enable_hitt"] = team_raw.get("enable_hitt", True)
     spec_dict["enable_permissions"] = _resolve_enable_permissions(config_base, team_raw)
+    swarmflow_budget = team_raw.get("swarmflow_budget")
+    if swarmflow_budget is not None:
+        spec_dict["swarmflow_budget"] = int(swarmflow_budget)
     spec_dict["leader"] = _build_leader_spec(team_raw)
     spec_dict["agents"] = agents
     spec_dict["language"] = str(config_base.get("preferred_language", "zh")).strip().lower()

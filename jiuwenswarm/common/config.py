@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 _CONFIG_MODULE_DIR = Path(__file__).parent
 CONFIG_YAML_PATH = get_config_file()
 SWARMFLOW_ENABLED_CONFIG_PATH = ("modes", "team", "jiuwen_team", "enable_swarmflow")
+SWARMFLOW_BUDGET_CONFIG_PATH = ("modes", "team", "jiuwen_team", "swarmflow_budget")
 DEFAULT_SWARMFLOW_ENABLED = False
 # Check if user workspace exists and use it if configured via env
 _user_config = os.getenv("JIUWENSWARM_CONFIG_DIR")
@@ -1580,6 +1581,22 @@ def update_swarmflow_enabled_in_config(enabled: bool) -> None:
         path_so_far.append(segment)
         current = _ensure_config_object(current, segment, ".".join(path_so_far))
     current[SWARMFLOW_ENABLED_CONFIG_PATH[-1]] = bool(enabled)
+    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+
+
+def update_swarmflow_budget_in_config(budget: str) -> None:
+    """Update ``modes.team.jiuwen_team.swarmflow_budget`` in config.yaml."""
+    try:
+        value = int(budget)
+    except (ValueError, TypeError):
+        raise ValueError(f"swarmflow_budget must be a positive integer, got {budget!r}") from None
+    if value <= 0:
+        raise ValueError(f"swarmflow_budget must be a positive integer, got {value}")
+    data = load_yaml_round_trip(CONFIG_YAML_PATH)
+    current = data
+    for segment in SWARMFLOW_BUDGET_CONFIG_PATH[:-1]:
+        current = _ensure_config_object(current, segment, ".".join(SWARMFLOW_BUDGET_CONFIG_PATH))
+    current[SWARMFLOW_BUDGET_CONFIG_PATH[-1]] = value
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
 
 

@@ -1172,6 +1172,11 @@ modes:
       spawn_mode: inprocess
       enable_swarmflow: false
 
+      # Team-level token budget ceiling for swarmflow runs.
+      # Unset / null = unbounded (no ceiling).  Set to a positive integer to
+      # cap total tokens across ALL swarmflow runs spawned by this team.
+      # swarmflow_budget: 500000
+
       # Proactive reliability monitoring for team leaders and teammates.
       reliability:
         enabled: false
