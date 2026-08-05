@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from jiuwenclaw.agentserver.skill_turbo.plan_node import AbortError, PlanNode
+from jiuwenclaw.agentserver.skill_turbo.skill_codes.ppt.ppt_common import PptCommon
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +64,10 @@ class DeliveryNode(PlanNode):
         pptx_filename = str(inputs.get("pptx_filename") or "").strip()
         export_status = str(inputs.get("export_status") or "failed").strip()
         page_count = int(inputs.get("page_count") or 0)
-        total_pages = int(
-            inputs.get("total_pages") or (page_count + _DEFAULT_STRUCTURAL_PAGES)
+        total_pages = PptCommon.resolve_total_pages(
+            page_count=page_count,
+            total_pages=inputs.get("total_pages"),
+            default_structural_pages=_DEFAULT_STRUCTURAL_PAGES,
         )
 
         if not pages_dir:
