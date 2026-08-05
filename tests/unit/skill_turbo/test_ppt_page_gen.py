@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -1068,31 +1067,63 @@ def test_extract_backup_timestamp() -> None:
     ) == "20260803065245"
 
 
-def test_validate_chart_height_chain_rejects_page5_badcase() -> None:
-    path = (
-        "优化skill turbo/0803验证PPTs/45-双碳目标下的能源转型与产业机遇"
-        "/pages/page-5.pptx.html"
-    )
-    html = Path(path).read_text(encoding="utf-8")
-    assert not ppg._validate_chart_height_chain(html)
+_CHART_HEIGHT_BAD_HTML = """<!DOCTYPE html>
+<html><body>
+<div class="ppt-slide">
+  <main class="flex-1 min-h-0 flex gap-4">
+    <section class="flex-[3] min-h-0 flex flex-col gap-3">
+      <div class="border border-gray3 bg-white flex flex-col" style="padding:10px;">
+        <h3>氢能需求时序预测</h3>
+        <div id="h2-chart" class="flex-1 min-h-0 w-full"></div>
+      </div>
+    </section>
+  </main>
+</div>
+<script>echarts.init(document.getElementById('h2-chart'), null, {renderer:'svg'});</script>
+</body></html>
+"""
+
+_CHART_HEIGHT_GOOD_HTML = """<!DOCTYPE html>
+<html><body>
+<div class="ppt-slide">
+  <main class="flex-1 min-h-0 flex gap-4">
+    <section class="flex-[3] min-h-0 flex flex-col gap-3">
+      <div class="flex-1 min-h-0 border border-gray3 bg-white p-3 flex flex-col">
+        <h3>减排贡献结构</h3>
+        <div id="chart-decarbon" class="flex-1 min-h-0 w-full"></div>
+      </div>
+    </section>
+  </main>
+</div>
+<script>echarts.init(document.getElementById('chart-decarbon'), null, {renderer:'svg'});</script>
+</body></html>
+"""
+
+_CHART_HEIGHT_ENDING_HTML = """<!DOCTYPE html>
+<html><body>
+<div class="ppt-slide">
+  <main class="flex-1 min-h-0 flex flex-col">
+    <div class="border border-gray3 bg-white p-3 flex flex-col min-h-0">
+      <span>双碳路径愿景</span>
+      <div id="carbonPathChart" class="flex-1 min-h-0 w-full"></div>
+    </div>
+  </main>
+</div>
+<script>echarts.init(document.getElementById('carbonPathChart'), null, {renderer:'svg'});</script>
+</body></html>
+"""
 
 
-def test_validate_chart_height_chain_accepts_page4_goodcase() -> None:
-    path = (
-        "优化skill turbo/0803验证PPTs/45-双碳目标下的能源转型与产业机遇"
-        "/pages/page-4.pptx.html"
-    )
-    html = Path(path).read_text(encoding="utf-8")
-    assert ppg._validate_chart_height_chain(html)
+def test_validate_chart_height_chain_rejects_collapsed_wrapper() -> None:
+    assert not ppg._validate_chart_height_chain(_CHART_HEIGHT_BAD_HTML)
 
 
-def test_validate_chart_height_chain_accepts_page8_ending_chart() -> None:
-    path = (
-        "优化skill turbo/0803验证PPTs/45-双碳目标下的能源转型与产业机遇"
-        "/pages/page-8.pptx.html"
-    )
-    html = Path(path).read_text(encoding="utf-8")
-    assert ppg._validate_chart_height_chain(html)
+def test_validate_chart_height_chain_accepts_flex1_wrapper() -> None:
+    assert ppg._validate_chart_height_chain(_CHART_HEIGHT_GOOD_HTML)
+
+
+def test_validate_chart_height_chain_accepts_min_h0_wrapper() -> None:
+    assert ppg._validate_chart_height_chain(_CHART_HEIGHT_ENDING_HTML)
 
 
 def test_validate_chart_height_chain_skips_non_chart_page() -> None:
