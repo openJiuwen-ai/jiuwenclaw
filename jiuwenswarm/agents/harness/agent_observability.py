@@ -31,6 +31,7 @@ Shared-provider caveat (important):
 from __future__ import annotations
 
 import logging
+from contextvars import ContextVar
 from typing import Any
 
 from jiuwenswarm.common.config import get_config
@@ -46,61 +47,82 @@ _agent_observability_active: bool = False
 
 # Process-global "current run's root span", set/cleared by open/close_agent_run_span.
 # The per-request _team_span_ctx ContextVar can't reach the round tasks (agent
-# execution runs in a session-setup supervisor task), so OtelCallbackHandler's
-# get_team_span() returns None there and child spans are skipped. The monkeypatch
-# below makes get_team_span fall back to this global so the callback finds a parent
-# regardless of task/context boundary.
+# execution runs in a session-setup supervisor task), so every SDK team-span
+# lookup returns None there and the whole child-span machinery goes dark. The
+# ContextVar stand-in installed below makes those lookups fall back to this
+# global so they work regardless of task/context boundary.
 _CURRENT_ROOT_SPAN: Any = None
 
-# get_team_span bindings already wrapped by _install_team_span_global_fallback,
-# keyed on the wrapper itself (it becomes the next lookup's orig) so repeat
-# calls stay idempotent without stamping an attribute on the function object.
-_team_span_patched: set[Any] = set()
+
+class _RootSpanFallbackContextVar:
+    """Stand-in for the SDK's ``_team_span_ctx`` that falls back to the root span.
+
+    ``span_context`` resolves the current team span in two ways, and both must
+    see the single-agent root span:
+
+    * Through ``get_team_span()`` — used by ``OtelCallbackHandler`` to pick the
+      parent for llm/tool spans, and by ``ObservabilityRail``, which *returns
+      early* when it is None (that is why the agent-tier spans, including the
+      sub-agent ``agent.<type>.invoke`` ones, used to be missing).
+    * By reading the ``_team_span_ctx`` ContextVar **directly**, inside
+      ``ActiveSpanTracker._find_llm_span`` / ``close_llm_spans_by_parent`` —
+      the lookups that resolve the trace before locating the already-open
+      ``llm.call`` span. These are not reachable by wrapping a function.
+
+    Missing the second path is not cosmetic: the llm.call span is created (its
+    parent comes from the first path) but never found again, so no chunk / TTFT
+    / completion / usage attribute is ever written to it and it is force-closed
+    later by the tracker's orphan sweep — an LLM span with input but no output.
+
+    Rebinding the ContextVar itself covers both paths at once, because every
+    reader lives in ``span_context`` and resolves the module global at call
+    time. Only ``get`` changes behavior; ``set`` / ``reset`` delegate to the
+    real ContextVar so team mode keeps exact per-context semantics — its team
+    span is ContextVar-visible, so the fallback never triggers there. A single
+    active single-agent run is assumed (multi-session concurrency: last-opened
+    wins).
+    """
+
+    def __init__(self, inner: ContextVar) -> None:
+        self._inner = inner
+
+    @property
+    def name(self) -> str:
+        """Return the wrapped ContextVar's name."""
+        return self._inner.name
+
+    def get(self, *default: Any) -> Any:
+        """Return the context-local team span, or the current run's root span."""
+        span = self._inner.get(*default)
+        if span is None:
+            return _CURRENT_ROOT_SPAN
+        return span
+
+    def set(self, value: Any) -> Any:
+        """Bind *value* in the current context and return the reset token."""
+        return self._inner.set(value)
+
+    def reset(self, token: Any) -> None:
+        """Restore the binding this context had before its matching ``set``."""
+        self._inner.reset(token)
 
 
 def _install_team_span_global_fallback() -> None:
-    """Patch get_team_span in EVERY consumer module to fall back to _CURRENT_ROOT_SPAN.
+    """Swap the SDK's ``_team_span_ctx`` for the root-span-aware stand-in.
 
-    Each SDK consumer did ``from span_context import get_team_span``, so each has
-    its own binding that must be rebound separately:
-      * callback_handler — creates llm/tool spans (parent lookup).
-      * rail (ObservabilityRail) — creates the agent.<type>.invoke spans; it
-        *returns early* when get_team_span() is None, which is why the agent-tier
-        spans (incl. sub-agent's agent.<type>.invoke) were missing.
-      * monitor_handler — team-only (harmless to patch; team_span is ContextVar-visible
-        there so the fallback never triggers).
-    Team mode is unaffected: its team_span is ContextVar-visible, so the original
-    lookup returns non-None and the fallback never triggers. Single active
-    single-agent run assumed (multi-session concurrency: last-opened wins).
-    Best-effort, idempotent, never raises.
+    Best-effort, idempotent (a second call sees the stand-in already in place),
+    never raises — observability must never break a run.
     """
-    import importlib
+    try:
+        from openjiuwen.agent_teams.observability import span_context
+    except Exception as exc:
+        logger.debug("[AgentObservability] skip team-span fallback install: %s", exc)
+        return
 
-    for mod_path in (
-        "openjiuwen.agent_teams.observability.callback_handler",
-        "openjiuwen.agent_teams.observability.rail",
-        "openjiuwen.agent_teams.observability.monitor_handler",
-    ):
-        try:
-            mod = importlib.import_module(mod_path)
-        except Exception as exc:
-            logger.debug(
-                "[AgentObservability] skip team-span fallback patch for %s: %s",
-                mod_path, exc,
-            )
-            continue
-        orig = getattr(mod, "get_team_span", None)
-        if orig is None or orig in _team_span_patched:
-            continue
-
-        def _get_team_span_with_global(team_name=None, _orig=orig):  # type: ignore[no-untyped-def]
-            span = _orig(team_name)
-            if span is None:
-                return _CURRENT_ROOT_SPAN
-            return span
-
-        _team_span_patched.add(_get_team_span_with_global)
-        mod.get_team_span = _get_team_span_with_global
+    current = getattr(span_context, "_team_span_ctx", None)
+    if current is None or isinstance(current, _RootSpanFallbackContextVar):
+        return
+    span_context._team_span_ctx = _RootSpanFallbackContextVar(current)
 
 
 _install_team_span_global_fallback()

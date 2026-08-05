@@ -321,17 +321,14 @@ class TestOtelTeamSpanFallback:
     task), so OtelCallbackHandler finds a parent and emits child spans."""
 
     def test_patch_is_installed(self):
-        # ALL consumers must be patched: callback_handler (llm/tool spans) AND
-        # rail (agent.<type>.invoke spans — returns early when get_team_span is None).
-        import openjiuwen.agent_teams.observability.callback_handler as ch
-        import openjiuwen.agent_teams.observability.rail as rail
+        # The ContextVar itself is replaced, so BOTH lookup paths see the
+        # fallback: the get_team_span accessor (llm/tool span parents, and the
+        # rail, which returns early when it is None) and span_context's direct
+        # _team_span_ctx readers inside ActiveSpanTracker.
+        import openjiuwen.agent_teams.observability.span_context as sc
         import jiuwenswarm.agents.harness.agent_observability as obs  # triggers install
 
-        # Patched bindings are tracked in the module-level _team_span_patched set
-        # (the wrapper is itself the key — it becomes the next lookup's orig, so
-        # re-install is idempotent).
-        assert ch.get_team_span in obs._team_span_patched
-        assert rail.get_team_span in obs._team_span_patched
+        assert isinstance(sc._team_span_ctx, obs._RootSpanFallbackContextVar)
 
     def test_fallback_returns_current_root_span(self):
         # _team_span_ctx ContextVar is unset in the test process -> orig returns
@@ -351,6 +348,46 @@ class TestOtelTeamSpanFallback:
 
         obs._CURRENT_ROOT_SPAN = None
         assert ch.get_team_span() is None
+
+
+def test_llm_span_lookup_falls_back_to_root_span():
+    """The open llm.call span stays findable from the supervisor task.
+
+    ``ActiveSpanTracker._find_llm_span`` reads ``_team_span_ctx`` directly to
+    resolve the trace — no function to wrap. Without the ContextVar stand-in it
+    returns None there, so ``on_llm_output`` never finds the span it must close
+    and the LLM span is exported with input but no completion / usage.
+    """
+    import openjiuwen.agent_teams.observability.span_context as sc
+    import jiuwenswarm.agents.harness.agent_observability as obs
+
+    trace_id = 0x1234
+
+    class _Span:
+        """Hashable span stub — ActiveSpanTracker keeps spans in a set."""
+
+        def __init__(self, name: str, span_id: int) -> None:
+            self.name = name
+            self.context = SimpleNamespace(trace_id=trace_id, span_id=span_id)
+            self.parent = None
+
+        def is_recording(self) -> bool:
+            return True
+
+    root_span = _Span("agent.code.normal.sess-1", 0x1)
+    llm_span = _Span("llm.call", 0x2)
+
+    tracker = sc.ActiveSpanTracker()
+    tracker.on_start(llm_span)
+    previous_tracker = sc.get_active_span_tracker()
+    sc.set_active_span_tracker(tracker)
+    obs._CURRENT_ROOT_SPAN = root_span
+    try:
+        assert sc.get_current_llm_span() is llm_span
+        assert sc.pop_current_llm_span() is llm_span
+    finally:
+        obs._CURRENT_ROOT_SPAN = None
+        sc.set_active_span_tracker(previous_tracker)
 
 
 # ── truncation / redaction ─────────────────────────────────────────────────
