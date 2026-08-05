@@ -13,6 +13,7 @@ import argparse
 import importlib
 import importlib.util
 import json
+import logging
 import os
 import platform
 import shutil
@@ -20,6 +21,9 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Iterable
+
+logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
+logger = logging.getLogger(__name__)
 
 _REEXEC_FLAG = "SKILL_OMNI_ENV_REEXEC"
 _STATUS_DIR = Path(__file__).resolve().parent / "work"
@@ -44,7 +48,7 @@ class EnvironmentGateError(RuntimeError):
 
 
 def _log(message: str) -> None:
-    print(f"[environment_gate] {message}", flush=True)
+    logger.info("[environment_gate] %s", message)
 
 
 def _resolved(path: Path | str) -> Path:
@@ -178,18 +182,15 @@ def _reexec_with_selected(selected: Path) -> None:
         )
 
     caller = Path(sys.argv[0]).resolve()
-    env = os.environ.copy()
-    env[_REEXEC_FLAG] = "1"
+    os.environ[_REEXEC_FLAG] = "1"
     _log(f"Re-executing with selected interpreter: {selected}")
     try:
-        result = subprocess.run(
-            [str(selected), str(caller), *sys.argv[1:]],
-            env=env,
-            check=False,
-        )
+        # Replace this process outright rather than spawning a child and
+        # exiting with its return code — avoids a lingering wrapper process
+        # and keeps termination out of this non-entry-point function.
+        os.execv(str(selected), [str(selected), str(caller), *sys.argv[1:]])
     except OSError as exc:
         raise EnvironmentGateError(f"Could not start selected interpreter {selected}: {exc}") from exc
-    raise SystemExit(result.returncode)
 
 
 def _run(command: list[str], *, timeout: int, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -417,12 +418,12 @@ def ensure_environment(
     except EnvironmentGateError as exc:
         _write_status(profile=profile, ready=False, error=str(exc))
         _log(f"ENVIRONMENT_BLOCKED profile={profile}: {exc}")
-        raise SystemExit(2) from exc
+        raise
     except subprocess.TimeoutExpired as exc:
         message = f"Environment repair command timed out: {exc}"
         _write_status(profile=profile, ready=False, error=message)
         _log(f"ENVIRONMENT_BLOCKED profile={profile}: {message}")
-        raise SystemExit(2) from exc
+        raise EnvironmentGateError(message) from exc
 
 
 def main() -> None:
@@ -438,12 +439,15 @@ def main() -> None:
     parser.add_argument("--no-create-venv", action="store_true", help="Do not create a project .venv when none exists.")
     args = parser.parse_args()
 
-    ensure_environment(
-        args.profile,
-        project_dir=args.project_dir,
-        auto_install=not args.check,
-        create_venv=not args.no_create_venv,
-    )
+    try:
+        ensure_environment(
+            args.profile,
+            project_dir=args.project_dir,
+            auto_install=not args.check,
+            create_venv=not args.no_create_venv,
+        )
+    except EnvironmentGateError:
+        sys.exit(2)
 
 
 if __name__ == "__main__":

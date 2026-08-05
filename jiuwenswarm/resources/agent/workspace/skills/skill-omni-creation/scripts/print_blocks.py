@@ -166,7 +166,8 @@ def _print_bounded(data: dict, found_stage: str) -> None:
             if path_field:
                 line = f"  IMG  [{src}]: path={path_field}  alt={block.get('alt', '')[:80]}"
             elif raw_path:
-                line = f"  IMG#{image_index:03d} [{src}]: review={status or 'UNREVIEWED'}  alt={block.get('alt', '')[:80]}"
+                alt = block.get("alt", "")[:80]
+                line = f"  IMG#{image_index:03d} [{src}]: review={status or 'UNREVIEWED'}  alt={alt}"
             else:
                 line = f"  IMG#{image_index:03d} [{src}]: alt={block.get('alt', '')[:80]}"
             records.append({"kind": "fixed", "line": line})

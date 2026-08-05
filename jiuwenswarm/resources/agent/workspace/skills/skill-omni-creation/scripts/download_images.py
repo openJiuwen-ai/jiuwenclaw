@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 # The shared environment gate runs before common.py or any third-party module.
 # It selects/re-executes the project interpreter and repairs requests/Pillow.
-from environment_gate import ensure_environment
+from environment_gate import EnvironmentGateError, ensure_environment
 
 requests = None
 Image = None
@@ -99,10 +99,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Download images from stage01.json.")
     parser.add_argument("slug", nargs="?", help="Skill slug — reads work/<slug>/stage01.json")
     parser.add_argument("--out", default=None)
-    parser.add_argument("--check-deps", action="store_true", help="Run the shared image environment gate with auto-repair, then exit.")
+    parser.add_argument(
+        "--check-deps",
+        action="store_true",
+        help="Run the shared image environment gate with auto-repair, then exit.",
+    )
     args = parser.parse_args()
 
-    _load_runtime_dependencies()
+    try:
+        _load_runtime_dependencies()
+    except EnvironmentGateError:
+        sys.exit(2)
     if args.check_deps:
         logger.info("[download_images] DEPENDENCIES_OK: %s", Path(sys.executable).resolve())
         return

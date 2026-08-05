@@ -55,7 +55,10 @@ def main() -> None:
         image_blocks = [b for b in stage02_data.get("blocks", []) if b.get("type") == "image"]
         unresolved = [b.get("raw_path") for b in image_blocks if b.get("review_status") in {None, "UNREVIEWED"}]
         if unresolved:
-            logger.error("[save_images] ERROR: image review is unresolved; finish image_review.py first: %s", unresolved)
+            logger.error(
+                "[save_images] ERROR: image review is unresolved; finish image_review.py first: %s",
+                unresolved,
+            )
             raise SystemExit(2)
         allowed_raw = {b.get("raw_path") for b in image_blocks if b.get("review_status") == "KEEP"}
         invalid_raw = [p for p in keep_paths if p.startswith("raw_images/") and p not in allowed_raw]

@@ -397,7 +397,14 @@ def download_video(url: str, tmp_dir: pathlib.Path, max_minutes: int | None = No
                 "-o", out_template,
                 url,
             ]
-            result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=OPERATION_TIMEOUT_SECONDS)
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=OPERATION_TIMEOUT_SECONDS,
+            )
             if result.returncode == 0:
                 videos = list(tmp_dir.glob("video.*"))
                 if videos:
@@ -414,7 +421,14 @@ def download_video(url: str, tmp_dir: pathlib.Path, max_minutes: int | None = No
             "-o", out_template,
             url,
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=OPERATION_TIMEOUT_SECONDS)
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=OPERATION_TIMEOUT_SECONDS,
+        )
         if result.returncode == 0:
             videos = list(tmp_dir.glob("video.*"))
             if videos:

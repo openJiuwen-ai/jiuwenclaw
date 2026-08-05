@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 # The environment gate uses only the standard library. It selects/re-executes
 # the correct virtual-environment interpreter and repairs missing packages or
 # Chromium before common.py (which imports requests) is loaded.
-from environment_gate import ensure_environment
+from environment_gate import EnvironmentGateError, ensure_environment
 
 BeautifulSoup = None
 common = None
@@ -129,7 +129,11 @@ def fetch_video_title(url: str, fallback: str) -> str:
         try:
             result = subprocess.run(
                 _ytdlp_base + ["--cookies-from-browser", _browser, url],
-                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=common.OPERATION_TIMEOUT_SECONDS,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=common.OPERATION_TIMEOUT_SECONDS,
             )
             title = result.stdout.strip().splitlines()[0] if result.returncode == 0 else ""
             if title:
@@ -368,6 +372,33 @@ def _is_leaf_js_text_container(el) -> bool:
 
 # ── Core: build unified blocks[] ─────────────────────────────────────────────
 
+_CANDIDATE_TAG_NAMES = {
+    "h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "img",
+    "pre", "code", "table", "dl", "textarea", "canvas",
+}
+_CANDIDATE_ROLES = {"heading", "listitem", "code"}
+_STRUCTURED_TAG_NAMES = {"pre", "code", "table", "dl", "textarea", "canvas"}
+
+
+def _is_candidate_element(el) -> bool:
+    return (
+        el.name in _CANDIDATE_TAG_NAMES
+        or el.get("role") in _CANDIDATE_ROLES
+        or _is_contenteditable(el)
+        or _is_custom_editor(el)
+        or _is_leaf_js_text_container(el)
+    )
+
+
+def _is_structured_element(el) -> bool:
+    return (
+        el.name in _STRUCTURED_TAG_NAMES
+        or _is_custom_editor(el)
+        or _is_contenteditable(el)
+        or _is_leaf_js_text_container(el)
+    )
+
+
 def build_blocks(soup, page_url: str, source: str) -> list[dict]:
     """Walk DOM in order, output interleaved heading / text / image blocks."""
     root = (
@@ -382,19 +413,7 @@ def build_blocks(soup, page_url: str, source: str) -> list[dict]:
     seen_text: set[str] = set()
     blocks: list[dict] = []
 
-    candidates = []
-    for el in root.find_all(True, recursive=True):
-        if (
-            el.name in {
-                "h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "img",
-                "pre", "code", "table", "dl", "textarea", "canvas",
-            }
-            or el.get("role") in {"heading", "listitem", "code"}
-            or _is_contenteditable(el)
-            or _is_custom_editor(el)
-            or _is_leaf_js_text_container(el)
-        ):
-            candidates.append(el)
+    candidates = [el for el in root.find_all(True, recursive=True) if _is_candidate_element(el)]
 
     for el in candidates:
         panel_id, tab_label = _tabpanel_info(el, root, tabpanel_labels)
@@ -438,12 +457,7 @@ def build_blocks(soup, page_url: str, source: str) -> list[dict]:
             alt = el.get("alt", "").strip() or resolve_remote_reference(el, soup)
             blocks.append({"type": "image", "url": url, "alt": alt, "source": source, "path": None})
 
-        elif (
-            el.name in {"pre", "code", "table", "dl", "textarea", "canvas"}
-            or _is_custom_editor(el)
-            or _is_contenteditable(el)
-            or _is_leaf_js_text_container(el)
-        ):
+        elif _is_structured_element(el):
             if el.name != "canvas" and _is_inside_container(el, root, include_paragraphs=(el.name == "code")):
                 continue
             structured = _structured_text(el)
@@ -674,6 +688,7 @@ def build_bounded_stage01_payload(
     payload["content_limits"]["serialized_chars"] = _serialized_chars(payload)
     return payload
 
+
 def parse_page_html(html: str, page_url: str, source: str) -> list[dict]:
     soup = BeautifulSoup(html, "html.parser")
     for noise_id in NOISE_IDS:
@@ -872,18 +887,28 @@ def main() -> None:
     parser.add_argument("url", nargs="?")
     parser.add_argument("slug", nargs="?", default=None)
     parser.add_argument("--out", default=None)
-    parser.add_argument("--check-deps", action="store_true", help="Run the shared environment gate with auto-repair, then exit.")
+    parser.add_argument(
+        "--check-deps",
+        action="store_true",
+        help="Run the shared environment gate with auto-repair, then exit.",
+    )
     args = parser.parse_args()
 
     if args.check_deps:
-        _load_runtime_dependencies(require_web=True)
+        try:
+            _load_runtime_dependencies(require_web=True)
+        except EnvironmentGateError:
+            sys.exit(2)
         logger.info("[scrape_page] DEPENDENCIES_OK: %s", Path(sys.executable).resolve())
         return
     if not args.url:
         parser.error("url is required unless --check-deps is used")
 
     require_web = not is_platform_url(args.url)
-    _load_runtime_dependencies(require_web=require_web)
+    try:
+        _load_runtime_dependencies(require_web=require_web)
+    except EnvironmentGateError:
+        sys.exit(2)
 
     if args.slug:
         slug = args.slug
@@ -934,7 +959,10 @@ def main() -> None:
     except Exception as exc:
         message = str(exc).lower()
         logger.error("[scrape_page] Playwright startup failed: %s", exc)
-        logger.error("[scrape_page] Environment gate had passed; this is a runtime browser/page failure, not a missing-package fallback.")
+        logger.error(
+            "[scrape_page] Environment gate had passed; this is a runtime "
+            "browser/page failure, not a missing-package fallback."
+        )
         raise SystemExit(4) from exc
 
     _blocked_markers = ("the request is blocked", "access denied", "403 forbidden", "enable javascript")

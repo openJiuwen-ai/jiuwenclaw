@@ -55,7 +55,7 @@ def main() -> None:
             keep_rel.add(_relative_script_path(value, script_dir))
         except ValueError as exc:
             logger.error("[finalize_scripts] ERROR: %s", exc)
-            raise SystemExit(2)
+            raise SystemExit(2) from exc
 
     deleted: list[str] = []
     kept: list[str] = []
