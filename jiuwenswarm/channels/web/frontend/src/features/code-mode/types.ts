@@ -118,6 +118,22 @@ export interface GitRedoTurnChangesResult {
   partial: boolean;
 }
 
+export interface GitCommitResult {
+  committed: true;
+  commit_hash: string | null;
+  amended: boolean;
+  status: GitRepoStatus;
+}
+
+export interface GitPushResult {
+  pushed: true;
+  remote: string;
+  branch: string | null;
+  deleted: boolean;
+  upstream_set: boolean;
+  status: GitRepoStatus;
+}
+
 export type CodeReviewTarget =
   | {
       source: 'last_turn';
