@@ -2177,6 +2177,10 @@ class TeamManager:
     @staticmethod
     async def _find_paused_runner_team_name(session_id: str) -> str | None:
         """Return the paused Runner team name for a session using the public facade."""
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id:
+            return None
+
         try:
             active_teams = await Runner.list_active_teams()
         except Exception as exc:
@@ -2188,8 +2192,10 @@ class TeamManager:
             return None
 
         for info in active_teams:
-            if info.current_session_id == session_id and info.state == RuntimeState.PAUSED:
-                return info.team_name or None
+            current_session_id = str(info.current_session_id or "").strip()
+            if current_session_id == normalized_session_id and info.state == RuntimeState.PAUSED:
+                team_name = str(info.team_name or "").strip()
+                return team_name or None
         return None
 
     async def stop_paused_session_runtime(
@@ -2242,7 +2248,7 @@ class TeamManager:
             session_id,
             stopped,
         )
-        return True
+        return stopped
 
     async def stop_all_paused_session_runtimes(self, reason: str = "") -> int:
         """Stop every paused Runner team runtime known to the process."""
@@ -2252,11 +2258,13 @@ class TeamManager:
             logger.warning("[TeamManager] list active teams failed before paused stop: %s", exc)
             return 0
 
-        paused_session_ids = {
-            str(info.current_session_id)
-            for info in active_teams
-            if info.state == RuntimeState.PAUSED
-        }
+        paused_session_ids: set[str] = set()
+        for info in active_teams:
+            if info.state != RuntimeState.PAUSED:
+                continue
+            current_session_id = str(info.current_session_id or "").strip()
+            if current_session_id:
+                paused_session_ids.add(current_session_id)
         stopped_count = 0
         for session_id in paused_session_ids:
             stopped = await self.stop_paused_session_runtime(session_id, reason=reason)

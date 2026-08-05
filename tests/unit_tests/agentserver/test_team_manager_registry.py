@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from openjiuwen.agent_teams.runtime.pool import RuntimeState
@@ -709,6 +710,124 @@ async def test_prepare_session_switch_keeps_other_local_sessions_running(
 
     assert manager.get_active_team_name("sess-active") == "team-active"
     assert manager.is_runtime_pending("sess-pending") is True
+
+
+@pytest.mark.asyncio
+async def test_find_paused_runner_team_name_normalizes_session_and_team_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    list_active_teams = AsyncMock(
+        return_value=[
+            SimpleNamespace(
+                current_session_id=123,
+                state=RuntimeState.PAUSED,
+                team_name=" team-123 ",
+            ),
+            SimpleNamespace(
+                current_session_id="sess-running",
+                state=RuntimeState.RUNNING,
+                team_name="team-running",
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.Runner.list_active_teams",
+        list_active_teams,
+    )
+
+    team_name = await TeamManager._find_paused_runner_team_name("123")
+
+    assert team_name == "team-123"
+
+
+@pytest.mark.asyncio
+async def test_stop_paused_session_runtime_returns_runner_stop_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _TeamManagerHarness()
+    find_paused_runner_team_name = AsyncMock(return_value="team-1")
+    stop_runner_team_runtime = AsyncMock(return_value=False)
+    stop_runner_team_agent_transport = AsyncMock()
+    finalize_runtime_cleanup = AsyncMock()
+    monkeypatch.setattr(
+        manager,
+        "_find_paused_runner_team_name",
+        find_paused_runner_team_name,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_stop_runner_team_runtime",
+        stop_runner_team_runtime,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_stop_runner_team_agent_transport",
+        stop_runner_team_agent_transport,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_finalize_runtime_cleanup",
+        finalize_runtime_cleanup,
+    )
+
+    stopped = await manager.stop_paused_session_runtime("sess-1", offload=False)
+
+    assert stopped is False
+    find_paused_runner_team_name.assert_awaited_once_with("sess-1")
+    stop_runner_team_runtime.assert_awaited_once_with(
+        "sess-1",
+        "team-1",
+        "paused-runtime-stop",
+    )
+    stop_runner_team_agent_transport.assert_awaited_once_with("sess-1")
+    finalize_runtime_cleanup.assert_awaited_once_with("sess-1", "paused-runtime-stop")
+
+
+@pytest.mark.asyncio
+async def test_stop_all_paused_session_runtimes_filters_empty_session_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _TeamManagerHarness()
+    list_active_teams = AsyncMock(
+        return_value=[
+            SimpleNamespace(
+                current_session_id=None,
+                state=RuntimeState.PAUSED,
+            ),
+            SimpleNamespace(
+                current_session_id="",
+                state=RuntimeState.PAUSED,
+            ),
+            SimpleNamespace(
+                current_session_id=" sess-good ",
+                state=RuntimeState.PAUSED,
+            ),
+            SimpleNamespace(
+                current_session_id="sess-running",
+                state=RuntimeState.RUNNING,
+            ),
+        ],
+    )
+    stop_calls: list[tuple[str, str]] = []
+
+    async def stop_paused_session_runtime(session_id: str, reason: str = "") -> bool:
+        stop_calls.append((session_id, reason))
+        return session_id == "sess-good"
+
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.Runner.list_active_teams",
+        list_active_teams,
+    )
+    monkeypatch.setattr(
+        manager,
+        "stop_paused_session_runtime",
+        stop_paused_session_runtime,
+    )
+
+    stopped_count = await manager.stop_all_paused_session_runtimes(reason="reload: ")
+
+    assert stopped_count == 1
+    assert stop_calls == [("sess-good", "reload: ")]
 
 
 @pytest.mark.asyncio
