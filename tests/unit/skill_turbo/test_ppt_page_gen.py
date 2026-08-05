@@ -576,6 +576,8 @@ def test_qa_fix_command_uses_fix_with_style_and_never_check_layout(
         lambda subcommand, _root: f"node cli.js {subcommand}",
     )
     monkeypatch.setattr(ppg, "run_bash", _run_bash)
+    # P8.2 fix 前后会探测 read_file；本用例只断言 bash 命令，不走 DOM 回退读盘。
+    node.set_runtime_callbacks(has_tool=lambda _name: False)
 
     results = asyncio.run(
         node._fix_pages(
