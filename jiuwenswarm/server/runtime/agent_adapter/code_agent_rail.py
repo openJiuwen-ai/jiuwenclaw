@@ -1,7 +1,7 @@
 # coding: utf-8
 """CodeAgentRail — 管理 /agents 创建的自定义子智能体。
 
-与 SubagentRail 共存：SubagentRail 管理内置 agent（explore/plan/code/browser），
+与 SubagentRail 共存：SubagentRail 管理内置 agent（code/browser），
 CodeAgentRail 只管理自定义 agent。
 """
 
@@ -357,7 +357,7 @@ class CodeAgentRail(DeepAgentRail):
     """Code 模式下的自定义 agent rail。
 
     与 SubagentRail 共存，只管理 /agents 创建的自定义 agent。
-    不触碰内置 agent（explore/plan/code/browser）。
+    不触碰内置 agent（code/browser）。
     """
 
     priority = 90  # 略低于 SubagentRail(95)，避免冲突

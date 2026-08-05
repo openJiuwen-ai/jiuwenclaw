@@ -133,8 +133,6 @@ def _code_session_guidance_prompt() -> PromptSection:
         "- For wider exploration across the codebase, "
         "continue with grep, glob, and read tools directly, "
         "keeping each query focused on the requested scope.\n"
-        "- plan_agent is for designing implementation approaches "
-        "before writing code.\n"
         "- For browser automation tasks (taking screenshots, navigating pages, "
         "interacting with web UIs, or scraping dynamic content), "
         "use task_tool with subagent_type=\"browser_agent\". "

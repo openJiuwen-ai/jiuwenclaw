@@ -182,8 +182,12 @@ class CodeAgentModeRail(AgentModeRail):
         # before they even answered (and "skip" is supposed to keep them in).
         executed = self._exit_plan_tool_executed(ctx)
 
-        # Segment 1: register / unregister task_tool (same as parent)
-        if tool_name == "enter_plan_mode" and not rejected:
+        # Segment 1: register / unregister task_tool when the plan whitelist allows it
+        if (
+            tool_name == "enter_plan_mode"
+            and not rejected
+            and "task_tool" in self._allowed_tools
+        ):
             self._register_task_tool(agent)
         elif tool_name == "exit_plan_mode" and not rejected and executed:
             self._unregister_task_tool(agent)

@@ -4640,7 +4640,7 @@ class JiuWenSwarmDeepAdapter:
     def _build_work_agent_mode_rail(self) -> Any | None:
         """构建 work profile 的 plan rail（只读白名单 + 通用工作计划提示词）。
 
-        与 code 侧的区别只在构造参数：work 不引用 plan_agent，
+        与 code 侧的区别只在构造参数：work 使用通用工作提示词，
         白名单只放调研与计划文件写入，其余会产生业务副作用的工具在 plan 期间
         一律被拦截。
         """

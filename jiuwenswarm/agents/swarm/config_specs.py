@@ -177,7 +177,7 @@ _CODE_TOOL_NAMES: tuple[str, ...] = (
     registry.SEND_FILE,
 )
 
-# Code-mode sub-agents are either always-on (plan) or config-gated.
+# Code-mode sub-agents are config-gated.
 _DEFAULT_SUBAGENT_MAX_ITERATIONS = 15
 
 
@@ -670,7 +670,7 @@ def build_member_subagent_specs(
 ) -> list[SubAgentSpec]:
     """Build the declarative code sub-agent specs (empty for non-code modes).
 
-    plan is always present, while code / browser are config-gated via
+    code / browser are config-gated via
     ``react.subagents.<name>.enabled``.
 
     Args:
@@ -688,9 +688,7 @@ def build_member_subagent_specs(
     subagents_cfg = react.get("subagents", {}) if isinstance(react, dict) else {}
     language = _subagent_language(mode, role, config)
 
-    specs: list[SubAgentSpec] = [
-        _code_subagent_spec("plan_agent", registry.PLAN_AGENT, react, language),
-    ]
+    specs: list[SubAgentSpec] = []
     if isinstance(subagents_cfg, dict):
         if _is_subagent_enabled(subagents_cfg.get("code_agent")):
             specs.append(
@@ -779,18 +777,20 @@ def build_member_deep_agent_spec(
                 "browser_agent", registry.SWARM_BROWSER_AGENT, react_cfg, language
             )
 
-    if subagent_specs or team_browser_spec:
+    if _is_code_mode(mode) or subagent_specs or team_browser_spec:
         merged_subagents = list(base_spec.subagents or [])
         if _is_code_mode(mode):
             filtered = []
             for spec in merged_subagents:
-                is_explore = (
-                    getattr(spec, "subagent_type", None) == "explore_agent"
-                    or getattr(spec, "factory_name", None) == registry.EXPLORE_AGENT
+                is_temporarily_disabled = (
+                    getattr(spec, "subagent_type", None)
+                    in {"explore_agent", "plan_agent"}
+                    or getattr(spec, "factory_name", None)
+                    in {registry.EXPLORE_AGENT, registry.PLAN_AGENT}
                     or getattr(getattr(spec, "agent_card", None), "name", None)
-                    == "explore_agent"
+                    in {"explore_agent", "plan_agent"}
                 )
-                if not is_explore:
+                if not is_temporarily_disabled:
                     filtered.append(spec)
             merged_subagents = filtered
         # Remove any browser_agent from base_spec to prevent the shared

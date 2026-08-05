@@ -9,7 +9,7 @@
 
 Code 模式独占逻辑全部收敛于此：
 - LspRail、ProjectMemoryRail、CodingMemoryRail 等 code 专属 rail
-- code_agent / plan_agent subagent 配置
+- code_agent / browser_agent subagent 配置
 - code 模式下 rail 生命周期（保留 SubagentRail、补充 ProjectMemoryRail 等）
 """
 
@@ -38,7 +38,6 @@ from openjiuwen.harness.lsp import InitializeOptions
 from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.subagents.browser_agent import build_browser_agent_config
 from openjiuwen.harness.subagents.code_agent import build_code_agent_config
-from openjiuwen.harness.subagents.plan_agent import build_plan_agent_config
 from openjiuwen.harness.tools import WebFetchWebpageTool, WebFreeSearchTool, WebPaidSearchTool
 from openjiuwen.harness.tools.worktree import WorktreeConfig, WorktreeRail
 from openjiuwen.harness.workspace.workspace import Workspace
@@ -130,7 +129,6 @@ You are now in **plan mode**. You must only plan — you must not make any modif
 - Read-only tools: read_file, grep, list_files, glob
 - Plan file tools: write_file, edit_file (only .plans/<slug>.md)
 - Interactive tools: ask_user
-- Sub-agent tool: task_tool (dispatch plan_agent)
 - Control tools: exit_plan_mode
 - bash (read-only operations only; git write / mkdir / touch / rm are blocked)
 
@@ -150,12 +148,12 @@ Goal: Gain a comprehensive understanding of the user's request by reading code a
 
 #### Phase 2: Design
 Goal: Design the implementation approach.
-1. Launch a plan sub-agent via task_tool, based on Phase 1 exploration results
-2. Provide full background context in the agent prompt
+1. Design the implementation approach based on Phase 1 exploration results
+2. Keep the proposed changes focused on the user's request
 
 #### Phase 3: Review
 Goal: Review the Phase 2 plan to ensure alignment with user intent.
-1. Read key paths named by the plan sub-agent and confirm they match the code
+1. Re-read key paths named by the proposed plan and confirm they match the code
 2. Use ask_user to clarify any unresolved questions with the user
 
 #### Phase 4: Write Final Plan
@@ -333,7 +331,6 @@ _CODE_PLAN_ALLOWED_TOOLS: list[str] = [
     "enter_plan_mode",
     "exit_plan_mode",
     "ask_user",
-    "task_tool",
     "read_file",
     "grep",
     "list_files",
@@ -351,7 +348,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
     - create_instance(): 统一使用 create_deep_agent()（completion_timeout 从配置读取）
     - _build_agent_rails(): 固定 Rails (含 LspRail/ProjectMemoryRail/CodingMemoryRail) + 从 config.yaml 读取动态 Rails
     - _get_tool_cards(): 从 config.yaml 读取动态 Tools
-    - _build_configured_subagents(): 固定 plan_agent + 按配置启用 code_agent/browser_agent
+    - _build_configured_subagents(): 按配置启用 code_agent/browser_agent
     - _update_rails_for_mode(): code 模式 rail 生命周期
     - _update_runtime_config(): 保留 ProjectMemoryRail 语言同步
     """
@@ -896,28 +893,14 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
 
     # ─── Subagent 配置 ──────────────────────────
 
-    @staticmethod
-    def _subagent_list_has_name(subagents: list, name: str) -> bool:
-        """检查 subagents 列表中是否已包含指定名字的 subagent."""
-        for spec in subagents:
-            if isinstance(spec, SubAgentConfig):
-                if spec.agent_card.name == name:
-                    return True
-            else:
-                card = getattr(spec, "card", None)
-                if getattr(card, "name", None) == name:
-                    return True
-        return False
-
     def _build_configured_subagents(
             self,
             model: Model,
             config: dict[str, Any],
             config_base: dict[str, Any] | None = None,
     ) -> tuple[list[Any] | None, bool]:
-        """Build subagents for code mode: plan_agent + code_agent + browser_agent.
+        """Build config-gated code_agent and browser_agent subagents for code mode.
 
-        plan_agent 固定挂载（Code 模式核心子代理）。
         code_agent / browser_agent 按配置启用。
         """
         react_cfg = config if isinstance(config, dict) else {}
@@ -927,21 +910,6 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         workspace = self._workspace_dir or "./"
         subagents: list[Any] = []
         self._sync_browser_runtime_environment(config_base)
-
-        # ── 固定挂载：plan_agent（Code 模式核心子代理，始终启用）──
-        if not self._subagent_list_has_name(subagents, "plan_agent"):
-            plan_agent_cfg = subagents_cfg.get("plan_agent") if isinstance(subagents_cfg, dict) else None
-            plan_spec = build_plan_agent_config(
-                model=model,
-                workspace=workspace,
-                language=resolved_language,
-                max_iterations=parse_int(
-                    plan_agent_cfg.get("max_iterations") if isinstance(plan_agent_cfg, dict) else None,
-                    react_cfg.get("max_iterations", 15),
-                ),
-            )
-            plan_spec.factory_kwargs = {"auto_create_workspace": False}
-            subagents.append(plan_spec)
 
         if isinstance(subagents_cfg, dict):
             # code_agent subagent — 按配置启用
@@ -1006,7 +974,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         """Code 模式下的 rail 生命周期管理.
 
         code.normal / code.plan 等模式：
-        - 保留 SubagentRail（主 Agent 通过 task_tool 派发 plan 子代理）
+        - 保留 SubagentRail（供按配置启用的 code/browser 子代理使用）
         - 保留 ProjectMemoryRail（code 模式始终挂载）
         - 保留 CodingMemoryRail（code 模式始终挂载）
         - 卸载 TaskPlanningRail、SkillEvolutionRail
