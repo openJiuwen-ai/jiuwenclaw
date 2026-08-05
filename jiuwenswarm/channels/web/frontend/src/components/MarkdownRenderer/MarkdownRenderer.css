@@ -6,6 +6,13 @@
   max-width: min(100%, 52rem);
 }
 
+/* Let wide display equations scroll instead of overflowing the chat bubble. */
+.katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 2px 0;
+}
+
 /* Toolbar button */
 .markdown-toolbar-btn {
   display: inline-flex;

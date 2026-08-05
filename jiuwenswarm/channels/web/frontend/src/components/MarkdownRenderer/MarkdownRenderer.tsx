@@ -1,12 +1,15 @@
 import { createContext, useContext, useMemo, type AnchorHTMLAttributes, type HTMLAttributes } from 'react';
 import ReactMarkdown from 'react-markdown';
+import rehypeKatex from 'rehype-katex';
 import rehypeSlug from 'rehype-slug';
 import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
 import type { Element as HastElement } from 'hast';
 import { unescapeLiteralNewlines } from '../../utils/finalContent';
 import { getFencedCodeBlock } from './codeBlocks/fencedCode';
 import { getFencedCodeAdapter } from './codeBlocks/registry';
 import { repairCollapsedGfmTables } from './markdownTransforms';
+import 'katex/dist/katex.min.css';
 import './MarkdownRenderer.css';
 
 interface MarkdownRendererProps {
@@ -64,7 +67,7 @@ export function MarkdownRenderer({ content, className, testId }: MarkdownRendere
   return (
     <div className={className} data-testid={testId}>
       <MarkdownContentLinesContext.Provider value={contentLines}>
-        <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSlug]} components={MARKDOWN_COMPONENTS}>
+        <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeSlug, rehypeKatex]} components={MARKDOWN_COMPONENTS}>
           {markdown}
         </ReactMarkdown>
       </MarkdownContentLinesContext.Provider>

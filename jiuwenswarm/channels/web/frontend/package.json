@@ -26,6 +26,7 @@
     "test:history-pagination": "tsc src/features/historyPagination.ts --target ES2020 --module ES2020 --moduleResolution Bundler --rootDir src --outDir node_modules/.cache/history-pagination --skipLibCheck --noEmitOnError && node --test tests/historyPagination.test.mjs",
     "test:artifact-collection": "esbuild src/components/ArtifactsPanel/artifactCollection.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/artifact-collection/artifactCollection.mjs && node --test tests/artifactCollection.test.mjs",
     "test:desktop-save": "esbuild src/utils/desktopSave.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/desktop-save/desktopSave.mjs && node --test tests/desktopSave.test.mjs",
+    "test:markdown-math": "esbuild src/components/MarkdownRenderer/index.ts --bundle --platform=node --format=esm --loader:.css=empty --external:react --external:react-markdown --external:react-i18next --external:lucide-react --external:mermaid --external:clsx --outfile=node_modules/.cache/markdown-math/markdownRenderer.mjs && node --test tests/markdownMath.test.mjs",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview"
   },
@@ -56,6 +57,7 @@
     "i18next": "^25.8.18",
     "i18next-browser-languagedetector": "^8.2.1",
     "jszip": "3.10.1",
+    "katex": "^0.16.47",
     "lucide-react": "1.16.0",
     "mermaid": "11.15.0",
     "qrcode.react": "^4.2.0",
@@ -63,8 +65,10 @@
     "react-dom": "^18.2.0",
     "react-i18next": "^16.5.8",
     "react-markdown": "^10.1.0",
+    "rehype-katex": "^7.0.1",
     "rehype-slug": "6.0.0",
     "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0",
     "saxes": "5.0.1",
     "ssf": "0.11.2",
     "zustand": "^4.5.0"
