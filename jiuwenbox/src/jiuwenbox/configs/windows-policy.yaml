@@ -1,0 +1,197 @@
+# Windows 沙箱示例 policy (docs/window沙箱.md 6.10).
+#
+# 与 Linux default-policy.yaml 并列: Linux 字段保留 (Windows 下忽略),
+# 新增 ``windows`` 顶层字段仅在 sys.platform == "win32" 时读取.
+# 用 ``JIUWENBOX_POLICY_PATH=<本文件>`` 指定加载.
+version: 1
+
+name: "windows-default"
+
+# Windows 沙箱下不使用 bubblewrap/landlock/seccomp, 但 environment 仍平台
+# 无关地注入到子进程.
+environment: {}
+
+# Linux 字段在 Windows 下忽略. directories 留空而非 "/home" "/tmp":
+# validate_policy 会对这些路径过 _expand_path, 在 Windows 上 str(Path("/home"))
+# 变成 "\home" 被判非绝对路径, 导致 POST /sandboxes 返回 HTTP 400
+# "Filesystem policy paths must be absolute sandbox paths", 阻断所有工具.
+# Windows 实际可写路径走下方 windows.filesystem.allow_write.
+filesystem_policy:
+  directories: []
+  read_only: []
+  read_write: []
+  bind_mounts: []
+  device: []
+process:
+  run_as_user: sandbox
+  run_as_group: sandbox
+namespace:
+  user: true
+  pid: true
+  ipc: true
+  cgroup: true
+  uts: true
+capabilities:
+  add: []
+  drop: []
+landlock:
+  compatibility: disabled
+syscall:
+  x86_64:
+    blocked: []
+  arm64:
+    blocked: []
+network:
+  mode: host
+  uplink:
+    nat: true
+    interface: ""
+  egress:
+    default: allow
+    allowed_domains: []
+    blocked_domains: []
+    allowed_ips: []
+    blocked_ips: []
+    allowed_ports: []
+    blocked_ports: []
+  ingress:
+    default: allow
+    allowed_domains: []
+    blocked_domains: []
+    allowed_ips: []
+    blocked_ips: []
+    allowed_ports: []
+    blocked_ports: []
+cgroup: {}
+timeout: {}
+
+# ---------------------------------------------------------------------------
+# Windows 专用配置 (docs/window沙箱.md 6.10)
+# ---------------------------------------------------------------------------
+windows:
+  # 出站代理端口范围: WFP Permit filter 仅放行指向 127.0.0.1:<port_range>
+  # 的流量, 沙箱出网必须经此代理做域名/IP 白名单过滤.
+  proxy:
+    port_range_start: 60080
+    port_range_end: 60089
+
+  filesystem:
+    # 一次性预装读 ACL 的路径 (安装阶段, 需提权, 只预装 jbx-sandbox 默认读不了
+    # 且沙箱运行必需的目录).
+    #
+    # 不预装系统/用户大目录 (实测 icacls 确认它们的 Windows 默认 DACL 已给
+    # BUILTIN\Users 组授 GR/GE 且继承, jbx-sandbox 作为本地用户默认在 Users 组,
+    # 靠默认 ACL 就能读, 无需也不该递归预装):
+    #   - "%USERPROFILE%"   # 巨型目录 (几十万文件), 递归 grant ACE 极慢会卡死
+    #                        # install; 且沙箱不该读整个用户 profile (安全+最小权限).
+    #                        # 沙箱要读的 workspace/venv/产物由会话时 apply_sandbox_acl
+    #                        # 精确授权, 不靠预装整个 USERPROFILE.
+    #   - "%SystemRoot%"    # C:\WINDOWS: 默认 ACL 已给 Users 组 (RX)+(GR,GE) 继承,
+    #                        # jbx-sandbox 能读 System32 的 dll/cmd/powershell.
+    #   - "%ProgramFiles%"  # 默认 ACL 已给 Users 组读权限继承, 能读已装软件 exe/dll.
+    #   - "%ProgramData"    # 默认 ACL 已给 Users 组 (RX) 继承.
+    #   - "%ProgramFiles%/nodejs"  # Program Files 子树, 被其默认 ACL 覆盖.
+    #   - "%APPDATA%/npm"          # USERPROFILE 子树, 非必需.
+    #
+    # 留空: 实际预装的只有 tool_paths 展开的工具目录 (D:\Files\Git 等,
+    # owner=Administrators 且不在系统目录下, 默认 ACL 不放行 Users → 需预装;
+    # 目录小递归快). 由 collect_preinstall_paths 自动合并 read_acl_preinstall +
+    # tool_paths, 故这里留空即可.
+    #
+    # 系统浏览器目录 (Qoom Chrome 等): 沙箱内 playwright convert 需浏览器,
+    # 宿主机若装了系统 Chrome 可复用 (skill 用 executablePath/channel 指向它).
+    # Program Files 默认 ACL 虽给 Users 组 ReadAndExecute, 但受限 token 实测
+    # 仍可能读不到某些子项, 预装一份 Allow Read ACE 保险. 路径按实际安装位置
+    # 调整; 该目录默认 ACL 已给 Users 组, 预装是 idempotent 保险, 不预装也多
+    # 半能读 (Users 组继承).
+    read_acl_preinstall:
+      # P2-35: 按实际安装位置调整; 该目录默认 ACL 已给 Users 组, 预装是保险.
+      - "C:\\Program Files (x86)\\Qoom\\Chrome"
+    # 沙箱可写路径 (合成 SID 授 Allow Write+Execute+Delete). 第一个路径作为
+    # 沙箱 workspace 根.
+    allow_write:
+      - "{{ workspace }}"
+    # 沙箱可读路径 (合成 SID + 真实 SID 授 Allow Read+Execute). runner 第一跳
+    # 用真实 SID token, 合成 SID 的 ACE 不生效, apply_sandbox_acl 会给真实 SID
+    # 也 grant Read. skill 脚本所在目录 (office-claw-skills) 必须列出, 否则
+    # node cli.js 读不到 skill 模板.
+    allow_read:
+      # skill 脚本目录 (pptx-craft 等), 经 JIUWENBOX_SKILLS_DIR env 注入实际路径.
+      # 未注入时 expandvars 不展开 → apply_sandbox_acl 跳过 (os.path.exists 守护).
+      - "%JIUWENBOX_SKILLS_DIR%"
+    # 在 allow 范围内精细化封锁 (Deny Write).
+    deny_write:
+      - "{{ workspace }}/.git"
+      - "{{ workspace }}/.env"
+    # 非默认安装路径的工具目录/可执行. 受限 token 默认读不了这些路径
+    # (不在 read_acl_preinstall 的默认目录内) → CreateProcessAsUserW 返回
+    # WinError 2/5. 在此配置后: ① 加进 read ACL 预装 (含 Execute) ② 拼进
+    # 子进程 PATH. 全部留空则跳过, 依赖系统 PATH + 默认预装目录
+    # (适合工具装在 %ProgramFiles% / %SystemRoot% 等默认路径的场景).
+    #
+    # 运行时自动检测 (policy_reader._resolve_tool_paths): 留空字段在 box-server
+    # load_policy 时用 sys.executable 反推 — agent-server 用 OfficeAce 预制
+    # python 跑 (OfficeAce/tools/python/python.exe, 自带 CPython+pywin32) →
+    # sys.executable 反推出 tools 目录, 填 python_dir/node_dir; git_dir/bash_path
+    # 从 PATH 检测 (OfficeAce 包未必带 git). 显式填写的字段不被覆盖.
+    # 开发环境 (relay-claw 源码 + venv): sys.executable 指向 .venv\Scripts\python.exe.
+    tool_paths:
+      git_dir: ''        # 运行时自动检测; OfficeAce 包未带 git 时留空 (需用户装 git)
+      node_dir: ''       # 运行时自动检测 (OfficeAce tools/node)
+      python_dir: ''     # 运行时自动检测 (sys.executable 反推)
+      bash_path: ''      # git_dir 解析后自动拼 usr/bin/bash.exe
+
+  network:
+    # wfp_loopback_proxy: WFP Block 所有出站 + Permit loopback:port_range.
+    # disabled: 不安装 WFP filter, 沙箱可直接访问外网 (第一阶段降级).
+    mode: wfp_loopback_proxy
+    egress:
+      # 当前为默认允许 (default: allow): Windows 沙箱尚在适配期, 业务 skill
+      # (pptx-craft 等) 产物 HTML 引用的 CDN 域名 (cdn.digitalhumanai.top /
+      # cdnjs / jsdelivr / unpkg / fonts.google 等) 未穷举进白名单, default:deny
+      # 会导致 convert 阶段 localize 资源时拉不到 CDN 而卡死超时. 先放开保证
+      # 功能可用, 待 skill 侧把 CDN 资源打包/镜像固化后, 再收紧为 default:deny
+      # + 完整白名单 (下方 allowed_domains 保留作为收紧时的清单参考).
+      default: allow
+      # 域名白名单 (沙箱可访问的外部域名, 解析后比对 IP).
+      # Playwright Chromium 下载: pptx-craft/.npmrc 配 playwright_download_host
+      # =https://npmmirror.com/mirrors/playwright, 实际经 npmmirror.com →
+      # registry.npmmirror.com (binary.html) → cdn.npmmirror.com (二进制文件).
+      # 故放行 npmmirror 全域 (*.npmmirror.com 含子域 + 主域).
+      # npm 包源: registry.npmmirror.com (pptx-craft .npmrc registry).
+      # python 包源: pypi.org / files.pythonhosted.org (pip install).
+      allowed_domains:
+        - "pypi.org"
+        - "files.pythonhosted.org"
+        # P2-34: *.npmmirror.com 通配偏宽, 待确认具体子域后收紧.
+        - "registry.npmmirror.com"
+        - "cdn.npmmirror.com"
+      blocked_domains:
+        - "ip.me"
+      allowed_ips:
+        - "127.0.0.1/32"
+        - "::1/128"
+      blocked_ips:
+        - "169.254.169.254/32"
+      allowed_ports:
+        - 443
+        - 80
+      blocked_ports:
+        - 22
+    ingress:
+      default: deny
+      allowed_domains:
+        - "localhost"
+      blocked_domains: []
+      allowed_ips:
+        - "127.0.0.1/32"
+        - "::1/128"
+      blocked_ips: []
+      allowed_ports: []
+      blocked_ports: []
+
+  resource:
+    # Job Object 限制 (对齐 Linux cgroup). 全部留空 = 不限制.
+    memory_max: 512M
+    cpu_rate: 50            # 百分比 (1-100), 对应 Job CpuRate.
+    max_processes: 32

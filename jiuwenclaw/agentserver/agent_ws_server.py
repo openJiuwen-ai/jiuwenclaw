@@ -10,6 +10,7 @@ import logging
 import math
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -64,6 +65,7 @@ from jiuwenclaw.schema.hooks_context import (
 from jiuwenclaw.agentserver.agent_manager import AgentManager, ACP_DEFAULT_CAPABILITIES
 from jiuwenclaw.e2a.acp.protocol import build_acp_session_new_result
 from jiuwenclaw.agentserver.permissions.config_rpc import get_permissions_config_req_methods
+from jiuwenclaw.agentserver.sandbox_config_rpc import get_sandbox_config_req_methods
 from jiuwenclaw.agentserver.tenant_agent_pool import TenantAgentPool
 from jiuwenclaw.agentserver.file_transfer_manager import get_file_transfer_manager
 from jiuwenclaw.security.ws_origin import (
@@ -81,6 +83,28 @@ logger = logging.getLogger(__name__)
 _STREAM_HEARTBEAT_INTERVAL_SECONDS = 10.0
 
 _SYSTEM_PROMPT_USER_HISTORY_PATTERN = re.compile(r"(\[[^\]\n]*用户\]\s*)(.*?)(\s*\[/对话历史\])", re.DOTALL)
+
+
+def _is_std_cpython(python_exe: str) -> bool:
+    """判断 python.exe 是否标准 CPython 安装 (非 venv trampoline/launcher).
+
+    jbx-sandbox 跑不了 uv trampoline/venv launcher (WinError 5), runner 必须用
+    标准 CPython. 判定: 同目录有 python3*.dll (CPython 根目录特征), 且不在
+    .../Scripts/ 子目录 (venv 的 python.exe 在 Scripts/ 下, 无 python3*.dll).
+    """
+    p = Path(python_exe)
+    try:
+        if not p.is_file():
+            return False
+    except OSError:
+        return False
+    parent = p.parent
+    # venv 的 python.exe 在 <venv>/Scripts/ 下, 同目录无 python3*.dll.
+    if parent.name.lower() == "scripts":
+        return False
+    # 标准 CPython 根目录有 python313.dll / python312.dll 等.
+    has_dll = any(parent.glob("python3*.dll"))
+    return has_dll
 
 
 def _mask_text_for_log(value: str) -> str:
@@ -237,6 +261,224 @@ class AgentWebSocketServer:
         return self._port
 
     # ---------- 生命周期 ----------
+    # 端口解析/分配工具已抽到 jiuwenclaw.agentserver.sandbox.port_util (Linux/Windows
+    # 共用, 照搬 jiuwenswarm PR #4088), 本类直接调用, 不再内联。
+
+    async def _bootstrap_internal_jiuwenbox(self) -> None:
+        """启动时按 ``config.yaml::sandbox`` 自动拉起 jiuwenbox 子进程。
+
+        触发条件: ``sandbox.startup_mode`` **显式**写为 ``internal``
+        (走 :func:`get_sandbox_startup_mode_explicit`, 字段缺失不拉, 避免没在用
+        沙箱的用户突然多出 jiuwenbox 进程)。不单独依赖 ``sandbox.enabled``:
+        只要 ``startup_mode=internal`` 就拉, 成功后落盘真实 url。
+
+        平台: 支持 Linux 与 Windows (Windows 走 ``_create_windows`` 分支); 其他平台跳过。
+        best-effort: 任何失败只 warning, 不让 agent-server 自身启动失败。
+        """
+        try:
+            if sys.platform not in ("linux", "win32"):
+                logger.info(
+                    "[AgentWebSocketServer] skipping jiuwenbox auto-start: "
+                    "sandbox is only supported on Linux/Windows (current: %r)",
+                    sys.platform,
+                )
+                return
+            from jiuwenclaw.agentserver.jiuwenbox_runner import JiuwenBoxRunner
+            from jiuwenclaw.config import (
+                DEFAULT_SANDBOX_POLICY_FILE,
+                get_sandbox_endpoint,
+                get_sandbox_startup_mode_explicit,
+                resolve_sandbox_policy_path,
+                update_sandbox_endpoint,
+            )
+
+            explicit_mode = get_sandbox_startup_mode_explicit()
+            if explicit_mode is None:
+                logger.info(
+                    "[AgentWebSocketServer] sandbox.startup_mode 未在 config.yaml "
+                    "中显式配置, skipping jiuwenbox auto-start (如需 agent-server "
+                    "自动拉起 jiuwenbox 子进程, 设置 sandbox.startup_mode: internal)"
+                )
+                return
+            if explicit_mode != "internal":
+                logger.info(
+                    "[AgentWebSocketServer] sandbox.startup_mode=%r, skipping "
+                    "jiuwenbox auto-start (external 模式由用户自行拉起 jiuwenbox-server)",
+                    explicit_mode,
+                )
+                return
+
+            endpoint = get_sandbox_endpoint()
+            url = endpoint.get("url") or "http://127.0.0.1:8321"
+            sandbox_type = endpoint.get("type") or "jiuwenbox"
+            raw_policy = endpoint.get("policy_file") or ""
+            effective_policy_file = raw_policy or DEFAULT_SANDBOX_POLICY_FILE
+            policy_path = resolve_sandbox_policy_path(effective_policy_file)
+            if policy_path is None or not policy_path.is_file():
+                logger.warning(
+                    "[AgentWebSocketServer] sandbox auto-start skipped: "
+                    "policy_file=%r 无法解析到存在的文件 (resolved=%s).",
+                    effective_policy_file, policy_path,
+                )
+                return
+
+            # Windows: policy = 打包基底 (windows-policy.yaml, 随 wheel, default) +
+            # workspace 副本 (windows-policy.runtime.yaml, 用户 user_config) 合并,
+            # 由 box-server PolicyReader.load_policy 做 (不生成合并文件, 机制对齐
+            # config.yaml template+override). 这里只把副本路径作为 JIUWENBOX_POLICY_PATH
+            # 注入 box-server (基底由 box-server 自己 base_policy_path() 解析).
+            # 副本不存在则建空骨架 (首次). Linux 不走 windows-policy, 保持原 policy_path.
+            if sys.platform == "win32":
+                try:
+                    from jiuwenclaw.agentserver.sandbox_policy_render import (
+                        _ensure_copy_exists,
+                    )
+                    runtime_policy = _ensure_copy_exists()
+                    if runtime_policy is not None and runtime_policy.is_file():
+                        policy_path = runtime_policy
+                        logger.info(
+                            "[AgentWebSocketServer][sandbox] using runtime policy copy: %s "
+                            "(box-server merges base + copy)",
+                            policy_path,
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[AgentWebSocketServer][sandbox] ensure runtime copy failed, "
+                        "fall back to base policy: %s",
+                        exc,
+                    )
+
+            from jiuwenclaw.agentserver.sandbox.port_util import (
+                allocate_internal_jiuwenbox_port,
+                parse_sandbox_host_port,
+            )
+            host, preferred_port = parse_sandbox_host_port(url)
+            port = allocate_internal_jiuwenbox_port(host, preferred_port)
+            if port != preferred_port:
+                url = f"http://{host}:{port}"
+                logger.info(
+                    "[AgentWebSocketServer] jiuwenbox auto-start: "
+                    "preferred port %d busy, using %d",
+                    preferred_port, port,
+                )
+
+            # 注入动态路径 env 给 box-server 子进程 (Windows 沙箱用):
+            #   JIUWENBOX_BUNDLED_PYTHON / JIUWENBOX_VENV_DIR
+            #   JIUWENBOX_RUNNER_PYTHON = runner 用的标准 CPython (非 uv venv).
+            #     jbx-sandbox 跑不了 uv trampoline/venv launcher (WinError 5 / os error 5),
+            #     runner 必须用自包含的标准 CPython. dev 实测设 D:\Files\python313,
+            #     打包环境设 tools/python/python.exe. 探测候选路径, 找到即注入.
+            #
+            # P0-5: 不写 os.environ (主进程全局污染, 后续所有子进程继承), 改构造
+            # sandbox_env dict 经 ensure_running(extra_env=...) 传给 box-server 子进程.
+            sandbox_env: dict[str, str] = {}
+            try:
+                from jiuwenclaw.runtime.pip_env import (
+                    ensure_runtime_venv, resolve_base_python,
+                )
+                venv_dir = ensure_runtime_venv()
+                sandbox_env["JIUWENBOX_VENV_DIR"] = str(venv_dir)
+                bundled_python = resolve_base_python()
+                sandbox_env["JIUWENBOX_BUNDLED_PYTHON"] = str(bundled_python.parent)
+                if not (sandbox_env.get("JIUWENBOX_RUNNER_PYTHON")
+                        or os.environ.get("JIUWENBOX_RUNNER_PYTHON") or "").strip():
+                    logger.info("[AgentWebSocketServer][sandbox] JIUWENBOX_RUNNER_PYTHON 未注入探测候选路径...")
+                    # 探测标准 CPython (非 venv trampoline): jbx-sandbox 跑不了 uv
+                    # trampoline/venv launcher (WinError 5). 候选顺序:
+                    #   1. 打包 tools/python (OfficeAce 自带 CPython)
+                    #   2. 系统安装 C:\Python3* (逐版本 glob)
+                    #   3. %LOCALAPPDATA%\Programs\Python\Python3* (用户级安装)
+                    #   4. PATH 里的 python.exe (校验非 venv: 不在 .../Scripts/ 下,
+                    #      且同目录有 python3.dll 证明是 CPython 根)
+                    # 不硬编码 dev 机路径 (原 D:\Files\python313 是 dev 实测机, 不通用).
+                    import shutil as _shutil
+                    import glob as _glob
+                    _runner_py: str | None = None
+                    _candidates: list[str] = []
+                    # 1. 打包
+                    _candidates.append(
+                        str(Path(__file__).resolve().parents[2] / "tools" / "python" / "python.exe"))
+                    # 2. C:\Python3* (系统安装, 逐版本 glob 覆盖 3.10-3.13+)
+                    _candidates += sorted(_glob.glob(r"C:\Python3*\python.exe"))
+                    # 3. %LOCALAPPDATA%\Programs\Python\Python3* (用户级安装)
+                    _lad = os.environ.get("LOCALAPPDATA", "")
+                    if _lad:
+                        _candidates += sorted(_glob.glob(
+                            str(Path(_lad) / "Programs" / "Python" / "Python3*" / "python.exe")))
+                    for _cand in _candidates:
+                        if _cand and Path(_cand).is_file() and _is_std_cpython(_cand):
+                            _runner_py = _cand
+                            break
+                    # 4. PATH 里的 python.exe (校验非 venv)
+                    if not _runner_py:
+                        _which = _shutil.which("python") or _shutil.which("python3")
+                        if _which and _is_std_cpython(_which):
+                            _runner_py = _which
+                    if _runner_py:
+                        sandbox_env["JIUWENBOX_RUNNER_PYTHON"] = _runner_py
+                logger.info(
+                    "[AgentWebSocketServer][sandbox] injected env: "
+                    "JIUWENBOX_VENV_DIR=%s, JIUWENBOX_BUNDLED_PYTHON=%s, "
+                    "JIUWENBOX_RUNNER_PYTHON=%s",
+                    venv_dir, bundled_python.parent,
+                    sandbox_env.get("JIUWENBOX_RUNNER_PYTHON") or "<未注入>",
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[AgentWebSocketServer] inject JIUWENBOX_BUNDLED_PYTHON/VENV_DIR failed: %s",
+                    exc,
+                )
+
+            logger.info(
+                "[AgentWebSocketServer][sandbox] spawning box-server (startup_mode=internal)..."
+            )
+            runner = JiuwenBoxRunner.instance()
+            ok = await runner.ensure_running(
+                host=host,
+                port=port,
+                startup_mode="internal",
+                policy_path=policy_path,
+                extra_env=sandbox_env or None,
+                # Windows 沙箱首次起 box-server 时, lifespan 的 ensure_windows_setup
+                # 同步阻塞等 install 子进程 (UAC 弹窗 + 用户安装几十秒). 旧默认 30s
+                # 会在 install 未完成时把 box-server 判为不健康而杀掉 (实测日志:
+                # "health check timeout after 30.0s" → SetEvent 日志没打出主进程就
+                # 被杀). 提到 2min, 给 install 足够时间完成 SetEvent 解除阻塞.
+                timeout=120.0,
+            )
+            if not ok:
+                stderr_tail = runner.get_stderr_tail(20)
+                hint = "\n--- jiuwenbox stderr (tail) ---\n" + stderr_tail if stderr_tail else ""
+                logger.warning(
+                    "[AgentWebSocketServer] jiuwenbox auto-start failed at %s:%d "
+                    "(policy=%s).%s",
+                    host, port, policy_path, hint,
+                )
+                return
+
+            # 落盘最终生效的 url (端口可能被换过), 让后续会话/agent 直接读到正确端点。
+            actual_url = runner.base_url
+            if actual_url and actual_url != endpoint.get("url"):
+                try:
+                    update_sandbox_endpoint(
+                        actual_url, sandbox_type,
+                        startup_mode="internal",
+                        policy_file=effective_policy_file,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[AgentWebSocketServer] persist sandbox endpoint failed "
+                        "after auto-start: %s", exc,
+                    )
+            logger.info(
+                "[AgentWebSocketServer][sandbox] box-server ready at %s, "
+                "sandbox_id 按需 lazy 创建",
+                actual_url,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[AgentWebSocketServer] jiuwenbox auto-start bootstrap failed: %s", exc,
+            )
 
     async def start(self) -> None:
         """启动 WebSocket 服务端，开始监听连接。优先使用 legacy.server.serve 以与 Gateway 的 legacy client 握手兼容."""
@@ -279,6 +521,8 @@ class AgentWebSocketServer:
             "[AgentWebSocketServer] 已启动: ws://%s:%s", self._host, self._port,
             extra={'user_visible': 'critical'},
         )
+        # 按 config.yaml::sandbox.startup_mode 自动拉起 jiuwenbox 子进程 (internal 模式)。
+        await self._bootstrap_internal_jiuwenbox()
 
     async def _process_request(self, *args: Any) -> Any:
         """在握手阶段执行 Origin 校验，兼容 legacy/new websockets APIs。"""
@@ -589,6 +833,11 @@ class AgentWebSocketServer:
                 logger.info(f"[AgentWebSocketServer] 处理 permissions.config: request_id={request.request_id}",
                             extra={'user_visible': 'progress'})
                 await self._handle_permissions_config(ws, request, send_lock)
+                return
+            if request.req_method in get_sandbox_config_req_methods():
+                logger.info(f"[AgentWebSocketServer] 处理 sandbox.config: request_id={request.request_id}",
+                           extra={'user_visible': 'progress'})
+                await self._handle_sandbox_config(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.HISTORY_GET:
                 logger.info(f"[AgentWebSocketServer] 处理 history.get: request_id={request.request_id}",
@@ -1032,6 +1281,15 @@ class AgentWebSocketServer:
             request,
             get_runtime_tools_catalog=catalog_fn,
         )
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await ws.send(json.dumps(wire, ensure_ascii=False))
+
+    async def _handle_sandbox_config(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """处理 sandbox.* 配置 E2A 请求 (officeAce 经 WS 控制沙箱开关/启动方式/文件/网络)."""
+        from jiuwenclaw.agentserver.sandbox_config_rpc import dispatch_sandbox_config_request
+
+        resp = dispatch_sandbox_config_request(request)
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
             await ws.send(json.dumps(wire, ensure_ascii=False))
