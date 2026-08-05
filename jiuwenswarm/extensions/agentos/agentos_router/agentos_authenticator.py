@@ -23,9 +23,6 @@ class AgentOSAuthenticator(CredentialAuthenticator):
         self._timeout = timeout
         self._auth_client = httpx.AsyncClient(timeout=timeout)
 
-    async def aclose(self) -> None:
-        await self._auth_client.aclose()
-
     async def _authenticate_token(self, token: str,
                                   extra_headers: dict | None = None
                                   ) -> AuthResult:
@@ -42,7 +39,6 @@ class AgentOSAuthenticator(CredentialAuthenticator):
 
         token = (token or "").strip()
         if not token:
-            await self.aclose()
             return AuthResult(
                 success=False,
                 user_id="",
