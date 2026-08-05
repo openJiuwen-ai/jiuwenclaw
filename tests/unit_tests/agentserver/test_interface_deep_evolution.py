@@ -777,6 +777,12 @@ async def test_handle_skills_evolution_rebuild_rejects_empty_registered_dirs(
         "_registered_skill_dirs_for_rail",
         lambda: [],
     )
+    # Union path also consults live resolve; isolate empty-dirs branch from host env.
+    monkeypatch.setattr(
+        interface_deep_module,
+        "resolve_agent_registered_skill_dirs",
+        lambda: [],
+    )
     monkeypatch.setattr(
         JiuWenClawDeepAdapter,
         "_guard_bootstrap_skill",
@@ -797,14 +803,13 @@ async def test_handle_skills_evolution_rebuild_rejects_empty_registered_dirs(
             }
         )
     message = str(exc_info.value)
-    assert "对话一轮后再采纳" in message
-    assert "skill_path=" in message
-    assert "resolved=" not in message
+    assert f"resolve_path={skill_md.resolve()}" in message
+    assert "allowed_path=" not in message
     generate.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_handle_skills_evolution_rebuild_rejects_path_outside_with_project_hint(
+async def test_handle_skills_evolution_rebuild_rejects_path_outside_registered_dirs(
     adapter, monkeypatch, tmp_path: Path,
 ):
     project_root = tmp_path / "relay-claw"
@@ -825,7 +830,7 @@ async def test_handle_skills_evolution_rebuild_rejects_path_outside_with_project
     generate = AsyncMock()
     monkeypatch.setattr(adapter, "generate_evolution_merge_version", generate)
 
-    with pytest.raises(ValueError, match="请切换到工程目录") as exc_info:
+    with pytest.raises(ValueError, match="技能路径不在允许目录内") as exc_info:
         await adapter.handle_skills_evolution_rebuild(
             {
                 "name": "demo-skill",
@@ -833,10 +838,10 @@ async def test_handle_skills_evolution_rebuild_rejects_path_outside_with_project
             }
         )
     message = str(exc_info.value)
-    assert str(project_root.resolve()) in message
-    assert "allowed=" in message
-    assert str(other_allowed.resolve()) in message
-    assert "resolved=" not in message
+    assert f"resolve_path={skill_md.resolve()}" in message
+    assert f"allowed_path={other_allowed.resolve()}" in message
+    assert "请切换到工程目录" not in message
+    assert "对话一轮后再采纳" not in message
     generate.assert_not_awaited()
 
 

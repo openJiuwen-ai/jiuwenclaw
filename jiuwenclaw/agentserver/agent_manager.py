@@ -36,7 +36,16 @@ from jiuwenclaw.agentserver.tools.multimodal_config import (
     merge_reload_env_snapshot,
     sync_multimodal_env_omission_state,
 )
-from jiuwenclaw.utils import get_agent_workspace_dir, get_multi_tenant_user_workspace_dir
+from jiuwenclaw.agentserver.session_skill_dirs import (
+    bind_session_registered_skill_dirs,
+    reset_session_registered_skill_dirs,
+)
+from jiuwenclaw.utils import (
+    get_agent_workspace_dir,
+    get_multi_tenant_user_workspace_dir,
+    get_shared_agent_skills_dirs,
+    resolve_agent_registered_skill_dirs,
+)
 from jiuwenclaw.config import _sandbox_yaml_to_env_overlay
 
 if TYPE_CHECKING:
@@ -55,6 +64,39 @@ _DISK_ONLY_EVOLUTION_METHODS: frozenset[str] = frozenset(
         "skills.evolution.rollback",
     }
 )
+
+
+def _skills_root_from_skill_md_path(skill_path: str | None) -> str | None:
+    """Return ``…/skills`` root for a control-plane ``…/<name>/SKILL.md`` path."""
+    if skill_path is None or not str(skill_path).strip():
+        return None
+    try:
+        resolved = Path(str(skill_path).strip()).expanduser().resolve()
+    except OSError:
+        return None
+    if resolved.name != "SKILL.md":
+        return None
+    return str(resolved.parent.parent)
+
+
+def _disk_only_evolution_skill_dirs(params: dict[str, Any]) -> list[str]:
+    """Skill roots for disk-only evolution: shared env + explicit skill_path root."""
+    roots: list[str] = []
+    seen: set[str] = set()
+    for path in get_shared_agent_skills_dirs():
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(key)
+    skill_root = _skills_root_from_skill_md_path(
+        params.get("skill_path") or params.get("path")
+    )
+    if skill_root and skill_root not in seen:
+        roots.append(skill_root)
+    if roots:
+        return roots
+    return [str(p) for p in resolve_agent_registered_skill_dirs()]
 
 
 def _build_acp_agent_config(extra_config: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -658,22 +700,27 @@ class AgentManager:
         mode = str(mode_full).split(".")[0] if mode_full else "agent"
 
         existing = self.get_agent_nowait(channel_id, mode, session_id)
-        if existing is not None:
-            return await existing.process_message(request)
+        bound_skill_dirs = _disk_only_evolution_skill_dirs(params)
 
-        from jiuwenclaw.agentserver.interface import JiuWenClaw
-
-        agent = JiuWenClaw(
-            user_workspace_dir=str(self.user_workspace_dir) if self.user_workspace_dir else None,
-            agent_id=self.agent_id,
-            service_id=self.service_id,
-        )
         overlay_token = None
+        skill_dirs_token = None
         if self._latest_env_overrides:
             overlay = build_effective_env_overlay(self._latest_env_overrides)
             if overlay:
                 overlay_token = bind_task_env_overlay(overlay)
+        if bound_skill_dirs:
+            skill_dirs_token = bind_session_registered_skill_dirs(bound_skill_dirs)
         try:
+            if existing is not None:
+                return await existing.process_message(request)
+
+            from jiuwenclaw.agentserver.interface import JiuWenClaw
+
+            agent = JiuWenClaw(
+                user_workspace_dir=str(self.user_workspace_dir) if self.user_workspace_dir else None,
+                agent_id=self.agent_id,
+                service_id=self.service_id,
+            )
             logger.info(
                 "[AgentManager] disk-only evolution RPC via ephemeral agent "
                 "(skip create_instance): method=%s channel=%s",
@@ -683,6 +730,8 @@ class AgentManager:
             )
             return await agent.process_message(request)
         finally:
+            if skill_dirs_token is not None:
+                reset_session_registered_skill_dirs(skill_dirs_token)
             if overlay_token is not None:
                 reset_task_env_overlay(overlay_token)
 

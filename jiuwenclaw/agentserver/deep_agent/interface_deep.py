@@ -7280,47 +7280,37 @@ class JiuWenClawDeepAdapter:
         head = " | ".join(rendered[:limit])
         return f"{head} | ...(+{len(rendered) - limit})"
 
-    @staticmethod
-    def _infer_skill_project_hint_dir(resolved: Path) -> Path | None:
-        """Infer the project root the user should switch to for rebuild allowlist.
-
-        Prefers ``<project>/.office-claw/skills/...`` → ``<project>``, then
-        ``<project>/office-claw-skills/...`` → ``<project>``. Falls back to the
-        parent of the skill directory (``SKILL.md``'s grandparent).
-        """
-        for parent in resolved.parents:
-            if parent.name == "skills" and parent.parent.name == ".office-claw":
-                return parent.parent.parent
-            if parent.name == "office-claw-skills":
-                return parent.parent
-        if resolved.name == "SKILL.md" and resolved.parent.parent != resolved.parent:
-            return resolved.parent.parent
-        if resolved.parent != resolved:
-            return resolved.parent
-        return None
-
     def _validate_rebuild_skill_path(self, skill_path: str) -> str:
         """Ensure RPC skill_path resolves under a registered skills directory."""
         resolved = Path(skill_path).expanduser().resolve()
-        skill_dirs = [Path(d).expanduser().resolve() for d in self._registered_skill_dirs_for_rail()]
+        # Union adapter snapshot with live resolve (session-bound / shared env).
+        # Disk-only rollback may bind the control-plane skill root for one request
+        # while a warm agent still holds a stale workspace-only snapshot.
+        skill_dirs: list[Path] = []
+        seen: set[str] = set()
+        for raw in (
+            *self._registered_skill_dirs_for_rail(),
+            *(str(p) for p in resolve_agent_registered_skill_dirs()),
+        ):
+            path = Path(raw).expanduser().resolve()
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            skill_dirs.append(path)
+        resolve_path = str(resolved)
         if not skill_dirs:
             raise ValueError(
-                "技能路径不在允许目录内（未注册任何技能目录）。"
-                "请先在技能所在工程的会话中与 agent 对话一轮后再采纳。"
-                f"skill_path={skill_path}"
+                "技能路径不在允许目录内（未注册任何技能目录）"
+                f"resolve_path={resolve_path}"
             )
         if not any(resolved == d or resolved.is_relative_to(d) for d in skill_dirs):
-            hint_dir = self._infer_skill_project_hint_dir(resolved)
-            if hint_dir is not None:
-                tip = f"请切换到工程目录「{hint_dir}」下的会话，与 agent 对话一轮后再采纳。"
-            else:
-                tip = "请切换到包含该技能路径的工程会话后再采纳。"
-            allowed = self._format_allowed_skill_dirs(skill_dirs)
+            allowed_path = self._format_allowed_skill_dirs(skill_dirs)
             raise ValueError(
-                f"技能路径不在允许目录内。{tip}"
-                f"skill_path={skill_path}；allowed={allowed}"
+                "技能路径不在允许目录内。"
+                f"resolve_path={resolve_path}；allowed_path={allowed_path}"
             )
-        return str(resolved)
+        return resolve_path
 
     async def handle_skills_evolution_rebuild(self, params: dict) -> dict[str, Any]:
         """RPC: skills.evolution.rebuild — generate a merged evolution version."""
