@@ -67,7 +67,7 @@ export interface ModelEntry {
    */
   origin_index?: number;
   /**
-   * workbuddy 式厂商选择器的预设 key（如 "alibaba"/"baidu"）。提示性字段：
+   * 厂商选择器的预设 key（如 "alibaba"/"baidu"）。提示性字段：
    * 不参与后端校验，仅用于前端回显图标 / 重新选中预设。由 vendors.list
    * 返回的预设表与 models.list 的回带字段对应。
    */

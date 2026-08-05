@@ -2073,7 +2073,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 "alias": alias,
                 "reasoning_level": reasoning_level,
                 "origin_index": origin_index,
-                # vendor_key is an opaque hint from the workbuddy-style vendor
+                # vendor_key is an opaque hint
                 # selector; not validated (the selector only ever emits keys
                 # present in jiuwenswarm.common.model_vendor_registry). It is
                 # persisted so the UI can match a configured entry back to its
@@ -2472,7 +2472,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             channels = []
         await channel.send_response(ws, req_id, ok=True, payload={"channels": channels})
 
-    # ── vendors.* handlers (workbuddy-style vendor selection) ──────────────
+    # ── vendors.* handlers ──────────────
 
     async def _vendors_list(ws, req_id, params, session_id):
         """返回按 plan 分组的厂商预设列表(供前端 Tab+厂商卡片渲染)。
@@ -6048,7 +6048,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("models.replace_all", _models_replace_all)
     channel.register_method("models.validate", _models_validate)
 
-    # workbuddy-style vendor selection (vendor presets + remote model fetch)
     channel.register_method("vendors.list", _vendors_list)
     channel.register_method("vendors.fetch_models", _vendors_fetch_models)
     channel.register_method("channel.get", _channel_get)

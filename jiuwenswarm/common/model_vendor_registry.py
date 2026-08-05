@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Model vendor preset registry (workbuddy-style vendor selection).
+"""Model vendor preset registry.
 
 A pure-data table mapping ``(vendor_key, plan)`` combinations to the
 configuration jiuwenswarm should auto-fill when a user picks that vendor under
@@ -45,7 +45,7 @@ from typing import Any
 
 
 class PlanKind(str, Enum):
-    """Model selection plan categories (mirrors workbuddy UI buckets)."""
+    """Model selection plan categories."""
 
     TOKEN_PLAN = "token_plan"        # 预付费套餐/资源包/订阅
     CODING_PLAN = "coding_plan"     # 编码场景
