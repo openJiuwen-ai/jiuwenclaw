@@ -219,7 +219,7 @@ models:
         verify_ssl: true
         custom_headers: {}
       model_config_obj:
-        temperature: 0.95
+        temperature: 0.6
       is_default: true
   video:
       model_client_config:
@@ -230,7 +230,7 @@ models:
         timeout: 1800
         verify_ssl: true
       model_config_obj:
-        temperature: 0.95
+        temperature: 0.6
   audio:
       model_client_config:
         api_base: ${AUDIO_API_BASE}
@@ -240,7 +240,7 @@ models:
         verify_ssl: true
         timeout: 1800
       model_config_obj:
-        temperature: 0.95
+        temperature: 0.6
   vision:
       model_client_config:
         api_base: ${VISION_API_BASE}
@@ -250,7 +250,7 @@ models:
         verify_ssl: true
         timeout: 1800
       model_config_obj:
-        temperature: 0.95
+        temperature: 0.6
   image_gen:
       model_client_config:
         api_base: ${IMAGE_GEN_API_BASE}
