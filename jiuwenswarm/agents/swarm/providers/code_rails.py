@@ -308,13 +308,14 @@ def build_code_coding_memory(params: dict[str, Any], ctx: SwarmBuildContext) -> 
 
         inp = CodeCodingMemoryInput.resolve(params, ctx)
         workspace_root = str(inp.workspace_root or "./")
+        effective_project_dir = inp.project_dir or workspace_root
         _set_workspace_coding_memory_directory(
             ctx.workspace,
-            project_dir=inp.project_dir,
+            project_dir=effective_project_dir,
             agent_workspace_dir=workspace_root,
         )
         rail = create_coding_memory_rail(
-            project_dir=inp.project_dir,
+            project_dir=effective_project_dir,
             agent_workspace_dir=workspace_root,
             config={"embed": inp.embed_config},
         )

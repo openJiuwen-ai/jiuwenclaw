@@ -84,7 +84,6 @@ from jiuwenswarm.agents.swarm.providers.code_subagents import (
 )
 from jiuwenswarm.common.coding_memory_paths import (
     resolve_project_coding_memory_dir,
-    resolve_project_coding_memory_workspace_path,
 )
 from jiuwenswarm.common.config import get_config
 
@@ -1923,7 +1922,8 @@ def test_code_coding_memory_provider_mounts_workspace_node(
         {
             "name": "coding_memory",
             "description": "Coding Agent memory",
-            "path": resolve_project_coding_memory_workspace_path(
+            "path": resolve_project_coding_memory_dir(
+                agent_workspace_dir=str(workspace_root),
                 project_dir=str(project_dir),
             ),
             "children": [
@@ -1938,6 +1938,63 @@ def test_code_coding_memory_provider_mounts_workspace_node(
             ],
         }
     ]
+
+
+def test_code_coding_memory_provider_falls_back_to_workspace_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing project_dir must not collapse distinct workspaces into default."""
+    register_swarm_providers()
+
+    import jiuwenswarm.server.runtime.agent_adapter.interface_code as interface_code
+
+    workspace_root = tmp_path / "frontend"
+    workspace_root.mkdir()
+    created: dict[str, Any] = {}
+    rail = object()
+
+    def _fake_create_coding_memory_rail(
+        *,
+        project_dir: str | None,
+        agent_workspace_dir: str,
+        config: dict[str, Any] | None,
+    ) -> object:
+        created["project_dir"] = project_dir
+        created["agent_workspace_dir"] = agent_workspace_dir
+        return rail
+
+    monkeypatch.setattr(
+        interface_code,
+        "create_coding_memory_rail",
+        _fake_create_coding_memory_rail,
+    )
+
+    class Workspace:
+        def __init__(self, root_path: Path) -> None:
+            self.root_path = str(root_path)
+            self.directories: list[dict[str, Any]] = []
+
+        def set_directory(self, directory: dict[str, Any]) -> None:
+            self.directories.append(directory)
+
+    workspace = Workspace(workspace_root)
+    ctx = SwarmBuildContext(
+        mode="code.team",
+        project_dir=None,
+        workspace=workspace,
+        config={},
+    )
+
+    assert code_rails.build_code_coding_memory({"embed_config": {}}, ctx) is rail
+    assert created == {
+        "project_dir": str(workspace_root),
+        "agent_workspace_dir": str(workspace_root),
+    }
+    assert workspace.directories[0]["path"] == resolve_project_coding_memory_dir(
+        agent_workspace_dir=workspace_root,
+        project_dir=workspace_root,
+    )
 
 
 def test_code_member_builds_declaratively_without_post_processing(
@@ -2016,16 +2073,16 @@ def test_code_member_builds_declaratively_without_post_processing(
         agent_workspace_dir=str(tmp_path),
         project_dir=str(tmp_path),
     )
-    coding_memory_workspace_path = resolve_project_coding_memory_workspace_path(
-        project_dir=str(tmp_path),
-    )
     coding_memory_node = next(
         node
         for node in agent.deep_config.workspace.directories
         if node.get("name") == "coding_memory"
     )
-    assert coding_memory_node["path"] == coding_memory_workspace_path
-    assert Path(coding_memory_node["path"]).is_absolute() is False
+    assert coding_memory_node["path"] == coding_memory_dir
+    assert Path(coding_memory_node["path"]).is_absolute() is True
+    assert agent.deep_config.workspace.get_node_path("coding_memory") == Path(
+        coding_memory_dir
+    )
     assert Path(coding_memory_dir).is_dir()
     assert coding_memory_node["children"] == [
         {
