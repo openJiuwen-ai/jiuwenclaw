@@ -116,6 +116,40 @@ uv add --dev pytest-cov pytest-asyncio
 
 修改代码后，需要根据修改的内容类型进行对应的构建和验证：
 
+#### 一键调试模式（推荐）
+
+`debug` 模式把「重新构建 + 重装依赖 + 后台启动」串成一条命令，适合改完代码后完整验证一遍：
+
+```bash
+uv run jiuwenswarm-start debug
+```
+
+它会依次执行：
+
+1. 在 `jiuwenswarm/channels/web/frontend` 下执行 `npm install`
+2. 在同一目录执行 `npm run build`，重新生成 `frontend/dist`
+3. 在仓库根目录执行 `uv sync`
+4. 后台启动全部服务，终端输出重定向到 `logs/swarm-<时间戳>.log`
+
+启动后命令立即返回，服务在后台继续运行。跟踪日志：
+
+```bash
+tail -f logs/swarm-<时间戳>.log
+```
+
+停止后台服务（连同它拉起的 AgentServer / Gateway / Web 子进程一起退出）：
+
+```bash
+uv run jiuwenswarm-stop
+```
+
+说明：
+
+- `debug` 需要在源码仓库中运行（要构建前端、执行 `uv sync`），安装包环境请直接用 `jiuwenswarm-start all`
+- `debug` 不能与 `--name` 组合，它只服务默认实例；多实例调试请用 `jiuwenswarm-start --name <name>`
+- 已有 debug 服务在运行时会拒绝重复启动，先执行 `uv run jiuwenswarm-stop`
+- 日志文件不会自动清理，需要时手动删除 `logs/swarm-*.log`
+
 #### 后端代码修改
 
 修改后端 Python 代码后，执行以下命令重新初始化并启动服务：
