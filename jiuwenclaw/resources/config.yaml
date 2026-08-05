@@ -1155,3 +1155,12 @@ web_search:
 
 # DeepResearch 工具：默认开启
 enable_deepresearch: true
+
+
+# 沙箱配置 (officeAce 经 WS 控制: 开关 / 启动方式; 文件白黑名单 + 网络域名配置写进运行时 policy 副本)
+sandbox:
+  enabled: true
+  startup_mode: internal
+  url: http://127.0.0.1:8321
+  type: jiuwenbox
+  policy_file: windows-policy.yaml
