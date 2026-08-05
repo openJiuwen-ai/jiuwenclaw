@@ -42,6 +42,49 @@ test('recognizes OOXML workbooks but leaves legacy XLS files unsupported', () =>
   assert.equal(previewKind({ name: 'data.csv' }), 'text');
 });
 
+test('previews only explicitly supported browser image formats', () => {
+  const supportedExtensions = [
+    'apng',
+    'avif',
+    'bmp',
+    'cur',
+    'gif',
+    'ico',
+    'jpe',
+    'jfif',
+    'jpeg',
+    'jpg',
+    'pjp',
+    'pjpeg',
+    'png',
+    'svg',
+    'webp',
+  ];
+  for (const extension of supportedExtensions) {
+    assert.equal(previewKind({ name: `image.${extension}`, mimeType: 'application/octet-stream' }), 'image');
+  }
+
+  const supportedMimeTypes = [
+    'image/apng',
+    'image/avif',
+    'image/bmp',
+    'image/gif',
+    'image/jpeg',
+    'image/png',
+    'image/svg+xml',
+    'image/vnd.microsoft.icon',
+    'image/webp',
+    'image/x-icon',
+  ];
+  for (const mimeType of supportedMimeTypes) {
+    assert.equal(previewKind({ name: 'image.bin', mimeType }), 'image');
+  }
+
+  assert.equal(previewKind({ name: 'image.tif', mimeType: 'image/tiff' }), 'unsupported');
+  assert.equal(previewKind({ name: 'image.tiff', mimeType: 'image/tiff' }), 'unsupported');
+  assert.equal(previewKind({ name: 'image.bin', mimeType: 'image/heic' }), 'unsupported');
+});
+
 test('uses signed download URLs without decoding them into local file paths', () => {
   const signedResource = {
     downloadUrl: '/file-api/download?token=signed-token',
