@@ -519,6 +519,11 @@ def _merge_models_for_replace_all(
                 new_mcc["timeout"] = item["timeout"]
             if not _values_match(item["alias"], (resolved_entry or {}).get("alias")):
                 new_entry["alias"] = item["alias"]
+            # vendor_key: persist the hint into model_client_config (or clear it).
+            if item.get("vendor_key"):
+                new_mcc["vendor_key"] = item["vendor_key"]
+            else:
+                new_mcc.pop("vendor_key", None)
             new_entry["is_default"] = item["is_default"]
             # api_key: resolved holds the decrypted plaintext shown to the frontend.
             # Unchanged → keep raw (placeholder or ciphertext); changed → encrypt new value.
@@ -538,6 +543,9 @@ def _merge_models_for_replace_all(
                     "client_provider": item["model_provider"],
                     "timeout": item["timeout"],
                     "verify_ssl": item["verify_ssl"],
+                    # vendor_key persisted on model_client_config so the UI can
+                    # match this entry back to a registry preset (icon/re-select).
+                    **({"vendor_key": item["vendor_key"]} if item.get("vendor_key") else {}),
                 },
                 "model_config_obj": {
                     "temperature": item["temperature"],
@@ -2065,6 +2073,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 "alias": alias,
                 "reasoning_level": reasoning_level,
                 "origin_index": origin_index,
+                # vendor_key is an opaque hint from the workbuddy-style vendor
+                # selector; not validated (the selector only ever emits keys
+                # present in jiuwenswarm.common.model_vendor_registry). It is
+                # persisted so the UI can match a configured entry back to its
+                # preset for icon display / re-selection. Not required.
+                "vendor_key": str(item.get("vendor_key") or "").strip() or None,
             })
 
         # alias 与其他条目的 model_name 冲突校验
@@ -2302,6 +2316,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     "alias": entry.get("alias", ""),
                     "origin_index": idx,
                     "context_window_tokens": context_window_tokens,
+                    "vendor_key": mcc.get("vendor_key") or entry.get("vendor_key") or "",
                 })
                 # active_model 为列表首位的模型（主对话默认）
             active_model = result[0]["model_name"] if result else ""
@@ -2456,6 +2471,129 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         else:
             channels = []
         await channel.send_response(ws, req_id, ok=True, payload={"channels": channels})
+
+    # ── vendors.* handlers (workbuddy-style vendor selection) ──────────────
+
+    async def _vendors_list(ws, req_id, params, session_id):
+        """返回按 plan 分组的厂商预设列表(供前端 Tab+厂商卡片渲染)。
+
+        纯数据,读 ``jiuwenswarm.common.model_vendor_registry``,无副作用。
+        """
+        del params, session_id
+        try:
+            from jiuwenswarm.common.model_vendor_registry import to_frontend_payload
+            await channel.send_response(
+                ws, req_id, ok=True,
+                payload={"vendors": to_frontend_payload()},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[vendors.list] %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+
+    async def _vendors_fetch_models(ws, req_id, params, session_id):
+        """按厂商预设拉取远端可用模型列表(供前端"拉取最新"按钮)。
+
+        params: {vendor_key, plan, api_key?}。按预设的 ``models_needs_key``
+        决定是否带 Authorization;失败/无端点优雅回退预设列表,永不报错。
+        """
+        del session_id
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        vendor_key = str(params.get("vendor_key") or "").strip()
+        plan_raw = str(params.get("plan") or "").strip()
+        api_key = str(params.get("api_key") or "").strip()
+        try:
+            from jiuwenswarm.common.model_vendor_registry import (
+                PlanKind,
+                get_preset,
+            )
+            from openjiuwen.extensions.external_provider.openai_auth.openai_account_models import (
+                parse_openai_account_model_ids,
+            )
+            import httpx  # noqa: PLC0415
+
+            try:
+                plan = PlanKind(plan_raw)
+            except ValueError:
+                await channel.send_response(
+                    ws, req_id, ok=False,
+                    error=f"invalid plan: {plan_raw}",
+                    code="BAD_REQUEST",
+                )
+                return
+
+            preset = get_preset(vendor_key, plan)
+            if preset is None:
+                await channel.send_response(
+                    ws, req_id, ok=False,
+                    error=f"unknown vendor/plan: {vendor_key}/{plan_raw}",
+                    code="BAD_REQUEST",
+                )
+                return
+
+            # 无远端端点(Maas 等) -> 直接回退预设
+            if not preset.models_endpoint:
+                await channel.send_response(
+                    ws, req_id, ok=True,
+                    payload={
+                        "models": list(preset.model_options),
+                        "source": "preset",
+                        "reason": "no remote models endpoint",
+                    },
+                )
+                return
+
+            headers: dict[str, str] = {"Accept": "application/json"}
+            if preset.models_needs_key:
+                if not api_key:
+                    # 需 key 但未提供 -> 回退预设
+                    await channel.send_response(
+                        ws, req_id, ok=True,
+                        payload={
+                            "models": list(preset.model_options),
+                            "source": "preset",
+                            "reason": "api_key required for fetch",
+                        },
+                    )
+                    return
+                headers["Authorization"] = f"Bearer {api_key}"
+
+            try:
+                resp = httpx.get(preset.models_endpoint, headers=headers, timeout=12.0)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("[vendors.fetch_models] http error: %s", exc)
+                resp = None
+
+            if resp is not None and resp.status_code == 200:
+                try:
+                    payload_json = resp.json()
+                except ValueError:
+                    payload_json = None
+                if isinstance(payload_json, dict):
+                    try:
+                        model_ids = parse_openai_account_model_ids(payload_json)
+                    except Exception:  # noqa: BLE001
+                        model_ids = []
+                    if model_ids:
+                        await channel.send_response(
+                            ws, req_id, ok=True,
+                            payload={"models": model_ids, "source": "remote"},
+                        )
+                        return
+
+            # 远端失败/空 -> 回退预设
+            await channel.send_response(
+                ws, req_id, ok=True,
+                payload={
+                    "models": list(preset.model_options),
+                    "source": "preset",
+                    "reason": "remote fetch failed or empty",
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[vendors.fetch_models] %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
 
     async def _openai_account_auth_status(ws, req_id, params, session_id):
         del params, session_id
@@ -5909,6 +6047,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("models.list", _models_list)
     channel.register_method("models.replace_all", _models_replace_all)
     channel.register_method("models.validate", _models_validate)
+
+    # workbuddy-style vendor selection (vendor presets + remote model fetch)
+    channel.register_method("vendors.list", _vendors_list)
+    channel.register_method("vendors.fetch_models", _vendors_fetch_models)
     channel.register_method("channel.get", _channel_get)
     channel.register_method("openai_account.auth.status", _openai_account_auth_status)
     channel.register_method("openai_account.auth.start_login", _openai_account_auth_start_login)
