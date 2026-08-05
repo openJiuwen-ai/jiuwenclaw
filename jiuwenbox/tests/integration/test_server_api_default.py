@@ -3821,6 +3821,143 @@ class TestBwrapFilesystem:
         assert _has_arg_pair(args, "--remount-ro", "/etc")
 
 
+class TestSandboxIpAddress:
+    @staticmethod
+    def _assert_usable_ipv4(value: str) -> ipaddress.IPv4Address:
+        address = ipaddress.IPv4Address(value)
+        assert not address.is_loopback, value
+        assert not address.is_unspecified, value
+        assert not address.is_link_local, value
+        return address
+
+    @staticmethod
+    def test_isolated_create_response_includes_matching_ip(
+        client,
+        create_sandbox_with_policy,
+    ):
+        sandbox = create_sandbox_with_policy(policy=_isolated_network_policy())
+        assert "ip_address" in sandbox
+        assert sandbox["ip_address"] is not None
+        TestSandboxIpAddress._assert_usable_ipv4(sandbox["ip_address"])
+
+        block, measured_ip, _gateway = _uplink_info_from_sandbox(client, sandbox["id"])
+        assert sandbox["ip_address"] == str(measured_ip)
+        assert measured_ip == block.network_address + 2
+
+        get_resp = client.get(f"/api/v1/sandboxes/{sandbox['id']}")
+        assert get_resp.status_code == 200
+        assert get_resp.json()["ip_address"] == sandbox["ip_address"]
+
+        list_resp = client.get("/api/v1/sandboxes")
+        assert list_resp.status_code == 200
+        listed = next(item for item in list_resp.json() if item["id"] == sandbox["id"])
+        assert listed["ip_address"] == sandbox["ip_address"]
+
+    @staticmethod
+    def test_host_create_response_includes_shared_namespace_egress_ip(
+        client,
+        create_sandbox_with_policy,
+    ):
+        sandbox = create_sandbox_with_policy(
+            policy={
+                "name": "host-ip-policy",
+                "filesystem_policy": {
+                    "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
+                    "read_write": ["/tmp"],
+                },
+                "network": {
+                    "mode": "host",
+                    "egress": {"default": "allow"},
+                    "ingress": {"default": "allow"},
+                },
+            },
+        )
+        assert sandbox["ip_address"] is not None
+        TestSandboxIpAddress._assert_usable_ipv4(sandbox["ip_address"])
+        measured = _host_network_ip_from_sandbox(client, sandbox["id"])
+        assert sandbox["ip_address"] == measured
+
+    @staticmethod
+    def test_stop_keeps_ip_and_restart_matches_measured_ip(
+        client,
+        create_sandbox_with_policy,
+    ):
+        sandbox = create_sandbox_with_policy(policy=_isolated_network_policy())
+        created_ip = sandbox["ip_address"]
+        assert created_ip is not None
+
+        stop_resp = client.post(f"/api/v1/sandboxes/{sandbox['id']}/stop")
+        assert stop_resp.status_code == 200
+        stop_data = stop_resp.json()
+        assert stop_data["phase"] == "stopped"
+        assert stop_data["ip_address"] == created_ip
+
+        restart_resp = client.post(f"/api/v1/sandboxes/{sandbox['id']}/restart")
+        assert restart_resp.status_code == 200
+        restart_data = restart_resp.json()
+        assert restart_data["phase"] == "ready"
+        assert restart_data["ip_address"] is not None
+
+        _block, measured_ip, _gateway = _uplink_info_from_sandbox(
+            client, sandbox["id"],
+        )
+        assert restart_data["ip_address"] == str(measured_ip)
+
+        start_resp = client.post(f"/api/v1/sandboxes/{sandbox['id']}/start")
+        assert start_resp.status_code == 200
+        assert start_resp.json()["ip_address"] == restart_data["ip_address"]
+
+    @staticmethod
+    def test_create_error_returns_null_ip_address(client):
+        """Uplink allocation failure leaves phase=error and ip_address=null."""
+        # 169.254.0.0/24 is a valid pool shape, but every /30 overlaps the
+        # reserved link-local range and is rejected by the allocator.
+        response = client.post("/api/v1/sandboxes", json={
+            "policy_mode": "override",
+            "policy": _with_runtime_support(
+                _isolated_network_policy(uplink_subnet="169.254.0.0/24"),
+            ),
+            "sandbox_id": f"iperr_{uuid.uuid4().hex[:6]}",
+        })
+        assert response.status_code == 201, response.text
+        sandbox = response.json()
+        assert sandbox["phase"] == "error", sandbox
+        assert sandbox["ip_address"] is None
+
+        get_resp = client.get(f"/api/v1/sandboxes/{sandbox['id']}")
+        assert get_resp.status_code == 200
+        assert get_resp.json()["ip_address"] is None
+
+    @staticmethod
+    def test_repeated_restart_keeps_ip_consistent_with_sandbox(
+        client,
+        create_sandbox_with_policy,
+    ):
+        """Restart rebuilds uplink; response IP must track the live sandbox addr."""
+        sandbox = create_sandbox_with_policy(policy=_isolated_network_policy())
+        sandbox_id = sandbox["id"]
+
+        for _ in range(2):
+            restart_resp = client.post(f"/api/v1/sandboxes/{sandbox_id}/restart")
+            assert restart_resp.status_code == 200, restart_resp.text
+            restart_data = restart_resp.json()
+            assert restart_data["phase"] == "ready", restart_data
+            assert restart_data["ip_address"] is not None
+            TestSandboxIpAddress._assert_usable_ipv4(restart_data["ip_address"])
+
+            _block, measured_ip, _gateway = _uplink_info_from_sandbox(
+                client, sandbox_id,
+            )
+            assert restart_data["ip_address"] == str(measured_ip)
+
+            exec_resp = client.post(f"/api/v1/sandboxes/{sandbox_id}/exec", json={
+                "command": ["python3", "-c", "print('ok')"],
+                "timeout_seconds": 5,
+            })
+            assert exec_resp.status_code == 200, exec_resp.text
+            assert exec_resp.json()["exit_code"] == 0, exec_resp.json()
+
+
 class TestNetworkUplink:
     @staticmethod
     def test_isolated_uplink_auto_allocates_cgnat_pool_block(
@@ -3831,6 +3968,7 @@ class TestNetworkUplink:
         block, sandbox_ip, _gateway = _uplink_info_from_sandbox(client, sandbox["id"])
         assert block.subnet_of(ipaddress.ip_network("100.64.0.0/10"))
         assert sandbox_ip == block.network_address + 2
+        assert sandbox["ip_address"] == str(sandbox_ip)
 
     @staticmethod
     def test_isolated_uplink_user_pool_allocates_within_subnet(

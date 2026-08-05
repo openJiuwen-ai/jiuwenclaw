@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import shutil
@@ -28,8 +29,39 @@ import uuid
 from pathlib import Path
 
 import pytest
+import yaml
+
+from jiuwenbox.bundled_configs import default_policy_path
 
 pytestmark = pytest.mark.integration
+
+_DEFAULT_FILESYSTEM_POLICY = yaml.safe_load(
+    default_policy_path().read_text(encoding="utf-8")
+)["filesystem_policy"]
+_DEFAULT_BIND_MOUNTS = copy.deepcopy(_DEFAULT_FILESYSTEM_POLICY["bind_mounts"])
+_DEFAULT_DIRECTORIES = copy.deepcopy(_DEFAULT_FILESYSTEM_POLICY["directories"])
+
+
+def _with_runtime_support(policy: dict) -> dict:
+    """Ensure override policies expose host python/runtime paths via bind_mounts.
+
+    ``read_only`` alone only affects Landlock remounts; bubblewrap only exposes
+    host paths listed in ``bind_mounts``. Mount list matches the bundled
+    default policy used by successful server-api override tests — not the
+    outdated ``conftest.SYSTEM_BIND_MOUNTS`` (which incorrectly includes
+    ``/etc/ssl/openssl.cnf``).
+    """
+    runtime_policy = copy.deepcopy(policy)
+    filesystem_policy = runtime_policy.setdefault("filesystem_policy", {})
+    bind_mounts = filesystem_policy.setdefault("bind_mounts", [])
+    for mount in _DEFAULT_BIND_MOUNTS:
+        if mount not in bind_mounts:
+            bind_mounts.append(copy.deepcopy(mount))
+    directories = filesystem_policy.setdefault("directories", [])
+    for directory in _DEFAULT_DIRECTORIES:
+        if directory not in directories:
+            directories.append(copy.deepcopy(directory))
+    return runtime_policy
 
 
 def _resolve_jiuwenbox_bin() -> str:
@@ -750,7 +782,7 @@ def test_cli_policy_update_append_via_policy_file(
     """``policy update --policy-file --policy-mode append`` 列表追加去重。"""
     create_policy = tmp_path / "create-isolated.json"
     create_policy.write_text(
-        json.dumps({
+        json.dumps(_with_runtime_support({
             "name": "cli-update-append",
             "filesystem_policy": {
                 "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
@@ -767,7 +799,7 @@ def test_cli_policy_update_append_via_policy_file(
                     "allowed_ports": [8080],
                 },
             },
-        }),
+        })),
         encoding="utf-8",
     )
     _, created = _run_cli_json(
@@ -887,7 +919,7 @@ def test_cli_policy_update_rejects_host_mode(
     """host 模式沙箱动态更新 → HTTP 400, stderr 含完整 error。"""
     create_policy = tmp_path / "host-policy.json"
     create_policy.write_text(
-        json.dumps({
+        json.dumps(_with_runtime_support({
             "name": "cli-host-update-reject",
             "filesystem_policy": {
                 "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
@@ -897,7 +929,7 @@ def test_cli_policy_update_rejects_host_mode(
                 "mode": "host",
                 "egress": {"default": "allow"},
             },
-        }),
+        })),
         encoding="utf-8",
     )
     _, created = _run_cli_json(
@@ -935,7 +967,7 @@ def test_cli_policy_update_all(server_url, tracking_sandboxes, client, tmp_path)
     """``policy update-all`` 对 isolated 写入 updated, host 写入 skipped。"""
     isolated_policy = tmp_path / "isolated.json"
     isolated_policy.write_text(
-        json.dumps({
+        json.dumps(_with_runtime_support({
             "name": "cli-batch-isolated",
             "filesystem_policy": {
                 "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
@@ -945,12 +977,12 @@ def test_cli_policy_update_all(server_url, tracking_sandboxes, client, tmp_path)
                 "mode": "isolated",
                 "egress": {"default": "allow"},
             },
-        }),
+        })),
         encoding="utf-8",
     )
     host_policy = tmp_path / "host.json"
     host_policy.write_text(
-        json.dumps({
+        json.dumps(_with_runtime_support({
             "name": "cli-batch-host",
             "filesystem_policy": {
                 "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
@@ -960,7 +992,7 @@ def test_cli_policy_update_all(server_url, tracking_sandboxes, client, tmp_path)
                 "mode": "host",
                 "egress": {"default": "allow"},
             },
-        }),
+        })),
         encoding="utf-8",
     )
 

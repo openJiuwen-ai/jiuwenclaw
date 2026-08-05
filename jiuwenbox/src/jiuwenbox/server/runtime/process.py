@@ -974,6 +974,17 @@ class ProcessRuntime(RuntimeAdapter):
         if policy.network.mode != NetworkMode.ISOLATED:
             return None
 
+        old_uplink = self._uplink_handles.pop(sandbox_id, None)
+        if old_uplink is not None:
+            try:
+                network_module.teardown_network_uplink(old_uplink)
+            except Exception:
+                logger.warning(
+                    "Failed to teardown previous uplink for sandbox %s before rebuild",
+                    sandbox_id,
+                    exc_info=True,
+                )
+
         namespace = self._get_netns_name(sandbox_id)
         if network_module.namespace_exists(namespace):
             network_module.delete_named_namespace(namespace)
@@ -1801,6 +1812,18 @@ class ProcessRuntime(RuntimeAdapter):
                 sandbox_id,
                 job,
             )
+
+    async def get_sandbox_ip_address(self, sandbox_id: str) -> str | None:
+        """Return the sandbox IPv4 confirmed by the current network setup."""
+        mode = self._network_modes.get(sandbox_id)
+        if mode == NetworkMode.ISOLATED:
+            handle = self._uplink_handles.get(sandbox_id)
+            if handle is None:
+                return None
+            return handle.sandbox_ip or None
+        if mode == NetworkMode.HOST:
+            return await asyncio.to_thread(network_module.resolve_host_egress_ipv4)
+        return None
 
     async def create(
         self,

@@ -487,6 +487,18 @@ class SandboxManager:
             return
         unregister(loop)
 
+    async def _resolve_sandbox_ip_address(self, sandbox_id: str) -> str | None:
+        """Best-effort IPv4 snapshot after create/start. Failures yield None."""
+        try:
+            return await self.runtime.get_sandbox_ip_address(sandbox_id)
+        except Exception:
+            logger.debug(
+                "Failed to resolve IP address for sandbox %s",
+                sandbox_id,
+                exc_info=True,
+            )
+            return None
+
     def _save_state(self, sandbox: SandboxRef) -> None:
         """Persist a single sandbox's state to disk."""
         path = self.state_dir / f"{sandbox.id}.json"
@@ -559,6 +571,7 @@ class SandboxManager:
                 policy_path=policy_path,
                 env=ref.env,
             )
+            ip_address = await self._resolve_sandbox_ip_address(sandbox_id)
             cleanup_after_create = False
             async with self._lock:
                 current_ref = self._sandboxes.get(sandbox_id)
@@ -567,6 +580,7 @@ class SandboxManager:
                 else:
                     ref.phase = SandboxPhase.READY
                     ref.pid = pid
+                    ref.ip_address = ip_address
                     now = datetime.now(timezone.utc)
                     ref.started_at = now
                     # 沙箱刚创建即视为最近一次活跃, 避免在第一次 exec 到来之前就被
@@ -582,6 +596,7 @@ class SandboxManager:
                     return ref
                 ref.phase = SandboxPhase.ERROR
                 ref.error_message = str(e)
+                ref.ip_address = None
                 logger.error("Failed to create sandbox %s: %s", sandbox_id, e)
                 self._save_state(ref)
 
@@ -632,8 +647,10 @@ class SandboxManager:
                 policy_path=policy_path,
                 env=ref.env,
             )
+            ip_address = await self._resolve_sandbox_ip_address(sandbox_id)
             ref.phase = SandboxPhase.READY
             ref.pid = pid
+            ref.ip_address = ip_address
             now = datetime.now(timezone.utc)
             ref.started_at = now
             ref.last_active_at = now
@@ -642,6 +659,7 @@ class SandboxManager:
             logger.error("Failed to start sandbox %s: %s", sandbox_id, e, exc_info=True)
             ref.phase = SandboxPhase.ERROR
             ref.error_message = str(e)
+            ref.ip_address = None
 
         self._save_state(ref)
         self.audit.log(AuditEventType.SANDBOX_STARTED, sandbox_id)

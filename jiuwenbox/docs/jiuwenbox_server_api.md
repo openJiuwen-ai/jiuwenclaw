@@ -152,6 +152,7 @@ JIUWENBOX_URL=unix:///tmp/jiuwenbox-sock/jiuwenbox.sock jiuwenbox health
 | `started_at` | string/null | 启动时间 |
 | `error_message` | string/null | 错误信息 |
 | `env` | object | 创建沙箱时注入的环境变量 |
+| `ip_address` | string/null | 最近一次成功 create/start 后确认的 IPv4 快照。`network.mode=isolated` 时为沙箱 veth 地址；`host` 时为 jiuwenbox 与沙箱共享网络命名空间的出口 IPv4（若服务运行在 Docker/WSL 中，可能是容器或 WSL 地址，不承诺物理宿主机 LAN 地址）。`provisioning`、创建/启动失败的 `error` 为 `null`；`stopped` 保留停止前最后一次有效地址。get/list 不重新探测，只返回该快照 |
 
 示例：
 
@@ -166,7 +167,8 @@ JIUWENBOX_URL=unix:///tmp/jiuwenbox-sock/jiuwenbox.sock jiuwenbox health
   "error_message": null,
   "env": {
     "DEMO_KEY": "demo-value"
-  }
+  },
+  "ip_address": "100.64.12.34"
 }
 ```
 
@@ -277,7 +279,8 @@ print(resp.json())
   "error_message": null,
   "env": {
     "DEMO_KEY": "demo-value"
-  }
+  },
+  "ip_address": "100.64.12.34"
 }
 ```
 
@@ -309,7 +312,8 @@ print(resp.json())
     "created_at": "2026-04-25T11:30:00.000000",
     "started_at": "2026-04-25T11:30:01.000000+00:00",
     "error_message": null,
-    "env": {}
+    "env": {},
+    "ip_address": "100.64.12.34"
   }
 ]
 ```
@@ -342,7 +346,8 @@ print(resp.json())
   "created_at": "2026-04-25T11:30:00.000000",
   "started_at": "2026-04-25T11:30:01.000000+00:00",
   "error_message": null,
-  "env": {}
+  "env": {},
+  "ip_address": "100.64.12.34"
 }
 ```
 
@@ -396,7 +401,8 @@ print(resp.json())
   "created_at": "2026-04-25T11:30:00.000000",
   "started_at": "2026-04-25T11:31:00.000000+00:00",
   "error_message": null,
-  "env": {}
+  "env": {},
+  "ip_address": "100.64.12.34"
 }
 ```
 
@@ -428,7 +434,8 @@ print(resp.json())
   "created_at": "2026-04-25T11:30:00.000000",
   "started_at": "2026-04-25T11:31:00.000000+00:00",
   "error_message": null,
-  "env": {}
+  "env": {},
+  "ip_address": "100.64.12.34"
 }
 ```
 
@@ -460,7 +467,8 @@ print(resp.json())
   "created_at": "2026-04-25T11:30:00.000000",
   "started_at": "2026-04-25T11:32:00.000000+00:00",
   "error_message": null,
-  "env": {}
+  "env": {},
+  "ip_address": "100.64.12.34"
 }
 ```
 
