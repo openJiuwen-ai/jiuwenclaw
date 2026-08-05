@@ -1778,6 +1778,14 @@ def get_checkpoint_dir() -> Path:
 
 
 def get_logs_dir() -> Path:
+    """Get the logs directory path.
+
+    Prefer ``LOG_ROOT_PATH`` when set (e.g. container-local disk instead of NFS
+    workspace). Otherwise use ``~/.jiuwenswarm/agent/.logs`` after legacy migration.
+    """
+    log_root_path = os.getenv("LOG_ROOT_PATH", "").strip()
+    if log_root_path:
+        return Path(log_root_path).expanduser().resolve()
     _migrate_legacy_checkpoint_and_logs()
     return get_agent_root_dir() / ".logs"
 
@@ -2083,7 +2091,8 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     - ``jiuwenswarm.agents.*`` 或 ``jiuwenswarm.server.*`` → agent_server.log
     - 其余 ``jiuwenswarm.*``（含 ``jiuwenswarm.app``、gateway、evolution、utils 等）→ gateway.log
 
-    所有分类日志同时写入 ``full.log``。输出目录：``~/.jiuwenswarm/agent/.logs/``。
+    所有分类日志同时写入 ``full.log``。输出目录默认 ``~/.jiuwenswarm/agent/.logs/``；
+    也可通过环境变量 ``LOG_ROOT_PATH`` 覆盖。
 
     级别由 ``config.yaml`` 的 ``logging`` 段控制；环境变量 ``LOG_LEVEL`` 仅覆盖**控制台**级别
     （``log_level`` 参数为 ``None`` 时）。若传入 ``log_level``（如单测），则控制台与各文件级别均为该值。
