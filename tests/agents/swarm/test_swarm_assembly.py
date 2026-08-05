@@ -84,7 +84,6 @@ from jiuwenswarm.agents.swarm.providers.code_subagents import (
 )
 from jiuwenswarm.common.coding_memory_paths import (
     resolve_project_coding_memory_dir,
-    resolve_project_coding_memory_workspace_path,
 )
 from jiuwenswarm.common.config import get_config
 
@@ -1873,6 +1872,7 @@ def test_code_coding_memory_provider_mounts_workspace_node(
     workspace_root = tmp_path / "member-workspace"
     project_dir.mkdir()
     workspace_root.mkdir()
+    monkeypatch.setattr(code_rails, "get_agent_workspace_dir", lambda: workspace_root)
 
     created: dict[str, Any] = {}
     rail = object()
@@ -1923,7 +1923,8 @@ def test_code_coding_memory_provider_mounts_workspace_node(
         {
             "name": "coding_memory",
             "description": "Coding Agent memory",
-            "path": resolve_project_coding_memory_workspace_path(
+            "path": resolve_project_coding_memory_dir(
+                agent_workspace_dir=str(workspace_root),
                 project_dir=str(project_dir),
             ),
             "children": [
@@ -1990,6 +1991,7 @@ def test_code_member_builds_declaratively_without_post_processing(
         trajectory_registry=InMemoryTrajectoryRegistry(),
         config=config,
     )
+    monkeypatch.setattr(code_rails, "get_agent_workspace_dir", lambda: tmp_path)
     agent = spec.build(context=ctx)
 
     rails = list(getattr(agent, "_pending_rails", [])) + list(
@@ -2016,7 +2018,8 @@ def test_code_member_builds_declaratively_without_post_processing(
         agent_workspace_dir=str(tmp_path),
         project_dir=str(tmp_path),
     )
-    coding_memory_workspace_path = resolve_project_coding_memory_workspace_path(
+    coding_memory_workspace_path = resolve_project_coding_memory_dir(
+        agent_workspace_dir=str(tmp_path),
         project_dir=str(tmp_path),
     )
     coding_memory_node = next(
@@ -2025,7 +2028,7 @@ def test_code_member_builds_declaratively_without_post_processing(
         if node.get("name") == "coding_memory"
     )
     assert coding_memory_node["path"] == coding_memory_workspace_path
-    assert Path(coding_memory_node["path"]).is_absolute() is False
+    assert Path(coding_memory_node["path"]).is_absolute() is True
     assert Path(coding_memory_dir).is_dir()
     assert coding_memory_node["children"] == [
         {

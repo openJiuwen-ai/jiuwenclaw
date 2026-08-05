@@ -35,6 +35,7 @@ from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.rails import SkillUseRail
 
 from jiuwenswarm.agents.swarm.context import SwarmBuildContext
+from jiuwenswarm.common.utils import get_agent_workspace_dir
 
 logger = logging.getLogger(__name__)
 
@@ -307,15 +308,17 @@ def build_code_coding_memory(params: dict[str, Any], ctx: SwarmBuildContext) -> 
         )
 
         inp = CodeCodingMemoryInput.resolve(params, ctx)
-        workspace_root = str(inp.workspace_root or "./")
+        # The build workspace is the project cwd. Persistent Coding Memory
+        # belongs to the agent-owned system workspace instead.
+        agent_workspace_dir = str(get_agent_workspace_dir())
         _set_workspace_coding_memory_directory(
             ctx.workspace,
             project_dir=inp.project_dir,
-            agent_workspace_dir=workspace_root,
+            agent_workspace_dir=agent_workspace_dir,
         )
         rail = create_coding_memory_rail(
             project_dir=inp.project_dir,
-            agent_workspace_dir=workspace_root,
+            agent_workspace_dir=agent_workspace_dir,
             config={"embed": inp.embed_config},
         )
         # Share the instance with the code_agent sub-agent via the build context.
