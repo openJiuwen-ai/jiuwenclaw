@@ -253,7 +253,7 @@ class WebChannel(BaseWsChannel):
 
     def on_connect(self, callback: ConnectHook) -> None:
         """注册连接建立钩子，新客户端接入时依次调用."""
-        self._connect_hooks.append(callback)
+        self._connect_hooks.append(callback) #TODO
 
     def on_disconnect(self, callback: ConnectHook) -> None:
         """注册连接断开钩子，客户端断连时依次调用.
@@ -376,6 +376,10 @@ class WebChannel(BaseWsChannel):
             return None
         text = str(uid).strip()
         return text or None
+
+    def _extract_ws_user_id(self, ws: Any) -> str:
+        """WebChannel: 从 ws 提取连接级 user_id。"""
+        return self._connection_user_id(ws) or ""
 
     @staticmethod
     def _routing_key_user_id(connection_user_id: str | None, remote: Any) -> str:

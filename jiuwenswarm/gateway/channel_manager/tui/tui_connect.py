@@ -21,7 +21,8 @@ from openjiuwen.core.foundation.llm.schema.config import (
     ModelClientConfig,
     ModelRequestConfig,
 )
-from openjiuwen.rsi.auto_harness.schema import load_auto_harness_config
+# from openjiuwen.rsi.auto_harness.schema import load_auto_harness_config
+from openjiuwen.auto_harness.schema import load_auto_harness_config
 
 from jiuwenswarm.common.config import (
     get_config,
@@ -3357,6 +3358,17 @@ def build_cli_route_binding(bind: CliRouteBindParams) -> GatewayRouteBinding:
         if mh is None or not hasattr(mh, "cancel_scheduled_disconnect_cancel"):
             return
         mh.cancel_scheduled_disconnect_cancel(channel_id, session_id)
+
+    async def _tui_connect_hook(ws, path):
+        """WS 建立后、业务消息前的简单鉴权。"""
+        ac = bind.agent_client
+        if hasattr(ac, "on_auth_connect"):
+            return await ac.on_auth_connect(ws, "tui")
+        return False
+
+    _tui_channel = bind.ws_channel
+    if _tui_channel is not None and hasattr(_tui_channel, "on_connect"):
+        _tui_channel.on_connect(_tui_connect_hook)
 
     return GatewayRouteBinding(
         path=bind.path,

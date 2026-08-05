@@ -146,7 +146,7 @@ class ChannelManager(ABC):
                 del self._channels[k]
         logger.info("[ChannelManager] 已注销 Channel: channel_id=%s", channel_id)
 
-    def get_channel(self, channel_id: str | ChannelKey) -> "BaseChannel | None":
+    def get_channel(self, channel_id: str | ChannelKey) -> "WSBaseChannel | None":
         """根据 channel_id（字符串）或 ChannelKey 获取 Channel。"""
         if isinstance(channel_id, ChannelKey):
             return self._channels.get(channel_id)

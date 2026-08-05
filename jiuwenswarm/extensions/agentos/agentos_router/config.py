@@ -47,6 +47,8 @@ class RouterConfig:
     sandbox_idle_check_interval_seconds: float = 30.0
     ssh: YuanrongSshSettings = YuanrongSshSettings()
     ssh_channel: SshChannelEndpoint | None = None
+    auth_service_url:str = None
+    timeout:float = 10.0
 
 
 def agentos_router_selected(config: dict[str, Any]) -> bool:
@@ -128,6 +130,16 @@ def load_router_config(config: dict[str, Any]) -> RouterConfig:
             "are required in agentos_router mode"
         )
 
+    auth = config.get("auth") if isinstance(config, dict) else {}
+    if not isinstance(auth, dict):
+        auth = {}
+    agentos_auth = auth.get("agentos")
+    if not isinstance(agentos_auth, dict):
+        agentos_auth = {}
+
+    auth_service_url = str(agentos_auth.get("auth_service_url") or "").strip()
+    timeout = float(agentos_auth.get("timeout") or 10)
+
     # Env wins over yaml (incl. explicit 0 to disable), same as vibeskill.
     idle_timeout_env = _read_float_env(SANDBOX_IDLE_TIMEOUT_ENV)
     sandbox_idle_timeout_seconds = (
@@ -164,4 +176,6 @@ def load_router_config(config: dict[str, Any]) -> RouterConfig:
         ),
         ssh=load_yuanrong_ssh_settings(agentos.get("ssh")),
         ssh_channel=load_ssh_channel_endpoint(config),
+        auth_service_url=auth_service_url,
+        timeout=timeout
     )

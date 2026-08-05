@@ -1048,6 +1048,14 @@ extensions:
   # EXTENSION_DIRS="E:/a;D:/b"
   extension_dirs: ${EXTENSION_DIRS:-jiuwenswarm/extensions}
 
+# Gateway 认证：默认 passthrough。仅当 agentos_router 生效且 type=agentos 时，
+# 由 agentos_router 注册 AgentOSAuthenticator（依赖第三方 IAM）。
+auth:
+  type: passthrough # passthrough | agentos
+  agentos:
+    auth_service_url: ${AGENTOS_AUTH_SERVICE_URL:-http://iam-agentos:8080}
+    timeout: ${AGENTOS_AUTH_TIMEOUT:-10}
+
 
 # ============================================================
 # Hooks 配置
