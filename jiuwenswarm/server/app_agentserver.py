@@ -123,11 +123,6 @@ from jiuwenswarm.agents.harness.common.tools.bash_tool_safety import (
 
 install_shell_tool_safety_hooks()
 
-# 兼容 SSE-only 网关：让非流式 invoke()（subagent / 心跳等）能解析 text/event-stream 响应
-from jiuwenswarm.llm_sse_patch import apply_openai_sse_invoke_patch
-
-apply_openai_sse_invoke_patch()
-
 # /debug 模式下捕获 builtin TaskTool 分发的 subagent 流（reasoning/tool_call/usage），
 # 内联写入主 dump。非 debug 或 include_subagent_flow 关闭时走原始 invoke，零回归。
 from jiuwenswarm.server.runtime.debug_trace.task_tool_patch import (
