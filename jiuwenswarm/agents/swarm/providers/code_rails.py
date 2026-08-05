@@ -209,6 +209,10 @@ class PermissionInterruptInput(ConstructionInput):
         default="gpt-4",
         description="Model name from config models.default (drives permission policy).",
     )
+    trusted_dirs: list[str] | None = context_field(
+        attr="trusted_dirs",
+        description="Directories the client declared as trusted for this request.",
+    )
 
 
 class _TeamPlanPermissionInterruptRail:
@@ -267,6 +271,10 @@ def build_permission_interrupt(params: dict[str, Any], ctx: SwarmBuildContext) -
             llm=None,
             model_name=inp.model_name,
         )
+        if rail is not None and inp.trusted_dirs:
+            # Mirrors the single agent: trusted subtrees count as internal, so
+            # the external_directory check skips ask/deny inside them.
+            rail.set_trusted_dirs(inp.trusted_dirs)
         if rail is not None and _is_team_plan_leader(ctx):
             return _TeamPlanPermissionInterruptRail(rail)
         return rail

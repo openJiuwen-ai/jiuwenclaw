@@ -577,6 +577,31 @@ def _resolve_user_turn(
     )
 
 
+def _request_trusted_dirs(request: Any) -> list[str]:
+    """Return the trusted directories declared by this request.
+
+    Members mount them on their runtime-prompt and permission rails, which is
+    how a single agent learns the same list (see ``_apply_runtime_config_stages``).
+
+    Args:
+        request: The incoming ``AgentRequest``.
+
+    Returns:
+        Non-empty trusted directory paths, or an empty list.
+    """
+    params = getattr(request, "params", None)
+    if not isinstance(params, dict):
+        return []
+    raw = params.get("trusted_dirs")
+    if not isinstance(raw, list):
+        return []
+    dirs: list[str] = []
+    for entry in raw:
+        if isinstance(entry, str) and entry.strip():
+            dirs.append(entry.strip())
+    return dirs
+
+
 def _deliverable(turn: UserTurn, text: Any) -> Any:
     """Render ``text`` into the payload delivered to the team runtime.
 
@@ -1572,6 +1597,7 @@ async def process_team_message_stream(
             session_id=session_id,
             mode=resolved_mode,
             project_dir=request_metadata.get("project_dir"),
+            trusted_dirs=_request_trusted_dirs(request),
             request_id=rid,
             channel_id=channel_id,
             request_metadata=request_metadata,

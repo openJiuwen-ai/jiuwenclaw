@@ -9029,7 +9029,15 @@ class JiuWenSwarmDeepAdapter:
                 set_current_multimodal_image_files,
             )
 
-            set_current_multimodal_image_files(inputs.pop("_multimodal_image_files", []) or [])
+            image_files_token = set_current_multimodal_image_files(
+                inputs.pop("_multimodal_image_files", []) or []
+            )
+            # Same permission bindings the single agent installs. Both are
+            # ContextVars, and ``asyncio.create_task`` snapshots the context, so
+            # the long-lived team stream task keeps the values this request set
+            # even after the resets below run at request end.
+            token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
+            token_perm = setup_permission_context(request)
             resolved_language = self._resolve_runtime_language()
             resolved_channel = str(cid or self._resolve_prompt_channel(session_id) or "web").strip() or "web"
             if self._runtime_prompt_rail:
@@ -9047,8 +9055,17 @@ class JiuWenSwarmDeepAdapter:
                 or self._workspace_dir,
             )
 
-            async for chunk in process_team_message_stream(request, inputs, self._instance):
-                yield chunk
+            try:
+                async for chunk in process_team_message_stream(request, inputs, self._instance):
+                    yield chunk
+            finally:
+                from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
+                    reset_current_multimodal_image_files,
+                )
+
+                reset_current_multimodal_image_files(image_files_token)
+                TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
+                cleanup_permission_context(token_perm)
             return
 
         # Auto-Harness 模式处理
