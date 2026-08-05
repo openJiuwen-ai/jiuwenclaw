@@ -1013,3 +1013,55 @@ def test_page_worker_ending_uses_template_fill_not_free_generation(tmp_path) -> 
     assert result["page_files"] == ["page-10.pptx.html"]
     assert "感谢聆听" in written_contents[0]
     assert "echarts" not in written_contents[0].lower()
+
+
+_GOOD_CONTENT_HTML = """<!DOCTYPE html>
+<html><body>
+<div class="ppt-slide">
+  <header><h1>标题</h1></header>
+  <main><section>正文</section></main>
+  <footer>页脚</footer>
+</div>
+</body></html>
+"""
+
+_BROKEN_CONTENT_HTML = """<!DOCTYPE html>
+<html><body>
+<div class="ppt-slide">
+  <header><h1>标题</h1></header></div></div>
+  <main><section>正文</section></main>
+</div>
+</body></html>
+"""
+
+
+def test_validate_slide_dom_accepts_normal_content_page() -> None:
+    assert ppg._validate_slide_dom(_GOOD_CONTENT_HTML)
+
+
+def test_validate_slide_dom_rejects_main_outside_slide() -> None:
+    assert not ppg._validate_slide_dom(_BROKEN_CONTENT_HTML)
+    assert not ppg._is_slide_exportable(_BROKEN_CONTENT_HTML)
+
+
+def test_validate_slide_dom_rejects_malformed_llm_tokens() -> None:
+    html = _GOOD_CONTENT_HTML.replace(
+        "<header>",
+        '<header class="border@none" style=".>',
+    ).replace("</header>", "</.></header>")
+    assert not ppg._validate_slide_dom(html)
+
+
+def test_is_slide_exportable_ignores_malformed_tokens_when_structure_ok() -> None:
+    html = _GOOD_CONTENT_HTML.replace(
+        "<header>",
+        '<header class="border@none" style=".>',
+    )
+    assert not ppg._validate_slide_dom(html)
+    assert ppg._is_slide_exportable(html)
+
+
+def test_extract_backup_timestamp() -> None:
+    assert ppg._extract_backup_timestamp(
+        "D:/pages/_backup/20260803065245/page-17.pptx.html"
+    ) == "20260803065245"

@@ -906,6 +906,73 @@ def _is_valid_html(text: str) -> bool:
     return True
 
 
+_MALFORMED_HTML_RE = re.compile(
+    r"</\.>|border@none|style=\"\.>",
+    re.IGNORECASE,
+)
+_PPT_SLIDE_OPEN_RE = re.compile(
+    r'<div\b[^>]*\bclass="[^"]*\bppt-slide\b',
+    re.IGNORECASE,
+)
+
+
+def _ppt_slide_bounds(html: str) -> tuple[int, int] | None:
+    """返回 .ppt-slide 内容区 [start, end) 偏移；解析失败时返回 None。"""
+    slide_match = _PPT_SLIDE_OPEN_RE.search(html)
+    if not slide_match:
+        return None
+    tag_end = html.find(">", slide_match.start())
+    if tag_end < 0:
+        return None
+    content_start = tag_end + 1
+    depth = 1
+    pos = content_start
+    lower = html.lower()
+    while pos < len(html) and depth > 0:
+        next_open = lower.find("<div", pos)
+        next_close = lower.find("</div>", pos)
+        if next_close == -1:
+            return None
+        if next_open != -1 and next_open < next_close:
+            depth += 1
+            pos = next_open + 4
+        else:
+            depth -= 1
+            if depth == 0:
+                return content_start, next_close
+            pos = next_close + 6
+    return None
+
+
+def _main_inside_ppt_slide(html: str) -> bool:
+    """内容页的 <main> 必须落在 .ppt-slide 容器内；无 <main> 时视为通过。"""
+    main_match = re.search(r"<main\b", html, re.IGNORECASE)
+    if not main_match:
+        return True
+    bounds = _ppt_slide_bounds(html)
+    if bounds is None:
+        return False
+    start, end = bounds
+    return start <= main_match.start() < end
+
+
+def _validate_slide_dom(html: str) -> bool:
+    """P8.1 写盘前校验：拦截 LLM 畸形片段与 main 滑出 slide。"""
+    if _MALFORMED_HTML_RE.search(html):
+        return False
+    return _main_inside_ppt_slide(html)
+
+
+def _is_slide_exportable(html: str) -> bool:
+    """P8.2 fix 后校验：仅确认导出边界内的结构未被破坏。"""
+    return _main_inside_ppt_slide(html)
+
+
+def _extract_backup_timestamp(path: str) -> str:
+    match = re.search(r"_backup[/\\](\d+)[/\\]", path.replace("\\", "/"))
+    return match.group(1) if match else ""
+
+
 _VISIBLE_PAGE_MARKER_RE = re.compile(
     r"^\s*(?:"
     r"第\s*0*\d+\s*页(?:\s*(?:(?:[/／]|of)\s*(?:共\s*)?0*\d+\s*页|"
@@ -3000,6 +3067,13 @@ class PageWorkerNode(PlanNode):
             total_pages=ctx.total_pages,
             style_id=ctx.style_id,
         )
+        if not _validate_slide_dom(html):
+            logger.warning(
+                "[P8.1] 结构页 DOM 校验失败 page=%d type=%s",
+                ctx.page_num,
+                page_type,
+            )
+            return ""
         logger.info(
             "[P8.1] 结构页官方模板填槽完成 page=%d style=%s type=%s",
             ctx.page_num,
@@ -3057,6 +3131,9 @@ class PageWorkerNode(PlanNode):
         )
         html = _fix_echarts_svg_renderer(html)
         html = _strip_unsupported_fullpage_overlays(html)
+        if not _validate_slide_dom(html):
+            logger.warning("[P8.1] 页面 %d DOM 结构校验失败", ctx.page_num)
+            return ""
         return html
 
     async def _write_file(self, path: str, content: str) -> bool:
@@ -3192,6 +3269,49 @@ class QAFixNode(PlanNode):
             "fix_report": "; ".join(fix_report_parts),
         }
 
+    async def _read_page_file(self, path: str) -> str:
+        if not path or not self.has_tool("read_file"):
+            return ""
+        try:
+            result = await self.call_tool("read_file", file_path=path)
+            return PptCommon.parse_tool_file_content(result)
+        except Exception as e:
+            if isinstance(e, AbortError):
+                raise
+            logger.warning("[P8.2] 读取页面失败 %s: %s", path, e)
+            return ""
+
+    async def _write_page_file(self, path: str, content: str) -> bool:
+        if not path or not self.has_tool("write_file"):
+            return False
+        try:
+            await self.call_tool("write_file", file_path=path, content=content)
+            return True
+        except Exception as e:
+            if isinstance(e, AbortError):
+                raise
+            logger.warning("[P8.2] 写入页面失败 %s: %s", path, e)
+            return False
+
+    async def _find_latest_backup_path(self, pages_dir: str, page_num: int) -> str:
+        if not self.has_tool("glob"):
+            return ""
+        try:
+            result = await self.call_tool(
+                "glob",
+                pattern=f"_backup/*/page-{page_num}.pptx.html",
+                path=pages_dir,
+            )
+            paths = self._parse_listing(result)
+        except Exception as e:
+            if isinstance(e, AbortError):
+                raise
+            logger.warning("[P8.2] 查找 backup 失败 page=%d: %s", page_num, e)
+            return ""
+        if not paths:
+            return ""
+        return max(paths, key=_extract_backup_timestamp)
+
     async def _fix_pages(
         self,
         page_nums: list[int],
@@ -3205,6 +3325,10 @@ class QAFixNode(PlanNode):
 
         async def _fix_one(page_num: int) -> tuple[int, bool, str]:
             async with sem:
+                page_path = f"{pages_dir}/page-{page_num}.pptx.html"
+                before_html = await self._read_page_file(page_path)
+                before_ok = bool(before_html) and _is_slide_exportable(before_html)
+
                 style_arg = (
                     f" --style {quote_path(style_file_path)}"
                     if style_file_path
@@ -3229,6 +3353,20 @@ class QAFixNode(PlanNode):
                         page_num,
                         result.exit_code,
                     )
+
+                after_html = await self._read_page_file(page_path)
+                after_ok = bool(after_html) and _is_slide_exportable(after_html)
+                if before_ok and not after_ok:
+                    backup_path = await self._find_latest_backup_path(pages_dir, page_num)
+                    if backup_path:
+                        backup_html = await self._read_page_file(backup_path)
+                        if backup_html and _is_slide_exportable(backup_html):
+                            if await self._write_page_file(page_path, backup_html):
+                                logger.warning(
+                                    "[P8.2] page-%d fix 破坏 DOM，已回退 backup",
+                                    page_num,
+                                )
+                                output = f"{output} dom_restored_from_backup"
                 return page_num, ok, output
 
         results = await asyncio.gather(
