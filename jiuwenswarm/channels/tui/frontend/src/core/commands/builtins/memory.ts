@@ -480,7 +480,7 @@ async function editMemoryByPath(
         const editorEnvironmentHint = getEditorEnvironmentHint();
         // openInEditor blocks until the editor window closes (TUI frozen in
         // the meantime). Report the result only after the editor exits.
-        ctx.openInEditor(path, (success) => {
+        await ctx.openInEditor(path, (success) => {
           if (success === false) {
             ctx.addItem(addError(ctx.sessionId, `Failed to open editor for memory file: ${displayPath}`));
             return;
@@ -523,7 +523,7 @@ async function editMemoryByPath(
       const editorEnvironmentHint = getEditorEnvironmentHint();
       // openInEditor blocks until the editor window closes (TUI frozen in
       // the meantime). Report the result only after the editor exits.
-      ctx.openInEditor(payload.path, (success) => {
+      await ctx.openInEditor(payload.path, (success) => {
         if (success === false) {
           ctx.addItem(addError(ctx.sessionId, `Failed to open editor for memory file: ${displayPath}`));
           return;

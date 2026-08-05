@@ -575,7 +575,7 @@ export class MemoryViewController {
       await new Promise<void>((resolveRender) => setImmediate(resolveRender));
       // 编辑器进程退出后触发回调；同步实现会在此期间停止 TUI 输入。
       try {
-        this.openEditor(this.tui, filePath, (success) => {
+        await this.openEditor(this.tui, filePath, (success) => {
           if (success === false) {
             this.handleEditorOpenFailure("configured editor and fallback editor both failed");
             return;

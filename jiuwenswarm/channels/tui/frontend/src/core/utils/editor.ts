@@ -80,6 +80,17 @@ function spawnFailed(result: SpawnSyncReturns<string | Buffer>): boolean {
 }
 
 /**
+ * Let the current terminal input callback unwind before another process
+ * inherits stdin. This matters for native Windows processes running under
+ * mintty (Git Bash), where an active input callback in the TUI runtime can
+ * otherwise keep a synchronously spawned terminal editor from receiving
+ * keyboard input.
+ */
+function yieldForTerminalHandoff(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+/**
  * Open a file in the user's external editor.
  *
  * GUI editors (notepad, VS Code, Sublime, etc.) AND terminal editors both
@@ -101,7 +112,11 @@ function spawnFailed(result: SpawnSyncReturns<string | Buffer>): boolean {
  *               has restored input. The boolean is false when both the
  *               configured editor and the fallback editor failed.
  */
-export function openFileInEditor(tui: TUI, filePath: string, onExit?: (success: boolean) => void): void {
+export async function openFileInEditor(
+  tui: TUI,
+  filePath: string,
+  onExit?: (success: boolean) => void,
+): Promise<void> {
   const editor = getExternalEditor();
   const gui = isGuiEditor(editor);
 
@@ -113,8 +128,14 @@ export function openFileInEditor(tui: TUI, filePath: string, onExit?: (success: 
   // Terminal editor: spawnSync + tui.stop/start (blocks until editor exits)
   const { cmd, args } = parseEditorCommand(editor);
 
+  // Stop listening immediately, then let the current pi-tui stdin callback
+  // unwind before another process inherits the handle. On Windows 10 + Git
+  // Bash/mintty, spawning from inside that callback can open vim without
+  // usable input. The macrotask boundary completes the terminal handoff while
+  // keeping the TUI paused, so no extra keystrokes can race into the composer.
   tui.stop();
   let success = false;
+  await yieldForTerminalHandoff();
 
   try {
     // Enter alt screen + clear + show cursor.
