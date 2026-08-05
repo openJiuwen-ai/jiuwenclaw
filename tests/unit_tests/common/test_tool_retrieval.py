@@ -36,12 +36,14 @@ from jiuwenswarm.common.tool_retrieval import (
     embed_single,
     embed_texts,
     filter_executable,
+    flatten_schema,
     haystack_for,
     hybrid_search,
     parameters_summary,
     parameters_to_text,
     precompute_embeddings,
     safe_serialize_parameters,
+    split_identifier,
     verb_intent_boost,
 )
 
@@ -137,15 +139,21 @@ def test_haystack_keeps_short_description():
 
 
 def test_haystack_none_description():
+    # v2: name only (no desc, no params) → haystack is just the name tokens.
     h = haystack_for(MockTool("t", None, None), desc_cap=64)
-    assert h.startswith("t ")
+    assert h == "t"
 
 
 def test_haystack_uses_parameters_to_text():
+    # v2: haystack is cleaned — field names appear, JSON noise doesn't.
     params = {"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]}
     h = haystack_for(MockTool("memory_search", "search memory", params), desc_cap=64)
-    assert "fields: q" in h
-    assert "q" in h
+    tokens = h.lower().split()
+    assert "q" in tokens                      # field name extracted
+    assert "fields" not in tokens             # v1's "fields: q" prefix gone
+    assert "type" not in tokens               # JSON structural noise excluded
+    assert "properties" not in tokens
+    assert "required" not in tokens
 
 
 # ---------------------------------------------------------------------------
@@ -615,3 +623,215 @@ def test_hybrid_both_legs_empty_returns_empty():
         limit=3, detail_level=1, desc_cap=64, min_sim=0.99,
     )
     assert results == []
+
+
+# ===========================================================================
+# v2 phase 2: haystack cleaning
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# _split_identifier
+# ---------------------------------------------------------------------------
+
+
+def test_split_snake_case():
+    assert split_identifier("memory_search") == "memory search"
+    assert split_identifier("read_file") == "read file"
+    assert split_identifier("send_file_to_user") == "send file to user"
+
+
+def test_split_camel_case():
+    assert split_identifier("sendEmail") == "send email"
+    assert split_identifier("readFile") == "read file"
+
+
+def test_split_preserves_lowercase_single_word():
+    assert split_identifier("bash") == "bash"
+    assert split_identifier("cron") == "cron"
+
+
+def test_split_handles_empty_and_none():
+    assert split_identifier("") == ""
+    assert split_identifier(None) == ""
+
+
+# ---------------------------------------------------------------------------
+# _flatten_schema
+# ---------------------------------------------------------------------------
+
+
+def test_flatten_extracts_field_names():
+    schema = {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "搜索词"},
+            "limit": {"type": "integer", "default": 10},
+        },
+        "required": ["query"],
+    }
+    out: list = []
+    flatten_schema(schema, out)
+    joined = " ".join(out)
+    # field names should appear (split, lowercased)
+    assert "query" in joined
+    assert "limit" in joined
+    # JSON structural keywords must NOT appear as tokens
+    assert "type" not in joined.split()
+    assert "properties" not in joined.split()
+    assert "required" not in joined.split()
+    assert "object" not in joined.split()  # value of "type" — also noise
+
+
+def test_flatten_extracts_enum_values():
+    schema = {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["create", "list", "delete"],
+            }
+        },
+    }
+    out: list = []
+    flatten_schema(schema, out)
+    joined = " ".join(out)
+    assert "create" in joined.split()
+    assert "list" in joined.split()
+    assert "delete" in joined.split()
+    assert "action" in joined.split()
+
+
+def test_flatten_recurses_nested_objects():
+    schema = {
+        "type": "object",
+        "properties": {
+            "task": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+            }
+        },
+    }
+    out: list = []
+    flatten_schema(schema, out)
+    joined = " ".join(out)
+    assert "id" in joined.split()
+    assert "content" in joined.split()
+    assert "task" in joined.split()
+
+
+def test_flatten_handles_empty_and_none():
+    assert flatten_schema(None, []) is None
+    out: list = []
+    flatten_schema({}, out)
+    assert out == []
+    flatten_schema([], out)
+    assert out == []
+
+
+def test_flatten_depth_guard():
+    """Deeply nested schemas should not blow the stack or take forever."""
+    # Build a 10-deep nested dict
+    inner = {"name": {"type": "string"}}
+    for _ in range(10):
+        inner = {"properties": inner}
+    out: list = []
+    flatten_schema(inner, out)  # should not raise
+    # the deepest "name" may or may not appear (depth guard), but no crash
+
+
+# ---------------------------------------------------------------------------
+# haystack_for (v2 cleaned)
+# ---------------------------------------------------------------------------
+
+
+def test_haystack_contains_split_name():
+    tool = MockTool("memory_search", "在持久化记忆中搜索。", {"type": "object"})
+    h = haystack_for(tool, desc_cap=64)
+    # raw name present (for exact-match boost)
+    assert "memory_search" in h
+    # split name present (for BM25/dense word matching)
+    assert "memory search" in h
+
+
+def test_haystack_excludes_json_noise():
+    schema = {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "搜索词"},
+        },
+        "required": ["query"],
+    }
+    tool = MockTool("memory_search", "搜索记忆", schema)
+    h = haystack_for(tool, desc_cap=64)
+    tokens = h.lower().split()
+    # These JSON-Schema structural words must not appear
+    assert "type" not in tokens
+    assert "properties" not in tokens
+    assert "required" not in tokens
+    assert "object" not in tokens
+    assert "string" not in tokens  # value of "type" — noise
+    # but the field name should
+    assert "query" in tokens
+
+
+def test_haystack_includes_enum_values():
+    schema = {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["create", "delete"]},
+        },
+    }
+    tool = MockTool("cron_modify", "修改定时任务", schema)
+    h = haystack_for(tool, desc_cap=64)
+    tokens = h.lower().split()
+    assert "create" in tokens
+    assert "delete" in tokens
+
+
+def test_haystack_no_json_noise_regression():
+    """Regression guard: the v1 haystack dumped the whole raw dict, so
+    'type'/'properties'/'required' appeared verbatim. v2 must not regress.
+    """
+    schema = {
+        "type": "object",
+        "properties": {"q": {"type": "string"}},
+        "required": ["q"],
+        "additionalProperties": False,
+    }
+    tool = MockTool("t", "desc", schema)
+    h = haystack_for(tool, desc_cap=64)
+    for noise in ("type", "properties", "required", "additionalproperties"):
+        assert noise not in h.lower().split(), f"{noise!r} leaked into haystack"
+
+
+# ---------------------------------------------------------------------------
+# build_tool_summary regression (must stay complete — full schema to LLM)
+# ---------------------------------------------------------------------------
+
+
+def test_build_tool_summary_keeps_full_schema_at_detail_level_3():
+    """build_tool_summary returns the FULL schema so the LLM can construct
+    arguments. Phase 2 must NOT change this — only haystack_for is cleaned.
+    """
+    schema = {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "搜索词"},
+        },
+        "required": ["query"],
+    }
+    tool = MockTool("memory_search", "搜索记忆", schema)
+    summary = build_tool_summary(tool, detail_level=3)
+    # Full schema must still be present
+    assert summary["name"] == "memory_search"
+    assert summary["description"] == "搜索记忆"
+    params = summary["parameters"]
+    # the raw schema structure is preserved (dict form)
+    assert isinstance(params, dict)
+    assert params.get("type") == "object"
+    assert "properties" in params
+    assert params["properties"]["query"]["type"] == "string"

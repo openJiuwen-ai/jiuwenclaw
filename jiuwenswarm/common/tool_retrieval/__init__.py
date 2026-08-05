@@ -25,6 +25,8 @@ from .summary import (
     parameters_summary,
     safe_serialize_parameters,
     build_tool_summary,
+    _split_identifier as split_identifier,
+    _flatten_schema as flatten_schema,
 )
 from .corpus import filter_executable
 from .bm25_search import (
@@ -49,6 +51,8 @@ __all__ = [
     "safe_serialize_parameters",
     "build_tool_summary",
     "filter_executable",
+    "split_identifier",
+    "flatten_schema",
     # BM25 + hybrid (v2)
     "bm25_tokenize",
     "BM25Okapi",

@@ -41,11 +41,37 @@ def verb_intent_boost(ql: str, nl: str) -> float:
 
 
 def haystack_for(tool: Any, desc_cap: int) -> str:
+    """Build the searchable text for a tool.
+
+    v2 (phase 2): cleaned haystack — name (split) + description + clean
+    schema tokens (field names, enum values; JSON structural noise like
+    ``type``/``properties``/``required`` excluded).
+
+    Both BM25 and dense rank over this. A clean haystack is the precondition
+    for both to score well: the old raw-dict haystack drowned the signal
+    field names in JSON noise and left composite names (``memory_search``)
+    unsplit, which bag-of-words rankers can't match on.
+
+    NOTE: ``build_tool_summary`` (the full schema returned to the LLM so it
+    can construct arguments) is NOT touched — it must stay complete. Only
+    the search index uses this cleaned text.
+    """
+    from .summary import _split_identifier, _flatten_schema
+
+    tokens: List[str] = []
     name = str(getattr(tool, "name", "") or "")
+    if name:
+        tokens.append(name)                       # raw name for exact-match boost
+        split = _split_identifier(name)
+        if split and split != name.lower():
+            tokens.append(split)                   # memory_search -> "memory search"
     desc = str(getattr(tool, "description", "") or "")
-    if len(desc) > desc_cap:
-        desc = desc[:desc_cap]
-    return f"{name} {desc} {parameters_to_text(getattr(tool, 'parameters', None))}"
+    if desc:
+        if len(desc) > desc_cap:
+            desc = desc[:desc_cap]
+        tokens.append(desc)
+    _flatten_schema(getattr(tool, "parameters", None), tokens)
+    return " ".join(tokens)
 
 
 def dense_search(
