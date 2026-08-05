@@ -3431,6 +3431,13 @@ def test_normalize_feedback_interaction_result(
             }),
             "不能包含有效回答",
         ),
+        (
+            json.dumps({
+                "status": "skipped",
+                "answers": [{"selected_options": [], "custom_input": "补充竞品"}],
+            }),
+            "不能包含有效回答",
+        ),
     ],
 )
 def test_normalize_feedback_interaction_result_rejects_invalid_states(
@@ -3460,6 +3467,32 @@ async def test_feedback_resume_rejects_cancelled_without_spawning():
     assert json.loads(result) == {
         "status": "error",
         "error": "feedback_handler interaction_result status=cancelled",
+    }
+    spawn.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_feedback_resume_rejects_contradictory_skip_without_spawning():
+    spawn = AsyncMock()
+    with patch.object(dt, "_resolve_jiuwenclaw_python", return_value="/p"), \
+         patch.object(dt, "_resolve_run_script", return_value="/s"), \
+         patch("asyncio.create_subprocess_exec", new=spawn):
+        result = await dt.deepresearch_stream._func(
+            action="resume",
+            conversation_id="C1",
+            node="feedback_handler",
+            feedback='{"feedback":"不应使用"}',
+            interaction_result=json.dumps({
+                "status": "skipped",
+                "answers": [
+                    {"selected_options": [], "custom_input": "补充竞品"},
+                ],
+            }),
+        )
+
+    assert json.loads(result) == {
+        "status": "error",
+        "error": "skipped interaction_result 不能包含有效回答",
     }
     spawn.assert_not_awaited()
 
