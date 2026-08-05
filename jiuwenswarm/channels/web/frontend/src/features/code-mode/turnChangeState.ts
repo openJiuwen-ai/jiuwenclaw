@@ -1,4 +1,4 @@
-import type { WebError } from '../../types';
+import type { Message, WebError } from '../../types';
 import type { GitTurnChangeAction, GitTurnDiff } from './types';
 
 interface TurnChangeResultIdentity {
@@ -17,6 +17,42 @@ export function latestTurnDiffKey(turns: GitTurnDiff[], latestUserMessageId?: st
   }
   if (latestUserMessageId && latest?.user_message_id !== latestUserMessageId) return null;
   return latest ? turnDiffKey(latest) : null;
+}
+
+/**
+ * Resolve the undo target for both restored history and the live chat timeline.
+ * Live user messages use a temporary frontend id that can differ from the id
+ * persisted by the backend, so the rendered card position is the safe fallback.
+ */
+export function latestTurnDiffKeyForMessages(
+  messages: Pick<Message, 'id' | 'role'>[],
+  turns: GitTurnDiff[],
+  turnsByMessageId: Map<string, GitTurnDiff[]>,
+): string | null {
+  let latestTurn: GitTurnDiff | null = null;
+  for (const turn of turns) {
+    if (!latestTurn || turn.turn_index > latestTurn.turn_index) latestTurn = turn;
+  }
+  if (!latestTurn) return null;
+
+  let latestUserIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].role === 'user') {
+      latestUserIndex = index;
+      break;
+    }
+  }
+  if (latestUserIndex < 0) return turnDiffKey(latestTurn);
+
+  const latestUserMessageId = messages[latestUserIndex].id;
+  const latestKey = turnDiffKey(latestTurn);
+  if (latestTurn.user_message_id === latestUserMessageId) return latestKey;
+
+  for (let index = latestUserIndex + 1; index < messages.length; index += 1) {
+    const boundTurns = turnsByMessageId.get(messages[index].id) ?? [];
+    if (boundTurns.some(turn => turnDiffKey(turn) === latestKey)) return latestKey;
+  }
+  return null;
 }
 
 export function updateTurnChangeStatus(turns: GitTurnDiff[], result: TurnChangeResultIdentity, status: 'completed' | 'discarded'): GitTurnDiff[] {

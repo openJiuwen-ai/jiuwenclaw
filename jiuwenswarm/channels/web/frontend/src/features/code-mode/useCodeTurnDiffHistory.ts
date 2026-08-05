@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Message, ProjectInfo } from '../../types';
 import { gitClient } from './gitClient';
 import { gitWatchClient } from './gitWatchClient';
-import { latestTurnDiffKey, turnChangeErrorMessage, turnDiffKey, updateTurnChangeStatus } from './turnChangeState';
+import { latestTurnDiffKeyForMessages, turnChangeErrorMessage, turnDiffKey, updateTurnChangeStatus } from './turnChangeState';
 import type { GitDiscardTurnChangesResult, GitRedoTurnChangesResult, GitTurnChangeAction, GitTurnDiff } from './types';
 import { bindTurnDiffsToMessages } from './codeTurnDiffBinding';
 export { bindTurnDiffsToMessages } from './codeTurnDiffBinding';
@@ -73,13 +73,7 @@ export function useCodeTurnDiffHistory({ project, sessionId, isProcessing, messa
   }, [isProcessing, loadHistory]);
 
   const turnsByMessageId = useMemo(() => bindTurnDiffsToMessages(messages, turns), [messages, turns]);
-  const latestUserMessageId = useMemo(() => {
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      if (messages[index].role === 'user') return messages[index].id;
-    }
-    return null;
-  }, [messages]);
-  const latestTurnKey = useMemo(() => latestTurnDiffKey(turns, latestUserMessageId), [latestUserMessageId, turns]);
+  const latestTurnKey = useMemo(() => latestTurnDiffKeyForMessages(messages, turns, turnsByMessageId), [messages, turns, turnsByMessageId]);
 
   useEffect(() => {
     if (!turnChangeNotice) return;

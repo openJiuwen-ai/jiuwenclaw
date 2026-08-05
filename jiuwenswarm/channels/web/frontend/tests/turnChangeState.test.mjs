@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   latestTurnDiffKey,
+  latestTurnDiffKeyForMessages,
   turnChangeErrorMessage,
   updateTurnChangeStatus,
 } from '../node_modules/.cache/turn-change-state/features/code-mode/turnChangeState.js';
@@ -35,6 +36,30 @@ test('only the newest turn diff is exposed as the undo or redo target', () => {
 
 test('hides the action when the latest user turn did not produce a diff', () => {
   assert.equal(latestTurnDiffKey([turn({ user_message_id: 'user-1' })], 'user-2'), null);
+});
+
+test('uses the latest rendered card when the live user id differs from persisted history', () => {
+  const latestTurn = turn({ user_message_id: 'persisted-user-1' });
+  const messages = [
+    { id: 'user-frontend-1', role: 'user' },
+    { id: 'assistant-live-1', role: 'assistant' },
+  ];
+  const bindings = new Map([['assistant-live-1', [latestTurn]]]);
+
+  assert.equal(latestTurnDiffKeyForMessages(messages, [latestTurn], bindings), 'cs-1');
+});
+
+test('does not expose an older bound card when the newest user turn has no diff', () => {
+  const previousTurn = turn({ user_message_id: 'persisted-user-1' });
+  const messages = [
+    { id: 'user-frontend-1', role: 'user' },
+    { id: 'assistant-live-1', role: 'assistant' },
+    { id: 'user-frontend-2', role: 'user' },
+    { id: 'assistant-live-2', role: 'assistant' },
+  ];
+  const bindings = new Map([['assistant-live-1', [previousTurn]]]);
+
+  assert.equal(latestTurnDiffKeyForMessages(messages, [previousTurn], bindings), null);
 });
 
 test('updates the operation target by change set id', () => {
