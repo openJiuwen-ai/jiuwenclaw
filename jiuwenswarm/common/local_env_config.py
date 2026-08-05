@@ -877,7 +877,12 @@ def _read_from_mapping(name: str, mapping: dict[str, Any], default: Any = None) 
 
 
 def get_local_config(name: str, default=None):
-    """Track-B reader: bound overlay (seal) → formula B tip. No os.environ."""
+    """Track-B reader: bound overlay (seal) → formula B tip → process env.
+
+    Falls back to ``os.environ`` for names not present in the tip (e.g. cold
+    start or non-Track-B keys) so ``${VAR}`` config substitution keeps working
+    for arbitrary process env vars; Track A keys are still refused.
+    """
     if name in SPAWN_ENV_KEYS:
         logger.warning(
             "get_local_config 不服务轨道 A 键 %s —— 请直读 spawn/path API", name
@@ -892,7 +897,11 @@ def get_local_config(name: str, default=None):
     tip = effective_tip()
     if name in tip:
         return _read_from_mapping(name, tip, default)
-    return default
+
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return default if value == "" else value
 
 
 def read_env(name: str, default: str = "") -> str:
@@ -973,7 +982,10 @@ def is_sensitive_env_name(name: str) -> bool:
 
 def set_local_config(name: str, value) -> None:
     """Legacy tip write for current ns (prefer :func:`set_os_environ`)."""
-    set_os_environ(name, value if value else None)
+    if value is None or value == "":
+        set_os_environ(name, None)
+        return
+    set_os_environ(name, value)
 
 
 def decrypt(name, cipher):

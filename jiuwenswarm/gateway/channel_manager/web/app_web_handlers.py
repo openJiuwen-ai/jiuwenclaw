@@ -102,6 +102,7 @@ from jiuwenswarm.common.work_mode import (
 from jiuwenswarm.agents.harness.common.auto_harness import AutoHarnessService
 from jiuwenswarm.agents.harness.common.tools.web_file_download import build_file_download_info
 from jiuwenswarm.common.version import __version__
+from jiuwenswarm.common.local_env_config import decrypt, encrypt
 from jiuwenswarm.gateway.media_attachments import normalize_chat_media_attachments
 from jiuwenswarm.gateway.document_attachments import (
     coerce_document_parse_flag,
@@ -1643,10 +1644,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 "true" if setup_guide_cfg.get("enabled", True) else "false"
             )
             for key, val in payload.items():
-                from jiuwenswarm.extensions.registry import ExtensionRegistry
-                if (("api_key" in key.lower() or "token" in key.lower())
-                        and ExtensionRegistry.get_instance().get_crypto_provider()):
-                    payload[key] = ExtensionRegistry.get_instance().get_crypto_provider().decrypt(val)
+                payload[key] = decrypt(key, val)
             react_cfg = raw.get("react") or {}
             ctx_cfg = react_cfg.get("context_engine_config") or {}
             kv_cfg = react_cfg.get("kv_cache_affinity_config") or {}
@@ -1857,7 +1855,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             if param_key.endswith("_provider") and val and val not in available_model_providers:
                 raise _ConfigBadRequest(f"Model provider must in: {available_model_providers} ")
             if val is None:
-                env_updates[env_key] = ""
+                env_updates[env_key] = os.getenv(env_key) or ""
             else:
                 env_updates[env_key] = str(val).strip()
 

@@ -21,6 +21,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
+
 import jiuwenswarm.common.utils as _utils
 
 _REAL_GET_CONFIG_FILE = _utils.get_config_file
@@ -60,3 +62,19 @@ def pytest_runtest_setup(item) -> None:
     else:
         _utils.get_config_file = _REAL_GET_CONFIG_FILE
         _utils.get_agent_workspace_dir = _REAL_GET_AGENT_WORKSPACE_DIR
+
+
+@pytest.fixture(autouse=True)
+def _reset_local_env_config_state() -> None:
+    """Reset the process Track-B tip/baseline so tests are isolated.
+
+    ``stage_env_overrides`` / ``apply_env_overrides_to_active`` (e.g. via the
+    agent manager) persist into the shared ``default/default`` tip bag; without
+    a reset a prior test's business keys (MODEL_NAME, API_KEY, ...) shadow
+    fresh ``monkeypatch.setenv`` values read by ``get_local_config``.
+    """
+    from jiuwenswarm.common.local_env_config import reset_local_env_state_for_tests
+
+    reset_local_env_state_for_tests()
+    yield
+    reset_local_env_state_for_tests()
