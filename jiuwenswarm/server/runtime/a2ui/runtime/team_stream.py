@@ -97,16 +97,31 @@ class TeamA2UIBlockBuffer:
             content: str,
     ) -> TeamA2UIBlockDecision | None:
         replaced = content
+        unprocessed = content
         for raw_block, finalized_block in state.replacements:
-            replaced = replaced.replace(raw_block, finalized_block, 1)
+            raw_index = unprocessed.find(raw_block)
+            if raw_index >= 0:
+                unprocessed = (
+                    unprocessed[:raw_index]
+                    + unprocessed[raw_index + len(raw_block):]
+                )
+                replaced = replaced.replace(raw_block, finalized_block, 1)
+                continue
+
+            finalized_index = unprocessed.find(finalized_block)
+            if finalized_index >= 0:
+                unprocessed = (
+                    unprocessed[:finalized_index]
+                    + unprocessed[finalized_index + len(finalized_block):]
+                )
 
         has_unclosed_block = bool(state.active_block)
-        has_new_block = _A2UI_OPEN_TAG in content and not state.replacements
+        has_new_block = _A2UI_OPEN_TAG in unprocessed
         self._states.pop(key, None)
         if has_unclosed_block or has_new_block:
             return TeamA2UIBlockDecision(
                 key=key,
-                raw_block=content,
+                raw_block=replaced,
                 finalize_whole_event=True,
                 suppress=True,
             )

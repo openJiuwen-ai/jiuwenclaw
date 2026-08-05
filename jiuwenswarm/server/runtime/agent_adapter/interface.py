@@ -2590,6 +2590,9 @@ class JiuWenSwarm:
                             "chat.final",
                             str(pending_final.get("content") or ""),
                         )
+                        if replay is not None and replay.raw_block:
+                            _schedule_team_a2ui_block(pending_final, replay)
+                            continue
                         replay_content = replay.replacement if replay is not None else None
                         output_payload = {
                             **pending_final,

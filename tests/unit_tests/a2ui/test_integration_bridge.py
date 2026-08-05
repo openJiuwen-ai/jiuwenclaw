@@ -258,6 +258,47 @@ def test_team_a2ui_final_reuses_repaired_closed_block():
     assert final.finalize_whole_event is False
 
 
+def test_team_a2ui_final_detects_block_not_seen_in_deltas():
+    """A new block in chat.final is finalized after known blocks are replaced."""
+    from jiuwenswarm.server.runtime.a2ui.runtime.team_stream import TeamA2UIBlockBuffer
+
+    blocks = TeamA2UIBlockBuffer()
+    payload = {"rid": 9, "role": "teammate", "member_name": "writer"}
+    raw_block = "<a2ui-json>[invalid-a]</a2ui-json>"
+    repaired_block = "<a2ui-json>[]</a2ui-json>"
+    new_block = "<a2ui-json>[invalid-b]</a2ui-json>"
+    closed = blocks.consume(payload, "chat.delta", raw_block)
+    assert closed is not None
+    blocks.remember_finalized(closed.key, raw_block, repaired_block)
+
+    final = blocks.consume(
+        payload,
+        "chat.final",
+        f"说明。{raw_block}{new_block}",
+    )
+
+    assert final is not None
+    assert final.raw_block == f"说明。{repaired_block}{new_block}"
+    assert final.finalize_whole_event is True
+
+
+def test_team_a2ui_final_recognizes_already_repaired_block():
+    """A known finalized block must not be mistaken for a new block."""
+    from jiuwenswarm.server.runtime.a2ui.runtime.team_stream import TeamA2UIBlockBuffer
+
+    blocks = TeamA2UIBlockBuffer()
+    payload = {"rid": 9, "role": "teammate", "member_name": "writer"}
+    raw_block = "<a2ui-json>[invalid]</a2ui-json>"
+    repaired_block = "<a2ui-json>[]</a2ui-json>"
+    closed = blocks.consume(payload, "chat.delta", raw_block)
+    assert closed is not None
+    blocks.remember_finalized(closed.key, raw_block, repaired_block)
+
+    final = blocks.consume(payload, "chat.final", repaired_block)
+
+    assert final is None
+
+
 def test_team_a2ui_member_final_is_fallback_for_missing_close_tag():
     """An unclosed block is finalized at the member boundary, not Team end."""
     from jiuwenswarm.server.runtime.a2ui.runtime.team_stream import TeamA2UIBlockBuffer
@@ -299,6 +340,8 @@ async def test_team_a2ui_repair_does_not_block_other_member(monkeypatch):
 
     raw_block = "<a2ui-json>[invalid]</a2ui-json>"
     repaired_block = "<a2ui-json>[]</a2ui-json>"
+    new_block = "<a2ui-json>[new-invalid]</a2ui-json>"
+    final_repaired = f"{repaired_block}<a2ui-json>[new-valid]</a2ui-json>"
 
     class FakeSessionManager:
         @staticmethod
@@ -339,7 +382,7 @@ async def test_team_a2ui_repair_does_not_block_other_member(monkeypatch):
                 channel_id="web",
                 payload={
                     "event_type": "chat.final",
-                    "content": raw_block,
+                    "content": f"{raw_block}{new_block}",
                     "rid": 12,
                     "role": "teammate",
                     "member_name": "writer",
@@ -351,6 +394,8 @@ async def test_team_a2ui_repair_does_not_block_other_member(monkeypatch):
         if content == raw_block:
             await asyncio.sleep(0.02)
             return repaired_block
+        if content == f"{repaired_block}{new_block}":
+            return final_repaired
         return content
 
     async def has_team_runtime(*_args, **_kwargs):
@@ -390,8 +435,9 @@ async def test_team_a2ui_repair_does_not_block_other_member(monkeypatch):
         if isinstance(chunk.payload, dict) and chunk.payload.get("content")
     ]
 
-    assert contents.index("reviewer finished") < contents.index(repaired_block)
+    assert contents.index("reviewer finished") < contents.index(final_repaired)
     assert raw_block not in contents
+    assert new_block not in contents
 
 
 def test_split_a2ui_stream_content_keeps_prefix_streamable():
