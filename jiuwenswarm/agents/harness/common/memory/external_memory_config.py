@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
+from jiuwenswarm.common.local_env_config import read_env
 from jiuwenswarm.common.utils import get_user_workspace_dir
 
 from .config import _load_config, get_embed_config
@@ -124,9 +125,9 @@ def build_openjiuwen_provider_config(
 
     embed_cfg = get_embed_config() or {}
     embedding = {
-        "model_name": embed_cfg.get("model") or os.getenv("EMBED_MODEL", ""),
-        "base_url": embed_cfg.get("base_url") or os.getenv("EMBED_BASE_URL", ""),
-        "api_key": embed_cfg.get("api_key") or os.getenv("EMBED_API_KEY", ""),
+        "model_name": embed_cfg.get("model") or read_env("EMBED_MODEL", ""),
+        "base_url": embed_cfg.get("base_url") or read_env("EMBED_BASE_URL", ""),
+        "api_key": embed_cfg.get("api_key") or read_env("EMBED_API_KEY", ""),
     }
     if not embedding["model_name"]:
         logger.warning(
@@ -247,3 +248,16 @@ def _build_scope_config(
         model_name, api_base,
     )
     return scope_config
+
+
+def external_memory_fingerprint(config: dict[str, Any] | None) -> str:
+    """Stable hash for external memory provider config."""
+    import hashlib
+    if not isinstance(config, dict):
+        return ""
+    provider = str(config.get("external_memory_provider") or "").strip()
+    embed_key = str(config.get("external_memory_api_key") or "").strip()
+    embed_base = str(config.get("external_memory_api_base") or "").strip()
+    embed_model = str(config.get("external_memory_model") or "").strip()
+    payload = f"{provider}|{embed_key}|{embed_base}|{embed_model}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]

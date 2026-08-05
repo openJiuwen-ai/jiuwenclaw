@@ -4,6 +4,18 @@ import logging
 from typing import Any, ClassVar
 
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse
+from jiuwenswarm.common.local_env_config import apply_env_removals
+from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
+    infer_multimodal_env_removals,
+    merge_reload_env_snapshot,
+    sync_multimodal_env_omission_state,
+)
+from jiuwenswarm.server.runtime.reload_result import (
+    ReloadAggregateResult,
+    ReloadResult,
+    log_agent_config_hot_reload,
+    log_reload_config_changes,
+)
 from jiuwenswarm.server.runtime.agent_manager import AgentManager
 
 logger = logging.getLogger(__name__)
@@ -23,6 +35,9 @@ class TenantAgentPool:
     def __init__(self) -> None:
         # 单个 AgentManager 实例
         self._agent_manager = AgentManager()
+        self._latest_config: dict[str, Any] | None = None
+        self._latest_env: dict[str, Any] | None = None
+        self._last_reload_trace_id: str | None = None
         logger.info("[TenantAgentPool] Initialized with AgentManager")
 
     @classmethod
@@ -81,6 +96,53 @@ class TenantAgentPool:
         except Exception as e:
             logger.error(f"[TenantAgentPool] Error in process_message_stream: {e}", exc_info=True)
             raise
+
+    async def reload_agents_config(
+        self,
+        config: dict[str, Any] | None,
+        env: dict[str, Any] | None,
+        *,
+        reload_trace_id: str | None = None,
+    ) -> ReloadAggregateResult:
+        """Hot-reload config/env for all managed agents."""
+        if self._agent_manager is None:
+            return ReloadAggregateResult()
+        if reload_trace_id:
+            self._last_reload_trace_id = reload_trace_id
+        previous_env = self._latest_env if isinstance(self._latest_env, dict) else None
+        omission_removals = infer_multimodal_env_removals(
+            previous_env,
+            env if isinstance(env, dict) else None,
+        )
+        if omission_removals:
+            apply_env_removals(omission_removals)
+            log_agent_config_hot_reload(
+                logger,
+                reload_trace_id=reload_trace_id,
+                phase="omission_removals",
+                source="TenantAgentPool",
+                env_removed_by_omission_keys=sorted(omission_removals.keys()),
+            )
+        sync_multimodal_env_omission_state(
+            omission_removals,
+            env if isinstance(env, dict) else None,
+        )
+        self._latest_config = config
+        self._latest_env = merge_reload_env_snapshot(previous_env, env)
+        # Staging/promote lives in AgentManager (idle-gated promote).
+
+        aggregate = ReloadAggregateResult()
+        # Delegate to the inner AgentManager
+        inner_result = await self._agent_manager.reload_agents_config(
+            config=config,
+            env=env,
+            reload_trace_id=reload_trace_id,
+        )
+        if isinstance(inner_result, ReloadAggregateResult):
+            aggregate.applied += inner_result.applied
+            aggregate.deferred += inner_result.deferred
+            aggregate.failed.extend(inner_result.failed)
+        return aggregate
 
     async def cleanup(self) -> None:
         """清理资源."""

@@ -42,8 +42,11 @@ class AgentAdapter(Protocol):
         config_base: dict[str, Any] | None = None,
         env_overrides: dict[str, Any] | None = None,
         target_session_id: str | None = None,
-    ) -> None:
+    ) -> Any:
         """Hot-reload configuration without restarting the process.
+
+        Returns:
+            ReloadResult when supported (applied/deferred), otherwise None.
 
         Args:
             config_base: Optional complete config snapshot; if provided, use it instead of reading local config.yaml.
