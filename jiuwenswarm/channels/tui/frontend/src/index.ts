@@ -30,12 +30,42 @@ if (values.help) {
 
 Options:
   --url <url>       Gateway CLI WebSocket URL (default: ws://127.0.0.1:19001/tui)
-  --session <id>    Resume a specific session
+  --session <id>    Resume or create a specific session by id. id 需匹配
+                    [A-Za-z0-9._-]、长度 ≤ 128（作为目录名落盘，受文件系统限制）
   --token <token>   Authentication token
   --user-id <id>    User identifier for the session
   -h, --help        Show this help
 `);
   process.exit(0);
+}
+
+// session_id 直接作为文件系统目录名落地（~/.jiuwenswarm/agent/sessions/<id>/），
+// 后端无任何校验，故在此前置校验，避免 OS 层 mkdir 报错导致的静默失败。
+// 约束：长度 ≤ 128（NTFS/ext 文件名单项上限 255，留余量 + 路径前缀），
+// 字符白名单 [A-Za-z0-9._-]（与 generateSessionId 产出 tui_<hex>_<hex> 同集），
+// 禁止中文 / 空格 / 路径分隔符等，防止目录注入与跨平台 mkdir OSError。
+const SESSION_ID_MAX_LEN = 128;
+const SESSION_ID_PATTERN = /^[A-Za-z0-9._-]+$/;
+const rawSession = values.session;
+if (rawSession !== undefined && rawSession !== "") {
+  const trimmed = rawSession.trim();
+  if (!trimmed) {
+    console.error("--session <id> 不能为空");
+    process.exit(1);
+  }
+  if (trimmed.length > SESSION_ID_MAX_LEN) {
+    console.error(
+      `--session <id> 长度 ${trimmed.length} 超出上限 ${SESSION_ID_MAX_LEN}（session_id 作为目录名落地，受文件系统限制）`,
+    );
+    process.exit(1);
+  }
+  if (!SESSION_ID_PATTERN.test(trimmed)) {
+    console.error(
+      "--session <id> 含非法字符：仅允许英文字母、数字、点(.)、下划线(_)、连字符(-)。禁止中文、空格及 / \\ : * ? \" < > | 等。",
+    );
+    process.exit(1);
+  }
+  values.session = trimmed;
 }
 
 // 允许通过环境变量跳过 TTY 检查（用于自动化测试）

@@ -35,6 +35,8 @@ export interface FileDownloadItem {
   mime_type: string;
   download_url: string;
   download_token: string;
+  /** 工作区绝对/相对路径；用于去重身份（优先于 downloadUrl 中的 exp token） */
+  path?: string;
 }
 
 export interface ContextCompressionRuntime {
@@ -60,6 +62,11 @@ export interface Message {
   role: MessageRole;
   content: string;
   timestamp: string;
+  /**
+   * 流式收尾 / chat.final 完成时刻。不参与时间线排序（排序仍用 timestamp，避免与 goal 卡抢序），
+   * 仅作为「任务用时」终点，避免 live 一直停在首包 delta 时间、刷新后变成 final 落盘时间。
+   */
+  completedAt?: string;
   /** 前端渲染身份，避免业务 id 重复或历史 prepend 导致 React key 抖动 */
   renderKey?: string;
   audioBase64?: string;
@@ -81,10 +88,11 @@ export interface Message {
   proactiveType?: 'skill_recommend' | 'task_reminder' | 'need_exploration';
   /**
    * 这条用户消息是否曾经用于设置/修改持续目标（"设为目标"徽章）。发送那一刻本地回显消息
-   * 直接置 true；历史消息刷新后重新加载时，靠 goalStore 持久化的 objective 文本列表按
-   * content 一次性回填（history.get 不会回传任何前端专用字段，见 useWebSocket.ts
-   * stampGoalObjectiveMessages）——不能靠实时比对"当前 Goal 的 objective"，目标被清除/
-   * 替换后旧消息也该继续保留这个标记，这是消息自身的历史事实，不是当前 Goal 状态的派生值。
+   * 直接置 true；历史消息刷新后重新加载时，优先读后端 history 字段
+   * `is_goal_objective_message`，没有时再靠 goalStore 持久化的 objective 文本列表按
+   * content 回填（见 useWebSocket.ts stampGoalObjectiveMessages）——不能靠实时比对
+   * "当前 Goal 的 objective"，目标被清除/替换后旧消息也该继续保留这个标记，这是消息自身的
+   * 历史事实，不是当前 Goal 状态的派生值。
    */
   isGoalObjectiveMessage?: boolean;
 }
@@ -95,6 +103,7 @@ export interface ToolCall {
   arguments: Record<string, unknown>;
   description?: string;  // 操作描述，如 "创建 3 个任务"
   formatted_args?: string;  // 格式化参数摘要
+  display_name?: string;  // 后端下发的可读展示名，前端优先直接展示
   memberName?: string;
 }
 
@@ -104,6 +113,8 @@ export interface ToolResult {
   success: boolean;
   toolCallId?: string;
   summary?: string;  // 结果摘要
+  /** 历史/实时结果显式标记为超时（与 success=false 一起用于展示「执行失败」） */
+  timedOut?: boolean;
   // agentic search（symphony 技能检索）下发的技能树路径，用于内联回放路径流转
   skillTree?: SkillTreePath;
   beamSearch?: BeamSearchProgress;

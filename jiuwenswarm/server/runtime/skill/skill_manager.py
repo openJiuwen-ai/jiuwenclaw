@@ -40,10 +40,21 @@ from jiuwenswarm.common.utils import (
     is_package_installation,
 )
 
+
+def _get_ssl_verify() -> bool:
+    """延迟导入以规避循环依赖：ssl_config 所在的 tools 包 __init__ 会回引本模块。"""
+    from jiuwenswarm.agents.harness.common.tools.ssl_config import get_ssl_verify
+
+    return get_ssl_verify()
+
 logger = logging.getLogger(__name__)
 
 _SKILLNET_DOWNLOAD_TIMEOUT: int = int(os.environ.get("SKILLNET_DOWNLOAD_TIMEOUT", "60"))
 _SKILLNET_MAX_RETRIES: int = int(os.environ.get("SKILLNET_MAX_RETRIES", "3"))
+# SkillNet 异步安装 job 必须跨 SkillManager 实例共享：skills.* 无状态 RPC 在
+# AgentManager 缓存未命中时会临时 new JiuWenSwarm()，install 与 install_status
+# 可能落到不同实例；若 job 仅存实例内存会误报「安装会话已过期」。
+_SKILLNET_INSTALL_JOBS: dict[str, dict[str, Any]] = {}
 _FREE_SEARCH_PROXY_URL_ENV = "FREE_SEARCH_PROXY_URL"
 _FREE_SEARCH_SSL_VERIFY_ENV = "FREE_SEARCH_SSL_VERIFY"
 _SKILLNET_PROXY_ENV_KEYS = (
@@ -71,10 +82,23 @@ _ONLINE_SEARCH_RRF_K = 60
 _ONLINE_SEARCH_SOURCE_ORDER = {"skillnet": 0, "clawhub": 1}
 
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+def _maybe_disable_insecure_warning() -> None:
+    """关闭证书校验时同步静默 urllib3 的 InsecureRequestWarning。
+
+    历史实现为模块导入即全局 disable_warnings，导致即便开启证书校验也仍静默
+    警告；改为按开关条件触发，开启校验时保留警告输出。
+    """
+    if not _get_ssl_verify():
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 class _ImportLocalTLSAdapter(HTTPAdapter):
+    """仅在 ssl_verify=false 时挂载，跳过证书/主机名校验。
+
+    开启证书校验（get_ssl_verify() 为 True）时不应 mount 本 Adapter，
+    而是走 requests 默认校验逻辑——调用方负责条件判断。
+    """
+
     def init_poolmanager(self, *args, **kwargs):
         ctx = create_urllib3_context(ssl_version=ssl.PROTOCOL_TLS_CLIENT)
         ctx.minimum_version = ssl.TLSVersion.TLSv1_2
@@ -419,8 +443,12 @@ class SkillManager:
         # local_skills，使其与"导入本地技能"完全等价（可展示/卸载/查看详情/禁用）。
         self._register_unmanaged_local_skills()
         # SkillNet 异步安装：install 立即返回 install_id，后台下载；完成后调用 hook 重载 Agent
-        self._skillnet_install_jobs: dict[str, dict[str, Any]] = {}
         self._skillnet_install_complete_hook: Callable[[], Awaitable[None]] | None = None
+
+    @property
+    def _skillnet_install_jobs(self) -> dict[str, dict[str, Any]]:
+        """进程级共享的 SkillNet 安装任务表（见模块常量 ``_SKILLNET_INSTALL_JOBS``）."""
+        return _SKILLNET_INSTALL_JOBS
 
     def set_skillnet_install_complete_hook(self, hook: Callable[[], Awaitable[None]] | None) -> None:
         """安装成功落盘后回调（通常为重载 Agent 实例）."""
@@ -508,6 +536,7 @@ class SkillManager:
                 meta["content"] = meta.pop("body", "")
                 meta["file_path"] = meta.pop("path", "")
                 meta["source"] = self._resolve_skill_source(meta.get("name", ""))
+                meta["display_name"] = self._resolve_skill_display_name(meta.get("name", ""))
                 meta["is_builtin"] = self._is_builtin_skill(meta.get("name", ""), self._get_installed_plugins(), child)
                 builtin_dir = get_builtin_skills_dir()
                 if builtin_dir.exists():
@@ -927,14 +956,16 @@ class SkillManager:
             description = str(item.get("summary") or "").strip()
             identifier = str(item.get("slug") or "").strip()
             version = str(item.get("version") or "").strip()
-            author = ""
+            owner_handle = str(item.get("owner_handle") or "").strip()
+            # ClawHub download needs ownerHandle when the same slug has multiple publishers.
+            author = owner_handle
             native_score = item.get("score")
             category = ""
             updated_at = item.get("updated_at") or 0
         else:
             raise ValueError(f"unsupported online search source: {source}")
 
-        return {
+        normalized: dict[str, Any] = {
             "source": source,
             "name": name,
             "description": description,
@@ -954,6 +985,11 @@ class SkillManager:
                 }
             ],
         }
+        if source == "clawhub":
+            normalized["owner_handle"] = owner_handle
+            if owner_handle:
+                normalized["matched_sources"][0]["owner_handle"] = owner_handle
+        return normalized
 
     @classmethod
     def _aggregate_online_search_results(
@@ -970,10 +1006,13 @@ class SkillManager:
                 item = cls._normalize_online_search_item(source, raw_item, rank)
                 if not item["identifier"] and not item["name"]:
                     continue
-                identity = cls._normalize_online_search_identifier(
-                    source,
-                    item["identifier"] or item["name"],
-                )
+                identity_value = item["identifier"] or item["name"]
+                if source == "clawhub":
+                    owner_handle = str(item.get("owner_handle") or "").strip()
+                    if owner_handle and identity_value:
+                        # Keep ambiguous slugs from different publishers as distinct results.
+                        identity_value = f"{owner_handle}/{identity_value}"
+                identity = cls._normalize_online_search_identifier(source, identity_value)
                 existing = merged.get(identity)
                 if existing is None:
                     merged[identity] = item
@@ -1335,6 +1374,7 @@ class SkillManager:
                             "summary": item.get("summary", ""),
                             "version": item.get("version", ""),
                             "updated_at": item.get("updatedAt", 0),
+                            "owner_handle": item.get("ownerHandle", ""),
                         }
                     )
 
@@ -1365,6 +1405,8 @@ class SkillManager:
 
         params:
             slug: skill slug (必需)
+            owner_handle: 发布者标识 (可选，slug 有多个发布者时必需)
+            display_name: 目录展示名 (可选；用于保留 ClawHub 大小写，避免安装后 Weather→weather)
             version: 版本号 (可选，默认 latest)
             tag: 标签 (可选，如 latest)
             force: 强制覆盖 (可选，默认 False)
@@ -1386,6 +1428,8 @@ class SkillManager:
                 "detail_key": "skills.clawhub.errors.tokenNotConfigured",
             }
 
+        owner_handle = str(params.get("owner_handle") or "").strip()
+        display_name = str(params.get("display_name") or "").strip()
         version = params.get("version")
         tag = params.get("tag")
         force = bool(params.get("force", False))
@@ -1408,6 +1452,8 @@ class SkillManager:
                 headers["Authorization"] = f"Bearer {token}"
 
             download_params = {"slug": slug}
+            if owner_handle:
+                download_params["ownerHandle"] = owner_handle
             if version:
                 download_params["version"] = version
             if tag:
@@ -1467,14 +1513,27 @@ class SkillManager:
                         mirror_root.mkdir(parents=True, exist_ok=True)
                         shutil.copytree(skill_dir, mirror_dest)
 
-                    # 记录安装信息
-                    parsed_name = meta.get("name", "")
-                    skill_name = parsed_name if (parsed_name and parsed_name != (md.stem if md else "")) else slug
+                    # skill_name 必须与磁盘扫描出的规范名（_resolve_skill_name）保持一致，
+                    # 否则会被 _register_unmanaged_local_skills 当作"未登记的本地技能"
+                    # 重复注册一条 source=local 的幽灵记录（表现为大小写不一致 + 重复条目）。
+                    # 展示层面的大小写差异（如 Weather vs weather）改为通过 display_name 单独承载。
+                    parsed_name = str(meta.get("name") or "").strip()
+                    stem = md.stem if md else ""
+                    if parsed_name and parsed_name != stem:
+                        skill_name = parsed_name
+                    else:
+                        skill_name = slug
+                    resolved_display_name = display_name if display_name else skill_name
 
                     self._add_local_skill(
                         {
                             "name": skill_name,
-                            "origin": f"clawhub:{slug}",
+                            "display_name": resolved_display_name,
+                            "origin": (
+                                f"clawhub:{owner_handle}/{slug}"
+                                if owner_handle
+                                else f"clawhub:{slug}"
+                            ),
                             "source": "clawhub",
                             "installed_at": datetime.now(timezone.utc).isoformat(),
                         }
@@ -1482,6 +1541,7 @@ class SkillManager:
                     self._add_installed_plugin(
                         {
                             "name": skill_name,
+                            "display_name": resolved_display_name,
                             "marketplace": "clawhub",
                             "version": meta.get("version", ""),
                             "commit": "",
@@ -1493,7 +1553,11 @@ class SkillManager:
                     _safe_rmtree(skill_dir)
                     return {
                         "success": True,
-                        "skill": {"name": skill_name, "source": "clawhub"},
+                        "skill": {
+                            "name": skill_name,
+                            "display_name": resolved_display_name,
+                            "source": "clawhub",
+                        },
                     }
 
         except httpx.HTTPStatusError as exc:
@@ -2378,15 +2442,23 @@ class SkillManager:
         )
 
         def _download_with_requests() -> bytes:
+            ssl_verify = _get_ssl_verify()
+            _maybe_disable_insecure_warning()
             with requests.Session() as session:
-                session.mount("https://", _ImportLocalTLSAdapter())
-                logger.info("[SkillManager] remote import downloading: url=%s", download_url)
+                # 仅在关闭证书校验时挂载跳过校验的 Adapter；开启时走 requests 默认校验。
+                if not ssl_verify:
+                    session.mount("https://", _ImportLocalTLSAdapter())
+                logger.info(
+                    "[SkillManager] remote import downloading: url=%s ssl_verify=%s",
+                    download_url,
+                    ssl_verify,
+                )
                 with session.get(
                     download_url.strip(),
                     timeout=timeout,
                     stream=True,
                     allow_redirects=False,
-                    verify=False,
+                    verify=ssl_verify,
                 ) as response:
                     response.raise_for_status()
                     chunks: list[bytes] = []
@@ -2745,9 +2817,14 @@ class SkillManager:
                         origin = ls.get("origin")
                         if isinstance(origin, str) and origin.strip():
                             meta["origin"] = origin.strip()
+                        display_name = ls.get("display_name")
+                        if isinstance(display_name, str) and display_name.strip():
+                            meta["display_name"] = display_name.strip()
                     break
 
             meta["source"] = source
+            if not str(meta.get("display_name") or "").strip():
+                meta["display_name"] = meta.get("name", "")
             meta["installed"] = True
             meta["enabled"] = self.get_skill_enabled(meta.get("name", ""))
             # 判断是否为内置技能（传入 child 路径，通过实际路径判断）
@@ -2829,6 +2906,24 @@ class SkillManager:
                 return "local"
 
         return "project"
+
+    def _resolve_skill_display_name(self, skill_name: str) -> str:
+        """解析 skill 展示名（优先 local_skills/installed_plugins 记录的 display_name）."""
+        if not skill_name:
+            return skill_name
+        for local_skill in self._state.get("local_skills", []):
+            if local_skill.get("name") == skill_name:
+                display_name = str(local_skill.get("display_name") or "").strip()
+                if display_name:
+                    return display_name
+                break
+        for plugin in self._get_installed_plugins():
+            if plugin.get("name") == skill_name:
+                display_name = str(plugin.get("display_name") or "").strip()
+                if display_name:
+                    return display_name
+                break
+        return skill_name
 
     def _resolve_local_skill_dir(self, skill_name: str) -> Path | None:
         """根据 skill name 定位本地技能目录（仅 agent/skills 下）."""

@@ -33,6 +33,11 @@ call uv run pyinstaller scripts\jiuwenswarm.spec --noconfirm
 if errorlevel 1 exit /b 1
 
 echo.
+echo Verifying frozen A2UI v0.8 bundle...
+start "" /wait "%cd%\dist\jiuwenswarm\jiuwenswarm.exe" "%cd%\scripts\verify_a2ui_bundle.py"
+if errorlevel 1 exit /b 1
+
+echo.
 echo === Build complete ===
 echo Desktop dir: %cd%\dist\jiuwenswarm
 echo Main exe:    %cd%\dist\jiuwenswarm\jiuwenswarm.exe

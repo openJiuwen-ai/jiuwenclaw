@@ -72,6 +72,8 @@ export interface NormalizedToolCall {
   arguments: Record<string, unknown>;
   description?: string;
   formatted_args?: string;
+  /** 后端下发的可读展示名（部分工具带），前端优先直接展示，省去本地推断。 */
+  display_name?: string;
   memberName?: string;
 }
 
@@ -80,6 +82,8 @@ export interface NormalizedToolResult {
   toolCallId?: string;
   result: string;
   success: boolean;
+  /** status=timeout / timed_out 时为 true，供 store 落成 timeout */
+  timedOut?: boolean;
   summary?: string;
   skillTree?: SkillTreePath;
   beamSearch?: BeamSearchProgress;
@@ -106,6 +110,11 @@ export function normalizeToolCallPayload(payload: UnknownPayload): NormalizedToo
     typeof toolCallPayload.formatted_args === 'string'
       ? toolCallPayload.formatted_args
       : undefined;
+  const displayNameRaw =
+    (typeof toolCallPayload.display_name === 'string' && toolCallPayload.display_name) ||
+    (typeof toolCallPayload.displayName === 'string' && toolCallPayload.displayName) ||
+    '';
+  const display_name = displayNameRaw.trim() || undefined;
   const memberName = resolveMemberName(toolCallPayload, payload);
 
   return {
@@ -114,6 +123,7 @@ export function normalizeToolCallPayload(payload: UnknownPayload): NormalizedToo
     arguments: parseArguments(toolCallPayload.arguments),
     description,
     formatted_args,
+    display_name,
     memberName,
   };
 }
@@ -136,13 +146,16 @@ export function normalizeToolResultPayload(payload: UnknownPayload): NormalizedT
       : '');
   const status =
     typeof toolResultPayload.status === 'string'
-      ? toolResultPayload.status
+      ? toolResultPayload.status.trim().toLowerCase()
       : '';
+  const timedOut = status === 'timeout' || status === 'timed_out';
+  const statusFailed =
+    timedOut || status === 'error' || status === 'failed' || status === 'failure';
   const success =
     typeof toolResultPayload.success === 'boolean'
-      ? toolResultPayload.success
+      ? toolResultPayload.success && !timedOut
       : status
-        ? status !== 'error'
+        ? !statusFailed
         : true;
   const toolName =
     (typeof toolResultPayload.tool_name === 'string' &&
@@ -166,6 +179,7 @@ export function normalizeToolResultPayload(payload: UnknownPayload): NormalizedT
     toolCallId,
     result,
     success,
+    ...(timedOut ? { timedOut: true } : {}),
     summary,
     skillTree,
     beamSearch,

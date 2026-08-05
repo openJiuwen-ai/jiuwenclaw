@@ -17,6 +17,29 @@ from jiuwenswarm.server.runtime.agent_adapter import evolution_helpers
 from jiuwenswarm.server.runtime.agent_adapter import team_helpers
 
 
+def _broadcast_recorder(events: list[dict], manager=None):
+    async def _record(_channel_id, session_id: str, event: dict) -> None:
+        events.append(event)
+        if (
+            manager is not None
+            and event.get("event_type") in team_helpers._TEAM_BUILDING_EVENT_TYPES
+        ):
+            manager.mark_seen_team_events(session_id)
+
+    return _record
+
+
+async def _noop_broadcast(*_args, **_kwargs) -> None:
+    return None
+
+
+def test_team_event_queue_is_bounded() -> None:
+    queue = team_helpers._new_team_event_queue()
+
+    assert queue.maxsize == team_helpers.TEAM_EVENT_QUEUE_MAXSIZE
+    assert queue.maxsize > 0
+
+
 def test_persist_team_history_event_keeps_human_spawn_details(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1330,7 +1353,7 @@ async def test_consume_monitor_events_only_broadcasts_monitor_events(monkeypatch
             for item in self._events:
                 yield item
 
-    monkeypatch.setattr(team_helpers, "_broadcast_event", lambda *args: broadcasted.append(args[2]))
+    monkeypatch.setattr(team_helpers, "_broadcast_event", _broadcast_recorder(broadcasted))
 
     monitor_handler = _FakeMonitorEventHandler([event])
     await _TeamHelpersTestApi.consume_monitor_events("web", "sess-monitor", monitor_handler)
@@ -2799,12 +2822,7 @@ async def test_consume_stream_with_query_broadcasts_leader_and_teammate_outputs(
     monkeypatch.setattr(
         team_helpers,
         "_broadcast_event",
-        lambda channel_id, session_id, event: (
-            broadcasted.append(event),
-            fake_mgr.mark_seen_team_events(session_id)
-            if event.get("event_type") in team_helpers._TEAM_BUILDING_EVENT_TYPES
-            else None,
-        ),
+        _broadcast_recorder(broadcasted, fake_mgr),
     )
     monkeypatch.setattr(team_helpers, "ensure_team_evolution_watcher", lambda *args, **kwargs: None)
     monkeypatch.setattr(team_helpers, "get_session_metadata", lambda session_id: {})
@@ -2847,6 +2865,78 @@ async def test_consume_stream_with_query_broadcasts_leader_and_teammate_outputs(
 
 
 @pytest.mark.anyio
+async def test_cancelled_stream_does_not_block_on_full_waiter_queue(monkeypatch):
+    from jiuwenswarm.agents.harness.team.team_manager import TeamManager
+
+    session_id = "sess-cancel-full-waiter"
+    manager = TeamManager()
+    waiter: asyncio.Queue = asyncio.Queue(maxsize=1)
+    waiter.put_nowait({"event_type": "already.queued"})
+    manager.add_waiter(session_id, "req-cancel", waiter)
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda _channel_id: manager)
+
+    stream_task = asyncio.create_task(
+        _TeamHelpersTestApi.consume_stream_with_query(
+            "tui",
+            session_id,
+            SimpleNamespace(team_name="demo-team"),
+            "hello",
+        )
+    )
+    manager.register_stream_task(session_id, stream_task)
+    await asyncio.sleep(0)
+    assert stream_task.done() is False
+
+    stream_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(stream_task, timeout=0.5)
+    assert manager.has_stream_task(session_id) is False
+
+
+@pytest.mark.anyio
+async def test_failed_stream_cancel_does_not_reenter_full_waiter_queue(monkeypatch):
+    from jiuwenswarm.agents.harness.team.team_manager import TeamManager
+
+    runner_failed = asyncio.Event()
+
+    async def failing_stream(**_kwargs):
+        runner_failed.set()
+        if False:
+            yield None
+        raise RuntimeError("runner failed")
+
+    class _FailingRunner:
+        run_agent_team_streaming = staticmethod(failing_stream)
+
+    session_id = "sess-failed-cancel-full-waiter"
+    manager = TeamManager()
+    waiter: asyncio.Queue = asyncio.Queue(maxsize=1)
+    manager.add_waiter(session_id, "req-failed-cancel", waiter)
+    monkeypatch.setattr(team_helpers, "Runner", _FailingRunner)
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda _channel_id: manager)
+
+    stream_task = asyncio.create_task(
+        _TeamHelpersTestApi.consume_stream_with_query(
+            "tui",
+            session_id,
+            SimpleNamespace(team_name="demo-team"),
+            "hello",
+        )
+    )
+    manager.register_stream_task(session_id, stream_task)
+    await asyncio.wait_for(runner_failed.wait(), timeout=0.5)
+    await asyncio.sleep(0)
+    assert stream_task.done() is False
+
+    stream_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(stream_task, timeout=0.5)
+    assert manager.has_stream_task(session_id) is False
+
+
+@pytest.mark.anyio
 async def test_consume_stream_with_query_broadcasts_leader_task_failed_detail_and_final(monkeypatch):
     broadcasted: list[dict] = []
     detail = (
@@ -2882,12 +2972,7 @@ async def test_consume_stream_with_query_broadcasts_leader_task_failed_detail_an
     monkeypatch.setattr(
         team_helpers,
         "_broadcast_event",
-        lambda channel_id, session_id, event: (
-            broadcasted.append(event),
-            fake_mgr.mark_seen_team_events(session_id)
-            if event.get("event_type") in team_helpers._TEAM_BUILDING_EVENT_TYPES
-            else None,
-        ),
+        _broadcast_recorder(broadcasted, fake_mgr),
     )
 
     await _TeamHelpersTestApi.consume_stream_with_query(
@@ -2955,12 +3040,7 @@ async def test_consume_stream_with_query_does_not_final_teammate_task_failed(mon
     monkeypatch.setattr(
         team_helpers,
         "_broadcast_event",
-        lambda channel_id, session_id, event: (
-            broadcasted.append(event),
-            fake_mgr.mark_seen_team_events(session_id)
-            if event.get("event_type") in team_helpers._TEAM_BUILDING_EVENT_TYPES
-            else None,
-        ),
+        _broadcast_recorder(broadcasted, fake_mgr),
     )
 
     await _TeamHelpersTestApi.consume_stream_with_query(
@@ -3029,12 +3109,7 @@ async def test_consume_stream_with_query_deduplicates_ask_user_questions(monkeyp
     monkeypatch.setattr(
         team_helpers,
         "_broadcast_event",
-        lambda channel_id, session_id, event: (
-            broadcasted.append(event),
-            fake_mgr.mark_seen_team_events(session_id)
-            if event.get("event_type") in team_helpers._TEAM_BUILDING_EVENT_TYPES
-            else None,
-        ),
+        _broadcast_recorder(broadcasted, fake_mgr),
     )
 
     await _TeamHelpersTestApi.consume_stream_with_query(
@@ -3125,7 +3200,7 @@ async def test_consume_stream_with_query_propagates_hide_dm_to_monitor(monkeypat
 
     monkeypatch.setattr(team_helpers, "Runner", _FakeRunner)
     monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
-    monkeypatch.setattr(team_helpers, "_broadcast_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(team_helpers, "_broadcast_event", _noop_broadcast)
     monkeypatch.setattr(team_helpers, "get_session_metadata", lambda session_id: {})
     monkeypatch.setattr(team_helpers, "update_session_metadata", lambda **kwargs: None)
 
@@ -3438,7 +3513,7 @@ async def test_consume_workflow_events_broadcasts_raw_for_tui(monkeypatch):
         async def events(self):
             yield event
 
-    monkeypatch.setattr(team_helpers, "_broadcast_event", lambda *args: broadcasted.append(args[2]))
+    monkeypatch.setattr(team_helpers, "_broadcast_event", _broadcast_recorder(broadcasted))
 
     handler = _FakeWorkflowHandler()
     await _TeamHelpersTestApi.consume_workflow_events(
@@ -3478,7 +3553,7 @@ async def test_consume_workflow_events_converts_to_team_events_for_web(monkeypat
         async def events(self):
             yield event
 
-    monkeypatch.setattr(team_helpers, "_broadcast_event", lambda *args: broadcasted.append(args[2]))
+    monkeypatch.setattr(team_helpers, "_broadcast_event", _broadcast_recorder(broadcasted))
 
     handler = _FakeWorkflowHandler()
     await _TeamHelpersTestApi.consume_workflow_events(
@@ -3560,7 +3635,7 @@ async def test_consume_stream_with_query_calls_ensure_workflow_handler_after_run
 
     monkeypatch.setattr(team_helpers, "Runner", _FakeRunner)
     monkeypatch.setattr(team_helpers, "get_team_manager", lambda cid: _FakeManager())
-    monkeypatch.setattr(team_helpers, "_broadcast_event", lambda *a, **kw: None)
+    monkeypatch.setattr(team_helpers, "_broadcast_event", _noop_broadcast)
     monkeypatch.setattr(team_helpers, "sync_team_identity_metadata", lambda **kw: calls.append("sync"))
     monkeypatch.setattr(team_helpers, "ensure_monitor_handlers_for_active_runtime", _fake_monitor)
     monkeypatch.setattr(team_helpers, "ensure_team_evolution_watcher", lambda *a, **kw: calls.append("watcher"))
@@ -3625,7 +3700,7 @@ async def test_try_finish_cron_team_stream_cancels_background_task(monkeypatch):
     monkeypatch.setattr(
         team_helpers,
         "_broadcast_event",
-        lambda cid, sid, event: processing_done.append(event),
+        _broadcast_recorder(processing_done),
     )
 
     _TeamHelpersTestApi.seed_cron_team_waiter(waiter_key, "cron-job-1:123")
@@ -3685,7 +3760,7 @@ async def test_try_finish_cron_team_stream_on_leader_final_without_team_complete
     monkeypatch.setattr(
         team_helpers,
         "_broadcast_event",
-        lambda cid, sid, event: processing_done.append(event),
+        _broadcast_recorder(processing_done),
     )
     monkeypatch.setattr(team_helpers, "_CRON_DELEGATION_GRACE_SECONDS", 0.0)
 
@@ -3736,7 +3811,7 @@ async def test_broadcast_team_state_snapshot_broadcasts_member_and_task_status(m
     monkeypatch.setattr(
         team_helpers,
         "_broadcast_event",
-        lambda cid, sid, event: broadcast_events.append(event),
+        _broadcast_recorder(broadcast_events),
     )
 
     await team_helpers._broadcast_team_state_snapshot("web", "sess-snapshot-test")
@@ -3771,7 +3846,7 @@ async def test_broadcast_team_state_snapshot_noop_when_no_monitor(monkeypatch):
     monkeypatch.setattr(
         team_helpers,
         "_broadcast_event",
-        lambda cid, sid, event: broadcast_events.append(event),
+        _broadcast_recorder(broadcast_events),
     )
 
     await team_helpers._broadcast_team_state_snapshot("web", "sess-no-monitor")
@@ -3830,7 +3905,7 @@ async def test_broadcast_team_state_snapshot_task_event_carries_title_content_an
     monkeypatch.setattr(
         team_helpers,
         "_broadcast_event",
-        lambda cid, sid, event: broadcast_events.append(event),
+        _broadcast_recorder(broadcast_events),
     )
     # _persist_team_history_event hits a real DB path; stub it to a no-op so
     # the test stays isolated (production call unchanged).

@@ -32,6 +32,7 @@ interface SessionSidebarProps {
   showNewSession?: boolean;
   hiddenNavItems?: MainNavKey[];
   onMorePanelOpenChange?: (open: boolean) => void;
+  onSetupGuideRequest: () => void;
 }
 
 interface NavItem {
@@ -55,9 +56,9 @@ const mainNavItems: NavItem[] = [
 ];
 
 const moreNavItems: NavItem[] = [
+  { key: 'configpanel', labelKey: 'nav.config', icon: <ConfigIcon aria-hidden /> },
   { key: 'extensions', labelKey: 'nav.extensions', icon: <PluginIcon aria-hidden /> },
   { key: 'browserpanel', labelKey: 'nav.browser', icon: <WebIcon aria-hidden /> },
-  { key: 'configpanel', labelKey: 'nav.config', icon: <ConfigIcon aria-hidden /> },
   { key: 'updatepanel', labelKey: 'nav.update', icon: <UpdateIcon aria-hidden /> },
 ];
 
@@ -156,6 +157,7 @@ export function SessionSidebar({
   showNewSession = true,
   hiddenNavItems = [],
   onMorePanelOpenChange,
+  onSetupGuideRequest,
 }: SessionSidebarProps) {
   const { t } = useTranslation();
   const [advancedConfigOpen, setAdvancedConfigOpen] = useState(false);
@@ -238,6 +240,7 @@ export function SessionSidebar({
             className={`icon-rail-nav-item${isMoreActive ? ' icon-rail-nav-item--active' : ''}`}
             onClick={handleMoreClick}
             aria-expanded={isMoreActive}
+            data-model-setup-guide-target="more"
           >
             <span className="icon-rail-nav-item__icon">
               <MoreDesignIcon aria-hidden />
@@ -265,6 +268,27 @@ export function SessionSidebar({
       )}
 
       <div className="icon-rail-spacer" />
+
+      <button
+        type="button"
+        className="icon-rail-nav-item icon-rail-help-button"
+        onClick={onSetupGuideRequest}
+        aria-label={t('modelSetupGuide.open')}
+        title={t('modelSetupGuide.open')}
+      >
+        <span className="icon-rail-nav-item__icon">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden>
+            <circle cx="12" cy="12" r="8.25" stroke="currentColor" strokeWidth="1.5" />
+            <path
+              d="M9.8 9.35a2.35 2.35 0 014.55.82c0 1.57-1.2 2.05-2.02 2.7-.48.38-.73.74-.73 1.38"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+            />
+            <circle cx="11.6" cy="17.15" r=".85" fill="currentColor" />
+          </svg>
+        </span>
+      </button>
 
       <button
         ref={settingsRef}

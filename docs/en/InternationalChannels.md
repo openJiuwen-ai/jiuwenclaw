@@ -313,6 +313,86 @@ Discord delivery is separate from model configuration. If you see HTTP errors fr
 
 ---
 
+## Slack
+
+JiuwenSwarm connects to Slack through the asynchronous Slack Bolt Socket Mode adapter. Socket Mode receives events over WebSocket, so JiuwenSwarm does not need a public HTTP callback URL.
+
+### 1. Create a Slack App
+
+1. Open [Slack API Apps](https://api.slack.com/apps), create an app, and select the target workspace.
+2. Enable **Socket Mode**.
+3. Create an App-Level Token with the `connections:write` scope and save the generated `xapp-...` token.
+4. Under **OAuth & Permissions**, add these Bot Token Scopes:
+   - `chat:write`
+   - `app_mentions:read`
+   - `im:history`
+5. Under **Event Subscriptions**, subscribe to these Bot Events:
+   - `app_mention`
+   - `message.im`
+6. Install the app to the workspace and save the generated `xoxb-...` Bot Token.
+7. Add the bot to every Slack channel where it should respond.
+
+> Treat both `xoxb-...` and `xapp-...` tokens as secrets. Never commit them or print them in logs.
+
+### 2. Configure JiuwenSwarm
+
+Use **Channel Management** → **Slack** in the Web UI, or edit:
+
+`~/.jiuwenswarm/config/config.yaml`
+
+```yaml
+channels:
+  slack:
+    bot_token: "xoxb-your-bot-token"
+    app_token: "xapp-your-app-token"
+    allow_from: []
+    allowed_channel_ids: []
+    default_channel_id:
+    reply_in_thread: true
+    enabled: true
+```
+
+| Field | Purpose | Default |
+|:------|:--------|:--------|
+| `bot_token` | Required Slack Bot Token in `xoxb-...` format | empty |
+| `app_token` | Required Socket Mode App Token in `xapp-...` format | empty |
+| `allow_from` | Allow-list of Slack user IDs; empty allows all users | `[]` |
+| `allowed_channel_ids` | Channel IDs allowed to mention the bot; empty allows all channels and does not restrict DMs | `[]` |
+| `default_channel_id` | Fallback channel for outbound messages without request context | empty |
+| `reply_in_thread` | Reply in the thread containing the triggering channel message | `true` |
+| `enabled` | Enable the Slack channel | `false` |
+
+### 3. Use the Bot
+
+- In a channel, send `@bot your message`. JiuwenSwarm processes it and replies in the message thread by default.
+- Send the bot a direct message without mentioning it.
+- Channel conversations are isolated by Slack thread, so separate threads do not share a JiuwenSwarm session.
+- The current integration sends final text replies and suppresses token-level `chat.delta` events to avoid channel noise and Slack rate limits.
+
+Slack user IDs and channel IDs are available from the member profile and channel details menus via **Copy ID**.
+
+### 4. Troubleshooting
+
+**The bot does not connect**
+
+- Confirm Socket Mode is enabled.
+- Confirm `app_token` is an `xapp-...` token with `connections:write`.
+- Confirm `bot_token` is the `xoxb-...` token generated after installing the app.
+
+**Channel mentions get no reply**
+
+- Confirm the app subscribes to `app_mention`.
+- Confirm the bot is a member of the channel.
+- If `allowed_channel_ids` is configured, include the current channel ID.
+- If `allow_from` is configured, include the current user ID.
+
+**Direct messages get no reply**
+
+- Confirm the app has `im:history` and subscribes to `message.im`.
+- Reinstall the app to the workspace after changing scopes or event subscriptions.
+
+---
+
 ## WhatsApp
 
 This guide describes the WhatsApp integration currently implemented in this repo.

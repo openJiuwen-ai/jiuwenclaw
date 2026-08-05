@@ -24,7 +24,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="JiuwenSwarm.app"
 APP_PATH="$PROJECT_ROOT/dist/$APP_NAME"
 DMG_ROOT="$PROJECT_ROOT/dist/dmg-root"
-VERSION="0.2.3"
+VERSION="0.2.4.beta3"
 DMG_PATH="$PROJECT_ROOT/dist/JiuwenSwarm-$VERSION.dmg"
 
 # === 签名 + 公证配置 ===
@@ -209,6 +209,9 @@ if [[ ! -d "$APP_PATH" ]]; then
   printf 'Error: app bundle not found: %s\n' "$APP_PATH" >&2
   exit 1
 fi
+
+printf 'Verifying frozen A2UI v0.8 bundle...\n'
+"$APP_PATH/Contents/MacOS/jiuwenswarm" "$PROJECT_ROOT/scripts/verify_a2ui_bundle.py"
 
 if [[ -n "$TUI_BINARY" && -f "$TUI_BINARY" ]]; then
   printf 'Copying TUI binary into app bundle...\n'

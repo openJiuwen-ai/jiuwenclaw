@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Tuple
 
 from datetime import datetime, timedelta, timezone
-from dotenv import load_dotenv
+from jiuwenswarm.dotenv_early import load_dotenv_runtime
 
 from jiuwenswarm.server.runtime.agent_adapter.agent_adapters import (
     AgentAdapter,
@@ -37,8 +37,19 @@ from jiuwenswarm.server.runtime.session.session_manager import SessionManager
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
 from jiuwenswarm.server.utils.utils import is_team_params
 from jiuwenswarm.common.config import get_config
+from jiuwenswarm.agents.harness.code.prompt.plan_approval import (
+    PLAN_EXECUTE_OPTION_VALUES,
+    PLAN_REMINDER_ORIGINAL_QUERY_KEY,
+    PLAN_SKIP_OPTION_VALUES,
+    plan_skip_feedback,
+)
+from jiuwenswarm.common.mode_matrix import (
+    is_web_composable_mode,
+    read_request_work_mode,
+)
 from jiuwenswarm.extensions.registry import ExtensionRegistry
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
+from jiuwenswarm.common.chat_final import ensure_final_mode_inplace
 from jiuwenswarm.extensions.hook_event import AgentServerHookEvents
 from jiuwenswarm.extensions.hooks_context import MemoryHookContext
 from jiuwenswarm.common.schema.message import EventType, ReqMethod
@@ -84,11 +95,19 @@ def _history_user_content(params: Any, query: Any) -> Any:
 
     追加补充/调整请求时，``query`` 是包装后的提示词模板，会把模型提示词暴露到
     历史记录里。这里优先使用原始用户输入 ``supplement_input`` 作为展示内容。
+
+    进入 plan 的那一轮同理：``query`` 前面被拼了一段 <system-reminder>，历史里
+    要还原成用户原文，否则重新加载会话会把提示词当成用户提问显示出来。
     """
-    if isinstance(params, dict) and params.get("is_supplement"):
+    if not isinstance(params, dict):
+        return query
+    if params.get("is_supplement"):
         supplement_input = params.get("supplement_input")
         if isinstance(supplement_input, str) and supplement_input.strip():
             return supplement_input
+    original_query = params.get(PLAN_REMINDER_ORIGINAL_QUERY_KEY)
+    if isinstance(original_query, str):
+        return original_query
     return query
 
 
@@ -247,6 +266,55 @@ def _make_a2ui_pending_render_chunk(*, request_id: str, channel_id: str) -> Agen
     )
 
 
+def _make_a2ui_final_chunk(
+        *,
+        request_id: str,
+        channel_id: str,
+        session_id: str,
+        content: str,
+) -> AgentResponseChunk:
+    return AgentResponseChunk(
+        request_id=request_id,
+        channel_id=channel_id,
+        payload={
+            "event_type": "chat.final",
+            "session_id": session_id,
+            "content": content,
+        },
+        is_complete=False,
+    )
+
+
+def _should_defer_a2ui_processing_status(
+        *,
+        suppress_a2ui_stream: bool,
+        event_type: str,
+        payload: dict[str, Any],
+) -> bool:
+    return (
+        suppress_a2ui_stream
+        and event_type == "chat.processing_status"
+        and payload.get("is_processing") is False
+    )
+
+
+def _normalize_nested_stream_chunk(
+        chunk: AgentResponseChunk,
+) -> AgentResponseChunk | None:
+    """Keep the facade stream open until its post-processing has finished."""
+    if not chunk.is_complete:
+        return chunk
+    payload = chunk.payload
+    if payload is None:
+        return None
+    if isinstance(payload, dict):
+        is_complete = payload.get("is_complete") is True
+        has_event_type = bool(payload.get("event_type"))
+        if is_complete and not has_event_type:
+            return None
+    return replace(chunk, is_complete=False)
+
+
 def _extend_a2ui_stream_probe(previous: str, content: str) -> str:
     probe = f"{previous}{content}"
     if len(probe) <= _A2UI_STREAM_PROBE_WINDOW:
@@ -265,7 +333,7 @@ def _looks_like_partial_a2ui_marker(value: Any) -> bool:
         if match is None:
             continue
         token = match.group(0)
-        if len(token) < 3:
+        if len(token) < 2:
             continue
         rest = candidate[len(token):].strip()
         if rest and not any(marker.startswith(token + rest) for marker in _A2UI_STREAM_PARTIAL_MARKERS):
@@ -320,7 +388,7 @@ def _a2ui_marker_start(value: Any) -> int | None:
         if match is None:
             continue
         token = match.group(0)
-        if len(token) < 3:
+        if len(token) < 2:
             continue
         rest = candidate[len(token):].strip()
         if rest and not any(marker.startswith(token + rest) for marker in _A2UI_STREAM_PARTIAL_MARKERS):
@@ -342,7 +410,7 @@ def _split_a2ui_stream_content(previous_probe: str, content: str) -> tuple[str, 
     return content[:split_index], content[split_index:]
 
 
-load_dotenv(dotenv_path=get_env_file(), override=True)
+load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
 reset_free_search_runtime_flags()
 
 
@@ -788,6 +856,12 @@ class JiuWenSwarm:
     - 公共编排（session 队列、Skills 路由、heartbeat、流式包装）
     """
 
+    # Keep a small bounded hand-off buffer between the agent producer and the
+    # WebSocket consumer.  An unbounded queue lets a fast Team runtime retain
+    # every pending AgentResponseChunk while a slow client is sending earlier
+    # chunks, which raises the process RSS across short-lived TUI sessions.
+    STREAM_QUEUE_MAXSIZE = 64
+
     def __init__(self) -> None:
         self._adapter: AgentAdapter | None = None
         self._sdk_name: str | None = None
@@ -845,14 +919,22 @@ class JiuWenSwarm:
 
     @staticmethod
     def _adapter_mode_for_request(request: AgentRequest) -> str:
+        """选择 Deep / Code adapter。
+
+        Web 请求（显式携带 ``work_mode``）由 ``work_mode`` 决定 profile：
+        ``code`` 走 CodeAdapter，``work`` 走 DeepAdapter。TUI 等历史客户端不带
+        ``work_mode``，继续按完整 mode 串判定，行为不变。
+        """
         params = request.params if isinstance(request.params, dict) else {}
+        work_mode = read_request_work_mode(params)
         raw_mode = params.get("mode", "")
-        if isinstance(raw_mode, str):
-            mode = raw_mode.strip().lower()
-            if mode == "team.plan":
-                return "code"
-            if mode == "code" or mode.startswith("code."):
-                return "code"
+        mode = raw_mode.strip().lower() if isinstance(raw_mode, str) else ""
+        if work_mode is not None and is_web_composable_mode(mode or "agent"):
+            return "code" if work_mode == "code" else "agent"
+        if mode == "team.plan":
+            return "code"
+        if mode == "code" or mode.startswith("code."):
+            return "code"
         return "agent"
 
     async def create_instance(self, config: dict[str, Any] | None = None, *,
@@ -929,6 +1011,26 @@ class JiuWenSwarm:
             sm = self._session_manager
             asyncio.create_task(adapter.try_start_dreaming(
                 busy_checker=lambda: sm.has_active_tasks(),))
+
+    async def prepare_session(
+        self,
+        *,
+        session_id: str,
+        channel_id: str,
+        mode: str,
+        project_dir: str | None = None,
+    ) -> None:
+        """Initialize and start the session-owned DeepAgent without sending input."""
+        adapter = self._ensure_adapter(mode="code" if mode.startswith("code") else "agent")
+        prepare = getattr(adapter, "prepare_session", None)
+        if not callable(prepare):
+            raise RuntimeError("active adapter does not support session prewarming")
+        await prepare(
+            session_id=session_id,
+            channel_id=channel_id,
+            mode=mode,
+            project_dir=project_dir,
+        )
 
     def build_inputs(self, request: AgentRequest) -> Tuple[dict[str, Any], str, str]:
         """构建 adapter 所需的 inputs 字典（公共接口）."""
@@ -1050,6 +1152,9 @@ class JiuWenSwarm:
             "query": final_query,
             "channel": channel,
             "language": language,
+            # Only an explicit false disables interactive tools. Existing
+            # clients that omit this capability remain backward compatible.
+            "supports_user_interaction": params.get("supports_user_interaction") is not False,
         }
         if _request_debug:
             inputs["_request_debug"] = True
@@ -1237,15 +1342,26 @@ class JiuWenSwarm:
                             for raw_option in selected_options
                             if str(raw_option or "").strip()
                         ]
-                        # When the only selection is "Other", prefer the free-text
-                        # custom_input (single-select free-text path).
-                        if len(cleaned_options) == 1 and cleaned_options[0] == "Other" and custom_input:
-                            answer_value: Any = custom_input
+                        if custom_input:
+                            # "Other" is only a UI placeholder. Preserve normal
+                            # multi-select choices and append the user's text.
+                            normal_options = [
+                                option for option in cleaned_options if option != "Other"
+                            ]
+                            if normal_options:
+                                answer_value: Any = [*normal_options, custom_input]
+                            else:
+                                answer_value = custom_input
                         elif len(cleaned_options) == 1:
-                            answer_value = cleaned_options[0]
+                            # Bare "Other" without custom text is incomplete (#2330).
+                            sole = cleaned_options[0]
+                            answer_value = "" if sole == "Other" else sole
                         elif cleaned_options:
-                            # Multi-select: preserve the full list of selections.
-                            answer_value = cleaned_options
+                            # Multi-select: preserve real choices; drop placeholder-only Other.
+                            normal_options = [
+                                option for option in cleaned_options if option != "Other"
+                            ]
+                            answer_value = normal_options if normal_options else ""
                         else:
                             answer_value = ""
                     elif custom_input:
@@ -1328,12 +1444,39 @@ class JiuWenSwarm:
                 "persist_allow": False,
                 "feedback": "",
             }
-        elif value in ("always_allow", "永久记住", "Always Allow"):
+        elif value in (
+            "always_allow",
+            "allow_always",
+            "永久记住",
+            "总是允许",
+            "Always Allow",
+        ):
             confirm_payload = {
                 "approved": True,
                 "auto_confirm": True,
                 "persist_allow": True,
                 "feedback": "",
+            }
+        elif value in PLAN_EXECUTE_OPTION_VALUES:
+            # Web 的"执行"：批准并退出 plan，但本轮不再调模型。真正的执行由前端
+            # 紧接着补发的普通消息开启新一轮完成。``plan_execute`` 是额外键，
+            # ConfirmPayload 会忽略它，rail 在校验前从原始 dict 读取。
+            confirm_payload = {
+                "approved": True,
+                "auto_confirm": False,
+                "feedback": "",
+                "plan_execute": True,
+            }
+        elif value in PLAN_SKIP_OPTION_VALUES:
+            # Web 的"跳过"：不退出 plan，也不继续修改，直接结束本轮。
+            # ``plan_skip`` 是额外键，ConfirmPayload 会忽略它；
+            # PlanApprovalInterruptRail 在校验前从原始 dict 读取该标记。
+            confirm_payload = {
+                "approved": False,
+                "auto_confirm": False,
+                "feedback": custom_input
+                or plan_skip_feedback(get_config().get("preferred_language")),
+                "plan_skip": True,
             }
         elif value in ("reject", "拒绝", "Reject", "继续规划", "其他意见"):
             feedback = custom_input or (
@@ -1785,6 +1928,12 @@ class JiuWenSwarm:
                     if ok and str(action or "").strip().lower() == "set":
                         objective = str(params.get("objective") or "").strip()
                         if objective:
+                            goal_obj = goal_result.get("goal")
+                            goal_id = (
+                                str(goal_obj.get("goal_id") or "").strip() or None
+                                if isinstance(goal_obj, dict)
+                                else None
+                            )
                             append_history_record(
                                 session_id=session_id,
                                 request_id=request.request_id,
@@ -1794,6 +1943,10 @@ class JiuWenSwarm:
                                 timestamp=time.time(),
                                 channel_metadata=request.metadata,
                                 mode=params.get("mode", "unknown"),
+                                extra={
+                                    "goal_id": goal_id,
+                                    "is_goal_objective_message": True,
+                                },
                             )
                     # Keep message for callers that read payload.message; also
                     # mirror into error on failure so Gateway top-level error
@@ -2198,8 +2351,9 @@ class JiuWenSwarm:
                 team_query_is_interactive_input,
             )
 
-        stream_queue = asyncio.Queue()
+        stream_queue = asyncio.Queue(maxsize=self.STREAM_QUEUE_MAXSIZE)
         stream_done = asyncio.Event()
+        producer_cancellation: asyncio.CancelledError | None = None
         final_answer_content = ""
         final_answer_chunks: list[str] = []
         durable_pending_final_chunks: list[str] = []
@@ -2245,10 +2399,13 @@ class JiuWenSwarm:
             durable_final_content = pending_text
 
         async def run_stream_task():
+            nonlocal producer_cancellation
             logger.info("[JiuWenSwarm] run_stream_task started: request_id=%s session_id=%s", rid, session_id)
             _put_count = 0
+            producer_stream: AsyncIterator[AgentResponseChunk] | None = None
             try:
-                async for chunk in adapter.process_message_stream_impl(request, inputs):
+                producer_stream = adapter.process_message_stream_impl(request, inputs)
+                async for chunk in producer_stream:
                     _put_count += 1
                     if _put_count <= 3:
                         _pl = getattr(chunk, "payload", None) or {}
@@ -2258,18 +2415,42 @@ class JiuWenSwarm:
                             _put_count, rid, _et,
                         )
                     await stream_queue.put(("chunk", chunk))
-            except asyncio.CancelledError:
+            except asyncio.CancelledError as exc:
+                producer_cancellation = exc
                 logger.info("[JiuWenSwarm] 流式任务被取消: request_id=%s session_id=%s", rid, session_id)
-                await stream_queue.put(("error", asyncio.CancelledError()))
+                # The outer consumer owns cancellation and awaits this task in
+                # its finally block.  Do not enqueue into a potentially full
+                # bounded queue after that consumer has gone away.
+                raise
             except Exception as exc:
                 logger.exception("[JiuWenSwarm] 流式任务异常: %s", exc)
-                await stream_queue.put(("error", exc))
+                try:
+                    await stream_queue.put(("error", exc))
+                except asyncio.CancelledError as cancel_exc:
+                    producer_cancellation = cancel_exc
+                    raise
             finally:
-                logger.info(
-                    "[JiuWenSwarm] run_stream_task finished: request_id=%s total_chunks=%s",
-                    rid, _put_count,
-                )
-                stream_done.set()
+                try:
+                    if producer_stream is not None:
+                        close_stream = getattr(producer_stream, "aclose", None)
+                        if callable(close_stream):
+                            try:
+                                await close_stream()
+                            except asyncio.CancelledError as exc:
+                                producer_cancellation = exc
+                                raise
+                            except Exception:
+                                logger.debug(
+                                    "[JiuWenSwarm] stream producer close failed: request_id=%s",
+                                    rid,
+                                    exc_info=True,
+                                )
+                finally:
+                    logger.info(
+                        "[JiuWenSwarm] run_stream_task finished: request_id=%s total_chunks=%s",
+                        rid, _put_count,
+                    )
+                    stream_done.set()
 
         # Team 模式: 后续请求直接执行，绕过 Session Manager 队列
         # 因为 Team 是长期运行的(persistent)，interact 调用不需要等待前一个任务完成
@@ -2353,12 +2534,16 @@ class JiuWenSwarm:
                     )
                 else:
                     if isinstance(data, AgentResponseChunk):
+                        if suppress_a2ui_stream:
+                            data = _normalize_nested_stream_chunk(data)
+                            if data is None:
+                                continue
                         if isinstance(data.payload, dict) and isinstance(data.payload.get("event_type"), str):
                             et = str(data.payload.get("event_type"))
                             should_record = et.startswith("chat.")
                             if not should_record and et == EventType.TEAM_MESSAGE.value:
                                 should_record = True
-                            if et == "context_compression_state":
+                            if et == "context.compression_state":
                                 _append_compact_history_from_payload(
                                     payload=data.payload,
                                     session_id=session_id,
@@ -2372,6 +2557,17 @@ class JiuWenSwarm:
                             if et in {"chat.delta", "chat.final"} and payload_content:
                                 a2ui_split = _split_a2ui_stream_content(a2ui_stream_probe, payload_content)
                                 a2ui_stream_probe = _extend_a2ui_stream_probe(a2ui_stream_probe, payload_content)
+                            if _should_defer_a2ui_processing_status(
+                                    suppress_a2ui_stream=suppress_a2ui_stream,
+                                    event_type=et,
+                                    payload=data.payload,
+                            ):
+                                logger.info(
+                                    "A2UI processing_status=false deferred until finalization: "
+                                    "request_id=%s",
+                                    rid,
+                                )
+                                continue
                             if et == "chat.delta":
                                 final_answer_chunks.append(payload_content)
                                 if suppress_a2ui_stream or a2ui_split is not None:
@@ -2404,6 +2600,8 @@ class JiuWenSwarm:
                             elif et == "chat.tool_call":
                                 _persist_pending_final_text()
                             elif et == "chat.final":
+                                if isinstance(data.payload, dict):
+                                    ensure_final_mode_inplace(data.payload)
                                 if suppress_a2ui_stream or a2ui_split is not None:
                                     first_a2ui_suppression = not suppress_a2ui_stream
                                     if first_a2ui_suppression:
@@ -2416,7 +2614,9 @@ class JiuWenSwarm:
                                     if first_a2ui_suppression and not a2ui_pending_render_sent:
                                         yield _make_a2ui_pending_render_chunk(request_id=rid, channel_id=cid)
                                         a2ui_pending_render_sent = True
-                                    final_answer_content = payload_content
+                                    if payload_content:
+                                        final_answer_content = payload_content
+                                        final_answer_chunks.clear()
                                     durable_pending_final_chunks = []
                                     continue
                                 durable_pending_final_chunks = []
@@ -2451,14 +2651,17 @@ class JiuWenSwarm:
                                 if et == "chat.final":
                                     durable_final_content = str(data.payload.get("content", ""))
                             if et == "chat.final":
-                                final_answer_content = str(data.payload.get("content", ""))
+                                next_final_content = str(data.payload.get("content", ""))
+                                if next_final_content:
+                                    final_answer_content = next_final_content
+                                    final_answer_chunks.clear()
                         yield data
                     elif isinstance(data, dict) and isinstance(data.get("event_type"), str):
                         et = str(data.get("event_type"))
                         should_record = et.startswith("chat.")
                         if not should_record and et == EventType.TEAM_MESSAGE.value:
                             should_record = True
-                        if et == "context_compression_state":
+                        if et == "context.compression_state":
                             _append_compact_history_from_payload(
                                 payload=data,
                                 session_id=session_id,
@@ -2472,6 +2675,19 @@ class JiuWenSwarm:
                         if et in {"chat.delta", "chat.final"} and payload_content:
                             a2ui_split = _split_a2ui_stream_content(a2ui_stream_probe, payload_content)
                             a2ui_stream_probe = _extend_a2ui_stream_probe(a2ui_stream_probe, payload_content)
+                        if _should_defer_a2ui_processing_status(
+                                suppress_a2ui_stream=suppress_a2ui_stream,
+                                event_type=et,
+                                payload=data,
+                        ):
+                            logger.info(
+                                "A2UI processing_status=false deferred until finalization: "
+                                "request_id=%s",
+                                rid,
+                            )
+                            continue
+                        if et == "chat.final":
+                            ensure_final_mode_inplace(data)
                         if et == "chat.delta":
                             final_answer_chunks.append(payload_content)
                             if suppress_a2ui_stream or a2ui_split is not None:
@@ -2516,7 +2732,9 @@ class JiuWenSwarm:
                                 if first_a2ui_suppression and not a2ui_pending_render_sent:
                                     yield _make_a2ui_pending_render_chunk(request_id=rid, channel_id=cid)
                                     a2ui_pending_render_sent = True
-                                final_answer_content = payload_content
+                                if payload_content:
+                                    final_answer_content = payload_content
+                                    final_answer_chunks.clear()
                                 durable_pending_final_chunks = []
                                 continue
                             durable_pending_final_chunks = []
@@ -2549,7 +2767,10 @@ class JiuWenSwarm:
                             if et == "chat.final":
                                 durable_final_content = str(data.get("content", ""))
                         if et == "chat.final":
-                            final_answer_content = str(data.get("content", ""))
+                            next_final_content = str(data.get("content", ""))
+                            if next_final_content:
+                                final_answer_content = next_final_content
+                                final_answer_chunks.clear()
                         yield AgentResponseChunk(
                             request_id=rid,
                             channel_id=cid,
@@ -2577,6 +2798,13 @@ class JiuWenSwarm:
                     rid,
                     exc_info=True,
                 )
+
+        # A producer may cancel itself without the outer WebSocket consumer
+        # being cancelled.  Keep that terminal state out of the bounded queue
+        # (which may be full after a disconnect), but preserve the public
+        # cancellation contract once all already-produced chunks are drained.
+        if producer_cancellation is not None:
+            raise producer_cancellation
 
         assistant_message = final_answer_content or "".join(final_answer_chunks)
         repair_call = getattr(adapter, "repair_model_response", None)
@@ -2612,11 +2840,11 @@ class JiuWenSwarm:
             )
             final_answer_content = finalized_assistant_message
             final_answer_chunks = []
-            yield AgentResponseChunk(
+            yield _make_a2ui_final_chunk(
                 request_id=rid,
                 channel_id=cid,
-                payload={"event_type": "chat.final", "content": finalized_assistant_message},
-                is_complete=False,
+                session_id=session_id,
+                content=finalized_assistant_message,
             )
 
         # cloud memory: after chat hook
@@ -2652,6 +2880,36 @@ class JiuWenSwarm:
 
     def get_instance(self):
         return self._adapter._instance
+
+    async def ensure_instance(self):
+        """Return the adapter's DeepAgent, building the root one on first use.
+
+        ``get_instance`` stays a plain accessor and may return None before the
+        root DeepAgent has been built; callers that need a live handle outside
+        the chat path should await this instead.
+
+        Returns:
+            The DeepAgent instance, or None when there is no adapter yet (the
+            stateless-RPC fallback wrapper never calls ``create_instance``) or
+            the adapter cannot build one.
+        """
+        if self._adapter is None:
+            return None
+        return await self._adapter.ensure_instance()
+
+    def get_live_session_instance(self, session_id: str | None):
+        """Return the DeepAgent already running ``session_id``, if any.
+
+        Returns None when no adapter exists, when the adapter predates this
+        accessor, or when the session has not started a child adapter yet.
+        """
+        adapter = self._adapter
+        if adapter is None:
+            return None
+        getter = getattr(adapter, "get_live_session_instance", None)
+        if getter is None:
+            return None
+        return getter(session_id)
 
     async def apply_package_change_to_session_adapters(
         self,
@@ -2795,6 +3053,20 @@ class JiuWenSwarm:
             return processor_cleaned
         adapter_cleaned = bool(await cleanup_fn(session_id))
         return processor_cleaned or adapter_cleaned
+
+    def has_session_runtime(self, session_id: str | None = None) -> bool:
+        """Return whether this facade still owns session-scoped runtime."""
+        if self._session_manager.has_session_runtime(session_id):
+            return True
+        adapter = self._adapter
+        if adapter is None:
+            return False
+        has_runtime = getattr(adapter, "has_session_runtime", None)
+        if not callable(has_runtime):
+            return True
+        if session_id is None:
+            return bool(has_runtime())
+        return bool(has_runtime(session_id))
 
     async def cancel_inflight_work(self, log_prefix: str = "[gateway disconnect] ") -> None:
         """Gateway 与 AgentServer 的 WebSocket 断开时调用：取消 session 流式任务并中止 adapter 内层循环。"""

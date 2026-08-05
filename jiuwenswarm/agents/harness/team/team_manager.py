@@ -20,6 +20,7 @@ from openjiuwen.agent_teams.runtime.pool import RuntimeState
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 from openjiuwen.core.runner import Runner
+from openjiuwen.core.common.logging import server_logger
 from openjiuwen.harness import DeepAgent
 from openjiuwen.harness.rails import (
     SkillEvolutionRail,
@@ -27,6 +28,7 @@ from openjiuwen.harness.rails import (
     TeamSkillEvolutionRail,
 )
 from jiuwenswarm.agents.harness.team.bootstrap import configure_agent_teams_home
+from jiuwenswarm.common.log_preview import preview_text
 from jiuwenswarm.common.utils import get_user_workspace_dir
 
 configure_agent_teams_home()
@@ -82,6 +84,29 @@ _PG_POST_START_READY_MAX_SLEEP = 2.0
 _PG_POST_START_READY_BACKOFF = 1.45
 _PG_POST_START_LOG_EVERY_SEC = 5.0
 _TEAM_STREAM_EXIT_GRACE_TIMEOUT_SEC = 1.5
+# Bound each frontend waiter's event backlog.  Producers await a free slot, so
+# a slow or disconnected TUI consumer cannot make the process retain every
+# event emitted by a long-running team session.
+TEAM_EVENT_QUEUE_MAXSIZE = 64
+_WAITER_PUT_RECHECK_TIMEOUT_SEC = 0.1
+
+
+def _safe_payload_preview(payload: Any) -> str:
+    """Render an interact payload as a bounded single-line log fragment.
+
+    Args:
+        payload: Raw interact payload, either plain text or a team message
+            object (``GodViewMessage`` / ``HumanAgentMessage`` / ...).
+
+    Returns:
+        Clipped text of the payload body, prefixed with the payload type when
+        it is not a plain string.
+    """
+    if isinstance(payload, str):
+        return preview_text(payload)
+    body = getattr(payload, "body", None)
+    text = body if isinstance(body, str) else str(payload)
+    return f"<{type(payload).__name__}>{preview_text(text)}"
 
 # ── Team Observability ──────────────────────────────────────
 # Tracks whether observability is currently active so we can
@@ -290,19 +315,45 @@ class TeamManager:
         else:
             self._pending_waiters.pop(session_id, None)
 
-    def broadcast_event(self, session_id: str, event: dict[str, Any]) -> None:
-        """Broadcast an event to all request queues waiting on the same session."""
-        waiters = self._pending_waiters.get(session_id)
-        if waiters:
-            for request_id, queue in waiters:
+    async def broadcast_event(self, session_id: str, event: dict[str, Any]) -> None:
+        """Broadcast an event with backpressure to every active waiter.
+
+        The short timed wait is only used while a queue is full.  It lets a
+        producer notice that ``remove_waiter`` detached a disconnected client
+        instead of remaining blocked forever on that orphaned queue.
+        """
+        waiters = list(self._pending_waiters.get(session_id, ()))
+
+        async def _put_to_waiter(
+            request_id: str,
+            queue: asyncio.Queue,
+        ) -> None:
+            queued_event = dict(event)
+            while any(
+                rid == request_id and registered_queue is queue
+                for rid, registered_queue in self._pending_waiters.get(session_id, ())
+            ):
                 try:
-                    queue.put_nowait(dict(event))
+                    await asyncio.wait_for(
+                        queue.put(queued_event),
+                        timeout=_WAITER_PUT_RECHECK_TIMEOUT_SEC,
+                    )
+                    break
+                except asyncio.TimeoutError:
+                    continue
                 except Exception:
                     logger.debug(
                         "[TeamManager] broadcast failed: session_id=%s request_id=%s",
                         session_id,
                         request_id,
+                        exc_info=True,
                     )
+                    break
+
+        await asyncio.gather(*(
+            _put_to_waiter(request_id, queue)
+            for request_id, queue in waiters
+        ))
 
     # --- seen_team_events tracking ---
     # A session enters "team" mode once any team-building event (team.member,
@@ -362,6 +413,15 @@ class TeamManager:
     def get_active_team_name(self, session_id: str) -> str | None:
         """Return the active Runner-owned team name for the session."""
         return self._active_team_names.get(session_id)
+
+    def get_runtime_team_snapshot(self) -> dict[str, dict[str, str]]:
+        """Return session -> team runtime status for active/pending team runs."""
+        snapshot: dict[str, dict[str, str]] = {}
+        for sid, team_name in self._active_team_names.items():
+            snapshot[sid] = {"team_name": team_name, "state": "active"}
+        for sid, team_name in self._pending_team_names.items():
+            snapshot.setdefault(sid, {"team_name": team_name, "state": "pending"})
+        return snapshot
 
     def _get_lifecycle_lock(self, session_id: str) -> asyncio.Lock:
         """Return the lock that serializes lifecycle operations for a session."""
@@ -487,6 +547,9 @@ class TeamManager:
         session_id: str,
         *,
         requested_model_name: str | None = None,
+        template_id: str | None = None,
+        template_snapshot: dict[str, Any] | None = None,
+        strict_template: bool = False,
     ) -> TeamAgentSpec:
         config_base = get_config()
         # Keep dependency checks scoped to distributed mode to make the
@@ -513,6 +576,9 @@ class TeamManager:
         spec_dict = load_team_spec_dict(
             config_base=config_base,
             requested_model_name=requested_model_name,
+            template_id=template_id,
+            template_snapshot=template_snapshot,
+            strict_template=strict_template,
         )
         spec_dict = TeamManager._normalize_team_identity_fields(spec_dict)
         if TeamManager._is_distributed_mode(config_base):
@@ -562,6 +628,59 @@ class TeamManager:
 
         return TeamAgentSpec.model_validate(spec_dict)
 
+    @staticmethod
+    def _lookup_bound_team_identity(session_id: str) -> tuple[str | None, str | None, dict[str, Any] | None]:
+        metadata = get_session_metadata(session_id, cache_bust=True)
+        team_name = str(metadata.get("team_name") or "").strip()
+        template_id = str(metadata.get("team_template_id") or "").strip()
+        template_snapshot: dict[str, Any] | None = None
+        if team_name:
+            from jiuwenswarm.server.runtime.team_binding_store import get_team_binding_store
+            from jiuwenswarm.server.runtime.team_entity_store import ensure_team_entity, ensure_team_entity_for_binding
+
+            binding = get_team_binding_store().get(team_name)
+            if binding is not None:
+                if not template_id:
+                    template_id = binding.template_id
+                entity = ensure_team_entity_for_binding(binding, config_base=get_config())
+            else:
+                legacy_snapshot = (
+                    copy.deepcopy(metadata.get("team_template_snapshot"))
+                    if isinstance(metadata.get("team_template_snapshot"), dict)
+                    else None
+                )
+                entity = ensure_team_entity(
+                    team_name=team_name,
+                    template_id=template_id,
+                    template_snapshot=legacy_snapshot,
+                    config_base=get_config(),
+                )
+            if entity is not None:
+                template_id = entity.template_id
+                template_snapshot = copy.deepcopy(entity.template_snapshot)
+        return team_name or None, template_id or None, template_snapshot
+
+    def _load_session_team_spec(
+        self,
+        session_id: str,
+        *,
+        requested_model_name: str | None = None,
+    ) -> tuple[TeamAgentSpec, bool]:
+        team_name, template_id, template_snapshot = self._lookup_bound_team_identity(session_id)
+        load_kwargs: dict[str, Any] = {}
+        if requested_model_name is not None:
+            load_kwargs["requested_model_name"] = requested_model_name
+        if template_id is not None:
+            load_kwargs["template_id"] = template_id
+            load_kwargs["strict_template"] = template_snapshot is None
+        if template_snapshot is not None:
+            load_kwargs["template_snapshot"] = template_snapshot
+        spec = self._load_team_spec(session_id, **load_kwargs)
+        if team_name:
+            spec.team_name = team_name
+            return spec, True
+        return spec, False
+
 
     async def get_swarm_enriched_team_spec(
         self,
@@ -596,11 +715,12 @@ class TeamManager:
 
         config_base = get_config()
         await self._ensure_postgresql_for_leader(config_base)
-        spec = self._load_team_spec(
+        spec, has_binding = self._load_session_team_spec(
             session_id,
             requested_model_name=requested_model_name,
         )
-        self._apply_session_scoped_team_name(spec, session_id=session_id)
+        if not has_binding:
+            self._apply_session_scoped_team_name(spec, session_id=session_id)
         self.apply_team_plan_mode(spec, request_metadata=request_metadata)
         enrich_team_spec_for_swarm(
             spec,
@@ -1026,11 +1146,12 @@ class TeamManager:
         config_base = get_config()
         await self._ensure_postgresql_for_leader(config_base)
         logger.info("[TeamManager] building TeamAgentSpec: session_id=%s", session_id)
-        spec = self._load_team_spec(session_id)
-        self._apply_session_scoped_team_name(
-            spec,
-            session_id=session_id,
-        )
+        spec, has_binding = self._load_session_team_spec(session_id)
+        if not has_binding:
+            self._apply_session_scoped_team_name(
+                spec,
+                session_id=session_id,
+            )
 
         resolved_mode = str((request_metadata or {}).get("mode") or "").strip()
         # Provider-based assembly: source every member capability from the shared
@@ -1159,6 +1280,13 @@ class TeamManager:
                 )
                 return False, "not_active"
 
+            # Last stop before the message enters the team runner interact path.
+            server_logger.info(
+                "[AgentServer] team message entering runner interact: session_id=%s team=%s payload=%s",
+                session_id,
+                team_name,
+                _safe_payload_preview(user_input),
+            )
             result = await Runner.interact_agent_team(
                 user_input,
                 team_name=team_name,
@@ -1239,6 +1367,14 @@ class TeamManager:
         self._team_rail_contexts.pop(session_id, None)
         self._team_live_rails.pop(session_id, None)
         self._team_shared_skill_link_targets.pop(session_id, None)
+
+    def _clear_terminal_session_markers(self, session_id: str) -> None:
+        """Release process-wide markers only for non-resumable teardown."""
+        self.clear_session_initialized(session_id)
+        self.reset_seen_team_events(session_id)
+        self.reset_workflow_completed(session_id)
+        self.pop_cron_completion(session_id)
+        self._pending_team_evolution_watcher_sessions.discard(session_id)
 
     async def _cancel_team_evolution_watcher(self, session_id: str) -> None:
         watcher_task = self._team_evolution_watchers.pop(session_id, None)
@@ -1755,6 +1891,11 @@ class TeamManager:
         )
         self.clear_active_runtime(session_id)
         self.clear_pending_runtime(session_id)
+        # These round/session markers live on the process-wide TeamManager.
+        # TUI disconnect cancels the async event generator before its normal
+        # tail can clear them, so terminal runtime cleanup must own the
+        # idempotent release as well.
+        self._clear_terminal_session_markers(session_id)
         logger.info(
             "[TeamManager] %s: clear done, session_id=%s",
             caller,
@@ -1827,6 +1968,7 @@ class TeamManager:
                 or self.is_runtime_pending(session_id)
             )
             if not has_stream_task and not has_team_runtime:
+                self._clear_terminal_session_markers(session_id)
                 return False
             logger.info(
                 "[TeamManager] %s terminate team session runtime: session_id=%s",
@@ -1912,6 +2054,7 @@ class TeamManager:
                 or self.is_runtime_pending(session_id)
             )
             if not has_stream_task and not has_team_runtime:
+                self._clear_terminal_session_markers(session_id)
                 return False
 
             logger.info(
@@ -1969,6 +2112,7 @@ class TeamManager:
                 or self.is_runtime_pending(session_id)
             )
             if not has_stream_task and not has_team_runtime:
+                self._clear_terminal_session_markers(session_id)
                 return False
 
             logger.info(
@@ -2015,6 +2159,7 @@ class TeamManager:
 
             self.clear_active_runtime(session_id)
             self.clear_pending_runtime(session_id)
+            self._clear_terminal_session_markers(session_id)
 
         logger.info(
             "[TeamManager] %steam session stopped: session_id=%s stopped=%s",

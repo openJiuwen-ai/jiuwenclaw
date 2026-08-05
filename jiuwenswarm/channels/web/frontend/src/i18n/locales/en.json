@@ -37,7 +37,7 @@
     "more": "More",
     "settings": "Settings",
     "config": "Configuration",
-    "browser": "Browser Service",
+    "browser": "Browser",
     "logs": "Logs",
     "update": "Updates"
   },
@@ -187,10 +187,38 @@
     "count": "{{count}} item(s)",
     "empty": "No artifacts",
     "download": "Download",
+    "downloadFailed": "Could not download “{{name}}”. Check your connection and save location, then try again.",
+    "expandList": "Show artifact list",
+    "collapseList": "Hide artifact list",
+    "openPreview": "Open preview for {{name}}",
     "selectArtifact": "Select an artifact to preview",
-    "previewUnsupported": "Preview is only supported for Markdown files",
-    "previewMissingPath": "No readable local path is available for this artifact",
-    "previewFailed": "Failed to load Markdown preview"
+    "previewUnsupported": "This file type cannot be previewed yet. Download it to view it.",
+    "previewMissingPath": "No downloadable resource is available for this artifact preview",
+    "previewFailed": "Failed to load the file preview",
+    "docxPreviewFailed": "Failed to load the Word document preview",
+    "presentationPreviewFailed": "Failed to load the PowerPoint presentation preview",
+    "presentationResourceLimitExceeded": "The PowerPoint presentation content exceeds the browser preview limit. Download the file to view it.",
+    "presentationTooLarge": "PowerPoint presentations larger than {{size}} cannot be previewed in the browser. Download the file to view it.",
+    "presentationSlides": "Slides",
+    "presentationPage": "Slide {{current}} of {{total}}",
+    "presentationSlideIncomplete": "Slide {{page}} is only partially previewed",
+    "presentationStructureInvalid": "This presentation contains structurally invalid slides. Try downloading it to view.",
+    "presentationGoToSlide": "Go to slide {{index}}",
+    "presentationScrollThumbnailsPrevious": "Scroll slide thumbnails left",
+    "presentationScrollThumbnailsNext": "Scroll slide thumbnails right",
+    "presentationPreviousSlide": "Previous slide",
+    "presentationNextSlide": "Next slide",
+    "presentationZoomOut": "Zoom out",
+    "presentationZoomIn": "Zoom in",
+    "presentationZoomLevel": "{{percent}}% actual slide size",
+    "spreadsheetPreviewFailed": "Failed to load the Excel workbook preview",
+    "spreadsheetResourceLimitExceeded": "The Excel workbook content exceeds the browser preview limit. Download the file to view it.",
+    "spreadsheetTooLarge": "Excel workbooks larger than {{size}} cannot be previewed in the browser. Download the file to view it.",
+    "spreadsheetEmptyWorkbook": "This workbook contains no visible worksheets",
+    "spreadsheetEmptySheet": "This worksheet is empty",
+    "spreadsheetSheetTabsLabel": "Worksheets",
+    "spreadsheetTableLabel": "{{sheet}} worksheet preview",
+    "invalidJson": "The JSON or JSONL content is invalid"
   },
   "teams": {
     "title": "Team Management",
@@ -259,6 +287,9 @@
     "removeTask": "Remove task",
     "addImage": "Add image",
     "addImageDisabled": "Cannot add images while processing or recording",
+    "addFile": "Add file",
+    "addFileDisabled": "Cannot add files while processing or recording",
+    "addAttachment": "Add attachment",
     "removeImage": "Remove image",
     "sendTask": "Send message without interrupting model",
     "editTask": "Edit",
@@ -267,6 +298,8 @@
     "paused": "Paused",
     "resume": "Resume",
     "queuePausedConfirm": "You are about to send a message. Clear the {{count}} queued message(s)?\n\nClick \"OK\" to clear the queue and send; click \"Cancel\" to keep the queue (message will be added to the queue).",
+    "goalAttachmentsBlocked": "Attachments are not supported when setting a goal. Remove them first, or send the attachment in a separate message.",
+    "editTaskDropAttachments": "Editing will remove the {{count}} attachment(s) carried by this task. Continue?",
     "holdToSpeak": "Hold to speak",
     "send": "Send (Enter)",
     "stop": "Stop",
@@ -293,12 +326,19 @@
     "teamPauseHint": "After pausing a team, send the next message to continue",
     "teamBroadcastTarget": "@all",
     "contextCompressionCompleted": "Completed context compression {{count}} time(s) this turn",
+    "contextCompressionStarted": {
+      "dialogue": "Compacting earlier rounds…",
+      "currentRound": "Compacting current round…",
+      "roundLevel": "Full compaction…"
+    },
     "historyPager": {
       "loadedOfTotal": "Loaded {{loaded}} / {{total}} pages",
       "loadingMore": "Loading...",
       "clickOrScrollToLoadMore": "Click or scroll up to load more",
       "allLoaded": "All history loaded"
     },
+    "historyLoading": "Loading conversation history…",
+    "historyLoadMore": "Load more history",
     "config": {
       "mode": {
         "cluster": "Cluster",
@@ -422,6 +462,16 @@
     "pending": "Pending",
     "completed": "Completed"
   },
+  "plan": {
+    "toolbarTag": "Plan",
+    "closeTag": "Exit plan mode",
+    "approvalPrompt": "The plan is ready. Choose what to do next.",
+    "executePrompt": "The plan is approved. Start executing it.",
+    "approvalExecute": "Execute",
+    "approvalSkip": "Skip",
+    "approvalNext": "Next",
+    "approvalInputPlaceholder": "Add revision notes then click Next; leave empty and click Skip"
+  },
   "goal": {
     "formSubmit": "Confirm",
     "formCancel": "Cancel",
@@ -463,7 +513,7 @@
     "restore": "Restore session",
     "restoreDisabledNotConnected": "Disconnected: cannot restore session",
     "restoreDisabledProcessing": "Assistant is busy: wait until idle to restore a session",
-    "restoreDisabledUnsupported": "Only web frontend sessions (sess_) can be restored",
+    "restoreDisabledUnsupported": "Only Web frontend sessions (sess_ / web_) can be restored",
     "restoreEmpty": "This session has no restorable messages (empty or filtered). You can still chat from here.",
     "delete": "Delete session",
     "teamLabel": "Team: {{team}}",
@@ -488,6 +538,7 @@
       "wecom": "WeCom",
       "wechat": "WeChat",
       "discord": "Discord",
+      "slack": "Slack",
       "heartbeat": "Heartbeat",
       "tui": "TUI",
       "unknown": "Unknown"
@@ -568,6 +619,7 @@
       "dingtalk": "DingTalk",
       "telegram": "Telegram",
       "discord": "Discord",
+      "slack": "Slack",
       "whatsapp": "WhatsApp",
       "wecom": "WeCom",
       "wechat": "WeChat"
@@ -592,6 +644,9 @@
       "discordTitle": "Discord Channel Configuration",
       "discordSubtitle": "Configure Discord bot service settings",
       "discordHint": "Discord Bot messaging is supported. Enable Message Content Intent in Developer Portal and optionally set the target channel, the block_dm toggle can be used to block direct message.",
+      "slackTitle": "Slack Channel Configuration",
+      "slackSubtitle": "Configure Slack Socket Mode bot settings",
+      "slackHint": "Create a Slack app with Socket Mode enabled, an xoxb bot token, and an xapp app token. Subscribe to app_mention and message.im events.",
       "telegramTitle": "Telegram Channel Configuration",
       "telegramSubtitle": "Configure Telegram Bot service settings",
       "whatsappTitle": "WhatsApp Channel Configuration",
@@ -607,6 +662,7 @@
       "feishu": "Loading Lark settings...",
       "telegram": "Loading Telegram settings...",
       "discord": "Loading Discord settings...",
+      "slack": "Loading Slack settings...",
       "whatsapp": "Loading WhatsApp settings...",
       "wecom": "Loading WeCom settings...",
       "wechat": "Loading WeChat settings..."
@@ -623,8 +679,15 @@
       "whatsappJids": "One WhatsApp JID per line (comma-separated is also supported)",
       "wecomDefaultChatId": "userid or chatid (group)",
       "wecomDefaultChatIdHint": "Target for heartbeat/scheduled push. Leave empty to use last chatid",
+      "xiaoyiApiIdHint": "Scheduled task push to Xiaoyi requires api_id. Without it, Xiaoyi cannot be selected as a cron push channel.",
+      "xiaoyiApiIdRequiredForCron": "api_id is not configured: Xiaoyi cannot be selected as a cron push channel.",
       "discordGuildId": "Enter the Discord server ID (direct message still works without this)",
       "discordChannelId": "Enter the Discord server's channel ID (direct message still works without this)",
+      "slackBotToken": "Enter the xoxb bot token",
+      "slackAppToken": "Enter the xapp app token",
+      "slackChannelId": "Enter the fallback Slack channel ID",
+      "slackUserIds": "One Slack user ID per line (empty allows all users)",
+      "slackChannelIds": "One Slack channel ID per line (empty allows all channels)",
       "allowFrom": "One chatid/userid per line (comma-separated is also supported)"
     },
     "saved": {
@@ -633,6 +696,7 @@
       "dingtalk": "DingTalk settings saved",
       "telegram": "Telegram settings saved",
       "discord": "Discord settings saved",
+      "slack": "Slack settings saved",
       "whatsapp": "WhatsApp settings saved",
       "wecom": "WeCom settings saved",
       "wechat": "WeChat settings saved"
@@ -668,6 +732,7 @@
       "loadDingtalk": "Failed to load DingTalk settings",
       "loadTelegram": "Failed to load Telegram settings",
       "loadDiscord": "Failed to load Discord settings",
+      "loadSlack": "Failed to load Slack settings",
       "loadWhatsApp": "Failed to load WhatsApp settings",
       "loadWecom": "Failed to load WeCom settings",
       "loadWechat": "Failed to load WeChat settings",
@@ -690,6 +755,23 @@
       "appIdNotConfigured": "app_id not configured",
       "deleteApp": "Delete app",
       "addApp": "Add app"
+    }
+  },
+  "modelSetupGuide": {
+    "progress": "Step {{current}} of {{total}}",
+    "clickMore": "Select More to continue",
+    "acknowledge": "Got it",
+    "skip": "Skip",
+    "open": "Setup guide",
+    "steps": {
+      "1": {
+        "title": "Configure your first model",
+        "description": "Model settings are under More, in Configuration."
+      },
+      "2": {
+        "title": "Complete model configuration",
+        "description": "Enter the model name, API URL, API key, and model provider in Default model, then select Save."
+      }
     }
   },
   "config": {
@@ -798,9 +880,46 @@
       "teamLeaderPersona": "Genius project management expert, skilled at task decomposition and team coordination"
     },
     "keyHelp": {
-      "skillCreate": "Install `skill-creator` and `teamskill-creator` before enabling",
+      "apiBase": "Base URL of the model API. Must start with http:// or https://, e.g. https://api.openai.com/v1 (usually without a chat-specific path).",
+      "apiKey": "Auth key for this model service. For local unauthenticated servers, any placeholder (e.g. sk-1234) is fine. Not needed after OpenAI account OAuth.",
+      "model": "Provider model ID/name, e.g. gpt-4o or qwen-plus. Must be compatible with the selected provider.",
+      "modelName": "Provider model ID/name, e.g. gpt-4o or qwen-plus. The same name can have multiple entries with different providers/endpoints.",
+      "modelProvider": "Provider/protocol type that determines request format and auth (e.g. OpenAI-compatible, DashScope).",
+      "alias": "Optional display alias to distinguish multiple entries with the same model name. Leave empty to show the model name only.",
+      "reasoningLevel": "Reasoning intensity. Leave empty for the provider default. Only applies to models that support reasoning/thinking.",
+      "isDefault": "When multiple entries share the same model name, mark this one as the group default.",
+      "embedApiBase": "Base URL of the embedding API. Must start with http:// or https://.",
+      "embedApiKey": "Auth key for the embedding service.",
+      "embedModel": "Embedding model name used for memory retrieval and semantic search.",
+      "jinaApiKey": "Jina AI key for web reading/search-related features.",
+      "bochaApiKey": "Bocha Search API key for web search.",
+      "perplexityApiKey": "Perplexity API key for web Q&A/search.",
+      "serperApiKey": "Serper (Google Search API) key for web search.",
+      "githubToken": "GitHub personal access token for repository or GitHub-related features.",
+      "freeSearchDdg": "Enable free DuckDuckGo search (including DDG via Jina). Disable to turn off this source.",
+      "freeSearchBing": "Enable free Bing search. Disable to stop using Bing.",
+      "evolutionAutoScan": "Automatically detect signals that a skill can be evolved and suggest creating/updating skills.",
+      "skillCreate": "Install `skill-creator` and `teamskill-creator` before enabling automatic skill-creation suggestions.",
+      "memoryForbiddenDescription": "Describe sensitive types or rules that must not be written to memory, e.g. passwords, ID numbers, secrets.",
       "symphonyDynamicGraphEnabled": "When disabled, planning uses only the static graph. Existing runtime data is retained.",
-      "skillRetrievalBuildRootCategories": "Edit YAML/JSON containing tree_root_categories or root_categories directly. The page shows the default taxonomy as a reference; saving writes the config content itself, not an external file path."
+      "skillRetrievalBuildRootCategories": "Edit YAML/JSON containing tree_root_categories or root_categories directly. The page shows the default taxonomy as a reference; saving writes the config content itself, not an external file path.",
+      "skillRetrievalBuildMaxDepth": "Maximum depth of the skill taxonomy tree. Deeper trees take longer to build.",
+      "skillRetrievalBuildMaxWorkers": "Number of concurrent workers when building the skill tree.",
+      "skillRetrievalBuildMaxRetries": "Max retries after a failed build request.",
+      "skillRetrievalBuildTotalTimeout": "Total timeout for one full build (seconds). 0 means no limit.",
+      "skillRetrievalBuildClassificationBatchLimit": "Max skills sent to the model in one classification batch.",
+      "skillRetrievalMaxExposureDepth": "Max depth of the skill tree disclosed to the model in one retrieval.",
+      "proactiveMaxPerDay": "Max proactive recommendations per user per day to avoid excessive interruption.",
+      "proactiveMaxRounds": "Max recent dialogue rounds read on each check to infer recommendation context.",
+      "agentSkills": "Skills pre-attached to this Agent. If empty, skills are retrieved/invoked on demand.",
+      "teamLifecycle": "persistent: keep team state across sessions; temporary: may be recycled after the task.",
+      "teamTeammateMode": "Collaboration mode: build_mode or plan_mode.",
+      "teamSpawnMode": "How the team starts and spawns members.",
+      "teamEnablePermissions": "Whether tool safety guardrails (permissions) apply to this Team.",
+      "teamMemberName": "Internal member ID: must start with a lowercase letter, then lowercase letters, digits, or hyphens.",
+      "teamPersona": "Role persona and responsibilities; shapes behavior and division of labor.",
+      "teamPromptHint": "Extra prompt fragment injected into this member's system prompt.",
+      "teamAgentKey": "Name of an existing Agent from Multi-Agent Configuration."
     },
     "hideValue": "Hide value",
     "showValue": "Show value",
@@ -847,6 +966,7 @@
       "modelsLoadFailed": "Failed to refresh OpenAI model list",
       "noModelsAvailable": "No OpenAI models were returned. Refresh after authorization completes.",
       "configuredModelUnavailable": "Configured model \"{{model}}\" is not in the OpenAI account model list.",
+      "needLoginForModel": "Please connect your OpenAI account first.",
       "modelNameUseDropdown": "Use the OpenAI model dropdown below",
       "apiBaseManaged": "Managed by the OAuth provider. No manual change is needed.",
       "autoSaving": "Login completed. Saving configuration...",
@@ -970,10 +1090,24 @@
       "invalidValue": "Non-standard value; choosing a policy will rewrite it. Current: {{raw}}",
       "addTitle": "Add tool rule",
       "toolPlaceholder": "e.g. mcp_exec_command",
+      "toolGenericHelp": "Apply the selected policy (allow / ask / deny) to calls of this tool.",
       "duplicateTool": "Tool already exists: {{tool}}",
       "add": "Add",
       "loadFailed": "Failed to load tool permissions",
-      "saveFailed": "Save failed"
+      "saveFailed": "Save failed",
+      "toolHelp": {
+        "bash": "Run a shell command in the workspace and return its output (primary shell tool).",
+        "mcp_exec_command": "Run a cross-platform command in the project workspace (supports background, timeout, and output truncation).",
+        "create_terminal": "Create a terminal via ACP/IDE and run a command.",
+        "write_file": "Write or overwrite file contents; existing files usually need a prior read.",
+        "write": "Permission alias for write-style tools (often maps to write_file).",
+        "edit_file": "Exact string replace on an already-read file (diff edit).",
+        "search_replace": "Permission alias for edit-style tools (often maps to edit_file).",
+        "read_file": "Read file contents (text, images, PDF, notebooks, etc.).",
+        "read": "Permission alias for read-style tools (often maps to read_file).",
+        "acp_chat": "Send a message to an external ACP agent process from config.",
+        "grep": "Search for matching content in workspace files."
+      }
     },
     "proactive": {
       "title": "Proactive Recommendation",
@@ -1048,6 +1182,15 @@
       "noResults": "No matching templates found. Try a different keyword.",
       "noResultsJobs": "No matching tasks found. Try a different keyword."
     },
+    "pagination": {
+      "pageSize": "Rows per page",
+      "rangeInfo": "{{start}}-{{end}} of {{total}}",
+      "prev": "Previous page",
+      "next": "Next page"
+    },
+    "filter": {
+      "reset": "Reset"
+    },
     "table": {
       "name": "Name",
       "project": "Project",
@@ -1056,7 +1199,7 @@
       "timezone": "Timezone",
       "channel": "Channel",
       "actions": "Actions",
-      "noProject": "–",
+      "noProject": "-",
       "runNow": "Run now",
       "stop": "Stop",
       "edit": "Edit",
@@ -1098,9 +1241,12 @@
       "fieldEnabled": "Enabled",
       "placeholderInput": "Enter",
       "placeholderSelect": "Select",
+      "placeholderProject": "-",
       "placeholderEffectiveDate": "Select effective date",
       "missingFieldsHint": "Still needed: {{fields}}",
-      "scheduleAlreadyExpiredHint": "The selected run time is already in the past, please choose another"
+      "scheduleAlreadyExpiredHint": "The selected run time is already in the past, please choose another",
+      "charCount": "{{count}}/{{max}}",
+      "maxLengthReachedHint": "Maximum length reached ({{max}} characters)"
     },
     "schedule": {
       "title": "Schedule",
@@ -1164,7 +1310,10 @@
         "3": "week 3",
         "4": "week 4",
         "last": "last week"
-      }
+      },
+      "wakeOffset": "Wake early",
+      "wakeOffsetUnit": "minutes",
+      "wakeOffsetHelp": "Start the agent this many minutes before the scheduled push time; 0 means run at the scheduled time"
     },
     "modelPicker": {
       "configured": "Configured",
@@ -1224,7 +1373,7 @@
     },
     "placeholders": {
       "name": "Enter task name",
-      "cron": "7 fields (Quartz): second minute hour day month dow year. Ranges: second(0-59), minute(0-59), hour(0-23), day(1-31), month(1-12), dow(1-7 or ?), year(1970-2099 or *). Day and dow cannot both be specific. Examples: daily 9am='0 0 9 * * ? *'; one-shot 2026-04-29 17:30='0 30 17 29 4 ? 2026'",
+      "cron": "7 fields (Quartz): second minute hour day month dow year. Ranges: second(0-59), minute(0-59), hour(0-23), day(1-31), month(1-12), dow(0-6 or ?, 0=Sun, 1=Mon...6=Sat; also accepts SUN/MON/TUE/WED/THU/FRI/SAT, case-insensitive), year(1970-2099 or *). Day and dow can both be specific at once; the job then fires when either matches (e.g. the 15th OR every Monday — an OR, not an AND). Examples: daily 9am='0 0 9 * * ? *'; one-shot 2026-04-29 17:30='0 30 17 29 4 ? 2026'",
       "cronShort": "7 fields (Quartz): second minute hour day month dow year",
       "description": "Enter description",
       "wakeOffset": "Wake offset in seconds"
@@ -1254,7 +1403,9 @@
     "errors": {
       "loadJobs": "Failed to load scheduled tasks",
       "createFailed": "Failed to create task",
+      "createFailedWithReason": "Failed to create task: {{reason}}",
       "updateFailed": "Failed to update task",
+      "updateFailedWithReason": "Failed to update task: {{reason}}",
       "deleteFailed": "Failed to delete task",
       "toggleFailed": "Failed to update task status",
       "previewFailed": "Failed to preview next runs",
@@ -1267,12 +1418,10 @@
       "cronRequired": "Cron expression is required",
       "cronFormat": "Invalid cron format (must be 7 fields: second minute hour day month dow year)",
       "cronSecondOrMinute": "Invalid second/minute field (0-59, supports * / - ,)",
-      "cronSecondOrMinuteStep": "Second/minute step must divide 60",
       "cronHour": "Invalid hour field (0-23, supports * / - ,)",
-      "cronHourStep": "Hour step must divide 24",
       "cronDay": "Invalid day field (1-31, supports * ? - ,)",
       "cronMonth": "Invalid month field (1-12, supports * - ,)",
-      "cronWeek": "Invalid dow field (0-6, supports * ? - ,, 0=Sun, 1=Mon...6=Sat)",
+      "cronWeek": "Invalid dow field (0-6, supports * ? - ,, 0=Sun, 1=Mon...6=Sat; also accepts SUN/MON/TUE/WED/THU/FRI/SAT, case-insensitive)",
       "cronYear": "Invalid year field (1970-2099 or *)",
       "timezoneRequired": "Time zone is required",
       "targetRequired": "Target channel is required",
@@ -1280,32 +1429,20 @@
     }
   },
   "browser": {
-    "title": "Browser Service",
-    "subtitle": "Configure the browser path and start the browser service.",
+    "title": "Browser",
+    "subtitle": "Configure the Chrome path and display mode used by browser agents.",
     "refreshPath": "Refresh Path",
     "savePath": "Save Path",
-    "startService": "Start Browser Service",
-    "starting": "Starting...",
     "pathConfigHelp": "Chrome path configuration (open chrome://version in Chrome and copy the executable path)",
     "examplePath": "Example: /Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     "success": {
-      "pathSaved": "Chrome path saved",
-      "started": "Browser service started successfully"
-    },
-    "tooltips": {
-      "fillPath": "Enter a Chrome path first",
-      "savePath": "Save the Chrome path first"
+      "pathSaved": "Chrome path saved"
     },
     "showBrowser": "Show Browser",
     "showBrowserDesc": "Open a visible browser window when running browser tasks.",
     "errors": {
       "loadPath": "Failed to load Chrome path",
-      "savePath": "Failed to save Chrome path",
-      "pathRequired": "Chrome path cannot be empty",
-      "saveBeforeStart": "Save the Chrome path before starting the browser service",
-      "startFailed": "Failed to start browser service",
-      "startFailedWithCode": "Browser service failed to start, return code {{code}}",
-      "startFailedWithMessage": "Browser service failed to start: {{message}}"
+      "savePath": "Failed to save Chrome path"
     }
   },
   "logsPanel": {
@@ -1365,7 +1502,11 @@
         "success": "Available ({{count}})",
         "error": "Unavailable",
         "skipped": "Not configured"
-      }
+      },
+      "sourceFilterHelp": "SkillNet and ClawHub are shown by default. Click a source chip to filter results; keep at least one source selected.",
+      "sourceFilterToggle": "Click to filter this source",
+      "sourceFilterKeepOne": "Keep at least one source selected",
+      "noFilteredResults": "No results for the current source filter. Select another source."
     },
     "actions": {
       "install": "Install",
@@ -1388,6 +1529,9 @@
       "local": "Local",
       "project": "Project",
       "builtin": "Built-in",
+      "clawhub": "ClawHub",
+      "skillnet": "SkillNet",
+      "teamskillshub": "TeamSkillsHub",
       "unknown": "Unknown"
     },
     "sourceLabel": "Source",
@@ -1594,7 +1738,7 @@
     "evolution": {
       "closeAria": "Close skill experience dialog",
       "title": "Skill Experience: {{name}}",
-      "subtitle": "You can edit experience content (change.content), delete entries, and save.",
+      "subtitle": "Edit or delete experiences, then save to apply your changes.",
       "empty": "No experience entries",
       "deleteConfirm": "Delete this experience entry?",
       "actions": {
@@ -1603,12 +1747,29 @@
       "fields": {
         "id": "ID",
         "source": "Source",
-        "section": "Section",
-        "target": "Target",
+        "section": "Type",
+        "target": "Improvement target",
         "applied": "Applied",
-        "timestamp": "Timestamp",
+        "timestamp": "Created at",
         "context": "Context",
         "content": "Experience Content"
+      },
+      "values": {
+        "section": {
+          "instructions": "Usage instructions",
+          "examples": "Examples",
+          "troubleshooting": "Troubleshooting",
+          "workflow": "Workflow",
+          "constraints": "Constraints",
+          "roles": "Roles",
+          "collaboration": "Collaboration",
+          "scripts": "Scripts"
+        },
+        "target": {
+          "description": "Skill description",
+          "body": "Skill body",
+          "script": "Skill scripts"
+        }
       },
       "messages": {
         "saved": "Saved successfully"
@@ -1799,6 +1960,44 @@
     "waitingTasks": "Waiting Tasks",
     "messageQueue": "Message Queue",
     "parallelProgress": "Parallel tasks running ({{completedCount}}/{{total}} complete)",
+    "turnRunning": "Running",
+    "turnElapsed": "Took",
+    "workCompleted": "Completed {{duration}}",
+    "workCompletedFallback": "Completed",
+    "workCompletedBoth": "Completed {{thinking}} thoughts, {{tools}} tool calls · {{duration}}",
+    "workCompletedBothNoDuration": "Completed {{thinking}} thoughts, {{tools}} tool calls",
+    "workCompletedThinking": "Completed {{thinking}} thoughts · {{duration}}",
+    "workCompletedThinkingNoDuration": "Completed {{thinking}} thoughts",
+    "workCompletedTools": "Completed {{tools}} tool calls · {{duration}}",
+    "workCompletedToolsNoDuration": "Completed {{tools}} tool calls",
+    "workFailedToolsNoDuration": "{{tools}} tool calls failed",
+    "workOutcomePartial": "Partial failure",
+    "reasoning": {
+      "thinking": "Thinking…",
+      "thought": "Thought"
+    },
+    "toolAction": {
+      "write": "Write",
+      "read": "Read",
+      "edit": "Edit",
+      "delete": "Delete",
+      "move": "Move",
+      "rename": "Rename",
+      "list": "List",
+      "search": "Search",
+      "glob": "Find",
+      "webSearch": "Web search",
+      "fetch": "Fetch",
+      "run": "Run",
+      "runCode": "Run code",
+      "upload": "Upload",
+      "sendFile": "Send file",
+      "todoCreate": "Create todos",
+      "todoModify": "Update todos",
+      "todoList": "List todos",
+      "todoGet": "Get todo",
+      "skill": "View skill"
+    },
     "subtask": {
       "starting": "Starting...",
       "toolCall": "Calling {{tool}} (#{{count}})",
@@ -1812,17 +2011,25 @@
       "failed": "failed",
       "timeout": "Execution timed out",
       "running": "Running...",
+      "toolName": "Tool name",
       "arguments": "Arguments",
       "result": "Result",
       "truncated": "result truncated"
     },
     "toolGroup": {
-      "executed": "{{totalPairs}} tool calls executed",
+      "running": "Running {{label}}",
+      "completed": "Completed {{label}}",
+      "failed": "{{label}} failed",
+      "category": {
+        "file": "file operations",
+        "search": "searches",
+        "code": "code executions",
+        "system": "system calls",
+        "other": "tool calls"
+      },
       "sessionExecuted": "{{count}} session tasks completed",
       "sessionCompleted": "Session task completed",
       "sessionFailed": "Session failed",
-      "pending": "{{pendingCount}} running",
-      "timeout": "{{timeoutCount}} timed out",
       "latest": "↓ Latest"
     },
     "teamActivity": {
@@ -2135,7 +2342,8 @@
       "absolutePathError": "Enter an absolute path, for example /Users/name/work/project",
       "errors": {
         "pathExists": "This project path already exists. Choose another directory or start a new conversation from the existing project.",
-        "nameExists": "This project name already exists. Please choose another name."
+        "nameExists": "This project name already exists. Please choose another name.",
+        "pathMissing": "Project directory does not exist. Choose an existing directory."
       },
       "cancel": "Cancel",
       "confirm": "Confirm"

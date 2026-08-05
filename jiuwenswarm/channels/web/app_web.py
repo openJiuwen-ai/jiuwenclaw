@@ -35,7 +35,8 @@ from jiuwenswarm.agents.harness.team.bootstrap import configure_agent_teams_home
 from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.ws_diagnostics import describe_ws_exception, format_ws_diagnostics
 from jiuwenswarm.common.utils import get_agent_root_dir, get_logs_dir, \
-    get_agent_sessions_dir, get_root_dir, get_user_workspace_dir, is_package_installation, wait_for_tcp_port
+    get_agent_sessions_dir, get_root_dir, get_user_workspace_dir, is_package_installation, \
+    wait_for_tcp_port, SensitiveDataFilter
 from jiuwenswarm.server.runtime.session.session_history import history_exists, load_history_records
 
 configure_agent_teams_home()
@@ -136,6 +137,39 @@ def _generate_agent_data(project_root: Path) -> None:
         json.dumps(sorted_folder_data, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+def _parse_single_byte_range(
+    range_header: str,
+    file_size: int,
+) -> tuple[int, int] | None:
+    """Parse one HTTP byte range, returning inclusive start and end offsets."""
+    if file_size == 0 or not range_header.startswith("bytes=") or "," in range_header:
+        return None
+
+    range_value = range_header[6:]
+    if "-" not in range_value:
+        return None
+
+    start_text, end_text = range_value.split("-", 1)
+    if not start_text:
+        if not end_text.isascii() or not end_text.isdecimal():
+            return None
+        suffix_length = int(end_text)
+        if suffix_length <= 0:
+            return None
+        return max(0, file_size - suffix_length), file_size - 1
+
+    if not start_text.isascii() or not start_text.isdecimal():
+        return None
+    if end_text and (not end_text.isascii() or not end_text.isdecimal()):
+        return None
+
+    start = int(start_text)
+    end = int(end_text) if end_text else file_size - 1
+    if start >= file_size or end < start:
+        return None
+    return start, min(end, file_size - 1)
 
 
 class _SpaStaticHandler(SimpleHTTPRequestHandler):
@@ -933,24 +967,50 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             if not mime_type:
                 mime_type = "application/octet-stream"
 
-            self.send_response(200)
+            range_header = self.headers.get("Range")
+            byte_range = None
+            if range_header:
+                byte_range = _parse_single_byte_range(range_header, file_size)
+                if byte_range is None:
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{file_size}")
+                    self.end_headers()
+                    return
+
+            start, end = byte_range or (0, max(0, file_size - 1))
+            content_length = 0 if file_size == 0 else end - start + 1
+            self.send_response(206 if byte_range is not None else 200)
             self.send_header("Content-Type", mime_type)
-            self.send_header("Content-Length", str(file_size))
+            self.send_header("Content-Length", str(content_length))
+            self.send_header("Accept-Ranges", "bytes")
             encoded_name = quote(file_name, safe="")
+            disposition = (
+                "inline"
+                if query.get("inline", "").lower() in {"1", "true"}
+                else "attachment"
+            )
             self.send_header(
                 "Content-Disposition",
-                f"attachment; filename*=UTF-8''{encoded_name}",
+                f"{disposition}; filename*=UTF-8''{encoded_name}",
             )
             self.send_header("Cache-Control", "no-store")
+            if byte_range is not None:
+                self.send_header(
+                    "Content-Range",
+                    f"bytes {start}-{end}/{file_size}",
+                )
             self.end_headers()
 
             if self.command != "HEAD":
                 with open(file_path, "rb") as f:
-                    while True:
-                        chunk = f.read(65536)
+                    f.seek(start)
+                    remaining = content_length
+                    while remaining > 0:
+                        chunk = f.read(min(65536, remaining))
                         if not chunk:
                             break
                         self.wfile.write(chunk)
+                        remaining -= len(chunk)
         except Exception as exc:
             self.log_error("file download error: %s", exc)
             try:
@@ -1134,8 +1194,15 @@ def _setup_logger(logs_root: Path, log_level: str) -> logging.Logger:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
+    # ws-dev.log 会原样记录前端↔后端业务报文（含 config.validate 等 method 的
+    # model_params，其中带 api_key/api_base 等敏感字段），必须挂脱敏 filter，
+    # 否则 api_key 明文落盘。propagate 到根 logger 的 handler 虽已脱敏，
+    # 但本 handler 自身需独立挂载，才能保证 ws-dev.log 也脱敏。
+    privacy_filter = SensitiveDataFilter()
+
     file_handler = logging.FileHandler(logs_root / "ws-dev.log", mode="w", encoding="utf-8")
     file_handler.setFormatter(formatter)
+    file_handler.addFilter(privacy_filter)
     lg.addHandler(file_handler)
     return lg
 

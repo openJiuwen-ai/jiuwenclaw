@@ -1,5 +1,5 @@
 import { addError, addInfo } from "../helpers.js";
-import { CommandKind, type SlashCommand } from "../types.js";
+import { CommandKind, type CommandContext, type SlashCommand } from "../types.js";
 
 type SandboxFileEntry =
   | string
@@ -16,7 +16,17 @@ type SandboxEffectiveFiles = {
   deny_write?: SandboxFileEntry[];
 };
 
+type SandboxMount = {
+  source?: string;
+  target?: string;
+  readonly?: boolean;
+};
+
 type SandboxResponse = {
+  type?: string;
+  enabled?: boolean;
+  executor?: string;
+  mounts?: SandboxMount[];
   runtime?: SandboxRuntime;
   excluded_commands?: string[];
   files?: { allow?: SandboxFileEntry[]; deny?: SandboxFileEntry[] };
@@ -25,6 +35,11 @@ type SandboxResponse = {
   agent_recreated?: boolean;
   jiuwenbox_stopped?: boolean;
 };
+
+type SandboxProviderType = "yuanrong" | "jiuwenbox" | "unknown";
+
+let cachedProviderType: SandboxProviderType = "unknown";
+let sandboxCommandRef: SlashCommand | null = null;
 
 function tokenize(raw: string): string[] {
   const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
@@ -48,6 +63,37 @@ function formatFileEntry(entry: SandboxFileEntry, defaultAccess?: string): strin
     return access ? `${path} (${access})` : path;
   }
   return String(entry);
+}
+
+function formatMount(mount: SandboxMount): string {
+  const source = String(mount.source ?? "").trim();
+  const target = String(mount.target ?? source).trim();
+  const access = mount.readonly ? "ro" : "rw";
+  if (!source) return "";
+  return `${source} -> ${target} (${access})`;
+}
+
+function showYuanrongRuntime(
+  ctx: Parameters<SlashCommand["action"]>[0],
+  payload: SandboxResponse,
+): void {
+  const mounts = payload.mounts ?? [];
+  const mountText = mounts
+    .map(formatMount)
+    .filter(Boolean)
+    .join(", ");
+  const items = [
+    { label: "enabled", value: formatBool(payload.enabled) },
+    { label: "executor", value: String(payload.executor ?? "(unset)") },
+    { label: "mounts", value: mountText || "(empty)" },
+  ];
+  ctx.addItem(
+    addInfo(ctx.sessionId, "Sandbox status", "s", {
+      view: "kv",
+      title: "Sandbox Runtime",
+      items,
+    }),
+  );
 }
 
 function showRuntime(
@@ -87,7 +133,7 @@ function showRuntime(
   );
 }
 
-function usageText(): string {
+function jiuwenboxUsageText(): string {
   const lines = [
     "/sandbox                              show current runtime status",
     "/sandbox enable                       enter sandbox mode (spawns jiuwenbox + recreates agent)",
@@ -103,28 +149,100 @@ function usageText(): string {
   return lines.map((line, i) => (i === 0 ? line : `  ${line}`)).join("\n");
 }
 
+function yuanrongUsageText(): string {
+  return "sandbox.type=yuanrong: only /sandbox (view config: enabled, executor, mounts); no subcommands";
+}
+
+function applySandboxCommandPresentation(type: SandboxProviderType): void {
+  cachedProviderType = type;
+  const cmd = sandboxCommandRef;
+  if (!cmd) return;
+  if (type === "yuanrong") {
+    cmd.description = "View YuanRong sandbox config (enabled / executor / mounts)";
+    cmd.usage = "/sandbox";
+    cmd.example = "/sandbox";
+    cmd.takesArgs = false;
+    cmd.argGuide = undefined;
+  } else {
+    cmd.description = "Manage jiuwenbox sandbox mode";
+    cmd.usage = "/sandbox <enable|disable|exclude|files> ...";
+    cmd.example = "/sandbox enable";
+    cmd.takesArgs = true;
+  }
+}
+
+function providerTypeFromPayload(payload: SandboxResponse): SandboxProviderType {
+  return payload.type === "yuanrong" ? "yuanrong" : "jiuwenbox";
+}
+
+/**
+ * Probe sandbox.type once WS is connected so inline `/sandbox` hints hide
+ * jiuwenbox subcommands when type=yuanrong.
+ */
+export async function refreshSandboxCommandPresentation(
+  ctx: Pick<CommandContext, "request">,
+): Promise<SandboxProviderType> {
+  try {
+    const payload = await ctx.request<SandboxResponse>("command.sandbox", { sub: "status" });
+    const type = providerTypeFromPayload(payload);
+    applySandboxCommandPresentation(type);
+    return type;
+  } catch {
+    return cachedProviderType;
+  }
+}
+
 export function createSandboxCommand(): SlashCommand {
-  return {
+  const command: SlashCommand = {
     name: "sandbox",
     description: "Manage jiuwenbox sandbox mode",
     usage: "/sandbox <enable|disable|exclude|files> ...",
     example: "/sandbox enable",
     kind: CommandKind.BUILT_IN,
     takesArgs: true,
+    completion: async () => {
+      // YuanRong has no subcommands — never suggest enable/disable/files/….
+      if (cachedProviderType === "yuanrong") {
+        return [];
+      }
+      return ["enable", "disable", "exclude", "files", "help", "status"];
+    },
     action: async (ctx, args) => {
       const raw = (args ?? "").trim();
       const tokens = tokenize(raw);
       const sub = (tokens[0] ?? "").toLowerCase();
 
       try {
+        // Ensure presentation/meta matches server config before handling args.
+        if (cachedProviderType === "unknown") {
+          await refreshSandboxCommandPresentation(ctx);
+        }
+
+        if (cachedProviderType === "yuanrong") {
+          // Bare /sandbox only — no status/help/enable/… tokens.
+          if (raw) {
+            ctx.addItem(addError(ctx.sessionId, yuanrongUsageText()));
+            return;
+          }
+          const payload = await ctx.request<SandboxResponse>("command.sandbox", { sub: "status" });
+          applySandboxCommandPresentation(providerTypeFromPayload(payload));
+          showYuanrongRuntime(ctx, payload);
+          return;
+        }
+
         if (!sub || sub === "status" || sub === "show") {
           const payload = await ctx.request<SandboxResponse>("command.sandbox", { sub: "status" });
+          applySandboxCommandPresentation(providerTypeFromPayload(payload));
+          if (payload.type === "yuanrong") {
+            showYuanrongRuntime(ctx, payload);
+            return;
+          }
           showRuntime(ctx, payload.runtime, payload.effective_files);
           return;
         }
 
         if (sub === "help") {
-          ctx.addItem(addInfo(ctx.sessionId, usageText(), "s"));
+          ctx.addItem(addInfo(ctx.sessionId, jiuwenboxUsageText(), "s"));
           return;
         }
 
@@ -279,11 +397,17 @@ export function createSandboxCommand(): SlashCommand {
           return;
         }
 
-        ctx.addItem(addError(ctx.sessionId, `Unknown sub-command: ${sub}\n${usageText()}`));
+        ctx.addItem(addError(ctx.sessionId, `Unknown sub-command: ${sub}\n${jiuwenboxUsageText()}`));
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         ctx.addItem(addError(ctx.sessionId, `sandbox failed: ${message}`));
       }
     },
   };
+
+  sandboxCommandRef = command;
+  if (cachedProviderType !== "unknown") {
+    applySandboxCommandPresentation(cachedProviderType);
+  }
+  return command;
 }
