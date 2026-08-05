@@ -321,8 +321,11 @@ _DESIGN_RULES_DIGEST = (
     "4.5 图例防叠字：图例项 ≥5 个时建议设 `legend:{type:'scroll'}` 或 `legend:{orient:'vertical'}`；"
     "横向图例还必须检查文字长度：任一中文标签超过 6 个字或全部标签合计超过 12 个字时，"
     "优先在不改变含义的前提下缩短标签，或改为纵向图例；若仍横排，`itemGap` 至少 24，"
-    "并增大 `grid.top` 为图例预留空间；顶部横向图例与 yAxis.name 文字框的净间距必须 ≥18px，"
-    "若图表标题行已写单位，则清空重复的 yAxis.name；否则通过增大 `grid.top` 或移动图例分开两条通道\n"
+    "并增大 `grid.top` 为图例预留空间；顶部横向图例与 yAxis.name 文字框的净间距必须 ≥18px；"
+    "图表单位只能写在 ECharts `yAxis.name` / `xAxis.name`，禁止在图表卡片头部 HTML（含标题行右上角）"
+    "再写单位文案，否则与轴名称形成双单位；右上角 HTML 文本仅放时间范围、来源等非单位元数据；"
+    "双 Y 轴时左/右轴各自在 yAxis.name 写本单位；"
+    "若图例仍与轴名冲突，通过增大 `grid.top` 或移动图例分开两条通道\n"
     "4.6 图表分割线：`splitLine` 建议使用浅色虚线，避免实线在 PPTX 中过于突兀；颜色由风格文件决定\n"
     "5. 步骤/流程页 → 用 HTML/CSS 绘制节点+连线+文字，禁止纯文字描述\n"
     "6. 关键数字必须有放大数字卡片，结论必须有摘要高亮；"
@@ -1035,6 +1038,71 @@ def _has_chart_without_init(html: str) -> bool:
     if not _ECHARTS_LIB_RE.search(html):
         return False
     return not _ECHARTS_INIT_RE.search(html)
+
+
+# --- 图表卡片头部 HTML 写单位检测（与 ECharts 轴名称形成双单位） ---
+# 场景：LLM 在图表标题行右上角 span 又写了一遍 "单位：克/日"，与 setOption 中
+# yAxis.name 形成左上角轴名 + 右上角 HTML 单位的双单位。单位唯一来源应为
+# ECharts yAxis.name / xAxis.name，图表卡片头部 HTML 不得再写单位文案。
+_CHART_CONTAINER_DIV_RE = re.compile(
+    r'<div\b[^>]*\bid\s*=\s*["\'][^"\']*chart[^"\']*["\'][^>]*>',
+    re.IGNORECASE,
+)
+_CHART_HEADER_SPAN_RE = re.compile(
+    r'<span\b[^>]*>(?P<text>.*?)</span\s*>',
+    re.IGNORECASE | re.DOTALL,
+)
+# 以 "单位：" / "（单位：）" 开头的单位文案
+_CHART_UNIT_LABEL_RE = re.compile(
+    r'^[\s（(]*单位\s*[：:].+',
+    re.IGNORECASE,
+)
+# 复合单位子串（含 "/" 的量纲表达），用于 "中值·千卡/小时" 这类带前缀的变体；
+# 仅匹配带斜杠的复合量纲，避免误伤 "40%"、"1.2亿元" 等数据值 span
+_CHART_UNIT_TOKEN_RE = re.compile(
+    r'(?:千卡/(?:时|小时)|克/日|g/日|kg/日|吨/日?|元/(?:日|年|月|吨)'
+    r'|次/(?:日|周|月)|小时/天|分钟/天|克/毫升)',
+    re.IGNORECASE,
+)
+_CHART_HEADER_WINDOW = 400  # 图表标题行通常紧邻容器上方 0~400 字符内
+
+
+def _strip_chart_header_unit(html: str) -> str:
+    """剥离图表卡片头部 HTML 中的单位 span，避免与 ECharts yAxis.name 形成双单位。
+
+    单位最终应由 yAxis.name / xAxis.name 承载。仅移除图表容器 div 前 400 字符窗口内、
+    文本为"单位：xx"前缀或含复合量纲（如 千卡/小时、克/日）的 span；不处理纯数字
+    数据值 span，避免误伤数据卡片单位 chip。为确定性后置修复，不触发 LLM 重写。
+    """
+    chart_starts = [m.start() for m in _CHART_CONTAINER_DIV_RE.finditer(html)]
+    if not chart_starts:
+        return html
+
+    stripped = 0
+
+    def _is_chart_header_unit(match: re.Match[str]) -> bool:
+        nonlocal stripped
+        span_end = match.end()
+        if not any(span_end <= cs <= span_end + _CHART_HEADER_WINDOW for cs in chart_starts):
+            return False
+        text = re.sub(r'\s+', '', re.sub(r'<[^>]+>', '', match.group('text')))
+        if not text:
+            return False
+        if _CHART_UNIT_LABEL_RE.match(text) or _CHART_UNIT_TOKEN_RE.search(text):
+            stripped += 1
+            return True
+        return False
+
+    new_html = _CHART_HEADER_SPAN_RE.sub(
+        lambda m: "" if _is_chart_header_unit(m) else m.group(0),
+        html,
+    )
+    if stripped:
+        logger.info(
+            "[P8.1] 剥离图表卡片头部重复单位 span %d 处（单位改由 yAxis.name 承载）",
+            stripped,
+        )
+    return new_html
 
 
 # 检测 CSS Grid 布局使用（html-to-pptx 不支持 Grid）
@@ -1893,7 +1961,7 @@ _REWRITE_ACTIONS = {
         "同时按图例项数量和文字长度处理：任一中文标签超过 6 个字或总长度超过 12 个字时，"
         "优先在不改变含义的前提下缩短标签，或改为 `legend:{orient:'vertical'}`；"
         "若仍横排，将 `itemGap` 调到至少 24；"
-        "标题行已标注单位时清空重复的 yAxis.name，否则增大 `grid.top` 或移动图例，"
+        "增大 `grid.top` 或移动图例分开两条通道，"
         "确保图例文字框底边与轴名称文字框顶边至少相隔 18px；不得缩小字号掩盖"
     ),
     "图表数据标签重叠风险": (
@@ -2742,6 +2810,7 @@ class PageWorkerNode(PlanNode):
         )
         html = _fix_echarts_svg_renderer(html)
         html = _strip_unsupported_fullpage_overlays(html)
+        html = _strip_chart_header_unit(html)
         return html
 
     async def _write_file(self, path: str, content: str) -> bool:
