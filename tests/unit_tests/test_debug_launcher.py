@@ -115,6 +115,121 @@ def test_build_debug_log_path_avoids_collision(debug_root: Path):
 
 
 # --------------------------------------------------------------------------
+# Access-URL banner relay
+# --------------------------------------------------------------------------
+
+
+# Real shape of start_services._print_port_banner output, including the partial
+# banner it prints first and the refreshed one once everything is reachable.
+_PARTIAL_BANNER = """\
+[start_services] ✓ Web UI ready (port 6173)
+
+================================================================
+  服务启动中，端口信息如下：
+  ✓ Web UI                 http://localhost:6173
+  … Gateway HTTP           http://localhost:20001
+================================================================
+
+"""
+
+_READY_BANNER = """\
+[start_services] ✓ Gateway HTTP ready (port 20001)
+
+================================================================
+  服务已启动，端口信息如下：
+  ✓ Web UI                 http://localhost:6173
+  ✓ Gateway HTTP           http://localhost:20001
+================================================================
+
+2026-08-05 11:48:17.399 INFO jiuwenswarm.gateway: something else
+"""
+
+
+def test_extract_port_banners_finds_each_block():
+    banners = debug_launcher._extract_port_banners(_PARTIAL_BANNER + _READY_BANNER)
+
+    assert len(banners) == 2
+    assert "服务启动中" in banners[0][0]
+    assert "服务已启动" in banners[1][0]
+    # Rows are kept, separators and trailing log lines are not.
+    assert banners[1][1:] == [
+        "  ✓ Web UI                 http://localhost:6173",
+        "  ✓ Gateway HTTP           http://localhost:20001",
+    ]
+
+
+def test_extract_port_banners_ignores_unrelated_log():
+    assert debug_launcher._extract_port_banners("just some log lines\n") == []
+
+
+def test_wait_for_port_banner_returns_ready_banner(tmp_path: Path):
+    log_path = tmp_path / "swarm.log"
+    log_path.write_text(_PARTIAL_BANNER + _READY_BANNER, encoding="utf-8")
+
+    with patch.object(debug_launcher, "is_process_alive", return_value=True):
+        banner = debug_launcher._wait_for_port_banner(log_path, 4242, timeout=1.0)
+
+    assert banner is not None
+    assert "服务已启动" in banner[0]
+    assert any("6173" in line for line in banner)
+
+
+def test_wait_for_port_banner_appears_after_a_delay(tmp_path: Path):
+    """The banner is written while we are already polling."""
+    log_path = tmp_path / "swarm.log"
+    log_path.write_text("starting...\n", encoding="utf-8")
+
+    polls = {"count": 0}
+
+    def _sleep(_seconds: float) -> None:
+        polls["count"] += 1
+        if polls["count"] == 3:
+            log_path.write_text(_PARTIAL_BANNER + _READY_BANNER, encoding="utf-8")
+
+    with patch.object(debug_launcher, "is_process_alive", return_value=True):
+        with patch.object(debug_launcher.time, "sleep", side_effect=_sleep):
+            banner = debug_launcher._wait_for_port_banner(log_path, 4242, timeout=30.0)
+
+    assert banner is not None
+    assert "服务已启动" in banner[0]
+
+
+def test_wait_for_port_banner_stops_when_service_dies(tmp_path: Path):
+    """A crashed service must not keep us waiting for a banner that never comes."""
+    log_path = tmp_path / "swarm.log"
+    log_path.write_text("boom\n", encoding="utf-8")
+
+    with patch.object(debug_launcher, "is_process_alive", return_value=False):
+        with patch.object(debug_launcher.time, "sleep") as sleeper:
+            banner = debug_launcher._wait_for_port_banner(log_path, 4242, timeout=30.0)
+
+    assert banner is None
+    sleeper.assert_not_called()
+
+
+def test_wait_for_port_banner_falls_back_to_partial(tmp_path: Path):
+    """If only the "starting" banner ever lands, report it rather than nothing."""
+    log_path = tmp_path / "swarm.log"
+    log_path.write_text(_PARTIAL_BANNER, encoding="utf-8")
+
+    alive = iter([True, False])
+    with patch.object(debug_launcher, "is_process_alive", side_effect=lambda _p: next(alive)):
+        with patch.object(debug_launcher.time, "sleep", return_value=None):
+            banner = debug_launcher._wait_for_port_banner(log_path, 4242, timeout=30.0)
+
+    assert banner is not None
+    assert "服务启动中" in banner[0]
+
+
+def test_wait_for_port_banner_handles_missing_log(tmp_path: Path):
+    with patch.object(debug_launcher, "is_process_alive", return_value=False):
+        assert (
+            debug_launcher._wait_for_port_banner(tmp_path / "nope.log", 4242, timeout=1.0)
+            is None
+        )
+
+
+# --------------------------------------------------------------------------
 # PID-reuse guard
 # --------------------------------------------------------------------------
 
@@ -200,6 +315,12 @@ def _patch_pipeline(*, run_codes: list[int], spawn_pid: int | None = 9999):
         patch.object(debug_launcher.platform, "system", return_value="Linux"),
         patch.object(debug_launcher, "is_process_alive", return_value=True),
         patch.object(debug_launcher.time, "sleep", return_value=None),
+        # Real banner tailing polls the clock; short-circuit it here.
+        patch.object(
+            debug_launcher,
+            "_wait_for_port_banner",
+            return_value=["  服务已启动，端口信息如下：", "  ✓ Web UI  http://localhost:6173"],
+        ),
     ]
     return patches, calls
 
@@ -217,13 +338,18 @@ def _exit(patches):
         item.stop()
 
 
-def test_run_debug_happy_path(debug_root: Path):
+def test_run_debug_happy_path(debug_root: Path, caplog: pytest.LogCaptureFixture):
     patches, calls = _patch_pipeline(run_codes=[0, 0, 0])
     _enter(patches)
     try:
-        assert run_debug() == 0
+        with caplog.at_level("INFO"):
+            assert run_debug() == 0
     finally:
         _exit(patches)
+
+    # The resolved access URLs must reach the terminal, not just the log file:
+    # start_services shifts the whole port group when 5173 is taken.
+    assert any("http://localhost:6173" in record.message for record in caplog.records)
 
     executed = [cmd for cmd, _cwd in calls]
     assert executed[0] == ["/usr/bin/npm", "install"]
@@ -299,6 +425,69 @@ def test_run_debug_reports_immediate_child_exit(debug_root: Path):
     sweeper.assert_called_once()
 
 
+def test_run_debug_skip_build_omits_npm_steps(debug_root: Path):
+    """--skip-build must drop both npm steps but keep uv sync and the launch."""
+    (debug_launcher.WEB_DEV_DIR / "dist").mkdir()
+    (debug_launcher.WEB_DEV_DIR / "dist" / "index.html").write_text("x", encoding="utf-8")
+
+    patches, calls = _patch_pipeline(run_codes=[0])
+    _enter(patches)
+    try:
+        assert run_debug(skip_build=True) == 0
+    finally:
+        _exit(patches)
+
+    executed = [cmd for cmd, _cwd in calls]
+    assert executed[0] == ["/usr/bin/uv", "sync"]
+    assert executed[1] == [sys.executable, "-m", "jiuwenswarm.start_services", "all"]
+    assert not any("npm" in part for cmd in executed for part in cmd)
+    assert read_debug_state() is not None
+
+
+def test_run_debug_skip_build_requires_existing_dist(debug_root: Path):
+    """Skipping the build without a dist would start a web server that dies."""
+    patches, calls = _patch_pipeline(run_codes=[0])
+    _enter(patches)
+    try:
+        assert run_debug(skip_build=True) == 1
+    finally:
+        _exit(patches)
+
+    assert calls == []
+    assert read_debug_state() is None
+
+
+def test_run_debug_skip_build_rejects_empty_dist(debug_root: Path):
+    """An empty dist directory is as unusable as a missing one."""
+    (debug_launcher.WEB_DEV_DIR / "dist").mkdir()
+
+    patches, calls = _patch_pipeline(run_codes=[0])
+    _enter(patches)
+    try:
+        assert run_debug(skip_build=True) == 1
+    finally:
+        _exit(patches)
+
+    assert calls == []
+
+
+def test_run_debug_default_still_builds(debug_root: Path):
+    """Without the flag the frontend is rebuilt even when a dist already exists."""
+    (debug_launcher.WEB_DEV_DIR / "dist").mkdir()
+    (debug_launcher.WEB_DEV_DIR / "dist" / "index.html").write_text("x", encoding="utf-8")
+
+    patches, calls = _patch_pipeline(run_codes=[0, 0, 0])
+    _enter(patches)
+    try:
+        assert run_debug() == 0
+    finally:
+        _exit(patches)
+
+    executed = [cmd for cmd, _cwd in calls]
+    assert executed[0] == ["/usr/bin/npm", "install"]
+    assert executed[1] == ["/usr/bin/npm", "run", "build"]
+
+
 def test_run_debug_requires_source_checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(debug_launcher, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(debug_launcher, "WEB_DEV_DIR", tmp_path / "missing")
@@ -339,11 +528,14 @@ def test_run_debug_refuses_when_already_running(debug_root: Path):
 def test_run_debug_clears_stale_state(debug_root: Path):
     write_debug_state(_state(pid=777))
     patches, _calls = _patch_pipeline(run_codes=[0, 0, 0])
-    # Stale check needs a dead PID, the post-spawn check needs a live one.
-    alive = iter([False, True])
-    patches[4] = patch.object(
-        debug_launcher, "is_process_alive", side_effect=lambda _pid: next(alive)
-    )
+    # Stale check needs a dead PID; every check after the spawn needs a live one.
+    checks = {"count": 0}
+
+    def _alive(_pid: int) -> bool:
+        checks["count"] += 1
+        return checks["count"] > 1
+
+    patches[4] = patch.object(debug_launcher, "is_process_alive", side_effect=_alive)
     _enter(patches)
     try:
         assert run_debug() == 0
@@ -537,7 +729,24 @@ def test_dispatch_routes_debug_mode(monkeypatch: pytest.MonkeyPatch):
     args = _parse_args()
     with patch.object(debug_launcher, "run_debug", return_value=0) as runner:
         assert _dispatch_action(args) == 0
-    runner.assert_called_once_with()
+    runner.assert_called_once_with(skip_build=False)
+
+
+def test_dispatch_passes_skip_build(monkeypatch: pytest.MonkeyPatch):
+    from jiuwenswarm.start_services import _dispatch_action
+
+    monkeypatch.setattr(sys, "argv", ["jiuwenswarm-start", "debug", "--skip-build"])
+    args = _parse_args()
+    assert _validate_args(args) is None
+    with patch.object(debug_launcher, "run_debug", return_value=0) as runner:
+        assert _dispatch_action(args) == 0
+    runner.assert_called_once_with(skip_build=True)
+
+
+def test_skip_build_rejected_outside_debug_mode(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(sys, "argv", ["jiuwenswarm-start", "all", "--skip-build"])
+    args = _parse_args()
+    assert _validate_args(args) == 1
 
 
 def test_stop_arg_parsing_default_timeout():

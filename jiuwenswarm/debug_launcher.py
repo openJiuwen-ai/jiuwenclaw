@@ -11,6 +11,9 @@ loop that developers otherwise type by hand:
 4. spawn ``jiuwenswarm-start all`` detached in the background, with stdout and
    stderr redirected to a timestamped ``swarm-<YYYYmmdd-HHMMSS>.log``
 
+``--skip-build`` drops steps 1-2 and reuses the existing ``frontend/dist``,
+which is the common case when only Python code changed.
+
 Step 4 records the background PID in a small JSON state file so that
 ``jiuwenswarm-stop`` can terminate exactly that service later. The service is
 spawned into its own process group / session, and stopping signals the whole
@@ -72,6 +75,20 @@ _SPAWN_SETTLE_SECONDS = 2.0
 
 # Default grace period given to the background service on stop.
 DEFAULT_STOP_TIMEOUT = 15.0
+
+# Marker that start_services._print_port_banner puts in its title line. The
+# banner is the only place the *resolved* ports appear (they shift when the
+# default group is taken), and redirecting the service output to a file would
+# otherwise hide it, so debug mode tails the log for it and echoes it back.
+BANNER_TITLE_MARKER = "端口信息如下"
+
+# Title fragment used once every service is reachable; until then the banner is
+# reprinted with a "starting" title and some rows still marked as pending.
+BANNER_READY_MARKER = "服务已启动"
+
+# How long to tail the log for the access-URL banner before giving up. Slightly
+# above the 45s worst case that _wait_for_services_ready itself allows.
+BANNER_WAIT_SECONDS = 60.0
 
 
 @dataclass(frozen=True)
@@ -402,20 +419,93 @@ def _spawn_background_service(log_path: Path) -> DebugState | None:
     )
 
 
-def run_debug() -> int:
-    """Run the full debug pipeline: npm install, npm build, uv sync, background start.
+def _extract_port_banners(text: str) -> list[list[str]]:
+    """Pull every access-URL banner block out of the captured service log.
+
+    ``start_services._print_port_banner`` frames its output between two rules of
+    ``=`` characters, with the title line first::
+
+        ================================================================
+          服务已启动，端口信息如下：
+          ✓ Web UI                 http://localhost:6173
+        ================================================================
+
+    Args:
+        text: Log content read so far.
 
     Returns:
-        Exit code: 0 when the background service is up, non-zero otherwise.
+        One list of lines (title + rows, separators stripped) per banner found,
+        in the order they were printed.
     """
-    error = _check_source_checkout()
-    if error is not None:
-        return error
+    banners: list[list[str]] = []
+    lines = text.splitlines()
 
-    error = _check_no_running_debug_service()
-    if error is not None:
-        return error
+    for index, line in enumerate(lines):
+        if BANNER_TITLE_MARKER not in line:
+            continue
+        block = [line.rstrip()]
+        for follow in lines[index + 1:]:
+            if set(follow.strip()) == {"="}:
+                break
+            block.append(follow.rstrip())
+        banners.append(block)
 
+    return banners
+
+
+def _wait_for_port_banner(
+    log_path: Path,
+    pid: int,
+    timeout: float = BANNER_WAIT_SECONDS,
+) -> list[str] | None:
+    """Tail the service log until it announces the ports it actually bound.
+
+    Debug mode redirects the service output to a file, so without this the user
+    never sees which ports the service settled on. That matters because
+    ``start_services`` silently shifts the whole port group when the default one
+    is taken - the Web UI can land on 6173 instead of 5173, and the launch looks
+    broken when you open the address you expected.
+
+    Args:
+        log_path: Log file the background service writes to.
+        pid: PID of the background service, polled so a crash ends the wait.
+        timeout: Seconds to wait for the banner.
+
+    Returns:
+        The most complete banner seen (preferring the "all ready" one), or None
+        if none appeared before the timeout / before the service died.
+    """
+    deadline = time.time() + timeout
+    latest: list[str] | None = None
+
+    while time.time() < deadline:
+        try:
+            text = log_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+
+        banners = _extract_port_banners(text)
+        if banners:
+            latest = banners[-1]
+            # The "all ready" banner is the final one; stop as soon as it lands.
+            if any(BANNER_READY_MARKER in line for line in latest):
+                return latest
+
+        if not is_process_alive(pid):
+            return latest
+
+        time.sleep(0.5)
+
+    return latest
+
+
+def _build_frontend() -> int:
+    """Run ``npm install`` followed by ``npm run build`` in the frontend project.
+
+    Returns:
+        0 on success, otherwise the failing step's exit code (1 if npm is
+        missing). Messages are printed to the terminal.
+    """
     npm_install = _resolve_npm_command(["install"])
     if npm_install is None:
         logging.info("[debug] ERROR: 'npm' not found on PATH.")
@@ -432,9 +522,59 @@ def run_debug() -> int:
         logging.info("[debug] ERROR: 'npm' disappeared from PATH.")
         return 1
 
-    code = _run_step("npm run build", npm_build, WEB_DEV_DIR)
-    if code != 0:
-        return code
+    return _run_step("npm run build", npm_build, WEB_DEV_DIR)
+
+
+def _check_prebuilt_frontend() -> int | None:
+    """Verify a previous build left artifacts behind before skipping the build.
+
+    ``app_web`` serves ``frontend/dist`` and hard-exits when it is missing, so
+    skipping the build without it produces a service that dies on startup. Catch
+    that here, where the message can name the flag that caused it.
+
+    Returns:
+        None when the built frontend is present, 1 otherwise.
+    """
+    dist_dir = WEB_DEV_DIR / "dist"
+    if dist_dir.is_dir() and any(dist_dir.iterdir()):
+        return None
+
+    logging.info(f"[debug] ERROR: 前端产物不存在: {dist_dir}")
+    logging.info(
+        "[debug] --skip-build 跳过了构建，但没有可用的 dist；请先不带该参数跑一次 "
+        "'jiuwenswarm-start debug' 完成构建。"
+    )
+    return 1
+
+
+def run_debug(skip_build: bool = False) -> int:
+    """Run the debug pipeline: frontend build, uv sync, background start.
+
+    Args:
+        skip_build: Skip ``npm install`` + ``npm run build`` and reuse the
+            existing ``frontend/dist``. Useful when only Python code changed -
+            the frontend build dominates the runtime of this command.
+
+    Returns:
+        Exit code: 0 when the background service is up, non-zero otherwise.
+    """
+    error = _check_source_checkout()
+    if error is not None:
+        return error
+
+    error = _check_no_running_debug_service()
+    if error is not None:
+        return error
+
+    if skip_build:
+        error = _check_prebuilt_frontend()
+        if error is not None:
+            return error
+        logging.info("[debug] ==> 跳过前端构建 (--skip-build)，复用已有 dist")
+    else:
+        code = _build_frontend()
+        if code != 0:
+            return code
 
     uv_path = shutil.which("uv")
     if uv_path is None:
@@ -468,6 +608,9 @@ def run_debug() -> int:
 
     write_debug_state(state)
 
+    logging.info("[debug] 等待服务就绪...")
+    banner = _wait_for_port_banner(log_path, state.pid)
+
     logging.info("")
     logging.info("=" * 64)
     logging.info("  调试服务已在后台启动")
@@ -475,8 +618,24 @@ def run_debug() -> int:
     logging.info(f"  日志: {log_path}")
     logging.info(f"  跟踪: tail -f {log_path}")
     logging.info("  停止: jiuwenswarm-stop")
+    if banner:
+        # Echo the service's own banner verbatim: the ports it reports are the
+        # ones it actually bound, which are not always the defaults.
+        logging.info("-" * 64)
+        for line in banner:
+            logging.info(line)
+    else:
+        logging.info("-" * 64)
+        logging.info("  ⚠️  未能读到端口信息，请查看日志确认服务状态和实际端口。")
     logging.info("=" * 64)
     logging.info("")
+
+    if not is_process_alive(state.pid):
+        logging.info("[debug] ERROR: 后台服务已退出，请查看日志。")
+        clear_debug_state()
+        _stop_process_tree(state.pid, timeout=5.0, assume_group_leader=True)
+        return 1
+
     return 0
 
 

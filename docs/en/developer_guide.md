@@ -133,7 +133,18 @@ It runs, in order:
 4. Starts all services in the background, redirecting terminal output to
    `logs/swarm-<timestamp>.log`
 
-The command returns immediately while the services keep running. Follow the log with:
+When only Python code changed, the frontend build (steps 1-2) is wasted time -
+pass `--skip-build` to reuse the existing `frontend/dist`:
+
+```bash
+uv run jiuwenswarm-start debug --skip-build
+```
+
+If `frontend/dist` is missing or empty the flag errors out and tells you to run a
+full build first, rather than starting a service whose UI would 404.
+
+The terminal then echoes the ports the services actually bound, and they keep
+running in the background. Follow the log with:
 
 ```bash
 tail -f logs/swarm-<timestamp>.log

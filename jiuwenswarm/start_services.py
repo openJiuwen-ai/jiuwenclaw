@@ -941,7 +941,8 @@ def _parse_args() -> argparse.Namespace:
             "Start mode: all (default), web, app, dev, or debug. "
             "debug runs npm install + npm run build + uv sync, then starts the "
             "services in the background with output redirected to a timestamped "
-            "logs/swarm-<timestamp>.log; stop it with 'jiuwenswarm-stop'."
+            "logs/swarm-<timestamp>.log; stop it with 'jiuwenswarm-stop', and "
+            "pass --skip-build to reuse the existing frontend build."
         ),
     )
 
@@ -950,6 +951,16 @@ def _parse_args() -> argparse.Namespace:
         "--name",
         metavar="<name>",
         help="Start a named instance from instances.yaml.",
+    )
+
+    # debug-mode only: reuse the existing frontend build
+    parser.add_argument(
+        "--skip-build",
+        action="store_true",
+        help=(
+            "debug mode only: skip 'npm install' + 'npm run build' and reuse the "
+            "existing frontend/dist. Use when only Python code changed."
+        ),
     )
 
     # Management function parameters (mutually exclusive group)
@@ -998,6 +1009,12 @@ def _validate_args(args: argparse.Namespace) -> int | None:
         )
         return 1
 
+    # --skip-build only means anything for the mode that builds the frontend.
+    if args.skip_build and args.mode != "debug":
+        logging.info("[start_services] ERROR: --skip-build only applies to 'debug' mode")
+        logging.info("[start_services] Run 'jiuwenswarm-start debug --skip-build'.")
+        return 1
+
     return None
 
 
@@ -1034,7 +1051,7 @@ def _dispatch_action(args: argparse.Namespace) -> int:
     # debug: rebuild frontend + sync deps, then run the services in background
     if args.mode == "debug":
         from jiuwenswarm.debug_launcher import run_debug
-        return run_debug()
+        return run_debug(skip_build=args.skip_build)
 
     # --name <name>: start named instance
     if args.name:

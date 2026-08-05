@@ -131,7 +131,15 @@ uv run jiuwenswarm-start debug
 3. 在仓库根目录执行 `uv sync`
 4. 后台启动全部服务，终端输出重定向到 `logs/swarm-<时间戳>.log`
 
-启动后命令立即返回，服务在后台继续运行。跟踪日志：
+只改了 Python 代码时，前端构建（1、2 两步）是纯浪费——加 `--skip-build` 跳过，复用已有的 `frontend/dist`：
+
+```bash
+uv run jiuwenswarm-start debug --skip-build
+```
+
+如果 `frontend/dist` 不存在或为空，该参数会直接报错并提示你先完整跑一次，避免起来一个前端 404 的服务。
+
+启动后终端会回显服务实际绑定的端口，服务在后台继续运行。跟踪日志：
 
 ```bash
 tail -f logs/swarm-<时间戳>.log
