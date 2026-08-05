@@ -37,6 +37,14 @@ def _cron_routing_from_params(params: dict[str, Any] | None) -> tuple[str | None
 
     return extract_routing_triple(params or {})
 
+# openjiuwen_runtime ServiceManager._fail 在资源打满时下发 legacy chunk：
+# payload={"error_code": 100001|100002, "message": "..."}，无 event_type / error。
+# 若不规范化，Channel 会按空 chat.final 下发，前端表现为「发消息后直接结束」。
+_RUNTIME_CAPACITY_ERROR_CODES = frozenset({"100001", "100002"})
+_RUNTIME_CAPACITY_USER_MESSAGES = {
+    "100001": "Request exceeds the maximum connection limit. Please try again later.",
+    "100002": "Service failed to start. Please try again later.",
+}
 
 _ACP_CHANNEL_ID = "acp"
 _ACP_ORIGINAL_SESSION_ID_KEY = "acp_original_session_id"
@@ -1470,6 +1478,61 @@ class MessageHandler(ABC):
         return merged
 
     @staticmethod
+    def _normalize_runtime_failure_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
+        """将 runtime 资源拒绝等失败 payload 规范化为 chat.error。
+
+        ServiceManager._fail 常见形态::
+            {"error_code": 100001, "message": "服务并发度超过上限，消息请求失败"}
+
+        返回规范化后的 payload；若不是此类失败则返回 None。
+        """
+        if not isinstance(payload, dict) or not payload:
+            return None
+
+        event_type_str = payload.get("event_type")
+        code_raw = payload.get("code", payload.get("error_code"))
+        code_s = str(code_raw).strip() if code_raw is not None else ""
+        err_text = payload.get("error")
+        if err_text in (None, ""):
+            err_text = payload.get("message")
+        err_s = str(err_text).strip() if err_text not in (None, "") else ""
+
+        is_capacity = code_s in _RUNTIME_CAPACITY_ERROR_CODES
+        already_chat_error = isinstance(event_type_str, str) and event_type_str.strip() == "chat.error"
+        if not is_capacity and not already_chat_error and not err_s:
+            return None
+        if not is_capacity and not already_chat_error and not payload.get("error"):
+            # 仅有 message、无 error/error_code 时不误判为业务错误（避免吞掉普通文本）
+            if code_s == "":
+                return None
+
+        if is_capacity:
+            user_msg = (
+                _RUNTIME_CAPACITY_USER_MESSAGES.get(code_s)
+                or err_s
+                or "Request exceeds the maximum connection limit. Please try again later."
+            )
+        else:
+            user_msg = err_s or "Request failed. Please try again later."
+
+        normalized: dict[str, Any] = {
+            "event_type": "chat.error",
+            "error": user_msg,
+        }
+        if code_s:
+            normalized["code"] = code_s
+            normalized["error_code"] = code_raw if code_raw is not None else code_s
+        if err_s and err_s != user_msg:
+            normalized["message"] = err_s
+        # 保留其余字段（如 detail），但避免覆盖已规范化的关键字段
+        for key, value in payload.items():
+            if key in ("event_type", "error", "code", "error_code", "message"):
+                continue
+            if key not in normalized:
+                normalized[key] = value
+        return normalized
+
+    @staticmethod
     def _response_to_message(
         resp: "AgentResponse | AgentResponseChunk",
         session_id: str | None,
@@ -1493,6 +1556,10 @@ class MessageHandler(ABC):
         # 检查 payload 中是否包含 event_type，如果包含则创建事件消息
         event_type = None
         if payload and isinstance(payload, dict):
+            normalized = MessageHandler._normalize_runtime_failure_payload(payload)
+            if normalized is not None:
+                payload = normalized
+                ok = False
             event_type_str = payload.get("event_type")
             if isinstance(event_type_str, str):
                 try:
@@ -1505,7 +1572,7 @@ class MessageHandler(ABC):
                         session_id=session_id,
                         params={},
                         timestamp=time.time(),
-                        ok=True,
+                        ok=False if event_type == EventType.CHAT_ERROR else True,
                         payload=payload,
                         event_type=event_type,
                         metadata=metadata,
@@ -1738,10 +1805,13 @@ class MessageHandler(ABC):
         group_digital_avatar = bool(metadata.get("group_digital_avatar", False)) if metadata else False
         enable_memory = bool(metadata.get("enable_memory", True)) if metadata else True
 
-        # 从 payload 中提取 event_type（如果存在）
+        # 从 payload 中提取 event_type（如果存在）；runtime 资源拒绝需规范化为 chat.error
         event_type = None
         payload = dict(chunk.payload) if chunk.payload and isinstance(chunk.payload, dict) else {}
         if payload:
+            normalized = MessageHandler._normalize_runtime_failure_payload(payload)
+            if normalized is not None:
+                payload = normalized
             event_type_str = payload.get("event_type")
             if isinstance(event_type_str, str):
                 try:
@@ -1786,6 +1856,13 @@ class MessageHandler(ABC):
         if payload.get("content") not in (None, ""):
             return False
         if payload.get("error") not in (None, ""):
+            return False
+        # runtime 资源拒绝：error_code/message 必须下发，不能当哨兵吞掉
+        if payload.get("error_code") not in (None, ""):
+            return False
+        if payload.get("code") not in (None, ""):
+            return False
+        if payload.get("message") not in (None, ""):
             return False
         return payload.get("is_complete") is True and set(payload.keys()) <= {"is_complete"}
 
