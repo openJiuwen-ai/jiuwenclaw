@@ -17,6 +17,8 @@ from .search import (
     dense_search,
     precompute_embeddings,
     embed_single,
+    hybrid_search,
+    search as dispatch_search,
 )
 from .summary import (
     parameters_to_text,
@@ -25,6 +27,13 @@ from .summary import (
     build_tool_summary,
 )
 from .corpus import filter_executable
+from .bm25_search import (
+    tokenize as bm25_tokenize,
+    BM25Okapi,
+    BM25Index,
+    build_bm25_index,
+    bm25_search,
+)
 
 __all__ = [
     "ensure_embedding_model",
@@ -40,4 +49,12 @@ __all__ = [
     "safe_serialize_parameters",
     "build_tool_summary",
     "filter_executable",
+    # BM25 + hybrid (v2)
+    "bm25_tokenize",
+    "BM25Okapi",
+    "BM25Index",
+    "build_bm25_index",
+    "bm25_search",
+    "hybrid_search",
+    "dispatch_search",
 ]

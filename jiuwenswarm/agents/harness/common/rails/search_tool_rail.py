@@ -159,9 +159,13 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         )
         self._top_k_max = int(getattr(config, "tool_retrieval_top_k_max", 3))
         self._min_sim = float(getattr(config, "tool_retrieval_min_sim", 0.35))
+        self._method = str(getattr(config, "tool_retrieval_method", "hybrid")).lower()
         self._embedding_model = None
         self._cached_tool_embeddings: Dict[str, Any] = {}
         self._cached_tool_sig: frozenset = frozenset()
+        # BM25 index + sig cache (pure-text, ghost-probe-free → sig is safe).
+        self._bm25_index = None
+        self._cached_bm25_sig: frozenset = frozenset()
         self._search_corpus: List = []
         self._executable_sig: frozenset = frozenset()
         self._ensure_embedding_model()
@@ -180,6 +184,7 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         )
         await asyncio.to_thread(self._build_executable_corpus, ctx)
         await asyncio.to_thread(self._precompute_tool_embeddings)
+        await asyncio.to_thread(self._build_bm25_index)
 
     async def before_model_call(self, ctx):
         session = getattr(ctx, "session", None)
@@ -483,12 +488,15 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         name_hits = self._lookup_tool_by_name(query, detail_level=detail_level)
         if name_hits:
             return name_hits[:limit]
-        if self._embedding_model is None:
-            return []
-        if not self._cached_tool_embeddings:
+        # v2: no early-return on embedding None — _search degrades to BM25.
+        # Only precompute embeddings lazily if dense/hybrid is the method AND
+        # the model is actually available.
+        if self._embedding_model is not None and not self._cached_tool_embeddings:
             await asyncio.to_thread(self._precompute_tool_embeddings)
+        if self._bm25_index is None and self._method != "semantic":
+            await asyncio.to_thread(self._build_bm25_index)
 
-        results = await asyncio.to_thread(self._dense_search, query, limit, detail_level)
+        results = await asyncio.to_thread(self._search, query, limit, detail_level)
 
         query_lower = query.lower()
         result_names = {str(r.get("name", "")).lower() for r in results}
@@ -515,10 +523,33 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         self._cached_all_tool_infos = live_infos
         self._search_corpus = list(live_infos)
         self._cached_tool_sig = frozenset()
+        self._cached_bm25_sig = frozenset()
         await asyncio.to_thread(self._precompute_tool_embeddings)
-        return await asyncio.to_thread(self._dense_search, query, limit, detail_level)
+        await asyncio.to_thread(self._build_bm25_index)
+        return await asyncio.to_thread(self._search, query, limit, detail_level)
+
+    def _search(self, query, limit, detail_level):
+        """Dispatch to dense / bm25 / hybrid by ``self._method``.
+
+        Degradation is handled inside ``tool_retrieval.search``: embedding
+        unavailable → BM25 (never []). The old ``_dense_search`` is kept
+        below for reference/tests but is no longer the call path.
+        """
+        return tool_retrieval.dispatch_search(
+            query,
+            self._search_corpus or self._cached_all_tool_infos,
+            method=self._method,
+            embedding_model=self._embedding_model,
+            embedding_cache=self._cached_tool_embeddings,
+            bm25_index=self._bm25_index,
+            limit=limit,
+            detail_level=detail_level,
+            desc_cap=self._desc_cap,
+            min_sim=self._min_sim,
+        )
 
     def _dense_search(self, query, limit, detail_level):
+        """Legacy dense-only path. Kept for tests; production uses _search."""
         return tool_retrieval.dense_search(
             query,
             self._search_corpus or self._cached_all_tool_infos,
@@ -636,6 +667,27 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
             self._embedding_model,
             self._cached_tool_embeddings,
             desc_cap=self._desc_cap,
+        )
+
+    def _build_bm25_index(self):
+        """Build/refresh the BM25 index over the search corpus.
+
+        Sig cache is safe here: BM25 is a pure-text index over haystacks (no
+        ghost-probe timing like the executable-corpus filter), so a name-set
+        sig correctly identifies an unchanged corpus. Kept separate from
+        ``_cached_tool_sig`` (dense) because their invalidation conditions
+        differ — BM25 only depends on text, dense depends on model + text.
+        """
+        all_tools = self._search_corpus or self._cached_all_tool_infos
+        if not all_tools:
+            self._bm25_index = None
+            return
+        sig = frozenset(str(getattr(t, "name", "") or "") for t in all_tools)
+        if sig == self._cached_bm25_sig and self._bm25_index is not None:
+            return
+        self._cached_bm25_sig = sig
+        self._bm25_index = tool_retrieval.build_bm25_index(
+            all_tools, desc_cap=self._desc_cap,
         )
 
     # ------------------------------------------------------------------

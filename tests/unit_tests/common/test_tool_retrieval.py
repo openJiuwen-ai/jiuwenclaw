@@ -29,11 +29,15 @@ import pytest
 from jiuwenswarm.common.tool_retrieval import (
     VERB_INTENT,
     build_tool_summary,
+    build_bm25_index,
+    bm25_search,
     dense_search,
+    dispatch_search,
     embed_single,
     embed_texts,
     filter_executable,
     haystack_for,
+    hybrid_search,
     parameters_summary,
     parameters_to_text,
     precompute_embeddings,
@@ -426,3 +430,188 @@ def test_embed_texts_passthrough():
     out = embed_texts(m, ["a b", "c"])
     assert len(out) == 2
     assert all(isinstance(v, np.ndarray) for v in out)
+
+
+# ===========================================================================
+# v2 phase 1: BM25 + hybrid + degradation chain
+# ===========================================================================
+
+
+def _ranking_names(results):
+    """Helper: extract ordered tool names from a search result list."""
+    return [r.get("name", "") for r in results]
+
+
+# ---------------------------------------------------------------------------
+# BM25 basic ranking
+# ---------------------------------------------------------------------------
+
+
+def test_bm25_ranks_by_term_frequency():
+    """A doc with more query-term occurrences should rank higher."""
+    tools = [
+        MockTool("read_file", "read a file read read"),   # 3x "read"
+        MockTool("write_file", "write a file"),            # 0x "read"
+        MockTool("read_log", "read the log"),              # 1x "read"
+    ]
+    idx = build_bm25_index(tools, desc_cap=64)
+    results = bm25_search("read", tools, idx, limit=3, detail_level=1)
+    names = _ranking_names(results)
+    # read_file (3 occurrences) > read_log (1) > write_file (0, filtered out)
+    assert names[0] == "read_file"
+    assert "write_file" not in names  # no term overlap → score 0 → dropped
+
+
+def test_bm25_idf_downweights_common_terms():
+    """A term present in all docs still scores (idf floors > 0), but a
+    discriminating term ranks its only-containing doc higher."""
+    tools = [
+        MockTool("a", "common rare"),
+        MockTool("b", "common"),
+        MockTool("c", "common"),
+    ]
+    idx = build_bm25_index(tools, desc_cap=64)
+    # "rare" only in doc a → a must rank first
+    results = bm25_search("common rare", tools, idx, limit=3, detail_level=1)
+    assert _ranking_names(results)[0] == "a"
+
+
+def test_bm25_empty_corpus_or_query():
+    assert bm25_search("", [], None, limit=3, detail_level=1) == []
+    assert bm25_search("q", [], None, limit=3, detail_level=1) == []
+    # query with no tokens → []
+    tools = [MockTool("t", "d")]
+    idx = build_bm25_index(tools, desc_cap=64)
+    assert bm25_search("   ", tools, idx, limit=3, detail_level=1) == []
+
+
+def test_bm25_builds_index_on_the_fly_when_none():
+    """bm25_search with bm25_index=None builds on the fly (slow path)."""
+    tools = [MockTool("read_file", "read a file")]
+    results = bm25_search("read", tools, None, limit=3, detail_level=1, desc_cap=64)
+    assert _ranking_names(results) == ["read_file"]
+
+
+# ---------------------------------------------------------------------------
+# Degradation chain: embedding None → BM25, never []
+# ---------------------------------------------------------------------------
+
+
+def test_dispatch_degrades_to_bm25_when_embedding_none():
+    """method=hybrid + embedding_model=None → must NOT return [] (the bug we
+    are fixing); it falls back to BM25 and still returns relevant tools.
+    """
+    tools = [
+        MockTool("read_file", "read a file"),
+        MockTool("write_file", "write a file"),
+    ]
+    results = dispatch_search(
+        "read", tools,
+        method="hybrid",
+        embedding_model=None,          # embedding unavailable
+        embedding_cache={},
+        bm25_index=None,
+        limit=3, detail_level=1,
+        desc_cap=64, min_sim=0.35,
+    )
+    assert results, "hybrid must degrade to BM25, not return []"
+    assert _ranking_names(results)[0] == "read_file"
+
+
+def test_dispatch_semantic_degrades_to_bm25_when_embedding_none():
+    """method=semantic + model None → BM25 (not the old paralysis)."""
+    tools = [MockTool("read_file", "read a file")]
+    results = dispatch_search(
+        "read", tools,
+        method="semantic",
+        embedding_model=None,
+        embedding_cache={},
+        bm25_index=None,
+        limit=3, detail_level=1,
+        desc_cap=64, min_sim=0.35,
+    )
+    assert results, "semantic must degrade to BM25, not return []"
+    assert _ranking_names(results)[0] == "read_file"
+
+
+def test_dispatch_bm25_works_without_model():
+    """method=bm25 never depends on the embedding model."""
+    tools = [MockTool("read_file", "read a file")]
+    results = dispatch_search(
+        "read", tools,
+        method="bm25",
+        embedding_model=None,
+        embedding_cache={},
+        bm25_index=None,
+        limit=3, detail_level=1,
+        desc_cap=64, min_sim=0.35,
+    )
+    assert _ranking_names(results) == ["read_file"]
+
+
+def test_dispatch_unknown_method_falls_back_to_hybrid():
+    """An unrecognized method string logs + falls back to hybrid, not crash."""
+    tools = [MockTool("read_file", "read a file")]
+    results = dispatch_search(
+        "read", tools,
+        method="nonsense",
+        embedding_model=FakeModel(),
+        embedding_cache={},
+        bm25_index=build_bm25_index(tools, desc_cap=64),
+        limit=3, detail_level=1,
+        desc_cap=64, min_sim=0.0,
+    )
+    # hybrid path runs; read_file appears (dense alone finds it via FakeModel)
+    assert "read_file" in _ranking_names(results)
+
+
+# ---------------------------------------------------------------------------
+# hybrid_search: RRF fusion
+# ---------------------------------------------------------------------------
+
+
+def test_hybrid_rrf_returns_relevant_tools():
+    """hybrid returns results (both rankers run). For a simple read_file query
+    the target tool is found. With model available the dense leg contributes."""
+    tools = [
+        MockTool("read_file", "read a file"),
+        MockTool("write_file", "write a file"),
+    ]
+    idx = build_bm25_index(tools, desc_cap=64)
+    model = FakeModel()
+    cache = {}
+    precompute_embeddings(tools, model, cache, desc_cap=64)
+    results = hybrid_search(
+        "read", tools, model, cache, idx,
+        limit=3, detail_level=1, desc_cap=64, min_sim=0.0,
+    )
+    assert results, "hybrid must return results"
+    assert "read_file" in _ranking_names(results)
+
+
+def test_hybrid_degrades_to_bm25_when_dense_returns_empty():
+    """If the dense leg returns nothing (no candidate above min_sim / model
+    fails), hybrid must still return BM25 results — the degradation guard."""
+    tools = [
+        MockTool("read_file", "read a file"),
+        MockTool("write_file", "write a file"),
+    ]
+    idx = build_bm25_index(tools, desc_cap=64)
+    # No cache precompute + FakeModel → dense leg runs but may return few;
+    # hybrid must still surface read_file via BM25 regardless.
+    results = hybrid_search(
+        "read", tools, FakeModel(), {}, idx,
+        limit=3, detail_level=1, desc_cap=64, min_sim=0.9,  # high min_sim → dense likely empty
+    )
+    assert "read_file" in _ranking_names(results)
+
+
+def test_hybrid_both_legs_empty_returns_empty():
+    tools = [MockTool("read_file", "read a file")]
+    idx = build_bm25_index(tools, desc_cap=64)
+    # query term not in any haystack → BM25 empty; dense with high min_sim → empty
+    results = hybrid_search(
+        "zzznotfound", tools, FakeModel(), {}, idx,
+        limit=3, detail_level=1, desc_cap=64, min_sim=0.99,
+    )
+    assert results == []
