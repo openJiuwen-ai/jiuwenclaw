@@ -737,7 +737,8 @@ def _handle_statusline_prompt_command(query: str) -> Tuple[str, str]:
 
 def build_user_prompt(content: str | dict, files: dict, channel: str, language: str, *,
     trusted_dirs: list[str] | None = None, metadata: dict[str, Any] | None = None,
-    skills: list[str] | None = None) -> str:
+    skills: list[str] | None = None,
+    supplementary_info: str | None = None) -> str:
     """Build user prompt for the agent.
 
     Args:
@@ -746,6 +747,7 @@ def build_user_prompt(content: str | dict, files: dict, channel: str, language: 
             （content 原样保留，如 "帮我用 /doc写文档"）。
             若为 None，回退到从 content 文本解析 /skills use（兼容 IM/CLI 老路径），
             同样不剥离 content，仅提取 skill 名。
+        supplementary_info: 可选补充信息（协作摘要、系统注入说明等），写入用户消息 JSON。
     """
     from jiuwenswarm.server.runtime.a2ui.integration import build_user_prompt_if_a2ui_event
 
@@ -805,6 +807,8 @@ def build_user_prompt(content: str | dict, files: dict, channel: str, language: 
             msg_data["sender"] = sender_name
     if channel not in ["cron", "heartbeat"]:
         msg_data["files_updated_by_user"] = json.dumps(files, ensure_ascii=False)
+    if supplementary_info:
+        msg_data["supplementary_info"] = supplementary_info
     final_prompt = interaction_prefix + prompt + json.dumps(msg_data, ensure_ascii=False)
     if interaction_prefix:
         logger.info(
@@ -828,6 +832,8 @@ def build_user_prompt(content: str | dict, files: dict, channel: str, language: 
         user_message_context["skills_to_use"] = skills_to_use
     if trusted_dirs:
         user_message_context["trusted_dirs"] = json.dumps(trusted_dirs, ensure_ascii=False)
+    if supplementary_info:
+        user_message_context["supplementary_info"] = supplementary_info
 
     # 仿 Claude Code statusline-setup: 把指令文本直接嵌入 prompt
     base_prompt = interaction_prefix + prompt + json.dumps(user_message_context, ensure_ascii=False)
@@ -1124,6 +1130,12 @@ class JiuWenSwarm:
         if isinstance(query, InteractiveInput):
             final_query = query
         else:
+            _supp_raw = params.get("supplementary_info")
+            supplementary: str | None = None
+            if isinstance(_supp_raw, str):
+                stripped = _supp_raw.strip()
+                if stripped:
+                    supplementary = stripped
             answers = params.get("answers", [])
             if answers:
                 request_id = params.get("request_id", "")
@@ -1147,6 +1159,7 @@ class JiuWenSwarm:
                         trusted_dirs=trusted_dirs,
                         metadata=request.metadata,
                         skills=skills,
+                        supplementary_info=supplementary,
                     )
             else:
                 final_query = build_user_prompt(
@@ -1157,6 +1170,7 @@ class JiuWenSwarm:
                     trusted_dirs=trusted_dirs,
                     metadata=request.metadata,
                     skills=skills,
+                    supplementary_info=supplementary,
                 )
                 # 调试日志：确认 /statusline prompt 注入是否生效
                 if isinstance(query, str) and "/statusline" in query:

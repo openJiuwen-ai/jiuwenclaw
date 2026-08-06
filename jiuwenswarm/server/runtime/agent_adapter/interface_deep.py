@@ -6801,6 +6801,19 @@ class JiuWenSwarmDeepAdapter:
         workspace: str | None = None
         project_dir: str | None = None
         supports_user_interaction: bool = True
+        request_system_prompt: str | None = None
+
+    @staticmethod
+    def _extract_request_system_prompt(request: AgentRequest | None) -> str | None:
+        """Read non-empty request.params.system_prompt."""
+        if request is None or not isinstance(request.params, dict):
+            return None
+        raw = request.params.get("system_prompt")
+        if isinstance(raw, str):
+            value = raw.strip()
+            if value:
+                return value
+        return None
 
     async def configure_session_runtime(
         self,
@@ -6918,6 +6931,9 @@ class JiuWenSwarmDeepAdapter:
             self._runtime_prompt_rail.set_model_name(self._resolve_model_name())
             self._runtime_prompt_rail.set_mode(runtime_config.mode)
             self._runtime_prompt_rail.set_session_id(runtime_config.session_id)
+            self._runtime_prompt_rail.set_request_system_prompt(
+                runtime_config.request_system_prompt if bind_request else None
+            )
         if self._response_prompt_rail:
             self._response_prompt_rail.set_channel(resolved_channel)
         # PermissionInterruptRail: per-request trusted_dirs 注入，使 external_directory
@@ -9308,6 +9324,7 @@ class JiuWenSwarmDeepAdapter:
                     supports_user_interaction=inputs.get(
                         "supports_user_interaction", True
                     ),
+                    request_system_prompt=self._extract_request_system_prompt(request),
                 )
             )
             inputs = dict(inputs)
@@ -9614,6 +9631,7 @@ class JiuWenSwarmDeepAdapter:
                     supports_user_interaction=inputs.get(
                         "supports_user_interaction", True
                     ),
+                    request_system_prompt=self._extract_request_system_prompt(request),
                 )
             )
 
@@ -9848,6 +9866,7 @@ class JiuWenSwarmDeepAdapter:
                     supports_user_interaction=inputs.get(
                         "supports_user_interaction", True
                     ),
+                    request_system_prompt=self._extract_request_system_prompt(request),
                 )
             )
             if self._stream_event_rail is not None:
