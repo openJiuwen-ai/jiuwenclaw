@@ -122,6 +122,8 @@ _STRUCTURAL_TEMPLATE_PAGE_TYPES: dict[str, str] = {
 _DEFAULT_GEN_RETRY_ROUND = 1
 _MAX_PAGE_GENERATION_ATTEMPTS = 3
 _UNFILLED_PLACEHOLDER_RE = re.compile(r"\{\{[A-Z][A-Z0-9_]*\}\}")
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+_CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 _CONTENT_PAGE_TYPES = frozenset({
     "content",
     "trend",
@@ -204,8 +206,15 @@ def _resolve_style_page_template_path(
 
 
 def _has_unfilled_placeholders(html: str) -> bool:
-    """检测是否残留 Stage 6 软门禁关心的 {{PLACEHOLDER}}。"""
-    return bool(_UNFILLED_PLACEHOLDER_RE.search(html or ""))
+    """检测是否残留 Stage 6 软门禁关心的 {{PLACEHOLDER}}。
+
+    先剥离 HTML 注释和 CSS 注释再检测，避免模板注释中出现的
+    {{PLACEHOLDER}} 文本被误判为未填槽（如 ending-template.html
+    theme-contract 中的 CSS 注释）。
+    """
+    stripped = _HTML_COMMENT_RE.sub("", html or "")
+    stripped = _CSS_COMMENT_RE.sub("", stripped)
+    return bool(_UNFILLED_PLACEHOLDER_RE.search(stripped))
 
 
 def _build_structural_template_fill_prompt(
@@ -258,6 +267,11 @@ def _build_structural_template_fill_prompt(
                 "3. `{{PAGE_CONTENT}}` 依据风格文件设计目录正文；目录条目的页码/导航标记必须"
                 "**全部统一有或全部统一无**，禁止部分条目有、部分没有\n"
                 "4. 禁止在模板未定义位置发明「四章·十二节」「章数汇总大号数字」等装饰元数据\n"
+                "5. **条目编号规则**（按编号格式区分，参考大纲全文中各内容页的 `### P{N}:` 编号）：\n"
+                "   - 若采用 `P0X` / `PX` 页码编码格式（如 `P03`、`P05`）：序号必须对应内容页在"
+                "outline 中的实际页码（如第一个内容页为 P3，则第一条为 `P03` 而非 `P01`）\n"
+                "   - 若采用纯数字或中文数字格式（如 `01`、`1`、`一`、`壹`）：从 `1`/`一` 开始"
+                "的自然数递增编号，不对应实际页码\n"
             ),
             "section": (
                 "1. 已预铺 `custom/section-template.html` 脚手架：逐字保留硬约束与 theme-contract\n"

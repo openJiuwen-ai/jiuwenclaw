@@ -71,6 +71,16 @@ _P21_SLOT_SYSTEM_PROMPT = ("""你是 PPT 需求槽位分析助手。从用户消
   当用户在消息中提到"用 XX 模板""用模板包""template pack"等，且给出了目录路径时提取该路径。
   路径可能是 Windows 格式（如 D:\\path\\to\\pack）或 Unix 格式（/path/to/pack）。
   仅提取用户明确给出的路径，不要编造。
+- structural_page_request: 用户是否要求中间结构页（目录页/章节页/分隔页）。字符串，取值：
+  "none"（默认，未要求任何中间结构页）；
+  "agenda"（用户要求目录页/议程页）；
+  "section"（用户要求章节页/章节分隔页/分节页）；
+  "chapter"（用户要求 PART 页/章首页/Chapter）；
+  "auto"（用户要求章节页但未指定类型，由大纲规划阶段自动选择 section 或 chapter）。
+  提取规则：仅当用户明确表达时才提取，例如"加章节页""每章一个章节页""加 3 页章节分隔""需要目录页""保留我大纲里的章节页""加 PART 页""加章首页"。
+  普通章节结构、素材中的标题层级、模型自己觉得需要分节，都不构成触发条件 -> "none"。
+  用户指定数量时（如"加 2 页章节页"），数量信息保留在 structural_page_count 中。
+- structural_page_count: 用户指定的中间结构页数量（整数；未指定或"每章一个"等需自动计算时为 null）。
 - missing_fields: 仍缺失且需用户补充的字段名数组，取值限于 topic / page_count / audience / presentation_purpose / style_id
 - need_ask_style: 用户未明确风格时为 true，否则 false
 
@@ -88,6 +98,7 @@ _P21_SLOT_SYSTEM_PROMPT = ("""你是 PPT 需求槽位分析助手。从用户消
 必须只输出 JSON："""
     + '{"topic":"","page_count":null,"audience":"","presentation_purpose":"",'
     + '"style_id":"","style_description":"","pack_dir":"",'
+    + '"structural_page_request":"none","structural_page_count":null,'
     + '"missing_fields":[],"need_ask_style":true}')
 
 _TOPIC_SUGGEST_COUNT = 4
@@ -369,6 +380,20 @@ def _merge_slot_payload(
     elif not preserve_topic:
         inputs.setdefault("missing_fields", [])
 
+    # 结构页需求提取
+    _VALID_STRUCTURAL_REQUESTS = frozenset({"none", "agenda", "section", "chapter", "auto"})
+    spr = payload.get("structural_page_request")
+    if isinstance(spr, str) and spr.strip().lower() in _VALID_STRUCTURAL_REQUESTS:
+        inputs["structural_page_request"] = spr.strip().lower()
+    else:
+        inputs.setdefault("structural_page_request", "none")
+
+    spc = payload.get("structural_page_count")
+    if isinstance(spc, int) and spc > 0:
+        inputs["structural_page_count"] = spc
+    else:
+        inputs.setdefault("structural_page_count", None)
+
     need_ask_style = payload.get("need_ask_style")
     if isinstance(need_ask_style, bool) and not inputs.get("pack_dir"):
         inputs["need_ask_style"] = need_ask_style
@@ -411,6 +436,8 @@ def _parse_slot_analysis_response(raw: str, *, preserve_topic: bool) -> dict[str
             "style_id": "",
             "style_description": "",
             "pack_dir": "",
+            "structural_page_request": "none",
+            "structural_page_count": None,
             "missing_fields": default_missing,
             "need_ask_style": True,
         }
@@ -1493,11 +1520,22 @@ class RequirementCollectNode(PlanNode):
                 if slot == "page_count" and v is not None:
                     ctx[slot] = v
                 elif slot == "style_id" and isinstance(v, str) and v.strip():
-                    # 归一化 style_id（如"华为风格"→"business-classic"），支持 style_description 回退
+                    # 归一化 style_id（如"华为风格"->"business-classic"），支持 style_description 回退
                     normalized = _resolve_style_id(v, pre_slots.get("style_description"))
                     ctx[slot] = normalized if normalized else v.strip()
                 elif isinstance(v, str) and v.strip():
                     ctx[slot] = v
+            # 结构页需求透传
+            _spr = pre_slots.get("structural_page_request")
+            if isinstance(_spr, str) and _spr.strip().lower() in frozenset({"none", "agenda", "section", "chapter", "auto"}):
+                ctx["structural_page_request"] = _spr.strip().lower()
+            else:
+                ctx.setdefault("structural_page_request", "none")
+            _spc = pre_slots.get("structural_page_count")
+            if isinstance(_spc, int) and _spc > 0:
+                ctx["structural_page_count"] = _spc
+            else:
+                ctx.setdefault("structural_page_count", None)
             await self.skip_subplan(self.sub_plans[0], ctx, message="slots pre-filled from query")
             await self.skip_subplan(self.sub_plans[1], ctx, message="slots pre-filled from query")
             await self.skip_subplan(self.sub_plans[2], ctx, message="slots pre-filled from query")
@@ -1519,6 +1557,19 @@ class RequirementCollectNode(PlanNode):
                     ctx[slot] = value
                 elif isinstance(value, str) and value.strip() and not ctx.get(slot):
                     ctx[slot] = value
+            # 结构页需求透传
+            if not ctx.get("structural_page_request"):
+                _spr = pre_slots.get("structural_page_request")
+                if isinstance(_spr, str) and _spr.strip().lower() in frozenset({"none", "agenda", "section", "chapter", "auto"}):
+                    ctx["structural_page_request"] = _spr.strip().lower()
+                else:
+                    ctx.setdefault("structural_page_request", "none")
+            if not ctx.get("structural_page_count"):
+                _spc = pre_slots.get("structural_page_count")
+                if isinstance(_spc, int) and _spc > 0:
+                    ctx["structural_page_count"] = _spc
+                else:
+                    ctx.setdefault("structural_page_count", None)
 
         await self.execute_subplan(self.sub_plans[0], ctx)
 
