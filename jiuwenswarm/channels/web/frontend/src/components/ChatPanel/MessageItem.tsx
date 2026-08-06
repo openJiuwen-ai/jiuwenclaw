@@ -250,6 +250,7 @@ export const MessageItem = memo(function MessageItem({
     mediaItems,
     fileItems,
     isGoalObjectiveMessage,
+    isCommandOutput,
   } = message;
   const [hasAutoSpoken, setHasAutoSpoken] = useState(false);
   const [isAudioPlaying, setIsAudioPlaying] = useState(false);
@@ -399,6 +400,23 @@ export const MessageItem = memo(function MessageItem({
 
   // 系统消息
   if (role === 'system') {
+    // slash 命令输出：居中、无边框无底色、浅灰小字、命令名等宽。
+    // 用 isCommandOutput 标记路由，不影响其他 system 消息。
+    if (isCommandOutput) {
+      const newlineIdx = content.indexOf('\n');
+      const command = newlineIdx >= 0 ? content.slice(0, newlineIdx) : content;
+      const output = newlineIdx >= 0 ? content.slice(newlineIdx + 1).trim() : '';
+      return (
+        <div className="flex justify-center my-2 animate-fade-in">
+          <div className="w-[85%] max-w-[44rem] px-2 py-0.5 text-xs leading-5 text-left text-text-muted">
+            <span className="font-mono">{command}</span>
+            {output && (
+              <span className="mt-0.5 block whitespace-pre-wrap break-words">{output}</span>
+            )}
+          </div>
+        </div>
+      );
+    }
  	     // 检查是否为 chat.session_result 事件
  	     if (content && content.startsWith('chat.session_result:')) {
  	       console.log('chat.session_result event:', content);

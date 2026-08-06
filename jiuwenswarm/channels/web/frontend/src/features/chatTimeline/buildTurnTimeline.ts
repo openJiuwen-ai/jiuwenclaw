@@ -466,10 +466,12 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
         }
       }
     } else if (item.type === 'message') {
-      hasActivity = true;
-      // timestamp：首包/落盘时间（排序用）；completedAt：chat.final 收尾（live 流式合并时才有）
-      acc(toTimestampMs(item.message.timestamp), true);
-      acc(toTimestampMs(item.message.completedAt), true);
+      if (!item.message.isCommandOutput) {
+        hasActivity = true;
+        // timestamp：首包/落盘时间（排序用）；completedAt：chat.final 收尾（live 流式合并时才有）
+        acc(toTimestampMs(item.message.timestamp), true);
+        acc(toTimestampMs(item.message.completedAt), true);
+      }
     } else if (item.type === 'reasoning') {
       hasActivity = true;
       hasWork = true;
