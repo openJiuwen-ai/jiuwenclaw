@@ -6,7 +6,7 @@
 
 import React, { useRef, useEffect, useLayoutEffect, useCallback, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ArrowRight, CheckCircle2, ClipboardList, Copy, Info, LoaderCircle, Share2, Sparkles, X } from 'lucide-react';
+import { Activity, ArrowRight, CheckCircle2, ClipboardList, Copy, Info, LoaderCircle, Share2, Sparkles, X } from 'lucide-react';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { useChatStore, useHarnessStore, useSessionStore, useTodoStore } from '../../stores';
@@ -18,6 +18,8 @@ import { InputArea, type InputAreaHandle } from './InputArea';
 import ChatOverviewIcon from '../../assets/chat-overview.svg?react';
 import PanelCollapseIcon from '../../assets/panel-collapse.svg?react';
 import lineUpIcon from '../../assets/lineUp.svg';
+import HeartbeatPanel from '../HeartbeatPanel';
+import { NEW_CONVERSATION_ID } from '../../multi-session/state/newConversationLifecycle';
 import loadSendIcon from '../../assets/load-send.svg';
 import editIcon from '../../assets/edit.svg';
 import deleteIcon from '../../assets/delete.svg';
@@ -824,6 +826,9 @@ export function ChatPanel({
   const shouldShowShareExport = Boolean(onExportShare);
   const shouldShowHumanShare = mode === 'team' && teamHumanShareCommands.length > 0;
   const [humanShareOpen, setHumanShareOpen] = React.useState(false);
+  const [heartbeatPanelOpen, setHeartbeatPanelOpen] = React.useState(false);
+  // 新会话占位符 'new' 还没有真实 session_id，隐藏心跳入口，见接口规格说明 §16.2
+  const heartbeatAvailable = Boolean(activeSessionId && activeSessionId !== NEW_CONVERSATION_ID);
   const {
     turnsByMessageId: codeTurnsByMessageId,
     loading: codeTurnHistoryLoading,
@@ -1286,6 +1291,16 @@ export function ChatPanel({
                 <Sparkles size={16} strokeWidth={2} />
               </button>
             )}
+            {heartbeatAvailable && (
+              <button
+                type="button"
+                className={`chat-header-icon-btn ${heartbeatPanelOpen ? 'chat-header-icon-btn--active' : ''}`}
+                onClick={() => setHeartbeatPanelOpen((v) => !v)}
+                title={t('heartbeat.panel.title')}
+              >
+                <Activity size={16} strokeWidth={2} />
+              </button>
+            )}
             <button
               type="button"
               className={`chat-header-icon-btn ${teamAreaExpanded === false ? 'chat-header-icon-btn--active' : ''}`}
@@ -1319,6 +1334,9 @@ export function ChatPanel({
           commands={teamHumanShareCommands}
           onClose={() => setHumanShareOpen(false)}
         />
+      )}
+      {heartbeatPanelOpen && heartbeatAvailable && (
+        <HeartbeatPanel sessionId={activeSessionId as string} onClose={() => setHeartbeatPanelOpen(false)} />
       )}
       <div ref={scrollContainerRef} className="chat-scroll flex-1 overflow-y-auto" data-testid="chat-panel-scroll" onScroll={handleScroll} onWheel={handleWheel}>
         <div className={chatContentClassName} data-testid="chat-panel-content">
