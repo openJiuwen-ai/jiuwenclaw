@@ -57,6 +57,7 @@ class RuntimePromptRail(DeepAgentRail):
         self._mode: str = ""
         self._session_id: str | None = None
         self._force_english: bool = False
+        self._request_system_prompt: str = ""
 
     def init(self, agent) -> None:
         """从 agent 获取 system_prompt_builder 引用。"""
@@ -74,6 +75,7 @@ class RuntimePromptRail(DeepAgentRail):
             self.system_prompt_builder.remove_section("browser_tool_policy")
             self.system_prompt_builder.remove_section("tui_current_project_policy")
             self.system_prompt_builder.remove_section("trusted_dirs_policy")
+            self.system_prompt_builder.remove_section("request_system_prompt")
         self._agent = None
         self.system_prompt_builder = None
         self.attachment_manager = None
@@ -141,6 +143,11 @@ class RuntimePromptRail(DeepAgentRail):
         follows the user's preferred language set via :meth:`set_language`.
         """
         self._force_english = force
+
+    def set_request_system_prompt(self, prompt: str | None) -> None:
+        """per-request 更新 system prompt 追加内容。"""
+        value = prompt.strip() if isinstance(prompt, str) else ""
+        self._request_system_prompt = value
 
     @staticmethod
     def _existing_dirs(paths: list[str] | None) -> list[str]:
@@ -230,7 +237,9 @@ class RuntimePromptRail(DeepAgentRail):
             "env",
             "browser_tool_policy",
             "tui_current_project_policy",
-            "trusted_dirs_policy"):
+            "trusted_dirs_policy",
+            "request_system_prompt",
+        ):
             self.system_prompt_builder.remove_section(name)
 
         # ── time ──
@@ -725,6 +734,14 @@ class RuntimePromptRail(DeepAgentRail):
                 name="trusted_dirs_policy",
                 content={"cn": trusted_dirs_content, "en": trusted_dirs_content},
                 priority=90,
+            ))
+
+        if self._request_system_prompt:
+            # priority 需高于 RuntimePromptRail 其它 section（最高 99），保证拼在系统提示词末尾
+            self.system_prompt_builder.add_section(PromptSection(
+                name="request_system_prompt",
+                content={"cn": self._request_system_prompt, "en": self._request_system_prompt},
+                priority=10_000,
             ))
 
     async def _upsert_prompt_attachment(
