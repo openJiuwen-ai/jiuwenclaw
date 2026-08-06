@@ -576,7 +576,7 @@ class TaskExecutionRail(DeepAgentRail):
         parent_request_id: str = "",
     ) -> None:
         full_task_id = f"todo:{task_id}"
-        context = self._active_tasks.get(full_task_id)
+        context = self._active_tasks.pop(full_task_id, None)
         timestamp = time.time()
 
         if context:
@@ -586,7 +586,6 @@ class TaskExecutionRail(DeepAgentRail):
             payload_task_id = context.task_id
             task_content = context.task_content
             source = context.source
-            self._active_tasks.pop(full_task_id, None)
         else:
             duration_ms = 0
             payload_task_id = full_task_id
@@ -824,5 +823,36 @@ class TaskExecutionRail(DeepAgentRail):
 
     @staticmethod
     def _extract_request_id(ctx: AgentCallbackContext) -> str:
-        value = getattr(ctx.inputs, "request_id", "")
-        return str(value) if value else ""
+        value = getattr(ctx.inputs, "request_id", None)
+        if value:
+            return str(value).strip()
+        if isinstance(ctx.inputs, dict):
+            raw = ctx.inputs.get("request_id")
+            if raw:
+                return str(raw).strip()
+        # ToolCallInputs usually has no request_id; fall back to the active
+        # perf request context so task.* UI payloads still carry
+        # parent_request_id when the rail is enabled.
+        try:
+            from jiuwenswarm.perf.context import (
+                extract_session_id_from_callback,
+                get_request_context,
+            )
+
+            session_id = None
+            if ctx.session is not None:
+                try:
+                    session_id = str(ctx.session.get_session_id() or "").strip() or None
+                except Exception:
+                    session_id = extract_session_id_from_callback(ctx)
+            else:
+                session_id = extract_session_id_from_callback(ctx)
+            req_ctx = get_request_context(session_id=session_id)
+            if req_ctx:
+                return str(req_ctx.get("request_id") or "").strip()
+        except Exception:
+            logger.debug(
+                "[TaskExecutionRail] request_id fallback failed",
+                exc_info=True,
+            )
+        return ""

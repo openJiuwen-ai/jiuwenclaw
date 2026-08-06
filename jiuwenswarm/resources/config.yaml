@@ -326,6 +326,17 @@ agents:
     max_iterations: 200
     completion_timeout: 6000.0
 
+# Request-level performance summaries (request_summaries.jsonl per session).
+# Default on; set PERF_SUMMARY_ENABLED=false or enabled: false to opt out.
+perf:
+  summary:
+    enabled: true
+    bottleneck_top_n: 3
+    include_tasks: true
+    include_errors: false
+    # Parent+subagent breakdown in stats.by_agent (off by default).
+    include_by_agent: false
+
 telemetry:
   enabled: false                    # 总开关（环境变量 OTEL_ENABLED 优先）
   exporter: otlp                    # otlp / console / none

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import atexit
 import logging
 import logging.handlers
 import os
@@ -142,6 +143,35 @@ from jiuwenswarm.common.thinking.register_hook import register_thinking_hook
 
 register_thinking_hook()
 
+# Attach RequestSummaryRail(record_only=True) after DeepAgent.create_subagent so
+# TaskTool / SessionSpawn children contribute llm/tool events to the parent
+# request_summaries.jsonl (no-op when perf.summary.enabled is false).
+from jiuwenswarm.perf.install_hooks import install_perf_hooks
+
+install_perf_hooks()
+
+# Process exit diagnostics: log reason only; do not change exit code or cleanup order.
+_EXIT_REASON = "unknown"
+
+
+def _set_exit_reason(reason: str) -> None:
+    global _EXIT_REASON
+    _EXIT_REASON = reason
+
+
+def _atexit_log_exit_reason() -> None:
+    # Interpreter/pytest teardown may close handler streams; suppress logging's
+    # default "Logging error" spam when emit hits a closed file.
+    old_raise = logging.raiseExceptions
+    logging.raiseExceptions = False
+    try:
+        logger.critical("[AgentServer] atexit reason=%s", _EXIT_REASON)
+    finally:
+        logging.raiseExceptions = old_raise
+
+
+atexit.register(_atexit_log_exit_reason)
+
 
 async def _run(host: str, port: int) -> None:
     from openjiuwen.core.runner import Runner
@@ -152,6 +182,10 @@ async def _run(host: str, port: int) -> None:
     from jiuwenswarm.common.config import get_config
 
     logger.info("[AgentServer] starting: ws://%s:%s", host, port)
+
+    from jiuwenswarm.perf.config import init_perf_summary_config
+
+    init_perf_summary_config()
 
     # ---------- 扩展系统初始化 ----------
     callback_framework = Runner.callback_framework
@@ -221,6 +255,14 @@ async def _run(host: str, port: int) -> None:
             except Exception as exc:
                 logger.warning("[AgentServer] teammate bootstrap daemon stop failed: %s", exc)
         await server.stop()
+        from jiuwenswarm.perf.guard import run_perf_safe
+        from jiuwenswarm.perf.writer import flush_request_summary_writer
+
+        run_perf_safe(
+            "AgentServer",
+            "request summary flush",
+            lambda: flush_request_summary_writer(timeout=5.0),
+        )
         # Shutdown team observability (flush & close spans)
         try:
             from jiuwenswarm.agents.harness.team.team_manager import shutdown_team_observability
@@ -238,6 +280,7 @@ async def _run(host: str, port: int) -> None:
         except Exception as exc:
             logger.warning("[AgentServer] agent observability shutdown failed: %s", exc)
         logger.info("[AgentServer] stopped")
+        _set_exit_reason("clean_shutdown")
 
 
 def main() -> None:
@@ -285,7 +328,16 @@ def main() -> None:
             port = 18092
 
     install_async_dump_handler("agentserver")
-    asyncio.run(_run(host=host, port=port))
+    try:
+        asyncio.run(_run(host=host, port=port))
+        if _EXIT_REASON == "unknown":
+            _set_exit_reason("asyncio_run_returned")
+    except SystemExit as exc:
+        _set_exit_reason(f"SystemExit({exc.code})")
+        raise
+    except BaseException as exc:
+        _set_exit_reason(f"{type(exc).__name__}: {exc}")
+        raise
 
 
 if __name__ == "__main__":

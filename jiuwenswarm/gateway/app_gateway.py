@@ -1478,6 +1478,11 @@ async def _run(
     from openjiuwen.core.runner import Runner
 
     logger.info("[App] Gateway starting, connecting AgentServer: %s", agent_server_url)
+
+    from jiuwenswarm.perf.config import init_perf_summary_config
+
+    init_perf_summary_config()
+
     restart_request = GatewayRestartRequest()
 
     callback_framework = Runner.callback_framework

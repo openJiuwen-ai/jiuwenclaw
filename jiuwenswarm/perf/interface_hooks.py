@@ -1,0 +1,154 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
+"""Deep adapter integration hooks for request_summaries.jsonl."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from jiuwenswarm.perf.collector import get_perf_collector
+from jiuwenswarm.perf.config import get_perf_summary_config
+from jiuwenswarm.perf.context import (
+    clear_request_context,
+    mark_first_answer_latency,
+    mark_first_byte_latency,
+    set_request_context,
+)
+from jiuwenswarm.perf.guard import run_perf_safe
+
+_COMPONENT = "JiuWenSwarmDeepAdapter"
+
+# Align with history.jsonl assistant surface: first tool/reasoning/answer event.
+_FIRST_BYTE_EVENT_TYPES = frozenset(
+    {"chat.delta", "chat.final", "chat.tool_call", "chat.reasoning"}
+)
+# Answer-token only (excludes tool_call / reasoning).
+_FIRST_ANSWER_EVENT_TYPES = frozenset({"chat.delta", "chat.final"})
+
+
+def set_perf_summary_context(
+    rail: Any | None = None,
+    *,
+    channel_id: str = "",
+    session_id: str = "",
+    request_id: str = "",
+    mode: str = "agent.plan",
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> None:
+    """Bind perf request context at parent-agent request entry.
+
+    Always begins the collector request (even if ``rail`` is None). When a
+    RequestSummaryRail is present, also bind on the rail instance so LLM/tool
+    hooks running on DeepAgent's interaction-round Task can resolve request_id
+    without relying on ContextVar inheritance.
+    """
+
+    def _setup() -> None:
+        if not get_perf_summary_config().enabled:
+            return
+        ctx = set_request_context(
+            session_id=session_id,
+            request_id=request_id,
+            channel_id=channel_id,
+            mode=mode,
+            service_id=service_id,
+            agent_id=agent_id,
+        )
+        bind = getattr(rail, "bind_request_context", None)
+        if callable(bind):
+            bind(ctx)
+
+    run_perf_safe(
+        _COMPONENT,
+        "perf summary context setup",
+        _setup,
+    )
+
+
+def mark_request_first_byte() -> None:
+    """Record first history-visible assistant event latency."""
+    run_perf_safe(
+        _COMPONENT,
+        "perf summary first-byte mark",
+        mark_first_byte_latency,
+    )
+
+
+def mark_request_first_answer() -> None:
+    """Record first answer-token latency (chat.delta / chat.final)."""
+    run_perf_safe(
+        _COMPONENT,
+        "perf summary first-answer mark",
+        mark_first_answer_latency,
+    )
+
+
+def maybe_mark_answer_first_byte(payload: Any) -> None:
+    """Mark first-byte / first-answer from a streamed chat payload."""
+    if not isinstance(payload, dict):
+        return
+    event_type = payload.get("event_type")
+    if event_type in _FIRST_BYTE_EVENT_TYPES:
+        mark_request_first_byte()
+    if event_type in _FIRST_ANSWER_EVENT_TYPES:
+        mark_request_first_answer()
+
+
+def finalize_perf_summary_request(
+    request_id: str | None,
+    *,
+    status: str = "ok",
+) -> None:
+    """Finalize and persist request summary; safe to call from finally blocks."""
+    rid = (request_id or "").strip()
+    if not rid:
+        return
+
+    def _finalize() -> None:
+        from jiuwenswarm.perf.extract import current_trace_id_hex
+
+        trace_id = current_trace_id_hex()
+        acc = get_perf_collector().get_accumulator(rid)
+        if acc is not None and trace_id:
+            acc.meta = acc.meta.with_trace_id(trace_id)
+        get_perf_collector().finalize_request(rid, status=status)
+
+    run_perf_safe(
+        _COMPONENT,
+        f"perf summary finalize request_id={rid} status={status}",
+        _finalize,
+    )
+
+
+def clear_perf_summary_context(
+    rail: Any | None = None,
+    *,
+    session_id: str | None = None,
+    request_id: str | None = None,
+) -> None:
+    """Clear perf ContextVar + session registry + optional rail binding."""
+
+    def _clear() -> None:
+        clear_fn = getattr(rail, "clear_bound_request_context", None)
+        if callable(clear_fn):
+            clear_fn()
+        clear_request_context(session_id=session_id, request_id=request_id)
+
+    run_perf_safe(
+        _COMPONENT,
+        "perf summary context clear",
+        _clear,
+    )
+
+
+def install_perf_hooks(_adapter: Any = None) -> None:
+    """Install create_subagent RequestSummaryRail(record_only) attachment.
+
+    Parent DeepAdapter already wires the rail in ``interface_deep`` /
+    ``interface_code``. This covers TaskTool / SessionSpawn children via
+    ``DeepAgent.create_subagent`` patching.
+    """
+    from jiuwenswarm.perf.subagent_hooks import apply_create_subagent_perf_patch
+
+    apply_create_subagent_perf_patch()

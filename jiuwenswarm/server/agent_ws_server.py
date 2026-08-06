@@ -2502,10 +2502,13 @@ class AgentWebSocketServer:
                         )
             except asyncio.CancelledError:
                 pass
-            except WebSocketConnectionClosed:
+            except WebSocketConnectionClosed as ws_closed_exc:
                 logger.info(
-                    "[AgentWebSocketServer] keepalive 停止，WebSocket 已关闭: request_id=%s",
-                    request.request_id,
+                    "[AgentWebSocketServer] keepalive 停止，WebSocket 已关闭: %s",
+                    format_ws_diagnostics(
+                        {"request_id": request.request_id},
+                        describe_ws_exception(ws_closed_exc),
+                    ),
                 )
 
         # 启动心跳任务
@@ -2547,10 +2550,13 @@ class AgentWebSocketServer:
                             chunk_count - 1,
                         )
                         return
-                except WebSocketConnectionClosed:
+                except WebSocketConnectionClosed as ws_closed_exc:
                     logger.info(
-                        "[AgentWebSocketServer] 流式响应停止，WebSocket 已关闭: request_id=%s",
-                        request.request_id,
+                        "[AgentWebSocketServer] 流式响应停止，WebSocket 已关闭: %s",
+                        format_ws_diagnostics(
+                            {"request_id": request.request_id},
+                            describe_ws_exception(ws_closed_exc),
+                        ),
                     )
                     return
                 # 清除 event，让心跳任务重新开始计时

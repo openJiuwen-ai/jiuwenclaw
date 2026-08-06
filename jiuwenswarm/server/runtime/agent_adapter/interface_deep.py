@@ -310,6 +310,14 @@ from jiuwenswarm.common.mcp_config import (
     preflight_mcp_server_reachable,
 )
 from jiuwenswarm.common.mcp_call_timeout_patch import apply_mcp_call_timeout_patch
+from jiuwenswarm.perf.interface_hooks import (
+    clear_perf_summary_context,
+    finalize_perf_summary_request,
+    mark_request_first_answer,
+    mark_request_first_byte,
+    maybe_mark_answer_first_byte,
+    set_perf_summary_context,
+)
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.server.runtime.agent_adapter.sysop_builder import (
     build_filesystem_policy,
@@ -1410,6 +1418,7 @@ class JiuWenSwarmDeepAdapter:
         self._skill_rail: SkillUseRail | None = None
         self._stream_event_rail: JiuSwarmStreamEventRail | None = None
         self._task_execution_rail: TaskExecutionRail | None = None
+        self._request_summary_rail: Any | None = None
         # Track session IDs currently executing on this adapter instance.
         # Used by process_interrupt to avoid aborting sessions that are not
         # the target of the interrupt request (cross-session contamination).
@@ -4786,6 +4795,23 @@ class JiuWenSwarmDeepAdapter:
         return task_rail
 
     @staticmethod
+    def _build_request_summary_rail() -> Any | None:
+        """Build RequestSummaryRail for per-request performance summaries."""
+        try:
+            from jiuwenswarm.perf.request_summary_rail import RequestSummaryRail
+
+            # Parent adapter owns finalize; rail only records llm/tool events.
+            rail = RequestSummaryRail(record_only=True)
+            logger.info("[JiuWenSwarmDeepAdapter] RequestSummaryRail create success")
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] RequestSummaryRail create failed: %s",
+                exc,
+            )
+            rail = None
+        return rail
+
+    @staticmethod
     def _build_multimodal_image_rail(
         enable_image_multimodal: bool | None = None,
     ) -> MultimodalImageRail | None:
@@ -5210,6 +5236,7 @@ class JiuWenSwarmDeepAdapter:
     ) -> list[Any]:
         """Build DeepAgent rails consistently for cold start and hot reload."""
         rail_infos = [
+            _RailBuildInfo("_request_summary_rail", self._build_request_summary_rail),
             _RailBuildInfo("_runtime_prompt_rail", self._build_runtime_prompt_rail),
             _RailBuildInfo("_response_prompt_rail", self._build_response_prompt_rail),
             _RailBuildInfo(
@@ -9309,6 +9336,15 @@ class JiuWenSwarmDeepAdapter:
         error_text: str | None = None
         interaction_stream = None
         interaction_stream_abort = True
+        first_byte_marked = False
+        set_perf_summary_context(
+            getattr(self, "_request_summary_rail", None),
+            channel_id=request.channel_id or "",
+            session_id=request.session_id or "",
+            request_id=request.request_id or "",
+            mode=mode,
+        )
+        perf_summary_status = "ok"
         try:
             await self._update_runtime_config(
                 self._RuntimeConfig(
@@ -9413,6 +9449,9 @@ class JiuWenSwarmDeepAdapter:
                         )
                         if text:
                             collected_content.append(text)
+                            if not first_byte_marked:
+                                first_byte_marked = True
+                                mark_request_first_byte()
                     else:
                         # check for error in other typed chunks (e.g. controller_output.task_failed)
                         parsed = self._parse_stream_chunk(chunk)
@@ -9422,14 +9461,19 @@ class JiuWenSwarmDeepAdapter:
                                 err = parsed.get("error") or parsed.get("message") or ""
                                 if err:
                                     error_text = str(err)
+                                    perf_summary_status = "error"
                 else:
                     parsed = self._parse_stream_chunk(chunk)
                     if parsed is not None:
                         text = parsed.get("content", "")
                         if text:
                             collected_content.append(text)
+                            if not first_byte_marked:
+                                first_byte_marked = True
+                                mark_request_first_byte()
             interaction_stream_abort = False
         except asyncio.CancelledError:
+            perf_summary_status = "cancelled"
             logger.info(
                 "[JiuWenSwarmDeepAdapter] Agent 任务被取消: request_id=%s session_id=%s",
                 request.request_id,
@@ -9437,6 +9481,7 @@ class JiuWenSwarmDeepAdapter:
             )
             raise
         except Exception as e:
+            perf_summary_status = "error"
             logger.error("[JiuWenSwarmDeepAdapter] Agent 任务执行异常: %s", e)
             raise
         finally:
@@ -9472,6 +9517,12 @@ class JiuWenSwarmDeepAdapter:
             # cron_* 在 checkpointer 恒为空、web 恢复读不到历史。此处显式补一次。
             if str(session_id).startswith("cron_"):
                 await self._persist_cron_checkpoint(session_id, request.request_id)
+            finalize_perf_summary_request(request.request_id, status=perf_summary_status)
+            clear_perf_summary_context(
+                getattr(self, "_request_summary_rail", None),
+                session_id=session_id,
+                request_id=request.request_id,
+            )
 
         content = "".join(collected_content) if collected_content else ""
 
@@ -9573,94 +9624,144 @@ class JiuWenSwarmDeepAdapter:
         if mode in ("team", "team.plan", "code.team"):
             from jiuwenswarm.server.runtime.agent_adapter.team_helpers import process_team_message_stream
 
-            resolved_model = self._resolve_model_for_request(request)
-            self._apply_model_to_react_agent(resolved_model)
-            inputs = self._prepare_multimodal_image_inputs(request, inputs)
-            enable_read_image_multimodal = self._native_image_input_enabled(
-                self._config_cache,
-                resolved_model,
-            )
-            inputs = self._prepare_react_image_tool_prompt(
-                request,
-                inputs,
-                enable_read_image_multimodal=enable_read_image_multimodal,
-            )
-            resolved_language = self._resolve_runtime_language()
-            resolved_channel = str(cid or self._resolve_prompt_channel(session_id) or "web").strip() or "web"
-            if self._runtime_prompt_rail:
-                self._runtime_prompt_rail.set_model_name(self._resolve_model_name())
-                self._runtime_prompt_rail.set_mode(mode)
-                self._runtime_prompt_rail.set_session_id(session_id)
-            self._write_runtime_state(
+            set_perf_summary_context(
+                getattr(self, "_request_summary_rail", None),
+                channel_id=request.channel_id or "",
+                session_id=request.session_id or "",
+                request_id=request.request_id or "",
                 mode=mode,
-                language=resolved_language,
-                channel=resolved_channel,
-                session_id=session_id,
-                project_dir=inputs.get("project_dir")
-                or inputs.get("cwd")
-                or self._project_dir
-                or self._workspace_dir,
             )
+            perf_summary_status = "ok"
+            try:
+                resolved_model = self._resolve_model_for_request(request)
+                self._apply_model_to_react_agent(resolved_model)
+                inputs = self._prepare_multimodal_image_inputs(request, inputs)
+                enable_read_image_multimodal = self._native_image_input_enabled(
+                    self._config_cache,
+                    resolved_model,
+                )
+                inputs = self._prepare_react_image_tool_prompt(
+                    request,
+                    inputs,
+                    enable_read_image_multimodal=enable_read_image_multimodal,
+                )
+                resolved_language = self._resolve_runtime_language()
+                resolved_channel = str(cid or self._resolve_prompt_channel(session_id) or "web").strip() or "web"
+                if self._runtime_prompt_rail:
+                    self._runtime_prompt_rail.set_model_name(self._resolve_model_name())
+                    self._runtime_prompt_rail.set_mode(mode)
+                    self._runtime_prompt_rail.set_session_id(session_id)
+                self._write_runtime_state(
+                    mode=mode,
+                    language=resolved_language,
+                    channel=resolved_channel,
+                    session_id=session_id,
+                    project_dir=inputs.get("project_dir")
+                    or inputs.get("cwd")
+                    or self._project_dir
+                    or self._workspace_dir,
+                )
 
-            async for chunk in process_team_message_stream(request, inputs, self._instance):
-                yield chunk
-            _LLM_TRACE_SESSION_ID.reset(token_trace_sid)
-            _LLM_TRACE_REQUEST_ID.reset(token_trace_rid)
-            _LLM_TRACE_ITERATION.reset(token_trace_iter)
-            _LLM_TRACE_MODEL_NAME.reset(token_trace_model)
+                async for chunk in process_team_message_stream(request, inputs, self._instance):
+                    maybe_mark_answer_first_byte(getattr(chunk, "payload", None))
+                    yield chunk
+            except asyncio.CancelledError:
+                perf_summary_status = "cancelled"
+                raise
+            except Exception:
+                perf_summary_status = "error"
+                raise
+            finally:
+                finalize_perf_summary_request(request.request_id, status=perf_summary_status)
+                clear_perf_summary_context(
+                    getattr(self, "_request_summary_rail", None),
+                    session_id=session_id,
+                    request_id=request.request_id,
+                )
+                _LLM_TRACE_SESSION_ID.reset(token_trace_sid)
+                _LLM_TRACE_REQUEST_ID.reset(token_trace_rid)
+                _LLM_TRACE_ITERATION.reset(token_trace_iter)
+                _LLM_TRACE_MODEL_NAME.reset(token_trace_model)
             return
 
         # Auto-Harness 模式处理
         if mode == "auto_harness":
-            if self._auto_harness_service is None:
-                self._auto_harness_service = AutoHarnessService(
-                    self._stream_event_rail,
-                    agent=self._instance,
-                )
-
-            await self._update_runtime_config(
-                self._RuntimeConfig(
-                    session_id=session_id,
-                    mode=mode,
-                    request_id=request.request_id,
-                    channel_id=request.channel_id,
-                    request_metadata=request.metadata,
-                    trusted_dirs=inputs.get("trusted_dirs"),
-                    cwd=inputs.get("cwd"),
-                    project_dir=inputs.get("project_dir"),
-                    supports_user_interaction=inputs.get(
-                        "supports_user_interaction", True
-                    ),
-                    request_system_prompt=self._extract_request_system_prompt(request),
-                )
+            set_perf_summary_context(
+                getattr(self, "_request_summary_rail", None),
+                channel_id=request.channel_id or "",
+                session_id=request.session_id or "",
+                request_id=request.request_id or "",
+                mode=mode,
             )
+            perf_summary_status = "ok"
+            try:
+                if self._auto_harness_service is None:
+                    self._auto_harness_service = AutoHarnessService(
+                        self._stream_event_rail,
+                        agent=self._instance,
+                    )
 
-            activate_response = request.params.get("activate_response")
-            if isinstance(activate_response, dict):
-                async for chunk in self._auto_harness_service.resume_activate(
-                    session_id, rid, cid, activate_response
-                ):
-                    yield chunk
-                return
+                await self._update_runtime_config(
+                    self._RuntimeConfig(
+                        session_id=session_id,
+                        mode=mode,
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        request_metadata=request.metadata,
+                        trusted_dirs=inputs.get("trusted_dirs"),
+                        cwd=inputs.get("cwd"),
+                        project_dir=inputs.get("project_dir"),
+                        supports_user_interaction=inputs.get(
+                            "supports_user_interaction", True
+                        ),
+                        request_system_prompt=self._extract_request_system_prompt(request),
+                    )
+                )
 
-            resolved_model = self._resolve_model_for_request(request)
-            if self._auto_harness_service.is_activate_only_request(request, query):
-                async for chunk in self._auto_harness_service.run_activate_only(
-                    request, session_id, rid, query, model=resolved_model
-                ):
-                    yield chunk
-                return
-            if self._auto_harness_service.is_implement_only_request(request, query):
-                async for chunk in self._auto_harness_service.run_implement_only(
-                    request, session_id, rid, query, model=resolved_model
-                ):
-                    yield chunk
-                return
-
-            async for chunk in self._auto_harness_service.run(
-                request, session_id, rid, query=query, model=resolved_model
-            ):
-                yield chunk
+                activate_response = request.params.get("activate_response")
+                if isinstance(activate_response, dict):
+                    async for chunk in self._auto_harness_service.resume_activate(
+                        session_id, rid, cid, activate_response
+                    ):
+                        maybe_mark_answer_first_byte(getattr(chunk, "payload", None))
+                        yield chunk
+                else:
+                    resolved_model = self._resolve_model_for_request(request)
+                    if self._auto_harness_service.is_activate_only_request(request, query):
+                        async for chunk in self._auto_harness_service.run_activate_only(
+                            request, session_id, rid, query, model=resolved_model
+                        ):
+                            maybe_mark_answer_first_byte(getattr(chunk, "payload", None))
+                            yield chunk
+                    elif self._auto_harness_service.is_implement_only_request(request, query):
+                        async for chunk in self._auto_harness_service.run_implement_only(
+                            request, session_id, rid, query, model=resolved_model
+                        ):
+                            maybe_mark_answer_first_byte(getattr(chunk, "payload", None))
+                            yield chunk
+                    else:
+                        async for chunk in self._auto_harness_service.run(
+                            request, session_id, rid, query=query, model=resolved_model
+                        ):
+                            maybe_mark_answer_first_byte(getattr(chunk, "payload", None))
+                            yield chunk
+            except asyncio.CancelledError:
+                perf_summary_status = "cancelled"
+                raise
+            except Exception:
+                perf_summary_status = "error"
+                raise
+            finally:
+                finalize_perf_summary_request(request.request_id, status=perf_summary_status)
+                clear_perf_summary_context(
+                    getattr(self, "_request_summary_rail", None),
+                    session_id=session_id,
+                    request_id=request.request_id,
+                )
+                _LLM_TRACE_SESSION_ID.reset(token_trace_sid)
+                _LLM_TRACE_REQUEST_ID.reset(token_trace_rid)
+                _LLM_TRACE_ITERATION.reset(token_trace_iter)
+                _LLM_TRACE_MODEL_NAME.reset(token_trace_model)
             return
 
         # 拦截斜杠命令 / 结构化 command.goal
@@ -9805,9 +9906,37 @@ class JiuWenSwarmDeepAdapter:
             emitted_ask_user_request_ids.add(request_id)
             return False
 
+        first_byte_marked = False
+        first_answer_marked = False
+
+        def _mark_first_byte_once() -> None:
+            nonlocal first_byte_marked
+            if first_byte_marked:
+                return
+            first_byte_marked = True
+            mark_request_first_byte()
+
+        def _mark_first_answer_once() -> None:
+            nonlocal first_answer_marked
+            if first_answer_marked:
+                return
+            first_answer_marked = True
+            mark_request_first_answer()
+
         def note_chat_payload(payload: dict[str, Any]) -> dict[str, Any]:
             nonlocal had_assistant_output, emitted_terminal_chat_final
             event_type = payload.get("event_type")
+            # first_byte: first history-visible assistant event (matches history.jsonl).
+            if event_type in (
+                "chat.delta",
+                "chat.final",
+                "chat.tool_call",
+                "chat.reasoning",
+            ):
+                _mark_first_byte_once()
+            # first_answer: first answer token only.
+            if event_type in ("chat.delta", "chat.final"):
+                _mark_first_answer_once()
             if event_type in ("chat.delta", "chat.reasoning", "chat.final"):
                 had_assistant_output = True
             if event_type == "chat.final":
@@ -9851,6 +9980,14 @@ class JiuWenSwarmDeepAdapter:
         _debug_trace_token = None  # reset token for the ContextVar-bound logger
         interaction_stream = None
         interaction_stream_abort = True
+        set_perf_summary_context(
+            getattr(self, "_request_summary_rail", None),
+            channel_id=request.channel_id or "",
+            session_id=request.session_id or "",
+            request_id=request.request_id or "",
+            mode=mode,
+        )
+        perf_summary_status = "ok"
         try:
             await self._update_runtime_config(
                 self._RuntimeConfig(
@@ -10471,6 +10608,7 @@ class JiuWenSwarmDeepAdapter:
                     _debug_logger.end_run(status="ok")
             interaction_stream_abort = False
         except asyncio.CancelledError:
+            perf_summary_status = "cancelled"
             stream_consumer_cancelled = True
             logger.info(
                 "[JiuWenSwarmDeepAdapter] 流式任务被取消: request_id=%s session_id=%s",
@@ -10487,6 +10625,7 @@ class JiuWenSwarmDeepAdapter:
                 _debug_logger.end_run(status="cancelled")
             raise
         except Exception as exc:
+            perf_summary_status = "error"
             logger.exception("[JiuWenSwarmDeepAdapter] 流式任务异常: %s", exc)
             if _debug_logger is not None:
                 _debug_logger.end_run(status="error", error=exc)
@@ -10540,6 +10679,12 @@ class JiuWenSwarmDeepAdapter:
             self._unmark_session_active(
                 session_id,
                 cleanup_rail=True,
+            )
+            finalize_perf_summary_request(request.request_id, status=perf_summary_status)
+            clear_perf_summary_context(
+                getattr(self, "_request_summary_rail", None),
+                session_id=session_id,
+                request_id=request.request_id,
             )
             if overlay_token is not None:
                 reset_task_env_overlay(overlay_token)
