@@ -42,11 +42,21 @@ react:
 
 The system automatically detects evolution signals after each complete conversation ends (in the after_invoke phase). When execution exceptions or user corrections are detected, it generates evolution records.
 
-The system identifies evolution signals and generates candidate experience automatically. Whether user confirmation is required depends on the role and the `auto_save` setting. After experience is saved, it is loaded automatically the next time the Skill is used.
+The system identifies evolution signals and generates candidate experience automatically. Whether user confirmation is required depends on the role and the `auto_save` setting. By default, `auto_save=false`, so approval is required before regular global experience is written. After experience is saved, it is loaded automatically the next time the Skill is used.
 
 ![Auto-trigger](../assets/images/skill演进_自动触发.png)
 
-### 2.3 Manual Evolution Triggering
+### 2.3 Reviewer Feedback-Driven Team Evolution
+
+For a scheduled team, when Task review fails and `react.evolution.skill_evolution` is enabled, the system attributes the Reviewer Feedback:
+
+- Skill issue: update the assignee's Skill experience first; after all Tasks finish, aggregate by Skill and create a global evolution approval.
+- Executor error or unattributed failure: record the failure without changing a Skill.
+- Repeated pattern with no attributable Skill: create a new-Skill approval after the same reusable pattern is observed across Tasks.
+
+The unified self-evolution switch is off by default. Global updates and new Skills require approval by default.
+
+### 2.4 Manual Evolution Triggering
 
 If you want to immediately trigger evolution for a specific skill, you can enter:
 
@@ -64,7 +74,7 @@ The system scans recent dialogue and execution records, generates evolution expe
 
 ![Manual trigger](../assets/images/skill演进_手动触发.png)
 
-### 2.4 View Evolution Status
+### 2.5 View Evolution Status
 
 To see which skills have pending evolution experience, you can enter:
 
@@ -76,7 +86,7 @@ The system lists all skills containing pending evolution records and their speci
 
 ![Evolution overview](../assets/images/skill演进_查看和整理经验.png)
 
-### 2.5 Manage Evolution Experience
+### 2.6 Manage Evolution Experience
 
 Evolution experience is stored in the `evolutions.json` file under the skill directory. **Note**: This file is dynamically generated when evolution is first triggered and may not exist if no evolution has occurred. You can edit this file directly to manage evolution experience:
 
