@@ -134,9 +134,13 @@ class AgentOSRouterClient(AgentServerClient):
         tui_channel = channel_manager.get_channel(ChannelType.CLI)
 
         if web_channel:
-            web_channel.on_connect(self.on_connect)
+            on_connect = getattr(web_channel, "on_connect", None)
+            if callable(on_connect):
+                on_connect(self.on_connect)
         if tui_channel:
-            tui_channel.on_connect(self.on_connect)
+            on_connect = getattr(tui_channel, "on_connect", None)
+            if callable(on_connect):
+                on_connect(self.on_connect)
 
     async def on_connect(self, ws: Any) -> AuthResult | None:
         if self._auth_client is None:

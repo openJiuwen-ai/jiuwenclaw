@@ -463,7 +463,6 @@ class GatewayServer(BaseWebChannel):
             idle_finalize_seconds=lambda: _PROMPT_IDLE_FINALIZE_SECONDS,
         )
         self._install_default_route_hooks()
-        self._ws_sessions: dict[int, set[str]] = {}
 
     @staticmethod
     def _extract_ws_user_id(ws: Any) -> str | None:
@@ -1041,24 +1040,21 @@ class GatewayServer(BaseWebChannel):
             matched_path,
         )
 
-        # 触发外部 ws_channel 的连接钩子（如 TuiChannel 的认证钩子）
-        ws_channel = getattr(route, "ws_channel", None)
-        if ws_channel is not None:
-            for hook in getattr(ws_channel, "_connect_hooks", []):
-                try:
-                    result = hook(ws)
-                    if inspect.isawaitable(result):
-                        await result
-                except Exception as e:
-                    logger.warning(
-                        "%s TUI on_connect hook error: %s",
-                        type(ws_channel).__name__,
-                        format_ws_diagnostics(
-                            {"remote": remote, "path": request_path},
-                            describe_ws_peer(ws),
-                            describe_ws_exception(e),
-                        )
-                    )
+        # 触发连接钩子（如发送 connection.ack）
+        for hook in self._connect_hooks:
+            try:
+                result = hook(ws)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as e:  # pragma: no cover
+                logger.warning(
+                    "WebChannel on_connect hook error: %s",
+                    format_ws_diagnostics(
+                        {"remote": remote, "path": request_path},
+                        describe_ws_peer(ws),
+                        describe_ws_exception(e),
+                    ),
+                )
 
         # connection.ack
         try:
@@ -1082,8 +1078,6 @@ class GatewayServer(BaseWebChannel):
         except ConnectionClosedError:
             logger.info("[App] WebSocket connection closed: channel=%s", route.channel_id)
         finally:
-            ws_id = id(ws)
-            disconnected_sessions = self._ws_sessions.pop(ws_id, set())
             if normal_close:
                 logger.info(
                     "[App] WebSocket connection closed (normal): channel=%s",
@@ -1116,19 +1110,6 @@ class GatewayServer(BaseWebChannel):
                         "GatewayServer delegate unregister_ws to ws_channel failed: path=%s",
                         request_path, exc_info=True,
                     )
-                # 触发 ws_channel 的断连钩子
-                ws_ch = route.ws_channel
-                for hook in getattr(ws_ch, "_disconnect_hooks", []):
-                    try:
-                        result = hook(ws, disconnected_sessions)
-                        if inspect.isawaitable(result):
-                            await result
-                    except Exception as e:
-                        logger.warning(
-                            "%s on_disconnect hook error: %s",
-                            type(ws_ch).__name__, e,
-                        )
-
             if route.disconnect_handler is not None:
                 try:
                     # Pass stale_request_keys so the handler can recover session_ids
@@ -1156,6 +1137,19 @@ class GatewayServer(BaseWebChannel):
                     )
             for session_key in stale_session_keys:
                 await self._promote_pending_session_client(route, session_key)
+
+            # 触发 ws_channel 的断连钩子
+            ws_ch = route.ws_channel
+            for hook in getattr(ws_ch, "_disconnect_hooks", []):
+                try:
+                    result = hook(ws, None)
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception as e:
+                    logger.warning(
+                        "%s on_disconnect hook error: %s",
+                        type(ws_ch).__name__, e,
+                    )
 
     async def _handle_raw_message(self, ws: Any, raw: str, request_path: str, route: RouteConfig) -> None:
 
