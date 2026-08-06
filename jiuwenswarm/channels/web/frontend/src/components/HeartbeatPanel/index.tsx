@@ -7,6 +7,12 @@ import type { WebError } from '../../types';
 import type { HeartbeatJobDTO, HeartbeatMeta, HeartbeatTaskUI } from '../../types/heartbeat';
 import { summarizeHeartbeatSchedule } from './heartbeatScheduleConvert';
 import HeartbeatStatusBadge from './HeartbeatStatusBadge';
+import HeartbeatTaskDrawer, {
+  emptyHeartbeatTaskForm,
+  jobToHeartbeatTaskForm,
+  type HeartbeatTaskFormValue,
+} from './HeartbeatTaskDrawer';
+import { scheduleFormToDto } from './heartbeatScheduleConvert';
 
 interface HeartbeatPanelProps {
   sessionId: string;
@@ -70,6 +76,56 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
     return () => controller.abort();
   }, [loadAll]);
 
+  const [drawer, setDrawer] = useState<
+    | { mode: 'create'; form: HeartbeatTaskFormValue; submitting: boolean; error: string | null }
+    | { mode: 'edit'; jobId: string; form: HeartbeatTaskFormValue; submitting: boolean; error: string | null }
+    | null
+  >(null);
+
+  const openCreateDrawer = useCallback(() => {
+    if (!meta) return;
+    setDrawer({ mode: 'create', form: emptyHeartbeatTaskForm(meta), submitting: false, error: null });
+  }, [meta]);
+
+  const openEditDrawer = useCallback((job: HeartbeatTaskUI) => {
+    setDrawer({ mode: 'edit', jobId: job.id, form: jobToHeartbeatTaskForm(job), submitting: false, error: null });
+  }, []);
+
+  const submitDrawer = useCallback(
+    async (value: HeartbeatTaskFormValue) => {
+      if (!drawer) return;
+      setDrawer({ ...drawer, form: value, submitting: true, error: null });
+      const payload = {
+        name: value.name.trim(),
+        prompt: value.prompt.trim(),
+        schedule: scheduleFormToDto(value.schedule),
+        timezone: value.schedule.timezone,
+        enabled: value.enabled,
+        concurrency_policy: value.concurrencyPolicy,
+        session_deleted_policy: value.sessionDeletedPolicy,
+        max_runs: value.maxRuns,
+      };
+      try {
+        if (drawer.mode === 'create') {
+          await webRequest<{ job: HeartbeatJobDTO }>('heartbeat.job.create', { session_id: sessionId, ...payload });
+        } else {
+          await webRequest<{ job: HeartbeatJobDTO }>('heartbeat.job.update', {
+            session_id: sessionId,
+            id: drawer.jobId,
+            patch: payload,
+          });
+        }
+        setDrawer(null);
+        const controller = new AbortController();
+        await loadAll(controller.signal);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        setDrawer((prev) => (prev ? { ...prev, submitting: false, error: message } : prev));
+      }
+    },
+    [drawer, sessionId, loadAll],
+  );
+
   return (
     <div className="fixed inset-0 z-40 flex justify-end bg-overlay-cron-dialog" onClick={onClose}>
       <div
@@ -78,9 +134,19 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
       >
         <div className="flex items-center justify-between border-b border-border p-4">
           <h2 className="text-lg font-bold text-text-strong">{t('heartbeat.panel.title')}</h2>
-          <button onClick={onClose} className="text-text-muted hover:text-text">
-            <X size={20} />
-          </button>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              disabled={!meta}
+              onClick={openCreateDrawer}
+              className="rounded-full bg-cron-action px-4 py-1.5 text-sm font-bold text-cron-action-foreground hover:bg-cron-action-hover disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {t('heartbeat.panel.create')}
+            </button>
+            <button onClick={onClose} className="text-text-muted hover:text-text">
+              <X size={20} />
+            </button>
+          </div>
         </div>
 
         <div className="flex-1 overflow-y-auto p-4">
@@ -99,11 +165,34 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
                   </div>
                   <p className="mt-1 line-clamp-2 text-sm text-text-muted">{job.prompt}</p>
                   <p className="mt-1 text-xs text-text-muted">{summarizeHeartbeatSchedule(job.schedule, t)}</p>
+                  <div className="mt-2 flex justify-end">
+                    <button
+                      type="button"
+                      onClick={() => openEditDrawer(job)}
+                      className="rounded-full border border-border px-3 py-1 text-xs text-text hover:bg-bg-hover"
+                    >
+                      {t('heartbeat.panel.edit')}
+                    </button>
+                  </div>
                 </li>
               ))}
             </ul>
           )}
         </div>
+
+        {drawer && meta && (
+          <div className="border-t border-border">
+            <HeartbeatTaskDrawer
+              mode={drawer.mode}
+              initial={drawer.form}
+              meta={meta}
+              submitting={drawer.submitting}
+              error={drawer.error}
+              onSubmit={submitDrawer}
+              onCancel={() => setDrawer(null)}
+            />
+          </div>
+        )}
       </div>
     </div>
   );
