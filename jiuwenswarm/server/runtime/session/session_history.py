@@ -5,6 +5,7 @@ import logging
 import json
 import os
 import queue
+import re
 import threading
 import time
 from pathlib import Path
@@ -22,6 +23,15 @@ _LEGACY_HISTORY_FILENAME = "history.json"
 _JSONL_HISTORY_FILENAME = "history.jsonl"
 _LEGACY_HISTORY_ENV = "JIUWENSWARM_USE_LEGACY_HISTORY_JSON"
 _HEARTBEAT_OK = "HEARTBEAT_OK"
+_VALID_SESSION_ID = re.compile(
+    r"^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,78}[A-Za-z0-9])?$"
+)
+
+
+def is_valid_session_id(session_id: str) -> bool:
+    """Return whether a session id is safe to use as one path component."""
+
+    return _VALID_SESSION_ID.fullmatch(session_id) is not None
 
 
 def _is_ephemeral_heartbeat_session(session_id: str) -> bool:
@@ -49,6 +59,8 @@ def _has_persistable_assistant_payload(
     if et == "chat.file" and payload.get("files"):
         return True
     if et == "chat.tool_call" and (payload.get("tool_call") or payload.get("tool_calls")):
+        return True
+    if et == "chat.tool_result" and (payload.get("tool_result") or payload.get("tool_call_id")):
         return True
     if payload.get("error") or payload.get("files"):
         return True
@@ -104,6 +116,45 @@ def _session_dir(session_id: str, *, create: bool = True) -> Path:
     if create:
         session_dir.mkdir(parents=True, exist_ok=True)
     return session_dir
+
+
+def resolve_session_dir(
+    session_id: str, *, create: bool = False, sessions_root: Path | None = None,
+) -> tuple[Path | None, str | None]:
+    """安全解析 session 目录路径（防路径遍历）。
+
+    采用严格白名单判据：session id 只能包含 ASCII 字母、数字、点、横线和下划线，
+    长度不超过 80，且首尾必须是字母或数字。不合法输入直接拒绝，根本不拼路径。
+
+    再用 ``resolve()`` + ``relative_to`` 做纵深防御，兜底白名单逻辑被绕过的极端情况。
+
+    Args:
+        session_id: 待校验的 session id（调用方应先 ``.strip()``）。
+        create: 是否创建目录（delete 流程传 False）。
+        sessions_root: sessions 根目录。由调用方传入
+
+    Returns:
+        ``(resolved_path, None)`` —— 合法，返回解析后的绝对路径（确认在 sessions 目录内）。
+        ``(None, error_reason)`` —— 非法，根本未触碰磁盘路径。
+    """
+    if not session_id or not is_valid_session_id(session_id):
+        return None, "invalid session_id"
+
+    if sessions_root is None:
+        sessions_root = get_agent_sessions_dir()
+    session_dir = sessions_root / session_id
+    # 纵深防御必须在 mkdir 之前：先 resolve + relative_to 确认路径仍在 sessions
+    # 目录内，通过后才允许创建。否则白名单一旦被绕过，mkdir(parents=True) 会
+    # 先在 sessions 根目录之外越界创建目录，relative_to 才事后检测到——此时
+    # 副作用已发生，越界空目录残留在磁盘上（虽不触发 rmtree，但仍是文件系统泄漏）。
+    try:
+        resolved = session_dir.resolve(strict=False)
+        resolved.relative_to(sessions_root.resolve(strict=False))
+    except (ValueError, OSError):
+        return None, "invalid session_id"
+    if create:
+        resolved.mkdir(parents=True, exist_ok=True)
+    return resolved, None
 
 
 def _history_file(session_id: str, *, create: bool = True) -> Path:
@@ -293,10 +344,16 @@ def _is_team_relevant(item: dict[str, Any]) -> bool:
     if not isinstance(et, str):
         return False
     if et in _TEAM_RELEVANT_EVENT_TYPES:
+        if et == "chat.file":
+            role = item.get("role")
+            return isinstance(role, str) and role.strip().lower() in {
+                "assistant",
+                "teammate",
+            }
         if et in ("chat.tool_call", "chat.tracer_agent"):
             mode = item.get("mode")
             return isinstance(mode, str) and mode.strip().lower() == "team"
-        if et in ("chat.final", "chat.tool_result", "chat.file"):
+        if et in ("chat.final", "chat.tool_result"):
             role = item.get("role")
             return isinstance(role, str) and role.strip().lower() == "teammate"
         return True

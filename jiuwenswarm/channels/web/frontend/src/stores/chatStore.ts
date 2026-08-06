@@ -22,6 +22,7 @@ import {
   ContextCompressionRuntime,
   ContextCompressionSummary,
   TodoItem,
+  MediaItem,
 } from '../types';
 import { useTodoStore } from './todoStore';
 import {
@@ -29,15 +30,29 @@ import {
   shouldDropToolResult,
 } from './toolResultLifecycle';
 import { mergeFileDownloadItems } from '../utils/fileDownloadDedup';
+import { parseTimestampToMs } from '../utils/timestamp';
 
 const TOOL_TIMEOUT_MS = 12_000_000;
 const EVOLUTION_STATUS_END_VISIBLE_MS = 3_000;
+
+let reasoningSegmentSeq = 0;
+
+function createReasoningSegmentId(): string {
+  reasoningSegmentSeq += 1;
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return `rsn-${crypto.randomUUID()}`;
+  }
+  return `rsn-${Date.now()}-${reasoningSegmentSeq}-${Math.random().toString(36).slice(2, 10)}`;
+}
 
 function computeTimeoutAt(baseIso: string): string {
   return new Date(Date.parse(baseIso) + TOOL_TIMEOUT_MS).toISOString();
 }
 
 function resolveExecutionStatus(result: ToolResult): ToolExecutionStatus {
+  if (result.timedOut) {
+    return 'timeout';
+  }
   return result.success ? 'completed' : 'error';
 }
 
@@ -60,6 +75,8 @@ interface TaskItem {
   id: string;
   content: string;
   timestamp: number;
+  /** Persisted attachments (images/documents, incl. PDF); dispatched with the message when the queued task is sent */
+  mediaItems?: MediaItem[];
 }
 
 export interface HistoryPagerMeta {
@@ -71,6 +88,15 @@ export interface HistoryPagerMeta {
  * 单个 session 的对话运行态。
  * 原全局字段全部迁移到这里，按 session 隔离。
  */
+export interface ReasoningSegment {
+  id: string;
+  text: string;
+  startedAt: number;
+  closed: boolean;
+  /** 收尾时刻；用于延迟折进 streak。历史可省略。 */
+  closedAt?: number;
+}
+
 export interface ChatRuntime {
   messages: Message[];
   isProcessing: boolean;
@@ -86,6 +112,11 @@ export interface ChatRuntime {
   isNewSession: boolean;
   currentStreamContent: string;
   currentStreamId: string | null;
+  /** 本轮是否已按工具边界分段（chat.final 去重）。 */
+  assistantStreamSplit: boolean;
+  reasoningSegments: ReasoningSegment[];
+  /** 「思考中」耗时锚点：仅在可见文字产出时前移。 */
+  thinkingAnchorAt: number;
   messageRenderKeySeq: number;
   /** 最近一次 chat.error 的错误信息，用于会话列表展示异常标记 */
   error: string | null;
@@ -103,6 +134,11 @@ export interface ChatRuntime {
   taskQueue: TaskItem[];
   queuePaused: boolean;
   pendingQuestion: AskUserQuestionPayload | null;
+  /**
+   * 忙碌时设目标：用户气泡暂存在此（界面不立刻显示）；
+   * 空 chat.final / processing 结束再正式入 messages。
+   */
+  pendingGoalObjectiveBubble: { content: string; timestamp: string } | null;
   inputValue: string;
   /** evolutionStatus 自动清除定时器，按 session 隔离 */
   evolutionStatusClearTimer: ReturnType<typeof setTimeout> | null;
@@ -126,6 +162,9 @@ function createEmptyRuntime(): ChatRuntime {
     isNewSession: false,
     currentStreamContent: '',
     currentStreamId: null,
+    assistantStreamSplit: false,
+    reasoningSegments: [],
+    thinkingAnchorAt: Date.now(),
     messageRenderKeySeq: 0,
     error: null,
     streamBuffers: new Map(),
@@ -142,6 +181,7 @@ function createEmptyRuntime(): ChatRuntime {
     taskQueue: [],
     queuePaused: false,
     pendingQuestion: null,
+    pendingGoalObjectiveBubble: null as ChatRuntime['pendingGoalObjectiveBubble'],
     inputValue: '',
     evolutionStatusClearTimer: null,
     interruptResultClearTimer: null,
@@ -184,8 +224,19 @@ interface ChatState {
   replaceHistoryMessages: (sessionId: string, messages: Message[]) => void;
   updateMessage: (sessionId: string, id: string, updates: Partial<Message>) => void;
   appendStreamContent: (sessionId: string, content: string, streamKey?: string) => void;
+  appendReasoning: (sessionId: string, content: string, options?: { atMs?: number }) => void;
+  closeReasoning: (sessionId: string, options?: { atMs?: number }) => void;
+  restoreReasoningSegments: (sessionId: string, items: { at: string; text: string }[]) => void;
   startStreaming: (sessionId: string, messageId: string, streamKey?: string) => void;
   stopStreaming: (sessionId: string, streamKey?: string) => void;
+  finalizeStreamSegment: (sessionId: string, streamKey?: string) => void;
+  finalizeTeamLeaderSegment: (sessionId: string) => void;
+  clearStreamSplit: (sessionId: string) => void;
+  collapseTurnFinal: (
+    sessionId: string,
+    opts: { kind: 'agent' | 'team'; content: string; finalId: string; timestampIso: string }
+  ) => void;
+  bumpThinkingAnchor: (sessionId: string) => void;
   setExecutionError: (sessionId: string, error: string | null) => void;
   setProcessing: (sessionId: string, status: boolean) => void;
   setThinking: (sessionId: string, status: boolean) => void;
@@ -201,20 +252,29 @@ interface ChatState {
   updateToolProgress: (sessionId: string, toolCallId: string, progress: Partial<ToolResult>) => void;
   addToolResult: (sessionId: string, toolResult: ToolResult, options?: { updatedAt?: string }) => void;
   markTimedOutExecutions: (sessionId: string) => void;
+  /** 历史回放常只有 tool_call、无 tool_result：把仍 pending 的工具按 startedAt 结算，避免超时巡检用 now 污染耗时 */
+  settleHistoricalToolExecutions: (sessionId: string) => void;
   updateSubtask: (sessionId: string, payload: SubtaskUpdatePayload) => void;
   clearSubtasks: (sessionId: string) => void;
   clearMessages: (sessionId: string) => void;
   clearCurrentTurnData: (sessionId: string, requestId?: string) => void;
   prependMessages: (sessionId: string, olderFirst: Message[]) => void;
-  addToTaskQueue: (sessionId: string, content: string) => void;
+  addToTaskQueue: (sessionId: string, content: string, mediaItems?: MediaItem[]) => void;
   clearTaskQueue: (sessionId: string) => void;
   removeFromTaskQueue: (sessionId: string, id: string) => void;
   reorderTaskQueue: (sessionId: string, fromIndex: number, toIndex: number) => void;
   setPendingQuestion: (sessionId: string, question: AskUserQuestionPayload | null) => void;
+  setPendingGoalObjectiveBubble: (sessionId: string, content: string | null) => void;
+  flushPendingGoalObjectiveBubble: (sessionId: string) => void;
+  queueOrAddGoalObjectiveMessage: (sessionId: string, content: string) => void;
   setInputValue: (sessionId: string, value: string) => void;
   setSessionError: (sessionId: string, error: string | null) => void;
   setUsageSummary: (sessionId: string, messageId: string, usage: UsageSummary) => void;
-  addFileItems: (sessionId: string, files: FileDownloadItem[]) => void;
+  addFileItems: (
+    sessionId: string,
+    files: FileDownloadItem[],
+    options?: { timestampIso?: string }
+  ) => void;
   setContextCompressionStatus: (
     sessionId: string,
     runtime?: ContextCompressionRuntime,
@@ -278,6 +338,7 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
             ...runtime,
             messages: [...runtime.messages, ...messages],
             messageRenderKeySeq,
+            ...(message.role === 'user' ? { assistantStreamSplit: false, reasoningSegments: [] } : {}),
           },
         },
       };
@@ -301,6 +362,8 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
             messageRenderKeySeq: assigned.messageRenderKeySeq,
             currentStreamContent: '',
             currentStreamId: null,
+            assistantStreamSplit: false,
+            reasoningSegments: [],
             streamBuffers: new Map(),
             evolutionStatus: null,
             evolutionStatusClearTimer: null,
@@ -320,6 +383,7 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
             },
             taskQueue: [],
             pendingQuestion: null,
+            pendingGoalObjectiveBubble: null,
           },
         },
       };
@@ -370,6 +434,101 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
     });
   },
 
+  appendReasoning: (sessionId, content, options) => {
+    if (!content) return;
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const segments = runtime.reasoningSegments;
+      const last = segments[segments.length - 1];
+      const atMs =
+        typeof options?.atMs === 'number' && Number.isFinite(options.atMs)
+          ? options.atMs
+          : Date.now();
+      let next: ReasoningSegment[];
+      if (last && !last.closed) {
+        next = segments.slice(0, -1).concat({ ...last, text: last.text + content });
+      } else {
+        next = segments.concat({
+          id: createReasoningSegmentId(),
+          text: content,
+          startedAt: atMs,
+          closed: false,
+        });
+      }
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, reasoningSegments: next },
+        },
+      };
+    });
+  },
+
+  closeReasoning: (sessionId, options) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const segments = runtime.reasoningSegments;
+      const last = segments[segments.length - 1];
+      if (!last || last.closed) return state;
+      const atMs =
+        typeof options?.atMs === 'number' && Number.isFinite(options.atMs)
+          ? options.atMs
+          : Date.now();
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            reasoningSegments: segments.slice(0, -1).concat({
+              ...last,
+              closed: true,
+              closedAt: atMs,
+            }),
+          },
+        },
+      };
+    });
+  },
+
+  restoreReasoningSegments: (sessionId, items) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const segments: ReasoningSegment[] = [];
+      const seen = new Set<string>();
+      items.forEach((item, index) => {
+        const text = item.text?.trim();
+        if (!text || seen.has(text)) return;
+        seen.add(text);
+        const parsed = parseTimestampToMs(item.at);
+        // 历史里思考与同一步 final/tool_call 共用落盘时间；减 1ms 仅补齐缺失的独立时间戳，
+        // 使时间线能分出「先思考、后动作」，不做跨步骤重排。
+        // 解析失败时跳过该段，勿用 index 当 epoch（会让 startMs≈0，耗时爆炸）
+        if (!Number.isFinite(parsed)) {
+          return;
+        }
+        const startedAt = parsed - 1;
+        segments.push({
+          id: `hist-rsn-${sessionId}-${index}-${createReasoningSegmentId()}`,
+          text,
+          startedAt,
+          closed: true,
+          // 历史已结束：closedAt 用 startedAt，立刻 settled，且比魔法 0 更可解释。
+          closedAt: startedAt,
+        });
+      });
+      segments.sort((a, b) => a.startedAt - b.startedAt);
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, reasoningSegments: segments },
+        },
+      };
+    });
+  },
+
   startStreaming: (sessionId, messageId, streamKey = 'default') => {
     set((state) => {
       const runtime = state.runtimes[sessionId];
@@ -409,6 +568,147 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
     });
   },
 
+  finalizeStreamSegment: (sessionId, streamKey = 'default') => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime || !runtime.currentStreamId) return state;
+      const streamingMessage = runtime.messages.find(
+        (msg) => msg.id === runtime.currentStreamId
+      );
+      const hasVisibleText = Boolean(streamingMessage?.content?.trim());
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            messages: runtime.messages.map((msg) =>
+              msg.id === runtime.currentStreamId ? { ...msg, isStreaming: false } : msg
+            ),
+            currentStreamId: null,
+            currentStreamContent: '',
+            assistantStreamSplit: runtime.assistantStreamSplit || hasVisibleText,
+            streamBuffers: new Map(runtime.streamBuffers).set(streamKey, ''),
+          },
+        },
+      };
+    });
+  },
+
+  finalizeTeamLeaderSegment: (sessionId) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      let latestUserIndex = -1;
+      for (let i = runtime.messages.length - 1; i >= 0; i -= 1) {
+        if (runtime.messages[i].role === 'user') {
+          latestUserIndex = i;
+          break;
+        }
+      }
+      let target: Message | undefined;
+      for (let i = runtime.messages.length - 1; i > latestUserIndex; i -= 1) {
+        const msg = runtime.messages[i];
+        if (msg.id.startsWith('team-leader-') && msg.isStreaming) {
+          target = msg;
+          break;
+        }
+      }
+      if (!target || !target.content?.trim()) return state;
+      const targetId = target.id;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            messages: runtime.messages.map((msg) =>
+              msg.id === targetId ? { ...msg, isStreaming: false } : msg
+            ),
+            assistantStreamSplit: true,
+          },
+        },
+      };
+    });
+  },
+
+  clearStreamSplit: (sessionId) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime || !runtime.assistantStreamSplit) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, assistantStreamSplit: false },
+        },
+      };
+    });
+  },
+
+  collapseTurnFinal: (sessionId, { kind, content, finalId, timestampIso }) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const msgs = runtime.messages;
+      let turnStart = 0;
+      for (let i = msgs.length - 1; i >= 0; i -= 1) {
+        if (msgs[i].role === 'user') {
+          turnStart = i + 1;
+          break;
+        }
+      }
+      const isTarget = (m: Message) =>
+        kind === 'team'
+          ? m.role === 'system' && typeof m.id === 'string' && m.id.startsWith('team-leader-')
+          : m.role === 'assistant';
+      const kept: Message[] = [];
+      let removed = 0;
+      for (let i = 0; i < msgs.length; i += 1) {
+        if (i >= turnStart && isTarget(msgs[i])) {
+          removed += 1;
+          continue;
+        }
+        kept.push(msgs[i]);
+      }
+      if (removed === 0) return state;
+      const displayContent =
+        kind === 'team'
+          ? `team.leader:${JSON.stringify({ content, timestamp: Date.parse(timestampIso) || Date.now() })}`
+          : content;
+      kept.push({
+        id: finalId,
+        role: kind === 'team' ? 'system' : 'assistant',
+        content: displayContent,
+        timestamp: timestampIso,
+        completedAt: timestampIso,
+        isStreaming: false,
+      });
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            messages: kept,
+            assistantStreamSplit: false,
+            currentStreamId: null,
+            currentStreamContent: '',
+          },
+        },
+      };
+    });
+  },
+
+  bumpThinkingAnchor: (sessionId) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, thinkingAnchorAt: Date.now() },
+        },
+      };
+    });
+  },
+
   setExecutionError: (sessionId, error) => {
     set((state) => {
       const runtime = state.runtimes[sessionId];
@@ -426,6 +726,8 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
     set((state) => {
       const runtime = state.runtimes[sessionId];
       if (!runtime) return state;
+      // 新一轮开始（false→true）：把「思考中」耗时锚点归到轮次起点。
+      const turnStart = status && !runtime.isProcessing;
       return {
         runtimes: {
           ...state.runtimes,
@@ -434,10 +736,15 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
             isProcessing: status,
             executionError: status ? null : runtime.executionError,
             ...(status ? { error: null } : {}),
+            ...(turnStart ? { thinkingAnchorAt: Date.now() } : {}),
           },
         },
       };
     });
+    // 整轮空闲：把忙碌时暂存的目标用户气泡正式入列（空 final 主路径之外的兜底）
+    if (!status) {
+      get().flushPendingGoalObjectiveBubble(sessionId);
+    }
   },
 
   setSessionError: (sessionId, error) => {
@@ -843,6 +1150,13 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
       const execution = runtime.toolExecutions.get(toolCallId);
       if (!execution) return state;
       const nextExecutions = new Map(runtime.toolExecutions);
+      // 进度更新不得把已完成/失败/超时打回 pending，否则 UI 会误显示「执行中」。
+      const keepStatus =
+        execution.status === 'completed' ||
+        execution.status === 'error' ||
+        execution.status === 'timeout'
+          ? execution.status
+          : 'pending';
       nextExecutions.set(toolCallId, {
         ...execution,
         result: {
@@ -853,8 +1167,9 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
           ...execution.result,
           ...progress,
         },
-        status: 'pending',
-        updatedAt: new Date().toISOString(),
+        status: keepStatus,
+        updatedAt:
+          keepStatus === 'pending' ? new Date().toISOString() : execution.updatedAt,
       });
       return {
         runtimes: {
@@ -881,11 +1196,59 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
           continue;
         }
         changed = true;
+        // timedOutAt = 巡检发现时刻；updatedAt 保持事件时间（startedAt/原值），避免把「已完成」耗时撑到 now。
         nextExecutions.set(toolCallId, {
           ...execution,
           status: 'timeout',
           timedOutAt: new Date(now).toISOString(),
-          updatedAt: new Date(now).toISOString(),
+        });
+      }
+      if (!changed) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, toolExecutions: nextExecutions },
+        },
+      };
+    });
+  },
+
+  settleHistoricalToolExecutions: (sessionId) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime || runtime.isProcessing) return state;
+      let changed = false;
+      const nextExecutions = new Map(runtime.toolExecutions);
+      for (const [toolCallId, execution] of nextExecutions) {
+        // 只结算仍 pending 的历史孤儿 tool_call。
+        // timeout/error 必须保留，否则刷新后失败/超时会被抹成「已完成」。
+        if (execution.status !== 'pending') {
+          continue;
+        }
+        if (execution.result) {
+          const nextStatus = resolveExecutionStatus(execution.result);
+          if (nextStatus !== execution.status) {
+            changed = true;
+            nextExecutions.set(toolCallId, {
+              ...execution,
+              status: nextStatus,
+              updatedAt: execution.updatedAt || execution.startedAt,
+            });
+          }
+          continue;
+        }
+        // 无真实 result：按调用时刻结算为完成，不引入 Date.now()
+        changed = true;
+        nextExecutions.set(toolCallId, {
+          ...execution,
+          status: 'completed',
+          updatedAt: execution.startedAt,
+          result: {
+            toolName: execution.toolCall.name,
+            result: '',
+            success: true,
+            toolCallId,
+          } as ToolResult,
         });
       }
       if (!changed) return state;
@@ -1083,13 +1446,14 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
             },
             taskQueue: [],
             pendingQuestion: null,
+            pendingGoalObjectiveBubble: null,
           },
         },
       };
     });
   },
 
-  addToTaskQueue: (sessionId, content) => {
+  addToTaskQueue: (sessionId, content, mediaItems) => {
     set((state) => {
       const runtime = state.runtimes[sessionId];
       if (!runtime) return state;
@@ -1104,6 +1468,7 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
                 id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
                 content,
                 timestamp: Date.now(),
+                ...(mediaItems && mediaItems.length > 0 ? { mediaItems } : {}),
               },
             ],
           },
@@ -1173,6 +1538,97 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
     });
   },
 
+  setPendingGoalObjectiveBubble: (sessionId, content) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId] ?? createEmptyRuntime();
+      const trimmed = content && content.trim() ? content.trim() : null;
+      const next = trimmed
+        ? {
+            content: trimmed,
+            timestamp: runtime.pendingGoalObjectiveBubble?.content === trimmed
+              ? runtime.pendingGoalObjectiveBubble.timestamp
+              : new Date().toISOString(),
+          }
+        : null;
+      if (
+        runtime.pendingGoalObjectiveBubble?.content === next?.content &&
+        runtime.pendingGoalObjectiveBubble?.timestamp === next?.timestamp &&
+        state.runtimes[sessionId]
+      ) {
+        return state;
+      }
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, pendingGoalObjectiveBubble: next },
+        },
+      };
+    });
+  },
+
+  flushPendingGoalObjectiveBubble: (sessionId) => {
+    const runtime = get().runtimes[sessionId];
+    const pending = runtime?.pendingGoalObjectiveBubble;
+    if (!pending?.content) {
+      return;
+    }
+    const already = (runtime.messages ?? []).some(
+      (message) =>
+        message.role === 'user' &&
+        message.isGoalObjectiveMessage &&
+        message.content === pending.content
+    );
+    set((state) => {
+      const current = state.runtimes[sessionId];
+      if (!current) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...current, pendingGoalObjectiveBubble: null },
+        },
+      };
+    });
+    if (!already) {
+      get().addMessage(sessionId, {
+        id: `user-goal-${Date.now()}`,
+        role: 'user',
+        content: pending.content,
+        // 入列时刻与后端 defer flush 对齐（上一轮收尾之后）
+        timestamp: new Date().toISOString(),
+        isGoalObjectiveMessage: true,
+      });
+    }
+  },
+
+  queueOrAddGoalObjectiveMessage: (sessionId, content) => {
+    const trimmed = content.trim();
+    if (!trimmed) {
+      return;
+    }
+    const runtime = get().runtimes[sessionId] ?? createEmptyRuntime();
+    const busy = Boolean(runtime.isProcessing || runtime.currentStreamId);
+    if (busy) {
+      get().setPendingGoalObjectiveBubble(sessionId, trimmed);
+      return;
+    }
+    get().setPendingGoalObjectiveBubble(sessionId, null);
+    const already = (runtime.messages ?? []).some(
+      (message) =>
+        message.role === 'user' &&
+        message.isGoalObjectiveMessage &&
+        message.content === trimmed
+    );
+    if (!already) {
+      get().addMessage(sessionId, {
+        id: `user-goal-${Date.now()}`,
+        role: 'user',
+        content: trimmed,
+        timestamp: new Date().toISOString(),
+        isGoalObjectiveMessage: true,
+      });
+    }
+  },
+
   setInputValue: (sessionId, value) => {
     set((state) => {
       const runtime = state.runtimes[sessionId];
@@ -1204,16 +1660,24 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
     });
   },
 
-  addFileItems: (sessionId, files) => {
+  addFileItems: (sessionId, files, options) => {
     set((state) => {
       const runtime = state.runtimes[sessionId];
       if (!runtime) return state;
       const lastMessage = runtime.messages[runtime.messages.length - 1];
+      // 与历史 restore 一致：优先挂当前流；否则挂最近一条助手消息（不是下一条 final）。
       const targetId =
         runtime.currentStreamId ??
-        (lastMessage?.role === 'assistant' ? lastMessage.id : null);
+        (lastMessage?.role === 'assistant' ||
+        (lastMessage?.role === 'system' && lastMessage.id?.startsWith('team-leader-'))
+          ? lastMessage.id
+          : null);
+      const timestampIso =
+        typeof options?.timestampIso === 'string' && options.timestampIso.trim()
+          ? options.timestampIso.trim()
+          : new Date().toISOString();
       if (!targetId) {
-        const msgId = `file-${Date.now()}`;
+        const msgId = `file-${timestampIso}`;
         return {
           runtimes: {
             ...state.runtimes,
@@ -1225,7 +1689,7 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
                   id: msgId,
                   role: 'assistant',
                   content: '',
-                  timestamp: new Date().toISOString(),
+                  timestamp: timestampIso,
                   fileItems: files,
                 },
               ],

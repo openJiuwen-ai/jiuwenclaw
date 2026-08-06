@@ -162,11 +162,13 @@ async def test_successful_discard_restores_files_and_marks_dirty():
     truncate_calls: list[dict] = []
     restore_calls: list[dict] = []
 
-    def fake_truncate(session_id, cutoff_ts, project_dir=None, *, extra_history_roots=None):
+    def fake_truncate(session_id, cutoff_ts, project_dir=None, soft=False, *, extra_history_roots=None, discarded=False):
         truncate_calls.append({
             "session_id": session_id,
             "cutoff_ts": cutoff_ts,
             "project_dir": project_dir,
+            "soft": soft,
+            "discarded": discarded,
             "extra_history_roots": extra_history_roots,
         })
 
@@ -255,6 +257,9 @@ async def test_successful_discard_restores_files_and_marks_dirty():
     assert restore_calls[0]["extra_history_roots"] == ["/tmp/team-workspace"]
     assert mark_discarded_calls[0]["extra_history_roots"] == ["/tmp/team-workspace"]
     assert truncate_calls[0]["extra_history_roots"] == ["/tmp/team-workspace"]
+    # discard 路径应使用 discarded_out 标记(与 rewind 的 rewound_out 区分)
+    assert truncate_calls[0]["soft"] is True
+    assert truncate_calls[0]["discarded"] is True
 
     # watcher 标脏正确项目
     assert registry.mark_dirty_calls == ["proj-A"]
@@ -280,11 +285,14 @@ async def test_partial_failure_keeps_file_ops_for_retry():
 
     truncate_calls: list[dict] = []
 
-    def fake_truncate(session_id, cutoff_ts, project_dir=None):
+    def fake_truncate(session_id, cutoff_ts, project_dir=None, soft=False, *, extra_history_roots=None, discarded=False):
         truncate_calls.append({
             "session_id": session_id,
             "cutoff_ts": cutoff_ts,
             "project_dir": project_dir,
+            "soft": soft,
+            "discarded": discarded,
+            "extra_history_roots": extra_history_roots,
         })
 
     fake_diff_service = SimpleNamespace(

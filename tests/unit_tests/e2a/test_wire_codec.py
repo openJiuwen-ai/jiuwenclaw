@@ -206,3 +206,50 @@ def test_inverse_raises_for_chunk_shape_on_unary_parser() -> None:
     )
     with pytest.raises(ValueError):
         parse_agent_server_wire_unary(chunk_wire)
+
+
+# ---------------------------------------------------------------------------
+# SDD-0010 — wire truncation keeps budget / token_count / child meta
+# ---------------------------------------------------------------------------
+
+def test_snapshot_keep_keys_include_budget() -> None:
+    from jiuwenswarm.server.wire_truncate import (
+        _WORKFLOW_SNAPSHOT_KEEP_KEYS,
+        _WORKFLOW_LIST_SUMMARY_KEEP_KEYS,
+    )
+
+    assert "budget" in _WORKFLOW_SNAPSHOT_KEEP_KEYS
+    assert "budget" in _WORKFLOW_LIST_SUMMARY_KEEP_KEYS
+
+
+def test_collapse_agent_keeps_token_count() -> None:
+    from jiuwenswarm.server.wire_truncate import _workflow_agent_for_collapse
+
+    agent = {"id": "k1", "name": "analyst", "status": "completed", "kind": "agent",
+             "token_count": 12700, "outcome": "ok"}
+    out = _workflow_agent_for_collapse(agent)
+    assert out.get("token_count") == 12700
+
+
+def test_collapse_phase_keeps_child_meta() -> None:
+    from jiuwenswarm.server.wire_truncate import _collapse_oversized_workflow_snapshot_item
+
+    item = {
+        "id": "wf_1", "name": "onboarding", "status": "running",
+        "agent_count": 1, "completed_agent_count": 0,
+        "started_at": "2026-08-01T10:00:00+08:00", "token_count": 12700,
+        "budget": {"total": 5, "spent": 5, "remaining": 0, "scope": "leader", "exhausted": True},
+        "phases": [{
+            "id": "p1", "name": "▸ intro #0", "status": "running",
+            "agent_count": 1, "completed_agent_count": 0,
+            "phase_type": "child", "nested_phase": "▸ intro #0",
+            "parent_phase": "review", "agents": [],
+        }],
+    }
+    out = _collapse_oversized_workflow_snapshot_item(item)
+    assert out["budget"]["exhausted"] is True
+    assert out["token_count"] == 12700
+    ph = out["phases"][0]
+    assert ph.get("phase_type") == "child"
+    assert ph.get("nested_phase") == "▸ intro #0"
+    assert ph.get("parent_phase") == "review"

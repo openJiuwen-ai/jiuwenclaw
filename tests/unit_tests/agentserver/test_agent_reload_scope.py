@@ -229,13 +229,21 @@ async def test_reload_agents_config_resolves_config_once_when_config_none(monkey
 
 @pytest.mark.asyncio
 async def test_agent_reload_config_handler_passes_explicit_scope(monkeypatch):
+    from jiuwenswarm.agents.harness import team as team_harness_module
+
     server = agent_ws_server_module.AgentWebSocketServer()
     calls = []
+    stop_paused = AsyncMock(return_value=2)
 
     async def fake_reload(config, env, **kwargs):
         calls.append((config, env, kwargs))
 
     monkeypatch.setattr(server._agent_manager, "reload_agents_config", fake_reload)
+    monkeypatch.setattr(
+        team_harness_module,
+        "stop_all_paused_team_session_runtimes_across_managers",
+        stop_paused,
+    )
     monkeypatch.setattr(
         agent_ws_server_module,
         "encode_agent_response_for_wire",
@@ -271,13 +279,22 @@ async def test_agent_reload_config_handler_passes_explicit_scope(monkeypatch):
             },
         )
     ]
+    stop_paused.assert_awaited_once_with(reason="agent.reload_config: ")
 
 
 @pytest.mark.asyncio
 async def test_agent_reload_config_handler_skips_agent_manager_for_web_ui_scope(monkeypatch):
+    from jiuwenswarm.agents.harness import team as team_harness_module
+
     server = agent_ws_server_module.AgentWebSocketServer()
     reload_agents = AsyncMock()
+    stop_paused = AsyncMock(return_value=0)
     monkeypatch.setattr(server._agent_manager, "reload_agents_config", reload_agents)
+    monkeypatch.setattr(
+        team_harness_module,
+        "stop_all_paused_team_session_runtimes_across_managers",
+        stop_paused,
+    )
     monkeypatch.setattr(
         agent_ws_server_module,
         "encode_agent_response_for_wire",
@@ -303,6 +320,7 @@ async def test_agent_reload_config_handler_skips_agent_manager_for_web_ui_scope(
     await server._handle_agent_reload_config(ws, request, asyncio.Lock())
 
     reload_agents.assert_not_awaited()
+    stop_paused.assert_not_awaited()
     assert json.loads(ws.sent[-1])["ok"] is True
 
 

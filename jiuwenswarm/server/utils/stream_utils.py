@@ -126,11 +126,7 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
             if payload_dict:
                 return {
                     "event_type": "context.compression_state",
-                    "status": payload_dict.get("status", ""),
-                    "phase": payload_dict.get("phase", ""),
-                    "processor": payload_dict.get("processor", ""),
-                    "summary": payload_dict.get("summary", ""),
-                    "operation_id": payload_dict.get("operation_id", ""),
+                    **payload_dict,
                 }
         if isinstance(payload, dict):
             return {

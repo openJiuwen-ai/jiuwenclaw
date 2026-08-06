@@ -130,7 +130,7 @@
     </tr>
     <tr>
       <td width="22%"><strong>上下文压缩</strong></td>
-      <td width="28%"><a href="zh/上下文压缩卸载.md">上下文压缩卸载</a></td>
+      <td width="28%"><a href="zh/上下文压缩.md">上下文压缩</a></td>
       <td width="50%">超长上下文处理、会话压缩与上下文卸载机制。</td>
     </tr>
     <tr>

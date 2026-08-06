@@ -6,7 +6,6 @@ import json
 import threading
 import time
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -134,6 +133,23 @@ class TestInitSessionMetadata:
         data = _read_json(sessions_dir / "sess_def" / "metadata.json")
         assert data["project_dir"] == ""
         assert data["model"] == ""
+
+    @staticmethod
+    def test_team_binding_fields(sessions_dir):
+        from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata
+
+        init_session_metadata(
+            session_id="sess_team",
+            mode="team.plan",
+            team_name="custom_team",
+            team_template_id="default",
+        )
+        data = _read_json(sessions_dir / "sess_team" / "metadata.json")
+
+        assert data["mode"] == "team.plan"
+        assert data["team_name"] == "custom_team"
+        assert data["team_template_id"] == "default"
+        assert "team_template_snapshot" not in data
 
 
 # ===========================================================================
@@ -326,6 +342,30 @@ class TestUpdateSessionMetadata:
         assert data["model"] == "glm-5"
         assert data["last_user_message_at"] == 2000.0
         assert data["status"] == "idle"
+
+    @staticmethod
+    def test_update_team_binding_fields(sessions_dir):
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            update_session_metadata,
+            _METADATA_QUEUE,
+        )
+
+        init_session_metadata(session_id="sess_bind", mode="agent")
+
+        update_session_metadata(
+            session_id="sess_bind",
+            mode="code.team",
+            team_name="research_team",
+            team_template_id="research",
+        )
+        _METADATA_QUEUE.join()
+
+        data = _read_json(sessions_dir / "sess_bind" / "metadata.json")
+        assert data["mode"] == "code.team"
+        assert data["team_name"] == "research_team"
+        assert data["team_template_id"] == "research"
+        assert "team_template_snapshot" not in data
 
 
 # ===========================================================================
@@ -2058,3 +2098,183 @@ class TestSetSessionPinnedQueuedWriteRace:
         assert data["model"] == "old-queued-write"
         assert data["pinned"] is True
         assert data["pin_order"] == 1
+
+
+# ===========================================================================
+# Session identity preservation under concurrent writes (regression tests)
+#
+# Background: _write_metadata_sync replaces the whole file; it does not merge
+# fields. The previous _read_metadata returned an empty file as a valid {}
+# (`read_text() or '{}'`) and did not hold _FILE_LOCK. Writers used write_text,
+# which truncates before writing, so a concurrent reader could land in the
+# truncation window, read "" -> get {} -> read-modify-write the empty dict back
+# -> session_id / title / created_at permanently erased. The session then loses
+# its ID in the list, cannot be opened, and session.pin fails with
+# "session_id is required".
+# ===========================================================================
+class TestIdentityPreservation:
+    @staticmethod
+    def _seed(sessions_dir: Path, sid: str = "sess_identity") -> Path:
+        d = sessions_dir / sid
+        d.mkdir(parents=True, exist_ok=True)
+        meta = {
+            "session_id": sid,
+            "channel_id": "web",
+            "created_at": 1700000000.0,
+            "title": "title must be preserved",
+            "team_name": f"jiuwen_team_{sid}",
+            "message_count": 3,
+            "mode": "team",
+        }
+        (d / "metadata.json").write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        return d / "metadata.json"
+
+    @staticmethod
+    def test_empty_file_is_read_failure_not_empty_dict(sessions_dir, monkeypatch):
+        """An empty file must be treated as a read failure and logged, not silently
+        accepted as valid empty metadata.
+
+        Note: both implementations return {}, so the return value alone cannot
+        tell them apart. The real difference is whether the failed read is
+        recorded at all -- that silence is why this bug was so hard to trace.
+        """
+        import jiuwenswarm.server.runtime.session.session_metadata as sm
+
+        fpath = TestIdentityPreservation._seed(sessions_dir)
+        fpath.write_text("", encoding="utf-8")
+        sm._METADATA_CACHE.clear()
+
+        warnings: list[str] = []
+        monkeypatch.setattr(
+            sm.logger, "warning", lambda msg, *a, **k: warnings.append(str(msg) % a if a else str(msg))
+        )
+
+        assert sm._read_metadata("sess_identity", cache_bust=True) == {}
+        assert warnings, "empty file silently returned as a valid {} with no warning"
+
+    @staticmethod
+    def test_write_without_session_id_does_not_erase_identity(sessions_dir):
+        """When the payload lacks session_id, identity fields on disk must survive."""
+        import jiuwenswarm.server.runtime.session.session_metadata as sm
+
+        fpath = TestIdentityPreservation._seed(sessions_dir)
+        # Simulate a caller doing read-modify-write after getting an empty
+        # dict (real case: persist_workflow_runs reads empty, then writes back
+        # a payload carrying only workflow_runs).
+        sm._write_metadata_sync("sess_identity", {"workflow_runs": {"wf_1": {}}})
+
+        data = _read_json(fpath)
+        assert data["session_id"] == "sess_identity"
+        assert data["title"] == "title must be preserved"
+        assert data["created_at"] == 1700000000.0
+        assert data["team_name"] == "jiuwen_team_sess_identity"
+        # The new field is still written
+        assert data["workflow_runs"] == {"wf_1": {}}
+
+    @staticmethod
+    def test_write_is_atomic_no_empty_window(sessions_dir):
+        """A concurrent reader must never observe an empty file mid-write (atomic replace)."""
+        import jiuwenswarm.server.runtime.session.session_metadata as sm
+
+        fpath = TestIdentityPreservation._seed(sessions_dir)
+        big = {
+            "session_id": "sess_identity",
+            "title": "title must be preserved",
+            "created_at": 1700000000.0,
+            "blob": "x" * 200_000,
+        }
+        empties: list[str] = []
+        stop = threading.Event()
+
+        def reader():
+            while not stop.is_set():
+                try:
+                    raw = fpath.read_text(encoding="utf-8")
+                except (FileNotFoundError, PermissionError):
+                    empties.append("missing")
+                    continue
+                if not raw.strip():
+                    empties.append("empty")
+
+        t = threading.Thread(target=reader, daemon=True)
+        t.start()
+        for i in range(60):
+            big["message_count"] = i
+            sm._write_metadata_sync("sess_identity", big)
+        stop.set()
+        t.join(timeout=3)
+
+        assert empties == [], f"observed {len(empties)} empty/missing reads: write is not atomic"
+
+    @staticmethod
+    def test_concurrent_persist_keeps_identity(sessions_dir):
+        """A normal write racing a new-field-only write must not erase identity."""
+        import jiuwenswarm.server.runtime.session.session_metadata as sm
+
+        fpath = TestIdentityPreservation._seed(sessions_dir)
+        stop = threading.Event()
+
+        def writer():
+            i = 0
+            while not stop.is_set():
+                i += 1
+                meta = sm._read_metadata("sess_identity", cache_bust=True)
+                if meta.get("session_id"):
+                    meta["message_count"] = i
+                    sm._write_metadata_sync("sess_identity", meta)
+
+        t = threading.Thread(target=writer, daemon=True)
+        t.start()
+        for i in range(200):
+            sm._write_metadata_sync("sess_identity", {"workflow_runs": {"n": i}})
+        stop.set()
+        t.join(timeout=3)
+
+        data = _read_json(fpath)
+        for key in ("session_id", "title", "created_at", "team_name"):
+            assert key in data, f"identity field {key} was lost after concurrent writes"
+
+
+def test_remove_team_mode_session_dirs_at_startup_keeps_stable_team_sessions(
+    sessions_dir,
+):
+    from jiuwenswarm.server.runtime.session.session_metadata import (
+        _write_metadata_sync,
+        remove_team_mode_session_dirs_at_startup,
+    )
+
+    _write_metadata_sync("stable_team", {"session_id": "stable_team", "mode": "team"})
+    _write_metadata_sync(
+        "stable_plan",
+        {"session_id": "stable_plan", "mode": "team.plan"},
+    )
+    _write_metadata_sync(
+        "stable_code",
+        {"session_id": "stable_code", "mode": "code.team"},
+    )
+    _write_metadata_sync(
+        "temp_team",
+        {
+            "session_id": "temp_team",
+            "mode": "team.plan",
+            "temporary_team_session": True,
+        },
+    )
+    _write_metadata_sync(
+        "agent_temp",
+        {
+            "session_id": "agent_temp",
+            "mode": "agent",
+            "temporary_team_session": True,
+        },
+    )
+
+    remove_team_mode_session_dirs_at_startup()
+
+    assert (sessions_dir / "stable_team").exists()
+    assert (sessions_dir / "stable_plan").exists()
+    assert (sessions_dir / "stable_code").exists()
+    assert not (sessions_dir / "temp_team").exists()
+    assert (sessions_dir / "agent_temp").exists()

@@ -253,13 +253,13 @@ cd jiuwenswarm
 
 ## 配置模型
 
-在 Web 页面左侧找到「配置信息」，进入配置页面：
+在 Web 页面左侧点击「**更多**」→「**配置信息**」，进入配置页面：
 
-![](../assets/images/jiuwenswarm_configuration_Info.png)
+![](../assets/images/current-ui/02-配置信息-模型配置.png)
 
 完善以下基本配置，完成后点击右上角「保存」：
 
-![](../assets/images/jiuwenswarm_config_api.png)
+![](../assets/images/current-ui/02-配置信息-模型配置.png)
 
 **配置项说明：**
 
@@ -285,19 +285,19 @@ cd jiuwenswarm
 
 ## 开始对话
 
-在 Web 页面左侧找到「对话」，输入问题即可开始：
+在 Web 页面左侧点击「**工作**」，输入问题即可开始：
 
-![](../assets/images/jiuwenswarm_example.png)
+![](../assets/images/current-ui/10-工作页面-完整.png)
 
 ## 会话管理
 
-点击下方的「+」号，可清空当前会话并开启新会话：
+点击左侧导航栏的「+」号（新建对话按钮），可清空当前会话并开启新会话：
 
-![](../assets/images/jiuwenswarm_new_session.png)
+![](../assets/images/current-ui/01-工作页面.png)
 
 清理后页面显示：
 
-![](../assets/images/jiuwenswarm_clear_session.png)
+![](../assets/images/current-ui/10-工作页面-完整.png)
 
 **什么时候需要清空会话？**
 
@@ -346,10 +346,8 @@ cd jiuwenswarm
 
 **方式一：通过 Agent 删除**
 直接告诉 JiuwenSwarm："请删除所有记忆文件" 或 "清空我的记忆"，Agent 会调用文件工具删除 memory 目录下的文件。
-![](../assets/images/jiuwenswarm_delete_memory.png)
 
 **方式二：手动删除**
 停止 JiuwenSwarm 服务后，直接删除 `memory/` 目录下的所有 Markdown 文件即可。
-![](../assets/images/jiuwenswarm_memory.png)
 
 > ⚠️ **注意**：清空记忆后无法恢复，请谨慎操作。建议定期备份重要的记忆文件。

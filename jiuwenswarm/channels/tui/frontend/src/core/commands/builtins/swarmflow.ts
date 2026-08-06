@@ -100,14 +100,34 @@ export function planSwarmflowToggle(input: {
 export function createSwarmflowCommand(): SlashCommand {
   return {
     name: "swarmflow",
-    description: "Toggle swarmflow human-in-the-loop mode (on/off) or show status",
-    usage: "/swarmflow [on|off]",
-    example: "/swarmflow on",
+    description: "Toggle swarmflow human-in-the-loop mode (on/off) or show status. Use --budget <tokens> to set team token ceiling.",
+    usage: "/swarmflow [on|off] [--budget <tokens>]",
+    example: "/swarmflow on --budget 500000",
     kind: CommandKind.BUILT_IN,
     takesArgs: true,
-    completion: async () => ["on", "off"],
+    completion: async (_ctx, remainingArgs: string) => {
+      const trimmed = (remainingArgs ?? "").trim().toLowerCase();
+      // After "on" is typed, offer "--budget" (value includes "on" so Tab keeps it)
+      if (trimmed === "on") return ["on --budget "];
+      if (trimmed === "off" || /\boff\b/.test(trimmed)) return [];
+      if (/--budget/i.test(trimmed)) return [];
+      return ["on", "off"];
+    },
     action: async (ctx, args) => {
-      const sub = args.trim().toLowerCase();
+      const hasBudgetFlag = /--budget/i.test(args);
+      const budgetMatch = args.match(/--budget\s+(\d+)/i);
+      const budget = budgetMatch ? parseInt(budgetMatch[1], 10) : null;
+      const sub = args.replace(/--budget(\s+\d+)?/i, "").trim().toLowerCase();
+
+      if (hasBudgetFlag && budget === null) {
+        ctx.addItem(addError(ctx.sessionId, "Usage: /swarmflow on --budget <tokens> (e.g. /swarmflow on --budget 500000)"));
+        return;
+      }
+
+      if (budget !== null && budget <= 0) {
+        ctx.addItem(addError(ctx.sessionId, "Budget must be a positive integer (e.g. /swarmflow on --budget 500000)"));
+        return;
+      }
 
       if (!sub) {
         const modeLabel = ctx.mode ?? "unknown";
@@ -127,6 +147,10 @@ export function createSwarmflowCommand(): SlashCommand {
       }
 
       const target = sub as SwarmflowToggleTarget;
+      if (target === "off" && budget !== null) {
+        ctx.addItem(addError(ctx.sessionId, "--budget is only valid with /swarmflow on"));
+        return;
+      }
       const payload = await ctx
         .request<Record<string, unknown>>("config.get", {})
         .catch(() => null);
@@ -139,12 +163,24 @@ export function createSwarmflowCommand(): SlashCommand {
 
       if (plan.writeConfig) {
         try {
-          await ctx.request("config.set", {
+          const values: Record<string, string | number> = {
             enable_swarmflow: target === "on" ? "true" : "false",
-          });
+          };
+          if (target === "on" && budget !== null) {
+            values["swarmflow_budget"] = String(budget);
+          }
+          await ctx.request("config.set", values);
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           ctx.addItem(addError(ctx.sessionId, `config.set enable_swarmflow failed: ${message}`));
+          return;
+        }
+      } else if (target === "on" && budget !== null) {
+        try {
+          await ctx.request("config.set", { swarmflow_budget: String(budget) });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          ctx.addItem(addError(ctx.sessionId, `config.set swarmflow_budget failed: ${message}`));
           return;
         }
       }
@@ -159,7 +195,11 @@ export function createSwarmflowCommand(): SlashCommand {
         }
       }
 
-      ctx.addItem(addInfo(ctx.sessionId, plan.message, "i"));
+      const budgetSuffix = target === "on" && budget !== null
+        ? ` Budget ceiling: ${budget.toLocaleString()} tokens.`
+        : "";
+      const message = `${plan.message}${budgetSuffix}`;
+      ctx.addItem(addInfo(ctx.sessionId, message, "i"));
     },
   };
 }

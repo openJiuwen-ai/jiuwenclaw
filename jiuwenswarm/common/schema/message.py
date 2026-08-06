@@ -51,6 +51,11 @@ class ReqMethod(Enum):
     SESSION_REWIND_COMPACT = "session.rewind_compact"
     SESSION_RESTORE_FILES = "session.restore_files"
     HISTORY_LIST_TURNS = "history.list_turns"
+    TEAM_TEMPLATES_LIST = "team.templates.list"
+    TEAM_BINDINGS_LIST = "team.bindings.list"
+    TEAM_BINDING_CREATE = "team.binding.create"
+    TEAM_BINDING_GENERATE = "team.binding.generate"
+    TEAM_SESSION_BIND = "team.session.bind"
     TEAM_DELETE = "team.delete"
 
     PATH_GET = "path.get"
@@ -60,6 +65,7 @@ class ReqMethod(Enum):
 
     CONFIG_CACHE_CLEAR = "config.cache_clear"
     AGENT_RELOAD_CONFIG = "agent.reload_config"
+    AGENT_PREWARM_SYNC = "agent.prewarm.sync"
 
     MEMORY_COMPUTE = "memory.compute"
 

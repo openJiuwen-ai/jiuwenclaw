@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import os
 import queue
 import re
 import shutil
@@ -26,7 +27,10 @@ logger = logging.getLogger(__name__)
 _METADATA_QUEUE: queue.Queue[tuple[str, dict[str, Any], bool]] = queue.Queue(maxsize=5000)
 _WORKER_STARTED = False
 _WORKER_LOCK = threading.Lock()
-_FILE_LOCK = threading.Lock()
+# Reentrant: the read path now holds this lock too (see _read_metadata).
+# RLock guards against a same-thread nesting (read->write or write->read)
+# deadlocking in the future.
+_FILE_LOCK = threading.RLock()
 
 # 内存缓存: 解决异步写入时读取到陈旧磁盘数据的竞态条件
 _METADATA_CACHE: dict[str, dict[str, Any]] = {}
@@ -293,13 +297,42 @@ def _read_metadata(session_id: str, cache_bust: bool = False) -> dict[str, Any]:
     fpath = get_agent_sessions_dir() / session_id / "metadata.json"
     if not fpath.exists():
         return {}
+    # Reading must be mutually exclusive with _write_metadata_sync: the writer
+    # replaces the whole file, so an unlocked read can land inside the
+    # replacement window and observe empty content.
     try:
-        data = json.loads(fpath.read_text(encoding="utf-8") or '{}')
-        if isinstance(data, dict):
-            return data
-    except Exception as exc:
-        logger.warning("读取 metadata.json 失败: %s", exc)
-    return {}
+        with _FILE_LOCK:
+            raw = fpath.read_text(encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "failed to read metadata.json: %s (session_id=%s)", exc, session_id,
+        )
+        return {}
+    if not raw.strip():
+        # An empty file is a FAILURE, not "empty metadata". It must never be
+        # returned as a valid {}: callers do read-modify-write and would write
+        # the empty dict back, erasing session_id/title and other identity
+        # fields, leaving the session without an ID and impossible to open.
+        logger.warning(
+            "metadata.json is empty, treating as read failure (session_id=%s)",
+            session_id,
+        )
+        return {}
+    try:
+        data = json.loads(raw)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "failed to parse metadata.json: %s (session_id=%s, size=%d)",
+            exc, session_id, len(raw),
+        )
+        return {}
+    if not isinstance(data, dict):
+        logger.warning(
+            "metadata.json content is not a dict: %s (session_id=%s)",
+            type(data).__name__, session_id,
+        )
+        return {}
+    return data
 
 
 def _write_metadata_sync(
@@ -316,17 +349,44 @@ def _write_metadata_sync(
     fpath = _metadata_file(session_id)
     to_write = metadata
     with _FILE_LOCK:
-        if preserve_pin_fields and fpath.exists():
+        current: dict[str, Any] | None = None
+        if fpath.exists():
             try:
-                current = json.loads(fpath.read_text(encoding="utf-8") or "{}")
-                if isinstance(current, dict):
-                    to_write = _merge_pin_fields(current, metadata)
+                raw = fpath.read_text(encoding="utf-8")
+                parsed = json.loads(raw) if raw.strip() else None
+                if isinstance(parsed, dict):
+                    current = parsed
             except Exception as exc:  # noqa: BLE001
-                logger.warning("读取 metadata.json 置顶字段失败: %s", exc)
-        fpath.write_text(
-            json.dumps(to_write, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+                logger.warning("failed to read metadata.json: %s", exc)
+
+        # Identity guard: a caller that received an empty/partial dict and
+        # writes it back would permanently erase session_id, title, created_at
+        # and friends (writes replace the whole file, they do not merge). When
+        # disk has an identity and the incoming payload does not, treat it as a
+        # race-induced dirty write and restore the missing fields.
+        if current and current.get("session_id") and not metadata.get("session_id"):
+            recovered = {k: v for k, v in current.items() if k not in metadata}
+            to_write = {**current, **metadata}
+            logger.warning(
+                "blocked overwrite of session identity (session_id=%s): payload "
+                "has no session_id, restored %d field(s) from disk: %s",
+                session_id, len(recovered), sorted(recovered),
+            )
+
+        if preserve_pin_fields and current is not None:
+            to_write = _merge_pin_fields(current, to_write)
+
+        # Atomic write: write a temp file then rename, so that truncation by
+        # write_text can never expose empty content to a concurrent reader
+        # (precisely how session identity was being lost).
+        payload = json.dumps(to_write, ensure_ascii=False, indent=2)
+        tmp = fpath.with_name(f"{fpath.name}.{os.getpid()}.tmp")
+        try:
+            tmp.write_text(payload, encoding="utf-8")
+            os.replace(tmp, fpath)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
     return to_write
 
 
@@ -455,6 +515,7 @@ def init_session_metadata(
     title: str = "",
     mode: str = "unknown",
     team_name: str = "",
+    team_template_id: str = "",
     project_dir: str = "",
     project_id: str = "",
     model: str = "",
@@ -483,6 +544,7 @@ def init_session_metadata(
         "message_count": 0,
         "mode": mode,
         "team_name": team_name,
+        "team_template_id": team_template_id,
         "round_id": 0,
         "project_dir": project_dir,
         "project_id": project_id,
@@ -512,6 +574,7 @@ def update_session_metadata(
     channel_metadata: dict[str, Any] | None = None,
     mode: str | None = None,
     team_name: str | None = None,
+    team_template_id: str | None = None,
     accent_color: str | None = None,
     project_dir: str | None = None,
     project_id: str | None = None,
@@ -521,6 +584,7 @@ def update_session_metadata(
     pin_order: int | None = None,
     touch_last_message_at: bool = True,
     cache_bust: bool = False,
+    sync: bool = False,
     sync_write: bool = False,
     work_mode: str | None = None,
 ) -> None:
@@ -583,6 +647,7 @@ def update_session_metadata(
             "message_count": 1 if increment_message_count else 0,
             "mode": mode if mode is not None else "unknown",
             "team_name": team_name or "",
+            "team_template_id": team_template_id or "",
             "round_id": 0,
             "project_dir": project_dir or "",
             "project_id": project_id or "",
@@ -607,6 +672,8 @@ def update_session_metadata(
             metadata["mode"] = mode
         if team_name is not None:
             metadata["team_name"] = team_name
+        if team_template_id is not None:
+            metadata["team_template_id"] = team_template_id
         if accent_color is not None:
             metadata["accent_color"] = accent_color
         # model：覆盖式——每次请求更新为本次模型
@@ -659,7 +726,7 @@ def update_session_metadata(
     _enqueue_write(
         session_id,
         metadata,
-        sync_write=sync_write,
+        sync_write=sync_write or sync,
         preserve_pin_fields=pinned is None and pin_order is None,
     )
 
@@ -747,6 +814,7 @@ def sync_session_request_metadata(
             "message_count": 0,
             "mode": mode if (mode is not None and explicit_mode_provided) else "unknown",
             "team_name": "",
+            "team_template_id": "",
             "round_id": 0,
             "project_dir": project_dir or "",
             "project_id": project_id or "",
@@ -833,15 +901,14 @@ def get_session_metadata(
     """
     metadata = _read_metadata(session_id, cache_bust)
     if isinstance(metadata, dict) and metadata:
-        # 统一兜底 + 惰性迁移:缺失字段补默认值,可推断字段(work_mode/project_id/
-        # last_user_message_at)做确定性推断并(可选)异步写盘。无法消歧的会话仍
-        # 按通道推断默认值兜底返回,不写盘。
         metadata = _apply_metadata_defaults_with_inference(
             session_id,
             metadata,
             session_dir=get_agent_sessions_dir() / session_id,
             enable_writeback=enable_writeback,
         )
+        metadata.setdefault("team_name", "")
+        metadata.setdefault("team_template_id", "")
     return metadata
 
 
@@ -1057,7 +1124,12 @@ def build_server_push_message(
 
 
 def remove_team_mode_session_dirs_at_startup() -> None:
-    """agentserver 启动时删除 metadata.json 中 mode 为 team 的会话目录。"""
+    """Remove only explicitly temporary team sessions at startup.
+
+    Stable team sessions are recoverable and must survive restarts. Older code
+    removed every ``mode=team`` session here, which prevents team session
+    restore once team entities are shared across sessions.
+    """
     sessions_dir = get_agent_sessions_dir()
     if not sessions_dir.is_dir():
         return
@@ -1074,7 +1146,12 @@ def remove_team_mode_session_dirs_at_startup() -> None:
         except Exception as exc:  # noqa: BLE001
             logger.warning("启动清理跳过会话 %s: 读取 metadata.json 失败: %s", session_dir.name, exc)
             continue
-        if not isinstance(raw, dict) or raw.get("mode") != "team":
+        if not isinstance(raw, dict):
+            continue
+        mode = str(raw.get("mode") or "").strip().lower()
+        if mode not in {"team", "team.plan", "code.team"}:
+            continue
+        if not bool(raw.get("temporary_team_session") or raw.get("team_temporary")):
             continue
 
         session_id = session_dir.name

@@ -15,14 +15,13 @@ from jiuwenswarm.extensions.agentos.agentos_router.models import AgentInfo, Agen
 AgentCreator = Callable[[AgentInfo], Awaitable[AgentInfo | None]]
 AgentKey = tuple[str, ...]
 BUILTIN_AGENT_TYPE = "jiuwenswarm"
-SUPPORTED_AGENT_TYPES = frozenset({BUILTIN_AGENT_TYPE, "opencode", "claude"})
-# Third-party types are provisioned via registry launch-spec + YuanRong create_sandbox.
-# ``jiuwenswarm`` uses the same URN invoke path as ``agent_client.type=yuanrong``.
-THIRD_PARTY_AGENT_TYPES = frozenset(
-    t for t in SUPPORTED_AGENT_TYPES if t != BUILTIN_AGENT_TYPE
-)
 SUPPORTED_AGENT_KEY_FIELDS = frozenset({"user_id", "agent_type", "session_id"})
 DEFAULT_AGENT_KEY_FIELDS = ("user_id", "agent_type")
+
+
+def is_third_party_agent_type(agent_type: str) -> bool:
+    """True when *agent_type* is not the builtin swarm type."""
+    return str(agent_type or "").strip().lower() not in {"", BUILTIN_AGENT_TYPE}
 
 
 def normalize_agent_key_fields(raw: Any = None) -> tuple[str, ...]:
@@ -156,10 +155,9 @@ class AgentRuntime:
 
     @staticmethod
     def normalize_agent_type(raw: Any) -> str:
-        agent_type = str(raw or BUILTIN_AGENT_TYPE).strip().lower()
-        if agent_type not in SUPPORTED_AGENT_TYPES:
-            raise ValueError(f"unsupported agent_type: {agent_type}")
-        return agent_type
+        """Normalize agent_type; any non-empty name is accepted (no allowlist)."""
+        agent_type = str(raw or "").strip().lower()
+        return agent_type or BUILTIN_AGENT_TYPE
 
     @staticmethod
     def normalize_session_id(raw: Any) -> str:

@@ -54,7 +54,7 @@
 
 ## 2. openjiuwen Spec 与注册底座（依赖，不在本模块）
 
-安装位置：`/Users/alan/Developer/alan_workspace/agent-core/openjiuwen/agent_teams/schema/`。
+安装位置：openjiuwen `agent_teams/schema/`（框架依赖，不在本模块仓库内）。
 
 ### 2.1 Spec 模型（pydantic，可 JSON round-trip）
 
@@ -336,7 +336,7 @@ harness_element(kind=RAIL, name=..., builder=SomeRailClass)              # 直�
 
 - Rail：`core.sys_operation`、`core.task_planning`、`core.security`、`core.heartbeat`、`core.confirm_interrupt`(tool_names)、`core.worktree`(enabled)、`core.lsp`(project_dir)。
 - Tool：`core.web_search`、`core.web_fetch`、`core.web_paid_search`、`core.vision`(vision_model_config)、`core.audio`(dedicated + audio_model_config)。vision/audio 的 config 由 swarm `tools.vision_model_config_params` / `audio_model_config_params` 从 yaml+env 填充后烘焙进 params。
-- Sub-agent：`core.explore_agent`、`core.plan_agent`、`core.browser_agent`（language / max_iterations 为 params，model 取 `ctx.extras["_parent_model"]`）。
+- Sub-agent：`core.plan_agent`、`core.browser_agent`（language / max_iterations 为 params，model 取 `ctx.extras["_parent_model"]`）。`core.explore_agent` provider 仍保留注册，当前临时版本不装配。
 
 `registry.register_swarm_providers` 先调 `ensure_harness_elements_registered()` 确保上述 openjiuwen 元素已注册。
 

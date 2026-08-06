@@ -752,10 +752,10 @@ class TestStructuredAskUserRailResolveInterrupt:
         assert payload["questions"][0]["header"] == "Question"
 
     @staticmethod
-    @pytest.mark.parametrize("options", [None, {}, "not an array", 123])
+    @pytest.mark.parametrize("options", [None, {}, "not an array", "a,b", 123])
     @pytest.mark.asyncio
     async def test_non_array_options_are_rejected(options):
-        """An explicitly provided options value must be an array."""
+        """An explicitly provided options value must be an array (#2331)."""
         rail = StructuredAskUserRail()
         tc = _make_tool_call(arguments={
             "query": "Choose",

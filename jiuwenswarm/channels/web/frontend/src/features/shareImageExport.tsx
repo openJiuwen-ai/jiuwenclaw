@@ -11,7 +11,7 @@ import {
   type ParsedTeamEvent,
 } from '../components/ChatPanel/teamEventUtils';
 import { isUserMember } from '../utils/teamMemberAvatar';
-import { parseHistoryJsonFileToPreviewMessages } from './historyRestore';
+import { parseHistoryJsonFileToTimelinePreview } from './historyRestore';
 import { parseTeamHistoryPanelRecords } from './teamHistoryPanelRestore';
 import { isA2UIClientEventContent } from './a2ui/a2uiContent';
 import { getSvgNaturalHeight, getSvgNaturalWidth } from '../utils/svgDimensions';
@@ -154,12 +154,14 @@ export const ShareImageDocument = forwardRef<HTMLDivElement, ShareImageDocumentP
       if (!snapshot) {
         return null;
       }
-      const messages = parseHistoryJsonFileToPreviewMessages(snapshot.records, snapshot.session_id);
+      const preview = parseHistoryJsonFileToTimelinePreview(snapshot.records, snapshot.session_id);
       // Filter out A2UI client event messages from exports
-      const filteredMessages = filterA2UIClientEvents(messages) as typeof messages;
+      const filteredMessages = filterA2UIClientEvents(preview.messages) as typeof preview.messages;
       return {
         mode: normalizeMode(snapshot.records),
         messages: filteredMessages,
+        executions: preview.executions,
+        reasoningSegments: preview.reasoningSegments,
         groupMessages: collectGroupMessages(snapshot),
       };
     }, [snapshot]);
@@ -200,7 +202,9 @@ export const ShareImageDocument = forwardRef<HTMLDivElement, ShareImageDocumentP
             {hasConversation ? (
               <ChatTimelineList
                 messages={data.messages}
-                executions={[]}
+                executions={data.executions}
+                reasoningSegments={data.reasoningSegments}
+                staticTimeline
                 mode={data.mode}
                 disableA2UIInteraction={true}
               />

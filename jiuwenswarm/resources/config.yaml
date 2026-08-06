@@ -115,8 +115,8 @@ memory:
     enabled: false
     patterns: []
     description:
-      zh: "以下内容禁止记忆：密码、API密钥、Secret、Token、信用卡号、身份证号、手机号等敏感信息"
-      en: "The following content is forbidden to remember: passwords, API keys, secrets, tokens, credit card numbers, ID numbers, phone numbers and other sensitive information"
+      zh: "以下内容禁止记忆：（用户自行补充，如身高、体重、姓名等，建议用逗号分隔）"
+      en: "The following content is forbidden to remember: (To be supplemented by users, e.g., height, weight, name, etc. Separate items with commas recommended)"
 
   # ------------------------------------------------------------
   # 外接记忆（External Memory）
@@ -125,7 +125,7 @@ memory:
   #
   # 【方案 1：YAML 直接改】
   #   memory.engine: external   # 或 both
-  #   memory.external.provider: mem0   # 选一个：openjiuwen | mem0 | openviking
+  #   memory.external.provider: mem0   # 选一个：openjiuwen | mem0 | openviking | jiuwenmemory
   #   # 然后在下方对应的 mem0/openjiuwen/openviking 子段填 api_key 或 endpoint
   #
   # 【方案 2：环境变量覆盖】
@@ -145,6 +145,7 @@ memory:
   #   │ external    │ openjiuwen    │ 只挂外接 LTM                         │
   #   │ external    │ mem0          │ 只挂外接 Mem0                        │
   #   │ external    │ openviking    │ 只挂外接 OpenViking                  │
+  #   │ external    │ jiuwenmemory │ 只挂外接 Jiuwen（远程 agent-memory） │
   #   │ external    │ <plugin-name> │ 只挂用户安装的插件                   │
   #   │ both        │ 任一          │ 内置 + 外接同时挂（LLM 两套工具并列）│
   #   │ none        │ *             │ 全关，任何记忆 rail 都不挂           │
@@ -157,7 +158,7 @@ memory:
   # - 失败降级：provider 构建失败或网络异常不阻塞主流程
   external:
     # 选哪家 provider。空字符串 = 禁用外接（等价于 engine=builtin）
-    provider: ${MEMORY_EXTERNAL_PROVIDER:-}   # '' | openjiuwen | mem0 | openviking | lakebase | <plugin-name>
+    provider: ${MEMORY_EXTERNAL_PROVIDER:-}   # '' | openjiuwen | mem0 | openviking | lakebase | jiuwenmemory | <plugin-name>
     # 数据隔离标识（所有 provider 共用）
     user_id: ${MEMORY_USER_ID:-__default__}
     scope_id: ${MEMORY_SCOPE_ID:-__default__}
@@ -197,6 +198,39 @@ memory:
       base_id: ${LAKEBASE_MEM_BASE_ID:-}
       database_id: ${LAKEBASE_DATABASE_ID:-}
 
+    # -- Jiuwen Memory（agent-memory 引擎，server 或 sdk 两种接入）--
+    jiuwen:
+      # 接入方式：server = 调远程 HTTP 服务；sdk = 进程内装配内核直连后端
+      mode: ${JIUWEN_MEMORY_MODE:-server}            # server | sdk
+      tenant_id: ${JIUWEN_MEMORY_TENANT_ID:-default} # org 轴
+      infer_turns: true                               # true=对话提炼为去重事实；false=原文存储
+      save_assistant_turns: false                     # 是否一并存助手回复（默认只存用户轮）
+
+      # ---- server 模式专用（mode=server）----
+      server:
+        base_url: ${JIUWEN_MEMORY_BASE_URL:-http://127.0.0.1:8137}
+        api_key: ${JIUWEN_MEMORY_API_KEY:-}
+        read_timeout: 30.0
+        write_timeout: 120.0
+
+      # ---- sdk 模式专用（mode=sdk）----
+      # 进程内装配 agent-memory 内核，直连后端。
+      # 只需配三个后端的 type + url；LLM/embedding 复用 jiuwenswarm 顶层配置
+      # （models.defaults[is_default=true] + embed 段），不在此重复配。
+      # rerank/graph 等不开放，由 builder 写死关闭。
+      # 需要 agent-memory 已安装（pip install JiuwenMemory）。
+      sdk:
+        # KV 真源：sqlite（落盘文件） | redis（远程） | memory（进程内，重启丢）
+        kv_type: ${JIUWEN_KV_TYPE:-redis}
+        kv_url: ${JIUWEN_KV_URL:-redis://localhost:6379/0}   # sqlite=文件路径；redis=redis://host:port/db
+        # 向量索引：milvus（远程 ANN） | memory（进程内暴力余弦）
+        vector_type: ${JIUWEN_VECTOR_TYPE:-milvus}
+        vector_url: ${JIUWEN_VECTOR_URL:-http://localhost:19530}   # milvus=http://host:19530
+        # 全文/关系：elasticsearch（BM25） | memory（进程内倒排）
+        db_type: ${JIUWEN_DB_TYPE:-elasticsearch}
+        db_url: ${JIUWEN_DB_URL:-http://localhost:9200}   # elasticsearch=http://host:9200
+        # 可选覆盖（缺省复用顶层 embed 配置）
+        embedder_dim: ${JIUWEN_EMBEDDER_DIM:-1024}     # 须与向量库 dim 一致
 
 proactive_recommendation:
   enabled: false                # 总开关
@@ -215,8 +249,8 @@ models:
         # 流式：等待首个分片的最大时间（秒）。放宽以兼容 reasoning/思考模型思考期的静默
         stream_first_chunk_timeout: 300
         # 流式：分片之间的最大空闲等待时间（秒）
-        stream_idle_timeout: 60
-        verify_ssl: false
+        stream_idle_timeout: 120
+        verify_ssl: true
         custom_headers: {}
       model_config_obj:
         temperature: 0.95
@@ -228,7 +262,7 @@ models:
         model_name: ${VIDEO_MODEL_NAME}
         client_provider: ${VIDEO_PROVIDER}
         timeout: 1800
-        verify_ssl: false
+        verify_ssl: true
       model_config_obj:
         temperature: 0.95
   audio:
@@ -237,7 +271,7 @@ models:
         api_key: ${AUDIO_API_KEY}
         model_name: ${AUDIO_MODEL_NAME}
         client_provider: ${AUDIO_PROVIDER}
-        verify_ssl: false
+        verify_ssl: true
         timeout: 1800
       model_config_obj:
         temperature: 0.95
@@ -247,7 +281,7 @@ models:
         api_key: ${VISION_API_KEY}
         model_name: ${VISION_MODEL_NAME}
         client_provider: ${VISION_PROVIDER}
-        verify_ssl: false
+        verify_ssl: true
         timeout: 1800
       model_config_obj:
         temperature: 0.95
@@ -257,7 +291,7 @@ models:
         api_key: ${IMAGE_GEN_API_KEY}
         model_name: ${IMAGE_GEN_MODEL_NAME}
         client_provider: ${IMAGE_GEN_PROVIDER}
-        verify_ssl: false
+        verify_ssl: true
         timeout: 1800
       model_config_obj:
         temperature: 0.95
@@ -282,7 +316,7 @@ acp_agents:
 #       api_base: https://api.deepseek.com
 #       api_key: sk-xxx
 #       timeout: 1800
-#       verify_ssl: false
+#       verify_ssl: true
 #       custom_headers: {}
 #     model_request_config:
 #       model: deepseek-chat
@@ -402,14 +436,13 @@ agent_observability:
 # ============================================================
 # 控制非 team 模式（agent.* / code.*）的人类可读本地 dump。
 # 生效逻辑（resolve_debug_trace_settings）：
-#   debug_enabled = 请求带 /debug OR debug_trace.enabled OR debug_trace.<mode>.enabled
+#   debug_enabled = 请求带 /debug OR debug_trace.<mode>.enabled
 #   dump_enabled  = debug_enabled AND debug_trace.<mode>.dump_enabled != false
 # dump 写入 ~/.jiuwenswarm/.agent/traces/ 或 .code/traces/（按模式）。
 # 与 agent_observability（OTel span）相互独立：本块只管本地文本 dump，
 # OTel 接入在后续阶段。
 # ============================================================
 debug_trace:
-  enabled: false                    # 全局开关（true=所有模式常开 dump）
   agent:                            # agent 模式（agent.plan / agent.fast …）
     enabled: false                  # 仅 agent 模式开关
     dump_enabled: true              # debug 开启时是否写本地 dump
@@ -418,6 +451,7 @@ debug_trace:
     include_reasoning: true         # 记录推理片段
     include_tool_args: true         # 记录工具参数
     include_tool_result: true       # 记录工具结果
+    include_subagent_flow: true     # 采集子 agent chunk 进同一 dump（内置 task / 自定义 / 后台子 agent）
   code:                             # code 模式（code.normal / code.plan …）
     enabled: false
     dump_enabled: true
@@ -426,6 +460,7 @@ debug_trace:
     include_reasoning: true
     include_tool_args: true
     include_tool_result: true
+    include_subagent_flow: true     # 采集子 agent chunk 进同一 dump（内置 task / 自定义 / 后台子 agent）
   limits:
     tool_args_max_chars: 2000       # 工具参数截断阈值
     tool_result_max_chars: 8000     # 工具结果截断阈值
@@ -454,7 +489,8 @@ react:
       # max_iterations: 15
     browser_agent:
       enabled: true
-      # max_iterations: 15
+      # Browser Agent 独立轮次预算；未配置时默认 100。
+      # max_iterations: 100
   answer_chunk_size: 500
   stream_chunk_threshold: 50
   stream_character_threshold: 2000
@@ -463,9 +499,14 @@ react:
     enable_kv_cache_affinity: false
   context_engine_config:
     enable_openrouter_model_context_window_tokens: true
+    # 显式覆盖上下文窗口 token 上限（正整数）；注释掉或留空则按模型自动解析
+    # context_window_tokens: 131072
     enable_reload: true
     enabled: true
     message_summary_offloader_config:
+      # read_pdf outputs are page-level source text; keep them verbatim like
+      # read_file so summaries are not built from doubly-compressed digests.
+      protected_tool_names: ["read_file", "read_pdf"]
       add_message_threshold_ratio: 0.1
       ttl_seconds: 300
       ttl_context_occupancy_ratio: 0.5
@@ -588,6 +629,9 @@ gateway:
       user_template: "yr:instance:{instance}"
       connect_timeout_s: 30
       client_keys_dir: "/root/.ssh"
+    auth_service_url: ${AGENTOS_AUTH_SERVICE_URL:-http://iam-agentos:8080}
+    timeout: ${AGENTOS_AUTH_TIMEOUT:-10}
+    auth_enabled: bool = True
 
 heartbeat:
   # 心跳间隔（秒），默认 3600
@@ -653,6 +697,8 @@ channels:
         my_user_id: ""
         bot_name: ""
         enable_memory: false
+        # 飞书开放平台 API 域名前缀（留空走官方默认，支持国际版/私有化切换）
+        api_base: https://open.feishu.cn
   feishu_enterprise:
     # 企业飞书多 Bot 配置（每个 bot 会注册为独立 channel: feishu_enterprise:<app_id>）
     # bot_a:
@@ -683,7 +729,7 @@ channels:
         # xiaoyi_claw配置
         uid:
         api_key:
-        push_url:
+        push_url: https://hag.cloud.huawei.com/open-ability-agent/v1/agent-webhook
         file_upload_url:
         # 小艺手机端插件tools调用，会添加相关tools到系统提示词
         phone_tools_enabled: false
@@ -694,6 +740,9 @@ channels:
     allow_from: []
     enabled: false
     send_file_allowed: true
+    # API 域名前缀（留空走官方默认，支持私有化/国际版切换）
+    api_base: https://api.dingtalk.com      # 新版 v1.0 接口域名
+    oapi_base: https://oapi.dingtalk.com    # 旧版 media 接口域名
   telegram:
     # Telegram Bot 配置
     # 从 @BotFather 获取 bot_token
@@ -808,10 +857,10 @@ permissions:
     bash: ask
     mcp_exec_command: ask
     create_terminal: ask
-    write: ask
-    write_file: ask
-    edit_file: ask
-    search_replace: ask
+    write: allow
+    write_file: allow
+    edit_file: allow
+    search_replace: allow
     # ask_user 只向用户提问，不修改系统，自动放行避免权限中断阻塞问题选项呈现
     ask_user: allow
     write_memory: allow
@@ -936,20 +985,39 @@ permissions:
       tools: [bash, mcp_exec_command, create_terminal]
       pattern: 're:(?i)(^|[\s;&|()])((cat|type|less|more|head|tail|grep|find|Get-Content|Select-String)\b[^;&|]*(id_rsa|id_ed25519|\.pem\b|\.pfx\b|\.key\b|\.kube/config|\.aws/(credentials|config)|\.npmrc\b|\.env(\.[A-Za-z0-9_-]+)?\b|authorized_keys|\.ssh/))'
       severity: HIGH
-    - id: path_ask_ssh
-      tools: [read_file, write_file, edit_file, read_text_file, write_text_file, write, read, glob_file_search, glob, list_dir, list_files, grep, search_replace]
-      pattern: "**/.ssh/**"
-      severity: HIGH
-    - id: path_ask_env
-      tools: [read_file, write_file, edit_file, read_text_file, write_text_file, write, read, glob_file_search, glob, list_dir, list_files, grep, search_replace]
-      pattern: "**/.env*"
-      severity: HIGH
+    # path_ask_* 已迁到 file_guard.paths（match: glob）；Pipeline A 不再重复匹配。
+    # - id: path_ask_ssh / path_ask_env → 见下方 file_guard.paths
 
   # 数字分身 owner-scoped 权限（默认空，不生效）
   owner_scopes: {}
   deny_guidance_message: ""
 
-  # 外部目录访问 (访问 workspace 外路径时的权限)
+  # Native 路径层（agent-core FileGuard）：defaults + workspace 绑定运行时 workspace_root
+  # trusted_dirs（TUI 项目 cwd / /add-dir）由引擎运行时编译，不必写进 YAML。
+  file_guard:
+    enabled: true
+    defaults:
+      read: ask
+      write: ask
+      exec: ask
+    workspace:
+      read: allow
+      write: allow
+      exec: ask
+    paths:
+      - path: "**/.ssh/**"
+        match: glob
+        read: ask
+        write: ask
+        exec: ask
+      - path: "**/.env*"
+        match: glob
+        read: ask
+        write: ask
+        exec: ask
+
+  # Legacy external_directory：仅作兼容；启用上方 Native file_guard 后 "*" 不再驱动路径层。
+  # 新信任目录写入 file_guard.paths（/add-dir），勿再写本键具名 allow。
   external_directory:
     "*": "ask"
 
@@ -982,7 +1050,6 @@ extensions:
   # 扩展包搜索目录（字符串），用 ';' 分割多个目录：
   # EXTENSION_DIRS="E:/a;D:/b"
   extension_dirs: ${EXTENSION_DIRS:-jiuwenswarm/extensions}
-
 
 # ============================================================
 # Hooks 配置
@@ -1106,6 +1173,71 @@ modes:
       teammate_mode: build_mode
       spawn_mode: inprocess
       enable_swarmflow: false
+
+      # Team-level token budget ceiling for swarmflow runs.
+      # Unset / null = unbounded (no ceiling).  Set to a positive integer to
+      # cap total tokens across ALL swarmflow runs spawned by this team.
+      # swarmflow_budget: 500000
+
+      # Proactive reliability monitoring for team leaders and teammates.
+      reliability:
+        enabled: false
+        monitor_roles:
+          - leader
+          - teammate
+
+        detectors:
+          tool_error:
+            enabled: true
+            window_seconds: 60.0
+            rate_threshold: 5
+            consecutive_threshold: 3
+
+          repeat_tool:
+            enabled: true
+            history_size: 30
+            repeat_warn: 10
+            pingpong_warn: 10
+            loop_block: 20
+            global_stop: 30
+
+          model_error:
+            enabled: true
+            window_seconds: 120.0
+            rate_threshold: 3
+            consecutive_threshold: 2
+
+          output_length:
+            enabled: true
+            text_threshold: 32000
+            thinking_threshold: 16000
+
+          compaction:
+            enabled: true
+            window_seconds: 300.0
+            frequency_threshold: 3
+            drop_ratio: 0.3
+
+          pingpong:
+            enabled: true
+            min_volleys: 6
+
+        policy:
+          severity_actions:
+            low:
+              - observe_only
+            medium:
+              - report_leader
+            high:
+              - local_steer
+              - report_leader
+            critical:
+              - local_steer
+              - escalate_user
+
+        restart_intensity:
+          intensity: 5
+          period_seconds: 60.0
 
       # SwarmFlow per-Leader concurrency caps (three-layer governor).
       # Only effective when enable_swarmflow is true.

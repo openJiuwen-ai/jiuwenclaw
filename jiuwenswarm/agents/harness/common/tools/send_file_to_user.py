@@ -146,6 +146,7 @@ class SendFileToolkit:
         self,
         abs_file_path_list: Union[List[str], str],
         target_channels: Union[List[str], str, None] = None,
+        **_ignored: Any,
     ) -> str:
         """Send files to user.
 
