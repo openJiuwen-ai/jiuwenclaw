@@ -8,11 +8,13 @@ TeamMember 专用 Rail、Ability 继承逻辑，不依赖主 agent adapter。
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.harness.rails import SecurityRail, TaskPlanningRail
+from openjiuwen.harness.rails.base import DeepAgentRail
 
 # Optional platform rails — soft-import so missing providers do not break team.
 try:
@@ -44,6 +46,78 @@ class JiuSwarmStreamEventRail(JiuClawStreamEventRail):
 
 
 logger = logging.getLogger(__name__)
+
+
+class TeamTelemetryContextRail(DeepAgentRail):
+    """为 team 成员注入 request context（替代 plan 模式 adapter 的 context 注入职责）。
+
+    plan 模式下，JiuWenClawDeepAdapter 在 invoke 前调用 set_telemetry_context /
+    set_request_context。team 成员不经 adapter，swarm runner 也不调用这些方法，
+    导致 TelemetryRail/RequestSummaryRail 拿不到 session_id/request_id/channel_id，
+    RequestSummaryRail 的 after_invoke 因 request_id 为 None 直接 return 不落盘。
+
+    本 rail 在 before_invoke 时从 openjiuwen.agent_teams.context 取 session_id，
+    生成唯一 request_id，注入两个 token rail 的 context；after_invoke 时
+    finalize_request 落盘 request_summaries.jsonl。
+    """
+
+    priority = 9
+
+    def __init__(
+        self,
+        telemetry_rail: Any | None,
+        request_summary_rail: Any | None,
+        *,
+        channel_id: str = "",
+    ) -> None:
+        super().__init__()
+        self._telemetry_rail = telemetry_rail
+        self._request_summary_rail = request_summary_rail
+        self._channel_id = str(channel_id or "").strip()
+
+    async def before_invoke(self, ctx: Any) -> None:
+        try:
+            from openjiuwen.agent_teams.context import get_session_id
+
+            session_id = get_session_id() or "default"
+        except Exception:
+            session_id = "default"
+        request_id = str(time.monotonic_ns())
+
+        if self._telemetry_rail is not None:
+            try:
+                self._telemetry_rail.set_telemetry_context(
+                    channel_id=self._channel_id,
+                    session_id=session_id,
+                    request_id=request_id,
+                    metadata=None,
+                )
+            except Exception as exc:
+                logger.warning("[TeamTelemetryContextRail] set_telemetry_context failed: %s", exc)
+
+        if self._request_summary_rail is not None:
+            try:
+                self._request_summary_rail.set_request_context(
+                    channel_id=self._channel_id,
+                    session_id=session_id,
+                    request_id=request_id,
+                    mode="team",
+                )
+            except Exception as exc:
+                logger.warning("[TeamTelemetryContextRail] set_request_context failed: %s", exc)
+
+    async def after_invoke(self, ctx: Any) -> None:
+        try:
+            from jiuwenclaw.perf.collector import get_perf_collector
+            from jiuwenclaw.perf.context import get_request_context
+
+            req_ctx = get_request_context()
+            rid = str(req_ctx.get("request_id") or "").strip() if req_ctx else ""
+            if rid:
+                status = "error" if getattr(ctx, "error", None) else "ok"
+                get_perf_collector().finalize_request(rid, status=status)
+        except Exception as exc:
+            logger.warning("[TeamTelemetryContextRail] finalize_request failed: %s", exc)
 
 
 @dataclass
@@ -279,6 +353,38 @@ def build_member_rails(
             rails_list.append(overflow_rail)
         if enable_qa:
             rails_list.extend(_build_team_leader_qa_rails(config))
+
+    # ── token 可观测 rail（镜像 plan：context 注入 → TelemetryRail → RequestSummaryRail）──
+    # team 成员不经主 adapter，这里补挂，使成员的 LLM/工具调用同样被统计 token 消耗
+    # 并写 request_summaries.jsonl。TeamTelemetryContextRail(priority 9) 先注入
+    # session/request/channel 上下文，TelemetryRail(10)/RequestSummaryRail(11) 再采集。
+    telemetry_rail = None
+    request_summary_rail = None
+    try:
+        from jiuwenclaw.telemetry.instrumentors.telemetry_rail import TelemetryRail
+
+        telemetry_rail = TelemetryRail()
+    except Exception as exc:
+        logger.warning("[TeamRuntime] TelemetryRail creation failed: %s", exc)
+    try:
+        from jiuwenclaw.perf.request_summary_rail import RequestSummaryRail
+
+        request_summary_rail = RequestSummaryRail(record_only=True)
+    except Exception as exc:
+        logger.warning("[TeamRuntime] RequestSummaryRail creation failed: %s", exc)
+    if telemetry_rail is not None or request_summary_rail is not None:
+        # priority 顺序：context(9) → telemetry(10) → request_summary(11)
+        rails_list.insert(0, TeamTelemetryContextRail(
+            telemetry_rail, request_summary_rail, channel_id=channel))
+        if request_summary_rail is not None:
+            rails_list.insert(0, request_summary_rail)
+        if telemetry_rail is not None:
+            rails_list.insert(0, telemetry_rail)
+        logger.info(
+            "[TeamRuntime] token rails mounted: telemetry=%s request_summary=%s",
+            telemetry_rail is not None,
+            request_summary_rail is not None,
+        )
 
     logger.info("[TeamRuntime] Total rails built: %d", len(rails_list))
     return rails_list

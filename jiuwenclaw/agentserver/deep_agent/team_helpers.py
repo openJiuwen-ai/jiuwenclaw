@@ -1682,6 +1682,46 @@ async def _consume_stream_with_query(channel_id: str | None,
         )
 
 
+def _extract_team_usage_metadata(chunk: Any) -> dict[str, Any] | None:
+    """从 llm_usage chunk 提取 usage_metadata（与 plan 的 _extract_usage_metadata_from_payload 一致）。"""
+    payload = getattr(chunk, 'payload', None)
+    if not isinstance(payload, dict):
+        return None
+    raw_meta = payload.get('metadata', payload)
+    if not isinstance(raw_meta, dict):
+        return None
+    usage_meta = raw_meta.get('usage_metadata', raw_meta)
+    return usage_meta if isinstance(usage_meta, dict) else None
+
+
+def _accumulate_team_usage(acc: dict[str, float], usage_meta: dict[str, Any]) -> None:
+    """累加单次 LLM 调用的 token/cost 到 session 级累加器（与 plan 的 _accumulate_usage_metadata 一致）。"""
+    for token in ('input_tokens', 'output_tokens', 'total_tokens', 'cache_tokens'):
+        acc[token] += usage_meta.get(token, 0) or 0
+    for cost in ('input_cost', 'output_cost', 'total_cost'):
+        acc[cost] += usage_meta.get(cost, 0.0) or 0.0
+
+
+def _build_team_usage_summary(acc: dict[str, float]) -> dict[str, Any]:
+    """构建 usage summary（与 plan 的 _build_usage_summary 格式一致，供 relayclaw 消费）。"""
+    # 部分 provider 的 usage 只带 input/output_tokens 而无 total_tokens，此时以 input+output 兜底
+    total_tokens = acc['total_tokens'] or (acc['input_tokens'] + acc['output_tokens'])
+    summary: dict[str, Any] = {
+        'input_tokens': acc['input_tokens'],
+        'output_tokens': acc['output_tokens'],
+        'total_tokens': total_tokens,
+    }
+    if acc['cache_tokens'] > 0:
+        summary['cache_tokens'] = acc['cache_tokens']
+    if acc['input_cost'] > 0:
+        summary['input_cost'] = round(acc['input_cost'], 6)
+    if acc['output_cost'] > 0:
+        summary['output_cost'] = round(acc['output_cost'], 6)
+    if acc['total_cost'] > 0:
+        summary['total_cost'] = round(acc['total_cost'], 6)
+    return summary
+
+
 async def _consume_stream_with_query_impl(
     channel_id: str | None,
     session_id: str,
@@ -1697,6 +1737,11 @@ async def _consume_stream_with_query_impl(
     emitted_ask_user_request_ids: set[str] = set()
     leader_final_texts: list[str] = []
     stream_started_at = time.time()
+    # 累加 team 成员 LLM 调用的 token 消耗（input/output/total/cache_tokens + cost）
+    team_usage_acc: dict[str, float] = {
+        "input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "cache_tokens": 0,
+        "input_cost": 0.0, "output_cost": 0.0, "total_cost": 0.0,
+    }
     tm_ = get_team_manager(channel_id)
     tm_.reset_seen_team_events(session_id)
     tm_.reset_workflow_completed(session_id)
@@ -1736,6 +1781,20 @@ async def _consume_stream_with_query_impl(
                         chunk,
                         'type',
                         None))
+            # 拦截 llm_usage chunk：parse_stream_chunk 对 llm_usage 返回 None 会丢弃，
+            # 这里提前提取 usage_metadata，累加并广播 chat.usage_metadata 让 relayclaw 端能累加。
+            _chunk_type = getattr(chunk, 'type', None)
+            if _chunk_type == 'llm_usage':
+                _usage_meta = _extract_team_usage_metadata(chunk)
+                if _usage_meta is not None:
+                    _accumulate_team_usage(team_usage_acc, _usage_meta)
+                    _broadcast_event(channel_id, session_id, {
+                        'event_type': 'chat.usage_metadata',
+                        'metadata': {'usage_metadata': _usage_meta},
+                        'session_id': session_id,
+                        'rid': round_id,
+                    })
+                continue
             is_leader = _is_leader_output(chunk)
             is_teammate = _is_teammate_output(chunk)
             if not is_leader and (not is_teammate):
@@ -1868,6 +1927,18 @@ async def _consume_stream_with_query_impl(
                                           'is_complete': True})
                     continue
                 _broadcast_event(channel_id, session_id, parsed)
+        # 流结束：广播 chat.usage_summary（与 plan 模式一致），让 relayclaw 端写入 SessionChainStore
+        _usage_summary = _build_team_usage_summary(team_usage_acc)
+        if _usage_summary.get('total_tokens', 0) > 0:
+            logger.info(
+                '[TeamHelpers] team usage summary: channel_id=%s session_id=%s usage=%s',
+                _resolve_channel_id(channel_id), session_id, _usage_summary)
+            _broadcast_event(channel_id, session_id, {
+                'event_type': 'chat.usage_summary',
+                'session_id': session_id,
+                'rid': round_id,
+                'usage': _usage_summary,
+            })
         if received_chunks == 0:
             logger.warning(
                 '[TeamHelpers] stream ended with no output: channel_id=%s session_id=%s',
