@@ -2965,6 +2965,22 @@
     },
     "errors": {
       "cronFieldCount": "心跳的 Cron 表达式需要 5 段（分 时 日 月 周）"
-    }
+    },
+    "drawer": {
+      "fieldName": "任务名称",
+      "fieldNameTooLong": "任务名称不能超过 64 字符",
+      "fieldPrompt": "续跑提示词",
+      "fieldPromptTooLong": "续跑提示词不能超过 2000 字符",
+      "fieldSchedule": "调度计划",
+      "fieldConcurrencyPolicy": "重叠运行策略",
+      "fieldSessionDeletedPolicy": "会话删除后策略",
+      "fieldMaxRuns": "最大触发次数",
+      "fieldMaxRunsUnlimited": "不限制",
+      "missingFields": "还需要填写：{{fields}}",
+      "submitCreate": "创建",
+      "submitUpdate": "保存"
+    },
+    "concurrencyPolicy": { "skip": "跳过（skip）", "queue": "排队（queue）", "replace": "替换（replace）" },
+    "sessionDeletedPolicy": { "disable": "停用任务", "completed": "标记为已完成" }
   }
 }
