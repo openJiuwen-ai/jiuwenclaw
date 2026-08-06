@@ -77,7 +77,13 @@ class _TeamPlanApprovalPayloadError(ValueError):
     """Raised when a structured team.plan approval payload is malformed."""
 
 
-def _schedule_symphony_session_feedback(session_id: str, request_id: str) -> None:
+def _schedule_symphony_session_feedback(
+    session_id: str,
+    request_id: str,
+    *,
+    channel_id: str = "",
+    mode: str = "",
+) -> None:
     """Submit session-based Symphony learning without delaying the response."""
 
     try:
@@ -85,7 +91,12 @@ def _schedule_symphony_session_feedback(session_id: str, request_id: str) -> Non
             schedule_session_evolution_consume,
         )
 
-        schedule_session_evolution_consume(session_id, request_id)
+        schedule_session_evolution_consume(
+            session_id,
+            request_id,
+            channel_id=channel_id,
+            mode=mode,
+        )
     except Exception as exc:  # noqa: BLE001
         logging.getLogger(__name__).debug(
             "Failed to schedule Symphony session feedback: %s",
@@ -2155,7 +2166,12 @@ class JiuWenSwarm:
             if is_auto_memory_enabled(mode, config) and is_memory_enabled(mode, config):
                 _trigger_auto_memory_extraction(adapter, request, session_id, is_stream=False)
 
-        _schedule_symphony_session_feedback(session_id, request.request_id)
+        _schedule_symphony_session_feedback(
+            session_id,
+            request.request_id,
+            channel_id=request.channel_id,
+            mode=request.params.get("mode", "unknown"),
+        )
         return result
 
     async def process_message_stream(
@@ -3155,7 +3171,12 @@ class JiuWenSwarm:
         if is_auto_memory_enabled(mode, config) and is_memory_enabled(mode, config):
             _trigger_auto_memory_extraction(adapter, request, session_id, is_stream=True)
 
-        _schedule_symphony_session_feedback(session_id, rid)
+        _schedule_symphony_session_feedback(
+            session_id,
+            rid,
+            channel_id=cid,
+            mode=request.params.get("mode", "unknown"),
+        )
         yield AgentResponseChunk(
             request_id=rid,
             channel_id=cid,

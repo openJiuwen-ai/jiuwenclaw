@@ -1653,11 +1653,13 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
                     >
                       <span>{edge.source === selectedNode.id ? '→' : '←'} {other?.label || labelFromId(otherId)}</span>
                       <small>
-                        {edge.type}
-                        {edge.runtimeWeight === undefined
-                          ? ''
-                          : ` · runtime_weight ${edge.runtimeWeight.toFixed(2)}`}
-                        {' · '}{Math.round(edge.confidence * 100)}%
+                        {[
+                          edge.type,
+                          `${Math.round(edge.confidence * 100)}%`,
+                          ...(edge.runtimeWeight === undefined
+                            ? []
+                            : ['runtime_weight', edge.runtimeWeight.toFixed(2)]),
+                        ].join(' · ')}
                       </small>
                     </button>
                   );

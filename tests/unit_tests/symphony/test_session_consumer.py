@@ -119,7 +119,15 @@ def test_wait_for_request_history_observes_late_terminal_record(
     _write_history(
         session_root,
         session_id,
-        [{"role": "user", "request_id": request_id, "content": "continue"}],
+        [
+            {"role": "user", "request_id": request_id, "content": "continue"},
+            {
+                "role": "assistant",
+                "request_id": request_id,
+                "event_type": "chat.final",
+                "content": "intermediate answer",
+            },
+        ],
     )
     history_path = session_root / session_id / "history.jsonl"
     monkeypatch.setattr(
@@ -136,8 +144,8 @@ def test_wait_for_request_history_observes_late_terminal_record(
                     {
                         "role": "assistant",
                         "request_id": request_id,
-                        "event_type": "chat.final",
-                        "content": "done",
+                        "event_type": session_consumer.SESSION_REQUEST_COMPLETED_EVENT,
+                        "content": "",
                     }
                 )
                 + "\n"
@@ -153,6 +161,95 @@ def test_wait_for_request_history_observes_late_terminal_record(
 
     assert sleep_calls == [True]
     assert history_limit == history_path.stat().st_size
+
+
+def test_session_consumer_records_success_when_skills_are_already_loaded(
+    monkeypatch,
+    tmp_path,
+):
+    session_root = tmp_path / "sessions"
+    score_dir = tmp_path / "score"
+    activation_records = []
+    for index, name in enumerate(("ocr-invoice", "verify-invoice"), start=1):
+        activation_records.extend(
+            [
+                {
+                    "role": "assistant",
+                    "request_id": "req-load",
+                    "event_type": "chat.tool_call",
+                    "tool_call": {
+                        "name": "skill_tool",
+                        "tool_call_id": f"load-{index}",
+                        "arguments": json.dumps({"skill_name": name}),
+                    },
+                },
+                {
+                    "role": "assistant",
+                    "request_id": "req-load",
+                    "event_type": "chat.tool_result",
+                    "tool_name": "skill_tool",
+                    "tool_call_id": f"load-{index}",
+                    "success": True,
+                    "result": "success=True",
+                },
+            ]
+        )
+    execution_records = [
+        {
+            "role": "user",
+            "request_id": "req-run",
+            "content": "确认，按上面的路径继续执行",
+        },
+        {
+            "role": "assistant",
+            "request_id": "req-run",
+            "event_type": "chat.tool_call",
+            "tool_call": {
+                "name": "verify_invoice",
+                "arguments": json.dumps({"invoice_id": "INV-001"}),
+            },
+        },
+        {
+            "role": "assistant",
+            "request_id": "req-run",
+            "event_type": "chat.tool_result",
+            "tool_name": "verify_invoice",
+            "success": True,
+            "result": {"verified": True},
+        },
+        {
+            "role": "assistant",
+            "request_id": "req-run",
+            "event_type": "chat.final",
+            "content": "发票识别和真伪校验完成",
+        },
+    ]
+    _write_history(
+        session_root,
+        "session-loaded-skills",
+        activation_records + _plan_records() + execution_records,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.session_history.get_agent_sessions_dir",
+        lambda: session_root,
+    )
+
+    result = consume_session_history(
+        "session-loaded-skills",
+        completed_request_id="req-run",
+        score_dir=score_dir,
+    )
+
+    assert result["outcomes"][0]["outcome"] == "success"
+    event = read_events(score_dir)[0]
+    assert event["selected_skill_ids"] == ["ocr-invoice", "verify-invoice"]
+    assert event["evidence"]["skill_evidence"] == (
+        "session_activation_with_tool_execution"
+    )
+    overlay = read_overlay(score_dir)
+    assert overlay["edges"]["ocr-invoice->verify-invoice:can_feed"][
+        "success_count"
+    ] == 1
 
 
 def test_session_consumer_records_cross_turn_success(monkeypatch, tmp_path):

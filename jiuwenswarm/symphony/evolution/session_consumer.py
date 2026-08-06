@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from jiuwenswarm.server.runtime.session.session_history import (
+    append_history_record,
     get_read_history_path,
     load_history_records,
 )
@@ -27,7 +28,9 @@ SESSION_FEEDBACK_SCHEMA_VERSION = "symphony.session_feedback.v1"
 SESSION_FEEDBACK_STATE_FILE = "session_feedback_state.json"
 SESSION_FEEDBACK_SOURCE = "session_history"
 SESSION_INFERENCE_VERSION = "session_history_v1"
+SESSION_REQUEST_COMPLETED_EVENT = "chat.request_completed"
 _MAX_TRACKED_SESSIONS = 500
+_MAX_TRACKED_SKILLS = 200
 _MAX_SKIPPED_TURNS = 3
 _HISTORY_READY_RETRIES = 20
 _HISTORY_READY_INTERVAL_SECONDS = 0.05
@@ -69,6 +72,9 @@ def session_feedback_state_path(score_dir: str | Path) -> Path:
 def schedule_session_evolution_consume(
     session_id: str,
     request_id: str,
+    *,
+    channel_id: str = "",
+    mode: str = "",
 ) -> bool:
     """Schedule non-blocking feedback consumption after history is durable."""
 
@@ -91,6 +97,19 @@ def schedule_session_evolution_consume(
             return False
         _SCHEDULED.add(schedule_key)
 
+    # The history writer is asynchronous. This marker is queued after every
+    # record from the request, so observing it guarantees the full turn is
+    # durable instead of mistaking an intermediate chat.final for completion.
+    append_history_record(
+        session_id=clean_session_id,
+        request_id=clean_request_id,
+        channel_id=channel_id,
+        role="assistant",
+        event_type=SESSION_REQUEST_COMPLETED_EVENT,
+        content="",
+        timestamp=time.time(),
+        mode=mode,
+    )
     future = _EXECUTOR.submit(
         _consume_after_history_ready,
         clean_session_id,
@@ -127,7 +146,7 @@ def _wait_for_request_history(
         records = load_history_records(session_id)
         if any(
             str(record.get("request_id") or "") == request_id
-            and record.get("event_type") == "chat.final"
+            and record.get("event_type") == SESSION_REQUEST_COMPLETED_EVENT
             for record in reversed(records)
         ):
             return _file_size(history_path)
@@ -258,8 +277,14 @@ def _consume_records(
         if isinstance(session_state.get("pending_plan"), dict)
         else {}
     )
+    activated_skill_ids = _unique_skill_ids(
+        session_state.get("activated_skill_ids") or []
+    )
     results: list[dict[str, Any]] = []
     for request_id, request_records in _group_by_request(records):
+        activated_skill_ids = _unique_skill_ids(
+            [*activated_skill_ids, *_loaded_skill_ids(request_records)]
+        )[-_MAX_TRACKED_SKILLS:]
         markers = _plan_markers(request_records, score_dir=score_dir)
 
         if markers:
@@ -273,6 +298,7 @@ def _consume_records(
                 request_id=request_id,
                 score_dir=score_dir,
                 same_turn=False,
+                activated_skill_ids=activated_skill_ids,
             )
             if result is not None:
                 results.append(result)
@@ -294,6 +320,7 @@ def _consume_records(
                 request_id=request_id,
                 score_dir=score_dir,
                 same_turn=True,
+                activated_skill_ids=activated_skill_ids,
             )
             if result is not None:
                 results.append(result)
@@ -303,6 +330,10 @@ def _consume_records(
         session_state["pending_plan"] = pending
     else:
         session_state.pop("pending_plan", None)
+    if activated_skill_ids:
+        session_state["activated_skill_ids"] = activated_skill_ids
+    else:
+        session_state.pop("activated_skill_ids", None)
     return results
 
 
@@ -314,6 +345,7 @@ def _consume_execution_turn(
     request_id: str,
     score_dir: Path,
     same_turn: bool,
+    activated_skill_ids: list[str],
 ) -> dict[str, Any] | None:
     correlation = _execution_correlation(pending, records, same_turn=same_turn)
     if not correlation:
@@ -329,13 +361,28 @@ def _consume_execution_turn(
     )
     observed_tools = _observed_tool_names(records)
     planned_skill_ids = list(pending.get("selected_skill_ids") or [])
+    effective_skill_ids = observed_skills
+    skill_evidence = "current_turn_skill_tool"
     if outcome == "success" and not _all_planned_skills_observed(
         planned_skill_ids,
         observed_skills,
     ):
-        return None
+        activated_planned_skills = _match_planned_skills(
+            planned_skill_ids,
+            activated_skill_ids,
+        )
+        if (
+            not _all_planned_skills_observed(
+                planned_skill_ids,
+                activated_planned_skills,
+            )
+            or not _has_successful_execution_tool_result(records)
+        ):
+            return None
+        effective_skill_ids = planned_skill_ids
+        skill_evidence = "session_activation_with_tool_execution"
     planned_edges = normalize_edges(pending.get("selected_edges") or [])
-    selected_edges = _observed_edges(planned_edges, observed_skills)
+    selected_edges = _observed_edges(planned_edges, effective_skill_ids)
     failed_edges = selected_edges[-1:] if outcome == "failure" else []
     evidence_id = f"session:{session_id}:{pending['plan_id']}:{request_id}"
     event = record_plan_outcome(
@@ -343,7 +390,7 @@ def _consume_execution_turn(
         plan_id=str(pending["plan_id"]),
         query=str(pending.get("query") or ""),
         outcome=outcome,
-        selected_skill_ids=observed_skills,
+        selected_skill_ids=effective_skill_ids,
         selected_edges=selected_edges,
         failed_edges=failed_edges,
         failure_attribution="terminal_edge" if outcome == "failure" else "",
@@ -359,6 +406,8 @@ def _consume_execution_turn(
             "planned_skill_ids": planned_skill_ids,
             "planned_edges": planned_edges,
             "observed_skill_ids": observed_skills,
+            "activated_skill_ids": activated_skill_ids,
+            "skill_evidence": skill_evidence,
             "observed_tool_names": observed_tools,
             "same_turn": same_turn,
         },
@@ -571,6 +620,71 @@ def _observed_skill_ids(
     return observed
 
 
+def _loaded_skill_ids(records: list[dict[str, Any]]) -> list[str]:
+    """Return Skills whose skill_tool result completed successfully."""
+
+    loaded: list[str] = []
+    pending_calls: list[tuple[str, str]] = []
+    for record in records:
+        event_type = record.get("event_type")
+        if event_type == "chat.tool_call":
+            tool_call = record.get("tool_call")
+            if not isinstance(tool_call, dict):
+                continue
+            if str(tool_call.get("name") or "").strip() != "skill_tool":
+                continue
+            arguments = _tool_arguments(tool_call.get("arguments"))
+            candidate = str(arguments.get("skill_name") or "").strip()
+            if not candidate:
+                continue
+            call_id = str(tool_call.get("tool_call_id") or "").strip()
+            pending_calls.append((call_id, candidate))
+            continue
+        if event_type != "chat.tool_result":
+            continue
+        if str(record.get("tool_name") or "").strip() != "skill_tool":
+            continue
+        call_id = str(record.get("tool_call_id") or "").strip()
+        invoked_name = _take_pending_skill_call(pending_calls, call_id)
+        if _tool_result_failed(record):
+            continue
+        candidate = _skill_name_from_result(record) or invoked_name
+        normalized = skill_id(candidate).strip()
+        if normalized and normalized not in loaded:
+            loaded.append(normalized)
+    return loaded
+
+
+def _unique_skill_ids(values: list[Any]) -> list[str]:
+    output: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = skill_id(value).strip()
+        key = normalized.lower()
+        if not normalized or key in seen:
+            continue
+        seen.add(key)
+        output.append(normalized)
+    return output
+
+
+def _match_planned_skills(
+    planned_skill_ids: list[str],
+    activated_skill_ids: list[str],
+) -> list[str]:
+    selected = {
+        skill_id(item).strip().lower(): skill_id(item).strip()
+        for item in planned_skill_ids
+        if skill_id(item).strip()
+    }
+    output: list[str] = []
+    for candidate in activated_skill_ids:
+        matched = _match_selected_skill(candidate, selected)
+        if matched and matched not in output:
+            output.append(matched)
+    return output
+
+
 def _take_pending_skill_call(
     pending_calls: list[tuple[str, str]],
     call_id: str,
@@ -646,6 +760,24 @@ def _observed_tool_names(records: list[dict[str, Any]]) -> list[str]:
         if name and name not in output:
             output.append(name)
     return output
+
+
+def _has_successful_execution_tool_result(
+    records: list[dict[str, Any]],
+) -> bool:
+    for record in records:
+        if record.get("event_type") != "chat.tool_result":
+            continue
+        tool_name = str(record.get("tool_name") or "").strip()
+        if (
+            not tool_name
+            or tool_name == "skill_tool"
+            or tool_name in _SYMPHONY_TOOL_NAMES
+        ):
+            continue
+        if not _tool_result_failed(record):
+            return True
+    return False
 
 
 def _observed_edges(
