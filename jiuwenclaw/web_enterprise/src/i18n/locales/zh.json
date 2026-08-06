@@ -805,6 +805,62 @@
       "importFailedHint": "导入失败，请检查路径或权限",
       "uninstallFailed": "卸载失败",
       "uninstallFailedHint": "卸载失败，请稍后重试"
+    },
+    "enterprise": {
+      "title": "技能",
+      "subtitle": "查看本租户已安装技能；支持 URL 验签安装与用户技能卸载。",
+      "installTitle": "通过 URL 安装",
+      "installHint": "填写下载地址即可安装；签名为可选项，填写后会对下载内容做 HMAC-SHA256 验签。",
+      "installing": "安装中…",
+      "searchPlaceholder": "搜索技能名称、来源或版本",
+      "empty": "暂无已安装技能",
+      "notRemovable": "预制不可卸",
+      "deleteConfirm": "确认卸载技能「{{name}}」？",
+      "fields": {
+        "url": "下载 URL",
+        "signature": "签名（可选，HMAC-SHA256 hex）"
+      },
+      "placeholders": {
+        "url": "https://example.com/skill.zip",
+        "signature": "可选：64 位十六进制签名"
+      },
+      "filter": {
+        "all": "全部",
+        "prebuilt": "预制",
+        "user": "用户自装"
+      },
+      "columns": {
+        "name": "名称",
+        "type": "类型",
+        "channel": "渠道",
+        "source": "来源",
+        "version": "版本",
+        "installer": "最近安装者",
+        "actions": "操作"
+      },
+      "sourceType": {
+        "prebuilt": "预制",
+        "user": "用户自装"
+      },
+      "channel": {
+        "prebuilt": "白名单同步",
+        "web": "web页面",
+        "skillnet": "SkillNet",
+        "clawhub": "ClawHub"
+      },
+      "success": {
+        "installed": "已安装：{{name}}",
+        "uninstalled": "已卸载：{{name}}"
+      },
+      "errors": {
+        "loadFailed": "加载已安装技能失败",
+        "urlRequired": "请填写下载 URL",
+        "urlSignatureRequired": "请填写下载 URL",
+        "routingRequired": "请先配置 group_id / bot_id / user_id",
+        "installFailed": "安装失败",
+        "uninstallFailed": "卸载失败",
+        "prebuiltNotRemovable": "预制技能不可卸载，请通过白名单模板调整"
+      }
     }
   },
   "agent": {
