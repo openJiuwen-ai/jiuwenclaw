@@ -26,6 +26,9 @@ _VALID_STYLE_IDS = frozenset(
 _VALID_SEARCH_MODES = frozenset({"auto", "no_search", "force_search"})
 _VALID_SOURCE_TYPES = frozenset({"topic", "outline", "description"})
 _VALID_RESEARCH_DEPTHS = frozenset({"L1", "L2", "L3"})
+_VALID_STRUCTURAL_REQUESTS = frozenset(
+    {"none", "agenda", "section", "chapter", "auto"}
+)
 
 _STYLE_LABEL_TO_ID: dict[str, str] = {
     "商务经典": "business-classic",
@@ -381,7 +384,6 @@ def _merge_slot_payload(
         inputs.setdefault("missing_fields", [])
 
     # 结构页需求提取
-    _VALID_STRUCTURAL_REQUESTS = frozenset({"none", "agenda", "section", "chapter", "auto"})
     spr = payload.get("structural_page_request")
     if isinstance(spr, str) and spr.strip().lower() in _VALID_STRUCTURAL_REQUESTS:
         inputs["structural_page_request"] = spr.strip().lower()
@@ -1527,7 +1529,10 @@ class RequirementCollectNode(PlanNode):
                     ctx[slot] = v
             # 结构页需求透传
             _spr = pre_slots.get("structural_page_request")
-            if isinstance(_spr, str) and _spr.strip().lower() in frozenset({"none", "agenda", "section", "chapter", "auto"}):
+            if (
+                isinstance(_spr, str)
+                and _spr.strip().lower() in _VALID_STRUCTURAL_REQUESTS
+            ):
                 ctx["structural_page_request"] = _spr.strip().lower()
             else:
                 ctx.setdefault("structural_page_request", "none")
@@ -1560,7 +1565,10 @@ class RequirementCollectNode(PlanNode):
             # 结构页需求透传
             if not ctx.get("structural_page_request"):
                 _spr = pre_slots.get("structural_page_request")
-                if isinstance(_spr, str) and _spr.strip().lower() in frozenset({"none", "agenda", "section", "chapter", "auto"}):
+                if (
+                    isinstance(_spr, str)
+                    and _spr.strip().lower() in _VALID_STRUCTURAL_REQUESTS
+                ):
                     ctx["structural_page_request"] = _spr.strip().lower()
                 else:
                     ctx.setdefault("structural_page_request", "none")
