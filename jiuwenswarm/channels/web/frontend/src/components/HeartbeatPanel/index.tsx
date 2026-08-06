@@ -58,8 +58,9 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
 
-  const loadAll = useCallback(async (signal: AbortSignal) => {
-    setLoading(true);
+  const loadAll = useCallback(async (signal: AbortSignal, options?: { silent?: boolean }) => {
+    const silent = options?.silent ?? false;
+    if (!silent) setLoading(true);
     setLoadError(null);
     try {
       const [metaPayload, listPayload] = await Promise.all([
@@ -74,7 +75,7 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
       if (sessionIdRef.current !== sessionId) return;
       setLoadError(err instanceof Error ? err.message : String(err));
     } finally {
-      if (sessionIdRef.current === sessionId) setLoading(false);
+      if (sessionIdRef.current === sessionId && !silent) setLoading(false);
     }
   }, [sessionId]);
 
@@ -119,7 +120,7 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
     const controller = new AbortController();
     const timer = window.setInterval(() => {
       if (document.hidden) return;
-      void loadAll(controller.signal);
+      void loadAll(controller.signal, { silent: true });
     }, 3000);
     return () => {
       window.clearInterval(timer);
@@ -138,7 +139,7 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
         });
         setToast(t(job.enabled ? 'heartbeat.toast.paused' : 'heartbeat.toast.resumed'));
         const controller = new AbortController();
-        await loadAll(controller.signal);
+        await loadAll(controller.signal, { silent: true });
       } catch (err) {
         setToast(err instanceof Error ? err.message : String(err));
       } finally {
@@ -159,7 +160,7 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
         });
         setToast(t(heartbeatRunNowMessageKey(result.accepted, result.reason, result.queued)));
         const controller = new AbortController();
-        await loadAll(controller.signal);
+        await loadAll(controller.signal, { silent: true });
       } catch (err) {
         setToast(err instanceof Error ? err.message : String(err));
       } finally {
@@ -180,7 +181,7 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
         });
         setToast(t(heartbeatCancelMessageKey(result.cancel_status)));
         const controller = new AbortController();
-        await loadAll(controller.signal);
+        await loadAll(controller.signal, { silent: true });
       } catch (err) {
         setToast(err instanceof Error ? err.message : String(err));
       } finally {
@@ -206,7 +207,7 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
       }
       setPendingDelete(null);
       const controller = new AbortController();
-      await loadAll(controller.signal);
+      await loadAll(controller.signal, { silent: true });
     } catch (err) {
       const webErr = err as WebError;
       if (webErr.code === 'CONFLICT') {
@@ -229,15 +230,20 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
         prompt: value.prompt.trim(),
         schedule: scheduleFormToDto(value.schedule),
         timezone: value.schedule.timezone,
-        enabled: value.enabled,
         concurrency_policy: value.concurrencyPolicy,
         session_deleted_policy: value.sessionDeletedPolicy,
         max_runs: value.maxRuns,
       };
       try {
         if (drawer.mode === 'create') {
-          await webRequest<{ job: HeartbeatJobDTO }>('heartbeat.job.create', { session_id: sessionId, ...payload });
+          await webRequest<{ job: HeartbeatJobDTO }>('heartbeat.job.create', {
+            session_id: sessionId,
+            ...payload,
+            enabled: value.enabled,
+          });
         } else {
+          // enabled 由 heartbeat.job.toggle 独占管理，编辑表单不应携带并覆盖它，
+          // 否则会把用户在抽屉打开期间通过 Pause/Resume 按钮做的改动静默覆盖回去
           await webRequest<{ job: HeartbeatJobDTO }>('heartbeat.job.update', {
             session_id: sessionId,
             id: drawer.jobId,
@@ -246,7 +252,7 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
         }
         setDrawer(null);
         const controller = new AbortController();
-        await loadAll(controller.signal);
+        await loadAll(controller.signal, { silent: true });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         setDrawer((prev) => (prev ? { ...prev, submitting: false, error: message } : prev));
@@ -254,6 +260,8 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
     },
     [drawer, sessionId, loadAll],
   );
+
+  const drawerBusy = Boolean(drawer?.submitting);
 
   return (
     <div className="fixed inset-0 z-40 flex justify-end bg-overlay-cron-dialog" onClick={onClose}>
@@ -266,7 +274,7 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
           <div className="flex items-center gap-3">
             <button
               type="button"
-              disabled={!meta}
+              disabled={!meta || drawerBusy}
               onClick={openCreateDrawer}
               className="rounded-full bg-cron-action px-4 py-1.5 text-sm font-bold text-cron-action-foreground hover:bg-cron-action-hover disabled:cursor-not-allowed disabled:opacity-60"
             >
@@ -323,8 +331,9 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
                     </button>
                     <button
                       type="button"
+                      disabled={drawerBusy}
                       onClick={() => openEditDrawer(job)}
-                      className="rounded-full border border-border px-3 py-1 text-xs text-text hover:bg-bg-hover"
+                      className="rounded-full border border-border px-3 py-1 text-xs text-text hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-60"
                     >
                       {t('heartbeat.panel.edit')}
                     </button>
@@ -349,6 +358,7 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
         {drawer && meta && (
           <div className="border-t border-border">
             <HeartbeatTaskDrawer
+              key={drawer.mode === 'edit' ? drawer.jobId : 'create'}
               mode={drawer.mode}
               initial={drawer.form}
               meta={meta}
