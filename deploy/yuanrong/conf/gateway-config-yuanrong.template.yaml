@@ -493,7 +493,8 @@ gateway:
       connect_timeout_s: 30
     auth_service_url: ${AGENTOS_AUTH_SERVICE_URL:-http://iam-agentos:8080}
     timeout: ${AGENTOS_AUTH_TIMEOUT:-10}
-    auth_enabled: bool = True
+    # Web/TUI token 鉴权总开关；默认关闭。true 时创建 AgentOSAuthenticator 校验连接。
+    auth_enabled: false
 
 heartbeat:
   # 心跳间隔（秒），默认 3600
