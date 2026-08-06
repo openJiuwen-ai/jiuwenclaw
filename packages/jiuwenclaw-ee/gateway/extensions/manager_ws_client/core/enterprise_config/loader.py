@@ -254,6 +254,7 @@ async def load_effective_enterprise_config(
 
     resolved_service_id: str | None = None
     resolved_agent_id: str | None = None
+    resolved_workspace_dir: str | None = None
     if TemplateRefSlot.SERVICE_CONFIG in load_slots:
         resolved_service_id = resolve_policy_field(
             match.matched_service,
@@ -265,9 +266,18 @@ async def load_effective_enterprise_config(
             "agent_id",
             ctx,
         )
+        resolved_workspace_dir = resolve_policy_field(
+            match.matched_agent,
+            "workspace_dir",
+            ctx,
+        )
+
     send_file_allowed = bool((match.matched_agent or {}).get("send_file_allowed", True))
     has_policy_outcome = bool(
-        resolved_service_id or resolved_agent_id or send_file_allowed
+        resolved_service_id
+        or resolved_agent_id
+        or resolved_workspace_dir
+        or send_file_allowed
     )
 
     filtered_refs = {
@@ -313,6 +323,7 @@ async def load_effective_enterprise_config(
         ),
         service_id=resolved_service_id,
         agent_id=resolved_agent_id,
+        workspace_dir=resolved_workspace_dir,
         send_file_allowed=send_file_allowed,
         service_policy=match.matched_service,
         agent_policy=match.matched_agent,

@@ -404,7 +404,7 @@ def cleanup_legacy_flat_agent_dir(workspace_dir: Path) -> None:
     if not legacy_agent.is_dir():
         return
 
-    new_agent_root = workspace_dir / "service_default" / "agent_default" / "agent"
+    new_agent_root = workspace_dir / "workspace_default" / "agent"
     new_deep = new_agent_root / "jiuwenclaw_workspace"
     if not new_deep.is_dir():
         return
@@ -861,14 +861,11 @@ def prepare_workspace(
     service_root.mkdir(parents=True, exist_ok=True)
     (service_root / ".logs").mkdir(parents=True, exist_ok=True)
 
-    agent_workspace = get_multi_tenant_user_workspace_dir("default", "default")
-    if agent_workspace:
-        agent_workspace.mkdir(parents=True, exist_ok=True)
-        (agent_workspace / ".checkpoint").mkdir(parents=True, exist_ok=True)
-        agent_root = agent_workspace / "agent"
-        agent_root.mkdir(parents=True, exist_ok=True)
-    else:
-        agent_root = workspace_dir / "agent"
+    agent_workspace = get_multi_tenant_user_workspace_dir(workspace_key="default")
+    agent_workspace.mkdir(parents=True, exist_ok=True)
+    (agent_workspace / ".checkpoint").mkdir(parents=True, exist_ok=True)
+    agent_root = agent_workspace / "agent"
+    agent_root.mkdir(parents=True, exist_ok=True)
 
     agent_sessions = agent_root / "sessions"
 
@@ -1031,12 +1028,9 @@ def _resolve_paths(force=False) -> None:
     # 优先使用已初始化的用户工作区 (~/.jiuwenclaw)，
     # 保证源码运行与安装包运行后的读写路径完全一致。
     user_config_dir = workspace_dir / "config"
-    # 多租户路径：service_default/agent_default/agent/jiuwenclaw_workspace
-    multi_tenant_workspace = get_multi_tenant_user_workspace_dir("default", "default")
-    if multi_tenant_workspace:
-        user_workspace_dir = multi_tenant_workspace / "agent" / "jiuwenclaw_workspace"
-    else:
-        user_workspace_dir = workspace_dir / "agent" / "jiuwenclaw_workspace"
+    # 多租户路径：workspace_default/agent/jiuwenclaw_workspace
+    multi_tenant_workspace = get_multi_tenant_user_workspace_dir(workspace_key="default")
+    user_workspace_dir = multi_tenant_workspace / "agent" / "jiuwenclaw_workspace"
     if user_config_dir.exists():
         _root_dir = workspace_dir
         _config_dir = user_config_dir
@@ -1108,9 +1102,9 @@ def get_agent_root_dir() -> Path:
     """Get the agent root directory path (multi-tenant default).
 
     单租户作为多租户的默认特例，返回默认多租户路径。
-    Path: ~/.jiuwenclaw/service_default/agent_default/agent/
+    Path: ~/.jiuwenclaw/workspace_default/agent/
     """
-    return get_multi_tenant_user_workspace_dir("default", "default") / "agent"
+    return get_multi_tenant_user_workspace_dir(workspace_key="default") / "agent"
 
 
 def get_agent_root_relative_dir() -> Path:
@@ -1133,7 +1127,7 @@ def _normalize_tenant_id(value: str | None) -> str:
 
 
 def _require_tenant_ids(service_id: str | None, agent_id: str | None) -> tuple[str, str]:
-    """白名单 / 租户工作区要求 ``service_id`` 与 ``agent_id`` 均非空."""
+    """白名单等逻辑要求 ``service_id`` 与 ``agent_id`` 均非空（不再用于路径拼接）."""
     sid = _normalize_tenant_id(service_id)
     aid = _normalize_tenant_id(agent_id)
     if not sid or not aid:
@@ -1143,22 +1137,22 @@ def _require_tenant_ids(service_id: str | None, agent_id: str | None) -> tuple[s
     return sid, aid
 
 
-def get_multi_tenant_user_workspace_dir(service_id: str | None, agent_id: str | None) -> Path | None:
+def _require_workspace_key(workspace_key: str | None) -> str:
+    wk = _normalize_tenant_id(workspace_key)
+    if not wk:
+        raise ValueError(f"workspace_key required: workspace_key={workspace_key!r}")
+    return wk
+
+
+def get_multi_tenant_user_workspace_dir(workspace_key: str) -> Path:
     """Get multi-tenant user workspace directory path.
 
-    Path format: ~/.jiuwenclaw/service_{service_id}/agent_{agent_id}
+    仅按 ``workspace_key`` 生成目录::
 
-    二者皆空时返回 ``None``（供单租户分支判断）。仅一侧有值时返回 ``service/.../agents`` 等
-    不完整路径，**不要**用于 Skill 白名单；租户工作区请用 ``get_tenant_agent_*`` 系列（要求双 ID）。
+        ~/.jiuwenclaw/workspace_{workspace_key}
     """
-    sid = _normalize_tenant_id(service_id)
-    aid = _normalize_tenant_id(agent_id)
-    if not sid and not aid:
-        return None
-    workspace_dir = get_user_workspace_dir()
-    workspace_dir = workspace_dir / f"service_{sid}" if sid else workspace_dir / "service"
-    workspace_dir = workspace_dir / f"agent_{aid}" if aid else workspace_dir / "agents"
-    return workspace_dir
+    wk = _require_workspace_key(workspace_key)
+    return get_user_workspace_dir() / f"workspace_{wk}"
 
 
 def get_agent_home_dir() -> Path:
@@ -1187,46 +1181,37 @@ def get_agent_skills_dir() -> Path:
     return get_agent_workspace_dir() / "skills"
 
 
-def get_tenant_agent_jiuwenclaw_workspace_dir(
-    service_id: str | None, agent_id: str | None,
-) -> Path:
-    """多租户 DeepAgent 工作区：``<tenant>/agent/jiuwenclaw_workspace``.
+def get_tenant_agent_jiuwenclaw_workspace_dir(workspace_key: str | None = None) -> Path:
+    """多租户 DeepAgent 工作区：``workspace_{key}/agent/jiuwenclaw_workspace``.
 
-    ``service_id`` / ``agent_id`` 任一缺失时抛 ``ValueError``（不返回 ``None``）。
+    必须提供 ``workspace_key``。
     """
-    sid, aid = _require_tenant_ids(service_id, agent_id)
-    base = get_multi_tenant_user_workspace_dir(sid, aid)
-    if base is None:
-        raise ValueError(
-            f"get_multi_tenant_user_workspace_dir returned None for service_id={sid!r}, agent_id={aid!r}"
-        )
-    return base / get_agent_root_relative_dir() / "jiuwenclaw_workspace"
+    wk = _require_workspace_key(workspace_key)
+    return (
+        get_multi_tenant_user_workspace_dir(wk)
+        / get_agent_root_relative_dir()
+        / "jiuwenclaw_workspace"
+    )
 
 
-def get_tenant_agent_skills_dirs(
-    service_id: str | None, agent_id: str | None,
-) -> list[Path]:
+def get_tenant_agent_skills_dirs(workspace_key: str | None = None) -> list[Path]:
     """多租户 skills 目录（与 ``JiuWenClaw`` / ``SkillManager`` 落盘路径一致）.
 
-    要求 ``service_id`` 与 ``agent_id`` 至少一个非空；二者皆空时抛 ``ValueError``（避免
-    静默落到 default 租户目录导致跨租户误读 skill）。单租户请用 ``get_multi_tenant_skill_dirs``
-    或 ``get_agent_skills_dir()``。
+    必须提供 ``workspace_key``。
     """
-    workspace = get_tenant_agent_jiuwenclaw_workspace_dir(service_id, agent_id)
+    workspace = get_tenant_agent_jiuwenclaw_workspace_dir(workspace_key=workspace_key)
     return [workspace / "skills"]
 
 
-def get_multi_tenant_skill_dirs(
-    service_id: str | None, agent_id: str | None,
-) -> list[Path]:
+def get_multi_tenant_skill_dirs(workspace_key: str | None = None) -> list[Path]:
     """Resolve the skills directory list for multi-tenant / single-tenant mode.
 
-    - Multi-tenant (any of ``service_id`` / ``agent_id`` provided): returns
-      ``[<tenant>/agent/jiuwenclaw_workspace/skills]``.
-    - Single-tenant (both ``None``): returns ``[get_agent_skills_dir()]``.
+    - Multi-tenant（提供 ``workspace_key``）: returns
+      ``[workspace_{key}/agent/jiuwenclaw_workspace/skills]``.
+    - Single-tenant（无 ``workspace_key``）: returns ``[get_agent_skills_dir()]``.
     """
-    if service_id or agent_id:
-        return get_tenant_agent_skills_dirs(service_id, agent_id)
+    if workspace_key:
+        return get_tenant_agent_skills_dirs(workspace_key=workspace_key)
     return [get_agent_skills_dir()]
 
 
@@ -1349,9 +1334,9 @@ def get_agent_sessions_dir() -> Path:
     """Get the default sessions directory path.
 
     返回默认多租户路径（单租户作为多租户的默认特例）：
-    ~/.jiuwenclaw/service_default/agent_default/agent/sessions
+    ~/.jiuwenclaw/workspace_default/agent/sessions
     """
-    return get_multi_tenant_user_workspace_dir("default", "default") / "agent" / "sessions"
+    return get_multi_tenant_user_workspace_dir(workspace_key="default") / "agent" / "sessions"
 
 
 _legacy_migration_done: bool = False
@@ -1360,14 +1345,10 @@ _legacy_migration_done: bool = False
 def get_checkpoint_dir() -> Path:
     """Get the checkpoint directory path (agent_id level).
 
-    多租户架构下，checkpoint 存放在 agent_id 级别。
-    Path: ~/.jiuwenclaw/service_default/agent_default/.checkpoint
+    多租户架构下，checkpoint 存放在 workspace 级别。
+    Path: ~/.jiuwenclaw/workspace_default/.checkpoint
     """
-    workspace = get_multi_tenant_user_workspace_dir("default", "default")
-    if workspace:
-        return workspace / ".checkpoint"
-    # Fallback
-    return get_agent_root_dir() / ".checkpoint"
+    return get_multi_tenant_user_workspace_dir(workspace_key="default") / ".checkpoint"
 
 
 def get_logs_dir() -> Path:

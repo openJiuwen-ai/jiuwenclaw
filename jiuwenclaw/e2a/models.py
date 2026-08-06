@@ -146,6 +146,8 @@ class E2AEnvelope:
     # --- 多实例多租户 ---
     service_id: str | None = None
     agent_id: str | None = None
+    # 数据目录逻辑键（Runtime 解析后可为明文；发往 AgentServer 前一般为为 MD5 hex）
+    workspace_dir: str | None = None
 
     def ensure_timestamp(self) -> None:
         """若未设置 timestamp，则填当前 UTC ISO8601。"""
@@ -401,6 +403,7 @@ def _envelope_from_dict(data: dict[str, Any]) -> E2AEnvelope:
         acp_meta=dict(data.get("acp_meta") or {}),
         service_id=data.get("service_id"),
         agent_id=data.get("agent_id"),
+        workspace_dir=data.get("workspace_dir"),
     )
 
 

@@ -178,9 +178,10 @@ def test_build_configured_subagents_omits_code_research_without_explicit_enable(
 
 @pytest.mark.asyncio
 async def test_runtime_rail_multi_tenant_workspace_dirs():
-    """测试多租户模式下 _get_workspace_dirs 返回正确路径。"""
-    
+    """测试注入 workspace_dir 时 _get_workspace_dirs 返回正确路径。"""
+
     builder = SystemPromptBuilder(language="cn")
+    workspace_root = Path("/tmp/test_jiuwenclaw/workspace_abc/agent/jiuwenclaw_workspace")
     runtime_rail = RuntimePromptRail(
         language="cn",
         channel="web",
@@ -188,38 +189,29 @@ async def test_runtime_rail_multi_tenant_workspace_dirs():
         model_name="test-model",
         agent_id="test_agent_001",
         service_id="test_service_001",
+        workspace_dir=str(workspace_root),
     )
     runtime_rail.init(SimpleNamespace(system_prompt_builder=builder))
 
-    # Mock get_multi_tenant_user_workspace_dir 返回测试路径
-    expected_base = Path("/tmp/test_jiuwenclaw/service_test_service_001/agent_test_agent_001")
-    with patch(
-        "jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail.get_multi_tenant_user_workspace_dir",
-        return_value=expected_base,
-    ):
-        ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
-        await runtime_rail.before_model_call(ctx)
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+    await runtime_rail.before_model_call(ctx)
 
     prompt = builder.build()
-    
-    # 验证多租户路径出现在 prompt 中（兼容 Windows 路径分隔符）
+
     assert "config" in prompt
     assert "jiuwenclaw_workspace" in prompt
     assert "memory" in prompt
     assert "skills" in prompt
     assert "todo" in prompt
-    # 验证多租户路径特征
-    assert "service_test_service_001" in prompt
-    assert "agent_test_agent_001" in prompt
-    
-    # 验证完整的绝对路径格式（兼容 Windows/Linux 路径分隔符）
+    assert "workspace_abc" in prompt
+
+    expected_base = workspace_root.parent.parent
     expected_config = str(expected_base / "config")
-    expected_workspace = str(expected_base / "agent" / "jiuwenclaw_workspace")
-    expected_memory = str(expected_base / "agent" /"jiuwenclaw_workspace" / "memory")
-    expected_skills = str(expected_base / "agent" /"jiuwenclaw_workspace" / "skills")
-    expected_todo = str(expected_base / "agent" /"jiuwenclaw_workspace" / "todo")
-    
-    # Windows 下 Path 会转换为 \ 分隔符，需要兼容
+    expected_workspace = str(workspace_root)
+    expected_memory = str(workspace_root / "memory")
+    expected_skills = str(workspace_root / "skills")
+    expected_todo = str(workspace_root / "todo")
+
     expected_config_win = expected_config.replace("/", "\\")
     expected_workspace_win = expected_workspace.replace("/", "\\")
     expected_memory_win = expected_memory.replace("/", "\\")
@@ -297,32 +289,26 @@ async def test_runtime_rail_single_tenant_workspace_dirs():
 
 
 def test_interface_deep_skill_rail_uses_multi_tenant_paths():
-    """测试 interface_deep 中的 SkillUseRail 使用多租户 skills 路径。"""
+    """测试 get_multi_tenant_skill_dirs 按 workspace_key 解析路径。"""
     from jiuwenclaw.utils import get_multi_tenant_skill_dirs
-    
-    # 测试多租户模式
-    service_id = "test_service"
-    agent_id = "test_agent"
-    
+
     with patch(
         "jiuwenclaw.utils.get_multi_tenant_user_workspace_dir",
     ) as mock_workspace:
-        mock_workspace.return_value = Path("/tmp/test/service_test/agent_test")
-        skill_dirs = get_multi_tenant_skill_dirs(service_id, agent_id)
-    
-    # 验证返回的是多租户路径
+        mock_workspace.return_value = Path("/tmp/test/workspace_key123")
+        skill_dirs = get_multi_tenant_skill_dirs(workspace_key="key123")
+
     assert len(skill_dirs) == 1
-    assert "service_test" in str(skill_dirs[0])
-    assert "agent_test" in str(skill_dirs[0])
+    assert "workspace_key123" in str(skill_dirs[0])
     assert "skills" in str(skill_dirs[0])
     assert "jiuwenclaw_workspace" in str(skill_dirs[0])
-    
-    # 测试单租户模式（不传参数）
+
+    # 无 workspace_key：单租户回退
     with patch(
         "jiuwenclaw.utils.get_agent_skills_dir",
     ) as mock_single:
         mock_single.return_value = Path("/home/user/.jiuwenclaw/skills")
-        skill_dirs_single = get_multi_tenant_skill_dirs(None, None)
-    
+        skill_dirs_single = get_multi_tenant_skill_dirs()
+
     assert len(skill_dirs_single) == 1
     assert skill_dirs_single[0].as_posix() == "/home/user/.jiuwenclaw/skills"

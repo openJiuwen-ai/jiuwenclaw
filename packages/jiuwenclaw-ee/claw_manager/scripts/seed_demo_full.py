@@ -453,6 +453,7 @@ def phase_templates(instance_ids: list[str]) -> None:
         f"/api/v1/instances/{full}/config-effective/agent-policies",
         {
             "agent_id": "${user_id}",
+            "workspace_dir": "${user_id}",
             "service_policy_id": sales_policy_id,
             "priority": 100,
             "match_expr": "user_id == 'alice'",
@@ -466,13 +467,14 @@ def phase_templates(instance_ids: list[str]) -> None:
     group_agent_policy = post(
         f"/api/v1/instances/{full}/config-effective/agent-policies",
         {
-            "agent_id": "${user_id}",
+            "agent_id": "default_agent_id_1",
+            "workspace_dir": "${group_id}::${bot_id}::${user_id}",
             "service_policy_id": sales_policy_id,
             "priority": 0,
             "match_expr": "",
             "template_ref": {"default_model": f"${{group::g_demo_sales}} or {t_fallback}"},
             "enabled": True,
-            "data": {"remark": "组映射 or 全局兜底"},
+            "data": {"remark": "组映射 or 全局兜底；workspace_dir 按组+Bot+用户隔离"},
         },
     )
     print(f"  + agent-policy[group-map] id={int(group_agent_policy['id'])}")

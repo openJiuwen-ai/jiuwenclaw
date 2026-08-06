@@ -559,6 +559,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
             "policy_name": "VIP alice",
             "policy_desc": "alice 覆盖为 M3",
             "agent_id": "${user_id}",
+            "workspace_dir": "${user_id}",
             "service_policy_id": sales_policy_id,
             "priority": 100,
             "match_expr": "user_id == 'alice'",
@@ -583,7 +584,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     result["agent_policy_vip_id"] = vip_id
     result["agent_policy_vip_policy_id"] = vip_policy_id
     logger.info(
-        "  [2.6.1] VIP alice -> id=%s policy_id=%s (default_model=%s, skill=%s, ext=%s)",
+        "  [2.6.1] VIP alice -> id=%s policy_id=%s (default_model=%s, skill=%s, ext=%s, workspace_dir=${user_id})",
         vip_id,
         vip_policy_id,
         m3,
@@ -596,13 +597,14 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
         {
             "policy_name": "组映射 default_model",
             "agent_id": "default_agent_id_1",
+            "workspace_dir": "${group_id}::${bot_id}::${user_id}",
             "service_policy_id": sales_policy_id,
             "priority": 0,
             "match_expr": "",
             "template_ref": {"default_model": [group_map_default_model]},
             "enabled": True,
             "data": {
-                "remark": "固定 agent_id；匹配仅看 match_expr；group:: 查 2.8.2"
+                "remark": "固定 agent_id；匹配仅看 match_expr；group:: 查 2.8.2；workspace_dir 按组+Bot+用户隔离"
             },
         },
     )
@@ -611,7 +613,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     result["agent_policy_mapping_id"] = mapping_id
     result["agent_policy_mapping_policy_id"] = mapping_policy_id
     logger.info(
-        "  [2.6.2] 组映射表达式 -> id=%s policy_id=%s (default_model=%s)",
+        "  [2.6.2] 组映射表达式 -> id=%s policy_id=%s (default_model=%s, workspace_dir=${group_id}::${bot_id}::${user_id})",
         mapping_id,
         mapping_policy_id,
         group_map_default_model,
@@ -766,15 +768,18 @@ def main() -> None:
     logger.info(
         "    skills=[W1 销售组-天气 Skill]; ext=E3 Agent Server 错误恢复（覆盖服务 E1+E2）"
     )
+    logger.info("    workspace_dir -> alice (2.6.1 ${user_id})")
     logger.info("  bob   + g_demo_sales::bot_main")
     logger.info("    default -> M5 销售组映射专用 (2.6.2 + 2.8.2)")
     logger.info("    vision -> M2 销售组-标准型 (继承 2.5.1)")
     logger.info("    video/audio -> M1 全局兜底-经济型 (2.7 回填)")
     logger.info("    skills=[W1 销售组-天气 Skill, W2 销售组-CRM Skill] 继承 2.5.1")
     logger.info("    ext=E1 Gateway 请求前鉴权 + E2 Gateway 请求后日志（继承 2.5.1）")
+    logger.info("    workspace_dir -> g_demo_sales::bot_main::bob (2.6.2)")
     logger.info("  g_unknown::bot_main")
     logger.info("    default/vision/video/audio -> M1 全局兜底-经济型 (全局兜底)")
     logger.info("    skill=W3 全局兜底 Skill; ext=E4 Gateway 定时清理")
+    logger.info("    workspace_dir -> g_unknownbot_mainbob (默认 ${group_id}${bot_id}${user_id})")
     logger.info("")
     logger.info("Gateway Runtime service_config 验证（§3.2）：")
     logger.info(

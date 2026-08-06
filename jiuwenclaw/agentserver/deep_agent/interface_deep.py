@@ -15,6 +15,7 @@ import importlib
 import os
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
+from pathlib import Path
 
 from typing import Any, AsyncIterator, Callable, List, Self, Tuple
 from sqlalchemy import text
@@ -211,8 +212,6 @@ from jiuwenclaw.utils import (
     get_checkpoint_dir,
     get_env_file,
     get_agent_root_dir,
-    get_multi_tenant_user_workspace_dir,
-    get_tenant_agent_skills_dirs,
 )
 from jiuwenclaw.local_env_config import set_local_config
 
@@ -908,7 +907,7 @@ class JiuWenClawDeepAdapter:
 
     def _resolve_skill_dirs(self, extra_skill_dir: str | None = None) -> list[str]:
         if is_skill_whitelist_tenant(self._agent_id, self._service_id):
-            skills_dirs = [str(p) for p in get_tenant_agent_skills_dirs(self._service_id, self._agent_id)]
+            skills_dirs = [str(Path(self._workspace_dir) / "skills")]
         else:
             skills_dirs = [str(p) for p in get_agent_registered_skill_dirs()]
         if extra_skill_dir:
@@ -1561,7 +1560,7 @@ class JiuWenClawDeepAdapter:
                     sandbox_url,
                     sandbox_type,
                     self._agent_id,
-                    shared_dir=get_multi_tenant_user_workspace_dir(self._service_id, self._agent_id),
+                    shared_dir=Path(self._workspace_dir).resolve().parent.parent,
                     files_runtime=runtime.get("files"),
                     excluded_commands=runtime.get("excluded_commands"),
                     idle_ttl_seconds=runtime.get("idle_ttl_seconds"),
@@ -2659,7 +2658,7 @@ class JiuWenClawDeepAdapter:
             if self._enterprise_config is not None:
                 enterprise_skills = getattr(self._enterprise_config, "skill_whitelist", None)
             skill_config = parse_agent_skill_whitelist(self._agent_id, self._service_id, enterprise_skills)
-            sync_result = await SkillWhitelistSynchronizer(self._service_id, self._agent_id).sync(skill_config)
+            sync_result = await SkillWhitelistSynchronizer(self._workspace_dir).sync(skill_config)
             if sync_result.errors:
                 logger.warning(
                     "[SkillWhitelist] sync partial errors: agent_id=%s service_id=%s errors=%s",
