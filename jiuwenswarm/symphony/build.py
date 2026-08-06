@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from openjiuwen.symphony import SymphonyRuntime
+
 from jiuwenswarm.symphony.config import (
     SymphonyConfig,
     default_symphony_config,
@@ -32,8 +34,6 @@ from jiuwenswarm.symphony.fingerprint import (
 from jiuwenswarm.symphony.fingerprint.extract.extractor import (
     SCHEMA_EXTRACTION_PROTOCOL_VERSION,
 )
-from openjiuwen.symphony import SymphonyRuntime
-
 from jiuwenswarm.symphony.adapter import (
     capabilities_from_skills,
     graph_build_orchestration_config_from_swarm,

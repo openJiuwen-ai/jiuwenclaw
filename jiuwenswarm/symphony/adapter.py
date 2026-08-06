@@ -112,16 +112,16 @@ def graph_config_from_swarm(config: SymphonyConfig) -> dict[str, Any]:
     build = config.build
     if is_dataclass(build) and not isinstance(build, type):
         return asdict(build)
-    return {
-        key: getattr(build, key)
-        for key in (
-            "workers",
-            "batch_size",
-            "max_candidates_per_skill_relation",
-            "require_consensus",
-            "min_edge_confidence",
-        )
-    }
+    graph_config: dict[str, Any] = {}
+    for key in (
+        "workers",
+        "batch_size",
+        "max_candidates_per_skill_relation",
+        "require_consensus",
+        "min_edge_confidence",
+    ):
+        graph_config[key] = getattr(build, key)
+    return graph_config
 
 
 def llm_config_signature(config: LLMConfig) -> str:

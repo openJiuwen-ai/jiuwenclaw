@@ -100,8 +100,12 @@ class SwarmSymphonyService:
                     "detail": "技能总谱已在后台构建中。",
                 }
                 payload.update(_build_log_payload(graph_dir))
-                if payload["build_progress"].get("status") != "running":
-                    payload["build_progress"] = _starting_build_progress()
+                build_progress = payload.get("build_progress")
+                if (
+                    not isinstance(build_progress, dict)
+                    or build_progress.get("status") != "running"
+                ):
+                    payload.update({"build_progress": _starting_build_progress()})
                 return payload
             if task is not None:
                 self._active_build_task = None
@@ -506,21 +510,25 @@ def _web_graph_payload(
             continue
         skills.append(capability)
 
-    graph = {
-        "nodes": [
-            dict(node)
-            for node in artifact.get("nodes") or []
-            if isinstance(node, dict)
-            and _capability_id(node.get("id")) not in disabled_ids
-        ],
-        "edges": [
-            dict(edge)
-            for edge in artifact.get("edges") or []
-            if isinstance(edge, dict)
-            and _capability_id(edge.get("source")) not in disabled_ids
-            and _capability_id(edge.get("target")) not in disabled_ids
-        ],
-    }
+    nodes: list[dict[str, Any]] = []
+    for node in artifact.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        if _capability_id(node.get("id")) in disabled_ids:
+            continue
+        nodes.append(dict(node))
+
+    edges: list[dict[str, Any]] = []
+    for edge in artifact.get("edges") or []:
+        if not isinstance(edge, dict):
+            continue
+        if _capability_id(edge.get("source")) in disabled_ids:
+            continue
+        if _capability_id(edge.get("target")) in disabled_ids:
+            continue
+        edges.append(dict(edge))
+
+    graph = {"nodes": nodes, "edges": edges}
     return {
         "success": True,
         "graph_dir": str(graph_dir),
@@ -684,7 +692,8 @@ def _read_build_log(graph_dir: Path, *, limit: int = 80) -> list[dict[str, Any]]
     except OSError:
         return []
     entries: list[dict[str, Any]] = []
-    for line in lines[-max(1, limit) :]:
+    line_limit = max(1, limit)
+    for line in lines[-line_limit:]:
         try:
             payload = json.loads(line)
         except json.JSONDecodeError:
