@@ -5932,6 +5932,50 @@ class JiuWenSwarmDeepAdapter:
 
         # 动态加载用户自定义的 Rail 扩展
         await self.load_user_rails()
+        self._register_extension_tools()
+
+    def _register_extension_tools(self) -> None:
+        """将 ExtensionRegistry 登记的扩展本地工具挂到 Runner 与 ability_manager。"""
+        if self._instance is None:
+            return
+        try:
+            from jiuwenswarm.extensions.registry import ExtensionRegistry
+            from jiuwenswarm.extensions.sdk.local_tool_builder import make_extension_tools
+
+            ext_reg = ExtensionRegistry.get_instance()
+            existing_ext_tool_names: set[str] = {
+                ab.name
+                for ab in self._instance.ability_manager.list()
+                if isinstance(ab, ToolCard)
+            }
+            for ext_tool in make_extension_tools(ext_reg.extension_local_tool_entries):
+                tname = ext_tool.card.name
+                tid = ext_tool.card.id
+                if tname in existing_ext_tool_names:
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] extension tool name conflicts with existing tool, skip: %s",
+                        tname,
+                    )
+                    continue
+                try:
+                    self._register_shared_tool(ext_tool)
+                    self._instance.ability_manager.add(ext_tool.card)
+                    existing_ext_tool_names.add(tname)
+                    logger.info(
+                        "[JiuWenSwarmDeepAdapter] extension tool add success, name: %s id: %s",
+                        tname,
+                        tid,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] extension tool register failed (%s): %s",
+                        tname,
+                        exc,
+                    )
+        except RuntimeError:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] ExtensionRegistry unavailable, skip extension tools"
+            )
 
     @staticmethod
     def _ensure_project_gitignore_agent_history(project_dir: str | None) -> None:

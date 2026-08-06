@@ -56,7 +56,7 @@ from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import 
     is_interrupt_resume_payload,
 )
 from jiuwenswarm.agents.harness.common.rails.permissions.permissions_persist import persist_cli_trusted_directory
-from jiuwenswarm.extensions.hooks_context import AgentServerChatHookContext
+from jiuwenswarm.extensions.hooks_context import AgentServerChatHookContext, AgentWsServerStartHookContext
 from jiuwenswarm.server.runtime.agent_manager import AgentManager, ACP_DEFAULT_CAPABILITIES
 from jiuwenswarm.server.runtime.session.session_metadata import get_all_sessions_metadata, remove_session_metadata_cache
 from jiuwenswarm.server.runtime.session.session_history import (
@@ -930,6 +930,7 @@ class AgentWebSocketServer:
         之后后台预热 (fire-and-forget), 让端口尽快开放; 首条 chat 请求若赶在预热完成前
         到达, 走 ``_ensure_persistent_checkpointer_response`` 兜底等待, 不影响握手.
         """
+        await self._trigger_before_ws_server_start_hook()
         if self._server is not None:
             logger.warning("[AgentWebSocketServer] 服务端已在运行")
             return
@@ -1744,6 +1745,22 @@ class AgentWebSocketServer:
                         describe_ws_exception(send_exc),
                     ),
                 )
+
+    @staticmethod
+    async def _trigger_before_ws_server_start_hook() -> None:
+        """在首次启动之前触发扩展；未初始化 ExtensionRegistry 时跳过。"""
+        from jiuwenswarm.extensions.registry import ExtensionRegistry
+        from jiuwenswarm.common.utils import get_agent_skills_dir
+
+        try:
+            ctx = AgentWsServerStartHookContext(skills_dir=str(get_agent_skills_dir()))
+            await ExtensionRegistry.get_instance().trigger(
+                AgentServerHookEvents.BEFORE_WS_SERVER_START, ctx
+            )
+        except RuntimeError:
+            logger.debug(
+                "[AgentWebSocketServer] ExtensionRegistry unavailable, skip BEFORE_WS_SERVER_START"
+            )
 
     @staticmethod
     def _should_trigger_before_chat_request_hook(request: AgentRequest) -> bool:

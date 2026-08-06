@@ -558,6 +558,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         logger.info("[JiuwenSwarmCodeAdapter] 初始化完成: agent_name=%s", self._agent_name)
 
         await self.load_user_rails()
+        self._register_extension_tools()
 
     # ─── Rails 构建 ──────────────────────────
 
