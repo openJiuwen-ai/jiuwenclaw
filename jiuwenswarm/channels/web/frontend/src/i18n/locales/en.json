@@ -2988,7 +2988,9 @@
     "panel": {
       "title": "Heartbeat Jobs",
       "loading": "Loading…",
-      "empty": "No heartbeat jobs in this session yet"
+      "empty": "No heartbeat jobs in this session yet",
+      "create": "New heartbeat job",
+      "edit": "Edit"
     }
   }
 }
