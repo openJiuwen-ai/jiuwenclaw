@@ -4,8 +4,15 @@ import { useTranslation } from 'react-i18next';
 import { X } from 'lucide-react';
 import { webRequest } from '../../services/webClient';
 import type { WebError } from '../../types';
-import type { HeartbeatJobDTO, HeartbeatMeta, HeartbeatTaskUI } from '../../types/heartbeat';
+import type {
+  HeartbeatCancelResult,
+  HeartbeatJobDTO,
+  HeartbeatMeta,
+  HeartbeatRunNowResult,
+  HeartbeatTaskUI,
+} from '../../types/heartbeat';
 import { summarizeHeartbeatSchedule } from './heartbeatScheduleConvert';
+import { heartbeatRunNowMessageKey, heartbeatCancelMessageKey } from './heartbeatStatusText';
 import HeartbeatStatusBadge from './HeartbeatStatusBadge';
 import HeartbeatTaskDrawer, {
   emptyHeartbeatTaskForm,
@@ -13,6 +20,7 @@ import HeartbeatTaskDrawer, {
   type HeartbeatTaskFormValue,
 } from './HeartbeatTaskDrawer';
 import { scheduleFormToDto } from './heartbeatScheduleConvert';
+import ConfirmDialog from '../CronPanel/ConfirmDialog';
 
 interface HeartbeatPanelProps {
   sessionId: string;
@@ -91,6 +99,125 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
     setDrawer({ mode: 'edit', jobId: job.id, form: jobToHeartbeatTaskForm(job), submitting: false, error: null });
   }, []);
 
+  const [toast, setToast] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<HeartbeatTaskUI | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [actingJobId, setActingJobId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!toast) return;
+    const timer = window.setTimeout(() => setToast(null), 4000);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
+
+  // 有任务处于 running 时，每 3 秒静默刷新一次列表；全部离开 running 后自动停止，
+  // 页面隐藏/组件卸载时也停止，见接口规格说明 §7 建议刷新策略
+  useEffect(() => {
+    const hasRunning = jobs.some((job) => job.status === 'running');
+    if (!hasRunning) return;
+    const controller = new AbortController();
+    const timer = window.setInterval(() => {
+      if (document.hidden) return;
+      void loadAll(controller.signal);
+    }, 3000);
+    return () => {
+      window.clearInterval(timer);
+      controller.abort();
+    };
+  }, [jobs, loadAll]);
+
+  const handleToggle = useCallback(
+    async (job: HeartbeatTaskUI) => {
+      setActingJobId(job.id);
+      try {
+        await webRequest<{ job: HeartbeatJobDTO }>('heartbeat.job.toggle', {
+          session_id: sessionId,
+          id: job.id,
+          enabled: !job.enabled,
+        });
+        setToast(t(job.enabled ? 'heartbeat.toast.paused' : 'heartbeat.toast.resumed'));
+        const controller = new AbortController();
+        await loadAll(controller.signal);
+      } catch (err) {
+        setToast(err instanceof Error ? err.message : String(err));
+      } finally {
+        setActingJobId(null);
+      }
+    },
+    [sessionId, loadAll, t],
+  );
+
+  const handleRunNow = useCallback(
+    async (job: HeartbeatTaskUI) => {
+      setActingJobId(job.id);
+      try {
+        const result = await webRequest<HeartbeatRunNowResult>('heartbeat.job.run_now', {
+          session_id: sessionId,
+          id: job.id,
+          reschedule: false,
+        });
+        setToast(t(heartbeatRunNowMessageKey(result.accepted, result.reason, result.queued)));
+        const controller = new AbortController();
+        await loadAll(controller.signal);
+      } catch (err) {
+        setToast(err instanceof Error ? err.message : String(err));
+      } finally {
+        setActingJobId(null);
+      }
+    },
+    [sessionId, loadAll, t],
+  );
+
+  const handleCancel = useCallback(
+    async (job: HeartbeatTaskUI, pauseSchedule: boolean) => {
+      setActingJobId(job.id);
+      try {
+        const result = await webRequest<HeartbeatCancelResult>('heartbeat.job.cancel', {
+          session_id: sessionId,
+          id: job.id,
+          pause_schedule: pauseSchedule,
+        });
+        setToast(t(heartbeatCancelMessageKey(result.cancel_status)));
+        const controller = new AbortController();
+        await loadAll(controller.signal);
+      } catch (err) {
+        setToast(err instanceof Error ? err.message : String(err));
+      } finally {
+        setActingJobId(null);
+      }
+    },
+    [sessionId, loadAll, t],
+  );
+
+  const confirmDelete = useCallback(async () => {
+    if (!pendingDelete) return;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      const result = await webRequest<{ deleted: boolean }>('heartbeat.job.delete', {
+        session_id: sessionId,
+        id: pendingDelete.id,
+      });
+      if (!result.deleted) {
+        setDeleteError(t('heartbeat.toast.deleteConflict') ?? undefined);
+        return;
+      }
+      setPendingDelete(null);
+      const controller = new AbortController();
+      await loadAll(controller.signal);
+    } catch (err) {
+      const webErr = err as WebError;
+      if (webErr.code === 'CONFLICT') {
+        setDeleteError(t('heartbeat.toast.deleteConflict'));
+      } else {
+        setDeleteError(webErr.message ?? String(err));
+      }
+    } finally {
+      setDeleting(false);
+    }
+  }, [pendingDelete, sessionId, loadAll, t]);
+
   const submitDrawer = useCallback(
     async (value: HeartbeatTaskFormValue) => {
       if (!drawer) return;
@@ -165,13 +292,49 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
                   </div>
                   <p className="mt-1 line-clamp-2 text-sm text-text-muted">{job.prompt}</p>
                   <p className="mt-1 text-xs text-text-muted">{summarizeHeartbeatSchedule(job.schedule, t)}</p>
-                  <div className="mt-2 flex justify-end">
+                  <div className="mt-2 flex flex-wrap justify-end gap-2">
+                    {job.status === 'running' && (
+                      <button
+                        type="button"
+                        disabled={actingJobId === job.id}
+                        onClick={() => void handleCancel(job, false)}
+                        className="rounded-full border border-border px-3 py-1 text-xs text-text hover:bg-bg-hover disabled:opacity-60"
+                      >
+                        {t('heartbeat.panel.cancelRun')}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      disabled={actingJobId === job.id}
+                      onClick={() => void handleRunNow(job)}
+                      className="rounded-full border border-border px-3 py-1 text-xs text-text hover:bg-bg-hover disabled:opacity-60"
+                    >
+                      {t('heartbeat.panel.runNow')}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={actingJobId === job.id || job.status === 'completed' || job.status === 'expired'}
+                      onClick={() => void handleToggle(job)}
+                      className="rounded-full border border-border px-3 py-1 text-xs text-text hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      {t(job.enabled ? 'heartbeat.panel.pause' : 'heartbeat.panel.resume')}
+                    </button>
                     <button
                       type="button"
                       onClick={() => openEditDrawer(job)}
                       className="rounded-full border border-border px-3 py-1 text-xs text-text hover:bg-bg-hover"
                     >
                       {t('heartbeat.panel.edit')}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDeleteError(null);
+                        setPendingDelete(job);
+                      }}
+                      className="rounded-full border border-red-300 px-3 py-1 text-xs text-red-500 hover:bg-red-50"
+                    >
+                      {t('heartbeat.panel.delete')}
                     </button>
                   </div>
                 </li>
@@ -194,6 +357,20 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
           </div>
         )}
       </div>
+      {toast && (
+        <div className="pointer-events-none fixed bottom-6 right-6 z-50 rounded-md bg-text-strong px-4 py-2 text-sm text-card shadow-lg">
+          {toast}
+        </div>
+      )}
+      {pendingDelete && (
+        <ConfirmDialog
+          title={t('heartbeat.panel.delete')}
+          message={deleteError ?? t('heartbeat.panel.deleteConfirm', { name: pendingDelete.name })}
+          loading={deleting}
+          onConfirm={() => void confirmDelete()}
+          onCancel={() => setPendingDelete(null)}
+        />
+      )}
     </div>
   );
 }

@@ -2433,7 +2433,36 @@
       "loading": "加载中…",
       "empty": "当前会话还没有心跳任务",
       "create": "新建心跳任务",
-      "edit": "编辑"
+      "edit": "编辑",
+      "runNow": "立即运行",
+      "cancelRun": "停止本次运行",
+      "pause": "暂停",
+      "resume": "恢复",
+      "delete": "删除",
+      "deleteConfirm": "确定删除心跳任务「{{name}}」吗？"
+    },
+    "toast": {
+      "paused": "已暂停后续计划",
+      "resumed": "已恢复后续计划",
+      "deleteConflict": "当前有运行未能取消，请稍后重试",
+      "runNowAccepted": "已接收，即将执行",
+      "runNowQueued": "已加入待执行队列",
+      "runNowRejected": {
+        "session_missing": "原会话不存在，未执行",
+        "session_busy": "当前会话忙碌，未执行",
+        "previous_run_active": "上一轮尚未结束，已跳过",
+        "already_queued": "已有一个待执行触发，未重复排队",
+        "replacement_pending": "正在替换上一轮运行，请稍候",
+        "replacement_cancel_failed": "无法取消上一轮运行，未执行",
+        "job_disabled_during_replace": "替换期间任务已被停用，未执行",
+        "unknown": "未执行，原因未知"
+      },
+      "cancel": {
+        "idle": "当前没有运行中的执行",
+        "cancelled": "已取消当前执行",
+        "not_found": "当前执行已结束或不存在",
+        "failed": "取消失败，状态待确认"
+      }
     }
   }
 }
