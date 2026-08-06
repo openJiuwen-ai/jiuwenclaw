@@ -11,6 +11,7 @@ import yaml
 from jiuwenswarm.common.config import (
     get_config_raw,
     get_evolution_auto_save_enabled,
+    get_evolution_review_feedback_min_confidence,
     get_skill_evolution_enabled,
     migrate_config_from_template,
     replace_teams_in_config,
@@ -204,6 +205,14 @@ class TestConfigFunctions:
         ):
             monkeypatch.setenv(env_name, "true")
         assert get_skill_evolution_enabled(config) is expected
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [(0.8, 0.8), (2, 1.0), (-1, 0.0), ("bad", 0.7)],
+    )
+    def test_evolution_review_feedback_min_confidence(self, raw, expected):
+        config = {"react": {"evolution": {"review_feedback_min_confidence": raw}}}
+        assert get_evolution_review_feedback_min_confidence(config) == expected
 
     @staticmethod
     def test_get_config_raw(temp_config_file: Path):

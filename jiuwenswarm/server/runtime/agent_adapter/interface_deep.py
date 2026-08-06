@@ -7503,7 +7503,14 @@ class JiuWenSwarmDeepAdapter:
         answers = request.params.get("answers", []) if isinstance(request.params, dict) else []
         session_id = request.session_id
         resolved = False
-        if request_id.startswith("team_skill_evolve_"):
+        if request_id.startswith("skill_create_"):
+            resolved = await self.handle_skill_create_approval(
+                request_id,
+                answers,
+                session_id,
+                request.channel_id,
+            )
+        elif request_id.startswith("team_skill_evolve_"):
             resolved = await self.handle_team_skill_evolve_approval(
                 request_id,
                 answers,
@@ -7536,6 +7543,63 @@ class JiuWenSwarmDeepAdapter:
             payload={"accepted": True, "resolved": resolved},
             metadata=request.metadata,
         )
+
+    async def handle_skill_create_approval(
+        self,
+        request_id: str,
+        answers: list,
+        session_id: str,
+        channel_id: str | None = None,
+    ) -> bool:
+        """Resolve a reviewer-driven new-Skill card and continue creation."""
+        from jiuwenswarm.agents.harness.team.team_manager import get_team_manager
+
+        manager = get_team_manager(channel_id)
+        rail = manager.get_team_skill_create_rail(session_id)
+        owns = rail is not None and bool(
+            getattr(rail, "owns_external_proposal", lambda _request_id: False)(request_id)
+        )
+        if not owns:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] skill creation approval failed: "
+                "no pending proposal request_id=%s session_id=%s",
+                request_id,
+                session_id,
+            )
+            return False
+
+        accepted = answers_select_option(answers, EVOLUTION_ACCEPT_LABELS)
+        creation_prompt = rail.resolve_external_proposal(
+            request_id,
+            accepted=accepted,
+        )
+        if not accepted:
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] skill creation proposal rejected: request_id=%s",
+                request_id,
+            )
+            return True
+        if not creation_prompt:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] accepted skill creation proposal has no continuation: %s",
+                request_id,
+            )
+            return False
+
+        delivered, reason = await manager.interact(session_id, creation_prompt)
+        if not delivered:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] approved skill creation continuation failed: "
+                "request_id=%s reason=%s",
+                request_id,
+                reason,
+            )
+            return False
+        logger.info(
+            "[JiuWenSwarmDeepAdapter] skill creation proposal accepted and dispatched: %s",
+            request_id,
+        )
+        return True
 
     async def handle_swarmflow_reply(self, request: AgentRequest) -> AgentResponse:
         """Handle chat.swarmflow_reply — deliver a person's reply to a human turn.
@@ -7707,6 +7771,15 @@ class JiuWenSwarmDeepAdapter:
         which will flush to store and solidify, or rail.on_reject() to discard.
         """
         rail = self._skill_evolution_rail
+        owns_request = rail is not None and request_id in getattr(
+            rail,
+            "_pending_approval_snapshots",
+            {},
+        )
+        if not owns_request:
+            # Team-mode aggregated review feedback is handled by an unmounted
+            # global SkillEvolutionRail sidecar registered with TeamManager.
+            rail = self.find_team_skill_rail(request_id)
         if rail is None:
             logger.warning("[JiuWenSwarmDeepAdapter] evolution approval failed: no SkillEvolutionRail")
             return False

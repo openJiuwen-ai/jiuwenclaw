@@ -22,6 +22,7 @@ factories to avoid pulling the code adapter at module load.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 from openjiuwen.agent_teams.harness.manifest import (
@@ -577,8 +578,27 @@ def build_code_skill_use(params: dict[str, Any], ctx: SwarmBuildContext) -> Any:
             if is_skill_retrieval_enabled()
             else inp.skill_mode
         )
+        skill_dirs: list[str] = []
+        workspace = getattr(ctx, "workspace", None)
+        if workspace is not None:
+            get_node_path = getattr(workspace, "get_node_path", None)
+            if callable(get_node_path):
+                member_skills_dir = get_node_path("skills")
+                if member_skills_dir:
+                    skill_dirs.append(str(member_skills_dir))
+            if not skill_dirs and getattr(workspace, "root_path", None):
+                skill_dirs.append(str(Path(workspace.root_path) / "skills"))
+        global_skills_dir = str(
+            Path(ctx.global_skills_dir)
+            if ctx.global_skills_dir
+            else get_agent_skills_dir()
+        )
+        if global_skills_dir not in skill_dirs:
+            skill_dirs.append(global_skills_dir)
         return SkillUseRail(
-            skills_dir=str(get_agent_skills_dir()),
+            # Member-private copies win name de-duplication; Skills that have
+            # not diverged yet continue to fall back to the global store.
+            skills_dir=skill_dirs,
             skill_mode=skill_mode,
             include_tools=inp.include_tools,
             disabled_skills=load_execution_disabled_skills(),

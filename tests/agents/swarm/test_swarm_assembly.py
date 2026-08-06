@@ -202,10 +202,14 @@ class _FakeEvolutionRail:
         self.args = args
         self.kwargs = kwargs
         self.swarm_context = {}
+        self.review_feedback_rail = None
         self.approval_submission_service = object()
 
     def bind_swarm_context(self, **kwargs) -> None:
         self.swarm_context.update(kwargs)
+
+    def bind_review_feedback_skill_rail(self, rail) -> None:
+        self.review_feedback_rail = rail
 
 
 class _FakeMemberSkillEvolutionRail(_FakeEvolutionRail):
@@ -614,6 +618,64 @@ def test_code_skill_use_rail_kept_as_auto_list_when_retrieval_enabled(
 
     assert isinstance(rail, SkillUseRail)
     assert rail.skill_mode == SkillUseRail.SKILL_MODE_AUTO_LIST
+
+
+def test_code_skill_use_prefers_member_skill_scope_before_global(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    member_root = tmp_path / "member"
+    global_root = tmp_path / "global"
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.tools.skill_retrieval_toolkits.is_skill_retrieval_enabled",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.skill.load_execution_disabled_skills",
+        lambda: [],
+    )
+
+    rail = code_rails.build_code_skill_use(
+        {"skill_mode": SkillUseRail.SKILL_MODE_ALL},
+        SwarmBuildContext(
+            global_skills_dir=str(global_root),
+            workspace=SimpleNamespace(
+                root_path=str(member_root),
+                get_node_path=lambda name: str(member_root / name),
+            ),
+        ),
+    )
+
+    assert rail.skills_dir == [str(member_root / "skills"), str(global_root)]
+
+
+def test_member_skill_copy_replaces_global_link_and_preserves_private_updates(
+    tmp_path: Path,
+) -> None:
+    global_root = tmp_path / "global"
+    global_skill = global_root / "xlsx"
+    global_skill.mkdir(parents=True)
+    (global_skill / "SKILL.md").write_text("global", encoding="utf-8")
+    member_root = tmp_path / "member" / "skills"
+    member_root.mkdir(parents=True)
+    (member_root / "xlsx").symlink_to(global_skill, target_is_directory=True)
+
+    copied = evolution_rails.ensure_member_skill_copy(
+        member_skills_dir=member_root,
+        global_skills_dir=global_root,
+        skill_name="xlsx",
+    )
+
+    assert copied == member_root / "xlsx"
+    assert not copied.is_symlink()
+    (copied / "SKILL.md").write_text("member", encoding="utf-8")
+    evolution_rails.ensure_member_skill_copy(
+        member_skills_dir=member_root,
+        global_skills_dir=global_root,
+        skill_name="xlsx",
+    )
+    assert (copied / "SKILL.md").read_text(encoding="utf-8") == "member"
+    assert (global_skill / "SKILL.md").read_text(encoding="utf-8") == "global"
 
 
 @pytest.mark.parametrize("role", ["leader", "teammate"])
@@ -1265,6 +1327,7 @@ def test_team_skill_evolution_provider_passes_review_runtime(
         "SwarmTeamSkillEvolutionRail",
         _FakeEvolutionRail,
     )
+    monkeypatch.setattr(evolution_rails, "SkillEvolutionRail", _FakeEvolutionRail)
     monkeypatch.setattr(evolution_rails, "EvolutionInterruptRail", _FakeEvolutionInterruptRail)
     monkeypatch.setattr(
         evolution_rails,
@@ -1308,6 +1371,10 @@ def test_team_skill_evolution_provider_passes_review_runtime(
     assert rail.kwargs["signal_trigger"] is False
     assert rail.kwargs["auto_save"] is auto_save
     assert rail.kwargs["review_trigger"] is True
+    assert rail.review_feedback_rail.args == (str(tmp_path / "global-skills"),)
+    assert rail.review_feedback_rail.kwargs["signal_trigger"] is False
+    assert rail.review_feedback_rail.kwargs["review_trigger"] is False
+    assert rail.review_feedback_rail.kwargs["auto_save"] is auto_save
 
 
 def test_swarm_team_skill_evolution_registration_retries_deferred_watcher(
@@ -1323,6 +1390,10 @@ def test_swarm_team_skill_evolution_registration_retries_deferred_watcher(
         @staticmethod
         def register_team_skill_rail(session_id, rail) -> None:
             calls.append(f"skill:{session_id}")
+
+        @staticmethod
+        def register_review_feedback_skill_rail(session_id, rail) -> None:
+            calls.append(f"review-feedback:{session_id}")
 
         @staticmethod
         def consume_team_evolution_watcher_deferred(session_id) -> bool:
@@ -1353,12 +1424,14 @@ def test_swarm_team_skill_evolution_registration_retries_deferred_watcher(
         config={},
         trajectory_registry=object(),
     )
+    rail.bind_review_feedback_skill_rail(object())
 
     rail.init(SimpleNamespace(card=SimpleNamespace(name="leader")))
 
     assert calls == [
         "live:sess-1",
         "skill:sess-1",
+        "review-feedback:sess-1",
         "consume:sess-1",
         "watcher:web:sess-1:rail_registered",
     ]
@@ -1385,11 +1458,16 @@ def test_member_skill_evolution_provider_passes_review_runtime(
     ctx = SwarmBuildContext(
         language="en",
         role="teammate",
+        member_name="worker-1",
         session_id="sess",
         channel="web",
         team_id="t",
         team_skills_dir=str(tmp_path / "skills"),
         global_skills_dir=str(tmp_path / "global-skills"),
+        workspace=SimpleNamespace(
+            root_path=str(tmp_path / "member-workspace"),
+            get_node_path=lambda name: str(tmp_path / "member-workspace" / name),
+        ),
         trajectory_registry=registry_obj,
         config=_skill_evolution_config(),
     )
@@ -1402,14 +1480,16 @@ def test_member_skill_evolution_provider_passes_review_runtime(
     assert len(built) == 1
     rail = built[0]
     assert isinstance(rail, _FakeMemberSkillEvolutionRail)
-    assert rail.args[0] == [
-        str(tmp_path / "skills"),
-        str(tmp_path / "global-skills"),
-    ]
     assert rail.kwargs["language"] == "en"
     assert rail.kwargs["signal_trigger"] is True
     assert rail.kwargs["review_trigger"] is False
     assert rail.kwargs["auto_save"] is True
+    assert rail.args[0] == [
+        str(tmp_path / "member-workspace" / "skills"),
+        str(tmp_path / "skills"),
+        str(tmp_path / "global-skills"),
+    ]
+    assert rail.swarm_context["member_name"] == "worker-1"
     assert rail.bound_sink == (registry_obj, "t", "teammate")
 
 
