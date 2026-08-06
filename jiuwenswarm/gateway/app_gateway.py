@@ -2557,14 +2557,13 @@ async def _run(
     # cron jobs 的 work_mode 补全已改为惰性迁移:scheduler.start() → reload() →
     # list_jobs() 读取时按需推断并写回磁盘(见 CronJobStore.list_jobs),无需启动全量扫描。
     await cron_scheduler.start()
-    if os.getenv("AGENT_RUNTIME", "").strip():
-        try:
-            from jiuwenswarm.infrastructure.log_masking.engine import LogMaskingEngine
+    try:
+        from jiuwenswarm.infrastructure.log_masking.engine import LogMaskingEngine
 
-            await LogMaskingEngine.reload_log_masking_from_gateway_db()
-            logger.info("[App] log masking rules loaded from Gateway DB (if any)")
-        except Exception:  # noqa: BLE001
-            logger.warning("[App] log_masking_rule cold load skipped", exc_info=True)
+        await LogMaskingEngine.reload_log_masking_rule()
+        logger.info("[App] log masking rules loaded from Gateway DB (if any)")
+    except Exception:  # noqa: BLE001
+        logger.warning("[App] log_masking_rule cold load skipped", exc_info=True)
     # 主动推荐：按 config 自动注册/删除 proactive.tick 定时 job
     try:
         from jiuwenswarm.gateway.cron.proactive_cron_sync import sync_proactive_tick_job

@@ -2097,6 +2097,8 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     级别由 ``config.yaml`` 的 ``logging`` 段控制；环境变量 ``LOG_LEVEL`` 仅覆盖**控制台**级别
     （``log_level`` 参数为 ``None`` 时）。若传入 ``log_level``（如单测），则控制台与各文件级别均为该值。
     """
+    from jiuwenswarm.infrastructure.config import Settings
+
     logs_root = get_logs_dir()
     logs_root.mkdir(parents=True, exist_ok=True)
 
@@ -2113,7 +2115,9 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
         fmt="%(asctime)s.%(msecs)03d %(levelname)s %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    privacy_filter = SensitiveDataFilter()
+    privacy_filter: Optional[SensitiveDataFilter] = None
+    if Settings().gateway_log_masking_enabled:
+        privacy_filter = SensitiveDataFilter()
 
     def _add_rotating(
         filename: str,
@@ -2129,7 +2133,8 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
         )
         h.setLevel(level)
         h.setFormatter(custom_formatter if custom_formatter is not None else formatter)
-        h.addFilter(privacy_filter)
+        if privacy_filter is not None:
+            h.addFilter(privacy_filter)
         if name_filter is not None:
             h.addFilter(name_filter)
         root.addHandler(h)
@@ -2145,12 +2150,14 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     stream_handler = logging.StreamHandler()
     stream_handler.setLevel(levels.console)
     stream_handler.setFormatter(formatter)
-    stream_handler.addFilter(privacy_filter)
+    if privacy_filter is not None:
+        stream_handler.addFilter(privacy_filter)
     root.addHandler(stream_handler)
 
     # 源头脱敏：覆盖 jiuwenswarm 命名空间之外的第三方 logger（openjiuwen/openai/
     # httpx 等），在 LogRecord 创建时统一脱敏，保证任何来源的 api_key 都不明文落盘。
-    install_source_record_masking()
+    if privacy_filter is not None:
+        install_source_record_masking()
     return root
 
 

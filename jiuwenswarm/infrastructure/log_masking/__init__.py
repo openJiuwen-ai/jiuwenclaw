@@ -16,6 +16,7 @@ from .probes import (
 
 reload_from_rows = LogMaskingEngine.reload_from_rows
 compile_masking_rows = LogMaskingEngine.compile_masking_rows
+reload_log_masking_rule = LogMaskingEngine.reload_log_masking_rule
 reload_log_masking_from_gateway_db = LogMaskingEngine.reload_log_masking_from_gateway_db
 
 __all__ = (
@@ -25,6 +26,7 @@ __all__ = (
     "SensitiveDataFilter",
     "compile_masking_rows",
     "reload_from_rows",
+    "reload_log_masking_rule",
     "reload_log_masking_from_gateway_db",
     "emit_log_masking_probe_samples",
     "log_masking_probes_enabled",

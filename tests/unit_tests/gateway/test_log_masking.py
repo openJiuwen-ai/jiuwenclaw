@@ -10,6 +10,7 @@ import pytest
 from jiuwenswarm.infrastructure.log_masking.engine import (
     LogMaskingEngine,
     _KV_SENSITIVE_PATTERN,
+    validate_pattern,
 )
 from jiuwenswarm.infrastructure.log_masking.probes import LOG_MASKING_PROBE_SAMPLES
 
@@ -40,7 +41,8 @@ def test_reload_from_rows_sets_external_flag():
                 "priority": 50,
                 "enabled": True,
             }
-        ]
+        ],
+        db_authoritative=True,
     )
     engine = LogMaskingEngine.get_instance()
     assert engine.uses_external_rules
@@ -68,19 +70,144 @@ def test_probe_samples_are_non_empty():
     assert len(LOG_MASKING_PROBE_SAMPLES) >= 5
 
 
+def test_validate_pattern_rejects_unsafe_structures():
+    with pytest.raises(
+        ValueError,
+        match=r"unsafe nested wildcard|too slow",
+    ):
+        validate_pattern(r"(.*)*")
+
+
+def test_validate_pattern_allows_simple_custom_pattern():
+    assert validate_pattern(r"abc") == "abc"
+    assert validate_pattern(r"\b\d{4,6}\b") == r"\b\d{4,6}\b"
+
+
+@pytest.mark.parametrize(
+    ("env_value", "expected"),
+    [
+        (None, True),
+        ("true", True),
+        ("false", False),
+    ],
+)
+def test_gateway_log_masking_enabled(monkeypatch, env_value, expected):
+    from jiuwenswarm.infrastructure.config import Settings
+
+    if env_value is None:
+        monkeypatch.delenv("GATEWAY_LOG_MASKING_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("GATEWAY_LOG_MASKING_ENABLED", env_value)
+    assert Settings().gateway_log_masking_enabled is expected
+
+
 @pytest.mark.asyncio
-async def test_reload_from_gateway_db_noop_without_agent_runtime(monkeypatch):
-    monkeypatch.delenv("AGENT_RUNTIME", raising=False)
-    with patch.object(
-        LogMaskingEngine, "list_enabled_log_masking_rule_rows", new_callable=AsyncMock
-    ) as mock_list:
-        await LogMaskingEngine.reload_log_masking_from_gateway_db()
-        mock_list.assert_not_called()
+async def test_reload_log_masking_rule_skips_gdb_in_standalone(monkeypatch):
+    """单机版不连 GDB，直接回退内置规则。"""
+    import jiuwenswarm.infrastructure.log_masking.engine as engine_mod
+    from jiuwenswarm.infrastructure.config import Settings
+
+    monkeypatch.setenv("AGENT_RUNTIME", "")
+    monkeypatch.setattr(engine_mod, "settings", Settings())
+
+    with (
+        patch.object(
+            LogMaskingEngine,
+            "list_enabled_log_masking_rule_rows",
+            new_callable=AsyncMock,
+        ) as list_rows,
+        patch.object(LogMaskingEngine, "reload_from_rows") as reload_from_rows,
+    ):
+        await LogMaskingEngine.reload_log_masking_rule()
+
+    list_rows.assert_not_called()
+    reload_from_rows.assert_called_once_with([])
+
+
+@pytest.mark.asyncio
+async def test_reload_log_masking_rule_reads_gdb_in_enterprise(monkeypatch):
+    """企业版 GDB 冷启动只 reload 引擎。"""
+    import jiuwenswarm.infrastructure.log_masking.engine as engine_mod
+    from jiuwenswarm.infrastructure.config import Settings
+
+    monkeypatch.setenv("AGENT_RUNTIME", "enterprise")
+    monkeypatch.setenv("JIUWENCLAW_ID", "sp-test")
+    monkeypatch.setattr(engine_mod, "settings", Settings())
+
+    with (
+        patch.object(
+            LogMaskingEngine,
+            "list_enabled_log_masking_rule_rows",
+            new_callable=AsyncMock,
+            return_value=[],
+        ) as list_rows,
+        patch.object(LogMaskingEngine, "reload_from_rows") as reload_from_rows,
+    ):
+        await LogMaskingEngine.reload_log_masking_rule()
+
+    list_rows.assert_awaited_once()
+    reload_from_rows.assert_called_once_with([], db_authoritative=False)
+
+
+@pytest.mark.asyncio
+async def test_reload_log_masking_rule_db_authoritative_when_rows_present(monkeypatch):
+    import jiuwenswarm.infrastructure.log_masking.engine as engine_mod
+    from jiuwenswarm.infrastructure.config import Settings
+
+    monkeypatch.setenv("AGENT_RUNTIME", "enterprise")
+    monkeypatch.setenv("JIUWENCLAW_ID", "sp-test")
+    monkeypatch.setattr(engine_mod, "settings", Settings())
+    rows = [{"rule_id": "r1", "pattern": r"X", "replacement": "Y", "enabled": True}]
+
+    with (
+        patch.object(
+            LogMaskingEngine,
+            "list_enabled_log_masking_rule_rows",
+            new_callable=AsyncMock,
+            return_value=rows,
+        ),
+        patch.object(LogMaskingEngine, "reload_from_rows") as reload_from_rows,
+    ):
+        await LogMaskingEngine.reload_log_masking_rule()
+
+    reload_from_rows.assert_called_once_with(rows, db_authoritative=True)
+
+
+@pytest.mark.asyncio
+async def test_reload_log_masking_rule_skips_gdb_without_jiuwenclaw_id(monkeypatch):
+    """企业版 ``JIUWENCLAW_ID`` 未就绪时不访问 GDB，保留内置规则。"""
+    import jiuwenswarm.infrastructure.log_masking.engine as engine_mod
+    from jiuwenswarm.infrastructure.config import Settings
+
+    monkeypatch.setenv("AGENT_RUNTIME", "enterprise")
+    monkeypatch.delenv("JIUWENCLAW_ID", raising=False)
+    monkeypatch.delenv("JIUWENSWARM_ID", raising=False)
+    monkeypatch.setattr(engine_mod, "settings", Settings())
+    LogMaskingEngine.reset_for_tests()
+
+    with (
+        patch.object(
+            LogMaskingEngine,
+            "list_enabled_log_masking_rule_rows",
+            new_callable=AsyncMock,
+        ) as list_rows,
+        patch.object(LogMaskingEngine, "reload_from_rows") as reload_from_rows,
+    ):
+        await LogMaskingEngine.reload_log_masking_rule()
+
+    list_rows.assert_not_called()
+    reload_from_rows.assert_not_called()
+    assert "******" in LogMaskingEngine.get_instance().sanitize("token=abc123")
 
 
 @pytest.mark.asyncio
 async def test_reload_from_gateway_db_loads_rows(monkeypatch):
     monkeypatch.setenv("AGENT_RUNTIME", "1")
+    monkeypatch.setenv("JIUWENCLAW_ID", "sp-1")
+    import jiuwenswarm.infrastructure.log_masking.engine as engine_mod
+    from jiuwenswarm.infrastructure.config import Settings
+
+    monkeypatch.setattr(engine_mod, "settings", Settings())
     rows = [
         {
             "id": 2,
@@ -99,7 +226,7 @@ async def test_reload_from_gateway_db_loads_rows(monkeypatch):
         new_callable=AsyncMock,
         return_value=rows,
     ):
-        await LogMaskingEngine.reload_log_masking_from_gateway_db()
+        await LogMaskingEngine.reload_log_masking_rule()
     engine = LogMaskingEngine.get_instance()
     assert engine.uses_external_rules
     assert "[PHONE]" in engine.sanitize("call 13800138000 now")

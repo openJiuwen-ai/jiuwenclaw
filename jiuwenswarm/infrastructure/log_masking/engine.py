@@ -7,8 +7,11 @@ import logging
 import os
 import re
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any, ClassVar
+
+from jiuwenswarm.infrastructure.config import settings
 
 _logger = logging.getLogger(__name__)
 
@@ -19,9 +22,52 @@ _RULE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _ALLOWED_SOURCES = frozenset({"builtin", "custom"})
 _MAX_SANITIZE_TEXT_LEN = 256 * 1024
 _LOG_MASKING_RULE_TABLE = "log_masking_rule"
+_PATTERN_PERF_SAMPLE_LIMIT_SEC = 0.05
+
 _SENSITIVE_KW = (
     r"password|passwd|pwd|secret|token|api[_-]?key|access[_-]?token|"
-    r"refresh[_-]?token|authorization|credential|private[_-]?key|user[_-]?id|userid"
+    r"refresh[_-]?token|authorization|credential|private[_-]?key|user[_-]?id"
+)
+
+
+def _expand_sensitive_kw_literals(kw_alternation: str) -> tuple[str, ...]:
+    """从 ``_SENSITIVE_KW`` alternation 展开预检用字面量（含 ``[_-]?`` 三种形式）。"""
+    literals: list[str] = []
+    for alt in kw_alternation.split("|"):
+        alt = alt.strip()
+        if not alt:
+            continue
+        if "[_-]?" not in alt:
+            lit = alt.lower()
+            if lit not in literals:
+                literals.append(lit)
+            continue
+        left, right = alt.split("[_-]?", 1)
+        for sep in ("", "_", "-"):
+            lit = f"{left.lower()}{sep}{right.lower()}"
+            if lit not in literals:
+                literals.append(lit)
+    return tuple(literals)
+
+
+_SENSITIVE_KW_LITERALS = _expand_sensitive_kw_literals(_SENSITIVE_KW)
+
+_KV_SENSITIVE_PATTERN = re.compile(
+    rf'(?i)(?P<prefix>["\']?[\w.-]{{0,128}}(?:{_SENSITIVE_KW})[\w.-]{{0,128}}["\']?\s*[:=]\s*)'
+    r'(?P<val>"[^"]*"|\'[^\']*\'|[^,\s"\'\}\]]+)'
+)
+_KV_SENSITIVE_REPLACEMENT = rf"\g<prefix>{DEFAULT_REPLACEMENT}"
+
+_PATTERN_PERF_PROBE_SAMPLES: tuple[str, ...] = (
+    ("x" * 19) + "z",
+    ("a" * 19) + "!",
+    "abc sample line with token=value",
+    ("b" * 28) + "!",
+    ('x="' * 30) + "password=",
+)
+
+_UNSAFE_WILDCARD_QUANTIFIER_RE = re.compile(
+    r"\(\.\*\)\*|\(\.\+\)\+|\(\.\*\)\+|\(\.\+\)\*"
 )
 
 
@@ -58,19 +104,12 @@ _BUILTIN_RULES: list[CompiledMaskingRule] = [
     ),
     CompiledMaskingRule(
         "builtin_kv_sensitive",
-        re.compile(
-            rf'(?i)(?P<prefix>["\']?[\w.-]{{0,128}}(?:{_SENSITIVE_KW})[\w.-]{{0,128}}["\']?\s*[:=]\s*)'
-            r'(?P<val>"[^"]*"|\'[^\']*\'|[^,\s"\'\}\]]+)'
-        ),
-        rf"\g<prefix>{DEFAULT_REPLACEMENT}",
+        _KV_SENSITIVE_PATTERN,
+        _KV_SENSITIVE_REPLACEMENT,
         name="敏感KV",
         priority=10,
     ),
 ]
-
-_KV_SENSITIVE_PATTERN = next(
-    rule.pattern for rule in _BUILTIN_RULES if rule.rule_id == "builtin_kv_sensitive"
-)
 
 
 def normalize_rule_id(rule_id: str) -> str:
@@ -91,16 +130,50 @@ def normalize_replacement(value: str | None) -> str:
     return text
 
 
-def validate_pattern(pattern: str) -> str:
+def validate_pattern_structure(pattern: str) -> None:
+    """静态拒绝明显 ReDoS 结构（如 ``(.*)*``）。"""
+    if _UNSAFE_WILDCARD_QUANTIFIER_RE.search(pattern):
+        raise ValueError(
+            "pattern contains unsafe nested wildcard quantifiers like (.*)*"
+        )
+
+
+def validate_pattern_performance(
+    pattern: re.Pattern[str],
+    *,
+    limit_sec: float = _PATTERN_PERF_SAMPLE_LIMIT_SEC,
+) -> None:
+    """拒绝在探测样例上过慢的自定义 pattern（防 ReDoS）。"""
+    for sample in _PATTERN_PERF_PROBE_SAMPLES:
+        t0 = time.perf_counter()
+        pattern.sub("***", sample)
+        elapsed = time.perf_counter() - t0
+        if elapsed > limit_sec:
+            raise ValueError(
+                "pattern too slow "
+                f"(>{limit_sec * 1000:.0f}ms on probe sample len={len(sample)})"
+            )
+
+
+def validate_pattern(
+    pattern: str,
+    *,
+    check_structure: bool = True,
+    check_performance: bool = True,
+) -> str:
     text = str(pattern or "").strip()
     if not text:
         raise ValueError("pattern is required")
     if len(text) > MAX_PATTERN_LENGTH:
         raise ValueError(f"pattern must be at most {MAX_PATTERN_LENGTH} chars")
     try:
-        re.compile(text)
+        compiled = re.compile(text)
     except re.error as exc:
         raise ValueError(f"invalid regex pattern: {exc}") from exc
+    if check_structure:
+        validate_pattern_structure(text)
+    if check_performance:
+        validate_pattern_performance(compiled)
     return text
 
 
@@ -116,6 +189,7 @@ class LogMaskingEngine:
 
     _instance: ClassVar[LogMaskingEngine | None] = None
     _lock: ClassVar[threading.Lock] = threading.Lock()
+    _db_authoritative: ClassVar[bool] = False
 
     @staticmethod
     def compiled_default_rules() -> list[CompiledMaskingRule]:
@@ -126,15 +200,14 @@ class LogMaskingEngine:
         if rules is None:
             rules = self.compiled_default_rules()
         self._rules: list[CompiledMaskingRule] = list(rules)
-        self._uses_external_rules: bool = False
 
     @classmethod
     def get_instance(cls) -> LogMaskingEngine:
-        """返回单例；首次调用时使用内置默认规则初始化。"""
+        """返回单例；初始均使用内置规则，企业版在 GDB/WS 同步后以库为准。"""
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
-                    cls._instance = cls(cls.compiled_default_rules())
+                    cls._instance = cls()
         return cls._instance
 
     @classmethod
@@ -142,6 +215,7 @@ class LogMaskingEngine:
         """单测用：重置单例。"""
         with cls._lock:
             cls._instance = None
+            cls._db_authoritative = False
 
     @property
     def rules(self) -> list[CompiledMaskingRule]:
@@ -149,57 +223,97 @@ class LogMaskingEngine:
 
     @property
     def uses_external_rules(self) -> bool:
-        """是否已从 Gateway DB 加载外部规则（企业版热更路径）。"""
-        return self._uses_external_rules
+        """是否已以 Gateway DB 为权威规则来源（企业版热更路径）。"""
+        return bool(type(self)._db_authoritative)
 
-    def set_rules(
-        self, rules: list[CompiledMaskingRule], *, external: bool = False
-    ) -> None:
+    def set_rules(self, rules: list[CompiledMaskingRule]) -> None:
         self._rules = list(rules)
-        self._uses_external_rules = bool(external)
 
     @classmethod
-    def reload_from_rows(cls, rows: list[dict[str, Any]] | None) -> None:
-        """从 DB/WS 行刷新单例规则；无行或全部编译失败时回退内置 defaults。"""
-        if not rows:
-            new_rules = list(cls.compiled_default_rules())
-            external = False
-        else:
-            compiled = cls.compile_masking_rows(rows)
+    def reload_from_rows(
+        cls,
+        rows: list[dict[str, Any]] | None,
+        *,
+        db_authoritative: bool = False,
+    ) -> None:
+        """从 DB/WS 行刷新单例规则。
+
+        - 单机版：无行或编译失败时回退内置规则。
+        - 企业版（``db_authoritative=True`` 或已有可编译规则）：完全以库为准，空库即空规则。
+        """
+        enterprise = bool(settings.agent_runtime.strip()) or bool(
+            os.getenv("AGENT_RUNTIME", "").strip()
+        )
+
+        if db_authoritative:
+            cls._db_authoritative = True
+
+        compiled = cls.compile_masking_rows(rows)
+
+        if not enterprise:
+            new_rules = list(compiled or cls.compiled_default_rules())
+        elif cls._db_authoritative or compiled:
             if compiled:
-                new_rules = list(compiled)
-                external = True
-            else:
-                new_rules = list(cls.compiled_default_rules())
-                external = False
+                cls._db_authoritative = True
+            new_rules = list(compiled)
+        else:
+            new_rules = list(cls.compiled_default_rules())
 
-        cls.get_instance().set_rules(new_rules, external=external)
+        cls.get_instance().set_rules(new_rules)
 
     @classmethod
-    async def reload_log_masking_from_gateway_db(cls) -> None:
+    async def reload_log_masking_rule(
+        cls,
+        *,
+        db_authoritative: bool | None = None,
+    ) -> None:
         """从 Gateway 库加载 enabled 规则并刷新**本进程**单例引擎。
 
-        仅企业版（``AGENT_RUNTIME``）生效；读库走本地 ``enterprise_config.gateway_db``
-        （aiosqlite），不依赖 ``packages/jiuwenclaw-ee``。
-        """
-        if not os.getenv("AGENT_RUNTIME", "").strip():
-            return
-        try:
-            from jiuwenswarm.server.runtime.enterprise_config import gateway_db
+        单机版（``AGENT_RUNTIME`` 未设置）不访问 GDB，直接使用内置规则。
+        企业版在 ``JIUWENCLAW_ID`` / ``JIUWENSWARM_ID`` 未就绪时保留内置规则。
+        读库走本地 ``enterprise_config.gateway_db``，不依赖 ``packages/jiuwenclaw-ee``。
 
-            rows = await cls.list_enabled_log_masking_rule_rows()
-            cls.reload_from_rows(rows)
-        except Exception as exc:  # noqa: BLE001
-            _logger.warning(
-                "[log_masking_db] log_masking_rule read failed: %s",
-                exc,
-                exc_info=True,
+        ``db_authoritative``：
+        - ``None``（默认）：GDB 有行时以库为准，空库保留内置；
+        - ``True``：强制以库为准（WS sync / 用户改规则后），空库即空规则；
+        - ``False``：仅刷新编译结果，不改变权威来源标记。
+        """
+        enterprise = bool(settings.agent_runtime.strip()) or bool(
+            os.getenv("AGENT_RUNTIME", "").strip()
+        )
+        if not enterprise:
+            cls.reload_from_rows([])
+        else:
+            jid = (
+                os.getenv("JIUWENCLAW_ID", "").strip()
+                or os.getenv("JIUWENSWARM_ID", "").strip()
             )
-            cls.reload_from_rows(None)
+            if not jid:
+                _logger.debug(
+                    "[log_masking_db] skip GDB load: JIUWENCLAW_ID/JIUWENSWARM_ID not set yet"
+                )
+            else:
+                try:
+                    rows = await cls.list_enabled_log_masking_rule_rows()
+                    authoritative = (
+                        db_authoritative
+                        if db_authoritative is not None
+                        else bool(rows)
+                    )
+                    cls.reload_from_rows(rows, db_authoritative=authoritative)
+                except Exception as exc:  # noqa: BLE001
+                    _logger.warning(
+                        "[log_masking_db] log_masking_rule read failed: %s",
+                        exc,
+                        exc_info=True,
+                    )
 
         from .probes import maybe_emit_log_masking_probe_samples
 
         maybe_emit_log_masking_probe_samples(_logger)
+
+    # 兼容旧调用名
+    reload_log_masking_from_gateway_db = reload_log_masking_rule
 
     @classmethod
     async def list_enabled_log_masking_rule_rows(
@@ -277,13 +391,20 @@ class LogMaskingEngine:
 
     @staticmethod
     def compile_masking_rows(
-        rows: list[dict[str, Any]],
+        rows: list[dict[str, Any]] | None,
         *,
         order_desc: bool = True,
     ) -> list[CompiledMaskingRule]:
-        """将 DB/WS 行编译为规则列表；编译失败的行跳过。"""
+        """将 DB/WS 行编译为规则列表；编译失败的行跳过。
+
+        ``rows`` 为 ``None`` 或空列表时直接返回 ``[]``。
+        """
+        normalized_rows = list(rows or [])
+        if not normalized_rows:
+            return []
+
         sorted_rows = sorted(
-            rows,
+            normalized_rows,
             key=lambda r: (
                 -int(r.get("priority") or 0)
                 if order_desc
@@ -300,13 +421,17 @@ class LogMaskingEngine:
             if not rule_id or not pattern_text:
                 continue
             try:
-                pattern = re.compile(validate_pattern(pattern_text))
-                replacement = normalize_replacement(row.get("replacement"))
                 compiled.append(
                     CompiledMaskingRule(
                         rule_id=rule_id,
-                        pattern=pattern,
-                        replacement=replacement,
+                        pattern=re.compile(
+                            validate_pattern(
+                                pattern_text,
+                                check_structure=False,
+                                check_performance=False,
+                            )
+                        ),
+                        replacement=normalize_replacement(row.get("replacement")),
                         name=str(row.get("rule_name") or "").strip(),
                         priority=int(row.get("priority") or 0),
                     )
@@ -329,6 +454,11 @@ class LogMaskingEngine:
         masked = text
         for rule in self._rules:
             try:
+                if (
+                    rule.rule_id == "builtin_kv_sensitive"
+                    and not any(kw in masked.lower() for kw in _SENSITIVE_KW_LITERALS)
+                ):
+                    continue
                 masked = rule.pattern.sub(rule.replacement, masked)
             except Exception:
                 _logger.debug(
