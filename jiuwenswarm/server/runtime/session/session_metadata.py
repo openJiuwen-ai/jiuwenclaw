@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import os
 import queue
 import re
 import shutil
@@ -26,7 +27,10 @@ logger = logging.getLogger(__name__)
 _METADATA_QUEUE: queue.Queue[tuple[str, dict[str, Any], bool]] = queue.Queue(maxsize=5000)
 _WORKER_STARTED = False
 _WORKER_LOCK = threading.Lock()
-_FILE_LOCK = threading.Lock()
+# Reentrant: the read path now holds this lock too (see _read_metadata).
+# RLock guards against a same-thread nesting (read->write or write->read)
+# deadlocking in the future.
+_FILE_LOCK = threading.RLock()
 
 # 内存缓存: 解决异步写入时读取到陈旧磁盘数据的竞态条件
 _METADATA_CACHE: dict[str, dict[str, Any]] = {}
@@ -293,13 +297,42 @@ def _read_metadata(session_id: str, cache_bust: bool = False) -> dict[str, Any]:
     fpath = get_agent_sessions_dir() / session_id / "metadata.json"
     if not fpath.exists():
         return {}
+    # Reading must be mutually exclusive with _write_metadata_sync: the writer
+    # replaces the whole file, so an unlocked read can land inside the
+    # replacement window and observe empty content.
     try:
-        data = json.loads(fpath.read_text(encoding="utf-8") or '{}')
-        if isinstance(data, dict):
-            return data
-    except Exception as exc:
-        logger.warning("读取 metadata.json 失败: %s", exc)
-    return {}
+        with _FILE_LOCK:
+            raw = fpath.read_text(encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "failed to read metadata.json: %s (session_id=%s)", exc, session_id,
+        )
+        return {}
+    if not raw.strip():
+        # An empty file is a FAILURE, not "empty metadata". It must never be
+        # returned as a valid {}: callers do read-modify-write and would write
+        # the empty dict back, erasing session_id/title and other identity
+        # fields, leaving the session without an ID and impossible to open.
+        logger.warning(
+            "metadata.json is empty, treating as read failure (session_id=%s)",
+            session_id,
+        )
+        return {}
+    try:
+        data = json.loads(raw)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "failed to parse metadata.json: %s (session_id=%s, size=%d)",
+            exc, session_id, len(raw),
+        )
+        return {}
+    if not isinstance(data, dict):
+        logger.warning(
+            "metadata.json content is not a dict: %s (session_id=%s)",
+            type(data).__name__, session_id,
+        )
+        return {}
+    return data
 
 
 def _write_metadata_sync(
@@ -316,17 +349,44 @@ def _write_metadata_sync(
     fpath = _metadata_file(session_id)
     to_write = metadata
     with _FILE_LOCK:
-        if preserve_pin_fields and fpath.exists():
+        current: dict[str, Any] | None = None
+        if fpath.exists():
             try:
-                current = json.loads(fpath.read_text(encoding="utf-8") or "{}")
-                if isinstance(current, dict):
-                    to_write = _merge_pin_fields(current, metadata)
+                raw = fpath.read_text(encoding="utf-8")
+                parsed = json.loads(raw) if raw.strip() else None
+                if isinstance(parsed, dict):
+                    current = parsed
             except Exception as exc:  # noqa: BLE001
-                logger.warning("读取 metadata.json 置顶字段失败: %s", exc)
-        fpath.write_text(
-            json.dumps(to_write, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+                logger.warning("failed to read metadata.json: %s", exc)
+
+        # Identity guard: a caller that received an empty/partial dict and
+        # writes it back would permanently erase session_id, title, created_at
+        # and friends (writes replace the whole file, they do not merge). When
+        # disk has an identity and the incoming payload does not, treat it as a
+        # race-induced dirty write and restore the missing fields.
+        if current and current.get("session_id") and not metadata.get("session_id"):
+            recovered = {k: v for k, v in current.items() if k not in metadata}
+            to_write = {**current, **metadata}
+            logger.warning(
+                "blocked overwrite of session identity (session_id=%s): payload "
+                "has no session_id, restored %d field(s) from disk: %s",
+                session_id, len(recovered), sorted(recovered),
+            )
+
+        if preserve_pin_fields and current is not None:
+            to_write = _merge_pin_fields(current, to_write)
+
+        # Atomic write: write a temp file then rename, so that truncation by
+        # write_text can never expose empty content to a concurrent reader
+        # (precisely how session identity was being lost).
+        payload = json.dumps(to_write, ensure_ascii=False, indent=2)
+        tmp = fpath.with_name(f"{fpath.name}.{os.getpid()}.tmp")
+        try:
+            tmp.write_text(payload, encoding="utf-8")
+            os.replace(tmp, fpath)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
     return to_write
 
 

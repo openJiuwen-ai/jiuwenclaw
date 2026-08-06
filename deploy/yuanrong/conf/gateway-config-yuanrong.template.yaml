@@ -491,6 +491,9 @@ gateway:
       port: 2222
       user_template: "yr:instance:{instance}"
       connect_timeout_s: 30
+    auth_service_url: ${AGENTOS_AUTH_SERVICE_URL:-http://iam-agentos:8080}
+    timeout: ${AGENTOS_AUTH_TIMEOUT:-10}
+    auth_enabled: bool = True
 
 heartbeat:
   # 心跳间隔（秒），默认 3600

@@ -23,8 +23,12 @@ from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmD
 from jiuwenswarm.agents.harness.common.prompt.prompt_builder import (
     build_agent_identity_prompt,
 )
+from jiuwenswarm.agents.harness.common.prompt.browser_task_prompt import (
+    build_browser_task_prompt,
+)
 from jiuwenswarm.agents.harness.common.rails import skill_retrieval_prompt_rail as _skill_retrieval_prompt_mod
 from jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail import RuntimePromptRail
+from jiuwenswarm.agents.harness.common.rails.response_prompt_rail import ResponsePromptRail
 from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import SkillRetrievalPromptRail
 from jiuwenswarm.agents.harness.common.rails.symphony import (
     SymphonyOrchestrationRail,
@@ -149,13 +153,43 @@ def _tool_call_ctx(
     )
 
 
-def test_build_agent_identity_prompt_contains_identity_section_only():
+def test_build_agent_identity_prompt_contains_stable_identity_and_task_strategy():
     prompt = build_agent_identity_prompt(language="zh")
 
-    assert "# JiuwenSwarm 内部数据" in prompt
+    assert "# 身份" in prompt
+    assert "# 任务执行策略" in prompt
+    assert "# JiuwenSwarm 内部数据" not in prompt
+    assert "## 输出文件放置规范" not in prompt
+    assert "## 文件发送" not in prompt
     assert "## Symphony Orchestration" not in prompt
     assert "`symphony_compose_score`" not in prompt
     assert "# 消息说明" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_response_prompt_rail_splits_input_and_output_rules():
+    builder = SystemPromptBuilder(language="cn")
+    agent = _FakeAgent(builder)
+    rail = ResponsePromptRail()
+    rail.init(agent)
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=None,
+        session=_FakeSession(),
+        extra={},
+    )
+
+    await rail.before_model_call(ctx)
+
+    prompt = builder.build()
+    assert "# 输入说明" in prompt
+    assert "# 输出规则" in prompt
+    assert "## 输出语言" in prompt
+    assert "## 模型名称回答" in prompt
+    assert "# 消息说明" not in prompt
+    assert builder.has_section("input")
+    assert builder.has_section("output")
+    assert not builder.has_section("response")
 
 
 @pytest.mark.asyncio
@@ -454,7 +488,7 @@ def test_deep_adapter_syncs_symphony_tools_from_config_snapshot(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_runtime_time_section_participates_in_priority_order():
+async def test_runtime_environment_section_participates_in_priority_order():
     builder = SystemPromptBuilder(language="cn")
     builder.add_section(PromptSection(name="identity", content={"cn": "identity"}, priority=10))
     builder.add_section(PromptSection(name="tools", content={"cn": "# 可用工具"}, priority=30))
@@ -480,11 +514,14 @@ async def test_runtime_time_section_participates_in_priority_order():
         "identity",
         "# 可用工具",
         "# 工作空间",
-        "# 时间说明",
+        "# 运行环境",
     ]
     positions = [prompt.index(marker) for marker in ordered_markers]
     assert positions == sorted(positions)
-    assert builder.has_section("runtime.model_answer_policy")
+    assert builder.has_section("env")
+    assert not builder.has_section("time")
+    assert not builder.has_section("runtime.model_answer_policy")
+    assert not builder.has_section("language_output")
     assert not builder.has_section("runtime")
     assert "# 运行时状态" not in prompt
 
@@ -508,24 +545,73 @@ async def test_runtime_dynamic_sections_go_to_prompt_attachment_when_manager_ava
     await runtime_rail.before_model_call(ctx)
 
     prompt = builder.build()
-    assert "# Time Description" in prompt
+    assert "# Runtime Environment" in prompt
     assert "# Runtime State" not in prompt
-    assert "# Language" in prompt
-    assert "# Browser Tool Policy" in prompt
+    assert "# Time Description" not in prompt
+    assert "# Language" not in prompt
+    assert "# Model Name Answer Policy" not in prompt
+    assert "# Browser Tool Policy" not in prompt
+    assert "## Browser Subagent Rules" not in prompt
     assert "browser_preflight_submit" not in prompt
     assert "hotel_option_select" not in prompt
     assert "gmail_email_select" not in prompt
     assert "social_post_draft_select" not in prompt
     assert "Mandatory Web A2UI account-action gate" not in prompt
-    assert 'subagent_type` set to `"browser_agent"`' in prompt
-    assert "# Environment" in prompt
+    assert 'subagent_type` set to `"browser_agent"`' not in prompt
+    assert "## Platform and Shell" in prompt
+    assert "## Time-sensitive Queries" in prompt
+    assert "## Current Channel" in prompt
 
     items = await agent.prompt_attachment_manager.collect_for_session("sess1")
     assert [item.id for item in items] == ["session.sess1.runtime.setting"]
     rendered = agent.prompt_attachment_manager.render(items)
     assert "model-x" in rendered
-    assert "Always respond in English" in prompt
-    assert "# Browser Tool Policy" in prompt
+    assert "Always respond in English" not in prompt
+    assert "# Browser Tool Policy" not in prompt
+    assert "## Browser Subagent Rules" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_browser_policy_is_localized_and_merged_into_task_tool_section():
+    rail = JiuWenSwarmDeepAdapter._build_subagent_rail()
+    if rail is None:
+        pytest.skip("SubagentRail is unavailable with the installed openjiuwen API")
+    rail.tools = [object()]
+    rail.system_prompt_builder = SystemPromptBuilder(language="en")
+
+    ctx = AgentCallbackContext(
+        agent=SimpleNamespace(),
+        inputs=None,
+        session=_FakeSession(),
+        extra={},
+    )
+    await rail.before_model_call(ctx)
+
+    task_section = rail.system_prompt_builder.get_section("task_tool")
+    if task_section is None:
+        pytest.skip("task_tool prompt section is unavailable in this tool configuration")
+    assert "# Subagent Usage Rules" in task_section.content["en"]
+    assert "## task_tool" not in task_section.content["en"]
+    assert "## Browser Subagent Rules" in task_section.content["en"]
+    assert 'set `subagent_type` to `"browser_agent"`' in task_section.content["en"]
+    assert not rail.system_prompt_builder.has_section("browser_tool_policy")
+    assert "浏览器子智能体规则" in build_browser_task_prompt("cn")
+
+    rail.set_channel("tui")
+    rail.system_prompt_builder = SystemPromptBuilder(language="en")
+    await rail.before_model_call(ctx)
+    non_web_task_section = rail.system_prompt_builder.get_section("task_tool")
+    if non_web_task_section is None:
+        pytest.skip("task_tool prompt section is unavailable in this tool configuration")
+    assert "# Subagent Usage Rules" in non_web_task_section.content["en"]
+    assert "## Browser Subagent Rules" not in non_web_task_section.content["en"]
+
+
+def test_task_planning_tools_remain_enabled_without_todo_prompt_section():
+    rail = JiuWenSwarmDeepAdapter._build_task_planning_rail()
+    if rail is None:
+        pytest.skip("TaskPlanningRail is unavailable with the installed openjiuwen API")
+    assert rail.inject_prompt is False
 
 
 @pytest.mark.asyncio
@@ -633,15 +719,17 @@ async def test_runtime_prompt_uses_runtime_cwd_over_stale_trusted_dir(tmp_path, 
     await runtime_rail.before_model_call(ctx)
 
     prompt = builder.build()
-    assert "# Runtime Directory Context" in prompt
-    assert "Current project directory (project root and workspace boundary)" in prompt
-    assert "Current working directory (cwd and Bash default directory)" in prompt
+    assert "# Directory and File-Operation Boundaries" in prompt
+    assert "# Runtime Directory Context" not in prompt
+    assert "# Working Directory Runtime Values" not in prompt
+    assert "The project directory is your current workspace" in prompt
+    assert f"the current project directory is: `{project_dir}`" in prompt
     assert "Agent internal data directory" in prompt
-    assert "# Working Directory Policy" in prompt
+    assert "## JiuwenSwarm Internal Directories" in prompt
     assert str(project_dir) in prompt
-    assert str(current_dir) in prompt
+    assert str(current_dir) not in prompt
     assert str(stale_dir) not in prompt
-    assert str(extra_dir) in prompt
+    assert str(extra_dir) not in prompt
     assert "System directory" not in prompt
 
     items = await agent.prompt_attachment_manager.list_by_filter(session_id="sess1")
@@ -678,10 +766,9 @@ async def test_runtime_prompt_describes_external_cwd_without_project(tmp_path, m
     await runtime_rail.before_model_call(ctx)
 
     prompt = builder.build()
-    assert "Current project directory: not set" in prompt
-    assert str(task_dir) in prompt
-    assert "No user project is currently bound" in prompt
-    assert "it is not a project directory" in prompt
+    assert "The project directory is your current workspace" in prompt
+    assert f"the current project directory is: `{task_dir}`" in prompt
+    assert "Other accessible directories" not in prompt
     assert "fallen back to the Agent internal data directory" not in prompt
 
 
@@ -713,10 +800,73 @@ async def test_runtime_prompt_describes_agent_data_cwd_fallback(tmp_path, monkey
     await runtime_rail.before_model_call(ctx)
 
     prompt = builder.build()
-    assert "当前项目目录：未设置" in prompt
-    assert str(agent_data_dir) in prompt
-    assert "当前工作目录暂时回退到 Agent 内部数据目录" in prompt
-    assert "它仍然是 Agent 内部数据目录，不是用户项目" in prompt
+    assert "# 目录与文件操作边界" in prompt
+    assert f"当前项目目录是：`{agent_data_dir}`" in prompt
+    assert "其他可访问目录" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_runtime_prompt_clears_directory_boundaries_outside_web_and_tui(
+    tmp_path,
+    monkeypatch,
+):
+    builder = SystemPromptBuilder(language="cn")
+    agent = _FakeAgent(builder)
+    agent_data_dir = tmp_path / "agent-data"
+    agent_data_dir.mkdir()
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail.get_agent_workspace_dir",
+        lambda: agent_data_dir,
+    )
+
+    runtime_rail = RuntimePromptRail(language="cn", channel="web")
+    runtime_rail.init(agent)
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=None,
+        session=_FakeSession(),
+        extra={},
+    )
+
+    await runtime_rail.before_model_call(ctx)
+    assert "# 目录与文件操作边界" in builder.build()
+
+    runtime_rail.set_channel("a2a")
+    await runtime_rail.before_model_call(ctx)
+    assert "# 目录与文件操作边界" not in builder.build()
+
+
+@pytest.mark.asyncio
+async def test_runtime_prompt_reports_powershell_and_removes_generic_shell_rules(monkeypatch):
+    import jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail as runtime_module
+
+    monkeypatch.setattr(runtime_module.sys, "platform", "win32")
+    monkeypatch.setattr(
+        runtime_module.shutil,
+        "which",
+        lambda command: r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        if command == "powershell"
+        else None,
+    )
+
+    builder = SystemPromptBuilder(language="cn")
+    agent = _FakeAgent(builder)
+    runtime_rail = RuntimePromptRail(language="cn", channel="web")
+    runtime_rail.init(agent)
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=None,
+        session=_FakeSession(),
+        extra={},
+    )
+
+    await runtime_rail.before_model_call(ctx)
+
+    prompt = builder.build()
+    assert "- Shell：PowerShell" in prompt
+    assert "Shell 规则：" not in prompt
+    assert "### 项目目录规则" in prompt
+    assert "### 项目录规则" not in prompt
 
 
 @pytest.mark.asyncio
@@ -748,13 +898,17 @@ async def test_runtime_prompt_language_output_prefers_rail_language_over_runtime
     await runtime_rail.before_model_call(ctx)
 
     prompt = builder.build()
-    assert "Always respond in Chinese (Simplified)" in prompt
+    # The runtime rail now keeps the selected language in the runtime state
+    # instead of emitting the legacy ``language_output`` section.
+    assert "Always respond in Chinese (Simplified)" not in prompt
     rendered = agent.prompt_attachment_manager.render(
         await agent.prompt_attachment_manager.list_by_filter(session_id="sess1")
     )
     assert "Always respond in Chinese (Simplified)" not in rendered
     assert "Always respond in English." not in rendered
     assert "Always respond in English." not in prompt
+    # Runtime context is attached separately and rendered by the attachment
+    # manager, rather than being part of the main system-prompt sections.
     assert "当前语言：cn" in rendered
 
 

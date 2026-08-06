@@ -9,6 +9,7 @@ sees the current values without needing to call any tool.
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 from typing import Any
 
@@ -28,8 +29,6 @@ from jiuwenswarm.common.utils import (
     get_user_workspace_dir,
     logger,
 )
-
-_LANGUAGE_NAMES = {"cn": "Chinese (Simplified)", "zh": "Chinese (Simplified)", "en": "English"}
 
 
 class RuntimePromptRail(DeepAgentRail):
@@ -71,7 +70,7 @@ class RuntimePromptRail(DeepAgentRail):
             self.system_prompt_builder.remove_section("runtime.model_answer_policy")
             self.system_prompt_builder.remove_section("language_output")
             self.system_prompt_builder.remove_section("env")
-            self.system_prompt_builder.remove_section("browser_tool_policy")
+            self.system_prompt_builder.remove_section("directory_boundaries")
             self.system_prompt_builder.remove_section("tui_current_project_policy")
             self.system_prompt_builder.remove_section("trusted_dirs_policy")
         self._agent = None
@@ -135,11 +134,7 @@ class RuntimePromptRail(DeepAgentRail):
         )
 
     def set_force_english(self, force: bool) -> None:
-        """Force English for scaffolding sections (time/runtime/env) in code mode.
-
-        Does NOT affect the Language section (response language), which always
-        follows the user's preferred language set via :meth:`set_language`.
-        """
+        """Force English for runtime scaffolding in code mode."""
         self._force_english = force
 
     @staticmethod
@@ -228,30 +223,9 @@ class RuntimePromptRail(DeepAgentRail):
             "runtime.model_answer_policy",
             "language_output",
             "env",
-            "browser_tool_policy",
             "tui_current_project_policy",
             "trusted_dirs_policy"):
             self.system_prompt_builder.remove_section(name)
-
-        # ── time ──
-        if not self._force_english and self._language == "cn":
-            time_content = (
-                "# 时间说明\n\n"
-                "- 当用户询问“最新、当前、今年、本年、实时、近期”等信息并需要搜索时，"
-                "搜索 query 必须优先使用当前年份或日期"
-            )
-        else:
-            time_content = (
-                "# Time Description\n\n"
-                "- When the user asks for latest/current/this-year/recent information and search is needed, "
-                "search queries must prefer the current year or date."
-            )
-
-        self.system_prompt_builder.add_section(PromptSection(
-            name="time",
-            content={"cn": time_content, "en": time_content},
-            priority=92,
-        ))
 
         # ── runtime ──
         runtime_state: dict[str, Any] = {}
@@ -287,12 +261,6 @@ class RuntimePromptRail(DeepAgentRail):
             runtime_state.get("mode") or self._mode or "unknown"
         ).strip()
         mode = self._resolve_current_mode(ctx, configured_mode)
-        # Language section controls the model's *response* language and must
-        # follow the user's preferred language.  ``_force_english`` only
-        # affects system-prompt scaffolding (time / runtime / env sections),
-        # NOT the response language, so that code mode (which sets
-        # _force_english=True for English scaffolding) still replies in the
-        # user's chosen language.
         language_val = (
             self._language
             or runtime_state.get("language")
@@ -309,13 +277,6 @@ class RuntimePromptRail(DeepAgentRail):
                 f"- 当前语言：{language_val}\n"
                 f"- 当前渠道：{channel}"
             )
-            model_answer_policy = (
-                "# 模型名称回答策略\n\n"
-                "- 当用户询问「你是什么模型」「当前用的是哪个模型」等问题时，"
-                "直接使用 `runtime.setting` 中的当前模型值回答，只说模型名称，不要介绍身份或列出能力。\n"
-                "- 当用户询问「你支持/配置了哪些模型」「有哪些模型可用」等问题时，"
-                "直接使用 `runtime.setting` 中的可用模型列表回答，列出所有已配置的模型名称。"
-            )
         else:
             runtime_content = (
                 "# Runtime State\n\n"
@@ -325,20 +286,6 @@ class RuntimePromptRail(DeepAgentRail):
                 f"- Current language: {language_val}\n"
                 f"- Current channel: {channel}"
             )
-            model_answer_policy = (
-                "# Model Name Answer Policy\n\n"
-                "- When the user asks what model you are using, answer with only the current model "
-                "value from `runtime.setting`. Do not introduce yourself or list capabilities.\n"
-                "- When the user asks what models are available or configured, list all available "
-                "models from the `runtime.setting` available_models list."
-            )
-
-        self.system_prompt_builder.add_section(PromptSection(
-            name="runtime.model_answer_policy",
-            content={"cn": model_answer_policy, "en": model_answer_policy},
-            priority=95,
-        ))
-
         await self._clear_prompt_attachment(ctx, section="runtime.setting")
         await self._upsert_prompt_attachment(
             ctx,
@@ -348,28 +295,16 @@ class RuntimePromptRail(DeepAgentRail):
             priority=95,
         )
 
-        # ── Language output constraint (injected near end) ──
-        language_name = _LANGUAGE_NAMES.get(language_val, language_val)
-        language_output_content = (
-            "# Language\n\n"
-            f"Always respond in {language_name}, regardless of the language "
-            f"used in the user's message. Even if the user writes in another "
-            f"language, you must still respond in {language_name}. "
-            f"Use {language_name} for all explanations, comments, "
-            f"and communications with the user. "
-            f"Technical terms and code identifiers should remain "
-            f"in their original form."
-        )
-        self.system_prompt_builder.add_section(PromptSection(
-            name="language_output",
-            content={"cn": language_output_content, "en": language_output_content},
-            priority=93,
-        ))
-
-        # ── Platform / OS environment section ──
+        # ── Platform, shell, encoding, time-query and channel rules ──
         os_type = sys.platform
         shell_path = os.environ.get("SHELL", "")
-        shell_name = os.path.basename(shell_path) if shell_path else "unknown"
+        if os_type.startswith("win"):
+            # Windows normally has no SHELL variable. Prefer the actual
+            # PowerShell executable so the prompt does not report unknown.
+            shell_path = shutil.which("pwsh") or shutil.which("powershell") or ""
+            shell_name = "PowerShell" if shell_path else "unknown"
+        else:
+            shell_name = os.path.basename(shell_path) if shell_path else "unknown"
         import platform as plat
         os_version = f"{plat.system()} {plat.release()}"
         env_language = "cn" if not self._force_english and self._language == "cn" else "en"
@@ -378,57 +313,37 @@ class RuntimePromptRail(DeepAgentRail):
         if not self._force_english and self._language == "cn":
             env_content = (
                 "# 运行环境\n\n"
+                "## 平台与 Shell\n\n"
                 f"- 当前运行平台：`{os_type}`\n"
-                f"- Shell：{shell_name}\n"
-                f"- OS 版本：{os_version}\n\n"
+                f"- OS 版本：{os_version}\n"
+                f"- Shell：{shell_name}\n\n"
                 f"{shell_env_prompt}\n\n"
-                "## 平台命令差异（仅在必须使用 shell 时参考）\n\n"
-                "以下命令差异仅适用于测试、构建、git、包管理、运行脚本等必须调用 shell 的场景。"
-                "文件读取、编辑、搜索仍应优先使用专用工具。\n\n"
-                "| 操作 | Windows (`win32`/`win64`) | Linux/macOS (`linux`/`darwin`) |\n"
-                "|------|---------------------------|-------------------------------|\n"
-                "| 创建目录 | `mkdir folder` 或 PowerShell "
-                "`New-Item -ItemType Directory -Path folder` "
-                "| `mkdir -p folder` |\n"
-                "| 删除文件 | `del file.txt` 或 PowerShell `Remove-Item file.txt` | `rm file.txt` |\n"
-                "| 删除目录 | `rmdir folder` 或 PowerShell `Remove-Item -Recurse folder` | `rm -rf folder` |\n"
-                "| 查找文件 | `dir /s pattern` 或 PowerShell "
-                "`Get-ChildItem -Recurse -Filter pattern` "
-                "| `find . -name pattern` |\n\n"
-                "**特别注意**：Windows 的 cmd/PowerShell `mkdir` 不支持 `-p` 参数；"
-                "只有在 Shell 能力显示 Git Bash/PATH bash 可用且实际使用 bash/Git Bash 时，"
-                "`mkdir -p` 才是合适的。"
-                "如需在 cmd/PowerShell 中创建嵌套目录，请使用 PowerShell "
-                "`New-Item -ItemType Directory -Path \"parent/child\" -Force`，"
-                "或使用 cmd 分步创建 `mkdir parent && mkdir parent\\child`。"
+                "## 编码兼容性\n\n"
+                "- 代码将在 GBK 控制台或仅支持 GBK 的工具中运行时，避免直接使用 GBK 无法编码的 Emoji 和特殊字符。\n"
+                "- 必须使用这些字符时，选择明确支持 UTF-8 的执行工具或显式配置 UTF-8 编码。\n\n"
+                "## 时间相关查询\n\n"
+                "- 用户询问“最新、当前、今年、实时、近期”等信息并需要搜索时，搜索 query 应优先包含当前年份或日期。\n\n"
+                "## 当前渠道\n\n"
+                f"- 当前渠道：`{channel}`"
             )
         else:
             env_content = (
-                "# Environment\n\n"
+                "# Runtime Environment\n\n"
+                "## Platform and Shell\n\n"
                 f"- Current platform: `{os_type}`\n"
-                f"- Shell: {shell_name}\n"
-                f"- OS Version: {os_version}\n\n"
+                f"- OS version: {os_version}\n"
+                f"- Shell: {shell_name}\n\n"
                 f"{shell_env_prompt}\n\n"
-                "## Platform Command Differences (only when shell is required)\n\n"
-                "The following command differences apply only to scenarios where shell execution is required "
-                "(testing, builds, git, package management, running scripts). "
-                "File reading, editing, and searching should still prefer dedicated tools.\n\n"
-                "| Operation | Windows (`win32`/`win64`) | Linux/macOS (`linux`/`darwin`) |\n"
-                "|-----------|---------------------------|-------------------------------|\n"
-                "| Create directory | `mkdir folder` or PowerShell "
-                "`New-Item -ItemType Directory -Path folder` "
-                "| `mkdir -p folder` |\n"
-                "| Delete file | `del file.txt` or PowerShell `Remove-Item file.txt` | `rm file.txt` |\n"
-                "| Delete directory | `rmdir folder` or PowerShell `Remove-Item -Recurse folder` | `rm -rf folder` |\n"
-                "| Find file | `dir /s pattern` or PowerShell "
-                "`Get-ChildItem -Recurse -Filter pattern` "
-                "| `find . -name pattern` |\n\n"
-                "**WARNING**: Windows cmd/PowerShell `mkdir` does NOT support the `-p` flag; "
-                "`mkdir -p` is appropriate only when Shell capabilities show Git Bash/PATH bash "
-                "is available and you are actually using bash/Git Bash. "
-                "To create nested directories in cmd/PowerShell, use either PowerShell "
-                "`New-Item -ItemType Directory -Path \"parent/child\" -Force` "
-                "or cmd with step-by-step creation `mkdir parent && mkdir parent\\\\child`."
+                "## Encoding Compatibility\n\n"
+                "- When code will run in a GBK console or a tool that supports only GBK, avoid Emoji and "
+                "special characters that GBK cannot encode.\n"
+                "- If those characters are required, use a tool that explicitly supports UTF-8 or "
+                "configure UTF-8 encoding.\n\n"
+                "## Time-sensitive Queries\n\n"
+                "- When the user asks for the latest, current, this year's, real-time, or recent information "
+                "and search is needed, prefer including the current year or date in the query.\n\n"
+                "## Current Channel\n\n"
+                f"- Current channel: `{channel}`"
             )
 
         self.system_prompt_builder.add_section(PromptSection(
@@ -476,28 +391,13 @@ class RuntimePromptRail(DeepAgentRail):
                 section="git_status",
             )
 
-        # ── Channel: browser_tool_policy or trusted_dirs_policy──
-        if self._channel == "web":
-            browser_tool_policy = (
-                "# Browser Tool Policy\n\n"
-                "- For browser tasks such as opening pages, navigation, clicking, typing, login, screenshots, "
-                "page inspection, or extracting data from a live website, use `task_tool` with "
-                '`subagent_type` set to `"browser_agent"` and put the full browser objective in '
-                "`task_description`.\n"
-                "- Do not use bash, execute_code, subprocess, shell commands, or direct Chrome/Edge launches "
-                "for browser automation.\n"
-                "- If `task_tool` or `browser_agent` is unavailable, say that the browser "
-                "subagent is unavailable before trying to start a browser through commands."
-            )
-            self.system_prompt_builder.add_section(PromptSection(
-                name="browser_tool_policy",
-                content={"cn": browser_tool_policy, "en": browser_tool_policy},
-                priority=98,
-            ))
-
-        if self._channel in ("tui", "web"):
-            # Trusted directories policy for TUI and Web mode
-            trusted_dirs = self._existing_dirs(self._trusted_dirs)
+        # ── Channel: directory and file-operation boundaries ──
+        # Remove both the consolidated section and legacy sections first so
+        # switching away from TUI/Web cannot leave stale directory guidance.
+        self.system_prompt_builder.remove_section("directory_boundaries")
+        self.system_prompt_builder.remove_section("tui_current_project_policy")
+        self.system_prompt_builder.remove_section("trusted_dirs_policy")
+        if self._channel in ("tui", "web", "ws_client"):
             # This agent's own workspace. Team members each own one; without
             # it (single-agent runs) the process-wide agent workspace is the
             # same directory anyway.
@@ -510,221 +410,82 @@ class RuntimePromptRail(DeepAgentRail):
                 or agent_workspace_dir
             )
             has_project = project_dir is not None
-            cwd_is_agent_workspace = self._same_path(runtime_cwd, agent_workspace_dir)
-            workspace_boundary = project_dir or runtime_cwd
-            other_dirs = []
-            for path in trusted_dirs:
-                if self._same_path(path, workspace_boundary):
-                    continue
-                if self._same_path(path, runtime_cwd):
-                    continue
-                other_dirs.append(path)
-            cn_dirs_display = ", ".join(other_dirs) if other_dirs else "无"
-            en_dirs_display = ", ".join(other_dirs) if other_dirs else "none"
+            # The prompt consistently calls the active path the project
+            # directory. When no explicit project is bound, cwd is the
+            # project directory shown to the model.
+            prompt_project_dir = project_dir or runtime_cwd
 
             if not self._force_english and self._language == "cn":
                 if has_project:
-                    current_project_policy = (
-                        "# 运行时目录上下文\n\n"
-                        f"- 当前项目目录（项目根目录，也是本次任务的 workspace 边界）：{project_dir}\n"
-                        f"- 当前工作目录（cwd，也是 Bash 默认执行目录）：{runtime_cwd}\n"
-                        f"- Agent 内部数据目录：{agent_workspace_dir}\n"
-                        f"- JiuwenSwarm 启动配置目录：{config_dir}\n\n"
-                        "目录含义：\n"
-                        "- 当前项目目录是用户正在处理的项目根目录，也是本次任务文件操作的主要边界。\n"
-                        "- 当前工作目录是 Bash 未显式传入 `workdir` 时的默认执行目录，也是相对路径的解析基准。\n"
-                        "- 当前工作目录可以等于项目目录，也可以是项目目录中的子目录。\n"
-                        "- Agent 内部数据目录只保存身份、记忆、技能、待办和运行状态，不属于用户项目。\n"
-                        "- JiuwenSwarm 启动配置目录只保存 JiuwenSwarm 自身配置，不属于用户项目中的 `config/`。\n\n"
-                        "回答规则：\n"
-                        "- 用户询问“当前项目”“项目目录”“项目工作空间”或未加限定的 workspace 时，回答当前项目目录。\n"
-                        "- 用户询问“当前工作目录”“cwd”或“Bash 在哪里执行”时，回答当前工作目录。\n"
-                        "- 用户询问“Agent 工作空间”“Agent 数据目录”时，回答 Agent 内部数据目录。\n"
-                        "- 用户询问“JiuwenSwarm 配置目录”时，回答 JiuwenSwarm 启动配置目录。\n"
-                    )
-                    trusted_dirs_content = (
-                        "# 工作目录策略\n\n"
-                        f"- 当前项目目录：{project_dir}\n"
-                        f"- 当前工作目录：{runtime_cwd}\n"
-                        f"- 其他可访问目录（可读写其中的资源，但不是当前项目目录）：{cn_dirs_display}\n\n"
-                        "重要规则：\n"
-                        "- 项目文件搜索、代码读取与编辑、测试、构建和 Git 操作应限制在当前项目目录内。\n"
-                        "- 用户任务中的相对路径相对于当前工作目录解析。\n"
-                        "- Bash 工具未显式传入 `workdir` 时，默认在当前工作目录中执行。\n"
-                        "- Bash 工具显式传入 `workdir` 时，本次命令在指定目录中执行。\n"
-                        "- 不要依赖一次 Bash 调用中的 `cd` 改变后续工具调用的工作目录。\n"
-                        "- 不要在 Agent 内部数据目录中搜索、运行或修改用户项目文件。\n"
-                        "- 不要将项目中的 `config/` 自动解释为 JiuwenSwarm 启动配置目录。\n"
-                        "- 若操作涉及当前项目目录和其他已授权目录之外的路径，应先向用户确认。\n"
-                    )
-                elif cwd_is_agent_workspace:
-                    current_project_policy = (
-                        "# 运行时目录上下文\n\n"
-                        "- 当前项目目录：未设置\n"
-                        f"- 当前工作目录（cwd，也是 Bash 默认执行目录）：{runtime_cwd}\n"
-                        f"- Agent 内部数据目录：{agent_workspace_dir}\n"
-                        f"- JiuwenSwarm 启动配置目录：{config_dir}\n\n"
-                        "当前没有绑定用户项目，也没有传入独立的任务工作路径。"
-                        "当前工作目录暂时回退到 Agent 内部数据目录。\n\n"
-                        "重要规则：\n"
-                        "- 当前目录虽然是 Bash 默认执行目录，但它仍然是 Agent 内部数据目录，不是用户项目。\n"
-                        "- 不要假设其中存在项目代码、Git 仓库或用户项目配置。\n"
-                        "- 可以在其中执行普通聊天、记忆、待办和非项目型文件任务。\n"
-                        "- 用户要求搜索、编辑、测试或构建项目时，应先获得明确的项目路径。\n"
-                        "- 任务中出现 `config/` 时，不要自动将其解释为 JiuwenSwarm 启动配置目录。\n"
-                    )
-                    trusted_dirs_content = (
-                        "# 工作目录策略\n\n"
-                        f"- 当前工作目录：{runtime_cwd}\n"
-                        f"- 其他可访问目录：{cn_dirs_display}\n\n"
-                        "重要规则：\n"
-                        "- 当前没有项目目录，不要把当前工作目录称为项目目录。\n"
-                        "- Bash 工具未显式传入 `workdir` 时，默认在当前工作目录中执行。\n"
-                        "- 用户任务中的相对路径相对于当前工作目录解析。\n"
-                        "- 用户要求处理项目时，应先获得明确的项目路径。\n"
-                    )
+                    project_path = project_dir
                 else:
-                    current_project_policy = (
-                        "# 运行时目录上下文\n\n"
-                        "- 当前项目目录：未设置\n"
-                        f"- 当前工作目录（cwd，也是 Bash 默认执行目录）：{runtime_cwd}\n"
-                        f"- Agent 内部数据目录：{agent_workspace_dir}\n"
-                        f"- JiuwenSwarm 启动配置目录：{config_dir}\n\n"
-                        "当前没有绑定用户项目。\n\n"
-                        "目录含义：\n"
-                        "- 当前工作目录是本次任务的文件操作目录和相对路径解析基准，但不要称其为项目目录。\n"
-                        "- Bash 未显式传入 `workdir` 时，默认在当前工作目录中执行。\n"
-                        "- 不要假设当前工作目录是 Git 仓库或代码项目。\n"
-                        "- Agent 内部数据目录只保存 Agent 自身数据。\n"
-                        "- 用户要求处理某个项目时，应先获得明确的项目路径。\n"
-                        "- 任务中出现 `config/` 时，不要自动将其解释为 JiuwenSwarm 启动配置目录。\n"
-                    )
-                    trusted_dirs_content = (
-                        "# 工作目录策略\n\n"
-                        f"- 当前工作目录：{runtime_cwd}\n"
-                        f"- 其他可访问目录：{cn_dirs_display}\n\n"
-                        "重要规则：\n"
-                        "- 当前工作目录是本次任务的主要文件操作范围，但不是项目目录。\n"
-                        "- Bash 工具未显式传入 `workdir` 时，默认在当前工作目录中执行。\n"
-                        "- 用户任务中的相对路径相对于当前工作目录解析。\n"
-                        "- 用户要求处理项目时，应先获得明确的项目路径。\n"
-                    )
+                    project_path = runtime_cwd
+                directory_content = (
+                    "# 目录与文件操作边界\n\n"
+                    "## 项目目录\n\n"
+                    "### 项目目录说明\n\n"
+                    "- 项目目录是你当前的工作空间，"
+                    f"当前项目目录是：`{project_path}`\n\n"
+                    "### 项目目录规则\n\n"
+                    "- 用户任务中的相对路径必须相对于当前项目目录路径去解析。\n"
+                    "- Bash 未显式传入 `workdir` 时，默认在当前项目目录执行。\n"
+                    "- 用户已经提供明确路径时直接使用，不要重复询问。\n"
+                    "- 只有任务确实需要操作某个项目、且现有上下文无法确定项目位置时，才询问项目路径。\n"
+                    "- 用户明确指定保存位置时，优先使用用户指定位置；否则，项目代码、测试、配置、构建文件、项目文档、报告、导出文件、图片和数据文件等放在当前工作目录的合理位置。\n\n"
+                    "## JiuwenSwarm 内部目录\n\n"
+                    f"- 智能体内部数据目录：`{agent_workspace_dir}`\n"
+                    f"- JiuwenSwarm 启动配置目录：`{config_dir}`\n\n"
+                    "以下资源由 JiuwenSwarm 提供，路径相对于运行时给出的智能体内部数据目录：\n\n"
+                    "- `IDENTITY.md`：用户为智能体指定的身份信息。\n"
+                    "- `skills/`：当前已安装并启用的技能。\n"
+                    "- `todo/`：任务和待办状态。\n\n"
+                    "目录规则：\n\n"
+                    "- 智能体内部数据目录只保存智能体自身数据，不是用户项目目录。\n"
+                    "- 智能体身份、记忆、技能、待办和运行状态只能保存在对应的内部数据目录。\n"
+                    f"- 技能执行产生的内部技能资产放在 `{agent_workspace_dir}/skills/{{skill_name}}/`。\n"
+                    "- JiuwenSwarm 启动配置目录不得用于保存普通任务产物。\n"
+                    "- 用户任务中的 `config/`、`memory/`、`skills/`、`todo/` 或 `workspace/` 不自动映射到 JiuwenSwarm 内部目录。"
+                )
             else:
-                if has_project:
-                    current_project_policy = (
-                        "# Runtime Directory Context\n\n"
-                        f"- Current project directory (project root and workspace boundary): {project_dir}\n"
-                        f"- Current working directory (cwd and Bash default directory): {runtime_cwd}\n"
-                        f"- Agent internal data directory: {agent_workspace_dir}\n"
-                        f"- JiuwenSwarm startup configuration directory: {config_dir}\n\n"
-                        "Directory semantics:\n"
-                        "- The current project directory is the user project's root "
-                        "and the main file-operation boundary.\n"
-                        "- The current working directory is Bash's default directory when `workdir` is omitted "
-                        "and the base for relative paths.\n"
-                        "- The current working directory may equal the project root or be a subdirectory inside it.\n"
-                        "- The Agent internal data directory stores identity, memory, skills, todos, "
-                        "and runtime state; it is not part of the user project.\n"
-                        "- The JiuwenSwarm startup configuration directory stores JiuwenSwarm's own "
-                        "configuration; it is not the project's `config/` directory.\n\n"
-                        "Answering rules:\n"
-                        "- For the current project, project directory, project workspace, or an unqualified "
-                        "workspace, answer with the current project directory.\n"
-                        "- For the current working directory, cwd, or Bash execution directory, "
-                        "answer with the current working directory.\n"
-                        "- For the Agent workspace or Agent data directory, "
-                        "answer with the Agent internal data directory.\n"
-                        "- For the JiuwenSwarm configuration directory, "
-                        "answer with the JiuwenSwarm startup configuration directory.\n"
-                    )
-                    trusted_dirs_content = (
-                        "# Working Directory Policy\n\n"
-                        f"- Current project directory: {project_dir}\n"
-                        f"- Current working directory: {runtime_cwd}\n"
-                        f"- Other accessible directories: {en_dirs_display}\n\n"
-                        "Important rules:\n"
-                        "- Project searches, code reads and edits, tests, builds, and Git operations "
-                        "must stay within the current project directory.\n"
-                        "- Relative paths in user tasks are resolved against the current working directory.\n"
-                        "- Bash runs in the current working directory when `workdir` is omitted.\n"
-                        "- When Bash is given an explicit `workdir`, that directory applies to that command.\n"
-                        "- Do not rely on `cd` in one Bash call to change the working directory of later tool calls.\n"
-                        "- Do not search for, run, or modify user project files in the Agent internal data directory.\n"
-                        "- Do not map the project's relative `config/` path to the JiuwenSwarm startup "
-                        "configuration directory.\n"
-                        "- Ask the user before operating outside the current project "
-                        "and other authorized directories.\n"
-                    )
-                elif cwd_is_agent_workspace:
-                    current_project_policy = (
-                        "# Runtime Directory Context\n\n"
-                        "- Current project directory: not set\n"
-                        f"- Current working directory (cwd and Bash default directory): {runtime_cwd}\n"
-                        f"- Agent internal data directory: {agent_workspace_dir}\n"
-                        f"- JiuwenSwarm startup configuration directory: {config_dir}\n\n"
-                        "No user project or independent task path is currently bound. "
-                        "The current working directory has temporarily fallen back to "
-                        "the Agent internal data directory.\n\n"
-                        "Important rules:\n"
-                        "- Although this is Bash's default directory, it remains the Agent internal data directory "
-                        "and is not a user project.\n"
-                        "- Do not assume that it contains project code, a Git repository, "
-                        "or user project configuration.\n"
-                        "- Ordinary conversation, memory, todo, and non-project file tasks may be performed here.\n"
-                        "- Obtain an explicit project path before searching, editing, testing, or building a project.\n"
-                        "- Do not map a task's relative `config/` path to the JiuwenSwarm startup "
-                        "configuration directory.\n"
-                    )
-                    trusted_dirs_content = (
-                        "# Working Directory Policy\n\n"
-                        f"- Current working directory: {runtime_cwd}\n"
-                        f"- Other accessible directories: {en_dirs_display}\n\n"
-                        "Important rules:\n"
-                        "- No project directory is set; do not call the current working directory "
-                        "a project directory.\n"
-                        "- Bash runs in the current working directory when `workdir` is omitted.\n"
-                        "- Relative paths in user tasks are resolved against the current working directory.\n"
-                        "- Obtain an explicit project path before performing project work.\n"
-                    )
-                else:
-                    current_project_policy = (
-                        "# Runtime Directory Context\n\n"
-                        "- Current project directory: not set\n"
-                        f"- Current working directory (cwd and Bash default directory): {runtime_cwd}\n"
-                        f"- Agent internal data directory: {agent_workspace_dir}\n"
-                        f"- JiuwenSwarm startup configuration directory: {config_dir}\n\n"
-                        "No user project is currently bound.\n\n"
-                        "Directory semantics:\n"
-                        "- The current working directory is this task's file-operation directory "
-                        "and relative-path base, but it is not a project directory.\n"
-                        "- Bash runs in the current working directory when `workdir` is omitted.\n"
-                        "- Do not assume that the current working directory is a Git repository or code project.\n"
-                        "- The Agent internal data directory stores only the Agent's own data.\n"
-                        "- Obtain an explicit project path before performing project work.\n"
-                        "- Do not map a task's relative `config/` path to the JiuwenSwarm startup "
-                        "configuration directory.\n"
-                    )
-                    trusted_dirs_content = (
-                        "# Working Directory Policy\n\n"
-                        f"- Current working directory: {runtime_cwd}\n"
-                        f"- Other accessible directories: {en_dirs_display}\n\n"
-                        "Important rules:\n"
-                        "- The current working directory is this task's main file-operation scope, "
-                        "but it is not a project directory.\n"
-                        "- Bash runs in the current working directory when `workdir` is omitted.\n"
-                        "- Relative paths in user tasks are resolved against the current working directory.\n"
-                        "- Obtain an explicit project path before performing project work.\n"
-                    )
-
+                directory_content = (
+                    "# Directory and File-Operation Boundaries\n\n"
+                    "## Project Directory\n\n"
+                    "### Project Directory Description\n\n"
+                    "- The project directory is your current workspace; "
+                    f"the current project directory is: `{prompt_project_dir}`\n\n"
+                    "### Project Directory Rules\n\n"
+                    "- Resolve relative paths in user tasks against the current project directory.\n"
+                    "- When Bash is called without an explicit `workdir`, run it in the current project "
+                    "directory.\n"
+                    "- When the user has provided an explicit path, use it directly without asking again.\n"
+                    "- Ask for a project path only when the task truly requires a project and its location "
+                    "cannot be determined from the existing context.\n"
+                    "- Prefer a user-specified save location. Otherwise, place project code, tests, "
+                    "configuration, build files, project documentation, reports, exports, images, and data "
+                    "files in an appropriate location under the current working directory.\n\n"
+                    "## JiuwenSwarm Internal Directories\n\n"
+                    f"- Agent internal data directory: `{agent_workspace_dir}`\n"
+                    f"- JiuwenSwarm startup configuration directory: `{config_dir}`\n\n"
+                    "The following resources are provided by JiuwenSwarm. Their paths are relative to the "
+                    "Agent internal data directory supplied at runtime:\n\n"
+                    "- `IDENTITY.md`: identity information assigned to the Agent by the user.\n"
+                    "- `skills/`: currently installed and enabled skills.\n"
+                    "- `todo/`: task and to-do state.\n\n"
+                    "Directory rules:\n\n"
+                    "- The Agent internal data directory stores only the Agent's own data; it is not a user "
+                    "project directory.\n"
+                    "- Agent identity, memory, skills, to-dos, and runtime state must be stored only in their "
+                    "corresponding internal data directories.\n"
+                    f"- Internal skill assets produced by skill execution belong in "
+                    f"`{agent_workspace_dir}/skills/{{skill_name}}/`.\n"
+                    "- Do not use the JiuwenSwarm startup configuration directory for ordinary task deliverables.\n"
+                    "- `config/`, `memory/`, `skills/`, `todo/`, or `workspace/` in a user task do not "
+                    "automatically refer to JiuwenSwarm internal directories."
+                )
             self.system_prompt_builder.add_section(PromptSection(
-                name="tui_current_project_policy",
-                content={"cn": current_project_policy, "en": current_project_policy},
-                priority=99,
-            ))
-            self.system_prompt_builder.add_section(PromptSection(
-                name="trusted_dirs_policy",
-                content={"cn": trusted_dirs_content, "en": trusted_dirs_content},
-                priority=90,
+                name="directory_boundaries",
+                content={"cn": directory_content, "en": directory_content},
+                priority=89,
             ))
 
     async def _upsert_prompt_attachment(

@@ -487,6 +487,16 @@ def persist_workflow_runs(runs: dict[str, WorkflowRunState], session_id: str) ->
     from jiuwenswarm.server.runtime.session.session_metadata import _read_metadata, _enqueue_write
     runs_data = {run_id: run_state.model_dump() for run_id, run_state in runs.items()}
     metadata = _read_metadata(session_id, cache_bust=True)
+    if not metadata.get("session_id"):
+        # Do not blindly write back after a failed read (e.g. a concurrent
+        # write window): the write replaces the whole file and would erase
+        # session_id/title. Skip this persist; the next delta retries.
+        logger.warning(
+            "[TeamHelpers] skipping workflow_runs persist: failed to read "
+            "session metadata (session_id=%s)",
+            session_id,
+        )
+        return
     metadata[_WORKFLOW_RUNS_STATE_KEY] = runs_data
     _enqueue_write(session_id, metadata)
 

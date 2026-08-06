@@ -7,7 +7,7 @@ import logging
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Coroutine
 
 from jiuwenswarm.common.e2a.models import E2AEnvelope
 from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
@@ -20,6 +20,13 @@ from jiuwenswarm.extensions.agentos.agentos_router.agent_manager import (
     AgentRuntime,
     is_third_party_agent_type,
 )
+from jiuwenswarm.extensions.agentos.agentos_router.agentos_authenticator import AgentOSAuthenticator
+from jiuwenswarm.extensions.agentos.auth.common import (
+    extract_headers,
+    extract_token,
+    get_remote_addr,
+)
+from jiuwenswarm.extensions.agentos.auth.credential_authenticator import AuthContext, AuthResult
 from jiuwenswarm.extensions.agentos.agentos_router.config import (
     DEFAULT_AGENT_WORKSPACE_ROOT,
     SshChannelEndpoint,
@@ -35,6 +42,8 @@ from jiuwenswarm.extensions.yuanrong_frontend_client import (
     AgentRuntimeSpec,
     YuanrongFrontendAgentClient,
 )
+from jiuwenswarm.gateway import ChannelManager
+from jiuwenswarm.gateway.channel_manager.base import ChannelType
 from jiuwenswarm.gateway.routing.agent_client import AgentServerClient
 
 
@@ -95,6 +104,7 @@ class AgentOSRouterClient(AgentServerClient):
         workspace_root: str = DEFAULT_AGENT_WORKSPACE_ROOT,
         sandbox_idle_timeout_seconds: float = 600.0,
         sandbox_idle_check_interval_seconds: float = 30.0,
+        auth_client: AgentOSAuthenticator | None = None,
     ) -> None:
         self._yuanrong = yuanrong
         self._registry = registry
@@ -115,6 +125,47 @@ class AgentOSRouterClient(AgentServerClient):
         self._closed = False
         # 用户当前 agent_type（3rdagent.switch 成功后更新）；SSH 接入跟随此值。
         self._current_agent_types: dict[str, str] = {}
+        self._auth_client = auth_client
+
+
+    def set_channel_manager(self, channel_manager: ChannelManager) -> None:
+        """订阅 web channel和 tui channel 的连接事件和断开。"""
+        web_channel = channel_manager.get_channel(ChannelType.WEB)
+        tui_channel = channel_manager.get_channel(ChannelType.CLI)
+
+        if web_channel:
+            on_connect = getattr(web_channel, "on_connect", None)
+            if callable(on_connect):
+                on_connect(self.on_connect)
+        if tui_channel:
+            on_connect = getattr(tui_channel, "on_connect", None)
+            if callable(on_connect):
+                on_connect(self.on_connect)
+
+    async def on_connect(self, ws: Any) -> AuthResult | None:
+        if self._auth_client is None:
+            return AuthResult(
+                success=True,
+                user_id="",
+                error="No valid credentials",
+                extensions={"error_code": "UNSUPPORTED_CREDENTIAL"},
+            )
+        token = extract_token(ws)
+        headers = extract_headers(ws)
+        context = AuthContext(
+            channel_type="",
+            credentials={"token": token} if token else {},
+            headers=headers,
+            remote_addr=get_remote_addr(ws),
+        )
+        result = await self._auth_client.authenticate(context)
+        if not result.success:
+            close = getattr(ws, "close", None)
+            if callable(close):
+                ret = close(code=1008, reason="unauthorized")
+                if hasattr(ret, "__await__"):
+                    await ret
+        return result
 
     def get_current_agent_type(self, user_id: str) -> str:
         """Return the user's current agent_type (default ``jiuwenswarm``)."""
