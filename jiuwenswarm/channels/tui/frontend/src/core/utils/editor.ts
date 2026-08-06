@@ -34,12 +34,21 @@ export function getExternalEditor(): string {
 }
 
 export function getEditorInfo(): { source: string; value: string } {
-  if (process.env.VISUAL) return { source: "$VISUAL", value: process.env.VISUAL };
-  if (process.env.EDITOR) return { source: "$EDITOR", value: process.env.EDITOR };
+  if (process.env.VISUAL?.trim()) return { source: "$VISUAL", value: process.env.VISUAL.trim() };
+  if (process.env.EDITOR?.trim()) return { source: "$EDITOR", value: process.env.EDITOR.trim() };
   return {
     source: "default",
     value: process.platform === "win32" ? "start /wait notepad" : "vi",
   };
+}
+
+/** Describe both the selected editor and how the user can change it. */
+export function getEditorEnvironmentHint(): string {
+  const { source, value } = getEditorInfo();
+  if (source !== "default") {
+    return `Using ${source}="${value}". To change editor, set the $EDITOR or $VISUAL environment variable.`;
+  }
+  return `Using default editor "${value}". To use a different editor, set the $EDITOR or $VISUAL environment variable.`;
 }
 
 export function isGuiEditor(editor: string): boolean {
@@ -89,9 +98,10 @@ function spawnFailed(result: SpawnSyncReturns<string | Buffer>): boolean {
  * closes, exactly like CC's `code -w` + execSync.
  *
  * @param onExit Called synchronously after the editor exits and tui.start()
- *               has restored input. Runs for both GUI and terminal editors.
+ *               has restored input. The boolean is false when both the
+ *               configured editor and the fallback editor failed.
  */
-export function openFileInEditor(tui: TUI, filePath: string, onExit?: () => void): void {
+export function openFileInEditor(tui: TUI, filePath: string, onExit?: (success: boolean) => void): void {
   const editor = getExternalEditor();
   const gui = isGuiEditor(editor);
 
@@ -104,6 +114,7 @@ export function openFileInEditor(tui: TUI, filePath: string, onExit?: () => void
   const { cmd, args } = parseEditorCommand(editor);
 
   tui.stop();
+  let success = false;
 
   try {
     // Enter alt screen + clear + show cursor.
@@ -116,9 +127,8 @@ export function openFileInEditor(tui: TUI, filePath: string, onExit?: () => void
     process.stdin.resume();
 
     const result = spawnEditorSync(cmd, args, filePath);
-    if (spawnFailed(result)) {
-      spawnFallbackSync(filePath);
-    }
+    const finalResult = spawnFailed(result) ? spawnFallbackSync(filePath) : result;
+    success = !spawnFailed(finalResult);
   } finally {
     // ── Terminal recovery (mirrors claude-code's exitAlternateScreen) ──
     //
@@ -145,7 +155,7 @@ export function openFileInEditor(tui: TUI, filePath: string, onExit?: () => void
 
     tui.start();
     tui.requestRender(true);
-    onExit?.();
+    onExit?.(success);
   }
 }
 
@@ -177,18 +187,23 @@ export function openFileInEditor(tui: TUI, filePath: string, onExit?: () => void
  * GUI_EDITOR_WAIT_FLAGS unless the user already supplied it. This matches
  * CC's EDITOR_OVERRIDES = { code: 'code -w', subl: 'subl --wait' }.
  */
-function spawnGuiEditorSync(tui: TUI, editor: string, filePath: string, onExit?: () => void): void {
+function spawnGuiEditorSync(
+  tui: TUI,
+  editor: string,
+  filePath: string,
+  onExit?: (success: boolean) => void,
+): void {
   // Resolve cmd + args, forcing a wait flag for editors that need one.
   const { cmd, args } = parseEditorCommand(editor);
 
   tui.stop();
+  let success = false;
 
   try {
     const result = spawnEditorSync(cmd, args, filePath);
-    if (spawnFailed(result)) {
-      // GUI editor failed to launch — fall back to notepad/vi (still blocking).
-      spawnFallbackSync(filePath);
-    }
+    // GUI editor failed to launch — fall back to notepad/vi (still blocking).
+    const finalResult = spawnFailed(result) ? spawnFallbackSync(filePath) : result;
+    success = !spawnFailed(finalResult);
   } finally {
     // Drain any stdin the editor may have left buffered (defensive — GUI
     // editors shouldn't touch our stdin, but a shell-wrapped one might).
@@ -202,7 +217,7 @@ function spawnGuiEditorSync(tui: TUI, editor: string, filePath: string, onExit?:
 
     tui.start();
     tui.requestRender(true);
-    onExit?.();
+    onExit?.(success);
   }
 }
 
