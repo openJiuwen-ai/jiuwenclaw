@@ -2399,6 +2399,18 @@
       "paused": "已暂停",
       "completed": "已完成",
       "expired": "已过期"
+    },
+    "schedule": {
+      "tab": { "interval": "按间隔", "cron": "Cron 表达式", "once": "单次" },
+      "interval": { "label": "每隔", "unit": "分钟回到当前会话" },
+      "summary": {
+        "interval": "每 {{minutes}} 分钟回到当前会话",
+        "cron": "{{expr}}（{{timezone}}）回到当前会话",
+        "once": "{{date}} {{time}} 回到当前会话一次"
+      }
+    },
+    "errors": {
+      "cronFieldCount": "心跳的 Cron 表达式需要 5 段（分 时 日 月 周）"
     }
   }
 }
