@@ -532,13 +532,13 @@ class CronTools:
         return [
             make_tool(
                 name="cron_list_jobs",
-                description="List all cron jobs.",
+                description="列出所有定时任务。",
                 input_params={"type": "object", "properties": {}},
                 func=self.list_jobs,
             ),
             make_tool(
                 name="cron_get_job",
-                description="Get a cron job by id.",
+                description="按 id 获取单个定时任务详情。",
                 input_params={
                     "type": "object",
                     "properties": {"job_id": {"type": "string"}},
@@ -548,7 +548,7 @@ class CronTools:
             ),
             make_tool(
                 name="cron_create_job",
-                description="Create cron job.",
+                description="创建定时任务。",
                 input_params={
                     "type": "object",
                     "properties": {
@@ -601,9 +601,9 @@ class CronTools:
             make_tool(
                 name="cron_update_job",
                 description=(
-                    "Update an existing cron job. Pass job_id and a patch dict with fields to update "
-                    "(name, enabled, cron_expr, timezone, description, wake_offset_seconds, "
-                    "targets, mode, model_name, project_dir, project_id)."
+                    "更新已有定时任务。传入 job_id 与包含待更新字段的 patch 字典"
+                    "（name、enabled、cron_expr、timezone、description、wake_offset_seconds、"
+                    "targets、mode、model_name、project_dir、project_id）。"
                 ),
                 input_params={
                     "type": "object",
@@ -679,10 +679,9 @@ class CronTools:
             make_tool(
                 name="cron_delete_job",
                 description=(
-                    "Delete cron job by id. "
-                    "Note: jobs with protected=true (from cron_list_jobs) are managed by "
-                    "system config and cannot be deleted here; tell the user to toggle the "
-                    "corresponding config switch instead."
+                    "按 id 删除定时任务。"
+                    "注意：protected=true（见 cron_list_jobs）的任务由系统配置管理，"
+                    "不能在此删除；请告知用户去切换相应配置开关。"
                 ),
                 input_params={"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]},
                 func=self.delete_job,
@@ -690,9 +689,8 @@ class CronTools:
             make_tool(
                 name="cron_toggle_job",
                 description=(
-                    "Enable or disable cron job. "
-                    "Note: jobs with protected=true cannot be toggled here; they are driven by "
-                    "system config."
+                    "启用或禁用定时任务。"
+                    "注意：protected=true 的任务不能在此启停；它们由系统配置驱动。"
                 ),
                 input_params={
                     "type": "object",
@@ -706,7 +704,7 @@ class CronTools:
             ),
             make_tool(
                 name="cron_preview_job",
-                description="Preview next runs.",
+                description="预览任务接下来若干次计划执行时间。",
                 input_params={
                     "type": "object",
                     "properties": {
@@ -719,7 +717,7 @@ class CronTools:
             ),
             make_tool(
                 name="cron_run_now",
-                description="Trigger run now.",
+                description="立即触发定时任务执行。",
                 input_params={"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]},
                 func=self.run_now,
             ),

@@ -722,10 +722,10 @@ class SkillToolkit:
             make_tool(
                 name="search_skill",
                 description=(
-                    "Search installable skills from SkillNet, ClawHub, TeamSkillsHub, "
-                    "and builtin directory. Use the returned identifier with install_skill "
-                    "(SkillNet URL, ClawHub slug, TeamSkillsHub asset_id, or skill name "
-                    "when source is builtin)."
+                    "从 SkillNet、ClawHub、TeamSkillsHub 及内置目录搜索可安装技能。"
+                    "将返回的 identifier 用于 install_skill"
+                    "（SkillNet URL、ClawHub slug、TeamSkillsHub asset_id，"
+                    "source 为 builtin 时则为技能名）。"
                 ),
                 input_params={
                     "type": "object",
@@ -754,10 +754,9 @@ class SkillToolkit:
             make_tool(
                 name="install_skill",
                 description=(
-                    "Install a skill. For skills found via search_skill, pass the identifier "
-                    "and matching source. For builtin skills (not yet installed but available "
-                    "locally), use source='builtin' and identifier=skill_name directly — "
-                    "no prior search needed."
+                    "安装技能。对于通过 search_skill 找到的技能，传入其 identifier "
+                    "及匹配的 source。对于内置技能（本地已提供但尚未安装），"
+                    "直接使用 source='builtin' 并将 identifier 设为技能名——无需先搜索。"
                 ),
                 input_params={
                     "type": "object",
@@ -786,7 +785,7 @@ class SkillToolkit:
             ),
             make_tool(
                 name="uninstall_skill",
-                description="Uninstall an installed skill by name.",
+                description="按名称卸载已安装的技能。",
                 input_params={
                     "type": "object",
                     "properties": {
