@@ -327,6 +327,7 @@ from jiuwenswarm.agents.harness.common.rails.symphony.retrieval_context_processo
 )
 from jiuwenswarm.agents.harness.common.tools.send_file_to_user import (
     bind_active_send_file_toolkit,
+    clear_active_send_file_toolkit,
 )
 from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import (
     SkillRetrievalPromptRail,
@@ -9017,6 +9018,10 @@ class JiuWenSwarmDeepAdapter:
                     project_dir=self._project_dir,
                 )
             bind_active_send_file_toolkit(self._send_file_toolkit)
+        else:
+            # Avoid leaving a prior request's session toolkit registered when
+            # this request does not enable send_file (misdelivery risk).
+            clear_active_send_file_toolkit(session_id=session_id)
 
     def _refresh_acp_runtime_tools(
         self,

@@ -17,6 +17,7 @@ import copy
 import logging
 import os
 import shutil
+import threading
 import time
 from collections.abc import Mapping
 from contextvars import ContextVar
@@ -66,23 +67,72 @@ _SENT_FILE_PATHS_BY_SESSION: dict[str, set[str]] = {}
 # Bound per-request so media-generation tools can emit chat.file without a
 # second model call to send_file_to_user.
 #
-# ContextVar alone is not enough: some tool runners execute in worker threads /
-# tasks that do not inherit the request ContextVar. Keep a process-level
-# fallback that ``update_runtime_context`` refreshes on every request.
+# Prefer the request ContextVar. For call sites that lose that context (e.g.
+# some tool workers), fall back to a *session-keyed* registry — never a single
+# process-global toolkit, which races under concurrent requests.
 _ACTIVE_SEND_FILE_TOOLKIT: ContextVar["SendFileToolkit | None"] = ContextVar(
     "active_send_file_toolkit", default=None
 )
-_FALLBACK_SEND_FILE_TOOLKIT: "SendFileToolkit | None" = None
+_TOOLKITS_BY_SESSION: dict[str, "SendFileToolkit"] = {}
+_TOOLKITS_BY_SESSION_LOCK = threading.RLock()
 
 
 def bind_active_send_file_toolkit(toolkit: "SendFileToolkit | None") -> None:
-    """Bind the request-scoped SendFileToolkit for auto media delivery."""
-    global _FALLBACK_SEND_FILE_TOOLKIT
-    _FALLBACK_SEND_FILE_TOOLKIT = toolkit
+    """Bind the request-scoped SendFileToolkit for auto media delivery.
+
+    Registers the toolkit under ``toolkit.session_id`` so workers that lose the
+    request ContextVar can still recover the correct session's toolkit.
+    """
     _ACTIVE_SEND_FILE_TOOLKIT.set(toolkit)
+    if toolkit is None:
+        return
+    sid = (toolkit.session_id or "").strip()
+    if not sid:
+        return
+    with _TOOLKITS_BY_SESSION_LOCK:
+        # Session id on a reused toolkit instance can change across requests;
+        # drop stale keys that still point at this same object.
+        stale = [key for key, value in _TOOLKITS_BY_SESSION.items() if value is toolkit and key != sid]
+        for key in stale:
+            _TOOLKITS_BY_SESSION.pop(key, None)
+        _TOOLKITS_BY_SESSION[sid] = toolkit
 
 
-async def deliver_file_to_user(abs_file_path: str) -> str:
+def clear_active_send_file_toolkit(*, session_id: str | None = None) -> None:
+    """Clear the request ContextVar binding; optionally drop a session registry entry."""
+    _ACTIVE_SEND_FILE_TOOLKIT.set(None)
+    sid = (session_id or "").strip()
+    if not sid:
+        return
+    with _TOOLKITS_BY_SESSION_LOCK:
+        _TOOLKITS_BY_SESSION.pop(sid, None)
+
+
+def _lookup_toolkit_for_session(session_id: str | None) -> "SendFileToolkit | None":
+    sid = (session_id or "").strip()
+    if not sid:
+        return None
+    with _TOOLKITS_BY_SESSION_LOCK:
+        return _TOOLKITS_BY_SESSION.get(sid)
+
+
+def _resolve_runtime_session_id() -> str | None:
+    """Best-effort session id from the agent request ContextVar (lazy import)."""
+    try:
+        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+            get_runtime_tool_session_id,
+        )
+
+        return get_runtime_tool_session_id()
+    except Exception:
+        return None
+
+
+async def deliver_file_to_user(
+    abs_file_path: str,
+    *,
+    session_id: str | None = None,
+) -> str:
     """Push a generated file via chat.file using the active SendFileToolkit.
 
     Returns the toolkit result string, or an empty string when no toolkit is
@@ -91,7 +141,15 @@ async def deliver_file_to_user(abs_file_path: str) -> str:
     path = (abs_file_path or "").strip()
     if not path:
         return ""
-    toolkit = _ACTIVE_SEND_FILE_TOOLKIT.get() or _FALLBACK_SEND_FILE_TOOLKIT
+    # Prefer the session-keyed registry whenever we know the session. That avoids
+    # concurrent requests stealing delivery via the latest ContextVar bind.
+    # ContextVar remains the fallback for offline/unit callers that only bind
+    # without a session id.
+    runtime_sid = (session_id or "").strip() or _resolve_runtime_session_id()
+    if runtime_sid:
+        toolkit = _lookup_toolkit_for_session(runtime_sid) or _ACTIVE_SEND_FILE_TOOLKIT.get()
+    else:
+        toolkit = _ACTIVE_SEND_FILE_TOOLKIT.get()
     if toolkit is None:
         logger.debug(
             "[deliver_file_to_user] no active SendFileToolkit; skip delivery path=%s",
