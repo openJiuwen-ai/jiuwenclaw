@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from openjiuwen.core.foundation.llm import ToolMessage
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.single_agent.rail.base import (
@@ -66,6 +67,7 @@ class TaskExecutionRail(DeepAgentRail):
     TODO_TOOLS = frozenset({
         "todo_create", "todo_get", "todo_list", "todo_modify",
     })
+    SKILL_COMPLETE_TOOLS = frozenset({"skill_complete"})
 
     def __init__(self) -> None:
         super().__init__()
@@ -151,6 +153,21 @@ class TaskExecutionRail(DeepAgentRail):
                 list(self._active_tasks.keys()),
             )
             self._todo_map_before_tool = dict(self._todo_map)
+            return
+
+        if tool_name in self.SKILL_COMPLETE_TOOLS:
+            if self._has_incomplete_todos(self._todo_map):
+                tc = ctx.inputs.tool_call
+                tool_call_id = str(getattr(tc, "id", "") or "")
+                msg = (
+                    "[SKILL_COMPLETE_BLOCKED] todo.json 中仍有未完成任务，"
+                    "请先用 todo_modify 将全部已完成项标为 completed。"
+                )
+                ctx.extra["_skip_tool"] = True
+                ctx.inputs.tool_result = msg
+                ctx.inputs.tool_msg = ToolMessage(
+                    content=msg, tool_call_id=tool_call_id,
+                )
             return
 
         self._bind_context_to_in_progress_task()
