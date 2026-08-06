@@ -314,11 +314,16 @@ class TestSessionRegistry:
             lg.flush()  # close the dump file opened on construction
 
 
-# ── OTel get_team_span global fallback ─────────────────────────────────────
+# ── OTel root-span fallback ────────────────────────────────────────────────
+def _root_span(name: str = "root"):
+    """Minimal stand-in for a recording root span."""
+    return SimpleNamespace(name=name, is_recording=lambda: True)
+
+
 class TestOtelTeamSpanFallback:
-    """The get_team_span monkeypatch returns _CURRENT_ROOT_SPAN when the
-    per-request ContextVar is invisible (agent runs in a session-setup supervisor
-    task), so OtelCallbackHandler finds a parent and emits child spans."""
+    """Team-span lookups fall back to the run's registered root span when the
+    per-request ContextVar is invisible (the agent runs in a session-setup
+    supervisor task), so the rail and OtelCallbackHandler still find a parent."""
 
     def test_patch_is_installed(self):
         # The ContextVar itself is replaced, so BOTH lookup paths see the
@@ -330,24 +335,75 @@ class TestOtelTeamSpanFallback:
 
         assert isinstance(sc._team_span_ctx, obs._RootSpanFallbackContextVar)
 
-    def test_fallback_returns_current_root_span(self):
-        # _team_span_ctx ContextVar is unset in the test process -> orig returns
-        # None -> the patched get_team_span falls back to _CURRENT_ROOT_SPAN.
+    def test_fallback_returns_the_running_root_span(self):
+        # _team_span_ctx ContextVar is unset in the test process -> the lookup
+        # falls back to the single run in flight.
         import openjiuwen.agent_teams.observability.callback_handler as ch
         import jiuwenswarm.agents.harness.agent_observability as obs
 
-        obs._CURRENT_ROOT_SPAN = "ROOT_SENTINEL"
+        span = _root_span()
+        obs._ROOT_SPANS["sess-A"] = span
         try:
-            assert ch.get_team_span() == "ROOT_SENTINEL"
+            assert ch.get_team_span() is span
         finally:
-            obs._CURRENT_ROOT_SPAN = None
+            obs._ROOT_SPANS.clear()
 
-    def test_fallback_none_when_no_global_and_contextvar_empty(self):
+    def test_fallback_none_when_no_run_and_contextvar_empty(self):
         import openjiuwen.agent_teams.observability.callback_handler as ch
         import jiuwenswarm.agents.harness.agent_observability as obs
 
-        obs._CURRENT_ROOT_SPAN = None
+        obs._ROOT_SPANS.clear()
         assert ch.get_team_span() is None
+
+    def test_one_session_closing_does_not_blind_another_still_running(self):
+        """Overlapping sessions must not share a single fallback slot.
+
+        A run that ended used to clear the slot outright, so a run still going
+        lost its team span mid-flight — from that moment its sub-agents got no
+        agent span and landed flat under the dispatching agent.
+        """
+        import openjiuwen.agent_teams.observability.callback_handler as ch
+        import jiuwenswarm.agents.harness.agent_observability as obs
+
+        running = _root_span("still-running")
+        finished = _root_span("finished")
+        obs._ROOT_SPANS.clear()
+        obs._ROOT_SPANS["sess-A"] = running
+        obs._ROOT_SPANS["sess-B"] = finished
+        try:
+            obs.close_agent_run_span(finished, session_id="sess-B")
+            assert ch.get_team_span() is running
+        finally:
+            obs._ROOT_SPANS.clear()
+
+    def test_ambiguous_runs_resolve_to_nothing_rather_than_the_wrong_trace(self):
+        """Two runs in flight with no session id in reach: refuse to guess."""
+        import openjiuwen.agent_teams.observability.callback_handler as ch
+        import jiuwenswarm.agents.harness.agent_observability as obs
+
+        obs._ROOT_SPANS.clear()
+        obs._ROOT_SPANS["sess-A"] = _root_span("a")
+        obs._ROOT_SPANS["sess-B"] = _root_span("b")
+        try:
+            assert ch.get_team_span() is None
+        finally:
+            obs._ROOT_SPANS.clear()
+
+    def test_run_is_resolved_by_session_id_when_available(self, monkeypatch):
+        """With the session id in context, each run resolves to its own span."""
+        import openjiuwen.agent_teams.observability.callback_handler as ch
+        import jiuwenswarm.agents.harness.agent_observability as obs
+        from openjiuwen.agent_teams import context as team_context
+
+        mine = _root_span("mine")
+        obs._ROOT_SPANS.clear()
+        obs._ROOT_SPANS["sess-A"] = _root_span("other")
+        obs._ROOT_SPANS["sess-B"] = mine
+        monkeypatch.setattr(team_context, "get_session_id", lambda: "sess-B")
+        try:
+            assert ch.get_team_span() is mine
+        finally:
+            obs._ROOT_SPANS.clear()
 
 
 def test_llm_span_lookup_falls_back_to_root_span():
@@ -384,12 +440,12 @@ def test_llm_span_lookup_falls_back_to_root_span():
     tracker.on_start(llm_span)
     previous_tracker = sc.get_active_span_tracker()
     sc.set_active_span_tracker(tracker)
-    obs._CURRENT_ROOT_SPAN = root_span
+    obs._ROOT_SPANS["sess-1"] = root_span
     try:
         assert sc.get_current_llm_span() is llm_span
         assert sc.pop_current_llm_span() is llm_span
     finally:
-        obs._CURRENT_ROOT_SPAN = None
+        obs._ROOT_SPANS.clear()
         sc.set_active_span_tracker(previous_tracker)
 
 

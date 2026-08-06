@@ -45,13 +45,59 @@ logger = logging.getLogger(__name__)
 # on each single-agent request.
 _agent_observability_active: bool = False
 
-# Process-global "current run's root span", set/cleared by open/close_agent_run_span.
+# Root spans of the runs currently in flight, keyed by session id.
+#
 # The per-request _team_span_ctx ContextVar can't reach the round tasks (agent
 # execution runs in a session-setup supervisor task), so every SDK team-span
 # lookup returns None there and the whole child-span machinery goes dark. The
-# ContextVar stand-in installed below makes those lookups fall back to this
-# global so they work regardless of task/context boundary.
-_CURRENT_ROOT_SPAN: Any = None
+# ContextVar stand-in installed below falls back to this registry, which works
+# regardless of task/context boundary.
+#
+# Keyed rather than a single "current run" slot because sessions overlap: a
+# process serves several chats at once, and a single slot made them fight over
+# it. Whoever finished first cleared it, so a run still in progress silently
+# lost its agent-tier spans from that moment on (its sub-agents landed flat
+# under the dispatching agent) — and before that, whoever opened last owned the
+# slot, so the other run's spans would have joined the wrong trace.
+_ROOT_SPANS: dict[str, Any] = {}
+
+
+def _is_recording(span: Any) -> bool:
+    """Report whether *span* is still open, tolerating stubs without the API."""
+    try:
+        return bool(span is not None and span.is_recording())
+    except Exception:
+        return False
+
+
+def _resolve_root_span() -> Any:
+    """Return the root span of the run the calling task belongs to, or None.
+
+    Resolution is by session id first: ``get_session_id`` is set by the SDK
+    around agent execution, so it is readable from the tasks the ContextVar
+    cannot reach — which is exactly where this fallback is needed.
+
+    When no session id is in reach, a single run in flight is unambiguous and
+    answers. Several in flight with no way to tell them apart returns None
+    rather than a guess: attaching one run's spans to another run's trace is
+    worse than the span being missing.
+    """
+    session_id = ""
+    try:
+        from openjiuwen.agent_teams.context import get_session_id
+
+        session_id = get_session_id() or ""
+    except Exception as exc:
+        logger.debug("[AgentObservability] session id lookup failed: %s", exc)
+
+    span = _ROOT_SPANS.get(session_id)
+    if _is_recording(span):
+        return span
+
+    live = [candidate for candidate in list(_ROOT_SPANS.values()) if _is_recording(candidate)]
+    if len(live) == 1:
+        return live[0]
+    return None
 
 
 class _RootSpanFallbackContextVar:
@@ -78,9 +124,7 @@ class _RootSpanFallbackContextVar:
     reader lives in ``span_context`` and resolves the module global at call
     time. Only ``get`` changes behavior; ``set`` / ``reset`` delegate to the
     real ContextVar so team mode keeps exact per-context semantics — its team
-    span is ContextVar-visible, so the fallback never triggers there. A single
-    active single-agent run is assumed (multi-session concurrency: last-opened
-    wins).
+    span is ContextVar-visible, so the fallback never triggers there.
 
     Upstream now offers the same seam as a supported API
     (``span_context.set_ambient_team_span`` / ``clear_ambient_team_span``,
@@ -100,10 +144,20 @@ class _RootSpanFallbackContextVar:
         return self._inner.name
 
     def get(self, *default: Any) -> Any:
-        """Return the context-local team span, or the current run's root span."""
+        """Return the context-local team span, or this run's root span.
+
+        A binding that has already ended does not win: the request coroutine's
+        span outlives its run in a task that snapshotted the context, and the
+        callers here need the span of the run happening *now*. The stale
+        binding is still returned as a last resort, for the close paths that
+        only need its trace id.
+        """
         span = self._inner.get(*default)
-        if span is None:
-            return _CURRENT_ROOT_SPAN
+        if _is_recording(span):
+            return span
+        root_span = _resolve_root_span()
+        if root_span is not None:
+            return root_span
         return span
 
     def set(self, value: Any) -> Any:
@@ -437,11 +491,10 @@ def open_agent_run_span(*, session_id: str = "", mode: str = "") -> Any:
         # Register as the team span so OtelCallbackHandler's parent lookup
         # (get_team_span fallback) finds it for LLM/tool span creation.
         set_team_span(span, team_name=SINGLE_AGENT_TEAM_NAME)
-        # Also publish as the process-global current span: the supervisor task
-        # doesn't inherit the ContextVar, so the get_team_span fallback (installed
-        # at import) returns this for OtelCallbackHandler's parent lookup.
-        global _CURRENT_ROOT_SPAN
-        _CURRENT_ROOT_SPAN = span
+        # Also register under this run's session: the supervisor task doesn't
+        # inherit the ContextVar, so the fallback installed at import resolves
+        # the root span from here for the rail and OtelCallbackHandler.
+        _ROOT_SPANS[session_id or ""] = span
         logger.info("[AgentObservability] root span opened: name=%s", name)
         return span
     except Exception as exc:
@@ -481,13 +534,15 @@ def close_agent_run_span(handle: Any, *, session_id: str = "", output: str = "")
 
     Args:
         handle: Opaque handle from :func:`open_agent_run_span`; None is a no-op.
-        session_id: Session the run belonged to (kept for symmetry / logging).
+        session_id: Session the run belonged to; its registry entry is dropped.
         output: The run's final answer, stamped as the trace-level output.
             Empty (aborted / errored run) leaves the attribute unset.
     """
-    # Clear the global fallback span (harmless if already None).
-    global _CURRENT_ROOT_SPAN
-    _CURRENT_ROOT_SPAN = None
+    # Drop this run's fallback entry — and only this run's. Sessions overlap,
+    # so clearing whatever happens to be registered would blind a run that is
+    # still going (its sub-agents would lose their spans mid-run).
+    if _ROOT_SPANS.get(session_id or "") is handle:
+        _ROOT_SPANS.pop(session_id or "", None)
     if handle is None:
         return
     try:
