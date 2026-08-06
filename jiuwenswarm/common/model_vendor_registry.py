@@ -86,6 +86,12 @@ class VendorPreset:
     needs_ak_sk: bool = False               # Maas uses AK/SK + Region, no public /v1
 
 
+# core 的 ProviderType.Anthropic 枚举值。当用户在前端选 "Anthropic 格式" 时,
+# 落库的 client_provider 用这个值(core 会实例化 AnthropicModelClient 走 /v1/messages)。
+# Anthropic 格式可用的充要条件:该预设的 anthropic_base 非空。
+ANTHROPIC_CLIENT_PROVIDER = "Anthropic"
+
+
 # ---------------------------------------------------------------------------
 # Registry: (vendor, plan) combinations, grouped by plan for readability.
 # Each entry's api_base / anthropic_base comes from the corresponding xlsx
@@ -417,6 +423,7 @@ def to_frontend_payload() -> dict[str, Any]:
                 "vendor_key": p.vendor_key,
                 "display_name": p.display_name,
                 "plan": p.plan.value,
+                # OpenAI 格式(默认): client_provider + api_base
                 "client_provider": p.client_provider,
                 "api_base": p.api_base,
                 "default_model": p.default_model,
@@ -425,7 +432,12 @@ def to_frontend_payload() -> dict[str, Any]:
                 "models_endpoint": p.models_endpoint,
                 "models_needs_key": p.models_needs_key,
                 "models_extra_auth": dict(p.models_extra_auth),
+                # Anthropic 格式(可选切换): 仅当 anthropic_base 非空时可用,
+                # 切换后落库 client_provider=ANTHROPIC_CLIENT_PROVIDER、
+                # api_base=anthropic_base(core 用 AnthropicModelClient 走 /v1/messages)。
+                "supports_anthropic": bool(p.anthropic_base),
                 "anthropic_base": p.anthropic_base,
+                "anthropic_client_provider": ANTHROPIC_CLIENT_PROVIDER if p.anthropic_base else None,
                 "needs_third_party": p.needs_third_party,
                 "needs_ak_sk": p.needs_ak_sk,
             }

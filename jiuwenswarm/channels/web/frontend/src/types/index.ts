@@ -89,7 +89,13 @@ export interface VendorPreset {
   models_endpoint: string | null;
   models_needs_key: boolean;
   models_extra_auth: Record<string, string>;
+  /** Anthropic 格式是否可选(仅当 anthropic_base 非空时为 true)。
+   * 选 Anthropic 格式时:落库 client_provider='Anthropic'、api_base=anthropic_base,
+   * core 用 AnthropicModelClient 走 /v1/messages。 */
+  supports_anthropic: boolean;
   anthropic_base: string | null;
+  /** Anthropic 格式落库用的 provider 值(= 'Anthropic');supports_anthropic=false 时为 null。 */
+  anthropic_client_provider: string | null;
   needs_third_party: boolean;
   needs_ak_sk: boolean;
 }
