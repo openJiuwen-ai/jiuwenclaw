@@ -48,6 +48,7 @@ from jiuwenswarm.extensions.yuanrong_frontend_client import (
     AgentRuntimeSpec,
     YuanrongFrontendAgentClient,
 )
+from jiuwenswarm.extensions.agentos.auth.ssh_key_issuer import SshKeyIssuer
 from jiuwenswarm.gateway import ChannelManager
 from jiuwenswarm.gateway.channel_manager.base import ChannelType
 from jiuwenswarm.gateway.routing.agent_client import (
@@ -90,6 +91,10 @@ def _is_ws_connect_retryable(exc: BaseException) -> bool:
 
 class UnsupportedAgentType(ValueError):
     pass
+
+
+class EphemeralKeyIssueError(RuntimeError):
+    """A configured issuer could not mint an ephemeral SSH key."""
 
 
 def build_inline_runtime_spec(image_info: ImageInfo) -> AgentRuntimeSpec:
@@ -153,6 +158,8 @@ class AgentOSRouterClient(AgentServerClient):
         agent_manager: AgentManager,
         ssh_relay: YuanrongSshRelay | None = None,
         ssh_channel_endpoint: SshChannelEndpoint | None = None,
+        key_issuer: SshKeyIssuer | None = None,
+        ephemeral_key_ttl_sec: float = 300.0,
         workspace_root: str = DEFAULT_AGENT_WORKSPACE_ROOT,
         sandbox_idle_timeout_seconds: float = 600.0,
         sandbox_idle_check_interval_seconds: float = 30.0,
@@ -164,6 +171,8 @@ class AgentOSRouterClient(AgentServerClient):
         self._agent_manager = agent_manager
         self._ssh_relay = ssh_relay
         self._ssh_channel_endpoint = ssh_channel_endpoint
+        self._key_issuer = key_issuer
+        self._ephemeral_key_ttl_sec = float(ephemeral_key_ttl_sec)
         self._workspace_root = (
             str(workspace_root or "").strip() or DEFAULT_AGENT_WORKSPACE_ROOT
         )
@@ -233,6 +242,16 @@ class AgentOSRouterClient(AgentServerClient):
                 if hasattr(ret, "__await__"):
                     await ret
         return result
+
+    def set_key_issuer(
+        self,
+        key_issuer: SshKeyIssuer | None,
+        *,
+        ephemeral_key_ttl_sec: float = 300.0,
+    ) -> None:
+        """Inject or clear the northbound SSH ephemeral key issuer."""
+        self._key_issuer = key_issuer
+        self._ephemeral_key_ttl_sec = float(ephemeral_key_ttl_sec)
 
     async def _on_channel_event(self, event: Any) -> None:
         """处理 Channel 连接事件，维护用户连接计数并触发延迟清理。"""
@@ -658,19 +677,31 @@ class AgentOSRouterClient(AgentServerClient):
         ssh_fields = self._ssh_endpoint_fields()
         if ssh_fields is None:
             return self._missing_ssh_endpoint_error()
+        # Fail fast before create: without the key the client cannot pass
+        # SSH public-key auth, so a "successful" switch would be unusable.
+        try:
+            key_fields = self._ephemeral_ssh_key_fields(
+                user_id=uid,
+                session_id=session_id,
+            )
+        except EphemeralKeyIssueError as exc:
+            return {
+                "ok": False,
+                "error": str(exc),
+                "code": "SSH_KEY_ISSUE_FAILED",
+            }
         # Builtin swarm: no registry / create_sandbox; mark current type only.
         if self._uses_direct_yuanrong(normalized):
             self._current_agent_types[uid] = normalized
-            return {
-                "ok": True,
-                "payload": {
-                    "agent_id": "",
-                    "agent_type": normalized,
-                    "sandbox_id": "",
-                    "status": AgentStatus.READY.value,
-                    **ssh_fields,
-                },
+            payload = {
+                "agent_id": "",
+                "agent_type": normalized,
+                "sandbox_id": "",
+                "status": AgentStatus.READY.value,
+                **ssh_fields,
+                **key_fields,
             }
+            return {"ok": True, "payload": payload}
         try:
             runtime = await self._agent_manager.get_or_create_agent(
                 uid,
@@ -689,19 +720,63 @@ class AgentOSRouterClient(AgentServerClient):
         status = info.status.value if hasattr(info.status, "value") else str(info.status)
         # 记录用户当前 agent_type，后续 SSH 接入默认跟随
         self._current_agent_types[uid] = normalized
-        return {
-            "ok": True,
-            "payload": {
-                "agent_id": info.agent_id,
-                "agent_type": info.agent_type,
-                "sandbox_id": info.sandbox_id,
-                "status": status,
-                **ssh_fields,
-            },
+        payload = {
+            "agent_id": info.agent_id,
+            "agent_type": info.agent_type,
+            "sandbox_id": info.sandbox_id,
+            "status": status,
+            **ssh_fields,
+            **key_fields,
         }
+        return {"ok": True, "payload": payload}
+
+    def _ephemeral_ssh_key_fields(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+    ) -> dict[str, Any]:
+        """Mint ``ssh_private_key`` when an issuer is configured.
+
+        Returns an empty mapping when no issuer is injected (auth disabled).
+        Raises :class:`EphemeralKeyIssueError` when issuance is expected but
+        does not yield a usable key.
+        """
+        issuer = self._key_issuer
+        if issuer is None:
+            return {}
+        try:
+            private_key = issuer.issue_ephemeral_key(
+                user_id=user_id,
+                username=user_id,
+                session_id=str(session_id or ""),
+                ttl_sec=self._ephemeral_key_ttl_sec,
+            )
+        except Exception as exc:
+            logger.error(
+                "[AgentOSRouter] failed to issue ephemeral SSH key: user=%s error=%s",
+                user_id,
+                exc,
+            )
+            raise EphemeralKeyIssueError(
+                f"failed to issue ephemeral SSH key: {exc}"
+            ) from exc
+        if not private_key:
+            logger.error(
+                "[AgentOSRouter] ephemeral SSH key issuer returned an empty key: user=%s",
+                user_id,
+            )
+            raise EphemeralKeyIssueError("ephemeral SSH key issuer returned an empty key")
+        return {"ssh_private_key": private_key}
 
     async def shutdown(self) -> None:
-        await self.disconnect()
+        try:
+            await self.disconnect()
+        finally:
+            auth_client = self._auth_client
+            close = getattr(auth_client, "aclose", None)
+            if callable(close):
+                await close()
 
     # ---------- SSH relay (northbound SshChannel -> YuanRong instance) ----------
 
