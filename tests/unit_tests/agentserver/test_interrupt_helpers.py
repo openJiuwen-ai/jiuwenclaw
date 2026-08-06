@@ -166,3 +166,44 @@ def test_scene_hook_leaves_other_tools_to_engine():
     outcome = asyncio.run(hook(_scene_hook_input("bash", None)))
 
     assert outcome is None
+
+
+def test_build_multi_questions_ignores_string_options():
+    """Regression for #2331: options='a,b' must not become character options + Other."""
+    from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
+        _build_multi_questions,
+    )
+
+    questions = _build_multi_questions(
+        [
+            {
+                "question": "Which option?",
+                "header": "Choice",
+                "options": "a,b",
+            }
+        ]
+    )
+
+    assert len(questions) == 1
+    assert questions[0]["options"] == []
+
+
+def test_build_multi_questions_appends_other_for_valid_options():
+    from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
+        _build_multi_questions,
+    )
+
+    questions = _build_multi_questions(
+        [
+            {
+                "question": "Which option?",
+                "header": "Choice",
+                "options": [
+                    {"label": "A", "description": "opt a"},
+                    {"label": "B", "description": "opt b"},
+                ],
+            }
+        ]
+    )
+
+    assert [opt["label"] for opt in questions[0]["options"]] == ["A", "B", "Other"]

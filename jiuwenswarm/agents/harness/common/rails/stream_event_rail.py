@@ -595,7 +595,6 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             raise asyncio.CancelledError("Agent abort requested")
 
         self._inject_tool_call_goal_schema(ctx)
-        self._ensure_tool_call_goal_prompt()
 
         if ctx.context is not None:
             if not self._read_image_multimodal_enabled():
@@ -653,47 +652,6 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                     "[StreamEventRail] replace tools with call_goal schema failed: %s",
                     exc,
                 )
-
-    def _ensure_tool_call_goal_prompt(self) -> None:
-        builder = getattr(self._deep_agent, "system_prompt_builder", None)
-        if builder is None:
-            return
-        try:
-            from openjiuwen.harness.prompts import PromptSection
-            cn_text = (
-                "# 工具 call_goal\n\n"
-                "每次调用工具时，请填写参数 `call_goal`：用一句简短中文说明"
-                "这次调用要达成的目标（如「调研 openJiuwen 官网信息」「创建三子棋对战团队」），"
-                "不要只写工具名或裸 URL。"
-                "该字段仅用于界面展示，不影响工具实际执行。\n"
-                "团队工具也必须填 `call_goal`，且不能用其它字段代替：\n"
-                "- `spawn_member` / `spawn_teammate`：`call_goal` 写「为何创建该成员」；"
-                "`display_name` 仍是成员展示名，两者都要填。\n"
-                "- `send_message`：`call_goal` 写「这次消息的目的」；"
-                "`summary` 可继续填，但不能省略 `call_goal`。\n"
-                "- `build_team`：`call_goal` 写建队目标；`display_name` 仍是团队名。"
-            )
-            en_text = (
-                "# Tool call_goal\n\n"
-                "When calling any tool, set `call_goal`: one short phrase for the goal of this call "
-                "(e.g. \"Research openJiuwen official site\", \"Create tic-tac-toe team\"). "
-                "Do not just repeat the tool name or raw URL. UI only; does not affect execution.\n"
-                "Team tools must also set `call_goal`; do not substitute other fields:\n"
-                "- `spawn_member` / `spawn_teammate`: `call_goal` = why spawn this member; "
-                "`display_name` remains the member label — fill both.\n"
-                "- `send_message`: `call_goal` = purpose of this message; "
-                "`summary` may still be set, but `call_goal` is required too.\n"
-                "- `build_team`: `call_goal` = team goal; `display_name` remains the team name."
-            )
-            builder.add_section(
-                PromptSection(
-                    name="tool_call_goal",
-                    content={"cn": cn_text, "en": en_text},
-                    priority=40,
-                )
-            )
-        except (ImportError, AttributeError, TypeError, ValueError) as exc:
-            logger.warning("[StreamEventRail] inject call_goal prompt failed: %s", exc)
 
     async def after_model_call(self, ctx: AgentCallbackContext) -> None:
         await self._emit_context_usage(

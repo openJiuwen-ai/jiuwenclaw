@@ -31,7 +31,7 @@ def test_instance_service_id_is_deterministic() -> None:
 
 def test_resolve_instance_kind() -> None:
     assert resolve_instance_kind("opencode") == "三方"
-    assert resolve_instance_kind("claude") == "三方"
+    assert resolve_instance_kind("custom-agent") == "三方"
     assert resolve_instance_kind("jiuwenswarm") == "九问"
     assert resolve_instance_kind("jiuwen-report") == "九问"
 
@@ -62,8 +62,7 @@ async def test_local_list_user_images_contains_supported_types() -> None:
     client = RegistryClient(RegistryConfig())
     images = await client.list_user_images("user-01")
     names = {item.image_name for item in images}
-    assert "opencode" in names
-    assert "jiuwenswarm" in names
+    assert names == {"jiuwenswarm"}
     assert all(item.metadata.get("user_id") == "user-01" for item in images)
     await client.close()
 
@@ -129,13 +128,6 @@ class _FakeRegistryTransport(httpx.AsyncBaseTransport):
                         "ports": [{"port": 8080, "protocol": "tcp"}],
                         "env": {"A2X_LLM_KEY": "${A2X_LLM_KEY}"},
                         "uploaded_by": "user-01",
-                    },
-                    {
-                        "framework": "claude",
-                        "framework_version": "v1.0.0",
-                        "is_default": True,
-                        "imageurl": "harbor.local/adapted/claude:v1.0.0",
-                        "uploaded_by": "system",
                     },
                 ],
             )
@@ -256,7 +248,7 @@ async def test_http_list_images_flat_entries_prefer_default() -> None:
     )
 
     entries = await client.list_images()
-    assert len(entries) == 3
+    assert len(entries) == 2
     assert entries[0].framework == "opencode"
     assert entries[0].framework_version == "v0.1.0"
     assert entries[0].is_default is False
@@ -265,11 +257,10 @@ async def test_http_list_images_flat_entries_prefer_default() -> None:
 
     images = await client.list_user_images("user-01")
     by_name = {item.image_name: item for item in images}
-    assert set(by_name) == {"opencode", "claude"}
+    assert set(by_name) == {"opencode"}
     assert by_name["opencode"].image_uri.endswith("opencode:v0.2.0")
     assert by_name["opencode"].metadata["is_default"] is True
     assert by_name["opencode"].metadata["framework_version"] == "v0.2.0"
-    assert by_name["claude"].metadata["user_id"] == "user-01"
     await client.close()
 
 
@@ -301,6 +292,30 @@ async def test_http_register_agent_maps_fields() -> None:
     assert post[2]["node"] == "192.168.0.12"
     assert post[2]["address"] == "10.244.1.7:4096"
     await client.unregister_agent(agent.agent_id)
+    delete = next(call for call in transport.calls if call[0] == "DELETE")
+    assert delete[1].endswith(f"/api/instances/{instance_service_id('user-01', 'opencode')}")
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_unregister_agent_resolves_service_id_without_local_map() -> None:
+    """Idle delete can race ahead of async register; still DELETE by (user, framework)."""
+    transport = _FakeRegistryTransport()
+    client = RegistryClient(RegistryConfig(endpoint="http://registry.test"))
+    client._http = httpx.AsyncClient(  # noqa: SLF001
+        base_url="http://registry.test/",
+        transport=transport,
+        timeout=5.0,
+    )
+    await client.unregister_agent(
+        "agent-not-yet-mapped",
+        user_id="user-01",
+        agent_type="opencode",
+    )
+    delete = next(call for call in transport.calls if call[0] == "DELETE")
+    assert delete[1].endswith(
+        f"/api/instances/{instance_service_id('user-01', 'opencode')}"
+    )
     await client.close()
 
 

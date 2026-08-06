@@ -189,13 +189,12 @@ def _build_runtime_prompt_rail(
 
 
 class TeamSkillStoragePolicyInput(ConstructionInput):
-    """Construction inputs for the team skill storage policy rail."""
+    """Construction inputs for the team skill storage policy rail.
 
-    language: str = context_field(
-        attr="language",
-        default="cn",
-        description="Resolved member language code.",
-    )
+    Team-level paths only: the member's own workspace is per-member and the
+    team rail tells the member about it as part of its identity.
+    """
+
     global_skills_dir: str | None = context_field(
         attr="global_skills_dir",
         description="Global shared skills source directory.",
@@ -207,10 +206,6 @@ class TeamSkillStoragePolicyInput(ConstructionInput):
     team_skills_dir: str | None = context_field(
         attr="team_skills_dir",
         description="Team shared skills linked view.",
-    )
-    member_workspace_root: str | None = context_field(
-        resolver=_workspace_root,
-        description="Current member workspace root.",
     )
 
 
@@ -242,8 +237,6 @@ def _build_team_skill_storage_policy_rail(
         global_skills_dir=inp.global_skills_dir,
         team_workspace_root=inp.team_ws_root,
         team_skills_dir=inp.team_skills_dir,
-        member_workspace_root=inp.member_workspace_root,
-        language=inp.language,
     )
 
 

@@ -61,6 +61,26 @@ def test_resolve_agent_request_mode_accepts_primary_and_dotted_modes(raw_mode, e
     assert agent_ws_server_module.resolve_agent_request_mode(raw_mode) == expected
 
 
+@pytest.mark.parametrize(
+    ("raw_mode", "work_mode", "expected"),
+    [
+        ("agent", "code", ("code", "normal", "code.normal")),
+        ("code.normal", "work", ("agent", None, "agent")),
+        ("code.plan", "code", ("code", "plan", "code.plan")),
+        ("team", "code", ("team", None, "team")),
+    ],
+)
+def test_resolve_agent_request_mode_aligns_single_agent_with_work_mode(
+    raw_mode,
+    work_mode,
+    expected,
+):
+    assert agent_ws_server_module.resolve_agent_request_mode(
+        raw_mode,
+        work_mode=work_mode,
+    ) == expected
+
+
 def test_team_plan_params_are_team_mode():
     from jiuwenswarm.server.utils.utils import is_team_params
 
@@ -554,6 +574,48 @@ def test_build_inputs_merges_multi_select_custom_input(monkeypatch):
                 "启用哪些模块？": ["auth", "metrics"],
                 "还有其他需求吗？": "tracing",
             }
+        }
+    }
+
+
+def test_build_inputs_drops_bare_other_without_custom_input(monkeypatch):
+    """Regression for #2330: empty Other must not become answer value \"Other\"."""
+    from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+    from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
+
+    monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
+    monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
+
+    request = AgentRequest(
+        request_id="req-answer",
+        channel_id="tui",
+        session_id="team-session",
+        params={
+            "query": "",
+            "mode": "team.plan",
+            "request_id": "tool-ask-1",
+            "source": "ask_user_interrupt",
+            "answers": [
+                {
+                    "question": "选择技术栈？",
+                    "selected_options": ["Other"],
+                    "custom_input": "",
+                },
+                {
+                    "question": "多选模块？",
+                    "selected_options": ["Other"],
+                    "custom_input": "   ",
+                },
+            ],
+        },
+    )
+
+    inputs, _, _ = interface_module.JiuWenSwarm().build_inputs(request)
+
+    assert isinstance(inputs["query"], InteractiveInput)
+    assert inputs["query"].user_inputs == {
+        "tool-ask-1": {
+            "answers": {},
         }
     }
 

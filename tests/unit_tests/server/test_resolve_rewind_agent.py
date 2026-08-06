@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -13,6 +14,19 @@ def server_cls():
     from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
 
     return AgentWebSocketServer
+
+
+def _returning(value):
+    """Build an async stand-in for the wrapper's ``ensure_instance``.
+
+    The root DeepAgent is built on demand now, so the rewind path awaits it
+    instead of reading a plain accessor.
+    """
+
+    async def _ensure_instance():
+        return value
+
+    return _ensure_instance
 
 
 def test_resolve_rewind_agent_prefers_session_scoped_instance(server_cls):
@@ -32,13 +46,14 @@ def test_resolve_rewind_agent_prefers_session_scoped_instance(server_cls):
 
     agent = SimpleNamespace(_adapter=root_adapter)
     agent.get_instance = lambda: root_deep
+    agent.ensure_instance = _returning(root_deep)
 
     server = MagicMock()
     server._agent_manager = MagicMock()
     server._agent_manager.get_agent_nowait.return_value = agent
     server._resolve_adapter = server_cls._resolve_adapter
 
-    pair = server_cls._resolve_rewind_agent(server, "tui", session_id="sess-1")
+    pair = asyncio.run(server_cls._resolve_rewind_agent(server, "tui", session_id="sess-1"))
     assert pair is not None
     deep, react = pair
     assert deep is session_deep
@@ -58,13 +73,14 @@ def test_resolve_rewind_agent_falls_back_to_root_when_no_session_adapter(server_
 
     agent = SimpleNamespace(_adapter=root_adapter)
     agent.get_instance = lambda: root_deep
+    agent.ensure_instance = _returning(root_deep)
 
     server = MagicMock()
     server._agent_manager = MagicMock()
     server._agent_manager.get_agent_nowait.return_value = agent
     server._resolve_adapter = server_cls._resolve_adapter
 
-    pair = server_cls._resolve_rewind_agent(server, "tui", session_id="missing")
+    pair = asyncio.run(server_cls._resolve_rewind_agent(server, "tui", session_id="missing"))
     assert pair is not None
     deep, _react = pair
     assert deep is root_deep

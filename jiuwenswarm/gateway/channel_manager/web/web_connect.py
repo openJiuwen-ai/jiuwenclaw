@@ -24,7 +24,7 @@ import aiohttp
 from websockets.exceptions import ConnectionClosed as WebSocketConnectionClosed
 
 from jiuwenswarm.common.utils import get_agent_workspace_dir
-from jiuwenswarm.gateway.channel_manager.base import ChannelMetadata, RobotMessageRouter
+from jiuwenswarm.gateway.channel_manager.base import ChannelMetadata, RobotMessageRouter, ConnectHook
 from jiuwenswarm.gateway.routing.base_ws_channel import BaseWsChannel
 from jiuwenswarm.gateway.routing.keys import AgentRef, RoutingKey
 from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
@@ -78,6 +78,9 @@ _WEB_FULL_PAYLOAD_EVENT_TYPES = frozenset(
         "security.alert",
         "goal.snapshot",
         "goal.updated",
+        # Web 的 Plan 开关靠该事件在计划执行后自动复位，需要完整 payload
+        # 才能拿到退出后应回到的 mode。
+        "plan.mode_exited",
         "runtime.accepted",
         "execution.error",
         "proactive_recommendation",
@@ -87,8 +90,6 @@ _WEB_FULL_PAYLOAD_EVENT_TYPES = frozenset(
 # ── 类型别名 ──────────────────────────────────────────────
 # 方法处理器签名: (ws, req_id, params, session_id) -> None
 MethodHandler = Callable[..., Awaitable[None]]
-# 连接钩子签名: (ws) -> None | Awaitable[None]
-ConnectHook = Callable[..., Any]
 
 
 @dataclass(frozen=True)
@@ -247,17 +248,6 @@ class WebChannel(BaseWsChannel):
         handler 应通过 `send_response` / `send_event` 向客户端回复。
         """
         self._method_handlers[method] = handler
-
-    def on_connect(self, callback: ConnectHook) -> None:
-        """注册连接建立钩子，新客户端接入时依次调用."""
-        self._connect_hooks.append(callback)
-
-    def on_disconnect(self, callback: ConnectHook) -> None:
-        """注册连接断开钩子，客户端断连时依次调用.
-
-        callback 签名: ``async def callback(ws, session_ids: set[str]) -> None``
-        """
-        self._disconnect_hooks.append(callback)
 
     def on_message(self, callback: Callable[[Message], None]) -> None:
         """注册消息接收回调（替代默认的 router.publish_user_messages）。"""
@@ -547,7 +537,7 @@ class WebChannel(BaseWsChannel):
 
             ws_serve = websockets.serve
 
-        ws_max_size = 8 * 2**20  # 8 MB — matches AgentServer link
+        from jiuwenswarm.common.ws_limits import WEB_WS_MAX_MESSAGE_BYTES
 
         self._server = await ws_serve(
             self._connection_handler,
@@ -556,7 +546,7 @@ class WebChannel(BaseWsChannel):
             process_request=self._process_request,
             ping_interval=20,
             ping_timeout=60,
-            max_size=ws_max_size,
+            max_size=WEB_WS_MAX_MESSAGE_BYTES,
         )
         self._running = True
         logger.info(

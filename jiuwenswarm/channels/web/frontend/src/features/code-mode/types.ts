@@ -94,22 +94,63 @@ export interface GitTurnDiffList {
   total: number;
 }
 
-export interface CodeReviewTarget {
-  changeSetId: string;
-  turnIndex: number;
+export type CodeReviewTarget =
+  | {
+      source: 'last_turn';
+      changeSetId: string;
+      turnIndex: number;
+    }
+  | {
+      source: 'working_tree';
+    };
+
+export interface GitDiffRepoInfo {
+  is_git: boolean;
+  repo_root: string | null;
+  branch: string | null;
+  head: string | null;
+  transient: boolean;
+}
+
+export interface GitDiffWatchSnapshot {
+  project_id: string;
+  session_id: string | null;
+  repo: GitDiffRepoInfo;
+  current: GitDiffSummary | null;
+  last_turn: GitTurnDiff | null;
+  revision: string;
+}
+
+export interface GitDiffWatchResponse {
+  watch_id: string;
+  scope: 'summary';
+  snapshot: GitDiffWatchSnapshot;
+}
+
+export interface GitDiffFilesWatchResponse {
+  watch_id: string;
+  files_scope: {
+    source: 'current' | 'last_turn';
+  };
+  revision: string;
+  files: Record<string, GitDiffFile>;
+}
+
+export interface GitDiffDetailWatchResponse {
+  watch_id: string;
+  detail_scope: {
+    source: 'current' | 'last_turn';
+    files: string[];
+  };
+  revision: string;
+  files: Record<string, GitDiffFile | null>;
 }
 
 export interface ProjectGitDiffStatus {
   project_id: string;
   session_id: string | null;
   work_mode: 'code';
-  repo: {
-    is_git: boolean;
-    repo_root: string | null;
-    branch: string | null;
-    head: string | null;
-    transient: boolean;
-  };
+  repo: GitDiffRepoInfo;
   current: GitDiffSummary | null;
   last_turn: GitTurnDiff | null;
   generated_at: number;

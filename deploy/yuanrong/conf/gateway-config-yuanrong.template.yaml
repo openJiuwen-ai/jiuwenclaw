@@ -68,7 +68,6 @@ symphony:
 
 # Auto Memory：对话结束后自动提取记忆，按项目隔离存储
 # 存储路径：~/.jiuwenswarm/projects/{sanitized-project-path}/memory/
-# 类似 Claude Code 的 auto-memory 功能
 auto_memory_enabled: false
 
 # 日志目录：~/.jiuwenswarm/agent/.logs/
@@ -464,7 +463,7 @@ gateway:
 
   # AgentOS Router Extension 配置；agent_client.type=agentos_router 时生效。
   # 默认 agent_type=jiuwenswarm 直走 YuanRong URN invoke（与 type=yuanrong 对齐）；
-  # opencode/claude 走 registry launch-spec + create_sandbox。
+  # 其他第三方 agent_type 走 registry launch-spec + create_sandbox。
   agentos:
     creating_timeout_seconds: 60
     # Agent 复用 key 字段，默认 user_id + agent_type。
@@ -492,6 +491,9 @@ gateway:
       port: 2222
       user_template: "yr:instance:{instance}"
       connect_timeout_s: 30
+    auth_service_url: ${AGENTOS_AUTH_SERVICE_URL:-http://iam-agentos:8080}
+    timeout: ${AGENTOS_AUTH_TIMEOUT:-10}
+    auth_enabled: bool = True
 
 heartbeat:
   # 心跳间隔（秒），默认 3600

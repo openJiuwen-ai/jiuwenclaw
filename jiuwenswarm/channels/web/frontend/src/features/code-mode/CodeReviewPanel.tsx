@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronDown, ChevronRight, ChevronUp, Columns2, FileCode2, Files, Folder, GitBranch, List, LoaderCircle, RefreshCw, Search } from 'lucide-react';
+import { Check, ChevronDown, ChevronRight, ChevronUp, Columns2, FileCode2, Files, Folder, List, LoaderCircle, RefreshCw, Search } from 'lucide-react';
 import type { ProjectInfo, WebError } from '../../types';
 import { gitClient } from './gitClient';
-import type { CodeReviewTarget, GitDiffFile, GitDiffHunk, GitTurnDiff } from './types';
+import type { CodeReviewTarget, GitDiffFile, GitDiffHunk, GitDiffStats, GitTurnDiff } from './types';
+import type { CodeGitDiffWatchController } from './useCodeGitDiffWatch';
 
 type DiffViewMode = 'unified' | 'split';
 type DiffLineKind = 'added' | 'removed' | 'context' | 'meta';
@@ -89,10 +90,10 @@ function FileTreeNodes({ nodes, depth = 0, selectedPath, expandedDirectories, se
         if (node.type === 'directory') {
           const expanded = searchActive || expandedDirectories.has(node.path);
           return (
-            <div key={`directory:${node.path}`} className='code-review__tree-directory'>
+            <div key={`directory:${node.path}`} className="code-review__tree-directory">
               <button
-                type='button'
-                className='code-review__tree-button code-review__tree-folder'
+                type="button"
+                className="code-review__tree-button code-review__tree-folder"
                 style={{ paddingLeft }}
                 onClick={() => onToggleDirectory(node.path)}
                 aria-expanded={expanded}
@@ -119,7 +120,7 @@ function FileTreeNodes({ nodes, depth = 0, selectedPath, expandedDirectories, se
 
         return (
           <button
-            type='button'
+            type="button"
             key={`file:${node.path}`}
             className={`code-review__tree-button code-review__tree-file${node.path === selectedPath ? ' is-active' : ''}`}
             style={{ paddingLeft }}
@@ -128,8 +129,8 @@ function FileTreeNodes({ nodes, depth = 0, selectedPath, expandedDirectories, se
           >
             <FileCode2 size={15} />
             <span>{node.name}</span>
-            <small className='code-stat-added'>+{node.file.lines_added}</small>
-            <small className='code-stat-removed'>-{node.file.lines_removed}</small>
+            <small className="code-stat-added">+{node.file.lines_added}</small>
+            <small className="code-stat-removed">-{node.file.lines_removed}</small>
           </button>
         );
       })}
@@ -166,17 +167,17 @@ function renderHunkLines(hunk: GitDiffHunk, hunkIndex: number): RenderedDiffLine
 
 function UnifiedDiff({ file }: { file: GitDiffFile }) {
   return (
-    <div className='code-diff-table code-diff-table--unified'>
+    <div className="code-diff-table code-diff-table--unified">
       {file.hunks.map((hunk, hunkIndex) => (
-        <div key={`${hunk.old_start}:${hunk.new_start}:${hunkIndex}`} className='code-diff-hunk'>
-          <div className='code-diff-hunk__header'>
+        <div key={`${hunk.old_start}:${hunk.new_start}:${hunkIndex}`} className="code-diff-hunk">
+          <div className="code-diff-hunk__header">
             @@ -{hunk.old_start},{hunk.old_lines} +{hunk.new_start},{hunk.new_lines} @@
           </div>
           {renderHunkLines(hunk, hunkIndex).map(line => (
             <div key={line.key} className={`code-diff-line code-diff-line--${line.kind}`}>
-              <span className='code-diff-line__number'>{line.oldNumber ?? ''}</span>
-              <span className='code-diff-line__number'>{line.newNumber ?? ''}</span>
-              <span className='code-diff-line__marker'>{line.marker}</span>
+              <span className="code-diff-line__number">{line.oldNumber ?? ''}</span>
+              <span className="code-diff-line__number">{line.newNumber ?? ''}</span>
+              <span className="code-diff-line__marker">{line.marker}</span>
               <code>{line.content || ' '}</code>
             </div>
           ))}
@@ -190,17 +191,17 @@ function SplitDiff({ file }: { file: GitDiffFile }) {
   const rows = useMemo(() => file.hunks.flatMap((hunk, hunkIndex) => renderHunkLines(hunk, hunkIndex)), [file]);
 
   return (
-    <div className='code-diff-table code-diff-table--split'>
+    <div className="code-diff-table code-diff-table--split">
       {rows.map(line => (
-        <div key={line.key} className='code-diff-split-row'>
+        <div key={line.key} className="code-diff-split-row">
           <div className={`code-diff-split-cell code-diff-split-cell--${line.kind === 'added' ? 'empty' : line.kind}`}>
-            <span className='code-diff-line__number'>{line.kind === 'added' ? '' : (line.oldNumber ?? '')}</span>
-            <span className='code-diff-line__marker'>{line.kind === 'removed' ? '-' : line.kind === 'context' ? ' ' : ''}</span>
+            <span className="code-diff-line__number">{line.kind === 'added' ? '' : (line.oldNumber ?? '')}</span>
+            <span className="code-diff-line__marker">{line.kind === 'removed' ? '-' : line.kind === 'context' ? ' ' : ''}</span>
             <code>{line.kind === 'added' ? ' ' : line.content || ' '}</code>
           </div>
           <div className={`code-diff-split-cell code-diff-split-cell--${line.kind === 'removed' ? 'empty' : line.kind}`}>
-            <span className='code-diff-line__number'>{line.kind === 'removed' ? '' : (line.newNumber ?? '')}</span>
-            <span className='code-diff-line__marker'>{line.kind === 'added' ? '+' : line.kind === 'context' ? ' ' : ''}</span>
+            <span className="code-diff-line__number">{line.kind === 'removed' ? '' : (line.newNumber ?? '')}</span>
+            <span className="code-diff-line__marker">{line.kind === 'added' ? '+' : line.kind === 'context' ? ' ' : ''}</span>
             <code>{line.kind === 'removed' ? ' ' : line.content || ' '}</code>
           </div>
         </div>
@@ -210,9 +211,9 @@ function SplitDiff({ file }: { file: GitDiffFile }) {
 }
 
 function FileDiff({ file, viewMode }: { file: GitDiffFile; viewMode: DiffViewMode }) {
-  if (file.is_binary) return <div className='code-review__empty'>二进制文件不能显示文本差异。</div>;
-  if (file.is_large_file && file.hunks.length === 0) return <div className='code-review__empty'>文件过大，后端未返回差异内容。</div>;
-  if (file.hunks.length === 0) return <div className='code-review__empty'>该文件没有可显示的差异内容。</div>;
+  if (file.is_binary) return <div className="code-review__empty">二进制文件不能显示文本差异。</div>;
+  if (file.is_large_file && file.hunks.length === 0) return <div className="code-review__empty">文件过大，后端未返回差异内容。</div>;
+  if (file.hunks.length === 0) return <div className="code-review__empty">该文件没有可显示的差异内容。</div>;
   return viewMode === 'split' ? <SplitDiff file={file} /> : <UnifiedDiff file={file} />;
 }
 
@@ -220,7 +221,25 @@ interface CodeReviewPanelProps {
   project: ProjectInfo;
   sessionId: string;
   target?: CodeReviewTarget | null;
+  diffWatch: CodeGitDiffWatchController;
 }
+
+type CodeReviewSource = 'last_turn' | 'working_tree';
+
+interface CodeReviewDocument {
+  source: CodeReviewSource;
+  branch: string | null;
+  status?: string;
+  turnIndex?: number;
+  stats: GitDiffStats;
+  files: Record<string, GitDiffFile>;
+}
+
+const EMPTY_STATS: GitDiffStats = {
+  files_changed: 0,
+  lines_added: 0,
+  lines_removed: 0,
+};
 
 function getReviewErrorMessage(error: unknown): string {
   const webError = error as WebError;
@@ -237,38 +256,39 @@ function getReviewErrorMessage(error: unknown): string {
   }
 }
 
-export function CodeReviewPanel({ project, sessionId, target = null }: CodeReviewPanelProps) {
-  const [diff, setDiff] = useState<GitTurnDiff | null>(null);
-  const [branch, setBranch] = useState(project.git.branch);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+export function CodeReviewPanel({ project, sessionId, target = null, diffWatch }: CodeReviewPanelProps) {
+  const [source, setSource] = useState<CodeReviewSource>(target?.source === 'working_tree' ? 'working_tree' : 'last_turn');
+  const [turnDiff, setTurnDiff] = useState<GitTurnDiff | null>(null);
+  const [turnLoading, setTurnLoading] = useState(false);
+  const [turnError, setTurnError] = useState<string | null>(null);
   const [selectedPath, setSelectedPath] = useState('');
   const [search, setSearch] = useState('');
   const [filePanelOpen, setFilePanelOpen] = useState(false);
+  const [sourceMenuOpen, setSourceMenuOpen] = useState(false);
   const [viewMode, setViewMode] = useState<DiffViewMode>('unified');
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(() => new Set());
   const [expandedDirectories, setExpandedDirectories] = useState<Set<string>>(() => new Set());
   const fileSectionRefs = useRef(new Map<string, HTMLElement>());
+  const sourceMenuRef = useRef<HTMLDivElement>(null);
   const loadSequenceRef = useRef(0);
+  const workingTreeIdentityRef = useRef('');
 
-  const loadDiff = useCallback(async () => {
+  const loadTurnDiff = useCallback(async () => {
     const loadSequence = loadSequenceRef.current + 1;
     loadSequenceRef.current = loadSequence;
-    setLoading(true);
-    setError(null);
+    setTurnLoading(true);
+    setTurnError(null);
     try {
-      let resolvedTarget = target;
+      let resolvedTarget = target?.source === 'last_turn' ? target : null;
       if (!resolvedTarget) {
         const history = await gitClient.turnDiffList(project.project_id, sessionId, { limit: 1 });
         const latestTurn = history.turns[0];
         if (!latestTurn) {
-          if (loadSequenceRef.current === loadSequence) {
-            setDiff(null);
-            setBranch(history.branch || project.git.branch);
-          }
+          if (loadSequenceRef.current === loadSequence) setTurnDiff(null);
           return;
         }
         resolvedTarget = {
+          source: 'last_turn',
           changeSetId: latestTurn.change_set_id,
           turnIndex: latestTurn.turn_index,
         };
@@ -278,22 +298,76 @@ export function CodeReviewPanel({ project, sessionId, target = null }: CodeRevie
         includeHunks: true,
       });
       if (loadSequenceRef.current !== loadSequence) return;
-      setBranch(turnDiff.branch || project.git.branch);
-      setDiff(Object.keys(turnDiff.files).length > 0 ? turnDiff : null);
+      setTurnDiff(turnDiff);
     } catch (nextError) {
       if (loadSequenceRef.current !== loadSequence) return;
-      setDiff(null);
-      setError(getReviewErrorMessage(nextError));
+      setTurnDiff(null);
+      setTurnError(getReviewErrorMessage(nextError));
     } finally {
-      if (loadSequenceRef.current === loadSequence) setLoading(false);
+      if (loadSequenceRef.current === loadSequence) setTurnLoading(false);
     }
   }, [project, sessionId, target]);
 
   useEffect(() => {
-    void loadDiff();
-  }, [loadDiff]);
+    loadSequenceRef.current += 1;
+    setTurnDiff(null);
+    setTurnError(null);
+    setSource(target?.source === 'working_tree' ? 'working_tree' : 'last_turn');
+  }, [project.project_id, sessionId, target]);
 
-  const files = useMemo(() => Object.values(diff?.files ?? {}), [diff]);
+  useEffect(() => {
+    if (source === 'last_turn') void loadTurnDiff();
+  }, [loadTurnDiff, source]);
+
+  useEffect(() => {
+    diffWatch.setFilesEnabled(source === 'working_tree');
+    return () => {
+      if (source === 'working_tree') diffWatch.setFilesEnabled(false);
+    };
+  }, [diffWatch.setFilesEnabled, source]);
+
+  useEffect(() => {
+    const closeMenu = (event: MouseEvent) => {
+      if (!sourceMenuRef.current?.contains(event.target as Node)) setSourceMenuOpen(false);
+    };
+    document.addEventListener('mousedown', closeMenu);
+    return () => document.removeEventListener('mousedown', closeMenu);
+  }, []);
+
+  const workingTreeFiles = useMemo(
+    () =>
+      Object.fromEntries(
+        Object.values(diffWatch.files).map(file => {
+          const detail = diffWatch.detailFiles[file.file_path];
+          return [file.file_path, detail ? { ...file, ...detail, hunks: detail.hunks } : { ...file, hunks: [] }];
+        })
+      ),
+    [diffWatch.detailFiles, diffWatch.files]
+  );
+  const workingTreeFilePaths = useMemo(() => Object.keys(diffWatch.files).sort(), [diffWatch.files]);
+
+  const reviewDocument = useMemo<CodeReviewDocument | null>(() => {
+    if (source === 'last_turn') {
+      if (!turnDiff) return null;
+      return {
+        source,
+        branch: turnDiff.branch || project.git.branch,
+        status: turnDiff.status,
+        turnIndex: turnDiff.turn_index,
+        stats: turnDiff.stats,
+        files: turnDiff.files,
+      };
+    }
+    if (!diffWatch.summary) return null;
+    return {
+      source,
+      branch: diffWatch.summary.repo.branch || project.git.branch,
+      stats: diffWatch.summary.current?.stats ?? EMPTY_STATS,
+      files: workingTreeFiles,
+    };
+  }, [diffWatch.summary, project.git.branch, source, turnDiff, workingTreeFiles]);
+
+  const files = useMemo(() => Object.values(reviewDocument?.files ?? {}), [reviewDocument]);
   useEffect(() => {
     if (!files.some(file => file.file_path === selectedPath)) setSelectedPath(files[0]?.file_path ?? '');
   }, [files, selectedPath]);
@@ -310,8 +384,13 @@ export function CodeReviewPanel({ project, sessionId, target = null }: CodeRevie
   useEffect(() => {
     setExpandedPaths(new Set());
     setExpandedDirectories(new Set());
+    setSearch('');
     fileSectionRefs.current.clear();
-  }, [project.project_id, sessionId, target?.changeSetId, target?.turnIndex]);
+  }, [project.project_id, sessionId, source, target]);
+
+  useEffect(() => {
+    diffWatch.setDetailPaths(source === 'working_tree' ? workingTreeFilePaths : []);
+  }, [diffWatch.setDetailPaths, source, workingTreeFilePaths]);
 
   const filteredFiles = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
@@ -345,93 +424,90 @@ export function CodeReviewPanel({ project, sessionId, target = null }: CodeRevie
     window.requestAnimationFrame(() => fileSectionRefs.current.get(filePath)?.scrollIntoView({ block: 'start' }));
   };
 
-  if (loading && !diff) {
-    return (
-      <div className='code-review-state'>
-        <LoaderCircle className='code-mode-spin' size={18} />
-        <span>正在加载审核结果…</span>
-      </div>
-    );
-  }
+  const sourceLoading =
+    source === 'last_turn' ? turnLoading && !turnDiff : (diffWatch.summaryLoading && !diffWatch.summary) || (diffWatch.filesLoading && !diffWatch.filesReady);
+  const sourceError = source === 'last_turn' ? turnError : diffWatch.summaryError || diffWatch.filesError;
+  const repoUnavailable = source === 'working_tree' && diffWatch.summary && !diffWatch.summary.repo.is_git;
+  const repoTransient = source === 'working_tree' && diffWatch.summary?.repo.transient;
+  const workingTreeIdentity = source === 'working_tree' ? `${diffWatch.summary?.repo.branch ?? ''}:${diffWatch.summary?.repo.head ?? ''}` : '';
+  const stats = reviewDocument?.stats ?? EMPTY_STATS;
 
-  if (!diff) {
-    return (
-      <div className='code-review-state'>
-        <FileCode2 size={20} />
-        <span>{error || '暂无最近一轮代码修改可供审核。'}</span>
-        <button type='button' className='code-mode-button' onClick={() => void loadDiff()}>
-          重新加载
-        </button>
-      </div>
-    );
-  }
+  useEffect(() => {
+    if (source !== 'working_tree' || !workingTreeIdentity) return;
+    if (workingTreeIdentityRef.current && workingTreeIdentityRef.current !== workingTreeIdentity) {
+      setSelectedPath('');
+      setSearch('');
+      setExpandedPaths(new Set());
+      setExpandedDirectories(new Set());
+      fileSectionRefs.current.clear();
+    }
+    workingTreeIdentityRef.current = workingTreeIdentity;
+  }, [source, workingTreeIdentity]);
 
-  return (
-    <section className='code-review code-review--embedded' aria-label='审核代码修改'>
-      <div className='code-review__toolbar'>
-        <button
-          type='button'
-          className={filePanelOpen ? 'code-review__icon-button is-active' : 'code-review__icon-button'}
-          onClick={() => setFilePanelOpen(open => !open)}
-          title='切换文件侧边栏'
-        >
-          <Files size={17} />
-        </button>
-        <div className='code-review__branch'>
-          <GitBranch size={15} />
-          <span>{branch || '当前分支'}</span>
+  const reload = () => {
+    if (source === 'last_turn') void loadTurnDiff();
+    else diffWatch.refresh();
+  };
+
+  const renderReviewBody = () => {
+    if (sourceLoading) {
+      return (
+        <div className="code-review-state">
+          <LoaderCircle className="code-mode-spin" size={18} />
+          <span>正在加载审核结果…</span>
         </div>
-        <div className='code-review__summary'>
-          <span>{files.length} 个文件已更改</span>
-          <span className='code-stat-added'>+{diff.stats.lines_added}</span>
-          <span className='code-stat-removed'>-{diff.stats.lines_removed}</span>
+      );
+    }
+    if ((sourceError && files.length === 0) || repoUnavailable || repoTransient) {
+      const message =
+        sourceError ||
+        (repoUnavailable ? '当前项目不是可用的 Git 仓库，无法查看分支修改。' : null) ||
+        (repoTransient ? '仓库正在执行 Git 操作，处理完成后再查看工作区差异。' : null);
+      return (
+        <div className="code-review-state">
+          <FileCode2 size={20} />
+          <span>{message}</span>
+          <button type="button" className="code-mode-button" onClick={reload}>
+            重新加载
+          </button>
         </div>
-        <div className='code-review__toolbar-spacer' />
-        <button type='button' className='code-review__icon-button' onClick={() => void loadDiff()} title='刷新审核结果'>
-          <RefreshCw size={16} />
-        </button>
-        <button
-          type='button'
-          className={viewMode === 'unified' ? 'code-review__icon-button is-active' : 'code-review__icon-button'}
-          onClick={() => setViewMode('unified')}
-          title='统一差异视图'
-        >
-          <List size={17} />
-        </button>
-        <button
-          type='button'
-          className={viewMode === 'split' ? 'code-review__icon-button is-active' : 'code-review__icon-button'}
-          onClick={() => setViewMode('split')}
-          title='拆分差异视图'
-        >
-          <Columns2 size={17} />
-        </button>
-      </div>
-
-      <div className='code-review__body'>
-        {filePanelOpen ? (
-          <aside className='code-review__files'>
-            <label className='code-review__search'>
-              <Search size={15} />
-              <input value={search} onChange={event => setSearch(event.target.value)} placeholder='搜索文件' />
-            </label>
-            <div className='code-review__file-list'>
-              <FileTreeNodes
-                nodes={fileTree}
-                selectedPath={selectedFile?.file_path ?? ''}
-                expandedDirectories={expandedDirectories}
-                searchActive={search.trim().length > 0}
-                onToggleDirectory={toggleDirectory}
-                onSelectFile={openFileFromSidebar}
-              />
-            </div>
-          </aside>
-        ) : null}
-        <main className='code-review__diff'>
-          {files.length > 0 ? (
-            <div className='code-review__diff-content'>
+      );
+    }
+    if (files.length === 0) {
+      return (
+        <div className="code-review-state">
+          <FileCode2 size={20} />
+          <span>{source === 'working_tree' ? '当前分支没有未提交修改。' : '暂无最近一轮代码修改可供审核。'}</span>
+        </div>
+      );
+    }
+    return (
+      <>
+        {sourceError ? <div className="code-review__notice">{sourceError}，当前保留上次成功加载的内容。</div> : null}
+        <div className="code-review__body">
+          {filePanelOpen ? (
+            <aside className="code-review__files">
+              <label className="code-review__search">
+                <Search size={15} />
+                <input value={search} onChange={event => setSearch(event.target.value)} placeholder="搜索文件" />
+              </label>
+              <div className="code-review__file-list">
+                <FileTreeNodes
+                  nodes={fileTree}
+                  selectedPath={selectedFile?.file_path ?? ''}
+                  expandedDirectories={expandedDirectories}
+                  searchActive={search.trim().length > 0}
+                  onToggleDirectory={toggleDirectory}
+                  onSelectFile={openFileFromSidebar}
+                />
+              </div>
+            </aside>
+          ) : null}
+          <main className="code-review__diff">
+            <div className="code-review__diff-content">
               {files.map(file => {
                 const expanded = expandedPaths.has(file.file_path);
+                const detailReady = Object.prototype.hasOwnProperty.call(diffWatch.detailFiles, file.file_path);
                 return (
                   <section
                     key={file.file_path}
@@ -439,27 +515,111 @@ export function CodeReviewPanel({ project, sessionId, target = null }: CodeRevie
                       if (element) fileSectionRefs.current.set(file.file_path, element);
                       else fileSectionRefs.current.delete(file.file_path);
                     }}
-                    className='code-review__file-section'
+                    className="code-review__file-section"
                   >
-                    <button type='button' className='code-review__file-header' onClick={() => toggleFile(file.file_path)} aria-expanded={expanded}>
+                    <button type="button" className="code-review__file-header" onClick={() => toggleFile(file.file_path)} aria-expanded={expanded}>
                       {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-                      <span>{file.file_path}</span>
-                      <span className='code-stat-added'>+{file.lines_added}</span>
-                      <span className='code-stat-removed'>-{file.lines_removed}</span>
+                      <span className="code-review__file-name">{file.file_path}</span>
+                      <span className="code-stat-added">+{file.lines_added}</span>
+                      <span className="code-stat-removed">-{file.lines_removed}</span>
                     </button>
-                    {expanded ? <FileDiff file={file} viewMode={viewMode} /> : null}
+                    {expanded && source === 'working_tree' && !detailReady ? (
+                      <div className="code-review__empty">{diffWatch.detailError || (diffWatch.detailLoading ? '正在加载文件差异…' : '正在等待文件差异…')}</div>
+                    ) : expanded ? (
+                      <FileDiff file={file} viewMode={viewMode} />
+                    ) : null}
                   </section>
                 );
               })}
             </div>
-          ) : (
-            <div className='code-review__empty'>没有可审核的文件。</div>
-          )}
-        </main>
+          </main>
+        </div>
+      </>
+    );
+  };
+
+  return (
+    <section className="code-review code-review--embedded" aria-label="审核代码修改">
+      <div className="code-review__toolbar">
+        <button
+          type="button"
+          className={filePanelOpen ? 'code-review__icon-button is-active' : 'code-review__icon-button'}
+          onClick={() => setFilePanelOpen(open => !open)}
+          title="切换文件侧边栏"
+        >
+          <Files size={17} />
+        </button>
+        <div ref={sourceMenuRef} className="code-review__source">
+          <button
+            type="button"
+            className="code-review__source-trigger"
+            onClick={() => setSourceMenuOpen(open => !open)}
+            aria-expanded={sourceMenuOpen}
+            aria-haspopup="menu"
+          >
+            <span>{source === 'working_tree' ? '分支' : '上一轮'}</span>
+            <ChevronDown size={14} />
+          </button>
+          {sourceMenuOpen ? (
+            <div className="code-review__source-menu" role="menu">
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setSource('last_turn');
+                  setSourceMenuOpen(false);
+                }}
+              >
+                <span>上一轮</span>
+                {source === 'last_turn' ? <Check size={15} /> : null}
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setSource('working_tree');
+                  setSourceMenuOpen(false);
+                }}
+              >
+                <span>分支</span>
+                {source === 'working_tree' ? <Check size={15} /> : null}
+              </button>
+            </div>
+          ) : null}
+        </div>
+        <div className="code-review__summary">
+          <span className="code-review__summary-label">{stats.files_changed} 个文件已更改</span>
+          <span className="code-review__stat code-review__stat--added">+{stats.lines_added}</span>
+          <span className="code-review__stat code-review__stat--removed">-{stats.lines_removed}</span>
+        </div>
+        <div className="code-review__toolbar-spacer" />
+        <button type="button" className="code-review__icon-button" onClick={reload} title="刷新审核结果">
+          <RefreshCw size={16} />
+        </button>
+        <button
+          type="button"
+          className={viewMode === 'unified' ? 'code-review__icon-button is-active' : 'code-review__icon-button'}
+          onClick={() => setViewMode('unified')}
+          title="统一差异视图"
+        >
+          <List size={17} />
+        </button>
+        <button
+          type="button"
+          className={viewMode === 'split' ? 'code-review__icon-button is-active' : 'code-review__icon-button'}
+          onClick={() => setViewMode('split')}
+          title="拆分差异视图"
+        >
+          <Columns2 size={17} />
+        </button>
       </div>
-      <footer className='code-review__footer'>
-        当前展示第 {diff.turn_index} 轮 Agent 修改的历史快照
-        {diff.status === 'discarded' ? '（已撤销）' : ''}，后续修改不会覆盖该轮差异。
+      {renderReviewBody()}
+      <footer className="code-review__footer">
+        {source === 'last_turn'
+          ? reviewDocument
+            ? `当前展示第 ${reviewDocument.turnIndex} 轮 Agent 修改的历史快照${reviewDocument.status === 'discarded' ? '（已撤销）' : ''}，后续修改不会覆盖该轮差异。`
+            : '上一轮使用固定历史快照，后续修改不会覆盖该轮差异。'
+          : '当前展示工作区相对 HEAD 的修改，文件变化会实时更新。'}
       </footer>
     </section>
   );

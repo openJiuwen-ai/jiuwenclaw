@@ -7,7 +7,7 @@ import logging
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Coroutine
 
 from jiuwenswarm.common.e2a.models import E2AEnvelope
 from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
@@ -18,8 +18,15 @@ from jiuwenswarm.extensions.agentos.agentos_router.agent_manager import (
     AgentDeleted,
     AgentManager,
     AgentRuntime,
-    THIRD_PARTY_AGENT_TYPES,
+    is_third_party_agent_type,
 )
+from jiuwenswarm.extensions.agentos.agentos_router.agentos_authenticator import AgentOSAuthenticator
+from jiuwenswarm.extensions.agentos.auth.common import (
+    extract_headers,
+    extract_token,
+    get_remote_addr,
+)
+from jiuwenswarm.extensions.agentos.auth.credential_authenticator import AuthContext, AuthResult
 from jiuwenswarm.extensions.agentos.agentos_router.config import (
     DEFAULT_AGENT_WORKSPACE_ROOT,
     SshChannelEndpoint,
@@ -35,6 +42,8 @@ from jiuwenswarm.extensions.yuanrong_frontend_client import (
     AgentRuntimeSpec,
     YuanrongFrontendAgentClient,
 )
+from jiuwenswarm.gateway import ChannelManager
+from jiuwenswarm.gateway.channel_manager.base import ChannelType
 from jiuwenswarm.gateway.routing.agent_client import AgentServerClient
 
 
@@ -95,6 +104,7 @@ class AgentOSRouterClient(AgentServerClient):
         workspace_root: str = DEFAULT_AGENT_WORKSPACE_ROOT,
         sandbox_idle_timeout_seconds: float = 600.0,
         sandbox_idle_check_interval_seconds: float = 30.0,
+        auth_client: AgentOSAuthenticator | None = None,
     ) -> None:
         self._yuanrong = yuanrong
         self._registry = registry
@@ -115,6 +125,47 @@ class AgentOSRouterClient(AgentServerClient):
         self._closed = False
         # 用户当前 agent_type（3rdagent.switch 成功后更新）；SSH 接入跟随此值。
         self._current_agent_types: dict[str, str] = {}
+        self._auth_client = auth_client
+
+
+    def set_channel_manager(self, channel_manager: ChannelManager) -> None:
+        """订阅 web channel和 tui channel 的连接事件和断开。"""
+        web_channel = channel_manager.get_channel(ChannelType.WEB)
+        tui_channel = channel_manager.get_channel(ChannelType.CLI)
+
+        if web_channel:
+            on_connect = getattr(web_channel, "on_connect", None)
+            if callable(on_connect):
+                on_connect(self.on_connect)
+        if tui_channel:
+            on_connect = getattr(tui_channel, "on_connect", None)
+            if callable(on_connect):
+                on_connect(self.on_connect)
+
+    async def on_connect(self, ws: Any) -> AuthResult | None:
+        if self._auth_client is None:
+            return AuthResult(
+                success=True,
+                user_id="",
+                error="No valid credentials",
+                extensions={"error_code": "UNSUPPORTED_CREDENTIAL"},
+            )
+        token = extract_token(ws)
+        headers = extract_headers(ws)
+        context = AuthContext(
+            channel_type="",
+            credentials={"token": token} if token else {},
+            headers=headers,
+            remote_addr=get_remote_addr(ws),
+        )
+        result = await self._auth_client.authenticate(context)
+        if not result.success:
+            close = getattr(ws, "close", None)
+            if callable(close):
+                ret = close(code=1008, reason="unauthorized")
+                if hasattr(ret, "__await__"):
+                    await ret
+        return result
 
     def get_current_agent_type(self, user_id: str) -> str:
         """Return the user's current agent_type (default ``jiuwenswarm``)."""
@@ -400,8 +451,9 @@ class AgentOSRouterClient(AgentServerClient):
             if self._uses_direct_yuanrong(agent_type):
                 ssh_relay.fail_session(
                     relay_session,
-                    "jiuwenswarm uses YuanRong URN invoke and has no AgentOS "
-                    "sandbox for SSH; switch to a third-party agent_type first",
+                    "builtin agent_type has no AgentOS sandbox for SSH; run "
+                    "3rdagent.switch first or provide a remote command so "
+                    "agent_type can be derived from its first token",
                 )
                 return
             runtime = await self._resolve_agent(envelope, acquire=True)
@@ -447,12 +499,24 @@ class AgentOSRouterClient(AgentServerClient):
             await self._agent_manager.release(runtime.key)
 
     def _apply_current_agent_type_for_ssh(self, envelope: E2AEnvelope) -> None:
-        """SSH 接入跟随用户当前 agent_type（由 3rdagent.switch 记录）。"""
+        """SSH 接入跟随用户当前 agent_type（由 3rdagent.switch 记录）。
+
+        未 switch / 仍为内置 ``jiuwenswarm`` 时，取 SSH 远程指令首词作为
+        agent_type。
+        """
         params = envelope.params if isinstance(envelope.params, dict) else {}
         if str(params.get("agent_type") or "").strip():
             return
         user_id = str(envelope.user_id or "").strip()
         current = self.get_current_agent_type(user_id)
+        if self._uses_direct_yuanrong(current):
+            command = str(params.get("command") or "").strip()
+            if not command:
+                ctx = envelope.channel_context
+                if isinstance(ctx, dict):
+                    command = str(ctx.get("command") or "").strip()
+            token = command.split(maxsplit=1)[0].lower() if command else ""
+            current = token or BUILTIN_AGENT_TYPE
         params = dict(params)
         params["agent_type"] = current
         envelope.params = params
@@ -526,41 +590,40 @@ class AgentOSRouterClient(AgentServerClient):
     async def _reap_idle_once(self) -> int:
         """Reclaim agents idle beyond the timeout; returns the reclaimed count.
 
-        ``pop_if_idle`` re-checks READY / ``task_count == 0`` / staleness under
+        Delegates to :meth:`delete_agent` with ``idle_timeout_seconds`` so the
+        same sandbox + registry cleanup path is used. ``pop_if_idle`` inside
+        ``delete_agent`` re-checks READY / ``task_count == 0`` / staleness under
         the manager lock, so a concurrent acquire can never lose its sandbox.
         """
         if not self._idle_reaper_enabled():
             return 0
         reaped = 0
         for key in await self._agent_manager.list_keys():
-            runtime = await self._agent_manager.pop_if_idle(
-                key, self._sandbox_idle_timeout_seconds
-            )
-            if runtime is None:
-                continue
-            reaped += 1
-            info = runtime.info
-            logger.info(
-                "[AgentOSRouter] reclaiming idle agent sandbox: user=%s "
-                "agent_type=%s sandbox_id=%s idle_timeout=%.0fs",
-                info.user_id,
-                info.agent_type,
-                info.sandbox_id,
-                self._sandbox_idle_timeout_seconds,
-            )
-            if not info.sandbox_id:
+            values = dict(zip(self._agent_manager.key_fields, key, strict=False))
+            user_id = str(values.pop("user_id", "") or "").strip()
+            agent_type = str(values.pop("agent_type", "") or "").strip()
+            if not user_id or not agent_type:
                 continue
             try:
-                await self._yuanrong.delete_sandbox(info.sandbox_id)
+                deleted = await self.delete_agent(
+                    user_id,
+                    agent_type,
+                    key_values=values or None,
+                    idle_timeout_seconds=self._sandbox_idle_timeout_seconds,
+                )
             except Exception:  # noqa: BLE001 - keep reaping other agents
                 logger.exception(
-                    "[AgentOSRouter] delete idle sandbox failed: sandbox_id=%s",
-                    info.sandbox_id,
+                    "[AgentOSRouter] delete idle agent failed: user=%s agent_type=%s",
+                    user_id,
+                    agent_type,
                 )
+                continue
+            if deleted:
+                reaped += 1
         return reaped
 
     async def _create_agent(self, agent_info: AgentInfo) -> AgentInfo:
-        if agent_info.agent_type not in THIRD_PARTY_AGENT_TYPES:
+        if not is_third_party_agent_type(agent_info.agent_type):
             raise UnsupportedAgentType(
                 f"sandbox create is only supported for third-party "
                 f"agent_type, got: {agent_info.agent_type}"
@@ -612,14 +675,28 @@ class AgentOSRouterClient(AgentServerClient):
         agent_type: str,
         *,
         key_values: dict[str, Any] | None = None,
-    ) -> None:
-        """Delete agent mapping and release its YuanRong sandbox."""
+        idle_timeout_seconds: float | None = None,
+    ) -> bool:
+        """Delete agent mapping, release its YuanRong sandbox, unregister registry.
+
+        When ``idle_timeout_seconds`` is set, only delete a READY agent that is
+        unheld (``task_count == 0``) and idle beyond the timeout. Returns whether
+        an agent was deleted.
+        """
         resolved_key_values = dict(key_values or {})
+        if idle_timeout_seconds is not None:
+            return await self._delete_idle_agent(
+                user_id,
+                agent_type,
+                key_values=resolved_key_values,
+                idle_timeout_seconds=float(idle_timeout_seconds),
+            )
+
         runtime = await self._agent_manager.get_agent(
             user_id, agent_type, key_values=resolved_key_values or None
         )
         if runtime is None:
-            return
+            return False
         agent_info = runtime.info
         if (
             "session_id" not in resolved_key_values
@@ -634,6 +711,72 @@ class AgentOSRouterClient(AgentServerClient):
             agent_info.user_id,
             agent_info.agent_type,
             key_values=resolved_key_values or None,
+        )
+        await self._unregister_agent(agent_info)
+        return True
+
+    async def _delete_idle_agent(
+        self,
+        user_id: str,
+        agent_type: str,
+        *,
+        key_values: dict[str, Any],
+        idle_timeout_seconds: float,
+    ) -> bool:
+        """Atomically pop an idle agent then run shared delete cleanup."""
+        key = AgentRuntime.build_key(
+            self._agent_manager.key_fields,
+            user_id=user_id,
+            agent_type=agent_type,
+            key_values=key_values or None,
+        )
+        runtime = await self._agent_manager.pop_if_idle(key, idle_timeout_seconds)
+        if runtime is None:
+            return False
+        agent_info = runtime.info
+        logger.info(
+            "[AgentOSRouter] reclaiming idle agent: user=%s agent_type=%s "
+            "sandbox_id=%s idle_timeout=%.0fs",
+            agent_info.user_id,
+            agent_info.agent_type,
+            agent_info.sandbox_id,
+            idle_timeout_seconds,
+        )
+        await self._release_agent_resources(agent_info, best_effort=True)
+        return True
+
+    async def _release_agent_resources(
+        self,
+        agent_info: AgentInfo,
+        *,
+        best_effort: bool = False,
+    ) -> None:
+        """Delete YuanRong sandbox and unregister the registry instance."""
+        if agent_info.sandbox_id:
+            try:
+                await self._yuanrong.delete_sandbox(agent_info.sandbox_id)
+            except Exception:
+                logger.exception(
+                    "[AgentOSRouter] delete sandbox failed: sandbox_id=%s",
+                    agent_info.sandbox_id,
+                )
+                if not best_effort:
+                    raise
+        try:
+            await self._unregister_agent(agent_info)
+        except Exception:
+            logger.exception(
+                "[AgentOSRouter] unregister agent failed: agent_id=%s",
+                agent_info.agent_id,
+            )
+            if not best_effort:
+                raise
+
+    async def _unregister_agent(self, agent_info: AgentInfo) -> None:
+        await self._registry.unregister_agent(
+            agent_info.agent_id,
+            user_id=agent_info.user_id,
+            agent_type=agent_info.agent_type,
         )
 
     async def _register_agent(self, agent_info: AgentInfo) -> None:

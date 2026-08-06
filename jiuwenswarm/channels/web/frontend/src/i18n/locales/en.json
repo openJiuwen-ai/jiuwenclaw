@@ -25,7 +25,7 @@
   },
   "nav": {
     "chat": "Chat",
-    "work": "Work",
+    "work": "Tasks",
     "agent": "Agent",
     "teams": "Teams",
     "sessions": "Sessions",
@@ -188,10 +188,38 @@
     "count": "{{count}} item(s)",
     "empty": "No artifacts",
     "download": "Download",
+    "downloadFailed": "Could not download “{{name}}”. Check your connection and save location, then try again.",
+    "expandList": "Show artifact list",
+    "collapseList": "Hide artifact list",
+    "openPreview": "Open preview for {{name}}",
     "selectArtifact": "Select an artifact to preview",
-    "previewUnsupported": "Preview is only supported for Markdown files",
-    "previewMissingPath": "No readable local path is available for this artifact",
-    "previewFailed": "Failed to load Markdown preview"
+    "previewUnsupported": "This file type cannot be previewed yet. Download it to view it.",
+    "previewMissingPath": "No downloadable resource is available for this artifact preview",
+    "previewFailed": "Failed to load the file preview",
+    "docxPreviewFailed": "Failed to load the Word document preview",
+    "presentationPreviewFailed": "Failed to load the PowerPoint presentation preview",
+    "presentationResourceLimitExceeded": "The PowerPoint presentation content exceeds the browser preview limit. Download the file to view it.",
+    "presentationTooLarge": "PowerPoint presentations larger than {{size}} cannot be previewed in the browser. Download the file to view it.",
+    "presentationSlides": "Slides",
+    "presentationPage": "Slide {{current}} of {{total}}",
+    "presentationSlideIncomplete": "Slide {{page}} is only partially previewed",
+    "presentationStructureInvalid": "This presentation contains structurally invalid slides. Try downloading it to view.",
+    "presentationGoToSlide": "Go to slide {{index}}",
+    "presentationScrollThumbnailsPrevious": "Scroll slide thumbnails left",
+    "presentationScrollThumbnailsNext": "Scroll slide thumbnails right",
+    "presentationPreviousSlide": "Previous slide",
+    "presentationNextSlide": "Next slide",
+    "presentationZoomOut": "Zoom out",
+    "presentationZoomIn": "Zoom in",
+    "presentationZoomLevel": "{{percent}}% actual slide size",
+    "spreadsheetPreviewFailed": "Failed to load the Excel workbook preview",
+    "spreadsheetResourceLimitExceeded": "The Excel workbook content exceeds the browser preview limit. Download the file to view it.",
+    "spreadsheetTooLarge": "Excel workbooks larger than {{size}} cannot be previewed in the browser. Download the file to view it.",
+    "spreadsheetEmptyWorkbook": "This workbook contains no visible worksheets",
+    "spreadsheetEmptySheet": "This worksheet is empty",
+    "spreadsheetSheetTabsLabel": "Worksheets",
+    "spreadsheetTableLabel": "{{sheet}} worksheet preview",
+    "invalidJson": "The JSON or JSONL content is invalid"
   },
   "teams": {
     "title": "Team Management",
@@ -260,6 +288,9 @@
     "removeTask": "Remove task",
     "addImage": "Add image",
     "addImageDisabled": "Cannot add images while processing or recording",
+    "addFile": "Add file",
+    "addFileDisabled": "Cannot add files while processing or recording",
+    "addAttachment": "Add attachment",
     "removeImage": "Remove image",
     "sendTask": "Send message without interrupting model",
     "editTask": "Edit",
@@ -268,6 +299,8 @@
     "paused": "Paused",
     "resume": "Resume",
     "queuePausedConfirm": "You are about to send a message. Clear the {{count}} queued message(s)?\n\nClick \"OK\" to clear the queue and send; click \"Cancel\" to keep the queue (message will be added to the queue).",
+    "goalAttachmentsBlocked": "Attachments are not supported when setting a goal. Remove them first, or send the attachment in a separate message.",
+    "editTaskDropAttachments": "Editing will remove the {{count}} attachment(s) carried by this task. Continue?",
     "holdToSpeak": "Hold to speak",
     "send": "Send (Enter)",
     "stop": "Stop",
@@ -279,7 +312,7 @@
       "placeholder": "Select Model"
     },
     "configLockedHistory": "Session has messages — create a new session to change config",
-    "modeSwitchDisabledProcessing":"This conversation is running. Start a new conversation to choose another mode",
+    "modeSwitchDisabledProcessing": "This conversation is running. Start a new conversation to choose another mode",
     "modeSwitchTitle": "Switch Mode",
     "modeSwitchConfirm": "Current session has history messages. Switching mode will create a new session. Continue?",
     "skills": "Skills",
@@ -294,12 +327,19 @@
     "teamPauseHint": "After pausing a team, send the next message to continue",
     "teamBroadcastTarget": "@all",
     "contextCompressionCompleted": "Completed context compression {{count}} time(s) this turn",
+    "contextCompressionStarted": {
+      "dialogue": "Compacting earlier rounds…",
+      "currentRound": "Compacting current round…",
+      "roundLevel": "Full compaction…"
+    },
     "historyPager": {
       "loadedOfTotal": "Loaded {{loaded}} / {{total}} pages",
       "loadingMore": "Loading...",
       "clickOrScrollToLoadMore": "Click or scroll up to load more",
       "allLoaded": "All history loaded"
     },
+    "historyLoading": "Loading conversation history…",
+    "historyLoadMore": "Load more history",
     "config": {
       "mode": {
         "cluster": "Cluster",
@@ -423,6 +463,16 @@
     "pending": "Pending",
     "completed": "Completed"
   },
+  "plan": {
+    "toolbarTag": "Plan",
+    "closeTag": "Exit plan mode",
+    "approvalPrompt": "The plan is ready. Choose what to do next.",
+    "executePrompt": "The plan is approved. Start executing it.",
+    "approvalExecute": "Execute",
+    "approvalSkip": "Skip",
+    "approvalNext": "Next",
+    "approvalInputPlaceholder": "Add revision notes then click Next; leave empty and click Skip"
+  },
   "goal": {
     "formSubmit": "Confirm",
     "formCancel": "Cancel",
@@ -464,7 +514,7 @@
     "restore": "Restore session",
     "restoreDisabledNotConnected": "Disconnected: cannot restore session",
     "restoreDisabledProcessing": "Assistant is busy: wait until idle to restore a session",
-    "restoreDisabledUnsupported": "Only web frontend sessions (sess_) can be restored",
+    "restoreDisabledUnsupported": "Only Web frontend sessions (sess_ / web_) can be restored",
     "restoreEmpty": "This session has no restorable messages (empty or filtered). You can still chat from here.",
     "delete": "Delete session",
     "teamLabel": "Team: {{team}}",
@@ -1010,7 +1060,10 @@
       "memory": { "label": "Memory Sensitive Info Filter", "hint": "Configure sensitive content types forbidden from memory" },
       "email": { "label": "Email Settings", "hint": "Email account and token settings" },
       "other": { "label": "Other Settings", "hint": "Unclassified extended parameters" },
-      "proactive": { "label": "Proactive Recommendation", "hint": "Automatically analyze user needs and proactively offer suggestions; adjust the schedule in the Cron panel" }
+      "proactive": {
+        "label": "Proactive Recommendation",
+        "hint": "Automatically analyze user needs and proactively offer suggestions; adjust the schedule in the Cron panel"
+      }
     },
     "booleanLabels": {
       "evolutionAutoScan": "Auto-detect evolution signals",
@@ -1921,6 +1974,8 @@
     "workCompletedThinkingNoDuration": "Completed {{thinking}} thoughts",
     "workCompletedTools": "Completed {{tools}} tool calls · {{duration}}",
     "workCompletedToolsNoDuration": "Completed {{tools}} tool calls",
+    "workFailedToolsNoDuration": "{{tools}} tool calls failed",
+    "workOutcomePartial": "Partial failure",
     "reasoning": {
       "thinking": "Thinking…",
       "thought": "Thought"
@@ -1960,6 +2015,7 @@
       "failed": "failed",
       "timeout": "Execution timed out",
       "running": "Running...",
+      "toolName": "Tool name",
       "arguments": "Arguments",
       "result": "Result",
       "truncated": "result truncated"
@@ -1967,6 +2023,7 @@
     "toolGroup": {
       "running": "Running {{label}}",
       "completed": "Completed {{label}}",
+      "failed": "{{label}} failed",
       "category": {
         "file": "file operations",
         "search": "searches",
@@ -2230,7 +2287,7 @@
     "workDescription": "Office, collaboration, and general tasks",
     "codeDescription": "Inspect and modify code in a project directory",
     "environment": "Environment",
-    "changes": "Current Turn Changes",
+    "changes": "Changes",
     "review": "Review"
   },
   "multiSession": {
@@ -2301,12 +2358,28 @@
     "errors": { "delete": "Failed to delete conversation", "create": "Failed to create conversation", "send": "Failed to send message" }
   },
   "mermaid": {
-    "image": "Image",
-    "code": "Code",
-    "copyCode": "Copy code",
+    "rendering": "Drawing…",
     "zoomIn": "Zoom in",
     "zoomOut": "Zoom out",
     "fitView": "Fit view"
+  },
+  "diagram": {
+    "image": "Image",
+    "code": "Code",
+    "moreActions": "More diagram actions",
+    "downloadSource": "Download source",
+    "downloadImage": "Download as image",
+    "copyCode": "Copy code",
+    "copied": "Copied",
+    "copyFailed": "Copy failed",
+    "downloadSourceFailed": "Could not save source file",
+    "preparingImage": "Preparing image…",
+    "downloadImageFailed": "Could not save image"
+  },
+  "svg": {
+    "streaming": "Drawing…",
+    "invalid": "Invalid SVG code",
+    "previewTitle": "SVG image preview"
   },
   "authPrompt": {
     "title": "Authorization",

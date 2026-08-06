@@ -3,19 +3,50 @@
 // 管理 /memory 的四个页签（edit/status/toggle/open）的交互、渲染和状态。
 // app-screen.ts 通过持有 MemoryViewController 实例并委托调用其方法来使用。
 
-import * as fs from "node:fs";
-import * as path from "node:path";
+import {
+  accessSync,
+  closeSync,
+  constants,
+  existsSync,
+  mkdirSync,
+  openSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, resolve } from "node:path";
 import { type TUI, type SelectItem, SelectList } from "@mariozechner/pi-tui";
 import { addInfo } from "../core/commands/helpers.js";
 import type { CliPiAppState } from "../app-state.js";
 import { openFileInEditor as openInExternalEditor, openFolderInExplorer, getEditorInfo } from "../core/utils/editor.js";
 import { collectOrderedMemoryFiles, type MemoryFile } from "../core/commands/builtins/memory.js";
-import { getDisplayPath } from "../core/commands/builtins/memory-path-utils.js";
+import {
+  formatMemoryPathForDisplay,
+  getDisplayPath,
+} from "../core/commands/builtins/memory-path-utils.js";
 import { palette, selectListTheme } from "./theme.js";
 import { padToWidth } from "./rendering/text.js";
 import { resolveAction } from "../core/keybindings/resolver.js";
 
 // ── 类型定义 ──
+
+function memoryPathKey(filePath: string): string {
+  const resolved = resolve(filePath);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function errorCode(error: unknown): string | undefined {
+  return typeof error === "object" && error !== null && "code" in error
+    ? String((error as { code?: unknown }).code)
+    : undefined;
+}
+
+function assertDirectoryWritable(directoryPath: string): void {
+  accessSync(directoryPath, constants.W_OK);
+}
+
+function assertFileWritable(filePath: string): void {
+  const fd = openSync(filePath, "r+");
+  closeSync(fd);
+}
 
 export type MemoryViewTab = "edit" | "status" | "toggle" | "open";
 
@@ -74,6 +105,8 @@ export class MemoryViewController {
   private statusMessage: string | null = null;
   /** 上一次 open 的目录绝对路径；Ctrl+O 切换时据此重算 statusMessage 的显示格式 */
   private lastOpenedPath: string | null = null;
+  /** 最近一次在 edit 页签中确认选择的文件；重新打开面板时恢复光标位置。 */
+  private lastSelectedEditFilePath: string | null = null;
   /**
    * 外部编辑器打开期间置为 true:此时 MemoryView 进入“不可操作态”
    * (吞掉所有按键,渲染一条 Editing… 提示行)。
@@ -88,6 +121,7 @@ export class MemoryViewController {
   constructor(
     private appState: CliPiAppState,
     private tui: TUI,
+    private openEditor: typeof openInExternalEditor = openInExternalEditor,
   ) {}
 
   // ── 状态查询 ──
@@ -339,7 +373,7 @@ export class MemoryViewController {
     const projectDir = this.state.projectDir ?? "";
     const gitRoot = this.state.gitRoot ?? null;
     const displayPath = this.showFullPath
-      ? this.lastOpenedPath.replace(/\\/g, "/")
+      ? formatMemoryPathForDisplay(this.lastOpenedPath).replace(/\\/g, "/")
       : getDisplayPath(this.lastOpenedPath, projectDir, gitRoot);
     // 保留原有 "Opened:" / "No GUI explorer detected. ..." 前缀,只替换显示路径
     if (this.statusMessage?.startsWith("Opened: ")) {
@@ -389,7 +423,20 @@ export class MemoryViewController {
       minPrimaryColumnWidth: 20,
       maxPrimaryColumnWidth: 50,
     });
+    const lastSelectedEditFilePath = this.lastSelectedEditFilePath;
+    if (tab === "edit" && lastSelectedEditFilePath) {
+      const selectedIndex = items.findIndex(
+        (item) =>
+          item.value !== "__display__" && memoryPathKey(item.value) === memoryPathKey(lastSelectedEditFilePath),
+      );
+      if (selectedIndex >= 0) {
+        list.setSelectedIndex(selectedIndex);
+      }
+    }
     list.onSelect = (item: SelectItem) => {
+      if (tab === "edit" && item.value && item.value !== "__display__") {
+        this.lastSelectedEditFilePath = item.value;
+      }
       this.handleSelect(tab, item, mode, projectDir);
     };
     list.onCancel = () => {
@@ -401,7 +448,9 @@ export class MemoryViewController {
   private buildEditItems(files: MVFile[], projectDir: string, gitRoot: string | null): SelectItem[] {
     return files.map((f) => {
       const label = this.fileLabel(f);
-      const dp = this.showFullPath ? f.path.replace(/\\/g, "/") : getDisplayPath(f.path, projectDir, gitRoot);
+      const dp = this.showFullPath
+        ? formatMemoryPathForDisplay(f.path).replace(/\\/g, "/")
+        : getDisplayPath(f.path, projectDir, gitRoot);
       const isGitTracked = gitRoot && f.kind !== "local" && f.kind !== "user";
       const desc = label === dp ? undefined : isGitTracked ? `Checked in at ${dp}` : `Saved in ${dp}`;
       return { value: f.path, label, description: desc };
@@ -447,7 +496,9 @@ export class MemoryViewController {
     const cat = this.modeCategory(mode);
     const projectDir = this.state?.projectDir ?? "";
     const gitRoot = this.state?.gitRoot ?? null;
-    const fmt = (p: string) => (this.showFullPath ? p : getDisplayPath(p, projectDir, gitRoot));
+    const fmt = (p: string) => (
+      this.showFullPath ? formatMemoryPathForDisplay(p) : getDisplayPath(p, projectDir, gitRoot)
+    );
     const items: SelectItem[] = [];
     if (cat === "agent") items.push({ value: openP.memory_dir, label: "Memory Dir", description: fmt(openP.memory_dir) });
     if (cat === "code" && openP.coding_memory_dir) items.push({ value: openP.coding_memory_dir, label: "Coding Memory Dir", description: fmt(openP.coding_memory_dir) });
@@ -459,13 +510,49 @@ export class MemoryViewController {
   private async handleSelect(tab: MemoryViewTab, item: SelectItem, mode: string, _projectDir: string): Promise<void> {
     if (tab === "edit" && item.value && item.value !== "__display__") {
       const filePath = item.value;
-      if (!fs.existsSync(filePath)) {
-        try {
-          fs.mkdirSync(path.dirname(filePath), { recursive: true });
-          fs.writeFileSync(filePath, "", "utf-8");
-        } catch {
-          // 创建失败仍尝试打开，让编辑器报错
+      let created = false;
+      if (!existsSync(filePath)) {
+        const selectedFile = this.state?.files.find(
+          (file) => memoryPathKey(file.path) === memoryPathKey(filePath),
+        );
+        // Any missing file shown by the edit panel may be created. Paths that
+        // were not supplied by the panel remain subject to the existing rejection.
+        const isCreatablePanelFile = selectedFile?.exists !== undefined;
+
+        if (!isCreatablePanelFile) {
+          this.statusMessage = "Cannot edit: memory file does not exist.";
+          this.tui.requestRender();
+          return;
         }
+
+        try {
+          mkdirSync(dirname(filePath), { recursive: true });
+          assertDirectoryWritable(dirname(filePath));
+          writeFileSync(filePath, "", { encoding: "utf-8", flag: "wx" });
+          created = true;
+        } catch (err) {
+          // If another process created the selected placeholder concurrently,
+          // continue opening it. Permission and all other errors must remain
+          // visible in the TUI even if the failed operation left a file behind.
+          if (errorCode(err) !== "EEXIST" || !existsSync(filePath)) {
+            this.statusMessage = `Cannot create memory file: ${err instanceof Error ? err.message : String(err)}`;
+            this.tui.requestRender();
+            return;
+          }
+        }
+      }
+
+      try {
+        // Opening an empty file with "wx" can succeed even when the resulting
+        // file cannot subsequently be opened for writing (notably with some
+        // Windows ACLs). Verify the same access the editor will need before
+        // leaving the TUI, so permission failures are reported here directly.
+        assertFileWritable(filePath);
+      } catch (err) {
+        const action = created ? "create" : "edit";
+        this.statusMessage = `Cannot ${action} memory file: ${err instanceof Error ? err.message : String(err)}`;
+        this.tui.requestRender();
+        return;
       }
       // 打开编辑器前先冻结列表(进入不可操作态)。编辑器关闭后由 onExit 退出列表
       // 并提示编辑成功(含编辑器来源与环境变量切换提示),与 CC memory.tsx 行为一致:
@@ -478,7 +565,7 @@ export class MemoryViewController {
       this.tui.requestRender();
       // GUI 编辑器：异步 spawn，TUI 不阻塞，编辑器关闭后通过 onExit 回调
       // 终端编辑器：spawnSync 阻塞，tui.start() 后同步调用 onExit
-      openInExternalEditor(this.tui, filePath, () => {
+      this.openEditor(this.tui, filePath, () => {
         this.handleEditComplete(filePath, source, value);
       });
       return;
@@ -516,7 +603,7 @@ export class MemoryViewController {
       const projectDir = this.state?.projectDir ?? "";
       const gitRoot = this.state?.gitRoot ?? null;
       const displayPath = this.showFullPath
-        ? item.value.replace(/\\/g, "/")
+        ? formatMemoryPathForDisplay(item.value).replace(/\\/g, "/")
         : getDisplayPath(item.value, projectDir, gitRoot);
       if (opened) {
         this.statusMessage = `Opened: ${displayPath}`;
@@ -573,7 +660,7 @@ export class MemoryViewController {
     const cat = this.modeCategory(mode);
     const all = [
       { key: "memory_enabled", label: "Memory", cats: ["agent", "code"], desc: "记忆功能总开关", read: (s: MVStatus) => s.enabled },
-      { key: "memory_proactive", label: "Proactive memory", cats: ["agent"], desc: "对话中自动搜索和记录", read: (s: MVStatus) => s.proactive },
+      // { key: "memory_proactive", label: "Proactive memory", cats: ["agent"], desc: "对话中自动搜索和记录", read: (s: MVStatus) => s.proactive },
       { key: "auto_coding_memory", label: "Auto coding memory", cats: ["code"], desc: "每轮对话后自动提取记忆（需总开关开启）", read: (s: MVStatus) => s.auto_coding_memory ?? false },
       { key: "memory_forbidden_enabled", label: "Forbidden filter", cats: ["agent", "code"], desc: "过滤敏感信息", read: (s: MVStatus) => s.forbidden_enabled },
     ];
@@ -581,7 +668,7 @@ export class MemoryViewController {
   }
 
   private fileLabel(f: MVFile): string {
-    const p = f.path.replace(/\\/g, "/");
+    const p = formatMemoryPathForDisplay(f.path).replace(/\\/g, "/");
     if (f.kind === "user") return "User memory";
     if (f.kind === "local") return "Local memory";
     if (f.kind === "project" && p.endsWith("JIUWENSWARM.md") && !p.endsWith("JIUWENSWARM.local.md")) return "Project memory";

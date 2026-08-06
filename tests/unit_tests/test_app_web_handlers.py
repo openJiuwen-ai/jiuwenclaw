@@ -88,6 +88,41 @@ class FakeHeartbeatService:
 
 
 @pytest.mark.asyncio
+async def test_session_list_preserves_team_name_in_projected_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.session_metadata.get_all_sessions_metadata",
+        lambda **_kwargs: (
+            [
+                {
+                    "session_id": "sess-team-1",
+                    "mode": "team",
+                    "team_name": "dev-team-swarm_sess-team-1",
+                    "title": "team task",
+                    "delivery_context": {"channel_id": "internal"},
+                }
+            ],
+            1,
+        ),
+    )
+    channel = FakeWebChannel()
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    await channel.methods["session.list"](
+        object(),
+        "req-session-list",
+        {},
+        "current-session",
+    )
+
+    payload = channel.responses[-1]["payload"]
+    assert payload["sessions"][0]["mode"] == "team"
+    assert payload["sessions"][0]["team_name"] == "dev-team-swarm_sess-team-1"
+    assert "delivery_context" not in payload["sessions"][0]
+
+
+@pytest.mark.asyncio
 async def test_path_set_reloads_config_and_resets_agent_browser_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -101,12 +136,17 @@ async def test_path_set_reloads_config_and_resets_agent_browser_runtime(
         "update_browser_in_config",
         lambda config: saved_configs.append(config),
     )
+    monkeypatch.setattr(
+        app_web_handlers,
+        "get_config",
+        lambda: {"browser": {"chrome_path": "", "headless": True}},
+    )
 
     async def fake_clear(client):
         lifecycle_calls.append(("reload", client))
 
-    async def fake_restart(client):
-        lifecycle_calls.append(("restart", client))
+    async def fake_restart(client, **kwargs):
+        lifecycle_calls.append(("restart", client, kwargs))
 
     monkeypatch.setattr(app_web_handlers, "_clear_agent_config_cache", fake_clear)
     monkeypatch.setattr(
@@ -130,7 +170,14 @@ async def test_path_set_reloads_config_and_resets_agent_browser_runtime(
     ]
     assert lifecycle_calls == [
         ("reload", agent_client),
-        ("restart", agent_client),
+        (
+            "restart",
+            agent_client,
+            {
+                "previous_chrome_path": "",
+                "previous_headless": True,
+            },
+        ),
     ]
     assert channel.responses[-1] == {
         "id": "req-path",

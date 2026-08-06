@@ -30,8 +30,10 @@ from urllib.parse import urlparse
 from openjiuwen.core.common.logging import LogManager
 from websockets.exceptions import ConnectionClosed, ConnectionClosedError
 
+from jiuwenswarm.common.ws_diagnostics import format_ws_diagnostics, describe_ws_peer, describe_ws_exception
 # --- Early --dotenv parsing (before jiuwenswarm imports) ---
 from jiuwenswarm.dotenv_early import parse_dotenv_early, load_dotenv_runtime
+from jiuwenswarm.gateway.channel_manager.base import BaseWebChannel
 
 parse_dotenv_early("jiuwenswarm-gateway")
 
@@ -79,6 +81,7 @@ logger = logging.getLogger("jiuwenswarm.gateway")
 
 # Keep gateway idle-finalize fallback aligned with ACP channel default.
 _PROMPT_IDLE_FINALIZE_SECONDS = 3.0
+_AGENT_PREWARM_EXCLUDED_CHANNELS = frozenset({"acp", "a2a"})
 
 # IM 平台官方 API 域名（仅作为 config.yaml 缺字段时的加载兜底，不在 Config 类里硬编码）
 _FEISHU_DEFAULT_API_BASE = "https://open.feishu.cn"
@@ -431,7 +434,7 @@ class _LocalHandlerContext:
     user_id: str | None
 
 
-class GatewayServer:
+class GatewayServer(BaseWebChannel):
     """通用多路路由 WebSocket Gateway Server。
 
     支持多个路径（如 /acp、/cli），每条路径可以有独立的 channel_id 和本地 handler。
@@ -439,6 +442,7 @@ class GatewayServer:
     """
 
     def __init__(self, config: GatewayServerConfig, router) -> None:
+        super().__init__(config, router)
         self.config = config
         self.bus = router
         self._server = None
@@ -1015,6 +1019,7 @@ class GatewayServer:
         raw_path = path if path is not None else getattr(ws, "path", "")
         parsed = urlparse(raw_path)
         request_path = parsed.path or raw_path
+        remote = getattr(ws, "remote_address", None)
 
         route, matched_path = self._resolve_route(request_path)
         if route is None:
@@ -1034,6 +1039,22 @@ class GatewayServer:
             route.channel_id,
             matched_path,
         )
+
+        # 触发连接钩子（如发送 connection.ack）
+        for hook in self._connect_hooks:
+            try:
+                result = hook(ws)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as e:  # pragma: no cover
+                logger.warning(
+                    "WebChannel on_connect hook error: %s",
+                    format_ws_diagnostics(
+                        {"remote": remote, "path": request_path},
+                        describe_ws_peer(ws),
+                        describe_ws_exception(e),
+                    ),
+                )
 
         # connection.ack
         try:
@@ -1116,6 +1137,16 @@ class GatewayServer:
                     )
             for session_key in stale_session_keys:
                 await self._promote_pending_session_client(route, session_key)
+
+            for hook in self._disconnect_hooks:
+                try:
+                    result = hook(ws, None)
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception as e:  # pragma: no cover
+                    logger.warning(
+                        "%s on_disconnect hook error: %s",
+                    )
 
     async def _handle_raw_message(self, ws: Any, raw: str, request_path: str, route: RouteConfig) -> None:
 
@@ -1298,7 +1329,7 @@ class GatewayServer:
             if project_dir and isinstance(project_dir, str) and project_dir.strip():
                 metadata["project_dir"] = project_dir.strip()
                 # 记录会话首条消息时所在的 git 分支，供 /resume 按分支过滤（Ctrl+B）。
-                # 非 git/detached/失败时为哨兵 "HEAD"，对齐 Claude Code。
+                # 非 git/detached/失败时为哨兵 "HEAD"。
                 from jiuwenswarm.common.utils import resolve_git_branch
 
                 metadata["git_branch"] = resolve_git_branch(project_dir.strip())
@@ -1595,7 +1626,61 @@ async def _run(
     channel_manager = ChannelManager(message_handler, config=initial_channels_conf)
     # 回填引用：MessageHandler 实例化早于 ChannelManager，广播全局事件时需经它取 web channel。
     message_handler.set_channel_manager(channel_manager)
+
+    # 装配 AgentOSRouterClient 订阅 Channel 连接事件
+    subscribe_fn = getattr(client, "set_channel_manager", None)
+    if callable(subscribe_fn):
+        subscribe_fn(channel_manager)
     updater_service = UpdaterService()
+    prewarm_sync_debounce_task: asyncio.Task[None] | None = None
+
+    async def _sync_agent_prewarm_channels() -> None:
+        try:
+            prewarm_channels = {
+                channel
+                for channel in channel_manager.enabled_channels
+                if channel.lower() not in _AGENT_PREWARM_EXCLUDED_CHANNELS
+            }
+            env = e2a_from_agent_fields(
+                request_id=f"agent-prewarm-sync-{uuid_module.uuid4().hex[:8]}",
+                channel_id="",
+                req_method=ReqMethod.AGENT_PREWARM_SYNC,
+                params={
+                    "enabled_channels": sorted(prewarm_channels),
+                },
+            )
+            resp = await client.send_request(env)
+            if not getattr(resp, "ok", False):
+                raise RuntimeError(
+                    f"agent.prewarm.sync rejected: {getattr(resp, 'payload', None)}"
+                )
+        except Exception as exc:  # noqa: BLE001 - prewarm never blocks Gateway config
+            logger.warning("[App] agent.prewarm.sync failed (non-fatal): %s", exc)
+
+    async def _periodic_agent_prewarm_sync() -> None:
+        while True:
+            await asyncio.sleep(60)
+            await _sync_agent_prewarm_channels()
+
+    def _schedule_agent_prewarm_sync(
+        name: str, *, delay_seconds: float = 1.0
+    ) -> None:
+        """Coalesce startup/config/channel churn into one settled sync."""
+        nonlocal prewarm_sync_debounce_task
+        previous = prewarm_sync_debounce_task
+        if previous is not None and not previous.done():
+            previous.cancel()
+
+        async def _delayed_sync() -> None:
+            try:
+                await asyncio.sleep(max(0.0, delay_seconds))
+                await _sync_agent_prewarm_channels()
+            except asyncio.CancelledError:
+                return
+
+        prewarm_sync_debounce_task = asyncio.create_task(
+            _delayed_sync(), name=name
+        )
 
     async def _on_config_saved(
             updated_env_keys: set[str] | None = None,
@@ -1654,6 +1739,11 @@ async def _run(
                     logger.warning("[App] agent.reload_config validation error (non-fatal): %s", err_str)
                     return False
                 raise RuntimeError(f"agent.reload_config rejected: {err_msg}")
+
+            _schedule_agent_prewarm_sync(
+                "agent-prewarm-sync-after-config",
+                delay_seconds=3.0,
+            )
 
             if updated_env_keys and (browser_runtime_keys & set(updated_env_keys)):
                 restart_env = e2a_from_agent_fields(
@@ -2482,8 +2572,21 @@ async def _run(
             else:
                 logger.info("[App] channels.ssh missing or invalid, SshChannel disabled")
 
+        _schedule_agent_prewarm_sync(
+            "agent-prewarm-sync-after-channel-change",
+            delay_seconds=1.0,
+        )
+
     channel_manager.set_config_callback(_apply_channel_config)
     await channel_manager.set_config(initial_channels_conf)
+    _schedule_agent_prewarm_sync(
+        "agent-prewarm-sync-after-startup",
+        delay_seconds=3.0,
+    )
+    prewarm_sync_task = asyncio.create_task(
+        _periodic_agent_prewarm_sync(),
+        name="agent-prewarm-periodic-sync",
+    )
 
     await channel_manager.start_dispatch()
     # cron jobs 的 work_mode 补全已改为惰性迁移:scheduler.start() → reload() →
@@ -2528,6 +2631,17 @@ async def _run(
     except asyncio.CancelledError:
         pass
     finally:
+        if prewarm_sync_debounce_task is not None:
+            prewarm_sync_debounce_task.cancel()
+            try:
+                await prewarm_sync_debounce_task
+            except asyncio.CancelledError:
+                pass
+        prewarm_sync_task.cancel()
+        try:
+            await prewarm_sync_task
+        except asyncio.CancelledError:
+            pass
         if a2a_task is not None:
             a2a_task.cancel()
             try:

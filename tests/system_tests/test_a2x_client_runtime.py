@@ -139,6 +139,22 @@ def _mock_create_model(self, config: dict) -> MagicMock:
     return fake_model
 
 
+class _FakeAbilityManager:
+    """Minimal stand-in for the DeepAgent ability manager the adapter registers into."""
+
+    def __init__(self) -> None:
+        self.cards: list = []
+
+    def list(self) -> list:
+        return list(self.cards)
+
+    def add(self, card) -> None:
+        self.cards.append(card)
+
+    def remove(self, name: str) -> None:
+        self.cards = [card for card in self.cards if getattr(card, "name", "") != name]
+
+
 async def _create_adapter_and_run_chat(config_base: dict) -> SimpleNamespace:
     """Create adapter, run one chat turn via interaction attach/send_input path.
 
@@ -162,6 +178,9 @@ async def _create_adapter_and_run_chat(config_base: dict) -> SimpleNamespace:
         attach_output=AsyncMock(return_value=_FakeInteractionStream()),
         send_input=AsyncMock(),
         goal_manager=None,
+        # A real DeepAgent always carries one, and the adapter registers its
+        # session-stable tools through it while preparing the turn.
+        ability_manager=_FakeAbilityManager(),
     )
     request, inputs = _make_request()
 

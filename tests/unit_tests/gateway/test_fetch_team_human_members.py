@@ -2,9 +2,8 @@
 
 """Tests for JoinExitHandlers.fetch_team_human_members (路线 B 纯查询契约).
 
-路线 B 后 fetch 退化为纯查询：mismatch 已由 join_slash_handler 本地挡掉，
-fetch 只查 member。返回 list[str]|None：查到→席位名列表，查不到
-（server ok=False / members 空 / RPC 异常）→ None，由调用方拼"不存在"文案。
+team↔session 一致性真伪的唯一仲裁：按 team_name 直查 team.db 取 human_agent 席位。
+返回 list[str]|None：查到→席位名列表，查不到→None，由调用方拼"不存在"文案。
 """
 
 from __future__ import annotations

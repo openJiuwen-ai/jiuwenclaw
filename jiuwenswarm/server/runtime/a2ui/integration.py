@@ -13,6 +13,7 @@ import logging
 from typing import Any
 
 from jiuwenswarm.server.runtime.a2ui.config import get_a2ui_config, get_current_a2ui_config
+from jiuwenswarm.server.runtime.a2ui.runtime.team_stream import TeamA2UIBlockBuffer
 
 logger = logging.getLogger(__name__)
 
@@ -161,5 +162,6 @@ __all__ = [
     "get_a2ui_config_payload",
     "get_default_a2ui_config_payload",
     "is_a2ui_channel",
+    "TeamA2UIBlockBuffer",
     "validate_a2ui_config_update",
 ]

@@ -65,6 +65,7 @@ class ReqMethod(Enum):
 
     CONFIG_CACHE_CLEAR = "config.cache_clear"
     AGENT_RELOAD_CONFIG = "agent.reload_config"
+    AGENT_PREWARM_SYNC = "agent.prewarm.sync"
 
     MEMORY_COMPUTE = "memory.compute"
 

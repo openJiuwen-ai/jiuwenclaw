@@ -47,12 +47,17 @@ def _ssh_envelope(
     *,
     agent_type: str | None = "jiuwenswarm",
     session_id: str | None = None,
+    command: str | None = None,
 ) -> E2AEnvelope:
     params: dict[str, Any] = {}
     if session is not None:
         params["relay_session"] = session
     if agent_type is not None:
         params["agent_type"] = agent_type
+    if command is not None:
+        params["command"] = command
+        if session is not None:
+            session.command = command
     return E2AEnvelope(
         request_id="req-ssh-1",
         channel="ssh",
@@ -341,8 +346,8 @@ async def test_ssh_relay_follows_user_current_agent_type() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ssh_relay_defaults_to_jiuwenswarm_without_switch() -> None:
-    """未切换过的用户，SSH 默认 jiuwenswarm：无 AgentOS sandbox，应失败。"""
+async def test_ssh_relay_without_switch_uses_opencode_command_prefix() -> None:
+    """未 switch：``ssh ... "opencode ..."`` 按指令首词拉起 opencode。"""
     yuanrong = FakeYuanRongClient()
     stub_relay = StubSshRelay()
     agent_manager = AgentManager()
@@ -352,7 +357,34 @@ async def test_ssh_relay_defaults_to_jiuwenswarm_without_switch() -> None:
         agent_manager,
         ssh_relay=stub_relay,
     )
-    assert client.get_current_agent_type("alice") == "jiuwenswarm"
+    session = _relay_session("ssh_alice_opencode_cmd")
+    try:
+        await client.send_request(
+            _ssh_envelope(session, agent_type=None, command="opencode -p hi")
+        )
+        await asyncio.wait_for(session.done.wait(), timeout=5)
+
+        assert yuanrong.create_calls == 1
+        assert stub_relay.ran == [("ssh_alice_opencode_cmd", "sbx-1", "alice")]
+        agents = await agent_manager.list_user_agents("alice")
+        assert [a.info.agent_type for a in agents] == ["opencode"]
+        assert session.exit_code == 0
+    finally:
+        await client.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_ssh_relay_without_switch_or_command_fails() -> None:
+    """未 switch 且无指令前缀：无法选择第三方 sandbox，应失败。"""
+    yuanrong = FakeYuanRongClient()
+    stub_relay = StubSshRelay()
+    agent_manager = AgentManager()
+    client = AgentOSRouterClient(
+        yuanrong,
+        FakeRegistryClient(),
+        agent_manager,
+        ssh_relay=stub_relay,
+    )
     session = _relay_session("ssh_alice_default")
     try:
         await client.send_request(_ssh_envelope(session, agent_type=None))
@@ -361,8 +393,33 @@ async def test_ssh_relay_defaults_to_jiuwenswarm_without_switch() -> None:
         assert yuanrong.create_calls == 0
         assert stub_relay.ran == []
         assert len(stub_relay.failed) == 1
-        assert "no AgentOS sandbox for SSH" in stub_relay.failed[0][1]
+        assert "derived from its first token" in stub_relay.failed[0][1]
         assert await agent_manager.list_user_agents("alice") == []
+        assert session.exit_code == 1
+    finally:
+        await client.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_ssh_relay_explicit_jiuwenswarm_still_fails() -> None:
+    """显式指定内置 agent_type 时仍无 sandbox，应失败。"""
+    yuanrong = FakeYuanRongClient()
+    stub_relay = StubSshRelay()
+    client = AgentOSRouterClient(
+        yuanrong,
+        FakeRegistryClient(),
+        AgentManager(),
+        ssh_relay=stub_relay,
+    )
+    session = _relay_session("ssh_alice_builtin")
+    try:
+        await client.send_request(_ssh_envelope(session, agent_type="jiuwenswarm"))
+        await asyncio.wait_for(session.done.wait(), timeout=5)
+
+        assert yuanrong.create_calls == 0
+        assert stub_relay.ran == []
+        assert len(stub_relay.failed) == 1
+        assert "builtin agent_type has no AgentOS sandbox for SSH" in stub_relay.failed[0][1]
         assert session.exit_code == 1
     finally:
         await client.shutdown()
