@@ -8,6 +8,7 @@ import pytest
 
 from jiuwenclaw.agentserver.deep_agent.team_helpers import (
     _deliver_followup_interact_across_boundary,
+    _detect_resume_from_pause,
     _interact_reason_requires_new_stream,
     _wrap_team_resume_protocol,
 )
@@ -125,9 +126,57 @@ async def test_gate_closed_without_pool_does_not_force_stream() -> None:
 
 
 def test_wrap_team_resume_protocol_cn() -> None:
-    wrapped = _wrap_team_resume_protocol("请继续", "zh")
+    wrapped = _wrap_team_resume_protocol("请继续", "zh", original_query="研究AI办公并写PPT")
     assert "【团队暂停续跑协议】" in wrapped
     assert "不要无故整图重开" in wrapped
     assert "请继续" in wrapped
+    assert "研究AI办公并写PPT" in wrapped
+    assert "禁止再向用户索要已给出的目标" in wrapped
     # Idempotent
     assert _wrap_team_resume_protocol(wrapped, "zh") == wrapped
+
+
+def test_wrap_team_resume_protocol_falls_back_to_user_query() -> None:
+    wrapped = _wrap_team_resume_protocol("请继续执行研究任务", "zh")
+    assert "原任务目标" in wrapped
+    assert "请继续执行研究任务" in wrapped
+
+
+@pytest.mark.asyncio
+async def test_detect_resume_from_pause_via_paused_bookmark() -> None:
+    """Clear-init first path still needs protocol wrap when paused bookmark exists."""
+
+    class _TM:
+        def get_paused_team_name(self, session_id: str) -> str | None:
+            assert session_id == "sess-paused"
+            return "team-research"
+
+        async def has_resumable_runtime(self, session_id: str) -> bool:
+            raise AssertionError("paused bookmark should short-circuit")
+
+    assert await _detect_resume_from_pause(_TM(), "sess-paused") is True
+
+
+@pytest.mark.asyncio
+async def test_detect_resume_from_pause_via_runner_pool() -> None:
+    class _TM:
+        def get_paused_team_name(self, session_id: str) -> str | None:
+            return None
+
+        async def has_resumable_runtime(self, session_id: str) -> bool:
+            return True
+
+    assert await _detect_resume_from_pause(_TM(), "sess-pool") is True
+
+
+@pytest.mark.asyncio
+async def test_detect_resume_from_pause_false_when_idle() -> None:
+    class _TM:
+        def get_paused_team_name(self, session_id: str) -> str | None:
+            return None
+
+        async def has_resumable_runtime(self, session_id: str) -> bool:
+            return False
+
+    assert await _detect_resume_from_pause(_TM(), "sess-idle") is False
+    assert await _detect_resume_from_pause(_TM(), "sess-force", force_resume_stream=True) is True

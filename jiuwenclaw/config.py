@@ -871,6 +871,112 @@ _ENV_TO_MODEL_CLIENT_CONFIG: dict[str, str] = {
     "MODEL_PROVIDER": "client_provider",
 }
 
+# Tip → model_client_config (inverse of _ENV_TO_MODEL_CLIENT_CONFIG).
+_MODEL_CLIENT_CONFIG_FROM_TIP: dict[str, str] = {
+    mcc_key: env_key for env_key, mcc_key in _ENV_TO_MODEL_CLIENT_CONFIG.items()
+}
+
+
+def is_unresolved_model_credential(value: Any) -> bool:
+    """True when a model credential is empty or still a ``${VAR}`` placeholder."""
+    if value is None:
+        return True
+    text = str(value).strip()
+    if not text:
+        return True
+    return text.startswith("${") and text.endswith("}")
+
+
+def resolve_model_credential_tip(
+    *,
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> dict[str, Any]:
+    """Return the tip bag for ``(service_id, agent_id)`` via ``resolve_env_ns``.
+
+    Credential isolation keeps ``API_BASE`` / ``API_KEY`` in per-agent tip
+    memory (not ``os.environ``). Agent selection is entirely owned by
+    ``resolve_env_ns``; this helper does not rematch across tips.
+    """
+    from jiuwenclaw.local_env_config import effective_tip, resolve_env_ns
+
+    sid, aid = resolve_env_ns(service_id, agent_id)
+    return dict(effective_tip(sid, aid) or {})
+
+
+def hydrate_model_client_config_from_tip(
+    model_client_config: dict[str, Any] | None,
+    *,
+    service_id: str | None = None,
+    agent_id: str | None = None,
+    tip: dict[str, Any] | None = None,
+    force_tip_identity: bool = False,
+) -> dict[str, Any]:
+    """Fill empty / ``${VAR}`` model credentials from tip memory (no os.environ).
+
+    Mutates and returns ``model_client_config``. Non-dict input becomes ``{}``.
+    When ``force_tip_identity`` is True (team members), tip ``MODEL_NAME`` /
+    ``MODEL_PROVIDER`` / ``API_*`` always overwrite sticky yaml/default values.
+    """
+    mcc: dict[str, Any] = (
+        dict(model_client_config) if isinstance(model_client_config, dict) else {}
+    )
+    identity_keys = frozenset({"model_name", "client_provider", "api_base", "api_key"})
+    needs_any = force_tip_identity or any(
+        is_unresolved_model_credential(mcc.get(mcc_key))
+        for mcc_key in _MODEL_CLIENT_CONFIG_FROM_TIP
+    )
+    if not needs_any:
+        return mcc
+
+    source = tip if isinstance(tip, dict) else resolve_model_credential_tip(
+        service_id=service_id,
+        agent_id=agent_id,
+    )
+
+    for mcc_key, tip_key in _MODEL_CLIENT_CONFIG_FROM_TIP.items():
+        force = force_tip_identity and mcc_key in identity_keys
+        if not force and not is_unresolved_model_credential(mcc.get(mcc_key)):
+            continue
+        raw = source.get(tip_key)
+        if raw is None:
+            continue
+        text = str(raw).strip()
+        if text:
+            mcc[mcc_key] = text
+    return mcc
+
+
+def hydrate_team_agent_model_from_tip(
+    model: dict[str, Any] | None,
+    *,
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> dict[str, Any]:
+    """Hydrate a team agent ``model`` block from catalog tip (identity + credentials)."""
+    if not isinstance(model, dict):
+        model = _empty_team_agent_model_skeleton()
+    out = copy.deepcopy(model)
+    mcc = out.get("model_client_config")
+
+    hydrated = hydrate_model_client_config_from_tip(
+        mcc if isinstance(mcc, dict) else {},
+        service_id=service_id,
+        agent_id=agent_id,
+        force_tip_identity=True,
+    )
+    out["model_client_config"] = hydrated
+
+    # Keep request model name aligned when tip supplied model_name.
+    model_name = str(hydrated.get("model_name") or "").strip()
+    if model_name:
+        request = out.get("model_request_config")
+        if not isinstance(request, dict):
+            request = {}
+            out["model_request_config"] = request
+        request["model"] = model_name
+    return out
+
 
 def patch_model_config_from_env(
     config: dict[str, Any],
@@ -1873,9 +1979,10 @@ def _transform_front_team_model_config(model_raw: dict[str, Any]) -> dict[str, A
                 if isinstance(entry, dict):
                     mcc = entry.get("model_client_config")
                     if isinstance(mcc, dict):
+                        # Never copy api_base/api_key into modes.team / agent registry.
                         model_client_config.update({
                             k: v for k, v in mcc.items()
-                            if k not in ("model_name",) and v is not None
+                            if k not in ("model_name", "api_base", "api_key") and v is not None
                         })
                         model_request_config["model"] = resolve_env_vars(str(mcc.get("model_name", model_name_part)))
                     mco = entry.get("model_config_obj")
@@ -1885,10 +1992,6 @@ def _transform_front_team_model_config(model_raw: dict[str, Any]) -> dict[str, A
     # 前端字段覆盖（优先级高于 #index 解析）
     if "provider" in model_raw and model_raw["provider"] is not None:
         model_client_config["client_provider"] = model_raw["provider"]
-    if "api_base" in model_raw and model_raw["api_base"] is not None:
-        model_client_config["api_base"] = model_raw["api_base"]
-    if "api_key" in model_raw and model_raw["api_key"] is not None:
-        model_client_config["api_key"] = model_raw["api_key"]
     if "model" in model_raw and model_raw["model"] is not None:
         # 若包含 #index，提取纯 model_name
         raw_model = model_raw["model"]
@@ -1908,33 +2011,60 @@ def _transform_front_team_model_config(model_raw: dict[str, Any]) -> dict[str, A
     return transformed
 
 
-def _transform_front_team_agent_spec(agent_key: str, agent_raw: Any) -> dict[str, Any]:
-    agent_config = _require_dict(agent_raw, f"agents.{agent_key}")
+def _empty_team_agent_model_skeleton() -> dict[str, Any]:
+    """Empty runtime model shell for team agents.
+
+    Tip hydrates MODEL_*/API_*; timeout and verify_ssl keep local defaults.
+    """
+    return {
+        "model_client_config": {
+            "timeout": 1800,
+            "verify_ssl": False,
+            "custom_headers": {},
+        },
+        "model_request_config": {},
+    }
+
+
+def _transform_front_team_agent_spec(agent_id: str, agent_raw: Any) -> dict[str, Any]:
+    """Map a front team-agent dict into the persisted ``teams.agents`` shape.
+
+    - Catalog link uses ``agent_id`` (tip / sync id).
+    - Tip ``API_*`` / ``MODEL_*`` are not written to yaml; runtime tip hydrate
+      supplies them.
+    - ``skills`` is stored on ``agents.*.skills`` (front value, or tip
+      ``ENABLED_SKILLS`` when front omits it).
+    """
+    from jiuwenclaw.agentserver.skill_manager import resolve_string_or_list_config
+
+    agent_config = _require_dict(agent_raw, f"agents.{agent_id}")
     transformed: dict[str, Any] = {}
 
-    if "model" in agent_config:
-        model_raw = _require_dict(agent_config.get("model"), f"agents.{agent_key}.model")
-        transformed_model = _transform_front_team_model_config(model_raw)
-        if transformed_model:
-            transformed["model"] = transformed_model
-
+    # Persist known knobs only; model identity/credentials come from tip at runtime.
     for field_name in ("skills", "workspace", "max_iterations", "completion_timeout"):
         if field_name in agent_config:
             transformed[field_name] = copy.deepcopy(agent_config[field_name])
+
+    if not resolve_string_or_list_config(transformed.get("skills")):
+        tip = resolve_model_credential_tip(agent_id=str(agent_id or "").strip() or None)
+        tip_skills = resolve_string_or_list_config((tip or {}).get("ENABLED_SKILLS"))
+        if tip_skills:
+            transformed["skills"] = tip_skills
 
     return transformed
 
 
 def _resolve_front_team_agent_spec(
     agents_raw: dict[str, Any],
-    agent_key: Any,
+    agent_id: Any,
     *,
     field_name: str,
 ) -> dict[str, Any]:
-    resolved_key = _require_non_empty_string(agent_key, field_name)
-    if resolved_key not in agents_raw:
-        raise ValueError(f"{field_name} references unknown agent_key: {resolved_key}")
-    return _transform_front_team_agent_spec(resolved_key, agents_raw[resolved_key])
+    """Resolve ``teams.agents[<catalog agent_id>]`` — same id space as plan tip."""
+    resolved_id = _require_non_empty_string(agent_id, field_name)
+    if resolved_id not in agents_raw:
+        raise ValueError(f"{field_name} references unknown agent_id: {resolved_id}")
+    return _transform_front_team_agent_spec(resolved_id, agents_raw[resolved_id])
 
 
 def _build_modes_team_mapping(front_payload: dict[str, Any]) -> dict[str, Any]:
@@ -1969,28 +2099,36 @@ def _build_modes_team_mapping(front_payload: dict[str, Any]) -> dict[str, Any]:
             for key in ("member_name", "display_name", "persona")
             if key in leader_raw
         }
-        transformed_team["leader"]["agent_key"] = leader_raw.get("agent_key", "")
         leader_name = _require_non_empty_string(
             leader_raw.get("member_name"),
             f"team[{team_index}].leader.member_name",
         )
         transformed_team["leader"]["member_name"] = leader_name
+        leader_agent_id = _require_non_empty_string(
+            leader_raw.get("agent_id"),
+            f"team[{team_index}].leader.agent_id",
+        )
+        transformed_team["leader"]["agent_id"] = leader_agent_id
         leader_agent_spec = _resolve_front_team_agent_spec(
             agents_raw,
-            leader_raw.get("agent_key"),
-            field_name=f"team[{team_index}].leader.agent_key",
+            leader_agent_id,
+            field_name=f"team[{team_index}].leader.agent_id",
         )
 
         teammate_raw = team_raw.get("teammate")
         teammate_agent_spec: dict[str, Any] | None = None
         if teammate_raw is not None:
             teammate_raw = _require_dict(teammate_raw, f"team[{team_index}].teammate")
+            teammate_agent_id = _require_non_empty_string(
+                teammate_raw.get("agent_id"),
+                f"team[{team_index}].teammate.agent_id",
+            )
             teammate_agent_spec = _resolve_front_team_agent_spec(
                 agents_raw,
-                teammate_raw.get("agent_key"),
-                field_name=f"team[{team_index}].teammate.agent_key",
+                teammate_agent_id,
+                field_name=f"team[{team_index}].teammate.agent_id",
             )
-            transformed_team["teammate"] = {"agent_key": teammate_raw.get("agent_key", "")}
+            transformed_team["teammate"] = {"agent_id": teammate_agent_id}
 
         predefined_members_raw = team_raw.get("predefined_members", [])
         if predefined_members_raw is None:
@@ -2016,18 +2154,25 @@ def _build_modes_team_mapping(front_payload: dict[str, Any]) -> dict[str, Any]:
                     f"duplicate member_name in team[{team_index}]: {member_name}"
                 )
             seen_member_names.add(member_name)
+            member_agent_id = _require_non_empty_string(
+                member.get("agent_id"),
+                f"team[{team_index}].predefined_members[{member_index}].agent_id",
+            )
             transformed_member = {
                 key: member[key]
-                for key in ("member_name", "display_name", "role_type", "persona", "prompt_hint", "agent_key")
+                for key in ("member_name", "display_name", "role_type", "persona", "prompt_hint")
                 if key in member
             }
             transformed_member["member_name"] = member_name
+            transformed_member["agent_id"] = member_agent_id
             transformed_members.append(transformed_member)
 
             member_agent_spec = _resolve_front_team_agent_spec(
                 agents_raw,
-                member.get("agent_key"),
-                field_name=f"team[{team_index}].predefined_members[{member_index}].agent_key",
+                member_agent_id,
+                field_name=(
+                    f"team[{team_index}].predefined_members[{member_index}].agent_id"
+                ),
             )
             transformed_agents[member_name] = member_agent_spec
 
@@ -2043,19 +2188,12 @@ def _build_modes_team_mapping(front_payload: dict[str, Any]) -> dict[str, Any]:
     return team_mapping
 
 
-def _build_front_agent_registry(front_payload: dict[str, Any]) -> dict[str, Any]:
-    agents_raw = _require_dict(front_payload.get("agents"), "agents")
-    registry: dict[str, Any] = {}
-    for agent_key, agent_raw in agents_raw.items():
-        resolved_key = _require_non_empty_string(agent_key, f"agents.{agent_key}")
-        registry[resolved_key] = _transform_front_team_agent_spec(resolved_key, agent_raw)
-    return registry
-
-
 def replace_teams_in_config(front_payload: dict[str, Any]) -> None:
     """Replace ``modes.team`` using the frontend team-editor payload.
 
     If team array is empty, delete ``modes.team`` from config.
+    Drop legacy ``web_config_panel.agent_team_agents`` (write-only duplicate;
+    relay panel does not read it).
     """
     if not isinstance(front_payload, dict):
         raise ValueError("payload must be an object")
@@ -2063,24 +2201,15 @@ def replace_teams_in_config(front_payload: dict[str, Any]) -> None:
     teams_raw = front_payload.get("team")
     data = _load_yaml_round_trip(_current_config_yaml_path())
 
-    panel_cfg_modified = False
-    agent_registry = None
-    if "agents" in front_payload:
-        agent_registry = _build_front_agent_registry(front_payload)
-        panel_cfg = data.get("web_config_panel")
-        if not isinstance(panel_cfg, dict):
-            panel_cfg = {}
-            data["web_config_panel"] = panel_cfg
-        if agent_registry:
-            panel_cfg["agent_team_agents"] = agent_registry
-        else:
-            panel_cfg.pop("agent_team_agents", None)
-        panel_cfg_modified = True
-
     # 空数组：删除 modes.team 配置项
     if isinstance(teams_raw, list) and not teams_raw:
         if "modes" in data and isinstance(data["modes"], dict) and "team" in data["modes"]:
             del data["modes"]["team"]
+        panel = data.get("web_config_panel")
+        if isinstance(panel, dict):
+            panel.pop("agent_team_agents", None)
+            if not panel:
+                data.pop("web_config_panel", None)
         _dump_yaml_round_trip(_current_config_yaml_path(), data)
         return
 
@@ -2088,17 +2217,14 @@ def replace_teams_in_config(front_payload: dict[str, Any]) -> None:
     team_mapping = _build_modes_team_mapping(front_payload)
 
     data = _load_yaml_round_trip(_current_config_yaml_path())
-    # Merge web_config_panel back into reloaded data (it was written earlier in this function)
-    if panel_cfg_modified:
-        if "web_config_panel" not in data or not isinstance(data.get("web_config_panel"), dict):
-            data["web_config_panel"] = {}
-        if agent_registry:
-            data["web_config_panel"]["agent_team_agents"] = agent_registry
-        else:
-            data.get("web_config_panel", {}).pop("agent_team_agents", None)
     if "modes" not in data or not isinstance(data["modes"], dict):
         data["modes"] = {}
     data["modes"]["team"] = team_mapping
+    panel = data.get("web_config_panel")
+    if isinstance(panel, dict):
+        panel.pop("agent_team_agents", None)
+        if not panel:
+            data.pop("web_config_panel", None)
     _dump_yaml_round_trip(_current_config_yaml_path(), data)
 
 

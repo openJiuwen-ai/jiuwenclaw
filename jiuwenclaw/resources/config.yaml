@@ -948,6 +948,30 @@ permissions:
     cron_toggle_job: allow
     cron_preview_job: allow
     skill_acceleration_exec: ask
+    # Agent-team 编排工具：与 leader/member role gate 对齐，避免 defaults.guard
+    # 把 build_team 等变成 ASK 后卡死团队回合。
+    build_team: allow
+    clean_team: allow
+    spawn_teammate: allow
+    spawn_human_agent: allow
+    spawn_bridge_agent: allow
+    spawn_external_cli: allow
+    shutdown_member: allow
+    approve_plan: allow
+    approve_tool: allow
+    create_task: allow
+    update_task: allow
+    claim_task: allow
+    submit_plan: allow
+    verify_task: allow
+    member_complete_task: allow
+    view_task: allow
+    send_message: allow
+    workspace_meta: allow
+    swarmflow: allow
+    async_tasks_list: allow
+    async_task_output: allow
+    async_task_cancel: allow
 
   rules:
     - id: shell_allow_dir

@@ -36,6 +36,84 @@ def test_enrich_team_spec_for_swarm_sets_build_context_and_rail_spec() -> None:
     assert leader_params.get("enable_permissions") is True
 
 
+def test_enrich_adds_missing_teammate_template_before_rewrite() -> None:
+    """Presets that only ship agents.leader must still enrich teammate rails."""
+    spec = TeamAgentSpec(
+        agents={"leader": DeepAgentSpec()},
+        team_name="leader-only-team",
+        spawn_mode="inprocess",
+    )
+    enrich_team_spec_for_swarm(
+        spec,
+        session_id="sess-leader-only",
+        mode="team",
+        channel_id="cli",
+    )
+    assert "teammate" in spec.agents
+    teammate_rails = [r.type for r in (spec.agents["teammate"].rails or [])]
+    assert teammate_rails == [PLATFORM_MEMBER_RAILS]
+
+
+def test_enrich_named_predefined_members_get_platform_rails() -> None:
+    """OfficeClaw presets key agents by member name; resolve prefers that key."""
+    spec = TeamAgentSpec(
+        agents={
+            "leader": DeepAgentSpec(skills=["task-implement", "handoff"]),
+            "product-architect": DeepAgentSpec(skills=["docx-craft", "handoff"]),
+            "client-engineer": DeepAgentSpec(skills=["caveman"]),
+            "teammate": DeepAgentSpec(skills=["should-not-leak"]),
+        },
+        team_name="oc_team_preset-software-dev",
+        spawn_mode="inprocess",
+    )
+    enrich_team_spec_for_swarm(
+        spec,
+        session_id="sess-dev",
+        mode="team",
+        channel_id="cli",
+    )
+
+    for key in ("leader", "teammate", "product-architect", "client-engineer"):
+        types = [r.type for r in (spec.agents[key].rails or [])]
+        assert PLATFORM_MEMBER_RAILS in types, key
+
+    skills_map = spec.build_context.agent_skills_by_key
+    assert skills_map["product-architect"] == ["docx-craft", "handoff"]
+    assert skills_map["teammate"] == ["should-not-leak"]
+    assert skills_map["leader"] == ["task-implement", "handoff"]
+
+
+def test_resolve_member_skills_does_not_borrow_teammate_template() -> None:
+    from jiuwenclaw.agentserver.swarm.context import SwarmBuildContext
+    from jiuwenclaw.agentserver.swarm.providers.member_rails import (
+        _resolve_member_enabled_skills,
+    )
+
+    ctx = SwarmBuildContext(
+        agent_skills_by_key={
+            "teammate": ["should-not-leak"],
+            "product-architect": ["docx-craft"],
+            "leader": ["task-implement"],
+        },
+    )
+    assert _resolve_member_enabled_skills(
+        ctx, member_name="product-architect", role="teammate"
+    ) == ["docx-craft"]
+    # Named member with no own skills must not inherit teammate template skills.
+    assert (
+        _resolve_member_enabled_skills(
+            ctx, member_name="server-engineer", role="teammate"
+        )
+        is None
+    )
+    assert _resolve_member_enabled_skills(
+        ctx, member_name="chief-researcher", role="leader"
+    ) == ["task-implement"]
+    assert _resolve_member_enabled_skills(
+        ctx, member_name="teammate", role="teammate"
+    ) == ["should-not-leak"]
+
+
 @pytest.mark.asyncio
 async def test_team_manager_get_swarm_enriched_team_spec_calls_enrich(monkeypatch) -> None:
     from jiuwenclaw.agentserver.team.team_manager import TeamManager

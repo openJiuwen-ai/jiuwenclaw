@@ -87,6 +87,18 @@ class _OrderRecorder:
     def clear_pending_runtime(self, session_id: str) -> None:
         self.events.append("clear_pending")
 
+    async def abort_team_llm_streams_before_pause(
+        self, session_id: str, reason: str = ""
+    ) -> bool:
+        self.events.append("abort_llm")
+        return True
+
+    async def freeze_leader_qa_before_pause(
+        self, session_id: str, reason: str = "", *, timeout_sec: float = 8.0
+    ) -> bool:
+        self.events.append("freeze_qa")
+        return True
+
 
 @pytest.mark.asyncio
 async def test_pause_awaits_runner_pause_then_waits_stream_exit(
@@ -114,7 +126,10 @@ async def test_pause_awaits_runner_pause_then_waits_stream_exit(
     ok = await bound("sess-1", reason="interrupt(intent=pause): ")
     assert ok is True
 
-    assert recorder.events[0].startswith("runner_pause:")
+    # Fast-cut LLM → freeze QA → kernel park (must not freeze before abort).
+    assert recorder.events[0] == "abort_llm"
+    assert recorder.events[1] == "freeze_qa"
+    assert recorder.events[2].startswith("runner_pause:")
     assert "wait_stream_exit" in recorder.events
     assert not any(e.startswith("cancel_stream:") for e in recorder.events)
     assert "pause-early" not in " ".join(recorder.events)
