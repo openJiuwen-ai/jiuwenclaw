@@ -100,12 +100,12 @@ def test_work_team_has_no_plan_rails(role):
     assert registry.TEAM_PLAN_APPROVAL not in rail_types
 
 
-def test_code_team_subagents_exclude_explore_for_both_roles():
+def test_code_team_subagents_unchanged_for_both_roles():
     from jiuwenswarm.agents.swarm.config_specs import build_member_subagent_specs
 
     for role in ("leader", "teammate"):
         names = [spec.agent_card.name for spec in build_member_subagent_specs({}, "code.team", role)]
-        assert names == ["plan_agent"]
+        assert names == ["explore_agent", "plan_agent"]
 
 
 def test_plain_work_team_has_no_code_subagents():

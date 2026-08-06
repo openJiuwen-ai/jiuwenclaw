@@ -179,7 +179,7 @@ _CODE_TOOL_NAMES: tuple[str, ...] = (
     registry.SEND_FILE,
 )
 
-# Code-mode sub-agents are either always-on (plan) or config-gated.
+# code_agent sub-agents are always-on (explore / plan) or config-gated.
 _DEFAULT_SUBAGENT_MAX_ITERATIONS = 15
 
 
@@ -665,6 +665,27 @@ def _code_subagent_spec(
     )
 
 
+def _is_explore_subagent(spec: Any) -> bool:
+    """Return whether ``spec`` declares the explore sub-agent.
+
+    Upstream team specs reach us in more than one shape, so all three identity
+    carriers are checked: ``subagent_type`` (present on some platform spec
+    objects), ``factory_name``, and the agent card name.
+
+    Args:
+        spec: A sub-agent spec from a base team spec or from
+            :func:`build_member_subagent_specs`.
+
+    Returns:
+        True when the spec declares ``explore_agent``.
+    """
+    return (
+        getattr(spec, "subagent_type", None) == "explore_agent"
+        or getattr(spec, "factory_name", None) == registry.EXPLORE_AGENT
+        or getattr(getattr(spec, "agent_card", None), "name", None) == "explore_agent"
+    )
+
+
 def build_member_subagent_specs(
     config: dict[str, Any],
     mode: str,
@@ -672,7 +693,7 @@ def build_member_subagent_specs(
 ) -> list[SubAgentSpec]:
     """Build the declarative code sub-agent specs (empty for non-code modes).
 
-    plan is always present, while code / browser are config-gated via
+    explore / plan are always present, while code / browser are config-gated via
     ``react.subagents.<name>.enabled``.
 
     Args:
@@ -691,6 +712,7 @@ def build_member_subagent_specs(
     language = _subagent_language(mode, role, config)
 
     specs: list[SubAgentSpec] = [
+        _code_subagent_spec("explore_agent", registry.EXPLORE_AGENT, react, language),
         _code_subagent_spec("plan_agent", registry.PLAN_AGENT, react, language),
     ]
     if isinstance(subagents_cfg, dict):
@@ -783,18 +805,16 @@ def build_member_deep_agent_spec(
 
     if subagent_specs or team_browser_spec:
         merged_subagents = list(base_spec.subagents or [])
-        if _is_code_mode(mode):
-            filtered = []
-            for spec in merged_subagents:
-                is_explore = (
-                    getattr(spec, "subagent_type", None) == "explore_agent"
-                    or getattr(spec, "factory_name", None) == registry.EXPLORE_AGENT
-                    or getattr(getattr(spec, "agent_card", None), "name", None)
-                    == "explore_agent"
-                )
-                if not is_explore:
-                    filtered.append(spec)
-            merged_subagents = filtered
+        # Drop a base_spec explore_agent when we contribute our own: code modes
+        # always declare one in build_member_subagent_specs, and two specs under
+        # the same name would just shadow each other in create_subagent.
+        # SubAgentSpec has no subagent_type field, so the name / factory_name
+        # checks are what actually match here.
+        if any(_is_explore_subagent(spec) for spec in subagent_specs):
+            merged_subagents = [
+                spec for spec in merged_subagents
+                if not _is_explore_subagent(spec)
+            ]
         # Remove any browser_agent from base_spec to prevent the shared
         # playwright_official_stdio entry from co-existing with our isolated one.
         if team_browser_spec or any(
