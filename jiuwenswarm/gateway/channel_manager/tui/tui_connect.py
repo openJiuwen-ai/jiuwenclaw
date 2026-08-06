@@ -824,6 +824,10 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             _jiuwen_team_cfg = _team_cfg.get("jiuwen_team") or {}
             _swarmflow_enabled = bool(_jiuwen_team_cfg.get("enable_swarmflow", False))
             payload["enable_swarmflow"] = "true" if _swarmflow_enabled else "false"
+            # swarmflow budget ceiling (integer token limit; absent/None → unbounded)
+            _swarmflow_budget = _jiuwen_team_cfg.get("swarmflow_budget")
+            if _swarmflow_budget is not None:
+                payload["swarmflow_budget"] = str(_swarmflow_budget)
 
             # Resolve model-related fields from config.yaml.
             # When models.defaults list is in use, it is the canonical source

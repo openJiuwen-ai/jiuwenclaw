@@ -125,6 +125,7 @@ const TRANSCRIPT_WHEEL_SCROLL_LINES = 3;
 // 不可中断的命令列表（ESC 按下时显示提示）
 const UNINTERRUPTIBLE_COMMANDS = ["compact"];
 const SWARM_WORKFLOW_LOG_PREVIEW_ROWS = 8;
+const SWARM_WORKFLOW_AGENT_PREVIEW_LIMIT = 8;
 const SWARM_WORKFLOW_AGENT_TEXT_PREVIEW_ROWS = 6;
 const PERMISSION_TOOL_RE = /工具\s+`([^`]+)`\s+需要授权/;
 const CONFIRM_TOOL_RE = /(?:Tool|工具)\s*:\s*`([^`]+)`/i;
@@ -6943,6 +6944,20 @@ export class AppScreen implements Component, Focusable {
     ];
     if (state.focus === "phases") {
       lines.push(...this.renderSwarmWorkflowDetailTree(workflow, state.selectedPhaseId, width));
+      lines.push("");
+      const agentsTitle = selectedPhase ? `Agents · ${selectedPhase.name}` : "Agents";
+      lines.push(padToWidth(palette.text.secondary(agentsTitle), width));
+      if (selectedPhase) {
+        lines.push(
+          ...this.renderSwarmWorkflowAgentRows(
+            selectedPhase.agents ?? [],
+            width,
+            SWARM_WORKFLOW_AGENT_PREVIEW_LIMIT,
+          ),
+        );
+      } else {
+        lines.push(padToWidth(palette.text.dim("No agents"), width));
+      }
     } else {
       lines.push(...this.renderSwarmWorkflowPhaseRows(workflow, state.selectedPhaseId, width));
       lines.push("");

@@ -773,7 +773,7 @@ assert.deepEqual(
   {
     writeConfig: false,
     switchToTeam: false,
-    message: "SwarmFlow is already on in team mode. No changes were made.",
+    message: "Already on. No changes.",
   },
 );
 assert.deepEqual(
@@ -781,8 +781,7 @@ assert.deepEqual(
   {
     writeConfig: false,
     switchToTeam: true,
-    message:
-      "SwarmFlow is already on. Switched to team mode — the next workflow run uses the enabled setting.",
+    message: "Already on. Switched to team mode.",
   },
 );
 assert.deepEqual(
@@ -790,7 +789,7 @@ assert.deepEqual(
   {
     writeConfig: false,
     switchToTeam: false,
-    message: "SwarmFlow is already off. Mode remains team. No changes were made.",
+    message: "Already off. Mode remains team. No changes. Use /mode to leave team.",
   },
 );
 assert.equal(
