@@ -13,9 +13,11 @@ interface MarkdownRendererProps {
   content: string;
   className?: string;
   testId?: string;
+  isStreaming?: boolean;
 }
 
 const MarkdownContentLinesContext = createContext<string[]>([]);
+const MarkdownStreamingContext = createContext(false);
 
 function MarkdownLink({ href, children, ...props }: AnchorHTMLAttributes<HTMLAnchorElement>): JSX.Element {
   const isFragmentLink = href?.startsWith('#');
@@ -31,12 +33,13 @@ type MarkdownPreProps = HTMLAttributes<HTMLPreElement> & { node?: HastElement };
 
 function MarkdownPre({ children, node, ...props }: MarkdownPreProps): JSX.Element {
   const contentLines = useContext(MarkdownContentLinesContext);
+  const isStreaming = useContext(MarkdownStreamingContext);
   const codeBlock = getFencedCodeBlock(children, contentLines, node);
   if (codeBlock) {
     const adapter = getFencedCodeAdapter(codeBlock);
     if (adapter) {
       const Renderer = adapter.Renderer;
-      return <Renderer code={codeBlock.code} complete={codeBlock.complete} />;
+      return <Renderer code={codeBlock.code} complete={codeBlock.complete} isStreaming={isStreaming} />;
     }
   }
 
@@ -57,16 +60,18 @@ const MARKDOWN_COMPONENTS = {
   table: MarkdownTable,
 };
 
-export function MarkdownRenderer({ content, className, testId }: MarkdownRendererProps): JSX.Element {
+export function MarkdownRenderer({ content, className, testId, isStreaming = false }: MarkdownRendererProps): JSX.Element {
   const markdown = useMemo(() => repairCollapsedGfmTables(unescapeLiteralNewlines(content)), [content]);
   const contentLines = useMemo(() => markdown.split(/\r\n|\n|\r/), [markdown]);
 
   return (
     <div className={className} data-testid={testId}>
       <MarkdownContentLinesContext.Provider value={contentLines}>
-        <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSlug]} components={MARKDOWN_COMPONENTS}>
-          {markdown}
-        </ReactMarkdown>
+        <MarkdownStreamingContext.Provider value={isStreaming}>
+          <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSlug]} components={MARKDOWN_COMPONENTS}>
+            {markdown}
+          </ReactMarkdown>
+        </MarkdownStreamingContext.Provider>
       </MarkdownContentLinesContext.Provider>
     </div>
   );
