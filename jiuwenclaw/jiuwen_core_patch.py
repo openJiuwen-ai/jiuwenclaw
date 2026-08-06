@@ -41,6 +41,7 @@ _ORIGINAL_BUILD_REQUEST_PARAMS = None
 _OPENJIUWEN_LOG_HANDLER_PATCHED = False
 _SKIP_TOOL_TOOL_MESSAGE_PATCHED = False
 _STREAMING_TOOL_WAIT_TIMEOUT_PATCHED = False
+_CALLBACK_INSTANCE_SCOPE_PATCHED = False
 
 # Default active-execution budget for StreamingToolExecutor.wait_all().
 # HITL/interrupt waits should call pause_streaming_tool_wait_timeout() so they
@@ -286,6 +287,73 @@ def _patch_streaming_tool_wait_timeout() -> None:
         "StreamingToolExecutor.wait_all timeout patch applied "
         "(STREAMING_TOOL_WAIT_TIMEOUT_S default=%s; HITL pause supported)",
         _DEFAULT_STREAMING_TOOL_WAIT_TIMEOUT_S,
+    )
+
+
+def _patch_agent_callback_instance_scope() -> None:
+    """Isolate AgentCallbackManager events per agent instance.
+
+    Upstream scopes events as ``{card.id}_{event}`` on the process-global
+    ``Runner.callback_framework``. Multi-session DeepAgents under one tenant
+    share the same ``card.id``, so each session re-registers rails on the same
+    event and a single trigger fans out N times (todo.json download storm).
+
+    Patch event names to ``{card.id}_{instance_id}_{event}``. ``card.id`` is
+    unchanged so tool resource tagging / ConcurrentSafe sharing still works.
+    """
+    global _CALLBACK_INSTANCE_SCOPE_PATCHED
+    if _CALLBACK_INSTANCE_SCOPE_PATCHED:
+        return
+    try:
+        import inspect
+        import uuid
+
+        from openjiuwen.core.single_agent.agent_callback_manager import (  # type: ignore
+            AgentCallbackManager,
+        )
+    except ImportError:
+        llm_logger.info(
+            "[callback-scope] patch skipped: AgentCallbackManager not importable"
+        )
+        return
+
+    # Upstream may already ship instance isolation; do not double-prefix.
+    try:
+        if "instance_id" in inspect.signature(AgentCallbackManager.__init__).parameters:
+            _CALLBACK_INSTANCE_SCOPE_PATCHED = True
+            llm_logger.info(
+                "[callback-scope] skipped: upstream AgentCallbackManager "
+                "already accepts instance_id"
+            )
+            return
+    except (TypeError, ValueError):
+        pass
+
+    # Use getattr/setattr (G.CLS.11): do not touch ``_get_agent_event`` by name.
+    _get_event_name = "_get_agent_event"
+    orig_get_agent_event = getattr(AgentCallbackManager, _get_event_name)
+    if getattr(orig_get_agent_event, "jiuwenclaw_instance_scope", False):
+        _CALLBACK_INSTANCE_SCOPE_PATCHED = True
+        return
+
+    orig_init = AgentCallbackManager.__init__
+
+    def _patched_init(self, agent_id, *args, **kwargs):  # type: ignore[no-untyped-def]
+        orig_init(self, agent_id, *args, **kwargs)
+        if not getattr(self, "instance_id", None):
+            self.instance_id = uuid.uuid4().hex
+
+    def _patched_get_agent_event(self, event):  # type: ignore[no-untyped-def]
+        instance_id = getattr(self, "instance_id", None) or "shared"
+        return f"{self.agent_id}_{instance_id}_{event}"
+
+    _patched_get_agent_event.jiuwenclaw_instance_scope = True  # type: ignore[attr-defined]
+    AgentCallbackManager.__init__ = _patched_init  # type: ignore[method-assign]
+    setattr(AgentCallbackManager, _get_event_name, _patched_get_agent_event)
+    _CALLBACK_INSTANCE_SCOPE_PATCHED = True
+    llm_logger.info(
+        "[callback-scope] AgentCallbackManager instance isolation patch applied "
+        "(event={agent_id}_{instance_id}_{event})"
     )
 
 
@@ -1152,6 +1220,7 @@ def apply_openai_model_client_patch() -> None:
     _patch_skip_tool_tool_message()
     _patch_railed_model_call_session()
     _patch_streaming_tool_wait_timeout()
+    _patch_agent_callback_instance_scope()
     _static_attrs = ('_extract_error_details', '_extract_retry_after', '_raise_mock_error')
     _instance_attrs = (
         '_stream_with_retry', '_invoke_with_retry',
