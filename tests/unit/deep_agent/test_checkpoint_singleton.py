@@ -73,3 +73,48 @@ async def test_set_checkpoint_reuses_mysql_engine(monkeypatch):
     assert create_mock.await_count == 1
     create_conf = create_mock.await_args_list[0].args[0].conf
     assert create_conf["db_client"] is mock_engine
+
+
+def test_gateway_db_pool_kwargs_from_env(monkeypatch):
+    monkeypatch.setenv("GATEWAY_DB_POOL_SIZE", "3")
+    monkeypatch.setenv("GATEWAY_DB_MAX_OVERFLOW", "7")
+    monkeypatch.setenv("GATEWAY_DB_POOL_TIMEOUT", "15")
+    kwargs = iface._gateway_db_pool_kwargs()
+    assert kwargs["pool_size"] == 3
+    assert kwargs["max_overflow"] == 7
+    assert kwargs["pool_timeout"] == 15
+    assert kwargs["pool_pre_ping"] is True
+
+
+@pytest.mark.asyncio
+async def test_build_mysql_engine_reuses_process_singleton(monkeypatch):
+    monkeypatch.setenv("AGENT_RUNTIME", "1")
+    monkeypatch.setenv("GATEWAY_DB_HOST", "db.example")
+    mock_engine = MagicMock(name="mysql_engine")
+    iface._shared_mysql_checkpoint_engine = mock_engine
+
+    with patch(
+        "sqlalchemy.ext.asyncio.create_async_engine",
+        new=MagicMock(),
+    ) as create_engine:
+        engine = await iface._build_mysql_async_engine()
+
+    assert engine is mock_engine
+    create_engine.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_build_postgresql_engine_reuses_process_singleton(monkeypatch):
+    monkeypatch.setenv("AGENT_RUNTIME", "1")
+    monkeypatch.setenv("GATEWAY_DB_HOST", "db.example")
+    mock_engine = MagicMock(name="pg_engine")
+    iface._shared_postgresql_checkpoint_engine = mock_engine
+
+    with patch(
+        "sqlalchemy.ext.asyncio.create_async_engine",
+        new=MagicMock(),
+    ) as create_engine:
+        engine = await iface._build_postgresql_async_engine()
+
+    assert engine is mock_engine
+    create_engine.assert_not_called()

@@ -365,16 +365,41 @@ _PERSISTENT_CHECKPOINTER_LOCK_LOOP: asyncio.AbstractEventLoop | None = None
 _PERSISTENT_CHECKPOINTER_LOCK_INIT = threading.Lock()
 _PERSISTENT_CHECKPOINTER_READY = False
 _shared_checkpoint_checkpointer: Any = None
+_shared_mysql_checkpoint_engine: Any = None
+_shared_postgresql_checkpoint_engine: Any = None
 
 
 def reset_shared_checkpoint_for_tests() -> None:
     """Reset process-wide checkpoint singleton (tests only)."""
     global _shared_checkpoint_checkpointer, _PERSISTENT_CHECKPOINTER_READY
     global _PERSISTENT_CHECKPOINTER_LOCK, _PERSISTENT_CHECKPOINTER_LOCK_LOOP
+    global _shared_mysql_checkpoint_engine, _shared_postgresql_checkpoint_engine
     _shared_checkpoint_checkpointer = None
     _PERSISTENT_CHECKPOINTER_READY = False
     _PERSISTENT_CHECKPOINTER_LOCK = None
     _PERSISTENT_CHECKPOINTER_LOCK_LOOP = None
+    _shared_mysql_checkpoint_engine = None
+    _shared_postgresql_checkpoint_engine = None
+
+
+def _gateway_db_pool_kwargs() -> dict[str, Any]:
+    """SQLAlchemy 连接池参数（``GATEWAY_DB_POOL_*``，企业 checkpoint 与文档默认一致）。"""
+    def _int_env(name: str, default: int) -> int:
+        raw = os.getenv(name, "").strip()
+        if not raw:
+            return default
+        try:
+            return int(raw)
+        except ValueError:
+            return default
+
+    return {
+        "pool_size": _int_env("GATEWAY_DB_POOL_SIZE", 2),
+        "max_overflow": _int_env("GATEWAY_DB_MAX_OVERFLOW", 20),
+        "pool_timeout": _int_env("GATEWAY_DB_POOL_TIMEOUT", 30),
+        "pool_recycle": 3600,
+        "pool_pre_ping": True,
+    }
 
 
 def _running_loop() -> asyncio.AbstractEventLoop | None:
@@ -896,14 +921,17 @@ _patch_compiler_for_on_conflict()
 
 
 async def _build_mysql_async_engine():
-    """构建 checkpoint MySQL AsyncEngine。
+    """构建 / 复用 checkpoint MySQL AsyncEngine。
 
-    连接参数从 ``GATEWAY_DB_*`` 环境变量读取，与 Gateway 共用同一 MySQL 实例。
-    未配置 ``GATEWAY_DB_HOST`` 时返回 None，checkpoint 回退到 SQLite。
-    如果目标库不存在，会自动创建。
+    连接参数从 ``GATEWAY_DB_*`` 读取；池参数见 ``GATEWAY_DB_POOL_*``。
+    进程内复用同一 engine，避免每个 agent 再建独立连接池。
+    未配置 ``GATEWAY_DB_HOST`` 或未开 ``AGENT_RUNTIME`` 时返回 None，回退 SQLite。
     """
+    global _shared_mysql_checkpoint_engine
     if not os.getenv("AGENT_RUNTIME", "").strip():
         return None
+    if _shared_mysql_checkpoint_engine is not None:
+        return _shared_mysql_checkpoint_engine
     db_host = os.getenv("GATEWAY_DB_HOST", "").strip()
     if not db_host:
         return None
@@ -938,18 +966,17 @@ async def _build_mysql_async_engine():
             f"mysql+aiomysql://{_encoded_user}:{_encoded_password}"
             f"@{db_host}:{db_port}/{db_name}?charset=utf8mb4"
         )
-        engine = create_async_engine(
-            db_url,
-            pool_size=5,
-            max_overflow=10,
-            pool_recycle=3600,
-            pool_pre_ping=True,
-        )
+        pool_kwargs = _gateway_db_pool_kwargs()
+        engine = create_async_engine(db_url, **pool_kwargs)
         logger.info(
-            "[JiuWenSwarmDeepAdapter] checkpoint MySQL engine created: %s:%s/%s",
+            "[JiuWenSwarmDeepAdapter] checkpoint MySQL engine created: %s:%s/%s "
+            "pool_size=%s max_overflow=%s pool_timeout=%s",
             db_host,
             db_port,
             db_name,
+            pool_kwargs["pool_size"],
+            pool_kwargs["max_overflow"],
+            pool_kwargs["pool_timeout"],
         )
 
         # 确保 kv_store.value 列为 LONGTEXT，避免 checkpoint 序列化数据被截断
@@ -984,6 +1011,7 @@ async def _build_mysql_async_engine():
                     "[JiuWenSwarmDeepAdapter] kv_store.value altered to LONGTEXT"
                 )
 
+        _shared_mysql_checkpoint_engine = engine
         return engine
     except Exception as exc:
         logger.error(
@@ -994,14 +1022,17 @@ async def _build_mysql_async_engine():
 
 
 async def _build_postgresql_async_engine():
-    """构建 checkpoint PostgreSQL AsyncEngine。
+    """构建 / 复用 checkpoint PostgreSQL AsyncEngine。
 
-    连接参数从 ``GATEWAY_DB_*`` 环境变量读取，与 Gateway 共用同一 PostgreSQL 实例。
-    未配置 ``GATEWAY_DB_HOST`` 时返回 None，checkpoint 回退到 SQLite。
-    如果目标库不存在，会自动创建。
+    连接参数从 ``GATEWAY_DB_*`` 读取；池参数见 ``GATEWAY_DB_POOL_*``。
+    进程内复用同一 engine，避免每个 agent 再建独立连接池。
+    未配置 ``GATEWAY_DB_HOST`` 或未开 ``AGENT_RUNTIME`` 时返回 None，回退 SQLite。
     """
+    global _shared_postgresql_checkpoint_engine
     if not os.getenv("AGENT_RUNTIME", "").strip():
         return None
+    if _shared_postgresql_checkpoint_engine is not None:
+        return _shared_postgresql_checkpoint_engine
     db_host = os.getenv("GATEWAY_DB_HOST", "").strip()
     if not db_host:
         return None
@@ -1048,18 +1079,17 @@ async def _build_postgresql_async_engine():
             f"postgresql+asyncpg://{_encoded_user}:{_encoded_password}"
             f"@{db_host}:{db_port}/{db_name}"
         )
-        engine = create_async_engine(
-            db_url,
-            pool_size=5,
-            max_overflow=10,
-            pool_recycle=3600,
-            pool_pre_ping=True,
-        )
+        pool_kwargs = _gateway_db_pool_kwargs()
+        engine = create_async_engine(db_url, **pool_kwargs)
         logger.info(
-            "[JiuWenSwarmDeepAdapter] checkpoint PostgreSQL engine created: %s:%s/%s",
+            "[JiuWenSwarmDeepAdapter] checkpoint PostgreSQL engine created: %s:%s/%s "
+            "pool_size=%s max_overflow=%s pool_timeout=%s",
             db_host,
             db_port,
             db_name,
+            pool_kwargs["pool_size"],
+            pool_kwargs["max_overflow"],
+            pool_kwargs["pool_timeout"],
         )
 
         # 确保 kv_store.value 列为 TEXT，避免 checkpoint 序列化数据被截断
@@ -1093,6 +1123,7 @@ async def _build_postgresql_async_engine():
                     "[JiuWenSwarmDeepAdapter] kv_store.value altered to TEXT"
                 )
 
+        _shared_postgresql_checkpoint_engine = engine
         return engine
     except Exception as exc:
         logger.error(
