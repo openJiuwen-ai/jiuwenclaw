@@ -151,10 +151,10 @@ Rebuild when:
 Open:
 
 ```text
-Left sidebar -> Skills -> Skill Score
+Left sidebar -> Skills -> Skill Graph
 ```
 
-#### How to read the skill score
+#### How to read the skill graph
 
 | Element | Description |
 |---------|-------------|
@@ -224,7 +224,7 @@ When a skill looks relevant, the agent may read its `SKILL.md` before executing 
 
 1. Open left sidebar -> **Configuration** -> **Other configuration**.
 2. Expand **Skill Symphony** and turn on **Enable skill orchestration**. To learn from real execution traces, also turn on **Enable dynamic graph**, then click **Save** in the top-right corner.
-3. Confirm the required skills are installed. If you recently added, removed, or changed skills, open **Skills** -> **Skill Score** and run **Incremental build**. If you only need to confirm the current score state, use **Read score**.
+3. Confirm the required skills are installed. If you recently added, removed, or changed skills, open **Skills** -> **Skill Graph** and run **Incremental build**. If you only need to confirm the current score state, use **Read score**.
 
 **Enable skill orchestration** is the Symphony master switch. **Enable dynamic graph** takes effect only while orchestration is enabled. Skill Retrieval is still controlled by the separate **Skill Retrieval** switch.
 
@@ -274,7 +274,7 @@ After seeing the route, you can respond in one of these ways:
 
 ## Configuration
 
-The Web configuration page exposes three related switches: **Enable Skill Retrieval** controls skill-tree retrieval tools, **Enable skill orchestration** controls skill score and orchestration tools, and **Enable dynamic graph** controls whether Session execution traces are learned from and used by later orchestration. The Skill Index page provides index build, rebuild, cancel, status, and tree viewing operations. The Skill Score page provides score reading, incremental build, cancel build, and full rebuild operations.
+The Web configuration page exposes three related switches: **Enable Skill Retrieval** controls skill-tree retrieval tools, **Enable skill orchestration** controls skill score and orchestration tools, and **Enable dynamic graph** controls whether Session execution traces are learned from and used by later orchestration. The Skill Index page provides index build, rebuild, cancel, status, and tree viewing operations. The Skill Graph page provides score reading, incremental build, cancel build, and full rebuild operations.
 
 Advanced build, retrieval, and orchestration settings are configured in the user runtime config file:
 

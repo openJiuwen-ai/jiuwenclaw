@@ -374,9 +374,9 @@ Related pages are under **Skills** in the left sidebar:
 | Page | Purpose |
 | --- | --- |
 | **Skill Index** | Builds the local installed-skill tree index used for step-by-step retrieval |
-| **Skill Score** | Builds and displays connectable relationships between skills for orchestration |
+| **Skill Graph** | Builds and displays connectable relationships between skills for orchestration |
 
-After installing, uninstalling, or heavily modifying skills, rebuild the skill index. If the skill changes affect relationships between skills, also run an incremental build or full rebuild on the Skill Score page.
+After installing, uninstalling, or heavily modifying skills, rebuild the skill index. If the skill changes affect relationships between skills, also run an incremental build or full rebuild on the Skill Graph page.
 
 ### 9.3 Symphony settings in the main config
 
