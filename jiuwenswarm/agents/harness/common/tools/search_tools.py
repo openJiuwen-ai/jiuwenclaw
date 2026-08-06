@@ -33,6 +33,44 @@ _FREE_SEARCH_DEFAULT_NO_PROXY = (
     "127.0.0.1,.huawei.com,localhost,local,.local,10.155.97.247,.myhuaweicloud.com"
 )
 
+_PETAL_SEARCH_URL_ENV = "PETAL_SEARCH_URL"
+_PETAL_SEARCH_HEADERS_ENV = "PETAL_SEARCH_HEADERS"
+_PETAL_MAX_TITLE_LEN = 2000
+_PETAL_MAX_URL_LEN = 2048
+
+_PAID_PROVIDER_KEY_ENVS: dict[str, str] = {
+    "bocha": "BOCHA_API_KEY",
+    "perplexity": "PERPLEXITY_API_KEY",
+    "serper": "SERPER_API_KEY",
+    "jina": "JINA_API_KEY",
+}
+_DEFAULT_PAID_PROVIDER_ORDER: tuple[str, ...] = ("petal", "bocha")
+_KNOWN_PAID_PROVIDERS = frozenset(_PAID_PROVIDER_KEY_ENVS.keys() | {"petal"})
+
+_ENGINE_ALIAS_MAP: dict[str, str] = {
+    "duckduckgo": "duckduckgo", "ddg": "duckduckgo",
+    "谷歌": "google", "google": "google",
+    "必应": "bing", "bing": "bing",
+    "百度": "baidu", "baidu": "baidu",
+    "花瓣": "petal", "petal": "petal",
+    "博查": "bocha", "bocha": "bocha",
+    "360": "360", "好搜": "360", "so": "360",
+    "搜狗": "sogou", "sogou": "sogou",
+    "头条": "toutiao", "今日头条": "toutiao",
+}
+
+_PROVIDER_TO_ENGINE: dict[str, str] = {
+    "petal": "petal",
+    "bocha": "bocha",
+    "tavily": "tavily",
+    "perplexity": "perplexity",
+    "serper": "serper",
+    "jina": "jina",
+    "duckduckgo": "duckduckgo",
+    "duckduckgo-jina": "duckduckgo",
+    "bing": "bing",
+}
+
 
 def _get_free_search_proxy_url() -> str:
     return str(os.environ.get(_FREE_SEARCH_PROXY_URL_ENV, "") or "").strip()
@@ -47,6 +85,78 @@ def _env_bool(name: str, default: bool = True) -> bool:
 
 def _env_flag(name: str, default: bool = False) -> bool:
     return _env_bool(name, default=default)
+
+
+def _configured_paid_providers() -> list[str]:
+    order = list(_DEFAULT_PAID_PROVIDER_ORDER)
+    petal_url = str(os.environ.get(_PETAL_SEARCH_URL_ENV, "") or "").strip()
+    petal_headers = str(os.environ.get(_PETAL_SEARCH_HEADERS_ENV, "") or "").strip()
+    if not (petal_url and petal_headers):
+        order = [p for p in order if p != "petal"]
+    for name in _PAID_PROVIDER_KEY_ENVS:
+        if name not in order:
+            order.append(name)
+    return [p for p in order if _paid_provider_available(p)]
+
+
+def _paid_provider_available(name: str) -> bool:
+    if name == "petal":
+        petal_url = str(os.environ.get(_PETAL_SEARCH_URL_ENV, "") or "").strip()
+        petal_headers = str(os.environ.get(_PETAL_SEARCH_HEADERS_ENV, "") or "").strip()
+        return bool(petal_url and petal_headers)
+    key = _PAID_PROVIDER_KEY_ENVS.get(name, "")
+    return bool(key and str(os.environ.get(key, "") or "").strip())
+
+
+def _paid_provider_skip_reason(name: str) -> str:
+    if name == "petal":
+        petal_url = str(os.environ.get(_PETAL_SEARCH_URL_ENV, "") or "").strip()
+        petal_headers = str(os.environ.get(_PETAL_SEARCH_HEADERS_ENV, "") or "").strip()
+        if not petal_url:
+            return "PETAL_SEARCH_URL not set"
+        if not petal_headers:
+            return "PETAL_SEARCH_HEADERS not set"
+        return "unknown"
+    key = _PAID_PROVIDER_KEY_ENVS.get(name, "")
+    if not key:
+        return f"unknown provider: {name}"
+    return f"{key} not set"
+
+
+def _detect_requested_engine(query: str) -> str | None:
+    query_lower = query.lower()
+    for alias, engine in _ENGINE_ALIAS_MAP.items():
+        if alias.isascii():
+            if re.search(rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])", query_lower):
+                return engine
+        elif alias in query_lower:
+            return engine
+    return None
+
+
+def _generate_engine_mismatch_warning(
+    query: str,
+    actual_provider: str,
+) -> str | None:
+    requested_engine = _detect_requested_engine(query)
+    if not requested_engine:
+        return None
+    actual_engine = _PROVIDER_TO_ENGINE.get(actual_provider, actual_provider)
+    if requested_engine == actual_engine:
+        return None
+    return (
+        f"⚠️ 用户请求使用 {requested_engine} 搜索，但该引擎不可用，"
+        f"已自动切换至 {actual_provider}。"
+    )
+
+
+def _free_search_engines() -> list[str]:
+    engines = []
+    if _env_flag(_FREE_SEARCH_DDG_ENABLED_ENV, default=False):
+        engines.extend(["duckduckgo", "duckduckgo-jina"])
+    if _env_flag(_FREE_SEARCH_BING_ENABLED_ENV, default=False):
+        engines.append("bing")
+    return engines
 
 
 def _free_search_ssl_verify() -> bool:
@@ -498,9 +608,116 @@ def _jina_search_sync(query: str, timeout_seconds: int) -> dict[str, Any]:
     return {"provider": "jina", "answer": (answer or "").strip(), "urls": urls}
 
 
+def _parse_default_headers(raw: str) -> dict[str, str]:
+    if not raw or not raw.strip():
+        return {}
+    import json as _json
+    raw_stripped = raw.strip()
+    if raw_stripped.startswith("{"):
+        try:
+            parsed = _json.loads(raw_stripped)
+            if isinstance(parsed, dict):
+                return {str(k): str(v) for k, v in parsed.items() if v is not None}
+        except (_json.JSONDecodeError, ValueError):
+            pass
+    result: dict[str, str] = {}
+    for pair in raw_stripped.split(";"):
+        pair = pair.strip()
+        if not pair:
+            continue
+        if "=" in pair:
+            k, v = pair.split("=", 1)
+            result[k.strip()] = v.strip()
+    return result
+
+
+def _resolve_petal_search_url() -> str:
+    petal_url = str(os.environ.get(_PETAL_SEARCH_URL_ENV, "") or "").strip()
+    if not petal_url:
+        raise ValueError("PETAL_SEARCH_URL is not set")
+    return petal_url
+
+
+def _load_petal_default_headers() -> dict[str, str]:
+    raw = str(os.environ.get(_PETAL_SEARCH_HEADERS_ENV, "") or "").strip()
+    header_map = _parse_default_headers(raw)
+    if not header_map:
+        raise ValueError("PETAL_SEARCH_HEADERS is not set")
+    return header_map
+
+
+def _extract_petal_records(data: dict[str, Any], max_results: int) -> list[dict[str, str]]:
+    items = []
+    for container in (
+        data.get("data", {}).get("webPages", {}).get("value"),
+        data.get("webPages", {}).get("value"),
+        data.get("data", {}).get("webPages"),
+        data.get("webPages"),
+        data.get("data", {}).get("results"),
+        data.get("results"),
+    ):
+        if isinstance(container, list):
+            items = container
+            break
+
+    rows: list[dict[str, str]] = []
+    for item in items[:max_results]:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("name", "") or item.get("title", "") or "")[:_PETAL_MAX_TITLE_LEN]
+        url = str(item.get("url", "") or item.get("link", "") or "")[:_PETAL_MAX_URL_LEN]
+        snippet = str(item.get("snippet", "") or item.get("summary", "") or "")
+        if url:
+            rows.append({"title": title, "url": url, "snippet": snippet})
+    return rows
+
+
+def _extract_petal_answer(data: dict[str, Any]) -> str:
+    candidates = [
+        data.get("data", {}).get("answer"),
+        data.get("data", {}).get("summary"),
+        data.get("answer"),
+        data.get("summary"),
+    ]
+    for value in candidates:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _petal_search_sync(query: str, max_results: int, timeout_seconds: int) -> dict[str, Any]:
+    petal_url = _resolve_petal_search_url()
+    headers = _load_petal_default_headers()
+    headers["Content-Type"] = "application/json"
+
+    payload = {"query": query, "num": max_results}
+    response = _http_request(
+        "POST",
+        petal_url,
+        headers=headers,
+        json=payload,
+        timeout=timeout_seconds,
+    )
+    response.raise_for_status()
+    data = response.json()
+    records = _extract_petal_records(data, max_results)
+    answer = _extract_petal_answer(data)
+    urls = [r["url"] for r in records if r.get("url")]
+    return {"provider": "petal", "answer": answer, "urls": urls, "records": records}
+
+
+def _build_free_search_description() -> str:
+    if _free_search_engines():
+        return "Free search via DuckDuckGo/Bing. Input query and return ranked URLs with snippets."
+    return ""
+
+
 @tool(
     name="mcp_free_search",
-    description="Free search via DuckDuckGo. Input query and return ranked URLs with snippets.",
+    description=(
+        _build_free_search_description()
+        or "Free search via DuckDuckGo. Input query and return ranked URLs with snippets."
+    ),
 )
 async def mcp_free_search(query: str, max_results: int = 8, timeout_seconds: int = 20) -> str:
     query = (query or "").strip()
@@ -520,6 +737,9 @@ async def mcp_free_search(query: str, max_results: int = 8, timeout_seconds: int
         return f"No search results for: {query}"
 
     lines = [f"Free search results ({_engine_display_name(engine_used)}) for: {query}"]
+    warning = _generate_engine_mismatch_warning(query, engine_used)
+    if warning:
+        lines.append(warning)
     for idx, row in enumerate(rows, 1):
         lines.append(f"{idx}. {row['title']}")
         lines.append(f"   URL: {row['url']}")
@@ -528,13 +748,29 @@ async def mcp_free_search(query: str, max_results: int = 8, timeout_seconds: int
     return "\n".join(lines)
 
 
+def _build_paid_search_description() -> str:
+    providers = ", ".join(_configured_paid_providers()) or "bocha, petal"
+    has_free = bool(_free_search_engines())
+    base = (
+        f"Paid search via {providers}. "
+        f"Support provider=auto|{providers.replace(', ', '|')}. "
+        "search_source 可选，指定付费源名称，配合 provider 使用时优先使用指定源，不可用时返回明确错误。"
+    )
+    if has_free:
+        base += " 若用户指定使用某搜索引擎（如 bing、duckduckgo），请在 query 开头包含该引擎名称，以便系统识别并在引擎不可用时向用户说明。"
+    else:
+        base += " 若用户指定使用某付费搜索引擎，请在 query 开头包含该引擎名称，以便系统识别并在引擎不可用时向用户说明。"
+    return base
+
+
 @tool(
     name="mcp_paid_search",
-    description="Paid search via Bocha/Perplexity/SERPER/JINA. Support provider=auto|bocha|perplexity|serper|jina.",
+    description=_build_paid_search_description(),
 )
 async def mcp_paid_search(
     query: str,
     provider: str = "auto",
+    search_source: str | None = None,
     max_results: int = 8,
     timeout_seconds: int = 45,
 ) -> str:
@@ -543,13 +779,23 @@ async def mcp_paid_search(
         return "[ERROR]: query cannot be empty."
 
     provider = (provider or "auto").strip().lower()
-    if provider not in {"auto", "bocha", "jina", "serper", "perplexity"}:
-        return "[ERROR]: provider must be one of auto|bocha|jina|serper|perplexity."
+    preferred_source = None
+    if search_source:
+        raw = search_source.strip().lower()
+        if raw in _KNOWN_PAID_PROVIDERS:
+            preferred_source = raw
+
+    all_valid = {"auto"} | _KNOWN_PAID_PROVIDERS
+    if provider not in all_valid:
+        return f"[ERROR]: provider must be one of auto|{'|'.join(sorted(_KNOWN_PAID_PROVIDERS))}."
 
     timeout_seconds = max(10, min(timeout_seconds, 120))
     max_results = max(1, min(max_results, 20))
 
     runners = {
+        "petal": lambda: _petal_search_sync(
+            query=query, max_results=max_results, timeout_seconds=timeout_seconds
+        ),
         "bocha": lambda: _bocha_search_sync(
             query=query, max_results=max_results, timeout_seconds=timeout_seconds
         ),
@@ -561,31 +807,33 @@ async def mcp_paid_search(
             query=query, max_results=max_results, timeout_seconds=timeout_seconds
         ),
     }
-    
-    available_providers = []
-    if os.environ.get("BOCHA_API_KEY"):
-        available_providers.append("bocha")
-    if os.environ.get("PERPLEXITY_API_KEY"):
-        available_providers.append("perplexity")
-    if os.environ.get("SERPER_API_KEY"):
-        available_providers.append("serper")
-    if os.environ.get("JINA_API_KEY"):
-        available_providers.append("jina")
-    
-    if not available_providers:
-        return "[ERROR]: no paid search API keys configured."
-    
+
     if provider != "auto":
-        if provider not in available_providers:
-            return f"[ERROR]: {provider} API key not configured. Available providers: {', '.join(available_providers)}"
+        if not _paid_provider_available(provider):
+            reason = _paid_provider_skip_reason(provider)
+            return f"[ERROR]: requested provider '{provider}' unavailable ({reason})."
         order = [provider]
     else:
-        order = [p for p in ["bocha", "perplexity", "serper", "jina"] if p in available_providers]
+        order = _configured_paid_providers()
+        if not order:
+            return "[ERROR]: no paid search API keys configured."
+
+    if preferred_source:
+        if preferred_source in order:
+            order = [preferred_source] + [p for p in order if p != preferred_source]
+        elif provider == "auto":
+            if not _paid_provider_available(preferred_source):
+                reason = _paid_provider_skip_reason(preferred_source)
+                return f"[ERROR]: requested source '{preferred_source}' unavailable ({reason})."
+            order = [preferred_source] + order
 
     errors: list[str] = []
     for name in order:
+        runner = runners.get(name)
+        if runner is None:
+            continue
         try:
-            result = await asyncio.to_thread(runners[name])
+            result = await asyncio.to_thread(runner)
         except Exception as exc:
             errors.append(f"{name}: {exc}")
             continue
@@ -593,6 +841,9 @@ async def mcp_paid_search(
         answer = str(result.get("answer", "") or "").strip()
         urls = [str(u) for u in (result.get("urls", []) or []) if u][:max_results]
         lines = [f"Paid search provider: {name}"]
+        warning = _generate_engine_mismatch_warning(query, name)
+        if warning:
+            lines.append(warning)
         if answer:
             lines.append("Answer:")
             lines.append(answer)
@@ -601,7 +852,8 @@ async def mcp_paid_search(
             for idx, url in enumerate(urls, 1):
                 lines.append(f"{idx}. {url}")
         if not answer and not urls:
-            lines.append("No usable result payload.")
+            errors.append(f"{name}: no usable result payload")
+            continue
         return "\n".join(lines)
 
     return "[ERROR]: paid search failed. " + " | ".join(errors)
