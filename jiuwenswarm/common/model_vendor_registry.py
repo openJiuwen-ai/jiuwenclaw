@@ -39,7 +39,7 @@ Notes on verified endpoints:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
@@ -78,7 +78,6 @@ class VendorPreset:
     # 可选拉取 (vendors.fetch_models RPC)
     models_endpoint: str | None = None     # GET /models endpoint; None = not supported
     models_needs_key: bool = True          # whether fetch requires api_key
-    models_extra_auth: dict[str, str] = field(default_factory=dict)  # e.g. minimax group_id hint
     # Anthropic-format base for this plan (custom_api allows switching OpenAI<->Anthropic)
     anthropic_base: str | None = None      # None = vendor has no Anthropic endpoint
 
@@ -120,7 +119,6 @@ _PRESETS: list[VendorPreset] = [
         icon_key="minimax",
         models_endpoint="https://api.minimaxi.com/v1/models",
         models_needs_key=True,
-        models_extra_auth={"group_id": "<可选,旧版需要>"},
         anthropic_base="https://api.minimaxi.com/anthropic",
     ),
     VendorPreset(
@@ -316,7 +314,6 @@ _PRESETS: list[VendorPreset] = [
         icon_key="minimax",
         models_endpoint="https://api.minimaxi.com/v1/models",
         models_needs_key=True,
-        models_extra_auth={"group_id": "<可选>"},
         anthropic_base="https://api.minimaxi.com/anthropic",
     ),
     VendorPreset(
@@ -427,7 +424,6 @@ def to_frontend_payload() -> dict[str, Any]:
                 "icon_key": p.icon_key,
                 "models_endpoint": p.models_endpoint,
                 "models_needs_key": p.models_needs_key,
-                "models_extra_auth": dict(p.models_extra_auth),
                 # Anthropic 格式(可选切换): 仅当 anthropic_base 非空时可用,
                 # 切换后落库 client_provider=ANTHROPIC_CLIENT_PROVIDER、
                 # api_base=anthropic_base(core 用 AnthropicModelClient 走 /v1/messages)。
