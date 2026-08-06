@@ -27,7 +27,6 @@ from jiuwenswarm.common.config import (
 )
 from jiuwenswarm.common.utils import (
     get_agent_root_dir,
-    get_agent_workspace_dir,
     get_config_file,
 )
 
@@ -125,35 +124,44 @@ def find_nested_files_conflict(
     return None
 
 
-def _resolve_workspace_dir() -> Path | None:
-    """Resolve agent workspace directory for sandbox rw bind."""
+def _resolve_shared_dir() -> Path | None:
+    """Resolve agent root directory for sandbox rw bind (shared downloads + workspace).
+
+    Mounts ``get_agent_root_dir()`` (e.g. ``~/.jiuwenswarm/agent``) rather than only
+    ``agent/workspace``, so sandbox downloads and sibling paths under the agent root
+    remain writable (download permission fix).
+    """
     try:
-        workspace = Path(get_agent_workspace_dir()).expanduser().resolve()
+        shared = Path(get_agent_root_dir()).expanduser().resolve()
     except OSError as exc:
-        logger.debug("[sysop_builder] workspace dir resolve failed: %s", exc)
+        logger.debug("[sysop_builder] shared dir resolve failed: %s", exc)
         return None
-    if workspace == Path(workspace.anchor):
+    if shared == Path(shared.anchor):
         logger.warning(
-            "[sysop_builder] refusing to mount filesystem root %s as workspace",
-            workspace,
+            "[sysop_builder] refusing to mount filesystem root %s as shared dir",
+            shared,
         )
         return None
     try:
-        workspace.mkdir(parents=True, exist_ok=True)
+        shared.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         logger.warning(
-            "[sysop_builder] could not ensure workspace dir %s: %s",
-            workspace,
+            "[sysop_builder] could not ensure shared dir %s: %s",
+            shared,
             exc,
         )
         return None
-    if not workspace.is_dir():
+    if not shared.is_dir():
         logger.debug(
-            "[sysop_builder] workspace %s is not a directory; skipping",
-            workspace,
+            "[sysop_builder] shared dir %s is not a directory; skipping",
+            shared,
         )
         return None
-    return workspace
+    return shared
+
+
+# Backward-compatible alias
+_resolve_workspace_dir = _resolve_shared_dir
 
 
 def _resolve_config_ro_path() -> Path | None:
@@ -507,7 +515,7 @@ def build_filesystem_policy(
         _record_rw_bind(path_str, path_str, is_dir=True, permissions="0777")
         mounted_rw_paths.add(path_str)
 
-    resolved_workspace = _resolve_workspace_dir()
+    resolved_workspace = _resolve_shared_dir()
     if resolved_workspace is not None:
         _mount_rw_dir(resolved_workspace)
 
@@ -805,7 +813,7 @@ def list_auto_managed_sandbox_paths(
 
     Mirrors :func:`build_filesystem_policy` auto-managed mounts:
 
-    - ``workspace`` → ``allow_write`` (rw)
+    - ``shared`` (agent root) → ``allow_write`` (rw)
     - ``project_dir`` (when resolved) → ``allow_write`` (rw)
     - ``config.yaml`` → ``deny_write`` (ro) only when ``startup_mode=internal``
     """
@@ -816,7 +824,7 @@ def list_auto_managed_sandbox_paths(
         startup_mode if startup_mode is not None else get_sandbox_startup_mode()
     )
 
-    workspace = _resolve_workspace_dir()
+    workspace = _resolve_shared_dir()
     if workspace is not None:
         _append_unique(
             allow,
