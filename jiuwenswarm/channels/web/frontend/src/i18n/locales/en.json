@@ -2990,7 +2990,36 @@
       "loading": "Loading…",
       "empty": "No heartbeat jobs in this session yet",
       "create": "New heartbeat job",
-      "edit": "Edit"
+      "edit": "Edit",
+      "runNow": "Run now",
+      "cancelRun": "Cancel this run",
+      "pause": "Pause",
+      "resume": "Resume",
+      "delete": "Delete",
+      "deleteConfirm": "Delete heartbeat job \"{{name}}\"?"
+    },
+    "toast": {
+      "paused": "Future schedule paused",
+      "resumed": "Future schedule resumed",
+      "deleteConflict": "Could not cancel the active run, try again later",
+      "runNowAccepted": "Accepted, starting shortly",
+      "runNowQueued": "Queued for execution",
+      "runNowRejected": {
+        "session_missing": "Original session missing, not executed",
+        "session_busy": "Session busy, not executed",
+        "previous_run_active": "Previous run still active, skipped",
+        "already_queued": "A run is already queued, not duplicated",
+        "replacement_pending": "Replacing the previous run, please wait",
+        "replacement_cancel_failed": "Could not cancel the previous run, not executed",
+        "job_disabled_during_replace": "Job was disabled during replacement, not executed",
+        "unknown": "Not executed, reason unknown"
+      },
+      "cancel": {
+        "idle": "No run currently active",
+        "cancelled": "Current run cancelled",
+        "not_found": "Current run already finished or missing",
+        "failed": "Cancel failed, status unconfirmed"
+      }
     }
   }
 }
