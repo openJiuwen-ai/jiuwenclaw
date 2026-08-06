@@ -2948,5 +2948,14 @@
     "authRequired": "Sign-in required to access",
     "secureHint": "You'll stay signed in after login",
     "logout": "Sign out"
+  },
+  "heartbeat": {
+    "status": {
+      "running": "Running",
+      "scheduled": "Scheduled",
+      "paused": "Paused",
+      "completed": "Completed",
+      "expired": "Expired"
+    }
   }
 }

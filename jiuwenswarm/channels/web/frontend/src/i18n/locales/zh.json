@@ -2945,5 +2945,14 @@
     "authRequired": "需要登录后才能访问",
     "secureHint": "登录后将自动保持登录状态",
     "logout": "登出"
+  },
+  "heartbeat": {
+    "status": {
+      "running": "执行中",
+      "scheduled": "已排期",
+      "paused": "已暂停",
+      "completed": "已完成",
+      "expired": "已过期"
+    }
   }
 }
