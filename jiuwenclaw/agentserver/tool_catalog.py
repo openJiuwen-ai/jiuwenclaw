@@ -91,6 +91,29 @@ def _has_cjk(text: str) -> bool:
     return bool(_CJK_RE.search(text))
 
 
+# Markdown structural lines to skip when extracting a short description:
+# headings, lists, ordered lists, blockquotes, and code fences.
+_MARKDOWN_STRUCTURE_RE = re.compile(
+    r"^(?:#{1,6}[ \t]*|[-*+][ \t]+|\d+[.)][ \t]+|>[ \t]*|```+)"
+)
+
+
+def _strip_markdown_inline(text: str) -> str:
+    """Strip inline Markdown marks (code spans, emphasis, links) to plain text.
+
+    Keeps the prose so sentence splitting only sees human-readable content,
+    instead of leaking markers like ``## `` or `` `code` `` into the result.
+    """
+    out = str(text or "")
+    # code spans `x` -> x ; bold **x** -> x
+    out = re.sub(r"`[^`]*`", lambda m: m.group(0)[1:-1], out)
+    out = re.sub(r"\*\*([^*]+)\*\*", r"\1", out)
+    # images ![alt](url) -> '' ; links [text](url) -> text
+    out = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", out)
+    out = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", out)
+    return out
+
+
 def short_description_from_description(description: str) -> str:
     """从 ToolCard.description 提取 short_description：中英文各取第一句，再截断至 100 字。"""
     desc = str(description or "").strip()
@@ -103,6 +126,11 @@ def short_description_from_description(description: str) -> str:
     zh_sentence: str | None = None
     en_sentence: str | None = None
     for paragraph in paragraphs:
+        # Skip Markdown structural lines (headings, lists, blockquotes, fences)
+        # so their markers are not mistaken for descriptive sentences.
+        if _MARKDOWN_STRUCTURE_RE.match(paragraph):
+            continue
+        paragraph = _strip_markdown_inline(paragraph)
         for sentence in _split_sentences(paragraph):
             if _has_cjk(sentence):
                 if zh_sentence is None:
@@ -114,7 +142,7 @@ def short_description_from_description(description: str) -> str:
 
     sentences = [part for part in (zh_sentence, en_sentence) if part]
     if not sentences:
-        first = _split_sentences(paragraphs[0])
+        first = _split_sentences(_strip_markdown_inline(paragraphs[0]))
         sentences = [first[0]] if first else [paragraphs[0]]
 
     joined = " ".join(sentences)

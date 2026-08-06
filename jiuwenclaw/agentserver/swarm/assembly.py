@@ -64,6 +64,18 @@ def enrich_team_spec_for_swarm(
     register_swarm_providers()
 
     config = get_config()
+    # When plan/project root is bound, bake shared workspace under
+    # ``{project}/.agent_teams/{team}/team-workspace`` (caller should enter
+    # ``agent_teams_home_scope`` so ``team_home`` resolves there).
+    project_root = str(project_dir or "").strip()
+    if project_root:
+        desired_ws = str(team_home(spec.team_name) / "team-workspace")
+        workspace = spec.workspace
+        if workspace is None:
+            spec.workspace = WorkspaceSpec(enabled=True, root_path=desired_ws)
+        elif not str(getattr(workspace, "root_path", "") or "").strip():
+            spec.workspace = workspace.model_copy(update={"root_path": desired_ws})
+
     workspace = spec.workspace
     team_ws_root = (
         workspace.root_path
@@ -71,6 +83,7 @@ def enrich_team_spec_for_swarm(
         else str(team_home(spec.team_name) / "team-workspace")
     )
     team_skills_dir = str(Path(team_ws_root) / "skills")
+    leader_skills_dir = str(Path(team_ws_root) / "leader-skills")
     global_skills_dir = str(get_agent_skills_dir())
 
     base = SwarmBuildContext(
@@ -84,11 +97,12 @@ def enrich_team_spec_for_swarm(
         team_id=spec.team_name,
         team_ws_root=team_ws_root,
         team_skills_dir=team_skills_dir,
+        leader_skills_dir=leader_skills_dir,
         global_skills_dir=global_skills_dir,
         trajectory_registry=None,
         config=config,
     )
-    # MCP provider assembly deferred; keep enrich pipeline complete with empty list.
+    # MCP provider assembly deferred; catalog tools mount via BuiltinToolSpec.
     mcp_configs: list[Any] = []
     leader_name = _leader_member_name(spec)
 

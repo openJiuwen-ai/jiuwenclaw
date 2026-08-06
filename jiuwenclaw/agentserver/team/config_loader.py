@@ -22,7 +22,11 @@ _DEFAULT_TEAM_WORKSPACE = {"enabled": True}
 _DEFAULT_TRANSPORT = {"type": "inprocess"}
 
 
-def _select_first_modes_team(config_base: dict[str, Any]) -> dict[str, Any]:
+class TeamTemplateNotFoundError(ValueError):
+    """Raised when a bound team references a template that no longer exists."""
+
+
+def _get_modes_team(config_base: dict[str, Any]) -> dict[str, Any]:
     modes_raw = config_base.get("modes", {})
     if not isinstance(modes_raw, dict):
         return {}
@@ -30,28 +34,72 @@ def _select_first_modes_team(config_base: dict[str, Any]) -> dict[str, Any]:
     teams_raw = modes_raw.get("team", {})
     if not isinstance(teams_raw, dict):
         return {}
+    return teams_raw
+
+
+def get_team_template_snapshot(
+    config_base: dict[str, Any] | None = None,
+    *,
+    template_id: str,
+) -> dict[str, Any]:
+    """Return a copy of the selected raw team template for team entity persistence."""
+    if config_base is None:
+        config_base = get_config()
+    resolved_template_id, team_raw = _select_modes_team(
+        config_base,
+        template_id=template_id,
+        strict_template=True,
+    )
+    snapshot = deepcopy(team_raw)
+    if resolved_template_id and not str(snapshot.get("team_name") or "").strip():
+        snapshot["team_name"] = resolved_template_id
+    return snapshot
+
+
+def _select_modes_team(
+    config_base: dict[str, Any],
+    template_id: str | None = None,
+    *,
+    strict_template: bool = False,
+) -> tuple[str, dict[str, Any]]:
+    """Select a team template from ``modes.team`` only."""
+    teams_raw = _get_modes_team(config_base)
+    requested_template_id = str(template_id or "").strip()
+    if requested_template_id:
+        candidate = teams_raw.get(requested_template_id)
+        if isinstance(candidate, dict):
+            logger.debug("[TeamConfigLoader] selected team template: %s", requested_template_id)
+            return requested_template_id, candidate
+        if strict_template:
+            raise TeamTemplateNotFoundError(f"team template not found: {requested_template_id}")
+        logger.warning("[TeamConfigLoader] requested team template not found: %s", requested_template_id)
 
     for team_name, team_raw in teams_raw.items():
         if isinstance(team_raw, dict):
             logger.debug("[TeamConfigLoader] selected team from modes.team: %s", team_name)
-            return team_raw
+            return str(team_name), team_raw
 
-    return {}
+    return "", {}
+
+
+def _select_first_modes_team(config_base: dict[str, Any]) -> dict[str, Any]:
+    _, team_raw = _select_modes_team(config_base)
+    return team_raw
+
+
+def resolve_team_section(config_base: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Return the active ``modes.team`` entry (first / only operational team section).
+
+    Used by distributed / remote helpers that previously read a top-level
+    ``config.team`` block. Roster and runtime settings live under ``modes.team``.
+    """
+    if config_base is None:
+        config_base = get_config()
+    return _select_first_modes_team(config_base)
 
 
 def _resolve_team_raw_for_storage(config_base: dict[str, Any]) -> dict[str, Any]:
-    selected = _select_first_modes_team(config_base)
-    if selected:
-        return selected
-
-    legacy_team = config_base.get("team", {})
-    if isinstance(legacy_team, dict) and legacy_team:
-        return legacy_team
-
-    if any(key in config_base for key in ("team_name", "leader", "agents", "storage", "predefined_members")):
-        return config_base
-
-    return {}
+    return _select_first_modes_team(config_base) or {}
 
 
 def resolve_team_sqlite_db_path(config_base: dict[str, Any] | None = None) -> Path | None:
@@ -299,12 +347,38 @@ def _build_leader_spec(team_raw: dict[str, Any]) -> dict[str, Any]:
         or str(leader_raw.get("display_name", "")).strip()
         or "TeamLeader"
     )
-    return {
+    leader_spec = {
         "member_name": leader_raw.get("member_name", "team_leader"),
         "display_name": leader_raw.get("display_name", "Team Leader"),
         "name": leader_name,
-        "persona": leader_raw.get("persona", "天才项目管理专家"),
     }
+    leader_spec.update(_map_member_public_private_fields(leader_raw, default_desc="天才项目管理专家"))
+    return leader_spec
+
+
+def _map_member_public_private_fields(
+    raw: dict[str, Any],
+    *,
+    default_desc: str = "",
+) -> dict[str, str]:
+    """Map relay/legacy identity fields onto TeamMemberSpec ``desc`` / ``prompt``.
+
+    openjiuwen F_49 split public roster text (``desc``) from private prompt
+    (``prompt``). Relay still syncs ``persona`` / ``prompt_hint``; without this
+    mapping those keys are dropped by pydantic and the Leader roster has empty
+    ``desc``, so ``create_task`` omits ``assignee`` and members race one claim
+    pool (assistant often wins). Swarm Leaders set assignees because their
+    roster carries real capability text.
+    """
+    desc = str(raw.get("desc") or raw.get("persona") or default_desc or "").strip()
+    prompt = str(raw.get("prompt") or "").strip()
+    if not prompt:
+        prompt_parts = [
+            str(raw.get("persona") or "").strip(),
+            str(raw.get("prompt_hint") or "").strip(),
+        ]
+        prompt = "\n\n".join(part for part in prompt_parts if part)
+    return {"desc": desc, "prompt": prompt}
 
 
 def _build_predefined_members(team_raw: dict[str, Any]) -> list[dict[str, Any]]:
@@ -334,7 +408,10 @@ def _build_predefined_members(team_raw: dict[str, Any]) -> list[dict[str, Any]]:
         member_spec = deepcopy(item)
         member_spec["member_name"] = member_name
         member_spec["display_name"] = str(identity_name).strip()
-        member_spec["persona"] = member_spec.get("persona") or ""
+        member_spec.update(_map_member_public_private_fields(member_spec))
+        # Drop legacy keys so TeamMemberSpec does not silently ignore them.
+        member_spec.pop("persona", None)
+        member_spec.pop("prompt_hint", None)
         # openjiuwen TeamMemberSpec 现按 role_type 判别联合类型，缺省补 teammate
         role_type = str(member_spec.get("role_type") or "").strip()
         member_spec["role_type"] = role_type or "teammate"
@@ -344,22 +421,22 @@ def _build_predefined_members(team_raw: dict[str, Any]) -> list[dict[str, Any]]:
     return predefined_members
 
 
-def _resolve_enable_permissions(config_base: dict[str, Any], team_raw: dict[str, Any]) -> bool:
+def _resolve_enable_permissions(config_base: dict[str, Any], _team_raw: dict[str, Any]) -> bool:
     """Resolve the effective team-permission toggle.
 
-    The effective value is ``permissions.enabled`` (global) AND
-    ``enable_permissions`` (team-level). Both must be true for
-    TeamPermissionRail to mount on teammates.
+    Team mode uses the same safety rail as plan: the global
+    ``permissions.enabled`` switch. A per-team ``enable_permissions``
+    field is ignored (not AND-gated) so the master switch applies
+    directly.
     """
-    global_enabled = bool((config_base.get("permissions") or {}).get("enabled", False))
-    team_enabled = bool(team_raw.get("enable_permissions", False))
-    return global_enabled and team_enabled
+    return bool((config_base.get("permissions") or {}).get("enabled", False))
 
 
 def load_team_spec_dict(
     config_base: dict[str, Any] | None = None,
     *,
     requested_model_name: str | None = None,
+    template_id: str | None = None,
 ) -> dict[str, Any]:
     """Load team config and build a TeamAgentSpec-compatible dict.
 
@@ -367,10 +444,32 @@ def load_team_spec_dict(
     selector), team members without an explicit ``modes.team.agents.*.model``
     fall back to the matching entry in ``models.defaults`` instead of the
     first list item.
+
+    When ``template_id`` is provided (e.g. chat.send ``params.team_name`` from
+    a bound expert team), select that ``modes.team`` entry instead of the first
+    key. Missing template raises ``TeamTemplateNotFoundError``.
     """
     if config_base is None:
         config_base = get_config()
-    team_raw = _select_first_modes_team(config_base)
+    requested_template = str(template_id or "").strip() or None
+    if requested_template:
+        resolved_id, team_raw = _select_modes_team(
+            config_base,
+            template_id=requested_template,
+            strict_template=True,
+        )
+        logger.info(
+            "[TeamConfigLoader] selected team by template_id=%s resolved=%s",
+            requested_template,
+            resolved_id,
+        )
+    else:
+        resolved_id, team_raw = _select_modes_team(config_base)
+        if resolved_id:
+            logger.info(
+                "[TeamConfigLoader] selected first modes.team entry: %s",
+                resolved_id,
+            )
 
     if not team_raw:
         logger.warning("[TeamConfigLoader] no modes.team config found, using defaults")
@@ -384,11 +483,17 @@ def load_team_spec_dict(
     spec_dict = deepcopy(team_raw)
     spec_dict.pop("enable_team_plan", None)
 
-    spec_dict["team_name"] = str(team_raw.get("team_name", "team")).strip() or "team"
+    # Prefer modes.team map key when present so session-scoped naming stays aligned
+    # with the catalog key relay sends as chat.send params.team_name.
+    spec_dict["team_name"] = (
+        str(resolved_id or team_raw.get("team_name", "team") or "team").strip() or "team"
+    )
     spec_dict["lifecycle"] = team_raw.get("lifecycle", "persistent")
     spec_dict["teammate_mode"] = team_raw.get("teammate_mode", "build_mode")
     spec_dict["spawn_mode"] = team_raw.get("spawn_mode", "inprocess")
-    spec_dict["enable_hitt"] = team_raw.get("enable_hitt", True)
+    # Human-member (HITT) is not migrated for ENT/relay yet — keep off unless
+    # modes.team.enable_hitt is explicitly set true in config.
+    spec_dict["enable_hitt"] = team_raw.get("enable_hitt", False)
     spec_dict["enable_permissions"] = _resolve_enable_permissions(config_base, team_raw)
     spec_dict["leader"] = _build_leader_spec(team_raw)
     spec_dict["agents"] = agents

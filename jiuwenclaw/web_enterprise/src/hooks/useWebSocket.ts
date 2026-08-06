@@ -332,6 +332,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const params: Record<string, unknown> = {
           session_id: sessionId,
           intent,
+          // Must match the cancelled chat.send mode bucket in AgentManager.
+          mode: useSessionStore.getState().mode,
         };
         if (intent === 'supplement') {
           params.new_input = newInput ?? '';
@@ -561,34 +563,40 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       }),
       webClient.on('chat.final', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;
-        
+        if (shouldDropDuplicatedEvent('chat.final', payload)) return;
+
         const currentMode = useSessionStore.getState().mode;
         const content = normalizeFinalContent(payload);
-        
-        // team 模式下，将 chat.final 作为 team_leader 消息处理
-        if (currentMode === 'team' && content) {
+
+        // In team mode, chat.final only closes the leader bubble; do not end
+        // the whole round. The backend may still emit chat.final while members
+        // are running; the true end is chat.processing_status(is_processing=false)
+        // (usually with team.completed). Do not setProcessing(false) here.
+        if (currentMode === 'team') {
           setThinking(false);
-          
-          const { messages } = useChatStore.getState();
-          const existingMsg = messages.find(m => 
-            m.id.startsWith('team-leader-') && 
-            (m as { isStreaming?: boolean }).isStreaming === true
-          );
-          
-          if (existingMsg) {
-            updateMessage(existingMsg.id, { content, isStreaming: false });
-          } else {
+          clearSubtasks();
+          if (content) {
+            const { messages } = useChatStore.getState();
+            const existingMsg = messages.find(m =>
+              m.id.startsWith('team-leader-') &&
+              (m as { isStreaming?: boolean }).isStreaming === true
+            );
             const timestamp = payload.timestamp || Date.now();
-            addMessage({
-              id: `team-leader-${Date.now()}`,
-              role: 'system',
-              content: `team.leader:${JSON.stringify({ content, timestamp })}`,
-              timestamp: new Date().toISOString(),
-            });
+            const leaderContent = `team.leader:${JSON.stringify({ content, timestamp })}`;
+            if (existingMsg) {
+              updateMessage(existingMsg.id, { content: leaderContent, isStreaming: false });
+            } else {
+              addMessage({
+                id: `team-leader-${Date.now()}`,
+                role: 'system',
+                content: leaderContent,
+                timestamp: new Date().toISOString(),
+              });
+            }
           }
           return;
         }
-        
+
         const { currentStreamId, messages } = useChatStore.getState();
         const payloadSessionId =
           typeof payload.session_id === 'string' ? payload.session_id.trim() : '';
@@ -731,14 +739,6 @@ webClient.on('chat.tool_call', ({ payload }) => {
             });
           }
           return;
-        }
-        const { currentStreamId, messages } = useChatStore.getState();
-        const currentStreamMessage =
-          currentMode === 'team'
-            ? findActiveTeamLeaderMessage()
-            : currentStreamId
-              ? messages.find((msg) => msg.id === currentStreamId)
-              : undefined;
         }
         const normalized = normalizeToolCallPayload(payload);
         addToolCall({
@@ -950,6 +950,15 @@ webClient.on('chat.tool_call', ({ payload }) => {
           }
           setProcessing(false);
           setThinking(false);
+          // Pause aborts member LLM streams promptly, but pending tool rows
+          // never receive chat.tool_result — clear their spinners here.
+          useChatStore.getState().markInterruptedExecutions();
+          for (const member of useSessionStore.getState().teamMembers) {
+            const status = `${member.status || ''}`.toLowerCase();
+            if (status.includes('running') || status.includes('busy') || status.includes('working') || status.includes('execut')) {
+              useSessionStore.getState().updateTeamMemberStatus(member.member_id, 'paused');
+            }
+          }
         } else if (resultPayload.intent === 'resume') {
           if (resultPayload.success) {
             setPaused(false);
@@ -958,6 +967,7 @@ webClient.on('chat.tool_call', ({ payload }) => {
           setPaused(false);
           setProcessing(false);
           setThinking(false);
+          useChatStore.getState().markInterruptedExecutions();
         } else if (resultPayload.intent === 'supplement') {
           setPaused(false);
         }

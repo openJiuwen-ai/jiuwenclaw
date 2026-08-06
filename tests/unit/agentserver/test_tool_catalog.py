@@ -38,6 +38,19 @@ def test_short_description_from_description_bilingual_paragraphs() -> None:
     assert text == "在会话工作目录下执行 Shell 命令。 Execute commands in the session workspace."
 
 
+def test_short_description_skips_markdown_structural_lines() -> None:
+    text = short_description_from_description(
+        "组建团队并注册自己为 Leader。拿到目标后就调用，不要犹豫。\n"
+        "\n"
+        "## HITT（Human in the Team）\n"
+        "HITT 是分层开关，`enable_hitt` 是运行时开关。\n"
+        "- 这些成员只能用 send_message。\n"
+        "- enable_hitt=true 本次显式启用。"
+    )
+    # Markdown 标题行（## …）与列表项不应被当作描述句提取，只保留首句。
+    assert text == "组建团队并注册自己为 Leader。"
+
+
 def test_resolve_short_description_uses_description_not_tool_name() -> None:
     short = resolve_short_description("bash", "Long model-facing description for bash execution.")
     assert short == "Long model-facing description for bash execution."

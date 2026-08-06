@@ -19,7 +19,8 @@ from jiuwenclaw.tool_arguments_validator import (
         ('{"content":"abc', "truncated", False),
         ('["a"]', "not_object", False),
         ('"abc"', "not_object", False),
-        ("", "invalid_json", False),
+        ("", "empty_object", True),
+        ("   ", "empty_object", True),
         (None, "not_string_or_dict", False),
     ],
 )

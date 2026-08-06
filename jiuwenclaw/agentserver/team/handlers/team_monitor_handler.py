@@ -228,6 +228,17 @@ class TeamMonitorHandler(BaseMonitorHandler):
             ``None`` so the caller can still emit the event with ``task_id`` +
             ``status`` (no body) — never blocks the event stream.
         """
+        fields = await self._lookup_task_fields(task_id)
+        if fields is None:
+            return None
+        return fields[0], fields[1]
+
+    async def _lookup_task_fields(self, task_id: str) -> tuple[str, str, str | None] | None:
+        """Re-query title/content/assignee for a task event.
+
+        Returns:
+            ``(title, content, assignee)`` when the task exists, else ``None``.
+        """
         if self._monitor is None or not task_id:
             return None
         try:
@@ -241,17 +252,20 @@ class TeamMonitorHandler(BaseMonitorHandler):
             return None
         if task is None:
             return None
-        return task.title, task.content
+        assignee = getattr(task, "assignee", None)
+        assignee_str = str(assignee).strip() if assignee else None
+        return task.title, task.content, assignee_str or None
 
     async def _handle_task(self, base: dict[str, Any], event: MonitorEvent) -> dict[str, Any]:
         """Converge every task event into the frontend-ready task shape.
 
         The authoritative task status is resolved once here (server-side) so the
         frontend reads ``status`` directly and never re-derives it from the event
-        type. The assignee already rides in ``member_id`` set by the caller.
+        type. Assignee preference: claimer ``event.member_name``, else DB
+        reserved ``task.assignee`` (create-with-assignee before claim).
 
         For ``TASK_CREATED`` / ``TASK_UPDATED`` only, the title/content are
-        re-queried from the DB (via ``_lookup_task_body``) and attached here so
+        re-queried from the DB (via ``_lookup_task_fields``) and attached here so
         these events become the single source of truth for the task body — the
         frontend's optimistic card (built from the tool_call ``id``) and the
         event card (built from the DB ``task_id``) can then merge. Body fields
@@ -272,13 +286,22 @@ class TeamMonitorHandler(BaseMonitorHandler):
         resolved = event.status or _TASK_EVENT_STATUS.get(event.event_type)
         if resolved:
             base["status"] = resolved
-        if event.event_type in _TASK_BODY_EVENT_TYPES and event.task_id:
-            body = await self._lookup_task_body(event.task_id)
-            if body is not None:
-                title_field = _task_text_field("title", body[0])
-                content_field = _task_text_field("content", body[1])
-                base.update(title_field)
-                base.update(content_field)
+        db_assignee: str | None = None
+        if event.task_id:
+            fields = await self._lookup_task_fields(event.task_id)
+            if fields is not None:
+                title, content, db_assignee = fields
+                if event.event_type in _TASK_BODY_EVENT_TYPES:
+                    title_field = _task_text_field("title", title)
+                    content_field = _task_text_field("content", content)
+                    base.update(title_field)
+                    base.update(content_field)
+        # Prefer claimer on the event; fall back to reserved create-time assignee
+        # so TeamRunPanel can show the member card before claim/complete.
+        if event.member_name:
+            base["assignee"] = event.member_name
+        elif db_assignee:
+            base["assignee"] = db_assignee
         return base
 
     async def _handle_message(self, base: dict[str, Any], event: MonitorEvent) -> dict[str, Any]:
@@ -376,6 +399,10 @@ class TeamMonitorHandler(BaseMonitorHandler):
                 event_data = await handler(event_data, event)
             else:
                 event_data = handler(event_data, event)
+
+        # Pass through MonitorEvent.timestamp (ms) on every team.* payload.
+        if event.timestamp is not None:
+            event_data["timestamp"] = event.timestamp
 
         return {
             "event_type": event_category.value,
