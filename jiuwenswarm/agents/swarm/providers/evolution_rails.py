@@ -19,8 +19,14 @@ captured on the instance at construction time by the provider factory.
 from __future__ import annotations
 
 import logging
+import os
+import re
+import shutil
+import uuid
 from pathlib import Path
 from typing import Any
+
+import portalocker
 
 from openjiuwen.agent_teams.harness.manifest import (
     ConstructionInput,
@@ -49,6 +55,90 @@ TEAM_SKILL_EVOLUTION = "swarm.team_skill_evolution"
 TEAM_SKILL_CREATE = "swarm.team_skill_create"
 MEMBER_SKILL_EVOLUTION = "swarm.member_skill_evolution"
 EVOLUTION_INTERRUPT = "swarm.evolution_interrupt"
+
+_SAFE_SKILL_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _member_skills_dir_from_context(ctx: Any) -> str | None:
+    """Resolve the current member's private Skill directory."""
+    workspace = getattr(ctx, "workspace", None)
+    if workspace is not None:
+        get_node_path = getattr(workspace, "get_node_path", None)
+        if callable(get_node_path):
+            value = get_node_path("skills")
+            if value:
+                return str(value)
+        root_path = getattr(workspace, "root_path", None)
+        if root_path:
+            return str(Path(root_path) / "skills")
+
+    team_id = str(getattr(ctx, "team_id", "") or "").strip()
+    member_name = str(getattr(ctx, "member_name", "") or "").strip()
+    if team_id and member_name:
+        from openjiuwen.agent_teams.workspace_layout import team_member_workspace_path
+
+        return str(team_member_workspace_path(team_id, member_name) / "skills")
+    return None
+
+
+def ensure_member_skill_copy(
+    *,
+    member_skills_dir: str | Path,
+    global_skills_dir: str | Path,
+    skill_name: str,
+) -> Path:
+    """Materialize one global Skill as a member-owned copy before mutation.
+
+    Member workspaces historically contain links into the global Skill store.
+    Evolution must never follow such a link when its intended scope is one
+    member.  This helper atomically replaces that link (or fills a missing
+    entry) with a real directory while preserving an existing private copy.
+    """
+    normalized_name = str(skill_name or "").strip()
+    if not normalized_name or _SAFE_SKILL_NAME.fullmatch(normalized_name) is None:
+        raise ValueError(f"unsafe Skill name: {skill_name!r}")
+
+    member_root = Path(member_skills_dir).expanduser()
+    global_root = Path(global_skills_dir).expanduser().resolve()
+    source = global_root / normalized_name
+    if not source.is_dir() or not (source / "SKILL.md").is_file():
+        raise FileNotFoundError(f"global Skill '{normalized_name}' does not exist: {source}")
+
+    member_root.mkdir(parents=True, exist_ok=True)
+    destination = member_root / normalized_name
+    lock_path = member_root / ".member-skill-copy.lock"
+    with portalocker.Lock(str(lock_path), timeout=30):
+        if destination.is_dir():
+            try:
+                if destination.resolve() != source.resolve():
+                    return destination
+            except OSError:
+                pass
+
+        temporary = member_root / f".{normalized_name}.copy-{uuid.uuid4().hex}"
+        try:
+            shutil.copytree(
+                source,
+                temporary,
+                symlinks=False,
+                copy_function=shutil.copy2,
+                dirs_exist_ok=False,
+            )
+            if os.path.lexists(destination):
+                from jiuwenswarm.agents.harness.team.team_skill_links import (
+                    remove_skill_dir_link,
+                )
+
+                remove_skill_dir_link(destination)
+            if os.path.lexists(destination):
+                # A real directory appeared while the copy was prepared. It is
+                # already member-owned, so preserve it rather than overwriting.
+                return destination
+            os.replace(temporary, destination)
+            return destination
+        finally:
+            if temporary.exists():
+                shutil.rmtree(temporary, ignore_errors=True)
 
 
 def _skill_library_dir(ctx: SwarmBuildContext) -> str:
@@ -198,6 +288,11 @@ class SwarmTeamSkillEvolutionRail(TeamSkillEvolutionRail):
             trajectory_span_processor=trajectory_span_processor,
         )
 
+    def bind_review_feedback_skill_rail(self, rail: SkillEvolutionRail) -> None:
+        """Bind the global regular-Skill sidecar used at team aggregation."""
+
+        self._swarm_review_feedback_skill_rail = rail
+
     def init(self, agent: Any) -> None:
         """Attach to *agent* and register with the per-channel team manager.
 
@@ -211,6 +306,12 @@ class SwarmTeamSkillEvolutionRail(TeamSkillEvolutionRail):
             team_manager = get_team_manager(self._swarm_channel)
             team_manager.register_team_live_rail(self._swarm_session_id, agent, self)
             team_manager.register_team_skill_rail(self._swarm_session_id, self)
+            review_feedback_rail = getattr(self, "_swarm_review_feedback_skill_rail", None)
+            if review_feedback_rail is not None:
+                team_manager.register_review_feedback_skill_rail(
+                    self._swarm_session_id,
+                    review_feedback_rail,
+                )
             if team_manager.consume_team_evolution_watcher_deferred(self._swarm_session_id):
                 from jiuwenswarm.server.runtime.agent_adapter.team_helpers import (
                     ensure_team_evolution_watcher,
@@ -344,6 +445,47 @@ class SwarmMemberSkillEvolutionRail(SkillEvolutionRail):
             trajectory_span_processor=trajectory_span_processor,
         )
         self._swarm_member_info = (team_id, language)
+        self._swarm_member_name = member_name
+        self._swarm_member_skills_dir = member_skills_dir
+        self._swarm_global_skills_dir = global_skills_dir
+
+    async def _handle_evolution_from_signals(
+        self,
+        *,
+        skill_name: str,
+        **kwargs: Any,
+    ) -> Any:
+        """Copy-on-write the target Skill, then use the standard evolution path."""
+        if not self._swarm_member_skills_dir or not self._swarm_global_skills_dir:
+            raise RuntimeError("member Skill copy-on-write scope is not configured")
+        ensure_member_skill_copy(
+            member_skills_dir=self._swarm_member_skills_dir,
+            global_skills_dir=self._swarm_global_skills_dir,
+            skill_name=skill_name,
+        )
+        return await super()._handle_evolution_from_signals(
+            skill_name=skill_name,
+            **kwargs,
+        )
+
+    async def _evolve_skill_with_sharing(
+        self,
+        *,
+        skill_name: str,
+        **kwargs: Any,
+    ) -> bool:
+        """Detach the member copy before shared records can be auto-saved."""
+        if not self._swarm_member_skills_dir or not self._swarm_global_skills_dir:
+            raise RuntimeError("member Skill copy-on-write scope is not configured")
+        ensure_member_skill_copy(
+            member_skills_dir=self._swarm_member_skills_dir,
+            global_skills_dir=self._swarm_global_skills_dir,
+            skill_name=skill_name,
+        )
+        return await super()._evolve_skill_with_sharing(
+            skill_name=skill_name,
+            **kwargs,
+        )
 
     def init(self, agent: Any) -> None:
         """Attach to *agent* and register with the per-channel team manager.
@@ -389,8 +531,9 @@ class SwarmMemberSkillEvolutionRail(SkillEvolutionRail):
                 )
             logger.info(
                 "[swarm.member_skill_evolution] registered member evolution rail "
-                "(session=%s)",
+                "(session=%s, member=%s)",
                 self._swarm_session_id,
+                self._swarm_member_name,
             )
         except Exception as exc:
             logger.warning(
@@ -551,6 +694,24 @@ def build_team_skill_evolution_rail(
                 inp.trajectory_span_processor or get_trajectory_span_processor()
             ),
         )
+        if inp.global_skills_dir:
+            review_feedback_rail = SkillEvolutionRail(
+                inp.global_skills_dir,
+                llm=llm_model,
+                model=actual_model_name,
+                review_runtime=EvolutionReviewRuntime(),
+                language=inp.language,
+                signal_trigger=False,
+                review_trigger=False,
+                auto_save=inp.auto_save,
+                disabled_skills=load_execution_disabled_skills(),
+            )
+            rail.bind_review_feedback_skill_rail(review_feedback_rail)
+        else:
+            logger.warning(
+                "[swarm.team_skill_evolution] review-feedback sidecar skipped: "
+                "global_skills_dir is unavailable"
+            )
         rail.bind_swarm_context(
             channel=inp.channel,
             session_id=inp.session_id,
@@ -701,6 +862,9 @@ class MemberSkillEvolutionInput(ConstructionInput):
     session_id: str | None = context_field(
         attr="session_id", description="Active session id."
     )
+    member_name: str | None = context_field(
+        attr="member_name", description="Current team member name."
+    )
 
 
 @harness_element(
@@ -793,4 +957,5 @@ __all__ = [
     "build_team_skill_evolution_rail",
     "build_team_skill_create_rail",
     "build_member_skill_evolution_rail",
+    "ensure_member_skill_copy",
 ]

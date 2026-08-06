@@ -209,10 +209,14 @@ class _FakeEvolutionRail:
         self.args = args
         self.kwargs = kwargs
         self.swarm_context = {}
+        self.review_feedback_rail = None
         self.approval_submission_service = object()
 
     def bind_swarm_context(self, **kwargs) -> None:
         self.swarm_context.update(kwargs)
+
+    def bind_review_feedback_skill_rail(self, rail) -> None:
+        self.review_feedback_rail = rail
 
 
 class _FakeMemberSkillEvolutionRail(_FakeEvolutionRail):
@@ -1537,6 +1541,7 @@ def test_team_skill_evolution_provider_passes_review_runtime(
         "SwarmTeamSkillEvolutionRail",
         _FakeEvolutionRail,
     )
+    monkeypatch.setattr(evolution_rails, "SkillEvolutionRail", _FakeEvolutionRail)
     monkeypatch.setattr(evolution_rails, "EvolutionInterruptRail", _FakeEvolutionInterruptRail)
     monkeypatch.setattr(
         evolution_rails,
@@ -1578,6 +1583,10 @@ def test_team_skill_evolution_provider_passes_review_runtime(
     assert rail.kwargs["signal_trigger"] is False
     assert rail.kwargs["auto_save"] is auto_save
     assert rail.kwargs["review_trigger"] is True
+    assert rail.review_feedback_rail.args == (str(tmp_path / "global-skills"),)
+    assert rail.review_feedback_rail.kwargs["signal_trigger"] is False
+    assert rail.review_feedback_rail.kwargs["review_trigger"] is False
+    assert rail.review_feedback_rail.kwargs["auto_save"] is auto_save
 
 
 def test_swarm_team_skill_evolution_registration_retries_deferred_watcher(
@@ -1593,6 +1602,10 @@ def test_swarm_team_skill_evolution_registration_retries_deferred_watcher(
         @staticmethod
         def register_team_skill_rail(session_id, rail) -> None:
             calls.append(f"skill:{session_id}")
+
+        @staticmethod
+        def register_review_feedback_skill_rail(session_id, rail) -> None:
+            calls.append(f"review-feedback:{session_id}")
 
         @staticmethod
         def consume_team_evolution_watcher_deferred(session_id) -> bool:
@@ -1622,12 +1635,14 @@ def test_swarm_team_skill_evolution_registration_retries_deferred_watcher(
         team_id="team-1",
         config={},
     )
+    rail.bind_review_feedback_skill_rail(object())
 
     rail.init(SimpleNamespace(card=SimpleNamespace(name="leader")))
 
     assert calls == [
         "live:sess-1",
         "skill:sess-1",
+        "review-feedback:sess-1",
         "consume:sess-1",
         "watcher:web:sess-1:rail_registered",
     ]
@@ -1654,6 +1669,7 @@ def test_member_skill_evolution_provider_passes_review_runtime(
     ctx = SwarmBuildContext(
         language="en",
         role="teammate",
+        member_name="worker-1",
         session_id="sess",
         channel="web",
         team_id="t",

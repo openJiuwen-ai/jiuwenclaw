@@ -22,6 +22,7 @@ factories to avoid pulling the code adapter at module load.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 from openjiuwen.agent_teams.harness.manifest import (
