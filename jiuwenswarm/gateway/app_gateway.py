@@ -1116,6 +1116,19 @@ class GatewayServer(BaseWebChannel):
                         "GatewayServer delegate unregister_ws to ws_channel failed: path=%s",
                         request_path, exc_info=True,
                     )
+                # 触发 ws_channel 的断连钩子
+                ws_ch = route.ws_channel
+                for hook in getattr(ws_ch, "_disconnect_hooks", []):
+                    try:
+                        result = hook(ws, disconnected_sessions)
+                        if inspect.isawaitable(result):
+                            await result
+                    except Exception as e:
+                        logger.warning(
+                            "%s on_disconnect hook error: %s",
+                            type(ws_ch).__name__, e,
+                        )
+
             if route.disconnect_handler is not None:
                 try:
                     # Pass stale_request_keys so the handler can recover session_ids
@@ -1144,13 +1157,6 @@ class GatewayServer(BaseWebChannel):
             for session_key in stale_session_keys:
                 await self._promote_pending_session_client(route, session_key)
 
-            for hook in self._disconnect_hooks:
-                try:
-                    result = hook(ws, disconnected_sessions)
-                    if inspect.isawaitable(result):
-                        await result
-                except Exception as e:  # pragma: no cover
-                    logger.warning("WebChannel on_disconnect hook error: %s", e)
 
     async def _handle_raw_message(self, ws: Any, raw: str, request_path: str, route: RouteConfig) -> None:
 

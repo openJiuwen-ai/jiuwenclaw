@@ -141,7 +141,7 @@ class AgentOSRouterClient(AgentServerClient):
     async def on_connect(self, ws: Any) -> AuthResult | None:
         if self._auth_client is None:
             return AuthResult(
-                success=False,
+                success=True,
                 user_id="",
                 error="No valid credentials",
                 extensions={"error_code": "UNSUPPORTED_CREDENTIAL"},

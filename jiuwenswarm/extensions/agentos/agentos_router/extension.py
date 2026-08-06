@@ -58,7 +58,7 @@ class AgentOSRouter(AgentServerClientExtension, ThirdAgentExtension):
             sandbox_idle_check_interval_seconds=(
                 config.sandbox_idle_check_interval_seconds
             ),
-            auth_client=AgentOSAuthenticator(config.auth_service_url, config.timeout),
+            auth_client=AgentOSAuthenticator(config.auth_service_url, config.timeout) if config.auth_enabled else None
         )
         self._third_agent = AgentOSThirdAgent(self._router_client)
         self._closed = False
