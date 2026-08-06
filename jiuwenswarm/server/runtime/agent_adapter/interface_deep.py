@@ -219,6 +219,17 @@ from jiuwenswarm.server.runtime.agent_adapter.evolution_slash import (
     handle_evolution_slash_command,
 )
 from jiuwenswarm.server.utils.stream_utils import parse_ask_user_question_payload
+from jiuwenswarm.common.local_env_config import (
+    bind_task_env_overlay,
+    build_effective_env_overlay,
+    promote_staged_env,
+    read_env,
+    reset_task_env_overlay,
+)
+from jiuwenswarm.server.runtime.reload_result import (
+    ReloadResult,
+    env_touches_task_memory,
+)
 from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
     apply_audio_model_config_from_yaml,
     apply_image_gen_model_config_from_yaml,
@@ -226,7 +237,11 @@ from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
     apply_vision_model_config_from_yaml,
     dedicated_multimodal_model_configured,
     complete_multimodal_model_configured,
+    clear_multimodal_env_groups,
+    MULTIMODAL_ENV_GROUP_KEYS,
+    multimodal_env_anchor_present,
 )
+from jiuwenswarm.agents.harness.common.tools.task_tools import clear_task_memory_service
 from jiuwenswarm.agents.harness.common.tools.video_tools import video_understanding
 from jiuwenswarm.agents.harness.common.tools.image_tools import generate_image
 
@@ -1466,6 +1481,10 @@ class JiuWenSwarmDeepAdapter:
         self._session_adapter_reload_failures: dict[str, tuple[int, float]] = {}
         self._pending_session_reload_config_base: dict[str, Any] | None = None
         self._pending_session_reload_env_overrides: dict[str, Any] | None = None
+        # Hot-reload deferral: (config_base, env_overrides) while this adapter is busy.
+        self._pending_reload: tuple[dict[str, Any] | None, dict[str, Any] | None] | None = None
+        self._reload_lock = asyncio.Lock()
+        self._working_checker: Callable[[], bool] | None = None
         self._session_instance_config: dict[str, Any] | None = None
         self._session_instance_mode: str = "agent"
         self._session_instance_sub_mode: str | None = None
@@ -1900,6 +1919,110 @@ class JiuWenSwarmDeepAdapter:
 
     def is_session_active(self, session_id: str) -> bool:
         return self._is_session_active(session_id)
+
+    def set_working_checker(self, checker: Callable[[], bool] | None) -> None:
+        """Inject callable returning whether this facade/session has in-flight work."""
+        self._working_checker = checker
+
+    def _adapter_is_working(self) -> bool:
+        if self._working_checker is not None:
+            try:
+                return bool(self._working_checker())
+            except Exception:
+                return False
+        if self._is_session_scoped_adapter:
+            sid = self._parent_session_id
+            return bool(sid and self._is_session_active(sid))
+        return bool(self._active_session_ids) or any(
+            self._session_has_registered_tasks(sid)
+            for sid in list(self._session_adapters)
+        )
+
+    @staticmethod
+    def _bind_request_env_overlay(
+        env_overrides: dict[str, Any] | None = None,
+    ) -> Token | None:
+        """Seal Track-B reads for the current request (formula B tip ± extras)."""
+        overlay = build_effective_env_overlay(env_overrides)
+        return bind_task_env_overlay(overlay)
+
+    async def _maybe_apply_pending_reload(self) -> ReloadResult | None:
+        if self._pending_reload is None or self._adapter_is_working():
+            return None
+        async with self._reload_lock:
+            pending = self._pending_reload
+            if pending is None or self._adapter_is_working():
+                return None
+            config_base, env_overrides = pending
+            try:
+                result = await self.reload_agent_config(
+                    config_base,
+                    env_overrides,
+                    _force_apply=True,
+                )
+            except Exception:
+                if self._pending_reload is None:
+                    self._pending_reload = pending
+                raise
+            if result.applied:
+                self._pending_reload = None
+                promote_staged_env()
+            return result
+
+    async def apply_pending_reload_if_idle(self) -> ReloadResult | None:
+        """Apply deferred reload when harness has verified no inflight work.
+
+        Unlike ``_maybe_apply_pending_reload``, does not consult ``working_checker``
+        (caller already verified idle). Also drains pending on session children.
+        """
+        applied_any = False
+        deferred_any = False
+        if self._pending_reload is not None:
+            async with self._reload_lock:
+                pending = self._pending_reload
+                if pending is not None:
+                    config_base, env_overrides = pending
+                    try:
+                        result = await self.reload_agent_config(
+                            config_base,
+                            env_overrides,
+                            _force_apply=True,
+                        )
+                    except Exception:
+                        if self._pending_reload is None:
+                            self._pending_reload = pending
+                        raise
+                    if result.applied:
+                        self._pending_reload = None
+                        applied_any = True
+                    elif result.deferred:
+                        deferred_any = True
+
+        if not self._is_session_scoped_adapter:
+            for session_id, adapter in list(self._session_adapters.items()):
+                apply_fn = getattr(adapter, "apply_pending_reload_if_idle", None)
+                if not callable(apply_fn):
+                    continue
+                try:
+                    child_result = await apply_fn()
+                except Exception:
+                    logger.exception(
+                        "[JiuWenSwarmDeepAdapter] child pending reload failed: session=%s",
+                        session_id,
+                    )
+                    continue
+                if isinstance(child_result, ReloadResult):
+                    if child_result.applied:
+                        applied_any = True
+                    elif child_result.deferred:
+                        deferred_any = True
+
+        if applied_any:
+            promote_staged_env()
+            return ReloadResult(applied=True)
+        if deferred_any:
+            return ReloadResult(deferred=True)
+        return None
 
     def has_session_runtime(self, session_id: str | None = None) -> bool:
         """Return whether this adapter still owns session runtime."""
@@ -2471,8 +2594,8 @@ class JiuWenSwarmDeepAdapter:
         """Whether browser runtime support is enabled for DeepAgent subagent wiring."""
         value = (
             str(
-                os.getenv("PLAYWRIGHT_RUNTIME_MCP_ENABLED")
-                or os.getenv("BROWSER_RUNTIME_MCP_ENABLED")
+                read_env("PLAYWRIGHT_RUNTIME_MCP_ENABLED")
+                or read_env("BROWSER_RUNTIME_MCP_ENABLED")
                 or ""
             )
             .strip()
@@ -2537,7 +2660,7 @@ class JiuWenSwarmDeepAdapter:
         """Synchronize browser launch settings before browser runtimes are built."""
         headless = self._resolve_headless_from_config(config_base)
         mcp_args_raw = (
-            os.getenv("PLAYWRIGHT_MCP_ARGS") or "-y @playwright/mcp@latest"
+            read_env("PLAYWRIGHT_MCP_ARGS") or "-y @playwright/mcp@latest"
         ).strip()
         mcp_args = (
             mcp_args_raw.split()
@@ -2634,7 +2757,7 @@ class JiuWenSwarmDeepAdapter:
 
         browser_enabled = self._browser_runtime_enabled()
         if browser_enabled:
-            if not str(os.getenv("BROWSER_DRIVER") or "").strip():
+            if not str(read_env("BROWSER_DRIVER") or "").strip():
                 os.environ["BROWSER_DRIVER"] = "managed"
                 logger.info(
                     "[JiuWenSwarmDeepAdapter] browser subagent enabled without BROWSER_DRIVER; "
@@ -2848,9 +2971,9 @@ class JiuWenSwarmDeepAdapter:
             )
             return None
         apply_vision_model_config_from_yaml(config_base)
-        api_key = str(os.getenv("VISION_API_KEY", "")).strip()
-        base_url = str(os.getenv("VISION_BASE_URL") or os.getenv("VISION_API_BASE") or "").strip()
-        model_name = str(os.getenv("VISION_MODEL") or os.getenv("VISION_MODEL_NAME") or "").strip()
+        api_key = str(read_env("VISION_API_KEY", "")).strip()
+        base_url = str(read_env("VISION_BASE_URL") or read_env("VISION_API_BASE") or "").strip()
+        model_name = str(read_env("VISION_MODEL") or read_env("VISION_MODEL_NAME") or "").strip()
         if not api_key or not base_url or not model_name:
             logger.info("[JiuWenSwarmDeepAdapter] vision tools skipped: incomplete config")
             return None
@@ -2858,7 +2981,7 @@ class JiuWenSwarmDeepAdapter:
             api_key=api_key,
             base_url=base_url,
             model=model_name,
-            max_retries=parse_int(os.getenv("VISION_MAX_RETRIES"), 3),
+            max_retries=parse_int(read_env("VISION_MAX_RETRIES"), 3),
         )
 
     @staticmethod
@@ -2873,30 +2996,30 @@ class JiuWenSwarmDeepAdapter:
             )
             return None
         apply_audio_model_config_from_yaml(config_base)
-        api_key = str(os.getenv("AUDIO_API_KEY", "")).strip()
-        base_url = str(os.getenv("AUDIO_BASE_URL") or os.getenv("AUDIO_API_BASE") or "").strip()
+        api_key = str(read_env("AUDIO_API_KEY", "")).strip()
+        base_url = str(read_env("AUDIO_BASE_URL") or read_env("AUDIO_API_BASE") or "").strip()
         if not api_key or not base_url:
             logger.info("[JiuWenSwarmDeepAdapter] audio tools skipped: incomplete config")
             return None
         transcription_model = str(
-            os.getenv("AUDIO_TRANSCRIPTION_MODEL") or os.getenv("AUDIO_MODEL_NAME") or ""
+            read_env("AUDIO_TRANSCRIPTION_MODEL") or read_env("AUDIO_MODEL_NAME") or ""
         ).strip()
         question_answering_model = str(
-            os.getenv("AUDIO_QUESTION_ANSWERING_MODEL") or os.getenv("AUDIO_MODEL_NAME") or ""
+            read_env("AUDIO_QUESTION_ANSWERING_MODEL") or read_env("AUDIO_MODEL_NAME") or ""
         ).strip()
         config_kwargs: dict[str, Any] = {
             "api_key": api_key,
             "base_url": base_url,
-            "max_retries": parse_int(os.getenv("AUDIO_MAX_RETRIES"), 3),
-            "http_timeout": parse_int(os.getenv("AUDIO_HTTP_TIMEOUT"), 20),
+            "max_retries": parse_int(read_env("AUDIO_MAX_RETRIES"), 3),
+            "http_timeout": parse_int(read_env("AUDIO_HTTP_TIMEOUT"), 20),
             "max_audio_bytes": parse_int(
-                os.getenv("AUDIO_MAX_AUDIO_BYTES"),
+                read_env("AUDIO_MAX_AUDIO_BYTES"),
                 25 * 1024 * 1024,
             ),
         }
-        acr_access_key = str(os.getenv("ACR_ACCESS_KEY", "")).strip()
-        acr_access_secret = str(os.getenv("ACR_ACCESS_SECRET", "")).strip()
-        acr_base_url = str(os.getenv("ACR_BASE_URL", "")).strip()
+        acr_access_key = str(read_env("ACR_ACCESS_KEY", "")).strip()
+        acr_access_secret = str(read_env("ACR_ACCESS_SECRET", "")).strip()
+        acr_base_url = str(read_env("ACR_BASE_URL", "")).strip()
         if acr_access_key:
             config_kwargs["acr_access_key"] = acr_access_key
         if acr_access_secret:
@@ -2921,9 +3044,9 @@ class JiuWenSwarmDeepAdapter:
                 "api_key, api_base, and model_name in config.yaml"
             )
             return False
-        video_api_key = str(os.getenv("VIDEO_API_KEY", "")).strip()
-        video_api_base = str(os.getenv("VIDEO_API_BASE", "")).strip()
-        video_model_name = str(os.getenv("VIDEO_MODEL_NAME", "")).strip()
+        video_api_key = str(read_env("VIDEO_API_KEY", "")).strip()
+        video_api_base = str(read_env("VIDEO_API_BASE", "")).strip()
+        video_model_name = str(read_env("VIDEO_MODEL_NAME", "")).strip()
         if not video_api_key or not video_api_base or not video_model_name:
             logger.info("[JiuWenSwarmDeepAdapter] video tools skipped: incomplete config")
             return False
@@ -2935,7 +3058,7 @@ class JiuWenSwarmDeepAdapter:
     ) -> bool:
         """Build DeepAgent image generation config from service config/env mapping."""
         apply_image_gen_model_config_from_yaml(config_base)
-        if not os.getenv("IMAGE_GEN_API_KEY"):
+        if not read_env("IMAGE_GEN_API_KEY"):
             logger.info("[JiuWenSwarmDeepAdapter] image_gen tool skipped: incomplete config")
             return False
         return True
@@ -2959,6 +3082,13 @@ class JiuWenSwarmDeepAdapter:
         config_base: dict[str, Any],
     ) -> None:
         """Refresh cached multimodal configs and live tool instances."""
+        for group in MULTIMODAL_ENV_GROUP_KEYS:
+            if dedicated_multimodal_model_configured(config_base, group):
+                continue
+            if multimodal_env_anchor_present(group):
+                continue
+            clear_multimodal_env_groups([group])
+
         self._vision_model_config = self._build_vision_model_config(config_base)
         self._audio_model_config = self._build_audio_model_config(config_base)
         self._video_model_config = self._build_video_model_config(config_base)
@@ -3256,6 +3386,49 @@ class JiuWenSwarmDeepAdapter:
             create_fn=lambda: mark_stateless([generate_image]),
             warn_label="generate_image tool",
         )
+
+    def _tools_in_ability_manager(self, tools: list[Any]) -> bool:
+        if not tools or self._instance is None:
+            return False
+        ability_manager = getattr(self._instance, "ability_manager", None)
+        if ability_manager is None:
+            return False
+        for tool in tools:
+            name = str(getattr(getattr(tool, "card", None), "name", "") or "")
+            if not name or ability_manager.get(name) is None:
+                return False
+        return True
+
+    def _sync_preinstance_runtime_tools_to_ability_manager(self) -> None:
+        """Sync tools registered before DeepAgent existed into ability_manager.
+
+        ``_get_tool_cards`` registers multimodal instances into the resource
+        manager before ``create_deep_agent`` exists, so the fresh
+        AbilityManager does not know about them until they are added here.
+        """
+        if self._instance is None:
+            return
+        ability_manager = getattr(self._instance, "ability_manager", None)
+        if ability_manager is None:
+            return
+        for tools in (
+            list(self._vision_tools or []),
+            list(self._audio_tools or []),
+        ):
+            if not tools or self._tools_in_ability_manager(tools):
+                continue
+            for tool in tools:
+                card = getattr(tool, "card", None)
+                if card is None:
+                    continue
+                try:
+                    ability_manager.add(card)
+                except Exception as exc:
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] ability_manager add failed: tool=%s error=%s",
+                        getattr(card, "name", ""),
+                        exc,
+                    )
 
     def _sync_paid_search_tool_for_runtime(self) -> None:
         """Sync paid-search tool registration after config reload."""
@@ -5754,6 +5927,9 @@ class JiuWenSwarmDeepAdapter:
         await self._load_active_packages()
         await asyncio.sleep(0)
 
+        self._sync_preinstance_runtime_tools_to_ability_manager()
+        self._sync_multimodal_tools_for_runtime()
+
         # 动态加载用户自定义的 Rail 扩展
         await self.load_user_rails()
 
@@ -5913,15 +6089,11 @@ class JiuWenSwarmDeepAdapter:
             logger.warning(
                 "[JiuWenSwarmDeepAdapter] aclose openjiuwen memory cache failed: %s", e
             )
+        clear_task_memory_service()
 
-        if env_overrides is not None:
-            if not isinstance(env_overrides, dict):
-                raise TypeError("env_overrides must be a dict when provided")
-            for env_key, env_value in env_overrides.items():
-                if env_value is None:
-                    os.environ.pop(str(env_key), None)
-                else:
-                    os.environ[str(env_key)] = str(env_value)
+        # env_overrides 已由上层 agent_manager 通过 stage_env_overrides +
+        # _bind_request_env_overlay 写入 tip bag / overlay，不再直接写入
+        # os.environ，避免 Track B 值同时存在于 os.environ 和 tip bag 中。
 
         if config_base is None:
             config_base = get_config()
@@ -5978,16 +6150,23 @@ class JiuWenSwarmDeepAdapter:
         config_base: dict[str, Any] | None = None,
         env_overrides: dict[str, Any] | None = None,
         target_session_id: str | None = None,
-    ) -> None:
+        *,
+        _force_apply: bool = False,
+    ) -> ReloadResult:
         """从 config.yaml 重新加载配置，通过 DeepAgent.configure() 热更新当前实例（不新建 DeepAgent）。
 
         DeepAgent.configure() 现在自动处理 rail 生命周期：保留旧已注册 rails 的注销上下文，
         并在下次 _ensure_initialized() 时先卸载旧回调，再注册新的 rails。
 
+        When the adapter is busy, stores a pending reload and returns deferred=True
+        (unless ``_force_apply``). Env overrides live in tip bags; configure runs
+        under a sealed task overlay so Track B is not written to os.environ.
+
         Args:
             config_base: 可选的完整配置快照；传入时优先使用它而不是读取本地 config.yaml。
             env_overrides: 可选的环境变量增量；仅覆盖请求中出现的 key。
             target_session_id: 可选的目标 session id；传入时仅级联热更新该 session adapter。
+            _force_apply: Bypass busy check (pending drain / authoritative apply).
         """
         target_sid = str(target_session_id or "").strip() or None
         if self._is_session_scoped_adapter and target_sid:
@@ -5998,7 +6177,26 @@ class JiuWenSwarmDeepAdapter:
                     target_sid,
                     own_sid,
                 )
-                return
+                return ReloadResult(applied=True)
+
+        # Session-scoped adapters that are mid-request defer configure.
+        if self._is_session_scoped_adapter and not _force_apply:
+            pending = (config_base, env_overrides)
+            if self._adapter_is_working():
+                self._pending_reload = pending
+                logger.info(
+                    "[JiuWenSwarmDeepAdapter] reload deferred (session busy): session=%s",
+                    self._parent_session_id,
+                )
+                return ReloadResult(deferred=True)
+            async with self._reload_lock:
+                if self._adapter_is_working():
+                    self._pending_reload = pending
+                    return ReloadResult(deferred=True)
+                self._pending_reload = None
+        elif _force_apply:
+            self._pending_reload = None
+
         if self._instance is None:
             if self._is_session_scoped_adapter:
                 raise RuntimeError("JiuWenSwarmDeepAdapter 未初始化，请先调用 create_instance()")
@@ -6006,74 +6204,92 @@ class JiuWenSwarmDeepAdapter:
             # it has nothing of its own to reconfigure, but the cached config
             # snapshot still has to move forward and the live session adapters
             # still have to be reloaded.
-            config_base = await self._apply_reload_config_snapshot(config_base, env_overrides)
-            await self._fan_out_reload_to_session_adapters(config_base, env_overrides, target_sid)
+            overlay_token = self._bind_request_env_overlay(env_overrides)
+            try:
+                config_base = await self._apply_reload_config_snapshot(config_base, env_overrides)
+                await self._fan_out_reload_to_session_adapters(config_base, env_overrides, target_sid)
+            finally:
+                if overlay_token is not None:
+                    reset_task_env_overlay(overlay_token)
             logger.info(
                 "[JiuWenSwarmDeepAdapter] 配置已热更新（root 实例未构建，仅刷新缓存并级联 session adapter）"
             )
-            return
+            return ReloadResult(applied=True)
 
-        config_base = await self._apply_reload_config_snapshot(config_base, env_overrides)
-        config = self._config_cache.copy()
-
-        model = self._create_model(config_base)
-        if self._is_session_scoped_adapter:
-            await self._try_init_a2x_client(config_base, reload=True)
-            self._sync_a2x_runtime_state()
-        self._agent_name = self._instance_overrides.get("agent_name", config.get("agent_name", "main_agent"))
-        agent_card = AgentCard(name=self._agent_name, id=_AGENT_CARD_ID)
-        self._sync_multimodal_tools_for_runtime()
-        self._sync_paid_search_tool_for_runtime()
-        self._sync_symphony_tools_for_runtime(config_base)
-        self._sync_skill_retrieval_tools_for_runtime(config_base)
-        await self._sync_skill_retrieval_prompt_rail_for_runtime(config_base)
-
-        if not self._filesystem_rail_enabled_for_profile() and self._filesystem_rail is not None:
-            try:
-                await self._instance.unregister_rail(self._filesystem_rail)
-            except Exception as exc:
-                logger.warning(
-                    "[JiuWenSwarmDeepAdapter] ACP filesystem rail unregister failed: %s", exc
-                )
-            self._filesystem_rail = None
-
-        rails_list = self._get_current_agent_rails(config, config_base)
-
-        # 加载用户自定义的 Rail 扩展
-        await self.load_user_rails()
-
-        deep_cfg = self._make_deep_agent_config(
-            model=model,
-            config=config,
-            config_base=config_base,
-            agent_card=agent_card,
-            tool_cards=self._tool_cards if self._tool_cards else [],
-            rails=rails_list,
-        )
-        omitted_fields, reload_fingerprints = self._omit_unchanged_reload_fields(deep_cfg)
+        overlay_token = self._bind_request_env_overlay(env_overrides)
         try:
-            self._instance.configure(deep_cfg)
-        finally:
-            self._restore_omitted_reload_fields(deep_cfg, omitted_fields)
-        self._commit_reload_fingerprints(reload_fingerprints)
-        self._sync_active_evolution_review_agent_after_reload()
+            # TaskMemory: clear when env keys that feed the fingerprint change.
+            if env_touches_task_memory(env_overrides):
+                clear_task_memory_service()
 
-        await self._sync_mcp_servers_for_runtime(config_base, tag="agent.reload")
+            config_base = await self._apply_reload_config_snapshot(config_base, env_overrides)
+            config = self._config_cache.copy()
 
-        await self._fan_out_reload_to_session_adapters(config_base, env_overrides, target_sid)
+            model = self._create_model(config_base)
+            if self._is_session_scoped_adapter:
+                await self._try_init_a2x_client(config_base, reload=True)
+                self._sync_a2x_runtime_state()
+            self._agent_name = self._instance_overrides.get("agent_name", config.get("agent_name", "main_agent"))
+            agent_card = AgentCard(name=self._agent_name, id=_AGENT_CARD_ID)
+            self._sync_multimodal_tools_for_runtime()
+            self._sync_paid_search_tool_for_runtime()
+            self._sync_symphony_tools_for_runtime(config_base)
+            self._sync_skill_retrieval_tools_for_runtime(config_base)
+            await self._sync_skill_retrieval_prompt_rail_for_runtime(config_base)
 
-        # 主动刷新 memory rail（不等下次请求的 _update_rails_for_mode）：
-        # 让 embedding 配置变更立即走指纹检测 + 重建 rail + 延时重索引。
-        # 若从未处理过请求（_last_mode 为 None，如冷启动后首次 reload），退化为默认 agent。
-        try:
-            mode = self._last_mode or "agent"
-            await self._handle_memory_rail_by_config(mode)
-        except Exception as e:
-            logger.warning(
-                "[JiuWenSwarmDeepAdapter] memory rail refresh on reload failed: %s", e
+            if not self._filesystem_rail_enabled_for_profile() and self._filesystem_rail is not None:
+                try:
+                    await self._instance.unregister_rail(self._filesystem_rail)
+                except Exception as exc:
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] ACP filesystem rail unregister failed: %s", exc
+                    )
+                self._filesystem_rail = None
+
+            rails_list = self._get_current_agent_rails(config, config_base)
+
+            # 加载用户自定义的 Rail 扩展
+            await self.load_user_rails()
+
+            deep_cfg = self._make_deep_agent_config(
+                model=model,
+                config=config,
+                config_base=config_base,
+                agent_card=agent_card,
+                tool_cards=self._tool_cards if self._tool_cards else [],
+                rails=rails_list,
             )
+            omitted_fields, reload_fingerprints = self._omit_unchanged_reload_fields(deep_cfg)
+            try:
+                self._instance.configure(deep_cfg)
+            finally:
+                self._restore_omitted_reload_fields(deep_cfg, omitted_fields)
+            # configure() rebuilds ability_manager from tool_cards; multimodal tools
+            # registered before configure are dropped — re-sync after configure.
+            self._sync_multimodal_tools_for_runtime()
+            self._commit_reload_fingerprints(reload_fingerprints)
+            self._sync_active_evolution_review_agent_after_reload()
 
-        logger.info("[JiuWenSwarmDeepAdapter] 配置已热更新（configure），未重启进程")
+            await self._sync_mcp_servers_for_runtime(config_base, tag="agent.reload")
+
+            await self._fan_out_reload_to_session_adapters(config_base, env_overrides, target_sid)
+
+            # 主动刷新 memory rail（不等下次请求的 _update_rails_for_mode）：
+            # 让 embedding 配置变更立即走指纹检测 + 重建 rail + 延时重索引。
+            # 若从未处理过请求（_last_mode 为 None，如冷启动后首次 reload），退化为默认 agent。
+            try:
+                mode = self._last_mode or "agent"
+                await self._handle_memory_rail_by_config(mode)
+            except Exception as e:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] memory rail refresh on reload failed: %s", e
+                )
+
+            logger.info("[JiuWenSwarmDeepAdapter] 配置已热更新（configure），未重启进程")
+            return ReloadResult(applied=True)
+        finally:
+            if overlay_token is not None:
+                reset_task_env_overlay(overlay_token)
 
     @staticmethod
     def _bind_runtime_cron_context(
@@ -9021,6 +9237,8 @@ class JiuWenSwarmDeepAdapter:
         token_perm = setup_permission_context(request)
         resolved_model = self._resolve_model_for_request(request)
         self._apply_model_to_react_agent(resolved_model)
+        await self._maybe_apply_pending_reload()
+        overlay_token = self._bind_request_env_overlay()
         self._mark_session_active(session_id)
         self._register_session_agent_task(session_id)
         if self._stream_event_rail is not None:
@@ -9184,6 +9402,9 @@ class JiuWenSwarmDeepAdapter:
             _LLM_TRACE_ITERATION.reset(token_trace_iter)
             _LLM_TRACE_MODEL_NAME.reset(token_trace_model)
             self._unmark_session_active(session_id)
+            if overlay_token is not None:
+                reset_task_env_overlay(overlay_token)
+            await self._maybe_apply_pending_reload()
             # [CRON-CTX] 非流式 cron 执行收尾补 commit：对齐流式路径的自动落盘。
             # 根因：cron 走非流式 _inner_invoke，其 commit 挂在 need_cleanup 下，
             # 而 adapter 提前绑定了 session 致 need_cleanup=False，commit 被跳过，
@@ -9557,6 +9778,8 @@ class JiuWenSwarmDeepAdapter:
         # 按请求选择模型
         resolved_model = self._resolve_model_for_request(request)
         self._apply_model_to_react_agent(resolved_model)
+        await self._maybe_apply_pending_reload()
+        overlay_token = self._bind_request_env_overlay()
         self._mark_session_active(session_id)
         self._register_session_agent_task(session_id)
         stream_consumer_cancelled = False
@@ -10255,6 +10478,9 @@ class JiuWenSwarmDeepAdapter:
                 session_id,
                 cleanup_rail=True,
             )
+            if overlay_token is not None:
+                reset_task_env_overlay(overlay_token)
+            await self._maybe_apply_pending_reload()
 
         summary = {
             "input_tokens": usage_accumulator["input_tokens"],

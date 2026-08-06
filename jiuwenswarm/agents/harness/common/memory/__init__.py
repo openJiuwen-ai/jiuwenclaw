@@ -26,6 +26,7 @@ from .external_memory_config import (
     get_memory_engine,
     is_builtin_memory_allowed,
     is_external_memory_allowed,
+    external_memory_fingerprint,
 )
 from .external_memory_builder import build_external_memory_rail
 from .internal import (
@@ -75,4 +76,5 @@ __all__ = [
     "get_memory_engine",
     "is_builtin_memory_allowed",
     "is_external_memory_allowed",
+    "external_memory_fingerprint",
 ]

@@ -23,6 +23,8 @@ from typing import Any, AsyncIterator, Tuple
 from datetime import datetime, timedelta, timezone
 from jiuwenswarm.dotenv_early import load_dotenv_runtime
 
+from jiuwenswarm.common.local_env_config import promote_staged_env
+from jiuwenswarm.server.runtime.reload_result import ReloadResult
 from jiuwenswarm.server.runtime.agent_adapter.agent_adapters import (
     AgentAdapter,
     create_adapter,
@@ -972,7 +974,7 @@ class JiuWenSwarm:
             config_base: dict[str, Any] | None = None,
             env_overrides: dict[str, Any] | None = None,
             target_session_id: str | None = None,
-    ) -> None:
+    ) -> ReloadResult:
         """从配置重新加载.
 
         Args:
@@ -981,18 +983,55 @@ class JiuWenSwarm:
             target_session_id: 可选的目标 session id；传入时限制 session adapter 级联热更新范围。
         """
         adapter = self._ensure_adapter()
+        if hasattr(adapter, "set_working_checker"):
+            adapter.set_working_checker(self.is_working)
         if hasattr(adapter, "try_stop_dreaming"):
             await adapter.try_stop_dreaming()
-        await adapter.reload_agent_config(
+        result = await adapter.reload_agent_config(
             config_base,
             env_overrides,
             target_session_id=target_session_id,
         )
-        logger.info("[JiuWenSwarm] Agent config reloaded: sdk=%s", self._sdk_name)
+        if not isinstance(result, ReloadResult):
+            result = ReloadResult(applied=True)
+        logger.info(
+            "[JiuWenSwarm] Agent config reloaded: sdk=%s applied=%s deferred=%s",
+            self._sdk_name,
+            result.applied,
+            result.deferred,
+        )
         if hasattr(adapter, "try_start_dreaming"):
             sm = self._session_manager
             asyncio.create_task(adapter.try_start_dreaming(
                 busy_checker=lambda: sm.has_active_tasks(),))
+        return result
+
+    def is_working(self) -> bool:
+        """True when SessionManager has in-flight session tasks.
+
+        Session managers that predate task tracking simply report idle.
+        """
+        checker = getattr(self._session_manager, "has_active_tasks", None)
+        if not callable(checker):
+            return False
+        return bool(checker())
+
+    async def _try_apply_adapter_pending_reload(self) -> None:
+        """Drain deferred adapter reloads when this facade is idle."""
+        if self.is_working():
+            return
+        adapter = self._adapter
+        if adapter is None:
+            return
+        apply_fn = getattr(adapter, "apply_pending_reload_if_idle", None)
+        if not callable(apply_fn):
+            return
+        try:
+            result = await apply_fn()
+            if isinstance(result, ReloadResult) and result.applied and not self.is_working():
+                promote_staged_env()
+        except Exception:
+            logger.exception("[JiuWenSwarm] apply_pending_reload_if_idle failed")
 
     async def prepare_session(
         self,
@@ -2087,6 +2126,7 @@ class JiuWenSwarm:
                 _trigger_auto_memory_extraction(adapter, request, session_id, is_stream=False)
 
         _schedule_symphony_session_feedback(session_id, request.request_id)
+        await self._try_apply_adapter_pending_reload()
         return result
 
     async def process_message_stream(
@@ -2790,6 +2830,7 @@ class JiuWenSwarm:
             _trigger_auto_memory_extraction(adapter, request, session_id, is_stream=True)
 
         _schedule_symphony_session_feedback(session_id, rid)
+        await self._try_apply_adapter_pending_reload()
         yield AgentResponseChunk(
             request_id=rid,
             channel_id=cid,

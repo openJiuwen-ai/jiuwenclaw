@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import os
 import re
 from typing import Any, List, Optional
 
@@ -21,6 +22,7 @@ from openjiuwen.core.foundation.llm import (
     ToolMessage,
 )
 from openjiuwen.core.session.agent import Session
+from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
@@ -49,6 +51,13 @@ from jiuwenswarm.common.tool_display import (
 from jiuwenswarm.common.utils import fix_json_arguments, logger
 
 _TODO_TOOL_NAMES = frozenset(["todo_create", "todo_get", "todo_list", "todo_modify"])
+_EARLY_CHECKPOINT_EXTRA_KEY = "_jiuwenswarm_early_checkpoint_done"
+_EARLY_CHECKPOINT_ENV = "JIUWENCLAW_EARLY_CHECKPOINT"
+
+
+def _early_checkpoint_disabled_by_env() -> bool:
+    raw = (os.getenv(_EARLY_CHECKPOINT_ENV) or "").strip().lower()
+    return raw in {"0", "false", "no", "off"}
 
 
 def _structured_tool_result_payload(result: Any) -> Any | None:
@@ -601,6 +610,59 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             if not self._read_image_multimodal_enabled():
                 strip_image_content_from_model_context(ctx.context)
             await self._fix_incomplete_tool_context(ctx)
+
+        await self._maybe_early_checkpoint(ctx)
+
+    async def _maybe_early_checkpoint(self, ctx: AgentCallbackContext) -> None:
+        """Persist context + agent state once per invoke before the first LLM call.
+
+        Mitigates losing the user message if the process dies before ``post_run``:
+        ``save_contexts`` then ``post_agent_execute`` (not ``post_run``, which closes
+        the stream). Skipped on later ReAct iterations via ``ctx.extra`` flag.
+        """
+        if _early_checkpoint_disabled_by_env():
+            return
+        if ctx.extra.get(_EARLY_CHECKPOINT_EXTRA_KEY):
+            return
+        sid = self._resolve_sid(ctx, ctx.session)
+        cid = (self._conversation_ids.get(sid, "") or "").strip()
+        if cid.startswith("heartbeat"):
+            return
+        session = getattr(ctx, "session", None)
+        agent = getattr(ctx, "agent", None)
+        if session is None or agent is None:
+            return
+        context_engine = getattr(agent, "context_engine", None)
+        if context_engine is None:
+            return
+
+        actual_session = getattr(session, "_parent", session) if session else None
+        if actual_session is None:
+            return
+
+        try:
+            await context_engine.save_contexts(actual_session)
+            inner = getattr(actual_session, "_inner", actual_session)
+            await CheckpointerFactory.get_checkpointer().post_agent_execute(inner)
+            ctx.extra[_EARLY_CHECKPOINT_EXTRA_KEY] = True
+            session_id = ""
+            gs = getattr(actual_session, "get_session_id", None)
+            if callable(gs):
+                session_id = str(gs())
+            else:
+                fn = getattr(actual_session, "session_id", None)
+                if callable(fn):
+                    session_id = str(fn())
+            logger.debug(
+                "[StreamEventRail] early checkpoint saved session_id=%s",
+                session_id or "",
+            )
+        except Exception as exc:
+            logger.warning(
+                "[StreamEventRail] early checkpoint failed: %s",
+                exc,
+                exc_info=True,
+            )
 
     @staticmethod
     def _inject_tool_call_goal_schema(ctx: AgentCallbackContext) -> None:

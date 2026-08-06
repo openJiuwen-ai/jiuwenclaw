@@ -3,7 +3,6 @@
 """Task tools - wraps TaskMemoryService as @tool decorated functions."""
 
 import logging
-import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -16,6 +15,7 @@ from jiuwenswarm.agents.harness.common.tools import (
     tool,
 )
 
+from jiuwenswarm.common.local_env_config import read_env
 from jiuwenswarm.common.utils import get_agent_workspace_dir
 
 logger = logging.getLogger(__name__)
@@ -34,6 +34,43 @@ class TaskAddParams:
     tools_used: Optional[List[Dict[str, Any]]] = None
 
 
+@dataclass(frozen=True)
+class TaskMemoryConfigFingerprint:
+    """Lightweight, hashable key for the service cache pool."""
+    api_key: str = ""
+    api_base: str = ""
+    embedding_model: str = ""
+    llm_model: str = ""
+    retrieval_algo: str = ""
+    summary_algo: str = ""
+
+    @classmethod
+    def from_resolved(cls, resolved: "TaskMemoryResolvedConfig") -> "TaskMemoryConfigFingerprint":
+        return cls(
+            api_key=resolved.api_key,
+            api_base=resolved.api_base,
+            embedding_model=resolved.embedding_model,
+            llm_model=resolved.llm_model,
+            retrieval_algo=resolved.retrieval_algo,
+            summary_algo=resolved.summary_algo,
+        )
+
+
+@dataclass(frozen=True)
+class TaskMemoryResolvedConfig:
+    """Fully resolved configuration for building a TaskMemoryService."""
+    llm_model: str = ""
+    embedding_model: str = ""
+    api_key: str = ""
+    api_base: str = ""
+    model_provider: str = ""
+    retrieval_algo: str = ""
+    summary_algo: str = ""
+
+    def fingerprint(self) -> TaskMemoryConfigFingerprint:
+        return TaskMemoryConfigFingerprint.from_resolved(self)
+
+
 # Path for persisting task_add entries
 def _get_task_data_path() -> str:
     return str(get_agent_workspace_dir() / "task-data.json")
@@ -41,49 +78,154 @@ def _get_task_data_path() -> str:
 
 _connector = JSONFileConnector(indent=2)
 
-_service: Optional[Any] = None  # TaskMemoryService instance
+_SERVICE_CACHE: dict[TaskMemoryConfigFingerprint, Any] = {}
+_SERVICE_CACHE_MAX = 32
 
 
-def _apply_ce_defaults() -> None:
-    """Seed the context_evolver config from the UI config (config.yaml), falling back to env vars."""
-    try:
-        from jiuwenswarm.common.config import get_config
+def task_memory_service_cache_size() -> int:
+    """Return the current number of cached TaskMemoryService instances."""
+    return len(_SERVICE_CACHE)
 
+
+def _first_non_empty(*values: Optional[str]) -> str:
+    """Return the first non-empty, non-None string among *values*."""
+    for v in values:
+        if v is not None and str(v).strip():
+            return str(v).strip()
+    return ""
+
+
+def resolve_task_memory_config(cfg=None) -> TaskMemoryResolvedConfig:
+    """Resolve task-memory configuration from yaml + overlay-aware env.
+
+    Uses ``read_env`` instead of ``os.getenv`` so that per-agent tip/overlay
+    values are respected.
+    """
+    from jiuwenswarm.common.config import get_config
+
+    if cfg is None:
         cfg = get_config()
-        react_cfg = cfg.get("react", {})
-        model_client = react_cfg.get("model_client_config", {})
-        embed_cfg = cfg.get("embed", {})
-        models_default = cfg.get("models", {}).get("default", {}).get("model_client_config", {})
 
-        # Resolve each value: UI config → env var → empty (no hardcoded fallback)
+    react_cfg = cfg.get("react", {})
+    model_client = react_cfg.get("model_client_config", {})
+    embed_cfg = cfg.get("embed", {})
+    models_default = cfg.get("models", {}).get("default", {}).get("model_client_config", {})
+    task_memory_cfg = cfg.get("task_memory", {})
+
+    llm_model = _first_non_empty(
+        task_memory_cfg.get("llm_model"),
+        read_env("TASK_MEMORY_LLM_MODEL"),
+        read_env("MODEL_NAME"),
+        react_cfg.get("model_name"),
+    )
+    embedding_model = _first_non_empty(
+        task_memory_cfg.get("embedding_model"),
+        read_env("TASK_MEMORY_EMBED_MODEL"),
+        embed_cfg.get("embed_model"),
+        read_env("EMBED_MODEL"),
+        read_env("EMBEDDING_MODEL"),
+    )
+    api_key = _first_non_empty(
+        task_memory_cfg.get("api_key"),
+        read_env("TASK_MEMORY_API_KEY"),
+        embed_cfg.get("embed_api_key"),
+        read_env("EMBED_API_KEY"),
+        read_env("API_KEY"),
+        model_client.get("api_key"),
+        models_default.get("api_key"),
+    )
+    api_base = _first_non_empty(
+        task_memory_cfg.get("api_base"),
+        read_env("TASK_MEMORY_API_BASE"),
+        embed_cfg.get("embed_base_url"),
+        read_env("EMBED_API_BASE"),
+        read_env("API_BASE"),
+        model_client.get("api_base"),
+        models_default.get("api_base"),
+    )
+    model_provider = _first_non_empty(
+        task_memory_cfg.get("model_provider"),
+        read_env("TASK_MEMORY_MODEL_PROVIDER"),
+        model_client.get("client_provider"),
+        models_default.get("client_provider"),
+        read_env("MODEL_PROVIDER"),
+    )
+    retrieval_algo = _first_non_empty(
+        task_memory_cfg.get("retrieval_algo"),
+        read_env("TASK_MEMORY_RETRIEVAL_ALGO"),
+    )
+    summary_algo = _first_non_empty(
+        task_memory_cfg.get("summary_algo"),
+        read_env("TASK_MEMORY_SUMMARY_ALGO"),
+    )
+
+    return TaskMemoryResolvedConfig(
+        llm_model=llm_model,
+        embedding_model=embedding_model,
+        api_key=api_key,
+        api_base=api_base,
+        model_provider=model_provider,
+        retrieval_algo=retrieval_algo,
+        summary_algo=summary_algo,
+    )
+
+
+def task_memory_config_fingerprint(cfg=None) -> TaskMemoryConfigFingerprint:
+    """Return the fingerprint for the current (or given) task-memory config."""
+    resolved = resolve_task_memory_config(cfg)
+    return resolved.fingerprint()
+
+
+def clear_task_memory_service() -> None:
+    """Clear the entire service cache pool."""
+    _SERVICE_CACHE.clear()
+    logger.debug("[Experience] Service cache pool cleared")
+
+
+def _evict_service_cache_if_needed() -> None:
+    """Evict the oldest entry when the cache exceeds ``_SERVICE_CACHE_MAX``."""
+    while len(_SERVICE_CACHE) > _SERVICE_CACHE_MAX:
+        oldest_key = next(iter(_SERVICE_CACHE))
+        _SERVICE_CACHE.pop(oldest_key, None)
+        logger.debug("[Experience] Evicted service cache entry (pool size=%d)", len(_SERVICE_CACHE))
+
+
+def _build_task_memory_service(resolved: TaskMemoryResolvedConfig, fp: TaskMemoryConfigFingerprint) -> Any:
+    """Create a TaskMemoryService instance from resolved config (no env mutation)."""
+    kwargs: Dict[str, Any] = dict(
+        llm_model=resolved.llm_model,
+        embedding_model=resolved.embedding_model,
+        api_key=resolved.api_key,
+    )
+    if resolved.api_base:
+        kwargs["api_base"] = resolved.api_base
+    if resolved.retrieval_algo:
+        kwargs["retrieval_algo"] = resolved.retrieval_algo
+    if resolved.summary_algo:
+        kwargs["summary_algo"] = resolved.summary_algo
+
+    svc = TaskMemoryService(**kwargs)
+    _SERVICE_CACHE[fp] = svc
+    _evict_service_cache_if_needed()
+    logger.info(
+        "[Experience] TaskMemoryService created & cached (llm=%s, embed=%s, pool=%d)",
+        resolved.llm_model, resolved.embedding_model, len(_SERVICE_CACHE),
+    )
+    return svc
+
+
+def _apply_ce_defaults(resolved: Optional[TaskMemoryResolvedConfig] = None) -> None:
+    """Seed the context_evolver config from the resolved config, falling back to env."""
+    try:
+        if resolved is None:
+            resolved = resolve_task_memory_config()
+
         mappings = {
-            "API_KEY": (
-                model_client.get("api_key")
-                or models_default.get("api_key")
-                or embed_cfg.get("embed_api_key")
-                or os.getenv("API_KEY", "")
-            ),
-            "API_BASE": (
-                model_client.get("api_base")
-                or models_default.get("api_base")
-                or embed_cfg.get("embed_base_url")
-                or os.getenv("API_BASE", "")
-            ),
-            "MODEL_NAME": (
-                react_cfg.get("model_name")
-                or os.getenv("MODEL_NAME", "")
-            ),
-            "MODEL_PROVIDER": (
-                model_client.get("client_provider")
-                or models_default.get("client_provider")
-                or os.getenv("MODEL_PROVIDER", "")
-            ),
-            "EMBEDDING_MODEL": (
-                embed_cfg.get("embed_model")
-                or os.getenv("EMBEDDING_MODEL")
-                or os.getenv("EMBED_MODEL")
-                or cfg.get("task_memory", {}).get("embedding_model", "text-embedding-3-small")
-            ),
+            "API_KEY": resolved.api_key,
+            "API_BASE": resolved.api_base,
+            "MODEL_NAME": resolved.llm_model,
+            "MODEL_PROVIDER": resolved.model_provider,
+            "EMBEDDING_MODEL": resolved.embedding_model,
         }
 
         for key, value in mappings.items():
@@ -101,97 +243,41 @@ def _is_task_memory_enabled() -> bool:
     return bool(task_memory_cfg.get("enabled", False))
 
 
-def _get_service():
-    """Lazily initialize and return the TaskMemoryService singleton."""
-    global _service
-    if _service is not None:
-        return _service
+def get_task_memory_service(cfg=None):
+    """Return a cached TaskMemoryService keyed by config fingerprint.
+
+    If the fingerprint matches an existing entry, return it; otherwise build,
+    cache, and return a new instance.
+    """
+    resolved = resolve_task_memory_config(cfg)
+    fp = resolved.fingerprint()
+
+    # Check cache first
+    svc = _SERVICE_CACHE.get(fp)
+    if svc is not None:
+        return svc
 
     if TaskMemoryService is None:
         logger.warning("[Experience] TaskMemoryService not available")
         return None
 
-    _apply_ce_defaults()
-
-    from jiuwenswarm.common.config import get_config
-    cfg = get_config()
-    task_memory_cfg = cfg.get("task_memory", {})
-    embed_cfg = cfg.get("embed", {})
-
-    llm_model = (
-        task_memory_cfg.get("llm_model")
-        or os.getenv("TASK_MEMORY_LLM_MODEL")
-        or os.getenv("MODEL_NAME")
-    )
-    embedding_model = (
-        task_memory_cfg.get("embedding_model")
-        or os.getenv("TASK_MEMORY_EMBED_MODEL")
-        or embed_cfg.get("embed_model")
-        or os.getenv("EMBED_MODEL")
-        or os.getenv("EMBEDDING_MODEL")
-    )
-    api_key = (
-        task_memory_cfg.get("api_key")
-        or os.getenv("TASK_MEMORY_API_KEY")
-        or embed_cfg.get("embed_api_key")
-        or os.getenv("EMBED_API_KEY")
-        or os.getenv("API_KEY")
-    )
-    api_base = (
-        task_memory_cfg.get("api_base")
-        or os.getenv("TASK_MEMORY_API_BASE")
-        or embed_cfg.get("embed_base_url")
-        or os.getenv("EMBED_API_BASE")
-        or os.getenv("API_BASE")
-    )
-    retrieval_algo = task_memory_cfg.get("retrieval_algo") or os.getenv("TASK_MEMORY_RETRIEVAL_ALGO")
-    summary_algo = task_memory_cfg.get("summary_algo") or os.getenv("TASK_MEMORY_SUMMARY_ALGO")
-
-    if not api_key:
+    if not resolved.api_key:
         logger.warning("[Experience] No API key found; task tools will be disabled")
         return None
-    if not llm_model:
+    if not resolved.llm_model:
         logger.warning("[Experience] No LLM model configured; task tools will be disabled")
         return None
-    if not embedding_model:
+    if not resolved.embedding_model:
         logger.warning("[Experience] No embedding model configured; task tools will be disabled")
         return None
 
+    _apply_ce_defaults(resolved)
+
     try:
-        kwargs: Dict[str, Any] = dict(
-            llm_model=llm_model,
-            embedding_model=embedding_model,
-            api_key=api_key,
-        )
-        if api_base:
-            kwargs["api_key"] = api_key  # already set, just making sure
-            # Pass via environment since TaskMemoryService reads from its own config
-            # We set them explicitly via kwargs instead
-        if retrieval_algo:
-            kwargs["retrieval_algo"] = retrieval_algo
-        if summary_algo:
-            kwargs["summary_algo"] = summary_algo
-
-        # TaskMemoryService reads API_BASE from its config; patch via kwarg if supported
-        # The constructor accepts no api_base param, so we pass via the wrappers internally.
-        # Temporarily set env vars so the wrappers pick them up.
-        _orig_base = os.environ.get("API_BASE")
-        if api_base:
-            os.environ["API_BASE"] = api_base
-
-        _service = TaskMemoryService(**kwargs)
-
-        if api_base and _orig_base is None:
-            del os.environ["API_BASE"]
-        elif api_base and _orig_base is not None:
-            os.environ["API_BASE"] = _orig_base
-
-        logger.info("[Experience] TaskMemoryService initialized (llm=%s, embed=%s)", llm_model, embedding_model)
+        return _build_task_memory_service(resolved, fp)
     except Exception as exc:
         logger.error("[Experience] Failed to initialize TaskMemoryService: %s", exc)
-        _service = None
-
-    return _service
+        return None
 
 
 @tool(
@@ -239,7 +325,7 @@ async def experience_retrieve(
     except Exception as load_exc:
         logger.warning("[Experience] experience_retrieve: failed to load task-data.json: %s", load_exc)
 
-    svc = _get_service()
+    svc = get_task_memory_service()
     if svc is None:
         logger.info("[Experience] experience_retrieve: service disabled — returning persisted only")
         memory_string = "\n\n".join(persisted_lines)
@@ -325,7 +411,7 @@ async def experience_learn(params: TaskAddParams, matts: str = "none") -> Dict[s
         "[Exp] experience_learn called: section=%s, content=%s",
         params.section, params.content[:120],
     )
-    svc = _get_service()
+    svc = get_task_memory_service()
     memory_id: Optional[str] = None
 
     # Step 1: add_memory via service (if available)
