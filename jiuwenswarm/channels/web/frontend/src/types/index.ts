@@ -96,8 +96,6 @@ export interface VendorPreset {
   anthropic_base: string | null;
   /** Anthropic 格式落库用的 provider 值(= 'Anthropic');supports_anthropic=false 时为 null。 */
   anthropic_client_provider: string | null;
-  needs_third_party: boolean;
-  needs_ak_sk: boolean;
 }
 
 /** vendors.list RPC 返回的载荷：按 plan 分组的厂商预设。 */

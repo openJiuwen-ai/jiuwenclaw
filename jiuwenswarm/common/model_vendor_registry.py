@@ -30,9 +30,9 @@ Notes on verified endpoints:
   - Maas: the xlsx leaves col8 (models endpoint) empty, but
     ``api.modelarts-maas.com/openai/v1/models`` was verified to exist (400,
     needs auth header). Registered accordingly.
-  - Mimo: ``api.mimo-v2.com`` is unreachable from this network (HTTP000), but
-    ``token-plan-cn.xiaomimimo.com`` (Token Plan) is reachable (401). Both are
-    registered; the api host reachability is environment-dependent.
+  - Mimo: official platform domain ``api.xiaomimimo.com`` (custom_api) and
+    ``token-plan-cn.xiaomimimo.com`` (Token Plan) both verified reachable (401,
+    needs api_key). OpenAI + Anthropic format + models endpoints all exist.
   - 百度: OpenAI base moved from /v1 to /v2 (verified 401). Token Plan has
     personal/team variants; the personal variant is used as default.
 """
@@ -81,9 +81,6 @@ class VendorPreset:
     models_extra_auth: dict[str, str] = field(default_factory=dict)  # e.g. minimax group_id hint
     # Anthropic-format base for this plan (custom_api allows switching OpenAI<->Anthropic)
     anthropic_base: str | None = None      # None = vendor has no Anthropic endpoint
-    # 特殊约束 (前端置灰提示)
-    needs_third_party: bool = False         # Mimo hosted via third party
-    needs_ak_sk: bool = False               # Maas uses AK/SK + Region, no public /v1
 
 
 # core 的 ProviderType.Anthropic 枚举值。当用户在前端选 "Anthropic 格式" 时,
@@ -136,15 +133,14 @@ _PRESETS: list[VendorPreset] = [
         models_endpoint="https://api.modelarts-maas.com/openai/v1/models",
         models_needs_key=True,
         anthropic_base="https://api.modelarts-maas.com/plan/anthropic",
-        needs_ak_sk=True,
     ),
     VendorPreset(
         vendor_key="baidu", display_name="百度智能云", plan=PlanKind.TOKEN_PLAN,
         client_provider="OpenAI",
         api_base="https://qianfan.baidubce.com/v2/tokenplan/personal",  # personal; team variant: /v2/tokenplan/team
-        default_model="deepseek-v4-pro",
+        default_model="ernie-5.1",
         model_options=(
-            "ernie-4.5-vl-424b-a47b",
+            "ernie-5.1",
             "deepseek-v4-pro",
             "deepseek-v4-flash",
             "glm-5.2",
@@ -160,8 +156,8 @@ _PRESETS: list[VendorPreset] = [
         vendor_key="mimo", display_name="小米Mimo", plan=PlanKind.TOKEN_PLAN,
         client_provider="OpenAI",
         api_base="https://token-plan-cn.xiaomimimo.com/v1",
-        default_model="mimo-v2-pro",
-        model_options=("mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-pro", "mimo-v2-omni"),
+        default_model="mimo-v2.5-pro",
+        model_options=("mimo-v2.5-pro", "mimo-v2.5"),
         icon_key="mimo",
         models_endpoint="https://token-plan-cn.xiaomimimo.com/v1/models",
         models_needs_key=True,
@@ -218,7 +214,7 @@ _PRESETS: list[VendorPreset] = [
         client_provider="OpenAI",
         api_base="https://qianfan.baidubce.com/v2/coding",
         default_model="deepseek-v4-pro",
-        model_options=("deepseek-v4-pro", "deepseek-v4-flash", "ernie-4.5-vl-424b-a47b", "glm-5.2", "kimi-k2.6"),
+        model_options=("deepseek-v4-pro", "deepseek-v4-flash", "glm-5.1", "kimi-k2.5"),
         icon_key="baidu",
         models_endpoint="https://qianfan.baidubce.com/v2/models",
         models_needs_key=False,
@@ -333,7 +329,6 @@ _PRESETS: list[VendorPreset] = [
         models_endpoint="https://api.modelarts-maas.com/openai/v1/models",
         models_needs_key=True,
         anthropic_base="https://api.modelarts-maas.com/anthropic/v1",
-        needs_ak_sk=True,
     ),
     VendorPreset(
         vendor_key="volcengine", display_name="火山引擎", plan=PlanKind.CUSTOM_API,
@@ -350,9 +345,10 @@ _PRESETS: list[VendorPreset] = [
         vendor_key="baidu", display_name="百度智能云", plan=PlanKind.CUSTOM_API,
         client_provider="OpenAI",
         api_base="https://qianfan.baidubce.com/v2",
-        default_model="ernie-4.5-vl-424b-a47b",
+        default_model="ernie-5.1",
         model_options=(
-            "ernie-4.5-vl-424b-a47b",
+            "ernie-5.1",
+            "ernie-5.0",
             "deepseek-v4-pro",
             "deepseek-v4-flash",
             "glm-5.2",
@@ -368,13 +364,13 @@ _PRESETS: list[VendorPreset] = [
     VendorPreset(
         vendor_key="mimo", display_name="小米Mimo", plan=PlanKind.CUSTOM_API,
         client_provider="OpenAI",
-        api_base="https://api.mimo-v2.com/v1",  # 实测本网络HTTP000不可达,域名真实但需特定来源
+        api_base="https://api.xiaomimimo.com/v1",  
         default_model="mimo-v2.5-pro",
-        model_options=("mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-pro", "mimo-v2-omni", "mimo-v2.5-pro-latest"),
+        model_options=("mimo-v2.5-pro", "mimo-v2.5"),
         icon_key="mimo",
-        models_endpoint="https://api.mimo-v2.com/v1/models",  # 同样主机,本网络不可达
+        models_endpoint="https://api.xiaomimimo.com/v1/models", 
         models_needs_key=True,
-        anthropic_base="https://api.mimo-v2.com/anthropic",
+        anthropic_base="https://api.xiaomimimo.com/anthropic",
     ),
 ]
 
@@ -438,8 +434,6 @@ def to_frontend_payload() -> dict[str, Any]:
                 "supports_anthropic": bool(p.anthropic_base),
                 "anthropic_base": p.anthropic_base,
                 "anthropic_client_provider": ANTHROPIC_CLIENT_PROVIDER if p.anthropic_base else None,
-                "needs_third_party": p.needs_third_party,
-                "needs_ak_sk": p.needs_ak_sk,
             }
             for p in _BY_PLAN[plan]
         ]
