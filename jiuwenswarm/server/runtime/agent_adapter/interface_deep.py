@@ -34,7 +34,6 @@ import yaml
 from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig, ContextEngineConfig
 from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
-from openjiuwen.core.foundation.llm.utils.provider_utils import is_openai_account_provider
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
 from openjiuwen.core.foundation.tool import ToolCard, McpServerConfig
 from openjiuwen.core.common.logging import server_logger
@@ -741,21 +740,6 @@ def init_permission_engine(*_args: Any, **_kwargs: Any) -> None:
     return None
 
 
-def _mcc_looks_usable(mcc: dict) -> bool:
-    """检查 model_client_config 是否包含有效的 API 凭据。"""
-    api_base = str(mcc.get("api_base", "") or "").strip()
-    if not api_base or is_placeholder_api_base(api_base):
-        return False
-
-    provider = mcc.get("client_provider", "")
-    provider = getattr(provider, "value", provider)
-    if is_openai_account_provider(str(provider or "")):
-        return True
-
-    api_key = str(mcc.get("api_key", "") or "").strip()
-    return bool(api_key)
-
-
 def build_model_from_entry(mcc: dict, mco: dict) -> Model:
     """根据单个模型条目的 model_client_config / model_config_obj 构建 Model 实例。
 
@@ -1047,7 +1031,7 @@ def _try_add_cache_control(msg: Any) -> None:
     where content is ``Union[str, List[Union[str, dict]]]``). If the last block
     is a dict, we add ``cache_control: {"type": "ephemeral"}`` to it.
 
-    Mark the last pre-prompt message for prompt caching, 
+    Mark the last pre-prompt message for prompt caching,
     while the btw/recap prompt itself carries no marker
     (skipCacheWrite — the side response doesn't create a new cache entry).
 
@@ -7592,11 +7576,10 @@ class JiuWenSwarmDeepAdapter:
         mcc_obj = getattr(model, "model_client_config", None)
         if not isinstance(mcc_obj, ModelClientConfig):
             return False
-        return _mcc_looks_usable({
-            "api_key": mcc_obj.api_key,
-            "api_base": getattr(mcc_obj, "api_base", None),
-            "client_provider": getattr(mcc_obj, "client_provider", None),
-        })
+        if getattr(model, "_client", None) is None:
+            return False
+        api_base = str(getattr(mcc_obj, "api_base", None) or "").strip()
+        return not is_placeholder_api_base(api_base)
 
     def _has_valid_model_config(self, requested_model_name: str = "") -> bool:
         """检查本次请求实际会使用的模型配置是否有效。"""
