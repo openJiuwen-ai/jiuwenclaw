@@ -122,14 +122,14 @@ class SwarmReviewFeedbackEvolutionHandler:
         async with self._task_evolution_lock:
             member_rail = self._member_rail_for(assignee, global_rail)
             trajectory = self._get_member_trajectory(assignee)
-            task_objective = "\n".join(
-                part
-                for part in (
-                    str(payload.get("task_title") or "").strip(),
-                    str(payload.get("task_content") or "").strip(),
-                )
-                if part
-            )
+            task_parts: list[str] = []
+            task_title = str(payload.get("task_title") or "").strip()
+            task_content = str(payload.get("task_content") or "").strip()
+            if task_title:
+                task_parts.append(task_title)
+            if task_content:
+                task_parts.append(task_content)
+            task_objective = "\n".join(task_parts)
             prior_pattern_evidence = tuple(
                 self._format_new_skill_pattern_evidence(item)
                 for item in self._new_skill_patterns
@@ -266,10 +266,10 @@ class SwarmReviewFeedbackEvolutionHandler:
 
         async with self._team_evolution_lock:
             end = len(self._observations)
-            observations = self._observations[self._global_observation_cursor : end]
+            observations = self._observations[self._global_observation_cursor:end]
             pattern_end = len(self._new_skill_patterns)
             pattern_observations = self._new_skill_patterns[
-                self._new_skill_pattern_cursor : pattern_end
+                self._new_skill_pattern_cursor:pattern_end
             ]
             if not observations and not pattern_observations:
                 return False
@@ -516,12 +516,14 @@ class SwarmReviewFeedbackEvolutionHandler:
         pattern_key = self._new_skill_proposal_key(reusable_guidance)
         if not pattern_key:
             return []
-        return [
-            item
-            for item in self._new_skill_patterns
-            if item.task_id != exclude_task_id
-            and self._new_skill_proposal_key(item.reusable_guidance) == pattern_key
-        ]
+        matching_patterns: list[_NewSkillPatternObservation] = []
+        for item in self._new_skill_patterns:
+            if item.task_id == exclude_task_id:
+                continue
+            item_pattern_key = self._new_skill_proposal_key(item.reusable_guidance)
+            if item_pattern_key == pattern_key:
+                matching_patterns.append(item)
+        return matching_patterns
 
     def _get_member_trajectory(self, assignee: str) -> Any | None:
         registry = self._trajectory_registry
