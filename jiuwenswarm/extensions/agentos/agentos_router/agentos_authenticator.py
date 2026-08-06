@@ -12,13 +12,14 @@ class AgentOSAuthenticator(CredentialAuthenticator):
     门禁只依据响应中的 ``valid``（身份是否合法），不消费 ``authorized``
     （资源级授权留给后续能力）。
     成功时 ``AuthResult`` 字段约定（供后续会话路由 / 注册中心 / 实例创建贯通）：
-        - ``user_id``: IAM 返回的用户 ID（权威身份）
-        - ``extensions.username``: 用户名（可选）
-     	- ``extensions.role``: 角色（可选）
-     	- ``extensions.auth_method``: 固定为 ``"token"``
+    - ``user_id``: IAM 返回的用户 ID（权威身份）
+    - ``extensions.username``: 用户名（可选）
+    - ``extensions.role``: 角色（可选）
+    - ``extensions.auth_method``: 固定为 ``"token"``
     """
+
     def __init__(self, auth_service_url: str,  # agent-os 后端地址，例如 "http://localhost:8000"
-                 timeout: float = 10.0, ):  # HTTP 请求超时秒数，默认 10
+                 timeout: float = 10.0):  # HTTP 请求超时秒数，默认 10
         self._auth_service_url = auth_service_url.rstrip("/")
         self._timeout = timeout
         self._auth_client = httpx.AsyncClient(timeout=timeout)

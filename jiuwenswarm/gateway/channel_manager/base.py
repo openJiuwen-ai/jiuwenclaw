@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 # 连接钩子签名: (ws) -> None | Awaitable[None]
 ConnectHook = Callable[..., Any]
 
+
 class ChannelType(str, Enum):
     """Channel 类型枚举."""
     ACP = "acp"
