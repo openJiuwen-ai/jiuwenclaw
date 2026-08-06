@@ -192,6 +192,7 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
 
   const confirmDelete = useCallback(async () => {
     if (!pendingDelete) return;
+    setActingJobId(pendingDelete.id);
     setDeleting(true);
     setDeleteError(null);
     try {
@@ -215,6 +216,7 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
       }
     } finally {
       setDeleting(false);
+      setActingJobId(null);
     }
   }, [pendingDelete, sessionId, loadAll, t]);
 
@@ -328,11 +330,12 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
                     </button>
                     <button
                       type="button"
+                      disabled={actingJobId === job.id}
                       onClick={() => {
                         setDeleteError(null);
                         setPendingDelete(job);
                       }}
-                      className="rounded-full border border-red-300 px-3 py-1 text-xs text-red-500 hover:bg-red-50"
+                      className="rounded-full border border-red-300 px-3 py-1 text-xs text-red-500 hover:bg-red-50 disabled:opacity-60"
                     >
                       {t('heartbeat.panel.delete')}
                     </button>
