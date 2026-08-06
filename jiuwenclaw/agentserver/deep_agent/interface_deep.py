@@ -7074,8 +7074,7 @@ class JiuWenClawDeepAdapter:
                 ),
                 "error": (
                     f"Skill '{resolved_name}' 融合重写 SKILL.md 失败。"
-                    "请在安全管理中将敏感操作 read_file、write_file、edit_file 设为不需要审批，"
-                    "或直接关闭审批护栏后重试。"
+                    "请到安全管理关闭审批护栏后重试。"
                 ),
             }
 
@@ -9283,13 +9282,11 @@ class JiuWenClawDeepAdapter:
                             is_complete=False,
                         )
 
-                # Always schedule followup to drain evolution summary for auto
-                # rebuild. Auto rebuild itself runs only when the turn fully
-                # completed (not HITL-pending).
+                # Always schedule followup to drain evolution summary and run
+                # detached auto rebuild (independent of HITL pause on this turn).
                 self._schedule_background_evolution_followup(
                     request_id=rid,
                     session_id=session_id,
-                    hitl_pending=hitl_pending_stream,
                 )
 
                 logger.info(
@@ -9413,13 +9410,12 @@ class JiuWenClawDeepAdapter:
         *,
         request_id: str,
         session_id: str,
-        hitl_pending: bool = False,
     ) -> None:
         """Fire-and-forget: wait for rail evolution, then auto rebuild.
 
         Must not be awaited from the chat stream — keeps the user turn non-blocking.
-        When ``hitl_pending`` is True, still drain the evolution summary but
-        skip auto rebuild (same policy as the former in-stream path).
+        Auto rebuild runs even when the chat turn paused for HITL, because rebuild
+        is detached and does not write to the closed stream.
         """
         rail = self._skill_evolution_rail
         if rail is None:
@@ -9429,9 +9425,8 @@ class JiuWenClawDeepAdapter:
             # still try to drain summary / rebuild once in the background.
             logger.info(
                 "[JiuWenClawDeepAdapter] schedule evolution followup with no pending task yet: "
-                "request_id=%s hitl_pending=%s",
+                "request_id=%s",
                 request_id,
-                hitl_pending,
                 extra={"user_visible": "progress"},
             )
 
@@ -9439,7 +9434,6 @@ class JiuWenClawDeepAdapter:
             self._background_evolution_followup(
                 request_id=request_id,
                 session_id=session_id,
-                hitl_pending=hitl_pending,
             ),
             name=f"evolution_followup_{request_id}",
         )
@@ -9473,9 +9467,8 @@ class JiuWenClawDeepAdapter:
         task.add_done_callback(_on_done)
         logger.info(
             "[JiuWenClawDeepAdapter] scheduled background evolution followup: "
-            "request_id=%s hitl_pending=%s pending_followups=%d",
+            "request_id=%s pending_followups=%d",
             request_id,
-            hitl_pending,
             len(self._pending_evolution_followup_tasks),
             extra={"user_visible": "progress"},
         )
@@ -9485,7 +9478,6 @@ class JiuWenClawDeepAdapter:
         *,
         request_id: str,
         session_id: str,
-        hitl_pending: bool = False,
         timeout: float | None = 300.0,
     ) -> None:
         """Detached worker: join rail evolution, drain summary, run auto rebuild."""
@@ -9506,16 +9498,6 @@ class JiuWenClawDeepAdapter:
                     [getattr(evt, "type", None) for evt in late_events],
                     extra={"user_visible": "progress"},
                 )
-
-        if hitl_pending:
-            # Mirror _iter_auto_rebuild_followups: do not rebuild while waiting on HITL.
-            self._pending_auto_rebuild_skills = []
-            logger.info(
-                "[JiuWenClawDeepAdapter] skip auto rebuild while HITL pending: request_id=%s",
-                request_id,
-                extra={"user_visible": "progress"},
-            )
-            return
 
         await self._run_auto_rebuild_skills_detached(request_id=request_id)
 
@@ -9717,22 +9699,12 @@ class JiuWenClawDeepAdapter:
         stream_request_id: str,
         channel_id: str,
         session_id: str,
-        hitl_pending: bool,
     ) -> AsyncIterator[AgentResponseChunk]:
         """Serially rebuild skills with stream progress (tests / legacy callers).
 
         Online chat path uses ``_run_auto_rebuild_skills_detached`` instead so the
         user turn is not blocked.
         """
-        if hitl_pending:
-            self._pending_auto_rebuild_skills = []
-            logger.info(
-                "[JiuWenClawDeepAdapter] skip auto rebuild: HITL pending request_id=%s",
-                stream_request_id,
-                extra={"user_visible": "progress"},
-            )
-            return
-
         if self._skill_evolution_rail is None:
             self._pending_auto_rebuild_skills = []
             return
