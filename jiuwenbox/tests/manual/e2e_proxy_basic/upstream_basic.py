@@ -70,7 +70,7 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return auth[len("Basic "):].strip() == EXPECTED
 
-    def do_POST(self) -> None:  # noqa: N802
+    def do_POST(self) -> None:  # pylint: disable=invalid-name  # noqa: N802
         length = int(self.headers.get("Content-Length", "0") or "0")
         raw = self.rfile.read(length) if length else b""
         if not self._check_auth():
@@ -97,7 +97,7 @@ class Handler(BaseHTTPRequestHandler):
                    "notifications": [], "errors": []}
         self._send(200, json.dumps(out, separators=(",", ":")).encode())
 
-    def do_GET(self) -> None:  # noqa: N802
+    def do_GET(self) -> None:  # pylint: disable=invalid-name  # noqa: N802
         if not self._check_auth():
             msg, www = self._auth_error()
             body = json.dumps({"errors": [
