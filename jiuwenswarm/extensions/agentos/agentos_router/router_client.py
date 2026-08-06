@@ -314,7 +314,7 @@ class AgentOSRouterClient(AgentServerClient):
                         "username": user_id,
                         "agent": False,
                         "key_file": key_file,
-                        "disable_host_key_check": True,
+                        "disable_host_key_check": False,
                     },
                 }
             )
