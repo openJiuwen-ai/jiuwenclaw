@@ -155,6 +155,7 @@ async def deliver_file_to_user(
             "[deliver_file_to_user] no active SendFileToolkit; skip delivery path=%s",
             path,
         )
+        return ""
     return await toolkit.send_file(path)
 
 
