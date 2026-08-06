@@ -20,13 +20,18 @@ def build_permission_rail(
 ) -> Any | None:
     """Build PermissionInterruptRail for tool permission checks.
 
+    Always mounts the rail even when ``permissions.enabled`` is false. The
+    shared PermissionEngine short-circuits to ALLOW while disabled; skipping
+    rail creation made re-enabling the guardrail a no-op for agents created
+    (or reloaded) while it was off — sensitive tools ran without HITL.
+
     Args:
         config: Agent config dict containing permissions section
         llm: LLM instance for risk assessment
         model_name: Model name for risk assessment
 
     Returns:
-        PermissionInterruptRail instance or None if disabled
+        PermissionInterruptRail instance, or None only if construction fails
     """
     from jiuwenclaw.agentserver.deep_agent.rails.permission_rail import PermissionInterruptRail
 
@@ -38,14 +43,12 @@ def build_permission_rail(
         permission_config.get("enabled", True),
     )
 
-    if not enabled:
-        logger.info("[InterruptHelpers] Permission system disabled — skipping rail creation")
-        return None
-
     logger.info(
-        "[InterruptHelpers] Building PermissionInterruptRail intercept=all llm=%s model_name=%s",
+        "[InterruptHelpers] Building PermissionInterruptRail intercept=all "
+        "llm=%s model_name=%s enabled=%s",
         llm is not None,
         model_name,
+        enabled,
     )
     try:
         permission_rail = PermissionInterruptRail(

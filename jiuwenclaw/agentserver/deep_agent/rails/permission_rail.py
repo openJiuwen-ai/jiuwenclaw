@@ -83,7 +83,9 @@ def clear_session_interrupt_state(session: Any) -> None:
     """Clear persisted interrupt-related state for one session.
 
     This is used by `chat.interrupt(cancel)` to ensure stale permission/interrupt
-    checkpoints cannot be resumed by the next user message.
+    checkpoints cannot be resumed by the next user message. Also clears
+    session-scoped permission auto-confirm so re-enabling the guardrail can
+    surface HITL again in the same conversation.
     """
     if session is None:
         return
@@ -91,11 +93,16 @@ def clear_session_interrupt_state(session: Any) -> None:
         session.update_state({
             INTERRUPT_PENDING_PERMISSION_CONTEXT_KEY: {},
             INTERRUPTION_KEY: None,
+            INTERRUPT_AUTO_CONFIRM_KEY: {},
         })
     except Exception:
         logger.warning(
             "[PermissionEngine] permission.rail.session_state_clear_failed keys=%s",
-            [INTERRUPT_PENDING_PERMISSION_CONTEXT_KEY, INTERRUPTION_KEY],
+            [
+                INTERRUPT_PENDING_PERMISSION_CONTEXT_KEY,
+                INTERRUPTION_KEY,
+                INTERRUPT_AUTO_CONFIRM_KEY,
+            ],
             exc_info=True,
         )
 

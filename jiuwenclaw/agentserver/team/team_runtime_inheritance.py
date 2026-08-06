@@ -447,10 +447,12 @@ def build_team_permission_rails(
     leader_member_name: str,
     permissions_override: dict[str, str] | None = None,
 ) -> list[Any]:
-    """Mount TeamPermissionPolicyRail (leader) and TeamPermissionRail (teammate)."""
-    if not permissions_config.get("enabled"):
-        return []
+    """Mount TeamPermissionPolicyRail (leader) and TeamPermissionRail (teammate).
 
+    Rails stay mounted even when ``permissions.enabled`` is false so that
+    re-enabling the guardrail does not require recreating team members. The
+    shared PermissionEngine short-circuits to ALLOW while disabled.
+    """
     rails: list[Any] = []
     lang = language if language in ("cn", "en") else "cn"
 

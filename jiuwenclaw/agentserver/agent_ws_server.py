@@ -1025,6 +1025,7 @@ class AgentWebSocketServer:
     async def _handle_permissions_config(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """处理 permissions.* E2A 请求（与 Web ``register_method`` 同名 method）。"""
         from jiuwenclaw.agentserver.permissions.config_rpc import dispatch_permissions_config_request
+        from jiuwenclaw.schema.message import ReqMethod
 
         pool = self._agent_manager
         catalog_fn = pool.collect_runtime_tools_catalog_nowait if pool is not None else None
@@ -1032,6 +1033,44 @@ class AgentWebSocketServer:
             request,
             get_runtime_tools_catalog=catalog_fn,
         )
+        # Re-enable must remount PermissionInterruptRail on cached agents that
+        # were created while the guardrail was off (rail was previously skipped),
+        # and force the shared engine to enabled=true for the same conversation.
+        if (
+            resp.ok
+            and request.req_method == ReqMethod.PERMISSIONS_ENABLED_SET
+            and pool is not None
+        ):
+            params = request.params if isinstance(request.params, dict) else {}
+            enabled = params.get("enabled")
+            nested = params.get("permissions")
+            if enabled is None and isinstance(nested, dict):
+                enabled = nested.get("enabled")
+            if enabled is True:
+                try:
+                    import copy
+
+                    from jiuwenclaw.agentserver.permissions.core import get_permission_engine
+                    from jiuwenclaw.config import get_config
+
+                    base = get_config()
+                    cfg = copy.deepcopy(base) if isinstance(base, dict) else {}
+                    perms = dict(cfg.get("permissions") or {})
+                    perms["enabled"] = True
+                    cfg["permissions"] = perms
+                    get_permission_engine().update_config(perms)
+                    await pool.reload_agents_config(cfg, None)
+                    logger.info(
+                        "[AgentWebSocketServer] remounted permission rails after "
+                        "permissions.enabled.set(true)"
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[AgentWebSocketServer] failed to remount permission rails "
+                        "after enabled.set: %s",
+                        exc,
+                        exc_info=True,
+                    )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
             await ws.send(json.dumps(wire, ensure_ascii=False))
