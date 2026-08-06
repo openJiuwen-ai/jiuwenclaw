@@ -10,6 +10,7 @@ This process starts:
 It connects to a remote/local AgentServer WebSocket endpoint.
 
 Supports ``--dotenv <path>`` for multi-instance isolation.
+test UT
 """
 
 from __future__ import annotations
