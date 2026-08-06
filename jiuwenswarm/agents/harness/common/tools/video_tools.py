@@ -407,10 +407,16 @@ async def generate_video(
         duration,
     )
 
+    try:
+        duration_int = int(duration)
+    except (TypeError, ValueError):
+        duration_int = 5
+    duration_int = max(1, min(duration_int, 15))
+
     result = await _invoke_model_video_generation(
         prompt,
         size=size,
-        duration=max(1, min(int(duration or 5), 15)),
+        duration=duration_int,
         resolution=resolution,
     )
     if "error" in result:

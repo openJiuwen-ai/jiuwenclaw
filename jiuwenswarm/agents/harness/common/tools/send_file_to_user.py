@@ -93,11 +93,10 @@ async def deliver_file_to_user(abs_file_path: str) -> str:
         return ""
     toolkit = _ACTIVE_SEND_FILE_TOOLKIT.get() or _FALLBACK_SEND_FILE_TOOLKIT
     if toolkit is None:
-        logger.warning(
+        logger.debug(
             "[deliver_file_to_user] no active SendFileToolkit; skip delivery path=%s",
             path,
         )
-        return ""
     return await toolkit.send_file(path)
 
 

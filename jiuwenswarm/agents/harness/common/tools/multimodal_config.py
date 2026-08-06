@@ -338,6 +338,7 @@ def apply_video_gen_model_config_from_yaml(config_base: dict[str, Any] | None) -
         or os.getenv("VIDEO_GEN_API_KEY")
         or image_mc.get("api_key")
         or os.getenv("IMAGE_GEN_API_KEY")
+        or os.getenv("API_KEY")
         or ""
     ).strip()
     api_base = str(
@@ -345,6 +346,7 @@ def apply_video_gen_model_config_from_yaml(config_base: dict[str, Any] | None) -
         or os.getenv("VIDEO_GEN_API_BASE")
         or image_mc.get("api_base")
         or os.getenv("IMAGE_GEN_API_BASE")
+        or os.getenv("API_BASE")
         or "https://dashscope.aliyuncs.com/api/v1"
     ).strip()
     model_name = str(
