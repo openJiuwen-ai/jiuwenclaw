@@ -2508,10 +2508,34 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 PlanKind,
                 get_preset,
             )
-            from openjiuwen.extensions.external_provider.openai_auth.openai_account_models import (
-                parse_openai_account_model_ids,
-            )
-            import httpx  # noqa: PLC0415
+
+            def _fetch_remote_sync(endpoint: str, hdrs: dict[str, str]) -> list[str]:
+                """同步拉取并解析 /models(在线程池里跑,不阻塞事件循环)。
+
+                成功返回模型 ID 列表;任何失败(网络/状态码非200/解析失败/空)
+                都返回空列表,由调用方回退预设。永不抛异常。
+                """
+                import httpx  # noqa: PLC0415
+                from openjiuwen.extensions.external_provider.openai_auth.openai_account_models import (
+                    parse_openai_account_model_ids,
+                )
+                try:
+                    resp = httpx.get(endpoint, headers=hdrs, timeout=12.0)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("[vendors.fetch_models] http error: %s", exc)
+                    return []
+                if resp.status_code != 200:
+                    return []
+                try:
+                    payload_json = resp.json()
+                except ValueError:
+                    return []
+                if not isinstance(payload_json, dict):
+                    return []
+                try:
+                    return parse_openai_account_model_ids(payload_json)
+                except Exception:  # noqa: BLE001
+                    return []
 
             try:
                 plan = PlanKind(plan_raw)
@@ -2559,28 +2583,18 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     return
                 headers["Authorization"] = f"Bearer {api_key}"
 
-            try:
-                resp = httpx.get(preset.models_endpoint, headers=headers, timeout=12.0)
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("[vendors.fetch_models] http error: %s", exc)
-                resp = None
+            # 同步 httpx.get 通过 asyncio.to_thread 卸载到线程池,避免阻塞事件循环
+            # (与同文件 _openai_account_*_payload / _updater_* 的 to_thread 模式一致)。
+            remote_ids = await asyncio.to_thread(
+                _fetch_remote_sync, preset.models_endpoint, headers,
+            )
 
-            if resp is not None and resp.status_code == 200:
-                try:
-                    payload_json = resp.json()
-                except ValueError:
-                    payload_json = None
-                if isinstance(payload_json, dict):
-                    try:
-                        model_ids = parse_openai_account_model_ids(payload_json)
-                    except Exception:  # noqa: BLE001
-                        model_ids = []
-                    if model_ids:
-                        await channel.send_response(
-                            ws, req_id, ok=True,
-                            payload={"models": model_ids, "source": "remote"},
-                        )
-                        return
+            if remote_ids:
+                await channel.send_response(
+                    ws, req_id, ok=True,
+                    payload={"models": remote_ids, "source": "remote"},
+                )
+                return
 
             # 远端失败/空 -> 回退预设
             await channel.send_response(

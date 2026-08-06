@@ -106,7 +106,8 @@ _PRESETS: list[VendorPreset] = [
         icon_key="qwen",
         models_endpoint="https://dashscope.aliyuncs.com/compatible-mode/v1/models",
         models_needs_key=True,
-        anthropic_base="https://token-plan.cn-beijing.maas.aliyuncs.com/anthropic"    ),
+        anthropic_base="https://token-plan.cn-beijing.maas.aliyuncs.com/anthropic",
+    ),
     VendorPreset(
         vendor_key="minimax", display_name="MiniMax", plan=PlanKind.TOKEN_PLAN,
         client_provider="OpenAI",
@@ -117,7 +118,8 @@ _PRESETS: list[VendorPreset] = [
         models_endpoint="https://api.minimaxi.com/v1/models",
         models_needs_key=True,
         models_extra_auth={"group_id": "<可选,旧版需要>"},
-        anthropic_base="https://api.minimaxi.com/anthropic"    ),
+        anthropic_base="https://api.minimaxi.com/anthropic",
+    ),
     VendorPreset(
         vendor_key="maas", display_name="Maas盘古", plan=PlanKind.TOKEN_PLAN,
         client_provider="OpenAI",  # 华为云盘古借壳 OpenAI provider;实际走 ModelArts MaaS,默认OpenAI格式
@@ -128,17 +130,26 @@ _PRESETS: list[VendorPreset] = [
         models_endpoint="https://api.modelarts-maas.com/openai/v1/models",
         models_needs_key=True,
         anthropic_base="https://api.modelarts-maas.com/plan/anthropic",
-        needs_ak_sk=True    ),
+        needs_ak_sk=True,
+    ),
     VendorPreset(
         vendor_key="baidu", display_name="百度智能云", plan=PlanKind.TOKEN_PLAN,
         client_provider="OpenAI",
         api_base="https://qianfan.baidubce.com/v2/tokenplan/personal",  # personal; team variant: /v2/tokenplan/team
         default_model="deepseek-v4-pro",
-        model_options=("ernie-4.5-vl-424b-a47b", "deepseek-v4-pro", "deepseek-v4-flash", "glm-5.2", "kimi-k2.6", "mimo-v2.5"),
+        model_options=(
+            "ernie-4.5-vl-424b-a47b",
+            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+            "glm-5.2",
+            "kimi-k2.6",
+            "mimo-v2.5",
+        ),
         icon_key="baidu",
         models_endpoint="https://qianfan.baidubce.com/v2/models",
         models_needs_key=False,  # 列表公开(实测200);chat/completions仍需Bearer
-        anthropic_base="https://qianfan.baidubce.com/anthropic/tokenplan/personal"    ),
+        anthropic_base="https://qianfan.baidubce.com/anthropic/tokenplan/personal",
+    ),
     VendorPreset(
         vendor_key="mimo", display_name="小米Mimo", plan=PlanKind.TOKEN_PLAN,
         client_provider="OpenAI",
@@ -148,7 +159,8 @@ _PRESETS: list[VendorPreset] = [
         icon_key="mimo",
         models_endpoint="https://token-plan-cn.xiaomimimo.com/v1/models",
         models_needs_key=True,
-        anthropic_base="https://token-plan-cn.xiaomimimo.com/anthropic"    ),
+        anthropic_base="https://token-plan-cn.xiaomimimo.com/anthropic",
+    ),
 
     # ── Coding Plan ─────────────────────────────────────────────────────────
     VendorPreset(
@@ -160,7 +172,8 @@ _PRESETS: list[VendorPreset] = [
         icon_key="qwen",
         models_endpoint="https://dashscope.aliyuncs.com/compatible-mode/v1/models",
         models_needs_key=True,
-        anthropic_base="https://coding.dashscope.aliyuncs.com/apps/anthropic"    ),
+        anthropic_base="https://coding.dashscope.aliyuncs.com/apps/anthropic",
+    ),
     VendorPreset(
         vendor_key="kimi", display_name="Kimi(月之暗面)", plan=PlanKind.CODING_PLAN,
         client_provider="OpenAI",
@@ -170,7 +183,8 @@ _PRESETS: list[VendorPreset] = [
         icon_key="kimi",
         models_endpoint="https://api.moonshot.cn/v1/models",
         models_needs_key=True,
-        anthropic_base="https://api.kimi.com/coding"    ),
+        anthropic_base="https://api.kimi.com/coding",
+    ),
     VendorPreset(
         vendor_key="zhipu", display_name="智谱GLM", plan=PlanKind.CODING_PLAN,
         client_provider="OpenAI",
@@ -180,7 +194,8 @@ _PRESETS: list[VendorPreset] = [
         icon_key="zhipu",
         models_endpoint="https://open.bigmodel.cn/api/paas/v4/models",
         models_needs_key=True,
-        anthropic_base="https://open.bigmodel.cn/api/anthropic"    ),
+        anthropic_base="https://open.bigmodel.cn/api/anthropic",
+    ),
     VendorPreset(
         vendor_key="volcengine", display_name="火山引擎", plan=PlanKind.CODING_PLAN,
         client_provider="OpenAI",
@@ -190,7 +205,8 @@ _PRESETS: list[VendorPreset] = [
         icon_key="doubao",
         models_endpoint="https://ark.cn-beijing.volces.com/api/v3/models",
         models_needs_key=True,
-        anthropic_base="https://ark.cn-beijing.volces.com/api/coding"    ),
+        anthropic_base="https://ark.cn-beijing.volces.com/api/coding",
+    ),
     VendorPreset(
         vendor_key="baidu", display_name="百度智能云", plan=PlanKind.CODING_PLAN,
         client_provider="OpenAI",
@@ -200,7 +216,8 @@ _PRESETS: list[VendorPreset] = [
         icon_key="baidu",
         models_endpoint="https://qianfan.baidubce.com/v2/models",
         models_needs_key=False,
-        anthropic_base="https://qianfan.baidubce.com/anthropic/coding"    ),
+        anthropic_base="https://qianfan.baidubce.com/anthropic/coding",
+    ),
 
     # ── 自定义API (通用Token / 按量计费) ────────────────────────────────────
     VendorPreset(
@@ -208,21 +225,37 @@ _PRESETS: list[VendorPreset] = [
         client_provider="OpenAI",
         api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
         default_model="qwen3.8-max",
-        model_options=("qwen3.8-max", "qwen3.7-max", "qwen3.7-plus", "qwen3.7-flash", "qwen3.6-max-preview", "qwen3-coder-next", "qwen3-vl-235b-a22b-thinking"),
+        model_options=(
+            "qwen3.8-max",
+            "qwen3.7-max",
+            "qwen3.7-plus",
+            "qwen3.7-flash",
+            "qwen3.6-max-preview",
+            "qwen3-coder-next",
+            "qwen3-vl-235b-a22b-thinking",
+        ),
         icon_key="qwen",
         models_endpoint="https://dashscope.aliyuncs.com/compatible-mode/v1/models",
         models_needs_key=True,
-        anthropic_base="https://dashscope.aliyuncs.com/apps/anthropic"    ),
+        anthropic_base="https://dashscope.aliyuncs.com/apps/anthropic",
+    ),
     VendorPreset(
         vendor_key="deepseek", display_name="DeepSeek", plan=PlanKind.CUSTOM_API,
         client_provider="OpenAI",
         api_base="https://api.deepseek.com",
         default_model="deepseek-v4-pro",
-        model_options=("deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4-flash-latest", "deepseek-v3.2", "deepseek-r1"),
+        model_options=(
+            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+            "deepseek-v4-flash-latest",
+            "deepseek-v3.2",
+            "deepseek-r1",
+        ),
         icon_key="deepseek",
         models_endpoint="https://api.deepseek.com/models",
         models_needs_key=True,
-        anthropic_base="https://api.deepseek.com/anthropic"    ),
+        anthropic_base="https://api.deepseek.com/anthropic",
+    ),
     VendorPreset(
         vendor_key="kimi", display_name="Kimi(月之暗面)", plan=PlanKind.CUSTOM_API,
         client_provider="OpenAI",
@@ -232,13 +265,21 @@ _PRESETS: list[VendorPreset] = [
         icon_key="kimi",
         models_endpoint="https://api.moonshot.cn/v1/models",
         models_needs_key=True,
-        anthropic_base="https://api.moonshot.cn/anthropic"    ),
+        anthropic_base="https://api.moonshot.cn/anthropic",
+    ),
     VendorPreset(
         vendor_key="openrouter", display_name="OpenRouter", plan=PlanKind.CUSTOM_API,
         client_provider="OpenAI",
         api_base="https://openrouter.ai/api/v1",
         default_model="anthropic/claude-sonnet-4.5",
-        model_options=("anthropic/claude-sonnet-4.5", "qwen/qwen3.8-max", "z-ai/glm-5.2", "deepseek/deepseek-v4-pro", "openai/gpt-5.6-terra", "google/gemini-2.5-flash"),
+        model_options=(
+            "anthropic/claude-sonnet-4.5",
+            "qwen/qwen3.8-max",
+            "z-ai/glm-5.2",
+            "deepseek/deepseek-v4-pro",
+            "openai/gpt-5.6-terra",
+            "google/gemini-2.5-flash",
+        ),
         icon_key="openai",
         models_endpoint="https://openrouter.ai/api/v1/models",
         models_needs_key=False,  # 公开列出(实测200,338模型)
@@ -249,11 +290,21 @@ _PRESETS: list[VendorPreset] = [
         client_provider="OpenAI",
         api_base="https://open.bigmodel.cn/api/paas/v4",
         default_model="glm-5.2",
-        model_options=("glm-5.2", "glm-5.1", "glm-5", "glm-4.7", "glm-4.7-flash", "glm-5-turbo", "glm-5v-turbo", "codegeex-4"),
+        model_options=(
+            "glm-5.2",
+            "glm-5.1",
+            "glm-5",
+            "glm-4.7",
+            "glm-4.7-flash",
+            "glm-5-turbo",
+            "glm-5v-turbo",
+            "codegeex-4",
+        ),
         icon_key="zhipu",
         models_endpoint="https://open.bigmodel.cn/api/paas/v4/models",
         models_needs_key=True,
-        anthropic_base="https://open.bigmodel.cn/api/paas/v4/anthropic"    ),
+        anthropic_base="https://open.bigmodel.cn/api/paas/v4/anthropic",
+    ),
     VendorPreset(
         vendor_key="minimax", display_name="MiniMax", plan=PlanKind.CUSTOM_API,
         client_provider="OpenAI",
@@ -264,7 +315,8 @@ _PRESETS: list[VendorPreset] = [
         models_endpoint="https://api.minimaxi.com/v1/models",
         models_needs_key=True,
         models_extra_auth={"group_id": "<可选>"},
-        anthropic_base="https://api.minimaxi.com/anthropic"    ),
+        anthropic_base="https://api.minimaxi.com/anthropic",
+    ),
     VendorPreset(
         vendor_key="maas", display_name="Maas盘古", plan=PlanKind.CUSTOM_API,
         client_provider="OpenAI",
@@ -275,7 +327,8 @@ _PRESETS: list[VendorPreset] = [
         models_endpoint="https://api.modelarts-maas.com/openai/v1/models",
         models_needs_key=True,
         anthropic_base="https://api.modelarts-maas.com/anthropic/v1",
-        needs_ak_sk=True    ),
+        needs_ak_sk=True,
+    ),
     VendorPreset(
         vendor_key="volcengine", display_name="火山引擎", plan=PlanKind.CUSTOM_API,
         client_provider="OpenAI",
@@ -285,17 +338,27 @@ _PRESETS: list[VendorPreset] = [
         icon_key="doubao",
         models_endpoint="https://ark.cn-beijing.volces.com/api/v3/models",
         models_needs_key=True,
-        anthropic_base="https://ark.cn-beijing.volces.com/api/v3/anthropic"    ),
+        anthropic_base="https://ark.cn-beijing.volces.com/api/v3/anthropic",
+    ),
     VendorPreset(
         vendor_key="baidu", display_name="百度智能云", plan=PlanKind.CUSTOM_API,
         client_provider="OpenAI",
         api_base="https://qianfan.baidubce.com/v2",
         default_model="ernie-4.5-vl-424b-a47b",
-        model_options=("ernie-4.5-vl-424b-a47b", "deepseek-v4-pro", "deepseek-v4-flash", "glm-5.2", "kimi-k2.6", "mimo-v2.5", "qianfan-ocr-fast"),
+        model_options=(
+            "ernie-4.5-vl-424b-a47b",
+            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+            "glm-5.2",
+            "kimi-k2.6",
+            "mimo-v2.5",
+            "qianfan-ocr-fast",
+        ),
         icon_key="baidu",
         models_endpoint="https://qianfan.baidubce.com/v2/models",
         models_needs_key=False,
-        anthropic_base="https://qianfan.baidubce.com/anthropic"    ),
+        anthropic_base="https://qianfan.baidubce.com/anthropic",
+    ),
     VendorPreset(
         vendor_key="mimo", display_name="小米Mimo", plan=PlanKind.CUSTOM_API,
         client_provider="OpenAI",
@@ -305,7 +368,8 @@ _PRESETS: list[VendorPreset] = [
         icon_key="mimo",
         models_endpoint="https://api.mimo-v2.com/v1/models",  # 同样主机,本网络不可达
         models_needs_key=True,
-        anthropic_base="https://api.mimo-v2.com/anthropic"    ),
+        anthropic_base="https://api.mimo-v2.com/anthropic",
+    ),
 ]
 
 
