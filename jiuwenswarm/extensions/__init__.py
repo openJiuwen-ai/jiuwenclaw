@@ -1,3 +1,9 @@
+from jiuwenswarm.extensions.harness import (
+    ExtensionBuildContext,
+    HarnessContribution,
+    HarnessContributor,
+    HarnessFailurePolicy,
+)
 from jiuwenswarm.extensions.loader import ExtensionLoader
 from jiuwenswarm.extensions.manager import ExtensionManager
 from jiuwenswarm.extensions.registry import ExtensionRegistry
@@ -15,6 +21,10 @@ __all__ = [
     "ExtensionMetadata",
     "ExtensionConfig",
     "ExtensionRegistry",
+    "ExtensionBuildContext",
+    "HarnessContribution",
+    "HarnessContributor",
+    "HarnessFailurePolicy",
     "ExtensionLoader",
     "ExtensionManager",
 ]

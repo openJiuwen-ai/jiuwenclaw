@@ -598,6 +598,77 @@ SubAgentConfig(
 
 自定义停止条件实现 `StopConditionEvaluator`，并传入 `TaskCompletionRail(evaluators=[...])`。外层循环按 OR 语义统一评估。
 
+### 6.5 通过 JiuwenSwarm 扩展自动装配 Tool 与 Rail
+
+标准 JiuwenSwarm 扩展可以声明一组 Agent Core Tool/Rail，并让 JiuwenSwarm 在创建普通 Agent、代码 Agent、团队 Leader 和团队成员时自动装配。扩展只描述“需要哪些能力”，不直接修改正在运行的 Agent。
+
+```python
+from openjiuwen.agent_teams.harness.manifest import ElementKind, harness_element
+from openjiuwen.agent_teams.schema.deep_agent_spec import BuiltinToolSpec, RailSpec
+
+from jiuwenswarm.extensions import HarnessContribution
+
+
+@harness_element(
+    kind=ElementKind.TOOL,
+    name="example.lookup_tool",
+    description="Build the example lookup tool",
+)
+def build_lookup_tool(params, context):
+    return create_lookup_tool(params=params, context=context)
+
+
+@harness_element(
+    kind=ElementKind.RAIL,
+    name="example.audit_rail",
+    description="Build the example audit rail",
+)
+def build_audit_rail(params, context):
+    return AuditRail(**params)
+
+
+def contribute_harness(context):
+    # 可根据 context.mode、getattr(context, "sub_mode", None)、
+    # context.role、context.project_dir 等字段决定给哪类 Agent 装配能力；
+    # 不适用时返回 None。
+    if context.mode not in {"agent", "code", "team", "code.team", "team.plan"}:
+        return None
+    return HarnessContribution(
+        tools=[BuiltinToolSpec(type="example.lookup_tool")],
+        rails=[RailSpec(type="example.audit_rail")],
+    )
+
+
+async def register_extensions(registry):
+    registry.register_harness_contributor(
+        "example.harness",
+        contribute_harness,
+        failure_policy="raise",
+    )
+```
+
+使用约束：
+
+- Contributor 必须是同步、无 I/O 的轻量函数，注册名称必须唯一。
+- Contributor 只返回 `BuiltinToolSpec` / `RailSpec`，Provider 负责构造真实 Tool/Rail。
+- `context.mode` 表示主要运行模式；普通/代码 Agent 如果还有更细的子模式，可通过 `context.sub_mode` 区分。团队上下文不保证存在该字段，因此扩展应使用 `getattr(context, "sub_mode", None)` 读取。
+- `failure_policy` 的作用范围很窄：对普通/代码 Agent，它只控制“调用 Contributor”和“由 Provider 构造声明对象”这两个阶段。`"skip"`（默认）会记录并跳过可选贡献；强制治理能力应使用 `"raise"`。它不是运行期的通用容错开关。
+- 强制扩展还必须在 `extension.yaml` 中声明 `required: true`。导入、依赖或 Factory 校验失败发生在 Contributor 注册之前，仅设置 `failure_policy="raise"` 无法保护启动过程；清单标记会让 AgentServer 直接启动失败，而不是在缺少治理能力时继续运行。
+- Rail 生命周期初始化、Rail 运行期回调，以及能力挂载/重名冲突一律安全失败，不能被 `failure_policy="skip"` 降级。对团队来说，该策略只控制首次生成 Spec 时的 Contributor 回调；Provider 可能稍后或在另一进程构造，策略不会随 Spec 序列化，因此 Provider 失败会直接使成员构建失败。
+- Rail 会先于 Tool 构造。普通或代码 Agent 中，如果一个扩展的能力构造失败，该扩展的整组能力不会挂载。
+- 每个已声明的 Spec 必须至少构造出一个有效资源；条件关闭时应由 Contributor 返回 `None` 或不声明该 Spec，而不是让 Provider 返回空结果。团队远端目前依赖 Provider 遵守这项约定。
+- 团队 Contributor 收到的是“成员模板”的上下文：`role` 通常只是 `leader` 或 `teammate`，`member_name` 也是模板/卡片名称。后续真正运行的 Worker、Avatar、预定义成员或动态成员可能拥有更具体的最终身份。凡是与身份有关的判断，都应由 Provider 根据它最终收到的真实上下文再决定，不能把 Contributor 阶段的模板身份当成最终身份。
+- 团队声明会跨进程传输，并作为团队 Spec 的一部分持久化。因此 `params` 只能放可 JSON 序列化的普通配置，严禁放 token、API key、密码或其他凭据；Provider 应在接收节点构造时，从该节点本地的密钥/配置来源读取凭据。
+- 每个 AgentServer 节点都必须安装并加载同版本扩展。远端缺少 Provider 时会明确失败，不会静默绕过安全 Rail。
+- 冷恢复会复用团队创建时已经写入 Spec 的 Tool/Rail 声明，不会重新调用 Contributor 来吸收后来修改的扩展配置。修改扩展代码、Contributor 规则或相关配置后，应新建团队。
+- Provider 返回纯 `ToolCard` 时，对应 Tool 必须已经注册，且返回卡片必须与注册 Tool 的卡片完全一致；有状态 ToolCard 还必须使用当前 Agent 的专属 ID。通常更推荐直接返回 Tool 实例，让 Agent Core 完成会话隔离。
+- 有状态 Tool Provider 每次应返回新实例；只有真正无状态、可安全共享的 Tool 才应标记为 `stateless`。Tool 可能被并行调用，内部可变状态应可重入或自行加锁。
+- 扩展工具的 `ToolCard.name` 应使用稳定且唯一的命名空间（例如 `cloudrobo_*`），避免与内置工具或其他扩展重名。
+- 当前装配是追加式的，不会替换宿主已有 Rail。扩展不得重复声明宿主已经挂载的同类权限或安全 Rail；需要复用原生审批时，应启用并配置宿主已有 Rail。
+- “整组跳过”只保证失败资源不会挂到 Agent；Provider 构造过程中已经产生的网络请求、文件写入等外部副作用无法自动回滚，因此 Provider 应尽量只做对象构造。
+- 普通/代码 Agent 的能力在创建或重建时装配，已经创建的 Agent 不保证自动热更新；团队声明遵循上面更严格的“创建/恢复”规则。
+- 当前接口只处理 Tool/Rail，Skill 自动装配不在此能力范围内。
+
 ## 七、代码目录
 
 Harness 的核心实现位于：

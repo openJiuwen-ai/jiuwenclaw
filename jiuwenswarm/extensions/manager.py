@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import Any
 
 from jiuwenswarm.common.config import get_config
-from jiuwenswarm.extensions.loader import ExtensionLoader
+from jiuwenswarm.extensions.loader import ExtensionLoader, is_extension_required
 from jiuwenswarm.extensions.registry import ExtensionRegistry
 from jiuwenswarm.common.utils import logger
 
@@ -81,6 +81,15 @@ class ExtensionManager:
         logger.info("[ExtensionManager] 发现扩展路径: %s", roots)
         for path in roots:
             try:
+                required = is_extension_required(path)
+            except Exception as e:
+                logger.error("[ExtensionManager] 扩展清单无效 %s: %s", path, e)
+                # A malformed manifest cannot be trusted to tell us whether the
+                # extension is optional. Fail startup instead of accidentally
+                # bypassing a governance extension that intended required=true.
+                raise
+
+            try:
                 loaded = await self.loader.load_extension(path)
                 if loaded:
                     logger.info("[ExtensionManager] 加载 %s", loaded)
@@ -90,6 +99,9 @@ class ExtensionManager:
                         self._loaded_extensions.append(loaded)
             except Exception as e:
                 logger.error("[ExtensionManager] 加载扩展 %s 失败: %s", path, e)
+
+                if required:
+                    raise
 
     async def shutdown_all_extensions(self) -> None:
         for ext in self._loaded_extensions:
@@ -102,7 +114,11 @@ class ExtensionManager:
 
     def list_extensions(self) -> list[dict]:
         return [
-            {"id": p.metadata.id, "name": p.metadata.name, "version": p.metadata.version}
+            {
+                "id": p.metadata.id,
+                "name": p.metadata.name,
+                "version": p.metadata.version,
+            }
             for p in self._loaded_extensions
             if hasattr(p, "metadata")
         ]
