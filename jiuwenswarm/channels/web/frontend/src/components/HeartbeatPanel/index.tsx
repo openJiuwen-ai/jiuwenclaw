@@ -3,7 +3,6 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { X } from 'lucide-react';
 import { webRequest } from '../../services/webClient';
-import type { WebError } from '../../types';
 import type { HeartbeatJobDTO, HeartbeatMeta, HeartbeatTaskUI } from '../../types/heartbeat';
 import { summarizeHeartbeatSchedule } from './heartbeatScheduleConvert';
 import HeartbeatStatusBadge from './HeartbeatStatusBadge';
