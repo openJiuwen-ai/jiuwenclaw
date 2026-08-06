@@ -81,6 +81,12 @@ filesystem_policy:
     - host_path: "/etc/host.conf"
       sandbox_path: "/etc/host.conf"
       mode: "ro"
+    - host_path: "/etc/passwd"
+      sandbox_path: "/etc/passwd"
+      mode: "ro"
+    - host_path: "/etc/group"
+      sandbox_path: "/etc/group"
+      mode: "ro"
     - host_path: "/etc/ssl/certs"
       sandbox_path: "/etc/ssl/certs"
       mode: "ro"
@@ -104,10 +110,10 @@ filesystem_policy:
 # Process identity inside the sandbox.
 process:
   # User name to run as. If the user cannot be resolved, runtime falls back to nobody-style IDs.
-  run_as_user: sandbox
+  run_as_user: app
 
   # Group name to run as. If the group cannot be resolved, runtime falls back to nobody-style IDs.
-  run_as_group: sandbox
+  run_as_group: app
 
 # Linux namespace isolation controlled by bubblewrap.
 namespace:
