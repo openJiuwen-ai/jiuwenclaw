@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import os
 import queue
 import re
 import shutil
@@ -312,6 +313,9 @@ def _write_metadata_sync(
     注意: 不更新 _METADATA_CACHE。缓存仅由 _enqueue_write 维护,
     避免 gateway 进程的 init_session_metadata 污染缓存导致后续
     读取不到 agentserver 进程写入的最新数据。
+
+    原子写入: 写临时文件 + fsync + os.replace，防止异常/崩溃时
+    metadata.json 被截断成非法 JSON。
     """
     fpath = _metadata_file(session_id)
     to_write = metadata
@@ -323,10 +327,21 @@ def _write_metadata_sync(
                     to_write = _merge_pin_fields(current, metadata)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("读取 metadata.json 置顶字段失败: %s", exc)
-        fpath.write_text(
-            json.dumps(to_write, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        content = json.dumps(to_write, ensure_ascii=False, indent=2)
+        tmp_path = fpath.with_suffix(".json.tmp")
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as fh:
+                fh.write(content)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(str(tmp_path), str(fpath))
+        except Exception:
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except Exception:  # noqa: BLE001
+                pass
+            raise
     return to_write
 
 
