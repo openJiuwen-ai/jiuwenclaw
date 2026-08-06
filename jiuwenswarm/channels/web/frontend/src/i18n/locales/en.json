@@ -1954,6 +1954,7 @@
   "chatUi": {
     "copyMessage": "Copy message",
     "copied": "Copied",
+    "copyFailed": "Copy failed",
     "stopReading": "Stop reading",
     "readMessage": "Read message",
     "fileExpired": "Expired",
