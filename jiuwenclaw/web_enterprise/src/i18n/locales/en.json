@@ -818,6 +818,62 @@
       "importFailedHint": "Import failed. Check the path or permissions.",
       "uninstallFailed": "Uninstall failed",
       "uninstallFailedHint": "Uninstall failed. Please try again later."
+    },
+    "enterprise": {
+      "title": "Skills",
+      "subtitle": "View skills installed for this tenant; install by signed URL or uninstall user skills.",
+      "installTitle": "Install via URL",
+      "installHint": "Provide a download URL to install. Signature is optional; when provided, the download is verified with HMAC-SHA256.",
+      "installing": "Installing…",
+      "searchPlaceholder": "Search by name, source, or version",
+      "empty": "No installed skills",
+      "notRemovable": "Prebuilt (not removable)",
+      "deleteConfirm": "Uninstall skill \"{{name}}\"?",
+      "fields": {
+        "url": "Download URL",
+        "signature": "Signature (optional, HMAC-SHA256 hex)"
+      },
+      "placeholders": {
+        "url": "https://example.com/skill.zip",
+        "signature": "Optional: 64-character hex signature"
+      },
+      "filter": {
+        "all": "All",
+        "prebuilt": "Prebuilt",
+        "user": "User-installed"
+      },
+      "columns": {
+        "name": "Name",
+        "type": "Type",
+        "channel": "Channel",
+        "source": "Source",
+        "version": "Version",
+        "installer": "Last installer",
+        "actions": "Actions"
+      },
+      "sourceType": {
+        "prebuilt": "Prebuilt",
+        "user": "User-installed"
+      },
+      "channel": {
+        "prebuilt": "Whitelist sync",
+        "web": "Web page",
+        "skillnet": "SkillNet",
+        "clawhub": "ClawHub"
+      },
+      "success": {
+        "installed": "Installed: {{name}}",
+        "uninstalled": "Uninstalled: {{name}}"
+      },
+      "errors": {
+        "loadFailed": "Failed to load installed skills",
+        "urlRequired": "Download URL is required",
+        "urlSignatureRequired": "Download URL is required",
+        "routingRequired": "Configure group_id / bot_id / user_id first",
+        "installFailed": "Install failed",
+        "uninstallFailed": "Uninstall failed",
+        "prebuiltNotRemovable": "Prebuilt skills cannot be uninstalled; change the whitelist template instead"
+      }
     }
   },
   "agent": {

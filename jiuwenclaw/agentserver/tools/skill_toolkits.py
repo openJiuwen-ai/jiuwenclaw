@@ -11,6 +11,7 @@ from typing import Any, Callable
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 
 from jiuwenclaw.agentserver.skill_manager import SkillManager
+from jiuwenclaw.agentserver.skill_whitelist import is_skill_whitelist_tenant
 from jiuwenclaw.config import get_config
 
 logger = logging.getLogger(__name__)
@@ -46,8 +47,45 @@ _INSTALL_SOURCE_BY_TARGET: tuple[tuple[str, str], ...] = (
 class SkillToolkit:
     """把 SkillManager 暴露成模型友好的 tool 集合。"""
 
-    def __init__(self, manager: SkillManager) -> None:
+    def __init__(
+        self,
+        manager: SkillManager,
+        *,
+        service_id: str | None = None,
+        agent_id: str | None = None,
+        on_installed_skills_changed: Callable[[], Any] | None = None,
+    ) -> None:
         self._manager = manager
+        self._service_id = str(service_id or "").strip() or None
+        self._agent_id = str(agent_id or "").strip() or None
+        self._on_installed_skills_changed = on_installed_skills_changed
+
+    def _is_enterprise(self) -> bool:
+        return is_skill_whitelist_tenant(self._agent_id, self._service_id)
+
+    @staticmethod
+    def _enterprise_user_id() -> str | None:
+        from jiuwenclaw.agentserver.tools.cron_tool_context import get_cron_tool_metadata
+        from jiuwenclaw.gateway.cron.enterprise_gate import extract_routing_triple
+
+        meta = get_cron_tool_metadata() or {}
+        _g, _b, user_id = extract_routing_triple(meta)
+        return str(user_id).strip() if user_id else None
+
+    @staticmethod
+    def _enterprise_routing() -> tuple[str | None, str | None, str | None]:
+        from jiuwenclaw.agentserver.tools.cron_tool_context import get_cron_tool_metadata
+        from jiuwenclaw.gateway.cron.enterprise_gate import extract_routing_triple
+
+        meta = get_cron_tool_metadata() or {}
+        return extract_routing_triple(meta)
+
+    async def _notify_installed_skills_changed(self) -> None:
+        if self._on_installed_skills_changed is None:
+            return
+        result = self._on_installed_skills_changed()
+        if asyncio.iscoroutine(result):
+            await result
 
     @staticmethod
     def _normalize_source(source: str) -> str:
@@ -275,9 +313,13 @@ class SkillToolkit:
         self,
         identifier: str,
         timeout_sec: int,
+        *,
+        force: bool = False,
     ) -> dict[str, Any]:
         """在单次 tool 调用内轮询 SkillNet 安装状态，直到完成或超时。"""
-        payload = await self._manager.handle_skills_skillnet_install({"url": identifier, "force": False})
+        payload = await self._manager.handle_skills_skillnet_install(
+            {"url": identifier, "force": force}
+        )
         if not payload.get("success"):
             return payload
         if not payload.get("pending"):
@@ -311,6 +353,22 @@ class SkillToolkit:
             "success": True,
             "skill": final_payload.get("skill"),
         }
+
+    async def _channel_install(
+        self,
+        target: str,
+        source: str,
+        timeout_sec: int,
+        *,
+        force: bool,
+    ) -> dict[str, Any]:
+        if source == "skillnet":
+            return await self._install_skillnet_sync_wait(
+                target, timeout_sec, force=force
+            )
+        return await self._manager.handle_skills_clawhub_download(
+            {"slug": target, "force": force}
+        )
 
     async def install_skill(
         self,
@@ -353,6 +411,52 @@ class SkillToolkit:
 
             resolved_source = normalized_source
             wait_timeout = self._safe_int(timeout_sec, 60)
+
+            if self._is_enterprise():
+                from jiuwenclaw.agentserver.installed_skill_ops import install_from_channel
+
+                group_id, bot_id, user_id = self._enterprise_routing()
+
+                async def _do_channel_install(
+                    tgt: str, src: str, timeout: int, *, force: bool
+                ) -> dict[str, Any]:
+                    return await self._channel_install(tgt, src, timeout, force=force)
+
+                result = await install_from_channel(
+                    service_id=str(self._service_id or ""),
+                    agent_id=str(self._agent_id or ""),
+                    target=target,
+                    source=resolved_source,
+                    timeout_sec=wait_timeout,
+                    channel_install=_do_channel_install,
+                    get_skill_meta=self._get_skill_meta,
+                    remove_skill_dir=self._manager.remove_skill_directory,
+                    group_id=group_id,
+                    bot_id=bot_id,
+                    user_id=user_id or self._enterprise_user_id(),
+                )
+                if not result.get("success"):
+                    return result
+                await self._notify_installed_skills_changed()
+                name = str(result.get("name") or "").strip()
+                installed_item = self._build_installed_item(name, resolved_source)
+                detail = (
+                    f"Skill installed successfully. Available now: - `{installed_item['name']}`: "
+                    f"{installed_item['description'].strip() or 'No description provided.'}"
+                )
+                if installed_item["skill_file"]:
+                    detail = f"{detail} Read SKILL.md before use."
+                return {
+                    "success": True,
+                    "source": resolved_source,
+                    "installed": True,
+                    "name": installed_item["name"],
+                    "description": installed_item["description"],
+                    "identifier": installed_item["identifier"],
+                    "skill_file": installed_item["skill_file"],
+                    "detail": detail,
+                }
+
             existing_item = self._find_installed_by_target(target, resolved_source)
             if existing_item is not None:
                 detail = (
@@ -374,7 +478,9 @@ class SkillToolkit:
             if resolved_source == "skillnet":
                 payload = await self._install_skillnet_sync_wait(target, wait_timeout)
             else:
-                payload = await self._manager.handle_skills_clawhub_download({"slug": target, "force": False})
+                payload = await self._manager.handle_skills_clawhub_download(
+                    {"slug": target, "force": False}
+                )
         except Exception as exc:  # noqa: BLE001
             logger.exception("install_skill failed")
             return {
@@ -437,13 +543,30 @@ class SkillToolkit:
                     "detail": "Built-in skills cannot be uninstalled.",
                 }
 
+            if self._is_enterprise():
+                from jiuwenclaw.agentserver.installed_skill_ops import uninstall
+
+                async def _remove_disk(n: str) -> dict[str, Any]:
+                    return await self._manager.handle_skills_uninstall({"name": n})
+
+                result = await uninstall(
+                    service_id=str(self._service_id or ""),
+                    agent_id=str(self._agent_id or ""),
+                    skill_name=skill_name,
+                    remove_from_disk=_remove_disk,
+                )
+                if result.get("success"):
+                    await self._notify_installed_skills_changed()
+                return result
+
             installed_payload = await self._list_installed_skills()
             if not installed_payload.get("success"):
                 return {
                     "success": False,
                     "removed": False,
                     "name": skill_name,
-                    "detail": str(installed_payload.get("detail", "")).strip() or "failed to inspect installed skills",
+                    "detail": str(installed_payload.get("detail", "")).strip()
+                    or "failed to inspect installed skills",
                 }
 
             installed_item = None
