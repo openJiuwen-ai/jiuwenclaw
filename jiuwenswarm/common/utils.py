@@ -1222,6 +1222,8 @@ def prepare_workspace(
         cumulative_diff=cumulative_diff,
     )
 
+    _resolve_paths(force=True)
+
     return cumulative_diff
 
 
@@ -1358,11 +1360,11 @@ def init_user_workspace(
     return workspace_dir
 
 
-def _resolve_paths() -> None:
+def _resolve_paths(force=False) -> None:
     """Resolve and cache all paths."""
     global _initialized, _config_dir, _workspace_dir, _root_dir
 
-    if _initialized:
+    if not force and _initialized:
         return
 
     workspace_dir = get_user_workspace_dir()
