@@ -5160,8 +5160,12 @@ class AgentWebSocketServer:
                     logger.info("[command.model] os.environ 已更新, MODEL_NAME=%s", os.getenv("MODEL_NAME", "unknown"))
 
                     try:
-                        from jiuwenswarm.agents.harness.common.memory.config import clear_config_cache
+                        from jiuwenswarm.agents.harness.common.memory.config import (
+                            clear_config_cache,
+                            clear_embed_config_db_cache,
+                        )
                         clear_config_cache()
+                        clear_embed_config_db_cache()
                         logger.info("[command.model] config cache 已清除")
                     except Exception as e:
                         logger.debug("[command.model] clear_config_cache skipped: %s", e)
@@ -7090,9 +7094,13 @@ class AgentWebSocketServer:
 
     async def _handle_config_cache_clear(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
-            from jiuwenswarm.agents.harness.common.memory.config import clear_config_cache
+            from jiuwenswarm.agents.harness.common.memory.config import (
+                clear_config_cache,
+                clear_embed_config_db_cache,
+            )
 
             clear_config_cache()
+            clear_embed_config_db_cache()
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,

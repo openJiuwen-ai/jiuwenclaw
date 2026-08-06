@@ -23,6 +23,7 @@ DEFAULT_CONFIG_PATH = str(get_config_file())
 DEFAULT_WORKSPACE_DIR = str(get_agent_workspace_dir())
 
 _config_cache: Optional[Dict[str, Any]] = None
+_embed_config_db_cache: Optional[Dict[str, Any]] = None
 
 
 def _resolve_env_vars(value: Any) -> Any:
@@ -49,6 +50,40 @@ def clear_config_cache() -> None:
     _config_cache = None
 
 
+def clear_embed_config_db_cache() -> None:
+    """清除 embedding 的 DB 缓存。"""
+    global _embed_config_db_cache
+    _embed_config_db_cache = None
+
+
+def set_embed_config_db_cache(enterprise_embedding: Any = None) -> None:
+    """用企业策略命中的 ``embedding_template`` 实体刷新 DB 缓存。
+
+    ``enterprise_embedding`` 可为单个 dict 或 list；取首个含完整
+    ``api_key`` / ``api_base`` / ``model_id`` 的实体写入缓存。无效则清空缓存。
+    """
+    global _embed_config_db_cache
+    entities = (
+        enterprise_embedding
+        if isinstance(enterprise_embedding, list)
+        else [enterprise_embedding]
+        if isinstance(enterprise_embedding, dict)
+        else []
+    )
+    for entity in entities:
+        if not isinstance(entity, dict):
+            continue
+        resolved = {
+            "api_key": str(entity.get("api_key") or "").strip() or None,
+            "base_url": str(entity.get("api_base") or "").strip() or None,
+            "model": str(entity.get("model_id") or "").strip() or None,
+        }
+        if all(resolved.values()):
+            _embed_config_db_cache = resolved
+            return
+    _embed_config_db_cache = None
+
+
 def _load_config() -> Dict[str, Any]:
     """Load configuration from YAML file."""
     global _config_cache
@@ -71,14 +106,20 @@ def _load_config() -> Dict[str, Any]:
     return config
 
 
-def get_embed_config() -> Dict[str, str]:
-    """Get embedding configuration from config file.
-    
-    Returns embedding API configuration from config.yaml embed section.
+def get_embed_config() -> Dict[str, Any]:
+    """Get embedding configuration.
+
+    Priority: DB cache (enterprise ``embedding_template``) > YAML (config.yaml embed section).
     """
+    global _embed_config_db_cache
+    if _embed_config_db_cache is not None:
+        return _embed_config_db_cache
+
     config = _load_config()
     embed_config = config.get("embed", {})
-    
+    if not isinstance(embed_config, dict):
+        embed_config = {}
+
     return {
         "api_key": embed_config.get("embed_api_key"),
         "base_url": embed_config.get("embed_base_url"),

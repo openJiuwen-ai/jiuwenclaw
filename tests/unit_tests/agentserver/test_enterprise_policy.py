@@ -507,3 +507,160 @@ async def test_load_effective_config_scopes_global_policy_by_jiuwenclaw_id(
     assert loaded.template_ref["extension_config"] == [e4]
     assert loaded.extension_config is not None
     assert loaded.extension_config[0]["template_name"] == "Gateway 定时清理"
+
+
+def test_embedding_slot_is_loaded_separately_from_model_slots() -> None:
+    from jiuwenswarm.server.runtime.enterprise_config.schemas import (
+        DEFAULT_AGENT_LOAD_SLOTS,
+        MODEL_SLOT_KEYS,
+        SLOT_ENTITY_TABLE,
+        TemplateRefSlot,
+    )
+
+    assert TemplateRefSlot.EMBEDDING_MODEL.value == "embedding_model"
+    assert SLOT_ENTITY_TABLE[TemplateRefSlot.EMBEDDING_MODEL] == "embedding_template"
+    assert TemplateRefSlot.EMBEDDING_MODEL in DEFAULT_AGENT_LOAD_SLOTS
+    assert TemplateRefSlot.EMBEDDING_MODEL not in MODEL_SLOT_KEYS
+
+
+def test_enterprise_embedding_maps_to_embed_config_section() -> None:
+    from jiuwenswarm.server.runtime.enterprise_config.apply_models import (
+        apply_enterprise_models_to_config,
+    )
+    from jiuwenswarm.server.runtime.enterprise_config.schemas import (
+        EffectiveEnterpriseConfig,
+        RoutingContext,
+    )
+
+    enterprise = EffectiveEnterpriseConfig(
+        routing=RoutingContext(group_id="g", bot_id="b", user_id="u"),
+        embedding=[
+            {
+                "api_key": "policy-key",
+                "api_base": "https://embedding.example.com/v1",
+                "model_id": "text-embedding-3-large",
+            }
+        ],
+    )
+
+    merged, applied = apply_enterprise_models_to_config(
+        {
+            "embed": {
+                "embed_api_key": "local-key",
+                "embed_base_url": "https://local.example.com/v1",
+                "embed_model": "local-model",
+            }
+        },
+        enterprise,
+    )
+
+    assert applied is True
+    assert merged["embed"] == {
+        "embed_api_key": "policy-key",
+        "embed_base_url": "https://embedding.example.com/v1",
+        "embed_model": "text-embedding-3-large",
+    }
+
+
+def test_get_embed_config_prefers_db_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.agents.harness.common.memory import config as memory_config
+
+    monkeypatch.setattr(
+        memory_config,
+        "_load_config",
+        lambda: {
+            "embed": {
+                "embed_api_key": "local-key",
+                "embed_base_url": "https://local.example.com/v1",
+                "embed_model": "local-model",
+            }
+        },
+    )
+    memory_config.clear_embed_config_db_cache()
+    assert memory_config.get_embed_config()["api_key"] == "local-key"
+
+    memory_config.set_embed_config_db_cache(
+        {
+            "api_key": "policy-key",
+            "api_base": "https://policy.example.com/v1",
+            "model_id": "policy-model",
+        }
+    )
+    assert memory_config.get_embed_config() == {
+        "api_key": "policy-key",
+        "base_url": "https://policy.example.com/v1",
+        "model": "policy-model",
+    }
+
+    memory_config.clear_embed_config_db_cache()
+    assert memory_config.get_embed_config()["api_key"] == "local-key"
+
+
+@pytest.mark.asyncio
+async def test_load_effective_config_loads_embedding_template(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.common.schema.agent import AgentRequest
+    from jiuwenswarm.server.runtime.enterprise_config import gateway_db
+    from jiuwenswarm.server.runtime.enterprise_config.loader import (
+        DEFAULT_AGENT_LOAD_SLOTS,
+        load_effective_enterprise_config,
+    )
+    from jiuwenswarm.server.runtime.enterprise_config.schemas import TemplateRefSlot
+
+    monkeypatch.setenv("AGENT_RUNTIME", "1")
+    jid = "embedding-demo"
+    monkeypatch.setenv("JIUWENCLAW_ID", jid)
+    embedding_id = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+
+    async def _list_records(
+        table: str,
+        *,
+        filters: dict | None = None,
+        order_by: str = "",
+    ) -> list[dict]:
+        scoped = gateway_db.apply_instance_scope(table, dict(filters or {}))
+        if table == "config_effective_service_policy":
+            return []
+        if (
+            table == "config_effective_global_policy"
+            and scoped.get("jiuwenclaw_id") == jid
+        ):
+            return [
+                {
+                    "id": 8,
+                    "jiuwenclaw_id": jid,
+                    "template_ref": {"embedding_model": [embedding_id]},
+                }
+            ]
+        return []
+
+    async def _fetch_template_by_slot(slot: str, template_id: str) -> dict | None:
+        assert slot == TemplateRefSlot.EMBEDDING_MODEL
+        assert template_id == embedding_id
+        return {
+            "template_id": template_id,
+            "api_base": "https://embedding.example.com/v1",
+            "api_key": "secret",
+            "model_id": "text-embedding-3-large",
+        }
+
+    monkeypatch.setattr(gateway_db, "list_records", _list_records)
+    monkeypatch.setattr(gateway_db, "fetch_template_by_slot", _fetch_template_by_slot)
+
+    loaded = await load_effective_enterprise_config(
+        AgentRequest(request_id="req-embedding"),
+        DEFAULT_AGENT_LOAD_SLOTS,
+    )
+
+    assert loaded is not None
+    assert loaded.embedding == [
+        {
+            "template_id": embedding_id,
+            "api_base": "https://embedding.example.com/v1",
+            "api_key": "secret",
+            "model_id": "text-embedding-3-large",
+        }
+    ]

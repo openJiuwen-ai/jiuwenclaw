@@ -166,9 +166,12 @@ from jiuwenswarm.agents.harness.common.rails.permissions.owner_scopes import (
 )
 from jiuwenswarm.agents.harness.common.memory.config import (
     clear_config_cache,
+    clear_embed_config_db_cache,
+    get_embed_config,
     get_memory_mode,
     is_memory_enabled,
     is_proactive_memory,
+    set_embed_config_db_cache,
 )
 from jiuwenswarm.agents.harness.common.memory.external_memory_config import is_builtin_memory_allowed
 from jiuwenswarm.common.model_config_validation import is_placeholder_api_base
@@ -3012,6 +3015,7 @@ class JiuWenSwarmDeepAdapter:
     ) -> dict[str, Any]:
         """若已加载 ``_enterprise_config``，将其模型槽位覆盖到 config 快照上。"""
         if self._enterprise_config is None:
+            clear_embed_config_db_cache()
             return config_base
         from jiuwenswarm.server.runtime.enterprise_config.apply_models import (
             apply_enterprise_models_to_config,
@@ -3019,6 +3023,9 @@ class JiuWenSwarmDeepAdapter:
 
         merged, applied = apply_enterprise_models_to_config(
             config_base, self._enterprise_config
+        )
+        set_embed_config_db_cache(
+            getattr(self._enterprise_config, "embedding", None)
         )
         if applied:
             self._model_config_source = "enterprise_policy"
@@ -4991,15 +4998,15 @@ class JiuWenSwarmDeepAdapter:
 
     def _build_memory_rail(self, mode: str) -> MemoryRail | None:
         try:
-            config = get_config()
-            embed_config = config.get("embed") if isinstance(config, dict) else None
-            has_api_key = (
-                embed_config.get("embed_api_key") if isinstance(embed_config, dict) else None
+            config = (
+                self._startup_config_base
+                if isinstance(self._startup_config_base, dict)
+                else get_config()
             )
-            has_base_url = (
-                embed_config.get("embed_base_url") if isinstance(embed_config, dict) else None
-            )
-            has_model = embed_config.get("embed_model") if isinstance(embed_config, dict) else None
+            embed_config = get_embed_config()
+            has_api_key = embed_config.get("api_key") if isinstance(embed_config, dict) else None
+            has_base_url = embed_config.get("base_url") if isinstance(embed_config, dict) else None
+            has_model = embed_config.get("model") if isinstance(embed_config, dict) else None
             if not all([has_api_key, has_base_url, has_model]):
                 logger.warning(
                     "[JiuWenSwarmDeepAdapter] MemoryRail create failed: No available embedding config"
@@ -5007,9 +5014,9 @@ class JiuWenSwarmDeepAdapter:
             self._is_proactive_memory = is_proactive_memory(mode, config)
             memory_rail = MemoryRail(
                 embedding_config=EmbeddingConfig(
-                    model_name=embed_config.get("embed_model"),
-                    base_url=embed_config.get("embed_base_url"),
-                    api_key=embed_config.get("embed_api_key"),
+                    model_name=embed_config.get("model"),
+                    base_url=embed_config.get("base_url"),
+                    api_key=embed_config.get("api_key"),
                 ),
                 is_proactive=self._is_proactive_memory,
             )
@@ -6198,6 +6205,7 @@ class JiuWenSwarmDeepAdapter:
         self._config_base_cache = config_base.copy()
         config_base = self._merge_enterprise_models_into_config(config_base)
         self._config_base_cache = config_base.copy()
+        self._startup_config_base = config_base.copy()
         self._refresh_multimodal_configs(config_base)
 
         self._config_cache = config_base.get("react", {}).copy()
@@ -11024,7 +11032,11 @@ class JiuWenSwarmDeepAdapter:
         return None
 
     async def _handle_memory_rail_by_config(self, mode: str):
-        config = get_config()
+        config = (
+            self._startup_config_base
+            if isinstance(self._startup_config_base, dict)
+            else get_config()
+        )
         if get_memory_mode(config) == "local":
             # 引擎门禁：memory.engine 未放行内置时，等同于禁用
             builtin_on = is_builtin_memory_allowed(config) and is_memory_enabled(mode, config)

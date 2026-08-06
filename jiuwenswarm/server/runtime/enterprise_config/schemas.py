@@ -17,6 +17,7 @@ class TemplateRefSlot(StrEnum):
     VIDEO_MODEL = "video_model"
     AUDIO_MODEL = "audio_model"
     VISION_MODEL = "vision_model"
+    EMBEDDING_MODEL = "embedding_model"
     SKILL_WHITELIST = "skill_whitelist"
     EXTENSION_CONFIG = "extension_config"
     SERVICE_CONFIG = "service_config"
@@ -27,6 +28,7 @@ SLOT_ENTITY_TABLE: dict[TemplateRefSlot, str] = {
     TemplateRefSlot.VIDEO_MODEL: "model_template",
     TemplateRefSlot.AUDIO_MODEL: "model_template",
     TemplateRefSlot.VISION_MODEL: "model_template",
+    TemplateRefSlot.EMBEDDING_MODEL: "embedding_template",
     TemplateRefSlot.SKILL_WHITELIST: "skill_whitelist_template",
     TemplateRefSlot.EXTENSION_CONFIG: "extension_config_template",
     TemplateRefSlot.SERVICE_CONFIG: "service_config_template",
@@ -41,6 +43,7 @@ MODEL_SLOT_KEYS = frozenset({
 
 DEFAULT_AGENT_LOAD_SLOTS = frozenset({
     *MODEL_SLOT_KEYS,
+    TemplateRefSlot.EMBEDDING_MODEL,
     TemplateRefSlot.SKILL_WHITELIST,
     TemplateRefSlot.EXTENSION_CONFIG,
 })
@@ -90,6 +93,7 @@ class EffectiveEnterpriseConfig:
     routing: RoutingContext
     template_ref: dict[str, list[str]] = field(default_factory=dict)
     models: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    embedding: list[dict[str, Any]] | None = None
     skill_whitelist: list[dict[str, Any]] | None = None
     extension_config: list[dict[str, Any]] | None = None
     service_config: list[dict[str, Any]] | None = None
@@ -106,6 +110,7 @@ class EffectiveEnterpriseConfig:
             "routing": self.routing.as_dict(),
             "template_ref": dict(self.template_ref),
             "models": dict(self.models),
+            "embedding": self.embedding,
             "skill_whitelist": self.skill_whitelist,
             "extension_config": self.extension_config,
             "service_config": self.service_config,
