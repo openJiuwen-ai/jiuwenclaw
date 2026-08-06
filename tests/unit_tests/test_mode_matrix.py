@@ -99,9 +99,9 @@ def test_web_team_plan_is_not_composable(work_mode):
     ("raw_mode", "expected"),
     [
         ("agent", ("agent", None, "agent")),
-        ("agent.plan", ("agent", None, "agent")),
+        ("agent.plan", ("agent", None, "agent.plan")),
         ("agent.fast", ("agent", None, "agent")),
-        ("plan", ("agent", None, "agent")),
+        ("plan", ("agent", None, "agent.plan")),
         ("code.normal", ("code", "normal", "code.normal")),
         ("code.plan", ("code", "plan", "code.plan")),
         ("code.team", ("code", "team", "code.team")),
@@ -158,7 +158,7 @@ def test_invalid_work_mode_falls_back_to_legacy():
     resolved = _resolve({"mode": "agent.plan", "work_mode": "nonsense"})
 
     assert resolved.from_web_composition is False
-    assert resolved.canonical_mode == "agent"
+    assert resolved.canonical_mode == "agent.plan"
 
 
 def test_missing_mode_defaults_to_agent():
