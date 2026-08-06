@@ -13,8 +13,10 @@ from jiuwenswarm.agents.harness.common.tools.web_file_download import (
 @pytest.fixture(autouse=True)
 def _clear_dedup_registry():
     sfu._SENT_FILE_PATHS_BY_SESSION.clear()
+    sfu.bind_active_send_file_toolkit(None)
     yield
     sfu._SENT_FILE_PATHS_BY_SESSION.clear()
+    sfu.bind_active_send_file_toolkit(None)
 
 
 def test_partition_and_mark_sent_files():
@@ -214,3 +216,38 @@ def test_send_file_keeps_worktree_file_in_worktree(tmp_path):
 
     assert toolkit._materialize_team_deliverable(str(source)) == str(source)
     assert not project_root.exists()
+
+
+def test_deliver_file_to_user_uses_bound_toolkit(tmp_path):
+    file_path = tmp_path / "generated.png"
+    file_path.write_text("img", encoding="utf-8")
+
+    toolkit = sfu.SendFileToolkit(
+        request_id="r2",
+        session_id="sess-2",
+        channel_id="web",
+    )
+    mock_server = MagicMock()
+    mock_server.send_push = AsyncMock()
+    sfu.bind_active_send_file_toolkit(toolkit)
+
+    try:
+        with patch(
+            "jiuwenswarm.server.agent_ws_server.AgentWebSocketServer.get_instance",
+            return_value=mock_server,
+        ), patch(
+            "jiuwenswarm.server.runtime.session.session_history.append_history_record",
+        ):
+            result = asyncio.run(sfu.deliver_file_to_user(str(file_path)))
+    finally:
+        sfu.bind_active_send_file_toolkit(None)
+
+    assert "成功发送" in result
+    assert mock_server.send_push.await_count == 1
+
+
+def test_deliver_file_to_user_noop_without_toolkit(tmp_path):
+    file_path = tmp_path / "orphan.mp4"
+    file_path.write_bytes(b"video")
+    sfu.bind_active_send_file_toolkit(None)
+    assert asyncio.run(sfu.deliver_file_to_user(str(file_path))) == ""

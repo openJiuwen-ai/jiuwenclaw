@@ -19,6 +19,7 @@ import os
 import shutil
 import time
 from collections.abc import Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -61,6 +62,43 @@ class _SendFileRuntimeEnvelope:
 # results, so the agent can re-call the same path; IM request-level dedup alone
 # cannot stop cross-turn duplicates.
 _SENT_FILE_PATHS_BY_SESSION: dict[str, set[str]] = {}
+
+# Bound per-request so media-generation tools can emit chat.file without a
+# second model call to send_file_to_user.
+#
+# ContextVar alone is not enough: some tool runners execute in worker threads /
+# tasks that do not inherit the request ContextVar. Keep a process-level
+# fallback that ``update_runtime_context`` refreshes on every request.
+_ACTIVE_SEND_FILE_TOOLKIT: ContextVar["SendFileToolkit | None"] = ContextVar(
+    "active_send_file_toolkit", default=None
+)
+_FALLBACK_SEND_FILE_TOOLKIT: "SendFileToolkit | None" = None
+
+
+def bind_active_send_file_toolkit(toolkit: "SendFileToolkit | None") -> None:
+    """Bind the request-scoped SendFileToolkit for auto media delivery."""
+    global _FALLBACK_SEND_FILE_TOOLKIT
+    _FALLBACK_SEND_FILE_TOOLKIT = toolkit
+    _ACTIVE_SEND_FILE_TOOLKIT.set(toolkit)
+
+
+async def deliver_file_to_user(abs_file_path: str) -> str:
+    """Push a generated file via chat.file using the active SendFileToolkit.
+
+    Returns the toolkit result string, or an empty string when no toolkit is
+    bound (e.g. unit tests / offline tool calls).
+    """
+    path = (abs_file_path or "").strip()
+    if not path:
+        return ""
+    toolkit = _ACTIVE_SEND_FILE_TOOLKIT.get() or _FALLBACK_SEND_FILE_TOOLKIT
+    if toolkit is None:
+        logger.warning(
+            "[deliver_file_to_user] no active SendFileToolkit; skip delivery path=%s",
+            path,
+        )
+        return ""
+    return await toolkit.send_file(path)
 
 
 def _normalize_sent_file_path(path: str) -> str:
