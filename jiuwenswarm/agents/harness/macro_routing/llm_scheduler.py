@@ -49,12 +49,12 @@ def _build_prompt(query: str, gate: MacroRoutingDecision) -> str:
 Pick ONE top-level mode for this user task.
 
 Modes:
-- agent.plan: Planning Mode — ambiguous/design/tradeoff tasks; think before acting
-- agent.fast: Performance Mode — clear short execution tasks for a single agent
+- agent.plan: Planning Mode — ambiguous/design/tradeoff tasks; think before acting (plan loop)
+- agent: Agent Mode — clear short execution tasks for a single agent (no plan loop)
 - team: Cluster Mode — multi-role or multi-area work needing a team
 
 Return ONLY JSON:
-{{"mode":"agent.plan|agent.fast|team","confidence":0.0,"rationale":"one sentence"}}
+{{"mode":"agent.plan|agent|team","confidence":0.0,"rationale":"one sentence"}}
 
 Gate suggestion (may be uncertain):
 mode={gate.mode}, confidence={gate.confidence:.2f}, rationale={gate.rationale}

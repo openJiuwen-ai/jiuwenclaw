@@ -662,7 +662,7 @@ export function MessageList({ messages, renderAfterMessage }: MessageListProps) 
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const toolExecutions = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.toolExecutions ?? new Map());
   const toolExecutionOrder = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.toolExecutionOrder ?? []);
-  const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent.plan');
+  const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent');
   const lastMacroRoutedMode = useSessionStore(
     (s) => s.runtimes[activeSessionId ?? '']?.lastMacroRoutedMode ?? null,
   );

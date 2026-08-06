@@ -102,9 +102,9 @@ def route_with_gate(
 
     if not text or features["is_greeting"]:
         return MacroRoutingDecision(
-            mode="agent.plan",
+            mode="agent",
             confidence=0.9,
-            rationale="Greeting or empty query — stay in Planning Mode.",
+            rationale="Greeting or empty query — stay in Agent Mode.",
             source="rules",
             features=features,
             gate_confident=True,
@@ -122,16 +122,16 @@ def route_with_gate(
     if 120 <= features["length"] <= 500 and not features["fast_hits"]:
         plan_score += 0.4
 
-    fast_score = len(features["fast_hits"]) * 1.5
+    agent_score = len(features["fast_hits"]) * 1.5
     if features["length"] < 160 and features["fast_hits"]:
-        fast_score += 1.0
-    # Do NOT boost Performance for short messages without execution markers —
+        agent_score += 1.0
+    # Do NOT boost Agent Mode for short messages without execution markers —
     # casual Q&A like "tell me the weather" should stay ambiguous → Planning bias.
 
     scores = {
         "team": team_score,
         "agent.plan": plan_score,
-        "agent.fast": fast_score,
+        "agent": agent_score,
     }
     features["scores"] = dict(scores)
     best_mode = max(scores, key=scores.get)
@@ -157,7 +157,7 @@ def route_with_gate(
     rationale_bits = {
         "team": "Multi-area / collaborative markers — Cluster Mode.",
         "agent.plan": "Design / tradeoff / planning markers — Planning Mode.",
-        "agent.fast": "Direct execution markers — Performance Mode.",
+        "agent": "Direct execution markers — Agent Mode.",
     }
     return MacroRoutingDecision(
         mode=normalize_macro_mode(best_mode),

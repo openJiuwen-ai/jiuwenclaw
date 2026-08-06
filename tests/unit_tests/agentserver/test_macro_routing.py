@@ -16,26 +16,29 @@ from jiuwenswarm.agents.harness.macro_routing.schemas import (
 
 
 def test_normalize_and_auto_aliases():
-    assert normalize_macro_mode("performance") == "agent.fast"
+    assert normalize_macro_mode("performance") == "agent"
+    assert normalize_macro_mode("agent.fast") == "agent"
     assert normalize_macro_mode("cluster") == "team"
     assert normalize_macro_mode("planning") == "agent.plan"
+    assert normalize_macro_mode("agent") == "agent"
     assert is_auto_mode("auto")
     assert is_auto_mode("agent.auto")
     assert is_auto_mode("macro.auto")
     assert not is_auto_mode("agent.plan")
     assert not is_auto_mode("team")
+    assert not is_auto_mode("agent")
 
 
-def test_gate_greeting_confident_plan():
+def test_gate_greeting_confident_agent():
     decision = route_with_gate("hello")
-    assert decision.mode == "agent.plan"
+    assert decision.mode == "agent"
     assert decision.gate_confident is True
     assert decision.confidence >= 0.72
 
 
-def test_gate_fast_execution_confident():
+def test_gate_agent_execution_confident():
     decision = route_with_gate("fix the bug in utils.py and rename the helper")
-    assert decision.mode == "agent.fast"
+    assert decision.mode == "agent"
     assert decision.gate_confident is True
     assert decision.confidence >= 0.72
 
@@ -66,32 +69,32 @@ def test_gate_plan_markers():
 async def test_forced_mode_untouched():
     decision = await route_macro_mode(
         "Build a full stack feature with frontend and backend in parallel",
-        requested_mode="agent.fast",
+        requested_mode="agent",
         config_base={"modes": {"macro_routing": {"enabled": True, "strategy": "rules"}}},
     )
-    assert decision.mode == "agent.fast"
+    assert decision.mode == "agent"
     assert decision.source == "forced"
 
 
 @pytest.mark.asyncio
-async def test_auto_rules_resolves_fast():
+async def test_auto_rules_resolves_agent():
     decision = await route_macro_mode(
         "fix the failing test and implement the rename",
         requested_mode="auto",
         config_base={"modes": {"macro_routing": {"enabled": True, "strategy": "rules"}}},
     )
-    assert decision.mode == "agent.fast"
+    assert decision.mode == "agent"
     assert decision.source == "rules"
 
 
 @pytest.mark.asyncio
-async def test_auto_disabled_falls_back_to_plan():
+async def test_auto_disabled_falls_back_to_agent():
     decision = await route_macro_mode(
         "fix the failing test",
         requested_mode="agent.auto",
         config_base={"modes": {"macro_routing": {"enabled": False, "strategy": "hybrid"}}},
     )
-    assert decision.mode == "agent.plan"
+    assert decision.mode == "agent"
     assert decision.source == "disabled"
 
 
@@ -121,7 +124,7 @@ async def test_hybrid_confident_gate_skips_llm(monkeypatch):
         },
     )
     assert called["llm"] is False
-    assert decision.mode == "agent.plan"
+    assert decision.mode == "agent"
     assert decision.source == "hybrid"
     assert decision.gate_confident is True
 
@@ -132,9 +135,9 @@ async def test_hybrid_uncertain_escalates_to_llm(monkeypatch):
         from jiuwenswarm.agents.harness.macro_routing.schemas import MacroRoutingDecision
 
         return MacroRoutingDecision(
-            mode="agent.fast",
+            mode="agent",
             confidence=0.8,
-            rationale="LLM chose performance.",
+            rationale="LLM chose agent mode.",
             source="llm",
             features=dict(gate.features),
             gate_confident=True,
@@ -157,9 +160,9 @@ async def test_hybrid_uncertain_escalates_to_llm(monkeypatch):
             }
         },
     )
-    assert decision.mode == "agent.fast"
+    assert decision.mode == "agent"
     assert decision.source == "hybrid"
-    assert "LLM" in decision.rationale or "performance" in decision.rationale.lower()
+    assert "LLM" in decision.rationale or "agent" in decision.rationale.lower()
 
 
 def test_load_macro_routing_config_defaults():
@@ -179,7 +182,7 @@ def test_resources_config_has_macro_routing_not_as_ui_default():
     macro = data["modes"]["macro_routing"]
     assert macro["enabled"] is True
     assert macro["strategy"] == "llm"
-    # Soft check: DEFAULT_MODE in frontend must remain agent.plan (documented convention).
+    # Soft check: DEFAULT_MODE in frontend is Agent (Plan is a separate toggle).
     frontend = (
         Path(__file__).resolve().parents[3]
         / "jiuwenswarm"
@@ -191,5 +194,5 @@ def test_resources_config_has_macro_routing_not_as_ui_default():
         / "sessionStore.ts"
     )
     text = frontend.read_text(encoding="utf-8")
-    assert "const DEFAULT_MODE: AgentMode = 'agent.plan'" in text
+    assert "const DEFAULT_MODE: AgentMode = 'agent'" in text
     assert "'auto'" in text

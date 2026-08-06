@@ -48,7 +48,7 @@ function saveModeToStorage(mode: AgentMode) {
   }
 }
 
-const DEFAULT_MODE: AgentMode = 'agent.plan';
+const DEFAULT_MODE: AgentMode = 'agent';
 
 function normalizeAgentMode(mode: unknown): AgentMode {
   if (typeof mode !== 'string') return DEFAULT_MODE;
@@ -58,18 +58,8 @@ function normalizeAgentMode(mode: unknown): AgentMode {
   if (normalized === 'auto' || normalized === 'agent.auto' || normalized === 'macro.auto') {
     return 'auto';
   }
-  if (normalized === 'agent.fast' || normalized === 'fast' || normalized === 'performance') {
-    return 'agent.fast';
-  }
-  if (
-    normalized === 'agent.plan' ||
-    normalized === 'plan' ||
-    normalized === 'planning' ||
-    normalized === 'agent'
-  ) {
-    return 'agent.plan';
-  }
-  return DEFAULT_MODE;
+  // agent.plan / agent.fast / bare agent → UI base mode Agent (Plan is a separate toggle).
+  return 'agent';
 }
 
 function normalizeSession(session: Session): Session {

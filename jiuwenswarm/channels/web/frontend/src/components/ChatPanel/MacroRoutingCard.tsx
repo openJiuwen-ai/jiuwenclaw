@@ -14,19 +14,21 @@ interface MacroRoutingCardProps {
 
 function modeLabelKey(mode: string | undefined): string {
   switch (mode) {
+    case 'agent':
     case 'agent.fast':
-      return 'chat.modeAgent';
+      return 'chat.config.mode.singleAgent';
     case 'team':
-      return 'chat.modeAgentTeam';
+      return 'chat.config.mode.cluster';
     case 'agent.plan':
-    default:
       return 'chat.modePlan';
+    default:
+      return 'chat.config.mode.singleAgent';
   }
 }
 
 export function MacroRoutingCard({ routing }: MacroRoutingCardProps) {
   const { t } = useTranslation();
-  const mode = typeof routing.mode === 'string' ? routing.mode : 'agent.plan';
+  const mode = typeof routing.mode === 'string' ? routing.mode : 'agent';
   const confidence =
     typeof routing.confidence === 'number' && Number.isFinite(routing.confidence)
       ? Math.round(routing.confidence * 100)

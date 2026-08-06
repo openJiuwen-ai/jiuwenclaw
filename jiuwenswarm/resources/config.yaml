@@ -1125,8 +1125,9 @@ mcp:
 
 
 modes:
-  # Lightweight MACRO Auto scheduler (LAS-inspired). Default UI mode remains Planning;
-  # Auto is available as an optional chip and only runs when the user selects it.
+  # Lightweight MACRO Auto scheduler (LAS-inspired). Default UI mode is Agent;
+  # Plan is a separate toggle on forced Agent. Auto is opt-in and maps to
+  # agent.plan / agent / team.
   macro_routing:
     enabled: true
     # llm = classify every Auto query with the lightweight scheduler (better cross-dataset;

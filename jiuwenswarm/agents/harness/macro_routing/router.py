@@ -25,16 +25,16 @@ async def route_macro_mode(
     requested_mode: str | None,
     config_base: dict[str, Any] | None = None,
 ) -> MacroRoutingDecision:
-    """Resolve Auto MACRO mode; pass through forced Planning/Performance/Cluster.
+    """Resolve Auto MACRO mode; pass through forced agent / agent.plan / team.
 
     Precedence:
     1. Forced non-auto mode → return as-is (source=forced)
-    2. Auto + macro_routing.enabled=false → agent.plan (source=disabled)
+    2. Auto + macro_routing.enabled=false → agent (source=disabled)
     3. Auto + rules/hybrid gate → optionally escalate to LLM scheduler
     """
     requested = str(requested_mode or "").strip().lower()
     if not is_auto_mode(requested):
-        mode = normalize_macro_mode(requested, default="agent.plan")
+        mode = normalize_macro_mode(requested, default="agent")
         return MacroRoutingDecision(
             mode=mode,
             confidence=1.0,
@@ -47,9 +47,9 @@ async def route_macro_mode(
     routing_cfg = load_macro_routing_config(config_base)
     if not routing_cfg.get("enabled", True):
         return MacroRoutingDecision(
-            mode="agent.plan",
+            mode="agent",
             confidence=1.0,
-            rationale="MACRO Auto is selected but macro_routing is disabled — using Planning Mode.",
+            rationale="MACRO Auto is selected but macro_routing is disabled — using Agent Mode.",
             source="disabled",
             features={},
             gate_confident=True,

@@ -602,37 +602,37 @@ def resolve_agent_request_mode(
     """Resolve request params.mode into manager mode, sub_mode, and canonical value.
 
     Rails for plan/fast remain unified under the agent profile, but canonical
-    MACRO lanes (``agent.plan`` / ``agent.fast`` / ``team`` / ``auto``) are kept
+    MACRO lanes (``agent.plan`` / ``agent`` / ``team`` / ``auto``) are kept
     in ``params.mode`` so Auto routing and the UI can distinguish them.
     """
     raw_value = getattr(raw_mode, "value", raw_mode)
     mode_text = raw_value.strip().lower() if isinstance(raw_value, str) else ""
     if not mode_text:
-        mode_text = "agent.plan"
+        mode_text = "agent"
     normalized_work_mode = (
         work_mode.strip().lower() if isinstance(work_mode, str) else ""
     )
 
     # MACRO Auto: keep canonical "auto" so the adapter can run the scheduler
-    # before picking plan/fast/team. AgentManager still uses mode "agent".
+    # before picking agent.plan / agent / team. AgentManager still uses mode "agent".
     if mode_text in {"auto", "agent.auto", "macro.auto"}:
         return "auto", None, "auto"
 
-    # Explicit MACRO lanes (and legacy bare tokens) → agent instance, lane label.
+    # Explicit MACRO / Web lanes → agent instance, lane label.
     # work_mode=code still maps into code.normal (develop behavior).
     if mode_text in {"plan", "planning", "agent.plan"}:
         if normalized_work_mode == "code":
             return "code", "normal", "code.normal"
         return "agent", None, "agent.plan"
     if mode_text in {"fast", "performance", "agent.fast"}:
+        # Legacy Performance token → develop Agent Mode (non-plan).
         if normalized_work_mode == "code":
             return "code", "normal", "code.normal"
-        return "agent", None, "agent.fast"
+        return "agent", None, "agent"
     if mode_text == "agent":
-        # Bare "agent" (pre-MACRO UI) maps to Planning, the product default.
         if normalized_work_mode == "code":
             return "code", "normal", "code.normal"
-        return "agent", None, "agent.plan"
+        return "agent", None, "agent"
 
     parts = mode_text.split(".")
     mode = parts[0] or "agent"

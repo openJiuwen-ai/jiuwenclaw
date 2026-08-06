@@ -1,11 +1,11 @@
 import type { AgentMode } from '../types';
 
-/** Concrete MACRO lanes (excludes Auto selection and harness). */
-export type MacroLaneMode = 'agent.plan' | 'agent.fast' | 'team';
+/** Concrete MACRO lanes after Auto resolves (excludes Auto selection and harness). */
+export type MacroLaneMode = 'agent.plan' | 'agent' | 'team';
 
 /** Modes that use the single-agent rails / queue UX (not team / harness). */
 export function isSingleAgentMode(mode: AgentMode | null | undefined): boolean {
-  return mode === 'agent' || mode === 'agent.plan' || mode === 'agent.fast';
+  return mode === 'agent' || mode === 'agent.plan' || mode === 'auto';
 }
 
 export function resolveEffectiveAgentMode(
@@ -28,19 +28,23 @@ export function isEffectiveTeamMode(
 export function normalizeMacroLaneMode(raw: unknown): MacroLaneMode | null {
   if (typeof raw !== 'string') return null;
   const normalized = raw.trim().toLowerCase();
-  if (normalized === 'agent.fast' || normalized === 'fast' || normalized === 'performance') {
-    return 'agent.fast';
-  }
   if (normalized === 'team' || normalized === 'cluster' || normalized === 'agent.team') {
     return 'team';
   }
   if (
     normalized === 'agent.plan' ||
     normalized === 'plan' ||
-    normalized === 'planning' ||
-    normalized === 'agent'
+    normalized === 'planning'
   ) {
     return 'agent.plan';
+  }
+  if (
+    normalized === 'agent' ||
+    normalized === 'agent.fast' ||
+    normalized === 'fast' ||
+    normalized === 'performance'
+  ) {
+    return 'agent';
   }
   return null;
 }

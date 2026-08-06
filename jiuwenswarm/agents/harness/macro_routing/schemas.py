@@ -8,11 +8,13 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
-MACRO_MODES = frozenset({"agent.plan", "agent.fast", "team"})
+# Align with develop Web wire modes: agent (execute) / agent.plan / team.
+# Legacy ``agent.fast`` normalizes to ``agent``.
+MACRO_MODES = frozenset({"agent.plan", "agent", "team"})
 AUTO_MODE_ALIASES = frozenset({"auto", "agent.auto", "macro.auto"})
 MACRO_MODE_LABELS = {
     "agent.plan": "Planning Mode",
-    "agent.fast": "Performance Mode",
+    "agent": "Agent Mode",
     "team": "Cluster Mode",
 }
 
@@ -22,28 +24,28 @@ def is_auto_mode(mode: str | None) -> bool:
     return text in AUTO_MODE_ALIASES
 
 
-def normalize_macro_mode(mode: str | None, *, default: str = "agent.plan") -> str:
+def normalize_macro_mode(mode: str | None, *, default: str = "agent") -> str:
     text = str(mode or "").strip().lower()
     if text in MACRO_MODES:
         return text
     if text in {"plan", "planning"}:
         return "agent.plan"
-    if text in {"fast", "performance", "agent"}:
-        return "agent.fast"
+    if text in {"fast", "performance", "agent.fast"}:
+        return "agent"
     if text in {"cluster", "agent.team"}:
         return "team"
-    return default if default in MACRO_MODES else "agent.plan"
+    return default if default in MACRO_MODES else "agent"
 
 
 def macro_mode_label(mode: str | None) -> str:
     """Human-readable MACRO lane name for logs / UI notices."""
     normalized = normalize_macro_mode(mode)
-    return MACRO_MODE_LABELS.get(normalized, "Planning Mode")
+    return MACRO_MODE_LABELS.get(normalized, "Agent Mode")
 
 
 @dataclass
 class MacroRoutingDecision:
-    """Resolved top-level execution lane (Planning / Performance / Cluster)."""
+    """Resolved top-level execution lane (Planning / Agent / Cluster)."""
 
     mode: str
     confidence: float

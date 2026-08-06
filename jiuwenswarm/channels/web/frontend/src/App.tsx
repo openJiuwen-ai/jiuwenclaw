@@ -474,7 +474,7 @@ function AppContent() {
       || Boolean(project.project_dir && project.project_dir === session.project_dir)
     )) ?? null;
   }, [currentSession, projects, sessions, sessionId]);
-  const mode = useSessionStore((s) => s.runtimes[sessionId]?.mode ?? 'agent.plan');
+  const mode = useSessionStore((s) => s.runtimes[sessionId]?.mode ?? 'agent');
   const lastMacroRoutedMode = useSessionStore(
     (s) => s.runtimes[sessionId]?.lastMacroRoutedMode ?? null,
   );
@@ -1832,7 +1832,7 @@ function AppContent() {
     if (
       effectiveMode === 'agent' ||
       effectiveMode === 'agent.plan' ||
-      effectiveMode === 'agent.fast'
+      effectiveMode === 'auto'
     ) {
       const runtime = useChatStore.getState().getRuntime(currentSessionId);
       if (runtime && runtime.taskQueue.length > 0) {

@@ -14,14 +14,14 @@
  * Code profile。前端不需要拼 `code.normal` / `code.plan` / `code.team`。
  */
 
-/** UI 层的基础模式。只有单 agent 支持 Plan。 */
-export type PlanBaseMode = 'agent' | 'team' | 'auto_harness';
+/** UI 层的基础模式。只有单 agent（非 Auto）支持 Plan toggle。 */
+export type PlanBaseMode = 'agent' | 'team' | 'auto' | 'auto_harness';
 
 /**
- * Plan 只对单 agent 开放。
+ * Plan 只对强制 Agent 开放（develop 对齐）。
  *
- * 集群（`team`）不支持 Plan：集群的计划由 Leader 在团队运行时里自行编排，
- * 没有独立的计划审批流程，所以工具栏不提供 Plan 入口。
+ * Auto / Cluster 不提供 Plan 入口：Auto 自己路由到 agent.plan 时由 MACRO 写 wire mode；
+ * 集群的计划由 Leader 编排。
  */
 export function supportsPlanMode(mode: PlanBaseMode | string | undefined): boolean {
   return mode === 'agent';

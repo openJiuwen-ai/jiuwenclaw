@@ -44,7 +44,6 @@ export interface Session {
 export type AgentMode =
   | 'agent'
   | 'agent.plan'
-  | 'agent.fast'
   | 'team'
   | 'auto'
   | 'auto_harness';

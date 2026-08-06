@@ -668,25 +668,15 @@ interface PendingContextCompressionStart {
 }
 
 function normalizeAgentMode(rawMode: unknown): AgentMode {
-  if (typeof rawMode !== 'string') return 'agent.plan';
+  if (typeof rawMode !== 'string') return 'agent';
   const normalized = rawMode.trim().toLowerCase();
   if (normalized === 'team') return 'team';
   if (normalized === 'auto_harness') return 'auto_harness';
   if (normalized === 'auto' || normalized === 'agent.auto' || normalized === 'macro.auto') {
     return 'auto';
   }
-  if (normalized === 'agent.fast' || normalized === 'fast' || normalized === 'performance') {
-    return 'agent.fast';
-  }
-  if (
-    normalized === 'agent.plan' ||
-    normalized === 'plan' ||
-    normalized === 'planning' ||
-    normalized === 'agent'
-  ) {
-    return 'agent.plan';
-  }
-  return 'agent.plan';
+  // agent.plan / agent.fast / bare agent → Agent (Plan is the + toggle, not a mode chip).
+  return 'agent';
 }
 
 function unsupportedEvolutionModeMessage(content: string, mode: AgentMode): string | null {
@@ -700,8 +690,8 @@ function unsupportedEvolutionModeMessage(content: string, mode: AgentMode): stri
     !isEvolutionCommand ||
     mode === 'agent' ||
     mode === 'agent.plan' ||
-    mode === 'agent.fast' ||
-    mode === 'team'
+    mode === 'team' ||
+    mode === 'auto'
   ) {
     return null;
   }

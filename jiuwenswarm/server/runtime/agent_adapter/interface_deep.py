@@ -8632,9 +8632,9 @@ class JiuWenSwarmDeepAdapter:
         )
 
         params = request.params if isinstance(request.params, dict) else {}
-        requested = str(params.get("mode") or "agent.plan").strip()
+        requested = str(params.get("mode") or "agent").strip()
         if not is_auto_mode(requested):
-            return requested or "agent.plan", None
+            return requested or "agent", None
 
         decision = await route_macro_mode(
             query,

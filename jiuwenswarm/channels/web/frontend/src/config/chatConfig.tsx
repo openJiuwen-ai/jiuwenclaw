@@ -15,20 +15,8 @@ function ClusterModeIcon({ className }: { className?: string }) {
   return <span className={`chat-config-icon chat-config-icon--cluster ${className ?? ''}`} aria-hidden="true" />;
 }
 
-function PlanModeIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
-    </svg>
-  );
-}
-
-function FastModeIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
-    </svg>
-  );
+function SingleAgentModeIcon({ className }: { className?: string }) {
+  return <span className={`chat-config-icon chat-config-icon--agent ${className ?? ''}`} aria-hidden="true" />;
 }
 
 function AutoModeIcon({ className }: { className?: string }) {
@@ -50,24 +38,19 @@ function SafeAccessPermissionIcon({ className }: { className?: string }) {
 }
 
 // ── 工作模式选项 ────────────────────────────────────────────────
-// MACRO lanes + opt-in Auto; auto_harness stays hidden.
+// Align with develop: Agent | Cluster | Auto (opt-in). Plan is a separate toggle on Agent.
 
 export const AGENT_MODE_OPTIONS: ChatOptionDef<AgentMode>[] = [
   {
-    value: 'agent.plan',
-    i18nKey: 'chat.modePlan',
-    icon: PlanModeIcon,
-  },
-  {
-    value: 'agent.fast',
-    i18nKey: 'chat.modeAgent',
-    icon: FastModeIcon,
-  },
-  {
     value: 'team',
-    i18nKey: 'chat.modeAgentTeam',
+    i18nKey: 'chat.config.mode.cluster',
     descriptionI18nKey: 'chat.config.mode.clusterDesc',
     icon: ClusterModeIcon,
+  },
+  {
+    value: 'agent',
+    i18nKey: 'chat.config.mode.singleAgent',
+    icon: SingleAgentModeIcon,
   },
   {
     value: 'auto',

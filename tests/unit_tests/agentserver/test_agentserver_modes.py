@@ -46,12 +46,13 @@ def _is_regular_skill_evolution_rail(rail):
     ("raw_mode", "expected"),
     [
         ("team", ("team", None, "team")),
-        # MACRO lanes: manager mode stays "agent", canonical keeps plan/fast labels.
-        ("agent", ("agent", None, "agent.plan")),
+        # MACRO / Web lanes: manager mode stays "agent"; plan stays agent.plan;
+        # bare agent and legacy fast → agent (non-plan).
+        ("agent", ("agent", None, "agent")),
         ("plan", ("agent", None, "agent.plan")),
         ("agent.plan", ("agent", None, "agent.plan")),
-        ("fast", ("agent", None, "agent.fast")),
-        ("agent.fast", ("agent", None, "agent.fast")),
+        ("fast", ("agent", None, "agent")),
+        ("agent.fast", ("agent", None, "agent")),
         ("code", ("code", "normal", "code.normal")),
         ("code.plan", ("code", "plan", "code.plan")),
         ("code.team", ("code", "team", "code.team")),
@@ -60,7 +61,7 @@ def _is_regular_skill_evolution_rail(rail):
         ("auto", ("auto", None, "auto")),
         ("agent.auto", ("auto", None, "auto")),
         ("macro.auto", ("auto", None, "auto")),
-        (None, ("agent", None, "agent.plan")),
+        (None, ("agent", None, "agent")),
     ],
 )
 def test_resolve_agent_request_mode_accepts_primary_and_dotted_modes(raw_mode, expected):

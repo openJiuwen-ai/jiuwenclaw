@@ -132,7 +132,7 @@ function InterruptResultBubble() {
 function ActiveTeamGroupEntry({ isProcessing, teamAreaExpanded }: { isProcessing: boolean; teamAreaExpanded?: boolean }) {
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const messages = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.messages ?? []);
-  const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent.plan');
+  const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent');
   const lastMacroRoutedMode = useSessionStore(
     (s) => s.runtimes[activeSessionId ?? '']?.lastMacroRoutedMode ?? null,
   );
@@ -175,7 +175,7 @@ function AgentActivityCard({ isProcessing: _isProcessing, onSendTask }: { isProc
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const { t } = useTranslation();
   const activeSessionId = useChatStore((s) => s.activeSessionId);
-  const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent.plan');
+  const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent');
   const taskQueue = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.taskQueue ?? []);
   const queuePaused = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.queuePaused ?? false);
   const removeFromTaskQueue = useChatStore((s) => s.removeFromTaskQueue);
@@ -183,7 +183,7 @@ function AgentActivityCard({ isProcessing: _isProcessing, onSendTask }: { isProc
   const setQueuePaused = useChatStore((s) => s.setQueuePaused);
   const setInputValue = useChatStore((s) => s.setInputValue);
 
-  const isAgentMode = mode === 'agent' || mode === 'agent.plan' || mode === 'agent.fast';
+  const isAgentMode = mode === 'agent' || mode === 'agent.plan' || mode === 'auto';
 
   // 有等待任务时自动展开
   useEffect(() => {
@@ -731,7 +731,7 @@ export function ChatPanel({
   const toolExecutionOrder = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.toolExecutionOrder ?? []);
   const contextCompressionRuntime = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionRuntime);
   const contextCompressionSummary = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionSummary);
-  const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent.plan');
+  const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent');
   const lastMacroRoutedMode = useSessionStore(
     (s) => s.runtimes[activeSessionId ?? '']?.lastMacroRoutedMode ?? null,
   );
