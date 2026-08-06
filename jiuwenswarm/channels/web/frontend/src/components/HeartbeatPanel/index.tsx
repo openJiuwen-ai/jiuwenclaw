@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { X } from 'lucide-react';
 import { webRequest } from '../../services/webClient';
+import type { WebError } from '../../types';
 import type { HeartbeatJobDTO, HeartbeatMeta, HeartbeatTaskUI } from '../../types/heartbeat';
 import { summarizeHeartbeatSchedule } from './heartbeatScheduleConvert';
 import HeartbeatStatusBadge from './HeartbeatStatusBadge';
@@ -55,7 +56,7 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
       setMeta(metaPayload);
       setJobs((listPayload.jobs ?? []).map(heartbeatJobToUI));
     } catch (err) {
-      if ((err as { name?: string }).name === 'AbortError') return;
+      if (typeof err === 'object' && err !== null && 'code' in err && (err as WebError).code === 'REQUEST_ABORTED') return;
       if (sessionIdRef.current !== sessionId) return;
       setLoadError(err instanceof Error ? err.message : String(err));
     } finally {
