@@ -1719,6 +1719,90 @@ class JiuWenClawDeepAdapter:
             skill_rail = None
         return skill_rail
 
+    async def refresh_enabled_skills_from_db(self) -> None:
+        """账本变更后直读 DB 刷新 ``_enabled_skills`` 并热替换 ``SkillUseRail``（D11 轻量路径）。
+
+        不全量 ``create_instance``：不重建模型/工具卡，仅更新启用集与技能 Rail。
+        """
+        if not is_skill_whitelist_tenant(self._agent_id, self._service_id):
+            return
+        if self._instance is None:
+            logger.debug(
+                "[JiuWenClawDeepAdapter] refresh_enabled_skills_from_db skipped: instance not ready"
+            )
+            return
+
+        from jiuwenclaw.agentserver.installed_skill import list_enabled_skill_names
+
+        try:
+            names = await list_enabled_skill_names(
+                service_id=str(self._service_id or ""),
+                agent_id=str(self._agent_id or ""),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[JiuWenClawDeepAdapter] list_enabled_skill_names failed: %s",
+                exc,
+            )
+            return
+
+        self._enabled_skills = [str(name) for name in names if str(name).strip()]
+
+        extra_skill_dir: str | None = None
+        try:
+            from jiuwenclaw.extensions.registry import ExtensionRegistry
+            from jiuwenclaw.schema.hooks_context import SystemPromptHookContext
+            from jiuwenclaw.schema import AgentServerHookEvents
+
+            context = SystemPromptHookContext()
+            await ExtensionRegistry.get_instance().trigger(
+                AgentServerHookEvents.BEFORE_SYSTEM_PROMPT_BUILD, context
+            )
+            extra_skill_dir = context.skill_dir
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "[JiuWenClawDeepAdapter] refresh_enabled_skills hook skipped: %s",
+                exc,
+            )
+
+        config = self._config_cache if isinstance(self._config_cache, dict) else {}
+        old_rail = self._skill_rail
+        new_rail = self._build_skill_rail(
+            config,
+            include_tools=self._skill_include_harness_fs_tools(),
+            include_skill_body_tools=self._skill_include_skill_body_tools(),
+            extra_skill_dir=extra_skill_dir,
+        )
+        if new_rail is None:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] refresh_enabled_skills_from_db: SkillUseRail rebuild failed"
+            )
+            return
+
+        if old_rail is not None:
+            try:
+                await self._instance.unregister_rail(old_rail)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] unregister old SkillUseRail failed: %s",
+                    exc,
+                )
+
+        self._skill_rail = new_rail
+        try:
+            await self._instance.register_rail(new_rail)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[JiuWenClawDeepAdapter] register new SkillUseRail failed: %s",
+                exc,
+            )
+            return
+
+        logger.info(
+            "[JiuWenClawDeepAdapter] enabled_skills refreshed from DB: count=%s",
+            len(self._enabled_skills),
+        )
+
     def _build_skill_evolution_rail(self, config: dict[str, Any]) -> SkillEvolutionRail | None:
         """Build SkillEvolutionRail."""
         try:
@@ -2442,7 +2526,12 @@ class JiuWenClawDeepAdapter:
                 )
 
         try:
-            skill_toolkit = SkillToolkit(manager=self._skill_manager)
+            skill_toolkit = SkillToolkit(
+                manager=self._skill_manager,
+                service_id=self._service_id,
+                agent_id=self._agent_id,
+                on_installed_skills_changed=self.refresh_enabled_skills_from_db,
+            )
             skill_tool_names: list[str] = []
             for tool in skill_toolkit.get_tools():
                 registered = _ensure_tool_registered(tool)
