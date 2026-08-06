@@ -104,8 +104,8 @@ class TenantAgentPool:
         Returns:
             对于 ACP 通道，返回 capabilities；否则返回 None
         """
-        agent_id, service_id = "acp", "global_acp"
-        agent_manager = await self._ensure_agent_manager(agent_id, service_id)
+        agent_id, service_id, workspace_key = "acp", "global_acp", "workspace_acp"
+        agent_manager = await self._ensure_agent_manager(agent_id, service_id, workspace_key)
         return await agent_manager.initialize(channel_id, extra_config)
 
     def get_client_capabilities(self, channel_id: str = "") -> dict[str, Any]:
@@ -117,7 +117,7 @@ class TenantAgentPool:
         Returns:
             客户端能力字典
         """
-        agent_manager = self._get_agent_manager_nowait("acp", "global_acp")
+        agent_manager = self._get_agent_manager_nowait("acp", "global_acp", "workspace_acp")
         if agent_manager is None:
             return {}
         return agent_manager.get_client_capabilities(channel_id)
@@ -132,8 +132,8 @@ class TenantAgentPool:
         Returns:
             会话 ID
         """
-        agent_id, service_id = "acp", "global_acp"
-        agent_manager = await self._ensure_agent_manager(agent_id, service_id)
+        agent_id, service_id, workspace_key = "acp", "global_acp", "workspace_acp"
+        agent_manager = await self._ensure_agent_manager(agent_id, service_id, workspace_key)
         return await agent_manager.create_session(channel_id, session_id)
 
     async def cleanup(self) -> None:
@@ -169,20 +169,6 @@ class TenantAgentPool:
                     continue
         return False
 
-    async def cancel_all_inflight_work(self, reason: str = "[gateway ws disconnect] ") -> None:
-        """WebSocket 断开时：对每个已缓存 ``AgentManager`` 取消在途任务。"""
-        keys = await self._agent_wrappers.keys()
-        for key in keys:
-            agent_manager = await self._agent_wrappers.get(key)
-            if agent_manager is None:
-                continue
-            try:
-                await agent_manager.cancel_all_inflight_work(reason)
-            except Exception:
-                logger.exception(
-                    "[TenantAgentPool] cancel_all_inflight_work failed for key=%s", key
-                )
-
     async def reload_agents_config(self, config: Any, env: Any) -> None:
         """与 ``AgentManager.reload_agents_config`` 一致：对每个已缓存租户热重载配置。"""
         # 保存配置，用于后续创建的 AgentManager 传递
@@ -208,18 +194,20 @@ class TenantAgentPool:
     async def _ensure_agent_manager(
             self,
             agent_id: str,
-            service_id: str | None = None,
+            service_id: str,
+            workspace_key: str,
     ) -> Any:
-        """确保 agent_id + service_id 对应的 AgentManager 实例已创建（线程安全）.
+        """确保 agent_id + service_id + workspace_key 对应的 AgentManager 已创建.
 
         Args:
             agent_id: agent名称/路径
             service_id: 服务ID（chat_id + bot_app_id 组合）
+            workspace_key: 数据目录键（通常为 md5(逻辑 workspace_dir)）
 
         Returns:
             AgentManager 实例
         """
-        cache_key = f"{agent_id}_{service_id}"
+        cache_key = f"{agent_id}_{service_id}_{workspace_key}"
         lock = self._get_lock(cache_key)
 
         async with lock:
@@ -228,18 +216,15 @@ class TenantAgentPool:
                 return agent_manager
 
             logger.info(
-                "[TenantAgentPool] 创建新 AgentManager 实例: agent_id=%s, service_id=%s",
+                "[TenantAgentPool] 创建新 AgentManager 实例: agent_id=%s, service_id=%s, workspace_key=%s",
                 agent_id,
                 service_id,
+                workspace_key,
             )
 
             try:
-                # 设置工作目录隔离
-                agent_dir_path = get_multi_tenant_user_workspace_dir(service_id, agent_id)
-                if agent_dir_path is None:
-                    raise ValueError(
-                        f"invalid tenant workspace: agent_id={agent_id!r}, service_id={service_id!r}"
-                    )
+                # 工作目录仅由 workspace_key 决定：workspace_{key}/
+                agent_dir_path = get_multi_tenant_user_workspace_dir(workspace_key)
 
                 from jiuwenclaw.agentserver.agent_manager import AgentManager
                 # 创建新的 AgentManager 实例，传入保存的配置
@@ -262,26 +247,34 @@ class TenantAgentPool:
                     self._lock_loops.pop(stale_key, None)
 
                 logger.info(
-                    "[TenantAgentPool] AgentManager 实例创建完成: agent_id=%s, service_id=%s",
+                    "[TenantAgentPool] AgentManager 实例创建完成: agent_id=%s, service_id=%s, workspace_key=%s path=%s",
                     agent_id,
                     service_id,
+                    workspace_key,
+                    agent_dir_path,
                 )
                 return agent_manager
             except Exception as e:
                 logger.error("[TenantAgentPool] 创建 AgentManager 失败: %s", e)
                 raise
 
-    def _get_agent_manager_nowait(self, agent_id: str, service_id: str) -> Any | None:
+    def _get_agent_manager_nowait(
+            self,
+            agent_id: str,
+            service_id: str,
+            workspace_key: str,
+    ) -> Any | None:
         """同步获取 AgentManager 实例（不自动创建）.
 
         Args:
             agent_id: agent名称/路径
             service_id: 服务ID
+            workspace_key: 数据目录键
 
         Returns:
             AgentManager 实例或 None
         """
-        cache_key = f"{agent_id}_{service_id}"
+        cache_key = f"{agent_id}_{service_id}_{workspace_key}"
         try:
             loop = asyncio.get_running_loop()
             future = asyncio.run_coroutine_threadsafe(
@@ -294,40 +287,41 @@ class TenantAgentPool:
 
     async def process_message(self, request: AgentRequest) -> AgentResponse:
         """处理非流式请求."""
-        agent_id, service_id = self.extract_ids(request)
-        agent_manager = await self._ensure_agent_manager(agent_id, service_id)
+        agent_id, service_id, workspace_key = self.extract_ids(request)
+        agent_manager = await self._ensure_agent_manager(agent_id, service_id, workspace_key)
         return await agent_manager.process_message(request)
 
     async def process_message_stream(
             self, request: AgentRequest
     ):
         """处理流式请求."""
-        agent_id, service_id = self.extract_ids(request)
-        agent_manager = await self._ensure_agent_manager(agent_id, service_id)
+        agent_id, service_id, workspace_key = self.extract_ids(request)
+        agent_manager = await self._ensure_agent_manager(agent_id, service_id, workspace_key)
         async for chunk in agent_manager.process_message_stream(request):
             yield chunk
 
     @staticmethod
-    def extract_ids(request: AgentRequest):
-        """从请求中提取 agent_id 和 service_id.
+    def extract_ids(request: AgentRequest) -> tuple[str, str, str]:
+        """从请求中提取 agent_id、service_id 与 workspace_key.
 
         单租户作为多租户的默认特例：
-        - 无指定时返回 ('default', 'default')
+        - 无指定时返回 ('default', 'default', 'default')
         - 有指定时返回对应值
-        - ACP 通道返回 ('acp', 'global_acp')
+        - ACP 通道返回 ('acp', 'global_acp', 'workspace_acp')
         """
         agent_id = getattr(request, 'agent_id', None)
         service_id = getattr(request, 'service_id', None)
-
-        # ACP 通道使用固定租户
+        workspace_key = request.workspace_dir
+        # ACP 通道使用固定租户与工作区
         if request.channel_id == "acp":
-            return "acp", "global_acp"
+            return "acp", "global_acp", "workspace_acp"
 
         # 无指定时使用默认租户（单租户作为多租户的默认特例）
         agent_id = agent_id or "default"
         service_id = service_id or "default"
+        workspace_key = workspace_key or "default"
 
-        return agent_id, service_id
+        return agent_id, service_id, workspace_key
 
     async def reload_agent_config(
             self,
@@ -337,7 +331,8 @@ class TenantAgentPool:
     ) -> None:
         """重新加载指定租户的 Agent 配置."""
         service_id = "global_acp" if agent_id == "acp" else "default"
-        agent_manager = await self._ensure_agent_manager(agent_id, service_id)
+        workspace_key = "workspace_acp" if agent_id == "acp" else "default"
+        agent_manager = await self._ensure_agent_manager(agent_id, service_id, workspace_key)
         channel_id = "acp" if agent_id == "acp" else "default"
         await agent_manager.reload_agent_config(
             channel_id=channel_id,
@@ -349,29 +344,35 @@ class TenantAgentPool:
         """获取当前活跃的 AgentManager 实例数量."""
         return self._agent_wrappers.__len__()
 
-    async def get_agent_manager(self, agent_id: str, service_id: str) -> Any:
+    async def get_agent_manager(
+            self, agent_id: str, service_id: str, workspace_key: str
+    ) -> Any:
         """获取指定租户的 AgentManager 实例.
 
         Args:
             agent_id: agent名称/路径
             service_id: 服务ID
+            workspace_key: 数据目录键
 
         Returns:
             AgentManager 实例
         """
-        return await self._ensure_agent_manager(agent_id, service_id)
+        return await self._ensure_agent_manager(agent_id, service_id, workspace_key)
 
-    def get_agent_manager_nowait(self, agent_id: str, service_id: str) -> Any | None:
+    def get_agent_manager_nowait(
+            self, agent_id: str, service_id: str, workspace_key: str
+    ) -> Any | None:
         """同步获取 AgentManager 实例（不自动创建）.
 
         Args:
             agent_id: agent名称/路径
             service_id: 服务ID
+            workspace_key: 数据目录键
 
         Returns:
             AgentManager 实例或 None
         """
-        return self._get_agent_manager_nowait(agent_id, service_id)
+        return self._get_agent_manager_nowait(agent_id, service_id, workspace_key)
 
     async def cancel_all_inflight_work(self, reason: str = "[gateway ws disconnect] ") -> None:
         """Gateway 与 AgentServer 的 WebSocket 断开时：取消所有租户的在途任务。

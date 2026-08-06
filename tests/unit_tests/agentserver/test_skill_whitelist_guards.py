@@ -26,15 +26,15 @@ def test_is_skill_whitelist_tenant_legacy_tenants() -> None:
     assert is_skill_whitelist_tenant("real-agent", "real-svc") is True
 
 
-def test_tenant_workspace_requires_both_ids() -> None:
-    with pytest.raises(ValueError, match="tenant id required"):
-        get_tenant_agent_jiuwenclaw_workspace_dir(None, None)
-    with pytest.raises(ValueError, match="tenant id required"):
-        get_tenant_agent_skills_dirs("only-service", "")
+def test_tenant_workspace_requires_workspace_key() -> None:
+    with pytest.raises(ValueError, match="workspace_key required"):
+        get_tenant_agent_jiuwenclaw_workspace_dir()
+    with pytest.raises(ValueError, match="workspace_key required"):
+        get_tenant_agent_skills_dirs(workspace_key="")
 
 
 def test_multi_tenant_skill_dirs_single_tenant_fallback() -> None:
-    dirs = get_multi_tenant_skill_dirs(None, None)
+    dirs = get_multi_tenant_skill_dirs()
     assert len(dirs) == 1
     assert dirs[0] == get_agent_skills_dir()
 
@@ -90,11 +90,6 @@ def test_multi_id_same_source_version_skips_second_download(
     source = "https://example.com/pkg.zip"
     version = "1.0.0"
 
-    monkeypatch.setattr(
-        "jiuwenclaw.agentserver.skill_whitelist.get_tenant_agent_jiuwenclaw_workspace_dir",
-        lambda _s, _a: workspace,
-    )
-
     install_called = {"count": 0}
 
     def _fake_install(_url: str, _force: bool, _mirror: None) -> dict:
@@ -113,7 +108,7 @@ def test_multi_id_same_source_version_skips_second_download(
         )(),
     )
 
-    sync = SkillWhitelistSynchronizer("svc", "bot")
+    sync = SkillWhitelistSynchronizer(workspace)
     config = AgentSkillWhitelistConfig(
         agent_id="bot",
         service_id="svc",
@@ -151,11 +146,6 @@ def test_manifest_skips_redownload_on_second_sync(
         skills=[SkillWhitelistItem(id="id-a", version=version, source=source)],
     )
 
-    monkeypatch.setattr(
-        "jiuwenclaw.agentserver.skill_whitelist.get_tenant_agent_jiuwenclaw_workspace_dir",
-        lambda _s, _a: workspace,
-    )
-
     install_called = {"count": 0}
 
     def _fake_install(_url: str, _force: bool, _mirror: None) -> dict:
@@ -174,13 +164,17 @@ def test_manifest_skips_redownload_on_second_sync(
         )(),
     )
 
-    asyncio.run(SkillWhitelistSynchronizer("svc", "bot").sync(config))
+    asyncio.run(SkillWhitelistSynchronizer(workspace).sync(config))
     assert install_called["count"] == 1
 
-    asyncio.run(SkillWhitelistSynchronizer("svc", "bot").sync(config))
+    asyncio.run(SkillWhitelistSynchronizer(workspace).sync(config))
     assert install_called["count"] == 1
 
 
-def test_multi_tenant_skill_dirs_requires_both_when_any_id_set() -> None:
-    with pytest.raises(ValueError, match="tenant id required"):
-        get_multi_tenant_skill_dirs("svc-only", None)
+def test_multi_tenant_skill_dirs_requires_workspace_key_for_tenant_path() -> None:
+    with pytest.raises(ValueError, match="workspace_key required"):
+        get_tenant_agent_skills_dirs(workspace_key=None)
+    # 无 workspace_key → 单租户回退
+    dirs = get_multi_tenant_skill_dirs()
+    assert len(dirs) == 1
+    assert dirs[0] == get_agent_skills_dir()

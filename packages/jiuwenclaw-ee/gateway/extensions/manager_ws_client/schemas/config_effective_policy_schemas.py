@@ -90,6 +90,7 @@ class ConfigEffectiveAgentPolicyUpdateRequest(BaseModel):
     policy_name: str | None = Field(default=None, max_length=128, min_length=1)
     policy_desc: str | None = Field(default=None, max_length=512)
     agent_id: OptionalRoutingIdField = Field(default=None, max_length=512)
+    workspace_dir: OptionalRoutingIdField = Field(default=None, max_length=512)
     service_policy_id: str | None = Field(default=None, max_length=100, min_length=1)
     priority: int | None = None
     match_expr: str | None = None
@@ -108,6 +109,7 @@ class ConfigEffectiveAgentPolicyCreateRequest(BaseModel):
     policy_name: str = Field(..., max_length=128, min_length=1)
     policy_desc: str | None = Field(default=None, max_length=512)
     agent_id: RoutingIdField = Field(..., max_length=512, min_length=1)
+    workspace_dir: OptionalRoutingIdField = Field(default=None, max_length=512)
     service_policy_id: str = Field(..., max_length=100, min_length=1)
     priority: int = 0
     match_expr: str | None = None

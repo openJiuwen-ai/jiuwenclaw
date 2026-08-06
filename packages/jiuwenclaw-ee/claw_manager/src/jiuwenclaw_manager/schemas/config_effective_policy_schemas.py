@@ -37,6 +37,14 @@ class ConfigEffectiveAgentPolicyCreateBody(BaseModel):
     policy_name: str = Field(..., max_length=128, min_length=1)
     policy_desc: str | None = Field(default=None, max_length=512)
     agent_id: RoutingIdField = Field(..., max_length=512)
+    workspace_dir: OptionalRoutingIdField = Field(
+        default=None,
+        max_length=512,
+        description=(
+            "数据存储目录逻辑键；可写 ${user_id}/${group_id}/${bot_id} 或固定值；"
+            "未配置时运行时默认 ${group_id}${bot_id}${user_id}"
+        ),
+    )
     service_policy_id: str = Field(..., max_length=100, min_length=1)
     priority: int = Field(default=0)
     match_expr: str | None = None
@@ -53,6 +61,7 @@ class ConfigEffectiveAgentPolicyUpdateBody(BaseModel):
     policy_name: str | None = Field(default=None, max_length=128, min_length=1)
     policy_desc: str | None = Field(default=None, max_length=512)
     agent_id: OptionalRoutingIdField = Field(default=None, max_length=512)
+    workspace_dir: OptionalRoutingIdField = Field(default=None, max_length=512)
     service_policy_id: str | None = Field(default=None, max_length=100, min_length=1)
     priority: int | None = None
     match_expr: str | None = None
@@ -69,6 +78,7 @@ class ConfigEffectiveAgentPolicyOut(BaseModel):
     policy_name: str
     policy_desc: str | None
     agent_id: str
+    workspace_dir: str | None = None
     service_policy_id: str
     priority: int
     match_expr: str | None
@@ -93,13 +103,13 @@ class ConfigEffectiveAgentPolicyListQuery(BaseModel):
     send_file_allowed: bool | None = None
     search: str | None = Field(
         default=None,
-        description="搜索策略 ID、名称、描述、Agent ID、关联服务策略、优先级或匹配表达式",
+        description="搜索策略 ID、名称、描述、Agent ID、workspace_dir、关联服务策略、优先级或匹配表达式",
     )
     sort_by: str | None = Field(
         default=None,
         description=(
             "排序字段：policy_name、policy_desc、service_policy_id、priority、"
-            "match_expr、agent_id、updated_at"
+            "match_expr、agent_id、workspace_dir、updated_at"
         ),
     )
     sort_order: str | None = Field(default=None, description="排序方向：asc、desc")

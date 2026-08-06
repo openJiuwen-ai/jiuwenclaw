@@ -714,7 +714,7 @@ def main() -> None:
         raise SystemExit(str(exc)) from exc
 
     project_root = get_user_workspace_dir()
-    workspace_root = get_multi_tenant_user_workspace_dir("default", "default") or project_root
+    workspace_root = get_multi_tenant_user_workspace_dir(workspace_key="default")
     logs_root = get_logs_dir().resolve()
     history_db = str(workspace_root / "web_history.db")
 

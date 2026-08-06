@@ -82,6 +82,7 @@ CONFIG_EFFECTIVE_AGENT_POLICY_TABLE_DEF = TableDefinition(
         ColumnDefinition("policy_name", "string", length=128, nullable=False),
         ColumnDefinition("policy_desc", "string", length=512, nullable=True),
         ColumnDefinition("agent_id", "string", length=512, nullable=False),
+        ColumnDefinition("workspace_dir", "string", length=512, nullable=True),
         ColumnDefinition("service_policy_id", "string", length=100, nullable=False),
         ColumnDefinition("priority", "integer", nullable=False, default=0),
         ColumnDefinition("match_expr", "string", length=8192, nullable=True),

@@ -1124,7 +1124,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         from jiuwenclaw.agentserver.session_metadata import get_all_sessions_metadata
 
         # 使用默认多租户路径（单租户作为多租户的默认特例）
-        sessions_root = get_multi_tenant_user_workspace_dir("default", "default") / "agent" / "sessions"
+        sessions_root = get_multi_tenant_user_workspace_dir(workspace_key="default") / "agent" / "sessions"
 
         sessions, total = get_all_sessions_metadata(
             limit=limit, offset=offset, sessions_root=sessions_root

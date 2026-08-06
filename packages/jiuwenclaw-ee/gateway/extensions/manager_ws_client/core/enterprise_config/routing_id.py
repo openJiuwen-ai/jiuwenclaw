@@ -35,4 +35,6 @@ def coerce_routing_id(value: str | None) -> str:
 def coerce_routing_id_optional(value: str | None) -> str | None:
     if value is None:
         return None
+    if not str(value).strip():
+        return None
     return validate_routing_id(value)

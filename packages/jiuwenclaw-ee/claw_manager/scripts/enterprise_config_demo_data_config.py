@@ -595,7 +595,8 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     result["service_policy_sales_id"] = sales_id
     result["service_policy_sales_policy_id"] = sales_policy_id
     logger.info(
-        "  [2.6.1] 销售通道 priority=100 -> id=%s policy_id=%s (default_model=%s, embedding=%s, skills=%s,%s, ext=%s,%s)",
+        "  [2.6.1] 销售通道 priority=100 -> id=%s policy_id=%s "
+        "(default_model=%s, embedding=%s, skills=%s,%s, ext=%s,%s)",
         sales_id,
         sales_policy_id,
         m2,
@@ -636,6 +637,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
             "policy_name": "VIP alice",
             "policy_desc": "alice 覆盖为 M3 与 B3",
             "agent_id": "${user_id}",
+            "workspace_dir": "${user_id}",
             "service_policy_id": sales_policy_id,
             "priority": 100,
             "match_expr": "user_id == 'alice'",
@@ -661,7 +663,8 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     result["agent_policy_vip_id"] = vip_id
     result["agent_policy_vip_policy_id"] = vip_policy_id
     logger.info(
-        "  [2.7.1] VIP alice -> id=%s policy_id=%s (default_model=%s, embedding=%s, skill=%s, ext=%s)",
+        "  [2.7.1] VIP alice -> id=%s policy_id=%s "
+        "(default_model=%s, embedding=%s, skill=%s, ext=%s, workspace_dir=${user_id})",
         vip_id,
         vip_policy_id,
         m3,
@@ -675,12 +678,18 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
         {
             "policy_name": "组映射 default_model",
             "agent_id": "default_agent_id_1",
+            "workspace_dir": "${group_id}::${bot_id}::${user_id}",
             "service_policy_id": sales_policy_id,
             "priority": 0,
             "match_expr": "",
             "template_ref": {"default_model": [group_map_default_model]},
             "enabled": True,
-            "data": {"remark": "固定 agent_id；匹配仅看 match_expr；group:: 查 2.9.2"},
+            "data": {
+                "remark": (
+                    "固定 agent_id 示例；匹配仅看 match_expr；group:: 查 2.9.2，"
+                    "or 右侧为 M1；workspace_dir 按组+Bot+用户隔离数据目录"
+                )
+            },
         },
     )
     mapping_id = _require_id(mapping_rule, "agent-policies/mapping")
@@ -688,7 +697,8 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     result["agent_policy_mapping_id"] = mapping_id
     result["agent_policy_mapping_policy_id"] = mapping_policy_id
     logger.info(
-        "  [2.7.2] 组映射表达式 -> id=%s policy_id=%s (default_model=%s)",
+        "  [2.7.2] 组映射表达式 -> id=%s policy_id=%s "
+        "(default_model=%s, workspace_dir=${group_id}::${bot_id}::${user_id})",
         mapping_id,
         mapping_policy_id,
         group_map_default_model,
@@ -851,6 +861,7 @@ def main() -> None:
     logger.info("    video/audio -> M1 全局兜底-经济型 (2.8 回填)")
     logger.info("    embedding -> B3 VIP 向量模型 (2.7.1)")
     logger.info("    skills=[W1 销售组-天气 Skill]; ext=E3 Agent Server 错误恢复（覆盖服务 E1+E2）")
+    logger.info("    workspace_dir -> alice (2.7.1 ${user_id})")
     logger.info("  bob   + g_demo_sales::bot_main")
     logger.info("    default -> M5 销售组映射专用 (2.7.2 + 2.9.2)")
     logger.info("    vision -> M2 销售组-标准型 (继承 2.6.1)")
@@ -858,10 +869,12 @@ def main() -> None:
     logger.info("    embedding -> B2 销售组向量模型 (继承 2.6.1)")
     logger.info("    skills=[W1 销售组-天气 Skill, W2 销售组-CRM Skill] 继承 2.6.1")
     logger.info("    ext=E1 Gateway 请求前鉴权 + E2 Gateway 请求后日志（继承 2.6.1）")
+    logger.info("    workspace_dir -> g_demo_sales::bot_main::bob (2.7.2)")
     logger.info("  g_unknown::bot_main")
     logger.info("    default/vision/video/audio -> M1 全局兜底-经济型 (全局兜底)")
     logger.info("    embedding -> B1 全局兜底向量模型 (全局兜底)")
     logger.info("    skill=W3 全局兜底 Skill; ext=E4 Gateway 定时清理")
+    logger.info("    workspace_dir -> g_unknownbot_mainbob (默认 ${group_id}${bot_id}${user_id})")
     logger.info("")
     logger.info("Gateway Runtime service_config 验证（§3.2）：")
     logger.info(

@@ -89,6 +89,12 @@ async def update_config_effective_agent_policy_record(
         if not field_updates["agent_id"]:
             raise ValueError("agent_id cannot be empty")
 
+    if "workspace_dir" in field_updates:
+        raw_ws = field_updates["workspace_dir"]
+        field_updates["workspace_dir"] = (
+            raw_ws.strip() if isinstance(raw_ws, str) and raw_ws.strip() else None
+        )
+
     if "service_policy_id" in field_updates and field_updates["service_policy_id"] is not None:
         field_updates["service_policy_id"] = str(field_updates["service_policy_id"]).strip()
         if not field_updates["service_policy_id"]:
@@ -131,6 +137,7 @@ def _build_row_from_sync_policy(
         "policy_name": req.policy_name,
         "policy_desc": req.policy_desc,
         "agent_id": req.agent_id,
+        "workspace_dir": req.workspace_dir,
         "service_policy_id": req.service_policy_id,
         "priority": req.priority,
         "match_expr": req.match_expr,
