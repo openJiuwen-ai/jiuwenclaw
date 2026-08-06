@@ -23,11 +23,10 @@ class AuthContext:
 @dataclass
 class AuthResult:
     """鉴权结果。
-
-     	     成功时字段约定（身份贯通预留，由调用方写入连接上下文）：
-     	     - ``user_id``: 权威用户身份，后续会话路由 / 注册中心 / 实例创建应使用此值
-     	     - ``extensions``: 可选扩展（如 username、role、auth_method）
-     	     - ``error``: 失败原因
+    成功时字段约定（身份贯通预留，由调用方写入连接上下文）：
+        - ``user_id``: 权威用户身份，后续会话路由 / 注册中心 / 实例创建应使用此值
+     	- ``extensions``: 可选扩展（如 username、role、auth_method）
+     	- ``error``: 失败原因
     """
     success: bool
     user_id: str = ""

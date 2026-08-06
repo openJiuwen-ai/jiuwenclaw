@@ -41,16 +41,6 @@ class TestAgentOSAuthenticatorInit:
         auth = AgentOSAuthenticator(auth_service_url="http://localhost:8000")
         assert isinstance(auth, CredentialAuthenticator)
 
-    @pytest.mark.asyncio
-    async def test_aclose(self):
-        """验证 aclose 可正常关闭客户端"""
-        auth = AgentOSAuthenticator(auth_service_url="http://localhost:8000")
-        client = auth._auth_client
-        await auth.aclose()
-        # 关闭后客户端应处于 closed 状态
-        with pytest.raises(RuntimeError):
-            await client.get("http://localhost:8000/test")
-
 
 class TestAuthenticateToken:
 

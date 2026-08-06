@@ -47,8 +47,8 @@ class RouterConfig:
     sandbox_idle_check_interval_seconds: float = 30.0
     ssh: YuanrongSshSettings = YuanrongSshSettings()
     ssh_channel: SshChannelEndpoint | None = None
-    auth_service_url:str = ""
-    timeout:float = 10.0
+    auth_service_url: str = ""
+    timeout: float = 10.0
     auth_enabled: bool = True
 
 
@@ -173,5 +173,5 @@ def load_router_config(config: dict[str, Any]) -> RouterConfig:
         ssh_channel=load_ssh_channel_endpoint(config),
         auth_service_url=auth_service_url,
         timeout=timeout,
-        auth_enabled = auth_enabled,
+        auth_enabled=auth_enabled,
     )
