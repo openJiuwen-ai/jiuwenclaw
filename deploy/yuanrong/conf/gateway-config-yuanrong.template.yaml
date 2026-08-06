@@ -491,6 +491,13 @@ gateway:
       port: 2222
       user_template: "yr:instance:{instance}"
       connect_timeout_s: 30
+      # 主机密钥校验文件路径。留空则回退到 client_keys_dir/known_hosts。
+      # 文件存在且非空时，南向连接按 SSH 主机密钥校验防御 MITM。
+      # 【fail-open 风险】文件不存在/为空/损坏时，为保证连通性会退回不校验，
+      # 此情形下南向链路（gateway <-> frontend）存在中间人攻击残余风险。
+      # 推荐预置：在受控跳板机执行 ssh-keyscan -p 2222 <MASTER_NODE_IP> 取公钥，
+      # 人工核对指纹后写入此文件；前端主机密钥轮换时需同步更新。
+      known_hosts_path:
 
 heartbeat:
   # 心跳间隔（秒），默认 3600

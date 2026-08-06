@@ -140,6 +140,7 @@ def test_load_yuanrong_ssh_settings_defaults() -> None:
     assert settings.user_template == DEFAULT_SSH_USER_TEMPLATE
     assert settings.connect_timeout_s == 30.0
     assert settings.client_keys_dir == DEFAULT_CLIENT_KEYS_DIR
+    assert settings.known_hosts_path == f"{DEFAULT_CLIENT_KEYS_DIR}/known_hosts"
 
     custom = load_yuanrong_ssh_settings(
         {
@@ -151,6 +152,18 @@ def test_load_yuanrong_ssh_settings_defaults() -> None:
     assert custom.port == 2223
     assert custom.user_template == "yr:{instance}"
     assert custom.client_keys_dir == "/data/{user_id}/keys"
+    assert custom.known_hosts_path == "/data/{user_id}/keys/known_hosts"
+
+
+def test_load_yuanrong_ssh_settings_known_hosts_path_explicit() -> None:
+    """Explicit known_hosts_path overrides the client_keys_dir fallback."""
+    settings = load_yuanrong_ssh_settings(
+        {
+            "known_hosts_path": "/etc/ssh/known_hosts",
+            "client_keys_dir": "/data/keys",
+        }
+    )
+    assert settings.known_hosts_path == "/etc/ssh/known_hosts"
 
 
 def test_resolve_client_keys_dir_defaults_to_root_ssh() -> None:
@@ -185,6 +198,53 @@ def test_resolve_client_keys_requires_private_key(tmp_path: Path) -> None:
     key_dir.mkdir()
     (key_dir / "id_ed25519").write_text("k", encoding="utf-8")
     assert relay._resolve_client_keys("alice") == [str(key_dir / "id_ed25519")]
+
+
+# ---------- known_hosts fail-open ----------
+
+
+def test_resolve_known_hosts_fails_open_when_missing() -> None:
+    """Missing file -> fail open (None) so the connection still proceeds."""
+    relay = YuanrongSshRelay(
+        YuanrongSshSettings(known_hosts_path="/nonexistent/path/known_hosts")
+    )
+    assert relay._resolve_known_hosts() is None
+
+
+def test_resolve_known_hosts_fails_open_when_empty(tmp_path: Path) -> None:
+    """Empty file -> fail open (None)."""
+    kh = tmp_path / "known_hosts"
+    kh.write_text("", encoding="utf-8")
+    relay = YuanrongSshRelay(
+        YuanrongSshSettings(known_hosts_path=str(kh))
+    )
+    assert relay._resolve_known_hosts() is None
+
+
+def test_resolve_known_hosts_returns_path_when_present(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Non-empty file -> return its path so asyncssh verifies the host key."""
+    kh = tmp_path / "known_hosts"
+    kh.write_text("[frontend]:2222 ssh-ed25519 AAAA...\n", encoding="utf-8")
+    relay = YuanrongSshRelay(
+        YuanrongSshSettings(known_hosts_path=str(kh))
+    )
+    with caplog.at_level("WARNING"):
+        result = relay._resolve_known_hosts()
+    assert result == str(kh)
+    # No fail-open warning when the file is usable.
+    assert not any(
+        "WITHOUT host key verification" in rec.message for rec in caplog.records
+    )
+
+
+def test_resolve_known_hosts_fails_open_on_empty_setting() -> None:
+    """Empty setting -> fail open (None)."""
+    relay = YuanrongSshRelay(
+        YuanrongSshSettings(known_hosts_path="")
+    )
+    assert relay._resolve_known_hosts() is None
 
 
 def test_import_asyncssh_raises_actionable_hint(monkeypatch: pytest.MonkeyPatch) -> None:

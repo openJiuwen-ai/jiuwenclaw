@@ -94,22 +94,32 @@ class YuanrongSshSettings:
     user_template: str = DEFAULT_SSH_USER_TEMPLATE
     connect_timeout_s: float = 30.0
     client_keys_dir: str = DEFAULT_CLIENT_KEYS_DIR
+    known_hosts_path: str = ""
 
 
 def load_yuanrong_ssh_settings(raw: Any) -> YuanrongSshSettings:
     """Build settings from the ``gateway.agentos.ssh`` config block."""
     if not isinstance(raw, dict):
         raw = {}
+    client_keys_dir = (
+        str(raw.get("client_keys_dir") or DEFAULT_CLIENT_KEYS_DIR).strip()
+        or DEFAULT_CLIENT_KEYS_DIR
+    )
+    known_hosts_path = str(raw.get("known_hosts_path") or "").strip()
+    if not known_hosts_path:
+        # Colocate with client keys (OpenSSH convention: known_hosts sits
+        # next to the private keys in ~/.ssh). Join with "/" so the stored
+        # config path stays platform-stable (Path("/data") / "x" yields
+        # backslashes on Windows, which breaks config expectations).
+        known_hosts_path = f"{client_keys_dir.rstrip('/')}/known_hosts"
     return YuanrongSshSettings(
         port=int(raw.get("port") or DEFAULT_SSH_PORT),
         user_template=str(
             raw.get("user_template") or DEFAULT_SSH_USER_TEMPLATE
         ).strip(),
         connect_timeout_s=float(raw.get("connect_timeout_s") or 30.0),
-        client_keys_dir=str(
-            raw.get("client_keys_dir") or DEFAULT_CLIENT_KEYS_DIR
-        ).strip()
-        or DEFAULT_CLIENT_KEYS_DIR,
+        client_keys_dir=client_keys_dir,
+        known_hosts_path=known_hosts_path,
     )
 
 
@@ -202,6 +212,40 @@ class YuanrongSshRelay:
             )
         return key_paths
 
+    def _resolve_known_hosts(self) -> str | None:
+        raw = str(self._settings.known_hosts_path or "").strip()
+        if not raw:
+            logger.warning(
+                "[YuanrongSshRelay] known_hosts path is empty; "
+                "connecting WITHOUT host key verification (MITM risk)"
+            )
+            return None
+        path = Path(raw).expanduser()
+        try:
+            if not path.is_file():
+                logger.warning(
+                    "[YuanrongSshRelay] known_hosts file not found at %s; "
+                    "connecting WITHOUT host key verification (MITM risk)",
+                    path,
+                )
+                return None
+            if path.stat().st_size == 0:
+                logger.warning(
+                    "[YuanrongSshRelay] known_hosts file is empty at %s; "
+                    "connecting WITHOUT host key verification (MITM risk)",
+                    path,
+                )
+                return None
+        except OSError as exc:
+            logger.warning(
+                "[YuanrongSshRelay] known_hosts file %s unreadable: %s; "
+                "connecting WITHOUT host key verification (MITM risk)",
+                path,
+                exc,
+            )
+            return None
+        return str(path)
+
     async def _relay(
         self,
         session: Any,
@@ -219,15 +263,18 @@ class YuanrongSshRelay:
             )
         username = self.backend_username(instance_id)
         client_keys = self._resolve_client_keys(user_id)
+        known_hosts = self._resolve_known_hosts()
 
         logger.info(
-            "[YuanrongSshRelay] connecting: %s@%s:%s session=%s keys_dir=%s keys=%s",
+            "[YuanrongSshRelay] connecting: %s@%s:%s session=%s keys_dir=%s keys=%s "
+            "host_key_verification=%s",
             username,
             host,
             self._settings.port,
             session.session_id,
             resolve_client_keys_dir(self._settings.client_keys_dir, user_id),
             len(client_keys),
+            "enabled" if known_hosts else "disabled(fail-open)",
         )
         conn = await asyncio.wait_for(
             asyncssh.connect(
@@ -236,7 +283,7 @@ class YuanrongSshRelay:
                 username=username,
                 client_keys=client_keys,
                 agent_path=None,
-                known_hosts=None,
+                known_hosts=known_hosts,
             ),
             timeout=self._settings.connect_timeout_s,
         )
