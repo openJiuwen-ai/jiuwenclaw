@@ -696,10 +696,13 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
         session_id = self.model_client_config.model_extra.get("session", "default")
 
         if llm_logger.isEnabledFor(logging.DEBUG):
+            _msg_preview = _format_messages_by_role(messages)
+            if len(_msg_preview) > 2000:
+                _msg_preview = _msg_preview[:2000] + f"...(truncated, total {len(_msg_preview)} chars)"
             llm_logger.debug(
-                "[session=%s] [LLM] Input messages:\n%s",
+                "[session=%s] [LLM] Input messages: %s",
                 session_id,
-                _format_messages_by_role(messages),
+                _msg_preview,
             )
         min_segment_size = self._MIN_SEGMENT_SIZE
         resp = await self._invoke_with_retry(
@@ -768,10 +771,13 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
         session_id = self.model_client_config.model_extra.get("session", "default")
 
         if llm_logger.isEnabledFor(logging.DEBUG):
+            _msg_preview = _format_messages_by_role(messages)
+            if len(_msg_preview) > 2000:
+                _msg_preview = _msg_preview[:2000] + f"...(truncated, total {len(_msg_preview)} chars)"
             llm_logger.debug(
-                "[session=%s] [LLM] Input messages:\n%s",
+                "[session=%s] [LLM] Input messages: %s",
                 session_id,
-                _format_messages_by_role(messages),
+                _msg_preview,
             )
         chunk_counter = 0
         token = _stream_tool_header_seen.set(frozenset())
