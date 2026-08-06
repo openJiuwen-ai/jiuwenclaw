@@ -1,11 +1,10 @@
 import { createContext, useContext, useMemo, type AnchorHTMLAttributes, type HTMLAttributes } from 'react';
 import ReactMarkdown from 'react-markdown';
-import rehypeSlug from 'rehype-slug';
-import remarkGfm from 'remark-gfm';
 import type { Element as HastElement } from 'hast';
 import { unescapeLiteralNewlines } from '../../utils/finalContent';
 import { getFencedCodeBlock } from './codeBlocks/fencedCode';
 import { getFencedCodeAdapter } from './codeBlocks/registry';
+import { MARKDOWN_REHYPE_PLUGINS, MARKDOWN_REMARK_PLUGINS } from './markdownPlugins';
 import { repairCollapsedGfmTables } from './markdownTransforms';
 import './MarkdownRenderer.css';
 
@@ -64,7 +63,7 @@ export function MarkdownRenderer({ content, className, testId }: MarkdownRendere
   return (
     <div className={className} data-testid={testId}>
       <MarkdownContentLinesContext.Provider value={contentLines}>
-        <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSlug]} components={MARKDOWN_COMPONENTS}>
+        <ReactMarkdown remarkPlugins={MARKDOWN_REMARK_PLUGINS} rehypePlugins={MARKDOWN_REHYPE_PLUGINS} components={MARKDOWN_COMPONENTS}>
           {markdown}
         </ReactMarkdown>
       </MarkdownContentLinesContext.Provider>

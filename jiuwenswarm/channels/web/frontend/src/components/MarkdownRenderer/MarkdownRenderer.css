@@ -1,3 +1,5 @@
+@import 'katex/dist/katex.min.css';
+
 /* ===========================================
    MarkdownRenderer Component Styles
    =========================================== */
@@ -280,4 +282,15 @@
     width: 100%;
     justify-content: flex-end;
   }
+}
+
+.chat-markdown .katex-display {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-block: 0.125rem;
+}
+
+.chat-markdown .katex-display > .katex {
+  min-width: max-content;
 }
