@@ -398,6 +398,16 @@ _PERSISTENT_CHECKPOINTER_LOCK_INIT = threading.Lock()
 _PERSISTENT_CHECKPOINTER_READY = False
 
 
+# Re-export pricing helpers so existing tests / patches keep importing from here.
+from jiuwenswarm.common.usage_cost import (  # noqa: E402
+    apply_usage_cost as _apply_usage_cost,
+    build_usage_summary as _build_usage_summary,
+    model_usage_bucket as _model_usage_bucket,
+    new_usage_accumulator as _new_usage_accumulator,
+    record_usage_event as _record_usage_event,
+)
+
+
 def _running_loop() -> asyncio.AbstractEventLoop | None:
     try:
         return asyncio.get_running_loop()
@@ -9232,19 +9242,7 @@ class JiuWenSwarmDeepAdapter:
         accumulated_reasoning = ""
         had_assistant_output = False
         emitted_terminal_chat_final = False
-        usage_accumulator = {
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "total_tokens": 0,
-            # Prompt tokens the provider served from its KV cache. Reported as a
-            # hit rate below: it is the direct read on whether the cached prefix
-            # is holding steady across turns, which is what keeps a 30k-token
-            # prompt from being re-processed on every message.
-            "cache_tokens": 0,
-            "input_cost": 0.0,
-            "output_cost": 0.0,
-            "total_cost": 0.0,
-        }
+        usage_accumulator = _new_usage_accumulator()
         emitted_ask_user_request_ids: set[str] = set()
         # The run's final answer for the OTel trace output, kept as the streamed
         # deltas plus the terminal chat.final — see ``_assemble_run_answer``.
@@ -9739,15 +9737,24 @@ class JiuWenSwarmDeepAdapter:
                         else {}
                     )
                     if isinstance(usage_meta, dict):
-                        for token in (
-                            "input_tokens",
-                            "output_tokens",
-                            "total_tokens",
-                            "cache_tokens",
-                        ):
-                            usage_accumulator[token] += usage_meta.get(token, 0) or 0
-                        for cost in ("input_cost", "output_cost", "total_cost"):
-                            usage_accumulator[cost] += usage_meta.get(cost, 0.0) or 0.0
+                        # Price this call before accumulating it. It has to
+                        # happen here, per event, because the accumulator keeps
+                        # no model breakdown -- and one turn can legitimately
+                        # span several models, since team members draw from
+                        # TeamSpec.model_pool whose default strategy rotates
+                        # without regard to the per-member model name. Pricing
+                        # the summed totals against a single model would be
+                        # wrong exactly where cost visibility matters most.
+                        agent_name = (
+                            usage_meta.get("agent_id")
+                            or usage_meta.get("subagent_type")
+                            or usage_meta.get("agent")
+                        )
+                        _record_usage_event(
+                            usage_meta,
+                            usage_accumulator,
+                            agent=agent_name,
+                        )
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,
@@ -10053,22 +10060,7 @@ class JiuWenSwarmDeepAdapter:
                 cleanup_rail=True,
             )
 
-        summary = {
-            "input_tokens": usage_accumulator["input_tokens"],
-            "output_tokens": usage_accumulator["output_tokens"],
-            "total_tokens": usage_accumulator["total_tokens"],
-        }
-        input_tokens = usage_accumulator["input_tokens"]
-        if input_tokens > 0:
-            cache_tokens = usage_accumulator["cache_tokens"]
-            summary["cache_tokens"] = cache_tokens
-            summary["cache_hit_rate"] = f"{cache_tokens / input_tokens:.1%}"
-        if usage_accumulator["input_cost"] > 0:
-            summary["input_cost"] = round(usage_accumulator["input_cost"], 6)
-        if usage_accumulator["output_cost"] > 0:
-            summary["output_cost"] = round(usage_accumulator["output_cost"], 6)
-        if usage_accumulator["total_cost"] > 0:
-            summary["total_cost"] = round(usage_accumulator["total_cost"], 6)
+        summary = _build_usage_summary(usage_accumulator)
 
         logger.info(
             "[JiuWenSwarmDeepAdapter] llm_usage summary: request_id=%s session_id=%s usage=%s",

@@ -20,6 +20,19 @@ export interface MediaItem {
   size_bytes?: number;
 }
 
+export type CostStatus = "priced" | "partial" | "unpriced";
+
+export interface UsageBucket {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  input_cost?: number;
+  output_cost?: number;
+  total_cost?: number;
+  cost_status?: CostStatus;
+  last_verified?: string;
+}
+
 export interface UsageSummary {
   input_tokens: number;
   output_tokens: number;
@@ -27,6 +40,11 @@ export interface UsageSummary {
   input_cost?: number;
   output_cost?: number;
   total_cost?: number;
+  /** How much of total_cost is covered by configured rates. Absent on older events. */
+  cost_status?: CostStatus;
+  by_model?: Array<UsageBucket & { model: string }>;
+  by_member?: Array<UsageBucket & { member: string }>;
+  by_agent?: Array<UsageBucket & { agent: string }>;
 }
 
 export interface FileDownloadItem {
