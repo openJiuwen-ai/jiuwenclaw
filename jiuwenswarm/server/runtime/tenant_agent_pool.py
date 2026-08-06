@@ -34,6 +34,11 @@ class TenantAgentPool:
         return cls._instance
 
     @classmethod
+    def peek_instance(cls) -> "TenantAgentPool | None":
+        """返回已初始化的单例；若尚未创建则返回 None（不触发构造）。"""
+        return cls._instance
+
+    @classmethod
     def reset_instance(cls) -> None:
         """重置单例（仅用于测试）."""
         if cls._instance is not None:

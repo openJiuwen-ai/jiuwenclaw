@@ -229,9 +229,9 @@ def _fetch_webpage_sync(url: str, timeout_seconds: int) -> dict[str, str | int]:
 @tool(
     name="mcp_fetch_webpage",
     description=(
-        "Fetch webpage text content from URL. Returns status/title/plain text content. "
-        "Set max_chars=0 to disable output clipping. "
-        "Use a larger timeout_seconds for slow websites."
+        "抓取网页文本内容，返回状态码、标题和纯文本正文。"
+        "设置 max_chars=0 可禁用输出截断。"
+        "慢速网站可增大 timeout_seconds。"
     ),
 )
 async def mcp_fetch_webpage(url: str, max_chars: int = 0, timeout_seconds: int = 30) -> str:
