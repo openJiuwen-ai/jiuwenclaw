@@ -211,12 +211,30 @@ class RuntimePromptRail(DeepAgentRail):
         python_ver = platform.python_version()
         os_type = platform.system().lower()
 
+        # 模型名优先级：
+        # ctx.extra["_model_routing_used_cap"] 存在 → 路由切了模型 → 读 _config.model_name
+        # 否则 → 用 self._model_name（前端传入值）
+        routed_model = ""
+        routing_used_cap = (
+            ctx.extra.get("_model_routing_used_cap")
+            if isinstance(ctx.extra, dict)
+            else None
+        )
+        if routing_used_cap is not None:
+            try:
+                cfg = getattr(ctx.agent, "_config", None) or getattr(ctx.agent, "config", None)
+                if cfg is not None:
+                    routed_model = getattr(cfg, "model_name", "") or ""
+            except Exception:
+                pass
+        current_model = routed_model or self._model_name
+
         if self._language == "cn":
             runtime_content = (
                 "# 运行时\n\n"
                 f"- 平台：{plat}\n"
                 f"- Python：{python_ver}\n"
-                f"- 模型：{self._model_name}\n"
+                f"- 模型：{current_model}\n"
                 f"- Agent：{self._agent_name}\n"
                 f"- 频道：{self._channel}\n"
                 f"- 语言：{self._language}\n"
@@ -244,7 +262,7 @@ class RuntimePromptRail(DeepAgentRail):
                 "# Runtime\n\n"
                 f"- Platform: {plat}\n"
                 f"- Python: {python_ver}\n"
-                f"- Model: {self._model_name}\n"
+                f"- Model: {current_model}\n"
                 f"- Agent: {self._agent_name}\n"
                 f"- Channel: {self._channel}\n"
                 f"- Language: {self._language}\n"

@@ -210,7 +210,7 @@ models:
     model_client_config:
       api_base: ${API_BASE}
       api_key: ${API_KEY}
-      model_name: ${MODEL_NAME:-xiaomi/mimo-v2-omni}
+      model_name: ${MODEL_NAME}
       client_provider: ${MODEL_PROVIDER}
       timeout: 1800
       stream_timeout: 60       # 可选，仅流式
@@ -218,6 +218,10 @@ models:
       verify_ssl: false
     model_config_obj:
       temperature: 0.6
+    is_trusted: false
+    model_score: null
+    model_expertise_category: []
+    model_type: ""
   video:
     model_client_config:
       api_base: ${VIDEO_API_BASE}
@@ -267,6 +271,22 @@ models:
 # 设为 false 可紧急关闭整套能力
 code_generation:
   unicode_readable: true
+
+# model_routing — 模型路由 Rail（按任务分类/隐私/能力表推荐或切换模型）
+model_routing:
+  enabled: false                    # 总开关：true 注册 rail（默认关，零影响）
+  apply: true                     # 真切换开关：true 调 set_llm 真切模型；false 只推荐不切
+  privacy_check: false             # 隐私检查开关：true 检查隐私；false 跳过（默认关）
+  stats_path: ""                    # per-model token 统计文件路径；空=默认 ~/.jiuwenswarm/config/routing_state/model_routing_list.json
+  health_check:
+    enabled: true                   # 健康检查开关
+    interval_seconds: 600           # 缓存 TTL（10 分钟）
+    timeout_seconds: 10             # 单次请求超时
+    max_rounds: 1                   # 重试轮次
+    max_consecutive_failures: 2     # 连续失败阈值
+    recovery_consecutive_successes: 1  # 恢复健康所需连续成功
+    health_check_prompt: "hi"       # 最小 prompt
+    max_tokens: 1                   # 最小输出
 
 telemetry:
   enabled: false                    # 总开关（环境变量 OTEL_ENABLED 优先）

@@ -1,0 +1,128 @@
+{
+  "vendor_map": [
+    {
+      "prefix": "chatglm",
+      "group": "GLM",
+      "provider": "zhipu"
+    },
+    {
+      "prefix": "glm",
+      "group": "GLM",
+      "provider": "zhipu"
+    },
+    {
+      "prefix": "qwen",
+      "group": "Qwen",
+      "provider": "alibaba"
+    },
+    {
+      "prefix": "deepseek",
+      "group": "DeepSeek",
+      "provider": "deepseek"
+    },
+    {
+      "prefix": "claude",
+      "group": "Claude",
+      "provider": "anthropic"
+    },
+    {
+      "prefix": "gemini",
+      "group": "Gemini",
+      "provider": "google"
+    },
+    {
+      "prefix": "mixtral",
+      "group": "Mixtral",
+      "provider": "mistral"
+    },
+    {
+      "prefix": "mistral",
+      "group": "Mistral",
+      "provider": "mistral"
+    },
+    {
+      "prefix": "llama",
+      "group": "Llama",
+      "provider": "meta"
+    },
+    {
+      "prefix": "baichuan",
+      "group": "Baichuan",
+      "provider": "baichuan"
+    },
+    {
+      "prefix": "moonshot",
+      "group": "Kimi",
+      "provider": "moonshot"
+    },
+    {
+      "prefix": "kimi",
+      "group": "Kimi",
+      "provider": "moonshot"
+    },
+    {
+      "prefix": "doubao",
+      "group": "Doubao",
+      "provider": "bytedance"
+    },
+    {
+      "prefix": "seed",
+      "group": "Seed",
+      "provider": "bytedance"
+    },
+    {
+      "prefix": "ernie",
+      "group": "ERNIE",
+      "provider": "baidu"
+    },
+    {
+      "prefix": "spark",
+      "group": "Spark",
+      "provider": "iflytek"
+    },
+    {
+      "prefix": "hunyuan",
+      "group": "Hunyuan",
+      "provider": "tencent"
+    },
+    {
+      "prefix": "mimo",
+      "group": "MiMo",
+      "provider": "xiaomi"
+    },
+    {
+      "prefix": "gpt",
+      "group": "GPT",
+      "provider": "openai"
+    },
+    {
+      "prefix": "o3",
+      "group": "GPT",
+      "provider": "openai"
+    },
+    {
+      "prefix": "o1",
+      "group": "GPT",
+      "provider": "openai"
+    },
+    {
+      "prefix": "yi",
+      "group": "Yi",
+      "provider": "01ai"
+    }
+  ],
+  "models": {
+    "glm-5.2": {
+      "model_score": 60
+    },
+    "glm-5.1": {
+      "model_score": 50
+    },
+    "glm-5": {
+      "model_score": 40
+    },
+    "deepseek-v3.2": {
+      "model_score": 25
+    }
+  }
+}
