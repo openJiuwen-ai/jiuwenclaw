@@ -145,19 +145,13 @@ class SpeakerNotesNode(PlanNode):
     async def _extract_page_texts(self, pptx_path: str, pptx_root: str) -> dict[int, str]:
         """cli notes extract-text 抽取每页可见纯文本。"""
         try:
-            # 创建临时输出文件路径
-            out_path = Path(pptx_root) / "extracted_texts.json"
-            cmd = f"{cli_path('notes', pptx_root)} extract-text --pptx {quote_path(pptx_path)} --out {quote_path(str(out_path))}"
+            cmd = f"{cli_path('notes', pptx_root)} extract-text --pptx {quote_path(pptx_path)}"
             result = await run_bash(self, cmd, timeout_seconds=60, required=False, workdir=pptx_root)
             if result.exit_code != 0:
                 logger.warning("[P11] notes extract-text 失败 exit=%d: %s",
                                result.exit_code, (result.stderr or "")[:300])
                 return {}
-            # 使用 PptCommon.read_file 安全读取文件内容
-            raw = await PptCommon.read_file(self, str(out_path), label="extracted_texts")
-            if not raw:
-                # 降级尝试从 stdout 读取
-                raw = result.stdout or ""
+            raw = result.stdout or ""
             # 尝试解析 JSON {page: text}
             try:
                 data = json.loads(raw)
