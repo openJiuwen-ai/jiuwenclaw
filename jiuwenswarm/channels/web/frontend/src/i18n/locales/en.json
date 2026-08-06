@@ -2423,6 +2423,11 @@
       "submitUpdate": "Save"
     },
     "concurrencyPolicy": { "skip": "Skip", "queue": "Queue", "replace": "Replace" },
-    "sessionDeletedPolicy": { "disable": "Disable job", "completed": "Mark completed" }
+    "sessionDeletedPolicy": { "disable": "Disable job", "completed": "Mark completed" },
+    "panel": {
+      "title": "Heartbeat Jobs",
+      "loading": "Loading…",
+      "empty": "No heartbeat jobs in this session yet"
+    }
   }
 }

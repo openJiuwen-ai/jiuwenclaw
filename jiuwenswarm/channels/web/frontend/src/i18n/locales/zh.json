@@ -2427,6 +2427,11 @@
       "submitUpdate": "保存"
     },
     "concurrencyPolicy": { "skip": "跳过（skip）", "queue": "排队（queue）", "replace": "替换（replace）" },
-    "sessionDeletedPolicy": { "disable": "停用任务", "completed": "标记为已完成" }
+    "sessionDeletedPolicy": { "disable": "停用任务", "completed": "标记为已完成" },
+    "panel": {
+      "title": "心跳任务",
+      "loading": "加载中…",
+      "empty": "当前会话还没有心跳任务"
+    }
   }
 }
