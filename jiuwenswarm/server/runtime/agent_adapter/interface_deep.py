@@ -5457,6 +5457,21 @@ class JiuWenSwarmDeepAdapter:
             rails_list.append(self._permission_rail)
         return rails_list
 
+    def _runtime_agent_scope_id(self) -> str:
+        """Return AgentCard / tool-owner base id for this adapter.
+
+        Community keeps the stable ``_AGENT_CARD_ID`` so checkpointer keys stay
+        constant. Enterprise (``AGENT_RUNTIME``) scopes by service/agent to avoid
+        cross-tenant card/tool collisions.
+        """
+        if not os.getenv("AGENT_RUNTIME", "").strip():
+            return _AGENT_CARD_ID
+        agent_id = str(self._agent_id or "").strip()
+        service_id = str(self._service_id or "").strip()
+        if service_id and agent_id:
+            return f"{service_id}_{agent_id}"
+        return agent_id or _AGENT_CARD_ID
+
     def _tool_owner_id(self) -> str:
         """Return the owner id qualifying this adapter's tool registrations.
 
@@ -5477,9 +5492,10 @@ class JiuWenSwarmDeepAdapter:
             Owner id for this adapter: ``"<card id>_s_<session>"`` for a
             session-scoped adapter, ``"<card id>_root"`` for the root adapter.
         """
+        card_id = self._runtime_agent_scope_id()
         if self._is_session_scoped_adapter:
-            return f"{_AGENT_CARD_ID}_s_{self._session_adapter_key(self._parent_session_id)}"
-        return f"{_AGENT_CARD_ID}_root"
+            return f"{card_id}_s_{self._session_adapter_key(self._parent_session_id)}"
+        return f"{card_id}_root"
 
     @staticmethod
     def _register_shared_tool(tool: Any) -> None:
@@ -5873,10 +5889,11 @@ class JiuWenSwarmDeepAdapter:
             raise
         if self._is_session_scoped_adapter:
             await self._try_init_a2x_client(config_base)
-        agent_card = AgentCard(name=self._agent_name, id=_AGENT_CARD_ID)
+        agent_card = AgentCard(name=self._agent_name, id=self._runtime_agent_scope_id())
 
         tool_cards = await self._get_tool_cards(self._tool_owner_id())
         self._tool_cards = tool_cards
+        logger.info("[JiuWenSwarmDeepAdapter] Agent card id: %s", agent_card.id)
         await asyncio.sleep(0)
 
         # 权限护栏由 openjiuwen PermissionInterruptRail + ToolPermissionHost 接管；
@@ -6225,7 +6242,7 @@ class JiuWenSwarmDeepAdapter:
             await self._try_init_a2x_client(config_base, reload=True)
             self._sync_a2x_runtime_state()
         self._agent_name = self._instance_overrides.get("agent_name", config.get("agent_name", "main_agent"))
-        agent_card = AgentCard(name=self._agent_name, id=_AGENT_CARD_ID)
+        agent_card = AgentCard(name=self._agent_name, id=self._runtime_agent_scope_id())
         self._sync_multimodal_tools_for_runtime()
         self._sync_paid_search_tool_for_runtime()
         self._sync_symphony_tools_for_runtime(config_base)
