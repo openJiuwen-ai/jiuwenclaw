@@ -84,6 +84,11 @@ _PG_POST_START_READY_MAX_SLEEP = 2.0
 _PG_POST_START_READY_BACKOFF = 1.45
 _PG_POST_START_LOG_EVERY_SEC = 5.0
 _TEAM_STREAM_EXIT_GRACE_TIMEOUT_SEC = 1.5
+# Bound each frontend waiter's event backlog.  Producers await a free slot, so
+# a slow or disconnected TUI consumer cannot make the process retain every
+# event emitted by a long-running team session.
+TEAM_EVENT_QUEUE_MAXSIZE = 64
+_WAITER_PUT_RECHECK_TIMEOUT_SEC = 0.1
 
 
 def _safe_payload_preview(payload: Any) -> str:
@@ -310,19 +315,45 @@ class TeamManager:
         else:
             self._pending_waiters.pop(session_id, None)
 
-    def broadcast_event(self, session_id: str, event: dict[str, Any]) -> None:
-        """Broadcast an event to all request queues waiting on the same session."""
-        waiters = self._pending_waiters.get(session_id)
-        if waiters:
-            for request_id, queue in waiters:
+    async def broadcast_event(self, session_id: str, event: dict[str, Any]) -> None:
+        """Broadcast an event with backpressure to every active waiter.
+
+        The short timed wait is only used while a queue is full.  It lets a
+        producer notice that ``remove_waiter`` detached a disconnected client
+        instead of remaining blocked forever on that orphaned queue.
+        """
+        waiters = list(self._pending_waiters.get(session_id, ()))
+
+        async def _put_to_waiter(
+            request_id: str,
+            queue: asyncio.Queue,
+        ) -> None:
+            queued_event = dict(event)
+            while any(
+                rid == request_id and registered_queue is queue
+                for rid, registered_queue in self._pending_waiters.get(session_id, ())
+            ):
                 try:
-                    queue.put_nowait(dict(event))
+                    await asyncio.wait_for(
+                        queue.put(queued_event),
+                        timeout=_WAITER_PUT_RECHECK_TIMEOUT_SEC,
+                    )
+                    break
+                except asyncio.TimeoutError:
+                    continue
                 except Exception:
                     logger.debug(
                         "[TeamManager] broadcast failed: session_id=%s request_id=%s",
                         session_id,
                         request_id,
+                        exc_info=True,
                     )
+                    break
+
+        await asyncio.gather(*(
+            _put_to_waiter(request_id, queue)
+            for request_id, queue in waiters
+        ))
 
     # --- seen_team_events tracking ---
     # A session enters "team" mode once any team-building event (team.member,
@@ -793,6 +824,11 @@ class TeamManager:
             await self.offload_session_kv_cache(
                 normalized_previous,
                 reason=f"{reason}session-switch",
+            )
+            await self.stop_paused_session_runtime(
+                normalized_previous,
+                reason=f"{reason}session-switch: ",
+                offload=False,
             )
             pre_signaled_session_ids.add(normalized_previous)
 
@@ -1337,6 +1373,14 @@ class TeamManager:
         self._team_live_rails.pop(session_id, None)
         self._team_shared_skill_link_targets.pop(session_id, None)
 
+    def _clear_terminal_session_markers(self, session_id: str) -> None:
+        """Release process-wide markers only for non-resumable teardown."""
+        self.clear_session_initialized(session_id)
+        self.reset_seen_team_events(session_id)
+        self.reset_workflow_completed(session_id)
+        self.pop_cron_completion(session_id)
+        self._pending_team_evolution_watcher_sessions.discard(session_id)
+
     async def _cancel_team_evolution_watcher(self, session_id: str) -> None:
         watcher_task = self._team_evolution_watchers.pop(session_id, None)
         if watcher_task and not watcher_task.done():
@@ -1852,6 +1896,11 @@ class TeamManager:
         )
         self.clear_active_runtime(session_id)
         self.clear_pending_runtime(session_id)
+        # These round/session markers live on the process-wide TeamManager.
+        # TUI disconnect cancels the async event generator before its normal
+        # tail can clear them, so terminal runtime cleanup must own the
+        # idempotent release as well.
+        self._clear_terminal_session_markers(session_id)
         logger.info(
             "[TeamManager] %s: clear done, session_id=%s",
             caller,
@@ -1924,6 +1973,7 @@ class TeamManager:
                 or self.is_runtime_pending(session_id)
             )
             if not has_stream_task and not has_team_runtime:
+                self._clear_terminal_session_markers(session_id)
                 return False
             logger.info(
                 "[TeamManager] %s terminate team session runtime: session_id=%s",
@@ -2009,6 +2059,7 @@ class TeamManager:
                 or self.is_runtime_pending(session_id)
             )
             if not has_stream_task and not has_team_runtime:
+                self._clear_terminal_session_markers(session_id)
                 return False
 
             logger.info(
@@ -2066,6 +2117,7 @@ class TeamManager:
                 or self.is_runtime_pending(session_id)
             )
             if not has_stream_task and not has_team_runtime:
+                self._clear_terminal_session_markers(session_id)
                 return False
 
             logger.info(
@@ -2112,6 +2164,7 @@ class TeamManager:
 
             self.clear_active_runtime(session_id)
             self.clear_pending_runtime(session_id)
+            self._clear_terminal_session_markers(session_id)
 
         logger.info(
             "[TeamManager] %steam session stopped: session_id=%s stopped=%s",
@@ -2120,6 +2173,96 @@ class TeamManager:
             stopped,
         )
         return True
+
+    @staticmethod
+    async def _find_paused_runner_team_name(session_id: str) -> str | None:
+        """Return the paused Runner team name for a session using the public facade."""
+        try:
+            active_teams = await Runner.list_active_teams()
+        except Exception as exc:
+            logger.warning(
+                "[TeamManager] list active teams failed before paused lookup: session_id=%s error=%s",
+                session_id,
+                exc,
+            )
+            return None
+
+        for info in active_teams:
+            if info.current_session_id == session_id and info.state == RuntimeState.PAUSED:
+                return info.team_name or None
+        return None
+
+    async def stop_paused_session_runtime(
+        self,
+        session_id: str,
+        reason: str = "",
+        *,
+        offload: bool = True,
+    ) -> bool:
+        """Stop a parked Runner team runtime without touching active streams."""
+        async with self._get_lifecycle_lock(session_id):
+            if self.has_stream_task(session_id):
+                logger.debug(
+                    "[TeamManager] skip paused runtime stop because stream task is active: session_id=%s",
+                    session_id,
+                )
+                return False
+
+            team_name = await self._find_paused_runner_team_name(session_id)
+            if not team_name:
+                logger.debug(
+                    "[TeamManager] skip paused runtime stop because no paused Runner entry matched: session_id=%s",
+                    session_id,
+                )
+                return False
+
+            if offload:
+                await self.offload_session_kv_cache(
+                    session_id,
+                    reason=f"{reason}paused-runtime-stop",
+                )
+
+            logger.info(
+                "[TeamManager] %sstop paused team session runtime: session_id=%s team_name=%s",
+                reason,
+                session_id,
+                team_name,
+            )
+            stopped = await self._stop_runner_team_runtime(
+                session_id,
+                team_name,
+                "paused-runtime-stop",
+            )
+            await self._stop_runner_team_agent_transport(session_id)
+            await self._finalize_runtime_cleanup(session_id, "paused-runtime-stop")
+
+        logger.info(
+            "[TeamManager] %spaused team session stopped: session_id=%s stopped=%s",
+            reason,
+            session_id,
+            stopped,
+        )
+        return True
+
+    async def stop_all_paused_session_runtimes(self, reason: str = "") -> int:
+        """Stop every paused Runner team runtime known to the process."""
+        try:
+            active_teams = await Runner.list_active_teams()
+        except Exception as exc:
+            logger.warning("[TeamManager] list active teams failed before paused stop: %s", exc)
+            return 0
+
+        paused_session_ids = {
+            str(info.current_session_id)
+            for info in active_teams
+            if info.state == RuntimeState.PAUSED
+        }
+        stopped_count = 0
+        for session_id in paused_session_ids:
+            stopped = await self.stop_paused_session_runtime(session_id, reason=reason)
+            if stopped:
+                stopped_count += 1
+        return stopped_count
 
     async def pause_session_runtime(self, session_id: str, reason: str = "") -> bool:
         """Pause the current team runtime for this session.
@@ -2344,6 +2487,11 @@ async def stop_team_session_runtime_across_managers(
         reason=reason,
         stop_runner=stop_runner,
     )
+
+
+async def stop_all_paused_team_session_runtimes_across_managers(reason: str = "") -> int:
+    """Stop all paused team runtimes on the singleton manager."""
+    return await get_team_manager().stop_all_paused_session_runtimes(reason=reason)
 
 
 def get_all_team_managers() -> list[TeamManager]:

@@ -1140,7 +1140,7 @@ def test_resolve_enable_task_loop_preserves_false_without_enforcers(monkeypatch)
 
 
 # DeepAdapter only builds research_agent + browser_agent (agent mode).
-# code_agent / explore_agent belong to CodeAdapter.
+# code_agent belongs to CodeAdapter.
 
 def test_deep_adapter_subagents_includes_optional_browser_and_configured_research():
     adapter = _TestableJiuWenSwarmDeepAdapter()

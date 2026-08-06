@@ -221,7 +221,7 @@ async def test_cleanup_session_adapter_defers_locked_cached_child_adapter() -> N
 
 
 @pytest.mark.asyncio
-async def test_cleanup_session_adapter_keeps_lock_after_failed_inflight_creation() -> None:
+async def test_cleanup_session_adapter_prunes_lock_after_failed_inflight_creation() -> None:
     lock = asyncio.Lock()
     await lock.acquire()
     parent = _make_adapter(
@@ -243,7 +243,45 @@ async def test_cleanup_session_adapter_keeps_lock_after_failed_inflight_creation
     removed = await asyncio.wait_for(cleanup_task, timeout=2)
 
     assert removed is False
-    assert getattr(parent, "_session_adapter_locks")["sess_failed_create"] is lock
+    assert getattr(parent, "_session_adapter_locks") == {}
+    assert getattr(parent, "_session_adapter_last_used") == {}
+    assert getattr(parent, "_session_adapter_versions") == {}
+
+
+@pytest.mark.asyncio
+async def test_concurrent_cleanup_prunes_empty_session_lock() -> None:
+    lock = asyncio.Lock()
+    child = _BlockingCleanupChildAdapter()
+    parent = _make_adapter(
+        _is_session_scoped_adapter=False,
+        _session_adapters={"sess_concurrent_cleanup": child},
+        _session_adapter_locks={"sess_concurrent_cleanup": lock},
+        _session_adapter_last_used={"sess_concurrent_cleanup": 1.0},
+        _session_adapter_versions={"sess_concurrent_cleanup": 1},
+        _session_adapter_reload_failures={
+            "sess_concurrent_cleanup": (1, 1.0),
+        },
+    )
+
+    first = asyncio.create_task(
+        getattr(parent, "cleanup_session_adapter")("sess_concurrent_cleanup")
+    )
+    await asyncio.wait_for(child.cleanup_started.wait(), timeout=2)
+    second = asyncio.create_task(
+        getattr(parent, "cleanup_session_adapter")("sess_concurrent_cleanup")
+    )
+    await asyncio.sleep(0)
+
+    child.cleanup_can_finish.set()
+    assert await asyncio.wait_for(first, timeout=2) is True
+    assert await asyncio.wait_for(second, timeout=2) is False
+
+    assert child.cleaned is True
+    assert getattr(parent, "_session_adapters") == {}
+    assert getattr(parent, "_session_adapter_locks") == {}
+    assert getattr(parent, "_session_adapter_last_used") == {}
+    assert getattr(parent, "_session_adapter_versions") == {}
+    assert getattr(parent, "_session_adapter_reload_failures") == {}
 
 
 @pytest.mark.asyncio

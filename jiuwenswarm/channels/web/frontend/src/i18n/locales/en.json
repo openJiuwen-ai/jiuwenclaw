@@ -24,7 +24,7 @@
   },
   "nav": {
     "chat": "Chat",
-    "work": "Work",
+    "work": "Tasks",
     "agent": "Agent",
     "teams": "Teams",
     "sessions": "Sessions",
@@ -298,6 +298,8 @@
     "paused": "Paused",
     "resume": "Resume",
     "queuePausedConfirm": "You are about to send a message. Clear the {{count}} queued message(s)?\n\nClick \"OK\" to clear the queue and send; click \"Cancel\" to keep the queue (message will be added to the queue).",
+    "goalAttachmentsBlocked": "Attachments are not supported when setting a goal. Remove them first, or send the attachment in a separate message.",
+    "editTaskDropAttachments": "Editing will remove the {{count}} attachment(s) carried by this task. Continue?",
     "holdToSpeak": "Hold to speak",
     "send": "Send (Enter)",
     "stop": "Stop",
@@ -309,7 +311,7 @@
       "placeholder": "Select Model"
     },
     "configLockedHistory": "Session has messages — create a new session to change config",
-    "modeSwitchDisabledProcessing":"This conversation is running. Start a new conversation to choose another mode",
+    "modeSwitchDisabledProcessing": "This conversation is running. Start a new conversation to choose another mode",
     "modeSwitchTitle": "Switch Mode",
     "modeSwitchConfirm": "Current session has history messages. Switching mode will create a new session. Continue?",
     "skills": "Skills",
@@ -324,6 +326,17 @@
     "teamPauseHint": "After pausing a team, send the next message to continue",
     "teamBroadcastTarget": "@all",
     "contextCompressionCompleted": "Completed context compression {{count}} time(s) this turn",
+    "contextCompressionStarted": {
+      "dialogue": "Compacting earlier rounds…",
+      "currentRound": "Compacting current round…",
+      "roundLevel": "Full compaction…"
+    },
+    "historyPager": {
+      "loadedOfTotal": "Loaded {{loaded}} / {{total}} pages",
+      "loadingMore": "Loading...",
+      "clickOrScrollToLoadMore": "Click or scroll up to load more",
+      "allLoaded": "All history loaded"
+    },
     "historyLoading": "Loading conversation history…",
     "historyLoadMore": "Load more history",
     "config": {
@@ -448,6 +461,16 @@
     "inProgress": "In progress",
     "pending": "Pending",
     "completed": "Completed"
+  },
+  "plan": {
+    "toolbarTag": "Plan",
+    "closeTag": "Exit plan mode",
+    "approvalPrompt": "The plan is ready. Choose what to do next.",
+    "executePrompt": "The plan is approved. Start executing it.",
+    "approvalExecute": "Execute",
+    "approvalSkip": "Skip",
+    "approvalNext": "Next",
+    "approvalInputPlaceholder": "Add revision notes then click Next; leave empty and click Skip"
   },
   "goal": {
     "formSubmit": "Confirm",
@@ -1036,7 +1059,10 @@
       "memory": { "label": "Memory Sensitive Info Filter", "hint": "Configure sensitive content types forbidden from memory" },
       "email": { "label": "Email Settings", "hint": "Email account and token settings" },
       "other": { "label": "Other Settings", "hint": "Unclassified extended parameters" },
-      "proactive": { "label": "Proactive Recommendation", "hint": "Automatically analyze user needs and proactively offer suggestions; adjust the schedule in the Cron panel" }
+      "proactive": {
+        "label": "Proactive Recommendation",
+        "hint": "Automatically analyze user needs and proactively offer suggestions; adjust the schedule in the Cron panel"
+      }
     },
     "booleanLabels": {
       "evolutionAutoScan": "Auto-detect evolution signals",
@@ -2331,12 +2357,28 @@
     "errors": { "delete": "Failed to delete conversation", "create": "Failed to create conversation", "send": "Failed to send message" }
   },
   "mermaid": {
-    "image": "Image",
-    "code": "Code",
-    "copyCode": "Copy code",
+    "rendering": "Drawing…",
     "zoomIn": "Zoom in",
     "zoomOut": "Zoom out",
     "fitView": "Fit view"
+  },
+  "diagram": {
+    "image": "Image",
+    "code": "Code",
+    "moreActions": "More diagram actions",
+    "downloadSource": "Download source",
+    "downloadImage": "Download as image",
+    "copyCode": "Copy code",
+    "copied": "Copied",
+    "copyFailed": "Copy failed",
+    "downloadSourceFailed": "Could not save source file",
+    "preparingImage": "Preparing image…",
+    "downloadImageFailed": "Could not save image"
+  },
+  "svg": {
+    "streaming": "Drawing…",
+    "invalid": "Invalid SVG code",
+    "previewTitle": "SVG image preview"
   },
   "authPrompt": {
     "title": "Authorization",

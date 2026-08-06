@@ -878,6 +878,7 @@ function handleContextCompressionState(
           sessionId: activeSessionId,
           content: formatCompressionStartedLine(processor, phase, before),
           icon: "i",
+          transcriptOnly: true,
           meta: { view: "dim" },
           at: new Date().toISOString(),
         });

@@ -9,7 +9,7 @@
 
 Code 模式独占逻辑全部收敛于此：
 - LspRail、ProjectMemoryRail、CodingMemoryRail 等 code 专属 rail
-- code_agent / explore_agent subagent 配置
+- code_agent / plan_agent subagent 配置
 - code 模式下 rail 生命周期（保留 SubagentRail、补充 ProjectMemoryRail 等）
 """
 
@@ -29,7 +29,7 @@ from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.rails import (
     AgentModeRail,
-    CodingMemoryRail,
+    CodingMemoryRail as _BaseCodingMemoryRail,
     SysOperationRail,
     LspRail
 )
@@ -38,7 +38,6 @@ from openjiuwen.harness.lsp import InitializeOptions
 from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.subagents.browser_agent import build_browser_agent_config
 from openjiuwen.harness.subagents.code_agent import build_code_agent_config
-from openjiuwen.harness.subagents.explore_agent import build_explore_agent_config
 from openjiuwen.harness.subagents.plan_agent import build_plan_agent_config
 from openjiuwen.harness.tools import WebFetchWebpageTool, WebFreeSearchTool, WebPaidSearchTool
 from openjiuwen.harness.tools.worktree import WorktreeConfig, WorktreeRail
@@ -50,6 +49,7 @@ from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
     _CRON_TOOL_CHANNEL_ID,
     _RailBuildInfo,
     _agent_def_to_subagent_config,
+    _deep_agent_context_engine_config,
     _deep_agent_kv_cache_affinity_config,
     parse_int,
 )
@@ -88,6 +88,70 @@ from jiuwenswarm.common.utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class CodingMemoryRail(_BaseCodingMemoryRail):
+    """Keep Coding Memory cold-start indexing out of the request path."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._manager_init_task: asyncio.Task[None] | None = None
+
+    async def before_invoke(self, ctx: Any) -> None:
+        """Start manager initialization without delaying the user request."""
+        if not self._manager_initialized and self._manager_init_task is None:
+            self._manager_init_task = asyncio.create_task(
+                self._initialize_manager_in_background(ctx),
+                name="coding-memory-init",
+            )
+
+        self._recalled_content = None
+        self._prefetch_task = None
+
+        is_read_only = getattr(self, "_read_only_tools", False) or self._is_read_only(
+            ctx.inputs
+        )
+        if not is_read_only and self._manager:
+            query = self._extract_last_user_query(ctx)
+            if query:
+                self._prefetch_task = asyncio.create_task(self._auto_recall(query))
+
+    async def _initialize_manager_in_background(self, ctx: Any) -> None:
+        """Run the base initializer and record success or degraded state."""
+        cancelled = False
+        try:
+            await self._init_coding_memory_manager(ctx)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "[CodingMemoryRail] background initialization failed: %s",
+                exc,
+            )
+        finally:
+            # A cancelled task may finish after uninit() and a new lifecycle
+            # has started. Only the current task may update this rail state.
+            if not cancelled and self._manager_init_task is asyncio.current_task():
+                self._manager_initialized = True
+
+    @staticmethod
+    def _is_read_only(inputs: Any) -> bool:
+        """Support callback inputs and lightweight test doubles."""
+        values = []
+        for name in ("is_cron", "is_heartbeat"):
+            value = getattr(inputs, name, False)
+            values.append(value() if callable(value) else value)
+        return any(values)
+
+    def uninit(self, agent: Any) -> None:
+        """Cancel pending initialization before the rail is torn down."""
+        task = self._manager_init_task
+        self._manager_init_task = None
+        if task is not None and not task.done():
+            task.cancel()
+        super().uninit(agent)
+
 
 # ---------------------------------------------------------------------------
 # Static plan mode system prompt note (KV-cache-friendly: same content every turn)
@@ -130,7 +194,7 @@ You are now in **plan mode**. You must only plan — you must not make any modif
 - Read-only tools: read_file, grep, list_files, glob
 - Plan file tools: write_file, edit_file (only .plans/<slug>.md)
 - Interactive tools: ask_user
-- Sub-agent tool: task_tool (dispatch explore_agent / plan_agent)
+- Sub-agent tool: task_tool (dispatch plan_agent)
 - Control tools: exit_plan_mode
 - bash (read-only operations only; git write / mkdir / touch / rm are blocked)
 
@@ -146,8 +210,7 @@ You are now in **plan mode**. You must only plan — you must not make any modif
 #### Phase 1: Initial Understanding
 Goal: Gain a comprehensive understanding of the user's request by reading code and asking questions.
 1. Focus on understanding existing architecture and patterns; identify relevant files and dependencies
-2. Launch explore sub-agents via task_tool to efficiently explore the codebase
-3. Quality over quantity — use the fewest agents possible
+2. Use read-only tools directly and keep exploration focused on the requested scope
 
 #### Phase 2: Design
 Goal: Design the implementation approach.
@@ -182,13 +245,20 @@ ask_user is only for clarifying requirements — do not use it for approval ques
 # Plan mode exit notification appended to exit_plan_mode tool_result.
 # Explicitly tells the model it can now edit files. Without this, the model only sees
 # MODE_INSTRUCTIONS removed from system prompt but receives no explicit signal.
+# The tool_result this is appended to carries the whole plan text, so a mild
+# "proceed with the plan" wording loses to that blob and the model just echoes the
+# plan back and asks whether to start. Hence the explicit do-NOT-restate wording.
 # ---------------------------------------------------------------------------
 
 _EXIT_PLAN_MODE_NOTIFICATION = """\
 <system-reminder>
-Plan mode has ended. You are now in normal mode. You can edit files,
-run write operations, and make changes to the system. Proceed with
-implementing the approved plan.
+The user approved this plan. Plan mode has ended and you are now in normal mode:
+you can edit files, run write operations, and make changes to the system.
+
+Start executing the first step now. Do NOT restate the plan and do NOT ask again
+whether to begin — the user has already read and approved it. This turn's output
+should be the work itself and its results. Use ask_user only if execution is
+genuinely blocked.
 </system-reminder>"""
 
 
@@ -342,10 +412,10 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
     """Code 模式适配器 — 配置驱动注册 rails/tools.
 
     继承 JiuWenSwarmDeepAdapter，只重写：
-    - create_instance(): 统一使用 create_deep_agent()，不传多模态/上下文引擎参数（completion_timeout 从配置读取）
+    - create_instance(): 统一使用 create_deep_agent()（completion_timeout 从配置读取）
     - _build_agent_rails(): 固定 Rails (含 LspRail/ProjectMemoryRail/CodingMemoryRail) + 从 config.yaml 读取动态 Rails
     - _get_tool_cards(): 从 config.yaml 读取动态 Tools
-    - _build_configured_subagents(): 固定 explore_agent/plan_agent + 按配置启用 code_agent/browser_agent
+    - _build_configured_subagents(): 固定 plan_agent + 按配置启用 code_agent/browser_agent
     - _update_rails_for_mode(): code 模式 rail 生命周期
     - _update_runtime_config(): 保留 ProjectMemoryRail 语言同步
     """
@@ -412,7 +482,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         """初始化 DeepAgent 实例（code 模式）.
 
         统一使用 create_deep_agent()，不传 vision_model_config /
-        audio_model_config / context_engine_config。
+        audio_model_config。
         completion_timeout 从配置读取，可在 react / modes.code 中自定义。
         """
         # Propagate create params to per-session child adapters (see
@@ -497,6 +567,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             sys_operation=sys_operation,
             language=self._resolve_runtime_language(),
             enable_read_image_multimodal=self._resolve_enable_read_image_multimodal(config),
+            context_engine_config=_deep_agent_context_engine_config(config),
             kv_cache_affinity_config=_deep_agent_kv_cache_affinity_config(config, model),
             auto_create_workspace=False,
             completion_timeout=config.get("completion_timeout", 3600.0),
@@ -551,8 +622,8 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             initial_workspace,
         )
 
-        # code 模式不传: vision_model_config, audio_model_config,
-        # context_engine_config（completion_timeout 已从配置读取传入）
+        # code 模式不传: vision_model_config, audio_model_config
+        #（context_engine_config / completion_timeout 已从配置读取传入）
 
         # Cron tools belong to the agent's standing toolset, not to any one
         # request; build them here so the first turn does not pay for it either.
@@ -575,7 +646,8 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
     ) -> list[Any]:
         """Build rails for code mode: fixed rails + dynamic rails from config.
 
-        Code 模式固定包含 LspRail、ProjectMemoryRail、CodingMemoryRail。
+        Code 模式固定包含 LspRail、ProjectMemoryRail、CodingMemoryRail。plan 相关
+        的 rails 同样固定挂载，不按子模式分叉。
         """
         # 固定 Rails — code 模式特有
         rail_infos = [
@@ -957,9 +1029,9 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             config: dict[str, Any],
             config_base: dict[str, Any] | None = None,
     ) -> tuple[list[Any] | None, bool]:
-        """Build subagents for code mode: explore_agent + plan_agent + code_agent + browser_agent.
+        """Build subagents for code mode: plan_agent + code_agent + browser_agent.
 
-        explore_agent / plan_agent 固定挂载（Code 模式核心子代理）。
+        plan_agent 固定挂载（Code 模式核心子代理）。
         code_agent / browser_agent 按配置启用。
         """
         react_cfg = config if isinstance(config, dict) else {}
@@ -969,21 +1041,6 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         workspace = self._workspace_dir or "./"
         subagents: list[Any] = []
         self._sync_browser_runtime_environment(config_base)
-
-        # ── 固定挂载：explore_agent（Code 模式核心子代理，始终启用）──
-        if not self._subagent_list_has_name(subagents, "explore_agent"):
-            explore_agent_cfg = subagents_cfg.get("explore_agent") if isinstance(subagents_cfg, dict) else None
-            explore_spec = build_explore_agent_config(
-                model=model,
-                workspace=workspace,
-                language=resolved_language,
-                max_iterations=parse_int(
-                    explore_agent_cfg.get("max_iterations") if isinstance(explore_agent_cfg, dict) else None,
-                    react_cfg.get("max_iterations", 15),
-                ),
-            )
-            explore_spec.factory_kwargs = {"auto_create_workspace": False}
-            subagents.append(explore_spec)
 
         # ── 固定挂载：plan_agent（Code 模式核心子代理，始终启用）──
         if not self._subagent_list_has_name(subagents, "plan_agent"):
@@ -1063,7 +1120,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         """Code 模式下的 rail 生命周期管理.
 
         code.normal / code.plan 等模式：
-        - 保留 SubagentRail（主 Agent 通过 task_tool 派发 explore/plan 子代理）
+        - 保留 SubagentRail（主 Agent 通过 task_tool 派发 plan 子代理）
         - 保留 ProjectMemoryRail（code 模式始终挂载）
         - 保留 CodingMemoryRail（code 模式始终挂载）
         - 卸载 TaskPlanningRail、SkillEvolutionRail

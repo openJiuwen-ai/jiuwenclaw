@@ -24,7 +24,7 @@
   },
   "nav": {
     "chat": "对话",
-    "work": "工作",
+    "work": "任务",
     "agent": "智能体",
     "teams": "团队",
     "sessions": "会话",
@@ -299,6 +299,8 @@
     "paused": "已暂停",
     "resume": "继续执行",
     "queuePausedConfirm": "你即将发送一条消息，要清除正在排队的{{count}}条消息吗？\n\n点击「确定」清空队列并发送；点击「取消」保持队列（消息将加入队列）。",
+    "goalAttachmentsBlocked": "设为目标时不支持附件，请先移除附件，或先单独发送附件消息。",
+    "editTaskDropAttachments": "编辑将移除该任务携带的 {{count}} 个附件，是否继续？",
     "holdToSpeak": "按住说话",
     "send": "发送 (Enter)",
     "stop": "停止",
@@ -325,6 +327,17 @@
     "teamPauseHint": "团队暂停后，直接发送下一条消息即可继续",
     "teamBroadcastTarget": "@所有人",
     "contextCompressionCompleted": "本轮完成上下文压缩 {{count}} 次",
+    "contextCompressionStarted": {
+      "dialogue": "压缩过去轮消息中…",
+      "currentRound": "压缩当前轮…",
+      "roundLevel": "全量压缩…"
+    },
+    "historyPager": {
+      "loadedOfTotal": "历史已加载 {{loaded}} / {{total}} 页",
+      "loadingMore": "加载中…",
+      "clickOrScrollToLoadMore": "点击或向上滚动加载更多",
+      "allLoaded": "历史已全部加载"
+    },
     "historyLoading": "历史数据加载中…",
     "historyLoadMore": "加载更多历史消息",
     "config": {
@@ -449,6 +462,16 @@
     "inProgress": "进行中",
     "pending": "待处理",
     "completed": "已完成"
+  },
+  "plan": {
+    "toolbarTag": "计划",
+    "closeTag": "退出计划模式",
+    "approvalPrompt": "计划已生成，请选择下一步。",
+    "executePrompt": "计划已批准，请按计划开始执行。",
+    "approvalExecute": "执行",
+    "approvalSkip": "跳过",
+    "approvalNext": "下一步",
+    "approvalInputPlaceholder": "填写修改意见后点击「下一步」；留空点击「跳过」"
   },
   "goal": {
     "formSubmit": "确定",
@@ -2335,12 +2358,28 @@
     "errors": { "delete": "删除对话失败", "create": "创建对话失败", "send": "发送消息失败" }
   },
   "mermaid": {
-    "image": "图片",
-    "code": "代码",
-    "copyCode": "复制代码",
+    "rendering": "绘制中…",
     "zoomIn": "放大",
     "zoomOut": "缩小",
     "fitView": "适应视图"
+  },
+  "diagram": {
+    "image": "图片",
+    "code": "代码",
+    "moreActions": "更多图表操作",
+    "downloadSource": "下载到本地",
+    "downloadImage": "下载为图片",
+    "copyCode": "复制代码",
+    "copied": "已复制",
+    "copyFailed": "复制失败",
+    "downloadSourceFailed": "源文件保存失败",
+    "preparingImage": "正在生成图片…",
+    "downloadImageFailed": "图片保存失败"
+  },
+  "svg": {
+    "streaming": "绘制中…",
+    "invalid": "SVG 代码无效",
+    "previewTitle": "SVG 图片预览"
   },
   "authPrompt": {
     "title": "操作授权",

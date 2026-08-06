@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -54,7 +55,9 @@ async def test_generate_team_name_uses_default_template_model(monkeypatch):
         captured["resolved_model"] = kwargs["model_resolver"](kwargs["model_name"])
         return FakeTinyAgent()
 
-    monkeypatch.setattr(team_name_generator, "create_tiny_agent", fake_create_tiny_agent)
+    monkeypatch.setattr(
+        team_name_generator, "create_tiny_agent", fake_create_tiny_agent
+    )
 
     result = await team_name_generator.generate_team_name(
         "研究多语言大模型",
@@ -76,7 +79,9 @@ async def test_generate_team_name_uses_default_template_model(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_generate_team_name_uses_tiny_agent_even_when_query_mentions_team_name(monkeypatch):
+async def test_generate_team_name_uses_tiny_agent_even_when_query_mentions_team_name(
+    monkeypatch,
+):
     prompts: list[str] = []
 
     class FakeTinyAgent:
@@ -207,7 +212,110 @@ async def test_generate_team_name_retries_underscore_candidate(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_generate_team_name_rejects_invalid_result(monkeypatch):
+async def test_generate_team_name_retries_run_failure(monkeypatch):
+    calls = 0
+
+    class FakeTinyAgent:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return None
+
+        async def run(self, content: str):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("temporary model failure")
+            return {"team_name": "recovered-name"}
+
+    monkeypatch.setattr(
+        team_name_generator,
+        "create_tiny_agent",
+        lambda **kwargs: FakeTinyAgent(),
+    )
+
+    result = await team_name_generator.generate_team_name(
+        "任意任务",
+        config_base=_team_config(),
+        template_id="default_team",
+    )
+
+    assert result == "recovered-name"
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_generate_team_name_retries_timeout(monkeypatch):
+    calls = 0
+
+    class FakeTinyAgent:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return None
+
+        async def run(self, content: str):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                await asyncio.sleep(1)
+            return {"team_name": "retry-after-timeout"}
+
+    monkeypatch.setattr(
+        team_name_generator,
+        "create_tiny_agent",
+        lambda **kwargs: FakeTinyAgent(),
+    )
+
+    result = await team_name_generator.generate_team_name(
+        "任意任务",
+        config_base=_team_config(),
+        template_id="default_team",
+        timeout_seconds=0.01,
+    )
+
+    assert result == "retry-after-timeout"
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_generate_team_name_propagates_cancellation(monkeypatch):
+    calls = 0
+
+    class FakeTinyAgent:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return None
+
+        async def run(self, content: str):
+            nonlocal calls
+            calls += 1
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(
+        team_name_generator,
+        "create_tiny_agent",
+        lambda **kwargs: FakeTinyAgent(),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await team_name_generator.generate_team_name(
+            "任意任务",
+            config_base=_team_config(),
+            template_id="default_team",
+        )
+
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_generate_team_name_uses_stable_fallback_after_invalid_results(
+    monkeypatch,
+):
     class FakeTinyAgent:
         async def __aenter__(self):
             return self
@@ -224,12 +332,51 @@ async def test_generate_team_name_rejects_invalid_result(monkeypatch):
         lambda **kwargs: FakeTinyAgent(),
     )
 
-    with pytest.raises(
-        team_name_generator.TeamNameGenerationError,
-        match="invalid team_name",
-    ):
-        await team_name_generator.generate_team_name(
-            "任意任务",
-            config_base=_team_config(),
-            template_id="default_team",
-        )
+    first = await team_name_generator.generate_team_name(
+        "任意任务",
+        config_base=_team_config(),
+        template_id="default_team",
+    )
+    second = await team_name_generator.generate_team_name(
+        "任意任务",
+        config_base=_team_config(),
+        template_id="default_team",
+    )
+
+    assert first == second
+    assert team_name_generator._TEAM_NAME_PATTERN.fullmatch(first)
+    assert first.startswith("task-")
+
+
+@pytest.mark.asyncio
+async def test_generate_team_name_uses_fallback_after_repeated_run_failures(
+    monkeypatch,
+):
+    calls = 0
+
+    class FakeTinyAgent:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return None
+
+        async def run(self, content: str):
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("model unavailable")
+
+    monkeypatch.setattr(
+        team_name_generator,
+        "create_tiny_agent",
+        lambda **kwargs: FakeTinyAgent(),
+    )
+
+    result = await team_name_generator.generate_team_name(
+        "继续执行原始任务",
+        config_base=_team_config(),
+        template_id="default_team",
+    )
+
+    assert result.startswith("task-")
+    assert calls == 2

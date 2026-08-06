@@ -29,8 +29,8 @@ _SESSION_ID_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 _MAX_DOCUMENT_BYTES = 30 * 1024 * 1024
 _MAX_DOCUMENT_COUNT = 20
-# Office binaries that read_file cannot open directly — persist a .txt sidecar.
-_OFFICE_TEXT_SIDECAR_SUFFIXES = frozenset({".docx", ".xlsx"})
+# Binary documents that read_file cannot open directly — persist a .txt sidecar.
+_TEXT_SIDECAR_SUFFIXES = frozenset({".pdf", ".docx", ".xlsx"})
 
 _TRUE_STRINGS = frozenset({"true", "1", "yes"})
 _FALSE_STRINGS = frozenset({"false", "0", "no"})
@@ -270,10 +270,10 @@ async def _store_and_maybe_parse_item(
                 "path": str(path),
                 "size_bytes": data_size,
             }
-            # Office re-parse / sidecar: always materialize .txt for read_file.
-            need_office_txt = path.suffix.lower() in _OFFICE_TEXT_SIDECAR_SUFFIXES
-            if parse or need_office_txt:
-                await _attach_parse_and_office_txt(
+            # Binary re-parse / sidecar: always materialize .txt for read_file.
+            need_sidecar = path.suffix.lower() in _TEXT_SIDECAR_SUFFIXES
+            if parse or need_sidecar:
+                await _attach_parse_and_text_sidecar(
                     stored,
                     original_path=path,
                     parse_meta=parse,
@@ -311,9 +311,9 @@ async def _store_and_maybe_parse_item(
         "path": str(path),
         "size_bytes": len(data),
     }
-    need_office_txt = path.suffix.lower() in _OFFICE_TEXT_SIDECAR_SUFFIXES
-    if parse or need_office_txt:
-        await _attach_parse_and_office_txt(
+    need_sidecar = path.suffix.lower() in _TEXT_SIDECAR_SUFFIXES
+    if parse or need_sidecar:
+        await _attach_parse_and_text_sidecar(
             stored,
             original_path=path,
             parse_meta=parse,
@@ -322,32 +322,44 @@ async def _store_and_maybe_parse_item(
     return stored
 
 
-async def _attach_parse_and_office_txt(
+async def _attach_parse_and_text_sidecar(
     stored: dict[str, Any],
     *,
     original_path: Path,
     parse_meta: bool,
     max_chars: int,
 ) -> None:
-    """Parse ``original_path``; for docx/xlsx also write a full ``.txt`` sidecar.
+    """Parse ``original_path``; for pdf/docx/xlsx also write a full ``.txt`` sidecar.
 
     After a successful sidecar write, ``stored["path"]`` points at the ``.txt``
     so Agent ``read_file`` can open it. ``original_path`` / ``text_path`` keep both.
+    A PDF with no text layer (scanned) yields empty text — keep ``path`` on the
+    original binary so page-level tools can still work on it.
     """
     suffix = original_path.suffix.lower()
-    write_sidecar = suffix in _OFFICE_TEXT_SIDECAR_SUFFIXES
+    write_sidecar = suffix in _TEXT_SIDECAR_SUFFIXES
 
     if write_sidecar:
         # Full text on disk for read_file (no truncation).
         parsed_full = await parse_document_file(original_path, max_chars=None)
-        text_path = _write_office_text_sidecar(original_path, parsed_full.get("text") or "")
+        text = parsed_full.get("text") or ""
         stored["original_path"] = str(original_path)
-        stored["text_path"] = str(text_path)
-        # Prefer .txt for downstream read_file / chat path hints.
-        stored["path"] = str(text_path)
         stored["parser"] = parsed_full.get("parser")
         stored["char_count"] = parsed_full.get("char_count")
         stored["documents_count"] = parsed_full.get("documents_count")
+        # Only PDFs skip the empty sidecar: a scanned PDF still has page-level
+        # tools (read_pdf/vision) that need the original binary path. docx/xlsx
+        # keep the historical behavior — always write the sidecar, even empty.
+        if text.strip() or suffix != ".pdf":
+            text_path = _write_text_sidecar(original_path, text)
+            stored["text_path"] = str(text_path)
+            # Prefer .txt for downstream read_file / chat path hints.
+            stored["path"] = str(text_path)
+        else:
+            logger.info(
+                "[document.persist] no extractable text (scanned PDF?) file=%s",
+                original_path.name,
+            )
         if parse_meta:
             full_len = int(parsed_full.get("char_count") or 0)
             stored["text_truncated"] = full_len > max(1, int(max_chars))
@@ -367,13 +379,13 @@ async def _attach_parse_and_office_txt(
     )
 
 
-def _write_office_text_sidecar(original_path: Path, text: str) -> Path:
-    """Write parsed office content next to the original as ``stem.txt``."""
+def _write_text_sidecar(original_path: Path, text: str) -> Path:
+    """Write parsed document content next to the original as ``stem.txt``."""
     candidate = original_path.with_suffix(".txt")
     txt_path = _unique_path(candidate)
     txt_path.write_text(text if isinstance(text, str) else str(text or ""), encoding="utf-8")
     logger.info(
-        "[document.persist] wrote office text sidecar original=%s text=%s chars=%s",
+        "[document.persist] wrote text sidecar original=%s text=%s chars=%s",
         original_path.name,
         txt_path.name,
         len(text or ""),

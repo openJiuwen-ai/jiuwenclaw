@@ -164,7 +164,7 @@ function ActiveTeamGroupEntry({ isProcessing, teamAreaExpanded }: { isProcessing
 }
 
 /** 单 Agent 模式的消息队列卡片，展示在输入框上方 */
-function AgentActivityCard({ isProcessing: _isProcessing, onSendTask }: { isProcessing: boolean; onSendTask?: (content: string) => void }) {
+function AgentActivityCard({ isProcessing: _isProcessing, onSendTask }: { isProcessing: boolean; onSendTask?: (content: string, mediaItems?: MediaItem[]) => void }) {
   const [expanded, setExpanded] = useState(true);
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
@@ -201,7 +201,7 @@ function AgentActivityCard({ isProcessing: _isProcessing, onSendTask }: { isProc
     const nextTask = runtime?.taskQueue[0];
     if (nextTask) {
       removeFromTaskQueue(sid, nextTask.id);
-      onSendTask?.(nextTask.content);
+      onSendTask?.(nextTask.content, nextTask.mediaItems);
     }
   };
 
@@ -213,23 +213,41 @@ function AgentActivityCard({ isProcessing: _isProcessing, onSendTask }: { isProc
     }
   };
 
-  const handleEditTask = (e: React.MouseEvent, taskId: string, content: string) => {
+  const handleEditTask = (
+    e: React.MouseEvent,
+    taskId: string,
+    content: string,
+    mediaItemCount = 0,
+  ) => {
     e.stopPropagation();
     const sid = useChatStore.getState().activeSessionId;
     if (sid) {
+      // Editing restores only the text into the input; attachments cannot follow
+      // and will be removed together with the task — confirm first.
+      if (
+        mediaItemCount > 0 &&
+        !window.confirm(t('chat.editTaskDropAttachments', { count: mediaItemCount }))
+      ) {
+        return;
+      }
       setInputValue(sid, content);
       removeFromTaskQueue(sid, taskId);
       window.dispatchEvent(new CustomEvent('chat-input-sync', { detail: { sessionId: sid, value: content } }));
     }
   };
 
-  const handleSendTask = (e: React.MouseEvent, taskId: string, content: string) => {
+  const handleSendTask = (
+    e: React.MouseEvent,
+    taskId: string,
+    content: string,
+    mediaItems?: MediaItem[],
+  ) => {
     e.stopPropagation();
     const sid = useChatStore.getState().activeSessionId;
     if (sid) {
       removeFromTaskQueue(sid, taskId);
     }
-    onSendTask?.(content);
+    onSendTask?.(content, mediaItems);
   };
 
   const handleDragStart = (index: number) => {
@@ -326,13 +344,31 @@ function AgentActivityCard({ isProcessing: _isProcessing, onSendTask }: { isProc
                   <span className="team-event-group-row__member" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {task.content}
                   </span>
+                  {(task.mediaItems?.length ?? 0) > 0 && (
+                    <span
+                      title={(task.mediaItems ?? [])
+                        .map((item) => item.filename)
+                        .filter(Boolean)
+                        .join('\n')}
+                      style={{
+                        flexShrink: 0,
+                        fontSize: '12px',
+                        color: 'var(--color-text-secondary)',
+                        background: 'var(--color-surface-hover)',
+                        borderRadius: '6px',
+                        padding: '0 6px',
+                      }}
+                    >
+                      📎{task.mediaItems?.length}
+                    </span>
+                  )}
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexShrink: 0 }}>
                   <button
                     type="button"
                     className="chat-input-task-action chat-input-task-action--send"
                     title={t('chat.sendTask')}
-                    onClick={(e) => handleSendTask(e, task.id, task.content)}
+                    onClick={(e) => handleSendTask(e, task.id, task.content, task.mediaItems)}
                   >
                     <img src={loadSendIcon} alt="" className="w-3.5 h-3.5" />
                   </button>
@@ -340,7 +376,7 @@ function AgentActivityCard({ isProcessing: _isProcessing, onSendTask }: { isProc
                     type="button"
                     className="chat-input-task-action chat-input-task-action--edit"
                     title={t('chat.editTask')}
-                    onClick={(e) => handleEditTask(e, task.id, task.content)}
+                    onClick={(e) => handleEditTask(e, task.id, task.content, task.mediaItems?.length ?? 0)}
                   >
                     <img src={editIcon} alt="" className="w-3 h-3" />
                   </button>

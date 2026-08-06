@@ -178,7 +178,10 @@ function PresentationViewer({ presentation, title }: { presentation: Presentatio
   useEffect(() => {
     const element = canvasRef.current;
     if (!element) return;
-    const update = () => setViewport({ width: element.clientWidth, height: element.clientHeight });
+    const update = () => {
+      const { width, height } = element.getBoundingClientRect();
+      setViewport({ width, height });
+    };
     update();
     const observer = new ResizeObserver(update);
     observer.observe(element);
@@ -226,8 +229,8 @@ function PresentationViewer({ presentation, title }: { presentation: Presentatio
       aria-label={title}
       data-testid="artifact-presentation-preview"
     >
-      <section className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <div ref={canvasRef} className="min-h-0 flex-1 overflow-auto bg-bg-muted p-6">
+      <section ref={canvasRef} className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <div className="min-h-0 flex-1 overflow-auto bg-bg-muted p-6">
           <div
             className="flex min-h-full min-w-full items-center justify-center"
             style={{ width: Math.max(viewport.width - 48, presentation.width * scale), height: Math.max(viewport.height - 48, presentation.height * scale) }}

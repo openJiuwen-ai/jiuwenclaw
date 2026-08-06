@@ -3,7 +3,16 @@
 // 管理 /memory 的四个页签（edit/status/toggle/open）的交互、渲染和状态。
 // app-screen.ts 通过持有 MemoryViewController 实例并委托调用其方法来使用。
 
-import { existsSync } from "node:fs";
+import {
+  accessSync,
+  closeSync,
+  constants,
+  existsSync,
+  mkdirSync,
+  openSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, resolve } from "node:path";
 import { type TUI, type SelectItem, SelectList } from "@mariozechner/pi-tui";
 import { addInfo } from "../core/commands/helpers.js";
 import type { CliPiAppState } from "../app-state.js";
@@ -18,6 +27,26 @@ import { padToWidth } from "./rendering/text.js";
 import { resolveAction } from "../core/keybindings/resolver.js";
 
 // ── 类型定义 ──
+
+function memoryPathKey(filePath: string): string {
+  const resolved = resolve(filePath);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function errorCode(error: unknown): string | undefined {
+  return typeof error === "object" && error !== null && "code" in error
+    ? String((error as { code?: unknown }).code)
+    : undefined;
+}
+
+function assertDirectoryWritable(directoryPath: string): void {
+  accessSync(directoryPath, constants.W_OK);
+}
+
+function assertFileWritable(filePath: string): void {
+  const fd = openSync(filePath, "r+");
+  closeSync(fd);
+}
 
 export type MemoryViewTab = "edit" | "status" | "toggle" | "open";
 
@@ -76,6 +105,8 @@ export class MemoryViewController {
   private statusMessage: string | null = null;
   /** 上一次 open 的目录绝对路径；Ctrl+O 切换时据此重算 statusMessage 的显示格式 */
   private lastOpenedPath: string | null = null;
+  /** 最近一次在 edit 页签中确认选择的文件；重新打开面板时恢复光标位置。 */
+  private lastSelectedEditFilePath: string | null = null;
   /**
    * 外部编辑器打开期间置为 true:此时 MemoryView 进入“不可操作态”
    * (吞掉所有按键,渲染一条 Editing… 提示行)。
@@ -90,6 +121,7 @@ export class MemoryViewController {
   constructor(
     private appState: CliPiAppState,
     private tui: TUI,
+    private openEditor: typeof openInExternalEditor = openInExternalEditor,
   ) {}
 
   // ── 状态查询 ──
@@ -391,7 +423,20 @@ export class MemoryViewController {
       minPrimaryColumnWidth: 20,
       maxPrimaryColumnWidth: 50,
     });
+    const lastSelectedEditFilePath = this.lastSelectedEditFilePath;
+    if (tab === "edit" && lastSelectedEditFilePath) {
+      const selectedIndex = items.findIndex(
+        (item) =>
+          item.value !== "__display__" && memoryPathKey(item.value) === memoryPathKey(lastSelectedEditFilePath),
+      );
+      if (selectedIndex >= 0) {
+        list.setSelectedIndex(selectedIndex);
+      }
+    }
     list.onSelect = (item: SelectItem) => {
+      if (tab === "edit" && item.value && item.value !== "__display__") {
+        this.lastSelectedEditFilePath = item.value;
+      }
       this.handleSelect(tab, item, mode, projectDir);
     };
     list.onCancel = () => {
@@ -465,8 +510,47 @@ export class MemoryViewController {
   private async handleSelect(tab: MemoryViewTab, item: SelectItem, mode: string, _projectDir: string): Promise<void> {
     if (tab === "edit" && item.value && item.value !== "__display__") {
       const filePath = item.value;
+      let created = false;
       if (!existsSync(filePath)) {
-        this.statusMessage = "Cannot edit: memory file does not exist.";
+        const selectedFile = this.state?.files.find(
+          (file) => memoryPathKey(file.path) === memoryPathKey(filePath),
+        );
+        // Any missing file shown by the edit panel may be created. Paths that
+        // were not supplied by the panel remain subject to the existing rejection.
+        const isCreatablePanelFile = selectedFile?.exists !== undefined;
+
+        if (!isCreatablePanelFile) {
+          this.statusMessage = "Cannot edit: memory file does not exist.";
+          this.tui.requestRender();
+          return;
+        }
+
+        try {
+          mkdirSync(dirname(filePath), { recursive: true });
+          assertDirectoryWritable(dirname(filePath));
+          writeFileSync(filePath, "", { encoding: "utf-8", flag: "wx" });
+          created = true;
+        } catch (err) {
+          // If another process created the selected placeholder concurrently,
+          // continue opening it. Permission and all other errors must remain
+          // visible in the TUI even if the failed operation left a file behind.
+          if (errorCode(err) !== "EEXIST" || !existsSync(filePath)) {
+            this.statusMessage = `Cannot create memory file: ${err instanceof Error ? err.message : String(err)}`;
+            this.tui.requestRender();
+            return;
+          }
+        }
+      }
+
+      try {
+        // Opening an empty file with "wx" can succeed even when the resulting
+        // file cannot subsequently be opened for writing (notably with some
+        // Windows ACLs). Verify the same access the editor will need before
+        // leaving the TUI, so permission failures are reported here directly.
+        assertFileWritable(filePath);
+      } catch (err) {
+        const action = created ? "create" : "edit";
+        this.statusMessage = `Cannot ${action} memory file: ${err instanceof Error ? err.message : String(err)}`;
         this.tui.requestRender();
         return;
       }
@@ -481,7 +565,7 @@ export class MemoryViewController {
       this.tui.requestRender();
       // GUI 编辑器：异步 spawn，TUI 不阻塞，编辑器关闭后通过 onExit 回调
       // 终端编辑器：spawnSync 阻塞，tui.start() 后同步调用 onExit
-      openInExternalEditor(this.tui, filePath, () => {
+      this.openEditor(this.tui, filePath, () => {
         this.handleEditComplete(filePath, source, value);
       });
       return;

@@ -32,27 +32,27 @@ import uuid
 import zipfile
 import yaml
 
-from openjiuwen.auto_harness import (
+from openjiuwen.rsi.auto_harness import (
     AutoHarnessConfig,
     AutoHarnessOrchestrator,
     create_auto_harness_orchestrator,
 )
-from openjiuwen.auto_harness.infra.git_auth import (
+from openjiuwen.rsi.auto_harness.infra.git_auth import (
     build_git_auth_env,
 )
-from openjiuwen.auto_harness.schema import (
+from openjiuwen.rsi.auto_harness.schema import (
     ExtensionDesign,
     OptimizationTask,
     RuntimeExtensionArtifact,
     StageResult,
     load_auto_harness_config,
 )
-from openjiuwen.auto_harness.contexts import TaskContext, TaskRuntime
-from openjiuwen.auto_harness.pipelines import EXTENDED_EVOLVE_PIPELINE
-from openjiuwen.auto_harness.pipelines.extended_evolve_pipeline import (
+from openjiuwen.rsi.auto_harness.contexts import TaskContext, TaskRuntime
+from openjiuwen.rsi.auto_harness.pipelines import EXTENDED_EVOLVE_PIPELINE
+from openjiuwen.rsi.auto_harness.pipelines.extended_evolve_pipeline import (
     ExtensionTaskPipeline,
 )
-from openjiuwen.auto_harness.stages.activate import ExtendActivateStage
+from openjiuwen.rsi.auto_harness.stages.activate import ExtendActivateStage
 from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.session.stream.base import OutputSchema
 
