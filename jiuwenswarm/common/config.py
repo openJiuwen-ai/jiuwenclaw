@@ -257,6 +257,16 @@ def get_skill_evolution_enabled(config: dict[str, Any] | None) -> bool:
     return _get_evolution_config(config).get("skill_evolution") is True
 
 
+def get_evolution_review_feedback_min_confidence(config: dict[str, Any] | None) -> float:
+    """Return the minimum confidence required for reviewer-driven evolution."""
+
+    raw = _get_evolution_config(config).get("review_feedback_min_confidence", 0.7)
+    try:
+        return max(0.0, min(1.0, float(raw)))
+    except (TypeError, ValueError):
+        return 0.7
+
+
 def get_evolution_auto_save_enabled(config: dict[str, Any] | None = None) -> bool:
     """Return canonical ``react.evolution.auto_save`` without disk/env reads."""
     return _get_evolution_config(config).get("auto_save") is True

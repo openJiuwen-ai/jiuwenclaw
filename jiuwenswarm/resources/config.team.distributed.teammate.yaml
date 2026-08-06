@@ -244,6 +244,7 @@ react:
   evolution:
     skill_evolution: false     # true = 启用技能演进与创建（自动及手动）
     auto_save: false           # leader/single 审批是否自动保存；teammate 固定自动保存
+    review_feedback_min_confidence: 0.7
   a2x_registry:
     base_url: "http://127.0.0.1:8000"
     timeout: 30.0
