@@ -907,6 +907,8 @@ class AgentWebSocketServer:
         self._jiuwenbox_runner = JiuwenBoxRunner.instance()
         # checkpointer 后台预热任务 (start() 里 fire-and-forget, stop() 时 cancel)
         self._checkpointer_warmup_task: Optional[asyncio.Task] = None
+        # 图像模态探针重探任务 (模型配置变更时拉起, stop() 时 cancel)
+        self._image_modality_refresh_task: Optional[asyncio.Task] = None
         # Proactive recommendation engine (set by app_agentserver for debug trigger)
         self._proactive_engine: Any = None
         get_acp_output_manager().set_send_push_callback(
@@ -1269,6 +1271,19 @@ class AgentWebSocketServer:
                 pass
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[AgentWebSocketServer] checkpointer warmup cancel failed: %s", exc)
+        # 同理取消图像模态重探任务.
+        image_modality_refresh = self._image_modality_refresh_task
+        self._image_modality_refresh_task = None
+        if image_modality_refresh is not None and not image_modality_refresh.done():
+            image_modality_refresh.cancel()
+            try:
+                await image_modality_refresh
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[AgentWebSocketServer] image modality refresh cancel failed: %s", exc
+                )
         had_server = self._server is not None
         if had_server:
             self._server.close()
@@ -7331,6 +7346,26 @@ class AgentWebSocketServer:
                 reload_kwargs["reload_scopes"] = reload_scopes
             agent_reload_scopes = {"model", "team", "permissions", "agent_runtime"}
             should_reload_agents = not reload_scopes or bool(reload_scopes & agent_reload_scopes)
+
+            # 模型配置变了就重探图像模态：同一个 (api_base, model_name) 背后可能已换
+            # 端点 / 密钥 / 后端，旧结论不能留。跑在后台任务里——探针每个最多 5s，不该
+            # 把 reload 响应拖在这里；这个 loop 活到进程结束，结论一定能落进缓存。
+            should_refresh_image_modality = not reload_scopes or "model" in reload_scopes
+            if should_refresh_image_modality:
+                from jiuwenswarm.server.runtime.image_modality_warmup import (
+                    refresh_image_modality_cache,
+                )
+
+                # 上一轮还没探完就又改了配置：旧结论已经作废，直接取消。
+                previous_task = self._image_modality_refresh_task
+                if previous_task is not None and not previous_task.done():
+                    previous_task.cancel()
+                self._image_modality_refresh_task = asyncio.create_task(
+                    refresh_image_modality_cache(
+                        get_config(),
+                        reason="model config change",
+                    )
+                )
             if should_reload_agents:
                 await self._agent_manager.reload_agents_config(
                     config_payload,

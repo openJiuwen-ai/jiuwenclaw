@@ -164,6 +164,13 @@ async def _run(host: str, port: int) -> None:
     # 会话 metadata 的字段补全已改为惰性迁移:读取时按需推断并写回磁盘
     # (见 session_metadata._apply_metadata_defaults_with_inference),无需启动全量扫描。
 
+    # ---------- 图像模态探针预热 ----------
+    # 在开始接受连接之前把探针缓存坐实：晚于这里的话，第一批 agent（含每个
+    # subagent）会各自在后台补探，多发无谓的 LLM 请求。
+    from jiuwenswarm.server.runtime.image_modality_warmup import warm_image_modality_cache
+
+    await warm_image_modality_cache(get_config(), reason="startup")
+
     server = AgentWebSocketServer.get_instance(
         host=host,
         port=port
