@@ -1,24 +1,66 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Runtime patch: make non-streaming OpenAI invoke() tolerate SSE-only gateways.
+"""Runtime patches for OpenAIModelClient.
 
-部分网关（如 celia-claw sse-api）即使在非流式调用下也只返回 ``text/event-stream``
-文本，此时 openai SDK 交回给框架的 ``response`` 会是 ``str`` 而非 ``ChatCompletion``，
-导致 ``response.choices`` 抛出 ``'str' object has no attribute 'choices'``，进而让
-subagent / 心跳等走 ``invoke()`` 的非流式路径全部失败。
+1. SSE-only 网关兼容：部分网关（如 celia-claw sse-api）即使在非流式调用下也只返回
+   ``text/event-stream`` 文本，此时 openai SDK 交回给框架的 ``response`` 会是 ``str``
+   而非 ``ChatCompletion``，导致 ``response.choices`` 抛出异常。补丁在收到 ``str``
+   响应时，先把 SSE 文本组装成标准的 ``ChatCompletion`` 再交回原解析逻辑。
 
-这里在服务启动时给 ``OpenAIModelClient._parse_response`` 打一个补丁：当收到 ``str``
-响应时，先把 SSE 文本组装成标准的 ``ChatCompletion`` 再交回原解析逻辑。
+2. GLM XML 标签清洗：流式场景下 GLM 调用原生工具的 XML 标签（如 ``<arg_value>``、
+   ``<arg_key>``、``<tool_call>``）未剥离干净，会污染后续 todo_list、LLM 上下文及
+   前端。补丁在解析流式 chunk 和非流式响应时，对 tool_call.arguments 做标签清洗。
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from typing import Any, Optional
 
 logger = logging.getLogger("jiuwenswarm.llm_sse_patch")
+
+_GLM_TOOL_XML_CLOSED_RE = re.compile(
+    r"<(arg_value|arg_key|tool_call)[^>]*?>.*?</\1>",
+    re.IGNORECASE | re.DOTALL,
+)
+_GLM_TOOL_XML_TRUNCATED_OPEN_RE = re.compile(
+    r"^.*?<(?:arg_value|arg_key|tool_call)[^>]*?>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _sanitize_glm_tool_xml_tags(raw: str) -> str:
+    """Strip GLM native XML tags and their inner content.
+
+    Complete closed tags: remove entire segment including inner content.
+    The closing tag name must match the opening tag name, so nested tags
+    of different names are handled correctly without leaving stray
+    closing tags behind.
+    Truncated open tags: delete preceding text + the tag itself,
+    preserve content after the tag.
+      e.g. 'prefix<tool_call...>suffix' -> 'suffix'
+    The ^-anchored regex is applied repeatedly until no truncated
+    open tag remains, so multiple truncated tags are all removed.
+
+    The early-exit guard checks for '<arg_' and '<tool_call' in
+    lowercased input so that uppercase variants (e.g. <TOOL_CALL>)
+    are also caught by the subsequent regex substitutions that use
+    re.IGNORECASE.
+    """
+    if not raw:
+        return raw
+    lowered = raw.lower()
+    if "<arg_" not in lowered and "<tool_call" not in lowered:
+        return raw
+    result = _GLM_TOOL_XML_CLOSED_RE.sub("", raw)
+    prev = None
+    while prev != result:
+        prev = result
+        result = _GLM_TOOL_XML_TRUNCATED_OPEN_RE.sub("", result)
+    return result
 
 _PATCH_APPLIED = False
 
@@ -55,7 +97,7 @@ def _build_tool_calls(msg: dict) -> list | None:
             type="function",
             function=Function(
                 name=tc["function"]["name"],
-                arguments=tc["function"]["arguments"],
+                arguments=_sanitize_glm_tool_xml_tags(tc["function"]["arguments"]),
             ),
         )
         for tc in msg["tool_calls"]
@@ -145,10 +187,13 @@ def assemble_openai_response(response: str) -> Any:
 
 
 def apply_openai_sse_invoke_patch() -> None:
-    """给 ``OpenAIModelClient._parse_response`` 打补丁以兼容 SSE-only 网关。
+    """给 ``OpenAIModelClient`` 打补丁：
+
+    1. SSE-only 网关兼容：非流式调用下返回 str 时，先组装成标准 ChatCompletion。
+    2. GLM XML 标签清洗：流式 chunk 中 tool_call.arguments 的 XML 标签剥离。
 
     幂等：重复调用只生效一次。在服务启动早期调用即可覆盖 subagent / 心跳等
-    所有走非流式 ``invoke()`` 的 LLM 调用。
+    所有走 ``invoke()`` / ``stream()`` 的 LLM 调用。
     """
     global _PATCH_APPLIED
     if _PATCH_APPLIED:
@@ -166,8 +211,7 @@ def apply_openai_sse_invoke_patch() -> None:
         _PATCH_APPLIED = True
         return
 
-    # monkeypatch 必须访问受保护成员 _parse_response 以包一层 SSE 兜底，
-    # 属于运行期补丁的正常诉求，豁免 G.CLS.11 protected-access。
+    # --- Patch 1: _parse_response (SSE-only 网关兼容) ---
     _orig_parse_response = OpenAIModelClient._parse_response  # pylint: disable=protected-access
 
     async def _parse_response_with_sse_guard(
@@ -175,14 +219,31 @@ def apply_openai_sse_invoke_patch() -> None:
         response: Any,
         parser: Optional[Any] = None,
     ):
-        # 非标准 OpenAI 格式：SSE-only 网关在非流式调用下仍返回 str 文本，
-        # 先组装成标准 ChatCompletion 再走原有解析逻辑。
         if isinstance(response, str):
             response = assemble_openai_response(response)
         return await _orig_parse_response(self, response, parser)
 
-    # 同上：运行期替换方法 + 打幂等标记，需写受保护属性。
     OpenAIModelClient._parse_response = _parse_response_with_sse_guard  # pylint: disable=protected-access
+
+    # --- Patch 2: _parse_stream_chunk (GLM XML 标签清洗) ---
+    _orig_parse_stream_chunk = OpenAIModelClient._parse_stream_chunk  # pylint: disable=protected-access
+
+    def _parse_stream_chunk_with_sanitize(self: Any, chunk: Any):
+        result = _orig_parse_stream_chunk(self, chunk)
+        if result is not None and getattr(result, "tool_calls", None):
+            for tc in result.tool_calls:
+                orig_args = getattr(tc, "arguments", None)
+                if isinstance(orig_args, str):
+                    sanitized = _sanitize_glm_tool_xml_tags(orig_args)
+                    if sanitized != orig_args:
+                        try:
+                            tc.arguments = sanitized
+                        except (AttributeError, TypeError):
+                            pass
+        return result
+
+    OpenAIModelClient._parse_stream_chunk = _parse_stream_chunk_with_sanitize  # pylint: disable=protected-access
+
     OpenAIModelClient._sse_invoke_patch_applied = True  # pylint: disable=protected-access
     _PATCH_APPLIED = True
-    logger.info("[llm_sse_patch] OpenAIModelClient._parse_response SSE 兼容补丁已应用")
+    logger.info("[llm_sse_patch] OpenAIModelClient SSE 兼容补丁 + GLM XML 标签清洗补丁已应用")
