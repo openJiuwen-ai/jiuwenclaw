@@ -1275,7 +1275,15 @@ class AgentWebSocketServer:
 
         try:
             async for raw in ws:
-                task = asyncio.create_task(self._handle_message(ws, raw, send_lock))
+                async def _run(raw=raw):
+                    try:
+                        await self._handle_message(ws, raw, send_lock)
+                    except WebSocketConnectionClosed as e:
+                        logger.info("[AgentWebSocketServer] 连接已关闭: %s", e)
+                    except Exception:
+                        logger.exception("[AgentWebSocketServer] 处理消息失败")
+
+                task = asyncio.create_task(_run())
                 tasks.add(task)
                 task.add_done_callback(tasks.discard)
         except WebSocketConnectionClosed as e:
@@ -1755,6 +1763,12 @@ class AgentWebSocketServer:
                         describe_ws_peer(ws),
                         describe_ws_exception(send_exc),
                     ),
+                )
+            except Exception as send_err:
+                logger.warning(
+                    "[AgentWebSocketServer] 错误回写失败: request_id=%s: %s",
+                    request.request_id,
+                    send_err,
                 )
 
     @staticmethod
