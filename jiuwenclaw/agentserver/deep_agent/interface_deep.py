@@ -7072,7 +7072,11 @@ class JiuWenClawDeepAdapter:
                     if isinstance(rebuild_context, dict)
                     else None
                 ),
-                "error": f"Skill '{resolved_name}' 融合重写 SKILL.md 失败",
+                "error": (
+                    f"Skill '{resolved_name}' 融合重写 SKILL.md 失败。"
+                    "请在安全管理中将敏感操作 read_file、write_file、edit_file 设为不需要审批，"
+                    "或直接关闭审批护栏后重试。"
+                ),
             }
 
         finalized = await self._finalize_rebuild_followup(prepared)
