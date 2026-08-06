@@ -37,7 +37,11 @@ from jiuwenswarm.extensions.agentos.agentos_router.models import (
     ImageInfo,
 )
 from jiuwenswarm.extensions.agentos.agentos_router.registry_client import RegistryClient
-from jiuwenswarm.extensions.agentos.agentos_router.ssh_relay import YuanrongSshRelay
+from jiuwenswarm.extensions.agentos.agentos_router.ssh_relay import (
+    DEFAULT_CLIENT_KEYS_DIR,
+    YuanrongSshRelay,
+    resolve_client_keys_dir,
+)
 from jiuwenswarm.extensions.yuanrong_frontend_client import (
     AgentRuntimeSpec,
     YuanrongFrontendAgentClient,
@@ -50,6 +54,15 @@ from jiuwenswarm.gateway.routing.agent_client import AgentServerClient
 logger = logging.getLogger(__name__)
 
 _WORKSPACE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+_TEAM_MODES = frozenset({"team", "code.team", "team.plan"})
+
+
+def _is_team_mode(params: Any) -> bool:
+    """Return True if params["mode"] is a team variant."""
+    if not isinstance(params, dict):
+        return False
+    return str(params.get("mode") or "").strip().lower() in _TEAM_MODES
 
 
 class UnsupportedAgentType(ValueError):
@@ -220,6 +233,7 @@ class AgentOSRouterClient(AgentServerClient):
         # (TUI local_handler), not via E2A send_request.
         if self._is_ssh_relay_request(envelope):
             return await self._handle_ssh_relay(envelope)
+        await self._inject_external_cli_agents(envelope)
         try:
             agent_type = self._extract_agent_type(envelope)
             if self._uses_direct_yuanrong(agent_type):
@@ -237,6 +251,7 @@ class AgentOSRouterClient(AgentServerClient):
     async def send_request_stream(
         self, envelope: E2AEnvelope
     ) -> AsyncIterator[AgentResponseChunk]:
+        await self._inject_external_cli_agents(envelope)
         try:
             agent_type = self._extract_agent_type(envelope)
             if self._uses_direct_yuanrong(agent_type):
@@ -254,6 +269,71 @@ class AgentOSRouterClient(AgentServerClient):
                 yield chunk
         finally:
             await self._agent_manager.release(runtime.key)
+
+    # ---------- external_cli_agents injection for team chat send ----------
+
+    async def _inject_external_cli_agents(self, envelope: E2AEnvelope) -> None:
+        """Inject ``external_cli_agents`` into params for team chat send.
+
+        When the request is a team-mode chat send, fetches registered
+        3rd-party agents from the registry and constructs
+        ``external_cli_agents`` with SSH transport info for each, so the
+        builtin agent (inside the container) can SSH into each 3rd-party
+        agent through the gateway's northbound SSH channel.
+        """
+        if not _is_team_mode(envelope.params):
+            return
+        user_id = str(envelope.user_id or "").strip()
+        if not user_id:
+            return
+        ssh_fields = self._ssh_endpoint_fields()
+        if ssh_fields is None:
+            logger.warning(
+                "[AgentOSRouter] skip external_cli_agents: ssh endpoint unavailable"
+            )
+            return
+        try:
+            images = await self._registry.list_user_images(user_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[AgentOSRouter] list_user_images failed: %s", exc)
+            return
+        key_file = self._resolve_ssh_key_file(user_id)
+        agents: list[dict[str, Any]] = []
+        for image in images:
+            agent_type = str(
+                (image.metadata or {}).get("agent_type") or image.image_name or ""
+            ).strip()
+            if not agent_type or not is_third_party_agent_type(agent_type):
+                continue
+            agents.append(
+                {
+                    "cli_agent": agent_type,
+                    "ssh_transport": {
+                        "host": ssh_fields["ssh_ip"],
+                        "port": ssh_fields["ssh_port"],
+                        "username": user_id,
+                        "agent": False,
+                        "key_file": key_file,
+                        "disable_host_key_check": True,
+                    },
+                }
+            )
+        if agents:
+            params = envelope.params if isinstance(envelope.params, dict) else {}
+            params["external_cli_agents"] = agents
+            logger.info(
+                "[AgentOSRouter] injected external_cli_agents: user=%s count=%d",
+                user_id,
+                len(agents),
+            )
+
+    def _resolve_ssh_key_file(self, user_id: str) -> str:
+        """Resolve the SSH key file path for external_cli_agents."""
+        keys_dir_template = DEFAULT_CLIENT_KEYS_DIR
+        if self._ssh_relay is not None:
+            keys_dir_template = self._ssh_relay.client_keys_dir
+        keys_dir = resolve_client_keys_dir(keys_dir_template, user_id)
+        return str(keys_dir / "id_ed25519")
 
     async def thirdagent_list(
         self,

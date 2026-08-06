@@ -134,6 +134,10 @@ class YuanrongSshRelay:
     def backend_port(self) -> int:
         return self._settings.port
 
+    @property
+    def client_keys_dir(self) -> str:
+        return self._settings.client_keys_dir
+
     def backend_username(self, instance_id: str) -> str:
         instance = str(instance_id or "").strip()
         if not instance:
