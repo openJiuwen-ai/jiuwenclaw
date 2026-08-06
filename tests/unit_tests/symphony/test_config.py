@@ -12,10 +12,13 @@ def test_symphony_config_defaults_paths(monkeypatch, tmp_path):
 
     cfg = symphony_config.symphony_config_from_dict({})
 
-    assert cfg.paths.skills_root == (tmp_path / "agent" / "workspace" / "skills").resolve()
-    assert cfg.paths.graph_dir == (
-        tmp_path / "agent" / "workspace" / "symphony" / "graph"
-    ).resolve()
+    assert (
+        cfg.paths.skills_root == (tmp_path / "agent" / "workspace" / "skills").resolve()
+    )
+    assert (
+        cfg.paths.graph_dir
+        == (tmp_path / "agent" / "workspace" / "symphony" / "graph").resolve()
+    )
     assert cfg.fingerprint.scan.max_depth is None
     assert cfg.fingerprint.extraction.body_limit is None
     assert cfg.build.batch_size == 12
@@ -38,9 +41,10 @@ def test_symphony_config_does_not_accept_legacy_score_dir(monkeypatch, tmp_path)
         {"paths": {"score_dir": str(tmp_path / "legacy-score")}}
     )
 
-    assert cfg.paths.graph_dir == (
-        tmp_path / "agent" / "workspace" / "symphony" / "graph"
-    ).resolve()
+    assert (
+        cfg.paths.graph_dir
+        == (tmp_path / "agent" / "workspace" / "symphony" / "graph").resolve()
+    )
 
 
 def test_symphony_config_normalizes_values(monkeypatch, tmp_path):
@@ -64,12 +68,6 @@ def test_symphony_config_normalizes_values(monkeypatch, tmp_path):
                     "workers": 0,
                     "batch_size": "4",
                     "body_limit": "0",
-                },
-                "normalization": {
-                    "workers": 2,
-                    "batch_size": "5",
-                    "duplicate_name_similarity_threshold": 2,
-                    "max_vocab_size": "9",
                 },
             },
             "build": {
@@ -95,10 +93,6 @@ def test_symphony_config_normalizes_values(monkeypatch, tmp_path):
     assert cfg.fingerprint.extraction.workers == 1
     assert cfg.fingerprint.extraction.batch_size == 4
     assert cfg.fingerprint.extraction.body_limit is None
-    assert cfg.fingerprint.normalization.workers == 2
-    assert cfg.fingerprint.normalization.batch_size == 5
-    assert cfg.fingerprint.normalization.duplicate_name_similarity_threshold == 1.0
-    assert cfg.fingerprint.normalization.max_vocab_size == 9
     assert cfg.build.workers == 3
     assert cfg.build.batch_size == 1
     assert cfg.build.max_candidates_per_skill_relation == 19
@@ -113,9 +107,7 @@ def test_symphony_config_normalizes_values(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("mode", ["fast", "beam", "", None])
 def test_symphony_config_accepts_supported_orchestration_modes(mode):
-    cfg = symphony_config.symphony_config_from_dict(
-        {"orchestration": {"mode": mode}}
-    )
+    cfg = symphony_config.symphony_config_from_dict({"orchestration": {"mode": mode}})
 
     assert cfg.orchestration.mode == (mode or "fast")
 
@@ -123,17 +115,7 @@ def test_symphony_config_accepts_supported_orchestration_modes(mode):
 @pytest.mark.parametrize("mode", ["default", "graph", "unknown", "quick"])
 def test_symphony_config_rejects_non_llm_orchestration_modes(mode):
     with pytest.raises(ValueError, match="Unsupported Symphony orchestration mode"):
-        symphony_config.symphony_config_from_dict(
-            {"orchestration": {"mode": mode}}
-        )
-
-
-def test_symphony_config_keeps_empty_max_vocab_size_as_none():
-    cfg = symphony_config.symphony_config_from_dict(
-        {"fingerprint": {"normalization": {"max_vocab_size": ""}}}
-    )
-
-    assert cfg.fingerprint.normalization.max_vocab_size is None
+        symphony_config.symphony_config_from_dict({"orchestration": {"mode": mode}})
 
 
 def test_symphony_config_keeps_empty_scan_and_body_limits_as_none():

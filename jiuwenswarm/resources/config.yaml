@@ -29,11 +29,6 @@ symphony:
       workers: 4
       batch_size: 2
       body_limit:
-    normalization:
-      workers: 4
-      batch_size: 2
-      duplicate_name_similarity_threshold: 0.8
-      max_vocab_size:
 
   build:
     workers: 4

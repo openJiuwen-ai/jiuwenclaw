@@ -388,18 +388,18 @@ Advanced build, retrieval, and orchestration parameters are configured in the us
 
 Common settings:
 
+The retained `symphony.fingerprint.scan` and `symphony.fingerprint.extraction`
+settings are mapped by the JiuwenSwarm Adapter to agent-core's
+`SkillFolderScanner` and `FingerprintService` configuration.
+
 | Setting | Default | Description |
 | --- | --- | --- |
 | `symphony.paths.skills_root` | Empty string | Skill source directory; empty means the runtime default is used |
 | `symphony.paths.graph_dir` | Empty string | Skill score artifact directory; empty means the runtime default is used |
-| `symphony.fingerprint.scan.max_depth` | Empty | Maximum skill-file scan depth; empty means the runtime default is used |
-| `symphony.fingerprint.extraction.workers` | `4` | Skill fingerprint extraction concurrency |
-| `symphony.fingerprint.extraction.batch_size` | `2` | Skill fingerprint extraction batch size |
-| `symphony.fingerprint.extraction.body_limit` | Empty | Body length limit for fingerprint extraction; empty means the runtime default is used |
-| `symphony.fingerprint.normalization.workers` | `4` | Skill fingerprint normalization concurrency |
-| `symphony.fingerprint.normalization.batch_size` | `2` | Skill fingerprint normalization batch size |
-| `symphony.fingerprint.normalization.duplicate_name_similarity_threshold` | `0.8` | Similarity threshold for detecting near-duplicate skill names |
-| `symphony.fingerprint.normalization.max_vocab_size` | Empty | Maximum dynamic vocabulary size; empty means the runtime default is used |
+| `symphony.fingerprint.scan.max_depth` | Empty | Maximum skill-file scan depth mapped to agent-core `SkillFolderScanner`; empty means the runtime default is used |
+| `symphony.fingerprint.extraction.workers` | `4` | Fingerprint extraction concurrency mapped to agent-core `FingerprintService` |
+| `symphony.fingerprint.extraction.batch_size` | `2` | Fingerprint extraction batch size mapped to agent-core `FingerprintService` |
+| `symphony.fingerprint.extraction.body_limit` | Empty | Body length limit mapped to agent-core `FingerprintService`; empty means the runtime default is used |
 | `symphony.build.workers` | `4` | Skill score build concurrency |
 | `symphony.build.batch_size` | `16` | Skill score build batch size |
 | `symphony.build.require_consensus` | `false` | Whether multiple judgments must agree before accepting a relationship |

@@ -39,6 +39,13 @@ The skill score is the graph used by orchestration. Each node represents a skill
 
 The skill score shows statically built connectable candidate relationships, and it does not guarantee every visible connection can be chained directly for every task. Always check the skill details, required inputs, and current task goal.
 
+Capability scanning, fingerprint extraction, normalization, and quality evaluation
+are provided by agent-core. JiuwenSwarm keeps only the application Adapter and
+graph publication flow. A score build publishes the canonical
+`fingerprint.json`, whose per-capability quality result and evidence are embedded
+in each fingerprint; the former `fingerprints.json` and separate evaluation
+artifacts are no longer produced.
+
 #### Improve orchestration from Session execution traces
 
 When **Dynamic Graph** is enabled, Symphony asynchronously reads JiuwenSwarm's existing Session JSON history after each conversation completes. It correlates the orchestration result with observed Skill calls and results. Repeated successful edges receive bounded reinforcement for later relevant tasks, while explicitly failed edges are downranked. A displayed orchestration graph without an observed Skill call is not counted as success evidence.

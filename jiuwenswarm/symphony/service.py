@@ -483,6 +483,8 @@ def _web_graph_payload(
     """Adapt the public capability graph for the existing Skill Graph panel."""
 
     skills = []
+    web_node_refs: dict[str, str] = {}
+    web_node_types: dict[str, str] = {}
     disabled_refs = {
         _normalize_capability_ref(value)
         for value in disabled_skill_names
@@ -499,9 +501,10 @@ def _web_graph_payload(
         if not capability_id:
             continue
         capability["id"] = capability_id
-        capability["type"] = str(
+        capability_type = str(
             capability.get("capability_type") or capability.get("type") or "skill"
         )
+        capability["type"] = capability_type
         if (
             _normalize_capability_ref(capability_id) in disabled_refs
             or _normalize_capability_ref(capability.get("name")) in disabled_refs
@@ -509,24 +512,46 @@ def _web_graph_payload(
             disabled_ids.add(capability_id)
             continue
         skills.append(capability)
+        web_node_refs[capability_id] = (
+            f"skill:{capability_id}"
+            if capability_type == "skill"
+            else f"capability:{capability_id}"
+        )
+        web_node_types[capability_id] = capability_type
 
     nodes: list[dict[str, Any]] = []
     for node in artifact.get("nodes") or []:
         if not isinstance(node, dict):
             continue
-        if _capability_id(node.get("id")) in disabled_ids:
+        capability_id = _capability_id(node.get("id"))
+        if capability_id in disabled_ids:
             continue
-        nodes.append(dict(node))
+        web_node = dict(node)
+        if capability_id in web_node_refs:
+            web_node["id"] = web_node_refs[capability_id]
+            web_node["type"] = web_node_types[capability_id]
+        nodes.append(web_node)
 
     edges: list[dict[str, Any]] = []
     for edge in artifact.get("edges") or []:
         if not isinstance(edge, dict):
             continue
-        if _capability_id(edge.get("source")) in disabled_ids:
+        source_id = _capability_id(edge.get("source"))
+        target_id = _capability_id(edge.get("target"))
+        if source_id in disabled_ids:
             continue
-        if _capability_id(edge.get("target")) in disabled_ids:
+        if target_id in disabled_ids:
             continue
-        edges.append(dict(edge))
+        web_edge = dict(edge)
+        web_edge["source"] = web_node_refs.get(
+            source_id,
+            str(edge.get("source") or ""),
+        )
+        web_edge["target"] = web_node_refs.get(
+            target_id,
+            str(edge.get("target") or ""),
+        )
+        edges.append(web_edge)
 
     graph = {"nodes": nodes, "edges": edges}
     return {

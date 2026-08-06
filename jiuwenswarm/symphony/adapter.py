@@ -2,65 +2,85 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from typing import Any
 
 from openjiuwen.symphony import (
-    ArtifactSpec,
-    CapabilityFingerprint,
+    CapabilityDescriptor,
+    FingerprintSettings,
     OrchestrationConfig,
-    ParameterSpec,
+    ScanResult,
+    SourceSnapshot,
 )
 
 from jiuwenswarm.symphony.config import SymphonyConfig
 from jiuwenswarm.symphony.llm import LLMConfig, create_model_response_observer
 
 
-def capability_from_skill(value: Any) -> CapabilityFingerprint:
-    """Map an extracted JiuwenSwarm Skill fingerprint to a public capability."""
+@dataclass(frozen=True)
+class ScanResultCapabilityProvider:
+    """Expose one immutable core scanner result through CapabilityProvider."""
 
-    payload = value.to_dict() if hasattr(value, "to_dict") else dict(value)
-    capability_id = str(payload.get("capability_id") or payload.get("id") or "").strip()
-    if not capability_id:
-        raise ValueError("Skill fingerprint requires an id.")
-    capability_type = str(
-        payload.get("capability_type") or payload.get("type") or "skill"
-    ).strip()
-    return CapabilityFingerprint(
-        capability_id=capability_id,
-        capability_type=capability_type,
-        name=str(payload.get("name") or capability_id),
-        description=str(payload.get("description") or ""),
-        version=str(payload.get("version") or "1.0.0"),
-        inputs=[
-            item
-            if isinstance(item, ParameterSpec)
-            else ParameterSpec(
-                name=str(_field(item, "name") or "input"),
-                type=str(_field(item, "type") or "unknown"),
-                required=bool(_field(item, "required", True)),
-                description=str(_field(item, "description") or ""),
-                default=_field(item, "default"),
-            )
-            for item in payload.get("inputs", [])
-        ],
-        outputs=[
-            item
-            if isinstance(item, ArtifactSpec)
-            else ArtifactSpec(
-                name=str(_field(item, "name") or "result"),
-                type=str(_field(item, "type") or "unknown"),
-                description=str(_field(item, "description") or ""),
-            )
-            for item in payload.get("outputs", [])
-        ],
-        static_data=dict(payload.get("static_data") or {}),
+    result: ScanResult
+
+    async def capabilities(self) -> tuple[CapabilityDescriptor, ...]:
+        return self.result.capabilities
+
+    async def source_snapshot(self) -> SourceSnapshot:
+        return self.result.source_snapshot
+
+    async def inventory_snapshot(
+        self,
+    ) -> tuple[SourceSnapshot, tuple[CapabilityDescriptor, ...]]:
+        return self.result.source_snapshot, self.result.capabilities
+
+
+class FingerprintLLMAdapter:
+    """Tag core fingerprint model calls for JiuwenSwarm usage accounting."""
+
+    def __init__(self, config: LLMConfig) -> None:
+        self._model = model_from_config(config)
+        self._observe = model_response_observer_from_config(config)
+        self.cache_signature = llm_config_signature(config)
+
+    async def invoke(self, messages: Any, **kwargs: Any) -> object:
+        response = await self._model.invoke(messages, **kwargs)
+        self._observe(
+            response,
+            "fingerprint_extraction",
+            "capability_extraction",
+        )
+        return response
+
+
+def fingerprint_settings_from_swarm(
+    config: SymphonyConfig,
+    llm_config: LLMConfig | None,
+) -> FingerprintSettings:
+    """Translate app configuration into the core fingerprint contract."""
+
+    defaults = FingerprintSettings()
+    extraction = config.fingerprint.extraction
+    return FingerprintSettings(
+        enable_llm_extraction=llm_config is not None,
+        enable_llm_evaluation=False,
+        batch_size=extraction.batch_size,
+        max_concurrency=extraction.workers,
+        body_limit=(
+            defaults.body_limit
+            if extraction.body_limit is None
+            else extraction.body_limit
+        ),
+        llm_max_tokens=defaults.llm_max_tokens,
+        llm_timeout=defaults.llm_timeout,
+        evidence_text_limit=defaults.evidence_text_limit,
+        cache_enabled=True,
+        extraction_protocol_version=defaults.extraction_protocol_version,
+        evaluation_protocol_version=defaults.evaluation_protocol_version,
+        configuration_signature=(
+            llm_config_signature(llm_config) if llm_config is not None else ""
+        ),
     )
-
-
-def capabilities_from_skills(values: Iterable[Any]) -> list[CapabilityFingerprint]:
-    return [capability_from_skill(value) for value in values]
 
 
 def candidate_ids_from_skill_ids(value: Any) -> list[str] | None:
@@ -157,9 +177,3 @@ def swarm_plan_from_public(value: Any) -> Any:
     if isinstance(value, tuple):
         return [swarm_plan_from_public(item) for item in value]
     return value
-
-
-def _field(value: Any, name: str, default: Any = None) -> Any:
-    if isinstance(value, dict):
-        return value.get(name, default)
-    return getattr(value, name, default)

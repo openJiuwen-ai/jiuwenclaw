@@ -7,9 +7,10 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
-from jiuwenswarm.symphony.fingerprint.models import Fingerprint
+from openjiuwen.symphony import CapabilityDescriptor, CapabilityFingerprint
+
 from jiuwenswarm.symphony.graph_storage import resolve_graph_artifact_dir
 
 GRAPH_STATE_FILENAME = "graph_state.json"
@@ -21,7 +22,7 @@ class GraphStateEntry:
 
     skill_id: str
     relative_path: str
-    skill_md_sha256: str
+    content_hash: str
     fingerprint_hash: str
     status: str = "active"
     updated_at: str = ""
@@ -30,7 +31,7 @@ class GraphStateEntry:
         return {
             "skill_id": self.skill_id,
             "relative_path": self.relative_path,
-            "skill_md_sha256": self.skill_md_sha256,
+            "content_hash": self.content_hash,
             "fingerprint_hash": self.fingerprint_hash,
             "status": self.status,
             "updated_at": self.updated_at,
@@ -41,7 +42,9 @@ class GraphStateEntry:
         return cls(
             skill_id=str(payload.get("skill_id") or ""),
             relative_path=str(payload.get("relative_path") or ""),
-            skill_md_sha256=str(payload.get("skill_md_sha256") or ""),
+            content_hash=str(
+                payload.get("content_hash") or payload.get("skill_md_sha256") or ""
+            ),
             fingerprint_hash=str(payload.get("fingerprint_hash") or ""),
             status=str(payload.get("status") or "active"),
             updated_at=str(payload.get("updated_at") or ""),
@@ -52,7 +55,7 @@ class GraphStateEntry:
 class GraphState:
     """Serializable incremental graph state."""
 
-    schema_version: str = "Symphony-graph-state-v1"
+    schema_version: str = "Symphony-graph-state-v2"
     skills: dict[str, GraphStateEntry] = field(default_factory=dict)
 
     def active_entries(self) -> dict[str, GraphStateEntry]:
@@ -66,8 +69,7 @@ class GraphState:
         return {
             "schema_version": self.schema_version,
             "skills": {
-                path: entry.to_dict()
-                for path, entry in sorted(self.skills.items())
+                path: entry.to_dict() for path, entry in sorted(self.skills.items())
             },
         }
 
@@ -84,43 +86,49 @@ class GraphState:
                 skills[relative_path] = GraphStateEntry(
                     skill_id=entry.skill_id,
                     relative_path=relative_path,
-                    skill_md_sha256=entry.skill_md_sha256,
+                    content_hash=entry.content_hash,
                     fingerprint_hash=entry.fingerprint_hash,
                     status=entry.status,
                     updated_at=entry.updated_at,
                 )
         return cls(
-            schema_version=str(payload.get("schema_version") or "Symphony-graph-state-v1"),
+            schema_version=str(
+                payload.get("schema_version") or "Symphony-graph-state-v1"
+            ),
             skills=skills,
         )
 
 
 class GraphStateBuilder:
-    """Compute folder hashes and the next persistent graph state."""
+    """Map a core capability inventory to JiuwenSwarm graph state."""
 
-    def folder_hashes(self, folders: Iterable[Any]) -> dict[str, str]:
+    def capability_hashes(
+        self,
+        capabilities: Iterable[CapabilityDescriptor],
+    ) -> dict[str, str]:
         return {
-            folder.relative_path: self.file_sha256(folder.entry)
-            for folder in folders
+            self.relative_path(capability): capability.content_hash
+            for capability in capabilities
         }
 
     def next_state(
         self,
         *,
-        folders: list[Any],
+        capabilities: Iterable[CapabilityDescriptor],
         current_hashes: dict[str, str],
-        fingerprints_by_path: dict[str, Fingerprint],
+        fingerprints_by_id: Mapping[str, CapabilityFingerprint],
         old_state: GraphState,
         removed_paths: set[str],
     ) -> GraphState:
         now = datetime.now(timezone.utc).isoformat()
         entries: dict[str, GraphStateEntry] = {}
-        for folder in folders:
-            fingerprint = fingerprints_by_path[folder.relative_path]
-            entries[folder.relative_path] = GraphStateEntry(
-                skill_id=fingerprint.id,
-                relative_path=folder.relative_path,
-                skill_md_sha256=current_hashes[folder.relative_path],
+        for capability in capabilities:
+            relative_path = self.relative_path(capability)
+            fingerprint = fingerprints_by_id[capability.capability_id]
+            entries[relative_path] = GraphStateEntry(
+                skill_id=fingerprint.capability_id,
+                relative_path=relative_path,
+                content_hash=current_hashes[relative_path],
                 fingerprint_hash=self.fingerprint_hash(fingerprint),
                 status="active",
                 updated_at=now,
@@ -133,7 +141,7 @@ class GraphStateBuilder:
             entries[relative_path] = GraphStateEntry(
                 skill_id=old_entry.skill_id,
                 relative_path=relative_path,
-                skill_md_sha256=old_entry.skill_md_sha256,
+                content_hash=old_entry.content_hash,
                 fingerprint_hash=old_entry.fingerprint_hash,
                 status="removed",
                 updated_at=now,
@@ -141,7 +149,7 @@ class GraphStateBuilder:
         return GraphState(skills=entries)
 
     @staticmethod
-    def fingerprint_hash(fingerprint: Fingerprint) -> str:
+    def fingerprint_hash(fingerprint: CapabilityFingerprint) -> str:
         payload = json.dumps(
             fingerprint.graph_identity_dict(),
             ensure_ascii=False,
@@ -150,8 +158,13 @@ class GraphStateBuilder:
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     @staticmethod
-    def file_sha256(path: Path) -> str:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
+    def relative_path(capability: CapabilityDescriptor) -> str:
+        entrypoint = str(capability.metadata.get("entrypoint") or "").strip()
+        if not entrypoint:
+            raise ValueError(
+                f"Capability {capability.capability_id!r} has no entrypoint metadata."
+            )
+        return Path(entrypoint).parent.as_posix()
 
 
 def load_graph_state(graph_dir: str | Path) -> GraphState:
