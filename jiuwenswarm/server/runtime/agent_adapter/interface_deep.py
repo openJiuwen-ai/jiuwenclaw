@@ -3972,8 +3972,8 @@ class JiuWenSwarmDeepAdapter:
         runtime = runtime or {}
         shared_dir: str | None = None
         if os.getenv("AGENT_RUNTIME", "").strip():
-            # 企业多租户：挂载 service 下 default agent 根，修复下载路径权限
-            mt_root = get_multi_tenant_user_workspace_dir(self._service_id, "default")
+            # 企业多租户：挂载当前 agent 工作区根，修复下载路径权限
+            mt_root = get_multi_tenant_user_workspace_dir(self._service_id, self._agent_id)
             if mt_root is not None:
                 shared_dir = str(mt_root)
         return create_sandbox_sysop_card(
@@ -4302,7 +4302,7 @@ class JiuWenSwarmDeepAdapter:
         extra["fallback_on_failure"] = bool(runtime.get("fallback_on_failure", False))
         shared_dir: str | None = None
         if os.getenv("AGENT_RUNTIME", "").strip():
-            mt_root = get_multi_tenant_user_workspace_dir(self._service_id, "default")
+            mt_root = get_multi_tenant_user_workspace_dir(self._service_id, self._agent_id)
             if mt_root is not None:
                 shared_dir = str(mt_root)
         new_policy, upload_list = build_filesystem_policy(
