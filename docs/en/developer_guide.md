@@ -295,6 +295,24 @@ scripts\build-exe.bat
 
 Output: `dist\jiuwenswarm\jiuwenswarm.exe`
 
+By default, the build does not bundle WebView2, so the target machine must provide
+the system WebView2 Runtime. To create a fully self-contained Windows package,
+use PowerShell with `-BundleWebView2`:
+
+```powershell
+.\scripts\build-exe.ps1 -BundleWebView2
+```
+
+The script first uses a Fixed Version WebView2 Runtime installed on the build machine.
+You can also specify an extracted Runtime directory explicitly:
+
+```powershell
+.\scripts\build-exe.ps1 -BundleWebView2 -WebView2RuntimeDir "D:\packages\WebView2FixedRuntime"
+```
+
+The Runtime root must directly contain `msedgewebview2.exe` and `msedge.dll`.
+`-WebView2RuntimeDir` has no effect unless `-BundleWebView2` is enabled.
+
 #### 6.2.3 macOS Packaging (DMG)
 
 ```bash
