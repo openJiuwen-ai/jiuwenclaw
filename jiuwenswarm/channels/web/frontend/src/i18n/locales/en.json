@@ -2407,6 +2407,22 @@
     },
     "errors": {
       "cronFieldCount": "Heartbeat cron expressions must have 5 fields (minute hour day month weekday)"
-    }
+    },
+    "drawer": {
+      "fieldName": "Task name",
+      "fieldNameTooLong": "Name must be at most 64 characters",
+      "fieldPrompt": "Follow-up prompt",
+      "fieldPromptTooLong": "Prompt must be at most 2000 characters",
+      "fieldSchedule": "Schedule",
+      "fieldConcurrencyPolicy": "Concurrency policy",
+      "fieldSessionDeletedPolicy": "On session deleted",
+      "fieldMaxRuns": "Max runs",
+      "fieldMaxRunsUnlimited": "Unlimited",
+      "missingFields": "Still needed: {{fields}}",
+      "submitCreate": "Create",
+      "submitUpdate": "Save"
+    },
+    "concurrencyPolicy": { "skip": "Skip", "queue": "Queue", "replace": "Replace" },
+    "sessionDeletedPolicy": { "disable": "Disable job", "completed": "Mark completed" }
   }
 }
