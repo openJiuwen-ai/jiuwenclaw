@@ -364,6 +364,17 @@ _PERSISTENT_CHECKPOINTER_LOCK: asyncio.Lock | None = None
 _PERSISTENT_CHECKPOINTER_LOCK_LOOP: asyncio.AbstractEventLoop | None = None
 _PERSISTENT_CHECKPOINTER_LOCK_INIT = threading.Lock()
 _PERSISTENT_CHECKPOINTER_READY = False
+_shared_checkpoint_checkpointer: Any = None
+
+
+def reset_shared_checkpoint_for_tests() -> None:
+    """Reset process-wide checkpoint singleton (tests only)."""
+    global _shared_checkpoint_checkpointer, _PERSISTENT_CHECKPOINTER_READY
+    global _PERSISTENT_CHECKPOINTER_LOCK, _PERSISTENT_CHECKPOINTER_LOCK_LOOP
+    _shared_checkpoint_checkpointer = None
+    _PERSISTENT_CHECKPOINTER_READY = False
+    _PERSISTENT_CHECKPOINTER_LOCK = None
+    _PERSISTENT_CHECKPOINTER_LOCK_LOOP = None
 
 
 def _running_loop() -> asyncio.AbstractEventLoop | None:
@@ -1093,9 +1104,11 @@ async def _build_postgresql_async_engine():
 
 async def ensure_persistent_checkpointer() -> None:
     """Ensure the process-wide default checkpointer uses sqlite / MySQL / PostgreSQL persistence."""
-    global _PERSISTENT_CHECKPOINTER_READY
+    global _PERSISTENT_CHECKPOINTER_READY, _shared_checkpoint_checkpointer
 
     if _PERSISTENT_CHECKPOINTER_READY:
+        if _shared_checkpoint_checkpointer is not None:
+            CheckpointerFactory.set_default_checkpointer(_shared_checkpoint_checkpointer)
         return
 
     lock = await _get_persistent_checkpointer_lock()
@@ -1114,6 +1127,8 @@ async def ensure_persistent_checkpointer() -> None:
             raise
         acquired = True
         if _PERSISTENT_CHECKPOINTER_READY:
+            if _shared_checkpoint_checkpointer is not None:
+                CheckpointerFactory.set_default_checkpointer(_shared_checkpoint_checkpointer)
             return
 
         try:
@@ -1145,6 +1160,7 @@ async def ensure_persistent_checkpointer() -> None:
             checkpointer = await CheckpointerFactory.create(
                 CheckpointerConfig(type="persistence", conf=conf),
             )
+            _shared_checkpoint_checkpointer = checkpointer
             CheckpointerFactory.set_default_checkpointer(checkpointer)
             _PERSISTENT_CHECKPOINTER_READY = True
             logger.info(
