@@ -58,3 +58,23 @@ class SystemPromptHookContext:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass
+class ImageArtifactHookContext:
+    """图像产物落盘后的扩展回调上下文。
+
+    TaskExecutionRail 在 generate_image 执行后从 tool_result 解析出图像路径，
+    触发 IMAGE_ARTIFACT_POST_PROCESS 事件，扩展可在 handler 中按 artifact_paths
+    对文件做原地后处理（如加水印）。
+    """
+
+    session_id: str
+    tool_name: str
+    task_id: str | None = None
+    artifact_paths: list[str] = field(default_factory=list)
+    # 输出扩展
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
