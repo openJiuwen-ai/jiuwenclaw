@@ -2391,5 +2391,14 @@
   },
   "qaSummary": {
     "title": "问题澄清"
+  },
+  "heartbeat": {
+    "status": {
+      "running": "执行中",
+      "scheduled": "已排期",
+      "paused": "已暂停",
+      "completed": "已完成",
+      "expired": "已过期"
+    }
   }
 }
