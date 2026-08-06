@@ -1606,7 +1606,14 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
       return;
     }
     const runtime = get().runtimes[sessionId] ?? createEmptyRuntime();
-    const busy = Boolean(runtime.isProcessing || runtime.currentStreamId);
+    // 暂存的目的是"避免插进当前回答中间拆轮"——只有存在可被拆的 assistant 轮次时才有意义。
+    // 后端 _should_defer_goal_objective_history 也是精确判断"有无活跃 user round / 并发任务"，
+    // idle 时不 defer（test_should_not_defer_when_idle）。这里用"已有 assistant 消息且仍在处理"
+    // 对齐该语义：新会话首次设目标时 messages 里没有 assistant 消息，即便
+    // registerCreatedConversation 把 isProcessing 乐观置 true 也不暂存，立即落地，避免用户
+    // 气泡被推迟到 agent 回复完成之后才 append 到末尾（顺序错乱、时间戳变落地时刻）。
+    const hasAssistantTurn = (runtime.messages ?? []).some((message) => message.role === 'assistant');
+    const busy = hasAssistantTurn && Boolean(runtime.isProcessing || runtime.currentStreamId);
     if (busy) {
       get().setPendingGoalObjectiveBubble(sessionId, trimmed);
       return;
