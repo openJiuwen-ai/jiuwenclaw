@@ -124,16 +124,19 @@ def find_nested_files_conflict(
     return None
 
 
-def _resolve_shared_dir() -> Path | None:
-    """Resolve agent root directory for sandbox rw bind (shared downloads + workspace).
+def _resolve_shared_dir(shared_dir: str | Path | None = None) -> Path | None:
+    """Resolve sandbox rw bind root (shared downloads + workspace).
 
-    Mounts ``get_agent_root_dir()`` (e.g. ``~/.jiuwenswarm/agent``) rather than only
-    ``agent/workspace``, so sandbox downloads and sibling paths under the agent root
-    remain writable (download permission fix).
+    Prefer an explicit ``shared_dir`` (enterprise multi-tenant workspace).
+    Otherwise mount ``get_agent_root_dir()`` (e.g. ``~/.jiuwenswarm/agent``)
+    rather than only ``agent/workspace``, so sibling download paths remain writable.
     """
     try:
-        shared = Path(get_agent_root_dir()).expanduser().resolve()
-    except OSError as exc:
+        if shared_dir is not None and str(shared_dir).strip():
+            shared = Path(shared_dir).expanduser().resolve()
+        else:
+            shared = Path(get_agent_root_dir()).expanduser().resolve()
+    except (TypeError, ValueError, OSError) as exc:
         logger.debug("[sysop_builder] shared dir resolve failed: %s", exc)
         return None
     if shared == Path(shared.anchor):
@@ -404,6 +407,7 @@ def build_filesystem_policy(
     project_dir: str | Path | None = None,
     is_code_agent: bool = False,
     startup_mode: str | None = None,
+    shared_dir: str | Path | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
     """build jiuwenbox filesystem policy."""
     del is_code_agent  # retained for caller compatibility
@@ -515,7 +519,7 @@ def build_filesystem_policy(
         _record_rw_bind(path_str, path_str, is_dir=True, permissions="0777")
         mounted_rw_paths.add(path_str)
 
-    resolved_workspace = _resolve_shared_dir()
+    resolved_workspace = _resolve_shared_dir(shared_dir)
     if resolved_workspace is not None:
         _mount_rw_dir(resolved_workspace)
 
@@ -588,6 +592,7 @@ def create_sandbox_sysop_card(
     project_dir: str | Path | None = None,
     is_code_agent: bool = False,
     startup_mode: str | None = None,
+    shared_dir: str | Path | None = None,
 ) -> SysOperationCard | None:
     """Create sandbox SysOperationCard (jiuwenbox or yuanrong)."""
     # 触发 sandbox provider 注册（@SandboxRegistry.provider 装饰器副作用）
@@ -637,6 +642,7 @@ def create_sandbox_sysop_card(
             project_dir=project_dir,
             is_code_agent=is_code_agent,
             startup_mode=startup_mode,
+            shared_dir=shared_dir,
         )
         extra_params = {
             "policy": policy,
@@ -808,12 +814,13 @@ def list_auto_managed_sandbox_paths(
     *,
     is_code_agent: bool = False,
     startup_mode: str | None = None,
+    shared_dir: str | Path | None = None,
 ) -> dict[str, list[dict[str, str]]]:
     """Auto-configured sandbox entries that users cannot mutate via ``/sandbox``.
 
     Mirrors :func:`build_filesystem_policy` auto-managed mounts:
 
-    - ``shared`` (agent root) → ``allow_write`` (rw)
+    - ``shared`` (agent root / multi-tenant workspace) → ``allow_write`` (rw)
     - ``project_dir`` (when resolved) → ``allow_write`` (rw)
     - ``config.yaml`` → ``deny_write`` (ro) only when ``startup_mode=internal``
     """
@@ -824,7 +831,7 @@ def list_auto_managed_sandbox_paths(
         startup_mode if startup_mode is not None else get_sandbox_startup_mode()
     )
 
-    workspace = _resolve_shared_dir()
+    workspace = _resolve_shared_dir(shared_dir)
     if workspace is not None:
         _append_unique(
             allow,

@@ -307,6 +307,7 @@ from jiuwenswarm.common.utils import (
     get_checkpoint_dir,
     get_default_project_session_workspace_dir,
     get_env_file,
+    get_multi_tenant_user_workspace_dir,
     get_prompt_attachment_dir,
     get_runtime_state_path,
     get_tenant_agent_skills_dirs,
@@ -3969,6 +3970,12 @@ class JiuWenSwarmDeepAdapter:
                 忽略——sysop_builder 不会有 cwd / env 之类的 fallback 接管。
         """
         runtime = runtime or {}
+        shared_dir: str | None = None
+        if os.getenv("AGENT_RUNTIME", "").strip():
+            # 企业多租户：挂载 service 下 default agent 根，修复下载路径权限
+            mt_root = get_multi_tenant_user_workspace_dir(self._service_id, "default")
+            if mt_root is not None:
+                shared_dir = str(mt_root)
         return create_sandbox_sysop_card(
             sandbox_url,
             sandbox_type,
@@ -3980,6 +3987,7 @@ class JiuWenSwarmDeepAdapter:
             project_dir=project_dir,
             is_code_agent=self._is_code_agent,
             startup_mode=get_sandbox_startup_mode(),
+            shared_dir=shared_dir,
         )
 
     def _resolve_project_dir_for_sandbox(self) -> str | None:
@@ -4292,11 +4300,17 @@ class JiuWenSwarmDeepAdapter:
         extra = launcher.extra_params or {}
         extra["excluded_commands"] = list(runtime.get("excluded_commands") or [])
         extra["fallback_on_failure"] = bool(runtime.get("fallback_on_failure", False))
+        shared_dir: str | None = None
+        if os.getenv("AGENT_RUNTIME", "").strip():
+            mt_root = get_multi_tenant_user_workspace_dir(self._service_id, "default")
+            if mt_root is not None:
+                shared_dir = str(mt_root)
         new_policy, upload_list = build_filesystem_policy(
             runtime.get("files") or {},
             project_dir=self._resolve_project_dir_for_sandbox(),
             is_code_agent=self._is_code_agent,
             startup_mode=get_sandbox_startup_mode(),
+            shared_dir=shared_dir,
         )
         extra["policy"] = new_policy
         # provider 侧契约: 沙箱 sysop 永远带这两个 key, mode 固定 ``mount``,
