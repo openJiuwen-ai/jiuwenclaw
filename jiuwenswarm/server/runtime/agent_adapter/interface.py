@@ -486,14 +486,24 @@ def _trigger_auto_memory_extraction(
     if messages is None or len(messages) == 0:
         return
 
+    # Chat requests run on a session-scoped child adapter.  The root adapter
+    # deliberately has no ``_instance``, while auto-memory needs the live
+    # session adapter for its model, tools, and rails.
     # Launch auto memory extraction task
     try:
+        parent_agent = adapter
+        get_session_adapter = getattr(adapter, "_get_cached_session_adapter", None)
+        if callable(get_session_adapter):
+            session_adapter = get_session_adapter(session_id)
+            if session_adapter is not None:
+                parent_agent = session_adapter
+
         asyncio.create_task(
             _execute_auto_memory_extraction(
                 session_id=session_id,
                 project_dir=project_dir,
                 messages=messages,
-                parent_agent=adapter,  # Pass adapter for cache sharing
+                parent_agent=parent_agent,  # Pass live adapter for cache sharing
             )
         )
         mode = request.params.get("mode", "unknown") if isinstance(request.params, dict) else "unknown"

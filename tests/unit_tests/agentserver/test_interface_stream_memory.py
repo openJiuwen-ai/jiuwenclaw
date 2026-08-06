@@ -10,6 +10,95 @@ import pytest
 
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponseChunk
 from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
+from jiuwenswarm.server.runtime.session import session_history
+
+
+@pytest.mark.asyncio
+async def test_auto_memory_uses_live_session_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    child_adapter = object()
+    extraction_started = asyncio.Event()
+    captured: dict[str, object] = {}
+
+    class RootAdapter:
+        @staticmethod
+        def _get_cached_session_adapter(session_id: str):
+            assert session_id == "sess-auto-memory"
+            return child_adapter
+
+    async def fake_execute_auto_memory_extraction(**kwargs) -> None:
+        captured.update(kwargs)
+        extraction_started.set()
+
+    monkeypatch.setattr(
+        session_history,
+        "read_session_history_records",
+        lambda _session_id: [{"role": "user", "content": "remember this"}],
+    )
+    monkeypatch.setattr(
+        interface_module,
+        "_execute_auto_memory_extraction",
+        fake_execute_auto_memory_extraction,
+    )
+
+    request = AgentRequest(
+        request_id="req-auto-memory",
+        channel_id="tui",
+        session_id="sess-auto-memory",
+        params={"project_dir": str(tmp_path), "mode": "code.normal"},
+    )
+
+    interface_module._trigger_auto_memory_extraction(
+        RootAdapter(),
+        request,
+        "sess-auto-memory",
+    )
+    await asyncio.wait_for(extraction_started.wait(), timeout=1.0)
+
+    assert captured["parent_agent"] is child_adapter
+
+
+@pytest.mark.asyncio
+async def test_auto_memory_keeps_adapter_without_session_cache_accessor(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    adapter = object()
+    extraction_started = asyncio.Event()
+    captured: dict[str, object] = {}
+
+    async def fake_execute_auto_memory_extraction(**kwargs) -> None:
+        captured.update(kwargs)
+        extraction_started.set()
+
+    monkeypatch.setattr(
+        session_history,
+        "read_session_history_records",
+        lambda _session_id: [{"role": "user", "content": "remember this"}],
+    )
+    monkeypatch.setattr(
+        interface_module,
+        "_execute_auto_memory_extraction",
+        fake_execute_auto_memory_extraction,
+    )
+
+    request = AgentRequest(
+        request_id="req-auto-memory-fallback",
+        channel_id="tui",
+        session_id="sess-auto-memory-fallback",
+        params={"project_dir": str(tmp_path), "mode": "code.normal"},
+    )
+
+    interface_module._trigger_auto_memory_extraction(
+        adapter,
+        request,
+        "sess-auto-memory-fallback",
+    )
+    await asyncio.wait_for(extraction_started.wait(), timeout=1.0)
+
+    assert captured["parent_agent"] is adapter
 
 
 @pytest.mark.asyncio
