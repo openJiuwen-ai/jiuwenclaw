@@ -416,6 +416,31 @@ def test_run_output_stamp_skips_empty_answer():
     obs._stamp_run_output(SimpleNamespace(set_attribute=_fail), "")
 
 
+def test_single_agent_team_marker_gives_the_agent_its_own_span_tier():
+    """A single agent must carry the synthetic team marker the rail keys off.
+
+    Without it ``ObservabilityRail.before_invoke`` returns early, the agent gets
+    no span on the single-round path, and a task-tool sub-agent's invoke span
+    ends up flat under the run's root span instead of nested under it.
+    """
+    import jiuwenswarm.agents.harness.agent_observability as obs
+
+    agent = SimpleNamespace(team_name="")
+    obs.mark_single_agent_team(agent)
+
+    assert agent.team_name == obs.SINGLE_AGENT_TEAM_NAME
+
+
+def test_single_agent_team_marker_leaves_a_real_team_member_alone():
+    """A spawned teammate already has its team; never overwrite it."""
+    import jiuwenswarm.agents.harness.agent_observability as obs
+
+    agent = SimpleNamespace(team_name="research_team")
+    obs.mark_single_agent_team(agent)
+
+    assert agent.team_name == "research_team"
+
+
 def test_assemble_run_answer_does_not_double_count_the_repeated_final():
     """An ``answer`` chunk re-sends the whole reply the deltas already carried."""
     from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (

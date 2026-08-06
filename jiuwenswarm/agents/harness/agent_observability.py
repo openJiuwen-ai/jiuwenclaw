@@ -270,6 +270,42 @@ def shutdown_agent_observability() -> None:
 #         ... Runner.run_agent_streaming / Runner.run_agent ...
 #     finally:
 #         close_agent_run_span(handle)
+# Synthetic team name for the non-team run paths. Registered with
+# ``set_team_span`` for the root span, and stamped on the agents themselves by
+# :func:`mark_single_agent_team` — the observability rail keys its agent-tier
+# spans off ``agent.team_name``.
+SINGLE_AGENT_TEAM_NAME = "single-agent"
+
+
+def mark_single_agent_team(agent: Any) -> None:
+    """Stamp the synthetic team marker the observability rail keys off.
+
+    ``ObservabilityRail.before_invoke`` returns early for an agent with no
+    ``team_name``, and a single-round agent (``enable_task_loop=False``) gets
+    its span from that hook alone — ``before_task_iteration`` never fires. A
+    single agent has no team, so without this marker it produces **no
+    agent-tier span at all**: its llm/tool spans and any sub-agent's
+    ``agent.<type>.invoke`` span both attach straight to the run's root span,
+    which is what flattens a task-tool sub-agent into the agent layer instead
+    of nesting it under the dispatching agent.
+
+    ``team_name`` is a plain attribute on DeepAgent. An agent that already
+    carries one is a real team member and is left alone. Best-effort: tracing
+    setup must never break a run.
+
+    Args:
+        agent: The DeepAgent instance about to run (main agent or sub-agent).
+    """
+    if agent is None:
+        return
+    if getattr(agent, "team_name", ""):
+        return
+    try:
+        agent.team_name = SINGLE_AGENT_TEAM_NAME
+    except Exception as exc:
+        logger.debug("[AgentObservability] set team_name on agent failed: %s", exc)
+
+
 def _build_run_span_name(*, mode: str, session_id: str) -> str:
     """Build a hierarchical OTel span name: ``agent.<mode>.<session_id>``.
 
@@ -322,7 +358,7 @@ def open_agent_run_span(*, session_id: str = "", mode: str = "") -> Any:
         span.set_attribute("jiuwenswarm.mode", mode or "")
         # Register as the team span so OtelCallbackHandler's parent lookup
         # (get_team_span fallback) finds it for LLM/tool span creation.
-        set_team_span(span, team_name="single-agent")
+        set_team_span(span, team_name=SINGLE_AGENT_TEAM_NAME)
         # Also publish as the process-global current span: the supervisor task
         # doesn't inherit the ContextVar, so the get_team_span fallback (installed
         # at import) returns this for OtelCallbackHandler's parent lookup.
