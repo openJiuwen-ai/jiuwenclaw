@@ -366,16 +366,19 @@ def test_llm_span_lookup_falls_back_to_root_span():
     class _Span:
         """Hashable span stub — ActiveSpanTracker keeps spans in a set."""
 
-        def __init__(self, name: str, span_id: int) -> None:
+        def __init__(self, name: str, span_id: int, parent: Any = None) -> None:
             self.name = name
             self.context = SimpleNamespace(trace_id=trace_id, span_id=span_id)
-            self.parent = None
+            self.parent = parent.context if parent is not None else None
 
         def is_recording(self) -> bool:
             return True
 
     root_span = _Span("agent.code.normal.sess-1", 0x1)
-    llm_span = _Span("llm.call", 0x2)
+    # The llm span hangs off the root span, as one opened with the root as
+    # parent does — that link is what the tracker matches on when the callback
+    # carries no LLM call id.
+    llm_span = _Span("llm.call", 0x2, parent=root_span)
 
     tracker = sc.ActiveSpanTracker()
     tracker.on_start(llm_span)
@@ -439,6 +442,51 @@ def test_single_agent_team_marker_leaves_a_real_team_member_alone():
     obs.mark_single_agent_team(agent)
 
     assert agent.team_name == "research_team"
+
+
+def test_subagent_hook_traces_every_dispatch_path(monkeypatch):
+    """Any subagent created through create_subagent gets an observability rail.
+
+    The builtin ``task_tool`` creates its subagent inside the SDK, so only a
+    hook at creation reaches it — attaching from the ``/debug`` capture wrapper
+    alone left normal runs with no subagent spans.
+    """
+    import jiuwenswarm.agents.harness.agent_observability as obs
+    from openjiuwen.agent_teams.observability.rail import ObservabilityRail
+    from openjiuwen.harness.deep_agent import DeepAgent
+
+    class _Subagent:
+        def __init__(self):
+            self.rails = []
+            self.team_name = ""
+
+        def configured_rails(self):
+            return list(self.rails)
+
+        def add_rail(self, rail):
+            self.rails.append(rail)
+
+    created = _Subagent()
+    monkeypatch.setattr(
+        DeepAgent, "create_subagent", lambda self, *a, **k: created, raising=False
+    )
+    monkeypatch.setattr(obs, "maybe_observability_rail", ObservabilityRail, raising=False)
+    monkeypatch.setattr(
+        "openjiuwen.agent_teams.observability.rail.maybe_observability_rail",
+        ObservabilityRail,
+    )
+
+    obs.install_subagent_observability_hook()
+    returned = DeepAgent.create_subagent(object(), "explore_agent", "sess-1")
+
+    assert returned is created
+    assert sum(isinstance(r, ObservabilityRail) for r in created.rails) == 1
+
+    # Idempotent: re-installing must not stack wrappers, and a second creation
+    # must not add a second rail.
+    obs.install_subagent_observability_hook()
+    DeepAgent.create_subagent(object(), "explore_agent", "sess-1")
+    assert sum(isinstance(r, ObservabilityRail) for r in created.rails) == 1
 
 
 def test_assemble_run_answer_does_not_double_count_the_repeated_final():
@@ -1019,12 +1067,12 @@ class TestSubagentCapture:
         assert getattr(TaskTool, "debug_trace_patch_applied", False) is True
 
     def test_ensure_observability_rail_attaches_when_obs_up(self, monkeypatch):
-        # When observability is initialized, _ensure_observability_rail must
+        # When observability is initialized, attach_subagent_observability must
         # add_rail() an ObservabilityRail onto the subagent (run-time attachment,
         # since build-time is unreliable when obs isn't up yet).
         import types
 
-        from jiuwenswarm.server.runtime.debug_trace import subagent_capture
+        import jiuwenswarm.agents.harness.agent_observability as subagent_capture
 
         sentinel = types.SimpleNamespace(name="OBS_RAIL")
 
@@ -1048,13 +1096,13 @@ class TestSubagentCapture:
             def add_rail(self, rail):
                 added.append(rail)
 
-        subagent_capture._ensure_observability_rail(FakeSub())
+        subagent_capture.attach_subagent_observability(FakeSub())
         assert added == [sentinel]
 
     def test_ensure_observability_rail_skips_when_already_attached(self, monkeypatch):
         import types, sys
 
-        from jiuwenswarm.server.runtime.debug_trace import subagent_capture
+        import jiuwenswarm.agents.harness.agent_observability as subagent_capture
 
         class FakeObsRail:
             pass
@@ -1075,13 +1123,13 @@ class TestSubagentCapture:
             def add_rail(self, rail):
                 added.append(rail)
 
-        subagent_capture._ensure_observability_rail(FakeSub())
+        subagent_capture.attach_subagent_observability(FakeSub())
         assert added == []  # idempotent: not re-added
 
     def test_ensure_observability_rail_noop_when_obs_off(self, monkeypatch):
         import types, sys
 
-        from jiuwenswarm.server.runtime.debug_trace import subagent_capture
+        import jiuwenswarm.agents.harness.agent_observability as subagent_capture
 
         fake_mod = types.ModuleType("fake_obs_rail")
         fake_mod.ObservabilityRail = type("ObservabilityRail", (), {})
@@ -1097,6 +1145,6 @@ class TestSubagentCapture:
             def add_rail(self, rail):
                 added.append(rail)
 
-        subagent_capture._ensure_observability_rail(FakeSub())
+        subagent_capture.attach_subagent_observability(FakeSub())
         assert added == []  # no-op when observability is off
 
