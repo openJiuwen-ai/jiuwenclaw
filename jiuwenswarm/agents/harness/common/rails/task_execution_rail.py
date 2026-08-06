@@ -9,6 +9,7 @@ so downstream tool/artifact events can be attributed to the active task.
 from __future__ import annotations
 
 import json
+import re
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -35,6 +36,68 @@ _ACTIVE_TASK_ID: ContextVar[str | None] = ContextVar(
 def get_current_task_id() -> str | None:
     """Return current task id for stream payload correlation."""
     return _ACTIVE_TASK_ID.get()
+
+
+# 图像产物扩展名白名单
+_IMAGE_ARTIFACT_EXTENSIONS = frozenset({
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg",
+})
+
+# 文件路径检测的正则表达式模式（仿 PR#1440，配合图像扩展名白名单过滤）
+_IMAGE_FILE_PATH_PATTERNS = [
+    # Windows绝对路径 (D:\path, D:/path)
+    re.compile(r'[A-Za-z]:[/\\][^\s\]\}\)\,\'\"`<>，。；、：]+'),
+    # Unix绝对路径 (/path/to/file)
+    re.compile(r'/[^\s\]\}\)\,\'\"`<>，。；、：]+'),
+    # 相对路径带有扩展名 (./path, path/file.ext)
+    re.compile(
+        r'(?<![/\\])(?:\.{1,2}[/\\])?(?:[^\s\]\}\)\,\'\"`<>，。；、：]+[/\\])+'
+        r'[^\s\]\}\)\,\'\"`<>，。；、：]+\.[a-zA-Z0-9]{1,10}'
+    ),
+]
+
+_PATH_TRAILING_CHARS = "'\"`\\]\\}\\),.;:，。；、："
+
+
+def _clean_path_candidate(path_str: str) -> str:
+    """清理正则提取到的路径候选首尾非法字符。"""
+    return path_str.strip().strip(_PATH_TRAILING_CHARS).strip()
+
+
+def _extract_image_paths_from_tool_result(tool_result: Any) -> list[str]:
+    """从工具输出结果中提取图像产物路径。
+
+    仿 PR#1440 的正则提取思路，范围限定为图像扩展名白名单。
+    处理字符串、字典、对象三类结果。
+    """
+    if tool_result is None:
+        return []
+
+    if isinstance(tool_result, str):
+        result_text = tool_result
+    elif isinstance(tool_result, dict):
+        result_text = json.dumps(tool_result, ensure_ascii=False)
+    elif hasattr(tool_result, "__dict__"):
+        result_text = str(tool_result)
+    else:
+        result_text = str(tool_result)
+
+    seen: set[str] = set()
+    paths: list[str] = []
+    for pattern in _IMAGE_FILE_PATH_PATTERNS:
+        for match in pattern.findall(result_text):
+            cleaned = _clean_path_candidate(match)
+            if not cleaned:
+                continue
+            identity = cleaned.replace("\\", "/").lower()
+            if identity in seen:
+                continue
+            if Path(cleaned).suffix.lower() not in _IMAGE_ARTIFACT_EXTENSIONS:
+                continue
+            seen.add(identity)
+            paths.append(cleaned)
+
+    return paths
 
 
 @dataclass
@@ -66,6 +129,9 @@ class TaskExecutionRail(DeepAgentRail):
     TODO_TOOLS = frozenset({
         "todo_create", "todo_get", "todo_list", "todo_modify",
     })
+
+    # 触发图像产物后处理 hook 的工具
+    IMAGE_TOOLS = frozenset({"generate_image"})
 
     def __init__(self) -> None:
         super().__init__()
@@ -163,6 +229,91 @@ class TaskExecutionRail(DeepAgentRail):
         if tool_name in self.TODO_TOOLS:
             await self._sync_todo_and_emit_transitions(ctx)
             return
+
+        if tool_name in self.IMAGE_TOOLS:
+            await self._trigger_image_artifact_hook(ctx)
+            return
+
+    async def _trigger_image_artifact_hook(
+        self, ctx: AgentCallbackContext
+    ) -> None:
+        """图像产物落盘后触发 IMAGE_ARTIFACT_POST_PROCESS 扩展 hook。
+
+        从 tool_result 解析图像路径，构建 ImageArtifactHookContext 并触发
+        扩展回调；扩展可在 handler 中对文件做原地后处理（如加水印）。
+        ExtensionRegistry 未初始化或扩展抛错时仅记 warning，不阻断主流程。
+        """
+        session = ctx.session
+        if session is None:
+            return
+        try:
+            session_id = session.get_session_id()
+        except Exception:
+            logger.debug(
+                "[TaskExecutionRail] image artifact hook: "
+                "failed to get session_id",
+                exc_info=True,
+            )
+            return
+
+        tool_result = getattr(ctx.inputs, "tool_result", None)
+        image_paths = _extract_image_paths_from_tool_result(tool_result)
+        if not image_paths:
+            return
+
+        task_id = _ACTIVE_TASK_ID.get()
+        tool_name = ctx.inputs.tool_name
+
+        try:
+            from jiuwenswarm.extensions.registry import ExtensionRegistry
+            from jiuwenswarm.extensions.hook_event import (
+                AgentServerHookEvents,
+            )
+            from jiuwenswarm.extensions.hooks_context import (
+                ImageArtifactHookContext,
+            )
+        except ImportError as exc:
+            logger.warning(
+                "[TaskExecutionRail] skip image artifact hook, "
+                "import failed: %s",
+                exc,
+            )
+            return
+
+        hook_ctx = ImageArtifactHookContext(
+            session_id=session_id,
+            tool_name=tool_name,
+            task_id=task_id,
+            artifact_paths=image_paths,
+        )
+        try:
+            await ExtensionRegistry.get_instance().trigger(
+                AgentServerHookEvents.IMAGE_ARTIFACT_POST_PROCESS,
+                hook_ctx,
+            )
+        except RuntimeError:
+            logger.warning(
+                "[TaskExecutionRail] skip image artifact hook: "
+                "ExtensionRegistry not initialized",
+            )
+            return
+        except Exception as exc:
+            logger.warning(
+                "[TaskExecutionRail] image artifact hook failed "
+                "session_id=%s tool=%s error=%s",
+                session_id,
+                tool_name,
+                exc,
+            )
+            return
+
+        logger.info(
+            "[TaskExecutionRail] image artifact hook done "
+            "session_id=%s tool=%s count=%d",
+            session_id,
+            tool_name,
+            len(image_paths),
+        )
 
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
         self._todo_map_before_tool = {}
