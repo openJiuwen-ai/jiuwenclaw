@@ -24,7 +24,12 @@ logger = logging.getLogger(__name__)
 _CHART_CANDIDATE_TYPES = {"data", "comparison", "technology", "trend"}
 
 
-def _extract_designer_section(text: str, *, include_charts: bool = False) -> str:
+def _extract_designer_section(
+    text: str,
+    *,
+    include_charts: bool = False,
+    for_content_template_fill: bool = False,
+) -> str:
     """从新版 references/designer.md 提取当前生成链路需要的关键章节。
 
     文件 IO 由 PrepareNode 通过 read_file 工具完成后传入 text，
@@ -71,25 +76,27 @@ def _extract_designer_section(text: str, *, include_charts: bool = False) -> str
     if include_charts:
         chart_section = _extract_bounded_section(
             "## 图表与数据可视化",
-            # 当前 SkillTurbo 普通分支仍生成完整 HTML，不预铺外部模板中的
-            # CHART_SCAFFOLD；只注入合并后的图表选型和通用规范，避免改变既有链路。
             ("\n### 激活 content-template", "\n## 图片使用规范"),
         )
-        chart_section = chart_section.replace(
-            "渲染器、`animation:false`、字体栈合并与容器高度兜底已由模板 CSS 与 "
-            "CHART_SCAFFOLD 固化并强制执行；以下为骨架无法替你决策、需要自觉遵守的规则。",
-            "当前 SkillTurbo 完整 HTML 分支由本提示和 P8 后置校验强制执行渲染器、"
-            "`animation:false`、字体栈与容器高度规则；以下规则必须由页面显式遵守。",
-        ).replace(
-            "骨架已内置 `{ renderer: 'svg' }`，禁止改回 canvas。",
-            "必须显式使用 `{ renderer: 'svg' }`，禁止改用 canvas。",
-        )
+        if chart_section and not for_content_template_fill:
+            chart_section = chart_section.replace(
+                "渲染器、`animation:false`、字体栈合并与容器高度兜底已由模板 CSS 与 "
+                "CHART_SCAFFOLD 固化并强制执行；以下为骨架无法替你决策、需要自觉遵守的规则。",
+                "当前 SkillTurbo 完整 HTML 分支由本提示和 P8 后置校验强制执行渲染器、"
+                "`animation:false`、字体栈与容器高度规则；以下规则必须由页面显式遵守。",
+            ).replace(
+                "骨架已内置 `{ renderer: 'svg' }`，禁止改回 canvas。",
+                "必须显式使用 `{ renderer: 'svg' }`，禁止改用 canvas。",
+            )
         sections.append(chart_section)
 
     selected = [section for section in sections if section]
     if not selected:
         logger.warning("[P8.0] designer.md 未匹配到新版关键章节")
         return ""
+
+    if for_content_template_fill:
+        return "\n\n".join(selected)
 
     return (
         "兼容说明：以下 designer 规范中的 Grid 示例在本链路必须用等价 Flex 权重实现；"
@@ -115,6 +122,61 @@ _STRUCTURAL_TEMPLATE_PAGE_TYPES: dict[str, str] = {
 _DEFAULT_GEN_RETRY_ROUND = 1
 _MAX_PAGE_GENERATION_ATTEMPTS = 3
 _UNFILLED_PLACEHOLDER_RE = re.compile(r"\{\{[A-Z][A-Z0-9_]*\}\}")
+_CONTENT_PAGE_TYPES = frozenset({
+    "content",
+    "trend",
+    "data",
+    "case",
+    "comparison",
+    "technology",
+})
+_PLACEHOLDER_SLOP_VALUES = frozenset({
+    "",
+    "—",
+    "–",
+    "-",
+    "n/a",
+    "tbd",
+    "暂无",
+    "待补充",
+    "待定",
+    "占位",
+})
+_MAIN_OPEN_TAG_RE = re.compile(r"<main\b[^>]*>", re.IGNORECASE)
+_MAIN_CLOSE_TAG_RE = re.compile(r"</main>", re.IGNORECASE)
+_HEAD_BLOCK_RE = re.compile(r"<head\b[^>]*>.*?</head>", re.IGNORECASE | re.DOTALL)
+_TITLE_TAG_RE = re.compile(r"(<title\b[^>]*>)(.*?)(</title>)", re.IGNORECASE | re.DOTALL)
+_H1_INNER_TEXT_RE = re.compile(
+    r"(<h1\b[^>]*>)(.*?)(</h1>)",
+    re.IGNORECASE | re.DOTALL,
+)
+_CONTENT_SAFE_OPEN_RE = re.compile(r'<div class="content-safe"', re.IGNORECASE)
+_FOOTER_BLOCK_RE = re.compile(
+    r'<div class="[^"]*\bflex-shrink-0\b[^"]*"[^>]*>\s*<p\b[^>]*>.*?</p>\s*</div>',
+    re.IGNORECASE | re.DOTALL,
+)
+_P_INNER_TEXT_RE = re.compile(r"(<p\b[^>]*>)(.*?)(</p>)", re.IGNORECASE | re.DOTALL)
+
+
+def _normalize_template_whitespace(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "")).strip()
+
+
+def _outline_needs_research(outline_page: str) -> bool:
+    return "✅" in outline_page and (
+        "页研究查询" in outline_page
+        or "数据需求" in outline_page
+        or "研究需求" in outline_page
+    )
+
+
+def _uses_content_template_fill(style_id: str, page_type: str, outline_page: str) -> bool:
+    """预设四风格内容页：官方 content-template 预铺后仅填槽。"""
+    if style_id not in _PRESET_STYLE_IDS:
+        return False
+    if page_type in _STRUCTURAL_TEMPLATE_PAGE_TYPES:
+        return False
+    return _outline_needs_research(outline_page)
 
 
 def _uses_structural_template_fill(style_id: str, page_type: str) -> bool:
@@ -305,6 +367,206 @@ def _build_agenda_template_fill_prompt(
         outline_full=outline_full,
         seed_html=seed_html,
         user_query=user_query,
+    )
+
+
+def _extract_main_open_tag(html: str) -> str:
+    match = _MAIN_OPEN_TAG_RE.search(html or "")
+    return match.group(0) if match else ""
+
+
+def _extract_main_inner_html(html: str) -> str:
+    open_match = _MAIN_OPEN_TAG_RE.search(html or "")
+    if not open_match:
+        return ""
+    close_match = _MAIN_CLOSE_TAG_RE.search(html or "", open_match.end())
+    if not close_match:
+        return ""
+    return (html or "")[open_match.end():close_match.start()]
+
+
+def _normalize_h1_text_only(html: str) -> str:
+    return _H1_INNER_TEXT_RE.sub(r"\1__PAGE_TITLE__\3", html or "", count=1)
+
+
+def _normalize_title_tag_text_only(html: str) -> str:
+    return _TITLE_TAG_RE.sub(r"\1__PAGE_TITLE__\3", html or "", count=1)
+
+
+def _extract_head_block(html: str) -> str:
+    match = _HEAD_BLOCK_RE.search(html or "")
+    return match.group(0) if match else ""
+
+
+def _extract_header_block(html: str) -> str:
+    content_safe_match = _CONTENT_SAFE_OPEN_RE.search(html or "")
+    main_match = _MAIN_OPEN_TAG_RE.search(html or "")
+    if not content_safe_match or not main_match or main_match.start() <= content_safe_match.start():
+        return ""
+    return (html or "")[content_safe_match.start():main_match.start()]
+
+
+def _extract_footer_block(html: str) -> str:
+    matches = list(_FOOTER_BLOCK_RE.finditer(html or ""))
+    if not matches:
+        return ""
+    return matches[-1].group(0)
+
+
+def _normalize_footer_text_only(html: str) -> str:
+    footer_block = _extract_footer_block(html)
+    if not footer_block:
+        return ""
+    return _P_INNER_TEXT_RE.sub(r"\1__PAGE_FOOTER__\3", footer_block, count=1)
+
+
+def _has_placeholder_slop(text: str) -> bool:
+    normalized = re.sub(r"\s+", " ", str(text or "")).strip().casefold()
+    return normalized in _PLACEHOLDER_SLOP_VALUES
+
+
+def _validate_content_template_fill_output(seed_html: str, filled_html: str) -> tuple[bool, str]:
+    """Stage 6 软门禁：内容页必须基于 seed 填槽，不能改 chrome。"""
+    if not _is_valid_html(filled_html):
+        return False, "invalid_html"
+    if _has_unfilled_placeholders(filled_html):
+        return False, "unfilled_placeholders"
+    if _normalize_template_whitespace(seed_html) == _normalize_template_whitespace(filled_html):
+        return False, "seed_not_modified"
+
+    seed_main_tag = _extract_main_open_tag(seed_html)
+    filled_main_tag = _extract_main_open_tag(filled_html)
+    if not seed_main_tag or seed_main_tag != filled_main_tag:
+        return False, "main_tag_changed"
+
+    seed_head = _normalize_template_whitespace(_normalize_title_tag_text_only(_extract_head_block(seed_html)))
+    filled_head = _normalize_template_whitespace(_normalize_title_tag_text_only(_extract_head_block(filled_html)))
+    if not seed_head or seed_head != filled_head:
+        return False, "content_template_chrome_changed"
+
+    seed_header = _normalize_template_whitespace(_normalize_h1_text_only(_extract_header_block(seed_html)))
+    filled_header = _normalize_template_whitespace(_normalize_h1_text_only(_extract_header_block(filled_html)))
+    if not seed_header or seed_header != filled_header:
+        return False, "content_template_chrome_changed"
+
+    seed_footer = _normalize_template_whitespace(_normalize_footer_text_only(seed_html))
+    filled_footer = _normalize_template_whitespace(_normalize_footer_text_only(filled_html))
+    if not seed_footer or seed_footer != filled_footer:
+        return False, "content_template_chrome_changed"
+
+    main_inner_html = _extract_main_inner_html(filled_html)
+    if not main_inner_html.strip():
+        return False, "empty_page_content"
+    if "{{PAGE_CONTENT}}" in main_inner_html:
+        return False, "page_content_unfilled"
+
+    title_match = _H1_INNER_TEXT_RE.search(filled_html)
+    if not title_match or _has_placeholder_slop(re.sub(r"<[^>]+>", "", title_match.group(2))):
+        return False, "title_invalid"
+
+    footer_block = _extract_footer_block(filled_html)
+    if not footer_block:
+        return False, "footer_missing"
+    footer_text = re.sub(r"<[^>]+>", "", footer_block).strip()
+    if _has_placeholder_slop(footer_text):
+        return False, "footer_invalid"
+
+    if not _validate_slide_dom(filled_html):
+        return False, "invalid_dom"
+    if not _validate_chart_height_chain(filled_html):
+        return False, "invalid_chart_height_chain"
+    return True, ""
+
+
+def _build_content_layout_template(page_type: str) -> str:
+    layout = _PAGE_LAYOUT_TEMPLATES.get(page_type, "")
+    if not layout:
+        return ""
+    return (
+        layout
+        .replace('<div class="content-safe flex flex-col">\n', "")
+        .replace('  <header class="flex-shrink-0">4-6 个关键数字卡片，flex</header>\n', "")
+        .replace('  <header class="flex-shrink-0">3 个关键数字卡片</header>\n', "")
+        .replace('  <header class="flex-shrink-0">4 个关键数字卡片</header>\n', "")
+        .replace('  <footer class="flex-shrink-0">数据来源汇总条</footer>\n', "")
+        .replace('  <footer class="flex-shrink-0">案例素材详细描述 + 数据来源页脚</footer>\n', "")
+        .replace("</div>\n```\n", "```\n")
+    )
+
+
+def _build_content_template_fill_prompt(
+    *,
+    page_number: int,
+    style_id: str,
+    style_text: str,
+    outline_page: str,
+    research_page: str,
+    outline_full: str,
+    seed_html: str,
+    image_map_page: str = "",
+    designer_md_text: str = "",
+    user_query: str = "",
+    total_pages: int = 0,
+) -> str:
+    """预设四风格内容页：content-template 预铺后仅填三处占位符。"""
+    user_query_section = ""
+    if user_query:
+        user_query_section = (
+            "## 用户原始 query（用于指导内容方向和视觉风格要求）\n"
+            f"{user_query}\n"
+            f"⚠️ 用户 query 中的页数/总量要求已由大纲规划完成，本步骤**仅填充第 {page_number} 页内容页模板**。\n\n"
+        )
+    outline_full_section = ""
+    if outline_full.strip() and outline_full.strip() != outline_page.strip():
+        outline_full_section = (
+            "### 大纲全文（仅用于核对本页章节与上下文，不得混入其他页内容）\n"
+            f"{outline_full}\n\n"
+        )
+    page_type = _detect_page_type(outline_page)
+    page_number_rule = _build_visible_page_number_rule(
+        user_query,
+        page_number,
+        total_pages or page_number,
+    )
+    designer_section = ""
+    if designer_md_text:
+        designer_md = _extract_designer_section(
+            designer_md_text,
+            include_charts=page_type in _CHART_CANDIDATE_TYPES,
+            for_content_template_fill=True,
+        )
+        if designer_md:
+            designer_section = f"\n## skill designer 约束（仅作用于 `{{PAGE_CONTENT}}`）\n{designer_md}\n"
+    layout_template = _build_content_layout_template(page_type)
+    return (
+        f"{user_query_section}"
+        f"## 任务：填充第 {page_number} 页预设风格 content-template 官方模板\n"
+        f"style_id=`{style_id}`，模板=`content-template.html`。你是模板填充师，不是自由排版设计师。\n\n"
+        "## 填充规则（对齐 Stage 6 §3.5，严格遵守）\n"
+        "1. **字面拷贝已完成**：下方 HTML 即官方 `content-template.html` 预铺结果；"
+        "禁止重写整页、禁止改标题栏/页脚/CSS/`@layer utilities`/装饰/SVG/Tailwind class 顺序\n"
+        "2. **只允许替换 3 类占位符**：`{{PAGE_TITLE}}`、`{{PAGE_CONTENT}}`、`{{PAGE_FOOTER}}`\n"
+        "3. `{{PAGE_TITLE}}` 只填写本页标题文字；不得改 `<h1>` 的 class、字号、字重、字体、装饰线、padding\n"
+        "4. `{{PAGE_FOOTER}}` 只填写来源/备注；不得追加运行页码\n"
+        "5. `{{PAGE_CONTENT}}` 必须替换为一个且仅一个首层根容器，根容器必须带 `w-full flex-1 min-h-0`\n"
+        "6. 不得修改预铺模板 `<main>` 的 class；所有布局变化仅在 `{{PAGE_CONTENT}}` 内完成\n"
+        "7. 每个占位符必须填有意义内容；禁止空串、`—`/`–`/`-`、`N/A`、`TBD`、`暂无`、`待补充`、`待定`、`占位`\n"
+        "8. 图表候选页必须优先激活模板内 `CHART_SCAFFOLD`，按模板注释填充 option；禁止额外手写第二套图表初始化框架\n"
+        "9. 直接输出完整 HTML，禁止 Markdown 代码块包裹与解释文字\n\n"
+        "## 风格文件（正文区配色/字体/组件权威；不得把风格元数据写成观众可见文字）\n"
+        f"{style_text}\n\n"
+        "## 大纲 — 本页规划\n"
+        f"{outline_page}\n\n"
+        f"{outline_full_section}"
+        "## 研究报告 — 本页素材\n"
+        f"{research_page}\n"
+        f"{_build_image_section(image_map_page)}\n"
+        f"{page_number_rule}"
+        f"{_EDITABLE_LAYERING_RULES}"
+        f"{designer_section}"
+        f"{layout_template}\n"
+        "## 预铺模板 HTML（只填槽，勿重写）\n"
+        f"{seed_html}\n"
     )
 
 _VISIBLE_PAGE_NUMBER_RULE = (
@@ -3187,11 +3449,90 @@ class PageWorkerNode(PlanNode):
         """预设/custom agenda：官方模板预铺 + 仅填 {{}}。"""
         return await self._generate_structural_template_fill(ctx, "agenda")
 
+    async def _generate_content_template_fill(self, ctx: PageGenContext) -> str:
+        """预设四风格内容页：官方 content-template 预铺 + 仅填三处占位符。"""
+        if not ctx.pptx_root:
+            logger.error("[P8.1] 内容页填槽缺少 pptx_root page=%d", ctx.page_num)
+            return ""
+
+        template_path = _resolve_style_page_template_path(
+            ctx.pptx_root,
+            ctx.style_id,
+            page_type="content",
+        )
+        seed_html = await self._read_file(template_path)
+        if not seed_html.strip():
+            logger.error(
+                "[P8.1] 内容页官方模板缺失或为空 page=%d style=%s path=%s",
+                ctx.page_num,
+                ctx.style_id,
+                template_path,
+            )
+            return ""
+
+        try:
+            result = await self.stream_llm_collect(
+                prompt=_build_content_template_fill_prompt(
+                    page_number=ctx.page_num,
+                    style_id=ctx.style_id,
+                    style_text=ctx.style_text,
+                    outline_page=ctx.outline_page,
+                    research_page=ctx.research_page,
+                    outline_full=ctx.outline_full,
+                    seed_html=seed_html,
+                    image_map_page=ctx.image_map_page,
+                    designer_md_text=ctx.designer_md_text,
+                    user_query=ctx.user_query,
+                    total_pages=ctx.total_pages,
+                ),
+                system_prompt=(
+                    "你是 PPT 内容页模板填充师。只替换模板中的 PAGE_TITLE、PAGE_CONTENT、PAGE_FOOTER，"
+                    "直接输出完整 HTML 原文，不输出任何解释。"
+                ),
+                node_name=f"p8_1_content_fill_{ctx.page_num}",
+                concurrent=True,
+            )
+        except Exception as e:
+            if isinstance(e, AbortError):
+                raise
+            logger.warning("[P8.1] 内容页填槽 LLM 失败 page=%d: %s", ctx.page_num, e)
+            return ""
+
+        html = _strip_html_fence(result or "")
+        html = _replace_placeholder_headings(html, ctx.outline_page)
+        html = _apply_visible_page_number_policy(
+            html,
+            user_query=ctx.user_query,
+            page_number=ctx.page_num,
+            total_pages=ctx.total_pages,
+            style_id=ctx.style_id,
+        )
+        html = _fix_echarts_svg_renderer(html)
+        html = _strip_unsupported_fullpage_overlays(html)
+        html = _strip_chart_header_unit(html)
+        ok, reason = _validate_content_template_fill_output(seed_html, html)
+        if not ok:
+            logger.warning(
+                "[P8.1] 内容页填槽校验失败 page=%d style=%s reason=%s",
+                ctx.page_num,
+                ctx.style_id,
+                reason,
+            )
+            return ""
+        logger.info(
+            "[P8.1] 内容页官方模板填槽完成 page=%d style=%s",
+            ctx.page_num,
+            ctx.style_id,
+        )
+        return html
+
     async def _generate_one(self, ctx: PageGenContext) -> str:
         """生成单页 HTML，返回校验通过的 html 或空串。"""
         page_type = _detect_page_type(ctx.outline_page)
         if _uses_structural_template_fill(ctx.style_id, page_type):
             return await self._generate_structural_template_fill(ctx, page_type)
+        if _uses_content_template_fill(ctx.style_id, page_type, ctx.outline_page):
+            return await self._generate_content_template_fill(ctx)
 
         try:
             result = await self.stream_llm_collect(

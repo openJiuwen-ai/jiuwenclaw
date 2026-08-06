@@ -714,6 +714,162 @@ _ENDING_FILLED_HTML = """<!DOCTYPE html>
 </html>
 """
 
+_CONTENT_SEED_HTML = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>{{PAGE_TITLE}}</title>
+</head>
+<body>
+<div class="ppt-slide flex flex-col bg-white" type="content">
+  <div class="content-safe">
+    <div class="pt-[40px] pb-[16px] flex-shrink-0">
+      <h1 class="text-[35px] font-semibold text-nearBlack leading-[1.07] tracking-[-0.28px]">
+        {{PAGE_TITLE}}
+      </h1>
+      <div class="w-[40px] h-[1px] bg-nearBlack mt-[12px]"></div>
+    </div>
+    <main class="flex-1 min-h-0 flex flex-col justify-center overflow-hidden">
+      {{PAGE_CONTENT}}
+    </main>
+    <div class="pt-[8px] pb-[16px] flex-shrink-0">
+      <p class="text-[14px] text-grayText">
+        {{PAGE_FOOTER}}
+      </p>
+    </div>
+  </div>
+</div>
+</body>
+</html>
+"""
+
+_CONTENT_FILLED_HTML = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>业务趋势</title>
+</head>
+<body>
+<div class="ppt-slide flex flex-col bg-white" type="content">
+  <div class="content-safe">
+    <div class="pt-[40px] pb-[16px] flex-shrink-0">
+      <h1 class="text-[35px] font-semibold text-nearBlack leading-[1.07] tracking-[-0.28px]">
+        业务趋势
+      </h1>
+      <div class="w-[40px] h-[1px] bg-nearBlack mt-[12px]"></div>
+    </div>
+    <main class="flex-1 min-h-0 flex flex-col justify-center overflow-hidden">
+      <div class="w-full flex-1 min-h-0 flex gap-3">
+        <section class="flex-[3] min-h-0 min-w-0">
+          <div class="text-[18px]">正文内容</div>
+        </section>
+        <section class="flex-[2] min-h-0 min-w-0 flex flex-col">
+          <div class="flex-1 min-h-0 flex flex-col">
+            <div id="chart-1" class="flex-1 min-h-0 w-full"></div>
+          </div>
+        </section>
+      </div>
+    </main>
+    <div class="pt-[8px] pb-[16px] flex-shrink-0">
+      <p class="text-[14px] text-grayText">
+        数据来源：研究院
+      </p>
+    </div>
+  </div>
+</div>
+<script>
+  echarts.init(document.getElementById('chart-1'), null, {renderer:'svg'});
+</script>
+</body>
+</html>
+"""
+
+_CONTENT_BAD_CHROME_HTML = _CONTENT_FILLED_HTML.replace("text-[35px]", "text-[37px]", 1)
+
+_CONTENT_REALISTIC_SEED_HTML = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>{{PAGE_TITLE}}</title>
+<style>
+  .ppt-slide { width:1280px; height:720px; overflow:hidden; }
+</style>
+</head>
+<body>
+<div class="ppt-slide flex flex-col bg-white" type="content">
+  <div class="content-safe">
+    <div class="pt-[40px] pb-[16px] flex-shrink-0">
+      <h1 class="text-[35px] font-semibold text-nearBlack leading-[1.07] tracking-[-0.28px]">
+        {{PAGE_TITLE}}
+      </h1>
+      <div class="w-[40px] h-[1px] bg-nearBlack mt-[12px]"></div>
+    </div>
+    <main class="flex-1 min-h-0 flex flex-col justify-center overflow-hidden">
+      {{PAGE_CONTENT}}
+    </main>
+    <div class="pt-[8px] pb-[16px] flex-shrink-0">
+      <p class="text-[14px] text-grayText">
+        {{PAGE_FOOTER}}
+      </p>
+    </div>
+  </div>
+</div>
+<!-- CHART_SCAFFOLD_BEGIN
+<script>
+  const option = null;
+</script>
+CHART_SCAFFOLD_END -->
+</body>
+</html>
+"""
+
+_CONTENT_REALISTIC_FILLED_HTML = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>业务趋势</title>
+<style>
+  .ppt-slide { width:1280px; height:720px; overflow:hidden; }
+</style>
+</head>
+<body>
+<div class="ppt-slide flex flex-col bg-white" type="content">
+  <div class="content-safe">
+    <div class="pt-[40px] pb-[16px] flex-shrink-0">
+      <h1 class="text-[35px] font-semibold text-nearBlack leading-[1.07] tracking-[-0.28px]">
+        业务趋势
+      </h1>
+      <div class="w-[40px] h-[1px] bg-nearBlack mt-[12px]"></div>
+    </div>
+    <main class="flex-1 min-h-0 flex flex-col justify-center overflow-hidden">
+      <div class="w-full flex-1 min-h-0 flex gap-3">
+        <section class="flex-[3] min-h-0 min-w-0">
+          <div class="text-[18px]">正文内容</div>
+        </section>
+        <section class="flex-[2] min-h-0 min-w-0 flex flex-col">
+          <div class="flex-1 min-h-0 flex flex-col">
+            <div id="chart-1" class="flex-1 min-h-0 w-full"></div>
+          </div>
+        </section>
+      </div>
+    </main>
+    <div class="pt-[8px] pb-[16px] flex-shrink-0">
+      <p class="text-[14px] text-grayText">
+        数据来源：研究院
+      </p>
+    </div>
+  </div>
+</div>
+<script>
+  const option = { xAxis: { type: "category", data: ["Q1", "Q2"] }, yAxis: { type: "value" }, series: [{ type: "bar", data: [1, 2] }] };
+  if (option) {
+    echarts.init(document.getElementById("chart-1"), null, { renderer: "svg" }).setOption(option);
+  }
+</script>
+</body>
+</html>
+"""
+
 
 def _agenda_template_path(pptx_root: str, style_id: str) -> str:
     return ppg._resolve_style_page_template_path(pptx_root, style_id, page_type="agenda")
@@ -736,6 +892,61 @@ def _configure_agenda_worker(
         pptx_root,
         style_id,
         page_type=template_page_type,
+    )
+
+    async def _stream_llm(
+        _prompt: str,
+        _system_prompt: str = "",
+        node_name: str | None = None,
+        **_: Any,
+    ) -> AsyncIterator[str]:
+        llm_calls.append(str(node_name or ""))
+        response = queue.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        yield response
+
+    async def _use_tool(tool_name: str, **kwargs: Any) -> dict[str, Any]:
+        tool_calls.append(tool_name)
+        if tool_name == "read_file":
+            file_path = str(kwargs.get("file_path") or "")
+            if file_path.replace("\\", "/") == template_path.replace("\\", "/"):
+                return {"content": seed_html}
+            return {"content": ""}
+        if tool_name == "write_file":
+            if written_contents is not None:
+                written_contents.append(str(kwargs.get("content") or ""))
+            return {"success": True}
+        raise AssertionError(f"unexpected tool call: {tool_name}")
+
+    node.set_runtime_callbacks(
+        has_tool=lambda name: name in {"read_file", "write_file"},
+        use_tool=_use_tool,
+        stream_llm=_stream_llm,
+    )
+    return node
+
+
+def _write_content_template(tmp_path, style_id: str, content: str = _CONTENT_SEED_HTML) -> str:
+    return _write_style_template(tmp_path, style_id, "content", content)
+
+
+def _configure_content_worker(
+    llm_responses: list[str | BaseException],
+    *,
+    pptx_root: str,
+    style_id: str,
+    llm_calls: list[str],
+    tool_calls: list[str],
+    written_contents: list[str] | None = None,
+    seed_html: str = _CONTENT_SEED_HTML,
+) -> ppg.PageWorkerNode:
+    node = ppg.PageWorkerNode()
+    queue = list(llm_responses)
+    template_path = ppg._resolve_style_page_template_path(
+        pptx_root,
+        style_id,
+        page_type="content",
     )
 
     async def _stream_llm(
@@ -910,21 +1121,25 @@ def test_page_worker_agenda_rejects_unfilled_placeholders(tmp_path) -> None:
 
 
 @pytest.mark.unit
-def test_page_worker_content_page_still_uses_free_generation(tmp_path) -> None:
-    pptx_root = _write_agenda_template(tmp_path, "business-classic")
+def test_page_worker_content_page_uses_template_fill_for_preset_style(tmp_path) -> None:
+    pptx_root = _write_content_template(tmp_path, "tech-minimal")
     llm_calls: list[str] = []
     tool_calls: list[str] = []
-    node = _configure_worker(
-        [_VALID_HTML],
+    written_contents: list[str] = []
+    node = _configure_content_worker(
+        [_CONTENT_FILLED_HTML],
         llm_calls=llm_calls,
         tool_calls=tool_calls,
+        written_contents=written_contents,
+        pptx_root=pptx_root,
+        style_id="tech-minimal",
     )
 
     result = asyncio.run(
         node._execute(
             _worker_inputs(
                 page_count=1,
-                style_id="business-classic",
+                style_id="tech-minimal",
                 pptx_root=pptx_root,
                 outline_pages={
                     1: "### P1:\n- **类型**：data\n- **研究需求**：✅\n- **标题**：正文",
@@ -934,9 +1149,36 @@ def test_page_worker_content_page_still_uses_free_generation(tmp_path) -> None:
         )
     )
 
-    assert llm_calls == ["p8_1_page_1"]
+    assert llm_calls == ["p8_1_content_fill_1"]
+    assert tool_calls == ["read_file", "write_file"]
     assert result["missing_pages"] == []
     assert result["page_files"] == ["page-1.pptx.html"]
+    assert "text-[35px]" in written_contents[0]
+    assert "w-[40px] h-[1px]" in written_contents[0]
+
+
+@pytest.mark.unit
+def test_validate_content_template_fill_output_rejects_chrome_changes() -> None:
+    ok, reason = ppg._validate_content_template_fill_output(_CONTENT_SEED_HTML, _CONTENT_BAD_CHROME_HTML)
+    assert not ok
+    assert reason == "content_template_chrome_changed"
+
+
+@pytest.mark.unit
+def test_validate_content_template_fill_output_accepts_valid_filled_content() -> None:
+    ok, reason = ppg._validate_content_template_fill_output(_CONTENT_SEED_HTML, _CONTENT_FILLED_HTML)
+    assert ok
+    assert reason == ""
+
+
+@pytest.mark.unit
+def test_validate_content_template_fill_output_allows_chart_scaffold_activation() -> None:
+    ok, reason = ppg._validate_content_template_fill_output(
+        _CONTENT_REALISTIC_SEED_HTML,
+        _CONTENT_REALISTIC_FILLED_HTML,
+    )
+    assert ok
+    assert reason == ""
 
 
 @pytest.mark.unit
