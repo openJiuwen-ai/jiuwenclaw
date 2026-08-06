@@ -3641,6 +3641,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             name?: string;
             execution_status?: string | null;
             mode?: string;
+            role?: string;
+            cli_agent?: string | null;
           };
           const activeSessionId = getPayloadSessionId(payload) || undefined;
           upsertHumanShareCommandFromEvent(payload, e);
@@ -3670,7 +3672,15 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
                 mode: e.mode,
               });
             }
-          } else if (!e.type || e.type === 'team.member.spawned' || e.type === 'team.member.restarted') {
+          } else if (
+            !e.type ||
+            e.type === 'team.member.spawned' ||
+            e.type === 'team.member.restarted' ||
+            // 成员刚建好还没被拉起（status=unstarted）。后端在 leader 建人后主动
+            // 补广播这条，否则成员在被消息唤醒前对前端完全不存在——而"能 @ 到"
+            // 正是唤醒它的手段（运行时会先 auto_start 再投递）。
+            e.type === 'team.member.registered'
+          ) {
             useSessionStore.getState().addTeamMember(sessionId, {
               id: `member-${Date.now()}`,
               member_id: e.member_id || '',
@@ -3679,6 +3689,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               name: e.name,
               execution_status: e.execution_status,
               mode: e.mode,
+              role: e.role,
+              cli_agent: e.cli_agent,
             });
           }
         }

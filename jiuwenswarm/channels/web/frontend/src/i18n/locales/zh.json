@@ -78,7 +78,6 @@
     "collapseView": "收起视图",
     "expandView": "展开视图",
     "expand": "展开",
-    "runningMode": "运行模式：{{mode}}",
     "taskFallback": "任务 {{id}}",
     "memberStatus": {
       "running": "进行中",

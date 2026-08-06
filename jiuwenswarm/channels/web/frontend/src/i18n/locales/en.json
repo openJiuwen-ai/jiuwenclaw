@@ -78,7 +78,6 @@
     "collapseView": "Collapse view",
     "expandView": "Expand view",
     "expand": "Expand",
-    "runningMode": "Mode: {{mode}}",
     "taskFallback": "Task {{id}}",
     "memberStatus": {
       "running": "Running",

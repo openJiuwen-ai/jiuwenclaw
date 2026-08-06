@@ -1108,6 +1108,123 @@ async def _broadcast_team_state_snapshot(
         )
 
 
+# Leader tools that add rows to the team roster. They only persist the member
+# (status ``unstarted``); the framework publishes ``member_spawned`` when a
+# member is actually started, which normally happens much later, when a message
+# addressed to it wakes it up. Clients would have no roster until then.
+_ROSTER_MUTATING_TOOLS = frozenset({
+    "build_team",
+    "spawn_teammate",
+    "spawn_human_agent",
+    "spawn_bridge_agent",
+    "spawn_external_cli",
+})
+
+
+async def _read_team_roster(
+    channel_id: str | None,
+    session_id: str,
+    team_name: str,
+) -> list[dict[str, Any]]:
+    """Read the team's members, leader excluded.
+
+    Prefers the live monitor, which already drops the leader. Falls back to the
+    database when the monitor is not up yet — the roster tools write their rows
+    before ``team.runtime_ready`` on a freshly built team, so the fallback is
+    the normal path for the very first ``build_team``, not an edge case.
+
+    Args:
+        channel_id: Channel the session belongs to.
+        session_id: Session whose team is read.
+        team_name: Team to read from the database in the fallback path.
+
+    Returns:
+        Member dicts shaped like ``TeamMonitorHandler.get_member_list``; empty
+        when neither source can answer.
+    """
+    monitor_handler = get_team_manager(channel_id).get_monitor_handler(session_id)
+    if monitor_handler is not None:
+        members = await monitor_handler.get_member_list()
+        if members:
+            return members
+    if not team_name:
+        return []
+    return await TeamMonitorHandler.get_member_list_from_db(
+        team_name,
+        exclude_leader=True,
+    ) or []
+
+
+async def _announce_team_roster(
+    channel_id: str | None,
+    session_id: str,
+    team_name: str,
+    announced_members: set[str],
+) -> None:
+    """Tell clients about roster members they have not been told about yet.
+
+    A member exists from the moment the leader creates it, but nothing on the
+    event bus says so until it is started. That leaves the frontend without a
+    member list, so the user cannot ``@`` anyone — and ``@`` is exactly what
+    starts a member (the runtime auto-starts the addressed member before
+    delivering to it). This closes that loop by announcing created-but-unstarted
+    members, carrying their real status so clients render them as such.
+
+    Args:
+        channel_id: Channel the session belongs to.
+        session_id: Session whose roster is announced.
+        team_name: Team name used when falling back to the database.
+        announced_members: Member names already announced on this stream;
+            updated in place so each member is announced exactly once.
+    """
+    try:
+        members = await _read_team_roster(channel_id, session_id, team_name)
+        fresh = [
+            m for m in members
+            if str(m.get("member_id") or "").strip()
+            and str(m.get("member_id")).strip() not in announced_members
+        ]
+        if not fresh:
+            return
+        for member in fresh:
+            member_id = str(member["member_id"]).strip()
+            announced_members.add(member_id)
+            role = str(member.get("role") or "")
+            event = {
+                "event_type": "team.member",
+                "session_id": session_id,
+                "event": {
+                    "type": "team.member.registered",
+                    "team_id": team_name,
+                    "member_id": member_id,
+                    "name": member.get("name"),
+                    "status": member.get("status"),
+                    "execution_status": member.get("execution_status"),
+                    # Same convention as the monitor's spawned event: clients
+                    # read ``mode`` to tell a human avatar from an AI member.
+                    "mode": "human" if role == TeamRole.HUMAN_AGENT.value else role,
+                    "role": role,
+                    # An external CLI member's role is a plain teammate; only
+                    # this says which CLI backs it (claude / codex).
+                    "cli_agent": member.get("cli_agent"),
+                },
+            }
+            _persist_team_history_event(channel_id, session_id, event)
+            await _broadcast_event(channel_id, session_id, event)
+        logger.info(
+            "[TeamHelpers] announced team roster: channel_id=%s session_id=%s members=%s",
+            _resolve_channel_id(channel_id),
+            session_id,
+            [m["member_id"] for m in fresh],
+        )
+    except Exception as exc:
+        logger.warning(
+            "[TeamHelpers] failed to announce team roster: session_id=%s error=%s",
+            session_id,
+            exc,
+        )
+
+
 def _approval_result_from_event_or_items(
     *,
     skill_name: str,
@@ -2058,6 +2175,10 @@ async def _consume_stream_with_query(
     received_chunks = 0
     first_model_output_at: float | None = None
     emitted_ask_user_request_ids: set[str] = set()
+    # Members already announced to clients on this stream, so a roster refresh
+    # only emits what is new. See _announce_team_roster.
+    announced_members: set[str] = set()
+    roster_team_name = str(getattr(team_spec, "team_name", "") or "")
     # Reset the team-events flag at the start of a new round so chat.final
     # can correctly determine whether the team is active.
     tm_ = get_team_manager(channel_id)
@@ -2213,6 +2334,16 @@ async def _consume_stream_with_query(
                         session_id,
                         source="runtime_ready",
                     )
+                    # A resumed team brings its whole roster back with it and
+                    # emits no member event for anyone who is merely persisted,
+                    # so announce here as well as after the roster tools.
+                    roster_team_name = ready_team_name
+                    await _announce_team_roster(
+                        channel_id,
+                        session_id,
+                        roster_team_name,
+                        announced_members,
+                    )
                 elif parsed.get("event_type") == "team.interact.failed":
                     reason = str(parsed.get("reason") or "").strip()
                     error_msg = _INTERACT_REASON_ERROR_MAP.get(
@@ -2291,6 +2422,23 @@ async def _consume_stream_with_query(
                             "is_complete": True,
                             "member_count": parsed.get("member_count"),
                         },
+                    )
+                    continue
+                elif (
+                    is_leader
+                    and parsed.get("event_type") == "chat.tool_result"
+                    and str(parsed.get("tool_name") or "") in _ROSTER_MUTATING_TOOLS
+                ):
+                    # The leader just added members. They exist in the database
+                    # but stay silent until something starts them, so announce
+                    # the roster now — that is what makes them addressable, and
+                    # addressing one is what starts it.
+                    await _broadcast_event(channel_id, session_id, parsed)
+                    await _announce_team_roster(
+                        channel_id,
+                        session_id,
+                        roster_team_name,
+                        announced_members,
                     )
                     continue
                 elif parsed.get("event_type") == "chat.error":
@@ -2704,6 +2852,7 @@ def _persist_team_history_event(
         if member_event_type not in {
             "team.member.spawned",
             "team.member.restarted",
+            "team.member.registered",
             "team.member.status_changed",
             "team.member.shutdown",
         }:

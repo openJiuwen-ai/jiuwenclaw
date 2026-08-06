@@ -82,6 +82,64 @@ def test_persist_team_history_event_keeps_human_spawn_details(
     }
 
 
+def test_persist_team_history_event_keeps_registered_member(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Created-but-unstarted members must survive a page refresh."""
+    persisted: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        team_helpers,
+        "append_history_record",
+        lambda **kwargs: persisted.append(kwargs),
+    )
+
+    team_helpers._persist_team_history_event(
+        "web",
+        "sess_roster",
+        {
+            "event_type": "team.member",
+            "event": {
+                "type": "team.member.registered",
+                "team_id": "demo-team",
+                "member_id": "analyst",
+                "name": "Analyst",
+                "status": "unstarted",
+            },
+        },
+    )
+
+    assert len(persisted) == 1
+    assert persisted[0]["extra"]["event"]["type"] == "team.member.registered"
+    assert persisted[0]["extra"]["event"]["member_id"] == "analyst"
+
+
+@pytest.mark.anyio
+async def test_read_team_roster_db_fallback_excludes_leader(monkeypatch):
+    """The leader row carries role="teammate", so the fallback must exclude by name."""
+    calls: list[dict[str, Any]] = []
+
+    async def _fake_from_db(team_name: str, *, exclude_leader: bool = False):
+        calls.append({"team_name": team_name, "exclude_leader": exclude_leader})
+        return [{"member_id": "analyst", "status": "unstarted", "role": "teammate"}]
+
+    class _FakeManager:
+        @staticmethod
+        def get_monitor_handler(session_id: str):
+            return None
+
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
+    monkeypatch.setattr(
+        team_helpers.TeamMonitorHandler,
+        "get_member_list_from_db",
+        staticmethod(_fake_from_db),
+    )
+
+    members = await team_helpers._read_team_roster("web", "sess-fallback", "demo-team")
+
+    assert calls == [{"team_name": "demo-team", "exclude_leader": True}]
+    assert [m["member_id"] for m in members] == ["analyst"]
+
+
 class _InactiveTeamRuntimeManagerMixin:
     """Provide the session-scoped runtime state API for inactive test managers."""
 
@@ -3955,6 +4013,162 @@ async def test_broadcast_team_state_snapshot_broadcasts_member_and_task_status(m
     assert task_events[0]["event"]["status"] == "completed"
     assert task_events[1]["event"]["task_id"] == "task-2"
     assert task_events[1]["event"]["status"] == "in_progress"
+
+
+@pytest.mark.anyio
+async def test_announce_team_roster_broadcasts_created_members_once(monkeypatch):
+    """Created-but-unstarted members are announced, and only once per stream."""
+    broadcast_events: list[dict] = []
+
+    class _FakeMonitorHandler:
+        @staticmethod
+        async def get_member_list():
+            return [
+                {
+                    "member_id": "analyst",
+                    "name": "Analyst",
+                    "status": "unstarted",
+                    "execution_status": "idle",
+                    "mode": "build_mode",
+                    "role": "teammate",
+                },
+                {
+                    "member_id": "reviewer",
+                    "name": "Reviewer",
+                    "status": "unstarted",
+                    "execution_status": "idle",
+                    "mode": "build_mode",
+                    "role": "human_agent",
+                },
+            ]
+
+    class _FakeManager:
+        @staticmethod
+        def get_monitor_handler(session_id: str):
+            return _FakeMonitorHandler()
+
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
+    monkeypatch.setattr(
+        team_helpers,
+        "_broadcast_event",
+        _broadcast_recorder(broadcast_events),
+    )
+
+    announced: set[str] = set()
+    await team_helpers._announce_team_roster("web", "sess-roster", "demo-team", announced)
+
+    assert [e["event"]["member_id"] for e in broadcast_events] == ["analyst", "reviewer"]
+    assert all(e["event_type"] == "team.member" for e in broadcast_events)
+    assert all(e["event"]["type"] == "team.member.registered" for e in broadcast_events)
+    assert broadcast_events[0]["event"]["status"] == "unstarted"
+    assert broadcast_events[0]["event"]["team_id"] == "demo-team"
+    # ``mode`` follows the monitor's spawned-event convention: human avatars are
+    # flagged as "human", everything else carries its role.
+    assert broadcast_events[0]["event"]["mode"] == "teammate"
+    assert broadcast_events[1]["event"]["mode"] == "human"
+    assert announced == {"analyst", "reviewer"}
+
+    # Second pass over the same roster adds nothing.
+    broadcast_events.clear()
+    await team_helpers._announce_team_roster("web", "sess-roster", "demo-team", announced)
+    assert broadcast_events == []
+
+
+@pytest.mark.anyio
+async def test_consume_stream_with_query_announces_roster_after_member_tool(monkeypatch):
+    """A roster-mutating leader tool triggers a roster announcement."""
+    broadcasted: list[dict] = []
+
+    async def _fake_stream(**kwargs):
+        yield SimpleNamespace(
+            type="tool_result",
+            payload={"tool_result": {"tool_name": "spawn_teammate", "result": "ok"}},
+            role=TeamRole.LEADER,
+        )
+
+    class _FakeRunner:
+        run_agent_team_streaming = staticmethod(_fake_stream)
+
+        @staticmethod
+        async def get_agent_team_monitor(team_name: str, session_id: str, hide_dm: bool = False):
+            return None
+
+    class _FakeMonitorHandler:
+        @staticmethod
+        async def get_member_list():
+            return [
+                {
+                    "member_id": "analyst",
+                    "name": "Analyst",
+                    "status": "unstarted",
+                    "execution_status": "idle",
+                    "mode": "build_mode",
+                    "role": "teammate",
+                },
+            ]
+
+        @staticmethod
+        async def get_team_snapshot():
+            return None
+
+    class _FakeManager(_InactiveTeamRuntimeManagerMixin):
+        @staticmethod
+        def get_monitor_handler(session_id: str):
+            return _FakeMonitorHandler()
+
+        @staticmethod
+        def clear_pending_runtime(session_id: str) -> None:
+            pass
+
+        @staticmethod
+        def pop_stream_task(session_id: str) -> None:
+            pass
+
+        @staticmethod
+        def get_monitor(session_id: str):
+            return None
+
+        @staticmethod
+        def resolve_team_agent(session_id: str):
+            return None
+
+        @staticmethod
+        def get_workflow_handler(session_id: str):
+            return None
+
+        @staticmethod
+        def register_workflow_handler(session_id: str, handler: object) -> None:
+            pass
+
+    monkeypatch.setattr(team_helpers, "Runner", _FakeRunner)
+    fake_mgr = _FakeManager()
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: fake_mgr)
+    monkeypatch.setattr(
+        team_helpers,
+        "_broadcast_event",
+        _broadcast_recorder(broadcasted, fake_mgr),
+    )
+    monkeypatch.setattr(team_helpers, "ensure_team_evolution_watcher", lambda *args, **kwargs: None)
+    monkeypatch.setattr(team_helpers, "get_session_metadata", lambda session_id: {})
+    monkeypatch.setattr(team_helpers, "update_session_metadata", lambda **kwargs: None)
+
+    await _TeamHelpersTestApi.consume_stream_with_query(
+        "web",
+        "sess-roster-tool",
+        SimpleNamespace(team_name="demo-team"),
+        "hello",
+    )
+
+    # The tool result still reaches clients, followed by the roster.
+    tool_results = [e for e in broadcasted if e.get("event_type") == "chat.tool_result"]
+    assert len(tool_results) == 1
+    assert tool_results[0]["tool_name"] == "spawn_teammate"
+    member_events = [e for e in broadcasted if e.get("event_type") == "team.member"]
+    assert len(member_events) == 1
+    assert member_events[0]["event"]["type"] == "team.member.registered"
+    assert member_events[0]["event"]["member_id"] == "analyst"
+    assert member_events[0]["event"]["status"] == "unstarted"
+    assert broadcasted.index(tool_results[0]) < broadcasted.index(member_events[0])
 
 
 @pytest.mark.anyio
