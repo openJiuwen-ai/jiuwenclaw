@@ -1036,6 +1036,12 @@ class GatewayServer:
             matched_path,
         )
 
+        # 上报连接事件
+        if route.ws_channel is not None:
+            reporter = getattr(route.ws_channel, "report_connect", None)
+            if callable(reporter):
+                reporter(ws)
+
         # connection.ack
         try:
             await ws.send(json.dumps({
@@ -1090,6 +1096,10 @@ class GatewayServer:
                         "GatewayServer delegate unregister_ws to ws_channel failed: path=%s",
                         request_path, exc_info=True,
                     )
+                # 上报断连事件
+                reporter = getattr(route.ws_channel, "report_disconnect", None)
+                if callable(reporter):
+                    reporter(ws)
             if route.disconnect_handler is not None:
                 try:
                     # Pass stale_request_keys so the handler can recover session_ids
@@ -1596,6 +1606,11 @@ async def _run(
     channel_manager = ChannelManager(message_handler, config=initial_channels_conf)
     # 回填引用：MessageHandler 实例化早于 ChannelManager，广播全局事件时需经它取 web channel。
     message_handler.set_channel_manager(channel_manager)
+
+    # 装配 AgentOSRouterClient 订阅 Channel 连接事件
+    subscribe_fn = getattr(client, "set_channel_manager", None)
+    if callable(subscribe_fn):
+        subscribe_fn(channel_manager)
     updater_service = UpdaterService()
     prewarm_sync_debounce_task: asyncio.Task[None] | None = None
 

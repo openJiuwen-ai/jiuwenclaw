@@ -377,6 +377,10 @@ class WebChannel(BaseWsChannel):
         text = str(uid).strip()
         return text or None
 
+    def _extract_ws_user_id(self, ws: Any) -> str:
+        """WebChannel: 从 ws 提取连接级 user_id。"""
+        return self._connection_user_id(ws) or ""
+
     @staticmethod
     def _routing_key_user_id(connection_user_id: str | None, remote: Any) -> str:
         if connection_user_id:
@@ -1012,6 +1016,9 @@ class WebChannel(BaseWsChannel):
         # 注：此 sid 仅为传输层占位，首条 chat.send 携带真实 session_id 时会 re-register 覆盖。
         setattr(ws, "_jiuwen_initial_sid", _initial_sid)
 
+        # 上报连接事件
+        self.report_connect(ws)
+
         # 触发连接钩子（如发送 connection.ack）
         for hook in self._connect_hooks:
             try:
@@ -1051,6 +1058,9 @@ class WebChannel(BaseWsChannel):
             )
         finally:
             await self.unregister_ws(ws)
+
+            # 上报断连事件
+            self.report_disconnect(ws)
 
             logger.info(
                 "WebChannel 连接清理完成: %s",
