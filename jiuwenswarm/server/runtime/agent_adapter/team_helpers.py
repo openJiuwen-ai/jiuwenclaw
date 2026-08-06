@@ -79,6 +79,9 @@ from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
     terminal_stage,
     visible_evolution_progress_from_events,
 )
+from jiuwenswarm.server.runtime.agent_adapter.team_startup_guard import (
+    iter_team_stream_with_startup_guard,
+)
 from jiuwenswarm.server.runtime.agent_adapter.evolution_slash import (
     EvolutionSlashContext,
     handle_evolution_slash_command,
@@ -2003,12 +2006,13 @@ async def _consume_stream_with_query(
             _safe_query_preview(initial_query),
         )
         runner_entered_at = time.monotonic()
-        async for chunk in Runner.run_agent_team_streaming(
+        async for chunk in iter_team_stream_with_startup_guard(
             agent_team=team_spec,
             inputs={"query": initial_query},
             session=session_id,
             envs=envs,
             stream_logger=lg,
+            runner=Runner,
         ):
             received_chunks += 1
             # First event of any kind from the runner — usually a framework

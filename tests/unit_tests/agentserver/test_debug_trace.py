@@ -325,7 +325,13 @@ class TestOtelTeamSpanFallback:
         # rail (agent.<type>.invoke spans — returns early when get_team_span is None).
         import openjiuwen.agent_teams.observability.callback_handler as ch
         import openjiuwen.agent_teams.observability.rail as rail
-        import jiuwenswarm.agents.harness.agent_observability as obs  # triggers install
+        import jiuwenswarm.agents.harness.agent_observability as obs
+
+        # The production module deliberately avoids importing SDK
+        # observability modules until a run enables observability. Install the
+        # fallback after the consumers are loaded so this test remains
+        # independent of collection order.
+        obs._install_team_span_global_fallback()
 
         # Patched bindings are tracked in the module-level _team_span_patched set
         # (the wrapper is itself the key — it becomes the next lookup's orig, so
@@ -339,6 +345,8 @@ class TestOtelTeamSpanFallback:
         import openjiuwen.agent_teams.observability.callback_handler as ch
         import jiuwenswarm.agents.harness.agent_observability as obs
 
+        obs._install_team_span_global_fallback()
+
         obs._CURRENT_ROOT_SPAN = "ROOT_SENTINEL"
         try:
             assert ch.get_team_span() == "ROOT_SENTINEL"
@@ -348,6 +356,8 @@ class TestOtelTeamSpanFallback:
     def test_fallback_none_when_no_global_and_contextvar_empty(self):
         import openjiuwen.agent_teams.observability.callback_handler as ch
         import jiuwenswarm.agents.harness.agent_observability as obs
+
+        obs._install_team_span_global_fallback()
 
         obs._CURRENT_ROOT_SPAN = None
         assert ch.get_team_span() is None
