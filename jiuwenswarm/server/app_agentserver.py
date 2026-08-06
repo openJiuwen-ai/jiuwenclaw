@@ -157,8 +157,12 @@ if _should_apply_sse_invoke_patch():
 from jiuwenswarm.server.runtime.debug_trace.task_tool_patch import (
     apply_task_tool_debug_patch,
 )
+from jiuwenswarm.server.runtime.usage import apply_task_tool_usage_patch
 
 apply_task_tool_debug_patch()
+# Outside the debug patch: capture subagent usage_metadata onto the parent
+# stream (tagged with subagent_type) so /usage can attribute by_agent.
+apply_task_tool_usage_patch()
 
 # 让所有分发路径创建的 subagent 都带上 OTel 观测 rail（内置 task_tool、自定义
 # agent 工具、后台 subagent），这样子 agent 的 llm/tool span 归属自己的

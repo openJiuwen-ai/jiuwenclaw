@@ -664,6 +664,22 @@ function parseHistoryTimelineEntry(
       if (typeof rawUsage.input_cost === 'number') usage.input_cost = rawUsage.input_cost;
       if (typeof rawUsage.output_cost === 'number') usage.output_cost = rawUsage.output_cost;
       if (typeof rawUsage.total_cost === 'number') usage.total_cost = rawUsage.total_cost;
+      if (
+        rawUsage.cost_status === 'priced' ||
+        rawUsage.cost_status === 'partial' ||
+        rawUsage.cost_status === 'unpriced'
+      ) {
+        usage.cost_status = rawUsage.cost_status;
+      }
+      if (Array.isArray(rawUsage.by_member)) {
+        usage.by_member = rawUsage.by_member as UsageSummary['by_member'];
+      }
+      if (Array.isArray(rawUsage.by_agent)) {
+        usage.by_agent = rawUsage.by_agent as UsageSummary['by_agent'];
+      }
+      if (Array.isArray(rawUsage.by_model)) {
+        usage.by_model = rawUsage.by_model as UsageSummary['by_model'];
+      }
       return { kind: 'usage_summary', at, usage };
     }
     return null;

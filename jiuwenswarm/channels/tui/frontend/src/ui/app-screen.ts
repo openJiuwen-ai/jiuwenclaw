@@ -8534,6 +8534,20 @@ export class AppScreen implements Component, Focusable {
         { value: "__display__", label: `  output`, description: fmt(entry.output_tokens) },
       );
     }
+    for (const entry of summary.byMember) {
+      items.push(
+        { value: "__display__", label: `member: ${entry.name}`, description: `${fmt(entry.total_tokens)} tokens` },
+        { value: "__display__", label: `  input`, description: fmt(entry.input_tokens) },
+        { value: "__display__", label: `  output`, description: fmt(entry.output_tokens) },
+      );
+    }
+    for (const entry of summary.byAgent) {
+      items.push(
+        { value: "__display__", label: `agent: ${entry.name}`, description: `${fmt(entry.total_tokens)} tokens` },
+        { value: "__display__", label: `  input`, description: fmt(entry.input_tokens) },
+        { value: "__display__", label: `  output`, description: fmt(entry.output_tokens) },
+      );
+    }
     return items;
   }
 
