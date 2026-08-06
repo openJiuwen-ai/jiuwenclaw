@@ -928,7 +928,9 @@ async def _build_mysql_async_engine():
 
     连接参数从 ``GATEWAY_DB_*`` 读取；池参数见 ``GATEWAY_DB_POOL_*``。
     进程内复用同一 engine，避免每个 agent 再建独立连接池。
-    未配置 ``GATEWAY_DB_HOST`` 或未开 ``AGENT_RUNTIME`` 时返回 None，回退 SQLite。
+    未配置 ``GATEWAY_DB_HOST`` 或未开 ``AGENT_RUNTIME`` 时返回 None，由调用方决定是否回退 SQLite。
+    配置了 ``GATEWAY_DB_HOST`` 但连接/初始化失败时抛出异常，避免静默回退到 SQLite。
+    注意：SQLite 不扛并发，并发时会报：(sqlite3.OperationalError) disk I/O error
     """
     global _shared_mysql_checkpoint_engine
     if not os.getenv("AGENT_RUNTIME", "").strip():
@@ -1021,7 +1023,7 @@ async def _build_mysql_async_engine():
             "[JiuWenSwarmDeepAdapter] failed to create checkpoint MySQL engine: %s",
             exc,
         )
-        return None
+        raise
 
 
 async def _build_postgresql_async_engine():
@@ -1029,7 +1031,9 @@ async def _build_postgresql_async_engine():
 
     连接参数从 ``GATEWAY_DB_*`` 读取；池参数见 ``GATEWAY_DB_POOL_*``。
     进程内复用同一 engine，避免每个 agent 再建独立连接池。
-    未配置 ``GATEWAY_DB_HOST`` 或未开 ``AGENT_RUNTIME`` 时返回 None，回退 SQLite。
+    未配置 ``GATEWAY_DB_HOST`` 或未开 ``AGENT_RUNTIME`` 时返回 None，由调用方决定是否回退 SQLite。
+    配置了 ``GATEWAY_DB_HOST`` 但连接/初始化失败时抛出异常，避免静默回退到 SQLite。
+    注意：SQLite 不扛并发，并发时会报：(sqlite3.OperationalError) disk I/O error
     """
     global _shared_postgresql_checkpoint_engine
     if not os.getenv("AGENT_RUNTIME", "").strip():
@@ -1133,7 +1137,7 @@ async def _build_postgresql_async_engine():
             "[JiuWenSwarmDeepAdapter] failed to create checkpoint PostgreSQL engine: %s",
             exc,
         )
-        return None
+        raise
 
 
 async def ensure_persistent_checkpointer() -> None:
