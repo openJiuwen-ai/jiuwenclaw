@@ -168,6 +168,7 @@ from jiuwenswarm.agents.harness.common.tools.todo_compat import (
 )
 from jiuwenswarm.agents.harness.common.prompt.prompt_builder import build_agent_identity_prompt
 from jiuwenswarm.agents.harness.common.rails import (
+    BrowserTaskPromptRail,
     JiuSwarmStreamEventRail,
     MultimodalImageRail,
     ResponsePromptRail,
@@ -263,7 +264,6 @@ from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import 
     SkillRetrievalPromptRail,
 )
 from jiuwenswarm.symphony.config import load_symphony_config
-from jiuwenswarm.agents.harness.common.tools.wiki_tools import wiki_ingest, wiki_query, wiki_lint
 from jiuwenswarm.agents.harness.common.tools.pdf_tools import read_pdf
 from jiuwenswarm.agents.harness.common.tools.acp_output_tools import get_tools as get_acp_output_tools
 from jiuwenswarm.agents.harness.common.tools.acp_chat import acp_chat
@@ -4284,7 +4284,7 @@ class JiuWenSwarmDeepAdapter:
     def _build_task_planning_rail() -> TaskPlanningRail | None:
         """Build TaskPlanningRail."""
         try:
-            task_planning_rail = TaskPlanningRail()
+            task_planning_rail = TaskPlanningRail(inject_prompt=False)
             logger.info("[JiuWenSwarmDeepAdapter] TaskPlanningRail create success")
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] TaskPlanningRail create failed: %s", exc)
@@ -4295,7 +4295,7 @@ class JiuWenSwarmDeepAdapter:
     def _build_subagent_rail() -> SubagentRail | None:
         """Build SubagentRail for subagent delegation."""
         try:
-            subagent_rail = SubagentRail()
+            subagent_rail = BrowserTaskPromptRail()
             logger.info("[JiuWenSwarmDeepAdapter] SubagentRail create success")
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] SubagentRail create failed: %s", exc)
@@ -5059,7 +5059,7 @@ class JiuWenSwarmDeepAdapter:
         """Get tool cards."""
         tool_cards = []
 
-        for wtool in [wiki_ingest, wiki_query, wiki_lint, read_pdf]:
+        for wtool in [read_pdf]:
             self._register_shared_tool(wtool)
             tool_cards.append(wtool.card)
 
@@ -6343,6 +6343,8 @@ class JiuWenSwarmDeepAdapter:
             self._runtime_prompt_rail.set_session_id(runtime_config.session_id)
         if self._response_prompt_rail:
             self._response_prompt_rail.set_channel(resolved_channel)
+        if isinstance(self._subagent_rail, BrowserTaskPromptRail):
+            self._subagent_rail.set_channel(resolved_channel)
         # PermissionInterruptRail: per-request trusted_dirs 注入，使 external_directory
         # 检查将这些子树视为 internal 而跳过 ask/deny（与 RuntimePromptRail 对齐）。
         # 用 getattr 兼容绕过 __init__ 的测试构造（_permission_rail 仅在 rail 构建流程赋值）。
