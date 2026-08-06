@@ -10,10 +10,10 @@ source and the member role. It deliberately depends on **no DeepAgent instance**
 :mod:`jiuwenswarm.agents.swarm.registry`.
 
 ``build_member_deep_agent_spec`` folds those specs onto a base ``DeepAgentSpec``
-so openjiuwen builds the member from the merged spec. Two modes are supported:
+so openjiuwen builds the member from the merged spec. Two profiles are supported:
 
 * ``team`` — the chat team profile (common rails + base tools).
-* ``code.team`` / ``team.plan`` — the code profile (``swarm.code_*`` rails, code
+* ``code.team`` / ``team.plan.code`` — the code profile (``swarm.code_*`` rails, code
     sub-agents, code system prompt), all still purely declarative.
 """
 
@@ -54,9 +54,13 @@ from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
 )
 from jiuwenswarm.agents.swarm import registry
 from jiuwenswarm.agents.swarm.providers import tools as _tools
+from jiuwenswarm.common.mode_matrix import (
+    TEAM_PLAN_CODE_MODE,
+    TEAM_PLAN_NORMAL_MODE,
+)
 
 # Modes that route to the code adapter and get the code member profile.
-_CODE_MODES: frozenset[str] = frozenset({"code.team", "team.plan"})
+_CODE_MODES: frozenset[str] = frozenset({"code.team", TEAM_PLAN_CODE_MODE})
 logger = logging.getLogger(__name__)
 
 
@@ -450,6 +454,7 @@ def _role_evolution_rails(config: dict[str, Any], role: str) -> list[RailSpec]:
 
 def _build_team_capability_specs(
     config: dict[str, Any],
+    mode: str,
     role: str,
     *,
     enable_permissions: bool = False,
@@ -461,6 +466,13 @@ def _build_team_capability_specs(
     ]
     if role == "leader":
         rails_specs.append(RailSpec(type=registry.STRUCTURED_ASK_USER))
+        if mode == TEAM_PLAN_NORMAL_MODE:
+            rails_specs.extend(
+                [
+                    RailSpec(type=registry.CODE_AGENT_MODE),
+                    RailSpec(type=registry.TEAM_PLAN_APPROVAL),
+                ]
+            )
 
     if _retrieval_enabled(config):
         rails_specs.append(
@@ -511,7 +523,7 @@ def _build_code_capability_specs(
     *,
     enable_permissions: bool = False,
 ) -> tuple[list[RailSpec], list[BuiltinToolSpec]]:
-    """Build the code profile (code.team / team.plan) rail/tool specs for a member.
+    """Build the code profile (code.team / team.plan.code) specs for a member.
 
     PermissionInterruptRail (``swarm.permission_interrupt``) cannot resolve ASK
     interrupts on headless team members: the user-facing confirmation path
@@ -522,7 +534,7 @@ def _build_code_capability_specs(
     When ``enable_permissions`` is false the permission interrupt rail is
     removed entirely: it would deadlock a teammate on any ASK-level tool call.
     """
-    is_team_plan_leader = mode == "team.plan" and role == "leader"
+    is_team_plan_leader = mode == TEAM_PLAN_CODE_MODE and role == "leader"
 
     rails_specs: list[RailSpec] = [
         RailSpec(type=name, params=_rail_params(name, config))
@@ -548,7 +560,9 @@ def _build_code_capability_specs(
             ),
         )
 
-    if mode != "team.plan":
+    # The plan-only approval gate belongs to the Leader. A code Team Plan
+    # teammate must otherwise be assembled exactly like a code.team teammate.
+    if not is_team_plan_leader:
         rails_specs.append(
             RailSpec(
                 type=registry.CODE_CONFIRM_INTERRUPT,
@@ -590,7 +604,7 @@ def build_member_capability_specs(
 
     Args:
         config: The resolved ``config.yaml`` mapping (team blueprint shape).
-        mode: The request mode ("team" / "code.team" / "team.plan").
+        mode: The canonical team request mode.
         role: The member role ("leader" or "teammate").
         enable_permissions: Effective team permission toggle from TeamAgentSpec.
 
@@ -599,7 +613,9 @@ def build_member_capability_specs(
     """
     if _is_code_mode(mode):
         return _build_code_capability_specs(config, mode, role, enable_permissions=enable_permissions)
-    return _build_team_capability_specs(config, role, enable_permissions=enable_permissions)
+    return _build_team_capability_specs(
+        config, mode, role, enable_permissions=enable_permissions
+    )
 
 
 def _is_subagent_enabled(sub_cfg: Any) -> bool:
@@ -610,11 +626,11 @@ def _is_subagent_enabled(sub_cfg: Any) -> bool:
 def _subagent_language(mode: str, role: str, config: dict[str, Any]) -> str:
     """Resolve the code sub-agent runtime language (mirrors ``code_runtime_language``).
 
-    Code mode is English-only except the team.plan leader, which uses the
+    Code mode is English-only except the team.plan.code leader, which uses the
     configured preferred language. Baked into ``factory_kwargs`` so the generic
     openjiuwen sub-agent providers stay free of swarm mode/role policy.
     """
-    if mode == "team.plan" and role == "leader":
+    if mode == TEAM_PLAN_CODE_MODE and role == "leader":
         return resolve_language((config or {}).get("preferred_language", "zh"))
     return "en"
 
@@ -736,7 +752,7 @@ def build_member_deep_agent_spec(
 
     Args:
         config: The resolved ``config.yaml`` mapping.
-        mode: The request mode ("team" / "code.team" / "team.plan").
+        mode: The canonical team request mode.
         role: The member role ("leader" or "teammate").
         base_spec: The base member ``DeepAgentSpec`` to extend.
         enable_permissions: Effective team permission toggle from TeamAgentSpec.

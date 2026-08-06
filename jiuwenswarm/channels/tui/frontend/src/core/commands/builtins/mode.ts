@@ -60,7 +60,8 @@ export function buildModeAutocompleteItems(): AutocompleteItem[] {
     { value: "code.normal", label: "    normal" },
     { value: "code.team", label: "    team" },
     { value: "team", label: "team" },
-    { value: "team.plan", label: "    plan" },
+    { value: "team.plan.normal", label: "    plan.normal" },
+    { value: "team.plan.code", label: "    plan.code" },
     { value: "team.normal", label: "    normal" },
   ];
 }
@@ -76,6 +77,8 @@ export function createModeCommand(): SlashCommand {
     "code.team",
     "team",
     "team.plan",
+    "team.plan.normal",
+    "team.plan.code",
     "team.normal",
   ] as const;
   /** 用户输入的简写 → 实际会话模式（/mode agent → agent.plan，/mode code → code.normal）。 */
@@ -89,14 +92,17 @@ export function createModeCommand(): SlashCommand {
     "code.normal": "code.normal",
     "code.team": "code.team",
     team: "team",
-    "team.plan": "team.plan",
+    "team.plan": "team.plan.normal",
+    "team.plan.normal": "team.plan.normal",
+    "team.plan.code": "team.plan.code",
     "team.normal": "team",
   };
 
   return {
     name: "mode",
     description: "Switch chat mode",
-    usage: "/mode <agent|code|code.plan|code.normal|code.team|team|team.plan>",
+    usage:
+      "/mode <agent|code|code.plan|code.normal|code.team|team|team.plan|team.plan.normal|team.plan.code>",
     example: "/mode code",
     kind: CommandKind.BUILT_IN,
     takesArgs: true,
@@ -122,7 +128,7 @@ export function createModeCommand(): SlashCommand {
           makeItem(
             ctx.sessionId,
             "error",
-            "usage: /mode <agent|code|code.plan|code.normal|code.team|team|team.plan>",
+            "usage: /mode <agent|code|code.plan|code.normal|code.team|team|team.plan|team.plan.normal|team.plan.code>",
           ),
         );
         return;

@@ -43,6 +43,10 @@ from jiuwenswarm.agents.harness.code.prompt.plan_approval import (
     plan_skip_feedback,
 )
 from jiuwenswarm.common.mode_matrix import (
+    canonicalize_mode_text,
+    is_code_profile_mode,
+    is_team_mode as is_team_runtime_mode,
+    is_team_plan_mode,
     is_web_composable_mode,
     read_request_work_mode,
 )
@@ -883,12 +887,10 @@ class JiuWenSwarm:
         params = request.params if isinstance(request.params, dict) else {}
         work_mode = read_request_work_mode(params)
         raw_mode = params.get("mode", "")
-        mode = raw_mode.strip().lower() if isinstance(raw_mode, str) else ""
+        mode = canonicalize_mode_text(raw_mode)
         if work_mode is not None and is_web_composable_mode(mode or "agent"):
             return "code" if work_mode == "code" else "agent"
-        if mode == "team.plan":
-            return "code"
-        if mode == "code" or mode.startswith("code."):
+        if is_code_profile_mode(mode) or mode == "code":
             return "code"
         return "agent"
 
@@ -1012,7 +1014,7 @@ class JiuWenSwarm:
         _request_debug = False
         _dbg_mode = params.get("mode")
         _dbg_mode_s = _dbg_mode.strip().lower() if isinstance(_dbg_mode, str) else ""
-        if not (params.get("team") or _dbg_mode_s in {"team", "team.plan", "code.team"}):
+        if not (params.get("team") or is_team_runtime_mode(_dbg_mode_s)):
             if isinstance(query, str):
                 from jiuwenswarm.server.runtime.debug_trace.directives import strip_debug_directive
                 query, _request_debug = strip_debug_directive(query)
@@ -1219,7 +1221,7 @@ class JiuWenSwarm:
     @classmethod
     def _is_malformed_team_plan_approval_payload(cls, params: dict[str, Any]) -> bool:
         return (
-            str(params.get("mode") or "").strip().lower() == "team.plan"
+            is_team_plan_mode(params.get("mode"))
             and str(params.get("source") or "").strip() == "confirm_interrupt"
             and isinstance(params.get("answers"), list)
             and bool(params.get("answers"))
@@ -2100,9 +2102,7 @@ class JiuWenSwarm:
 
         mode = request.params.get("mode", "") if isinstance(request.params, dict) else ""
         team_flag = request.params.get("team", False) if isinstance(request.params, dict) else False
-        is_team_mode = team_flag or (
-            isinstance(mode, str) and mode.strip().lower() in {"team", "team.plan", "code.team"}
-        )
+        is_team_mode = team_flag or is_team_runtime_mode(mode)
         is_auto_harness_resume = (
             isinstance(mode, str)
             and mode.strip().lower() == "auto_harness"

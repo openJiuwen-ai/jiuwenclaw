@@ -90,7 +90,7 @@ from jiuwenswarm.common.config import get_config
 logger = logging.getLogger(__name__)
 
 
-@pytest.mark.parametrize("mode", ["team", "team.plan", "code.team"])
+@pytest.mark.parametrize("mode", ["team", "team.plan.normal", "code.team", "team.plan.code"])
 def test_member_runtime_prompt_rail_binds_request_identity(mode: str) -> None:
     context = SwarmBuildContext(session_id="session-123", mode=mode)
 
@@ -663,7 +663,7 @@ def test_team_member_deep_agent_spec_keeps_core_skill_discovery_when_retrieval_d
     assert spec.enable_skill_discovery is True
 
 
-@pytest.mark.parametrize("mode", ["code.team", "team.plan"])
+@pytest.mark.parametrize("mode", ["code.team", "team.plan.code"])
 def test_code_member_deep_agent_spec_keeps_skill_use_rail_when_retrieval_enabled(mode: str) -> None:
     """Code profiles keep skill_tool access without all-mode skill injection."""
     base = DeepAgentSpec(enable_skill_discovery=False)
@@ -676,7 +676,7 @@ def test_code_member_deep_agent_spec_keeps_skill_use_rail_when_retrieval_enabled
     assert skill_rails[0].params["skill_mode"] == SkillUseRail.SKILL_MODE_AUTO_LIST
 
 
-@pytest.mark.parametrize("mode", ["code.team", "team.plan"])
+@pytest.mark.parametrize("mode", ["code.team", "team.plan.code"])
 def test_code_member_deep_agent_spec_keeps_skill_use_rail_when_retrieval_disabled(mode: str) -> None:
     """Code profiles keep their explicit SkillUseRail provider when retrieval is disabled."""
     base = DeepAgentSpec(enable_skill_discovery=False)
@@ -875,7 +875,7 @@ def test_enrich_team_spec_appends_after_existing_rails(monkeypatch) -> None:
     assert len(leader_rail_types) > 1
 
 
-@pytest.mark.parametrize("mode", ["team", "code.team", "team.plan"])
+@pytest.mark.parametrize("mode", ["team", "team.plan.normal", "code.team", "team.plan.code"])
 def test_enrich_team_spec_for_swarm_injects_config_mcp_servers(
     mode: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -1506,7 +1506,7 @@ def test_team_skill_create_rail_registers_full_workspace(
 
 
 # ---------------------------------------------------------------------------
-# code.team / team.plan declarative profile
+# code.team / team.plan.code declarative profile
 # ---------------------------------------------------------------------------
 
 _EXPECTED_CODE_RAIL_NAMES_LEADER: frozenset[str] = frozenset(
@@ -1539,7 +1539,7 @@ _EXPECTED_CODE_RAIL_NAMES_TEAMMATE: frozenset[str] = _EXPECTED_CODE_RAIL_NAMES_L
 }
 
 
-@pytest.mark.parametrize("mode", ["code.team", "team.plan"])
+@pytest.mark.parametrize("mode", ["code.team", "team.plan.code"])
 def test_code_capability_specs_rail_and_tool_names(mode: str) -> None:
     """Code modes emit the code rail/tool profile (not the chat-team common rails)."""
     register_swarm_providers()
@@ -1551,13 +1551,13 @@ def test_code_capability_specs_rail_and_tool_names(mode: str) -> None:
     tool_names = {spec.type for spec in tool_specs}
 
     expected_rails = _EXPECTED_CODE_RAIL_NAMES_LEADER
-    if mode == "team.plan":
+    if mode == "team.plan.code":
         expected_rails = expected_rails - {registry.CODE_CONFIRM_INTERRUPT}
     assert expected_rails <= rail_names
     assert registry.CODE_TASK_PLANNING not in rail_names
     assert registry.TEAM_SKILL_EVOLUTION in rail_names
     assert registry.STRUCTURED_ASK_USER in rail_names
-    if mode == "team.plan":
+    if mode == "team.plan.code":
         assert registry.TEAM_PLAN_APPROVAL in rail_names
         assert registry.CODE_CONFIRM_INTERRUPT not in rail_names
     else:
@@ -1588,18 +1588,98 @@ def test_code_capability_specs_rail_and_tool_names(mode: str) -> None:
     }
 
 
-def test_team_plan_approval_only_mounts_on_leader() -> None:
-    """Only team.plan leader uses the code.plan-style plan approval interrupt."""
+def test_code_team_plan_approval_only_mounts_on_leader() -> None:
+    """Only team.plan.code leader uses the plan approval interrupt."""
     register_swarm_providers()
-    leader_rails, _ = build_member_capability_specs({}, "team.plan", "leader")
-    teammate_rails, _ = build_member_capability_specs({}, "team.plan", "teammate")
+    leader_rails, _ = build_member_capability_specs({}, "team.plan.code", "leader")
+    teammate_rails, _ = build_member_capability_specs({}, "team.plan.code", "teammate")
     code_team_rails, _ = build_member_capability_specs({}, "code.team", "leader")
 
     assert registry.TEAM_PLAN_APPROVAL in {spec.type for spec in leader_rails}
     assert registry.TEAM_PLAN_APPROVAL not in {spec.type for spec in teammate_rails}
     assert registry.TEAM_PLAN_APPROVAL not in {spec.type for spec in code_team_rails}
     assert registry.CODE_CONFIRM_INTERRUPT not in {spec.type for spec in leader_rails}
-    assert registry.CODE_CONFIRM_INTERRUPT not in {spec.type for spec in teammate_rails}
+    assert registry.CODE_CONFIRM_INTERRUPT in {spec.type for spec in teammate_rails}
+
+
+def test_normal_team_plan_leader_uses_deepagent_plan_profile() -> None:
+    """Normal Team Plan adds Work plan rails without mounting Code profile rails."""
+    register_swarm_providers()
+    leader_rails, _ = build_member_capability_specs(
+        {}, "team.plan.normal", "leader"
+    )
+    teammate_rails, _ = build_member_capability_specs(
+        {}, "team.plan.normal", "teammate"
+    )
+
+    leader_types = {spec.type for spec in leader_rails}
+    teammate_types = {spec.type for spec in teammate_rails}
+
+    assert registry.RUNTIME_PROMPT in leader_types
+    assert registry.CODE_AGENT_MODE in leader_types
+    assert registry.TEAM_PLAN_APPROVAL in leader_types
+    assert registry.CODE_RUNTIME_PROMPT not in leader_types
+    assert registry.CODE_CODING_MEMORY not in leader_types
+    assert registry.CODE_AGENT_MODE not in teammate_types
+    assert registry.TEAM_PLAN_APPROVAL not in teammate_types
+
+
+def test_normal_team_plan_agent_mode_provider_builds_work_rail() -> None:
+    """The normal Team Plan leader receives WorkAgentModeRail with Team semantics."""
+    register_swarm_providers()
+    ctx = SwarmBuildContext(
+        mode="team.plan.normal",
+        role="leader",
+        config={"preferred_language": "zh"},
+    )
+
+    rail = code_rails.build_code_agent_mode({}, ctx)
+
+    from jiuwenswarm.agents.harness.work.rails.work_agent_mode_rail import (
+        WorkAgentModeRail,
+    )
+
+    assert isinstance(rail, WorkAgentModeRail)
+    assert code_rails.build_code_agent_mode(
+        {}, SwarmBuildContext(mode="team.plan.normal", role="teammate")
+    ) is None
+
+
+def test_normal_team_plan_teammate_spec_equals_plain_team() -> None:
+    """Normal Team Plan does not change the ordinary DeepAgent teammate spec."""
+    base = DeepAgentSpec(system_prompt="base teammate prompt")
+
+    plain = build_member_deep_agent_spec({}, "team", "teammate", base)
+    planned = build_member_deep_agent_spec(
+        {}, "team.plan.normal", "teammate", base
+    )
+
+    assert planned.model_dump() == plain.model_dump()
+
+
+def test_code_team_plan_teammate_spec_equals_code_team() -> None:
+    """Code Team Plan changes only the Leader; its teammate matches code.team."""
+    base = DeepAgentSpec(system_prompt="base teammate prompt")
+
+    plain = build_member_deep_agent_spec({}, "code.team", "teammate", base)
+    planned = build_member_deep_agent_spec(
+        {}, "team.plan.code", "teammate", base
+    )
+
+    assert planned.system_prompt == plain.system_prompt
+    assert [rail.model_dump() for rail in planned.rails or []] == [
+        rail.model_dump() for rail in plain.rails or []
+    ]
+    assert [tool.model_dump() for tool in planned.tools or []] == [
+        tool.model_dump() for tool in plain.tools or []
+    ]
+    assert [
+        (sub.factory_name, sub.factory_kwargs, getattr(sub, "subagent_type", None))
+        for sub in planned.subagents or []
+    ] == [
+        (sub.factory_name, sub.factory_kwargs, getattr(sub, "subagent_type", None))
+        for sub in plain.subagents or []
+    ]
 
 
 def test_leader_omits_harness_todo_planning_rails() -> None:
@@ -1621,7 +1701,7 @@ def test_leader_omits_harness_todo_planning_rails() -> None:
     assert registry.CODE_TASK_PLANNING in code_teammate_types
 
 
-@pytest.mark.parametrize("mode", ["team", "code.team", "team.plan"])
+@pytest.mark.parametrize("mode", ["team", "code.team", "team.plan.normal", "team.plan.code"])
 def test_leader_deep_agent_spec_forces_enable_task_planning_off(mode: str) -> None:
     """Leader must not rely on agent-core auto-inject when YAML enables the flag."""
     register_swarm_providers()
@@ -1671,13 +1751,13 @@ def test_code_member_deep_spec_dedupes_base_explore_agent() -> None:
 
 
 def test_code_runtime_language_by_mode_and_role() -> None:
-    """Only the team.plan leader uses the configured language; code is else English."""
+    """Only the team.plan.code leader uses configured language; code is else English."""
     plan_leader = SwarmBuildContext(
-        mode="team.plan",
+        mode="team.plan.code",
         role="leader",
         config={"preferred_language": "zh"},
     )
-    plan_teammate = SwarmBuildContext(mode="team.plan", role="teammate", config={})
+    plan_teammate = SwarmBuildContext(mode="team.plan.code", role="teammate", config={})
     code_team = SwarmBuildContext(mode="code.team", role="leader", config={})
 
     assert code_rails.code_runtime_language(plan_leader) in {"cn", "zh"}
@@ -1710,10 +1790,11 @@ def test_code_runtime_prompt_provider_carries_project_dir(tmp_path: Path) -> Non
 
 
 def test_team_plan_approval_provider_builds_only_for_leader() -> None:
-    """The code.plan-style approval rail is scoped to the team.plan leader."""
+    """The approval rail is scoped to both normal/code Team Plan leaders."""
     register_swarm_providers()
-    plan_leader = SwarmBuildContext(mode="team.plan", role="leader")
-    plan_teammate = SwarmBuildContext(mode="team.plan", role="teammate")
+    plan_leader = SwarmBuildContext(mode="team.plan.code", role="leader")
+    normal_plan_leader = SwarmBuildContext(mode="team.plan.normal", role="leader")
+    plan_teammate = SwarmBuildContext(mode="team.plan.code", role="teammate")
     code_team_leader = SwarmBuildContext(mode="code.team", role="leader")
 
     rail = RailSpec(type=registry.TEAM_PLAN_APPROVAL).build(
@@ -1724,6 +1805,13 @@ def test_team_plan_approval_provider_builds_only_for_leader() -> None:
     from jiuwenswarm.agents.harness.code.rails import PlanApprovalInterruptRail
 
     assert isinstance(rail, PlanApprovalInterruptRail)
+    assert isinstance(
+        RailSpec(type=registry.TEAM_PLAN_APPROVAL).build(
+            language="cn",
+            context=normal_plan_leader,
+        ),
+        PlanApprovalInterruptRail,
+    )
     assert RailSpec(type=registry.TEAM_PLAN_APPROVAL).build(
         language="cn",
         context=plan_teammate,
@@ -1740,7 +1828,7 @@ async def test_team_plan_approval_reuses_code_plan_copy(
 ) -> None:
     """team.plan reuses the same raw approval copy as code.plan."""
     register_swarm_providers()
-    plan_leader = SwarmBuildContext(mode="team.plan", role="leader")
+    plan_leader = SwarmBuildContext(mode="team.plan.code", role="leader")
     rail = RailSpec(type=registry.TEAM_PLAN_APPROVAL).build(
         language="cn",
         context=plan_leader,
@@ -1802,7 +1890,7 @@ def test_team_plan_leader_code_agent_mode_has_team_exit_notification(monkeypatch
         _PLAN_MODE_SYSTEM_NOTE,
     )
 
-    plan_leader = SwarmBuildContext(mode="team.plan", role="leader")
+    plan_leader = SwarmBuildContext(mode="team.plan.code", role="leader")
     code_team_leader = SwarmBuildContext(mode="code.team", role="leader")
     captured_configs: list[dict[str, object]] = []
 
@@ -1846,7 +1934,7 @@ def test_team_plan_leader_code_agent_mode_has_team_exit_notification(monkeypatch
 def test_team_plan_leader_structured_ask_user_provider_builds() -> None:
     """team.plan leader keeps code-mode structured ask_user clarification."""
     register_swarm_providers()
-    plan_leader = SwarmBuildContext(mode="team.plan", role="leader")
+    plan_leader = SwarmBuildContext(mode="team.plan.code", role="leader")
     code_team_leader = SwarmBuildContext(mode="code.team", role="leader")
 
     assert type(
@@ -1917,7 +2005,7 @@ async def test_team_plan_leader_permission_rail_skips_exit_plan_mode(
 
     plan_rail = code_rails.build_permission_interrupt(
         {"permissions_config": {"enabled": True}, "model_name": "gpt-4"},
-        SwarmBuildContext(mode="team.plan", role="leader"),
+        SwarmBuildContext(mode="team.plan.code", role="leader"),
     )
     code_rail = code_rails.build_permission_interrupt(
         {"permissions_config": {"enabled": True}, "model_name": "gpt-4"},

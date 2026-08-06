@@ -264,6 +264,8 @@ class Mode(Enum):
     CODE_NORMAL = "code.normal"
     CODE_TEAM = "code.team"
     TEAM = "team"
+    TEAM_PLAN_NORMAL = "team.plan.normal"
+    TEAM_PLAN_CODE = "team.plan.code"
 
     @classmethod
     def from_raw(cls, raw_mode: Any, default: "Mode | None" = None) -> "Mode":
@@ -286,6 +288,8 @@ class Mode(Enum):
         # 不依赖 fallback 默认值恰好等于 AGENT。
         if normalized in ("plan", "fast"):
             return cls.AGENT
+        if normalized == "team.plan":
+            return cls.TEAM_PLAN_NORMAL
         try:
             return cls(normalized)
         except ValueError:

@@ -2,7 +2,7 @@
 
 """Config-sourced code-mode rail providers for swarm team assembly.
 
-Each code (code.team / team.plan) member rail is declared as a ``swarm.code_*``
+Each code (code.team / team.plan.code) member rail is declared as a ``swarm.code_*``
 factory resolved during ``spec.build()``. The factories mirror the construction
 in ``interface_code.py::_build_*_rail`` but read everything from the build
 context (config / project_dir / workspace) instead of a live adapter, so code
@@ -35,6 +35,11 @@ from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.rails import SkillUseRail
 
 from jiuwenswarm.agents.swarm.context import SwarmBuildContext
+from jiuwenswarm.common.mode_matrix import (
+    TEAM_PLAN_NORMAL_MODE,
+    is_code_profile_mode,
+    is_team_plan_mode,
+)
 from jiuwenswarm.common.utils import get_agent_workspace_dir
 
 logger = logging.getLogger(__name__)
@@ -56,7 +61,7 @@ CODE_SKILL_USE = "swarm.code_skill_use"
 # for the code_agent sub-agent to reuse the same instance.
 CODING_MEMORY_EXTRAS_KEY = "_coding_memory_rail"
 
-_TEAM_PLAN_EXIT_NOTIFICATION = """\
+_TEAM_PLAN_EXIT_NOTIFICATION_EN = """\
 <system-reminder>
 The user approved the team plan. Continue as the Team Leader inside the
 team runtime. Do not implement directly as a single code agent. Start the
@@ -64,16 +69,23 @@ approved team workflow with team tools such as build_team, create_task,
 spawn_teammate, and send_message.
 </system-reminder>"""
 
+_TEAM_PLAN_EXIT_NOTIFICATION_CN = """\
+<system-reminder>
+用户已批准团队计划。请继续作为 Team Leader 工作，不要由 Leader 独自完成全部任务。
+立即使用 build_team、create_task、spawn_teammate、send_message 等 Team 工具启动并分派
+已批准的团队工作流。
+</system-reminder>"""
+
 
 def _is_team_plan_leader(ctx: SwarmBuildContext) -> bool:
-    """Return whether this build context is the team.plan leader."""
-    return ctx.mode == "team.plan" and ctx.role == "leader"
+    """Return whether this build context is a normal/code Team Plan leader."""
+    return is_team_plan_mode(ctx.mode) and ctx.role == "leader"
 
 
 def code_runtime_language(ctx: SwarmBuildContext) -> str:
     """Resolve the code member's runtime-prompt language.
 
-    Code mode is English-only except the team.plan leader, which uses the
+    Code mode is English-only except the team.plan.code leader, which uses the
     configured preferred language (mirrors the legacy ``force_english_runtime_prompt``
     / ``team_plan_runtime_language`` handling).
 
@@ -90,7 +102,7 @@ def code_runtime_language(ctx: SwarmBuildContext) -> str:
 
 def structured_ask_user_language(ctx: SwarmBuildContext) -> str:
     """Resolve the StructuredAskUserRail language for team/code profiles."""
-    if ctx.role == "leader" and ctx.mode in {"team", "team.plan"}:
+    if ctx.role == "leader" and (ctx.mode == "team" or is_team_plan_mode(ctx.mode)):
         return resolve_language((ctx.config or {}).get("preferred_language", "zh"))
     return code_runtime_language(ctx)
 
@@ -134,7 +146,7 @@ class CodeRuntimePromptInput(ConstructionInput):
     kind=ElementKind.RAIL,
     name=CODE_RUNTIME_PROMPT,
     description="Code-mode runtime prompt rail (English, or the configured language "
-    "for the team.plan leader).",
+    "for the team.plan.code leader).",
     input_model=CodeRuntimePromptInput,
 )
 def build_code_runtime_prompt(params: dict[str, Any], ctx: SwarmBuildContext) -> Any:
@@ -342,11 +354,31 @@ def build_code_coding_memory(params: dict[str, Any], ctx: SwarmBuildContext) -> 
 @harness_element(
     kind=ElementKind.RAIL,
     name=CODE_AGENT_MODE,
-    description="Code plan-mode rail (Claude-Code-aligned agent mode).",
+    description="Profile-aware plan-mode rail for code members and Team Plan leaders.",
 )
 def build_code_agent_mode(params: dict[str, Any], ctx: SwarmBuildContext) -> Any:
-    """Build the code plan-mode rail (Claude-Code-aligned AgentModeRail)."""
+    """Build one profile-aware plan rail for code or normal Team Plan contexts."""
     try:
+        if ctx.mode == TEAM_PLAN_NORMAL_MODE and ctx.role == "leader":
+            from jiuwenswarm.agents.harness.work.rails.work_agent_mode_rail import (
+                WorkAgentModeRail,
+            )
+
+            language = resolve_language(
+                (ctx.config or {}).get("preferred_language", "zh")
+            )
+            notification = (
+                _TEAM_PLAN_EXIT_NOTIFICATION_EN
+                if language == "en"
+                else _TEAM_PLAN_EXIT_NOTIFICATION_CN
+            )
+            return WorkAgentModeRail(
+                language=language,
+                exit_plan_notification=notification,
+            )
+        if not is_code_profile_mode(ctx.mode):
+            return None
+
         from jiuwenswarm.agents.harness.code.rails.code_agent_mode_rail import (
             CodeAgentModeRail,
         )
@@ -356,7 +388,7 @@ def build_code_agent_mode(params: dict[str, Any], ctx: SwarmBuildContext) -> Any
         )
 
         exit_notification = (
-            _TEAM_PLAN_EXIT_NOTIFICATION
+            _TEAM_PLAN_EXIT_NOTIFICATION_EN
             if _is_team_plan_leader(ctx)
             else None
         )
@@ -386,10 +418,10 @@ def build_code_agent_mode(params: dict[str, Any], ctx: SwarmBuildContext) -> Any
 @harness_element(
     kind=ElementKind.RAIL,
     name=TEAM_PLAN_APPROVAL,
-    description="Reuses the code.plan exit_plan_mode approval interrupt for the team.plan leader.",
+    description="Shared exit_plan_mode approval interrupt for Team Plan leaders.",
 )
 def build_team_plan_approval(params: dict[str, Any], ctx: SwarmBuildContext) -> Any:
-    """Build the team.plan leader approval rail for ``exit_plan_mode``."""
+    """Build the Team Plan leader approval rail for ``exit_plan_mode``."""
     try:
         if not _is_team_plan_leader(ctx):
             return None

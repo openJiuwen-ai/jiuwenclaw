@@ -233,7 +233,11 @@ const DEFERRED_TRANSCRIPT_EVENTS = new Set([
 ]);
 
 function isPlanClientMode(mode: ClientMode): boolean {
-  return mode === "agent.plan" || mode === "code.plan" || mode === "team.plan";
+  return (
+    mode === "agent.plan" ||
+    mode === "code.plan" ||
+    mode.startsWith("team.plan")
+  );
 }
 
 // ── Auto-recap (自动回顾) 常量 ──

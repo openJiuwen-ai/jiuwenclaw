@@ -340,6 +340,7 @@ from jiuwenswarm.common.utils import (
     reset_free_search_runtime_flags,
 )
 from jiuwenswarm.dotenv_early import load_dotenv_runtime
+from jiuwenswarm.common.mode_matrix import is_team_mode
 
 load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
 reset_free_search_runtime_flags()
@@ -985,6 +986,8 @@ _MODE_DISPLAY_MAP: dict[str, dict[str, str]] = {
     "agent.fast": {"cn": "智能体模式", "en": "Agent Mode"},
     "team": {"cn": "集群模式", "en": "Cluster Mode"},
     "team.plan": {"cn": "集群计划模式", "en": "Cluster Plan Mode"},
+    "team.plan.normal": {"cn": "集群计划模式", "en": "Cluster Plan Mode"},
+    "team.plan.code": {"cn": "代码集群计划模式", "en": "Code Team Plan Mode"},
     "code.team": {"cn": "代码集群模式", "en": "Code Team Mode"},
 }
 
@@ -8948,7 +8951,7 @@ class JiuWenSwarmDeepAdapter:
         mode = request.params.get("mode", "agent")
 
         # Team 模式处理
-        if mode in ("team", "team.plan", "code.team"):
+        if is_team_mode(mode):
             from jiuwenswarm.server.runtime.agent_adapter.team_helpers import process_team_message_stream
 
             resolved_model = self._resolve_model_for_request(request)

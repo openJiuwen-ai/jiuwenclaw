@@ -12,7 +12,7 @@ export function createPlanCommand(): SlashCommand {
     kind: CommandKind.BUILT_IN,
     takesArgs: true,
     action: (ctx, args) => {
-      if (ctx.mode === "team" || ctx.mode === "team.plan") {
+      if (ctx.mode === "team" || ctx.mode.startsWith("team.plan")) {
         ctx.addItem(
           addInfo(
             ctx.sessionId,

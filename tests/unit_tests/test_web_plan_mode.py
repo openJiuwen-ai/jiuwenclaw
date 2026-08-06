@@ -52,7 +52,9 @@ def test_web_cluster_adapter_is_not_affected_by_work_mode(work_mode):
         ("code.normal", "code"),
         ("code.plan", "code"),
         ("code.team", "code"),
-        ("team.plan", "code"),
+        ("team.plan", "agent"),
+        ("team.plan.normal", "agent"),
+        ("team.plan.code", "code"),
     ],
 )
 def test_legacy_requests_keep_previous_adapter_choice(raw_mode, expected_adapter):
@@ -77,13 +79,13 @@ def test_web_team_modes_never_enable_team_plan(mode):
     assert spec.enable_team_plan is False
 
 
-def test_tui_code_team_plan_still_enables_team_plan():
-    """TUI 的 ``team.plan`` 行为保持不变。"""
+@pytest.mark.parametrize("mode", ["team.plan", "team.plan.normal", "team.plan.code"])
+def test_team_plan_modes_enable_team_plan(mode):
     from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
     from jiuwenswarm.agents.harness.team.team_manager import TeamManager
 
     spec = TeamAgentSpec.model_construct(team_name="t", agents={}, enable_team_plan=False)
-    TeamManager.apply_team_plan_mode(spec, request_metadata={"mode": "team.plan"})
+    TeamManager.apply_team_plan_mode(spec, request_metadata={"mode": mode})
 
     assert spec.enable_team_plan is True
 

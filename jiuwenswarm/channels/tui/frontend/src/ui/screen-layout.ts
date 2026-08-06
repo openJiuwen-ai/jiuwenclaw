@@ -132,7 +132,11 @@ function connectionStatusLabel(status: AppSnapshot["connectionStatus"]): string 
 }
 
 function isPlanMode(mode: AppSnapshot["mode"]): boolean {
-  return mode === "agent.plan" || mode === "code.plan" || mode === "team.plan";
+  return (
+    mode === "agent.plan" ||
+    mode === "code.plan" ||
+    mode.startsWith("team.plan")
+  );
 }
 
 function buildStatusLines(

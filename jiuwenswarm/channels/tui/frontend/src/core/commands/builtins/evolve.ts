@@ -6,6 +6,8 @@ const EVOLUTION_SUPPORTED_MODES = new Set<ClientMode>([
   "agent.plan",
   "team",
   "team.plan",
+  "team.plan.normal",
+  "team.plan.code",
   "code.team",
 ]);
 

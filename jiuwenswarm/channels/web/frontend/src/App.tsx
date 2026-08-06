@@ -89,7 +89,13 @@ import {
 import { isSetupGuideEnabled } from './features/modelSetupGuide/modelSetupGuideState';
 import './App.css';
 
-const TEAM_SESSION_MODES = new Set(['team', 'team.plan', 'code.team']);
+const TEAM_SESSION_MODES = new Set([
+  'team',
+  'team.plan',
+  'team.plan.normal',
+  'team.plan.code',
+  'code.team',
+]);
 const CHAT_PANEL_DEFAULT_WIDTH_PCT = 33.33;
 const CHAT_PANEL_MIN_WIDTH_PCT = 20;
 const CHAT_PANEL_MAX_WIDTH_PCT = 70;

@@ -78,6 +78,15 @@ from jiuwenswarm.server.runtime.agent_adapter.sysop_builder import (
     validate_sandbox_files_runtime,
 )
 from jiuwenswarm.server.utils.utils import is_team_params
+from jiuwenswarm.common.mode_matrix import (
+    ResolvedMode,
+    TEAM_PLAN_CODE_MODE,
+    TEAM_PLAN_NORMAL_MODE,
+    canonicalize_mode_text,
+    is_plan_mode,
+    is_team_mode,
+    resolve_request_mode,
+)
 from jiuwenswarm.agents.harness.common.rails.permissions.permissions_config_rpc import (
     get_permissions_config_req_methods,
 )
@@ -114,11 +123,6 @@ from jiuwenswarm.common.security.ws_origin import (
 from jiuwenswarm.agents.harness.code.prompt.plan_approval import (
     PLAN_MODE_EXITED_EVENT_TYPE,
     PLAN_REMINDER_ORIGINAL_QUERY_KEY,
-)
-from jiuwenswarm.common.mode_matrix import (
-    ResolvedMode,
-    is_plan_mode,
-    resolve_request_mode,
 )
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.common.log_preview import preview_text
@@ -448,7 +452,7 @@ def _is_restorable_history_record(record: Any) -> bool:
 
     if role == "user":
         mode = record.get("mode", "")
-        if mode in ("team", "team.plan", "code.team"):
+        if is_team_mode(mode):
             channel_id = record.get("channel_id", "")
             if channel_id not in ("web", "tui"):
                 return False
@@ -608,10 +612,7 @@ def resolve_agent_request_mode(
     ``fast``（无 ``agent.`` 前缀，如旧 cron job 存量数据）同样归一到 ``agent``，
     与 CLI ``MODE_ALIASES``、记忆配置 ``_resolve_mode_memory`` 的裸 token 处理保持一致。
     """
-    raw_value = getattr(raw_mode, "value", raw_mode)
-    mode_text = raw_value.strip().lower() if isinstance(raw_value, str) else ""
-    if not mode_text:
-        mode_text = "agent"
+    mode_text = canonicalize_mode_text(raw_mode)
     normalized_work_mode = (
         work_mode.strip().lower() if isinstance(work_mode, str) else ""
     )
@@ -620,6 +621,11 @@ def resolve_agent_request_mode(
         if normalized_work_mode == "code":
             return "code", "normal", "code.normal"
         return "agent", None, "agent"
+
+    if mode_text == TEAM_PLAN_NORMAL_MODE:
+        return "team", "plan", TEAM_PLAN_NORMAL_MODE
+    if mode_text == TEAM_PLAN_CODE_MODE:
+        return "code", "team", TEAM_PLAN_CODE_MODE
 
     parts = mode_text.split(".")
     mode = parts[0] or "agent"
@@ -630,11 +636,9 @@ def resolve_agent_request_mode(
         return "agent", None, "agent"
     if mode == "team":
         sub_mode = parts[1] if len(parts) > 1 and parts[1] else None
-        if sub_mode not in {None, "plan"}:
+        if sub_mode not in {None}:
             sub_mode = None
         canonical_mode = f"team.{sub_mode}" if sub_mode else "team"
-        if sub_mode == "plan":
-            return "code", "team", canonical_mode
         return "team", sub_mode, canonical_mode
 
     default_sub_modes = {
@@ -3279,8 +3283,7 @@ class AgentWebSocketServer:
 
     @staticmethod
     def _is_team_metadata_mode(metadata: dict[str, Any]) -> bool:
-        mode = str(metadata.get("mode") or "").strip().lower()
-        return mode in {"team", "team.plan", "code.team"}
+        return is_team_mode(metadata.get("mode"))
 
     @staticmethod
     def _active_team_session_map() -> dict[str, str]:
@@ -3783,10 +3786,10 @@ class AgentWebSocketServer:
                     resp = checkpoint_resp
                 else:
                     metadata = get_session_metadata(target)
-                    is_team_mode = self._is_team_metadata_mode(metadata)
+                    is_team_session = self._is_team_metadata_mode(metadata)
                     team_name = str(metadata.get("team_name") or "").strip()
                     channel_id = str(metadata.get("channel_id") or request.channel_id or "").strip() or None
-                    if not is_team_mode:
+                    if not is_team_session:
                         from jiuwenswarm.server.runtime.session.kv_cache_product_hooks import (
                             evict_plan_session,
                         )
@@ -3797,7 +3800,7 @@ class AgentWebSocketServer:
                             channel_id=channel_id,
                         )
                     try:
-                        if is_team_mode:
+                        if is_team_session:
                             team_manager = get_team_manager(channel_id)
                             deleted = await team_manager.delete_session_runtime(
                                 target,
@@ -3827,7 +3830,7 @@ class AgentWebSocketServer:
                         _plan_exited_sessions.discard(target)
                         _plan_active_sessions.discard(target)
                         remove_session_metadata_cache(target)
-                        if is_team_mode:
+                        if is_team_session:
                             try:
                                 from jiuwenswarm.server.runtime.team_binding_store import get_team_binding_store
 
@@ -7944,11 +7947,7 @@ class AgentWebSocketServer:
             params["project_dir"] = project_dir
             params["work_mode"] = final_work_mode
 
-            is_swarm = bool(params.get("is_swarm")) or canonical_mode in {
-                "team",
-                "team.plan",
-                "code.team",
-            }
+            is_swarm = bool(params.get("is_swarm")) or is_team_mode(canonical_mode)
             if not is_swarm:
                 mode, _, canonical_mode = resolve_agent_request_mode(
                     canonical_mode,

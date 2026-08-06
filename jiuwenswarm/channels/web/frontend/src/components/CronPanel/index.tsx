@@ -208,7 +208,13 @@ function cronJobToUI(job: CronJobDTO, projects: ProjectInfo[]): CronTaskUI {
 // 跟 CronTaskUI.mode 这个已经归一过的 UI 字段语义不同。
 function isTeamCronModeValue(raw: string | undefined | null): boolean {
   const value = String(raw ?? '').trim().toLowerCase();
-  return value === 'team' || value === 'team.plan' || value === 'code.team';
+  return (
+    value === 'team' ||
+    value === 'team.plan' ||
+    value === 'team.plan.normal' ||
+    value === 'team.plan.code' ||
+    value === 'code.team'
+  );
 }
 
 type StatusFilterKey = 'running' | 'paused' | 'expired';

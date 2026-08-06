@@ -128,12 +128,16 @@ class ChannelMode(str, Enum):
     CODE_NORMAL = "code.normal"
     CODE_TEAM = "code.team"
     TEAM = "team"
-    TEAM_PLAN = "team.plan"
+    TEAM_PLAN = "team.plan.normal"
+    TEAM_PLAN_NORMAL = "team.plan.normal"
+    TEAM_PLAN_CODE = "team.plan.code"
 
     @classmethod
     def is_team_mode(cls, mode: str) -> bool:
         """Return True if *mode* resolves to any team variant (case-insensitive)."""
-        return mode.strip().lower() in {cls.TEAM.value, cls.CODE_TEAM.value, cls.TEAM_PLAN.value}
+        from jiuwenswarm.common.mode_matrix import is_team_mode
+
+        return is_team_mode(mode)
 
 
 @dataclass
@@ -647,6 +651,8 @@ class MessageHandler(ABC):
             "code.team": ChannelMode.CODE_TEAM,
             "team": ChannelMode.TEAM,
             "team.plan": ChannelMode.TEAM_PLAN,
+            "team.plan.normal": ChannelMode.TEAM_PLAN_NORMAL,
+            "team.plan.code": ChannelMode.TEAM_PLAN_CODE,
         }
         mode = mode_map.get(mode_raw, ChannelMode.AGENT)
         return ChannelControlState(session_id=sid, mode=mode)
@@ -1591,6 +1597,8 @@ class MessageHandler(ABC):
                 "code.normal",
                 "code.team",
                 "team.plan",
+                "team.plan.normal",
+                "team.plan.code",
             ):
                 asyncio.create_task(
                     self.send_channel_notice(
@@ -1621,6 +1629,10 @@ class MessageHandler(ABC):
                 state.mode = ChannelMode.CODE_TEAM
             elif mode_str == "team.plan":
                 state.mode = ChannelMode.TEAM_PLAN
+            elif mode_str == "team.plan.normal":
+                state.mode = ChannelMode.TEAM_PLAN_NORMAL
+            elif mode_str == "team.plan.code":
+                state.mode = ChannelMode.TEAM_PLAN_CODE
             new_label = state.mode.value
             if old_mode != state.mode:
                 asyncio.create_task(

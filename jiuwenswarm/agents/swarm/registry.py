@@ -92,7 +92,7 @@ TEAM_SKILL_CREATE = _evolution_rails.TEAM_SKILL_CREATE
 MEMBER_SKILL_EVOLUTION = _evolution_rails.MEMBER_SKILL_EVOLUTION
 EVOLUTION_INTERRUPT = _evolution_rails.EVOLUTION_INTERRUPT
 
-# Code-mode (code.team / team.plan) swarm-owned rail provider names.
+# Code-profile (code.team / team.plan.code) swarm-owned rail provider names.
 CODE_EXTRA_TOOLS = _tools.CODE_EXTRA_TOOLS
 CODE_RUNTIME_PROMPT = _code_rails.CODE_RUNTIME_PROMPT
 CODE_PROJECT_MEMORY = _code_rails.CODE_PROJECT_MEMORY

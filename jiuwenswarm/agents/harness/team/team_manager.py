@@ -790,8 +790,10 @@ class TeamManager:
         *,
         request_metadata: dict[str, Any] | None,
     ) -> None:
-        mode = str((request_metadata or {}).get("mode") or "").strip().lower()
-        if mode == "team.plan":
+        from jiuwenswarm.common.mode_matrix import is_team_plan_mode
+
+        mode = (request_metadata or {}).get("mode")
+        if is_team_plan_mode(mode):
             try:
                 spec.enable_team_plan = True
             except (AttributeError, ValueError):

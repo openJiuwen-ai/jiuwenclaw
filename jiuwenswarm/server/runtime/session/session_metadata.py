@@ -14,6 +14,7 @@ from typing import Any
 from datetime import datetime, timezone
 
 from jiuwenswarm.common.utils import get_agent_sessions_dir
+from jiuwenswarm.common.mode_matrix import is_team_mode
 from jiuwenswarm.server.runtime.session.work_mode import (
     DEFAULT_WEB_WORK_MODE,
     SUPPORTED_WORK_MODES,
@@ -1175,7 +1176,7 @@ def remove_team_mode_session_dirs_at_startup() -> None:
         if not isinstance(raw, dict):
             continue
         mode = str(raw.get("mode") or "").strip().lower()
-        if mode not in {"team", "team.plan", "code.team"}:
+        if not is_team_mode(mode):
             continue
         if not bool(raw.get("temporary_team_session") or raw.get("team_temporary")):
             continue
