@@ -1157,7 +1157,6 @@ class GatewayServer(BaseWebChannel):
             for session_key in stale_session_keys:
                 await self._promote_pending_session_client(route, session_key)
 
-
     async def _handle_raw_message(self, ws: Any, raw: str, request_path: str, route: RouteConfig) -> None:
 
         try:
