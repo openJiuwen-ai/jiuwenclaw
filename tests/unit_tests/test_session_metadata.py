@@ -64,6 +64,39 @@ class TestAutoTitle:
         assert _auto_title("") == ""
         assert _auto_title("   ") == ""
 
+    @staticmethod
+    def test_strips_upload_document_block():
+        """【上传文档】块由前端追加、网关补全路径，不是用户输入，不应进入标题。"""
+        from jiuwenswarm.server.runtime.session.session_metadata import _auto_title
+
+        assert _auto_title("What is the title of this paper\n【上传文档】\n- DiT.pdf") == (
+            "What is the title of this paper"
+        )
+        with_paths = (
+            "What is the title of this paper\n【上传文档】\n"
+            "- DiT.pdf: /s/u/DiT.txt (original file: /s/u/DiT.pdf)"
+        )
+        assert _auto_title(with_paths) == "What is the title of this paper"
+        multi = "compare these\n【上传文档】\n- a.pdf: /s/a.txt\n- b.pdf: /s/b.txt"
+        assert _auto_title(multi) == "compare these"
+        assert _auto_title("hello\n【上传文档: old.pdf】\n路径: /s/old.pdf") == "hello"
+
+    @staticmethod
+    def test_attachment_only_falls_back_to_filenames():
+        """只发附件不打字时，用文件名兜底，好过无标题会话。"""
+        from jiuwenswarm.server.runtime.session.session_metadata import _auto_title
+
+        only = "【上传文档】\n- DiT.pdf: /s/u/DiT.txt (original file: /s/u/DiT.pdf)"
+        assert _auto_title(only) == "DiT.pdf"
+        assert _auto_title("【上传文档】\n- a.pdf: /s/a.txt\n- b.pdf: /s/b.txt") == "a.pdf, b.pdf"
+
+    @staticmethod
+    def test_keeps_header_typed_inside_prose():
+        """用户自己在正文里提到该标记时不应被吞掉（块必须独占整行）。"""
+        from jiuwenswarm.server.runtime.session.session_metadata import _auto_title
+
+        assert _auto_title("what does 【上传文档】 mean?") == "what does 【上传文档】 mean?"
+
 
 # ===========================================================================
 # init_session_metadata

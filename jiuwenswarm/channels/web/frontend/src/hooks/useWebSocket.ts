@@ -1469,7 +1469,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               }
             }
             if (documentItems.length) {
-              const persistedDocs = await persistDocuments(content, sessionId, documentItems);
+              const persistedDocs = await persistDocuments(outgoingContent, sessionId, documentItems);
+              outgoingContent = persistedDocs.content ?? persistedDocs.query ?? outgoingContent;
               if (Array.isArray(persistedDocs.media_items)) {
                 mergedItems.push(...persistedDocs.media_items);
               }

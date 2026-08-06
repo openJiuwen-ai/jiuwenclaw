@@ -13,6 +13,10 @@ from pathlib import Path
 from typing import Any
 from datetime import datetime, timezone
 
+from jiuwenswarm.common.upload_block import (
+    strip_upload_document_blocks,
+    upload_document_names,
+)
 from jiuwenswarm.common.utils import get_agent_sessions_dir
 from jiuwenswarm.server.runtime.session.work_mode import (
     DEFAULT_WEB_WORK_MODE,
@@ -496,9 +500,13 @@ def _enqueue_write(
 
 def _auto_title(content: str) -> str:
     """从首条用户消息自动生成会话标题"""
-    # 先剥离所有小写 XML 注入标签，
-    # 避免将系统提示/文件注入/工具标签误识别为会话标题
-    cleaned = _INJECTED_TAG_RE.sub("", content).strip()
+    # 先剥离附件路径提示块（【上传文档】，由前端追加、网关补全路径，非用户输入），
+    # 再剥离所有小写 XML 注入标签，
+    # 避免将系统提示/文件注入/工具标签或上传路径误识别为会话标题
+    cleaned = _INJECTED_TAG_RE.sub("", strip_upload_document_blocks(content)).strip()
+    if not cleaned:
+        # 整条消息只有附件时，用文件名兜底，避免会话无标题
+        cleaned = ", ".join(upload_document_names(content))
     if not cleaned:
         return ""
     title = cleaned.replace("\n", " ")

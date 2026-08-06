@@ -20,6 +20,7 @@ from jiuwenswarm.common.document_parser import (
     resolve_document_suffix,
     supported_formats,
 )
+from jiuwenswarm.common.upload_block import UPLOAD_BLOCK_HEADER
 from jiuwenswarm.common.utils import get_agent_sessions_dir
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,9 @@ _TEXT_SIDECAR_SUFFIXES = frozenset({".pdf", ".docx", ".xlsx"})
 
 _TRUE_STRINGS = frozenset({"true", "1", "yes"})
 _FALSE_STRINGS = frozenset({"false", "0", "no"})
+
+# Message keys that may carry the attachment block; both are echoed by document.persist.
+_UPLOAD_BLOCK_CONTENT_KEYS = ("content", "query")
 
 
 def coerce_document_parse_flag(value: Any, *, default: bool = True) -> bool:
@@ -104,6 +108,9 @@ async def persist_and_parse_documents(
                 }
             )
 
+    # Names each stored document may be referred to by in the message body: the
+    # client's original filename, and the (sanitized, de-duplicated) stored one.
+    stored_names: list[set[str]] = []
     for index, item in enumerate(accepted_items):
         try:
             stored_item = await _store_and_maybe_parse_item(
@@ -115,6 +122,9 @@ async def persist_and_parse_documents(
             )
             if stored_item:
                 stored.append(stored_item)
+                requested_name = str(item.get("filename") or item.get("name") or "")
+                stored_name = str(stored_item.get("filename") or "")
+                stored_names.append({name for name in (requested_name, stored_name) if name})
         except Exception as exc:
             logger.exception("[document.persist] failed for item %s: %s", index, exc)
             errors.append(
@@ -151,6 +161,13 @@ async def persist_and_parse_documents(
             for item in stored
         ]
         params["files"] = files
+        # The client could not know the storage paths if it composed the message
+        # before this session existed; fill them in now that they are known.
+        entries = list(zip(stored_names, stored))
+        for content_key in _UPLOAD_BLOCK_CONTENT_KEYS:
+            raw_content = params.get(content_key)
+            if isinstance(raw_content, str) and raw_content:
+                params[content_key] = _fill_upload_block_paths(raw_content, entries)
     else:
         params.pop("documents", None)
 
@@ -212,6 +229,71 @@ def resolve_session_upload_path(path: str | Path, *, session_id: str | None) -> 
     if not resolved.is_file():
         raise FileNotFoundError(f"File not found: {resolved}")
     return resolved
+
+
+def _document_reference_line(display_name: str, record: dict[str, Any]) -> str:
+    """Render one ``UPLOAD_BLOCK_HEADER`` entry, matching the web client's format.
+
+    Binary documents with a ``.txt`` sidecar expose both paths: the sidecar (what
+    ``read_file`` opens) and the original, without which page-level tools such as
+    ``read_pdf`` have nothing to work on.
+    """
+    path = str(record.get("path") or "").strip()
+    if not path:
+        return f"- {display_name}"
+    original_path = str(record.get("original_path") or "").strip()
+    if original_path and original_path != path:
+        return f"- {display_name}: {path} (original file: {original_path})"
+    return f"- {display_name}: {path}"
+
+
+def _fill_upload_block_paths(
+    content: str, entries: list[tuple[set[str], dict[str, Any]]]
+) -> str:
+    """Rewrite ``UPLOAD_BLOCK_HEADER`` entries with the paths documents were stored at.
+
+    The web client composes this block at submit time from each attachment's
+    persisted record. On the first message of a new conversation there is no
+    session yet, so nothing is persisted at attach time and the block carries a
+    bare ``- <filename>``. The model then hands that to ``read_file``, which
+    resolves it against the agent workspace and fails. Persisting happens here,
+    so this is the first point where the real paths are known.
+
+    Entries are consumed in upload order, which is the order the client lists
+    them in, so repeated filenames still map to distinct records. Lines that
+    match no stored document are left untouched.
+    """
+    if not content or UPLOAD_BLOCK_HEADER not in content:
+        return content
+
+    rewritten: list[str] = []
+    cursor = 0
+    in_block = False
+    for line in content.split("\n"):
+        if line.strip() == UPLOAD_BLOCK_HEADER:
+            in_block = True
+            rewritten.append(line)
+            continue
+        if in_block:
+            stripped = line.strip()
+            if stripped.startswith("- "):
+                # A line the client already resolved reads "name: path"; keep only
+                # the name so such a line still consumes its entry (and is refreshed
+                # from the authoritative record) rather than shifting later lines.
+                display_name = stripped[2:].split(":", 1)[0].strip()
+                match = next(
+                    (i for i in range(cursor, len(entries)) if display_name in entries[i][0]),
+                    None,
+                )
+                if match is not None:
+                    rewritten.append(_document_reference_line(display_name, entries[match][1]))
+                    cursor = match + 1
+                    continue
+                rewritten.append(line)
+                continue
+            in_block = False
+        rewritten.append(line)
+    return "\n".join(rewritten)
 
 
 def _collect_document_items(params: dict[str, Any]) -> list[dict[str, Any]]:

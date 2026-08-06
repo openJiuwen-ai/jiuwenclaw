@@ -33,6 +33,10 @@ parse_dotenv_early("jiuwenswarm-web")
 from jiuwenswarm.agents.harness.common.tools.ssl_config import get_insecure_ssl_context, get_ssl_verify
 from jiuwenswarm.agents.harness.team.bootstrap import configure_agent_teams_home
 from jiuwenswarm.common.debug_dump import install_async_dump_handler
+from jiuwenswarm.common.upload_block import (
+    strip_upload_document_blocks,
+    upload_document_names,
+)
 from jiuwenswarm.common.ws_diagnostics import describe_ws_exception, format_ws_diagnostics
 from jiuwenswarm.common.utils import get_agent_root_dir, get_logs_dir, \
     get_agent_sessions_dir, get_root_dir, get_user_workspace_dir, is_package_installation, \
@@ -716,7 +720,13 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             if record.get("role") == "user":
                 content = record.get("content")
                 if isinstance(content, str) and content.strip():
-                    return content.strip().replace("\n", " ")[:80]
+                    # Drop the 【上传文档】 path hint — it is appended for the agent,
+                    # not typed by the user, and must not surface as a title.
+                    typed = strip_upload_document_blocks(content).strip()
+                    if not typed:
+                        typed = ", ".join(upload_document_names(content))
+                    if typed:
+                        return typed.replace("\n", " ")[:80]
         return session_dir.name
 
     def _build_share_snapshot(

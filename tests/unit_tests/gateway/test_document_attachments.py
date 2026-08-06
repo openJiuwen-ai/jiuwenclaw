@@ -153,6 +153,150 @@ async def test_persist_and_parse_documents(tmp_path: Path, monkeypatch: pytest.M
     assert result["files"]["uploaded_documents"][0]["path"] == items[0]["path"]
 
 
+def _markdown_document(filename: str, body: str = "# body") -> dict[str, str]:
+    return {
+        "filename": filename,
+        "mime_type": "text/markdown",
+        "base64_data": base64.b64encode(body.encode("utf-8")).decode("ascii"),
+    }
+
+
+@pytest.mark.asyncio
+async def test_upload_block_bare_filename_gets_storage_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A new conversation has no session at attach time, so the client sends a
+    pathless entry; without a path the model calls read_file on a bare filename,
+    which resolves against its own workspace and fails."""
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.document_attachments.get_agent_sessions_dir",
+        lambda: tmp_path,
+    )
+    payload = {
+        "content": "What is the title of this paper?\n【上传文档】\n- readme.md",
+        "documents": [_markdown_document("readme.md")],
+    }
+    result = await persist_and_parse_documents(payload, "sess_block", parse=True, max_chars=1000)
+    stored_path = result["media_items"][0]["path"]
+    assert result["content"] == (
+        "What is the title of this paper?\n【上传文档】\n" f"- readme.md: {stored_path}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_upload_block_pdf_entry_exposes_original_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A PDF's entry must name the sidecar *and* the original: page-level tools
+    such as read_pdf cannot work on the .txt."""
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.document_attachments.get_agent_sessions_dir",
+        lambda: tmp_path,
+    )
+
+    async def fake_parse(file_path, *, max_chars=None, doc_id=""):
+        return {
+            "text": "parsed pdf body",
+            "truncated": False,
+            "parser": "PDFParser",
+            "file_ext": ".pdf",
+            "char_count": len("parsed pdf body"),
+            "documents_count": 1,
+        }
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.document_attachments.parse_document_file",
+        fake_parse,
+    )
+    payload = {
+        "content": "summarize\n【上传文档】\n- paper.pdf",
+        "documents": [
+            {
+                "filename": "paper.pdf",
+                "mime_type": "application/pdf",
+                "base64_data": base64.b64encode(b"%PDF-fake-bytes").decode("ascii"),
+            }
+        ],
+    }
+    result = await persist_and_parse_documents(payload, "sess_pdf_block", parse=True, max_chars=1000)
+    item = result["media_items"][0]
+    assert result["content"].endswith(
+        f"- paper.pdf: {item['text_path']} (original file: {item['original_path']})"
+    )
+
+
+@pytest.mark.asyncio
+async def test_upload_block_repeated_filenames_map_to_distinct_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Same-named uploads are stored under de-duplicated names; entries are
+    consumed in upload order so the second line cannot point at the first file."""
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.document_attachments.get_agent_sessions_dir",
+        lambda: tmp_path,
+    )
+    payload = {
+        "content": "compare these\n【上传文档】\n- notes.md\n- notes.md",
+        "documents": [
+            _markdown_document("notes.md", "# first"),
+            _markdown_document("notes.md", "# second"),
+        ],
+    }
+    result = await persist_and_parse_documents(payload, "sess_dupe", parse=True, max_chars=1000)
+    first, second = (item["path"] for item in result["media_items"])
+    assert first != second
+    assert result["content"].endswith(f"- notes.md: {first}\n- notes.md: {second}")
+
+
+@pytest.mark.asyncio
+async def test_upload_block_leaves_unrelated_content_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """No block, an unknown filename, and prose after the block must all survive."""
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.document_attachments.get_agent_sessions_dir",
+        lambda: tmp_path,
+    )
+    no_block = {"content": "just a question", "documents": [_markdown_document("readme.md")]}
+    result = await persist_and_parse_documents(no_block, "sess_plain", parse=True, max_chars=1000)
+    assert result["content"] == "just a question"
+
+    mixed = {
+        "content": "q\n【上传文档】\n- readme.md\n- ghost.md\n\ntrailing prose",
+        "documents": [_markdown_document("readme.md")],
+    }
+    result = await persist_and_parse_documents(mixed, "sess_mixed", parse=True, max_chars=1000)
+    stored_path = result["media_items"][0]["path"]
+    assert result["content"] == (
+        f"q\n【上传文档】\n- readme.md: {stored_path}\n- ghost.md\n\ntrailing prose"
+    )
+
+
+@pytest.mark.asyncio
+async def test_upload_block_is_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Re-persisting a message that already carries paths must not stack them."""
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.document_attachments.get_agent_sessions_dir",
+        lambda: tmp_path,
+    )
+    payload = {
+        "content": "q\n【上传文档】\n- readme.md",
+        "documents": [_markdown_document("readme.md")],
+    }
+    once = await persist_and_parse_documents(payload, "sess_idem", parse=True, max_chars=1000)
+    first_content = once["content"]
+    again = await persist_and_parse_documents(
+        {"content": first_content, "documents": [_markdown_document("readme.md")]},
+        "sess_idem",
+        parse=True,
+        max_chars=1000,
+    )
+    # Second upload stores a de-duplicated file, so the path is refreshed rather
+    # than appended to — one "name: path" pair, pointing at the newest copy.
+    assert again["content"].count(":") == first_content.count(":")
+    assert again["content"].endswith(f"- readme.md: {again['media_items'][0]['path']}")
+
+
 @pytest.mark.asyncio
 async def test_persist_docx_writes_txt_sidecar(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
