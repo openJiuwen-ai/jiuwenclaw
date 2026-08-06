@@ -85,6 +85,8 @@ interface ChatState {
   addToolCall: (toolCall: ToolCall, options?: { startedAt?: string }) => void;
   addToolResult: (toolResult: ToolResult, options?: { updatedAt?: string }) => void;
   markTimedOutExecutions: () => void;
+  /** Mark in-flight tool rows stopped after pause/cancel so UI spinners clear. */
+  markInterruptedExecutions: () => void;
   updateSubtask: (payload: SubtaskUpdatePayload) => void;
   clearSubtasks: () => void;
   clearMessages: () => void;
@@ -394,6 +396,40 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return {
         ...state,
         toolExecutions: nextExecutions,
+      };
+    });
+  },
+
+  markInterruptedExecutions: () => {
+    const nowIso = new Date().toISOString();
+    set((state) => {
+      let changed = false;
+      const nextExecutions = new Map(state.toolExecutions);
+      for (const [toolCallId, execution] of nextExecutions) {
+        if (execution.status !== 'pending') {
+          continue;
+        }
+        changed = true;
+        nextExecutions.set(toolCallId, {
+          ...execution,
+          status: 'timeout',
+          timedOutAt: nowIso,
+          updatedAt: nowIso,
+          result: execution.result ?? {
+            toolCallId,
+            toolName: execution.toolCall.name,
+            result: 'Interrupted by user',
+            success: false,
+            summary: 'Interrupted',
+          },
+        });
+      }
+      if (!changed) {
+        return { activeSubtasks: new Map() };
+      }
+      return {
+        toolExecutions: nextExecutions,
+        activeSubtasks: new Map(),
       };
     });
   },

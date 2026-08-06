@@ -272,7 +272,9 @@ def _stream_adapter(fast_path_result: RewriteFastPathResult | None):
     adapter._skill_evolution_rail = None
     adapter._try_skill_turbo_resume = AsyncMock(return_value=None)
     adapter._has_valid_model_config = Mock(return_value=True)
-    adapter._on_chat_request_start = AsyncMock(return_value=(None, None, None))
+    adapter._on_chat_request_start = AsyncMock(
+        return_value=(None, None, None, None, None)
+    )
     adapter._on_chat_request_end = AsyncMock()
     adapter._plain_chat_should_clear_stale_interrupt = Mock(return_value=False)
     adapter._handle_slash_command = AsyncMock(return_value=None)

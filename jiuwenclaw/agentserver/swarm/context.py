@@ -24,6 +24,7 @@ class SwarmBuildContext(BuildContext):
     team_id: str = ""
     team_ws_root: str | None = None
     team_skills_dir: str | None = None
+    leader_skills_dir: str | None = None
     global_skills_dir: str | None = None
     trajectory_registry: Any = None
     config: dict[str, Any] | None = None
@@ -40,6 +41,7 @@ class SwarmBuildContext(BuildContext):
             "team_id": self.team_id,
             "team_ws_root": self.team_ws_root,
             "team_skills_dir": self.team_skills_dir,
+            "leader_skills_dir": self.leader_skills_dir,
             "global_skills_dir": self.global_skills_dir,
         }
 
@@ -62,6 +64,7 @@ class SwarmBuildContext(BuildContext):
             team_id=seed.get("team_id", ""),
             team_ws_root=seed.get("team_ws_root"),
             team_skills_dir=seed.get("team_skills_dir"),
+            leader_skills_dir=seed.get("leader_skills_dir"),
             global_skills_dir=seed.get("global_skills_dir"),
             trajectory_registry=trajectory_registry,
             config=config,

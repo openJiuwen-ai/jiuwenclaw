@@ -100,8 +100,212 @@ def _extract_designer_section(text: str, *, include_charts: bool = False) -> str
 
 
 _PRESET_STYLE_IDS = {"business-classic", "tech-minimal", "elegant-narrative", "industrial-tech"}
+# Stage 6 §3.5/§3.6：预设四风格 + custom 的结构页走官方模板预铺填槽，禁止整页自由重写。
+_AGENDA_TEMPLATE_FILL_STYLE_IDS = _PRESET_STYLE_IDS | {"custom"}
+_STRUCTURAL_TEMPLATE_PAGE_TYPES: dict[str, str] = {
+    "cover": "cover",
+    "intro": "cover",
+    "agenda": "agenda",
+    "section": "section",
+    "chapter": "section",
+    "ending": "ending",
+    "conclusion": "ending",
+    "transition": "ending",
+}
 _DEFAULT_GEN_RETRY_ROUND = 1
 _MAX_PAGE_GENERATION_ATTEMPTS = 3
+_UNFILLED_PLACEHOLDER_RE = re.compile(r"\{\{[A-Z][A-Z0-9_]*\}\}")
+
+
+def _uses_structural_template_fill(style_id: str, page_type: str) -> bool:
+    """普通分支下结构页是否走官方模板预铺填槽。"""
+    return (
+        page_type in _STRUCTURAL_TEMPLATE_PAGE_TYPES
+        and style_id in _AGENDA_TEMPLATE_FILL_STYLE_IDS
+    )
+
+
+def _uses_agenda_template_fill(style_id: str, page_type: str) -> bool:
+    """普通分支下 agenda 是否走官方 agenda-template 预铺填槽。"""
+    return _uses_structural_template_fill(style_id, page_type) and page_type == "agenda"
+
+
+def _resolve_style_page_template_path(
+    pptx_root: str,
+    style_id: str,
+    *,
+    page_type: str = "agenda",
+) -> str:
+    """解析 references/styles/{style_id}/{page_type}-template.html 绝对路径字符串。"""
+    root = pptx_root.replace("\\", "/").rstrip("/")
+    return f"{root}/references/styles/{style_id}/{page_type}-template.html"
+
+
+def _has_unfilled_placeholders(html: str) -> bool:
+    """检测是否残留 Stage 6 软门禁关心的 {{PLACEHOLDER}}。"""
+    return bool(_UNFILLED_PLACEHOLDER_RE.search(html or ""))
+
+
+def _build_structural_template_fill_prompt(
+    *,
+    page_number: int,
+    page_type: str,
+    template_page_type: str,
+    style_id: str,
+    style_text: str,
+    outline_page: str,
+    outline_full: str,
+    seed_html: str,
+    user_query: str = "",
+) -> str:
+    """构造结构页官方模板填槽 prompt（仅替换 {{}}，不重写骨架）。"""
+    user_query_section = ""
+    if user_query:
+        user_query_section = (
+            "## 用户原始 query（指导内容方向，不改变本页范围）\n"
+            f"{user_query}\n\n"
+        )
+
+    outline_full_section = ""
+    if outline_full.strip() and outline_full.strip() != outline_page.strip():
+        outline_full_section = (
+            "### 大纲全文（用于核对章节标题与页码范围）\n"
+            f"{outline_full}\n\n"
+        )
+
+    _placeholder_common_tail = (
+        "禁止敷衍值：空串、`—`/`–`/`-`、`N/A`、`TBD`、`暂无`、`待补充`、`待定`、`占位`\n"
+        "完成后不得残留任何 `{{[A-Z][A-Z0-9_]*}}`\n"
+        "直接输出完整 HTML，禁止 Markdown 代码块包裹与解释文字\n"
+    )
+
+    if style_id == "custom":
+        custom_rules: dict[str, str] = {
+            "cover": (
+                "1. 已预铺 `custom/cover-template.html` 脚手架：逐字保留 `.ppt-slide` 硬约束、"
+                "`@layer utilities` 与 `theme-contract` 插槽结构\n"
+                "2. 仅替换实际出现的占位符：`{{THEME_CSS_VARIABLES}}`、`{{THEME_CSS_RULES}}`、"
+                "`{{PAGE_TITLE}}`、`{{PAGE_CONTENT}}` 及 STRUCTURAL_IMAGE 相关槽位\n"
+                "3. `{{PAGE_CONTENT}}` 依据风格文件设计封面；禁止 ECharts/数据图表\n"
+            ),
+            "agenda": (
+                "1. 已预铺 `custom/agenda-template.html` 脚手架：逐字保留 `.ppt-slide` 硬约束、"
+                "`@layer utilities` 与 `theme-contract` 插槽结构\n"
+                "2. 仅替换实际出现的占位符：`{{THEME_CSS_VARIABLES}}`、`{{THEME_CSS_RULES}}`、"
+                "`{{PAGE_TITLE}}`、`{{PAGE_CONTENT}}`；未提供的主题槽替换为空\n"
+                "3. `{{PAGE_CONTENT}}` 依据风格文件设计目录正文；目录条目的页码/导航标记必须"
+                "**全部统一有或全部统一无**，禁止部分条目有、部分没有\n"
+                "4. 禁止在模板未定义位置发明「四章·十二节」「章数汇总大号数字」等装饰元数据\n"
+            ),
+            "section": (
+                "1. 已预铺 `custom/section-template.html` 脚手架：逐字保留硬约束与 theme-contract\n"
+                "2. 仅替换实际出现的主题槽与 `{{PAGE_TITLE}}`、`{{PAGE_CONTENT}}`\n"
+                "3. `{{PAGE_CONTENT}}` 设计章节过渡页；禁止 ECharts/数据图表/内容页双栏布局\n"
+            ),
+            "ending": (
+                "1. 已预铺 `custom/ending-template.html` 脚手架：逐字保留硬约束与 theme-contract\n"
+                "2. 仅替换实际出现的主题槽与 `{{PAGE_CONTENT}}`\n"
+                "3. `{{PAGE_CONTENT}}` 设计简洁结束页：主文案必须为「感谢聆听」或同等简短收束语；"
+                "若 outline 标题为长总结句，只能作为一句副标语，不得做成内容页布局\n"
+                "4. **禁止** ECharts、数据图表、双栏正文、在模板外追加独立「感谢聆听」页脚块\n"
+            ),
+        }
+        fill_rules = (
+            f"### 填充规则（custom {template_page_type}，对齐 Stage 6 §3.6）\n"
+            f"{custom_rules.get(template_page_type, custom_rules['section'])}\n"
+            f"{_placeholder_common_tail}"
+        )
+    else:
+        preset_rules: dict[str, str] = {
+            "cover": (
+                "1. **字面拷贝已完成**：下方 HTML 即官方 `cover-template.html` 预铺结果；"
+                "禁止重写整页、禁止改标题栏/页脚/CSS/`@layer`/装饰/SVG\n"
+                "2. **只替换 `{{...}}`**：以模板内实际出现的占位符为准\n"
+                "3. 主标题/副标题取自 outline；禁止引入 ECharts 或正文页布局\n"
+            ),
+            "agenda": (
+                "1. **字面拷贝已完成**：下方 HTML 即官方 `agenda-template.html` 预铺结果；"
+                "禁止重写整页、禁止改标题栏/页脚/CSS/`@layer`/装饰/SVG/编号锚点/Tailwind class 顺序\n"
+                "2. **只替换 `{{...}}`**：以模板内实际出现的占位符为准"
+                "（常见：`{{PAGE_TITLE}}`、`{{AGENDA_DESC}}`、`{{AGENDA_N_TITLE}}`、"
+                "`{{AGENDA_N_DESC}}`、`{{AGENDA_N_PAGE}}`、`{{PAGE_FOOTER}}`）\n"
+                "3. **禁止自创装饰块**：不得新增模板未定义的「四章 · 十二节」、章数汇总、"
+                "大号装饰数字等元数据文案\n"
+                "4. **页码标记一致性**：\n"
+                "   - 若模板含 `{{AGENDA_N_PAGE}}`：每条都必须填写，格式统一"
+                "（如 `P03` / `P03 — P04`）；单页条目也要填（如 `P10`），"
+                "禁止部分有、部分空\n"
+                "   - 若模板无独立 PAGE 槽：页码信息统一写入 `{{AGENDA_N_DESC}}`"
+                "（全部带或不全部带，保持一致），来源为 outline 内容概要\n"
+                "5. **条目数 ≠ 默认 4**：仅允许按模板注释增删同构条目槽位并同步编号；"
+                "不得改其他结构或发明新布局\n"
+            ),
+            "section": (
+                "1. **字面拷贝已完成**：下方 HTML 即官方 `section-template.html` 预铺结果；"
+                "禁止重写整页、禁止改固定骨架/CSS/`@layer`/装饰\n"
+                "2. **只替换 `{{...}}`**：章节号/章节标题取自 outline\n"
+                "3. 禁止引入 ECharts、数据图表或内容页双栏布局\n"
+            ),
+            "ending": (
+                "1. **字面拷贝已完成**：下方 HTML 即官方 `ending-template.html` 预铺结果；"
+                "禁止重写整页、禁止改标题栏/页脚/CSS/`@layer`/装饰/SVG\n"
+                "2. **只替换 `{{...}}`**：以模板内实际出现的占位符为准"
+                "（如 `{{ENDING_TITLE}}`、`{{ENDING_SUBTITLE}}`、`{{SUMMARY_STAT_*}}`、"
+                "`{{REPORTER_*}}`、`{{PAGE_FOOTER_*}}`）\n"
+                "3. **ENDING_TITLE 主标语**：优先填入「感谢聆听」；若 outline 标题为长总结句，"
+                "应放入 `{{ENDING_SUBTITLE}}` 或 `{{SUMMARY_STAT_*}}` 槽位，"
+                "不得把总结句当作内容页 h1 并引入图表/双栏正文\n"
+                "4. **禁止内容页元素**：不得引入 ECharts、数据图表、content 页双栏布局，"
+                "或在模板结构外追加独立「感谢聆听」页脚块\n"
+                "5. 可用 outline 内容概要提炼最多 4 条简短 SUMMARY_STAT 回响；不得臆造定量数据\n"
+            ),
+        }
+        fill_rules = (
+            f"### 填充规则（预设风格 {template_page_type}，对齐 Stage 6 §3.5）\n"
+            f"{preset_rules.get(template_page_type, preset_rules['section'])}\n"
+            "每个占位符必须填有意义内容；"
+            f"{_placeholder_common_tail}"
+        )
+
+    page_type_label = page_type or template_page_type
+    return (
+        f"{user_query_section}"
+        f"## 任务：填充第 {page_number} 页 {page_type_label} 官方模板占位符\n"
+        f"style_id=`{style_id}`，模板=`{template_page_type}-template.html`。"
+        "你是模板填充师，不是自由排版设计师。\n\n"
+        f"{fill_rules}\n"
+        "## 风格文件（配色/字体权威；不得把风格元数据写成观众可见装饰）\n"
+        f"{style_text}\n\n"
+        f"### 大纲 — 本页规划（{page_type_label}）\n"
+        f"{outline_page}\n\n"
+        f"{outline_full_section}"
+        "### 预铺模板 HTML（只填槽，勿重写）\n"
+        f"{seed_html}\n"
+    )
+
+
+def _build_agenda_template_fill_prompt(
+    *,
+    page_number: int,
+    style_id: str,
+    style_text: str,
+    outline_page: str,
+    outline_full: str,
+    seed_html: str,
+    user_query: str = "",
+) -> str:
+    """构造 agenda 官方模板填槽 prompt（仅替换 {{}}，不重写骨架）。"""
+    return _build_structural_template_fill_prompt(
+        page_number=page_number,
+        page_type="agenda",
+        template_page_type="agenda",
+        style_id=style_id,
+        style_text=style_text,
+        outline_page=outline_page,
+        outline_full=outline_full,
+        seed_html=seed_html,
+        user_query=user_query,
+    )
 
 _VISIBLE_PAGE_NUMBER_RULE = (
     "- 可见运行页码禁令（所有页型）：页码只用于文件名、任务定位和完整性校验，"
@@ -311,6 +515,8 @@ _DESIGN_RULES_DIGEST = (
     "4.2 图表最小高度（强制）：图表容器实际渲染高度必须 ≥ 160px（防塌缩下限），"
     "用 `min-h-[160px]` 或 `flex-1` 确保图表区域能初始化渲染；"
     "建议图表可读高度 ≥ 300px，由页面预算保证\n"
+    "4.2.1 图表高度链（强制）：图表外层卡片须 `flex-1 min-h-0 flex flex-col`（或 `flex-[N] min-h-0 flex flex-col`），"
+    "内层 `#xxx-chart` 用 `flex-1 min-h-0 w-full`；禁止在无 `min-h-0`/`flex-1` 的 flex-col 父容器内单独给 chart div 加 `flex-1`\n"
     "4.3 图表颜色（强制）：图表数据系列颜色必须来自风格文件的图表配色表，禁止使用相近色；"
     "坐标轴标签用深色，分割线用浅色\n"
     "4.4 图表标签防重叠：建议为 ECharts series 设置 `labelLayout:{moveOverlap:'shiftY'}` 防止同系列标签重叠；"
@@ -321,8 +527,11 @@ _DESIGN_RULES_DIGEST = (
     "4.5 图例防叠字：图例项 ≥5 个时建议设 `legend:{type:'scroll'}` 或 `legend:{orient:'vertical'}`；"
     "横向图例还必须检查文字长度：任一中文标签超过 6 个字或全部标签合计超过 12 个字时，"
     "优先在不改变含义的前提下缩短标签，或改为纵向图例；若仍横排，`itemGap` 至少 24，"
-    "并增大 `grid.top` 为图例预留空间；顶部横向图例与 yAxis.name 文字框的净间距必须 ≥18px，"
-    "若图表标题行已写单位，则清空重复的 yAxis.name；否则通过增大 `grid.top` 或移动图例分开两条通道\n"
+    "并增大 `grid.top` 为图例预留空间；顶部横向图例与 yAxis.name 文字框的净间距必须 ≥18px；"
+    "图表单位只能写在 ECharts `yAxis.name` / `xAxis.name`，禁止在图表卡片头部 HTML（含标题行右上角）"
+    "再写单位文案，否则与轴名称形成双单位；右上角 HTML 文本仅放时间范围、来源等非单位元数据；"
+    "双 Y 轴时左/右轴各自在 yAxis.name 写本单位；"
+    "若图例仍与轴名冲突，通过增大 `grid.top` 或移动图例分开两条通道\n"
     "4.6 图表分割线：`splitLine` 建议使用浅色虚线，避免实线在 PPTX 中过于突兀；颜色由风格文件决定\n"
     "5. 步骤/流程页 → 用 HTML/CSS 绘制节点+连线+文字，禁止纯文字描述\n"
     "6. 关键数字必须有放大数字卡片，结论必须有摘要高亮；"
@@ -602,35 +811,7 @@ _PAGE_LAYOUT_TEMPLATES = {
         "```\n"
         "- 低密度页面，允许较高留白，不要求双栏、数据卡片或图表\n"
     ),
-    "ending": (
-        "### 推荐布局（ending 类型，结束页）\n"
-        "```html\n"
-        '<div class="content-safe flex flex-col items-center justify-center">\n'
-        '  <h2 class="text-[42px] font-bold text-center">感谢聆听</h2>\n'
-        '  <p class="text-[22px] text-center mt-4">联系方式（可选）</p>\n'
-        '</div>\n'
-        "```\n"
-        "- 低密度页面，允许较高留白，不要求双栏、数据卡片或图表\n"
-    ),
-    "agenda": (
-        "### 推荐布局（agenda 类型，目录页）\n"
-        "```html\n"
-        '<div class="content-safe flex flex-col">\n'
-        '  <div class="flex-shrink-0">\n'
-        '    <h1 class="text-[44px] font-bold">目录</h1>\n'
-        '    <p class="text-[16px] mt-2">演示内容导览</p>\n'
-        '  </div>\n'
-        '  <div class="flex-1 min-h-0 flex flex-col justify-center gap-3 mt-6">\n'
-        '    <div class="flex items-center gap-6 py-3">\n'
-        '      <span class="text-[36px] font-bold w-[60px] flex-shrink-0">01</span>\n'
-        '      <p class="text-[24px] flex-1">内容章节标题</p>\n'
-        '    </div>\n'
-        '  </div>\n'
-        '</div>\n'
-        "```\n"
-        "- 只列内容页（✅）章节标题，不得列入封面/目录/结束页等结构页本身\n"
-        "- 低密度页面，允许较高留白，布局可按风格调整\n"
-    ),
+    # cover/agenda/ending 等结构页在预设四风格 + custom 下走官方模板填槽，不注入自由生成布局权威。
 }
 
 
@@ -728,6 +909,110 @@ def _is_valid_html(text: str) -> bool:
     if "</body>" not in lower or "</html>" not in lower:
         return False
     return True
+
+
+_MALFORMED_HTML_RE = re.compile(
+    r"</\.>|border@none|style=\"\.>",
+    re.IGNORECASE,
+)
+_PPT_SLIDE_OPEN_RE = re.compile(
+    r'<div\b[^>]*\bclass="[^"]*\bppt-slide\b',
+    re.IGNORECASE,
+)
+
+
+def _ppt_slide_bounds(html: str) -> tuple[int, int] | None:
+    """返回 .ppt-slide 内容区 [start, end) 偏移；解析失败时返回 None。"""
+    slide_match = _PPT_SLIDE_OPEN_RE.search(html)
+    if not slide_match:
+        return None
+    tag_end = html.find(">", slide_match.start())
+    if tag_end < 0:
+        return None
+    content_start = tag_end + 1
+    depth = 1
+    pos = content_start
+    lower = html.lower()
+    while pos < len(html) and depth > 0:
+        next_open = lower.find("<div", pos)
+        next_close = lower.find("</div>", pos)
+        if next_close == -1:
+            return None
+        if next_open != -1 and next_open < next_close:
+            depth += 1
+            pos = next_open + 4
+        else:
+            depth -= 1
+            if depth == 0:
+                return content_start, next_close
+            pos = next_close + 6
+    return None
+
+
+def _main_inside_ppt_slide(html: str) -> bool:
+    """内容页的 <main> 必须落在 .ppt-slide 容器内；无 <main> 时视为通过。"""
+    main_match = re.search(r"<main\b", html, re.IGNORECASE)
+    if not main_match:
+        return True
+    bounds = _ppt_slide_bounds(html)
+    if bounds is None:
+        return False
+    start, end = bounds
+    return start <= main_match.start() < end
+
+
+def _validate_slide_dom(html: str) -> bool:
+    """P8.1 写盘前校验：拦截 LLM 畸形片段与 main 滑出 slide。"""
+    if _MALFORMED_HTML_RE.search(html):
+        return False
+    return _main_inside_ppt_slide(html)
+
+
+def _is_slide_exportable(html: str) -> bool:
+    """P8.2 fix 后校验：仅确认导出边界内的结构未被破坏。"""
+    return _main_inside_ppt_slide(html)
+
+
+_CHART_DIV_RE = re.compile(
+    r'<div\b[^>]*\bid\s*=\s*["\'][^"\']*chart[^"\']*["\'][^>]*>',
+    re.IGNORECASE,
+)
+_FLEX_COL_DIV_RE = re.compile(
+    r'<div\b[^>]*\bclass="[^"]*\bflex-col\b[^"]*"[^>]*>',
+    re.IGNORECASE,
+)
+_CHART_WRAPPER_HEIGHT_RE = re.compile(
+    r"\bmin-h-0\b|\bflex-1\b|\bflex-\[\d+\]",
+    re.IGNORECASE,
+)
+
+
+def _chart_wrapper_has_height_chain(wrapper_tag: str) -> bool:
+    """designer.md 图表高度链：包装器须参与纵向高度分配（min-h-0 或 flex-1/flex-[N]）。"""
+    return bool(_CHART_WRAPPER_HEIGHT_RE.search(wrapper_tag))
+
+
+def _validate_chart_height_chain(html: str) -> bool:
+    """P8.1 写盘前校验：ECharts 图表外层 flex-col 卡片须具备高度分配类。
+
+    仅拦截高置信坏案（如 page-5：包装器只有 flex flex-col、无 min-h-0/flex-1）；
+    无法定位包装器时不拦截，避免误伤。
+    """
+    if "echarts.init" not in html.lower():
+        return True
+    for chart_match in _CHART_DIV_RE.finditer(html):
+        before = html[max(0, chart_match.start() - 2000):chart_match.start()]
+        wrappers = list(_FLEX_COL_DIV_RE.finditer(before))
+        if not wrappers:
+            continue
+        if not _chart_wrapper_has_height_chain(wrappers[-1].group(0)):
+            return False
+    return True
+
+
+def _extract_backup_timestamp(path: str) -> str:
+    match = re.search(r"_backup[/\\](\d+)[/\\]", path.replace("\\", "/"))
+    return match.group(1) if match else ""
 
 
 _VISIBLE_PAGE_MARKER_RE = re.compile(
@@ -1035,6 +1320,65 @@ def _has_chart_without_init(html: str) -> bool:
     if not _ECHARTS_LIB_RE.search(html):
         return False
     return not _ECHARTS_INIT_RE.search(html)
+
+
+# --- 图表卡片头部 HTML 写单位检测（与 ECharts 轴名称形成双单位） ---
+# 场景：LLM 在图表标题行右上角 span 又写了一遍「单位：克/日」，与 setOption 中
+# yAxis.name 形成左上角轴名 + 右上角 HTML 单位的双单位。单位唯一来源应为
+# ECharts yAxis.name / xAxis.name，图表卡片头部 HTML 不得再写单位文案。
+_CHART_HEADER_SPAN_RE = re.compile(
+    r"<span\b[^>]*>(?P<text>.*?)</span\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_CHART_UNIT_LABEL_RE = re.compile(
+    r"^[\s（(]*单位\s*[：:].+",
+    re.IGNORECASE,
+)
+# 仅匹配带斜杠的复合量纲，避免误伤「40%」「1.2亿元」等数据值 span
+_CHART_UNIT_TOKEN_RE = re.compile(
+    r"(?:千卡/(?:时|小时)|克/日|g/日|kg/日|吨/日?|元/(?:日|年|月|吨)"
+    r"|次/(?:日|周|月)|小时/天|分钟/天|克/毫升)",
+    re.IGNORECASE,
+)
+_CHART_HEADER_WINDOW = 400
+
+
+def _strip_chart_header_unit(html: str) -> str:
+    """剥离图表卡片头部 HTML 中的单位 span，避免与 ECharts yAxis.name 形成双单位。
+
+    单位最终应由 yAxis.name / xAxis.name 承载。仅移除图表容器 div 前 400 字符窗口内、
+    文本为「单位：xx」前缀或含复合量纲（如 千卡/小时、克/日）的 span；不处理纯数字
+    数据值 span，避免误伤数据卡片单位 chip。为确定性后置修复，不触发 LLM 重写。
+    """
+    chart_starts = [m.start() for m in _CHART_DIV_RE.finditer(html)]
+    if not chart_starts:
+        return html
+
+    stripped = 0
+
+    def _is_chart_header_unit(match: re.Match[str]) -> bool:
+        nonlocal stripped
+        span_end = match.end()
+        if not any(span_end <= cs <= span_end + _CHART_HEADER_WINDOW for cs in chart_starts):
+            return False
+        text = re.sub(r"\s+", "", re.sub(r"<[^>]+>", "", match.group("text")))
+        if not text:
+            return False
+        if _CHART_UNIT_LABEL_RE.match(text) or _CHART_UNIT_TOKEN_RE.search(text):
+            stripped += 1
+            return True
+        return False
+
+    new_html = _CHART_HEADER_SPAN_RE.sub(
+        lambda m: "" if _is_chart_header_unit(m) else m.group(0),
+        html,
+    )
+    if stripped:
+        logger.info(
+            "[P8.1] 剥离图表卡片头部重复单位 span %d 处（单位改由 yAxis.name 承载）",
+            stripped,
+        )
+    return new_html
 
 
 # 检测 CSS Grid 布局使用（html-to-pptx 不支持 Grid）
@@ -1893,7 +2237,7 @@ _REWRITE_ACTIONS = {
         "同时按图例项数量和文字长度处理：任一中文标签超过 6 个字或总长度超过 12 个字时，"
         "优先在不改变含义的前提下缩短标签，或改为 `legend:{orient:'vertical'}`；"
         "若仍横排，将 `itemGap` 调到至少 24；"
-        "标题行已标注单位时清空重复的 yAxis.name，否则增大 `grid.top` 或移动图例，"
+        "增大 `grid.top` 或移动图例分开两条通道，"
         "确保图例文字框底边与轴名称文字框顶边至少相隔 18px；不得缩小字号掩盖"
     ),
     "图表数据标签重叠风险": (
@@ -2358,6 +2702,8 @@ class PageGenContext:
     designer_md_text: str  # references/designer.md 原文（由 PrepareNode 通过 read_file 读取）
     user_query: str = ""  # 用户原始 query（由 collect_user_text 提取）
     total_pages: int = 0
+    pptx_root: str = ""  # pptx-craft 根目录（agenda 官方模板预铺用）
+    outline_full: str = ""  # outline.md 全文（agenda 核对章节页码用）
 
 
 class PrepareNode(PlanNode):
@@ -2399,14 +2745,20 @@ class PrepareNode(PlanNode):
 
     async def _execute(self, inputs: dict[str, Any]) -> dict[str, Any]:
         page_count = int(inputs.get("page_count") or 0)
-        total_pages = int(
-            inputs.get("total_pages") or (page_count + _DEFAULT_STRUCTURAL_PAGES)
-        )
         output_dir = str(inputs.get("output_dir") or "").strip()
         style_file_path = str(inputs.get("style_file_path") or "").strip()
 
         outline_text = await self._read_file(f"{output_dir}/outline.md")
         style_text = await self._read_file(style_file_path)
+
+        outline_pages = _split_md_pages(outline_text)
+        total_pages = PptCommon.resolve_total_pages(
+            page_count=page_count,
+            total_pages=inputs.get("total_pages"),
+            outline_text=outline_text,
+            outline_pages=outline_pages,
+            default_structural_pages=_DEFAULT_STRUCTURAL_PAGES,
+        )
 
         if not outline_text or not style_text:
             logger.error(
@@ -2421,13 +2773,12 @@ class PrepareNode(PlanNode):
                 "outline_text": outline_text,
                 "style_text": style_text,
                 "all_pages": list(range(1, total_pages + 1)) if total_pages > 0 else [],
+                "total_pages": total_pages,
             }
 
-        outline_pages = _split_md_pages(outline_text)
         if not outline_pages:
             logger.warning("[P8.0] outline.md 未拆分到任何页面章节，下游回退全文")
 
-        # 逐页读取 research-P{N}.md（不再读取单文件 research.md）
         # 遍历 total_pages（含结构页），❌ 页无 research 文件会跳过
         all_pages = list(range(1, total_pages + 1)) if total_pages > 0 else sorted(outline_pages.keys())
         research_pages: dict[int, str] = {}
@@ -2466,10 +2817,11 @@ class PrepareNode(PlanNode):
         designer_md_text = await self._read_file(f"{pptx_root}/references/designer.md")
 
         logger.info(
-            "[P8.0] 预处理完成 outline_pages=%d research_pages=%d image_map_pages=%d",
+            "[P8.0] 预处理完成 outline_pages=%d research_pages=%d image_map_pages=%d total_pages=%d",
             len(outline_pages),
             len(research_pages),
             len(image_map),
+            total_pages,
         )
         return {
             "prepare_status": "ok",
@@ -2480,6 +2832,7 @@ class PrepareNode(PlanNode):
             "all_pages": all_pages,
             "image_map": image_map,
             "designer_md_text": designer_md_text,
+            "total_pages": total_pages,
         }
 
     async def _read_file(self, path: str) -> str:
@@ -2540,14 +2893,18 @@ class PageWorkerNode(PlanNode):
                 "\n"
                 "### 执行流程（N 页 asyncio.gather 并发）\n"
                 "对每一页独立执行：\n"
-                "1. 生成阶段：用该页 outline 片段 + research 片段 + 风格规范 + 视觉与布局硬约束构造 prompt，"
+                "1. 若 style_id ∈ 预设四风格∪custom 且页型为 agenda：读取官方 "
+                "`references/styles/{style_id}/agenda-template.html` 预铺，LLM 仅替换 `{{}}` "
+                "占位符；残留占位符判失败；不走整页自由生成\n"
+                "2. 其余页：用该页 outline 片段 + research 片段 + 风格规范 + 视觉与布局硬约束构造 prompt，"
                 "调 LLM 生成 HTML；剥 ```html 包裹 → 校验（含 <!DOCTYPE> + ppt-slide 容器）→ write_file 落盘\n"
                 "   - 失败按 gen_retry_round 重试（仅本页）\n"
                 "   - 重试后仍失败 → 进 missing_pages\n"
-                "2. 成功页只保留一个 ppt-slide 容器并直接落盘；生成后不再调用 LLM 核查、搜索或整页重写\n"
+                "3. 成功页只保留一个 ppt-slide 容器并直接落盘；生成后不再调用 LLM 核查、搜索或整页重写\n"
                 "\n"
                 "### 失败兜底\n"
                 "- 生成 LLM 调用 raise / 返回空 / HTML 校验失败：进 missing_pages\n"
+                "- agenda 模板缺失或填槽后残留 `{{...}}`：进 missing_pages\n"
                 "- 首次落盘 write_file 异常：进 missing_pages\n"
                 "- 重试后仍缺失：透传给根节点\n"
             ),
@@ -2566,6 +2923,7 @@ class PageWorkerNode(PlanNode):
         image_map: dict[str, Any] = inputs.get("image_map") or {}
         designer_md_text = str(inputs.get("designer_md_text") or "")
         user_query = PptCommon.collect_user_text(inputs)
+        pptx_root = str(inputs.get("pptx_root") or "").strip()
 
         if not pages_dir or not all_pages:
             logger.error("[P8.1] 必填输入缺失，跳过生成")
@@ -2594,6 +2952,8 @@ class PageWorkerNode(PlanNode):
                 designer_md_text=designer_md_text,
                 user_query=user_query,
                 total_pages=total_pages,
+                pptx_root=pptx_root,
+                outline_full=outline_full,
             )
             for p in all_pages
         ]
@@ -2644,6 +3004,8 @@ class PageWorkerNode(PlanNode):
         designer_md_text: str = "",
         user_query: str = "",
         total_pages: int = 0,
+        pptx_root: str = "",
+        outline_full: str = "",
     ) -> dict[str, Any]:
         """生成并校验单页；仅生成失败时按预算重试。"""
         path = f"{pages_dir}/page-{page_num}.pptx.html"
@@ -2672,6 +3034,8 @@ class PageWorkerNode(PlanNode):
             designer_md_text=designer_md_text,
             user_query=user_query,
             total_pages=total_pages,
+            pptx_root=pptx_root,
+            outline_full=outline_full or outline_page,
         )
 
         html = ""
@@ -2701,8 +3065,134 @@ class PageWorkerNode(PlanNode):
             "report": {},
         }
 
+    async def _read_file(self, path: str) -> str:
+        if not path:
+            return ""
+        if not self.has_tool("read_file"):
+            logger.warning("[P8.1] read_file 工具不可用 %s", path)
+            return ""
+        try:
+            result = await self.call_tool("read_file", file_path=path)
+            return PptCommon.parse_tool_file_content(result)
+        except Exception as e:
+            if isinstance(e, AbortError):
+                raise
+            logger.warning("[P8.1] 读取文件失败 %s: %s", path, e)
+            return ""
+
+    async def _generate_structural_template_fill(
+        self,
+        ctx: PageGenContext,
+        page_type: str,
+    ) -> str:
+        """预设/custom 结构页：官方模板预铺 + 仅填 {{}}。"""
+        if not ctx.pptx_root:
+            logger.error(
+                "[P8.1] 结构页填槽缺少 pptx_root page=%d type=%s",
+                ctx.page_num,
+                page_type,
+            )
+            return ""
+
+        template_page_type = _STRUCTURAL_TEMPLATE_PAGE_TYPES.get(page_type, page_type)
+        template_path = _resolve_style_page_template_path(
+            ctx.pptx_root,
+            ctx.style_id,
+            page_type=template_page_type,
+        )
+        seed_html = await self._read_file(template_path)
+        if not seed_html.strip():
+            logger.error(
+                "[P8.1] 结构页官方模板缺失或为空 page=%d style=%s type=%s path=%s",
+                ctx.page_num,
+                ctx.style_id,
+                page_type,
+                template_path,
+            )
+            return ""
+
+        prompt = _build_structural_template_fill_prompt(
+            page_number=ctx.page_num,
+            page_type=page_type,
+            template_page_type=template_page_type,
+            style_id=ctx.style_id,
+            style_text=ctx.style_text,
+            outline_page=ctx.outline_page,
+            outline_full=ctx.outline_full,
+            seed_html=seed_html,
+            user_query=ctx.user_query,
+        )
+        node_suffix = f"{template_page_type}_fill_{ctx.page_num}"
+        try:
+            result = await self.stream_llm_collect(
+                prompt=prompt,
+                system_prompt=(
+                    "你是 PPT 模板填充师。只替换模板中的 {{...}} 占位符，"
+                    "直接输出完整 HTML 原文，不输出任何解释。"
+                ),
+                node_name=f"p8_1_{node_suffix}",
+                concurrent=True,
+            )
+        except Exception as e:
+            if isinstance(e, AbortError):
+                raise
+            logger.warning(
+                "[P8.1] 结构页填槽 LLM 失败 page=%d type=%s: %s",
+                ctx.page_num,
+                page_type,
+                e,
+            )
+            return ""
+
+        html = _strip_html_fence(result or "")
+        if not _is_valid_html(html):
+            logger.warning(
+                "[P8.1] 结构页填槽 HTML 校验失败 page=%d type=%s",
+                ctx.page_num,
+                page_type,
+            )
+            return ""
+        if _has_unfilled_placeholders(html):
+            logger.warning(
+                "[P8.1] 结构页填槽残留占位符 page=%d type=%s placeholders=%s",
+                ctx.page_num,
+                page_type,
+                _UNFILLED_PLACEHOLDER_RE.findall(html)[:8],
+            )
+            return ""
+
+        html = _apply_visible_page_number_policy(
+            html,
+            user_query=ctx.user_query,
+            page_number=ctx.page_num,
+            total_pages=ctx.total_pages,
+            style_id=ctx.style_id,
+        )
+        if not _validate_slide_dom(html):
+            logger.warning(
+                "[P8.1] 结构页 DOM 校验失败 page=%d type=%s",
+                ctx.page_num,
+                page_type,
+            )
+            return ""
+        logger.info(
+            "[P8.1] 结构页官方模板填槽完成 page=%d style=%s type=%s",
+            ctx.page_num,
+            ctx.style_id,
+            page_type,
+        )
+        return html
+
+    async def _generate_agenda_template_fill(self, ctx: PageGenContext) -> str:
+        """预设/custom agenda：官方模板预铺 + 仅填 {{}}。"""
+        return await self._generate_structural_template_fill(ctx, "agenda")
+
     async def _generate_one(self, ctx: PageGenContext) -> str:
         """生成单页 HTML，返回校验通过的 html 或空串。"""
+        page_type = _detect_page_type(ctx.outline_page)
+        if _uses_structural_template_fill(ctx.style_id, page_type):
+            return await self._generate_structural_template_fill(ctx, page_type)
+
         try:
             result = await self.stream_llm_collect(
                 prompt=_build_page_prompt(
@@ -2742,6 +3232,13 @@ class PageWorkerNode(PlanNode):
         )
         html = _fix_echarts_svg_renderer(html)
         html = _strip_unsupported_fullpage_overlays(html)
+        html = _strip_chart_header_unit(html)
+        if not _validate_slide_dom(html):
+            logger.warning("[P8.1] 页面 %d DOM 结构校验失败", ctx.page_num)
+            return ""
+        if not _validate_chart_height_chain(html):
+            logger.warning("[P8.1] 页面 %d 图表容器高度链校验失败", ctx.page_num)
+            return ""
         return html
 
     async def _write_file(self, path: str, content: str) -> bool:
@@ -2809,8 +3306,11 @@ class QAFixNode(PlanNode):
     async def _execute(self, inputs: dict[str, Any]) -> dict[str, Any]:
         pages_dir = str(inputs.get("pages_dir") or "").strip()
         page_count = int(inputs.get("page_count") or 0)
-        total_pages = int(
-            inputs.get("total_pages") or (page_count + _DEFAULT_STRUCTURAL_PAGES)
+        total_pages = PptCommon.resolve_total_pages(
+            page_count=page_count,
+            total_pages=inputs.get("total_pages"),
+            outline_text=str(inputs.get("outline_text") or ""),
+            default_structural_pages=_DEFAULT_STRUCTURAL_PAGES,
         )
 
         if not pages_dir:
@@ -2874,6 +3374,49 @@ class QAFixNode(PlanNode):
             "fix_report": "; ".join(fix_report_parts),
         }
 
+    async def _read_page_file(self, path: str) -> str:
+        if not path or not self.has_tool("read_file"):
+            return ""
+        try:
+            result = await self.call_tool("read_file", file_path=path)
+            return PptCommon.parse_tool_file_content(result)
+        except Exception as e:
+            if isinstance(e, AbortError):
+                raise
+            logger.warning("[P8.2] 读取页面失败 %s: %s", path, e)
+            return ""
+
+    async def _write_page_file(self, path: str, content: str) -> bool:
+        if not path or not self.has_tool("write_file"):
+            return False
+        try:
+            await self.call_tool("write_file", file_path=path, content=content)
+            return True
+        except Exception as e:
+            if isinstance(e, AbortError):
+                raise
+            logger.warning("[P8.2] 写入页面失败 %s: %s", path, e)
+            return False
+
+    async def _find_latest_backup_path(self, pages_dir: str, page_num: int) -> str:
+        if not self.has_tool("glob"):
+            return ""
+        try:
+            result = await self.call_tool(
+                "glob",
+                pattern=f"_backup/*/page-{page_num}.pptx.html",
+                path=pages_dir,
+            )
+            paths = self._parse_listing(result)
+        except Exception as e:
+            if isinstance(e, AbortError):
+                raise
+            logger.warning("[P8.2] 查找 backup 失败 page=%d: %s", page_num, e)
+            return ""
+        if not paths:
+            return ""
+        return max(paths, key=_extract_backup_timestamp)
+
     async def _fix_pages(
         self,
         page_nums: list[int],
@@ -2887,6 +3430,10 @@ class QAFixNode(PlanNode):
 
         async def _fix_one(page_num: int) -> tuple[int, bool, str]:
             async with sem:
+                page_path = f"{pages_dir}/page-{page_num}.pptx.html"
+                before_html = await self._read_page_file(page_path)
+                before_ok = bool(before_html) and _is_slide_exportable(before_html)
+
                 style_arg = (
                     f" --style {quote_path(style_file_path)}"
                     if style_file_path
@@ -2911,6 +3458,20 @@ class QAFixNode(PlanNode):
                         page_num,
                         result.exit_code,
                     )
+
+                after_html = await self._read_page_file(page_path)
+                after_ok = bool(after_html) and _is_slide_exportable(after_html)
+                if before_ok and not after_ok:
+                    backup_path = await self._find_latest_backup_path(pages_dir, page_num)
+                    if backup_path:
+                        backup_html = await self._read_page_file(backup_path)
+                        if backup_html and _is_slide_exportable(backup_html):
+                            if await self._write_page_file(page_path, backup_html):
+                                logger.warning(
+                                    "[P8.2] page-%d fix 破坏 DOM，已回退 backup",
+                                    page_num,
+                                )
+                                output = f"{output} dom_restored_from_backup"
                 return page_num, ok, output
 
         results = await asyncio.gather(
@@ -3163,8 +3724,10 @@ class PPTPageGenNode(PlanNode):
                     "low_density_pages": [],
                     "ppt_gen_status": "failed",
                 }
-            total_pages = int(
-                inputs.get("total_pages") or (page_count + _DEFAULT_STRUCTURAL_PAGES)
+            total_pages = PptCommon.resolve_total_pages(
+                page_count=page_count,
+                total_pages=inputs.get("total_pages"),
+                default_structural_pages=_DEFAULT_STRUCTURAL_PAGES,
             )
             return await self._execute_template_pack(inputs, page_count, total_pages)
 
@@ -3197,9 +3760,12 @@ class PPTPageGenNode(PlanNode):
                 "ppt_gen_status": "failed",
             }
 
-        total_pages = int(
-            inputs.get("total_pages") or (page_count + _DEFAULT_STRUCTURAL_PAGES)
+        total_pages = PptCommon.resolve_total_pages(
+            page_count=page_count,
+            total_pages=inputs.get("total_pages"),
+            default_structural_pages=_DEFAULT_STRUCTURAL_PAGES,
         )
+        inputs = {**inputs, "total_pages": total_pages}
 
         prep_result = await self.execute_subplan(self.sub_plans[0], inputs)
         if not isinstance(prep_result, dict) or prep_result.get("prepare_status") != "ok":

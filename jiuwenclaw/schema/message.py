@@ -45,6 +45,8 @@ class ReqMethod(Enum):
     AGENT_RELOAD_CONFIG = "agent.reload_config"
     SYNC_AGENTS_CONFIGS = "sync_agents_configs"
 
+    TEAM_CATALOG_LIST = "team.catalog.list"
+
     MEMORY_COMPUTE = "memory.compute"
 
     FILES_LIST = "files.list"
@@ -124,6 +126,20 @@ class ReqMethod(Enum):
     UPDATER_DOWNLOAD = "updater.download"
     UPDATER_GET_CONF = "updater.get_conf"
     UPDATER_SET_CONF = "updater.set_conf"
+
+    # 沙箱配置（officeAce 经 WS 控制 jiuwenbox 沙箱开关/启动方式/文件/网络配置）。
+    # enabled = 是否开启沙箱（false→LOCAL，true→SANDBOX）；
+    # startup_mode = 开了沙箱后 box-server 的拉起方式（internal=agent-server 拉起，
+    #   external=K8s/外部部署）；两者独立，均开放给 officeAce。
+    # files/network 配置直接写进 windows-policy 运行时副本的对应字段（不存 config.yaml）。
+    SANDBOX_ENABLED_GET = "sandbox.enabled.get"
+    SANDBOX_ENABLED_SET = "sandbox.enabled.set"
+    SANDBOX_STARTUP_MODE_GET = "sandbox.startup_mode.get"
+    SANDBOX_STARTUP_MODE_SET = "sandbox.startup_mode.set"
+    SANDBOX_FILES_GET = "sandbox.files.get"
+    SANDBOX_FILES_SET = "sandbox.files.set"
+    SANDBOX_NETWORK_GET = "sandbox.network.get"
+    SANDBOX_NETWORK_SET = "sandbox.network.set"
 
 # SkillDev 模式请求方法
     SKILLDEV_START = "skilldev.start"  # 发起新任务（create/upgrade 由 params 自动判断）

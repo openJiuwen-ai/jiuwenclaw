@@ -576,6 +576,8 @@ def test_qa_fix_command_uses_fix_with_style_and_never_check_layout(
         lambda subcommand, _root: f"node cli.js {subcommand}",
     )
     monkeypatch.setattr(ppg, "run_bash", _run_bash)
+    # P8.2 fix 前后会探测 read_file；本用例只断言 bash 命令，不走 DOM 回退读盘。
+    node.set_runtime_callbacks(has_tool=lambda _name: False)
 
     results = asyncio.run(
         node._fix_pages(
@@ -593,3 +595,538 @@ def test_qa_fix_command_uses_fix_with_style_and_never_check_layout(
     assert all("--style \"D:/workspace/style.md\"" in command for command in commands)
     assert all("--pages" in command for command in commands)
     assert all("check-layout" not in command for command in commands)
+
+
+_AGENDA_OUTLINE = (
+    "### P2:\n"
+    "- **类型**：agenda\n"
+    "- **研究需求**：❌\n"
+    "- **标题**：目录\n"
+    "- **内容概要**：\n"
+    "  - 历史背景：（P3-P4）\n"
+    "  - 事件经过：（P5-P9）\n"
+    "  - 历史意义：（P10）\n"
+    "  - 影响与评价：（P11-P12）\n"
+)
+
+_AGENDA_SEED_HTML = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>{{PAGE_TITLE}}</title>
+<style>.ppt-slide{width:1280px;height:720px;overflow:hidden}</style>
+</head>
+<body>
+<div class="ppt-slide agenda-stage" type="agenda">
+  <h1>{{PAGE_TITLE}}</h1>
+  <p>{{AGENDA_DESC}}</p>
+  <div>
+    <p>{{AGENDA_1_TITLE}}</p><p>{{AGENDA_1_DESC}}</p>
+    <p>{{AGENDA_2_TITLE}}</p><p>{{AGENDA_2_DESC}}</p>
+    <p>{{AGENDA_3_TITLE}}</p><p>{{AGENDA_3_DESC}}</p>
+    <p>{{AGENDA_4_TITLE}}</p><p>{{AGENDA_4_DESC}}</p>
+  </div>
+  <p>{{PAGE_FOOTER}}</p>
+</div>
+</body>
+</html>
+"""
+
+_AGENDA_FILLED_HTML = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>目录</title>
+<style>.ppt-slide{width:1280px;height:720px;overflow:hidden}</style>
+</head>
+<body>
+<div class="ppt-slide agenda-stage" type="agenda">
+  <h1>目录</h1>
+  <p>沿文明长河读中华故事</p>
+  <div>
+    <p>历史背景</p><p>中国历史文化脉络（P3-P4）</p>
+    <p>事件经过</p><p>唐朝与四大发明（P5-P9）</p>
+    <p>历史意义</p><p>中华文明价值（P10）</p>
+    <p>影响与评价</p><p>世界影响（P11-P12）</p>
+  </div>
+  <p>历史课 · 文化分享</p>
+</div>
+</body>
+</html>
+"""
+
+
+def _write_agenda_template(tmp_path, style_id: str, content: str = _AGENDA_SEED_HTML) -> str:
+    return _write_style_template(tmp_path, style_id, "agenda", content)
+
+
+def _write_style_template(
+    tmp_path,
+    style_id: str,
+    template_page_type: str,
+    content: str,
+) -> str:
+    template_dir = tmp_path / "references" / "styles" / style_id
+    template_dir.mkdir(parents=True, exist_ok=True)
+    (template_dir / f"{template_page_type}-template.html").write_text(content, encoding="utf-8")
+    return str(tmp_path)
+
+
+_ENDING_OUTLINE = (
+    "### P10:\n"
+    "- **类型**：ending\n"
+    "- **研究需求**：❌\n"
+    "- **标题**：感谢聆听\n"
+    "- **内容概要**：结束页，展示感谢语与一句总结\n"
+)
+
+_ENDING_SEED_HTML = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>{{ENDING_TITLE}}</title>
+<style>.ppt-slide{width:1280px;height:720px;overflow:hidden}</style>
+</head>
+<body>
+<div class="ppt-slide ending-stage" type="ending">
+  <h1>{{ENDING_TITLE}}</h1>
+  <p>{{ENDING_SUBTITLE}}</p>
+  <p>{{PAGE_FOOTER_LEFT}}</p>
+</div>
+</body>
+</html>
+"""
+
+_ENDING_FILLED_HTML = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>感谢聆听</title>
+<style>.ppt-slide{width:1280px;height:720px;overflow:hidden}</style>
+</head>
+<body>
+<div class="ppt-slide ending-stage" type="ending">
+  <h1>感谢聆听</h1>
+  <p>把握高质量发展机遇</p>
+  <p>金融行业趋势分析</p>
+</div>
+</body>
+</html>
+"""
+
+
+def _agenda_template_path(pptx_root: str, style_id: str) -> str:
+    return ppg._resolve_style_page_template_path(pptx_root, style_id, page_type="agenda")
+
+
+def _configure_agenda_worker(
+    llm_responses: list[str | BaseException],
+    *,
+    pptx_root: str,
+    style_id: str,
+    llm_calls: list[str],
+    tool_calls: list[str],
+    written_contents: list[str] | None = None,
+    seed_html: str = _AGENDA_SEED_HTML,
+    template_page_type: str = "agenda",
+) -> ppg.PageWorkerNode:
+    node = ppg.PageWorkerNode()
+    queue = list(llm_responses)
+    template_path = ppg._resolve_style_page_template_path(
+        pptx_root,
+        style_id,
+        page_type=template_page_type,
+    )
+
+    async def _stream_llm(
+        _prompt: str,
+        _system_prompt: str = "",
+        node_name: str | None = None,
+        **_: Any,
+    ) -> AsyncIterator[str]:
+        llm_calls.append(str(node_name or ""))
+        response = queue.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        yield response
+
+    async def _use_tool(tool_name: str, **kwargs: Any) -> dict[str, Any]:
+        tool_calls.append(tool_name)
+        if tool_name == "read_file":
+            file_path = str(kwargs.get("file_path") or "")
+            if file_path.replace("\\", "/") == template_path.replace("\\", "/"):
+                return {"content": seed_html}
+            return {"content": ""}
+        if tool_name == "write_file":
+            if written_contents is not None:
+                written_contents.append(str(kwargs.get("content") or ""))
+            return {"success": True}
+        raise AssertionError(f"unexpected tool call: {tool_name}")
+
+    node.set_runtime_callbacks(
+        has_tool=lambda name: name in {"read_file", "write_file"},
+        use_tool=_use_tool,
+        stream_llm=_stream_llm,
+    )
+    return node
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "style_id",
+    sorted(ppg._AGENDA_TEMPLATE_FILL_STYLE_IDS),
+)
+def test_uses_agenda_template_fill_for_preset_and_custom(style_id: str) -> None:
+    assert ppg._uses_agenda_template_fill(style_id, "agenda")
+    assert not ppg._uses_agenda_template_fill(style_id, "data")
+    assert ppg._uses_structural_template_fill(style_id, "cover")
+    assert ppg._uses_structural_template_fill(style_id, "ending")
+    assert not ppg._uses_structural_template_fill(style_id, "data")
+
+
+@pytest.mark.unit
+def test_has_unfilled_placeholders_detects_stage6_soft_gate() -> None:
+    assert ppg._has_unfilled_placeholders(_AGENDA_SEED_HTML)
+    assert not ppg._has_unfilled_placeholders(_AGENDA_FILLED_HTML)
+    assert not ppg._has_unfilled_placeholders("{{lowercase_ignored}}")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "style_id",
+    [
+        "business-classic",
+        "tech-minimal",
+        "elegant-narrative",
+        "industrial-tech",
+        "custom",
+    ],
+)
+def test_agenda_fill_prompt_is_seed_fill_not_freeform(style_id: str) -> None:
+    prompt = ppg._build_agenda_template_fill_prompt(
+        page_number=2,
+        style_id=style_id,
+        style_text="---\nfont-family: Test\n---\n",
+        outline_page=_AGENDA_OUTLINE,
+        outline_full="# outline\n" + _AGENDA_OUTLINE,
+        seed_html=_AGENDA_SEED_HTML,
+    )
+
+    assert "只填槽" in prompt or "只替换" in prompt or "脚手架" in prompt
+    assert "{{PAGE_TITLE}}" in prompt
+    assert "agenda-stage" in prompt
+    assert "推荐布局（agenda 类型" not in prompt
+    assert "禁止" in prompt
+    if style_id == "custom":
+        assert "Stage 6 §3.6" in prompt
+        assert "{{PAGE_CONTENT}}" in prompt
+    else:
+        assert "Stage 6 §3.5" in prompt
+        assert "字面拷贝" in prompt
+        assert "自创装饰" in prompt or "四章" in prompt
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "style_id",
+    [
+        "business-classic",
+        "tech-minimal",
+        "elegant-narrative",
+        "industrial-tech",
+        "custom",
+    ],
+)
+def test_page_worker_agenda_uses_template_fill_not_free_generation(
+    tmp_path,
+    style_id: str,
+) -> None:
+    pptx_root = _write_agenda_template(tmp_path, style_id)
+    llm_calls: list[str] = []
+    tool_calls: list[str] = []
+    written_contents: list[str] = []
+    node = _configure_agenda_worker(
+        [_AGENDA_FILLED_HTML],
+        pptx_root=pptx_root,
+        style_id=style_id,
+        llm_calls=llm_calls,
+        tool_calls=tool_calls,
+        written_contents=written_contents,
+    )
+
+    result = asyncio.run(
+        node._execute(
+            _worker_inputs(
+                page_count=1,
+                style_id=style_id,
+                pptx_root=pptx_root,
+                all_pages=[2],
+                outline_pages={2: _AGENDA_OUTLINE},
+                outline_text="# outline\n" + _AGENDA_OUTLINE,
+            )
+        )
+    )
+
+    assert llm_calls == ["p8_1_agenda_fill_2"]
+    assert tool_calls == ["read_file", "write_file"]
+    assert result["page_files"] == ["page-2.pptx.html"]
+    assert result["missing_pages"] == []
+    assert not ppg._has_unfilled_placeholders(written_contents[0])
+    assert 'type="agenda"' in written_contents[0]
+    assert "四章 · 十二节" not in written_contents[0]
+
+
+@pytest.mark.unit
+def test_page_worker_agenda_rejects_unfilled_placeholders(tmp_path) -> None:
+    pptx_root = _write_agenda_template(tmp_path, "elegant-narrative")
+    llm_calls: list[str] = []
+    tool_calls: list[str] = []
+
+    node = _configure_agenda_worker(
+        [_AGENDA_SEED_HTML, _AGENDA_SEED_HTML],
+        pptx_root=pptx_root,
+        style_id="elegant-narrative",
+        llm_calls=llm_calls,
+        tool_calls=tool_calls,
+    )
+
+    result = asyncio.run(
+        node._execute(
+            _worker_inputs(
+                page_count=1,
+                style_id="elegant-narrative",
+                pptx_root=pptx_root,
+                all_pages=[2],
+                outline_pages={2: _AGENDA_OUTLINE},
+                outline_text=_AGENDA_OUTLINE,
+            )
+        )
+    )
+
+    assert llm_calls == ["p8_1_agenda_fill_2", "p8_1_agenda_fill_2"]
+    assert tool_calls == ["read_file", "read_file"]
+    assert result["page_files"] == []
+    assert result["missing_pages"] == [2]
+
+
+@pytest.mark.unit
+def test_page_worker_content_page_still_uses_free_generation(tmp_path) -> None:
+    pptx_root = _write_agenda_template(tmp_path, "business-classic")
+    llm_calls: list[str] = []
+    tool_calls: list[str] = []
+    node = _configure_worker(
+        [_VALID_HTML],
+        llm_calls=llm_calls,
+        tool_calls=tool_calls,
+    )
+
+    result = asyncio.run(
+        node._execute(
+            _worker_inputs(
+                page_count=1,
+                style_id="business-classic",
+                pptx_root=pptx_root,
+                outline_pages={
+                    1: "### P1:\n- **类型**：data\n- **研究需求**：✅\n- **标题**：正文",
+                },
+                research_pages={1: "### P1:\n正文素材"},
+            )
+        )
+    )
+
+    assert llm_calls == ["p8_1_page_1"]
+    assert result["missing_pages"] == []
+    assert result["page_files"] == ["page-1.pptx.html"]
+
+
+@pytest.mark.unit
+def test_resolve_style_page_template_path_returns_string_without_pathlib() -> None:
+    path = ppg._resolve_style_page_template_path(
+        r"D:\skills\pptx-craft",
+        "elegant-narrative",
+        page_type="agenda",
+    )
+    assert isinstance(path, str)
+    assert path.endswith("references/styles/elegant-narrative/agenda-template.html")
+
+
+@pytest.mark.unit
+def test_build_page_prompt_no_longer_injects_agenda_layout_authority() -> None:
+    prompt = ppg._build_page_prompt(
+        2,
+        style_id="elegant-narrative",
+        style_text="---\nfont-family: Test\n---\n",
+        outline_page=_AGENDA_OUTLINE,
+        research_page="",
+    )
+    assert "推荐布局（agenda 类型" not in prompt
+    assert "agenda" not in ppg._PAGE_LAYOUT_TEMPLATES
+
+
+@pytest.mark.unit
+def test_ending_fill_prompt_forbids_content_page_layout() -> None:
+    prompt = ppg._build_structural_template_fill_prompt(
+        page_number=10,
+        page_type="ending",
+        template_page_type="ending",
+        style_id="business-classic",
+        style_text="---\nfont-family: Arial\n---\n",
+        outline_page=_ENDING_OUTLINE,
+        outline_full="",
+        seed_html=_ENDING_SEED_HTML,
+    )
+    assert "ending-template.html" in prompt
+    assert "禁止内容页元素" in prompt
+    assert "感谢聆听" in prompt
+    assert "推荐布局（ending 类型" not in prompt
+
+
+@pytest.mark.unit
+def test_page_worker_ending_uses_template_fill_not_free_generation(tmp_path) -> None:
+    pptx_root = _write_style_template(tmp_path, "business-classic", "ending", _ENDING_SEED_HTML)
+    llm_calls: list[str] = []
+    written_contents: list[str] = []
+    node = _configure_agenda_worker(
+        [_ENDING_FILLED_HTML],
+        llm_calls=llm_calls,
+        tool_calls=[],
+        written_contents=written_contents,
+        pptx_root=pptx_root,
+        style_id="business-classic",
+        seed_html=_ENDING_SEED_HTML,
+        template_page_type="ending",
+    )
+
+    result = asyncio.run(
+        node._execute(
+            _worker_inputs(
+                page_count=8,
+                style_id="business-classic",
+                pptx_root=pptx_root,
+                total_pages=10,
+                outline_pages={10: _ENDING_OUTLINE},
+                all_pages=[10],
+            )
+        )
+    )
+
+    assert llm_calls == ["p8_1_ending_fill_10"]
+    assert result["missing_pages"] == []
+    assert result["page_files"] == ["page-10.pptx.html"]
+    assert "感谢聆听" in written_contents[0]
+    assert "echarts" not in written_contents[0].lower()
+
+
+_GOOD_CONTENT_HTML = """<!DOCTYPE html>
+<html><body>
+<div class="ppt-slide">
+  <header><h1>标题</h1></header>
+  <main><section>正文</section></main>
+  <footer>页脚</footer>
+</div>
+</body></html>
+"""
+
+_BROKEN_CONTENT_HTML = """<!DOCTYPE html>
+<html><body>
+<div class="ppt-slide">
+  <header><h1>标题</h1></header></div></div>
+  <main><section>正文</section></main>
+</div>
+</body></html>
+"""
+
+
+def test_validate_slide_dom_accepts_normal_content_page() -> None:
+    assert ppg._validate_slide_dom(_GOOD_CONTENT_HTML)
+
+
+def test_validate_slide_dom_rejects_main_outside_slide() -> None:
+    assert not ppg._validate_slide_dom(_BROKEN_CONTENT_HTML)
+    assert not ppg._is_slide_exportable(_BROKEN_CONTENT_HTML)
+
+
+def test_validate_slide_dom_rejects_malformed_llm_tokens() -> None:
+    html = _GOOD_CONTENT_HTML.replace(
+        "<header>",
+        '<header class="border@none" style=".>',
+    ).replace("</header>", "</.></header>")
+    assert not ppg._validate_slide_dom(html)
+
+
+def test_is_slide_exportable_ignores_malformed_tokens_when_structure_ok() -> None:
+    html = _GOOD_CONTENT_HTML.replace(
+        "<header>",
+        '<header class="border@none" style=".>',
+    )
+    assert not ppg._validate_slide_dom(html)
+    assert ppg._is_slide_exportable(html)
+
+
+def test_extract_backup_timestamp() -> None:
+    assert ppg._extract_backup_timestamp(
+        "D:/pages/_backup/20260803065245/page-17.pptx.html"
+    ) == "20260803065245"
+
+
+_CHART_HEIGHT_BAD_HTML = """<!DOCTYPE html>
+<html><body>
+<div class="ppt-slide">
+  <main class="flex-1 min-h-0 flex gap-4">
+    <section class="flex-[3] min-h-0 flex flex-col gap-3">
+      <div class="border border-gray3 bg-white flex flex-col" style="padding:10px;">
+        <h3>氢能需求时序预测</h3>
+        <div id="h2-chart" class="flex-1 min-h-0 w-full"></div>
+      </div>
+    </section>
+  </main>
+</div>
+<script>echarts.init(document.getElementById('h2-chart'), null, {renderer:'svg'});</script>
+</body></html>
+"""
+
+_CHART_HEIGHT_GOOD_HTML = """<!DOCTYPE html>
+<html><body>
+<div class="ppt-slide">
+  <main class="flex-1 min-h-0 flex gap-4">
+    <section class="flex-[3] min-h-0 flex flex-col gap-3">
+      <div class="flex-1 min-h-0 border border-gray3 bg-white p-3 flex flex-col">
+        <h3>减排贡献结构</h3>
+        <div id="chart-decarbon" class="flex-1 min-h-0 w-full"></div>
+      </div>
+    </section>
+  </main>
+</div>
+<script>echarts.init(document.getElementById('chart-decarbon'), null, {renderer:'svg'});</script>
+</body></html>
+"""
+
+_CHART_HEIGHT_ENDING_HTML = """<!DOCTYPE html>
+<html><body>
+<div class="ppt-slide">
+  <main class="flex-1 min-h-0 flex flex-col">
+    <div class="border border-gray3 bg-white p-3 flex flex-col min-h-0">
+      <span>双碳路径愿景</span>
+      <div id="carbonPathChart" class="flex-1 min-h-0 w-full"></div>
+    </div>
+  </main>
+</div>
+<script>echarts.init(document.getElementById('carbonPathChart'), null, {renderer:'svg'});</script>
+</body></html>
+"""
+
+
+def test_validate_chart_height_chain_rejects_collapsed_wrapper() -> None:
+    assert not ppg._validate_chart_height_chain(_CHART_HEIGHT_BAD_HTML)
+
+
+def test_validate_chart_height_chain_accepts_flex1_wrapper() -> None:
+    assert ppg._validate_chart_height_chain(_CHART_HEIGHT_GOOD_HTML)
+
+
+def test_validate_chart_height_chain_accepts_min_h0_wrapper() -> None:
+    assert ppg._validate_chart_height_chain(_CHART_HEIGHT_ENDING_HTML)
+
+
+def test_validate_chart_height_chain_skips_non_chart_page() -> None:
+    assert ppg._validate_chart_height_chain(_GOOD_CONTENT_HTML)

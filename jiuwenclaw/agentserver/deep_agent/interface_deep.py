@@ -1409,9 +1409,6 @@ class JiuWenClawDeepAdapter:
         self._context_engine_config_fp: str | None = None
         self._working_checker: Callable[[], bool] | None = None
         self._last_runtime_mode: str = "agent.plan"
-        self._chat_env_overlay_token: Token | None = None
-        self._chat_env_ns_token: Token | None = None
-        self._chat_browser_runtime_pin: Any | None = None
         set_skill_credential_provider(
             lambda: (
                 self._skill_credential_injection_rail.get_skill_envs()
@@ -1608,15 +1605,12 @@ class JiuWenClawDeepAdapter:
 
     @staticmethod
     def _browser_runtime_enabled() -> bool:
-        """Whether browser runtime support is enabled for DeepAgent subagent wiring."""
-        # value = str(
-        #     os.getenv("PLAYWRIGHT_RUNTIME_MCP_ENABLED")
-        #     or os.getenv("BROWSER_RUNTIME_MCP_ENABLED")
-        #     or ""
-        # ).strip().lower()
-        # return value in {"1", "true", "yes", "on"}
+        """Whether browser runtime support is enabled for DeepAgent subagent wiring.
 
-        # close browser subagent
+        Always False — plan/chat keep browser subagent closed. Team mode manages
+        browser runtime independently via swarm subagent config.
+        """
+        # close browser subagent for plan/chat (pre-team behavior)
         return False
 
     @staticmethod
@@ -2617,8 +2611,66 @@ class JiuWenClawDeepAdapter:
             rail = None
         return rail
 
+    @staticmethod
+    def _sys_operation_isolation_key(sysop_card: SysOperationCard) -> str | None:
+        try:
+            sys_operation = SysOperation(sysop_card)
+            return sys_operation.isolation_key_template
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "[JiuWenClawDeepAdapter] failed to resolve sys_operation isolation key: %s",
+                exc,
+            )
+            return None
+
+    @staticmethod
+    def _get_registered_sys_operation_by_isolation_key(
+        isolation_key_template: str | None,
+    ) -> SysOperation | None:
+        if not isolation_key_template:
+            return None
+        try:
+            resource_registry = getattr(Runner.resource_mgr, "_resource_registry", None)
+            if resource_registry is None:
+                return None
+            sys_operation_mgr = resource_registry.sys_operation()
+            owner_map = getattr(sys_operation_mgr, "_sandbox_key_owner_map", {})
+            existing_op_id = owner_map.get(isolation_key_template)
+            if not existing_op_id:
+                return None
+            return Runner.resource_mgr.get_sys_operation(existing_op_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "[JiuWenClawDeepAdapter] failed to get registered sys_operation: %s",
+                exc,
+            )
+            return None
+
+    def _resolve_project_dir_for_sandbox(self) -> str | None:
+        """Best-effort lookup of the user project directory for sandbox builds.
+
+        优先 ``self._instance_overrides['project_dir']``, 否则回落到
+        ``self._workspace_dir``。返回 ``None`` 让 sysop_builder 走自己的 fallback。
+        """
+        overrides = getattr(self, "_instance_overrides", None)
+        if isinstance(overrides, dict):
+            value = overrides.get("project_dir")
+            if value:
+                return str(value)
+        workspace = getattr(self, "_workspace_dir", None)
+        if workspace:
+            return str(workspace)
+        return None
+
     def _create_sys_operation(self) -> SysOperation | None:
-        """Create a sys operation with workspace as working directory."""
+        """Create a sys operation with workspace as working directory.
+
+        是否走沙箱由 ``config.yaml::sandbox.enabled`` 决定（同时要求
+        ``sandbox.url`` / ``sandbox.type`` 已配置）。
+        isolation key 按 project_dir 摘要算（同 project 共享），跨 instance
+        复用守卫：add 之前/失败后都按 isolation_key 查已注册的 sysop，命中即复用，
+        避免撞 agent-core "isolation key already registered" 单例约束。
+        """
         try:
             from jiuwenclaw.utils import get_multi_tenant_user_workspace_dir
 
@@ -2650,36 +2702,139 @@ class JiuWenClawDeepAdapter:
                     excluded_commands=runtime.get("excluded_commands"),
                     idle_ttl_seconds=runtime.get("idle_ttl_seconds"),
                     idle_check_interval=runtime.get("idle_check_interval"),
+                    project_dir=self._resolve_project_dir_for_sandbox(),
                 )
             else:
-                if sandbox_enabled and not (sandbox_url and sandbox_type):
-                    missing = []
-                    if not sandbox_url:
-                        missing.append("JIUWENCLAW_SANDBOX_URL")
-                    if not sandbox_type:
-                        # TYPE 已有默认值, 真触发说明用户显式设了空串, 罕见
-                        missing.append("JIUWENCLAW_SANDBOX_TYPE")
-                    logger.warning(
-                        "[JiuWenClawDeepAdapter] sandbox enabled but missing %s; "
-                        "falling back to local sys_operation. set the env var(s) "
-                        "and restart agent-server to actually use jiuwenbox.",
-                        ", ".join(missing),
-                    )
-                else:
-                    logger.info(
-                        "[JiuWenClawDeepAdapter] local mode (sandbox %s)",
-                        "disabled" if not sandbox_enabled else "url/type empty",
-                    )
+                logger.info(
+                    "[DIAG] _create_sys_operation local branch: enabled=%s url=%s type=%s",
+                    sandbox_enabled, sandbox_url, sandbox_type,
+                )
                 sysop_card = create_local_sysop_card(work_dir=work_dir)
             if sysop_card is None:
-                logger.warning("[JiuWenClawDeepAdapter] add sys_operation failed: sysop_card is None")
-                return None
+                # 沙箱 sysop_card 创建失败 (create_sandbox_sysop_card 内部异常:
+                # 文件白名单路径不存在 / policy 校验失败 / Linux bind_mount 失败 等)
+                # 不阻塞任务 —— 回退 local 模式继续执行, 让用户任务跑完而非直接报错.
+                # 只有"进入沙箱执行后"失败 (sysop 已建好, 执行命令时失败) 才抛错,
+                # 那是执行阶段, 不在此处.
+                if sandbox_enabled and sandbox_url and sandbox_type:
+                    # P1-15: fallback_on_failure 开关控制是否降级到 local (在宿主机
+                    # 直接跑, 隔离失效). 默认 False = 不降级, 让任务失败而非静默绕过隔离.
+                    # 用户显式设 sandbox.fallback_on_failure=true 才允许降级 (兼容旧行为).
+                    _allow_fallback = bool(runtime.get("fallback_on_failure"))
+                    if _allow_fallback:
+                        logger.warning(
+                            "[JiuWenClawDeepAdapter] sandbox sysop_card is None "
+                            "(create_sandbox_sysop_card failed); fallback to LOCAL mode "
+                            "(隔离失效, 在宿主机直接执行; sandbox.fallback_on_failure=true 已启用)"
+                        )
+                        sysop_card = create_local_sysop_card(work_dir=work_dir)
+                    else:
+                        logger.error(
+                            "[JiuWenClawDeepAdapter] sandbox sysop_card is None "
+                            "(create_sandbox_sysop_card failed); fallback to LOCAL 已禁用 "
+                            "(sandbox.fallback_on_failure 未启用). 任务失败而非静默绕过隔离"
+                        )
+                        return None
+                if sysop_card is None:
+                    logger.warning(
+                        "[JiuWenClawDeepAdapter] local fallback sysop_card also None"
+                    )
+                    return None
+
+            isolation_key_template = JiuWenClawDeepAdapter._sys_operation_isolation_key(sysop_card)
+            registered_sys_operation = (
+                JiuWenClawDeepAdapter._get_registered_sys_operation_by_isolation_key(
+                    isolation_key_template
+                )
+            )
+            if registered_sys_operation is not None:
+                logger.info(
+                    "[DIAG] _create_sys_operation reuse: id=%s mode=%s iso_key=%s",
+                    registered_sys_operation.id,
+                    getattr(registered_sys_operation, "mode", None),
+                    getattr(registered_sys_operation, "isolation_key_template", None),
+                )
+                return registered_sys_operation
+
             result = Runner.resource_mgr.add_sys_operation(sysop_card)
             if result.is_err():
+                registered_sys_operation = (
+                    JiuWenClawDeepAdapter._get_registered_sys_operation_by_isolation_key(
+                        isolation_key_template
+                    )
+                )
+                if registered_sys_operation is not None:
+                    logger.info(
+                        "[JiuWenClawDeepAdapter] reuse registered sys_operation after add failure: %s",
+                        registered_sys_operation.id,
+                    )
+                    return registered_sys_operation
+                # 沙箱 sysop add 失败 (sandbox 进程创建失败 / provider 注册失败等):
+                # 不阻塞任务 —— 回退 local card 重试一次. local card 的 add 也失败
+                # 才真正 return None (留给调用方报错).
+                is_sandbox_card = (
+                    sysop_card.mode == OperationMode.SANDBOX
+                    and sandbox_enabled
+                    and sandbox_url
+                    and sandbox_type
+                )
+                if is_sandbox_card:
+                    _allow_fallback = bool(runtime.get("fallback_on_failure"))
+                    if not _allow_fallback:
+                        logger.error(
+                            "[JiuWenClawDeepAdapter] sandbox add_sys_operation failed (%s); "
+                            "fallback to LOCAL 已禁用 (sandbox.fallback_on_failure 未启用). "
+                            "任务失败而非静默绕过隔离", result.msg(),
+                        )
+                        return None
+                    logger.warning(
+                        "[JiuWenClawDeepAdapter] sandbox add_sys_operation failed (%s); "
+                        "fallback to LOCAL mode and retry (隔离失效, sandbox.fallback_on_failure=true)",
+                        result.msg(),
+                    )
+                    local_card = create_local_sysop_card(work_dir=work_dir)
+                    local_result = Runner.resource_mgr.add_sys_operation(local_card)
+                    if local_result.is_ok():
+                        return Runner.resource_mgr.get_sys_operation(local_card.id)
+                    logger.warning(
+                        "[JiuWenClawDeepAdapter] local fallback add also failed: %s",
+                        local_result.msg(),
+                    )
                 logger.warning("[JiuWenClawDeepAdapter] add sys_operation failed: %s", result.msg())
                 return None
-            return Runner.resource_mgr.get_sys_operation(sysop_card.id)
-        except Exception as exc:
+            _created_sysop = Runner.resource_mgr.get_sys_operation(sysop_card.id)
+            logger.info(
+                "[DIAG] _create_sys_operation created: id=%s mode=%s iso_key=%s",
+                sysop_card.id,
+                getattr(_created_sysop, "mode", None) if _created_sysop else None,
+                getattr(_created_sysop, "isolation_key_template", None) if _created_sysop else None,
+            )
+            return _created_sysop
+        except Exception as exc:  # noqa: BLE001
+            # 整个 _create_sys_operation 异常 (非 add 阶段): 若原本要走沙箱, 回退 local.
+            if sandbox_enabled and sandbox_url and sandbox_type:
+                _allow_fallback = bool(runtime.get("fallback_on_failure"))
+                if not _allow_fallback:
+                    logger.error(
+                        "[JiuWenClawDeepAdapter] _create_sys_operation raised (%s); "
+                        "fallback to LOCAL 已禁用 (sandbox.fallback_on_failure 未启用). "
+                        "任务失败而非静默绕过隔离", exc,
+                    )
+                    return None
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] _create_sys_operation raised (%s); "
+                    "fallback to LOCAL mode (隔离失效, sandbox.fallback_on_failure=true)", exc,
+                )
+                try:
+                    local_card = create_local_sysop_card(work_dir=work_dir)
+                    local_result = Runner.resource_mgr.add_sys_operation(local_card)
+                    if local_result.is_ok():
+                        return Runner.resource_mgr.get_sys_operation(local_card.id)
+                except Exception as fallback_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[JiuWenClawDeepAdapter] local fallback after exception failed: %s",
+                        fallback_exc,
+                    )
             logger.warning("[JiuWenClawDeepAdapter] add sys_operation failed: %s", exc)
             return None
 
@@ -2692,7 +2847,16 @@ class JiuWenClawDeepAdapter:
         """
         new_fp = self._sandbox_config_fingerprint()
         old_fp = getattr(self, "_sandbox_fingerprint", None)
+        logger.info("[DIAG] _maybe_recreate: new_fp=%s old_fp=%s changed=%s",
+            new_fp, old_fp, new_fp != old_fp,
+        )
         if new_fp == old_fp:
+            _cur = getattr(self, "_sys_operation", None)
+            logger.info("[DIAG] _maybe_recreate noop (fp unchanged): sysop_id=%s mode=%s iso_key=%s",
+                getattr(_cur, "id", None),
+                getattr(_cur, "mode", None),
+                getattr(_cur, "isolation_key_template", None) if _cur else None,
+            )
             return
         old_sysop = getattr(self, "_sys_operation", None)
         new_sysop = self._create_sys_operation()
@@ -4336,7 +4500,17 @@ class JiuWenClawDeepAdapter:
                     )
             return result
 
-    async def _on_chat_request_start(self) -> tuple[Token | None, Token | None, Token | None]:
+    async def _on_chat_request_start(
+        self,
+    ) -> tuple[Token | None, Token | None, Token | None, Token | None, Any | None]:
+        """Bind request-scoped ContextVars and return tokens for paired reset.
+
+        Returns:
+            ``(overlay_token, fp_token, skill_dirs_token, ns_token, browser_pin)``.
+            All tokens/pins must be passed back to ``_on_chat_request_end`` on the
+            same request — never stored on the shared adapter instance (team
+            follow-ups use ``asyncio.create_task`` with a copied Context).
+        """
         await self._maybe_apply_pending_reload()
         if not self._registered_skill_dirs:
             self._sync_registered_skill_dirs_snapshot()
@@ -4353,52 +4527,47 @@ class JiuWenClawDeepAdapter:
         fp_token: Token | None = None
         if self._memory_cache_fingerprint:
             fp_token = bind_memory_cache_fingerprint(self._memory_cache_fingerprint)
-        # Pack ns_token into env_token path via attribute? Return 4-tuple would break callers.
-        # Store ns token on instance for end().
-        self._chat_env_ns_token = ns_token
         # Pin browser runtime generation after tip/ns bind so this request keeps
         # the credential generation captured at start across mid-request reloads.
+        browser_pin: Any | None = None
         try:
             from jiuwenclaw.agentserver.tools.browser_tools import (
                 pin_browser_runtime_generation,
             )
 
-            self._chat_browser_runtime_pin = pin_browser_runtime_generation(
+            browser_pin = pin_browser_runtime_generation(
                 service_id=sid,
                 agent_id=aid,
             )
         except Exception:
-            self._chat_browser_runtime_pin = None
             logger.exception(
                 "[JiuWenClawDeepAdapter] pin browser runtime generation failed"
             )
-        return env_token, fp_token, skill_dirs_token
+        return env_token, fp_token, skill_dirs_token, ns_token, browser_pin
 
     async def _on_chat_request_end(
             self,
             overlay_token: Token | None,
             fp_token: Token | None = None,
             skill_dirs_token: Token | None = None,
+            ns_token: Token | None = None,
+            browser_pin: Any | None = None,
     ) -> None:
         if overlay_token is not None:
             reset_task_env_overlay(overlay_token)
-        ns_token = getattr(self, "_chat_env_ns_token", None)
         if ns_token is not None:
             reset_agent_env_ns(ns_token)
-            self._chat_env_ns_token = None
-        pin = getattr(self, "_chat_browser_runtime_pin", None)
-        if pin is not None:
+        if browser_pin is not None:
             try:
                 from jiuwenclaw.agentserver.tools.browser_tools import (
                     reset_browser_runtime_generation,
                 )
 
-                reset_browser_runtime_generation(pin)
+                reset_browser_runtime_generation(browser_pin)
             except Exception:
                 logger.exception(
                     "[JiuWenClawDeepAdapter] reset browser runtime generation failed"
                 )
-            self._chat_browser_runtime_pin = None
         if fp_token is not None:
             reset_memory_cache_fingerprint(fp_token)
         if skill_dirs_token is not None:
@@ -7072,7 +7241,11 @@ class JiuWenClawDeepAdapter:
                     if isinstance(rebuild_context, dict)
                     else None
                 ),
-                "error": f"Skill '{resolved_name}' 融合重写 SKILL.md 失败",
+                "error": (
+                    f"Skill '{resolved_name}' 融合重写 SKILL.md 失败。"
+                    "请在安全管理中将敏感操作 read_file、write_file、edit_file 设为不需要审批，"
+                    "或直接关闭审批护栏后重试。"
+                ),
             }
 
         finalized = await self._finalize_rebuild_followup(prepared)
@@ -7110,47 +7283,37 @@ class JiuWenClawDeepAdapter:
         head = " | ".join(rendered[:limit])
         return f"{head} | ...(+{len(rendered) - limit})"
 
-    @staticmethod
-    def _infer_skill_project_hint_dir(resolved: Path) -> Path | None:
-        """Infer the project root the user should switch to for rebuild allowlist.
-
-        Prefers ``<project>/.office-claw/skills/...`` → ``<project>``, then
-        ``<project>/office-claw-skills/...`` → ``<project>``. Falls back to the
-        parent of the skill directory (``SKILL.md``'s grandparent).
-        """
-        for parent in resolved.parents:
-            if parent.name == "skills" and parent.parent.name == ".office-claw":
-                return parent.parent.parent
-            if parent.name == "office-claw-skills":
-                return parent.parent
-        if resolved.name == "SKILL.md" and resolved.parent.parent != resolved.parent:
-            return resolved.parent.parent
-        if resolved.parent != resolved:
-            return resolved.parent
-        return None
-
     def _validate_rebuild_skill_path(self, skill_path: str) -> str:
         """Ensure RPC skill_path resolves under a registered skills directory."""
         resolved = Path(skill_path).expanduser().resolve()
-        skill_dirs = [Path(d).expanduser().resolve() for d in self._registered_skill_dirs_for_rail()]
+        # Union adapter snapshot with live resolve (session-bound / shared env).
+        # Disk-only rollback may bind the control-plane skill root for one request
+        # while a warm agent still holds a stale workspace-only snapshot.
+        skill_dirs: list[Path] = []
+        seen: set[str] = set()
+        for raw in (
+            *self._registered_skill_dirs_for_rail(),
+            *(str(p) for p in resolve_agent_registered_skill_dirs()),
+        ):
+            path = Path(raw).expanduser().resolve()
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            skill_dirs.append(path)
+        resolve_path = str(resolved)
         if not skill_dirs:
             raise ValueError(
-                "技能路径不在允许目录内（未注册任何技能目录）。"
-                "请先在技能所在工程的会话中与 agent 对话一轮后再采纳。"
-                f"skill_path={skill_path}"
+                "技能路径不在允许目录内（未注册任何技能目录）"
+                f"resolve_path={resolve_path}"
             )
         if not any(resolved == d or resolved.is_relative_to(d) for d in skill_dirs):
-            hint_dir = self._infer_skill_project_hint_dir(resolved)
-            if hint_dir is not None:
-                tip = f"请切换到工程目录「{hint_dir}」下的会话，与 agent 对话一轮后再采纳。"
-            else:
-                tip = "请切换到包含该技能路径的工程会话后再采纳。"
-            allowed = self._format_allowed_skill_dirs(skill_dirs)
+            allowed_path = self._format_allowed_skill_dirs(skill_dirs)
             raise ValueError(
-                f"技能路径不在允许目录内。{tip}"
-                f"skill_path={skill_path}；allowed={allowed}"
+                "技能路径不在允许目录内。"
+                f"resolve_path={resolve_path}；allowed_path={allowed_path}"
             )
-        return str(resolved)
+        return resolve_path
 
     async def handle_skills_evolution_rebuild(self, params: dict) -> dict[str, Any]:
         """RPC: skills.evolution.rebuild — generate a merged evolution version."""
@@ -8480,7 +8643,13 @@ class JiuWenClawDeepAdapter:
         query = request.params.get("query", "")
         mode = request.params.get("mode", "agent.plan")
         self._last_runtime_mode = mode
-        chat_env_token, chat_fp_token, chat_skill_dirs_token = await self._on_chat_request_start()
+        (
+            chat_env_token,
+            chat_fp_token,
+            chat_skill_dirs_token,
+            chat_ns_token,
+            chat_browser_pin,
+        ) = await self._on_chat_request_start()
 
         if self._plain_chat_should_clear_stale_interrupt(request):
             await self._clear_session_persisted_interrupt_state(
@@ -8512,6 +8681,13 @@ class JiuWenClawDeepAdapter:
                     payload = {"content": content}
                 reset_request_id(token_request_id)
                 _reset_llm_trace_tokens(token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model)
+                await self._on_chat_request_end(
+                    chat_env_token,
+                    chat_fp_token,
+                    chat_skill_dirs_token,
+                    chat_ns_token,
+                    chat_browser_pin,
+                )
                 return AgentResponse(
                     request_id=request.request_id,
                     channel_id=request.channel_id,
@@ -8612,7 +8788,13 @@ class JiuWenClawDeepAdapter:
             if request.request_id:
                 self._untrack_session_toolkit(request.request_id)
             self._cleanup_circuit_breaker_session(session_id)
-            await self._on_chat_request_end(chat_env_token, chat_fp_token, chat_skill_dirs_token)
+            await self._on_chat_request_end(
+                chat_env_token,
+                chat_fp_token,
+                chat_skill_dirs_token,
+                chat_ns_token,
+                chat_browser_pin,
+            )
             finalize_perf_summary_request(request.request_id, status=perf_summary_status)
             clear_perf_summary_context()
 
@@ -8670,7 +8852,13 @@ class JiuWenClawDeepAdapter:
         query = request.params.get("query", "")
         mode = request.params.get("mode", "agent.plan")
         self._last_runtime_mode = mode
-        chat_env_token, chat_fp_token, chat_skill_dirs_token = await self._on_chat_request_start()
+        (
+            chat_env_token,
+            chat_fp_token,
+            chat_skill_dirs_token,
+            chat_ns_token,
+            chat_browser_pin,
+        ) = await self._on_chat_request_start()
         raw_interactive = request.params.get("interactive_ask", request.params.get("interactiveAsk"))
         interactive_ask = bool(raw_interactive) if raw_interactive is not None else False
         token_trace_sid = _LLM_TRACE_SESSION_ID.set(session_id)
@@ -8681,8 +8869,12 @@ class JiuWenClawDeepAdapter:
             getattr(self._model, "model_config", None) and getattr(self._model.model_config, "model_name", "") or ""
         )
 
-        # Team mode handling (current: mode=team only; team.plan / code.team not supported)
-        if mode == "team":
+        # Team mode entry (canonicalize agent.team -> team).
+        mode_norm = str(mode or "").strip().lower()
+        if mode_norm in {"team", "agent.team", "team.plan", "code.team"}:
+            if mode_norm == "agent.team" and isinstance(request.params, dict):
+                request.params["mode"] = "team"
+                mode = "team"
             from jiuwenclaw.agentserver.deep_agent.team_helpers import process_team_message_stream
 
             resolved_model = self._resolve_model_for_request(request)
@@ -8703,8 +8895,16 @@ class JiuWenClawDeepAdapter:
                     yield chunk
             finally:
                 reset_request_id(token_request_id)
-                _reset_llm_trace_tokens(token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model)
-                await self._on_chat_request_end(chat_env_token, chat_fp_token, chat_skill_dirs_token)
+                _reset_llm_trace_tokens(
+                    token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model
+                )
+                await self._on_chat_request_end(
+                    chat_env_token,
+                    chat_fp_token,
+                    chat_skill_dirs_token,
+                    chat_ns_token,
+                    chat_browser_pin,
+                )
             return
 
         # 拦截斜杠命令
@@ -8747,6 +8947,13 @@ class JiuWenClawDeepAdapter:
                     )
                 reset_request_id(token_request_id)
                 _reset_llm_trace_tokens(token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model)
+                await self._on_chat_request_end(
+                    chat_env_token,
+                    chat_fp_token,
+                    chat_skill_dirs_token,
+                    chat_ns_token,
+                    chat_browser_pin,
+                )
                 return
 
         if self._plain_chat_should_clear_stale_interrupt(request):
@@ -9378,7 +9585,13 @@ class JiuWenClawDeepAdapter:
             if rid:
                 self._untrack_session_toolkit(rid)
             self._cleanup_circuit_breaker_session(session_id)
-            await self._on_chat_request_end(chat_env_token, chat_fp_token, chat_skill_dirs_token)
+            await self._on_chat_request_end(
+                chat_env_token,
+                chat_fp_token,
+                chat_skill_dirs_token,
+                chat_ns_token,
+                chat_browser_pin,
+            )
             finalize_perf_summary_request(request.request_id, status=perf_summary_status)
             clear_perf_summary_context()
 

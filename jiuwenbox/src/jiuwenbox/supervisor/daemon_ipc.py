@@ -61,6 +61,19 @@ REQUEST_TYPE_SHUTDOWN = "shutdown"
 REQUEST_TYPE_WRITE_FILE = "write_file"
 REQUEST_TYPE_READ_FILE = "read_file"
 REQUEST_TYPE_LIST_DIR = "list_dir"
+# Windows runner 日志订阅 (仅 win32 路径用). box-server 创建 sandbox 后
+# 主动 connect control_port 发此握手帧, runner 识别后把该连接作为日志长连,
+# 持续往里 push log 帧; 短连 exec/write_file/... 仍走一连接一请求.
+REQUEST_TYPE_SUBSCRIBE_LOG = "subscribe_log"
+
+# runner 往日志长连上 push 的帧载荷 type (与请求 type 同名字段区分: 请求是
+# box-server->runner, log 是 runner->box-server).
+LOG_FRAME_TYPE = "log"
+# log 帧载荷字段名.
+LOG_FIELD_LEVEL = "level"
+LOG_FIELD_MESSAGE = "msg"
+LOG_FIELD_TIMESTAMP = "ts"
+LOG_FIELD_TRACEBACK = "exc"
 
 PROTOCOL_VERSION = 1
 MAX_HEADER_BYTES = 1 * 1024 * 1024          # 1 MiB JSON header upper bound

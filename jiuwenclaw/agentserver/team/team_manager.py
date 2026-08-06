@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
+import hashlib
 import re
 import time
 import weakref
@@ -45,17 +46,28 @@ from jiuwenclaw.agentserver.team.distributed_runtime import (
 )
 from jiuwenclaw.agentserver.team.handlers.team_monitor_handler import TeamMonitorHandler
 from jiuwenclaw.agentserver.team.remote_member_bootstrap import release_a2x_reservations_for_session
+from jiuwenclaw.agentserver.team.prompt_skill_mount import (
+    PromptSkillMountResult,
+    mount_leader_prompt_skills,
+)
 from jiuwenclaw.agentserver.team.team_runtime_inheritance import (
     MemberInfo,
     RuntimeInfo,
     TeamWorkspaceInfo,
 )
-from jiuwenclaw.agentserver.team.team_skill_links import sync_skill_dir_links
+from jiuwenclaw.agentserver.team.team_skill_links import (
+    ensure_skill_dir_links,
+    sync_skill_dir_links,
+)
 from jiuwenclaw.config import (
     get_config,
     get_default_models,
 )
-from jiuwenclaw.utils import get_agent_skills_dir, get_user_workspace_dir
+from jiuwenclaw.utils import (
+    get_agent_skills_dir,
+    get_shared_agent_skills_dirs,
+    get_user_workspace_dir,
+)
 
 configure_agent_teams_home()
 
@@ -71,7 +83,6 @@ _PG_POST_START_READY_MAX_SLEEP = 2.0
 _PG_POST_START_READY_BACKOFF = 1.45
 _PG_POST_START_LOG_EVERY_SEC = 5.0
 _TEAM_STREAM_EXIT_GRACE_TIMEOUT_SEC = 1.5
-
 # ── Team Observability ──────────────────────────────────────
 # Tracks whether observability is currently active so we can
 # detect config toggles (enabled → disabled or vice-versa)
@@ -198,6 +209,8 @@ class TeamManager:
         self._runner_team_agents: dict[str, TeamAgent] = {}
         self._team_monitors: dict[str, TeamMonitorHandler] = {}
         self._stream_tasks: dict[str, asyncio.Task] = {}
+        # Last non-resume user query per session — rewrite reconnect/continue phrases.
+        self._last_user_queries: dict[str, str] = {}
         self._bootstrap_lock = asyncio.Lock()
         self._distributed_switch_lock = asyncio.Lock()
         self._session_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
@@ -209,6 +222,9 @@ class TeamManager:
         self._active_pause_tasks: dict[str, asyncio.Task] = {}
         self._active_team_names: dict[str, str] = {}
         self._pending_team_names: dict[str, str] = {}
+        # Survives clear_active_runtime after pause so continue can restore /
+        # open RESUME_FROM_PAUSE even while another session is active.
+        self._paused_team_names: dict[str, str] = {}
         # session_id → list of (request_id, asyncio.Queue) waiters
         self._pending_waiters: dict[str, list[tuple[str, asyncio.Queue]]] = {}
         # session_id → cron team round completion state. Lifetime-coupled to
@@ -351,10 +367,13 @@ class TeamManager:
         return self._active_team_names.get(session_id)
 
     def _get_lifecycle_lock(self, session_id: str) -> asyncio.Lock:
-        """Return the lock that serializes lifecycle operations for a session."""
-        if self._is_distributed_mode(get_config()):
-            return self._bootstrap_lock
+        """Return the lock that serializes lifecycle ops for one session.
 
+        Always per-session. Cross-session isolation must not share a global
+        lock: holding pause on session A must not block create/pause on B.
+        Distributed bootstrap / single-session switch use ``_bootstrap_lock``
+        and ``_distributed_switch_lock`` at those call sites explicitly.
+        """
         lock = self._session_locks.get(session_id)
         if lock is None:
             lock = asyncio.Lock()
@@ -474,6 +493,7 @@ class TeamManager:
         session_id: str,
         *,
         requested_model_name: str | None = None,
+        template_id: str | None = None,
     ) -> TeamAgentSpec:
         config_base = get_config()
         # Keep dependency checks scoped to distributed mode to make the
@@ -500,6 +520,7 @@ class TeamManager:
         spec_dict = load_team_spec_dict(
             config_base=config_base,
             requested_model_name=requested_model_name,
+            template_id=template_id,
         )
         spec_dict = TeamManager._normalize_team_identity_fields(spec_dict)
         if TeamManager._is_distributed_mode(config_base):
@@ -554,6 +575,7 @@ class TeamManager:
         channel_id: str | None = None,
         request_metadata: dict[str, Any] | None = None,
         requested_model_name: str | None = None,
+        template_id: str | None = None,
     ) -> TeamAgentSpec:
         """Build a team spec via provider-based assembly (no parent DeepAgent).
 
@@ -568,6 +590,7 @@ class TeamManager:
             request_id: Originating request id, if any.
             channel_id: Raw channel id from the request, if any.
             request_metadata: Request metadata mapping.
+            template_id: Bound ``modes.team`` key / chat.send ``team_name``.
 
         Returns:
             The enriched ``TeamAgentSpec`` ready to build (``build_context`` set;
@@ -578,6 +601,7 @@ class TeamManager:
         spec = self._load_team_spec(
             session_id,
             requested_model_name=requested_model_name,
+            template_id=template_id,
         )
         self._apply_session_scoped_team_name(spec, session_id=session_id)
         self.apply_team_plan_mode(spec, request_metadata=request_metadata)
@@ -763,6 +787,7 @@ class TeamManager:
     def commit_runtime_ready(self, session_id: str, team_name: str) -> None:
         self._active_team_names[session_id] = team_name
         self._pending_team_names.pop(session_id, None)
+        self._paused_team_names.pop(session_id, None)
         self._initialized_sessions.add(session_id)
         logger.info(
             "[TeamManager] commit_runtime_ready session_id=%s team_name=%s active=%s pending=%s",
@@ -775,13 +800,27 @@ class TeamManager:
     def clear_pending_runtime(self, session_id: str) -> None:
         self._pending_team_names.pop(session_id, None)
 
-    def clear_active_runtime(self, session_id: str) -> None:
+    def clear_active_runtime(self, session_id: str, *, bookmark_paused: bool = False) -> None:
         removed = self._active_team_names.pop(session_id, None)
         if removed is not None:
+            if bookmark_paused:
+                # Keep a pause bookmark so interact/continue can resolve the team
+                # after active is cleared (multi-session: another team may be active).
+                self._paused_team_names[session_id] = removed
+            else:
+                self._paused_team_names.pop(session_id, None)
             logger.info(
-                "[TeamManager] clear_active_runtime: session_id=%s team_name=%s remaining_active=%s",
+                "[TeamManager] clear_active_runtime: session_id=%s team_name=%s "
+                "remaining_active=%s paused=%s bookmark_paused=%s",
                 session_id, removed, list(self._active_team_names),
+                list(self._paused_team_names), bookmark_paused,
             )
+
+    def clear_paused_runtime(self, session_id: str) -> None:
+        self._paused_team_names.pop(session_id, None)
+
+    def get_paused_team_name(self, session_id: str) -> str | None:
+        return self._paused_team_names.get(session_id)
 
     def _lookup_session_team_name(self, session_id: str) -> str | None:
         active_team_name = self._active_team_names.get(session_id)
@@ -790,6 +829,9 @@ class TeamManager:
         pending_team_name = self._pending_team_names.get(session_id)
         if pending_team_name:
             return pending_team_name
+        paused_team_name = self._paused_team_names.get(session_id)
+        if paused_team_name:
+            return paused_team_name
 
         metadata = get_session_metadata(session_id)
         team_name = str(metadata.get("team_name") or "").strip()
@@ -808,25 +850,60 @@ class TeamManager:
 
     async def _resolve_resumable_runner_entry(self, session_id: str) -> tuple[str, Any] | None:
         """Return a same-session paused/running Runner pool entry when resumable."""
-        team_name = self._lookup_session_team_name(session_id)
-        if not team_name:
-            return None
-
         from openjiuwen.core.runner.runner import GLOBAL_RUNNER
 
         runtime_mgr = _runner_team_runtime_manager(GLOBAL_RUNNER)
-        entry = await runtime_mgr.pool.get(team_name)
-        if entry is None or getattr(entry, "current_session_id", None) != session_id:
-            return None
-        # Trust the Runner pool over claw-local active/pending markers here.
-        # The local markers can be stale after a team.plan round pauses on
-        # exit_plan_mode, but the pool still owns the resumable runtime.
-        if getattr(entry, "state", None) not in {RuntimeState.PAUSED, RuntimeState.RUNNING}:
-            return None
-        return team_name, entry
+
+        async def _entry_for(team_name: str) -> tuple[str, Any] | None:
+            entry = await runtime_mgr.pool.get(team_name)
+            if entry is None or getattr(entry, "current_session_id", None) != session_id:
+                return None
+            # Trust the Runner pool over claw-local active/pending markers here.
+            # The local markers can be stale after a team.plan round pauses on
+            # exit_plan_mode, but the pool still owns the resumable runtime.
+            if getattr(entry, "state", None) not in {RuntimeState.PAUSED, RuntimeState.RUNNING}:
+                return None
+            return team_name, entry
+
+        team_name = self._lookup_session_team_name(session_id)
+        if team_name:
+            resolved = await _entry_for(team_name)
+            if resolved is not None:
+                return resolved
+
+        # Multi-session race: active markers cleared after pause while another
+        # session is running. Scan the pool by session_id.
+        try:
+            for entry in await runtime_mgr.pool.teams_for_session(session_id):
+                if getattr(entry, "state", None) not in {RuntimeState.PAUSED, RuntimeState.RUNNING}:
+                    continue
+                name = getattr(entry, "team_name", None)
+                if name:
+                    return str(name), entry
+        except Exception:
+            logger.debug(
+                "[TeamManager] pool scan for resumable session failed: session_id=%s",
+                session_id,
+                exc_info=True,
+            )
+        return None
 
     async def has_resumable_runtime(self, session_id: str) -> bool:
         return await self._resolve_resumable_runner_entry(session_id) is not None
+
+    async def has_paused_runtime(self, session_id: str) -> bool:
+        """True only when the same-session Runner pool entry is PAUSED.
+
+        Unlike ``has_resumable_runtime`` (PAUSED|RUNNING), this is the hard
+        pause→continue signal: live follow-up interact must not be skipped.
+        """
+        if self._paused_team_names.get(session_id):
+            return True
+        resolved = await self._resolve_resumable_runner_entry(session_id)
+        if resolved is None:
+            return False
+        _team_name, entry = resolved
+        return getattr(entry, "state", None) is RuntimeState.PAUSED
 
     async def session_has_runtime(self, session_id: str) -> bool:
         return (
@@ -839,6 +916,7 @@ class TeamManager:
     def _restore_active_runtime(self, session_id: str, team_name: str) -> None:
         self._active_team_names[session_id] = team_name
         self._pending_team_names.pop(session_id, None)
+        self._paused_team_names.pop(session_id, None)
         logger.info(
             "[TeamManager] restored resumable runtime: session_id=%s team_name=%s active=%s pending=%s",
             session_id,
@@ -924,11 +1002,17 @@ class TeamManager:
 
     @staticmethod
     def _initialize_team_shared_skill_links(spec: TeamAgentSpec) -> None:
-        """Initialize team shared skill links from the global skill root."""
+        """Initialize team shared skill links from the global skill root + relay shared dirs."""
         global_skills_dir = get_agent_skills_dir()
-        if not global_skills_dir.exists():
-            logger.warning("[TeamManager] global_skills_dir does not exist: %s", global_skills_dir)
-            return
+        global_skills_dir.mkdir(parents=True, exist_ok=True)
+
+        # Relay-configured skill directories (e.g. office-claw-skills) must be
+        # linked into the global skills dir before syncing to team-shared,
+        # because each member's SkillManager reads get_agent_skills_dir()
+        # directly. ensure-only (no prune) to avoid removing skills installed
+        # by the user or other teams.
+        for shared_dir in get_shared_agent_skills_dirs():
+            ensure_skill_dir_links(shared_dir, global_skills_dir)
 
         # Resolve team workspace path
         ws_config = spec.workspace
@@ -968,16 +1052,35 @@ class TeamManager:
         """Register the team shared skills directory for link refresh."""
         self._team_shared_skill_link_targets[session_id] = target
 
+    @staticmethod
+    def ensure_leader_prompt_skills_ready_for_session(
+        session_id: str,
+        spec: TeamAgentSpec,
+        query: str,
+    ) -> PromptSkillMountResult:
+        """Mount prompt-selected skills into this conversation's Leader-only view."""
+        build_context = getattr(spec, "build_context", None)
+        target_value = str(getattr(build_context, "leader_skills_dir", "") or "").strip()
+        if target_value:
+            target = Path(target_value)
+        else:
+            target = TeamManager._resolve_team_shared_skills_dir(spec).parent / "leader-skills"
+        return mount_leader_prompt_skills(
+            session_id=session_id,
+            query=query,
+            target_dir=target,
+        )
+
     def refresh_team_shared_skill_links(self, session_id: str) -> bool:
-        """Refresh team shared skill links from global skills."""
+        """Refresh team shared skill links from global skills + relay shared dirs."""
         target = self._team_shared_skill_link_targets.get(session_id)
         if target is None:
             logger.debug("[TeamManager] no team shared skill link target for session_id=%s", session_id)
             return False
         global_skills_dir = get_agent_skills_dir()
-        if not global_skills_dir.exists():
-            logger.warning("[TeamManager] global_skills_dir does not exist: %s", global_skills_dir)
-            return False
+        global_skills_dir.mkdir(parents=True, exist_ok=True)
+        for shared_dir in get_shared_agent_skills_dirs():
+            ensure_skill_dir_links(shared_dir, global_skills_dir)
         sync_skill_dir_links(global_skills_dir, target)
         logger.info("[TeamManager] Refreshed team shared skill links: session_id=%s target=%s", session_id, target)
         return True
@@ -1020,7 +1123,11 @@ class TeamManager:
             spec,
             session_id=session_id,
             mode=resolved_mode or "team",
-            project_dir=(request_metadata or {}).get("project_dir"),
+            project_dir=(
+                str((request_metadata or {}).get("effective_project_dir") or "").strip()
+                or str((request_metadata or {}).get("project_dir") or "").strip()
+                or None
+            ),
             request_id=request_id,
             channel_id=channel_id,
             request_metadata=request_metadata,
@@ -1312,6 +1419,20 @@ class TeamManager:
 
     def register_stream_task(self, session_id: str, task: asyncio.Task) -> None:
         self._stream_tasks[session_id] = task
+
+    def remember_user_query(self, session_id: str, query: str) -> None:
+        """Persist the last non-resume user query for interrupt/reconnect continue."""
+        text = str(query or "").strip()
+        if not text:
+            return
+        self._last_user_queries[session_id] = text
+
+    def get_last_user_query(self, session_id: str) -> str | None:
+        text = self._last_user_queries.get(session_id)
+        return text if text else None
+
+    def clear_last_user_query(self, session_id: str) -> None:
+        self._last_user_queries.pop(session_id, None)
 
     def _has_local_team_runtime(self, session_id: str) -> bool:
         """Return whether the session should use the legacy in-memory TeamAgent path."""
@@ -1888,12 +2009,60 @@ class TeamManager:
         )
         return True
 
-    async def pause_session_runtime(self, session_id: str, reason: str = "") -> bool:
-        """Pause the current team runtime for this session.
+    def is_pause_in_progress(self, session_id: str) -> bool:
+        """Return whether ``pause_session_runtime`` is still running for session."""
+        task = self._active_pause_tasks.get(session_id)
+        return task is not None and not task.done()
 
-        Team runtimes are persistent. The current implementation pauses by
-        tearing down the foreground stream task and parking the Runner-owned
-        runtime in paused state so a later `chat.send` can resume it.
+    async def wait_for_pause_complete(
+        self,
+        session_id: str,
+        *,
+        timeout_sec: float | None = None,
+    ) -> bool:
+        """Await an in-flight pause so continue/chat.send does not race it.
+
+        Protocol stop parks via ``Runner.pause`` first; the foreground stream
+        then exits (kernel ``close_stream``). Continue must wait here so it
+        does not open ``RESUME_FROM_PAUSE`` against a half-paused pool.
+
+        Default: wait until pause finishes (no wall-clock abandon). Optional
+        ``timeout_sec`` is only for callers that explicitly need a bound.
+        """
+        task = self._active_pause_tasks.get(session_id)
+        if task is None or task.done():
+            return True
+        logger.info(
+            "[TeamManager] waiting for in-flight pause: session_id=%s timeout=%s",
+            session_id,
+            "none" if timeout_sec is None else f"{timeout_sec:.1f}s",
+        )
+        try:
+            if timeout_sec is None:
+                await asyncio.shield(task)
+                return True
+            await asyncio.wait_for(asyncio.shield(task), timeout=max(0.0, timeout_sec))
+            return True
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[TeamManager] timed out waiting for pause: session_id=%s after %.1fs",
+                session_id,
+                timeout_sec,
+            )
+            return False
+        except asyncio.CancelledError:
+            # Caller cancelled; pause may still be running independently.
+            return not self.is_pause_in_progress(session_id)
+
+    async def pause_session_runtime(self, session_id: str, reason: str = "") -> bool:
+        """Pause the current team runtime for this session (stop-work, keep-team).
+
+        Behavior:
+        1. ``Runner.pause_agent_team`` to completion (no wall-clock abandon)
+        2. Wait for the foreground stream to exit after kernel ``close_stream``
+        3. Only cancel the stream task if it still has not exited after grace
+
+        Do **not** remove the team from the pool or call ``clean_team``.
         """
         async with self._get_lifecycle_lock(session_id):
             has_stream_task = session_id in self._stream_tasks
@@ -1907,7 +2076,6 @@ class TeamManager:
             if not has_stream_task and not has_team_runtime:
                 return False
 
-            # 如果 cancel 请求已到达，中止 pause 并让 cancel 执行
             if self._cancel_requested.get(session_id):
                 logger.info(
                     "[TeamManager] %s pause aborted: cancel requested for session_id=%s",
@@ -1921,21 +2089,19 @@ class TeamManager:
                 session_id,
             )
 
-            team_name = self._resolve_session_team_name(session_id)
+            self._active_pause_tasks[session_id] = asyncio.current_task()
             runner_paused = False
-            if team_name:
-                try:
-                    # 再次检查 cancel 标志，避免在等待 Runner.pause 时 cancel 已到达
-                    if self._cancel_requested.get(session_id):
-                        logger.info(
-                            "[TeamManager] %s pause aborted before Runner.pause: session_id=%s",
-                            reason, session_id,
-                        )
-                        return False
-
-                    # 注册当前 pause 任务，供 cancel 抢占取消
-                    self._active_pause_tasks[session_id] = asyncio.current_task()
+            try:
+                team_name = self._resolve_session_team_name(session_id)
+                if team_name:
                     try:
+                        if self._cancel_requested.get(session_id):
+                            logger.info(
+                                "[TeamManager] %s pause aborted before Runner.pause: session_id=%s",
+                                reason, session_id,
+                            )
+                            return False
+
                         runner_paused = await Runner.pause_agent_team(
                             team_name=team_name,
                             session_id=session_id,
@@ -1950,27 +2116,41 @@ class TeamManager:
                             await self._stop_runner_team_runtime(
                                 session_id, team_name, "pause aborted"
                             )
+                        cancelled_stream = self._pop_and_cancel_stream_task_unlocked(
+                            session_id, f"{reason}pause-aborted: "
+                        )
+                        await self._await_cancelled_stream_task(
+                            cancelled_stream, session_id=session_id
+                        )
                         await self._finalize_runtime_cleanup(session_id, "pause aborted")
                         return False
-                    finally:
-                        self._active_pause_tasks.pop(session_id, None)
+                    except Exception as exc:
+                        logger.warning(
+                            "[TeamManager] runner pause failed: session_id=%s team_name=%s error=%s",
+                            session_id,
+                            team_name,
+                            exc,
+                        )
 
-                except Exception as exc:
-                    logger.warning(
-                        "[TeamManager] runner pause failed: session_id=%s team_name=%s error=%s",
-                        session_id,
-                        team_name,
-                        exc,
-                    )
+                # Successful park closes the team stream from inside the kernel.
+                # Wait for the consumer task to finish; cancel only if it sticks.
+                if runner_paused:
+                    exited = await self._wait_for_stream_task_exit(session_id)
+                    if not exited:
+                        cancelled_stream = self._pop_and_cancel_stream_task_unlocked(
+                            session_id, f"{reason}pause-stream-grace: "
+                        )
+                        await self._await_cancelled_stream_task(
+                            cancelled_stream, session_id=session_id
+                        )
 
-            if runner_paused:
-                await self._wait_for_stream_task_exit(session_id)
-
-            # Pause parks the runtime in place (resumable via a later chat.send),
-            # so running workflows may still continue — do NOT finalize them.
-            await self._cleanup_runtime_locals(session_id, finalize_workflows=False)
-            self.clear_active_runtime(session_id)
-            self.clear_pending_runtime(session_id)
+                await self._cleanup_runtime_locals(session_id, finalize_workflows=False)
+                self.clear_active_runtime(session_id)
+                self.clear_pending_runtime(session_id)
+                # Interrupt reaches classic standby in-kernel
+                # (handles killed, harness stopped); no delayed warm degrade.
+            finally:
+                self._active_pause_tasks.pop(session_id, None)
 
         logger.info(
             "[TeamManager] %steam session paused: session_id=%s runner_paused=%s",
@@ -2029,35 +2209,93 @@ class TeamManager:
     async def _cancel_stream_task(self, session_id: str, reason: str) -> None:
         """Cancel one stream task while serializing its lifecycle operations."""
         async with self._get_lifecycle_lock(session_id):
-            task = self._stream_tasks.get(session_id)
-            if task is None:
-                return
-            if not task.done():
-                logger.info(
-                    "[TeamManager] %s cancel stream task session_id=%s",
-                    reason,
-                    session_id,
-                )
-                task.cancel()
-            if not task.done():
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-                except Exception as exc:
-                    logger.warning(
-                        "[TeamManager] stream task await after cancel failed session_id=%s: %s",
-                        session_id,
-                        exc,
-                    )
-            if self._stream_tasks.get(session_id) is task:
-                self._stream_tasks.pop(session_id, None)
+            task = self._pop_and_cancel_stream_task_unlocked(session_id, reason)
+        await self._await_cancelled_stream_task(task, session_id=session_id)
+
+    def _pop_and_cancel_stream_task_unlocked(
+        self, session_id: str, reason: str
+    ) -> asyncio.Task | None:
+        """Pop+cancel stream task without taking the lifecycle lock.
+
+        Callers that already hold ``_get_lifecycle_lock(session_id)`` must use
+        this helper — ``_cancel_stream_task`` would deadlock on the same lock.
+        """
+        task = self._stream_tasks.pop(session_id, None)
+        if task is None:
+            return None
+        if not task.done():
+            logger.info(
+                "[TeamManager] %s cancel stream task session_id=%s",
+                reason,
+                session_id,
+            )
+            task.cancel()
+        return task
+
+    async def _await_cancelled_stream_task(
+        self,
+        task: asyncio.Task | None,
+        *,
+        session_id: str,
+        timeout_sec: float = 5.0,
+    ) -> None:
+        """Await a cancelled stream task with a hard timeout (avoid hang)."""
+        if task is None or task.done():
+            return
+        try:
+            await asyncio.wait_for(task, timeout=timeout_sec)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[TeamManager] stream task did not exit after cancel within "
+                "%.1fs: session_id=%s",
+                timeout_sec,
+                session_id,
+            )
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.warning(
+                "[TeamManager] stream task await after cancel failed session_id=%s: %s",
+                session_id,
+                exc,
+            )
 
     async def cancel_all_stream_tasks(self, reason: str = "") -> None:
         """Cancel Team stream tasks after AgentServer disconnects."""
         session_ids = list(self._stream_tasks)
         await asyncio.gather(
             *(self._cancel_stream_task(session_id, reason) for session_id in session_ids),
+        )
+
+    def _iter_disconnect_pause_session_ids(self) -> list[str]:
+        """Sessions that may own a live team runtime when the gateway drops."""
+        session_ids: set[str] = set()
+        session_ids.update(self._stream_tasks)
+        session_ids.update(self._active_team_names)
+        session_ids.update(self._pending_team_names)
+        session_ids.update(self._team_monitors)
+        session_ids.update(self._runner_team_agents)
+        session_ids.update(self._team_agents)
+        return list(session_ids)
+
+    async def pause_all_session_runtimes(self, reason: str = "") -> None:
+        """Pause all live team runtimes (gateway disconnect / system fault).
+
+        Stops in-flight work: stop in-flight work but keep the session
+        resumable. Uses ``pause_session_runtime`` (not stop/remove-from-pool)
+        so a later ``chat.send`` on the same session can continue.
+        """
+        session_ids = self._iter_disconnect_pause_session_ids()
+        if not session_ids:
+            return
+        logger.info(
+            "[TeamManager] %spause all team session runtimes: count=%s",
+            reason,
+            len(session_ids),
+        )
+        await asyncio.gather(
+            *(self.pause_session_runtime(session_id, reason=reason) for session_id in session_ids),
+            return_exceptions=True,
         )
 
 
@@ -2097,6 +2335,11 @@ def refresh_team_shared_skill_links_across_managers(session_id: str | None = Non
 async def cancel_all_team_stream_tasks_across_managers(reason: str = "") -> None:
     """Cancel all team stream tasks on the singleton manager."""
     await get_team_manager().cancel_all_stream_tasks(reason=reason)
+
+
+async def pause_all_team_session_runtimes_across_managers(reason: str = "") -> None:
+    """Pause all team session runtimes (disconnect / fault; same-session resumable)."""
+    await get_team_manager().pause_all_session_runtimes(reason=reason)
 
 
 async def stop_team_session_runtime_across_managers(

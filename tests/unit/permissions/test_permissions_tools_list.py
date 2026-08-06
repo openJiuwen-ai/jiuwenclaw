@@ -68,16 +68,23 @@ def test_build_permissions_tools_list_view_merges_catalog_and_config(
 
     assert payload["default_level"] == "ask"
     by_name = {item["name"]: item for item in payload["tools"]}
-    assert set(by_name) == {"bash", "read_file"}
+    assert set(by_name) == {"bash", "read_file", "manual_only"}
     assert by_name["bash"] == {
         "name": "bash",
         "short_description": "Run shell commands.",
         "level": "deny",
         "configured": True,
+        "registered": True,
     }
     assert by_name["read_file"]["level"] == "ask"
     assert by_name["read_file"]["configured"] is False
-    assert "manual_only" not in by_name
+    assert by_name["read_file"]["registered"] is True
+    # config 独有键（catalog 里没有、但 permissions.tools 里配过）现在也会暴露，
+    # 以便用户为按需注册的工具（如 agent-team 工具）预配审批档位。
+    assert by_name["manual_only"]["name"] == "manual_only"
+    assert by_name["manual_only"]["level"] == "allow"
+    assert by_name["manual_only"]["configured"] is True
+    assert by_name["manual_only"]["registered"] is False
 
 
 def test_build_permissions_tools_list_view_strips_placeholder_short_description(

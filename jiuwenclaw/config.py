@@ -8,6 +8,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 from typing import Any, Optional
 from ruamel.yaml import YAML
@@ -475,10 +476,86 @@ def normalize_permissions_tool_level(raw: Any) -> str | None:
     return None
 
 
+def _resolve_ui_language() -> str:
+    """Resolve the translator language from jiuwenclaw's global config.
+
+    ``preferred_language`` is stored as ``zh``/``en`` (this branch's convention),
+    while the upstream ``openjiuwen`` translator expects ``cn``/``en``. Map
+    ``zh``-family values to ``cn`` and default to ``cn``, mirroring the existing
+    mapping in ``agentserver/swarm/config_specs.py``.
+    """
+    cfg = get_config() or {}
+    lang = str(cfg.get("preferred_language", "zh") or "zh").strip().lower()
+    if lang in ("en", "english"):
+        return "en"
+    return "cn"
+
+
+@cache
+def _get_team_tool_translator(lang: str | None = None) -> Any:
+    """Lazily build the agent-team tool description translator (cached).
+
+    Config-only agent-team tools (``build_team``, ``spawn_teammate``, ...) are
+    registered to ``ability_manager`` only after ``build_team`` completes, so
+    they are absent from the runtime catalog until then. Their descriptions
+    are sourced from the upstream ``openjiuwen.agent_teams.tools.locales``
+    translator so they stay in sync with upstream changes without a
+    hand-maintained static mapping. Returns ``None`` when the upstream package
+    is unavailable (e.g. a jiuwenclaw runtime without agent-team support).
+
+    ``lang`` is the translator language (``cn``/``en``); when omitted it is
+    resolved from the global ``preferred_language`` config so the tool list
+    stays consistent with the runtime's language. A future request-level
+    language can be threaded through by passing ``lang`` explicitly.
+    """
+    try:
+        from openjiuwen.agent_teams.tools.locales import make_translator
+
+        return make_translator(lang or _resolve_ui_language())
+    except Exception:
+        return None
+
+
+def _resolve_config_only_tool_description(tool_name: str) -> str:
+    """Resolve description for a config-only tool absent from the runtime catalog.
+
+    Agent-team tools resolve via the upstream translator; tools whose
+    descriptions live elsewhere (e.g. ``office_claw_*`` MCP tools described by
+    the relay-claw MCP server) return an empty string so the UI can show a
+    placeholder.
+    """
+    translator = _get_team_tool_translator(_resolve_ui_language())
+    if translator is None:
+        return ""
+    try:
+        return str(translator(tool_name)) or ""
+    except (FileNotFoundError, KeyError):
+        return ""
+    except Exception:
+        return ""
+
+
 def build_permissions_tools_list_view(
     catalog_by_name: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, Any]:
-    """Build permissions UI list: runtime catalog tools with explicit/default levels."""
+    """Build permissions UI list merging runtime catalog and config-only tools.
+
+    Tools are drawn from two sources, merged by name:
+
+    1. ``catalog_by_name`` — tools currently registered in the runtime
+       ``ability_manager`` (``registered=True``).
+    2. ``permissions.tools`` config keys absent from the runtime catalog
+       (``registered=False``). These are tools configured in advance but not
+       yet registered — e.g. agent-team tools only registered after
+       ``build_team`` completes. Surfacing them lets users pre-configure
+       approval levels before the tool is ever invoked; the level takes effect
+       once the tool registers and is called, because ``PermissionEngine``
+       reads ``config.tools[name]`` independent of registration state.
+
+    Descriptions for config-only agent-team tools are resolved via the
+    ``openjiuwen.agent_teams.tools.locales`` translator so they stay in sync
+    with upstream tool definitions without a hand-maintained mapping.
+    """
     from jiuwenclaw.agentserver.tool_catalog import ui_list_short_description
 
     catalog = dict(catalog_by_name or {})
@@ -487,8 +564,12 @@ def build_permissions_tools_list_view(
         explicit = {}
     default_level = get_permissions_defaults_level()
 
+    seen: set[str] = set()
     tools_out: list[dict[str, Any]] = []
+
+    # 1. 已注册工具（runtime catalog）：registered=True
     for name in sorted(catalog.keys()):
+        seen.add(name)
         entry = catalog.get(name, {})
         raw_explicit = explicit.get(name)
         if raw_explicit is not None:
@@ -510,6 +591,33 @@ def build_permissions_tools_list_view(
                 "short_description": short,
                 "level": level,
                 "configured": configured,
+                "registered": True,
+            }
+        )
+
+    # 2. config 独有键（permissions.tools 里配过、但不在 runtime catalog）：
+    #    典型场景是 agent-team 工具——只在 build_team 成功后才注册到
+    #    ability_manager。提前暴露它们让用户可预配审批档位；档位在该工具
+    #    注册并被调用时即生效（PermissionEngine 读 config.tools[name]，
+    #    与注册状态无关）。
+    for name in sorted(explicit.keys()):
+        if name in seen:
+            continue
+        raw_explicit = explicit.get(name)
+        level = normalize_permissions_tool_level(raw_explicit) or default_level
+        description = _resolve_config_only_tool_description(name)
+        short = ui_list_short_description(
+            name,
+            description=description,
+            short_description="",
+        )
+        tools_out.append(
+            {
+                "name": name,
+                "short_description": short,
+                "level": level,
+                "configured": True,
+                "registered": False,
             }
         )
 
@@ -1162,7 +1270,11 @@ def update_file_transfer_in_config(updates: dict[str, Any]) -> None:
 #   TYPE                          (str, sandbox provider 名; 缺省/空回落到
 #                                   ``jiuwenbox`` —— 这是项目里唯一注册的
 #                                   provider, 显式覆盖只有自定义 provider 时才用)
-#   STARTUP_MODE                  (str, 仅接受 ``external``; 非法抛 ValueError)
+#   STARTUP_MODE                  (str, 接受 ``internal`` / ``external``;
+#                                   缺省/空回落 ``internal``。``internal`` =
+#                                   agent-server 自动 spawn jiuwenbox-server
+#                                   子进程; ``external`` = 外部独立托管, 仅健康
+#                                   检查 + HTTP 调用)
 #   PRESERVE_FILE_SHARING_MODE    (str, 仅接受 ``mount``; 缺省回落 ``mount``)
 #   EXCLUDED_COMMANDS             (str: JSON 数组 ``["ls", "cat"]`` 或
 #                                   :func:`os.pathsep` (linux ``:``) 分隔
@@ -1177,10 +1289,12 @@ def update_file_transfer_in_config(updates: dict[str, Any]) -> None:
 #                                   jiuwenbox 服务端用自身默认值)
 #
 # 注意:
-#   - ``startup_mode`` 仅接受 ``external``，``internal`` 之类抛 ``ValueError``。
-#     ``external`` 表示 “使用 ``URL`` 端点连接由外部启动的 jiuwenbox”
-#     (claw2b 不负责拉起 jiuwenbox; 在 K8s / 企业部署里 jiuwenbox-server 由
-#     Deployment / sidecar 等独立托管)。
+#   - ``startup_mode`` 接受 ``internal`` 与 ``external``, 默认 ``internal``。
+#     ``internal``: agent-server 启动时自动 spawn ``jiuwenbox-server`` 子进程
+#     (由 ``jiuwenclaw/agentserver/jiuwenbox_runner.py`` 的 ``JiuwenBoxRunner``
+#     管理), 适合桌面 / 单机部署; ``external``: jiuwenbox-server 由 K8s /
+#     企业部署的 Deployment / sidecar 等独立托管, agent-server 只健康检查 +
+#     HTTP 调用 (运维显式设 ``STARTUP_MODE=external``)。
 #   - 不引入 ``policy_file`` 字段 (jiuwenbox 自管 policy)。
 #   - 不引入任何 ``update_sandbox_*`` 写回函数 (无 ``/sandbox`` 命令调用方)。
 #   - ``IDLE_TTL_SECONDS`` / ``IDLE_CHECK_INTERVAL`` 经
@@ -1189,17 +1303,18 @@ def update_file_transfer_in_config(updates: dict[str, Any]) -> None:
 #     policy 的 ``timeout`` 子段不驱动 reaper, 必须改根 policy 才能生效)。
 # =====================================================================
 
-_SANDBOX_ENV_PREFIX: str = "JIUWENCLAW_SANDBOX_"
+_VALID_SANDBOX_STARTUP_MODES: tuple[str, ...] = ("internal", "external")
+_DEFAULT_SANDBOX_STARTUP_MODE: str = "internal"
+_DEFAULT_SANDBOX_POLICY_FILE: str = "code-agent-policy.yaml"
 
-_VALID_SANDBOX_STARTUP_MODES: tuple[str, ...] = ("external",)
-_DEFAULT_SANDBOX_STARTUP_MODE: str = "external"
+# Public re-exports for callers that need to fall back to / advertise defaults.
+DEFAULT_SANDBOX_STARTUP_MODE = _DEFAULT_SANDBOX_STARTUP_MODE
+DEFAULT_SANDBOX_POLICY_FILE = _DEFAULT_SANDBOX_POLICY_FILE
 
 _VALID_PRESERVE_FILE_SHARING_MODES: tuple[str, ...] = ("mount",)
 _DEFAULT_PRESERVE_FILE_SHARING_MODE: str = "mount"
 
-# 唯一已注册的 sandbox provider 名。 历史上 ``JIUWENCLAW_SANDBOX_TYPE`` 必填,
-# 用户漏配就会让 ``_create_sys_operation`` 静默回落到 local 模式 (现象: "我开了
-# sandbox 怎么没连"); 改为空时回落到 ``jiuwenbox``。
+# 唯一已注册的 sandbox provider 名; ``sandbox.type`` 未配置时回落到 ``jiuwenbox``。
 _DEFAULT_SANDBOX_TYPE: str = "jiuwenbox"
 
 _SANDBOX_RUNTIME_DEFAULTS: dict[str, Any] = {
@@ -1208,50 +1323,19 @@ _SANDBOX_RUNTIME_DEFAULTS: dict[str, Any] = {
     "files": {"allow": [], "deny": []},
     "idle_ttl_seconds": None,
     "idle_check_interval": None,
+    "fallback_on_failure": False,
 }
 _SANDBOX_RUNTIME_KEYS: tuple[str, ...] = tuple(_SANDBOX_RUNTIME_DEFAULTS.keys())
-
-
-def _read_sandbox_env(suffix: str) -> str | None:
-    """读取 ``JIUWENCLAW_SANDBOX_<suffix>`` 环境变量.
-
-    优先经 :func:`get_local_config` (走 agentserver 进程内 ENV_CONFIG_DICT
-    + os.environ + 解密钩子), 与项目内其它 env 读取保持一致。
-    返回 ``None`` 表示未设置或空字符串。
-    """
-    name = _SANDBOX_ENV_PREFIX + suffix
-    value = get_local_config(name)
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
 
 
 _TRUE_VALUES: frozenset[str] = frozenset({"1", "true", "yes", "y", "on", "t"})
 _FALSE_VALUES: frozenset[str] = frozenset({"0", "false", "no", "n", "off", "f"})
 
 
-def _coerce_bool_env(raw: str | None, *, env_name: str, default: bool = False) -> bool:
-    """把环境变量字符串解析为 bool. 未设置 / 空 → ``default``; 非法值抛 ValueError."""
-    if raw is None:
-        return default
-    text = raw.strip().lower()
-    if not text:
-        return default
-    if text in _TRUE_VALUES:
-        return True
-    if text in _FALSE_VALUES:
-        return False
-    raise ValueError(
-        f"{env_name} must be a boolean string ({sorted(_TRUE_VALUES | _FALSE_VALUES)}), "
-        f"got {raw!r}",
-    )
-
-
 def _coerce_optional_positive_int(
-    value: Any, *, env_name: str, allow_zero: bool = False,
+    value: Any, *, field: str, allow_zero: bool = False,
 ) -> Optional[int]:
-    """把 env / yaml 来的 idle 配置值归一化为 ``Optional[int]``.
+    """把 yaml 来的 idle 配置值归一化为 ``Optional[int]``.
 
     - ``None`` / 缺失 / 空字符串 → ``None``。
     - ``int`` / 数字字符串 → ``int(value)``; ``allow_zero=False`` 时 ``<= 0``
@@ -1263,7 +1347,7 @@ def _coerce_optional_positive_int(
     if isinstance(value, bool):
         # bool 是 int 子类, 必须先排掉; ``True`` -> 1 这种隐式转换在配置文件里
         # 几乎肯定是误写, 不要静默放行。
-        raise ValueError(f"{env_name} must be a number, not a boolean")
+        raise ValueError(f"{field} must be a number, not a boolean")
     if isinstance(value, str):
         text = value.strip()
         if not text:
@@ -1275,75 +1359,34 @@ def _coerce_optional_positive_int(
                 number = int(float(text))
             except ValueError as exc:
                 raise ValueError(
-                    f"{env_name} must parse as an integer of seconds, got {value!r}"
+                    f"{field} must parse as an integer of seconds, got {value!r}"
                 ) from exc
     elif isinstance(value, (int, float)):
         number = int(value)
     else:
         raise ValueError(
-            f"{env_name} must be number or string, got {type(value).__name__}"
+            f"{field} must be number or string, got {type(value).__name__}"
         )
     if not allow_zero and number <= 0:
         return None
     return number
 
 
-def _parse_list_env(raw: str | None, *, env_name: str) -> list[Any]:
-    """把 env 里的列表型 sandbox 配置解析成 Python list.
-
-    支持两种形态 (优先级):
-
-    1. **JSON 数组** (推荐): 字符串首字符为 ``[``, 整体 ``json.loads`` 解析.
-       元素可以是 ``str`` 或 ``{"path": "...", "permissions": "..."}`` 这种
-       与 ``files.allow`` / ``files.deny`` 对应的 dict。
-    2. **:os.pathsep 分隔的纯字符串**: 例如 ``/etc/foo:/etc/bar``。 适合
-       ``EXCLUDED_COMMANDS`` 与简单路径场景, dict 形态的 ``permissions``
-       不便表达。
-
-    空字符串 / ``None`` → 返回空 list。 JSON 解析失败时回退到分隔符模式;
-    若 JSON 形态明显 (以 ``[`` 开头) 但解析失败, 抛 ``ValueError`` 让用户
-    知道是 JSON 写错而不是悄悄变成单字符串。
-    """
-    if raw is None:
-        return []
-    text = raw.strip()
-    if not text:
-        return []
-    if text.startswith("["):
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                f"{env_name} starts with '[' but is not valid JSON: {exc}"
-            ) from exc
-        if not isinstance(parsed, list):
-            raise ValueError(f"{env_name} JSON must be an array, got {type(parsed).__name__}")
-        return parsed
-    return [piece for piece in (p.strip() for p in text.split(os.pathsep)) if piece]
-
 
 def _normalize_sandbox_startup_mode(value: Any) -> str:
     """归一化 ``sandbox.startup_mode``.
 
-    - ``None`` / 空字符串 → 返回默认 ``external``；
-    - ``"external"`` (大小写不敏感, 前后空格) → 返回 ``"external"``；
-    - 其它任何取值 (含 ``internal``) → 抛 ``ValueError``。
-
-    显式拒绝 ``internal``: claw2b 在 K8s / 企业部署中, jiuwenbox-server 由
-    Deployment / sidecar 等外部进程独立托管, agent-server 完全不 spawn 它,
-    只通过 ``JIUWENCLAW_SANDBOX_URL`` 健康检查 + HTTP 调用。 这就是 jiuwenbox
-    README 中 ``external`` 的定义; ``internal`` (agent-server 自动拉起
-    jiuwenbox 子进程) 在本工程内不实现, 留下名字徒增歧义, 故 schema 收窄。
+    P1-16: 读取路径与写入路径校验一致. 旧版对非空非法值 (如 ``iternal`` 拼错)
+    静默回落默认, 用户无反馈. 现改为: None/空 → 默认; 非空但非法 → 抛 ValueError
+    (与 update_sandbox_startup_mode 写入路径一致), 启动时报错定位.
     """
-    if value is None:
-        return _DEFAULT_SANDBOX_STARTUP_MODE
-    text = str(value).strip().lower()
+    text = str(value or "").strip().lower()
     if not text:
         return _DEFAULT_SANDBOX_STARTUP_MODE
     if text not in _VALID_SANDBOX_STARTUP_MODES:
         raise ValueError(
-            f"JIUWENCLAW_SANDBOX_STARTUP_MODE must be one of "
-            f"{_VALID_SANDBOX_STARTUP_MODES}, got {value!r}",
+            f"invalid sandbox.startup_mode: {value!r}; "
+            f"must be one of {_VALID_SANDBOX_STARTUP_MODES}"
         )
     return text
 
@@ -1362,28 +1405,23 @@ def _normalize_preserve_file_sharing_mode(value: Any) -> str | None:
         return None
     if text not in _VALID_PRESERVE_FILE_SHARING_MODES:
         raise ValueError(
-            f"JIUWENCLAW_SANDBOX_PRESERVE_FILE_SHARING_MODE must be one of "
-            f"{_VALID_PRESERVE_FILE_SHARING_MODES}, got {value!r}",
+            f"sandbox.preserve_file_sharing_mode must be one of "
+            f"{_VALID_PRESERVE_FILE_SHARING_MODES}, got {value!r}"
         )
     return text
 
 
 def _ensure_sandbox_runtime_shape(runtime: Any) -> dict[str, Any]:
-    """填充 sandbox runtime 缺省字段，返回归一化后的 dict（不写盘）。
-
-    ``runtime`` 由 :func:`get_sandbox_runtime` 从 env var 拼装而成；保留
-    ``Any`` 入参类型只是让本函数对历史 yaml 输入也能容错 (传 ``None`` /
-    非 dict 时返回纯默认值)。
-    """
-    base = {
-        k: (list(v) if isinstance(v, list) else dict(v) if isinstance(v, dict) else v)
-        for k, v in _SANDBOX_RUNTIME_DEFAULTS.items()
-    }
+    """填充 sandbox runtime 缺省字段，返回归一化后的 dict（不写盘）。"""
+    base = {k: (list(v) if isinstance(v, list) else dict(v) if isinstance(v, dict) else v)
+            for k, v in _SANDBOX_RUNTIME_DEFAULTS.items()}
     if not isinstance(runtime, dict):
         return base
     out = dict(base)
     if "enabled" in runtime:
         out["enabled"] = bool(runtime["enabled"])
+    if "fallback_on_failure" in runtime:
+        out["fallback_on_failure"] = bool(runtime["fallback_on_failure"])
     raw_excluded = runtime.get("excluded_commands")
     if isinstance(raw_excluded, list):
         out["excluded_commands"] = [str(p) for p in raw_excluded if str(p).strip()]
@@ -1399,81 +1437,360 @@ def _ensure_sandbox_runtime_shape(runtime: Any) -> dict[str, Any]:
         # ``<= 0`` 归一化成 ``None`` (= 禁用淘汰), 与 jiuwenbox server 端
         # ``TimeoutPolicy.idle_timeout`` 的语义对齐。
         out["idle_ttl_seconds"] = _coerce_optional_positive_int(
-            runtime["idle_ttl_seconds"],
-            env_name="JIUWENCLAW_SANDBOX_IDLE_TTL_SECONDS",
+            runtime["idle_ttl_seconds"], field="sandbox.idle_ttl_seconds",
         )
     if "idle_check_interval" in runtime:
         out["idle_check_interval"] = _coerce_optional_positive_int(
-            runtime["idle_check_interval"],
-            env_name="JIUWENCLAW_SANDBOX_IDLE_CHECK_INTERVAL",
+            runtime["idle_check_interval"], field="sandbox.idle_check_interval",
         )
     return out
 
 
-def get_sandbox_endpoint() -> dict[str, Any]:
-    """从 env var 返回 sandbox 接入端点配置.
-
-    Reads:
-        - ``JIUWENCLAW_SANDBOX_URL``
-        - ``JIUWENCLAW_SANDBOX_TYPE`` (default ``jiuwenbox`` —— 项目内唯一
-          已注册的 provider; 不必显式设)
-        - ``JIUWENCLAW_SANDBOX_STARTUP_MODE`` (default ``external``,
-          非法值抛 ``ValueError``)
-        - ``JIUWENCLAW_SANDBOX_PRESERVE_FILE_SHARING_MODE`` (default
-          ``mount``)
-
-    返回 key 与历史调用方契约保持一致 (``url`` / ``type`` / ``startup_mode`` /
-    ``preserve_file_sharing_mode``), 让 ``interface_deep.py`` 等调用方
-    无需改动。
-    """
-    mode = _normalize_preserve_file_sharing_mode(_read_sandbox_env("PRESERVE_FILE_SHARING_MODE"))
-    return {
-        "url": _read_sandbox_env("URL") or "",
-        "type": _read_sandbox_env("TYPE") or _DEFAULT_SANDBOX_TYPE,
-        "startup_mode": _normalize_sandbox_startup_mode(_read_sandbox_env("STARTUP_MODE")),
-        "preserve_file_sharing_mode": mode or _DEFAULT_PRESERVE_FILE_SHARING_MODE,
-    }
-
-
 def get_sandbox_runtime() -> dict[str, Any]:
-    """从 env var 返回 sandbox runtime 配置 (含缺省字段填充)。
+    """返回 sandbox runtime 当前内容 (含缺省字段填充)。
 
-    Reads:
-        - ``JIUWENCLAW_SANDBOX_ENABLED`` (bool, 默认 false)
-        - ``JIUWENCLAW_SANDBOX_EXCLUDED_COMMANDS`` (JSON 数组 / 分隔列表)
-        - ``JIUWENCLAW_SANDBOX_FILES_ALLOW``  (JSON 数组 / 分隔列表)
-        - ``JIUWENCLAW_SANDBOX_FILES_DENY``   (JSON 数组 / 分隔列表)
-        - ``JIUWENCLAW_SANDBOX_IDLE_TTL_SECONDS`` (int seconds; ``<=0`` 视作禁用)
-        - ``JIUWENCLAW_SANDBOX_IDLE_CHECK_INTERVAL`` (int seconds; ``<=0`` 视作未配置)
-
-    返回结构与历史 ``config.yaml::sandbox`` runtime 完全相同 (含
-    ``files: {allow, deny}`` 子结构), 让下游 ``interface_deep.py`` /
-    ``sysop_builder.py`` 不感知配置源切换。
+    读取优先级: 当 task env overlay 已绑定 (reload_agent_config 把 yaml sandbox
+    翻译成 overlay) 时, ``enabled`` 优先读 overlay 的
+    ``JIUWENCLAW_SANDBOX_ENABLED`` (经 :func:`get_local_config`); 其余字段直接从
+    ``sandbox.<key>`` config dict 读。字段缺失时用 ``_SANDBOX_RUNTIME_DEFAULTS``。
     """
-    raw: dict[str, Any] = {
-        "enabled": _coerce_bool_env(
-            _read_sandbox_env("ENABLED"),
-            env_name="JIUWENCLAW_SANDBOX_ENABLED",
-            default=False,
-        ),
-        "excluded_commands": _parse_list_env(
-            _read_sandbox_env("EXCLUDED_COMMANDS"),
-            env_name="JIUWENCLAW_SANDBOX_EXCLUDED_COMMANDS",
-        ),
-        "files": {
-            "allow": _parse_list_env(
-                _read_sandbox_env("FILES_ALLOW"),
-                env_name="JIUWENCLAW_SANDBOX_FILES_ALLOW",
-            ),
-            "deny": _parse_list_env(
-                _read_sandbox_env("FILES_DENY"),
-                env_name="JIUWENCLAW_SANDBOX_FILES_DENY",
-            ),
-        },
-        "idle_ttl_seconds": _read_sandbox_env("IDLE_TTL_SECONDS"),
-        "idle_check_interval": _read_sandbox_env("IDLE_CHECK_INTERVAL"),
-    }
+    cfg = get_config() or {}
+    sandbox = cfg.get("sandbox")
+    if not isinstance(sandbox, dict):
+        sandbox = {}
+    raw = {key: sandbox[key] for key in _SANDBOX_RUNTIME_KEYS if key in sandbox}
+    # overlay 优先读 enabled (reload_agent_config 把 yaml enabled 翻译成 env overlay).
+    enabled_env = get_local_config("JIUWENCLAW_SANDBOX_ENABLED", None)
+    if enabled_env is not None:
+        text = str(enabled_env).strip().lower()
+        if text in _TRUE_VALUES:
+            raw["enabled"] = True
+        elif text in _FALSE_VALUES:
+            raw["enabled"] = False
     return _ensure_sandbox_runtime_shape(raw)
+
+
+def get_sandbox_startup_mode() -> str:
+    """返回 ``sandbox.startup_mode``: ``internal`` (agent-server 拉起 jiuwenbox)
+    或 ``external`` (用户自己启动 jiuwenbox)。未配置时默认 ``internal``。
+    """
+    cfg = get_config() or {}
+    sandbox = cfg.get("sandbox") or {}
+    return _normalize_sandbox_startup_mode(sandbox.get("startup_mode"))
+
+
+def get_sandbox_startup_mode_explicit() -> str | None:
+    """同 :func:`get_sandbox_startup_mode`, 但仅返回 ``config.yaml`` 里**显式**
+    写出的合法值 (``internal`` / ``external``); 未配置 / 空串 / 非法值都返回
+    ``None``。
+
+    用途: agent-server boot 时判断要不要自动拉起 jiuwenbox 子进程。
+    ``get_sandbox_startup_mode`` 默认归一会把缺失字段变成 ``internal``, 那样
+    会让从来没碰过沙箱的用户在升级到带 bootstrap 逻辑的版本后, 突然多出一个
+    jiuwenbox 进程。靠这个 ``_explicit`` 变体可以严格区分 "用户主动选了 internal"
+    和 "字段不存在, 走的默认"。
+    """
+    cfg = get_config() or {}
+    sandbox = cfg.get("sandbox") or {}
+    raw = sandbox.get("startup_mode")
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip().lower()
+    if text not in _VALID_SANDBOX_STARTUP_MODES:
+        return None
+    return text
+
+
+def update_sandbox_startup_mode(mode: str) -> str:
+    """写入 ``sandbox.startup_mode`` 到 config.yaml; 返回归一化后的值。"""
+    normalized = _normalize_sandbox_startup_mode(mode)
+    if str(mode or "").strip().lower() not in _VALID_SANDBOX_STARTUP_MODES:
+        raise ValueError(
+            f"startup_mode must be one of {_VALID_SANDBOX_STARTUP_MODES}, got {mode!r}",
+        )
+    data = _load_yaml_round_trip(_current_config_yaml_path())
+    if "sandbox" not in data or not isinstance(data.get("sandbox"), dict):
+        data["sandbox"] = {}
+    data["sandbox"]["startup_mode"] = normalized
+    _dump_yaml_round_trip(_current_config_yaml_path(), data)
+    return normalized
+
+
+def _looks_like_bare_filename(value: str) -> bool:
+    """``True`` 表示参数应该被解释为 ``jiuwenbox/configs/`` 下的文件名。
+
+    判据: 不含任何路径分隔符 (``/`` 或 ``\\``); 含分隔符或绝对路径一律按整路径处理。
+    """
+    if not value:
+        return False
+    return "/" not in value and "\\" not in value and not Path(value).is_absolute()
+
+
+def _jiuwenbox_configs_dir() -> Path | None:
+    """探测仓库或安装位置上的 ``jiuwenbox/configs/`` 目录。
+
+    优先在仓库目录树里寻找 (开发场景, ``jiuwenbox/src/jiuwenbox/configs``);
+    失败再尝试已 ``pip install`` 的 jiuwenbox 包内 ``configs/``。
+    """
+    here = Path(__file__).resolve()
+    for ancestor in here.parents[1:7]:
+        for candidate in (
+            ancestor / "jiuwenbox" / "src" / "jiuwenbox" / "configs",
+            ancestor / "jiuwenbox" / "configs",
+        ):
+            if candidate.is_dir():
+                return candidate
+    try:
+        import jiuwenbox  # type: ignore[import-not-found]
+    except ImportError:
+        return None
+    try:
+        pkg_dir = Path(jiuwenbox.__file__).resolve().parent
+    except Exception:  # noqa: BLE001
+        return None
+    direct = pkg_dir / "configs"
+    if direct.is_dir():
+        return direct
+    for steps_up in (2, 3):
+        candidate = pkg_dir
+        for _ in range(steps_up):
+            candidate = candidate.parent
+        candidate = candidate / "configs"
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
+def resolve_sandbox_policy_path(value: str | None) -> Path | None:
+    r"""把 ``sandbox.policy_file`` 的取值解析为宿主机绝对路径。
+
+    - ``None`` / 空字符串 → 返回 None, 由调用方决定是否落到 jiuwenbox 自身默认 policy;
+    - 仅文件名 (不含路径分隔符) → 在 ``jiuwenbox/configs/`` 下拼接;
+      ``configs/`` 探测不到时返回 None;
+    - 含 ``/`` ``\\`` 或绝对路径 → 展开 ``~`` / ``$VAR`` 后按整路径返回。
+    """
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    expanded = os.path.expandvars(os.path.expanduser(text))
+    if _looks_like_bare_filename(expanded):
+        configs_dir = _jiuwenbox_configs_dir()
+        if configs_dir is None:
+            return None
+        return (configs_dir / expanded).resolve()
+    return Path(expanded).resolve()
+
+
+def get_sandbox_policy_file() -> str:
+    """返回 ``sandbox.policy_file`` 原始字符串 (空表示未配置, 由调用方走默认)。"""
+    cfg = get_config() or {}
+    sandbox = cfg.get("sandbox") or {}
+    return str(sandbox.get("policy_file") or "").strip()
+
+
+def get_sandbox_policy_path() -> Path | None:
+    """返回 ``sandbox.policy_file`` 解析后的绝对路径。
+
+    未配置时回落到 ``_DEFAULT_SANDBOX_POLICY_FILE``; 解析失败返回 None。
+    """
+    raw = get_sandbox_policy_file() or _DEFAULT_SANDBOX_POLICY_FILE
+    return resolve_sandbox_policy_path(raw)
+
+
+def update_sandbox_policy_file(value: str) -> str:
+    """写入 ``sandbox.policy_file`` (仅文件名或绝对路径) 到 config.yaml; 返回归一化后的字符串。"""
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError("policy_file must be non-empty")
+    data = _load_yaml_round_trip(_current_config_yaml_path())
+    if "sandbox" not in data or not isinstance(data.get("sandbox"), dict):
+        data["sandbox"] = {}
+    data["sandbox"]["policy_file"] = text
+    _dump_yaml_round_trip(_current_config_yaml_path(), data)
+    return text
+
+
+def get_sandbox_endpoint() -> dict[str, Any]:
+    """返回 ``sandbox.url`` / ``sandbox.type`` / ``sandbox.preserve_file_sharing_mode``
+    / ``sandbox.startup_mode`` / ``sandbox.policy_file``。
+
+    读取优先级: 当 task env overlay 已绑定 (reload_agent_config 把 yaml sandbox
+    翻译成 overlay) 时, 优先读 overlay 的 ``JIUWENCLAW_SANDBOX_URL`` /
+    ``JIUWENCLAW_SANDBOX_TYPE`` env var (经 :func:`get_local_config`); 否则
+    fallback 到 ``config.yaml::sandbox`` config dict。这让 hot-reload 的 yaml
+    sandbox 配置能即时生效, 不必写盘。
+
+    ``preserve_file_sharing_mode`` 缺省或为空时返回空串, 由调用方决定默认值
+    (当前只有 ``"mount"``)。 ``startup_mode`` 未配置时回落到 ``internal``;
+    ``policy_file`` 未配置时返回空串 (由调用方决定默认 policy)。
+
+    Raises:
+        ValueError: yaml 里 ``preserve_file_sharing_mode`` 写了非法值时, 直接
+            把 :func:`_normalize_preserve_file_sharing_mode` 的异常向上抛。
+    """
+    cfg = get_config() or {}
+    sandbox = cfg.get("sandbox") or {}
+    mode = _normalize_preserve_file_sharing_mode(sandbox.get("preserve_file_sharing_mode"))
+    # overlay 优先: reload_agent_config 把 yaml sandbox 翻译成 env overlay, 这里读回.
+    # 未绑定时 get_local_config 走 config dict/tip/os.environ, 仍能读到 yaml 写盘值.
+    url = str(get_local_config("JIUWENCLAW_SANDBOX_URL", "") or sandbox.get("url") or "").strip()
+    sb_type = str(get_local_config("JIUWENCLAW_SANDBOX_TYPE", "") or sandbox.get("type") or "").strip()
+    return {
+        "url": url,
+        "type": sb_type or _DEFAULT_SANDBOX_TYPE,
+        "preserve_file_sharing_mode": mode or "",
+        "startup_mode": _normalize_sandbox_startup_mode(sandbox.get("startup_mode")),
+        "policy_file": str(sandbox.get("policy_file") or "").strip(),
+    }
+
+
+def update_sandbox_endpoint(
+    url: str,
+    sandbox_type: str,
+    *,
+    preserve_file_sharing_mode: str | None = None,
+    startup_mode: str | None = None,
+    policy_file: str | None = None,
+) -> dict[str, Any]:
+    """写入 ``sandbox.url`` / ``sandbox.type`` 以及可选的
+    ``preserve_file_sharing_mode`` / ``startup_mode`` / ``policy_file``
+    到 config.yaml; 返回实际写入的字段集合 (没有改动的字段不在返回里)。
+
+    所有 ``None`` 入参表示"本次不修改该字段, 保留 config.yaml 中既有值"。
+    """
+    url_value = str(url or "").strip()
+    type_value = str(sandbox_type or "").strip()
+    if not url_value or not type_value:
+        raise ValueError("sandbox url and type must be non-empty")
+    mode_value = _normalize_preserve_file_sharing_mode(preserve_file_sharing_mode)
+
+    startup_value: str | None = None
+    if startup_mode is not None:
+        raw_startup = str(startup_mode).strip().lower()
+        if raw_startup not in _VALID_SANDBOX_STARTUP_MODES:
+            raise ValueError(
+                f"startup_mode must be one of {_VALID_SANDBOX_STARTUP_MODES}, "
+                f"got {startup_mode!r}",
+            )
+        startup_value = raw_startup
+
+    policy_value: str | None = None
+    if policy_file is not None:
+        policy_text = str(policy_file).strip()
+        if not policy_text:
+            raise ValueError("policy_file must be non-empty when provided")
+        policy_value = policy_text
+
+    data = _load_yaml_round_trip(_current_config_yaml_path())
+    if "sandbox" not in data or not isinstance(data.get("sandbox"), dict):
+        data["sandbox"] = {}
+    data["sandbox"]["url"] = url_value
+    data["sandbox"]["type"] = type_value
+    if mode_value is not None:
+        data["sandbox"]["preserve_file_sharing_mode"] = mode_value
+    if startup_value is not None:
+        data["sandbox"]["startup_mode"] = startup_value
+    if policy_value is not None:
+        data["sandbox"]["policy_file"] = policy_value
+    _dump_yaml_round_trip(_current_config_yaml_path(), data)
+    result: dict[str, Any] = {"url": url_value, "type": type_value}
+    if mode_value is not None:
+        result["preserve_file_sharing_mode"] = mode_value
+    if startup_value is not None:
+        result["startup_mode"] = startup_value
+    if policy_value is not None:
+        result["policy_file"] = policy_value
+    return result
+
+
+def get_sandbox_preserve_file_sharing_mode() -> str | None:
+    """返回 ``sandbox.preserve_file_sharing_mode`` (当前仅 ``"mount"``)。
+
+    未配置返回 ``None`` (调用方按默认走)。 非法取值不在这里兜底, 直接由
+    :func:`_normalize_preserve_file_sharing_mode` 抛 ``ValueError``。
+    """
+    cfg = get_config() or {}
+    sandbox = cfg.get("sandbox") or {}
+    return _normalize_preserve_file_sharing_mode(sandbox.get("preserve_file_sharing_mode"))
+
+
+def update_sandbox_preserve_file_sharing_mode(mode: str) -> str:
+    """写入 ``sandbox.preserve_file_sharing_mode``; 返回归一化后的值.
+
+    空值与非法值都会抛 ``ValueError``——写入路径不允许 "保留旧值" 语义, 必须
+    给出明确的合法 mode (当前仅 ``"mount"``)。
+    """
+    normalized = _normalize_preserve_file_sharing_mode(mode)
+    if normalized is None:
+        raise ValueError(
+            f"preserve_file_sharing_mode must be one of {_VALID_PRESERVE_FILE_SHARING_MODES}"
+        )
+    data = _load_yaml_round_trip(_current_config_yaml_path())
+    if "sandbox" not in data or not isinstance(data.get("sandbox"), dict):
+        data["sandbox"] = {}
+    data["sandbox"]["preserve_file_sharing_mode"] = normalized
+    _dump_yaml_round_trip(_current_config_yaml_path(), data)
+    return normalized
+
+
+def update_sandbox_runtime(patch: dict[str, Any]) -> dict[str, Any]:
+    """合并 patch 到 sandbox runtime 字段, 写回 YAML, 返回合并后的完整 runtime。
+
+    持久化位置: ``sandbox`` 顶层 (扁平形式), 与 ``url`` / ``type`` /
+    ``startup_mode`` / ``policy_file`` / ``preserve_file_sharing_mode`` 并列。
+
+    Args:
+        patch: 部分字段更新；支持顶层键 ``enabled`` / ``excluded_commands``
+            / ``files`` / ``idle_ttl_seconds`` / ``idle_check_interval``
+            / ``fallback_on_failure``。 ``files`` 字典若提供则整体替换; 其余
+            键按值合并。 ``idle_*`` 字段接受整数秒数 (``<= 0`` 归一化为 ``None``
+            = 禁用淘汰) 或 ``None``。
+    """
+    if not isinstance(patch, dict):
+        raise ValueError("patch must be an object")
+
+    current = get_sandbox_runtime()
+    merged = dict(current)
+
+    if "enabled" in patch:
+        merged["enabled"] = bool(patch["enabled"])
+    if "fallback_on_failure" in patch:
+        merged["fallback_on_failure"] = bool(patch["fallback_on_failure"])
+    if "excluded_commands" in patch:
+        value = patch["excluded_commands"]
+        if not isinstance(value, list):
+            raise ValueError("excluded_commands must be a list")
+        merged["excluded_commands"] = [str(p) for p in value if str(p).strip()]
+    if "files" in patch:
+        files = patch["files"] or {}
+        if not isinstance(files, dict):
+            raise ValueError("files must be an object")
+        allow = files.get("allow")
+        deny = files.get("deny")
+        merged["files"] = {
+            "allow": list(allow) if isinstance(allow, list) else merged["files"]["allow"],
+            "deny": list(deny) if isinstance(deny, list) else merged["files"]["deny"],
+        }
+    if "idle_ttl_seconds" in patch:
+        merged["idle_ttl_seconds"] = _coerce_optional_positive_int(
+            patch["idle_ttl_seconds"], field="sandbox.idle_ttl_seconds",
+        )
+    if "idle_check_interval" in patch:
+        merged["idle_check_interval"] = _coerce_optional_positive_int(
+            patch["idle_check_interval"], field="sandbox.idle_check_interval",
+        )
+
+    data = _load_yaml_round_trip(_current_config_yaml_path())
+    if "sandbox" not in data or not isinstance(data.get("sandbox"), dict):
+        data["sandbox"] = {}
+    sandbox_block = data["sandbox"]
+    # 写入扁平 runtime 字段, 每次 update 都把全集刷一遍, 保证 yaml 形状稳定。
+    for key in _SANDBOX_RUNTIME_KEYS:
+        sandbox_block[key] = merged[key]
+    _dump_yaml_round_trip(_current_config_yaml_path(), data)
+    return merged
 
 
 _SANDBOX_YAML_TO_ENV: dict[str, str] = {
@@ -1519,3 +1836,441 @@ def _sandbox_yaml_to_env_overlay(sandbox: Any) -> dict[str, str]:
             if text:
                 out[env_key] = text
     return out
+
+
+# ---- Relay / front team config sync helpers ----
+def _require_dict(value: Any, field_name: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{field_name} must be an object")
+    return value
+
+
+def _require_non_empty_string(value: Any, field_name: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError(f"{field_name} must be non-empty")
+    return text
+
+
+def _transform_front_team_model_config(model_raw: dict[str, Any]) -> dict[str, Any]:
+    model_client_config: dict[str, Any] = {}
+    model_request_config: dict[str, Any] = {}
+
+    # 从 models.defaults 列表中按 #index 查找完整配置
+    model_value = model_raw.get("model")
+    if model_value and isinstance(model_value, str) and "#" in model_value:
+        sep = model_value.rfind("#")
+        model_name_part = model_value[:sep]
+        index_part = model_value[sep + 1:]
+        try:
+            target_index = int(index_part)
+        except ValueError:
+            target_index = None
+        if target_index is not None:
+            defaults_list = get_config_raw().get("models", {}).get("defaults")
+            if isinstance(defaults_list, list) and 0 <= target_index < len(defaults_list):
+                entry = defaults_list[target_index]
+                if isinstance(entry, dict):
+                    mcc = entry.get("model_client_config")
+                    if isinstance(mcc, dict):
+                        model_client_config.update({
+                            k: v for k, v in mcc.items()
+                            if k not in ("model_name",) and v is not None
+                        })
+                        model_request_config["model"] = resolve_env_vars(str(mcc.get("model_name", model_name_part)))
+                    mco = entry.get("model_config_obj")
+                    if isinstance(mco, dict):
+                        model_request_config.update(mco)
+
+    # 前端字段覆盖（优先级高于 #index 解析）
+    if "provider" in model_raw and model_raw["provider"] is not None:
+        model_client_config["client_provider"] = model_raw["provider"]
+    if "api_base" in model_raw and model_raw["api_base"] is not None:
+        model_client_config["api_base"] = model_raw["api_base"]
+    if "api_key" in model_raw and model_raw["api_key"] is not None:
+        model_client_config["api_key"] = model_raw["api_key"]
+    if "model" in model_raw and model_raw["model"] is not None:
+        # 若包含 #index，提取纯 model_name
+        raw_model = model_raw["model"]
+        if isinstance(raw_model, str) and "#" in raw_model:
+            model_request_config["model"] = raw_model[:raw_model.rfind("#")]
+        else:
+            model_request_config["model"] = raw_model
+
+    transformed: dict[str, Any] = {}
+    if model_client_config:
+        model_client_config.setdefault("timeout", 1800)
+        model_client_config.setdefault("verify_ssl", False)
+        model_client_config.setdefault("custom_headers", {})
+        transformed["model_client_config"] = model_client_config
+    if model_request_config:
+        transformed["model_request_config"] = model_request_config
+    return transformed
+
+
+def _transform_front_team_agent_spec(agent_key: str, agent_raw: Any) -> dict[str, Any]:
+    agent_config = _require_dict(agent_raw, f"agents.{agent_key}")
+    transformed: dict[str, Any] = {}
+
+    if "model" in agent_config:
+        model_raw = _require_dict(agent_config.get("model"), f"agents.{agent_key}.model")
+        transformed_model = _transform_front_team_model_config(model_raw)
+        if transformed_model:
+            transformed["model"] = transformed_model
+
+    for field_name in ("skills", "workspace", "max_iterations", "completion_timeout"):
+        if field_name in agent_config:
+            transformed[field_name] = copy.deepcopy(agent_config[field_name])
+
+    return transformed
+
+
+def _resolve_front_team_agent_spec(
+    agents_raw: dict[str, Any],
+    agent_key: Any,
+    *,
+    field_name: str,
+) -> dict[str, Any]:
+    resolved_key = _require_non_empty_string(agent_key, field_name)
+    if resolved_key not in agents_raw:
+        raise ValueError(f"{field_name} references unknown agent_key: {resolved_key}")
+    return _transform_front_team_agent_spec(resolved_key, agents_raw[resolved_key])
+
+
+def _build_modes_team_mapping(front_payload: dict[str, Any]) -> dict[str, Any]:
+    agents_raw = _require_dict(front_payload.get("agents"), "agents")
+    teams_raw = front_payload.get("team")
+    if teams_raw is None:
+        return {}
+    if not isinstance(teams_raw, list):
+        raise ValueError("team must be an array")
+
+    team_mapping: dict[str, Any] = {}
+    seen_team_names: set[str] = set()
+
+    for team_index, team_item in enumerate(teams_raw):
+        team_raw = _require_dict(team_item, f"team[{team_index}]")
+        team_name = _require_non_empty_string(team_raw.get("team_name"), f"team[{team_index}].team_name")
+        if team_name in seen_team_names:
+            raise ValueError(f"duplicate team_name: {team_name}")
+        seen_team_names.add(team_name)
+
+        transformed_team: dict[str, Any] = {}
+        for key, value in team_raw.items():
+            if key in {"leader", "teammate", "predefined_members"}:
+                continue
+            transformed_team[key] = value
+        transformed_team["team_name"] = team_name
+        transformed_team.setdefault("enable_swarmflow", False)
+
+        leader_raw = _require_dict(team_raw.get("leader"), f"team[{team_index}].leader")
+        transformed_team["leader"] = {
+            key: leader_raw[key]
+            for key in ("member_name", "display_name", "persona")
+            if key in leader_raw
+        }
+        transformed_team["leader"]["agent_key"] = leader_raw.get("agent_key", "")
+        leader_name = _require_non_empty_string(
+            leader_raw.get("member_name"),
+            f"team[{team_index}].leader.member_name",
+        )
+        transformed_team["leader"]["member_name"] = leader_name
+        leader_agent_spec = _resolve_front_team_agent_spec(
+            agents_raw,
+            leader_raw.get("agent_key"),
+            field_name=f"team[{team_index}].leader.agent_key",
+        )
+
+        teammate_raw = team_raw.get("teammate")
+        teammate_agent_spec: dict[str, Any] | None = None
+        if teammate_raw is not None:
+            teammate_raw = _require_dict(teammate_raw, f"team[{team_index}].teammate")
+            teammate_agent_spec = _resolve_front_team_agent_spec(
+                agents_raw,
+                teammate_raw.get("agent_key"),
+                field_name=f"team[{team_index}].teammate.agent_key",
+            )
+            transformed_team["teammate"] = {"agent_key": teammate_raw.get("agent_key", "")}
+
+        predefined_members_raw = team_raw.get("predefined_members", [])
+        if predefined_members_raw is None:
+            predefined_members_raw = []
+        if not isinstance(predefined_members_raw, list):
+            raise ValueError(f"team[{team_index}].predefined_members must be an array")
+
+        transformed_members: list[dict[str, Any]] = []
+        transformed_agents: dict[str, Any] = {"leader": leader_agent_spec}
+        seen_member_names: set[str] = {leader_name}
+
+        for member_index, member_item in enumerate(predefined_members_raw):
+            member = _require_dict(
+                member_item,
+                f"team[{team_index}].predefined_members[{member_index}]",
+            )
+            member_name = _require_non_empty_string(
+                member.get("member_name"),
+                f"team[{team_index}].predefined_members[{member_index}].member_name",
+            )
+            if member_name in seen_member_names:
+                raise ValueError(
+                    f"duplicate member_name in team[{team_index}]: {member_name}"
+                )
+            seen_member_names.add(member_name)
+            transformed_member = {
+                key: member[key]
+                for key in ("member_name", "display_name", "role_type", "persona", "prompt_hint", "agent_key")
+                if key in member
+            }
+            transformed_member["member_name"] = member_name
+            transformed_members.append(transformed_member)
+
+            member_agent_spec = _resolve_front_team_agent_spec(
+                agents_raw,
+                member.get("agent_key"),
+                field_name=f"team[{team_index}].predefined_members[{member_index}].agent_key",
+            )
+            transformed_agents[member_name] = member_agent_spec
+
+        if transformed_members:
+            transformed_team["predefined_members"] = transformed_members
+
+        if teammate_agent_spec is not None:
+            transformed_agents["teammate"] = copy.deepcopy(teammate_agent_spec)
+
+        transformed_team["agents"] = transformed_agents
+        team_mapping[team_name] = transformed_team
+
+    return team_mapping
+
+
+def _build_front_agent_registry(front_payload: dict[str, Any]) -> dict[str, Any]:
+    agents_raw = _require_dict(front_payload.get("agents"), "agents")
+    registry: dict[str, Any] = {}
+    for agent_key, agent_raw in agents_raw.items():
+        resolved_key = _require_non_empty_string(agent_key, f"agents.{agent_key}")
+        registry[resolved_key] = _transform_front_team_agent_spec(resolved_key, agent_raw)
+    return registry
+
+
+def replace_teams_in_config(front_payload: dict[str, Any]) -> None:
+    """Replace ``modes.team`` using the frontend team-editor payload.
+
+    If team array is empty, delete ``modes.team`` from config.
+    """
+    if not isinstance(front_payload, dict):
+        raise ValueError("payload must be an object")
+
+    teams_raw = front_payload.get("team")
+    data = _load_yaml_round_trip(_current_config_yaml_path())
+
+    panel_cfg_modified = False
+    agent_registry = None
+    if "agents" in front_payload:
+        agent_registry = _build_front_agent_registry(front_payload)
+        panel_cfg = data.get("web_config_panel")
+        if not isinstance(panel_cfg, dict):
+            panel_cfg = {}
+            data["web_config_panel"] = panel_cfg
+        if agent_registry:
+            panel_cfg["agent_team_agents"] = agent_registry
+        else:
+            panel_cfg.pop("agent_team_agents", None)
+        panel_cfg_modified = True
+
+    # 空数组：删除 modes.team 配置项
+    if isinstance(teams_raw, list) and not teams_raw:
+        if "modes" in data and isinstance(data["modes"], dict) and "team" in data["modes"]:
+            del data["modes"]["team"]
+        _dump_yaml_round_trip(_current_config_yaml_path(), data)
+        return
+
+    # 非空数组：正常构建并保存
+    team_mapping = _build_modes_team_mapping(front_payload)
+
+    data = _load_yaml_round_trip(_current_config_yaml_path())
+    # Merge web_config_panel back into reloaded data (it was written earlier in this function)
+    if panel_cfg_modified:
+        if "web_config_panel" not in data or not isinstance(data.get("web_config_panel"), dict):
+            data["web_config_panel"] = {}
+        if agent_registry:
+            data["web_config_panel"]["agent_team_agents"] = agent_registry
+        else:
+            data.get("web_config_panel", {}).pop("agent_team_agents", None)
+    if "modes" not in data or not isinstance(data["modes"], dict):
+        data["modes"] = {}
+    data["modes"]["team"] = team_mapping
+    _dump_yaml_round_trip(_current_config_yaml_path(), data)
+
+
+def _ensure_config_object(parent: dict[str, Any], key: str, path: str) -> dict[str, Any]:
+    value = parent.get(key)
+    if value is None:
+        value = {}
+        parent[key] = value
+    if not isinstance(value, dict):
+        raise ValueError(f"{path} config must be an object")
+    return value
+
+
+def update_swarmflow_enabled_in_config(enabled: bool) -> None:
+    """Update ``modes.team.jiuwen_team.enable_swarmflow`` in config.yaml."""
+    data = _load_yaml_round_trip(_current_config_yaml_path())
+    current = data
+    path_so_far: list[str] = []
+    for segment in SWARMFLOW_ENABLED_CONFIG_PATH[:-1]:
+        path_so_far.append(segment)
+        current = _ensure_config_object(current, segment, ".".join(path_so_far))
+    current[SWARMFLOW_ENABLED_CONFIG_PATH[-1]] = bool(enabled)
+    _dump_yaml_round_trip(_current_config_yaml_path(), data)
+
+
+def get_mcp_servers() -> list[dict[str, Any]]:
+    """读取 config.yaml 中的 mcp.servers（原始结构，不解析环境变量）。"""
+    data = get_config_raw()
+    mcp_cfg = data.get("mcp", {})
+    if not isinstance(mcp_cfg, dict):
+        return []
+    servers = mcp_cfg.get("servers", [])
+    if not isinstance(servers, list):
+        return []
+    return [item for item in servers if isinstance(item, dict)]
+
+
+def upsert_mcp_server_in_config(server: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """新增或更新 mcp.servers 条目，返回（条目, 是否创建）。"""
+    name = str(server.get("name", "")).strip()
+    if not name:
+        raise ValueError("MCP server name is required")
+    data = _load_yaml_round_trip(_current_config_yaml_path())
+    if "mcp" not in data or not isinstance(data["mcp"], dict):
+        data["mcp"] = {}
+    mcp_cfg = data["mcp"]
+    servers = mcp_cfg.get("servers")
+    if not isinstance(servers, list):
+        servers = []
+        mcp_cfg["servers"] = servers
+
+    created = True
+    for idx, item in enumerate(servers):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("name", "")).strip() != name:
+            continue
+        servers[idx] = server
+        created = False
+        break
+    else:
+        servers.append(server)
+    _dump_yaml_round_trip(_current_config_yaml_path(), data)
+    return server, created
+
+
+def set_mcp_server_enabled_in_config(name: str, enabled: bool) -> dict[str, Any]:
+    """切换 mcp.servers 指定 name 的 enabled 状态并返回更新后的条目。"""
+    target = str(name or "").strip()
+    if not target:
+        raise ValueError("MCP server name is required")
+    data = _load_yaml_round_trip(_current_config_yaml_path())
+    if "mcp" not in data or not isinstance(data["mcp"], dict):
+        raise KeyError(f"MCP server '{target}' not found")
+    servers = data["mcp"].get("servers", [])
+    if not isinstance(servers, list):
+        raise KeyError(f"MCP server '{target}' not found")
+    for item in servers:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("name", "")).strip() != target:
+            continue
+        item["enabled"] = bool(enabled)
+        _dump_yaml_round_trip(_current_config_yaml_path(), data)
+        return dict(item)
+    raise KeyError(f"MCP server '{target}' not found")
+
+
+def get_mcp_server_config(name: str) -> dict[str, Any] | None:
+    """按名称读取单个 mcp server 配置（原始结构）。"""
+    target = str(name or "").strip()
+    if not target:
+        return None
+    for item in get_mcp_servers():
+        if str(item.get("name", "")).strip() == target:
+            return item
+    return None
+
+
+def remove_mcp_server_in_config(name: str) -> dict[str, Any]:
+    """删除指定 mcp server 配置并返回被删除的条目。"""
+    target = str(name or "").strip()
+    if not target:
+        raise ValueError("MCP server name is required")
+    data = _load_yaml_round_trip(_current_config_yaml_path())
+    mcp_cfg = data.get("mcp")
+    if not isinstance(mcp_cfg, dict):
+        raise KeyError(f"MCP server '{target}' not found")
+    servers = mcp_cfg.get("servers", [])
+    if not isinstance(servers, list):
+        raise KeyError(f"MCP server '{target}' not found")
+    for idx, item in enumerate(servers):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("name", "")).strip() != target:
+            continue
+        removed = dict(item)
+        del servers[idx]
+        _dump_yaml_round_trip(_current_config_yaml_path(), data)
+        return removed
+    raise KeyError(f"MCP server '{target}' not found")
+
+
+# ---------------------------------------------------------------------------
+# react.subagents 段操作
+# ---------------------------------------------------------------------------
+
+
+def upsert_subagent_in_config(name: str, enabled: bool = True) -> None:
+    """在 react.subagents.<name> 中添加或更新 agent 启用状态。
+
+    自动创建不存在的 react / subagents 段。
+    保留已有的其他 subagent 配置键（如 max_iterations 等）。
+    """
+    target = str(name or "").strip()
+    if not target:
+        raise ValueError("subagent name is required")
+    data = _load_yaml_round_trip(_current_config_yaml_path())
+    if "react" not in data or not isinstance(data["react"], dict):
+        data["react"] = {}
+    react = data["react"]
+    if "subagents" not in react or not isinstance(react["subagents"], dict):
+        react["subagents"] = {}
+    subagents = react["subagents"]
+    if target not in subagents or not isinstance(subagents[target], dict):
+        subagents[target] = {}
+    subagents[target]["enabled"] = bool(enabled)
+    _dump_yaml_round_trip(_current_config_yaml_path(), data)
+
+
+def remove_subagent_from_config(name: str) -> bool:
+    """从 react.subagents.<name> 中删除 agent 条目。
+
+    Returns:
+        True: 找到并删除
+        False: 条目不存在
+    """
+    target = str(name or "").strip()
+    if not target:
+        raise ValueError("subagent name is required")
+    data = _load_yaml_round_trip(_current_config_yaml_path())
+    react = data.get("react")
+    if not isinstance(react, dict):
+        return False
+    subagents = react.get("subagents")
+    if not isinstance(subagents, dict):
+        return False
+    if target not in subagents:
+        return False
+    del subagents[target]
+    _dump_yaml_round_trip(_current_config_yaml_path(), data)
+    return True
+
+
+
