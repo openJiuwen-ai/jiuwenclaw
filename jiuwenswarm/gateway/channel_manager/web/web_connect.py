@@ -501,6 +501,8 @@ class WebChannel(BaseWsChannel):
         if not files or not isinstance(files, list):
             return params
 
+        # 企业态：有 url 时不落 Gateway 本地 path，避免 Agent 先 read_file 失败再 fetch_webpage
+        strip_path_for_url = bool(os.getenv("AGENT_RUNTIME", "").strip())
         downloaded_files = []
         workspace_dir = str(get_agent_workspace_dir())
 
@@ -511,6 +513,13 @@ class WebChannel(BaseWsChannel):
 
             file_url = file_info.get("url") or file_info.get("uri") or ""
             file_name = file_info.get("name") or file_info.get("filename") or "unknown_file"
+
+            if file_url and strip_path_for_url:
+                updated = dict(file_info)
+                updated["url"] = file_url
+                updated.pop("path", None)
+                downloaded_files.append(updated)
+                continue
 
             if file_url:
                 file_content = await self._download_file(file_url)

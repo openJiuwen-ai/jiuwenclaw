@@ -722,6 +722,39 @@ def _handle_statusline_prompt_command(query: str) -> Tuple[str, str]:
     return "", query
 
 
+def _enterprise_file_download_hint(language: str) -> str:
+    if language == "zh":
+        return (
+            "附件中的 http/https url 是远程文件地址，不在本机 path 上。"
+            "请先用 bash/curl 等工具将 url 下载到当前工作区，再对下载后的本地文件使用 read_file；"
+            "不要根据 path 字段或文件名猜测并直接 read_file 本地路径。"
+        )
+    return (
+        "Attachments with http/https url point to remote files, not local path values. "
+        "Download the url to the workspace with bash/curl first, then use read_file on the "
+        "downloaded local file. Do not guess local paths from path or filename."
+    )
+
+
+def _normalize_files_for_agent_prompt(files: dict | list | Any) -> dict | list | Any:
+    """企业态：有 url 时去掉 Gateway 本地 path，避免 Agent 优先 read_file 失败。"""
+    if not os.getenv("AGENT_RUNTIME", "").strip():
+        return files
+    if isinstance(files, list):
+        normalized: list[Any] = []
+        for file_info in files:
+            if not isinstance(file_info, dict):
+                normalized.append(file_info)
+                continue
+            updated = dict(file_info)
+            file_url = str(updated.get("url") or updated.get("uri") or "").strip()
+            if file_url:
+                updated.pop("path", None)
+            normalized.append(updated)
+        return normalized
+    return files
+
+
 def build_user_prompt(content: str | dict, files: dict, channel: str, language: str, *,
     trusted_dirs: list[str] | None = None, metadata: dict[str, Any] | None = None,
     skills: list[str] | None = None) -> str:
@@ -765,6 +798,8 @@ def build_user_prompt(content: str | dict, files: dict, channel: str, language: 
     else:
         statusline_prompt = ""
 
+    files = _normalize_files_for_agent_prompt(files)
+
     if language == "zh":
         prompt = "你收到一条消息：\n"
         if channel == "cron":
@@ -792,6 +827,8 @@ def build_user_prompt(content: str | dict, files: dict, channel: str, language: 
             msg_data["sender"] = sender_name
     if channel not in ["cron", "heartbeat"]:
         msg_data["files_updated_by_user"] = json.dumps(files, ensure_ascii=False)
+        if os.getenv("AGENT_RUNTIME", "").strip() and files:
+            msg_data["file_handling_hint"] = _enterprise_file_download_hint(language)
     final_prompt = interaction_prefix + prompt + json.dumps(msg_data, ensure_ascii=False)
     if interaction_prefix:
         logger.info(
@@ -811,6 +848,8 @@ def build_user_prompt(content: str | dict, files: dict, channel: str, language: 
         "files_updated_by_user": json.dumps(files, ensure_ascii=False),
         "type": "user input",
     }
+    if os.getenv("AGENT_RUNTIME", "").strip() and files and channel not in ["cron", "heartbeat"]:
+        user_message_context["file_handling_hint"] = _enterprise_file_download_hint(language)
     if skills_to_use:
         user_message_context["skills_to_use"] = skills_to_use
     if trusted_dirs:
