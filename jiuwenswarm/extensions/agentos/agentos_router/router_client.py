@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
@@ -151,11 +152,13 @@ class AgentOSRouterClient(AgentServerClient):
 
     async def on_connect(self, ws: Any) -> AuthResult | None:
         if self._auth_client is None:
+            # auth 未启用时回落使用握手头里的 X-User-Id，
+            # 否则 user_id 为空会跳过连接计数/延迟清理，导致 agent 泄漏不回收。
+            headers = {k.lower(): v for k, v in extract_headers(ws).items()}
+            fallback_user_id = str(headers.get("x-user-id", "") or "").strip()
             return AuthResult(
                 success=True,
-                user_id="",
-                error="No valid credentials",
-                extensions={"error_code": "UNSUPPORTED_CREDENTIAL"},
+                user_id=fallback_user_id,
             )
         token = extract_token(ws)
         headers = extract_headers(ws)
@@ -704,8 +707,8 @@ class AgentOSRouterClient(AgentServerClient):
                     "ports": [f"tcp:{port}"]
                 },
                 "cmds": [["jiuwenswarm-agentserver", "--port", f"{port}"]],
-                "cpu": 2000,
-                "memory": 4096
+                "cpu": int(os.environ.get("AGENTOS_BUILTIN_AGENT_CPU", "2000")),
+                "memory": int(os.environ.get("AGENTOS_BUILTIN_AGENT_MEMORY", "4096"))
             }
             env_vars = {"AGENT_SERVER_HOST": "127.0.0.1", "AGENT_SERVER_PORT": f"{port}"}
             extra_metadata: dict[str, Any] = {}
