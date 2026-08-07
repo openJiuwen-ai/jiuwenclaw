@@ -834,14 +834,16 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         tool_name = ctx.inputs.tool_name
         sid = self._resolve_sid(ctx, session)
         conv_id = self._conversation_ids.get(sid, "")
-        if not conv_id:
-            return
         if tool_name in _TODO_TOOL_NAMES:
-            # Emit the main-agent todo snapshot after every todo tool call.  The
-            # todo tool itself is loaded from the main workspace below, so this
-            # stays authoritative even when a resumed/supplement turn uses a
-            # different stream session object.
-            await self._emit_todo_updated(session, conv_id)
+            # Prefer conversation_id (main session key for todo.json). Fall back
+            # to resolved sid so perf/todo.updated still fire if mapping is late.
+            todo_sid = conv_id or sid
+            if todo_sid:
+                # Emit the main-agent todo snapshot after every todo tool call.
+                # The todo tool itself is loaded from the main workspace below, so
+                # this stays authoritative even when a resumed/supplement turn uses
+                # a different stream session object.
+                await self._emit_todo_updated(session, todo_sid)
 
     # ------------------------------------------------------------------
     # on_model_exception: attempt context repair
@@ -987,6 +989,24 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                 "[StreamEventRail] Failed to load todos: %s", exc
             )
             return
+
+        # Parent StreamEventRail only: team-member rails use their own
+        # workspace and must not feed request_summaries.tasks.
+        if not self._member_name:
+            from jiuwenswarm.perf.guard import run_perf_safe
+            from jiuwenswarm.perf.todo_tracker import (
+                sync_main_agent_todos,
+                todos_from_items,
+            )
+
+            run_perf_safe(
+                "StreamEventRail",
+                "perf sync main-agent todos",
+                lambda: sync_main_agent_todos(
+                    todos_from_items(todos_data),
+                    session_id=session_id,
+                ),
+            )
 
         todos = self._format_todos_for_frontend(todos_data)
 
