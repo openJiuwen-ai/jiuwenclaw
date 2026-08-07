@@ -194,6 +194,7 @@ from jiuwenclaw.agentserver.skill_turbo.permission_bridge import (
 from jiuwenclaw.agentserver.deep_agent.plan_pause_helpers import (
     build_paused_plan_decision_prompt_from_session_snapshot,
     cancel_pending_todos_on_tool,
+    clear_plan_pause_file,
     clear_plan_pause_on_session,
     clear_task_plan_on_state,
     merge_supplementary_into_request_params,
@@ -201,8 +202,10 @@ from jiuwenclaw.agentserver.deep_agent.plan_pause_helpers import (
     persist_checkpoint_for_session,
     post_agent_execute_for_session,
     resolve_context_engine,
+    read_plan_pause_from_file,
     read_plan_pause_from_session,
     repair_task_plan_after_pause,
+    write_plan_pause_to_file,
     write_plan_pause_to_session,
     _resolve_session_for_checkpoint,
     read_interrupt_artifacts_summary_from_session,
@@ -7727,6 +7730,16 @@ class JiuWenClawDeepAdapter:
             write_plan_pause_to_session(session, paused=True, snapshot=snapshot)
             await post_agent_execute_for_session(session, self._checkpointer)
 
+            # Disk backup: aborted-stream checkpoint may overwrite CP without plan_paused.
+            try:
+                write_plan_pause_to_file(Path(self._workspace_dir), session_id, snapshot)
+            except Exception as file_exc:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] write plan pause file failed session=%s: %s",
+                    session_id,
+                    file_exc,
+                )
+
             logger.info(
                 "[JiuWenClawDeepAdapter] plan pause persisted session=%s",
                 session_id,
@@ -7985,6 +7998,18 @@ class JiuWenClawDeepAdapter:
                 return
 
             paused, snapshot = read_plan_pause_from_session(session)
+            # CP may have been overwritten by the aborted stream; fall back to disk.
+            if not paused:
+                try:
+                    paused, snapshot = read_plan_pause_from_file(
+                        Path(self._workspace_dir), session_id
+                    )
+                except Exception as file_exc:
+                    logger.debug(
+                        "[JiuWenClawDeepAdapter] read plan pause file failed session=%s: %s",
+                        session_id,
+                        file_exc,
+                    )
             if not paused:
                 return
 
@@ -8000,6 +8025,14 @@ class JiuWenClawDeepAdapter:
             )
             merge_supplementary_into_request_params(params, decision)
             clear_plan_pause_on_session(session)
+            try:
+                clear_plan_pause_file(Path(self._workspace_dir), session_id)
+            except Exception as file_exc:
+                logger.debug(
+                    "[JiuWenClawDeepAdapter] clear plan pause file failed session=%s: %s",
+                    session_id,
+                    file_exc,
+                )
             mark_interrupt_recovery_injected(session)
             await post_agent_execute_for_session(session, self._checkpointer)
 
