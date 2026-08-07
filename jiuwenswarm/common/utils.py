@@ -621,6 +621,8 @@ def _install_default_builtin_skills(
     默认安装的技能：
     - skill-creator: 技能创建助手
     - swarmskill-creator: Swarm技能创建助手
+    - skill-omni-creation: 链接/多模态技能创建助手
+    - skill-creator-router: 创建/修改 Skill 分发器
 
     Args:
         builtin_dir: 内置技能目录路径
@@ -629,7 +631,12 @@ def _install_default_builtin_skills(
         cumulative_diff: 累积的文件变更追踪结果
     """
     # 定义默认安装的技能列表
-    default_skills = ["skill-creator", "swarmskill-creator"]
+    default_skills = [
+        "skill-creator",
+        "swarmskill-creator",
+        "skill-omni-creation",
+        "skill-creator-router",
+    ]
 
     if not builtin_dir.exists() or not builtin_dir.is_dir():
         logger.warning(f"内置技能目录不存在，跳过默认技能安装: {builtin_dir}")
