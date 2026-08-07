@@ -18,6 +18,7 @@ from jiuwenswarm.gateway.cron.models import (
     CRON_JOB_DEFAULT_MODE,
     normalize_cron_job_mode,
     normalize_cron_job_timeout_seconds,
+    normalize_required_device_intents,
 )
 from jiuwenswarm.common.utils import get_cron_jobs_path
 from jiuwenswarm.common.work_mode import (
@@ -244,6 +245,8 @@ class CronJobStore:
         model_name: str | None = None,
         app_id: str = "",
         work_mode: str = DEFAULT_WEB_WORK_MODE,
+        required_device_intents: list[str] | None = None,
+        xiaoyi_push_id: str | None = None,
     ) -> CronJob:
         now = time.time()
         sid = str(session_id).strip() if isinstance(session_id, str) and session_id.strip() else None
@@ -261,6 +264,10 @@ class CronJobStore:
             if isinstance(model_name, str) and model_name.strip()
             else None
         )
+        device_intents = normalize_required_device_intents(required_device_intents)
+        push_id = str(xiaoyi_push_id or "").strip() or None
+        if device_intents and not push_id:
+            raise ValueError("xiaoyi_push_id is required for device cron jobs")
         job = CronJob(
             id=str(job_id or "").strip() or uuid.uuid4().hex,
             name=str(name or "").strip(),
@@ -281,6 +288,8 @@ class CronJobStore:
             model_name=model_name_val,
             app_id=str(app_id or "").strip(),
             work_mode=normalize_work_mode(work_mode, default=DEFAULT_WEB_WORK_MODE),
+            required_device_intents=device_intents,
+            xiaoyi_push_id=push_id,
         )
         # validate via round-trip
         CronJob.from_dict(job.to_dict())
@@ -384,6 +393,19 @@ class CronJobStore:
             updated = replace(
                 updated,
                 work_mode=normalize_work_mode(patch.get("work_mode"), default=DEFAULT_WEB_WORK_MODE),
+            )
+        if "required_device_intents" in patch:
+            updated = replace(
+                updated,
+                required_device_intents=normalize_required_device_intents(
+                    patch.get("required_device_intents")
+                ),
+            )
+        if "xiaoyi_push_id" in patch:
+            raw_push_id = patch.get("xiaoyi_push_id")
+            updated = replace(
+                updated,
+                xiaoyi_push_id=str(raw_push_id or "").strip() or None,
             )
 
         updated.updated_at = time.time()

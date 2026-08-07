@@ -51,6 +51,7 @@ from jiuwenswarm.agents.swarm.providers import (
     builtin_rails as _builtin_rails,
     code_rails as _code_rails,
     code_subagents as _code_subagents,
+    cspl_rail as _cspl_rail,
     evolution_rails as _evolution_rails,
     member_rails as _member_rails,
     runtime_tools as _runtime_tools,
@@ -70,6 +71,7 @@ XIAOYI_PHONE = _tools.XIAOYI_PHONE
 SYMPHONY_TOOLKIT = _tools.SYMPHONY_TOOLKIT
 CRON_TOOLS = _runtime_tools.CRON_TOOLS
 SEND_FILE = _runtime_tools.SEND_FILE
+SEND_HTML_CARD = _runtime_tools.SEND_HTML_CARD
 MEMBER_SKILL_TOOLKIT = _skills.MEMBER_SKILL_TOOLKIT
 # Generic tools provided + registered by openjiuwen (referenced by bare name).
 WEB_SEARCH = _OJ_WEB_SEARCH
@@ -105,6 +107,7 @@ CODE_TASK_PLANNING = _code_rails.CODE_TASK_PLANNING
 CODE_AGENT_RAIL = _code_rails.CODE_AGENT_RAIL
 USER_HOOKS = _code_rails.USER_HOOKS
 CODE_SKILL_USE = _code_rails.CODE_SKILL_USE
+CSPL_SENTINEL = _cspl_rail.CSPL_SENTINEL
 
 # Sub-agent provider names (resolved via SubAgentSpec.factory_name). explore /
 # plan / browser are provided by openjiuwen; code_agent stays swarm-side (reuses
@@ -202,6 +205,7 @@ __all__ = [
     "AUDIO",
     "CRON_TOOLS",
     "SEND_FILE",
+    "SEND_HTML_CARD",
     "MEMBER_SKILL_TOOLKIT",
     "RUNTIME_PROMPT",
     "TEAM_SKILL_STORAGE_POLICY",
@@ -237,6 +241,7 @@ __all__ = [
     "CODE_AGENT_RAIL",
     "USER_HOOKS",
     "CODE_SKILL_USE",
+    "CSPL_SENTINEL",
     "CODE_WORKTREE",
     "EXPLORE_AGENT",
     "PLAN_AGENT",

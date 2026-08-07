@@ -5,6 +5,7 @@ import heapq
 import json
 import logging
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Callable
@@ -222,12 +223,9 @@ def _cron_next_push_dt(cron_expr: str, base_dt: datetime) -> datetime:
     # Lazy import so the rest of the system can still run without cron enabled.
     from croniter import croniter  # type: ignore
 
-    # Support Quartz 7-field format: second minute hour day month dow year
-    # croniter default is minute hour day month dow second year
-    field_count = len(cron_expr.strip().split())
-    second_at_beginning = field_count == 7
-
-    it = croniter(cron_expr, base_dt, second_at_beginning=second_at_beginning)
+    # 5-field standard cron: minute hour day month dow.
+    # croniter default ordering matches this (second_at_beginning=False).
+    it = croniter(cron_expr, base_dt)
     nxt = it.get_next(datetime)
     if not isinstance(nxt, datetime):
         raise RuntimeError("croniter returned invalid datetime")
@@ -532,7 +530,7 @@ class CronSchedulerService:
         now = datetime.now(tz=ZoneInfo(job.timezone))
         push_dt = now
         wake_dt = now
-        run_id = f"{job.id}:{int(push_dt.timestamp())}"
+        run_id = f"{job.id}:{uuid.uuid4().hex}:{int(push_dt.timestamp())}"
         channel_id, exec_session_id = self._make_execution_context(job)
         self._runs[run_id] = CronRunState(
             run_id=run_id,
@@ -991,6 +989,14 @@ class CronSchedulerService:
                 }
                 if job.model_name:
                     params["model_name"] = job.model_name
+                request_metadata: dict[str, Any] = {
+                    "cron": {"job_id": job.id, "run_id": run_id}
+                }
+                if job.xiaoyi_push_id:
+                    request_metadata["scheduled_device"] = {
+                        "push_id": job.xiaoyi_push_id,
+                        "required_intents": list(job.required_device_intents),
+                    }
                 envelope = e2a_from_agent_fields(
                     request_id=f"cron-{run_id}",
                     channel_id=channel_id,
@@ -999,7 +1005,7 @@ class CronSchedulerService:
                     params=params,
                     is_stream=is_team_cron_mode(mode),
                     timestamp=self._now_fn(),
-                    metadata={"cron": {"job_id": job.id, "run_id": run_id}},
+                    metadata=request_metadata,
                 )
                 if is_team_cron_mode(mode):
                     timeout_seconds = resolve_cron_job_timeout_seconds(job)
@@ -1644,4 +1650,18 @@ class CronSchedulerService:
             group_digital_avatar=_group_digital_avatar,
             app_id=_msg_app_id,
         )
-        await self._message_handler.publish_robot_messages(msg)
+        try:
+            await self._message_handler.publish_robot_messages(msg)
+            # Mark delivery success on state (only for non-placeholder final pushes)
+            if not is_placeholder:
+                state.delivered = True
+                state.delivery_status = "delivered"
+        except Exception as push_exc:
+            logger.warning(
+                "[Cron] push_to_targets failed job=%s run_id=%s channel=%s error=%s",
+                job.id, state.run_id, channel_id, push_exc,
+            )
+            if not is_placeholder:
+                state.delivery_status = "failed"
+
+

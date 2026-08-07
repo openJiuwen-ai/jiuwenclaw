@@ -131,6 +131,19 @@ def cron_job_modes_for_tools() -> list[str]:
     return sorted(CRON_JOB_MODES)
 
 
+def normalize_required_device_intents(raw: Any) -> list[str]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError("required_device_intents must be a list")
+    intents: list[str] = []
+    for item in raw:
+        intent = str(item or "").strip()
+        if intent and intent not in intents:
+            intents.append(intent)
+    return intents
+
+
 def cron_job_metadata() -> dict[str, str | list[str] | int]:
     """Cron job schema for clients (TUI/Web); single source for supported modes."""
     return {
@@ -273,6 +286,8 @@ class CronJob:
     # from_dict 仅做 normalize + 兜底 "work"，不做跨层 Project 反查；
     # 精确值由创建/更新路径从 Project 记录注入，或由展示层二次查询覆盖。
     work_mode: str = DEFAULT_WEB_WORK_MODE
+    required_device_intents: list[str] = field(default_factory=list)
+    xiaoyi_push_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -309,6 +324,10 @@ class CronJob:
             d["model_name"] = self.model_name
         if self.app_id:
             d["app_id"] = self.app_id
+        if self.required_device_intents:
+            d["required_device_intents"] = list(self.required_device_intents)
+        if self.xiaoyi_push_id:
+            d["xiaoyi_push_id"] = self.xiaoyi_push_id
         return d
 
     @staticmethod
@@ -413,6 +432,17 @@ class CronJob:
         # （gateway.cron.models 是底层数据模型，不应反向依赖 server.runtime.session.project_store）
         # 精确值由创建/更新路径从 Project 记录注入，或由展示层二次查询覆盖。
         job_work_mode = normalize_work_mode(data.get("work_mode"), default=DEFAULT_WEB_WORK_MODE)
+        required_device_intents = normalize_required_device_intents(
+            data.get("required_device_intents")
+        )
+        push_id_raw = data.get("xiaoyi_push_id")
+        xiaoyi_push_id = (
+            str(push_id_raw).strip()
+            if isinstance(push_id_raw, str) and push_id_raw.strip()
+            else None
+        )
+        if required_device_intents and not xiaoyi_push_id:
+            raise ValueError("xiaoyi_push_id is required for device cron jobs")
 
         return CronJob(
             id=job_id,
@@ -436,7 +466,112 @@ class CronJob:
             model_name=job_model_name,
             app_id=job_app_id,
             work_mode=job_work_mode,
+            required_device_intents=required_device_intents,
+            xiaoyi_push_id=xiaoyi_push_id,
         )
+
+    # ── A2A CronQuery protocol conversion ──────────────────────────────
+
+    def to_a2a_job(
+        self,
+        include_description: bool = False,
+        *,
+        next_run_at_ms: int = 0,
+        last_run_at_ms: int = 0,
+        job_run_stats: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Convert to A2A CronQuery ``list``/``add``/``update`` ans format.
+
+        Maps the internal flat ``CronJob`` structure to the nested A2A shape
+        defined in ``定时任务 RPC 接口协议文档.md`` (schedule / payload /
+        delivery / state objects).
+
+        Args:
+            include_description: If True, include ``description`` field
+                (used by ``add``/``update`` responses per protocol doc).
+                ``list`` response omits it.
+            next_run_at_ms: Next scheduled run time in milliseconds (from
+                scheduler events heap). 0 if unknown/disabled.
+            last_run_at_ms: Last run start time in milliseconds (from
+                scheduler runs history). 0 if never run.
+            job_run_stats: Aggregated run statistics dict from
+                ``controller._compute_job_run_stats``. Used only for ``list``
+                responses (include_description=False). Keys: last_run_status,
+                last_duration_ms, last_delivery_status, consecutive_errors,
+                consecutive_skipped. If None, defaults are used.
+        """
+        created_ms = int(self.created_at * 1000) if isinstance(self.created_at, (int, float)) else 0
+        updated_ms = int(self.updated_at * 1000) if isinstance(self.updated_at, (int, float)) else 0
+
+        # delivery: targets maps to delivery.channel; keep "announce" mode.
+        # Per protocol doc:
+        #   - list response: delivery has only {mode, channel} (no "to")
+        #   - add/update response: delivery has {mode, channel, to}
+        # We use include_description to distinguish: list=False, add/update=True.
+        channel = self.targets or CronTargetChannel.WEB.value
+        delivery: dict[str, Any] = {
+            "mode": "announce",
+            "channel": channel,
+        }
+        if include_description:
+            delivery["to"] = "default"
+
+        # state: per protocol doc, list (§2.1) has full state object,
+        # add (§2.4) and update (§2.5) have only {nextRunAtMs} (or {} if disabled).
+        if include_description:
+            state: dict[str, Any] = {
+                "nextRunAtMs": next_run_at_ms,
+            }
+        else:
+            stats = job_run_stats or {}
+            last_run_status = stats.get("last_run_status", "ok")
+            last_duration_ms = stats.get("last_duration_ms", 0)
+            last_delivery_status = stats.get("last_delivery_status", "unknown")
+            consecutive_errors = stats.get("consecutive_errors", 0)
+            consecutive_skipped = stats.get("consecutive_skipped", 0)
+            state: dict[str, Any] = {
+                "nextRunAtMs": next_run_at_ms,
+                "lastRunStatus": last_run_status,
+                "lastStatus": last_run_status,
+                "lastDurationMs": last_duration_ms,
+                "lastDeliveryStatus": last_delivery_status,
+                "consecutiveErrors": consecutive_errors,
+                "consecutiveSkipped": consecutive_skipped,
+            }
+            # Only include lastRunAtMs when there is a real value (non-zero).
+            # 0 means the job has never run — don't return a misleading default.
+            if last_run_at_ms:
+                state["lastRunAtMs"] = last_run_at_ms
+
+        # schedule: always kind="cron" with 5-field expr.
+        # One-shot tasks are encoded as a 5-field cron with a matching
+        # month/day/hour/minute and rely on delete_after_run=True for
+        # one-shot semantics. The device protocol only defines kind="cron".
+        schedule_obj = {
+            "kind": "cron",
+            "expr": self.cron_expr,
+            "tz": self.timezone,
+        }
+
+        result: dict[str, Any] = {
+            "id": self.id,
+            "name": self.name,
+            "enabled": bool(self.enabled),
+            "createdAtMs": created_ms,
+            "updatedAtMs": updated_ms,
+            "schedule": schedule_obj,
+            "sessionTarget": "isolated",
+            "wakeMode": "now",
+            "payload": {
+                "kind": "agentTurn",
+                "message": self.description or "",
+            },
+            "delivery": delivery,
+            "state": state,
+        }
+        if include_description:
+            result["description"] = self.description or ""
+        return result
 
 
 @dataclass
@@ -461,3 +596,125 @@ class CronRunState:
     timezone: str | None = None
     exec_channel_id: str | None = None
     exec_session_id: str | None = None
+    # Delivery tracking (filled by _push_to_targets)
+    delivered: bool = False
+    delivery_status: str = "unknown"  # unknown|delivered|failed|not-requested
+    # Telemetry (filled when available from agent response)
+    model: str = ""
+    provider: str = ""
+    usage: dict[str, Any] = field(default_factory=dict)
+
+    def to_a2a_run_entry(
+        self,
+        *,
+        for_runs: bool = False,
+        next_run_at_ms: int = 0,
+    ) -> dict[str, Any]:
+        """Convert to A2A CronQuery ``runs`` / ``queryTimeList`` entry format.
+
+        Per protocol doc:
+        - **runs** (§2.3): entries include ts, jobId, action, status, error,
+          summary, diagnostics, runAtMs, durationMs, nextRunAtMs, model,
+          provider, usage, deliveryStatus, delivery, sessionId, sessionKey.
+          Status values: ``"error"`` | ``"success"`` | ``"running"``.
+        - **queryTimeList** (§2.8): entries include ts, jobId, action, status,
+          error, summary, diagnostics, delivered, deliveryStatus, deliveryError,
+          delivery, sessionId, sessionKey, runId, runAtMs, durationMs, nextRunAtMs.
+          Status values: ``"ok"`` | ``"error"`` | ``"skipped"``.
+
+        Args:
+            for_runs: If True, format for ``runs`` action (status "success",
+                includes model/provider/usage/delivery full structure).
+                If False, format for ``queryTimeList`` (status "ok").
+            next_run_at_ms: Next scheduled run time in milliseconds for this
+                job (from scheduler events heap). 0 if unknown.
+        """
+        # Map internal status to A2A status.
+        # runs uses "success"; queryTimeList uses "ok".
+        if for_runs:
+            status_map = {
+                "succeeded": "success",
+                "failed": "error",
+                "running": "running",
+                "pending": "skipped",
+            }
+        else:
+            status_map = {
+                "succeeded": "ok",
+                "failed": "error",
+                "running": "running",
+                "pending": "skipped",
+            }
+        a2a_status = status_map.get(self.status, "skipped")
+
+        started_ms = int(self.started_at * 1000) if isinstance(self.started_at, (int, float)) else 0
+        finished_ms = int(self.finished_at * 1000) if isinstance(self.finished_at, (int, float)) else 0
+        duration_ms = max(0, finished_ms - started_ms) if started_ms and finished_ms else 0
+        ts_ms = finished_ms or started_ms
+
+        entry: dict[str, Any] = {
+            "ts": ts_ms,
+            "jobId": self.job_id,
+            "action": "finished",
+            "status": a2a_status,
+            "runAtMs": started_ms,
+            "durationMs": duration_ms,
+            "nextRunAtMs": next_run_at_ms,
+            "deliveryStatus": self.delivery_status or "unknown",
+            "sessionId": self.session_id or "",
+            "sessionKey": f"agent:main:cron:{self.job_id}:run:{self.run_id}",
+        }
+
+        if for_runs:
+            # runs action (§2.3): model, provider, usage, delivery are required.
+            # Use actual values from CronRunState (filled by scheduler when available).
+            usage = self.usage or {}
+            entry["model"] = self.model or ""
+            entry["provider"] = self.provider or ""
+            entry["usage"] = {
+                "input_tokens": int(usage.get("input_tokens", 0) or 0),
+                "output_tokens": int(usage.get("output_tokens", 0) or 0),
+                "total_tokens": int(usage.get("total_tokens", 0) or 0),
+            }
+            # delivery: build from actual delivery tracking state
+            resolved_channel = self.targets or ""
+            # Normalize channel name: internal enum → device-facing format
+            if resolved_channel and not resolved_channel.endswith("-channel"):
+                resolved_channel = f"{resolved_channel}-channel"
+            entry["delivery"] = {
+                "intended": {
+                    "channel": "last",
+                    "to": None,
+                    "source": "last",
+                },
+                "resolved": {
+                    "ok": bool(self.targets),
+                    "channel": resolved_channel or "unknown",
+                    "to": "default",
+                    "source": "explicit",
+                },
+                "fallbackUsed": False,
+                "delivered": bool(self.delivered),
+            }
+
+        if self.error:
+            entry["error"] = self.error
+            # Build diagnostics for error entries per protocol doc
+            entry["diagnostics"] = {
+                "summary": self.error,
+                "entries": [
+                    {
+                        "ts": ts_ms,
+                        "source": "delivery",
+                        "severity": "error",
+                        "message": self.error,
+                    }
+                ],
+            }
+        if self.result_text:
+            entry["summary"] = self.result_text
+        if self.job_name:
+            entry["name"] = self.job_name
+        return entry
+
+

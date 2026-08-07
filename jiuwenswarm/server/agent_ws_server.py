@@ -20,8 +20,15 @@ from openjiuwen.core.common.logging import server_logger
 from websockets.exceptions import ConnectionClosed as WebSocketConnectionClosed
 
 from jiuwenswarm.agents.harness.common.auto_harness import AutoHarnessService, reset_harness_packages_state
+from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools.device_command_manager import (
+    get_device_command_manager,
+)
+from jiuwenswarm.common.device_rpc.models import DeviceCommandResponse
+from jiuwenswarm.common.gui_rpc.models import GuiRpcResponse
 from jiuwenswarm.server.gateway_push.wire import build_server_push_wire
 from jiuwenswarm.server.ws_send import send_wire_payload
+from jiuwenswarm.server.gui_rpc import get_gui_rpc_client
+from jiuwenswarm.server.gui_rpc.client import GuiRpcClientError
 from jiuwenswarm.agents.harness.common.tools.acp_output_tools import get_acp_output_manager
 from jiuwenswarm.common.utils import get_agent_sessions_dir, get_config_file, mask_sensitive
 from jiuwenswarm.common.e2a.agent_compat import e2a_to_agent_request
@@ -122,6 +129,13 @@ from jiuwenswarm.common.mode_matrix import (
 )
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.common.log_preview import preview_text
+from jiuwenswarm.server.request_context import (
+    build_device_context_from_request,
+    reset_current_agent_request,
+    reset_device_context,
+    set_current_agent_request,
+    set_device_context,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -912,6 +926,8 @@ class AgentWebSocketServer:
         get_acp_output_manager().set_send_push_callback(
             lambda msg: asyncio.create_task(self.send_push(msg))
         )
+        get_device_command_manager().set_send_push_callback(self.send_push)
+        get_gui_rpc_client().set_send_push_callback(self.send_push)
 
     def set_proactive_engine(self, engine: Any) -> None:
         """Store the proactive engine instance for debug trigger interface."""
@@ -1339,6 +1355,13 @@ class AgentWebSocketServer:
         finally:
             self._current_ws = None
             self._current_send_lock = None
+            get_device_command_manager().fail_all(RuntimeError("Gateway disconnected"))
+            get_gui_rpc_client().fail_all(
+                GuiRpcClientError(
+                    "DEVICE_DISCONNECTED",
+                    "Gateway disconnected",
+                )
+            )
             self._clear_ws_acp_client_capabilities(ws)
             connection_tasks = list(tasks)
             for task in connection_tasks:
@@ -1449,6 +1472,13 @@ class AgentWebSocketServer:
                     ws_caps or self._agent_manager.get_client_capabilities("acp"),
                 )
                 request.metadata = metadata
+
+            if request.req_method == ReqMethod.XIAOYI_DEVICE_COMMAND_RESPONSE:
+                await self._handle_xiaoyi_device_command_response(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.XIAOYI_GUI_RPC_RESPONSE:
+                await self._handle_xiaoyi_gui_rpc_response(ws, request, send_lock)
+                return
 
             await self._trigger_before_chat_request_hook(request)
 
@@ -2556,9 +2586,15 @@ class AgentWebSocketServer:
                 await self._push_plan_mode_exited(request)
 
         resp = None
+        device_context_token = set_device_context(
+            build_device_context_from_request(request)
+        )
+        agent_request_token = set_current_agent_request(request)
         try:
             resp = await agent.process_message(request)
         finally:
+            reset_current_agent_request(agent_request_token)
+            reset_device_context(device_context_token)
             # Push plan.mode_exited if exit_plan_mode restored mode during processing
             if not readonly_goal_get:
                 await self._check_post_process_plan_exit(request, agent)
@@ -2605,6 +2641,22 @@ class AgentWebSocketServer:
         await ensure_persistent_checkpointer()
         channel_id = request.channel_id or "default"
         session_id = request.session_id or "default"
+        request_metadata = request.metadata if isinstance(request.metadata, dict) else {}
+        is_xiaoyi_request = (
+            str(channel_id).strip().lower() == "xiaoyi"
+            or bool(request_metadata.get("xiaoyi_session_id"))
+            or bool(request_metadata.get("xiaoyi_task_id"))
+        )
+        if is_xiaoyi_request:
+            logger.info(
+                "[GUI_AGENT_DIAG] phase=AGENT_STREAM_BEGIN request_id=%s "
+                "session_id=%s channel_id=%s params=%r metadata=%r",
+                request.request_id,
+                session_id,
+                channel_id,
+                request.params,
+                request_metadata,
+            )
         current_task = asyncio.current_task()
         stream_stop_event = asyncio.Event()
         if current_task is not None:
@@ -2681,9 +2733,28 @@ class AgentWebSocketServer:
         # 启动心跳任务
         heartbeat_task = asyncio.create_task(_heartbeat_loop())
 
+        device_context_token = set_device_context(
+            build_device_context_from_request(request)
+        )
+        agent_request_token = set_current_agent_request(request)
         try:
             async for chunk in agent.process_message_stream(request):
                 chunk_count += 1
+                if is_xiaoyi_request:
+                    logger.info(
+                        "[GUI_AGENT_DIAG] phase=AGENT_CHUNK_GENERATED "
+                        "request_id=%s sequence=%s event_type=%s "
+                        "is_complete=%s payload=%r",
+                        request.request_id,
+                        chunk_count - 1,
+                        (
+                            chunk.payload.get("event_type")
+                            if isinstance(chunk.payload, dict)
+                            else None
+                        ),
+                        chunk.is_complete,
+                        chunk.payload,
+                    )
                 # 通知心跳任务有真实 chunk 发送，重置心跳计时
                 heartbeat_event.set()
                 # V2: chunk 回带请求侧 agent_ref，供 gateway 3 元组精确路由
@@ -2708,7 +2779,22 @@ class AgentWebSocketServer:
                     )
                 try:
                     async with send_lock:
+                        if is_xiaoyi_request:
+                            logger.info(
+                                "[GUI_AGENT_DIAG] phase=AGENT_CHUNK_WS_SEND_BEGIN "
+                                "request_id=%s sequence=%s wire=%r",
+                                request.request_id,
+                                chunk_count - 1,
+                                wire,
+                            )
                         sent_original = await send_wire_payload(ws, wire)
+                        if is_xiaoyi_request:
+                            logger.info(
+                                "[GUI_AGENT_DIAG] phase=AGENT_CHUNK_WS_SEND_DONE "
+                                "request_id=%s sequence=%s",
+                                request.request_id,
+                                chunk_count - 1,
+                            )
                     if not sent_original:
                         logger.warning(
                             "[AgentWebSocketServer] 流式响应因单个 chunk 超限而停止: "
@@ -2726,6 +2812,10 @@ class AgentWebSocketServer:
                 # 清除 event，让心跳任务重新开始计时
                 heartbeat_event.clear()
         finally:
+            # 通知 heartbeat_loop 立即退出（即使 stream task 卡在 process_message_stream 中）
+            stream_stop_event.set()
+            reset_current_agent_request(agent_request_token)
+            reset_device_context(device_context_token)
             # 停止心跳任务
             if heartbeat_task is not None:
                 heartbeat_task.cancel()
@@ -2744,6 +2834,14 @@ class AgentWebSocketServer:
             # Push plan.mode_exited if exit_plan_mode restored mode during processing
             if not readonly_goal_get:
                 await self._check_post_process_plan_exit(request, agent)
+            if is_xiaoyi_request:
+                logger.info(
+                    "[GUI_AGENT_DIAG] phase=AGENT_STREAM_EXIT request_id=%s "
+                    "session_id=%s chunk_count=%s",
+                    request.request_id,
+                    session_id,
+                    chunk_count,
+                )
 
         logger.info(
             "[AgentWebSocketServer] 流式响应已发送: request_id=%s 共 %s 个 chunk",
@@ -7545,14 +7643,34 @@ class AgentWebSocketServer:
         payload 格式与 AgentResponse.payload 一致，
         可含 event_type 等字段供 Gateway 转为 Message 派发到 Channel。
         """
+        response_kind = str(msg.get("response_kind") or "").strip()
+        gui_rpc_id = ""
+        if response_kind.startswith("xiaoyi.gui_rpc."):
+            body = msg.get("body")
+            if isinstance(body, dict):
+                gui_rpc_id = str(body.get("rpc_id") or "")
         if self._current_ws is None or self._current_send_lock is None:
+            if gui_rpc_id:
+                logger.error(
+                    "[GUI_RPC_TRACE] phase=AGENT_WS_PUSH_NO_CONNECTION "
+                    "rpc_id=%s response_kind=%s",
+                    gui_rpc_id,
+                    response_kind,
+                )
             logger.warning(
                 "[AgentWebSocketServer] send_push 失败: 无活跃 Gateway 连接"
             )
-            return
+            raise RuntimeError("No active Gateway connection")
 
         try:
             wire = build_server_push_wire(msg)
+            if gui_rpc_id:
+                logger.info(
+                    "[GUI_RPC_TRACE] phase=AGENT_WS_SEND_BEGIN rpc_id=%s "
+                    "response_kind=%s",
+                    gui_rpc_id,
+                    response_kind,
+                )
             async with self._current_send_lock:
                 sent_original = await send_wire_payload(self._current_ws, wire)
             if not sent_original:
@@ -7562,6 +7680,13 @@ class AgentWebSocketServer:
                 )
                 return
             response_kind = str(msg.get("response_kind") or "").strip()
+            if gui_rpc_id:
+                logger.info(
+                    "[GUI_RPC_TRACE] phase=AGENT_WS_SEND_DONE rpc_id=%s "
+                    "response_kind=%s",
+                    gui_rpc_id,
+                    response_kind,
+                )
             if response_kind:
                 logger.info(
                     "[AgentWebSocketServer] send_push response_kind wire sent: channel_id=%s kind=%s",
@@ -7575,6 +7700,7 @@ class AgentWebSocketServer:
                 )
         except Exception as e:
             logger.warning("[AgentWebSocketServer] send_push 失败: %s", e)
+            raise
 
     def get_agent(self):
         """获取 default agent 实例（向后兼容）."""
@@ -8211,6 +8337,95 @@ class AgentWebSocketServer:
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
             await send_wire_payload(ws, wire)
+
+    async def _handle_xiaoyi_device_command_response(
+            self,
+            ws: Any,
+            request: AgentRequest,
+            send_lock: asyncio.Lock,
+    ) -> None:
+        params = request.params if isinstance(request.params, dict) else {}
+        response = DeviceCommandResponse(
+            rpc_id=str(params.get("rpc_id") or ""),
+            operation_id=str(params.get("operation_id") or ""),
+            ok=bool(params.get("ok")),
+            result=params.get("result") if isinstance(params.get("result"), dict) else None,
+            error_code=params.get("error_code"),
+            error_message=params.get("error_message"),
+        )
+        accepted = get_device_command_manager().complete(response)
+        if not accepted:
+            logger.info(
+                "[AgentServer] ignore unknown/late xiaoyi device response: rpc_id=%s operation_id=%s",
+                response.rpc_id,
+                response.operation_id,
+            )
+        resp = AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=True,
+            payload={
+                "accepted": accepted,
+                "rpc_id": response.rpc_id,
+                "ignored": not accepted,
+            },
+        )
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await ws.send(json.dumps(wire, ensure_ascii=False))
+
+    async def _handle_xiaoyi_gui_rpc_response(
+            self,
+            ws: Any,
+            request: AgentRequest,
+            send_lock: asyncio.Lock,
+    ) -> None:
+        params = request.params if isinstance(request.params, dict) else {}
+        logger.info(
+            "[GUI_RPC_TRACE] phase=AGENT_RESPONSE_RECEIVED rpc_id=%s "
+            "source_envelope_request_id=%s",
+            str(params.get("rpc_id") or ""),
+            request.request_id,
+        )
+        try:
+            response = GuiRpcResponse.from_dict(params)
+            accepted = get_gui_rpc_client().complete(response)
+        except ValueError as exc:
+            response = None
+            accepted = False
+            logger.warning(
+                "[GUI_RPC_TRACE] phase=AGENT_RESPONSE_INVALID rpc_id=%s "
+                "error_type=%s",
+                str(params.get("rpc_id") or ""),
+                type(exc).__name__,
+            )
+        if response is not None and not accepted:
+            logger.info(
+                "[GUI_RPC_TRACE] phase=AGENT_RESPONSE_IGNORED rpc_id=%s "
+                "reason=unknown_or_completed",
+                response.rpc_id,
+            )
+        elif response is not None:
+            logger.info(
+                "[GUI_RPC_TRACE] phase=AGENT_RESPONSE_COMPLETED rpc_id=%s "
+                "success=%s error_code=%s",
+                response.rpc_id,
+                response.success,
+                response.error_code,
+            )
+        resp = AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=True,
+            payload={
+                "accepted": accepted,
+                "rpc_id": response.rpc_id if response is not None else "",
+                "ignored": not accepted,
+            },
+        )
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await ws.send(json.dumps(wire, ensure_ascii=False))
 
     async def handle_acp_tool_response_for_test(
             self,

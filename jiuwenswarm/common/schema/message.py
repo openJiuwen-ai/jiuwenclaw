@@ -10,6 +10,8 @@ from typing import Any, Literal
 class ReqMethod(Enum):
     INITIALIZE = "initialize"
     ACP_TOOL_RESPONSE = "acp.tool_response"
+    XIAOYI_DEVICE_COMMAND_RESPONSE = "xiaoyi.device_command.response"
+    XIAOYI_GUI_RPC_RESPONSE = "xiaoyi.gui_rpc.response"
 
     CHAT_SEND = "chat.send"
     CHAT_RESUME = "chat.resume"
@@ -227,6 +229,7 @@ class EventType(Enum):
     CHAT_RETRACT = "chat.retract"
     CHAT_MEDIA = "chat.media"
     CHAT_FILE = "chat.file"
+    CHAT_HTML_CARD = "chat.html_card"
     CHAT_TOOL_CALL = "chat.tool_call"
     CHAT_TOOL_UPDATE = "chat.tool_update"
     CHAT_TOOL_RESULT = "chat.tool_result"

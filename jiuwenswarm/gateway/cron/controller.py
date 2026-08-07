@@ -1,25 +1,50 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+import asyncio
+import logging
+import re
+from datetime import datetime, timedelta, timezone
 from typing import Any, ClassVar, List
 from zoneinfo import ZoneInfo
 
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 
-from jiuwenswarm.gateway.cron.cron_expr import normalize_cron_expr
+from jiuwenswarm.gateway.cron.cron_expr import normalize_cron_expr, iso_to_five_field_cron, validate_cron_expression
 from jiuwenswarm.gateway.cron.models import (
     CRON_JOB_DESCRIPTION_MAX_LENGTH,
     CRON_JOB_NAME_MAX_LENGTH,
+    CRON_JOB_DEFAULT_MODE,
+    CronJob,
+    CronRunState,
     CronTargetChannel,
     cron_job_metadata,
     cron_job_modes_for_tools,
+    is_team_cron_mode,
     is_valid_target_channel_id,
     normalize_cron_job_mode,
     normalize_target_channel_id,
     validate_cron_model,
+    normalize_required_device_intents,
 )
 from jiuwenswarm.gateway.cron.scheduler import CronSchedulerService, _cron_next_push_dt
 from jiuwenswarm.gateway.cron.store import CronJobStore
+
+logger = logging.getLogger(__name__)
+
+# cron session_id 格式: cron_{ts_hex}_{job_id}
+# 例如 cron_18f3a2b1c00_myjob  → job_id="myjob", ts_hex="18f3a2b1c00"
+_CRON_SESSION_PREFIX = "cron_"
+_CRON_SESSION_RE = re.compile(r"^cron_([0-9a-fA-F]+)_(.+)$")
+
+
+def _strip_onetime_marker(name: str) -> str:
+    if not name:
+        return name
+    idx = name.find("|")
+    if idx < 0:
+        return name
+    cleaned = name[:idx].strip()
+    return cleaned if cleaned else name
 
 
 class CronController:
@@ -75,6 +100,9 @@ class CronController:
     def _validate_schedule(*, cron_expr: str, timezone: str) -> None:
         tz = ZoneInfo(timezone)
         base = datetime.now(tz=tz)
+        # All jobs use 5-field standard cron, which always has a future
+        # match (year is implicit '*'). One-shot semantics are achieved
+        # via delete_after_run=True, not via a fixed-year cron expression.
         _ = _cron_next_push_dt(cron_expr, base)
 
     _DESCRIPTION_TIME_KEYWORDS = ("每天", "每周", "每月", "上午", "下午", "早上", "晚上", "凌晨")
@@ -189,6 +217,15 @@ class CronController:
         resolved_project_id = binding.project_id
         work_mode = binding.work_mode
         app_id = str(params.get("app_id") or "").strip()
+        required_device_intents = normalize_required_device_intents(
+            params.get("required_device_intents")
+        )
+        xiaoyi_push_id = str(params.get("xiaoyi_push_id") or "").strip() or None
+        if required_device_intents and not xiaoyi_push_id:
+            raise ValueError("xiaoyi_push_id is required for device cron jobs")
+        effective_mode = mode or CRON_JOB_DEFAULT_MODE
+        if required_device_intents and is_team_cron_mode(effective_mode):
+            raise ValueError("Xiaoyi device cron jobs do not support team mode")
         job = await self._store.create_job(
             job_id=str(params.get("id") or "").strip() or None,
             name=name,
@@ -207,6 +244,8 @@ class CronController:
             model_name=model_name,
             app_id=app_id,
             work_mode=work_mode,
+            required_device_intents=required_device_intents,
+            xiaoyi_push_id=xiaoyi_push_id,
         )
         await self._scheduler.reload()
         return job.to_dict()
@@ -222,6 +261,17 @@ class CronController:
         existing = await self._store.get_job(job_id)
         if existing is None:
             raise KeyError("job not found")
+        immutable_device_fields = {
+            "description",
+            "required_device_intents",
+            "xiaoyi_push_id",
+        }
+        if existing.required_device_intents and immutable_device_fields.intersection(
+            patch
+        ):
+            raise ValueError(
+                "Device cron task content cannot be updated; delete and recreate it"
+            )
         if "cron_expr" in patch:
             patch["cron_expr"] = normalize_cron_expr(str(patch["cron_expr"]).strip())
         if "cron_expr" in patch or "timezone" in patch:
@@ -298,6 +348,609 @@ class CronController:
     async def run_now_info(self, job_id: str) -> dict[str, str]:
         return await self._scheduler.trigger_run_now_info(job_id)
 
+    async def run_now_and_wait(
+        self, job_id: str, *, timeout: float = 300.0, poll_interval: float = 0.2
+    ) -> tuple[str, str]:
+        """Trigger immediate run and wait for completion, returning (run_id, result_text).
+
+        Unlike ``run_now`` which only enqueues, this method polls the scheduler's
+        ``_runs`` dict until the run reaches a terminal status
+        (``succeeded`` / ``failed``), then returns the produced ``result_text``.
+        """
+        run_id = await self._scheduler.trigger_run_now(job_id)
+        runs = getattr(self._scheduler, "_runs", None)
+        if not isinstance(runs, dict):
+            return run_id, "[cron] 任务执行失败: scheduler runs dict unavailable"
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            state = runs.get(run_id)
+            if state is not None and state.status in ("succeeded", "failed"):
+                return run_id, str(state.result_text or "")
+            await asyncio.sleep(poll_interval)
+        return run_id, "[cron] 任务执行超时"
+
+    # ── A2A CronQuery protocol methods ────────────────────────────────
+
+    def _compute_next_run_ms(self, job_id: str, *, job: CronJob | None = None) -> int:
+        """Compute next scheduled run time (ms) for a job from scheduler events.
+
+        Scans ``scheduler._events`` heap for the earliest ``wake`` event
+        matching ``job_id``. Returns 0 if not found or scheduler unavailable.
+
+        For one-shot tasks (``delete_after_run=True``), always returns 0 —
+        one-shot tasks have no recurring next run; they fire once then expire.
+        If ``job`` is provided, its ``delete_after_run`` flag is checked
+        directly; otherwise the flag cannot be determined synchronously.
+        """
+        # One-shot tasks have no next run — they fire once then auto-expire.
+        if job is not None and job.delete_after_run:
+            return 0
+        events = getattr(self._scheduler, "_events", None)
+        if not events:
+            return 0
+        min_ts: float | None = None
+        for at_ts, _seq, ev in events:
+            if ev.kind == "wake" and ev.job_id == job_id:
+                if min_ts is None or at_ts < min_ts:
+                    min_ts = at_ts
+        if min_ts is not None:
+            return int(float(min_ts) * 1000)
+        return 0
+
+    def _compute_last_run_ms(self, job_id: str) -> int:
+        """Compute last run start time (ms) for a job from scheduler runs.
+
+        Scans ``scheduler._runs`` dict for the most recent run matching
+        ``job_id`` (by ``started_at``). Returns 0 if not found.
+        """
+        runs = getattr(self._scheduler, "_runs", None)
+        if not runs:
+            return 0
+        max_started: float | None = None
+        for state in runs.values():
+            if state.job_id != job_id:
+                continue
+            if isinstance(state.started_at, (int, float)):
+                if max_started is None or state.started_at > max_started:
+                    max_started = state.started_at
+        if max_started is not None:
+            return int(float(max_started) * 1000)
+        return 0
+
+    def _compute_job_run_stats(self, job_id: str) -> dict[str, Any]:
+        """Compute aggregated run statistics for a job from scheduler runs.
+
+        Returns a dict with:
+            last_run_status: str (ok/error/skipped/running) — status of the most recent run
+            last_duration_ms: int — duration of the most recent run
+            last_delivery_status: str — delivery status of the most recent run
+            consecutive_errors: int — count of consecutive failed runs
+            consecutive_skipped: int — count of consecutive skipped runs
+        """
+        runs = getattr(self._scheduler, "_runs", None)
+        if not runs:
+            return {
+                "last_run_status": "skipped",
+                "last_duration_ms": 0,
+                "last_delivery_status": "unknown",
+                "consecutive_errors": 0,
+                "consecutive_skipped": 0,
+            }
+
+        # Collect all runs for this job, sorted by started_at descending
+        job_runs: list[CronRunState] = []
+        for state in runs.values():
+            if state.job_id == job_id:
+                job_runs.append(state)
+        if not job_runs:
+            return {
+                "last_run_status": "skipped",
+                "last_duration_ms": 0,
+                "last_delivery_status": "unknown",
+                "consecutive_errors": 0,
+                "consecutive_skipped": 0,
+            }
+
+        # Sort by started_at descending (most recent first)
+        job_runs.sort(
+            key=lambda s: s.started_at or 0,
+            reverse=True,
+        )
+
+        latest = job_runs[0]
+        # Map internal status to A2A display
+        status_map = {
+            "succeeded": "ok",
+            "failed": "error",
+            "running": "running",
+            "pending": "skipped",
+        }
+        last_run_status = status_map.get(latest.status, "skipped")
+
+        # Duration
+        started_ms = int(latest.started_at * 1000) if isinstance(latest.started_at, (int, float)) else 0
+        finished_ms = int(latest.finished_at * 1000) if isinstance(latest.finished_at, (int, float)) else 0
+        last_duration_ms = max(0, finished_ms - started_ms) if started_ms and finished_ms else 0
+
+        # Delivery status from the latest run
+        last_delivery_status = latest.delivery_status or "unknown"
+
+        # Count consecutive errors and skipped from the most recent runs
+        consecutive_errors = 0
+        consecutive_skipped = 0
+        for s in job_runs:
+            if s.status == "failed":
+                consecutive_errors += 1
+            elif s.status == "pending":
+                consecutive_skipped += 1
+            else:
+                break  # stop counting at first non-error/skipped
+
+        return {
+            "last_run_status": last_run_status,
+            "last_duration_ms": last_duration_ms,
+            "last_delivery_status": last_delivery_status,
+            "consecutive_errors": consecutive_errors,
+            "consecutive_skipped": consecutive_skipped,
+        }
+
+    async def status(self) -> dict[str, Any]:
+        """Return cron service overall status for A2A ``status`` action."""
+        jobs = await self._store.list_jobs()
+        store_path = str(self._store.path)
+        # nextWakeAtMs: compute from scheduler events if available
+        next_wake_ms = 0
+        events = getattr(self._scheduler, "_events", None)
+        if events:
+            # _events is a heap of (at_ts, seq, ev); find earliest wake event
+            min_ts = None
+            for at_ts, _seq, ev in events:
+                if ev.kind == "wake":
+                    if min_ts is None or at_ts < min_ts:
+                        min_ts = at_ts
+            if min_ts is not None:
+                next_wake_ms = int(float(min_ts) * 1000)
+        return {
+            "enabled": True,
+            "storePath": store_path,
+            "jobs": len(jobs),
+            "nextWakeAtMs": next_wake_ms,
+        }
+
+    async def runs(self, job_id: str, limit: int = 10) -> dict[str, Any]:
+        """Return run history for a job (A2A ``runs`` action).
+
+        The scheduler ``_runs`` dict only tracks in-flight runs (not persisted).
+        We return whatever is available; absent persistent history, entries will
+        be sparse. This is a best-effort implementation.
+        """
+        job_id = str(job_id or "").strip()
+        if not job_id:
+            raise ValueError("jobId is required")
+        job = await self._store.get_job(job_id)
+        if job is None:
+            raise KeyError("job not found")
+
+        limit = max(1, min(int(limit), 100))
+        entries: list[dict[str, Any]] = []
+        # Compute next run time for this job once (shared across all entries)
+        next_run_ms = self._compute_next_run_ms(job_id, job=job)
+        runs = getattr(self._scheduler, "_runs", None)
+        if runs:
+            for state in runs.values():
+                if state.job_id == job_id and state.status in ("succeeded", "failed", "running"):
+                    entries.append(state.to_a2a_run_entry(for_runs=True, next_run_at_ms=next_run_ms))
+        # Sort by ts descending and limit
+        entries.sort(key=lambda e: e.get("ts", 0), reverse=True)
+        entries = entries[:limit]
+        total = len(entries)
+        return {
+            "entries": entries,
+            "total": total,
+            "offset": 0,
+            "limit": limit,
+            "hasMore": False,
+            "nextOffset": None,
+        }
+
+    def _load_cron_session_history(
+        self,
+        *,
+        jobs_map: dict[str, CronJob],
+        next_run_cache: dict[str, int],
+    ) -> list[dict[str, Any]]:
+        """Scan the agent sessions directory for ``cron_*`` sessions and build
+        historical execution entries.
+
+        Each cron run creates an isolated session ``cron_{ts_hex}_{job_id}``
+        under ``~/.jiuwenswarm/agent/sessions/``. This method scans those
+        directories, reads ``metadata.json`` (created_at, last_message_at,
+        mode, title) and the history file (last assistant message as summary),
+        and returns A2A ``queryTimeList`` entries.
+
+        Only sessions matching ``cron_{hex}_{job_id}`` are included; other
+        session types are ignored.
+
+        Args:
+            jobs_map: ``job_id → CronJob`` map (for timezone / one-shot lookup).
+                Built by the async caller before invoking this method.
+            next_run_cache: ``job_id → next_run_ms`` cache (mutated in-place
+                for newly seen job_ids).
+
+        Returns a list of entry dicts (``queryTimeList`` format, status "ok").
+        """
+        try:
+            from jiuwenswarm.common.utils import get_agent_sessions_dir
+            from jiuwenswarm.server.runtime.session.session_metadata import _read_metadata
+            from jiuwenswarm.server.runtime.session.session_history import load_history_records
+        except Exception as exc:
+            logger.warning("[Cron] _load_cron_session_history import failed: %s", exc)
+            return []
+
+        sessions_dir = get_agent_sessions_dir()
+        if not sessions_dir.exists() or not sessions_dir.is_dir():
+            return []
+
+        entries: list[dict[str, Any]] = []
+        for session_dir in sessions_dir.iterdir():
+            if not session_dir.is_dir():
+                continue
+            session_id = session_dir.name
+            if not session_id.startswith(_CRON_SESSION_PREFIX):
+                continue
+            m = _CRON_SESSION_RE.match(session_id)
+            if not m:
+                continue
+            ts_hex = m.group(1)
+            job_id = m.group(2)
+
+            # Parse timestamp from ts_hex (milliseconds epoch, hex-encoded).
+            try:
+                run_ts_ms = int(ts_hex, 16)
+            except ValueError:
+                run_ts_ms = 0
+
+            # Read metadata.json for created_at / last_message_at / mode.
+            meta = _read_metadata(session_id, cache_bust=True)
+            created_at = meta.get("created_at") or 0
+            last_message_at = meta.get("last_message_at") or 0
+            title = str(meta.get("title") or "")
+
+            # Determine run status from history records.
+            # - If history has a final assistant message → "ok" (succeeded)
+            # - If history exists but no assistant output → "skipped"
+            # - If no history file → "skipped"
+            status = "skipped"
+            summary = ""
+            try:
+                records = load_history_records(session_id)
+            except Exception:
+                records = []
+            if records:
+                status = "ok"
+                # Find the last assistant message as summary.
+                for rec in reversed(records):
+                    if rec.get("role") == "assistant":
+                        content = rec.get("content")
+                        if isinstance(content, str) and content.strip():
+                            summary = content.strip()
+                            break
+                        # Some records store content as list of blocks
+                        if isinstance(content, list):
+                            for block in reversed(content):
+                                if isinstance(block, dict):
+                                    text = block.get("text") or block.get("content")
+                                    if isinstance(text, str) and text.strip():
+                                        summary = text.strip()
+                                        break
+                            if summary:
+                                break
+
+            # Use created_at (run start) as runAtMs; last_message_at as ts.
+            run_at_ms = int(float(created_at) * 1000) if created_at else run_ts_ms
+            ts_ms = int(float(last_message_at) * 1000) if last_message_at else run_at_ms
+            duration_ms = max(0, ts_ms - run_at_ms) if run_at_ms and ts_ms else 0
+
+            # Compute next run for this job (cached).
+            if job_id not in next_run_cache:
+                next_run_cache[job_id] = self._compute_next_run_ms(job_id, job=jobs_map.get(job_id))
+
+            entry: dict[str, Any] = {
+                "ts": ts_ms,
+                "jobId": job_id,
+                "action": "finished",
+                "status": status,
+                "runAtMs": run_at_ms,
+                "durationMs": duration_ms,
+                "nextRunAtMs": next_run_cache[job_id],
+                "deliveryStatus": "unknown",
+                "sessionId": session_id,
+                "sessionKey": f"agent:main:cron:{job_id}:run:{session_id}",
+            }
+            if summary:
+                entry["summary"] = summary
+            if title:
+                entry["name"] = title
+            entries.append(entry)
+
+        return entries
+
+    async def query_time_list(self) -> list[dict[str, list[dict[str, Any]]]]:
+        """Return run history grouped by date (A2A ``queryTimeList``).
+
+        Per protocol doc §2.8: queryTimeList queries **historical** execution
+        records only (not upcoming schedule). ``ans`` is an array of single-key
+        objects: ``[{"2026-06-01": [entry, ...]}, {"2026-06-02": [entry, ...]}]``.
+        Each entry has action="finished", status=ok|error|skipped, etc.
+
+        Data sources (merged, deduplicated by session_id):
+          1. ``scheduler._runs`` dict — in-memory runs (current process only,
+             lost on restart). Has accurate status for in-flight runs.
+          2. ``~/.jiuwenswarm/agent/sessions/cron_*`` directories — persisted
+             session files from all past runs (survives restarts). Scanned via
+             ``_load_cron_session_history``.
+
+        Future scheduled events (from ``_events`` heap) are NOT included —
+        they are not "finished" executions.
+        """
+        all_entries: list[dict[str, Any]] = []
+
+        # Build job_id → CronJob map so we can check delete_after_run for
+        # one-shot tasks (their next run is 0).
+        jobs_map: dict[str, CronJob] = {
+            j.id: j for j in await self._store.list_jobs()
+        }
+
+        # Cache next run times per job_id to avoid repeated heap scans.
+        next_run_cache: dict[str, int] = {}
+
+        # ── Source 1: in-memory runs (scheduler._runs) ─────────────────────
+        # These have accurate status (running/succeeded/failed) and delivery
+        # tracking. Collect session_ids for dedup against file history.
+        in_memory_session_ids: set[str] = set()
+        runs = getattr(self._scheduler, "_runs", None)
+        if runs:
+            for state in runs.values():
+                jid = state.job_id
+                if jid not in next_run_cache:
+                    next_run_cache[jid] = self._compute_next_run_ms(jid, job=jobs_map.get(jid))
+                entry = state.to_a2a_run_entry(next_run_at_ms=next_run_cache[jid])
+                all_entries.append(entry)
+                # Track session_id for dedup. CronRunState doesn't store
+                # session_id directly, but run_id format is "{job_id}:{ts}",
+                # and the session_id is "cron_{ts_hex}_{job_id}". We dedup
+                # by (job_id, run_ts) instead.
+                in_memory_session_ids.add(f"{jid}:{int(state.started_at or 0)}")
+
+        # ── Source 2: persisted cron session files ─────────────────────────
+        # Scan sessions dir for cron_* sessions. Dedup against in-memory runs
+        # by (job_id, run_ts) to avoid double-counting runs that are still
+        # in _runs (e.g. currently running).
+        file_entries = self._load_cron_session_history(
+            jobs_map=jobs_map,
+            next_run_cache=next_run_cache,
+        )
+        for fe in file_entries:
+            # Dedup key: job_id + runAtMs (start timestamp in ms).
+            # In-memory run may have slightly different started_at (UTC float)
+            # vs metadata created_at (UTC float from agentserver). Allow ±2s
+            # tolerance to catch the same run across both sources.
+            fe_jid = fe.get("jobId") or ""
+            fe_run_ms = int(fe.get("runAtMs") or 0)
+            is_dup = False
+            for im_key in in_memory_session_ids:
+                im_jid, im_ts_s = im_key.split(":", 1)
+                if im_jid != fe_jid:
+                    continue
+                im_run_ms = int(im_ts_s) * 1000
+                if abs(im_run_ms - fe_run_ms) <= 2000:
+                    is_dup = True
+                    break
+            if not is_dup:
+                all_entries.append(fe)
+
+        # Group by date (YYYY-MM-DD) based on ts
+        by_date: dict[str, list[dict[str, Any]]] = {}
+        for entry in all_entries:
+            ts = entry.get("ts", 0)
+            if ts > 0:
+                dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+                date_key = dt.strftime("%Y-%m-%d")
+            else:
+                date_key = "unknown"
+            if entry.get("status") != "running":
+                by_date.setdefault(date_key, []).append(entry)
+
+        # Sort entries within each date by ts ascending
+        for entries in by_date.values():
+            entries.sort(key=lambda e: e.get("ts", 0))
+
+        # Per protocol doc: ans is an array of single-key objects
+        # e.g. [{"2026-06-01": [...]}, {"2026-06-02": [...]}]
+        ans: list[dict[str, list[dict[str, Any]]]] = [
+            {date_key: entries} for date_key, entries in by_date.items()
+        ]
+        return ans
+
+    async def list_jobs_a2a(self, include_disabled: bool = True) -> dict[str, Any]:
+        """Return jobs list in A2A ``list`` ans format."""
+        jobs = await self._store.list_jobs()
+        if not include_disabled:
+            jobs = [j for j in jobs if j.enabled]
+        a2a_jobs = [
+            j.to_a2a_job(
+                next_run_at_ms=self._compute_next_run_ms(j.id, job=j),
+                last_run_at_ms=self._compute_last_run_ms(j.id),
+                job_run_stats=self._compute_job_run_stats(j.id),
+            )
+            for j in jobs
+        ]
+        total = len(a2a_jobs)
+        ans = {
+            "jobs": a2a_jobs,
+            "total": total,
+            "offset": 0,
+            "limit": total,
+            "hasMore": False,
+            "nextOffset": None,
+            "deliveryPreviews": {},
+        }
+        return ans
+
+    async def create_job_a2a(self, job_params: dict[str, Any], session_id: str | None = None) -> dict[str, Any]:
+        """Create job from A2A ``add`` action params and return A2A ans format.
+
+        Supports both frontend nested format ({job: {...}}) and Xiaoyi device
+        flat format (job fields directly in params).
+        """
+        # Extract A2A nested fields and map to internal flat params
+        params: dict[str, Any] = {}
+        params["name"] = _strip_onetime_marker(str(job_params.get("name") or "").strip())
+        params["enabled"] = bool(job_params.get("enabled", True))
+        if job_params.get("deleteAfterRun") is not None:
+            params["delete_after_run"] = bool(job_params.get("deleteAfterRun"))
+        if job_params.get("wakeOffsetSeconds") is not None:
+            try:
+                params["wake_offset_seconds"] = int(job_params.get("wakeOffsetSeconds"))
+            except (TypeError, ValueError):
+                pass
+        if job_params.get("mode") is not None:
+            mode_val = str(job_params.get("mode") or "").strip()
+            if mode_val:
+                params["mode"] = mode_val
+        # 设备可能用 wakeMode ("now"/"skip") 代替 wakeOffsetSeconds
+        wake_mode = str(job_params.get("wakeMode") or "").strip().lower()
+        if wake_mode == "now" and "wake_offset_seconds" not in params:
+            params["wake_offset_seconds"] = 0
+
+        schedule = job_params.get("schedule") or {}
+        if isinstance(schedule, dict):
+            schedule_kind = str(schedule.get("kind") or "").strip().lower()
+            timezone = str(schedule.get("tz") or "Asia/Shanghai").strip() or "Asia/Shanghai"
+            params["timezone"] = timezone
+            if schedule_kind == "at":
+                # One-shot task: convert ISO datetime to 5-field cron.
+                # Device sends {"kind": "at", "at": "2026-07-16T16:00:00+08:00", "expr": ""}.
+                # The year is dropped (5-field cron has no year); one-shot
+                # semantics rely on delete_after_run=True below.
+                at_iso = str(schedule.get("at") or "").strip()
+                if not at_iso:
+                    raise ValueError("schedule.kind='at' requires non-empty 'at' field")
+                params["cron_expr"] = iso_to_five_field_cron(at_iso, timezone=timezone)
+                # One-shot tasks should be auto-deleted after execution.
+                params["delete_after_run"] = True
+            else:
+                # Standard cron task.
+                params["cron_expr"] = str(schedule.get("expr") or "").strip()
+
+        # description: 优先从 payload.message 获取，fallback 到顶层 description
+        payload = job_params.get("payload") or {}
+        desc = ""
+        if isinstance(payload, dict):
+            desc = str(payload.get("message") or "").strip()
+        if not desc:
+            desc = str(job_params.get("description") or "").strip()
+        params["description"] = desc
+
+        delivery = job_params.get("delivery") or {}
+        if isinstance(delivery, dict):
+            channel = str(delivery.get("channel") or "").strip()
+            # 设备可能发送 "xiaoyi-channel"，映射为内部枚举值 "xiaoyi"
+            if channel.endswith("-channel"):
+                channel = channel[:-len("-channel")]
+            if channel:
+                params["targets"] = channel
+
+        if session_id:
+            params["session_id"] = session_id
+
+        job = await self.create_job(params)
+        # Convert to A2A format
+        jobs_list = await self._store.list_jobs()
+        created = None
+        for j in jobs_list:
+            if j.id == job.get("id"):
+                created = j
+                break
+        if created:
+            return created.to_a2a_job(
+                include_description=True,
+                next_run_at_ms=self._compute_next_run_ms(created.id, job=created),
+                last_run_at_ms=self._compute_last_run_ms(created.id),
+            )
+        # Fallback: construct minimal A2A shape from to_dict result
+        return job
+
+    async def update_job_a2a(self, job_id: str, patch_params: dict[str, Any]) -> dict[str, Any]:
+        """Update job from A2A ``update`` action and return A2A ans format."""
+        patch: dict[str, Any] = {}
+        # Map A2A nested patch fields to internal flat patch
+        if "enabled" in patch_params:
+            patch["enabled"] = bool(patch_params["enabled"])
+        if "name" in patch_params:
+            patch["name"] = _strip_onetime_marker(str(patch_params["name"]).strip())
+        if "wakeOffsetSeconds" in patch_params:
+            try:
+                patch["wake_offset_seconds"] = int(patch_params["wakeOffsetSeconds"])
+            except (TypeError, ValueError):
+                pass
+        if "mode" in patch_params:
+            mode_val = str(patch_params.get("mode") or "").strip()
+            if mode_val:
+                patch["mode"] = mode_val
+        schedule = patch_params.get("schedule")
+        if isinstance(schedule, dict):
+            schedule_kind = str(schedule.get("kind") or "").strip().lower()
+            timezone = str(schedule.get("tz") or "").strip()
+            if timezone:
+                patch["timezone"] = timezone
+            if schedule_kind == "at":
+                # One-shot task: convert ISO datetime to 5-field cron.
+                at_iso = str(schedule.get("at") or "").strip()
+                if not at_iso:
+                    raise ValueError("schedule.kind='at' requires non-empty 'at' field")
+                # Use timezone from schedule if present, else fall back to existing job tz
+                tz_for_conversion = timezone or "Asia/Shanghai"
+                patch["cron_expr"] = iso_to_five_field_cron(at_iso, timezone=tz_for_conversion)
+                # One-shot tasks should be auto-deleted after execution.
+                patch["delete_after_run"] = True
+            elif schedule.get("expr"):
+                patch["cron_expr"] = str(schedule["expr"]).strip()
+        payload = patch_params.get("payload")
+        if isinstance(payload, dict) and payload.get("message") is not None:
+            patch["description"] = str(payload["message"]).strip()
+        delivery = patch_params.get("delivery")
+        if isinstance(delivery, dict) and delivery.get("channel"):
+            patch["targets"] = str(delivery["channel"]).strip()
+
+        job = await self.update_job(job_id, patch)
+        # Convert to A2A format (include description per add/update protocol)
+        stored = await self._store.get_job(job_id)
+        if stored:
+            return stored.to_a2a_job(
+                include_description=True,
+                next_run_at_ms=self._compute_next_run_ms(stored.id, job=stored),
+                last_run_at_ms=self._compute_last_run_ms(stored.id),
+            )
+        return job
+
+    async def delete_job_a2a(self, job_id: str) -> dict[str, Any]:
+        """Delete job and return A2A ``remove`` ans format."""
+        deleted = await self.delete_job(job_id)
+        return {
+            "ok": True,
+            "removed": bool(deleted),
+        }
+
+    async def run_now_a2a(self, job_id: str) -> dict[str, Any]:
+        """Trigger immediate run and return A2A ``run`` ans format."""
+        run_id = await self.run_now(job_id)
+        return {
+            "ok": True,
+            "runId": run_id,
+            "enqueued": True,
+        }
+
     async def _create_job_tool(
         self,
         name: str,
@@ -313,6 +966,8 @@ class CronController:
         project_dir: str | None = None,
         project_id: str | None = None,
         work_mode: str | None = None,
+        required_device_intents: list[str] | None = None,
+        delete_after_run: bool | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {
             "name": name,
@@ -336,6 +991,10 @@ class CronController:
             params["project_id"] = str(project_id).strip()
         if work_mode is not None and str(work_mode).strip():
             params["work_mode"] = str(work_mode).strip()
+        if required_device_intents is not None:
+            params["required_device_intents"] = required_device_intents
+        if delete_after_run is not None:
+            params["delete_after_run"] = delete_after_run
         return await self.create_job(params)
 
     async def _update_job_tool(
@@ -412,19 +1071,15 @@ class CronController:
                 name="cron_create_job",
                 description=(
                     "Create a scheduled cron job.\n"
-                    "cron_expr:\n"
-                    "- Recurring (5 fields): minute hour day month day-of-week.\n"
+                    "cron_expr is always 5-field standard cron: "
+                    "minute hour day month day-of-week.\n"
                     "  Example: daily 9:00 = '0 9 * * *', every Monday 9:00 = '0 9 * * 1'.\n"
-                    "- Relative time (e.g. \"in X minutes\"): take now in the given timezone, "
-                    "compute run_at = now + X minutes, then encode run_at as 7-field cron "
-                    "with a fixed year (minute hour day month day-of-week second year). "
-                    "Example: run_at (Mar 19, 2026 10:07:00 local) -> '0 7 10 19 3 * 2026'.\n"
-                    "- One-shot (runs only once): must use 7 fields with a fixed year: "
-                    "minute hour day month day-of-week second year. "
-                    "Example: 2026-03-28 17:00 (local) -> '0 17 28 3 * 0 2026'.\n"
-                    "Warning: if you use a 5-field expression with fixed day/month "
-                    "but year semantics implicitly '*', it will repeat every year; "
-                    "for a real one-shot, use the 7-field form with a fixed year.\n"
+                    "For a one-shot / relative-time task (e.g. \"in X minutes\"), "
+                    "compute run_at = now + X minutes in the given timezone, "
+                    "encode it as a 5-field cron (minute hour day month day-of-week), "
+                    "and set delete_after_run=true so the task fires once then stops.\n"
+                    "  Example: run_at = Mar 19, 2026 10:07 local -> '7 10 19 3 *' with "
+                    "delete_after_run=true.\n"
                     "description should contain task content only (no time/frequency). "
                     "timezone defaults to Asia/Shanghai."
                 ),
@@ -438,13 +1093,12 @@ class CronController:
                         "cron_expr": {
                             "type": "string",
                             "description": (
-                                "Cron expression. "
-                                "Recurring jobs use 5 fields: minute hour dom month day-of-week. "
-                                "One-shot jobs must use 7 fields: minute hour dom month "
-                                "day-of-week second year (fixed year). "
-                                "For relative time, treat it as one-shot: compute run_at = now + X minutes, "
-                                "then encode it as a 7-field expression with a fixed year. "
-                                "Example: 2026-03-28 17:00 (local) -> '0 17 28 3 * 0 2026'."
+                                "Cron expression (5 fields): "
+                                "minute hour day month day-of-week. "
+                                "For one-shot tasks, encode the target time as a 5-field "
+                                "cron and set delete_after_run=true. "
+                                "Example: 2026-03-28 17:00 local -> '0 17 28 3 *' "
+                                "with delete_after_run=true."
                             ),
                         },
                         "timezone": {
@@ -523,6 +1177,25 @@ class CronController:
                                 "Defaults to current channel default (tui->code, web->work). "
                                 "Only used when project_id is not provided; ignored if project_id "
                                 "is provided (work_mode inherited from the project)."
+                            ),
+                        },
+                        "delete_after_run": {
+                            "type": "boolean",
+                            "description": (
+                                "If true, the task fires once then is marked "
+                                "expired/disabled (one-shot semantics). Use this "
+                                "with a 5-field cron encoding a specific "
+                                "month/day/hour/minute for one-shot tasks."
+                            ),
+                            "default": False,
+                        },
+                        "required_device_intents": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Device intent names needed when this cron runs. "
+                                "For Xiaoyi device cron jobs, call check_plugin_privilege "
+                                "for each intent before creating the job."
                             ),
                         },
                     },
@@ -648,3 +1321,5 @@ class CronController:
                 func=self._preview_job_tool,
             ),
         ]
+
+

@@ -46,6 +46,10 @@ from jiuwenswarm.server.runtime.session.session_metadata import (
     update_session_metadata,
 )
 from jiuwenswarm.server.runtime.session.session_history import append_history_record
+from jiuwenswarm.server.request_context import (
+    XIAOYI_MODEL_TRACE_HEADERS_METADATA_KEY,
+    build_xiaoyi_model_trace_headers,
+)
 from jiuwenswarm.agents.harness.team.handlers.team_monitor_handler import TeamMonitorHandler
 from jiuwenswarm.server.utils.stream_utils import parse_stream_chunk
 from jiuwenswarm.common.schema.agent import AgentResponseChunk
@@ -1505,6 +1509,10 @@ async def process_team_message_stream(
                 session_id,
                 _safe_query_preview(query),
             )
+        request_metadata.pop(XIAOYI_MODEL_TRACE_HEADERS_METADATA_KEY, None)
+        trace_headers = build_xiaoyi_model_trace_headers(request)
+        if trace_headers:
+            request_metadata[XIAOYI_MODEL_TRACE_HEADERS_METADATA_KEY] = trace_headers
         if isinstance(getattr(request, "params", None), dict):
             request_metadata.setdefault("mode", request.params.get("mode"))
             request_metadata.setdefault(

@@ -13,7 +13,7 @@
 - 相册: search_photo_gallery, upload_photo
 - 文件: search_file, upload_file, send_file_to_user
 - 电话: call_phone
-- 短信/消息: send_message, search_message
+- 短信/消息: send_sms, search_message
 - 闹钟: create_alarm, search_alarms, modify_alarm, delete_alarm
 - 收藏: query_collection, add_collection, delete_collection
 - 保存: save_media_to_gallery, save_file_to_file_manager
@@ -30,7 +30,7 @@ from .contact_tools import search_contact
 from .photo_tools import search_photo_gallery, upload_photo
 from .file_tools import search_file, upload_file
 from .phone_tools import call_phone
-from .message_tools import send_message, search_message
+from .message_tools import send_message, send_sms, search_message
 from .alarm_tools import create_alarm, search_alarms, modify_alarm, delete_alarm
 from .xiaoyi_collection_tool import query_collection, add_collection, delete_collection
 from .save_tools import save_media_to_gallery, save_file_to_file_manager
@@ -38,6 +38,8 @@ from .push_result_tool import view_push_result
 from .timestamp_tool import convert_timestamp_to_utc8_time
 from .xiaoyi_gui_tool import xiaoyi_gui_agent
 from .image_reading_tool import image_reading
+from .check_plugin_privilege_tool import check_plugin_privilege
+from .login_token_tool import huawei_id_tool
 
 __all__ = [
     "get_user_location",
@@ -52,6 +54,7 @@ __all__ = [
     "search_file",
     "upload_file",
     "call_phone",
+    "send_sms",
     "send_message",
     "search_message",
     "create_alarm",
@@ -67,4 +70,6 @@ __all__ = [
     "convert_timestamp_to_utc8_time",
     "xiaoyi_gui_agent",
     "image_reading",
+    "check_plugin_privilege",
+    "huawei_id_tool",
 ]

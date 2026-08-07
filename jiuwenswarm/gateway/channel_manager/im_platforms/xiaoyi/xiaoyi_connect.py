@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 
 import aiohttp
 
+from jiuwenswarm.common.device_rpc.models import DeviceCommandRequest
 from jiuwenswarm.gateway.channel_manager.base import BaseChannel, ChannelMetadata, RobotMessageRouter
 from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
 from jiuwenswarm.gateway.routing.keys import XiaoyiDeliveryTarget
@@ -30,10 +31,45 @@ from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.xiaoyi_utils.push i
 from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.xiaoyi_utils.formatter import (
     get_status_state_for_event,
     get_status_text_for_event,
+    should_send_as_reasoning_text,
     should_send_as_status_update,
+    should_send_as_text,
+)
+from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.xiaoyi_utils.a2a_vars import (
+    extract_model_name,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _is_data_event_status_success(status: Any) -> bool:
+    if status is True:
+        return True
+    if status is None or status is False:
+        return False
+    return str(status).strip().lower() in ("success", "succeed", "successful", "ok")
+
+
+def _gui_response_session_id(message: dict[str, Any]) -> str:
+    session_id = str(message.get("sessionId") or "").strip()
+    if session_id:
+        return session_id
+    params = message.get("params")
+    if isinstance(params, dict):
+        session_id = str(params.get("sessionId") or "").strip()
+        if session_id:
+            return session_id
+    detail = message.get("msgDetail")
+    if isinstance(detail, str):
+        try:
+            parsed = json.loads(detail)
+        except json.JSONDecodeError:
+            return ""
+        detail_params = parsed.get("params")
+        if isinstance(detail_params, dict):
+            return str(detail_params.get("sessionId") or "").strip()
+    return ""
+
 
 FILE_TYPE_TO_MIME_TYPE: dict[str, str] = {
     "txt": "text/plain",
@@ -239,6 +275,10 @@ class XiaoyiChannel(BaseChannel):
         self._heartbeat_tasks: dict[str, asyncio.Task] = {}  # Heartbeat tasks for each channel
         self._connect_tasks: dict[str, asyncio.Task] = {}  # Connection tasks for each channel
         self._session_task_map: dict[str, str] = {}
+        # Team responses are produced by the first request's long-lived
+        # stream. Keep the current platform task for each stable session so
+        # those responses reach the user's latest A2A request.
+        self._latest_platform_tasks: dict[str, str] = {}
         self._session_heartbeat_tasks: dict[str, asyncio.Task] = {}  # Response heartbeat tasks for each session
         self._stream_text_buffers: dict[str, str] = {}
         self._task_last_activity: dict[str, float] = {}
@@ -248,9 +288,13 @@ class XiaoyiChannel(BaseChannel):
         self._on_message_cb: Callable[[Message], Any] | None = None
         # Task timeout management
         self._session_active: set[str] = set()  # Active sessions (concurrent request detection)
-        self._task_timeout_tasks: dict[str, asyncio.Task] = {}  # 1-hour task timeout tasks
-        self._session_timeout_tasks: dict[str, asyncio.Task] = {}  # 60-second periodic timeout tasks
+        self._active_tasks: set[tuple[str, str]] = set()
+        self._task_timeout_tasks: dict[tuple[str, str], asyncio.Task] = {}
+        self._session_timeout_tasks: dict[tuple[str, str], asyncio.Task] = {}
         self._sessions_waiting_for_push: dict[str, str] = {}  # {session: task} waiting for push
+        self._team_sessions: set[str] = set()  # Team rounds stay active across member outputs
+        self._team_tasks: set[tuple[str, str]] = set()
+        self._team_last_leader_finals: dict[tuple[str, str], str] = {}
         # Session cleanup management
         self._sessions_marked_for_cleanup: dict[str, dict[str, Any]] = {}  # Session cleanup state
         # File upload service configuration
@@ -288,6 +332,9 @@ class XiaoyiChannel(BaseChannel):
         self._gui_agent_handlers: List[Callable[[dict[str, Any]], Any]] = []
         # GUI 工具互斥：避免并发注册多个 handler 导致回包串单；不影响其他工具并发
         self._gui_tool_lock = asyncio.Lock()
+        self._device_command_locks: dict[tuple[str, str], asyncio.Lock] = {}
+        self._privilege_check_lock = asyncio.Lock()
+        self._scheduled_device_command_lock = asyncio.Lock()
 
     @property
     def channel_id(self) -> str:
@@ -305,6 +352,11 @@ class XiaoyiChannel(BaseChannel):
     def gui_tool_lock(self) -> asyncio.Lock:
         """供 xiaoyi_gui_agent 串行执行，避免多路 GUI 回包互相唤醒。"""
         return self._gui_tool_lock
+
+    @property
+    def is_ready(self) -> bool:
+        """当前 Channel 是否至少持有一条可发送的小艺连接."""
+        return self._running and any(self._ws_connections.values())
 
     @property
     def clients(self) -> set[Any]:
@@ -362,15 +414,13 @@ class XiaoyiChannel(BaseChannel):
                 self._session_heartbeat_tasks[session_id].cancel()
                 self._session_heartbeat_tasks[session_id] = None
         # Cancel all task timeout tasks
-        for session_id in list(self._task_timeout_tasks.keys()):
-            if self._task_timeout_tasks[session_id]:
-                self._task_timeout_tasks[session_id].cancel()
-                self._task_timeout_tasks[session_id] = None
+        for task in self._task_timeout_tasks.values():
+            if task:
+                task.cancel()
         # Cancel all session timeout tasks
-        for session_id in list(self._session_timeout_tasks.keys()):
-            if self._session_timeout_tasks[session_id]:
-                self._session_timeout_tasks[session_id].cancel()
-                self._session_timeout_tasks[session_id] = None
+        for task in self._session_timeout_tasks.values():
+            if task:
+                task.cancel()
         # Close all websocket connections
         for url_key, ws in list(self._ws_connections.items()):
             if ws:
@@ -386,7 +436,12 @@ class XiaoyiChannel(BaseChannel):
         self._session_timeout_tasks.clear()
         self._ws_connections.clear()
         self._session_active.clear()
+        self._active_tasks.clear()
+        self._latest_platform_tasks.clear()
         self._sessions_waiting_for_push.clear()
+        self._team_sessions.clear()
+        self._team_tasks.clear()
+        self._team_last_leader_finals.clear()
         self._sessions_marked_for_cleanup.clear()
         self._accumulated_texts.clear()
         # V2: 清理 push 合并窗口任务
@@ -508,13 +563,208 @@ class XiaoyiChannel(BaseChannel):
 
         # ── 非 team 模式：原有单值路径 ──
         if not self._ws_connections:
+            if str(msg.channel_id or "").strip().lower() == "xiaoyi":
+                logger.warning(
+                    "[GUI_AGENT_DIAG] phase=XIAOYI_SEND_SKIPPED "
+                    "message_id=%s reason=no_ws_connections payload=%r",
+                    msg.id,
+                    msg.payload,
+                )
             return
         await self._send_legacy(msg)
 
     async def _send_legacy(self, msg: Message) -> None:
         """非 team 模式原有单值投递路径（保留兼容）."""
+        logger.info(
+            "[GUI_AGENT_DIAG] phase=XIAOYI_SEND_MESSAGE message_id=%s "
+            "session_id=%s event_type=%s payload=%r enable_streaming=%s",
+            msg.id,
+            msg.session_id,
+            getattr(msg.event_type, "value", msg.event_type),
+            msg.payload,
+            self.config.enable_streaming,
+        )
         logger.info(f"XiaoyiChannel 发送消息: {msg}")
+        payload = msg.payload if isinstance(msg.payload, dict) else {}
+        event_name = str(
+            getattr(msg.event_type, "value", None) or payload.get("event_type") or ""
+        ).strip()
+        team_role = str(payload.get("role") or "").strip().lower()
+        metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
+        mode = str(metadata.get("mode") or "").strip().lower()
+        reset_team_session = bool(metadata.get("reset_team_session"))
+        terminal_notice = bool(metadata.get("terminal_notice"))
         session_id, task_id = self._extract_platform_receive_info(msg)
+        is_team_mode = mode in {"team", "team.plan", "code.team"}
+        is_team_event = not reset_team_session and (
+            event_name.startswith("team.")
+            or is_team_mode
+        )
+        latest_task_id = self._latest_platform_tasks.get(session_id)
+        if (
+            is_team_event
+            and session_id not in self._team_sessions
+            and (not latest_task_id or task_id != latest_task_id)
+        ):
+            logger.info(
+                "[GUI_AGENT_DIAG] phase=XIAOYI_STALE_TEAM_EVENT_SKIPPED "
+                "message_id=%s session_id=%s source_task_id=%s "
+                "latest_task_id=%s event_type=%s",
+                msg.id,
+                session_id,
+                task_id,
+                latest_task_id,
+                event_name,
+            )
+            return
+        if is_team_event:
+            task_id = latest_task_id or task_id
+        team_task_key = (session_id, task_id)
+
+        # Team control/state events are not user-visible.  They identify a
+        # long-lived round whose chat.final frames are member outputs rather
+        # than the terminal frame for the whole A2A task.
+        if is_team_event and session_id:
+            self._team_sessions.add(session_id)
+            self._team_tasks.add(team_task_key)
+        elif mode or reset_team_session:
+            # An explicit non-Team mode overrides stale session-level Team
+            # state. Clear every task marker for the platform session so an
+            # older Team round cannot contaminate the new non-Team task.
+            self._clear_team_session(session_id)
+        is_team_session = team_task_key in self._team_tasks
+
+        # keepalive 是 jiuwenswarm 流空窗期(如 team 长任务后台执行工具)每 10s
+        # 发出的保活帧，payload 仅 {event_type: keepalive}，无 content。原本会漏到
+        # 下方 text 管道，被当成 text="\n" 的空内容 artifact-update 推给小艺——
+        # 小艺侧 120s 超时机制只认实质 content，收到一连串空帧判定超时，回
+        # "稍等，稍等片刻再试试"。这里改为转成一条 A2A status-update(state=working)
+        # 推给小艺：带实质状态文本、is_final=False，既保活又满足超时判定。
+        if event_name == "keepalive":
+            if session_id and self._is_session_active(session_id, task_id):
+                for url_key in list(self._ws_connections.keys()):
+                    await self._send_status_update_with_state(
+                        task_id,
+                        session_id,
+                        "正在处理中，请稍候~",
+                        "working",
+                        url_key,
+                    )
+                logger.info(
+                    "[GUI_AGENT_DIAG] phase=XIAOYI_KEEPALIVE_TO_STATUS "
+                    "message_id=%s session_id=%s task_id=%s "
+                    "reason=keepalive_as_status_update_to_avait_peer_timeout",
+                    msg.id,
+                    session_id,
+                    task_id,
+                )
+            else:
+                logger.info(
+                    "[GUI_AGENT_DIAG] phase=XIAOYI_KEEPALIVE_SKIPPED "
+                    "message_id=%s session_id=%s task_id=%s "
+                    "reason=keepalive_no_active_session",
+                    msg.id,
+                    session_id,
+                    task_id,
+                )
+            return
+
+        if event_name == "team.runtime_ready":
+            return
+
+        # Match Feishu's low-noise policy: member/task lifecycle events remain
+        # internal, while team.message is delivered as readable text.
+        if event_name in {"team.member", "team.task"}:
+            return
+
+        # A completed Xiaoyi task cannot accept more artifacts. Team runtimes
+        # can keep producing member events after the leader has ended the
+        # current round, so drop those events until the next inbound platform
+        # task becomes active. The runtime-level completion event is still
+        # consumed below so its Team markers can be cleared.
+        if (
+            is_team_session
+            and event_name != "team.completed"
+            and not self._is_session_active(session_id, task_id)
+        ):
+            logger.info(
+                "[GUI_AGENT_DIAG] phase=XIAOYI_TEAM_EVENT_SKIPPED "
+                "message_id=%s session_id=%s task_id=%s event_type=%s "
+                "reason=platform_task_already_completed",
+                msg.id,
+                session_id,
+                task_id,
+                event_name,
+            )
+            return
+
+        if event_name == "team.message":
+            event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
+            from_member = str(event.get("from_member") or "团队成员").strip()
+            to_member = str(event.get("to_member") or "").strip()
+            message_type = str(event.get("type") or "").strip()
+            content = str(event.get("content") or "").strip()
+            if not content:
+                logger.warning("XiaoyiChannel Team 消息缺少 content，跳过发送")
+                return
+            receiver = to_member if message_type == "team.message.p2p" and to_member else "全体"
+            team_text = f"【团队消息｜{from_member} → {receiver}】\n{content}"
+            self._accumulated_texts[team_task_key] = team_text
+            for url_key in list(self._ws_connections.keys()):
+                await self._send_text_response(
+                    session_id,
+                    task_id,
+                    team_text,
+                    url_key,
+                    append=False,
+                    last_chunk=True,
+                    is_final=False,
+                )
+            return
+
+        if event_name == "team.completed":
+            if self._is_session_active(session_id, task_id):
+                leader_summary = self._team_last_leader_finals.get(team_task_key, "")
+                for url_key in list(self._ws_connections.keys()):
+                    if leader_summary:
+                        await self._send_text_response(
+                            session_id,
+                            task_id,
+                            leader_summary,
+                            url_key,
+                            append=False,
+                            last_chunk=True,
+                            is_final=False,
+                        )
+                    await self._send_status_update_with_state(
+                        task_id,
+                        session_id,
+                        "团队任务已完成~",
+                        "completed",
+                        url_key,
+                    )
+                await self._finalize_session(
+                    session_id,
+                    task_id,
+                    leader_summary or None,
+                )
+            self._latest_platform_tasks.pop(session_id, None)
+            self._session_task_map.pop(task_id, None)
+            self._clear_task_timeout(session_id)
+            self._clear_session_timeout(session_id)
+            self._sessions_waiting_for_push.pop(session_id, None)
+            self._clear_team_session(session_id)
+            return
+
+        # Xiaoyi exposes chat.delta/subtask updates as reasoningText. Keep that
+        # live process leader-only while preserving teammate final/error output.
+        if (
+            is_team_session
+            and team_role == "teammate"
+            and event_name in {"chat.delta", "chat.subtask_update"}
+        ):
+            return
+
         # Handle chat.file event
         if self.config.mode == "xiaoyi_claw" and msg.event_type == EventType.CHAT_FILE:
             files = msg.payload.get("files", {}) if isinstance(msg.payload, dict) else {}
@@ -543,13 +793,107 @@ class XiaoyiChannel(BaseChannel):
                                 logger.warning(f"XiaoyiChannel 发送文件响应失败 ({url_key}): {e}")
             return
 
+        # Handle chat.html_card event (H5 card via clawH5; URL already resolved by toolkit)
+        if self.config.mode == "xiaoyi_claw" and msg.event_type == EventType.CHAT_HTML_CARD:
+            payload = msg.payload if isinstance(msg.payload, dict) else {}
+            cards_info = payload.get("cardsInfo")
+            if not isinstance(cards_info, list) or not cards_info:
+                url = str(payload.get("url") or "").strip()
+                if url:
+                    cards_info = [
+                        {
+                            "cardName": "clawH5",
+                            "cardData": {"url": url},
+                            "displayType": "DisplayFaCard",
+                        }
+                    ]
+            if cards_info:
+                message_id = str(msg.id or task_id or "")
+                for url_key, ws in self._ws_connections.items():
+                    if ws:
+                        try:
+                            await self._send_html_card_response(
+                                session_id, task_id, message_id, cards_info, url_key
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                "XiaoyiChannel 发送 HTML 卡片失败 (%s): %s", url_key, e
+                            )
+            else:
+                logger.warning(
+                    "XiaoyiChannel chat.html_card 缺少 cardsInfo/url，跳过 session_id=%s",
+                    session_id,
+                )
+            return
+
         if should_send_as_status_update(msg.event_type):
-            status_text = get_status_text_for_event(msg.event_type, msg.payload)
+            if is_team_session and msg.event_type in {
+                EventType.CHAT_TOOL_CALL,
+                EventType.CHAT_TOOL_RESULT,
+            }:
+                return
+            is_processing = (
+                msg.payload.get("is_processing", True)
+                if isinstance(msg.payload, dict)
+                else True
+            )
+            if (
+                is_team_session
+                and msg.event_type == EventType.CHAT_PROCESSING_STATUS
+                and is_processing is False
+            ):
+                logger.info(
+                    "[GUI_AGENT_DIAG] phase=XIAOYI_TEAM_STATUS_DEFERRED "
+                    "message_id=%s session_id=%s task_id=%s",
+                    msg.id,
+                    session_id,
+                    task_id,
+                )
+                return
+            if not is_processing and not self._is_session_active(session_id, task_id):
+                logger.info(
+                    "[GUI_AGENT_DIAG] phase=XIAOYI_STATUS_SKIPPED "
+                    "message_id=%s session_id=%s event_type=%s "
+                    "reason=terminal_text_already_sent payload=%r",
+                    msg.id,
+                    session_id,
+                    getattr(msg.event_type, "value", msg.event_type),
+                    msg.payload,
+                )
+                return
+            status_text = (
+                "团队任务已完成~"
+                if is_team_session and not is_processing
+                else get_status_text_for_event(msg.event_type, msg.payload)
+            )
             status_state = get_status_state_for_event(msg.event_type, msg.payload)
             for url_key in list(self._ws_connections.keys()):
                 await self._send_status_update_with_state(
                     task_id, session_id, status_text, status_state, url_key
                 )
+            if status_state in {"completed", "failed", "canceled"} and session_id:
+                await self._finalize_session(
+                    session_id,
+                    task_id,
+                    preserve_team_session=(
+                        is_team_session and status_state == "completed"
+                    ),
+                )
+            return
+
+        if not (
+            should_send_as_reasoning_text(msg.event_type)
+            or should_send_as_text(msg.event_type)
+        ):
+            logger.info(
+                "[GUI_AGENT_DIAG] phase=XIAOYI_EVENT_SKIPPED message_id=%s "
+                "session_id=%s event_type=%s reason=non_user_visible_event "
+                "payload=%r",
+                msg.id,
+                session_id,
+                getattr(msg.event_type, "value", msg.event_type),
+                msg.payload,
+            )
             return
 
         # 处理错误消息：发送 failed 状态 + 错误文本 + 结束会话
@@ -594,55 +938,228 @@ class XiaoyiChannel(BaseChannel):
             logger.warning(f"XiaoyiChannel 发送错误消息: session={session_id}, error={error_text}")
             return
 
+        # 问卷降级保底：端侧无选项点选卡片能力，把 chat.ask_user_question 降级为纯文本，
+        # 走 text part 管道（A2A artifact-update kind:"text"），保证端侧一定能渲染出问卷。
+        # 必须放在下方 non_user_visible SKIPPED 判断之前——chat.ask_user_question 既非
+        #   status_update 也非 reasoning/text，会被那段直接 SKIPPED，降级就永远到不了。
+        # 协议帧与普通正文回复末帧完全一致：append=False, lastChunk=True, final=True, kind="text"。
+        #   last_chunk=True：一次性整段输出，按协议流式输出必须以 lastChunk=True 结束，
+        #   且 last_chunk=True 才走 kind:"text" 正文管道（False 会走 reasoningText 思考管道）。
+        #   is_final=True：与普通回复末帧一致，本轮结束；用户回答问卷作为新一轮请求重新进来，
+        #   agent 拿到回答后再给出方案，与纯文本 ask_user 的处理方式完全相同。
+        if msg.event_type == EventType.CHAT_ASK_USER_QUESTION:
+            ask_payload = msg.payload if isinstance(msg.payload, dict) else {}
+            ask_questions = ask_payload.get("questions", []) or []
+            if ask_questions:
+                ask_lines = ["为了帮你更好地完成任务，请回答以下几个问题：", ""]
+                for q in ask_questions:
+                    q_header = q.get("header", "") or q.get("question", "") or "问题"
+                    q_text = q.get("question", "")
+                    if q_header and q_header != q_text:
+                        ask_lines.append(f"【{q_header}】{q_text}")
+                    else:
+                        ask_lines.append(q_text)
+                    q_opts = q.get("options", []) or []
+                    for opt in q_opts:
+                        if isinstance(opt, dict):
+                            opt_label = opt.get("label", "") or opt.get("description", "")
+                        else:
+                            opt_label = str(opt)
+                        if opt_label:
+                            ask_lines.append(f"  • {opt_label}")
+                ask_lines.append("（直接回复你的选择或补充具体信息即可，我会据此继续处理）")
+                ask_text = "\n".join(ask_lines)
+                for url_key in list(self._ws_connections.keys()):
+                    await self._send_text_response(
+                        session_id,
+                        task_id,
+                        ask_text,
+                        url_key,
+                        append=False,
+                        last_chunk=True,
+                        is_final=True,  # 与普通回复末帧一致，本轮结束；用户回答作为新请求重新进来
+                    )
+            return
+
+        if not (
+            should_send_as_reasoning_text(msg.event_type)
+            or should_send_as_text(msg.event_type)
+        ):
+            logger.info(
+                "[GUI_AGENT_DIAG] phase=XIAOYI_EVENT_SKIPPED message_id=%s "
+                "session_id=%s event_type=%s reason=non_user_visible_event "
+                "payload=%r",
+                msg.id,
+                session_id,
+                getattr(msg.event_type, "value", msg.event_type),
+                msg.payload,
+            )
+            return
+
         content = ""
         cron_job_name = ""
+        cron_job_id = ""
         if isinstance(msg.payload, dict):
             content = msg.payload.get("content", "\n")
+            if msg.event_type == EventType.CHAT_ERROR:
+                error_text = str(msg.payload.get("error") or "处理出错").strip()
+                content = f"⚠️ {error_text}"
             if isinstance(content, dict):
                 content = content.get("output", str(content))
             content = str(content)
-            cron_job_name = msg.payload.get("cron", {}).get("job_name", "")
+            cron_block = msg.payload.get("cron", {})
+            if isinstance(cron_block, dict):
+                cron_job_name = str(cron_block.get("job_name") or "")
+                cron_job_id = str(cron_block.get("job_id") or "")
         elif msg.payload:
             content = str(msg.payload)
 
+        if (
+            is_team_session
+            and team_role != "teammate"
+            and event_name == "chat.final"
+            and content.strip()
+        ):
+            self._team_last_leader_finals[team_task_key] = content
+
         # 推送消息发送
         if msg.id.startswith("cron-push"):
-            await self._send_push_notification(cron_job_name, content)
+            # 与 xy_channel cron-buffer.ts flushBufferedTexts + outbound.ts sendText 对齐：
+            # 1. 持久化全文到 pushData（客户端 Trigger 回查看全文，不受截断影响）
+            # 2. 经 push_broadcast 向所有已注册 pushId 广播（单 pushId 失败不影响其他）
+            # pushDataId 为空时回落 kind="text" 内联，行为同现状。
+            push_text = content[:1000] if len(content) > 1000 else content
+            title = content.split("\n")[0][:57] if content else ""
+            push_data_id = ""
+            try:
+                from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools.pushdata_manager import (
+                    save_push_data,
+                )
+                cron_meta = None
+                if cron_job_id or cron_job_name:
+                    cron_meta = {
+                        "cronJobId": cron_job_id,
+                        "cronTitle": cron_job_name,
+                    }
+                push_data_id = save_push_data(content, cron_meta)
+                logger.info(
+                    "[CRON-PUSH] Saved pushData: pushDataId=%s cronId=%s cronTitle=%s",
+                    push_data_id[:8] if push_data_id else "-",
+                    cron_job_id or "-",
+                    cron_job_name or "-",
+                )
+            except Exception as save_err:
+                logger.error(
+                    "[CRON-PUSH] Failed to save pushData: %s", save_err
+                )
+
+            try:
+                from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.xiaoyi_utils.push import (
+                    PushConfig as _PushConfig,
+                    push_broadcast,
+                )
+                push_config = _PushConfig(
+                    mode=self.config.mode,
+                    api_id=self.config.api_id,
+                    push_id=self.config.push_id,
+                    push_url=self.config.push_url,
+                    ak=self.config.ak,
+                    sk=self.config.sk,
+                    uid=self.config.uid,
+                    api_key=self.config.api_key,
+                )
+                result = await push_broadcast(
+                    config=push_config,
+                    text=push_text,
+                    title=title or cron_job_name or "任务已完成",
+                    to=str(session_id or ""),
+                    push_data_id=push_data_id,
+                    cron_job_id=cron_job_id or None,
+                    cron_title=cron_job_name or None,
+                )
+                logger.info(
+                    "[CRON-PUSH] push_broadcast done: success=%d failure=%d cronId=%s",
+                    result.success_count,
+                    result.failure_count,
+                    cron_job_id or "-",
+                )
+            except Exception as push_err:
+                logger.error(
+                    "[CRON-PUSH] push_broadcast failed, fallback to single push: %s",
+                    push_err,
+                )
+                # 回退到原有的单 pushId 推送，保证推送不丢
+                await self._send_push_notification(
+                    cron_job_name or title, content
+                )
             return
 
         # 如果禁用流式，总是作为完整消息发送
         if not self.config.enable_streaming:
             append = False
             last_chunk = True
-            final = True
+            final = not (
+                is_team_session
+                and msg.event_type in {EventType.CHAT_FINAL, EventType.CHAT_ERROR}
+            )
+            if not final and team_role == "teammate":
+                member_name = str(msg.payload.get("member_name") or "").strip()
+                if member_name:
+                    content = f"【{member_name}】\n{content}"
         else:
             # 流式模式：按事件类型计算增量与是否结束
-            is_delta = msg.event_type == EventType.CHAT_DELTA
-            last_chunk = msg.event_type == EventType.CHAT_FINAL
-            is_final = msg.payload.get("is_complete", False)
-            last_chunk = True if is_final else last_chunk
-
-            # 获取之前发送的文本
-            previous_text = self._accumulated_texts.get(session_id, "")
+            is_chat_final = msg.event_type == EventType.CHAT_FINAL
+            is_final = bool(msg.payload.get("is_complete", False))
 
             # 累积当前文本
-            self._accumulated_texts[session_id] = content
+            self._accumulated_texts[team_task_key] = content
 
-            # 计算增量文本
-            if is_delta:
-                incremental_text = content[len(previous_text):]
+            # chat.final 携带完整正文，直接作为独立终帧发送，避免客户端
+            # 等待后续空 status 帧提交正文。
+            if is_team_session and msg.event_type in {
+                EventType.CHAT_FINAL,
+                EventType.CHAT_ERROR,
+            }:
+                if team_role == "teammate":
+                    member_name = str(msg.payload.get("member_name") or "").strip()
+                    if member_name:
+                        content = f"【{member_name}】\n{content}"
+                append = False
+                last_chunk = True
+                final = False
+            elif is_chat_final:
+                append = False
+                last_chunk = True
+                # Agent streams finish via processing_status; local notices do not.
+                final = terminal_notice
             else:
-                incremental_text = content
+                append = True
+                last_chunk = is_final
+                final = is_final
 
-            # 在消息流中，总是使用 append=true, isFinal=false
-            append = True
-            final = False
-            last_chunk = last_chunk
-            final = is_final
+        logger.info(
+            "[GUI_AGENT_DIAG] phase=XIAOYI_TEXT_FLAGS message_id=%s "
+            "platform_session_id=%s platform_task_id=%s event_type=%s "
+            "payload_is_complete=%r append=%s last_chunk=%s final=%s "
+            "content=%r",
+            msg.id,
+            session_id,
+            task_id,
+            getattr(msg.event_type, "value", msg.event_type),
+            (
+                msg.payload.get("is_complete")
+                if isinstance(msg.payload, dict)
+                else None
+            ),
+            append,
+            last_chunk,
+            final,
+            content,
+        )
 
         # Get accumulated text for this session (for push notification)
-        accumulated_text = self._accumulated_texts.get(session_id, "")
-        self._accumulated_texts[session_id] = content
+        accumulated_text = self._accumulated_texts.get(team_task_key, "")
+        self._accumulated_texts[team_task_key] = content
 
         # Send to all active connections
         for url_key, ws in self._ws_connections.items():
@@ -666,7 +1183,6 @@ class XiaoyiChannel(BaseChannel):
             self._clear_task_timeout(session_id)
             self._clear_session_timeout(session_id)
             self._mark_session_completed(session_id)
-
             # Check if session was waiting for push and send notification
             if self._is_session_waiting_for_push(session_id, task_id) and accumulated_text:
                 summary = accumulated_text[:30] + "..." if len(accumulated_text) > 30 else accumulated_text
@@ -1056,7 +1572,7 @@ class XiaoyiChannel(BaseChannel):
         async with websockets.connect(
                 url,
                 additional_headers=headers,
-                ssl=ssl_context,
+                # ssl=ssl_context,
                 ping_interval=15,
                 ping_timeout=15,
                 close_timeout=5,
@@ -1073,7 +1589,7 @@ class XiaoyiChannel(BaseChannel):
 
             try:
                 async for raw in ws:
-                    await self._handle_raw_message(raw)
+                    await self._handle_raw_message(raw, url_key)
             except Exception as e:
                 logger.warning(f"XiaoyiChannel 连接异常 ({url_key}): {e}")
             finally:
@@ -1121,18 +1637,32 @@ class XiaoyiChannel(BaseChannel):
                 break
             await asyncio.sleep(20)
 
-    async def _handle_raw_message(self, raw: str | bytes) -> None:
+    async def _handle_raw_message(self, raw: str | bytes, url_key: str | None = None) -> None:
         """处理接收到的原始消息，转换为 JiuwenSwarm 内部格式."""
         try:
             if isinstance(raw, bytes):
                 raw = raw.decode("utf-8")
+            is_gui_response_frame = "InvokeJarvisGUIAgentResponse" in raw
             message = json.loads(raw)
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
             logger.warning(f"XiaoyiChannel JSON 解析失败: {e}")
             return
-
         msg_type = message.get("msgType")
         method = message.get("method")
+        if is_gui_response_frame:
+            logger.info(
+                "[GUI_RPC_TRACE] phase=CHANNEL_RAW_GUI_FRAME "
+                "msg_type=%s method=%s session_id=%s has_msg_detail=%s",
+                msg_type,
+                method,
+                str(message.get("sessionId") or ""),
+                isinstance(message.get("msgDetail"), str),
+            )
+            logger.info(
+                "[GUI_AGENT_DIAG] phase=XIAOYI_RAW_GUI_FRAME raw=%s parsed=%r",
+                raw,
+                message,
+            )
 
         # 添加详细日志用于诊断工具消息
         if method or (msg_type and msg_type != "heartbeat"):
@@ -1141,9 +1671,387 @@ class XiaoyiChannel(BaseChannel):
 
         if msg_type == "heartbeat":
             return
+        # ── 入站 A2A 诊断:扫描所有 AgentEvent header 打出,用于发现端侧下发的
+        # 各类指令(含尚未处理的 MemoryQuery/SelfEvolution/CronQuery 及其他)。
+        # 无 AgentEvent header 的普通消息也打一条 msg_type/method,便于全覆盖。
+        try:
+            from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.self_evolution import (
+                iter_agent_event_headers,
+            )
+            _in_events = iter_agent_event_headers(message)
+            if _in_events:
+                logger.info(
+                    "[XiaoyiChannel][A2A_IN] AgentEvent=%s msg_type=%s method=%s "
+                    "session_id=%s task_id=%s msg_id=%s",
+                    _in_events, msg_type, method,
+                    str(message.get("sessionId") or ""),
+                    str(message.get("taskId") or ""),
+                    str(message.get("id") or ""),
+                )
+            else:
+                logger.info(
+                    "[XiaoyiChannel][A2A_IN] no_AgentEvent msg_type=%s method=%s "
+                    "session_id=%s",
+                    msg_type, method,
+                    str(message.get("sessionId") or ""),
+                )
+        except Exception as _e:
+            logger.debug("[XiaoyiChannel][A2A_IN] scan failed: %s", _e)
+        # MemoryQuery is a command data event (direct or wrapped A2A), not a
+        # normal user message. Consume it before the generic data-event parser.
+        from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.memory_query import (
+            extract_memory_query,
+            handle_memory_query,
+            memory_query_command,
+            configured_runtime_state_path,
+        )
 
-        # 根级直连 A2A（jsonrpc 2.0）须含 params.sessionId，否则整帧丢弃
-        if message.get("jsonrpc") == "2.0":
+        memory_query = extract_memory_query(message)
+        if memory_query is not None:
+            logger.info(
+                "[XiaoyiChannel][MemoryQuery_IN] action=%s session=%s task=%s "
+                "msg=%s params=%s",
+                memory_query.action,
+                memory_query.session_id,
+                memory_query.task_id,
+                memory_query.message_id,
+                memory_query.params,
+            )
+            from jiuwenswarm.common.utils import get_agent_workspace_dir
+
+            answer = await asyncio.to_thread(
+                handle_memory_query,
+                memory_query,
+                workspace_dir=get_agent_workspace_dir(),
+                runtime_state_path=configured_runtime_state_path(),
+            )
+            logger.info(
+                "[XiaoyiChannel][MemoryQuery_DONE] action=%s answer=%s",
+                memory_query.action,
+                answer,
+            )
+            await self.send_xiaoyi_phone_tools_command(
+                memory_query.session_id,
+                memory_query.task_id,
+                memory_query.message_id,
+                memory_query_command(memory_query.action, answer),
+                final=True,
+            )
+            return
+        # ── SelfEvolution detection (AgentEvent.ClawSelfEvolutionState / .Get) ──
+        # 1:1 with xy_channel self-evolution-handler.ts: persist device-reported
+        # selfEvolutionState to .xiaoyiruntime (set, reply empty final ACK) or emit
+        # a Common/Action intent back to the device (get). Consumed before the
+        # generic data-event parser, same slot as MemoryQuery above.
+        from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.self_evolution import (
+            extract_self_evolution_set,
+            extract_self_evolution_get,
+            build_self_evolution_state_get_command,
+        )
+        from jiuwenswarm.agents.harness.common.memory.celia.runtime_state import (
+            set_self_evolution_state,
+            read_self_evolution_state,
+        )
+
+        self_evolution_set = extract_self_evolution_set(message)
+        if self_evolution_set is not None:
+            logger.info(
+                "[XiaoyiChannel][SelfEvolution_IN] kind=ClawSelfEvolutionState "
+                "state=%s session=%s task=%s msg=%s",
+                self_evolution_set.state,
+                self_evolution_set.session_id,
+                self_evolution_set.task_id,
+                self_evolution_set.message_id,
+            )
+            await asyncio.to_thread(
+                set_self_evolution_state,
+                self_evolution_set.state,
+                configured_runtime_state_path(),
+            )
+            logger.info(
+                "[XiaoyiChannel][SelfEvolution_SET_DONE] persisted state=%s "
+                "session=%s task=%s msg=%s",
+                self_evolution_set.state,
+                self_evolution_set.session_id,
+                self_evolution_set.task_id,
+                self_evolution_set.message_id,
+            )
+            await self._send_empty_final_ack(
+                self_evolution_set.session_id,
+                self_evolution_set.task_id,
+                self_evolution_set.message_id,
+            )
+            return
+
+        self_evolution_get = extract_self_evolution_get(message)
+        if self_evolution_get is not None:
+            logger.info(
+                "[XiaoyiChannel][SelfEvolution_IN] kind=ClawSelfEvolutionStateGet "
+                "session=%s task=%s msg=%s",
+                self_evolution_get.session_id,
+                self_evolution_get.task_id,
+                self_evolution_get.message_id,
+            )
+            state = await asyncio.to_thread(
+                read_self_evolution_state,
+                configured_runtime_state_path(),
+            )
+            logger.info(
+                "[XiaoyiChannel][SelfEvolution_GET_DONE] read state=%s "
+                "session=%s task=%s msg=%s",
+                state,
+                self_evolution_get.session_id,
+                self_evolution_get.task_id,
+                self_evolution_get.message_id,
+            )
+            await self.send_xiaoyi_phone_tools_command(
+                self_evolution_get.session_id,
+                self_evolution_get.task_id,
+                self_evolution_get.message_id,
+                build_self_evolution_state_get_command(state),
+                final=True,
+            )
+            return
+        # ── A2A CronQuery detection (AgentEvent.CronQuery) ──────────────
+        # Detect CronQuery directives at root level or inside parts directives.
+        # Handle and respond via WebSocket before falling through to normal flow.
+        try:
+            from jiuwenswarm.gateway.cron.cron_query_handler import (
+                extract_cron_query_from_message,
+                dispatch_cron_query,
+                build_a2a_response_envelope,
+            )
+            from jiuwenswarm.gateway.cron.controller import CronController
+
+            cron_payload = extract_cron_query_from_message(message)
+            if cron_payload is not None:
+                logger.info(
+                    "[XiaoyiChannel] CronQuery action=%s detected",
+                    cron_payload.get("action"),
+                )
+                try:
+                    cc = CronController.get_instance()
+                except RuntimeError:
+                    cc = None
+                # session_id_ctx: params.sessionId (conversationId, 带 _CronQuery 后缀)
+                session_id_ctx = ""
+                params_root = message.get("params")
+                if isinstance(params_root, dict):
+                    sid_val = params_root.get("sessionId")
+                    if isinstance(sid_val, str) and sid_val.strip():
+                        session_id_ctx = sid_val.strip()
+                # rpc_id: JSON-RPC request id (用于响应关联)
+                rpc_id = message.get("id") or ""
+                task_id = ""
+                if isinstance(params_root, dict):
+                    task_id = params_root.get("id") or ""
+                result = await dispatch_cron_query(
+                    cron_payload,
+                    cron_controller=cc,
+                    session_id=session_id_ctx,
+                )
+                # dispatch returns {action, status:True, ans} on success,
+                # or {action, ans:{error}} on error (no status field).
+                # build_a2a_response_envelope: status=True → include payload.status;
+                # status=False → omit payload.status (error per protocol doc).
+                is_ok = bool(result.get("status", False))
+                response_envelope = build_a2a_response_envelope(
+                    result.get("action", cron_payload.get("action", "")),
+                    result.get("ans", {}),
+                    status=is_ok,
+                )
+                if url_key:
+                    try:
+                        # CronQuery 信封包装在标准 JSON-RPC artifact-update 响应里，
+                        # 与正常 agent_response 路径一致（jsonrpc/id/result/artifact/parts）。
+                        # 下行响应用 data.commands（与正常消息流一致），元素为 {header, payload} 信封。
+                        cron_rpc_response = {
+                            "jsonrpc": "2.0",
+                            "id": rpc_id,
+                            "result": {
+                                "taskId": task_id,
+                                "kind": "artifact-update",
+                                "append": False,
+                                "lastChunk": True,
+                                "final": True,
+                                "artifact": {
+                                    "artifactId": str(uuid.uuid4()),
+                                    "parts": [
+                                        {
+                                            "kind": "data",
+                                            "data": {"commands": [response_envelope]},
+                                        }
+                                    ],
+                                },
+                            },
+                        }
+                        cron_wrapper = {
+                            "msgType": "agent_response",
+                            "agentId": self.config.agent_id,
+                            "sessionId": session_id_ctx,
+                            "taskId": task_id,
+                            "msgDetail": json.dumps(cron_rpc_response, ensure_ascii=False),
+                        }
+                        await self._safe_ws_send(url_key, cron_wrapper)
+                    except Exception as send_err:
+                        logger.warning(
+                            "[XiaoyiChannel] CronQuery response send failed: %s",
+                            send_err,
+                        )
+                return  # CronQuery handled; do not fall through to message dispatch
+        except ImportError:
+            logger.debug("[XiaoyiChannel] cron_query_handler not available, skipping CronQuery detection")
+        except Exception as exc:
+            logger.warning("[XiaoyiChannel] CronQuery handling error: %s", exc)
+
+        # ── Cron Trigger detection (Common/Trigger, triggerType=event) ──
+        # 设备端 cron 到时间后，通过 WS 发来报文1（含 Common/Trigger 事件，
+        # payload.dataMap 含 cronId/cronTitle/pushDataId）。我们识别后触发
+        # 对应 cron job 执行，等结果产出，再通过 WS 回发正常 a2a 文本消息
+        # （kind: "text" 的 artifact-update），与普通消息流一致。
+        # 与 CronQuery 同层，在 _handle_message_stream 之前拦截。
+        try:
+            from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.cron_trigger_handler import (
+                extract_cron_trigger,
+            )
+            from jiuwenswarm.gateway.cron.controller import CronController
+
+            trigger_ctx = extract_cron_trigger(message)
+            if trigger_ctx is not None:
+                logger.info(
+                    "[XiaoyiChannel][CronTrigger_IN] cronId=%s cronTitle=%s "
+                    "pushDataId=%s session=%s conversation=%s agent=%s "
+                    "rpc_id=%s task_id=%s",
+                    trigger_ctx.cron_id,
+                    trigger_ctx.cron_title,
+                    trigger_ctx.push_data_id,
+                    trigger_ctx.session_id,
+                    trigger_ctx.conversation_id,
+                    trigger_ctx.agent_id,
+                    trigger_ctx.rpc_id,
+                    trigger_ctx.task_id,
+                )
+                try:
+                    cc = CronController.get_instance()
+                except RuntimeError:
+                    cc = None
+
+                result_text = ""
+                run_id = ""
+                if cc is not None:
+                    try:
+                        run_id, result_text = await cc.run_now_and_wait(
+                            trigger_ctx.cron_id
+                        )
+                        logger.info(
+                            "[XiaoyiChannel][CronTrigger_DONE] cronId=%s run_id=%s "
+                            "result_len=%d",
+                            trigger_ctx.cron_id,
+                            run_id,
+                            len(result_text or ""),
+                        )
+                    except Exception as run_exc:
+                        logger.warning(
+                            "[XiaoyiChannel][CronTrigger_RUN_ERROR] cronId=%s "
+                            "error=%s",
+                            trigger_ctx.cron_id,
+                            run_exc,
+                        )
+                        result_text = f"[cron] 任务执行失败: {run_exc}"
+
+                if not result_text:
+                    result_text = "[cron] 任务完成，但未返回可展示文本"
+
+                # 用正常 a2a 文本消息回发（kind: "text"），与 _send_text_response 一致
+                if url_key:
+                    try:
+                        await self._send_text_response(
+                            trigger_ctx.session_id,
+                            trigger_ctx.task_id,
+                            result_text,
+                            url_key,
+                        )
+                        logger.info(
+                            "[XiaoyiChannel][CronTrigger_SENT] cronId=%s "
+                            "session=%s result_len=%d",
+                            trigger_ctx.cron_id,
+                            trigger_ctx.session_id,
+                            len(result_text),
+                        )
+                    except Exception as send_err:
+                        logger.warning(
+                            "[XiaoyiChannel][CronTrigger_SEND_ERROR] cronId=%s "
+                            "error=%s",
+                            trigger_ctx.cron_id,
+                            send_err,
+                        )
+                return  # CronTrigger handled; do not fall through to message dispatch
+        except ImportError:
+            logger.debug("[XiaoyiChannel] cron_trigger_handler not available, skipping CronTrigger detection")
+        except Exception as exc:
+            logger.warning("[XiaoyiChannel] CronTrigger handling error: %s", exc)
+
+        # ── Common/Trigger detection (用户点击推送消息触发) ──────────
+        # 设备端用户点击定时任务的推送消息时，通过 WS 发来含 Common/Trigger
+        # 事件的报文（payload.dataMap 含 pushDataId）。识别后直接读取预存的
+        # pushData 内容，构造标准 a2a 文本消息（kind: "text" 的 artifact-update）
+        # 通过 WS 回发，不走正常 agent 流程。与 xy_channel bot.ts Trigger 分支
+        # + formatter.ts sendA2AResponse 对齐。与上方 CronTrigger（System/UnfinishedTask，
+        # 设备 cron 到点自动触发并执行 job）的区别：本分支是用户主动点击、
+        # 直接返回缓存内容、不执行 cron job。
+        try:
+            from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools.trigger_handler import (
+                handle_trigger_event,
+            )
+
+            async def _send_trigger_wrapper(wrapper: dict[str, Any]) -> None:
+                logger.info("url_key %s wrapper %s", url_key, json.dumps(wrapper))
+                if url_key:
+                    await self._safe_ws_send(url_key, wrapper)
+
+            handled = await handle_trigger_event(
+                message,
+                _send_trigger_wrapper,
+                agent_id=self.config.agent_id,
+            )
+            if handled:
+                return  # Common/Trigger handled; do not fall through to message dispatch
+        except ImportError:
+            logger.debug("[XiaoyiChannel] trigger_handler not available, skipping Common/Trigger detection")
+        except Exception as exc:
+            logger.warning("[XiaoyiChannel] Common/Trigger handling error: %s", exc)
+
+        # MemoryQuery is a command data event (direct or wrapped A2A), not a
+        # normal user message. Consume it before the generic data-event parser.
+        from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.memory_query import (
+            extract_memory_query,
+            handle_memory_query,
+            memory_query_command,
+            configured_runtime_state_path,
+        )
+
+        memory_query = extract_memory_query(message)
+        if memory_query is not None:
+            from jiuwenswarm.common.utils import get_agent_workspace_dir
+
+            answer = await asyncio.to_thread(
+                handle_memory_query,
+                memory_query,
+                workspace_dir=get_agent_workspace_dir(),
+                runtime_state_path=configured_runtime_state_path(),
+            )
+            await self.send_xiaoyi_phone_tools_command(
+                memory_query.session_id,
+                memory_query.task_id,
+                memory_query.message_id,
+                memory_query_command(memory_query.action, answer),
+                final=True,
+            )
+            return
+
+        # Direct message streams require a stable params.sessionId. Other
+        # JSON-RPC methods (for example tasks/cancel) have their own schema.
+        if message.get("jsonrpc") == "2.0" and method == "message/stream":
             params_root = message.get("params")
             if not isinstance(params_root, dict):
                 params_root = {}
@@ -1161,6 +2069,18 @@ class XiaoyiChannel(BaseChannel):
         if data_event:
             logger.info(f"XiaoyiChannel 收到 data-event: {data_event.intent_name}, status={data_event.status}")
             await self._handle_data_event(data_event)
+            return
+
+        # Direct A2A GUI responses also use method=message/stream. They have
+        # already been consumed by the GUI handler and must not become a new
+        # empty user request, which would cancel the active Agent stream.
+        if is_gui_response_frame:
+            logger.info(
+                "[GUI_AGENT_DIAG] phase=XIAOYI_GUI_FRAME_CONSUMED "
+                "session_id=%s method=%s reason=handled_by_gui_rpc",
+                str(message.get("sessionId") or ""),
+                method,
+            )
             return
 
         # GUI / UploadExeResult 等已在 _dispatch_gui_agent_events 与 _extract_data_event 中处理，勿再落 unknown method。
@@ -1197,12 +2117,13 @@ class XiaoyiChannel(BaseChannel):
         task_id = message.get("params", {}).get("id", "") or message.get("id", "") or ""
         agent_id = message.get("agentId", "") or self.config.agent_id
         device_id = message.get("deviceId", "") or ""
+        # 优先用 params.sessionId（= conversationId，真·对话 id），跨多轮稳定、与 task 解耦；
+        # 缺失时回退到顶层 sessionId。
+        session_id = message.get("params", {}).get("sessionId") or message.get("sessionId", "")
+        task_id = message.get("params", {}).get("id", ) or ""
+        root_session_id = message.get("sessionId", "")
         user_message = message.get("params", {}).get("message", {})
         parts = user_message.get("parts", [])
-
-        # Mark session as active
-        self._mark_session_active(session_id)
-        self._session_task_map[task_id] = session_id
 
         # ==================== PROCESS PARTS (TEXT & FILES) ====================
         text = ""
@@ -1247,9 +2168,24 @@ class XiaoyiChannel(BaseChannel):
             elif kind == "data":
                 data = part.get("data", {})
                 if isinstance(data, dict):
-                    pid = data.get("variables", {}).get("systemVariables", {}).get("push_id", "")
-                    if pid:
-                        push_id = pid
+                    push_id = data.get("variables", {}).get("systemVariables", {}).get("push_id", "")
+                    self.config.push_id = push_id if push_id else self.config.push_id
+                    # 持久化 pushId 到本地 pushIdList.json（异步，不阻塞主流程），
+                    # 供 pushBroadcast 向所有已注册 pushId 广播。对应 xy_channel
+                    # 的 utils/pushid-manager.ts addPushId 调用。
+                    if push_id:
+                        try:
+                            from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.xiaoyi_utils.pushid_manager import (
+                                add_push_id,
+                            )
+                            asyncio.ensure_future(
+                                asyncio.to_thread(add_push_id, push_id)
+                            )
+                            logger.info("XiaoYi: Extracted push_id from user message")
+                        except Exception as push_id_error:
+                            logger.warning(
+                                f"XiaoYi: Failed to persist pushId: {push_id_error}"
+                            )
         # =================================================================
 
         # V2: 维护 agent_id → (顶层 sessionId, task_id, push_id, ts) 活跃映射，出站判定 ws vs push 用
@@ -1262,17 +2198,6 @@ class XiaoyiChannel(BaseChannel):
         # Log summary of processed attachments
         if file_attachments:
             logger.info(f"XiaoYi: Processed {len(file_attachments)} file(s): {', '.join(file_attachments)}")
-
-        # ==================== INTERCEPT TEAM MODE COMMANDS ====================
-        # xiaoyi channel 不支持 team 模式，拦截并直接返回提示
-        text_stripped = text.strip()
-        if text_stripped in ("/mode team", "/mode code.team"):
-            logger.info(f"XiaoYi: Intercepted team mode command: {text_stripped}")
-            response_text = "小艺：暂不支持team 模式。请使用web或者飞书频道试用"
-            for url_key in list(self._ws_connections.keys()):
-                await self._send_text_response(session_id, task_id, response_text, url_key, is_final=True)
-            return
-        # =================================================================
 
         # ==================== DOWNLOAD AND SAVE MEDIA FILES ====================
         media_payload: dict[str, Any] = {}
@@ -1332,11 +2257,80 @@ class XiaoyiChannel(BaseChannel):
             "xiaoyi_push_id": push_id,  # webhook 推送 token
             "xiaoyi_device_id": device_id,  # 设备标识（备用）
             "im_sender_user_id": user_id,  # MessageHandler whoami 用
+            "xiaoyi_session_id": session_id,
+            "xiaoyi_root_session_id": root_session_id or session_id,
+            "xiaoyi_params_session_id": message.get("params", {}).get("sessionId", ""),
+            "xiaoyi_task_id": task_id,
+            "xiaoyi_rpc_id": str(message.get("id") or ""),
+            "xiaoyi_push_id": str(self.config.push_id or ""),
+            "xiaoyi_user_id": str(self.config.uid or ""),
+            "celia_user_id": str(self.config.uid or ""),
+            "conversation_id": session_id,
         }
+        try:
+            from jiuwenswarm.agents.harness.common.memory.celia.runtime_state import update_runtime_info
+            from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.memory_query import (
+                configured_runtime_state_path,
+            )
+
+            await asyncio.to_thread(
+                update_runtime_info,
+                root_session_id or session_id,
+                session_id,
+                task_id,
+                configured_runtime_state_path(),
+            )
+        except OSError:
+            logger.warning("XiaoyiChannel failed to update .xiaoyiruntime", exc_info=True)
+
+        raw_msg_id = message.get("id")
+        # ── 空 message/stream 帧拦截 ───────────────────────────────────
+        # 端侧会通过同一条 WS 推一些 method=message/stream 的事件帧（切换到下一条
+        # 指令、文件更新通知 files_updated_by_user、push_id 回写等）：它们带一个
+        # data part 但没有真实用户文本/文件，顶层 id 与 task_id 却是有效真值。若
+        # 仅按 id 是否占位符判定（旧版 guard），这类帧因 id 有效而被放过，空内容
+        # 被当成空 user 消息路由进对话流，凭空起新 session 让模型对空 input 回无关
+        # 寒暄（如"看起来你发了一条空消息过来~是不是手滑了"/"内容好像有点空空的"）。
+        # 根治判定：无文本且无文件附件且无 media —— 直接 return，不构造 Message、
+        # 不路由。push_id 回写在上方 for 循环内已完成，此处 return 不影响它；正常
+        # 用户消息必有 text 或 file/media，不会被误拦。
+        if not text and not file_attachments and not media_files:
+            logger.info(
+                "[XiaoyiChannel] 跳过空 message/stream 事件帧（无文本/文件/media）"
+                " session_id=%s method=message/stream msg_type=%s task_id=%r raw_msg_id=%r",
+                str(message.get("sessionId") or ""),
+                str(message.get("msgType")),
+                task_id,
+                raw_msg_id,
+            )
+            return
+        # ────────────────────────────────────────────────────────────────
+
+        # Only real user requests become active platform tasks. Empty
+        # message/stream event frames must not leave behind phantom tasks.
+        previous_task_id = self._latest_platform_tasks.get(session_id)
+        if (
+            session_id in self._team_sessions
+            and previous_task_id
+            and previous_task_id != task_id
+        ):
+            await self._retire_superseded_team_task(session_id, previous_task_id)
+
+        self._mark_session_active(session_id, task_id)
+        self._remember_active_platform_task(session_id, task_id)
+        if session_id in self._team_sessions:
+            self._team_tasks.add((session_id, task_id))
+        self._session_task_map[task_id] = session_id
+
         # Add media payload to metadata
         params = {"query": text, "task_id": task_id}
         if media_payload:
             params["files"] = media_payload
+        # Per-request model (same key as Web chat.send); agent last-mile overrides model=
+        model_name = extract_model_name(parts)
+        if model_name:
+            params["model_name"] = model_name
+            logger.info("[Xiaoyi] Found modelName: %s", model_name)
 
         user_message = Message(
             id=message.get("id", ""),
@@ -1364,6 +2358,8 @@ class XiaoyiChannel(BaseChannel):
             """1-hour task timeout handler."""
             try:
                 await asyncio.sleep(task_timeout_ms / 1000)
+                if (session_id, task_id) not in self._active_tasks:
+                    return
                 logger.info(f"[TASK TIMEOUT] 1-hour timeout triggered for session {session_id}")
                 # Send default message with is_final=true
                 for url_key in list(self._ws_connections.keys()):
@@ -1373,14 +2369,18 @@ class XiaoyiChannel(BaseChannel):
             except asyncio.CancelledError:
                 pass
 
-        self._task_timeout_tasks[session_id] = asyncio.create_task(task_timeout_handler())
+        task_key = (session_id, task_id)
+        self._clear_task_timeout(session_id, task_id)
+        self._task_timeout_tasks[task_key] = asyncio.create_task(task_timeout_handler())
 
         # Start 60-second periodic timeout for status updates
         async def periodic_timeout_handler():
             """60-second periodic timeout for status updates."""
             try:
-                while session_id in self._session_active:
+                while (session_id, task_id) in self._active_tasks:
                     await asyncio.sleep(60)
+                    if (session_id, task_id) not in self._active_tasks:
+                        break
                     # Skip if already waiting for push (1-hour timeout triggered)
                     if self._is_session_waiting_for_push(session_id, task_id):
                         break
@@ -1389,7 +2389,8 @@ class XiaoyiChannel(BaseChannel):
             except asyncio.CancelledError:
                 pass
 
-        self._session_timeout_tasks[session_id] = asyncio.create_task(periodic_timeout_handler())
+        self._clear_session_timeout(session_id, task_id)
+        self._session_timeout_tasks[task_key] = asyncio.create_task(periodic_timeout_handler())
         # =================================================================
 
         handled = False
@@ -1475,13 +2476,14 @@ class XiaoyiChannel(BaseChannel):
             self, task_id: str, session_id: str, message: str, state: str, url_key: str
     ) -> None:
         """发送状态更新消息（A2A 格式），支持自定义状态."""
+        is_final = state in {"completed", "failed", "canceled"}
         response = {
             "jsonrpc": "2.0",
             "id": f"msg_{int(time.time() * 1000)}",
             "result": {
                 "taskId": task_id,
                 "kind": "status-update",
-                "final": False,
+                "final": is_final,
                 "status": {
                     "message": {
                         "role": "agent",
@@ -1491,19 +2493,89 @@ class XiaoyiChannel(BaseChannel):
                 },
             },
         }
+        logger.info(
+            "[GUI_AGENT_DIAG] phase=XIAOYI_STATUS_RESPONSE_BUILT "
+            "session_id=%s task_id=%s connection=%s state=%s "
+            "final=%s text=%r response=%r",
+            session_id,
+            task_id,
+            url_key,
+            state,
+            is_final,
+            message,
+            response,
+        )
         await self._send_agent_response(session_id, task_id, response, url_key)
 
-    def _is_session_active(self, session_id: str) -> bool:
+    def _is_session_active(self, session_id: str, task_id: str | None = None) -> bool:
         """检查会话是否有活跃任务."""
+        if task_id:
+            session_tasks = {key for key in self._active_tasks if key[0] == session_id}
+            if session_tasks:
+                return (session_id, task_id) in session_tasks
         return session_id in self._session_active
 
-    def _mark_session_active(self, session_id: str) -> None:
+    def _remember_active_platform_task(self, session_id: str, task_id: str) -> None:
+        """Remember the latest inbound A2A task for a stable Xiaoyi session."""
+        if session_id and task_id:
+            self._latest_platform_tasks[session_id] = task_id
+
+    async def _retire_superseded_team_task(
+        self, session_id: str, task_id: str
+    ) -> None:
+        """Finish one delivery task while retaining its Agent Team session."""
+        if self._is_session_active(session_id, task_id):
+            for url_key in list(self._ws_connections.keys()):
+                await self._send_status_update_with_state(
+                    task_id,
+                    session_id,
+                    "已切换到下一条指令，团队继续处理中~",
+                    "completed",
+                    url_key,
+                )
+        self._clear_session_waiting_for_push(session_id, task_id)
+        await self._finalize_session(
+            session_id,
+            task_id,
+            preserve_team_session=True,
+        )
+        self._session_task_map.pop(task_id, None)
+
+    def _mark_session_active(self, session_id: str, task_id: str | None = None) -> None:
         """标记会话为活跃状态."""
         self._session_active.add(session_id)
+        if task_id:
+            self._active_tasks.add((session_id, task_id))
 
-    def _mark_session_completed(self, session_id: str) -> None:
+    def _mark_session_completed(self, session_id: str, task_id: str | None = None) -> None:
         """标记会话已完成."""
+        if task_id:
+            self._active_tasks.discard((session_id, task_id))
+            if any(key[0] == session_id for key in self._active_tasks):
+                return
+        else:
+            self._active_tasks = {
+                key for key in self._active_tasks if key[0] != session_id
+            }
         self._session_active.discard(session_id)
+
+    def _clear_team_task(self, session_id: str, task_id: str) -> None:
+        """Clear one Team A2A round without clearing later tasks."""
+        task_key = (session_id, task_id)
+        self._team_tasks.discard(task_key)
+        self._team_last_leader_finals.pop(task_key, None)
+        if not any(key[0] == session_id for key in self._team_tasks):
+            self._team_sessions.discard(session_id)
+
+    def _clear_team_session(self, session_id: str) -> None:
+        """Clear all Team task markers for a platform session."""
+        self._team_tasks = {key for key in self._team_tasks if key[0] != session_id}
+        self._team_last_leader_finals = {
+            key: value
+            for key, value in self._team_last_leader_finals.items()
+            if key[0] != session_id
+        }
+        self._team_sessions.discard(session_id)
 
     def _is_session_waiting_for_push(self, session_id: str, task_id: str) -> bool:
         """检查会话是否正在等待推送."""
@@ -1517,6 +2589,41 @@ class XiaoyiChannel(BaseChannel):
         """清除会话的推送等待状态."""
         if self._sessions_waiting_for_push.get(session_id) == task_id:
             self._sessions_waiting_for_push.pop(session_id, None)
+
+    async def _finalize_session(
+        self,
+        session_id: str,
+        task_id: str,
+        accumulated_text: str | None = None,
+        *,
+        preserve_team_session: bool = False,
+    ) -> None:
+        """Finish one A2A task and emit a deferred push exactly once."""
+        self._clear_task_timeout(session_id, task_id)
+        self._clear_session_timeout(session_id, task_id)
+        self._mark_session_completed(session_id, task_id)
+        if not self._is_session_active(session_id):
+            await self._stop_session_heartbeat(session_id)
+            self._clear_task_timeout(session_id)
+            self._clear_session_timeout(session_id)
+
+        text = accumulated_text
+        task_key = (session_id, task_id)
+        if text is None:
+            text = self._accumulated_texts.get(task_key, "")
+        if self._is_session_waiting_for_push(session_id, task_id):
+            if not text:
+                text = "团队任务已完成" if session_id in self._team_sessions else "任务已完成"
+            summary = text[:30] + "..." if len(text) > 30 else text
+            await self._send_push_notification(summary, "后台任务已完成：" + summary)
+            self._clear_session_waiting_for_push(session_id, task_id)
+
+        self._accumulated_texts.pop(task_key, None)
+        if preserve_team_session:
+            self._team_tasks.discard((session_id, task_id))
+            self._team_last_leader_finals.pop((session_id, task_id), None)
+        else:
+            self._clear_team_task(session_id, task_id)
 
     def _is_session_pending_cleanup(self, session_id: str) -> bool:
         """检查会话是否待清理."""
@@ -1533,6 +2640,17 @@ class XiaoyiChannel(BaseChannel):
         """强制清理会话."""
         self._sessions_marked_for_cleanup.pop(session_id, None)
         self._session_task_map.pop(session_id, None)
+        self._mark_session_completed(session_id)
+        self._latest_platform_tasks.pop(session_id, None)
+        self._clear_team_session(session_id)
+        self._clear_task_timeout(session_id)
+        self._clear_session_timeout(session_id)
+        self._sessions_waiting_for_push.pop(session_id, None)
+        self._accumulated_texts = {
+            key: value
+            for key, value in self._accumulated_texts.items()
+            if key[0] != session_id
+        }
 
     async def _handle_clear_context(self, message: dict[str, Any]) -> None:
         """处理清空上下文请求."""
@@ -1559,12 +2677,12 @@ class XiaoyiChannel(BaseChannel):
 
     async def _handle_tasks_cancel(self, message: dict[str, Any]) -> None:
         """处理取消任务请求."""
-        session_id = message.get("sessionId", "")
-        task_id = message.get("params", {}).get("id") or message.get("taskId", "")
+        params = message.get("params")
+        if not isinstance(params, dict):
+            params = {}
+        session_id = params.get("sessionId") or message.get("sessionId", "")
+        task_id = params.get("id") or message.get("taskId", "")
         logger.info(f"XiaoyiChannel 取消任务: {session_id} {task_id}")
-        if session_id:
-            await self._stop_session_heartbeat(session_id)
-
         response = {
             "jsonrpc": "2.0",
             "id": message.get("id", ""),
@@ -1575,10 +2693,19 @@ class XiaoyiChannel(BaseChannel):
             await self._send_agent_response(session_id, task_id, response, url_key)
 
         # 清理超时任务和推送状态
-        self._clear_task_timeout(session_id)
-        self._clear_session_timeout(session_id)
         self._clear_session_waiting_for_push(session_id, task_id)
-        self._mark_session_completed(session_id)
+        self._clear_task_timeout(session_id, task_id)
+        self._clear_session_timeout(session_id, task_id)
+        self._mark_session_completed(session_id, task_id)
+        if not self._is_session_active(session_id):
+            if session_id:
+                await self._stop_session_heartbeat(session_id)
+            self._clear_task_timeout(session_id)
+            self._clear_session_timeout(session_id)
+        # Cancelling one platform task must not stop a long-running Team
+        # runtime. A later user turn will replace the latest task mapping.
+        self._team_tasks.discard((session_id, task_id))
+        self._team_last_leader_finals.pop((session_id, task_id), None)
 
     async def _send_text_response(
             self,
@@ -1611,7 +2738,65 @@ class XiaoyiChannel(BaseChannel):
                 },
             },
         }
+        logger.info(
+            "[GUI_AGENT_DIAG] phase=XIAOYI_TEXT_RESPONSE_BUILT "
+            "session_id=%s task_id=%s connection=%s append=%s "
+            "last_chunk=%s final=%s text=%r response=%r",
+            session_id,
+            task_id,
+            url_key,
+            append,
+            last_chunk,
+            is_final,
+            text,
+            response,
+        )
         await self._send_agent_response(session_id, task_id, response, url_key)
+
+    async def _send_empty_final_ack(
+            self, session_id: str, task_id: str, message_id: str
+    ) -> None:
+        """发送空正文 artifact-update 末帧作为事件 ACK.
+
+        1:1 对应 xy_channel formatter.ts sendA2AResponse(text:"", append:false,
+        final:true). 用于 SelfEvolution set 等只需确认"已处理、流结束"、无需
+        实质内容的事件回复:parts 为空 text part,final=True,id 用入站 message_id.
+        遍历所有活跃连接;ACK 失败只 warning 不 raise.
+        """
+        response = {
+            "jsonrpc": "2.0",
+            "id": message_id,
+            "result": {
+                "taskId": task_id,
+                "kind": "artifact-update",
+                "append": False,
+                "lastChunk": True,
+                "final": True,
+                "artifact": {
+                    "artifactId": str(uuid.uuid4()),
+                    "parts": [{"kind": "text", "text": ""}],
+                },
+            },
+        }
+        logger.info(
+            "[GUI_AGENT_DIAG] phase=XIAOYI_EMPTY_FINAL_ACK "
+            "session_id=%s task_id=%s message_id=%s",
+            session_id,
+            task_id,
+            message_id,
+        )
+        for url_key, ws in self._ws_connections.items():
+            if ws:
+                try:
+                    await self._send_agent_response(
+                        session_id, task_id, response, url_key
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "[XiaoyiChannel] _send_empty_final_ack 失败 (%s): %s",
+                        url_key,
+                        e,
+                    )
 
     async def _send_agent_response(self, session_id: str, task_id: str, response: dict[str, Any], url_key: str) -> None:
         """发送 agent_response 包装的消息（A2A 格式）到指定通道."""
@@ -1622,9 +2807,75 @@ class XiaoyiChannel(BaseChannel):
             "taskId": task_id,
             "msgDetail": json.dumps(response),
         }
+        result = response.get("result")
+        is_status_response = (
+            isinstance(result, dict) and result.get("kind") == "status-update"
+        )
+        artifact = result.get("artifact") if isinstance(result, dict) else None
+        parts = artifact.get("parts") if isinstance(artifact, dict) else None
+        is_text_response = bool(
+            isinstance(parts, list)
+            and any(
+                isinstance(part, dict)
+                and part.get("kind") in ("text", "reasoningText")
+                for part in parts
+            )
+        )
         try:
+            if is_text_response:
+                logger.info(
+                    "[GUI_AGENT_DIAG] phase=XIAOYI_WS_TEXT_SEND_BEGIN "
+                    "session_id=%s task_id=%s connection=%s wrapper=%r",
+                    session_id,
+                    task_id,
+                    url_key,
+                    wrapper,
+                )
+            elif is_status_response:
+                logger.info(
+                    "[GUI_AGENT_DIAG] phase=XIAOYI_WS_STATUS_SEND_BEGIN "
+                    "session_id=%s task_id=%s connection=%s wrapper=%r",
+                    session_id,
+                    task_id,
+                    url_key,
+                    wrapper,
+                )
             await self._safe_ws_send(url_key, wrapper)
+            if is_text_response:
+                logger.info(
+                    "[GUI_AGENT_DIAG] phase=XIAOYI_WS_TEXT_SEND_DONE "
+                    "session_id=%s task_id=%s connection=%s",
+                    session_id,
+                    task_id,
+                    url_key,
+                )
+            elif is_status_response:
+                logger.info(
+                    "[GUI_AGENT_DIAG] phase=XIAOYI_WS_STATUS_SEND_DONE "
+                    "session_id=%s task_id=%s connection=%s",
+                    session_id,
+                    task_id,
+                    url_key,
+                )
         except Exception as e:
+            if is_text_response:
+                logger.exception(
+                    "[GUI_AGENT_DIAG] phase=XIAOYI_WS_TEXT_SEND_FAILED "
+                    "session_id=%s task_id=%s connection=%s error_type=%s",
+                    session_id,
+                    task_id,
+                    url_key,
+                    type(e).__name__,
+                )
+            elif is_status_response:
+                logger.exception(
+                    "[GUI_AGENT_DIAG] phase=XIAOYI_WS_STATUS_SEND_FAILED "
+                    "session_id=%s task_id=%s connection=%s error_type=%s",
+                    session_id,
+                    task_id,
+                    url_key,
+                    type(e).__name__,
+                )
             logger.warning(f"XiaoyiChannel 发送响应失败 ({url_key}): {e}")
 
     async def _send_file_response_base64(self, session_id: str, task_id: str, file_info: dict, url_key: str) -> None:
@@ -1701,6 +2952,55 @@ class XiaoyiChannel(BaseChannel):
         except Exception as e:
             logger.error(f"XiaoyiChannel 发送文件响应失败: {e}")
 
+    async def _send_html_card_response(
+        self,
+        session_id: str,
+        task_id: str,
+        message_id: str,
+        cards_info: list[dict[str, Any]],
+        url_key: str,
+    ) -> None:
+        """发送 HTML H5 卡片（对齐 openclaw sendCard / clawH5）."""
+        try:
+            rpc_id = message_id or task_id
+            payload = {
+                "jsonrpc": "2.0",
+                "id": rpc_id,
+                "result": {
+                    "taskId": task_id,
+                    "kind": "artifact-update",
+                    "append": False,
+                    "lastChunk": True,
+                    "final": False,
+                    "artifact": {
+                        "artifactId": str(uuid.uuid4()),
+                        "parts": [
+                            {
+                                "kind": "data",
+                                "data": {"cardsInfo": cards_info},
+                            }
+                        ],
+                    },
+                },
+            }
+            response = {
+                "msgType": "agent_response",
+                "agentId": self.config.agent_id,
+                "sessionId": session_id,
+                "taskId": task_id,
+                "msgDetail": json.dumps(payload, ensure_ascii=False),
+            }
+            logger.info(
+                "[A2A_CARD] Sending html card session_id=%s task_id=%s cards=%s",
+                session_id,
+                task_id,
+                len(cards_info),
+            )
+            await self._safe_ws_send(url_key, response)
+        except Exception as e:
+            logger.error("XiaoyiChannel 发送 HTML 卡片失败: %s", e)
+            raise
+
     async def _safe_ws_send(self, url_key: str, payload: dict[str, Any]) -> None:
         ws = self._ws_connections.get(url_key)
         if not ws:
@@ -1737,21 +3037,29 @@ class XiaoyiChannel(BaseChannel):
         if not sent:
             raise RuntimeError("发送文件消息失败，WebSocket 未连接")
 
-    def _clear_task_timeout(self, session_id: str) -> None:
+    def _clear_task_timeout(self, session_id: str, task_id: str | None = None) -> None:
         """清除任务超时任务."""
-        if session_id in self._task_timeout_tasks:
-            task = self._task_timeout_tasks[session_id]
+        keys = [
+            key
+            for key in self._task_timeout_tasks
+            if key[0] == session_id and (task_id is None or key[1] == task_id)
+        ]
+        for key in keys:
+            task = self._task_timeout_tasks.pop(key, None)
             if task and not task.done():
                 task.cancel()
-            self._task_timeout_tasks.pop(session_id, None)
 
-    def _clear_session_timeout(self, session_id: str) -> None:
+    def _clear_session_timeout(self, session_id: str, task_id: str | None = None) -> None:
         """清除会话超时任务."""
-        if session_id in self._session_timeout_tasks:
-            task = self._session_timeout_tasks[session_id]
+        keys = [
+            key
+            for key in self._session_timeout_tasks
+            if key[0] == session_id and (task_id is None or key[1] == task_id)
+        ]
+        for key in keys:
+            task = self._session_timeout_tasks.pop(key, None)
             if task and not task.done():
                 task.cancel()
-            self._session_timeout_tasks.pop(session_id, None)
 
     async def _send_push_notification(self, text: str, push_text: str) -> bool:
         """发送推送通知."""
@@ -1784,6 +3092,7 @@ class XiaoyiChannel(BaseChannel):
             task_id: str,
             message_id: str,
             command: dict[str, Any],
+            final: bool = False,
     ) -> bool:
         """发送 Command 指令到手机端（A2A artifact-update 格式）.
 
@@ -1804,7 +3113,7 @@ class XiaoyiChannel(BaseChannel):
                 "kind": "artifact-update",
                 "append": False,
                 "lastChunk": True,
-                "final": False,
+                "final": final,
                 "artifact": {
                     "artifactId": str(uuid.uuid4()),
                     "parts": [{"kind": "data", "data": {"commands": [command]}}],
@@ -1822,20 +3131,417 @@ class XiaoyiChannel(BaseChannel):
         }
 
         # 发送到所有活跃连接
+        privilege_intent = (
+            command.get("payload", {})
+            .get("executeParam", {})
+            .get("intentName")
+        )
+        if privilege_intent == "CheckPlugInPrivilege":
+            logger.info(
+                "[CRON_DEVICE] phase=PRIVILEGE_WIRE_SEND "
+                "agent_id=%s session_id=%s task_id=%s message_id=%s "
+                "wrapper=%r",
+                self.config.agent_id,
+                session_id,
+                task_id,
+                message_id,
+                wrapper,
+            )
+
         sent = False
+        is_gui_command = (
+            command.get("header", {}).get("namespace") == "ClawAgent"
+            and command.get("header", {}).get("name")
+            == "InvokeJarvisGUIAgentRequest"
+        )
+        if is_gui_command:
+            logger.info(
+                "[GUI_RPC_TRACE] phase=CHANNEL_SEND_ENTER session_id=%s "
+                "task_id=%s message_id=%s active_connection_count=%s",
+                session_id,
+                task_id,
+                message_id,
+                sum(bool(ws) for ws in self._ws_connections.values()),
+            )
         for url_key, ws in self._ws_connections.items():
             if ws:
                 try:
+                    if is_gui_command:
+                        logger.info(
+                            "[GUI_RPC_TRACE] phase=CHANNEL_WS_SEND_BEGIN "
+                            "session_id=%s task_id=%s message_id=%s "
+                            "connection=%s",
+                            session_id,
+                            task_id,
+                            message_id,
+                            url_key,
+                        )
                     await self._safe_ws_send(url_key, wrapper)
+                    if is_gui_command:
+                        logger.info(
+                            "[GUI_RPC_TRACE] phase=CHANNEL_WS_SEND_DONE "
+                            "session_id=%s task_id=%s message_id=%s "
+                            "connection=%s success=true",
+                            session_id,
+                            task_id,
+                            message_id,
+                            url_key,
+                        )
                     intent_name = command.get("payload", {}).get("executeParam", {}).get("intentName") or command.get(
                         "header", {}
                     ).get("name", "unknown")
                     logger.info(f"XiaoyiChannel 发送 command 成功 ({url_key}):intent={intent_name}")
                     sent = True
                 except Exception as e:
+                    if is_gui_command:
+                        logger.warning(
+                            "[GUI_RPC_TRACE] phase=CHANNEL_WS_SEND_DONE "
+                            "session_id=%s task_id=%s message_id=%s "
+                            "connection=%s success=false error_type=%s",
+                            session_id,
+                            task_id,
+                            message_id,
+                            url_key,
+                            type(e).__name__,
+                        )
                     logger.warning(f"XiaoyiChannel 发送 command 失败 ({url_key}): {e}")
 
+        if is_gui_command:
+            logger.info(
+                "[GUI_RPC_TRACE] phase=CHANNEL_SEND_EXIT session_id=%s "
+                "task_id=%s message_id=%s sent=%s",
+                session_id,
+                task_id,
+                message_id,
+                sent,
+            )
         return sent
+
+    async def send_login_token_artifact(
+        self,
+        *,
+        session_id: str,
+        task_id: str,
+        message_id: str,
+        client_id: str,
+        skill_name: str,
+        final: bool = False,
+    ) -> bool:
+        """下发 getLoginToken artifact 给端侧小艺 App（huawei_id_tool 方案1 wire）.
+
+        1:1 复刻 xy_channel login-token-tool.ts 第 53-90 行：artifact-update 的
+        parts 为单个自定义 part {kind: "getLoginToken", clientId, skillName}，
+        append=False / lastChunk=True / final=False。端侧 App 收到该 part 后弹
+        授权 UI，授权完成经 LoginTokenEvent.ClawAutoLogin 回写
+        /home/sandbox/.openclaw/.xiaoyitoken.json（由 login-token-handler.ts 写入），
+        工具侧轮询该文件取结果。
+
+        与 send_xiaoyi_phone_tools_command 的差异：后者 parts 为
+        [{kind:"data", data:{commands:[...]}}]（设备指令）；本方法 parts 为
+        自定义 getLoginToken part（授权请求），不走 commands 包装，与 TS 原样一致。
+
+        Args:
+            session_id: 小艺会话 ID
+            task_id: 小艺任务 ID
+            message_id: JSON-RPC id（端侧用它关联授权回调）
+            client_id: 账号服务唯一标识
+            skill_name: skill 名称
+            final: 是否为末帧（默认 False，授权请求不是末帧）
+
+        Returns:
+            是否至少成功发送到一个活跃连接
+        """
+        logger.info(
+            "[SEND_LOGIN_TOKEN_ARTIFACT_ENTER] 方法被调用 client_id=%s skill=%s "
+            "session=%s task=%s msg_id=%s",
+            client_id, skill_name, session_id, task_id, message_id,
+        )
+        response = {
+            "jsonrpc": "2.0",
+            "id": message_id,
+            "result": {
+                "taskId": task_id,
+                "kind": "artifact-update",
+                "append": False,
+                "lastChunk": True,
+                "final": final,
+                "artifact": {
+                    "artifactId": str(uuid.uuid4()),
+                    "parts": [
+                        {
+                            "kind": "getLoginToken",
+                            "clientId": client_id,
+                            "skillName": skill_name,
+                        }
+                    ],
+                },
+            },
+        }
+        wrapper = {
+            "msgType": "agent_response",
+            "agentId": self.config.agent_id,
+            "sessionId": session_id,
+            "taskId": task_id,
+            "msgDetail": json.dumps(response, ensure_ascii=False),
+        }
+        logger.info(
+            "[LOGIN_TOKEN] phase=CHANNEL_ARTIFACT_SEND_BEGIN "
+            "session_id=%s task_id=%s message_id=%s client_id=%s skill_name=%s "
+            "connection_count=%s",
+            session_id,
+            task_id,
+            message_id,
+            client_id,
+            skill_name,
+            sum(bool(ws) for ws in self._ws_connections.values()),
+        )
+        sent = False
+        for url_key, ws in self._ws_connections.items():
+            if ws:
+                try:
+                    await self._safe_ws_send(url_key, wrapper)
+                    logger.info(
+                        "[LOGIN_TOKEN] phase=CHANNEL_ARTIFACT_SEND_DONE "
+                        "session_id=%s connection=%s success=true",
+                        session_id,
+                        url_key,
+                    )
+                    sent = True
+                except Exception as exc:
+                    logger.warning(
+                        "[LOGIN_TOKEN] phase=CHANNEL_ARTIFACT_SEND_DONE "
+                        "session_id=%s connection=%s success=false error_type=%s",
+                        session_id,
+                        url_key,
+                        type(exc).__name__,
+                    )
+        logger.info(
+            "[LOGIN_TOKEN] phase=CHANNEL_ARTIFACT_SEND_EXIT "
+            "session_id=%s message_id=%s sent=%s",
+            session_id,
+            message_id,
+            sent,
+        )
+        return sent
+
+    async def execute_phone_tool_command(
+        self,
+        request: DeviceCommandRequest,
+    ) -> dict[str, Any]:
+        context = request.context
+        session_id = (
+            context.xiaoyi_root_session_id
+            or context.xiaoyi_params_session_id
+            or context.jiuwen_session_id
+            or ""
+        )
+        if not session_id:
+            raise RuntimeError("Xiaoyi session_id is missing")
+        task_id = context.xiaoyi_task_id or session_id
+        message_id = (
+            context.xiaoyi_rpc_id
+            if request.intent_name == "CheckPlugInPrivilege"
+            and context.xiaoyi_rpc_id
+            else f"cmd_{request.operation_id}"
+        )
+        if request.intent_name == "CheckPlugInPrivilege":
+            lock = self._privilege_check_lock
+        else:
+            lock_key = (session_id, request.intent_name)
+            lock = self._device_command_locks.setdefault(lock_key, asyncio.Lock())
+        async with lock:
+            return await self._execute_phone_tool_command_locked(
+                request=request,
+                session_id=session_id,
+                task_id=task_id,
+                message_id=message_id,
+            )
+
+    async def _execute_phone_tool_command_locked(
+        self,
+        *,
+        request: DeviceCommandRequest,
+        session_id: str,
+        task_id: str,
+        message_id: str,
+    ) -> dict[str, Any]:
+        result_event = asyncio.Event()
+        result_data: dict[str, Any] | None = None
+        error: Exception | None = None
+        started_at = time.monotonic()
+
+        def on_data_event(event: DataEvent) -> None:
+            nonlocal result_data, error
+            if event.intent_name != request.intent_name:
+                return
+            if request.intent_name == "CheckPlugInPrivilege":
+                result_data = {} if event.outputs is None else event.outputs
+            elif _is_data_event_status_success(event.status):
+                result_data = {} if event.outputs is None else event.outputs
+            else:
+                error = RuntimeError(f"Device execution failed: {event.status}")
+            result_event.set()
+
+        self.register_data_event_handler(request.intent_name, on_data_event)
+        try:
+            logger.info(
+                "[XiaoyiChannel] device command send: rpc_id=%s operation_id=%s source_request_id=%s "
+                "session_id=%s task_id=%s intent_name=%s pid=%s",
+                request.rpc_id,
+                request.operation_id,
+                request.context.source_request_id,
+                session_id,
+                task_id,
+                request.intent_name,
+                os.getpid(),
+            )
+            sent = await self.send_xiaoyi_phone_tools_command(
+                session_id=session_id,
+                task_id=task_id,
+                message_id=message_id,
+                command=request.command,
+            )
+            if not sent:
+                raise RuntimeError("Xiaoyi WebSocket is not connected")
+
+            await asyncio.wait_for(
+                result_event.wait(),
+                timeout=request.timeout_seconds,
+            )
+            if error is not None:
+                raise error
+            return {} if result_data is None else result_data
+        finally:
+            elapsed_ms = int((time.monotonic() - started_at) * 1000)
+            logger.info(
+                "[XiaoyiChannel] device command finished: rpc_id=%s operation_id=%s source_request_id=%s "
+                "session_id=%s task_id=%s intent_name=%s pid=%s elapsed_ms=%s",
+                request.rpc_id,
+                request.operation_id,
+                request.context.source_request_id,
+                session_id,
+                task_id,
+                request.intent_name,
+                os.getpid(),
+                elapsed_ms,
+            )
+            self.unregister_data_event_handler(request.intent_name, on_data_event)
+
+    async def execute_scheduled_phone_tool_command(
+        self,
+        request: DeviceCommandRequest,
+    ) -> dict[str, Any]:
+        scheduled_device = request.context.metadata.get("scheduled_device")
+        if not isinstance(scheduled_device, dict):
+            logger.warning(
+                "[CRON_DEVICE] phase=SCHEDULED_INTENT_REJECTED rpc_id=%s "
+                "operation_id=%s intent_name=%s reason=missing_scheduled_device",
+                request.rpc_id,
+                request.operation_id,
+                request.intent_name,
+            )
+            raise RuntimeError(
+                "Scheduled Xiaoyi device permissions are missing; "
+                "recreate the cron job"
+            )
+        push_id = str(scheduled_device.get("push_id") or "").strip()
+        required_intents = scheduled_device.get("required_intents")
+        allowed_intents = {
+            str(item or "").strip()
+            for item in required_intents
+            if str(item or "").strip()
+        } if isinstance(required_intents, list) else set()
+        if not push_id:
+            raise RuntimeError("Scheduled Xiaoyi push_id is missing")
+        if not allowed_intents:
+            logger.warning(
+                "[CRON_DEVICE] phase=SCHEDULED_INTENT_REJECTED rpc_id=%s "
+                "operation_id=%s intent_name=%s reason=empty_required_intents",
+                request.rpc_id,
+                request.operation_id,
+                request.intent_name,
+            )
+            raise RuntimeError(
+                "Scheduled Xiaoyi device intents are missing; "
+                "recreate the cron job"
+            )
+        if request.intent_name not in allowed_intents:
+            logger.warning(
+                "[CRON_DEVICE] phase=SCHEDULED_INTENT_REJECTED rpc_id=%s "
+                "operation_id=%s intent_name=%s reason=intent_not_allowed",
+                request.rpc_id,
+                request.operation_id,
+                request.intent_name,
+            )
+            raise RuntimeError(
+                f"Intent {request.intent_name} is not allowed by the scheduled device context"
+            )
+
+        async with self._scheduled_device_command_lock:
+            result_event = asyncio.Event()
+            result_data: dict[str, Any] | None = None
+            error: Exception | None = None
+            started_at = time.monotonic()
+
+            def on_data_event(event: DataEvent) -> None:
+                nonlocal result_data, error
+                if event.intent_name != request.intent_name:
+                    return
+                if _is_data_event_status_success(event.status):
+                    result_data = {} if event.outputs is None else event.outputs
+                else:
+                    error = RuntimeError(
+                        f"Device execution failed: {event.status}"
+                    )
+                result_event.set()
+
+            self.register_data_event_handler(request.intent_name, on_data_event)
+            try:
+                push_config = PushConfig(
+                    mode=self.config.mode,
+                    api_id=self.config.api_id,
+                    push_id=push_id,
+                    push_url=self.config.push_url,
+                    ak=self.config.ak,
+                    sk=self.config.sk,
+                    uid=self.config.uid,
+                    api_key=self.config.api_key,
+                )
+                push_service = XiaoYiPushService(push_config)
+                logger.info(
+                    "[CRON_DEVICE] phase=DIRECTIVE_SEND_BEGIN rpc_id=%s "
+                    "operation_id=%s intent_name=%s",
+                    request.rpc_id,
+                    request.operation_id,
+                    request.intent_name,
+                )
+                sent = await push_service.send_push_with_directives(
+                    push_id=push_id,
+                    session_id=str(uuid.uuid4()),
+                    directives=[request.command],
+                )
+                if not sent:
+                    raise RuntimeError("Failed to send Xiaoyi directive push")
+                await asyncio.wait_for(
+                    result_event.wait(),
+                    timeout=request.timeout_seconds,
+                )
+                if error is not None:
+                    raise error
+                return {} if result_data is None else result_data
+            finally:
+                self.unregister_data_event_handler(
+                    request.intent_name,
+                    on_data_event,
+                )
+                logger.info(
+                    "[CRON_DEVICE] phase=DIRECTIVE_SEND_DONE rpc_id=%s "
+                    "operation_id=%s intent_name=%s elapsed_ms=%s",
+                    request.rpc_id,
+                    request.operation_id,
+                    request.intent_name,
+                    int((time.monotonic() - started_at) * 1000),
+                )
 
     def _get_a2a_parts(self, message: dict[str, Any]) -> list[dict[str, Any]]:
         """从直连或 Wrapped A2A 消息中取出 message.parts."""
@@ -1873,12 +3579,40 @@ class XiaoyiChannel(BaseChannel):
                         item.get("header", {}).get("namespace") == "ClawAgent"
                         and item.get("header", {}).get("name") == "InvokeJarvisGUIAgentResponse"
                 ):
+                    dispatch_item = dict(item)
+                    dispatch_item["_xiaoyi_session_id"] = _gui_response_session_id(message)
+                    payload = item.get("payload")
+                    payload = payload if isinstance(payload, dict) else {}
+                    stream_info = payload.get("streamInfo")
+                    stream_info = stream_info if isinstance(stream_info, dict) else {}
+                    content = stream_info.get("streamContent")
+                    logger.info(
+                        "[GUI_RPC_TRACE] phase=CHANNEL_GUI_FRAME_DISPATCH "
+                        "session_id=%s interaction_id=%s is_final=%s "
+                        "content_len=%s handler_count=%s",
+                        dispatch_item["_xiaoyi_session_id"],
+                        str(payload.get("interactionId") or ""),
+                        payload.get("isFinal"),
+                        len(str(content)) if content is not None else 0,
+                        len(self._gui_agent_handlers),
+                    )
+                    logger.info(
+                        "[GUI_AGENT_DIAG] phase=XIAOYI_GUI_EVENT_DISPATCH "
+                        "session_id=%s interaction_id=%s raw_is_final=%r "
+                        "stream_content=%r payload=%r event=%r",
+                        dispatch_item["_xiaoyi_session_id"],
+                        str(payload.get("interactionId") or ""),
+                        payload.get("isFinal"),
+                        content,
+                        payload,
+                        item,
+                    )
                     for h in list(self._gui_agent_handlers):
                         try:
                             if asyncio.iscoroutinefunction(h):
-                                await h(item)
+                                await h(dispatch_item)
                             else:
-                                h(item)
+                                h(dispatch_item)
                         except Exception as e:
                             logger.warning(
                                 "XiaoyiChannel GUI agent 处理器异常（已隔离）: %s",
@@ -2047,3 +3781,5 @@ class XiaoyiChannel(BaseChannel):
                     )
 
         return None
+
+

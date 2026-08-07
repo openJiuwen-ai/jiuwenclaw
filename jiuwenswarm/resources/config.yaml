@@ -110,7 +110,7 @@ memory:
   #   external — 仅外接记忆（LTM / Mem0 / OpenViking / 插件）
   #   both     — 内置 + 外接并存
   #   none     — 全部关闭
-  engine: ${MEMORY_ENGINE:-builtin}
+  engine: external
   forbidden_memory_definition:
     enabled: false
     patterns: []
@@ -157,10 +157,40 @@ memory:
   # - 失败降级：provider 构建失败或网络异常不阻塞主流程
   external:
     # 选哪家 provider。空字符串 = 禁用外接（等价于 engine=builtin）
-    provider: ${MEMORY_EXTERNAL_PROVIDER:-}   # '' | openjiuwen | mem0 | openviking | lakebase | <plugin-name>
+    provider: celia   # openjiuwen | mem0 | openviking | lakebase | celia | <plugin-name>
     # 数据隔离标识（所有 provider 共用）
-    user_id: ${MEMORY_USER_ID:-__default__}
-    scope_id: ${MEMORY_SCOPE_ID:-__default__}
+    user_id: ${MEMORY_USER_ID:-openclaw-user}
+    scope_id: ${MEMORY_SCOPE_ID:-user}
+
+    # -- Celia Memory MCP -------------------------------------------------
+    # 生效条件：provider='celia'。正式运行需要 Linux ARM64/aarch64 binary。
+    celia:
+      server_binary_path: ${CELIA_MEMORY_BINARY_PATH:-}
+      db_path: ${CELIA_MEMORY_DB_PATH:-}
+      log_path: ${CELIA_MEMORY_LOG_PATH:-}
+      runtime_state_path: ${CELIA_XIAOYI_RUNTIME_PATH:-}
+      tenant_id: ${CELIA_TENANT_ID:-default}
+      vector_dim: ${CELIA_VECTOR_DIM:-}
+      embed:
+        base_url: http://lfhagmirror.hwcloudtest.cn:80/celia-claw/v1/rest-api
+        api_key: sk-virtual
+        model: xiaoyiprovider/text-embedding-v1.0
+        uid: uid-virtual
+        headers: {}
+      chat:
+        base_url: http://lfhagmirror.hwcloudtest.cn:80/celia-claw/v1/sse-api
+        api_key: sk-virtual
+        model: Auto-Model
+        uid: uid-virtual
+        headers: {"Accept": "text/event-stream", "x-request-from": "openclaw", "x-uid": "uid-virtual", "x-api-key": "sk-virtual"}
+      rerank:
+        base_url: ${OPENAI_RERANK_BASE_URL:-}
+        api_key: ${OPENAI_RERANK_API_KEY:-}
+        model: ${OPENAI_RERANK_MODEL:-}
+      procedural_dir: ${CELIA_PROCEDURAL_DIR:-}
+      procedural_learn_debug: false
+      dedup_policy: {}
+      dreaming_enabled: inherit
 
     # -- OpenJiuwen LTM（本地长期记忆：KV + 向量 + DB）--
     # 生效条件：provider='openjiuwen'
@@ -600,8 +630,8 @@ heartbeat:
   target: web
   # 心跳生效时间段（本地时间），start <= now < end 时心跳生效
   active_hours:
-    start: 08:00
-    end: 22:00
+    start: 00:00
+    end: 00:00
 
 # 执行护栏：工具循环检测与主动中断
 execution_guard:
@@ -636,6 +666,26 @@ execution_guard:
     global_breaker_threshold: 30
     # 未知/错误工具连续调用达到该次数时停止重试并中断
     unknown_tool_threshold: 10
+
+# CSPL Sentinel：工具输入/输出安全扫描（对标 xy_channel sentinel_hook.ts）
+cspl:
+  # 总开关，默认关闭
+  enabled: false
+  # CSPL 服务根地址，例如 http://lfhagmirror.hwcloudtest.cn:80
+  service_url: ""
+  uid: ""
+  api_key: ""
+  # 华为账号 uid，写入 extra.userId；未配置时默认取 channels.xiaoyi.uid
+  extra_user_id: ""
+  skill_id: skill-scope
+  request_from: openclaw
+  package_name: com.huawei.hag
+  text_source: question
+  timeout_ms: 15000
+  # API 异常时是否放行（fail-open）
+  fail_open: true
+  scan_tool_input: true
+  scan_tool_output: true
 
 channels:
   web:
@@ -672,6 +722,7 @@ channels:
     #   enabled: false
   xiaoyi:
     send_file_allowed: true
+    send_html_card_allowed: true
     apps:
       - name: 小艺默认应用
         # 华为小艺 A2A 配置
@@ -765,7 +816,26 @@ channels:
     long_poll_timeout_sec: 45
     backoff_base_sec: 1.0
     backoff_max_sec: 30.0
-    credential_file: ~/.wx-ai-bridge/credentials.json
+    credential_file: ./wechat/credentials.json
+    enabled: false
+  qq:
+    # QQ 官方机器人配置（频道、群聊和单聊）
+    app_id:
+    app_secret:
+    allow_from: []
+    enable_streaming: true
+    enable_guild: true
+    enable_group: true
+    enable_c2c: true
+    enabled: false
+  weibo:
+    # 微博智能助手私信 WebSocket 配置
+    app_id:
+    app_secret:
+    allow_from: []
+    enable_streaming: true
+    ws_endpoint: wss://open-im.api.weibo.com/ws/stream
+    token_endpoint: https://open-im.api.weibo.com/open/auth/ws_token
     enabled: false
   wecom:
     # 企业微信 AI 机器人配置
@@ -858,6 +928,8 @@ permissions:
     cron_delete_job: allow
     cron_toggle_job: allow
     cron_preview_job: allow
+    configure_channel: allow
+    get_wechat_login_status: allow
     acp_chat: ask
 
   rules:

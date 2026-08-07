@@ -27,8 +27,16 @@ async def upload_local_file_public_url(
     config: XiaoyiObsUploadConfig,
     file_path: str,
     object_type: str = "TEMPORARY_MATERIAL_DOC",
+    *,
+    need_preview: bool = False,
+    expire_time: int = 259200,
 ) -> str:
     """上传本地文件并通过 completeAndQuery 返回可公网访问的 URL.
+
+    Args:
+        need_preview: 为 True 时请求可预览 URL（对齐 openclaw
+            ``uploadFileAndGetPreviewUrl`` 的 needPreview=true）。
+        expire_time: 预览 URL 过期秒数；仅 need_preview=True 时写入请求体。
 
     Raises:
         RuntimeError: 任一步骤失败（prepare、上传、completeAndQuery 或缺少 url）。
@@ -81,7 +89,10 @@ async def upload_local_file_public_url(
                 raise RuntimeError(f"Upload failed: HTTP {resp.status}")
 
         cq_url = f"{base}/osms/v1/file/manager/completeAndQuery"
-        cq_data = {"objectId": object_id, "draftId": draft_id}
+        cq_data: dict = {"objectId": object_id, "draftId": draft_id}
+        if need_preview:
+            cq_data["needPreview"] = True
+            cq_data["expireTime"] = int(expire_time)
         async with session.post(cq_url, json=cq_data, headers=headers) as resp:
             if not resp.ok:
                 raise RuntimeError(f"completeAndQuery failed: HTTP {resp.status}")

@@ -32,6 +32,8 @@ class ChannelType(str, Enum):
     WECOM = "wecom"
     WECHAT = "wechat"
     SSH = "ssh"
+    QQ = "qq"
+    WEIBO = "weibo"
     CLI = "tui"
 
 
@@ -208,4 +210,3 @@ class BaseChannel(ABC):
     def is_running(self) -> bool:
         """Check if the channel_id is running."""
         return self._running
-

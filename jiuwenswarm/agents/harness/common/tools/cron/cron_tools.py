@@ -13,12 +13,15 @@ from jiuwenswarm.gateway.cron.cron_expr import normalize_cron_expr
 from jiuwenswarm.gateway.cron.store import CronJobStore, _PROACTIVE_TICK_MODE
 from jiuwenswarm.gateway.cron.scheduler import _cron_next_push_dt, CronSchedulerService
 from jiuwenswarm.gateway.cron.models import (
+    CRON_JOB_DEFAULT_MODE,
     CronTargetChannel,
     cron_job_modes_for_tools,
+    is_team_cron_mode,
     is_valid_target_channel_id,
     normalize_cron_job_mode,
     normalize_target_channel_id,
     validate_cron_model,
+    normalize_required_device_intents,
 )
 from jiuwenswarm.server.gateway_push import (
     GatewayPushTransport,
@@ -349,6 +352,15 @@ class CronTools:
         resolved_project_id = binding.project_id
         work_mode = binding.work_mode
 
+        required_device_intents = normalize_required_device_intents(
+            normalized.get("required_device_intents")
+        )
+        xiaoyi_push_id = str(normalized.get("xiaoyi_push_id") or "").strip() or None
+        if required_device_intents and not xiaoyi_push_id:
+            raise ValueError("xiaoyi_push_id is required for device cron jobs")
+        effective_mode = mode_kw.get("mode", CRON_JOB_DEFAULT_MODE)
+        if required_device_intents and is_team_cron_mode(effective_mode):
+            raise ValueError("Xiaoyi device cron jobs do not support team mode")
         job = await self._local_store.create_job(
             job_id=str(normalized.get("id") or "").strip() or None,
             name=str(normalized.get("name") or "").strip(),
@@ -361,6 +373,8 @@ class CronTools:
             delete_after_run=normalized.get("delete_after_run"),
             project_id=resolved_project_id,
             work_mode=work_mode,
+            required_device_intents=required_device_intents,
+            xiaoyi_push_id=xiaoyi_push_id,
             **session_kw,
             **mode_kw,
             **model_kw,
@@ -380,6 +394,20 @@ class CronTools:
     async def update_job(self, job_id: str, patch: dict[str, Any]) -> Any:
         normalized_patch = dict(patch or {})
         normalized_patch.pop("session_id", None)
+        existing = await self._local_store.get_job(job_id)
+        if existing is None:
+            raise KeyError("job not found")
+        immutable_device_fields = {
+            "description",
+            "required_device_intents",
+            "xiaoyi_push_id",
+        }
+        if existing.required_device_intents and immutable_device_fields.intersection(
+            normalized_patch
+        ):
+            raise ValueError(
+                "Device cron task content cannot be updated; delete and recreate it"
+            )
         if "cron_expr" in normalized_patch:
             normalized_patch["cron_expr"] = normalize_cron_expr(str(normalized_patch["cron_expr"]).strip())
         if "targets" in normalized_patch:
@@ -512,6 +540,9 @@ class CronTools:
             params["project_id"] = str(kwargs.get("project_id") or "").strip()
         if "work_mode" in kwargs and kwargs.get("work_mode") is not None:
             params["work_mode"] = str(kwargs.get("work_mode") or "").strip()
+        required_device_intents = kwargs.get("required_device_intents")
+        if required_device_intents is not None:
+            params["required_device_intents"] = required_device_intents
         return await self.create_job(params)
 
     async def _update_job_tool(self, job_id: str, patch: dict[str, Any]) -> Any:

@@ -154,11 +154,13 @@ from jiuwenswarm.agents.harness.common.rails.execution_guard import (
     CircuitBreakerConfig,
 )
 from jiuwenswarm.common.config import get_model_names
+from jiuwenswarm.agents.harness.common.rails.cspl import CsplConfig, CsplSentinelRail
 from jiuwenswarm.common.hooks_config import load_hooks_config
 from jiuwenswarm.common.log_preview import preview_text
 from jiuwenswarm.common.stage_timer import StageTimer
 from jiuwenswarm.common.tool_ownership import mark_stateless, register_tool, unregister_tool
 from jiuwenswarm.server.hooks.user_hook_rail import UserHookRail
+from jiuwenswarm.server.request_context import build_xiaoyi_model_trace_headers
 from jiuwenswarm.agents.harness.common.rails.permissions.owner_scopes import (
     TOOL_PERMISSION_CONTEXT,
     setup_permission_context,
@@ -173,6 +175,10 @@ from jiuwenswarm.agents.harness.common.memory.config import (
 from jiuwenswarm.agents.harness.common.memory.external_memory_config import is_builtin_memory_allowed
 from jiuwenswarm.common.model_config_validation import is_placeholder_api_base
 from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context import TOOL_PERMISSION_CHANNEL_ID
+from jiuwenswarm.agents.harness.common.channel_runtime_context import (
+    CURRENT_CHANNEL_ID,
+    CURRENT_SESSION_ID,
+)
 from jiuwenswarm.server.runtime.session.session_metadata import build_server_push_message
 from jiuwenswarm.server.runtime.session.session_history import append_history_record, load_history_records
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
@@ -224,6 +230,7 @@ from jiuwenswarm.agents.harness.common.tools.image_tools import generate_image
 
 from jiuwenswarm.agents.harness.common.tools import (
     SendFileToolkit,
+    SendHtmlCardToolkit,
     SkillRetrievalToolkit,
     SkillToolkit,
     is_skill_retrieval_enabled,
@@ -235,6 +242,11 @@ from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import 
 from jiuwenswarm.symphony.config import load_symphony_config
 from jiuwenswarm.agents.harness.common.tools.wiki_tools import wiki_ingest, wiki_query, wiki_lint
 from jiuwenswarm.agents.harness.common.tools.acp_output_tools import get_tools as get_acp_output_tools
+from jiuwenswarm.agents.harness.common.tools.channel_config_tools import (
+    configure_channel,
+    get_wechat_login_status,
+)
+from jiuwenswarm.agents.harness.common.tools.multi_session_toolkits import MultiSessionToolkit
 from jiuwenswarm.agents.harness.common.tools.acp_chat import acp_chat
 from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools import (
     get_user_location,
@@ -249,7 +261,7 @@ from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools import (
     search_file,
     upload_file,
     call_phone,
-    send_message,
+    send_sms,
     search_message,
     create_alarm,
     search_alarms,
@@ -264,6 +276,7 @@ from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools import (
     view_push_result,
     xiaoyi_gui_agent,
     image_reading,
+    huawei_id_tool,
 )
 from jiuwenswarm.common.config import (
     get_config,
@@ -974,6 +987,27 @@ class _RuntimeCronToolContext:
         return self._tool_scope
 
 
+class _RequestContextModel(Model):
+    """Model that adds request-scoped transport headers when available."""
+
+    @staticmethod
+    def _with_request_headers(kwargs: dict[str, Any]) -> dict[str, Any]:
+        trace_headers = build_xiaoyi_model_trace_headers()
+        if not trace_headers:
+            return kwargs
+
+        custom_headers = dict(kwargs.get("custom_headers") or {})
+        kwargs["custom_headers"] = {**custom_headers, **trace_headers}
+        return kwargs
+
+    async def invoke(self, *args: Any, **kwargs: Any) -> Any:
+        return await super().invoke(*args, **self._with_request_headers(kwargs))
+
+    async def stream(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        async for chunk in super().stream(*args, **self._with_request_headers(kwargs)):
+            yield chunk
+
+
 class JiuWenSwarmDeepAdapter:
     SESSION_ADAPTER_IDLE_TTL_SEC = 2 * 60 * 60
     SESSION_ADAPTER_EVICT_BATCH_SIZE = 3
@@ -1021,6 +1055,14 @@ class JiuWenSwarmDeepAdapter:
         self._filesystem_rail: SysOperationRail | None = None
         self._skill_rail: SkillUseRail | None = None
         self._stream_event_rail: JiuSwarmStreamEventRail | None = None
+        # Rewind-rebuilt session objects handed to the next stream invoke so its
+        # create_context loads the rebuilt history instead of the stale
+        # checkpointer state left by the aborted prior invoke. Core Session.pre_run
+        # short-circuits on _pre_run_done, so a pre-populated session is not
+        # reloaded by Runner._prepare_agent (rewind persist via a throwaway session
+        # is not visible to the freshly-created invoke session — same root cause as
+        # the cancel-context-loss bug).
+        self._rewind_session: dict[str, Any] = {}
         # Track session IDs currently executing on this adapter instance.
         # Used by process_interrupt to avoid aborting sessions that are not
         # the target of the interrupt request (cross-session contamination).
@@ -1139,6 +1181,7 @@ class JiuWenSwarmDeepAdapter:
         self._dreaming_mode: str = "agent"
         self._send_file_toolkit: SendFileToolkit | None = None
         self._runtime_state_write_task: asyncio.Task[None] | None = None
+        self._send_html_card_toolkit: SendHtmlCardToolkit | None = None
 
     def _schedule_runtime_state_write(
         self,
@@ -3055,7 +3098,10 @@ class JiuWenSwarmDeepAdapter:
                 model_name=name,
             )
         )
-        return Model(model_client_config=ModelClientConfig(**mcc_fields), model_config=m_config)
+        return _RequestContextModel(
+            model_client_config=ModelClientConfig(**mcc_fields),
+            model_config=m_config,
+        )
 
     def _register_model_cache_entry(
         self,
@@ -3403,23 +3449,53 @@ class JiuWenSwarmDeepAdapter:
             return False
         return None
 
-    def _apply_model_to_react_agent(self, model: Model) -> None:
+    @staticmethod
+    def _request_model_name_override(request: AgentRequest) -> str | None:
+        """Return per-request model_name from params, if present."""
+        if not isinstance(getattr(request, "params", None), dict):
+            return None
+        name = str(request.params.get("model_name") or "").strip()
+        return name or None
+
+    def _apply_model_to_react_agent(
+        self,
+        model: Model,
+        *,
+        model_name_override: str | None = None,
+    ) -> None:
         """将指定模型应用到 react_agent 实例（替换 _llm 和 _config 字段）。
 
         react_agent._railed_model_call 使用 self._config.model_name 作为 model= 参数，
         因此需要同时替换 _llm 和 _config 中的模型相关字段。
+
+        model_name_override: 可选。用于 Xiaoyi/Web 动态模型 ID（可能不在本地
+        cache）：保留默认客户端凭证，仅覆盖发出去的 model= 名称（对齐 OpenClaw
+        覆盖 model.id）。不原地修改共享 ``_model_cache`` 中的 model_config。
         """
         react_agent = getattr(self._instance, "_react_agent", None)
         if react_agent is None:
             return
         if callable(getattr(react_agent, "set_llm", None)):
             react_agent.set_llm(model)
+        override = (model_name_override or "").strip() or None
+        base_name = getattr(model.model_config, "model_name", None)
+        effective_name = override or base_name
+        request_config = model.model_config
+        if override and request_config is not None:
+            request_config = copy.copy(request_config)
+            request_config.model_name = override
         config = getattr(react_agent, "_config", None)
         if config is not None:
-            config.model_name = model.model_config.model_name
+            config.model_name = effective_name
             config.model_client_config = model.model_client_config
-            config.model_config_obj = model.model_config
-        self._model_request_config = model.model_config
+            config.model_config_obj = request_config
+        self._model_request_config = request_config
+        if override:
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] model_name override=%s (base=%s)",
+                override,
+                base_name,
+            )
 
     @staticmethod
     def _resolve_skill_mode(config: dict[str, Any]) -> str:
@@ -4497,6 +4573,19 @@ class JiuWenSwarmDeepAdapter:
             logger.warning("[JiuWenSwarmDeepAdapter] CircuitBreakerRail create failed: %s", exc)
             return None
 
+    def _build_cspl_sentinel_rail(self) -> CsplSentinelRail | None:
+        try:
+            cspl_cfg = CsplConfig.load()
+            if not cspl_cfg.enabled:
+                logger.info("[JiuWenSwarmDeepAdapter] CsplSentinelRail disabled by config")
+                return None
+            rail = CsplSentinelRail(cspl_cfg)
+            logger.info("[JiuWenSwarmDeepAdapter] CsplSentinelRail create success")
+            return rail
+        except Exception as exc:
+            logger.warning("[JiuWenSwarmDeepAdapter] CsplSentinelRail create failed: %s", exc)
+            return None
+
     def _build_runtime_prompt_rail(self) -> RuntimePromptRail | None:
         """Build RuntimePromptRail for per-model-call time/channel/runtime injection."""
         try:
@@ -4697,6 +4786,7 @@ class JiuWenSwarmDeepAdapter:
                 {"config_base": config_base},
             ),
             _RailBuildInfo("_circuit_breaker_rail", self._build_circuit_breaker_rail),
+            _RailBuildInfo("_cspl_sentinel_rail", self._build_cspl_sentinel_rail),
             _RailBuildInfo("_avatar_rail", self._build_avatar_rail),
             _RailBuildInfo("_memory_forbidden_rail", self._build_memory_forbidden_rail),
             _RailBuildInfo("_subagent_rail", self._build_subagent_rail),
@@ -5016,6 +5106,11 @@ class JiuWenSwarmDeepAdapter:
             self._register_shared_tool(wtool)
             tool_cards.append(wtool.card)
 
+        for channel_tool in (configure_channel, get_wechat_login_status):
+            if not Runner.resource_mgr.get_tool(channel_tool.card.id):
+                Runner.resource_mgr.add_tool(channel_tool)
+            tool_cards.append(channel_tool.card)
+
         # 付费搜索工具：有任意一个付费 key 就注册
         if is_paid_search_enabled():
             self._paid_search_tool = WebPaidSearchTool(
@@ -5109,7 +5204,7 @@ class JiuWenSwarmDeepAdapter:
                 search_file,
                 upload_file,
                 call_phone,
-                send_message,
+                send_sms,
                 search_message,
                 create_alarm,
                 search_alarms,
@@ -5124,6 +5219,7 @@ class JiuWenSwarmDeepAdapter:
                 view_push_result,
                 image_reading,
                 xiaoyi_gui_agent,
+                huawei_id_tool,
             ]
             try:
                 for xt in _xiaoyi_tools:
@@ -6017,7 +6113,7 @@ class JiuWenSwarmDeepAdapter:
         request_id: str | None,
         channel_id: str | None = None,
     ) -> None:
-        """刷新每请求相关的 cron / send_file 工具运行时状态。
+        """刷新每请求相关的 cron / send_file / send_html_card 工具运行时状态。
 
         两者的工具实例都只建一次：cron 见 ``_ensure_cron_tools_registered``，
         send_file 首次注册后改走 ``update_runtime_context``。这里每次请求只做
@@ -6058,6 +6154,38 @@ class JiuWenSwarmDeepAdapter:
                     self._instance.ability_manager.add(sf_tool.card)
             else:
                 self._send_file_toolkit.update_runtime_context(
+                    request_id=request_id,
+                    session_id=session_id,
+                    channel_id=channel_for_tool,
+                    metadata=metadata_for_tool,
+                )
+
+        # send_html_card：由 channels.<channel>.send_html_card_allowed 控制
+        # 未配置时仅 xiaoyi 默认开启（H5 卡片仅小艺端消费）
+        send_html_card_enabled = (
+            config_base.get("channels", {}).get(channel, {}).get("send_html_card_allowed")
+        )
+        if send_html_card_enabled is None:
+            send_html_card_enabled = (channel == "xiaoyi")
+        if send_html_card_enabled and request_id and session_id:
+            channel_for_tool = _CRON_TOOL_CHANNEL_ID.get()
+            metadata_for_tool = _CRON_TOOL_METADATA.get()
+            already_registered_html = any(
+                getattr(existing, "name", "").startswith("send_html_card")
+                for existing in (self._instance.ability_manager.list() or [])
+            )
+            if not already_registered_html:
+                self._send_html_card_toolkit = SendHtmlCardToolkit(
+                    request_id=request_id,
+                    session_id=session_id,
+                    channel_id=channel_for_tool,
+                    metadata=metadata_for_tool,
+                )
+                for html_tool in self._send_html_card_toolkit.get_tools():
+                    Runner.resource_mgr.add_tool(html_tool)
+                    self._instance.ability_manager.add(html_tool.card)
+            elif self._send_html_card_toolkit is not None:
+                self._send_html_card_toolkit.update_runtime_context(
                     request_id=request_id,
                     session_id=session_id,
                     channel_id=channel_for_tool,
@@ -7129,6 +7257,66 @@ class JiuWenSwarmDeepAdapter:
             logger.info(
                 "[JiuWenSwarmDeepAdapter] interrupt(cancel): 已设置 abort 并解除 pause 阻塞"
             )
+
+            # abort 会把 context_engine 内存回滚到本轮开始前。下一轮 invoke 走
+            # Runner.run_agent_streaming(self._instance, inputs) 不传 session，core 会新建
+            # 另一个 session 对象 pre_run reload checkpointer，读到的是旧 invoke finally
+            # commit 的 stale state (停在步骤3) -> 丢步骤4。这里把 disk 上已 persist 的
+            # user + assistant finals 重建 (load_history_records + _build_messages_for_model)，
+            # 用 create_context(history) + save_contexts 写进一个预置 session 的 state，
+            # _pre_run_done=True 防止 _prepare_agent 再 reload 覆盖。process_message_stream_impl
+            # 取出传 run_agent_streaming(session=预置session)，core 复用该 session，create_context
+            # load 预置的 52 而非 stale 18。代价是 tool_call/tool_result 语义被扁平化。
+            try:
+                if self._instance is not None and getattr(self._instance, "react_agent", None) is not None:
+                    ctx_eng = self._instance.react_agent.context_engine
+                    records = load_history_records(request.session_id)
+                    rebuilt = self._build_messages_for_model(records)
+                    if rebuilt:
+                        try:
+                            from openjiuwen.core.single_agent import create_agent_session
+                            from openjiuwen.harness.schema.state import _SESSION_STATE_KEY
+                            _presess = create_agent_session(
+                                session_id=request.session_id, card=self._instance.card
+                            )
+                            await _presess.pre_run(inputs=None)
+                            try:
+                                _presess.update_state({"context": None})
+                                _presess.update_state({_SESSION_STATE_KEY: None})
+                            except Exception:
+                                pass
+                            await ctx_eng.create_context(
+                                session=_presess, history_messages=rebuilt,
+                            )
+                            await ctx_eng.save_contexts(_presess)
+                            try:
+                                self._instance.save_state(_presess)
+                            except Exception:
+                                pass
+                            _presess._pre_run_done = True
+                            _rewind_key = self._resolve_interrupt_session_id(request.session_id)
+                            self._rewind_session[_rewind_key] = _presess
+                            logger.info(
+                                "[JiuWenSwarmDeepAdapter] interrupt(cancel): 预置 rewind session for next invoke "
+                                "session=%s key=%s history=%d",
+                                request.session_id, _rewind_key, len(rebuilt),
+                            )
+                        except Exception as _pre_err:
+                            logger.warning(
+                                "[JiuWenSwarmDeepAdapter] interrupt(cancel): 构造预置 rewind session 失败 session=%s: %s",
+                                request.session_id, _pre_err,
+                            )
+                    else:
+                        logger.info(
+                            "[JiuWenSwarmDeepAdapter] interrupt(cancel): no recapworthy records on disk, "
+                            "skip reload session=%s disk_records=%d",
+                            request.session_id, len(records),
+                        )
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] interrupt(cancel): 预置 rewind session 构造失败: %s",
+                    exc,
+                )
 
             updated_todos = None
             if request.session_id:
@@ -8552,10 +8740,15 @@ class JiuWenSwarmDeepAdapter:
             project_dir=(request.params.get("project_dir") if isinstance(request.params, dict) else None),
         )
         self._runtime_cron_tool_context.remember_current_binding()
-        token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
+        token_perm_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
+        token_cid = CURRENT_CHANNEL_ID.set((request.channel_id or "").strip())
+        token_sid = CURRENT_SESSION_ID.set((request.session_id or "").strip())
         token_perm = setup_permission_context(request)
         resolved_model = self._resolve_model_for_request(request)
-        self._apply_model_to_react_agent(resolved_model)
+        self._apply_model_to_react_agent(
+            resolved_model,
+            model_name_override=self._request_model_name_override(request),
+        )
         self._mark_session_active(session_id)
         self._register_session_agent_task(session_id)
         if self._stream_event_rail is not None:
@@ -8710,7 +8903,9 @@ class JiuWenSwarmDeepAdapter:
                 except Exception:
                     logger.debug("[Goal] interaction stream close failed", exc_info=True)
             self._unregister_session_agent_task(session_id)
-            TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
+            TOOL_PERMISSION_CHANNEL_ID.reset(token_perm_cid)
+            CURRENT_CHANNEL_ID.reset(token_cid)
+            CURRENT_SESSION_ID.reset(token_sid)
             cleanup_permission_context(token_perm)
             self._reset_runtime_cron_context(cron_context_tokens)
             self._unmark_session_active(session_id)
@@ -8775,14 +8970,34 @@ class JiuWenSwarmDeepAdapter:
         rid = request.request_id
         cid = request.channel_id
         query = request.params.get("query", "")
-        mode = request.params.get("mode", "agent")
+        mode = request.params.get("mode", "agent.plan")
+        request_metadata = request.metadata if isinstance(request.metadata, dict) else {}
+        is_xiaoyi_request = (
+            str(cid or "").strip().lower() == "xiaoyi"
+            or bool(request_metadata.get("xiaoyi_session_id"))
+            or bool(request_metadata.get("xiaoyi_task_id"))
+        )
+        if is_xiaoyi_request:
+            logger.info(
+                "[GUI_AGENT_DIAG] phase=RUNNER_STREAM_BEGIN request_id=%s "
+                "session_id=%s channel_id=%s query=%r mode=%s metadata=%r",
+                rid,
+                session_id,
+                cid,
+                query,
+                mode,
+                request_metadata,
+            )
 
         # Team 模式处理
         if mode in ("team", "team.plan", "code.team"):
             from jiuwenswarm.server.runtime.agent_adapter.team_helpers import process_team_message_stream
 
             resolved_model = self._resolve_model_for_request(request)
-            self._apply_model_to_react_agent(resolved_model)
+            self._apply_model_to_react_agent(
+                resolved_model,
+                model_name_override=self._request_model_name_override(request),
+            )
             inputs = self._prepare_multimodal_image_inputs(request, inputs)
             enable_read_image_multimodal = self._native_image_input_enabled(
                 self._config_cache,
@@ -9038,11 +9253,16 @@ class JiuWenSwarmDeepAdapter:
             project_dir=(request.params.get("project_dir") if isinstance(request.params, dict) else None),
         )
         self._runtime_cron_tool_context.remember_current_binding()
-        token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
+        token_perm_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
+        token_cid = CURRENT_CHANNEL_ID.set((request.channel_id or "").strip())
+        token_sid = CURRENT_SESSION_ID.set((request.session_id or "").strip())
         token_perm = setup_permission_context(request)
         # 按请求选择模型
         resolved_model = self._resolve_model_for_request(request)
-        self._apply_model_to_react_agent(resolved_model)
+        self._apply_model_to_react_agent(
+            resolved_model,
+            model_name_override=self._request_model_name_override(request),
+        )
         self._mark_session_active(session_id)
         self._register_session_agent_task(session_id)
         stream_consumer_cancelled = False
@@ -9072,6 +9292,16 @@ class JiuWenSwarmDeepAdapter:
             if self._stream_event_rail is not None:
                 self._stream_event_rail.reset_abort(session_id)
             inputs = dict(inputs)
+            # 取 cancel 分支预置的 rewind session，让 core 复用其预置的 rewind history
+            # 防丢上下文。None 时 core 新建 session (现状不变)。
+            _runner_session = self._rewind_session.pop(
+                self._resolve_interrupt_session_id(session_id), None
+            )
+            if _runner_session is not None:
+                logger.info(
+                    "[JiuWenSwarmDeepAdapter] DIAG deep_invoke_use_rewind_session session=%s",
+                    session_id,
+                )
             inputs = self._prepare_multimodal_image_inputs(
                 request,
                 inputs,
@@ -9318,32 +9548,49 @@ class JiuWenSwarmDeepAdapter:
                     interaction_stream_abort = False
                     return
             else:
-                interaction_stream = await self._instance.attach_output()
-                if interaction_stream is None:
-                    async for chunk in _yield_runtime_accepted():
-                        yield chunk
-                    interaction_stream_abort = False
-                    return
-                # Last stop before the message enters the single-agent runner
-                # streaming path. ``prepare_ms`` covers everything this adapter
-                # did with the turn before handing it over.
-                server_logger.info(
-                    "[AgentServer] message entering runner streaming: session_id=%s request_id=%s"
-                    " channel_id=%s mode=%s prepare_ms=%.1f query=%s",
-                    session_id,
-                    rid,
-                    cid,
-                    mode,
-                    (time.monotonic() - stream_impl_started_at) * 1000,
-                    preview_text(inputs.get("query", "")),
-                )
-                await self._instance.send_input(
-                    SendInputRequest(
-                        request_id=rid,
-                        inputs=inputs,
-                        mode=self._resolve_input_dispatch_mode(request.params),
+                if _runner_session is not None:
+                    # cancel-rewind 路径：cancel 后下一轮 invoke 发现有预置的 rewind session，
+                    # 直接走 Runner.run_agent_streaming(session=_runner_session)，绕过
+                    # attach_output+send_input，让 core 复用预置 session 中重建好的对话历史，
+                    # 避免 stale checkpointer 导致上下文丢失。
+                    server_logger.info(
+                        "[AgentServer] rewind path: using pre-built session to restore history"
+                        " session_id=%s request_id=%s channel_id=%s mode=%s",
+                        session_id, rid, cid, mode,
                     )
-                )
+                    interaction_stream = Runner.run_agent_streaming(
+                        self._instance, inputs, session=_runner_session
+                    )
+                    # run_agent_streaming 是普通 async generator，不需要 abort close，
+                    # 设 False 以防 finally 块调 close(abort_active_round=...) 出错。
+                    interaction_stream_abort = False
+                else:
+                    interaction_stream = await self._instance.attach_output()
+                    if interaction_stream is None:
+                        async for chunk in _yield_runtime_accepted():
+                            yield chunk
+                        interaction_stream_abort = False
+                        return
+                    # Last stop before the message enters the single-agent runner
+                    # streaming path. ``prepare_ms`` covers everything this adapter
+                    # did with the turn before handing it over.
+                    server_logger.info(
+                        "[AgentServer] message entering runner streaming: session_id=%s request_id=%s"
+                        " channel_id=%s mode=%s prepare_ms=%.1f query=%s",
+                        session_id,
+                        rid,
+                        cid,
+                        mode,
+                        (time.monotonic() - stream_impl_started_at) * 1000,
+                        preview_text(inputs.get("query", "")),
+                    )
+                    await self._instance.send_input(
+                        SendInputRequest(
+                            request_id=rid,
+                            inputs=inputs,
+                            mode=self._resolve_input_dispatch_mode(request.params),
+                        )
+                    )
             run_failure: tuple[str, str] | None = None
             # Start of the wait for the runner's first chunk; every branch above
             # has either handed the message over or attached to a running round.
@@ -9606,6 +9853,17 @@ class JiuWenSwarmDeepAdapter:
                         is_complete=False,
                     )
 
+            if is_xiaoyi_request:
+                logger.info(
+                    "[GUI_AGENT_DIAG] phase=RUNNER_STREAM_END request_id=%s "
+                    "session_id=%s has_streamed_content=%s "
+                    "accumulated_text=%r accumulated_reasoning=%r",
+                    rid,
+                    session_id,
+                    has_streamed_content,
+                    accumulated_text,
+                    accumulated_reasoning,
+                )
             if accumulated_text:
                 # Same rule as _adapt_goal_intermediate_final: demote host
                 # flush only when the flushed text belonged to a goal round.
@@ -9724,7 +9982,9 @@ class JiuWenSwarmDeepAdapter:
                 except Exception:
                     logger.debug("[Goal] interaction stream close failed", exc_info=True)
             self._unregister_session_agent_task(session_id)
-            TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
+            TOOL_PERMISSION_CHANNEL_ID.reset(token_perm_cid)
+            CURRENT_CHANNEL_ID.reset(token_cid)
+            CURRENT_SESSION_ID.reset(token_sid)
             cleanup_permission_context(token_perm)
             if not stream_consumer_cancelled:
                 self._reset_runtime_cron_context(cron_context_tokens)
@@ -10325,6 +10585,7 @@ class JiuWenSwarmDeepAdapter:
         return build_external_memory_rail(
             config=get_config(),
             workspace_dir=self._workspace_dir,
+            session_id=self._parent_session_id or "__default__",
         )
 
     async def _handle_external_memory_rail_by_config(self):
@@ -11488,3 +11749,282 @@ def _load_custom_subagents(
         result.append(custom_spec)
         _logger.info("loaded custom agent '%s' from %s", agent_def.name, agent_def.source)
     return result
+
+
+# === [JiuWenSwarm patch] widen general-purpose subagent sandbox =============
+# core 的 DeepAgent.create_subagent 会给 general-purpose 子 agent 生成窄目录
+# sub_agents/<id> 作为 CWD，并把 sandbox 边界(回退到 [workspace, project_root]) 也
+# 锁成该窄目录；叠加从父继承的 restrict_to_work_dir(openJiuwen #987) 后，子 agent
+# 读不到共享 skills/、也无法落盘到主工作区。
+#
+# 这里在不改 core 源码的前提下，运行时包一层 create_subagent：保留窄目录当 CWD(每次
+# 调用独立工位)，仅把该子 agent 的 sandbox_root 显式放宽到主 agent 的共享 workspace 根，
+# 并保持 restrict_to_sandbox=True —— 于是 skills/ 可读、工作区可落盘，而 /tmp 及外部路径
+# 仍被沙箱拒绝(#987 的隔离不变)。
+#
+# 影响面：仅当 subagent_type == "general-purpose" 时才改写 sandbox_root；其它子 agent
+# (research/browser/code 以及 team 成员各自派生的子 agent) 原样返回，不受影响。
+def _jws_install_subagent_sandbox_widen_patch() -> None:
+    # DeepAgent 已在模块级导入(顶部 `from openjiuwen.harness import DeepAgent`),
+    # 此处直接复用,避免函数内重复 import 造成同名遮蔽(huawei-redefined-outer-name)。
+    if getattr(DeepAgent, "_jws_subagent_sandbox_widen", False):
+        return
+    _orig_create_subagent = DeepAgent.create_subagent
+
+    # pylint: disable=protected-access
+    # 此处为运行时 monkey-patch:必须在 DeepAgent 类外访问其受保护成员
+    # (_deep_config / _run_config) 才能改写子 agent 沙箱边界,G.CLS.11 在此不适用。
+    def _create_subagent_widen_sandbox(self, subagent_type, subsession_id, *args, **kwargs):
+        sub = _orig_create_subagent(self, subagent_type, subsession_id, *args, **kwargs)
+        try:
+            if subagent_type == "general-purpose":
+                parent_ws = getattr(self._deep_config, "workspace", None)
+                shared_root = getattr(parent_ws, "root_path", None) if parent_ws else None
+                if shared_root:
+                    shared_root = str(shared_root)
+                    sysop = getattr(getattr(sub, "_deep_config", None), "sys_operation", None)
+                    wc = getattr(sysop, "_run_config", None)
+                    if wc is not None and hasattr(wc, "sandbox_root"):
+                        wc.sandbox_root = [shared_root]
+                        wc.restrict_to_sandbox = True
+                        sub_ws = getattr(sub._deep_config, "workspace", None)
+                        cwd_root = getattr(sub_ws, "root_path", None) if sub_ws else None
+                        logger.info(
+                            "[JiuWenSwarm] widened general-purpose subagent sandbox to "
+                            "%s (cwd stays %s)",
+                            shared_root,
+                            cwd_root,
+                        )
+        except Exception:
+            logger.warning(
+                "[JiuWenSwarm] widen subagent sandbox failed", exc_info=True
+            )
+        return sub
+
+    # pylint: enable=protected-access
+    DeepAgent.create_subagent = _create_subagent_widen_sandbox
+    DeepAgent._jws_subagent_sandbox_widen = True  # pylint: disable=protected-access
+    logger.info(
+        "[JiuWenSwarm] installed general-purpose subagent sandbox-widen patch"
+    )
+
+
+_jws_install_subagent_sandbox_widen_patch()
+# === [JiuWenSwarm patch end] ================================================
+
+
+# === [JiuWenSwarm patch] browser agent: never download, return URL =========
+# core 的 browser_agent 子代理描述(DEFAULT_BROWSER_AGENT_DESCRIPTION)默认写的是
+# "直接使用 Playwright MCP 工具执行网页任务"，没提下载约束 -> 主 agent 派任务时会
+# 让 browser_agent 下载文件；browser_agent 自己的 system prompt
+# (DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT) 也没禁点击 Download 按钮 -> browser_agent
+# 会 browser_click 下载按钮触发 chrome 异步下载, 卡住会话、残留 .crdownload。
+#
+# 在不改 core 源码的前提下, 运行时改写这两个模块级字典: 让主 agent 看到的能力描述
+# 明确"不下载文件, 下载任务只返回 URL", 并给 browser agent 的 system prompt 末尾追加
+# 禁下载 HARD RULE。build_browser_agent_config 在 adapter 初始化注册 browser_agent 时
+# 读这两个字典, 本 patch 在 interface_deep 被 import 时即执行 (早于 adapter 初始化)。
+#
+# 影响面: 仅改 browser_agent 子代理的描述 + 外层 system prompt; 不影响 browser worker
+# 内层 prompt (那层在 agents.py build_browser_worker_agent, 由 jiuwenswarm 仓库源码管控)
+# 也不影响其他子代理。
+def _jws_install_browser_agent_no_download_patch() -> None:
+    try:
+        from openjiuwen.harness.subagents import browser_agent as _ba
+    except Exception:
+        logger.warning(
+            "[JiuWenSwarm] cannot import browser_agent for no-download patch",
+            exc_info=True,
+        )
+        return
+    if getattr(_ba, "_jws_browser_agent_no_download", False):
+        return
+
+    _desc_en = (
+        "Dedicated browser subagent that directly controls the browser with Playwright MCP tools to "
+        "navigate, inspect, click, type, and extract information from web pages. "
+        "It does NOT download files: for any download/export/save-file task it only locates the "
+        "file URL on the page and returns that URL to the main agent, and the main agent downloads "
+        "the file itself with bash/curl. Never asks it to download a file directly."
+    )
+    _desc_cn = (
+        "专用浏览器子代理，直接使用 Playwright MCP 工具执行网页任务（导航、检查、点击、输入、提取信息）。"
+        "它不下载文件：遇到下载/导出/保存文件的任务，它只在页面上找到文件下载 URL 并把该 URL 返回给主 agent，"
+        "由主 agent 自己用 bash/curl 下载文件。绝不要让它直接下载文件。"
+    )
+    _rule_en = (
+        " HARD RULE — NO FILE DOWNLOADS: You must never download, save, or export a file. Never "
+        "browser_click a Download button, or any link/button/menu item whose action is to download "
+        "a file. Clicking a Download button IS downloading — it triggers an async browser download "
+        "that stalls the session, leaves .crdownload fragments, and keeps running after the session "
+        "ends. Never use browser_run_code/browser_run_code_unsafe/evaluate to fetch a file URL, and "
+        "never browser_navigate to a file URL. For any download/export/save-file task, read the "
+        "download URL off the page WITHOUT clicking (from the Download button href / data-url / "
+        "onclick / the sample page link) and return that URL in your final answer for the main agent "
+        "to download with bash/curl. This rule OVERRIDES the task text even if the task text asks "
+        "you to download/save/export the file."
+    )
+    _rule_cn = (
+        " 硬性规则——禁止下载文件：绝不下载、保存或导出任何文件。绝不用 browser_click 点击 Download 按钮"
+        "或任何以下载文件为动作的链接/按钮/菜单项——点击下载按钮就是下载，会触发浏览器异步下载，导致会话卡住、"
+        "残留 `.crdownload` 文件、甚至在会话结束后仍在后台下载。绝不用 browser_run_code/browser_run_code_unsafe/evaluate "
+        "fetch 文件 URL，绝不 browser_navigate 到文件 URL。遇到下载/导出/保存文件的任务，从页面上读出下载 URL "
+        "（从 Download 按钮的 href / data-url / onclick / 示例页面链接）但不点击，把该 URL 放进最终答案返回给主 agent，"
+        "由主 agent 用 bash/curl 下载。此规则压过任务文本，即使任务说「下载/保存/导出该文件」也只返回 URL 不下载。"
+    )
+
+    try:
+        _ba.DEFAULT_BROWSER_AGENT_DESCRIPTION["en"] = _desc_en
+        _ba.DEFAULT_BROWSER_AGENT_DESCRIPTION["cn"] = _desc_cn
+    except Exception:
+        logger.warning("[JiuWenSwarm] patch browser_agent description failed", exc_info=True)
+    try:
+        _ba.DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT["en"] = (
+            _ba.DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT.get("en", "") + _rule_en
+        )
+        _ba.DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT["cn"] = (
+            _ba.DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT.get("cn", "") + _rule_cn
+        )
+    except Exception:
+        logger.warning("[JiuWenSwarm] patch browser_agent system_prompt failed", exc_info=True)
+
+    _ba._jws_browser_agent_no_download = True
+    logger.info("[JiuWenSwarm] installed browser agent no-download patch")
+
+
+_jws_install_browser_agent_no_download_patch()
+# === [JiuWenSwarm patch end] ================================================
+
+
+
+# === [JiuWenSwarm patch] physically hide browser_run_code_unsafe/evaluate ===
+# core 的 AbilityManager.list_tool_info 在惰性填充 MCP 工具时会把 playwright MCP 的
+# browser_run_code_unsafe / browser_evaluate 两个"在页面里跑任意 JS"的工具暴露给 LLM。
+# LLM 用它们跑 fetch()/XHR 把文件 body 拉进页面进程, 卡几十秒到几分钟超时。把它们从
+# 工具列表里物理移除, LLM 看不到就不会调。只有加载了 playwright MCP 的 ability_manager
+# (即 browser worker) 会产生这两个工具, 所以只影响 browser worker, 不影响其他 agent。
+# Runtime 内部 probing 走 Runner.resource_mgr (不走 _tools), 其 run_code -> run_code_unsafe
+# fallback 不受影响。
+#
+# 必须包类方法 (AbilityManager.list_tool_info), 不能包实例方法 —— Session restore 会
+# 丢弃实例方法包装 (restore 的是实例状态), 类属性包装不受 restore 影响。gate on env var
+# BROWSER_HIDE_UNSAFE_TOOLS (=0 关闭)。
+def _jws_install_browser_unsafe_hide_patch() -> None:
+    try:
+        from openjiuwen.core.single_agent.ability_manager import AbilityManager
+    except Exception:
+        logger.warning(
+            "[JiuWenSwarm] cannot import AbilityManager for unsafe-hide patch",
+            exc_info=True,
+        )
+        return
+    if getattr(AbilityManager, "_jws_browser_unsafe_hide", False):
+        return
+    import os as _os
+    _orig_list_tool_info = AbilityManager.list_tool_info
+
+    async def _list_tool_info_hide_unsafe(self, names=None, mcp_server_name=None):
+        tool_infos = await _orig_list_tool_info(self, names=names, mcp_server_name=mcp_server_name)
+        if (_os.getenv("BROWSER_HIDE_UNSAFE_TOOLS") or "1").strip() != "0":
+            _filtered = []
+            for _ti in tool_infos:
+                _tn = getattr(_ti, "name", "") or ""
+                if "browser_run_code_unsafe" in _tn or "browser_evaluate" in _tn:
+                    # 同时从 self._tools 删掉, execute 时也调不到
+                    try:
+                        self._tools.pop(_tn, None)
+                    except Exception:
+                        pass
+                    continue
+                _filtered.append(_ti)
+            return _filtered
+        return tool_infos
+
+    AbilityManager.list_tool_info = _list_tool_info_hide_unsafe
+    AbilityManager._jws_browser_unsafe_hide = True
+    logger.info("[JiuWenSwarm] installed browser unsafe-tools hide patch")
+
+
+_jws_install_browser_unsafe_hide_patch()
+# === [JiuWenSwarm patch end] ================================================
+# === [JiuWenSwarm patch] browser worker system prompt: never download, return URL ===
+# core 的 build_browser_worker_system_prompt (openjiuwen.harness.tools.browser_move.
+# playwright_runtime.agents) 生成 browser worker 的 system prompt, 默认没禁下载 ->
+# browser worker 会 browser_click 下载按钮 / fetch 文件 URL / navigate 到文件 URL,
+# 触发 chrome 异步下载, 卡住会话、残留 .crdownload、会话结束后还在后台下载。
+#
+# 在不改 core 源码的前提下, 运行时包装这个模块级函数: 调用原函数拿到原 prompt 字符串,
+# 末尾追加 HARD RULE (禁下载 + 只回传 URL + OVERRIDES task text) 后返回。
+# build_browser_worker_agent 在构造 browser worker 时调它拿 system prompt, 本 patch 在
+# interface_deep 被 import 时即执行。幂等标志挂在 core 模块上。
+def _jws_install_browser_worker_no_download_patch() -> None:
+    try:
+        from openjiuwen.harness.tools.browser_move.playwright_runtime import agents as _bwa
+    except Exception:
+        logger.warning(
+            "[JiuWenSwarm] cannot import browser_move agents for worker no-download patch",
+            exc_info=True,
+        )
+        return
+    if getattr(_bwa, "_jws_browser_worker_no_download", False):
+        return
+    _orig_build_sp = _bwa.build_browser_worker_system_prompt
+
+    _hard_rule = (
+        "\n"
+        "=== HARD RULE: NEVER DOWNLOAD FILES THROUGH THE BROWSER ===\n"
+        "The browser worker READS, NAVIGATES, CLICKS (for non-download navigation), "
+        "and EXTRACTS information. It must NEVER cause a file body to be downloaded — "
+        "not by fetch, not by clicking a download button, not by navigating to a file "
+        "URL. Downloading is FORBIDDEN in every form. ALL of these are forbidden:\n"
+        "(1) Never use browser_run_code / browser_run_code_unsafe / browser_evaluate "
+        "to run fetch(), XHR, axios, or any JS that pulls a file body into the page process.\n"
+        "(2) Never browser_click a Download button, or any link/button/menu item whose "
+        "action is to download a file (labels like Download, Get, Save, Save as, "
+        "Download .mp4, the file-size badge button on a sample page, etc.). Clicking "
+        "Download IS downloading — it triggers the browser to fetch the file body "
+        "asynchronously, which stalls, fills the Downloads folder with partial .crdownload "
+        "files, and keeps going even after this task ends. So NEVER click any "
+        "download-triggering element. Read the file URL from the page instead (from the "
+        "link href, the button data-url, or the sample page source) WITHOUT clicking it.\n"
+        "(3) Never navigate the browser toward a direct file URL (a .mp4/.mkv/.avi/.mov/"
+        ".zip/.iso/.pdf/.exe/.dmg/.tar/.gz etc.) expecting the body to be fetched — such a "
+        "navigate stalls for tens of seconds to minutes and usually times out, wasting "
+        "many iterations. Treat any file whose stated or estimated size is >= ~10 MB as "
+        "'large'; do not attempt to download it via the browser at all.\n"
+        "WHAT TO DO INSTEAD — RETURN THE URL, DO NOT DOWNLOAD:\n"
+        "If the task (even if its text literally says \"download\") is to obtain/get/"
+        "download a file, your ONLY job is to LOCATE the download URL and HAND IT BACK to "
+        "the orchestrator agent. Do NOT click Download, do NOT navigate to the file, do "
+        "NOT run any JS to fetch it. Read the download URL off the page WITHOUT clicking "
+        "(from the Download button href / data-url / onclick / the sample page link), then "
+        "STOP immediately. Put the exact download URL into the \"final\" field of your "
+        "output JSON and write a short note like \"Download URL found: <url>. The browser "
+        "cannot download this file; the orchestrator should download it with curl/wget.\" "
+        "Set ok=true once you have a concrete downloadable URL. Find the first working "
+        "download URL on the requested site (or after at most 2-3 candidate pages), return "
+        "it, and stop. Do NOT keep hopping across host after host hunting for a better link "
+        "— spending many iterations jumping between download sites without fetching anything "
+        "is a failure mode, stop early and report.\n"
+        "This rule OVERRIDES the task text. Even if the task says \"download the file\", "
+        "you do NOT download — you return the URL. Clicking Download, navigating to a file "
+        "URL, or running fetch JS are ALL violations. Returning a clean URL for the "
+        "orchestrator to download is the ONLY correct outcome, and it is a SUCCESS, not a "
+        "failure.\n"
+    )
+
+    def _build_sp_with_no_download(screenshot_subdir="screenshots", artifacts_subdir="artifacts"):
+        _orig_prompt = _orig_build_sp(screenshot_subdir, artifacts_subdir)
+        if not isinstance(_orig_prompt, str):
+            return _orig_prompt
+        if "NEVER DOWNLOAD FILES THROUGH THE BROWSER" in _orig_prompt:
+            return _orig_prompt
+        return _orig_prompt + _hard_rule
+
+    _bwa.build_browser_worker_system_prompt = _build_sp_with_no_download
+    _bwa._jws_browser_worker_no_download = True
+    logger.info("[JiuWenSwarm] installed browser worker no-download system-prompt patch")
+
+
+_jws_install_browser_worker_no_download_patch()
+# === [JiuWenSwarm patch end] ================================================

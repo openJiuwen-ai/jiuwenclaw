@@ -12,10 +12,7 @@ from openjiuwen.core.session.stream import OutputSchema
 
 from jiuwenswarm.common.e2a.constants import E2A_WIRE_LEGACY_AGENT_RESPONSE_KEY
 from jiuwenswarm.common.e2a.gateway_normalize import (
-    e2a_response_from_agent_chunk,
     e2a_response_from_agent_response,
-    e2a_response_to_agent_chunk,
-    e2a_response_to_agent_response,
 )
 from jiuwenswarm.common.e2a.wire_codec import (
     encode_agent_chunk_for_wire,
@@ -41,6 +38,28 @@ def test_roundtrip_unary_ok() -> None:
     assert back.ok is True
     assert back.payload == orig.payload
     assert back.metadata == orig.metadata
+
+
+def test_unary_wire_serializes_model_dump_payload() -> None:
+    class OutputLike:
+        @staticmethod
+        def model_dump(mode: str = "python") -> dict:
+            return {"type": "llm_output", "payload": {"content": "hello"}}
+
+    orig = AgentResponse(
+        request_id="model-dump",
+        channel_id="weibo",
+        ok=True,
+        payload={"output": OutputLike()},
+    )
+
+    wire = encode_agent_response_for_wire(orig, response_id="model-dump")
+
+    json.dumps(wire, ensure_ascii=False)
+    back = parse_agent_server_wire_unary(wire)
+    assert back.payload == {
+        "output": {"type": "llm_output", "payload": {"content": "hello"}}
+    }
 
 
 def test_roundtrip_unary_error() -> None:
