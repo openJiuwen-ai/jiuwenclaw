@@ -209,6 +209,10 @@ class RedisClient:
                 keys.append(k)
         return keys
 
+    async def scan_keys(self, pattern: str) -> list[str]:
+        """``scan_iter`` 的别名（SessionMap / LeaderElection 故障切换用）。"""
+        return await self.scan_iter(pattern)
+
     async def hget(self, key: str, field: str) -> str | None:
         r = self._connection()
         return await r.hget(self._cfg.effective_key(key), field)

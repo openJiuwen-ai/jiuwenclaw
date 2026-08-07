@@ -219,3 +219,159 @@ class TestSessionMapWithStorage:
         s3, a3 = invoke_ids_from_session_id_string(sid)
         assert s3 == invoke_service_id("chatX", "botY")
         assert a3 is None
+
+
+# ---------------------------------------------------------------------------
+# RedisSessionStorage / failover reload
+# ---------------------------------------------------------------------------
+
+class _AsyncDictRedis:
+    def __init__(self) -> None:
+        self._data: dict[str, str] = {}
+
+    def peek(self, key: str) -> str | None:
+        return self._data.get(key)
+
+    async def get(self, key: str) -> str | None:
+        return self._data.get(key)
+
+    async def set(self, key: str, value: str, ttl_seconds: int | None = None) -> bool:
+        self._data[key] = value
+        return True
+
+    async def delete(self, key: str) -> bool:
+        return self._data.pop(key, None) is not None
+
+    async def mget(self, keys: list[str]) -> list[str | None]:
+        return [self._data.get(key) for key in keys]
+
+    async def scan_keys(self, pattern: str) -> list[str]:
+        if pattern.endswith("*"):
+            prefix = pattern[:-1]
+            return [key for key in self._data if key.startswith(prefix)]
+        return [key for key in self._data if key == pattern]
+
+
+class _TestRedisSessionStorage:
+    """Reuse RedisSessionStorage with injected fake Redis."""
+
+    def __init__(self, redis_client: _AsyncDictRedis, claw_id: str) -> None:
+        from jiuwenswarm.gateway.routing.session_storage import RedisSessionStorage
+
+        self._inner = RedisSessionStorage()
+        self._inner._redis = redis_client
+        self._inner._claw_id = claw_id
+        self._inner._mapping = {}
+
+    async def seed_session(self, identity_key: str, raw_session: dict) -> None:
+        await self._inner._redis.set(  # type: ignore[union-attr]
+            self._inner._redis_key(identity_key),
+            json.dumps(raw_session),
+        )
+
+    def has_identity_key(self, identity_key: str) -> bool:
+        return bool(self._inner._redis and self._inner._redis.peek(self._inner._redis_key(identity_key)))
+
+    def get(self, identity_key: str):
+        return self._inner.get(identity_key)
+
+    def get_all(self):
+        return self._inner.get_all()
+
+    def load(self) -> None:
+        self._inner.load()
+
+    def set(self, identity_key: str, session: Session) -> None:
+        self._inner.set(identity_key, session)
+
+
+@pytest.mark.asyncio
+async def test_redis_session_storage_fetches_existing_session_without_local_cache() -> None:
+    test_storage = _TestRedisSessionStorage(_AsyncDictRedis(), "gateway-1")
+
+    identity_key = "feishu::chat-1::bot-1"
+    raw_session = {
+        "session_id": "feishu::chat-1::bot-1::abc123::def456",
+        "service_id": invoke_service_id("chat-1", "bot-1"),
+        "agent_id": None,
+    }
+    await test_storage.seed_session(identity_key, raw_session)
+
+    session = test_storage.get(identity_key)
+
+    assert session is not None
+    assert session.session_id == raw_session["session_id"]
+    assert test_storage.get_all()[identity_key].session_id == raw_session["session_id"]
+
+
+def test_session_map_reload_after_failover() -> None:
+    """PRIMARY writes Redis; STANDBY promotion sees same Session via reload()."""
+    from jiuwenswarm.gateway.routing.session_map import SessionMap, SessionMapScope
+
+    shared_redis = _AsyncDictRedis()
+    storage_a = _TestRedisSessionStorage(shared_redis, "gateway-1")
+    storage_b = _TestRedisSessionStorage(shared_redis, "gateway-1")
+
+    map_a = SessionMap(scope=SessionMapScope.PER_CHAT_BOT)
+    map_a._storage = storage_a  # type: ignore[assignment]
+    sid = "feishu::chat-1::bot-1::abc123::def456"
+    map_a.set_session_id("feishu", "chat-1", "bot-1", "user-1", sid)
+
+    assert storage_a.has_identity_key("feishu::chat-1::bot-1")
+
+    map_b = SessionMap(scope=SessionMapScope.PER_CHAT_BOT)
+    map_b._storage = storage_b  # type: ignore[assignment]
+    # get() 可直读 Redis；reload 用于全量刷新内存缓存（晋升 PRIMARY）
+    map_b.reload()
+    assert map_b.find_session_id("feishu", "chat-1", "bot-1", "user-1") == sid
+    assert "feishu::chat-1::bot-1" in map_b._storage.get_all()
+
+
+def test_message_handler_reload_session_map() -> None:
+    from typing import cast
+
+    from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
+    from jiuwenswarm.gateway.routing.agent_client import AgentServerClient
+    from jiuwenswarm.gateway.routing.session_map import SessionMap, SessionMapScope
+    from jiuwenswarm.common.schema.message import Message, ReqMethod
+
+    shared_redis = _AsyncDictRedis()
+    MessageHandler._instance = None
+
+    handler = MessageHandler(cast(AgentServerClient, object()))
+    storage = _TestRedisSessionStorage(shared_redis, "gateway-1")
+    sm = SessionMap(scope=SessionMapScope.PER_CHAT_BOT)
+    sm._storage = storage  # type: ignore[assignment]
+    handler._session_map = sm
+
+    sid = "feishu::chat-1::bot-1::abc123::def456"
+    sm.set_session_id("feishu", "chat-1", "bot-1", "user-1", sid)
+
+    MessageHandler._instance = None
+    promoted = MessageHandler(cast(AgentServerClient, object()))
+    storage2 = _TestRedisSessionStorage(shared_redis, "gateway-1")
+    sm2 = SessionMap(scope=SessionMapScope.PER_CHAT_BOT)
+    sm2._storage = storage2  # type: ignore[assignment]
+    promoted._session_map = sm2
+    promoted._session_map_channel_types = frozenset({"feishu_enterprise"})
+    promoted._control_channel_types = {"feishu", "feishu_enterprise"}
+
+    promoted.reload_session_map()
+    msg = Message(
+        id="req-1",
+        type="req",
+        channel_id="feishu_enterprise",
+        session_id="external-chat-1",
+        params={"query": "hi"},
+        timestamp=123.0,
+        ok=True,
+        req_method=ReqMethod.CHAT_SEND,
+        provider="feishu",
+        chat_id="chat-1",
+        bot_id="bot-1",
+        user_id="user-1",
+    )
+    promoted._apply_channel_state(msg)
+    assert msg.session_id == sid
+
+    MessageHandler._instance = None

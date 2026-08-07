@@ -292,6 +292,10 @@ class MessageHandler(ABC):
         if isinstance(self.agent_client, WebSocketAgentServerClient):
             self.agent_client.set_server_push_handler(self._handle_agent_server_push)
 
+    def reload_session_map(self) -> None:
+        """Reload distributed SessionMap cache after leader switchover."""
+        self._session_map.reload()
+
     @classmethod
     def get_instance(cls, agent_client: "AgentServerClient | None" = None) -> "MessageHandler":
         """获取单例实例。

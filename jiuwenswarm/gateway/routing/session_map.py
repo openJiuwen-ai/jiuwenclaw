@@ -227,3 +227,7 @@ class SessionMap:
         existing = self._storage.get(key)
         if existing != sess:
             self._storage.set(key, sess)
+
+    def reload(self) -> None:
+        """Reload all sessions from storage backend (called when promoted to PRIMARY)."""
+        self._storage.load()
