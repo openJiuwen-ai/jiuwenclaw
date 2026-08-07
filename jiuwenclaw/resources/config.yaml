@@ -275,12 +275,12 @@ code_generation:
 # model_routing — 模型路由 Rail（按任务分类/隐私/能力表推荐或切换模型）
 model_routing:
   enabled: false                    # 总开关：true 注册 rail（默认关，零影响）
-  apply: true                     # 真切换开关：true 调 set_llm 真切模型；false 只推荐不切
-  privacy_check: false             # 隐私检查开关：true 检查隐私；false 跳过（默认关）
+  apply: true                       # 真切换开关：true 调 set_llm 真切模型；false 只推荐不切
+  privacy_check: false              # 隐私检查开关：true 检查隐私；false 跳过（默认关）
   stats_path: ""                    # per-model token 统计文件路径；空=默认 ~/.jiuwenswarm/config/routing_state/model_routing_list.json
   health_check:
     enabled: true                   # 健康检查开关
-    interval_seconds: 600           # 缓存 TTL（10 分钟）
+    interval_seconds: 180           # 缓存 TTL（3 分钟）
     timeout_seconds: 10             # 单次请求超时
     max_rounds: 1                   # 重试轮次
     max_consecutive_failures: 2     # 连续失败阈值

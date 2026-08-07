@@ -114,25 +114,27 @@ class ModelHealthChecker:
                 continue
 
             new_status: HealthStatus = result
-            # 继承连续计数
+            # 首次检查（prev=None）也需要走连续失败判定，避免单次失败直接判死
             if prev is not None:
                 new_status.consecutive_failures = prev.consecutive_failures
                 new_status.consecutive_successes = prev.consecutive_successes
-                # 根据本次检查结果更新
-                if new_status.healthy:
-                    new_status.consecutive_successes = prev.consecutive_successes + 1
-                    new_status.consecutive_failures = 0
-                else:
-                    new_status.consecutive_failures = prev.consecutive_failures + 1
-                    new_status.consecutive_successes = 0
+            # 根据本次检查结果更新连续计数
+            if new_status.healthy:
+                new_status.consecutive_successes = (prev.consecutive_successes if prev else 0) + 1
+                new_status.consecutive_failures = 0
+            else:
+                new_status.consecutive_failures = (prev.consecutive_failures if prev else 0) + 1
+                new_status.consecutive_successes = 0
 
-                # 判定健康状态
-                if new_status.consecutive_failures >= self._config.max_consecutive_failures:
-                    new_status.healthy = False
-                elif new_status.consecutive_successes >= self._config.recovery_consecutive_successes:
-                    new_status.healthy = True
-                else:
-                    new_status.healthy = prev.healthy  # 保持上一次
+            # 判定健康状态：连续失败达到阈值才判不健康，否则保守视为健康
+            if new_status.consecutive_failures >= self._config.max_consecutive_failures:
+                new_status.healthy = False
+            elif new_status.consecutive_successes >= self._config.recovery_consecutive_successes:
+                new_status.healthy = True
+            elif prev is not None:
+                new_status.healthy = prev.healthy  # 保持上一次
+            else:
+                new_status.healthy = True  # 首次检查失败，保守视为健康
 
             self._status_map[key] = new_status
 
