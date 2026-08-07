@@ -2,10 +2,18 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
-from unittest.mock import patch
 
 import pytest
+
+from jiuwenswarm.gateway.routing.session_map import Session, invoke_service_id
+
+
+def _sess(session_id: str, *, chat_id: str = "c", bot_id: str = "b", agent_id: str | None = None) -> Session:
+    return Session(
+        session_id=session_id,
+        service_id=invoke_service_id(chat_id, bot_id),
+        agent_id=agent_id,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -46,10 +54,10 @@ class TestLocalSessionStorageBasic:
         store_path = storage_dir / "session_map_default.json"
         storage = LocalSessionStorage(store_path=store_path)
 
-        storage.set("key1", "sess_001")
+        storage.set("key1", _sess("sess_001"))
         result = storage.get("key1")
         assert result is not None
-        assert result == "sess_001"
+        assert result.session_id == "sess_001"
 
     @staticmethod
     def test_get_nonexistent(storage_dir):
@@ -69,7 +77,7 @@ class TestLocalSessionStorageBasic:
         store_path = storage_dir / "session_map_default.json"
         storage = LocalSessionStorage(store_path=store_path)
 
-        storage.set("key1", "sess_001")
+        storage.set("key1", _sess("sess_001"))
         storage.remove("key1")
         assert storage.get("key1") is None
 
@@ -81,12 +89,12 @@ class TestLocalSessionStorageBasic:
         store_path = storage_dir / "session_map_default.json"
         storage = LocalSessionStorage(store_path=store_path)
 
-        storage.set("key1", "sess_001")
-        storage.set("key2", "sess_002")
+        storage.set("key1", _sess("sess_001"))
+        storage.set("key2", _sess("sess_002"))
         all_data = storage.get_all()
         assert len(all_data) == 2
-        assert all_data["key1"] == "sess_001"
-        assert all_data["key2"] == "sess_002"
+        assert all_data["key1"].session_id == "sess_001"
+        assert all_data["key2"].session_id == "sess_002"
 
 
 # ---------------------------------------------------------------------------
@@ -98,40 +106,36 @@ class TestLocalSessionStoragePersist:
 
     @staticmethod
     def test_save_single_session(storage_dir):
-        """save(session_id) 应只保存单条数据到文件。"""
+        """set 应把 Session 对象持久化为 JSON dict。"""
         from jiuwenswarm.gateway.routing.session_storage import LocalSessionStorage
 
         store_path = storage_dir / "session_map_default.json"
         storage = LocalSessionStorage(store_path=store_path)
 
-        # 设置多条数据
-        storage.set("key1", "sess_001")
-        storage.set("key2", "sess_002")
+        storage.set("key1", _sess("sess_001"))
+        storage.set("key2", _sess("sess_002"))
 
-        # 只保存 sess_001（实际上 set 已经自动保存了）
-        # 验证文件内容
         with open(store_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        assert data["key1"] == "sess_001"
+        assert data["key1"]["session_id"] == "sess_001"
+        assert data["key1"]["service_id"]
 
     @staticmethod
     def test_save_nonexistent_session(storage_dir):
-        """save 不存在的 session_id 应无操作。"""
+        """save 不在 mapping 中的 Session 应无操作（不抛异常）。"""
         from jiuwenswarm.gateway.routing.session_storage import LocalSessionStorage
 
         store_path = storage_dir / "session_map_default.json"
         storage = LocalSessionStorage(store_path=store_path)
 
-        # 不应抛出异常
-        storage.save("nonexistent_session_id")
+        storage.save(_sess("nonexistent_session_id"))
 
     @staticmethod
     def test_load_from_existing_file(storage_dir):
-        """从已存在的文件加载。"""
+        """从已存在的文件加载（兼容旧版纯字符串）。"""
         from jiuwenswarm.gateway.routing.session_storage import LocalSessionStorage
 
         store_path = storage_dir / "session_map_default.json"
-        # 预写文件（简化格式：直接存 session_id 字符串）
         store_path.write_text(
             json.dumps({"key1": "sess_old"}, ensure_ascii=False),
             encoding="utf-8",
@@ -141,7 +145,8 @@ class TestLocalSessionStoragePersist:
 
         result = storage.get("key1")
         assert result is not None
-        assert result == "sess_old"
+        assert result.session_id == "sess_old"
+        assert result.service_id
 
 
 # ---------------------------------------------------------------------------
@@ -168,22 +173,49 @@ class TestSessionMapWithStorage:
     """SessionMap 通过存储抽象层操作。"""
 
     @staticmethod
-    def test_session_map_get_session(storage_dir, monkeypatch):
-        """get_session 应创建并返回正确的 Session。"""
+    def test_session_map_set_and_find(storage_dir, monkeypatch):
+        """set_session_id / find_session_id 应读写 Session 并持久化。"""
+        from jiuwenswarm.gateway.routing.session_map import SessionMap, SessionMapScope
         from jiuwenswarm.gateway.routing.session_storage import LocalSessionStorage
 
         store_path = storage_dir / "session_map_default.json"
-        storage = LocalSessionStorage(store_path=store_path)
+        monkeypatch.setattr(
+            "jiuwenswarm.gateway.routing.session_map.LocalSessionStorage",
+            lambda: LocalSessionStorage(store_path=store_path),
+        )
+        monkeypatch.delenv("AGENT_RUNTIME", raising=False)
 
-        # 模拟 SessionMap 的 get_session 逻辑
-        from jiuwenswarm.gateway.routing.session_map import SessionMap, SessionMapScope
+        sm = SessionMap(scope=SessionMapScope.PER_CHAT_BOT)
+        sm.set_session_id("provider1", "chat1", "bot1", "user1", "provider1::chat1::bot1::ts1::suffix1")
+        assert sm.find_session_id("provider1", "chat1", "bot1", "user1") == (
+            "provider1::chat1::bot1::ts1::suffix1"
+        )
+        sess = sm.find_session("provider1", "chat1", "bot1", "user1")
+        assert sess is not None
+        assert sess.service_id == invoke_service_id("chat1", "bot1")
 
-        identity_key = "provider1::chat1::bot1"
-        session_id = "provider1::chat1::bot1::ts1::suffix1"
-        storage.set(identity_key, session_id)
-
-        # 验证持久化
         storage2 = LocalSessionStorage(store_path=store_path)
-        result = storage2.get(identity_key)
+        result = storage2.get("provider1::chat1::bot1")
         assert result is not None
-        assert result == session_id
+        assert result.session_id == "provider1::chat1::bot1::ts1::suffix1"
+
+    @staticmethod
+    def test_invoke_ids_helpers():
+        from jiuwenswarm.gateway.routing.session_map import (
+            SessionMapScope,
+            invoke_ids_from_identity,
+            invoke_ids_from_session_id_string,
+        )
+
+        svc, aid = invoke_ids_from_identity("chat", "bot", "user", SessionMapScope.PER_CHAT_BOT)
+        assert svc == invoke_service_id("chat", "bot")
+        assert aid is None
+
+        svc2, aid2 = invoke_ids_from_identity("chat", "bot", "user", SessionMapScope.PER_CHAT_BOT_USER)
+        assert svc2 == svc
+        assert aid2 == "user"
+
+        sid = "feishu::chatX::botY::aabb::cc"
+        s3, a3 = invoke_ids_from_session_id_string(sid)
+        assert s3 == invoke_service_id("chatX", "botY")
+        assert a3 is None
