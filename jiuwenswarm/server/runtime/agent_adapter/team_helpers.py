@@ -1179,11 +1179,12 @@ async def _announce_team_roster(
     """
     try:
         members = await _read_team_roster(channel_id, session_id, team_name)
-        fresh = [
-            m for m in members
-            if str(m.get("member_id") or "").strip()
-            and str(m.get("member_id")).strip() not in announced_members
-        ]
+        fresh: list[dict[str, Any]] = []
+        for member in members:
+            candidate_id = str(member.get("member_id") or "").strip()
+            if not candidate_id or candidate_id in announced_members:
+                continue
+            fresh.append(member)
         if not fresh:
             return
         for member in fresh:

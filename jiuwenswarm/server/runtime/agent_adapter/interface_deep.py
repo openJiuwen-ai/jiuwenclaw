@@ -756,6 +756,34 @@ def _mcc_looks_usable(mcc: dict) -> bool:
     return bool(api_key)
 
 
+def build_model_from_entry(mcc: dict, mco: dict) -> Model:
+    """根据单个模型条目的 model_client_config / model_config_obj 构建 Model 实例。
+
+    模块级公开函数：除本适配器外，模型缓存构建（``agent_ws_server`` /
+    ``auto_harness.scheduler``）与图像模态探测预热（``image_modality_warmup``）
+    都要按同一规则从 ``models.defaults`` 条目造 Model，共享这一份实现。
+
+    Args:
+        mcc: 条目的 ``model_client_config`` 段，``model_name`` 单独取出。
+        mco: 条目的 ``model_config_obj`` 段。
+
+    Returns:
+        按该条目配置构建的 Model 实例。
+    """
+    name = mcc.get("model_name", "")
+    mcc_fields = {k: v for k, v in mcc.items() if k != "model_name"}
+    if not mcc_fields.get("client_provider"):
+        mcc_fields["client_provider"] = "OpenAI"
+    m_config = ModelRequestConfig(
+        **build_reasoning_model_request_kwargs(
+            model_client_config=mcc_fields,
+            model_config_obj=mco,
+            model_name=name,
+        )
+    )
+    return Model(model_client_config=ModelClientConfig(**mcc_fields), model_config=m_config)
+
+
 def parse_int(value: Any, default: int) -> int:
     """Parse integer-like values safely."""
     try:
@@ -2371,8 +2399,12 @@ class JiuWenSwarmDeepAdapter:
         try:
             subagents.extend(
                 _load_custom_subagents(
-                    self._workspace_dir, subagents_cfg, model, workspace,
-                    __name__, model_cache=self._model_cache,
+                    workspace_dir=self._workspace_dir,
+                    subagents_cfg=subagents_cfg,
+                    model=model,
+                    workspace=workspace,
+                    logger_name=__name__,
+                    model_cache=self._model_cache,
                     sys_operation=sys_operation,
                 )
             )
@@ -3131,22 +3163,6 @@ class JiuWenSwarmDeepAdapter:
         if prompt_fingerprint is not None:
             self._last_reload_system_prompt_fingerprint = prompt_fingerprint
 
-    @staticmethod
-    def _build_model_from_entry(mcc: dict, mco: dict) -> Model:
-        """根据单个模型条目的 model_client_config / model_config_obj 构建 Model 实例。"""
-        name = mcc.get("model_name", "")
-        mcc_fields = {k: v for k, v in mcc.items() if k != "model_name"}
-        if not mcc_fields.get("client_provider"):
-            mcc_fields["client_provider"] = "OpenAI"
-        m_config = ModelRequestConfig(
-            **build_reasoning_model_request_kwargs(
-                model_client_config=mcc_fields,
-                model_config_obj=mco,
-                model_name=name,
-            )
-        )
-        return Model(model_client_config=ModelClientConfig(**mcc_fields), model_config=m_config)
-
     def _register_model_cache_entry(
         self,
         entry: dict[str, Any],
@@ -3161,7 +3177,7 @@ class JiuWenSwarmDeepAdapter:
         name_counter[model_name] = idx + 1
         cache_key = f"{model_name}#{idx}"
         try:
-            model = self._build_model_from_entry(
+            model = build_model_from_entry(
                 mcc,
                 entry.get("model_config_obj") or {},
             )
@@ -3216,7 +3232,7 @@ class JiuWenSwarmDeepAdapter:
             or {}
         )
         try:
-            self._model_cache[model_name] = self._build_model_from_entry(mcc, mco)
+            self._model_cache[model_name] = build_model_from_entry(mcc, mco)
         except Exception as exc:
             logger.warning(
                 "[JiuWenSwarmDeepAdapter] 跳过无效模型条目(legacy) %s: %s",
@@ -11813,6 +11829,7 @@ def _agent_def_to_subagent_config(
 
 
 def _load_custom_subagents(
+    *,
     workspace_dir: str,
     subagents_cfg: dict | None,
     model: Any,

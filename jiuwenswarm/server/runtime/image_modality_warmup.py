@@ -81,7 +81,7 @@ def _build_probe_models(config_base: dict[str, Any]) -> list[Model]:
         The models to probe, in configuration order.
     """
     from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
-        JiuWenSwarmDeepAdapter,
+        build_model_from_entry,
     )
 
     models: list[Model] = []
@@ -93,7 +93,7 @@ def _build_probe_models(config_base: dict[str, Any]) -> list[Model]:
         if not model_client_config.get("model_name"):
             continue
         try:
-            model = JiuWenSwarmDeepAdapter._build_model_from_entry(
+            model = build_model_from_entry(
                 model_client_config,
                 entry.get("model_config_obj") or {},
             )

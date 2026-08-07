@@ -114,6 +114,7 @@ _TEAM_SHARED_RAIL_NAMES: frozenset[str] = frozenset(
         registry.SECURITY,
         registry.HEARTBEAT,
         registry.AVATAR_PROMPT,
+        registry.MULTIMODAL_IMAGE,
         registry.TEAM_WORKSPACE_REPORT_PATH,
         registry.CONTEXT_PROCESSOR,
         registry.PLUGIN_RAILS,
@@ -439,7 +440,7 @@ def test_build_member_capability_specs_rail_names(
 
     assert _TEAM_SHARED_RAIL_NAMES <= rail_names
     assert extra_rails <= rail_names
-    assert len(_TEAM_SHARED_RAIL_NAMES) == 15
+    assert len(_TEAM_SHARED_RAIL_NAMES) == 16
     assert rail_names == expected
     # No DeepAgent is involved; every entry is a plain declarative RailSpec.
     assert all(isinstance(spec, RailSpec) for spec in rails_specs)
@@ -737,6 +738,7 @@ def test_enrich_team_spec_for_swarm_has_no_deep_agent_param() -> None:
         "session_id",
         "mode",
         "project_dir",
+        "trusted_dirs",
         "request_id",
         "channel_id",
         "request_metadata",

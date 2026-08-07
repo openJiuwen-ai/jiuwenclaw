@@ -2370,7 +2370,7 @@ class JiuWenSwarm:
                 finalized = await finalize_assistant_response_if_a2ui(
                     decision.raw_block,
                     channel=cid,
-                    user_query=raw_query,
+                    user_query=user_turn.text,
                     request_id=f"{rid}:{decision.key[0]}:{decision.key[1]}",
                     repair_call=repair_call,
                     retry_without_a2ui_call=retry_without_a2ui_call,

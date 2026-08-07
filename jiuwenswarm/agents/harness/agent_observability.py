@@ -61,6 +61,13 @@ _agent_observability_active: bool = False
 # slot, so the other run's spans would have joined the wrong trace.
 _ROOT_SPANS: dict[str, Any] = {}
 
+# Name of the SDK-private ContextVar the fallback below rebinds.
+#
+# Held as a constant, and reached through getattr / setattr, so that the single
+# place this package reaches into another package's module internals is
+# explicit and greppable, instead of reading like an ordinary attribute access.
+_SDK_TEAM_SPAN_CTX_ATTR = "_team_span_ctx"
+
 
 def _is_recording(span: Any) -> bool:
     """Report whether *span* is still open, tolerating stubs without the API."""
@@ -126,13 +133,20 @@ class _RootSpanFallbackContextVar:
     real ContextVar so team mode keeps exact per-context semantics — its team
     span is ContextVar-visible, so the fallback never triggers there.
 
-    Upstream now offers the same seam as a supported API
+    Upstream offers a related seam as a supported API
     (``span_context.set_ambient_team_span`` / ``clear_ambient_team_span``,
     which also spares the root span from the flush by identity rather than by
-    a ``team.`` name prefix). This stand-in keeps working either way; once the
-    pinned ``openjiuwen`` release carries that API, replace it with those two
-    calls in :func:`open_agent_run_span` / :func:`close_agent_run_span` and the
-    end-before-flush ordering there becomes unnecessary.
+    a ``team.`` name prefix), but it is NOT a drop-in replacement for this
+    stand-in and swapping to it would regress two fixes:
+
+    * It registers one process-wide slot, while :data:`_ROOT_SPANS` is keyed by
+      session — overlapping chats in one process would fight over the slot.
+    * It falls back only when the ContextVar holds None, whereas :meth:`get`
+      below also overrides a binding that has already *ended* (the request
+      coroutine's span outliving its run in a context-snapshotting task).
+
+    Adopting it therefore needs those two behaviors upstream first; until then
+    this stand-in stays.
     """
 
     def __init__(self, inner: ContextVar) -> None:
@@ -181,10 +195,10 @@ def _install_team_span_global_fallback() -> None:
         logger.debug("[AgentObservability] skip team-span fallback install: %s", exc)
         return
 
-    current = getattr(span_context, "_team_span_ctx", None)
+    current = getattr(span_context, _SDK_TEAM_SPAN_CTX_ATTR, None)
     if current is None or isinstance(current, _RootSpanFallbackContextVar):
         return
-    span_context._team_span_ctx = _RootSpanFallbackContextVar(current)
+    setattr(span_context, _SDK_TEAM_SPAN_CTX_ATTR, _RootSpanFallbackContextVar(current))
 
 
 _install_team_span_global_fallback()
@@ -405,6 +419,13 @@ def attach_subagent_observability(subagent: Any) -> None:
     mark_single_agent_team(subagent)
 
 
+# Marker stamped on the wrapper below so a second install recognizes its own
+# work and leaves it alone. The ``jiuwenswarm`` prefix is what keeps it from
+# colliding with anything the SDK puts on the same function object, so the name
+# carries no leading underscore: it is read from outside the wrapper.
+_SUBAGENT_HOOK_MARKER_ATTR = "jiuwenswarm_observability_hooked"
+
+
 def install_subagent_observability_hook() -> None:
     """Trace every sub-agent, whichever tool dispatched it.
 
@@ -425,7 +446,7 @@ def install_subagent_observability_hook() -> None:
         return
 
     original = getattr(DeepAgent, "create_subagent", None)
-    if original is None or getattr(original, "_jiuwenswarm_observability_hooked", False):
+    if original is None or getattr(original, _SUBAGENT_HOOK_MARKER_ATTR, False):
         return
 
     def create_subagent_with_observability(self, *args, **kwargs):  # type: ignore[no-untyped-def]
@@ -434,7 +455,7 @@ def install_subagent_observability_hook() -> None:
         attach_subagent_observability(subagent)
         return subagent
 
-    create_subagent_with_observability._jiuwenswarm_observability_hooked = True
+    setattr(create_subagent_with_observability, _SUBAGENT_HOOK_MARKER_ATTR, True)
     DeepAgent.create_subagent = create_subagent_with_observability
 
 
@@ -522,9 +543,11 @@ def _stamp_run_output(handle: Any, output: str) -> None:
         return
     from openjiuwen.agent_teams.observability.redaction import redact_completion
     from openjiuwen.agent_teams.observability.semconv import LANGFUSE_OBSERVATION_OUTPUT
-    from openjiuwen.agent_teams.observability.setup import get_config
+    # Aliased: the module-level ``get_config`` is JiuwenSwarm's own settings
+    # reader, and this SDK-side one returns the active ObservabilityConfig.
+    from openjiuwen.agent_teams.observability.setup import get_config as get_observability_config
 
-    config = get_config()
+    config = get_observability_config()
     text = redact_completion(output, config) if config else output
     handle.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, text)
 

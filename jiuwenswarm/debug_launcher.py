@@ -40,7 +40,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from jiuwenswarm.instance_manager import is_process_alive, stop_process_by_pid
@@ -160,7 +160,8 @@ def build_debug_log_path(now: datetime | None = None) -> Path:
     """Build a timestamped log path, avoiding collisions within one second.
 
     Args:
-        now: Timestamp used to build the suffix, defaults to the current time.
+        now: Timestamp used to build the suffix, defaults to the current local
+            time carrying an explicit timezone.
 
     Returns:
         Path like ``<root>/logs/swarm-20250805-143000.log``. If that name is
@@ -168,7 +169,10 @@ def build_debug_log_path(now: datetime | None = None) -> Path:
         discriminator is appended.
     """
     if now is None:
-        now = datetime.now()
+        # Log file names stay in local wall-clock time (that is what a developer
+        # reads); the UTC -> astimezone() round trip only makes the timezone
+        # explicit instead of relying on the naive-now default.
+        now = datetime.now(UTC).astimezone()
     log_dir = get_debug_log_dir()
     stamp = now.strftime("%Y%m%d-%H%M%S")
     candidate = log_dir / f"{DEBUG_LOG_PREFIX}-{stamp}{DEBUG_LOG_SUFFIX}"

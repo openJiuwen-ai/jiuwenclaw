@@ -8566,12 +8566,10 @@ class AgentWebSocketServer:
 
     def _build_model_cache(self) -> None:
         """Build model cache from jiuwenswarm config.yaml (reuse interface_deep logic)."""
-        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
+        # Use the same model building function as interface_deep
+        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import build_model_from_entry
 
         config = get_config()
-
-        # Use the same model building method as interface_deep
-        build_model_from_entry = getattr(JiuWenSwarmDeepAdapter, '_build_model_from_entry')
 
         # Build from models.defaults list
         for entry in get_default_models(config):
