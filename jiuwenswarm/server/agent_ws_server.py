@@ -7997,6 +7997,16 @@ class AgentWebSocketServer:
         """Public test helper that delegates to ACP tool-response handling."""
         await self._handle_acp_tool_response(ws, request, send_lock)
 
+    def is_working(self) -> bool:
+        """返回 Agent 是否正在工作.
+
+        用于沙箱保活校验。
+
+        Returns:
+            bool: 是否正在工作
+        """
+        return self._agent_manager.is_working()
+
     async def _handle_harness_packages_get(
         self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
     ) -> None:

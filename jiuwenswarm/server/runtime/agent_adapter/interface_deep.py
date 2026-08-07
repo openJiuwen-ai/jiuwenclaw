@@ -155,6 +155,7 @@ from jiuwenswarm.agents.harness.common.rails import (
     StructuredAskUserRail,
     SymphonyOrchestrationRail,
     TaskExecutionRail,
+    ContextOverflowRecoveryRail,
 )
 from jiuwenswarm.agents.harness.common.rails.execution_guard import (
     CircuitBreakerRail,
@@ -1507,6 +1508,7 @@ class JiuWenSwarmDeepAdapter:
         self._skill_retrieval_tools_registered: bool = False
         self._skill_retrieval_tools: list[Any] = []
         self._skill_retrieval_prompt_rail: SkillRetrievalPromptRail | None = None
+        self._context_overflow_recovery_rail: ContextOverflowRecoveryRail | None = None
         self._skill_manager: SkillManager | None = None
         self._a2x_client: Any | None = None
         self._a2x_config: dict[str, Any] = {}
@@ -4764,6 +4766,17 @@ class JiuWenSwarmDeepAdapter:
         return stream_event_rail
 
     @staticmethod
+    def _build_context_overflow_recovery_rail() -> ContextOverflowRecoveryRail | None:
+        """Build ContextOverflowRecoveryRail."""
+        try:
+            recovery_rail = ContextOverflowRecoveryRail(max_recovery_attempts=3)
+            logger.info("[JiuWenClawDeepAdapter] ContextOverflowRecoveryRail create success")
+        except Exception as exc:
+            logger.warning("[JiuWenClawDeepAdapter] ContextOverflowRecoveryRail create failed: %s", exc)
+            recovery_rail = None
+        return recovery_rail
+
+    @staticmethod
     def _build_task_execution_rail() -> TaskExecutionRail | None:
         """Build TaskExecutionRail for task.start/complete/update lifecycle events."""
         try:
@@ -5230,6 +5243,7 @@ class JiuWenSwarmDeepAdapter:
             _RailBuildInfo("_task_planning_rail", self._build_task_planning_rail),
             _RailBuildInfo("_security_rail", self._build_security_rail),
             _RailBuildInfo("_heartbeat_rail", self._build_heartbeat_rail),
+            _RailBuildInfo("_context_overflow_recovery_rail", self._build_context_overflow_recovery_rail),
             _RailBuildInfo(
                 "_llm_retry_rail",
                 self._build_llm_retry_rail,
@@ -6152,6 +6166,16 @@ class JiuWenSwarmDeepAdapter:
             raise TypeError("config_base must be a dict when provided")
         else:
             config_base = resolve_env_vars(config_base)
+
+        # 同步扩展配置到 ExtensionRegistry
+        # Gateway 已解密 extension_security_configs，AgentServer 直接使用明文
+        try:
+            from jiuwenswarm.extensions.registry import ExtensionRegistry
+            registry = ExtensionRegistry.get_instance()
+            registry.update_config(config_base)
+            logger.info("[JiuWenSwarm] Extension config synced to Registry")
+        except Exception as exc:
+            logger.warning("[JiuWenSwarm] ExtensionRegistry update failed: %s", exc)
 
         self._config_base_cache = config_base.copy()
         self._refresh_multimodal_configs(config_base)
@@ -8098,6 +8122,56 @@ class JiuWenSwarmDeepAdapter:
         return self._model_looks_usable(
             self._resolve_model_by_name(requested_model_name)
         )
+
+    @classmethod
+    def is_working(cls, session_tasks: dict[str, asyncio.Task],
+                   session_queues: dict[str, asyncio.PriorityQueue]) -> bool:
+        """返回 Agent 是否正在工作.
+
+        用于沙箱保活校验，一旦发现任何活跃状态立即返回 True.
+
+        判断维度：
+        1. 非流式任务：_session_tasks 中正在执行的 Task
+        2. 待处理消息：_session_queues 中队列的消息数
+        3. Team 流式任务：TeamManager._stream_tasks 中正在执行的 Team 模式流式任务
+        4. Team monitors：TeamManager._team_monitors 中正在运行的监控处理器
+        5. ACP 待响应请求：AcpOutputManager._pending 中等待用户响应的 ACP 工具请求
+
+        Returns:
+            bool: 是否正在工作
+        """
+        # 检查正在执行的非流式任务
+        for task in session_tasks.values():
+            if task is not None and not task.done():
+                return True
+
+        # 检查队列中待处理的消息
+        for queue in session_queues.values():
+            if queue.qsize() > 0:
+                return True
+
+        # 检查 Team 模式下的流式任务和 monitors
+        try:
+            from jiuwenswarm.agents.harness.team import get_team_manager
+            team_manager = get_team_manager()
+            for task in team_manager._stream_tasks.values():  # pylint: disable=protected-access
+                if task is not None and not task.done():
+                    return True
+            for monitor in team_manager._team_monitors.values():  # pylint: disable=protected-access
+                if monitor is not None and monitor.is_running:
+                    return True
+        except Exception:
+            pass
+
+        # 检查 ACP 待响应请求
+        try:
+            from jiuwenswarm.agents.harness.common.tools.acp_output_tools import get_acp_output_manager
+            if len(get_acp_output_manager()._pending) > 0:  # pylint: disable=protected-access
+                return True
+        except Exception:
+            pass
+
+        return False
 
     async def handle_user_answer(self, request: AgentRequest) -> AgentResponse:
         """Handle chat.user_answer request."""

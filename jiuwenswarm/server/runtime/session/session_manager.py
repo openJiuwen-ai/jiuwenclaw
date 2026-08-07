@@ -37,6 +37,14 @@ class SessionManager:
         """获取 session_id，默认为 'default'."""
         return session_id or "default"
 
+    def get_session_tasks(self) -> dict[str, asyncio.Task]:
+        """返回 session_id -> asyncio.Task 映射（用于工作状态判定）."""
+        return self._session_tasks
+
+    def get_session_queues(self) -> dict[str, asyncio.PriorityQueue]:
+        """返回 session_id -> asyncio.PriorityQueue 映射（用于工作状态判定）."""
+        return self._session_queues
+
     @staticmethod
     def _is_oneshot_session(session_id: str) -> bool:
         """判断是否为一次性 session（心跳/定时任务），其 session_id 永不复用.
