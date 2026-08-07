@@ -580,9 +580,18 @@ class TestSyncAgentsConfigsValidation:
         assert "FREE_SEARCH_BING_ENABLED" in SYNC_ENV_SCHEMA
 
     @staticmethod
-    def test_validate_rejects_missing_env_key():
-        with pytest.raises(ValueError, match="missing required keys"):
-            validate_sync_payload(
+    def test_sync_env_schema_includes_llm_max_tokens():
+        assert "LLM_MAX_TOKENS" in SYNC_ENV_SCHEMA
+        assert "LLM_MAX_TOKENS" in BUSINESS_MIRROR_KEYS
+
+    @staticmethod
+    def test_validate_warns_on_missing_env_key():
+        from unittest.mock import patch
+
+        from jiuwenclaw.agentserver import sync_agents_configs as sync_mod
+
+        with patch.object(sync_mod.logger, "warning") as warn:
+            normalized = validate_sync_payload(
                 {
                     "revision": "r1",
                     "service_id": "default",
@@ -596,14 +605,25 @@ class TestSyncAgentsConfigsValidation:
                     ],
                 }
             )
+        assert normalized["agents"][0]["env"] == {"API_KEY": "x"}
+        warn.assert_called()
+        fmt, agent_id, missing_csv = warn.call_args.args[:3]
+        assert "missing schema keys" in fmt
+        assert agent_id == "office"
+        assert "LLM_MAX_TOKENS" in missing_csv
+        assert "MODEL_NAME" in missing_csv
 
     @staticmethod
-    def test_validate_rejects_missing_free_search_keys():
+    def test_validate_warns_on_missing_free_search_keys():
+        from unittest.mock import patch
+
+        from jiuwenclaw.agentserver import sync_agents_configs as sync_mod
+
         env = _full_env()
         del env["FREE_SEARCH_DDG_ENABLED"]
         del env["FREE_SEARCH_BING_ENABLED"]
-        with pytest.raises(ValueError, match="missing required keys"):
-            validate_sync_payload(
+        with patch.object(sync_mod.logger, "warning") as warn:
+            normalized = validate_sync_payload(
                 {
                     "revision": "r1",
                     "service_id": "default",
@@ -617,6 +637,13 @@ class TestSyncAgentsConfigsValidation:
                     ],
                 }
             )
+        assert "FREE_SEARCH_DDG_ENABLED" not in normalized["agents"][0]["env"]
+        assert "FREE_SEARCH_BING_ENABLED" not in normalized["agents"][0]["env"]
+        warn.assert_called()
+        fmt, _agent_id, missing_csv = warn.call_args.args[:3]
+        assert "missing schema keys" in fmt
+        assert "FREE_SEARCH_DDG_ENABLED" in missing_csv
+        assert "FREE_SEARCH_BING_ENABLED" in missing_csv
 
     @staticmethod
     def test_validate_accepts_free_search_false_or_null():
@@ -1056,6 +1083,45 @@ async def test_sync_agents_configs_registers_and_isolates_tip(mock_warmup):
         get_active_env(service_id="default", agent_id="assistant")["MODEL_NAME"]
         == "assistant-model"
     )
+
+
+@pytest.mark.asyncio
+async def test_sync_agents_configs_materializes_llm_max_tokens_tip(mock_warmup):
+    """relay-claw agents[].env LLM_MAX_TOKENS lands in tip, not os.environ."""
+    pool = TenantAgentPool.get_instance()
+    payload = _sync_payload(
+        revision="rev-max-tokens",
+        agents=[
+            {
+                "agent_id": "office",
+                "config": {"react": {"agent_name": "office"}},
+                "env": _full_env(LLM_MAX_TOKENS="8192", MODEL_NAME="office-model"),
+                "runtime": {},
+            },
+            {
+                "agent_id": "assistant",
+                "config": {"react": {"agent_name": "assistant"}},
+                "env": _full_env(LLM_MAX_TOKENS="4096", MODEL_NAME="assistant-model"),
+                "runtime": {},
+            },
+        ],
+    )
+
+    result = await pool.sync_agents_configs(payload)
+    assert all(a["ok"] for a in result["agents"])
+
+    assert get_active_env(service_id="default", agent_id="office")["LLM_MAX_TOKENS"] == "8192"
+    assert (
+        get_active_env(service_id="default", agent_id="assistant")["LLM_MAX_TOKENS"] == "4096"
+    )
+    assert "LLM_MAX_TOKENS" not in os.environ
+    assert make_env_ns_key("default", "office", "LLM_MAX_TOKENS") not in os.environ
+
+    ns = bind_agent_env_ns("default", "office")
+    try:
+        assert read_env_if_set("LLM_MAX_TOKENS") == "8192"
+    finally:
+        reset_agent_env_ns(ns)
 
 
 @pytest.mark.asyncio

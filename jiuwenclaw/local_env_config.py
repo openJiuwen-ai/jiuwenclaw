@@ -89,6 +89,7 @@ BUSINESS_MIRROR_KEYS: frozenset[str] = frozenset(
         "MODEL_NAME",
         "MODEL_PROVIDER",
         "MODEL_CONTEXT_WINDOW",
+        "LLM_MAX_TOKENS",
         "TOOL_CALLING_GUARD_ENABLED",
         "TOOL_CALLING_GUARD_DISABLE",
         "TOOL_CALLING_GUARD_STRIP_REASON",

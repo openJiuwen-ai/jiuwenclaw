@@ -29,7 +29,7 @@ from jiuwenclaw.http_proxy_config import (
     resolve_httpx_proxy,
     should_bypass_proxy,
 )
-from jiuwenclaw.local_env_config import read_default_headers
+from jiuwenclaw.local_env_config import read_default_headers, read_env_if_set
 from jiuwenclaw.tool_arguments_validator import (
     tool_arguments_failure_message,
     tool_arguments_failure_payload,
@@ -968,9 +968,9 @@ def _patched_build_request_params(self, *, stream: bool, **kwargs) -> dict:
             "invalid request: LLM messages must contain at least one 'user' or 'tool' role; "
             f"current roles {set(roles)} are insufficient"
         )
-    # Fallback max_tokens to environment variable if not configured
+    # Fallback max_tokens from per-agent tip (sync_agents_configs / Track B), not os.environ.
     if params.get("max_tokens") is None:
-        env_max_tokens = os.environ.get("LLM_MAX_TOKENS")
+        env_max_tokens = read_env_if_set("LLM_MAX_TOKENS")
         if env_max_tokens:
             try:
                 params["max_tokens"] = int(env_max_tokens)

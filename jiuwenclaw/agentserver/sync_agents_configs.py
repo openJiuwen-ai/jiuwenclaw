@@ -31,6 +31,7 @@ SYNC_ENV_SCHEMA: frozenset[str] = frozenset(
         "MODEL_NAME",
         "MODEL_PROVIDER",
         "MODEL_CONTEXT_WINDOW",
+        "LLM_MAX_TOKENS",
         "TOOL_CALLING_GUARD_ENABLED",
         "TOOL_CALLING_GUARD_DISABLE",
         "TOOL_CALLING_GUARD_STRIP_REASON",
@@ -217,12 +218,21 @@ def compute_content_hash(
 
 
 def _validate_env_schema(env: Any, *, agent_id: str) -> None:
+    """Validate agents[].env shape; schema gaps warn only (treated as unset).
+
+    Missing ``SYNC_ENV_SCHEMA`` keys no longer reject the sync — they are logged
+    so callers can locate incomplete payloads without blocking the catalog apply.
+    """
     if not isinstance(env, dict):
         raise ValueError(f"agent {agent_id!r}: env must be an object")
-    missing = sorted(SYNC_ENV_SCHEMA - {str(k) for k in env})
+    present = {str(k) for k in env}
+    missing = sorted(SYNC_ENV_SCHEMA - present)
     if missing:
-        raise ValueError(
-            f"agent {agent_id!r}: env missing required keys: {', '.join(missing)}"
+        logger.warning(
+            "sync_agents_configs: agent %r env missing schema keys "
+            "(accepted; treated as unset/null): %s",
+            agent_id,
+            ", ".join(missing),
         )
     extra = sorted(str(k) for k in env if str(k) not in SYNC_ENV_SCHEMA)
     if extra:

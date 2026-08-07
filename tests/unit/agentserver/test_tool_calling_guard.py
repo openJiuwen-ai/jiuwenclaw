@@ -229,6 +229,102 @@ def test_patched_build_request_params_logs_reason(monkeypatch: pytest.MonkeyPatc
     )
 
 
+def test_patched_build_request_params_falls_back_to_tip_llm_max_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Track B tip LLM_MAX_TOKENS fills max_tokens when request omits it."""
+    set_os_environ("LLM_MAX_TOKENS", "8192")
+    assert "LLM_MAX_TOKENS" not in os.environ
+    monkeypatch.setattr(
+        "jiuwenclaw.jiuwen_core_patch._ORIGINAL_BUILD_REQUEST_PARAMS",
+        lambda self, *, stream, **kwargs: {
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": None,
+        },
+    )
+
+    params = _patched_build_request_params(SimpleNamespace(), stream=False)
+    assert params["max_tokens"] == 8192
+
+
+def test_patched_build_request_params_keeps_explicit_max_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_os_environ("LLM_MAX_TOKENS", "8192")
+    monkeypatch.setattr(
+        "jiuwenclaw.jiuwen_core_patch._ORIGINAL_BUILD_REQUEST_PARAMS",
+        lambda self, *, stream, **kwargs: {
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 100,
+        },
+    )
+
+    params = _patched_build_request_params(SimpleNamespace(), stream=False)
+    assert params["max_tokens"] == 100
+
+
+def test_patched_build_request_params_ignores_invalid_llm_max_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_os_environ("LLM_MAX_TOKENS", "not-an-int")
+    monkeypatch.setattr(
+        "jiuwenclaw.jiuwen_core_patch._ORIGINAL_BUILD_REQUEST_PARAMS",
+        lambda self, *, stream, **kwargs: {
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": None,
+        },
+    )
+
+    params = _patched_build_request_params(SimpleNamespace(), stream=False)
+    assert params.get("max_tokens") is None
+
+
+def test_llm_max_tokens_registered_in_sync_and_mirror_tables() -> None:
+    from jiuwenclaw.agentserver.sync_agents_configs import SYNC_ENV_SCHEMA
+    from jiuwenclaw.local_env_config import BUSINESS_MIRROR_KEYS
+
+    assert "LLM_MAX_TOKENS" in SYNC_ENV_SCHEMA
+    assert "LLM_MAX_TOKENS" in BUSINESS_MIRROR_KEYS
+
+
+def test_llm_max_tokens_tip_readable_per_agent_ns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenclaw.local_env_config import (
+        apply_env_overrides_to_active,
+        bind_agent_env_ns,
+        read_env_if_set,
+        reset_agent_env_ns,
+    )
+
+    apply_env_overrides_to_active(
+        {"LLM_MAX_TOKENS": "8192"},
+        service_id="default",
+        agent_id="office",
+    )
+    apply_env_overrides_to_active(
+        {"LLM_MAX_TOKENS": "4096"},
+        service_id="default",
+        agent_id="assistant",
+    )
+    assert "LLM_MAX_TOKENS" not in os.environ
+
+    ns = bind_agent_env_ns("default", "office")
+    try:
+        assert read_env_if_set("LLM_MAX_TOKENS") == "8192"
+        monkeypatch.setattr(
+            "jiuwenclaw.jiuwen_core_patch._ORIGINAL_BUILD_REQUEST_PARAMS",
+            lambda self, *, stream, **kwargs: {
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": None,
+            },
+        )
+        params = _patched_build_request_params(SimpleNamespace(), stream=False)
+        assert params["max_tokens"] == 8192
+    finally:
+        reset_agent_env_ns(ns)
+
+
 def test_legacy_office_claw_disable_maps_into_guard_tip(mock_config) -> None:
     mock_config(_guard_config(enabled=False))
     os.environ.pop("AGENT_RUNTIME", None)

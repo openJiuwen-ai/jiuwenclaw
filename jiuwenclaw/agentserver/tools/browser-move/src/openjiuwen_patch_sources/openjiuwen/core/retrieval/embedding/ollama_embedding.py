@@ -15,7 +15,24 @@ import requests
 
 
 def _ssl_verify() -> bool:
-    return os.environ.get("JIUWENCLAW_SSL_VERIFY", "true").strip().lower() not in ("0", "false", "no", "off")
+    """Tip-aware SSL verify (Track B); fall back to process env outside jiuwenclaw."""
+    try:
+        from jiuwenclaw.local_env_config import read_env
+
+        raw = read_env("JIUWENCLAW_SSL_VERIFY", "").strip().lower()
+        if raw in ("0", "false", "no", "off"):
+            return False
+        if raw in ("1", "true", "yes", "on"):
+            return True
+        # Unset tip: match historical default (verify on).
+        return True
+    except ImportError:
+        return os.environ.get("JIUWENCLAW_SSL_VERIFY", "true").strip().lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+        )
 
 
 from openjiuwen.core.common.exception.codes import StatusCode
