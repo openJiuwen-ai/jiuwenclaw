@@ -809,6 +809,7 @@
     "enterprise": {
       "title": "技能",
       "subtitle": "查看本租户已安装技能；支持 URL 验签安装与用户技能卸载。",
+      "boundSession": "当前绑定会话：{{sessionId}}",
       "installTitle": "通过 URL 安装",
       "installHint": "填写下载地址即可安装；签名为可选项，填写后会对下载内容做 HMAC-SHA256 验签。",
       "installing": "安装中…",
@@ -857,6 +858,7 @@
         "urlRequired": "请填写下载 URL",
         "urlSignatureRequired": "请填写下载 URL",
         "routingRequired": "请先配置 group_id / bot_id / user_id",
+        "sessionRequired": "无法创建会话，请稍后重试或先返回聊天页新建会话",
         "installFailed": "安装失败",
         "uninstallFailed": "卸载失败",
         "prebuiltNotRemovable": "预制技能不可卸载，请通过白名单模板调整"

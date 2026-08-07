@@ -809,6 +809,7 @@
     "enterprise": {
       "title": "Skills",
       "subtitle": "View skills installed for this tenant; install by signed URL or uninstall user skills.",
+      "boundSession": "Bound session: {{sessionId}}",
       "installTitle": "Install via URL",
       "installHint": "Provide a download URL to install. Signature is optional; when provided, the download is verified with HMAC-SHA256.",
       "installing": "Installing…",
@@ -857,6 +858,7 @@
         "urlRequired": "Download URL is required",
         "urlSignatureRequired": "Download URL is required",
         "routingRequired": "Configure group_id / bot_id / user_id first",
+        "sessionRequired": "Could not create a session. Retry or open Chat and start a new session first.",
         "installFailed": "Install failed",
         "uninstallFailed": "Uninstall failed",
         "prebuiltNotRemovable": "Prebuilt skills cannot be uninstalled; change the whitelist template instead"
