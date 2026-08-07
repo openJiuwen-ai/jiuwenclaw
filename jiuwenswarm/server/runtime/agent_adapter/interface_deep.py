@@ -5450,7 +5450,11 @@ class JiuWenSwarmDeepAdapter:
 
     def _update_permission_rail(self, config_base: dict[str, Any] | None) -> None:
         """原地更新已有 PermissionRail 配置，或在首次启用时新建。"""
-        permission_config = config_base.get("permissions", {}) if config_base else {}
+        from jiuwenswarm.agents.harness.common.rails.permissions.config_loader import (
+            get_effective_permissions_config,
+        )
+
+        permission_config = get_effective_permissions_config()
         if self._permission_rail is not None:
             self._permission_rail.update_config(permission_config)
             logger.info("[JiuWenSwarmDeepAdapter] _permission_rail config hot-updated")

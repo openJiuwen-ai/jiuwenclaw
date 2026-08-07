@@ -88,11 +88,13 @@ def build_permission_rail(
     from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context import (
         TOOL_PERMISSION_CHANNEL_ID,
     )
-    from jiuwenswarm.common.config import get_config
     from jiuwenswarm.common.e2a.acp.acp_tool_updates import build_acp_tool_descriptor
     from jiuwenswarm.common.utils import get_config_file, get_workspace_dir
+    from jiuwenswarm.agents.harness.common.rails.permissions.config_loader import (
+        get_effective_permissions_config,
+    )
 
-    permission_config = config.get("permissions", {})
+    permission_config = get_effective_permissions_config()
     logger.info(
         "[InterruptHelpers] build_permission_rail called: enabled=%s",
         permission_config.get("enabled", False)
