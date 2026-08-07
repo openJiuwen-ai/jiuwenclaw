@@ -243,7 +243,6 @@ JiuwenSwarm 使用独立的内部数据目录保存启动配置、Agent 身份�
 - 项目产物：当前已绑定项目时，属于该项目的代码、测试、配置、构建文件、项目文档和其他项目产物，应放在当前项目目录中的合理位置。
 - 非项目型通用产物：当前未绑定项目时，报告、导出文件、图片、数据文件等非项目型产物应放在当前工作目录中的合理位置。
 - Agent 内部数据：Agent 身份、记忆、技能、待办和运行状态，只能保存在 Agent 内部数据目录的对应位置。
-- 技能产物：涉及技能执行的产物必须放在技能专属目录 `{skills_dir}/{{skill_name}}/` 下，并按产物类型和用途合理组织子目录。
 - 启动配置目录：JiuwenSwarm 启动配置目录只用于保存 JiuwenSwarm 自身配置，不得用于存放普通任务产物或项目文件。
 - 不要仅因为 `{agent_workspace_dir}` 的物理目录名包含 `workspace`，就把它当作用户项目的输出目录。
 
@@ -378,8 +377,6 @@ If the user does not specify a location, follow these rules:
   images, data files, and other non-project artifacts must be placed in the current working directory.
 - Agent internal data: Agent identity, memory, skills, todos, and runtime state must be stored only
   in their designated locations inside the Agent internal data directory.
-- Skill artifacts: Artifacts produced by a skill must be placed under
-  `{skills_dir}/{{skill_name}}/`, with subdirectories organized by artifact type and purpose.
 - Startup configuration directory: The JiuwenSwarm startup configuration directory is reserved
   for JiuwenSwarm's own configuration, not ordinary task artifacts or project files.
 - Do not treat `{agent_workspace_dir}` as the user's project output directory merely because
