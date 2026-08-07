@@ -164,6 +164,16 @@ def message_to_e2a(msg: "Message") -> E2AEnvelope:
     if getattr(msg, "app_id", None):
         d["app_id"] = msg.app_id
 
+    # 企业版：SessionMap 写入的 service_id / agent_id 提升到信封顶层（供 AgentServer 多租户路由）
+    params = d.get("params")
+    if isinstance(params, dict):
+        svc = str(params.get("service_id") or "").strip()
+        if svc:
+            d["service_id"] = svc
+        if "agent_id" in params:
+            ag = params.get("agent_id")
+            d["agent_id"] = str(ag).strip() if ag is not None and str(ag).strip() else None
+
     return E2AEnvelope.from_dict(d)
 
 

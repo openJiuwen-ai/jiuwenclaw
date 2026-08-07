@@ -42,7 +42,6 @@ from jiuwenswarm.common.security.ws_origin import get_header_value
 from jiuwenswarm.gateway.routing.route_binding import GatewayRouteBinding
 from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.utils import (
-    get_cron_jobs_path,
     get_env_file,
     get_root_dir,
     get_user_workspace_dir,
@@ -350,14 +349,25 @@ def _schedule_gateway_restart(
 async def _wait_for_gateway_tasks_or_restart(
         tasks_to_wait: list[asyncio.Task],
         restart_request: GatewayRestartRequest,
+        shutdown_requested: asyncio.Event | None = None,
 ) -> bool:
     restart_task = asyncio.create_task(restart_request.ready_event.wait(), name="gateway-restart")
+    shutdown_task: asyncio.Task | None = None
+    if shutdown_requested is not None:
+        shutdown_task = asyncio.create_task(
+            shutdown_requested.wait(),
+            name="gateway-await-sigterm",
+        )
     service_tasks = set(tasks_to_wait)
     wait_tasks = set(service_tasks)
     wait_tasks.add(restart_task)
+    if shutdown_task is not None:
+        wait_tasks.add(shutdown_task)
     try:
         while wait_tasks:
             done, _ = await asyncio.wait(wait_tasks, return_when=asyncio.FIRST_COMPLETED)
+            if shutdown_task is not None and shutdown_task in done:
+                return False
             if restart_task in done:
                 return restart_request.requested or restart_request.ready_event.is_set()
             for task in done:
@@ -375,12 +385,13 @@ async def _wait_for_gateway_tasks_or_restart(
                 return restart_request.requested or restart_request.ready_event.is_set()
         return restart_request.requested or restart_request.ready_event.is_set()
     finally:
-        if not restart_task.done():
-            restart_task.cancel()
-            try:
-                await restart_task
-            except asyncio.CancelledError:
-                pass
+        for extra in (restart_task, shutdown_task):
+            if extra is not None and not extra.done():
+                extra.cancel()
+                try:
+                    await extra
+                except asyncio.CancelledError:
+                    pass
 
 
 @dataclass
@@ -1452,7 +1463,7 @@ async def _run(
     from jiuwenswarm.common.cleanup import start_background_cleanup
     from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
     from jiuwenswarm.gateway.channel_manager.channel_manager import ChannelManager
-    from jiuwenswarm.gateway.cron import CronController, CronJobStore, CronSchedulerService
+    from jiuwenswarm.gateway.cron import CronController, CronSchedulerService
     from jiuwenswarm.gateway.heartbeat.heartbeat import GatewayHeartbeatService, HeartbeatConfig
     from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
     from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import (
@@ -1474,6 +1485,7 @@ async def _run(
     from jiuwenswarm.gateway.channel_manager.tui.tui_channel import TuiChannel, TuiChannelConfig
     from jiuwenswarm.extensions.manager import ExtensionManager
     from jiuwenswarm.extensions.registry import ExtensionRegistry
+    from jiuwenswarm.extensions.redis import init_gateway_redis_from_config, shutdown_gateway_redis
     from jiuwenswarm.common.updater import UpdaterService
     from openjiuwen.core.runner import Runner
 
@@ -1533,15 +1545,6 @@ async def _run(
     message_handler.set_inbound_pipeline(im_inbound)
     message_handler.set_outbound_pipeline(im_outbound)
 
-    cron_store = CronJobStore(path=get_cron_jobs_path())
-    cron_scheduler = CronSchedulerService(
-        store=cron_store,
-        agent_client=client,
-        message_handler=message_handler,
-    )
-    cron_controller = CronController.get_instance(store=cron_store, scheduler=cron_scheduler)
-    message_handler.set_cron_controller(cron_controller)
-
     full_cfg: dict[str, Any] = {}
     heartbeat_cfg: dict | None = None
     channels_cfg: dict | None = None
@@ -1553,6 +1556,19 @@ async def _run(
         logger.warning("[App] failed to read heartbeat config from config.yaml, using defaults: %s", e)
         heartbeat_cfg = None
         channels_cfg = None
+
+    await init_gateway_redis_from_config(dict(full_cfg or {}))
+
+    from jiuwenswarm.gateway.cron.factory import create_gateway_cron_store
+
+    cron_store = await create_gateway_cron_store()
+    cron_scheduler = CronSchedulerService(
+        store=cron_store,
+        agent_client=client,
+        message_handler=message_handler,
+    )
+    cron_controller = CronController.get_instance(store=cron_store, scheduler=cron_scheduler)
+    message_handler.set_cron_controller(cron_controller)
 
     client.set_or_update_server_config(
         config=dict(full_cfg or {}),
@@ -2557,6 +2573,47 @@ async def _run(
     # cron jobs 的 work_mode 补全已改为惰性迁移:scheduler.start() → reload() →
     # list_jobs() 读取时按需推断并写回磁盘(见 CronJobStore.list_jobs),无需启动全量扫描。
     await cron_scheduler.start()
+
+    # ---------- LeaderElection 初始化（企业分布式 Redis）----------
+    leader_election = None
+    if os.getenv("AGENT_RUNTIME", "").strip():
+        deployment_mode = str(
+            (get_config().get("gateway") or {}).get("deployment_mode", "standalone")
+        ).strip().lower()
+        if deployment_mode == "active-standby":
+            from jiuwenswarm.gateway.leader_election import LeaderElection, Role
+
+            leader_election = LeaderElection.get_instance()
+
+            async def _reload_session_map_on_leader_change(role: Role) -> None:
+                if role == Role.PRIMARY:
+                    logger.info("[App] PRIMARY elected, reloading session map from Redis")
+                    message_handler.reload_session_map()
+
+            leader_election.register_callback(_reload_session_map_on_leader_change)
+
+            # 选主结果未知前先把 cron 设为 STANDBY，避免短暂窗口内非 PRIMARY 进程触发任务；
+            # cron_scheduler.start() 已在前面跑过，loop 已存活，set_active(False) 仅让它跳过事件处理。
+            cron_scheduler.set_active(False)
+
+            async def _cron_on_role_change(role: Role) -> None:
+                if role == Role.PRIMARY:
+                    # 顺序：先 reload 重建事件队列，再激活，避免 loop 抢先消费旧事件。
+                    try:
+                        await cron_scheduler.reload()
+                    except Exception:
+                        logger.exception("[App] cron reload on promotion failed")
+                    cron_scheduler.set_active(True)
+                else:
+                    cron_scheduler.set_active(False)
+
+            leader_election.register_callback(_cron_on_role_change)
+            await leader_election.start()
+        else:
+            logger.info("[App] standalone mode, skip LeaderElection")
+    else:
+        logger.info("[App] AGENT_RUNTIME unset, skip LeaderElection")
+
     try:
         from jiuwenswarm.infrastructure.log_masking.engine import LogMaskingEngine
 
@@ -2591,12 +2648,23 @@ async def _run(
         )
 
     restart_requested = False
+    shutdown_requested: asyncio.Event | None = None
+    _setup_signals = getattr(agent_server_ext, "setup_gateway_shutdown_signals", None)
+    if agent_server_ext is not None and callable(_setup_signals):
+        shutdown_requested = asyncio.Event()
+        _setup_signals(shutdown_requested)
+
     try:
         tasks_to_wait = [task for task in (gateway_server_task, web_task) if task is not None]
-        if tasks_to_wait:
+        # 无扩展或未实现 setup_gateway_shutdown_signals：等价于原先 await gather（有任务时）
+        if not tasks_to_wait:
+            if shutdown_requested is not None:
+                await shutdown_requested.wait()
+        else:
             restart_requested = await _wait_for_gateway_tasks_or_restart(
                 tasks_to_wait,
                 restart_request,
+                shutdown_requested,
             )
     except KeyboardInterrupt:
         logger.info("received Ctrl+C, shutting down...")
@@ -2737,6 +2805,9 @@ async def _run(
         await channel_manager.stop_dispatch()
         await heartbeat_service.stop()
         await message_handler.stop_forwarding()
+        if leader_election is not None:
+            await leader_election.stop()
+        await shutdown_gateway_redis()
         await client.disconnect()
 
         _cleanup_task.cancel()

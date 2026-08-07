@@ -3081,6 +3081,20 @@ class JiuWenSwarmDeepAdapter:
         ext_config = getattr(self._enterprise_config, "extension_config", None)
         if ext_config:
             inputs["extension_config"] = ext_config
+            # Rails 从 InvokeInputs.run_context.extra 读取，同步写入 run.context.extra
+            run_payload = inputs.get("run")
+            if not isinstance(run_payload, dict):
+                run_payload = {}
+                inputs["run"] = run_payload
+            context = run_payload.get("context")
+            if not isinstance(context, dict):
+                context = {}
+                run_payload["context"] = context
+            extra = context.get("extra")
+            if not isinstance(extra, dict):
+                extra = {}
+                context["extra"] = extra
+            extra["extension_config"] = ext_config
             logger.info(
                 "[JiuWenSwarmDeepAdapter] extension_config injected from enterprise config: count=%s",
                 len(ext_config) if isinstance(ext_config, list) else "?",

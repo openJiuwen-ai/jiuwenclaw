@@ -133,6 +133,9 @@ class ChannelMode(str, Enum):
 class ChannelControlState:
     session_id: str | None = None
     mode: ChannelMode = ChannelMode.AGENT
+    # SessionMap + 企业运行时：受控通道绑定后填充，供 E2A / 多租户路由
+    service_id: str | None = None
+    agent_id: str | None = None
 
 
 @dataclass
@@ -288,6 +291,10 @@ class MessageHandler(ABC):
 
         if isinstance(self.agent_client, WebSocketAgentServerClient):
             self.agent_client.set_server_push_handler(self._handle_agent_server_push)
+
+    def reload_session_map(self) -> None:
+        """Reload Redis-backed SessionMap cache after leader switchover (active-standby)."""
+        self._session_map.reload()
 
     @classmethod
     def get_instance(cls, agent_client: "AgentServerClient | None" = None) -> "MessageHandler":
@@ -605,7 +612,12 @@ class MessageHandler(ABC):
         state = self._get_channel_default_state(ch)
         identity_key = self._extract_identity_tuple(msg)
         if identity_key and self._channel_id_matches_session_map_types(str(ch or "")):
-            state.session_id = self._session_map.find_session_id(*identity_key)
+            sess = self._session_map.find_session(*identity_key)
+            if sess is not None:
+                state.session_id = sess.session_id
+                if os.getenv("AGENT_RUNTIME", "").strip():
+                    state.service_id = sess.service_id
+                    state.agent_id = sess.agent_id
         self._channel_states[key] = state
         return state
 
@@ -661,6 +673,11 @@ class MessageHandler(ABC):
         identity_key = self._extract_identity_tuple(msg)
         if identity_key and self._channel_id_matches_session_map_types(str(msg.channel_id or "")):
             self._session_map.set_session_id(*identity_key, sid)
+            if os.getenv("AGENT_RUNTIME", "").strip():
+                sess = self._session_map.find_session(*identity_key)
+                if sess is not None:
+                    state.service_id = sess.service_id
+                    state.agent_id = sess.agent_id
         return sid
 
     async def _resolve_external_channel_session(self, msg: "Message") -> None:
@@ -2107,14 +2124,36 @@ class MessageHandler(ABC):
         cid = str(getattr(msg, "channel_id", "") or "")
         identity_key = self._extract_identity_tuple(msg)
         if identity_key and self._channel_id_matches_session_map_types(cid):
-            sid = self._session_map.find_session_id(*identity_key)
-            if sid:
-                state.session_id = sid
-                msg.session_id = sid
+            sess = self._session_map.find_session(*identity_key)
+            if sess is not None:
+                state.session_id = sess.session_id
+                msg.session_id = sess.session_id
+                if os.getenv("AGENT_RUNTIME", "").strip():
+                    state.service_id = sess.service_id
+                    state.agent_id = sess.agent_id
+                    if msg.params is None:
+                        msg.params = {}
+                    if isinstance(msg.params, dict):
+                        msg.params["service_id"] = sess.service_id
+                        if sess.agent_id:
+                            msg.params["agent_id"] = sess.agent_id
+                        else:
+                            msg.params.pop("agent_id", None)
+                else:
+                    state.service_id = None
+                    state.agent_id = None
+                    if isinstance(msg.params, dict):
+                        msg.params.pop("service_id", None)
+                        msg.params.pop("agent_id", None)
             else:
                 msg.session_id = None
+                state.service_id = None
+                state.agent_id = None
         elif state.session_id:
             msg.session_id = state.session_id
+            if isinstance(msg.params, dict):
+                msg.params.pop("service_id", None)
+                msg.params.pop("agent_id", None)
         else:
             msg.session_id = None
 
@@ -2630,7 +2669,7 @@ class MessageHandler(ABC):
 
     @staticmethod
     def _response_to_message(
-        resp: "AgentResponse",
+        resp: "AgentResponse | AgentResponseChunk",
         session_id: str | None,
         *,
         request_metadata: dict[str, Any] | None = None,
@@ -2638,7 +2677,12 @@ class MessageHandler(ABC):
     ) -> "Message":
         from jiuwenswarm.common.schema.message import Message, EventType
 
-        metadata = MessageHandler._merge_agent_metadata(request_metadata, resp.metadata)
+        resp_metadata = getattr(resp, "metadata", None)
+        metadata = MessageHandler._merge_agent_metadata(request_metadata, resp_metadata)
+        request_id = str(getattr(resp, "request_id", ""))
+        channel_id = str(getattr(resp, "channel_id", ""))
+        raw_payload = getattr(resp, "payload", None)
+        ok = bool(getattr(resp, "ok", True))
 
         # ── V2: 合并 resp 的 agent_ref ──
         resp_agent_ref = getattr(resp, "agent_ref", None)
@@ -2650,11 +2694,11 @@ class MessageHandler(ABC):
 
         # 检查 payload 中是否包含 event_type，如果包含则创建事件消息
         event_type = None
-        payload = resp.payload
-        if resp.payload and isinstance(resp.payload, dict):
+        payload = raw_payload
+        if raw_payload and isinstance(raw_payload, dict):
             payload = apply_a2ui_text_fallback_to_gateway_payload(
-                dict(resp.payload),
-                channel_id=resp.channel_id,
+                dict(raw_payload),
+                channel_id=channel_id,
             )
             event_type_str = payload.get("event_type")
             if isinstance(event_type_str, str):
@@ -2662,9 +2706,9 @@ class MessageHandler(ABC):
                     event_type = EventType(event_type_str)
                     # 如果是事件类型，创建事件消息而不是响应消息
                     return Message(
-                        id=resp.request_id,
+                        id=request_id,
                         type="event",
-                        channel_id=resp.channel_id,
+                        channel_id=channel_id,
                         session_id=session_id,
                         params={},
                         timestamp=time.time(),
@@ -2683,13 +2727,13 @@ class MessageHandler(ABC):
 
         # 普通响应消息
         return Message(
-            id=resp.request_id,
+            id=request_id,
             type="res",
-            channel_id=resp.channel_id,
+            channel_id=channel_id,
             session_id=session_id,
             params={},
             timestamp=time.time(),
-            ok=resp.ok,
+            ok=ok,
             payload=payload,
             event_type=EventType.CHAT_FINAL,
             metadata=metadata,
