@@ -182,6 +182,17 @@ async def _run(host: str, port: int) -> None:
 
     if os.getenv("AGENT_RUNTIME", "").strip():
         try:
+            from jiuwenswarm.agents.harness.common.memory.config import (
+                reload_task_memory_config_from_gateway_db,
+            )
+
+            await reload_task_memory_config_from_gateway_db()
+            logger.info("[AgentServer] task_memory_config loaded from Gateway DB (if any)")
+        except Exception:  # noqa: BLE001
+            logger.warning("[AgentServer] task_memory_config cold load skipped", exc_info=True)
+
+    if os.getenv("AGENT_RUNTIME", "").strip():
+        try:
             from jiuwenswarm.common.utils import reload_logging_levels_from_gateway_db
 
             await reload_logging_levels_from_gateway_db()

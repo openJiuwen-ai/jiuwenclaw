@@ -48,12 +48,16 @@ def _apply_ce_defaults() -> None:
     """Seed the context_evolver config from the UI config (config.yaml), falling back to env vars."""
     try:
         from jiuwenswarm.common.config import get_config
-        from jiuwenswarm.agents.harness.common.memory.config import get_embed_config
+        from jiuwenswarm.agents.harness.common.memory.config import (
+            get_embed_config,
+            get_task_memory_config,
+        )
 
         cfg = get_config()
         react_cfg = cfg.get("react", {})
         model_client = react_cfg.get("model_client_config", {})
         embed_cfg = get_embed_config()
+        task_memory_cfg = get_task_memory_config()
         models_default = cfg.get("models", {}).get("default", {}).get("model_client_config", {})
 
         # Resolve each value: UI config → env var → empty (no hardcoded fallback)
@@ -83,7 +87,7 @@ def _apply_ce_defaults() -> None:
                 embed_cfg.get("model")
                 or os.getenv("EMBEDDING_MODEL")
                 or os.getenv("EMBED_MODEL")
-                or cfg.get("task_memory", {}).get("embedding_model", "text-embedding-3-small")
+                or task_memory_cfg.get("embedding_model", "text-embedding-3-small")
             ),
         }
 
@@ -96,9 +100,9 @@ def _apply_ce_defaults() -> None:
 
 def _is_task_memory_enabled() -> bool:
     """Check if task memory is enabled via config or environment."""
-    from jiuwenswarm.common.config import get_config
-    cfg = get_config()
-    task_memory_cfg = cfg.get("task_memory", {})
+    from jiuwenswarm.agents.harness.common.memory.config import get_task_memory_config
+
+    task_memory_cfg = get_task_memory_config()
     return bool(task_memory_cfg.get("enabled", False))
 
 
@@ -114,10 +118,12 @@ def _get_service():
 
     _apply_ce_defaults()
 
-    from jiuwenswarm.common.config import get_config
-    from jiuwenswarm.agents.harness.common.memory.config import get_embed_config
-    cfg = get_config()
-    task_memory_cfg = cfg.get("task_memory", {})
+    from jiuwenswarm.agents.harness.common.memory.config import (
+        get_embed_config,
+        get_task_memory_config,
+    )
+
+    task_memory_cfg = get_task_memory_config()
     embed_cfg = get_embed_config()
 
     llm_model = (

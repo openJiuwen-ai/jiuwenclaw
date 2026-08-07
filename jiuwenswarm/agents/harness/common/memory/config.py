@@ -24,6 +24,7 @@ DEFAULT_WORKSPACE_DIR = str(get_agent_workspace_dir())
 
 _config_cache: Optional[Dict[str, Any]] = None
 _embed_config_db_cache: Optional[Dict[str, Any]] = None
+_task_memory_config_db_cache: Optional[Dict[str, Any]] = None
 
 
 def _resolve_env_vars(value: Any) -> Any:
@@ -389,6 +390,73 @@ async def reload_embed_config_from_gateway_db() -> None:
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "embed_config read failed: %s",
+            exc,
+            exc_info=True,
+        )
+
+
+def clear_task_memory_config_db_cache() -> None:
+    """清除 task_memory_config 的 DB 缓存，使下次重新从 DB 读取."""
+    global _task_memory_config_db_cache
+    _task_memory_config_db_cache = None
+
+
+def get_task_memory_config() -> Dict[str, Any]:
+    """Get task_memory configuration.
+
+    Priority: DB(task_memory_config table) > YAML (config.yaml task_memory section).
+    """
+    global _task_memory_config_db_cache
+    if _task_memory_config_db_cache is not None:
+        return _task_memory_config_db_cache
+
+    config = _load_config()
+    task_memory_cfg = config.get("task_memory", {})
+
+    return {
+        "enabled": task_memory_cfg.get("enabled", False),
+        "llm_model": task_memory_cfg.get("llm_model"),
+        "embedding_model": task_memory_cfg.get("embedding_model"),
+        "api_key": task_memory_cfg.get("api_key"),
+        "api_base": task_memory_cfg.get("api_base"),
+        "retrieval_algo": task_memory_cfg.get("retrieval_algo"),
+        "summary_algo": task_memory_cfg.get("summary_algo"),
+    }
+
+
+async def reload_task_memory_config_from_gateway_db() -> None:
+    """从 Gateway 库加载 ``task_memory_config`` 并刷新缓存（企业版）。"""
+    global _task_memory_config_db_cache
+    if not os.getenv("AGENT_RUNTIME", "").strip():
+        return
+    try:
+        from jiuwenswarm.server.runtime.enterprise_config import gateway_db
+
+        jid = gateway_db.resolve_jiuwenclaw_id()
+        if not jid:
+            _task_memory_config_db_cache = None
+            return
+
+        rows = await gateway_db.list_records(
+            "task_memory_config",
+            filters={"jiuwenclaw_id": jid},
+        )
+        row = rows[0] if rows else None
+        if row is not None:
+            _task_memory_config_db_cache = {
+                "enabled": row.get("enabled", False),
+                "llm_model": row.get("llm_model"),
+                "embedding_model": row.get("embedding_model"),
+                "api_key": row.get("api_key"),
+                "api_base": row.get("api_base"),
+                "retrieval_algo": row.get("retrieval_algo"),
+                "summary_algo": row.get("summary_algo"),
+            }
+        else:
+            _task_memory_config_db_cache = None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "task_memory_config read failed: %s",
             exc,
             exc_info=True,
         )
