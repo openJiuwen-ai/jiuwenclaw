@@ -714,7 +714,7 @@ def _persist_permissions(mutate_fn) -> dict[str, Any]:
         persist_permissions_mutate,
     )
 
-    return persist_permissions_mutate(mutate_fn)
+    return persist_permissions_mutate(mutate_fn, persist_scope="base")
 
 
 def get_permissions_file_guard_workspace_rw_enabled() -> bool:

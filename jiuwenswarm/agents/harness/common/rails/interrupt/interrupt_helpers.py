@@ -7,6 +7,7 @@ and building permission rails.
 """
 from __future__ import annotations
 
+import copy
 import json
 import re
 from typing import Any
@@ -91,6 +92,7 @@ def build_permission_rail(
     from jiuwenswarm.common.e2a.acp.acp_tool_updates import build_acp_tool_descriptor
     from jiuwenswarm.common.utils import get_config_file, get_workspace_dir
     from jiuwenswarm.agents.harness.common.rails.permissions.config_loader import (
+        get_base_permissions_config,
         get_effective_permissions_config,
     )
 
@@ -156,7 +158,12 @@ def build_permission_rail(
             that the user has already removed via the webui.
             """
             try:
-                from jiuwenswarm.common.config import _dump_yaml_round_trip, _load_yaml_round_trip
+                from jiuwenswarm.agents.harness.common.rails.permissions.config_loader import (
+                    get_base_permissions_config,
+                    is_enterprise_runtime,
+                    persist_permissions_mutate,
+                )
+                from jiuwenswarm.common.config import _load_yaml_round_trip
 
                 yaml_path = get_config_file()
                 data = _load_yaml_round_trip(yaml_path)
@@ -165,16 +172,12 @@ def build_permission_rail(
 
                 on_disk_perms = data.get("permissions")
                 if not isinstance(on_disk_perms, dict):
-                    on_disk_perms = {}
+                    on_disk_perms = get_base_permissions_config() if is_enterprise_runtime() else {}
 
-                # Overlay path-related deltas + approval_overrides;
-                # keep on-disk tools/defaults/rules to avoid restoring
-                # entries the user already deleted via webui.
                 merged = dict(on_disk_perms)
                 overrides_new = permissions.get("approval_overrides")
                 if overrides_new is not None:
                     merged["approval_overrides"] = overrides_new
-                # 路径信任写 file_guard.paths（agent-core §5.5.6）；过渡期仍接受旧 external_directory
                 fg_new = permissions.get("file_guard")
                 if fg_new is not None:
                     merged["file_guard"] = fg_new
@@ -182,8 +185,11 @@ def build_permission_rail(
                 if ext_dir_new is not None:
                     merged["external_directory"] = ext_dir_new
 
-                data["permissions"] = merged
-                _dump_yaml_round_trip(yaml_path, data)
+                def mutate(perms: dict[str, Any]) -> None:
+                    perms.clear()
+                    perms.update(copy.deepcopy(merged))
+
+                persist_permissions_mutate(mutate)
                 return True
             except Exception as exc:
                 logger.warning("[InterruptHelpers] persist_allow_rule failed: %s", exc)
@@ -350,8 +356,7 @@ def build_permission_rail(
             return ("reject", f"[PERMISSION_DENIED] 该工具未被授权 (owner_scopes: {owner_level})")
 
         def _get_permissions_snapshot():
-            cfg = get_config()
-            return cfg.get("permissions") if isinstance(cfg, dict) else {}
+            return get_effective_permissions_config()
 
         host = ToolPermissionHost(
             get_permissions_snapshot=_get_permissions_snapshot,

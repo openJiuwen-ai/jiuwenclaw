@@ -176,6 +176,11 @@ from jiuwenswarm.agents.harness.common.memory.config import (
 from jiuwenswarm.agents.harness.common.memory.external_memory_config import is_builtin_memory_allowed
 from jiuwenswarm.common.model_config_validation import is_placeholder_api_base
 from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context import TOOL_PERMISSION_CHANNEL_ID
+from jiuwenswarm.agents.harness.common.rails.permissions.config_loader import (
+    get_effective_permissions_config,
+    reset_permissions_session_scope,
+    setup_permissions_session_scope,
+)
 from jiuwenswarm.server.runtime.session.session_metadata import build_server_push_message
 from jiuwenswarm.server.runtime.session.session_history import append_history_record, load_history_records
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
@@ -5451,10 +5456,16 @@ class JiuWenSwarmDeepAdapter:
     def _update_permission_rail(self, config_base: dict[str, Any] | None) -> None:
         """原地更新已有 PermissionRail 配置，或在首次启用时新建。"""
         from jiuwenswarm.agents.harness.common.rails.permissions.config_loader import (
+            get_base_permissions_config,
             get_effective_permissions_config,
+            is_enterprise_runtime,
         )
 
-        permission_config = get_effective_permissions_config()
+        permission_config = (
+            get_base_permissions_config()
+            if is_enterprise_runtime()
+            else get_effective_permissions_config()
+        )
         if self._permission_rail is not None:
             self._permission_rail.update_config(permission_config)
             logger.info("[JiuWenSwarmDeepAdapter] _permission_rail config hot-updated")
@@ -9328,6 +9339,11 @@ class JiuWenSwarmDeepAdapter:
         self._runtime_cron_tool_context.remember_current_binding()
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         token_perm = setup_permission_context(request)
+        token_perm_sid = setup_permissions_session_scope(session_id)
+        if self._permission_rail is not None:
+            self._permission_rail.update_config(
+                get_effective_permissions_config(session_id=session_id),
+            )
         resolved_model = self._resolve_model_for_request(request)
         self._apply_model_to_react_agent(resolved_model)
         self._mark_session_active(session_id)
@@ -9487,6 +9503,7 @@ class JiuWenSwarmDeepAdapter:
             self._unregister_session_agent_task(session_id)
             TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
             cleanup_permission_context(token_perm)
+            reset_permissions_session_scope(token_perm_sid)
             self._reset_runtime_cron_context(cron_context_tokens)
             self._unmark_session_active(session_id)
             # [CRON-CTX] 非流式 cron 执行收尾补 commit：对齐流式路径的自动落盘。
@@ -10536,6 +10553,7 @@ class JiuWenSwarmDeepAdapter:
             self._unregister_session_agent_task(session_id)
             TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
             cleanup_permission_context(token_perm)
+            reset_permissions_session_scope(token_perm_sid)
             if not stream_consumer_cancelled:
                 self._reset_runtime_cron_context(cron_context_tokens)
             # Always clean up rail state — process_interrupt's
