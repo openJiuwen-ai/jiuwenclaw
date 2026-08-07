@@ -640,7 +640,11 @@ function ProjectCreateDialog({
         >
           <CloseIcon aria-hidden />
         </button>
-        <div className="conversation-path-dialog__title">{t('multiSession.project.newProject')}</div>
+        <div className="conversation-path-dialog__title">
+          {mode === 'existing'
+            ? t('multiSession.project.selectExisting')
+            : t('multiSession.project.createBlank')}
+        </div>
         <input
           className="conversation-path-dialog__input"
           value={name}
@@ -653,7 +657,7 @@ function ProjectCreateDialog({
             className="conversation-path-dialog__input"
             value={projectDir}
             onChange={(event) => setProjectDir(event.target.value)}
-            placeholder="/Users/name/work/project"
+            placeholder={t('multiSession.project.pathPlaceholder')}
           />
         ) : null}
         {error ? <div className="conversation-path-dialog__error">{error}</div> : null}

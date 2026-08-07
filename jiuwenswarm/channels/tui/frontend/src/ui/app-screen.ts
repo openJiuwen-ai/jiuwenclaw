@@ -125,6 +125,7 @@ const TRANSCRIPT_WHEEL_SCROLL_LINES = 3;
 // 不可中断的命令列表（ESC 按下时显示提示）
 const UNINTERRUPTIBLE_COMMANDS = ["compact"];
 const SWARM_WORKFLOW_LOG_PREVIEW_ROWS = 8;
+const SWARM_WORKFLOW_AGENT_PREVIEW_LIMIT = 8;
 const SWARM_WORKFLOW_AGENT_TEXT_PREVIEW_ROWS = 6;
 const PERMISSION_TOOL_RE = /工具\s+`([^`]+)`\s+需要授权/;
 const CONFIRM_TOOL_RE = /(?:Tool|工具)\s*:\s*`([^`]+)`/i;
@@ -6126,7 +6127,7 @@ export class AppScreen implements Component, Focusable {
       void this.openSwarmWorkflowBudget();
       return;
     }
-    if (action === "swarm:back") {
+    if (action === "swarm:back" || action === "swarm:left") {
       if (state.phase === "pending-list") {
         this.restoreFromPendingList(state.previous_phase);
         this.tui.requestRender();
@@ -6135,7 +6136,15 @@ export class AppScreen implements Component, Focusable {
       if (state.phase === "list") {
         this.closeSwarmWorkflowsView();
       } else if (state.phase === "workflow") {
-        this.swarmWorkflowsViewState = this.buildSwarmWorkflowsListState(false, state.workflowId);
+        this.swarmWorkflowsViewState =
+          state.focus === "agents"
+            ? this.buildSwarmWorkflowDetailState(
+                state.workflowId,
+                state.selectedPhaseId,
+                "phases",
+                state.agentList.getSelectedItem()?.value,
+              )
+            : this.buildSwarmWorkflowsListState(false, state.workflowId);
       } else if (state.phase === "agent") {
         if (state.returnTo?.kind === "pending-list") {
           this.replyingToHumanPrompt = null;
@@ -6161,55 +6170,6 @@ export class AppScreen implements Component, Focusable {
         this.restoreFromSessionDetail(state.returnTo);
       }
       // pending-list phase is handled separately above
-      this.tui.requestRender();
-      return;
-    }
-    if (action === "swarm:left") {
-      if (state.phase === "list") {
-        this.closeSwarmWorkflowsView();
-        this.tui.requestRender();
-        return;
-      }
-      if (state.phase === "pending-list") {
-        this.restoreFromPendingList(state.previous_phase);
-        this.tui.requestRender();
-        return;
-      }
-      if (state.phase === "agent") {
-        if (state.returnTo?.kind === "pending-list") {
-          this.replyingToHumanPrompt = null;
-          this.editor.setText("");
-          this.editor.focused = false;
-          this.swarmWorkflowsViewState = this.buildPendingListState(
-            state.returnTo.previous_phase ?? "chat",
-          );
-          this.tui.requestRender();
-          return;
-        }
-        const lookup = findWorkflowAgent(
-          this.state.getSnapshot().workflowRuns,
-          state.workflowId,
-          state.agentId,
-        );
-        this.swarmWorkflowsViewState = this.buildSwarmWorkflowDetailState(
-          state.workflowId,
-          lookup?.phase.id,
-          "agents",
-          state.agentId,
-        );
-      } else if (state.phase === "session-detail") {
-        this.restoreFromSessionDetail(state.returnTo);
-      } else if (state.phase === "workflow") {
-        this.swarmWorkflowsViewState =
-          state.focus === "agents"
-            ? this.buildSwarmWorkflowDetailState(
-                state.workflowId,
-                state.selectedPhaseId,
-                "phases",
-                state.agentList.getSelectedItem()?.value,
-              )
-            : this.buildSwarmWorkflowsListState(false, state.workflowId);
-      }
       this.tui.requestRender();
       return;
     }
@@ -6984,6 +6944,20 @@ export class AppScreen implements Component, Focusable {
     ];
     if (state.focus === "phases") {
       lines.push(...this.renderSwarmWorkflowDetailTree(workflow, state.selectedPhaseId, width));
+      lines.push("");
+      const agentsTitle = selectedPhase ? `Agents · ${selectedPhase.name}` : "Agents";
+      lines.push(padToWidth(palette.text.secondary(agentsTitle), width));
+      if (selectedPhase) {
+        lines.push(
+          ...this.renderSwarmWorkflowAgentRows(
+            selectedPhase.agents ?? [],
+            width,
+            SWARM_WORKFLOW_AGENT_PREVIEW_LIMIT,
+          ),
+        );
+      } else {
+        lines.push(padToWidth(palette.text.dim("No agents"), width));
+      }
     } else {
       lines.push(...this.renderSwarmWorkflowPhaseRows(workflow, state.selectedPhaseId, width));
       lines.push("");

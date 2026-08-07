@@ -1585,7 +1585,22 @@ def update_swarmflow_enabled_in_config(enabled: bool) -> None:
 
 
 def update_swarmflow_budget_in_config(budget: str) -> None:
-    """Update ``modes.team.jiuwen_team.swarmflow_budget`` in config.yaml."""
+    """Update ``modes.team.jiuwen_team.swarmflow_budget`` in config.yaml.
+
+    Pass an empty string or ``"none"`` to remove the budget ceiling.
+    """
+    clear_budget = not budget or budget.strip().lower() in ("none", "null")
+    if clear_budget:
+        data = load_yaml_round_trip(CONFIG_YAML_PATH)
+        current = data
+        for segment in SWARMFLOW_BUDGET_CONFIG_PATH[:-1]:
+            if segment not in current or not isinstance(current, dict):
+                return  # path doesn't exist, nothing to clear
+            current = current[segment]
+        current.pop(SWARMFLOW_BUDGET_CONFIG_PATH[-1], None)
+        dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+        return
+
     try:
         value = int(budget)
     except (ValueError, TypeError):

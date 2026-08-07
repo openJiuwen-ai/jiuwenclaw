@@ -401,6 +401,38 @@ assert.deepEqual(
   ["swarmflows", "workspace"],
 );
 
+// Escape and left both move from the workflow's agents panel back to phases.
+for (const key of ["\x1b", "\x1b[D"]) {
+  let swarmNavigationRenderCount = 0;
+  const swarmNavigationScreen = Object.create(AppScreen.prototype);
+  Object.assign(swarmNavigationScreen, {
+    swarmWorkflowsViewState: {
+      phase: "workflow",
+      workflowId: "workflow-1",
+      selectedPhaseId: "phase-1",
+      focus: "agents",
+      agentList: { getSelectedItem: () => ({ value: "agent-2" }) },
+    },
+    buildSwarmWorkflowDetailState: (workflowId, phaseId, focus, agentId) => ({
+      phase: "workflow",
+      workflowId,
+      selectedPhaseId: phaseId,
+      focus,
+      selectedAgentId: agentId,
+    }),
+    tui: {
+      requestRender: () => {
+        swarmNavigationRenderCount += 1;
+      },
+    },
+  });
+
+  swarmNavigationScreen.handleSwarmWorkflowsInput(key);
+  assert.equal(swarmNavigationScreen.swarmWorkflowsViewState.focus, "phases");
+  assert.equal(swarmNavigationScreen.swarmWorkflowsViewState.selectedAgentId, "agent-2");
+  assert.equal(swarmNavigationRenderCount, 1);
+}
+
 const pendingQuestionScreen = Object.create(AppScreen.prototype);
 let pendingQuestionExitCount = 0;
 let pendingQuestionInterruptCount = 0;
@@ -741,7 +773,7 @@ assert.deepEqual(
   {
     writeConfig: false,
     switchToTeam: false,
-    message: "SwarmFlow is already on in team mode. No changes were made.",
+    message: "Already on. No changes.",
   },
 );
 assert.deepEqual(
@@ -749,8 +781,7 @@ assert.deepEqual(
   {
     writeConfig: false,
     switchToTeam: true,
-    message:
-      "SwarmFlow is already on. Switched to team mode — the next workflow run uses the enabled setting.",
+    message: "Already on. Switched to team mode.",
   },
 );
 assert.deepEqual(
@@ -758,7 +789,7 @@ assert.deepEqual(
   {
     writeConfig: false,
     switchToTeam: false,
-    message: "SwarmFlow is already off. Mode remains team. No changes were made.",
+    message: "Already off. Mode remains team. No changes. Use /mode to leave team.",
   },
 );
 assert.equal(

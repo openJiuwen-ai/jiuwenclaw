@@ -49,7 +49,7 @@ class RouterConfig:
     ssh_channel: SshChannelEndpoint | None = None
     auth_service_url: str = ""
     timeout: float = 10.0
-    auth_enabled: bool = True
+    auth_enabled: bool = False
 
 
 def agentos_router_selected(config: dict[str, Any]) -> bool:
@@ -133,7 +133,7 @@ def load_router_config(config: dict[str, Any]) -> RouterConfig:
 
     auth_service_url = str(agentos.get("auth_service_url") or "").strip()
     timeout = float(agentos.get("timeout") or 10)
-    auth_enabled = str(agentos.get("auth_enabled", "true")).strip().lower() in ("true", "1", "yes")
+    auth_enabled = str(agentos.get("auth_enabled", "false")).strip().lower() in ("true", "1", "yes")
 
     # Env wins over yaml (incl. explicit 0 to disable), same as vibeskill.
     idle_timeout_env = _read_float_env(SANDBOX_IDLE_TIMEOUT_ENV)

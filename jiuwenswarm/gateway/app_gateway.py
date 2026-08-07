@@ -1627,10 +1627,6 @@ async def _run(
     # 回填引用：MessageHandler 实例化早于 ChannelManager，广播全局事件时需经它取 web channel。
     message_handler.set_channel_manager(channel_manager)
 
-    # 装配 AgentOSRouterClient 订阅 Channel 连接事件
-    subscribe_fn = getattr(client, "set_channel_manager", None)
-    if callable(subscribe_fn):
-        subscribe_fn(channel_manager)
     updater_service = UpdaterService()
     prewarm_sync_debounce_task: asyncio.Task[None] | None = None
 
@@ -1842,6 +1838,11 @@ async def _run(
         "TUI",
     )
     channel_manager.register_channel_with_inbound(tui_channel, tui_norm_and_forward)
+
+    # Web/TUI 注册后再订阅连接钩子，否则 get_channel 拿不到 channel。
+    subscribe_fn = getattr(client, "set_channel_manager", None)
+    if callable(subscribe_fn):
+        subscribe_fn(channel_manager)
 
     acp_inbound_server = _InboundGatewayServer(
         lambda msg: _normalize_and_forward_message(msg, channel_manager)

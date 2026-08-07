@@ -399,6 +399,93 @@ test('keeps Markdown behavior compatible while dispatching supported fenced bloc
   }
 });
 
+test('renders dollar and native LaTeX delimiters through KaTeX', async () => {
+  const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>');
+  const restore = installGlobals({
+    HTMLElement: dom.window.HTMLElement,
+    IS_REACT_ACT_ENVIRONMENT: true,
+    Node: dom.window.Node,
+    document: dom.window.document,
+    navigator: dom.window.navigator,
+    window: dom.window,
+  });
+  const container = dom.window.document.querySelector('#root');
+  const markdown = [
+    String.raw`Inline $x^2$ and \(\frac{a}{b}\).`,
+    '',
+    '$$',
+    String.raw`\int_0^1 x\,dx`,
+    '$$',
+    '',
+    String.raw`Same-line display: \[S=(1,0)\]`,
+    '',
+    String.raw`\[`,
+    String.raw`\sum_{i=1}^{n} i`,
+    String.raw`\]`,
+  ].join('\n');
+  let root;
+  try {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(createElement(MarkdownRenderer, { className: 'chat-markdown', content: markdown }));
+    });
+
+    assert.equal(container.querySelectorAll('.katex').length, 5);
+    assert.equal(container.querySelectorAll('.katex-display').length, 3);
+    assert.equal(container.querySelectorAll('.katex-mathml math').length, 5);
+    assert.match(container.textContent, /x2/);
+    assert.match(container.textContent, /S=\(1,0\)/);
+  } finally {
+    if (root) await act(async () => root.unmount());
+    restore();
+    dom.window.close();
+  }
+});
+
+test('isolates LaTeX parsing from code and incomplete streaming delimiters', async () => {
+  const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>');
+  const restore = installGlobals({
+    HTMLElement: dom.window.HTMLElement,
+    IS_REACT_ACT_ENVIRONMENT: true,
+    Node: dom.window.Node,
+    document: dom.window.document,
+    navigator: dom.window.navigator,
+    window: dom.window,
+  });
+  const container = dom.window.document.querySelector('#root');
+  const markdown = [
+    String.raw`Rendered: \(x+y\).`,
+    '',
+    'Inline code: `$not_math$ and \\(not_math\\)`.',
+    '',
+    '```text',
+    String.raw`$not_math$ and \[not_math\]`,
+    '```',
+    '',
+    String.raw`Incomplete stream: \(x+y`,
+    '',
+    'Price: $100.',
+  ].join('\n');
+  let root;
+  try {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(createElement(MarkdownRenderer, { className: 'chat-markdown', content: markdown }));
+    });
+
+    assert.equal(container.querySelectorAll('.katex').length, 1);
+    const codeBlocks = Array.from(container.querySelectorAll('code'));
+    assert.ok(codeBlocks.some(code => code.textContent === String.raw`$not_math$ and \(not_math\)`));
+    assert.ok(codeBlocks.some(code => code.textContent.includes(String.raw`$not_math$ and \[not_math\]`)));
+    assert.match(container.textContent, /Incomplete stream: \(x\+y/);
+    assert.match(container.textContent, /Price: \$100\./);
+  } finally {
+    if (root) await act(async () => root.unmount());
+    restore();
+    dom.window.close();
+  }
+});
+
 test('downloads a blob through a temporary anchor and always revokes its object URL', () => {
   const dom = new JSDOM('<!doctype html><html><body></body></html>');
   const calls = [];
