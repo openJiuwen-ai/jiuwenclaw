@@ -681,7 +681,8 @@ async def test_generate_evolution_merge_version_skips_complete_on_rewrite_failur
     assert result["ok"] is False
     assert "融合重写" in result["error"]
     assert "安全管理" in result["error"]
-    assert "审批护栏" in result["error"]
+    assert "安全审批" in result["error"]
+    assert "write_file" in result["error"]
     assert _FakeRebuildService.prepare_calls
     assert _FakeRebuildService.complete_rebuild_calls == []
 
