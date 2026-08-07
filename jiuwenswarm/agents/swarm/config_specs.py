@@ -46,10 +46,7 @@ from jiuwenswarm.common.config import (
     ASCEND_AFFINITY_PROVIDER,
     get_default_model_provider,
     get_evolution_auto_save_enabled,
-    get_evolution_auto_scan_enabled,
-    get_evolution_review_trigger_enabled,
-    get_evolution_signal_trigger_enabled,
-    get_skill_create_enabled,
+    get_skill_evolution_enabled,
 )
 from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
     get_context_engine_enabled,
@@ -97,6 +94,7 @@ _COMMON_RAIL_NAMES: tuple[str, ...] = (
     registry.SECURITY,
     registry.HEARTBEAT,
     registry.AVATAR_PROMPT,
+    registry.MULTIMODAL_IMAGE,
     registry.TEAM_WORKSPACE_REPORT_PATH,
     registry.CONTEXT_PROCESSOR,
     registry.PLUGIN_RAILS,
@@ -134,6 +132,7 @@ _CODE_RAIL_NAMES: tuple[str, ...] = (
     registry.CODE_RUNTIME_PROMPT,
     registry.RESPONSE_PROMPT,
     registry.STREAM_EVENT,
+    registry.MULTIMODAL_IMAGE,
     registry.SECURITY,
     registry.CODE_LSP,
     registry.CODE_PROJECT_MEMORY,
@@ -332,13 +331,8 @@ def _permission_params(config: dict[str, Any]) -> dict[str, Any]:
 
 def _team_evolution_rail_params(config: dict[str, Any]) -> dict[str, Any]:
     """Attribute params for the leader team skill-evolution rail."""
-    auto_scan = get_evolution_auto_scan_enabled(config)
     return {
         "evolution_model_config": _evolution_model_config(config),
-        "review_trigger": get_evolution_review_trigger_enabled(
-            config,
-            fallback=auto_scan,
-        ),
         "auto_save": get_evolution_auto_save_enabled(config),
     }
 
@@ -347,10 +341,6 @@ def _member_evolution_rail_params(config: dict[str, Any]) -> dict[str, Any]:
     """Attribute params for the member skill-evolution rail."""
     return {
         "evolution_model_config": _evolution_model_config(config),
-        "signal_trigger": get_evolution_signal_trigger_enabled(
-            config,
-            fallback=get_evolution_auto_scan_enabled(config),
-        ),
     }
 
 
@@ -437,6 +427,8 @@ def _code_base_rail_names(role: str) -> tuple[str, ...]:
 
 def _role_evolution_rails(config: dict[str, Any], role: str) -> list[RailSpec]:
     """Return the role-specific skill-evolution rails (shared by both profiles)."""
+    if not get_skill_evolution_enabled(config):
+        return []
     if role == "leader":
         return [
             RailSpec(
@@ -445,7 +437,7 @@ def _role_evolution_rails(config: dict[str, Any], role: str) -> list[RailSpec]:
             ),
             RailSpec(
                 type=registry.TEAM_SKILL_CREATE,
-                params={"skill_create": get_skill_create_enabled(config)},
+                params={},
             ),
         ]
     return [
@@ -663,6 +655,27 @@ def _code_subagent_spec(
     )
 
 
+def _is_explore_subagent(spec: Any) -> bool:
+    """Return whether ``spec`` declares the explore sub-agent.
+
+    Upstream team specs reach us in more than one shape, so all three identity
+    carriers are checked: ``subagent_type`` (present on some platform spec
+    objects), ``factory_name``, and the agent card name.
+
+    Args:
+        spec: A sub-agent spec from a base team spec or from
+            :func:`build_member_subagent_specs`.
+
+    Returns:
+        True when the spec declares ``explore_agent``.
+    """
+    return (
+        getattr(spec, "subagent_type", None) == "explore_agent"
+        or getattr(spec, "factory_name", None) == registry.EXPLORE_AGENT
+        or getattr(getattr(spec, "agent_card", None), "name", None) == "explore_agent"
+    )
+
+
 def build_member_subagent_specs(
     config: dict[str, Any],
     mode: str,
@@ -782,6 +795,16 @@ def build_member_deep_agent_spec(
 
     if subagent_specs or team_browser_spec:
         merged_subagents = list(base_spec.subagents or [])
+        # Drop a base_spec explore_agent when we contribute our own: code modes
+        # always declare one in build_member_subagent_specs, and two specs under
+        # the same name would just shadow each other in create_subagent.
+        # SubAgentSpec has no subagent_type field, so the name / factory_name
+        # checks are what actually match here.
+        if any(_is_explore_subagent(spec) for spec in subagent_specs):
+            merged_subagents = [
+                spec for spec in merged_subagents
+                if not _is_explore_subagent(spec)
+            ]
         # Remove any browser_agent from base_spec to prevent the shared
         # playwright_official_stdio entry from co-existing with our isolated one.
         if team_browser_spec or any(

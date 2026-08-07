@@ -24,7 +24,7 @@
   },
   "nav": {
     "chat": "Chat",
-    "work": "Work",
+    "work": "Tasks",
     "agent": "Agent",
     "teams": "Teams",
     "sessions": "Sessions",
@@ -78,7 +78,6 @@
     "collapseView": "Collapse view",
     "expandView": "Expand view",
     "expand": "Expand",
-    "runningMode": "Mode: {{mode}}",
     "taskFallback": "Task {{id}}",
     "memberStatus": {
       "running": "Running",
@@ -298,6 +297,8 @@
     "paused": "Paused",
     "resume": "Resume",
     "queuePausedConfirm": "You are about to send a message. Clear the {{count}} queued message(s)?\n\nClick \"OK\" to clear the queue and send; click \"Cancel\" to keep the queue (message will be added to the queue).",
+    "goalAttachmentsBlocked": "Attachments are not supported when setting a goal. Remove them first, or send the attachment in a separate message.",
+    "editTaskDropAttachments": "Editing will remove the {{count}} attachment(s) carried by this task. Continue?",
     "holdToSpeak": "Hold to speak",
     "send": "Send (Enter)",
     "stop": "Stop",
@@ -309,7 +310,7 @@
       "placeholder": "Select Model"
     },
     "configLockedHistory": "Session has messages — create a new session to change config",
-    "modeSwitchDisabledProcessing":"This conversation is running. Start a new conversation to choose another mode",
+    "modeSwitchDisabledProcessing": "This conversation is running. Start a new conversation to choose another mode",
     "modeSwitchTitle": "Switch Mode",
     "modeSwitchConfirm": "Current session has history messages. Switching mode will create a new session. Continue?",
     "skills": "Skills",
@@ -896,8 +897,7 @@
       "githubToken": "GitHub personal access token for repository or GitHub-related features.",
       "freeSearchDdg": "Enable free DuckDuckGo search (including DDG via Jina). Disable to turn off this source.",
       "freeSearchBing": "Enable free Bing search. Disable to stop using Bing.",
-      "evolutionAutoScan": "Automatically detect signals that a skill can be evolved and suggest creating/updating skills.",
-      "skillCreate": "Install `skill-creator` and `teamskill-creator` before enabling automatic skill-creation suggestions.",
+      "skillEvolution": "Learn from tasks and suggest capturing experience or creating new skills.",
       "memoryForbiddenDescription": "Describe sensitive types or rules that must not be written to memory, e.g. passwords, ID numbers, secrets.",
       "symphonyDynamicGraphEnabled": "When disabled, planning uses only the static graph. Existing runtime data is retained.",
       "skillRetrievalBuildRootCategories": "Edit YAML/JSON containing tree_root_categories or root_categories directly. The page shows the default taxonomy as a reference; saving writes the config content itself, not an external file path.",
@@ -1057,11 +1057,13 @@
       "memory": { "label": "Memory Sensitive Info Filter", "hint": "Configure sensitive content types forbidden from memory" },
       "email": { "label": "Email Settings", "hint": "Email account and token settings" },
       "other": { "label": "Other Settings", "hint": "Unclassified extended parameters" },
-      "proactive": { "label": "Proactive Recommendation", "hint": "Automatically analyze user needs and proactively offer suggestions; adjust the schedule in the Cron panel" }
+      "proactive": {
+        "label": "Proactive Recommendation",
+        "hint": "Automatically analyze user needs and proactively offer suggestions; adjust the schedule in the Cron panel"
+      }
     },
     "booleanLabels": {
-      "evolutionAutoScan": "Auto-detect evolution signals",
-      "skillCreate": "Auto-suggest new skill creation",
+      "skillEvolution": "Enable automatic skill learning",
       "freeSearchDdg": "Enable DuckDuckGo (including DDG via Jina)",
       "freeSearchBing": "Enable Bing",
       "enabled": "Enable",
@@ -1671,13 +1673,13 @@
       "actions": {
         "read": "Read score",
         "incrementalBuild": "Incremental build",
-        "pauseBuild": "Pause build",
+        "cancelBuild": "Cancel build",
         "fullRebuild": "Full rebuild",
         "fitView": "Fit view"
       },
       "status": {
         "refreshing": "Refreshing skill score",
-        "paused": "Skill score build paused",
+        "cancelled": "Skill score build cancelled",
         "reading": "Reading skill score",
         "noBuildLogs": "No build logs",
         "waitingBuildLogs": "Waiting for build logs...",
@@ -1687,21 +1689,22 @@
       "errors": {
         "readFailed": "Unable to read the skill score. Refresh the score first.",
         "refreshFailed": "Failed to refresh the skill score",
-        "pauseFailed": "Failed to pause the skill score build",
+        "cancelFailed": "Failed to cancel the skill score build",
         "buildFailedWithDetail": "Symphony score build failed: {{detail}}"
       },
       "serverDetails": {
         "noRunningBuild": "No skill score build is currently running.",
-        "pauseRequested": "Skill score build pause requested. Completed cache and checkpoints will be kept.",
-        "buildRunning": "A skill score build is already running. Wait for it to finish or pause the current build first.",
-        "buildPaused": "Skill score build paused. Run an incremental build again to continue.",
-        "scoreMissing": "The skill score is missing or incomplete. Build the score first."
+        "buildStarted": "Skill score background build started.",
+        "cancelRequested": "Skill score build cancelled. Completed cache and checkpoints will be kept.",
+        "buildRunning": "A skill score build is already running in the background.",
+        "buildCancelled": "Skill score build cancelled. Run an incremental build again to continue.",
+        "graphMissing": "The skill score is missing or incomplete. Build the score first."
       },
       "buildStages": {
         "idle": "No build logs",
         "updateStart": "Starting skill score build",
-        "updatePauseRequested": "Pausing skill score build",
-        "updatePaused": "Skill score build paused",
+        "updateCancelRequested": "Cancelling skill score build",
+        "updateCancelled": "Skill score build cancelled",
         "scanStart": "Scanning skill directories",
         "scanDone": "Skill directory scan complete",
         "diffDone": "Checking skill changes",
@@ -1722,8 +1725,8 @@
         "graphResolveDone": "Candidate relation resolution complete",
         "graphMaterializeStart": "Generating score structure",
         "graphMaterializeDone": "Score structure generated",
-        "graphScoreStart": "Building score retrieval structure",
-        "graphScoreDone": "Score retrieval structure built",
+        "graphLookupStart": "Building score lookup structure",
+        "graphLookupDone": "Score lookup structure built",
         "graphBuildDone": "Skill relation graph built",
         "artifactGraphWriteStart": "Writing score files",
         "artifactGraphWriteDone": "Score files written",
@@ -2314,11 +2317,12 @@
       "selectExisting": "Select existing directory",
       "addNewProject": "Add new project",
       "namePlaceholder": "Enter a short, recognizable project name",
+      "pathPlaceholder": "Enter an absolute project directory path",
       "chooseProjectDirectory": "Choose project directory",
       "directoryPickerUnsupported": "This environment cannot open the system directory picker. Enter the project name and path manually.",
-      "directoryPickerFailed": "Failed to choose directory. Please try again.",
+      "directoryPickerFailed": "Failed to choose directory. Enter the project name and path manually.",
       "lockedProjectTitle": "Project assignment cannot be changed from the input box for an existing conversation",
-      "clearProject": "Do not use a project",
+      "clearProject": "Work outside a project",
       "searchProject": "Search projects",
       "noProjectMatches": "No matching projects",
       "noProjects": "No projects",
@@ -2352,12 +2356,28 @@
     "errors": { "delete": "Failed to delete conversation", "create": "Failed to create conversation", "send": "Failed to send message" }
   },
   "mermaid": {
-    "image": "Image",
-    "code": "Code",
-    "copyCode": "Copy code",
+    "rendering": "Drawing…",
     "zoomIn": "Zoom in",
     "zoomOut": "Zoom out",
     "fitView": "Fit view"
+  },
+  "diagram": {
+    "image": "Image",
+    "code": "Code",
+    "moreActions": "More diagram actions",
+    "downloadSource": "Download source",
+    "downloadImage": "Download as image",
+    "copyCode": "Copy code",
+    "copied": "Copied",
+    "copyFailed": "Copy failed",
+    "downloadSourceFailed": "Could not save source file",
+    "preparingImage": "Preparing image…",
+    "downloadImageFailed": "Could not save image"
+  },
+  "svg": {
+    "streaming": "Drawing…",
+    "invalid": "SVG code contains errors",
+    "previewTitle": "SVG image preview"
   },
   "authPrompt": {
     "title": "Authorization",

@@ -213,14 +213,14 @@ _TOOL_PARAM_BUILDERS: dict[name, (config) -> params]   # send_file / code_extra_
 | `context_engine_enabled` + `context_engine_config`（context_processor） | `get_context_engine_enabled(config)` + `config.context_engine_config` |
 | `acp_enabled`（code_extra_tools） | `config.acp_agents` 非空 |
 | `channels_config`（send_file） | `config.channels` |
-| `evolution_model_config` + `auto_scan`（evolution×2） | `resolve_model_config(config)`（序列化 dict）+ `get_evolution_auto_scan_enabled(config)` |
-| `skill_create`（team_skill_create） | `get_skill_create_enabled(config)` |
+| `evolution_model_config` + `auto_save`（evolution×2） | `resolve_model_config(config)`（序列化 dict）+ `react.evolution.auto_save` |
+| `skill_evolution`（evolution rails） | `react.evolution.skill_evolution` |
 
 > **evolution_llm**：`config_specs` 只烘焙*可序列化的模型配置*（`model_client_config` / `model_config_obj` / `model_name`）进 params；活的 LLM 句柄由工厂 `_build_evolution_llm_from(inp.evolution_model_config)` 在 **build 期**构造，**不进 schema**。
 
 > **blob builder**（permission / coding_memory / context_processor）签名不动：`config_specs` 抽 config 子树进 params，工厂传子 dict（如 `build_permission_rail(config={"permissions": inp.permissions_config}, ...)`）。**零 legacy 回归面**。
 
-> **env 烘焙**：env 派生位（`EVOLUTION_AUTO_SCAN` / `JIUWENSWARM_ADDITIONAL_DIRECTORIES` 等）在 enrich 期一并解析烘焙，随 spec 序列化——与既有 params 一致（团队级配置）。
+> **配置烘焙**：canonical `react.evolution` 派生位在 enrich 期一并解析烘焙，随 spec 序列化——与既有 params 一致（团队级配置）。
 
 ---
 
@@ -306,9 +306,9 @@ harness_element(kind=RAIL, name=..., builder=SomeRailClass)              # 直�
 | `swarm.team_workspace_report_path` | T+K | — | team_ws_root, team_id, language |
 | `swarm.context_processor` | T+K | context_engine_enabled, context_engine_config | — |
 | `swarm.plugin_rails` | T+K | — | —（全局 rail manager） |
-| `swarm.team_skill_evolution` | T+K / leader | evolution_model_config, auto_scan | team_skills_dir, language, role, team_id, trajectory_registry, channel, session_id, team_ws_root, global_skills_dir |
-| `swarm.team_skill_create` | T+K / leader | skill_create | team_skills_dir, language, channel, session_id, team_ws_root, team_id, trajectory_registry |
-| `swarm.member_skill_evolution` | T+K / teammate | evolution_model_config, auto_scan | team_skills_dir, trajectory_registry, team_id, channel, session_id |
+| `swarm.team_skill_evolution` | T+K / leader | evolution_model_config, auto_save, skill_evolution | team_skills_dir, language, role, team_id, trajectory_registry, channel, session_id, team_ws_root, global_skills_dir |
+| `swarm.team_skill_create` | T+K / leader | skill_evolution | team_skills_dir, language, channel, session_id, team_ws_root, team_id, trajectory_registry |
+| `swarm.member_skill_evolution` | T+K / teammate | evolution_model_config, skill_evolution | team_skills_dir, trajectory_registry, team_id, channel, session_id |
 | `swarm.code_runtime_prompt` | K | — | language, channel |
 | `swarm.code_project_memory` | K | additional_directories | project_dir, language |
 | `swarm.permission_interrupt` | K | permissions_config, model_name | — |

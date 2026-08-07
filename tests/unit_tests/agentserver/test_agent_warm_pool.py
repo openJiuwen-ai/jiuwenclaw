@@ -82,14 +82,14 @@ def isolated_pool(monkeypatch, tmp_path: Path):
     )
 
     def factory(agent: _FakeRootAgent) -> AgentWarmPool:
-        # Prewarming is on by default; stay explicit so a developer environment
-        # that opts out cannot silently turn these cases into no-ops.
+        # Prewarming is off by default; stay explicit so a developer environment
+        # that opts in cannot silently turn these cases into no-ops.
         return AgentWarmPool(_FakeManager(agent), max_concurrency=4, enabled=True)
 
     yield factory
 
 
-def test_prewarm_is_enabled_unless_the_environment_opts_out(
+def test_prewarm_is_disabled_unless_the_environment_opts_in(
     monkeypatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(
@@ -101,7 +101,7 @@ def test_prewarm_is_enabled_unless_the_environment_opts_out(
         return AgentWarmPool(_FakeManager(_FakeRootAgent()))
 
     monkeypatch.delenv("JIUWENSWARM_AGENT_PREWARM", raising=False)
-    assert build()._enabled is True
+    assert build()._enabled is False
 
     monkeypatch.setenv("JIUWENSWARM_AGENT_PREWARM", " OFF ")
     assert build()._enabled is False
@@ -403,3 +403,25 @@ def test_new_boot_cleans_only_metadata_less_marked_workspace(
 
     assert not (tmp_path / stale_id).exists()
     assert (tmp_path / persisted_id / "metadata.json").is_file()
+
+
+def test_prewarm_is_enabled_unless_the_environment_opts_out(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Dolores: prewarm is on by default; OPT_OUT disables it."""
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_warm_pool.get_agent_sessions_dir",
+        lambda: tmp_path,
+    )
+
+    def build() -> AgentWarmPool:
+        return AgentWarmPool(_FakeManager(_FakeRootAgent()))
+
+    monkeypatch.delenv("JIUWENSWARM_AGENT_PREWARM", raising=False)
+    assert build()._enabled is True
+
+    monkeypatch.setenv("JIUWENSWARM_AGENT_PREWARM", " OFF ")
+    assert build()._enabled is False
+
+    monkeypatch.setenv("JIUWENSWARM_AGENT_PREWARM", "1")
+    assert build()._enabled is True

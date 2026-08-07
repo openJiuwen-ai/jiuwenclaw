@@ -3,12 +3,25 @@
 // 管理 /memory 的四个页签（edit/status/toggle/open）的交互、渲染和状态。
 // app-screen.ts 通过持有 MemoryViewController 实例并委托调用其方法来使用。
 
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import {
+  accessSync,
+  closeSync,
+  constants,
+  existsSync,
+  mkdirSync,
+  openSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, resolve } from "node:path";
 import { type TUI, type SelectItem, SelectList } from "@mariozechner/pi-tui";
 import { addInfo } from "../core/commands/helpers.js";
 import type { CliPiAppState } from "../app-state.js";
-import { openFileInEditor as openInExternalEditor, openFolderInExplorer, getEditorInfo } from "../core/utils/editor.js";
+import {
+  getEditorEnvironmentHint,
+  getEditorInfo,
+  openFileInEditor as openInExternalEditor,
+  openFolderInExplorer,
+} from "../core/utils/editor.js";
 import { collectOrderedMemoryFiles, type MemoryFile } from "../core/commands/builtins/memory.js";
 import {
   formatMemoryPathForDisplay,
@@ -23,6 +36,21 @@ import { resolveAction } from "../core/keybindings/resolver.js";
 function memoryPathKey(filePath: string): string {
   const resolved = resolve(filePath);
   return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function errorCode(error: unknown): string | undefined {
+  return typeof error === "object" && error !== null && "code" in error
+    ? String((error as { code?: unknown }).code)
+    : undefined;
+}
+
+function assertDirectoryWritable(directoryPath: string): void {
+  accessSync(directoryPath, constants.W_OK);
+}
+
+function assertFileWritable(filePath: string): void {
+  const fd = openSync(filePath, "r+");
+  closeSync(fd);
 }
 
 export type MemoryViewTab = "edit" | "status" | "toggle" | "open";
@@ -82,6 +110,8 @@ export class MemoryViewController {
   private statusMessage: string | null = null;
   /** 上一次 open 的目录绝对路径；Ctrl+O 切换时据此重算 statusMessage 的显示格式 */
   private lastOpenedPath: string | null = null;
+  /** 最近一次在 edit 页签中确认选择的文件；重新打开面板时恢复光标位置。 */
+  private lastSelectedEditFilePath: string | null = null;
   /**
    * 外部编辑器打开期间置为 true:此时 MemoryView 进入“不可操作态”
    * (吞掉所有按键,渲染一条 Editing… 提示行)。
@@ -96,6 +126,7 @@ export class MemoryViewController {
   constructor(
     private appState: CliPiAppState,
     private tui: TUI,
+    private openEditor: typeof openInExternalEditor = openInExternalEditor,
   ) {}
 
   // ── 状态查询 ──
@@ -272,15 +303,18 @@ export class MemoryViewController {
     lines.push(...this.renderTabBar(width));
     lines.push(padToWidth(palette.text.dim("─".repeat(width)), width));
     if (this.editing) {
-      // 不可操作态:列表冻结(对应 CC editFileInEditor 的 pause()+suspendStdin())。
-      // 显示编辑器来源,便于用户在编辑期间知道当前用的是哪个编辑器。
+      // 保留原列表并整体灰化，让用户清楚看到选择上下文已经进入不可操作态。
+      // 同步编辑器会在下一行的强制 render 后暂停 TUI，因此该画面会一直保留到编辑器退出。
+      for (const line of this.state.list.render(width)) {
+        lines.push(padToWidth(palette.text.dim(line), width));
+      }
       const { source, value } = getEditorInfo();
       const editorHint = source !== "default" ? ` (${source}="${value}")` : " (default editor)";
       const displayPath = this.editingPath
         ? getDisplayPath(this.editingPath, this.state.projectDir, this.state.gitRoot)
         : "";
       lines.push(padToWidth(palette.status.warning(`  Editing ${displayPath}${editorHint}`), width));
-      lines.push(padToWidth(palette.text.dim("  Close the editor to return — list frozen"), width));
+      lines.push(padToWidth(palette.text.dim("  Memory list disabled until the editor closes"), width));
     } else if (this.state.loading) {
       lines.push(padToWidth(palette.text.dim("  Loading..."), width));
     } else if (this.state.tab === "status") {
@@ -397,7 +431,20 @@ export class MemoryViewController {
       minPrimaryColumnWidth: 20,
       maxPrimaryColumnWidth: 50,
     });
+    const lastSelectedEditFilePath = this.lastSelectedEditFilePath;
+    if (tab === "edit" && lastSelectedEditFilePath) {
+      const selectedIndex = items.findIndex(
+        (item) =>
+          item.value !== "__display__" && memoryPathKey(item.value) === memoryPathKey(lastSelectedEditFilePath),
+      );
+      if (selectedIndex >= 0) {
+        list.setSelectedIndex(selectedIndex);
+      }
+    }
     list.onSelect = (item: SelectItem) => {
+      if (tab === "edit" && item.value && item.value !== "__display__") {
+        this.lastSelectedEditFilePath = item.value;
+      }
       this.handleSelect(tab, item, mode, projectDir);
     };
     list.onCancel = () => {
@@ -471,6 +518,7 @@ export class MemoryViewController {
   private async handleSelect(tab: MemoryViewTab, item: SelectItem, mode: string, _projectDir: string): Promise<void> {
     if (tab === "edit" && item.value && item.value !== "__display__") {
       const filePath = item.value;
+      let created = false;
       if (!existsSync(filePath)) {
         const selectedFile = this.state?.files.find(
           (file) => memoryPathKey(file.path) === memoryPathKey(filePath),
@@ -487,31 +535,56 @@ export class MemoryViewController {
 
         try {
           mkdirSync(dirname(filePath), { recursive: true });
+          assertDirectoryWritable(dirname(filePath));
           writeFileSync(filePath, "", { encoding: "utf-8", flag: "wx" });
+          created = true;
         } catch (err) {
           // If another process created the selected placeholder concurrently,
-          // continue opening it; otherwise preserve the existing failure behavior.
-          if (!existsSync(filePath)) {
+          // continue opening it. Permission and all other errors must remain
+          // visible in the TUI even if the failed operation left a file behind.
+          if (errorCode(err) !== "EEXIST" || !existsSync(filePath)) {
             this.statusMessage = `Cannot create memory file: ${err instanceof Error ? err.message : String(err)}`;
             this.tui.requestRender();
             return;
           }
         }
       }
+
+      try {
+        // Opening an empty file with "wx" can succeed even when the resulting
+        // file cannot subsequently be opened for writing (notably with some
+        // Windows ACLs). Verify the same access the editor will need before
+        // leaving the TUI, so permission failures are reported here directly.
+        assertFileWritable(filePath);
+      } catch (err) {
+        const action = created ? "create" : "edit";
+        this.statusMessage = `Cannot ${action} memory file: ${err instanceof Error ? err.message : String(err)}`;
+        this.tui.requestRender();
+        return;
+      }
       // 打开编辑器前先冻结列表(进入不可操作态)。编辑器关闭后由 onExit 退出列表
-      // 并提示编辑成功(含编辑器来源与环境变量切换提示),与 CC memory.tsx 行为一致:
-      // CC 在 await editFileInEditor 期间 pause()+suspendStdin() 使对话框不可操作,
-      // 退出后 onDone() 输出单条 “Opened memory file at <path>” + 编辑器切换提示。
-      const { source, value } = getEditorInfo();
+      // 并提示编辑成功(含编辑器来源与环境变量切换提示)。
+      const editorEnvironmentHint = getEditorEnvironmentHint();
       this.editing = true;
       this.editingPath = filePath;
-      this.statusMessage = "Opening editor…";
-      this.tui.requestRender();
-      // GUI 编辑器：异步 spawn，TUI 不阻塞，编辑器关闭后通过 onExit 回调
-      // 终端编辑器：spawnSync 阻塞，tui.start() 后同步调用 onExit
-      openInExternalEditor(this.tui, filePath, () => {
-        this.handleEditComplete(filePath, source, value);
-      });
+      this.statusMessage = null;
+      // requestRender(true) is intentionally immediate: openFileInEditor may
+      // block the JS event loop. pi-tui schedules even forced renders on the
+      // next tick, so yield once to ensure the disabled list is painted first.
+      this.tui.requestRender(true);
+      await new Promise<void>((resolveRender) => setImmediate(resolveRender));
+      // 编辑器进程退出后触发回调；同步实现会在此期间停止 TUI 输入。
+      try {
+        await this.openEditor(this.tui, filePath, (success) => {
+          if (success === false) {
+            this.handleEditorOpenFailure("configured editor and fallback editor both failed");
+            return;
+          }
+          this.handleEditComplete(filePath, editorEnvironmentHint);
+        });
+      } catch (err) {
+        this.handleEditorOpenFailure(err instanceof Error ? err.message : String(err));
+      }
       return;
     }
     if (tab === "toggle" && item.value && item.value !== "__display__") {
@@ -564,29 +637,30 @@ export class MemoryViewController {
 
   /**
    * 编辑器退出后的收尾:清掉不可操作态,关闭 MemoryView(列表退出),
-   * 并向 transcript 写入一条信息。与 CC memory.tsx 行为对齐:
-   *  - 动词用 “Opened”(编辑器已打开过,不假设用户一定保存),而非 “saved”;
-   *  - 始终附上编辑器来源与环境变量切换提示(见下方 editorHint 措辞)。
+   * 并向 transcript 写入一条明确的编辑成功信息，同时附上编辑器来源与环境变量切换提示。
    * 不复用 close():close() 会额外写一条“Memory console dismissed”,
    * 与编辑成功提示重复,故这里静默置空 state,只保留一条提示。
    */
-  private handleEditComplete(filePath: string, source: string, value: string): void {
+  private handleEditComplete(filePath: string, editorEnvironmentHint: string): void {
     this.editing = false;
     this.editingPath = null;
     const sessionId = this.appState.getSnapshot().sessionId;
     const projectDir = this.state?.projectDir ?? "";
     const gitRoot = this.state?.gitRoot ?? null;
     const displayPath = getDisplayPath(filePath, projectDir, gitRoot);
-    // 措辞与 CC memory.tsx 的 editorHint 保持一致:
-    //   命中 $VISUAL/$EDITOR: “> Using $VAR="value". To change editor, set $EDITOR or $VISUAL environment variable.”
-    //   均未设置(默认):      “> To use a different editor, set the $EDITOR or $VISUAL environment variable.”
-    const editorHint = source !== "default"
-      ? `> Using ${source}="${value}". To change editor, set $EDITOR or $VISUAL environment variable.`
-      : `> To use a different editor, set the $EDITOR or $VISUAL environment variable.`;
-    this.appState.addItem(addInfo(sessionId, `Opened memory file at ${displayPath}\n\n${editorHint}`, "✓"));
+    this.appState.addItem(
+      addInfo(sessionId, `Memory file edited successfully: ${displayPath}\n\n> ${editorEnvironmentHint}`, "✓"),
+    );
     this.statusMessage = null;
     this.state = null;
     this.tui.requestRender();
+  }
+
+  private handleEditorOpenFailure(reason: string): void {
+    this.editing = false;
+    this.editingPath = null;
+    this.statusMessage = `Failed to open editor: ${reason}`;
+    this.tui.requestRender(true);
   }
 
   // ── 辅助方法 ──

@@ -7,7 +7,6 @@ from __future__ import annotations
 import base64
 import binascii
 import logging
-import re
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -21,16 +20,18 @@ from jiuwenswarm.common.document_parser import (
     supported_formats,
 )
 from jiuwenswarm.common.utils import get_agent_sessions_dir
+from jiuwenswarm.gateway.upload_storage import (
+    safe_session_dirname,
+    safe_upload_filename,
+    unique_upload_path,
+)
 
 logger = logging.getLogger(__name__)
 
-_SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
-_SESSION_ID_RE = re.compile(r"[^A-Za-z0-9._-]+")
-
 _MAX_DOCUMENT_BYTES = 30 * 1024 * 1024
 _MAX_DOCUMENT_COUNT = 20
-# Office binaries that read_file cannot open directly — persist a .txt sidecar.
-_OFFICE_TEXT_SIDECAR_SUFFIXES = frozenset({".docx", ".xlsx"})
+# Binary documents that read_file cannot open directly — persist a .txt sidecar.
+_TEXT_SIDECAR_SUFFIXES = frozenset({".pdf", ".docx", ".xlsx"})
 
 _TRUE_STRINGS = frozenset({"true", "1", "yes"})
 _FALSE_STRINGS = frozenset({"false", "0", "no"})
@@ -184,7 +185,7 @@ async def parse_existing_document(
 
 def session_uploads_dir(session_id: str | None) -> Path:
     """Return the canonical uploads directory for a session."""
-    return (get_agent_sessions_dir() / _safe_session_id(session_id) / "uploads").resolve()
+    return (get_agent_sessions_dir() / safe_session_dirname(session_id) / "uploads").resolve()
 
 
 def resolve_session_upload_path(path: str | Path, *, session_id: str | None) -> Path:
@@ -270,10 +271,10 @@ async def _store_and_maybe_parse_item(
                 "path": str(path),
                 "size_bytes": data_size,
             }
-            # Office re-parse / sidecar: always materialize .txt for read_file.
-            need_office_txt = path.suffix.lower() in _OFFICE_TEXT_SIDECAR_SUFFIXES
-            if parse or need_office_txt:
-                await _attach_parse_and_office_txt(
+            # Binary re-parse / sidecar: always materialize .txt for read_file.
+            need_sidecar = path.suffix.lower() in _TEXT_SIDECAR_SUFFIXES
+            if parse or need_sidecar:
+                await _attach_parse_and_text_sidecar(
                     stored,
                     original_path=path,
                     parse_meta=parse,
@@ -293,15 +294,15 @@ async def _store_and_maybe_parse_item(
             f"{filename_hint or f'document-{index + 1}'}"
         )
 
-    safe_session_id = _safe_session_id(session_id)
+    safe_session_id = safe_session_dirname(session_id)
     upload_dir = get_agent_sessions_dir() / safe_session_id / "uploads"
     upload_dir.mkdir(parents=True, exist_ok=True)
 
     fallback = f"document-{index + 1}{suffix}"
-    filename = _safe_filename(filename_hint or fallback, fallback=fallback)
+    filename = safe_upload_filename(filename_hint or fallback, fallback=fallback)
     if Path(filename).suffix.lower() not in SUPPORTED_DOCUMENT_EXTENSIONS:
         filename = f"{filename}{suffix}"
-    path = _unique_path(upload_dir / filename)
+    path = unique_upload_path(upload_dir / filename)
     path.write_bytes(data)
 
     stored = {
@@ -311,9 +312,9 @@ async def _store_and_maybe_parse_item(
         "path": str(path),
         "size_bytes": len(data),
     }
-    need_office_txt = path.suffix.lower() in _OFFICE_TEXT_SIDECAR_SUFFIXES
-    if parse or need_office_txt:
-        await _attach_parse_and_office_txt(
+    need_sidecar = path.suffix.lower() in _TEXT_SIDECAR_SUFFIXES
+    if parse or need_sidecar:
+        await _attach_parse_and_text_sidecar(
             stored,
             original_path=path,
             parse_meta=parse,
@@ -322,32 +323,44 @@ async def _store_and_maybe_parse_item(
     return stored
 
 
-async def _attach_parse_and_office_txt(
+async def _attach_parse_and_text_sidecar(
     stored: dict[str, Any],
     *,
     original_path: Path,
     parse_meta: bool,
     max_chars: int,
 ) -> None:
-    """Parse ``original_path``; for docx/xlsx also write a full ``.txt`` sidecar.
+    """Parse ``original_path``; for pdf/docx/xlsx also write a full ``.txt`` sidecar.
 
     After a successful sidecar write, ``stored["path"]`` points at the ``.txt``
     so Agent ``read_file`` can open it. ``original_path`` / ``text_path`` keep both.
+    A PDF with no text layer (scanned) yields empty text — keep ``path`` on the
+    original binary so page-level tools can still work on it.
     """
     suffix = original_path.suffix.lower()
-    write_sidecar = suffix in _OFFICE_TEXT_SIDECAR_SUFFIXES
+    write_sidecar = suffix in _TEXT_SIDECAR_SUFFIXES
 
     if write_sidecar:
         # Full text on disk for read_file (no truncation).
         parsed_full = await parse_document_file(original_path, max_chars=None)
-        text_path = _write_office_text_sidecar(original_path, parsed_full.get("text") or "")
+        text = parsed_full.get("text") or ""
         stored["original_path"] = str(original_path)
-        stored["text_path"] = str(text_path)
-        # Prefer .txt for downstream read_file / chat path hints.
-        stored["path"] = str(text_path)
         stored["parser"] = parsed_full.get("parser")
         stored["char_count"] = parsed_full.get("char_count")
         stored["documents_count"] = parsed_full.get("documents_count")
+        # Only PDFs skip the empty sidecar: a scanned PDF still has page-level
+        # tools (read_pdf/vision) that need the original binary path. docx/xlsx
+        # keep the historical behavior — always write the sidecar, even empty.
+        if text.strip() or suffix != ".pdf":
+            text_path = _write_text_sidecar(original_path, text)
+            stored["text_path"] = str(text_path)
+            # Prefer .txt for downstream read_file / chat path hints.
+            stored["path"] = str(text_path)
+        else:
+            logger.info(
+                "[document.persist] no extractable text (scanned PDF?) file=%s",
+                original_path.name,
+            )
         if parse_meta:
             full_len = int(parsed_full.get("char_count") or 0)
             stored["text_truncated"] = full_len > max(1, int(max_chars))
@@ -367,13 +380,13 @@ async def _attach_parse_and_office_txt(
     )
 
 
-def _write_office_text_sidecar(original_path: Path, text: str) -> Path:
-    """Write parsed office content next to the original as ``stem.txt``."""
+def _write_text_sidecar(original_path: Path, text: str) -> Path:
+    """Write parsed document content next to the original as ``stem.txt``."""
     candidate = original_path.with_suffix(".txt")
-    txt_path = _unique_path(candidate)
+    txt_path = unique_upload_path(candidate)
     txt_path.write_text(text if isinstance(text, str) else str(text or ""), encoding="utf-8")
     logger.info(
-        "[document.persist] wrote office text sidecar original=%s text=%s chars=%s",
+        "[document.persist] wrote text sidecar original=%s text=%s chars=%s",
         original_path.name,
         txt_path.name,
         len(text or ""),
@@ -401,25 +414,3 @@ def _mime_from_suffix(suffix: str) -> str:
     return _SUFFIX_TO_MIME.get(suffix.lower(), "application/octet-stream")
 
 
-def _safe_session_id(session_id: str | None) -> str:
-    text = str(session_id or "default").strip() or "default"
-    return _SESSION_ID_RE.sub("_", text)[:120]
-
-
-def _safe_filename(filename: str, *, fallback: str) -> str:
-    name = Path(filename).name.strip()
-    if not name or name in {".", ".."}:
-        name = fallback
-    return _SAFE_FILENAME_RE.sub("_", name)[:180]
-
-
-def _unique_path(path: Path) -> Path:
-    if not path.exists():
-        return path
-    stem = path.stem
-    suffix = path.suffix
-    for idx in range(1, 1000):
-        candidate = path.with_name(f"{stem}-{idx}{suffix}")
-        if not candidate.exists():
-            return candidate
-    return path.with_name(f"{stem}-overflow{suffix}")

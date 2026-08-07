@@ -10,6 +10,11 @@ Multi-instance management commands:
 - ``--stop <name>``: Stop a running instance
 - ``--restart <name>``: Restart an instance
 - ``--name <name>``: Start a named instance with mode
+
+The ``debug`` mode is a developer shortcut handled by
+``jiuwenswarm.debug_launcher``: it runs ``npm install`` + ``npm run build`` +
+``uv sync``, then starts the services detached with their output redirected to
+``logs/swarm-<timestamp>.log``. ``jiuwenswarm-stop`` terminates that service.
 """
 
 from __future__ import annotations
@@ -931,8 +936,14 @@ def _parse_args() -> argparse.Namespace:
         "mode",
         nargs="?",
         default="all",
-        choices=["all", "web", "app", "dev"],
-        help="Start mode: all (default), web, app, or dev.",
+        choices=["all", "web", "app", "dev", "debug"],
+        help=(
+            "Start mode: all (default), web, app, dev, or debug. "
+            "debug runs npm install + npm run build + uv sync, then starts the "
+            "services in the background with output redirected to a timestamped "
+            "logs/swarm-<timestamp>.log; stop it with 'jiuwenswarm-stop', and "
+            "pass --skip-build to reuse the existing frontend build."
+        ),
     )
 
     # Instance specification parameter
@@ -940,6 +951,16 @@ def _parse_args() -> argparse.Namespace:
         "--name",
         metavar="<name>",
         help="Start a named instance from instances.yaml.",
+    )
+
+    # debug-mode only: reuse the existing frontend build
+    parser.add_argument(
+        "--skip-build",
+        action="store_true",
+        help=(
+            "debug mode only: skip 'npm install' + 'npm run build' and reuse the "
+            "existing frontend/dist. Use when only Python code changed."
+        ),
     )
 
     # Management function parameters (mutually exclusive group)
@@ -978,6 +999,22 @@ def _validate_args(args: argparse.Namespace) -> int | None:
         logging.info(f"[start_services] ERROR: Invalid mode '{args.mode}' for --restart")
         return 1
 
+    # debug mode always drives the default instance: it rebuilds the frontend
+    # and syncs the repository, neither of which is per-instance state.
+    if args.mode == "debug" and args.name:
+        logging.info("[start_services] ERROR: 'debug' mode cannot be combined with --name")
+        logging.info(
+            "[start_services] Run 'jiuwenswarm-start debug' for the default instance, "
+            f"or 'jiuwenswarm-start --name {args.name}' to start the named one."
+        )
+        return 1
+
+    # --skip-build only means anything for the mode that builds the frontend.
+    if args.skip_build and args.mode != "debug":
+        logging.info("[start_services] ERROR: --skip-build only applies to 'debug' mode")
+        logging.info("[start_services] Run 'jiuwenswarm-start debug --skip-build'.")
+        return 1
+
     return None
 
 
@@ -1010,6 +1047,11 @@ def _dispatch_action(args: argparse.Namespace) -> int:
     # --restart <name>: restart specific instance
     if args.restart:
         return _action_restart(args.restart, args.mode)
+
+    # debug: rebuild frontend + sync deps, then run the services in background
+    if args.mode == "debug":
+        from jiuwenswarm.debug_launcher import run_debug
+        return run_debug(skip_build=args.skip_build)
 
     # --name <name>: start named instance
     if args.name:

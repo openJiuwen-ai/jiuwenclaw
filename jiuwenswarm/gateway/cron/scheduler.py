@@ -1000,7 +1000,14 @@ class CronSchedulerService:
                     is_stream=is_team_cron_mode(mode),
                     timestamp=self._now_fn(),
                     metadata={"cron": {"job_id": job.id, "run_id": run_id}},
+                    user_id=job.user_id,
                 )
+                if not str(job.user_id or "").strip():
+                    logger.warning(
+                        "[Cron] job has no user_id, faas X-Session-Context will be omitted: "
+                        "job_id=%s",
+                        job.id,
+                    )
                 if is_team_cron_mode(mode):
                     timeout_seconds = resolve_cron_job_timeout_seconds(job)
                     text, ok = await self._run_team_stream_job(

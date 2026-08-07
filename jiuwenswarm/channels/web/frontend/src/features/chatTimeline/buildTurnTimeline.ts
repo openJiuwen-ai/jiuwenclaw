@@ -9,6 +9,7 @@ import {
   isToolExecutionFailed,
 } from '../../components/ChatPanel/ToolGroupDisplay';
 import { isTeamMemberCollaborationMessage } from '../../components/ChatPanel/teamEventUtils';
+import { isGoalCompletedContent } from '../../components/GoalBar/goalCompletedMessage';
 import { isA2UIClientEventContent } from '../a2ui/a2uiContent';
 import { parseTimestampToMs } from '../../utils/timestamp';
 
@@ -318,6 +319,12 @@ export function buildRenderItems(items: TimelineItem[], isTeamMode: boolean, isP
       laterAssistantInTurn = false;
       continue;
     }
+    // Goal 完成卡片是该目标的结论卡，不是「中间文字」：自己永不折进「已完成」，
+    // 也不能顶掉它上面那条真正的收尾回答（否则完成卡一到，最后一条回答就被折走）。
+    if (isGoalCompletedContent(renderItem.message.content)) {
+      renderItem.hideMeta = false;
+      continue;
+    }
     const isAssistantReply =
       renderItem.message.role === 'assistant' || getMessageActor(renderItem.message) === 'team_leader';
     if (isAssistantReply) {
@@ -423,6 +430,10 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
   };
   const flush = (isLastTurn: boolean) => {
     const shouldShow = (isLastTurn && isProcessing) || hasActivity;
+    // 整段没有任何活动（goal 插队时「上一个提问」和「设目标」两条 user 消息紧挨着，中间
+    // 空窗）：不出耗时条，起止时刻也别丢，留给真正承载这段回答的那一轮当起点，否则那一轮
+    // 从首次思考才开始算，耗时显示成 0s。
+    const carryTimestamps = !hasActivity;
     if (shouldShow && Number.isFinite(startMs) && Number.isFinite(endMs)) {
       out.push({
         type: 'turnSummary',
@@ -437,8 +448,10 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
       });
       seq += 1;
     }
-    startMs = Number.POSITIVE_INFINITY;
-    endMs = Number.NEGATIVE_INFINITY;
+    if (!carryTimestamps) {
+      startMs = Number.POSITIVE_INFINITY;
+      endMs = Number.NEGATIVE_INFINITY;
+    }
     workStartMs = Number.POSITIVE_INFINITY;
     workEndMs = Number.NEGATIVE_INFINITY;
     hasActivity = false;
@@ -657,9 +670,22 @@ export function buildTurnWorkMeta(items: RenderItem[], isProcessing: boolean): M
       map.set(item.turnId, next);
     }
   }
+  // 收集含主动推荐消息的 turnId：proactive 消息是系统插入的推荐（带
+  // isProactiveRecommendation 标记），不该和用户那轮混在一起触发 turn 折叠——
+  // 否则 proactive 触发的主 agent 这轮（带工具/思考）会让用户上一轮回复被收起。
+  // 把含 proactive 的 turn 的 hasWork 置 false，让它不 foldable，上一轮回复保持展开。
+  const proactiveTurnIds = new Set<number>();
+  for (const item of items) {
+    if (item.type === 'message' && item.message?.isProactiveRecommendation) {
+      proactiveTurnIds.add(item.turnId);
+    }
+  }
   for (const meta of map.values()) {
     if (meta.thinkingCount > 0 || meta.toolCount > 0) {
       meta.hasWork = true;
+    }
+    if (proactiveTurnIds.has(meta.turnId)) {
+      meta.hasWork = false;
     }
     const isLast = Number.isFinite(lastTurnId) && meta.turnId === lastTurnId;
     meta.completed = !(isProcessing && isLast);

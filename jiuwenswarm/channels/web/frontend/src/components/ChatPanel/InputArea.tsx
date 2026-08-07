@@ -15,6 +15,7 @@ import {
   resolveEffectiveModel,
 } from '../../stores';
 import { supportsPlanMode } from '../../features/planMode/wireMode';
+import { queueOrAddGoalObjectiveMessage } from '../../features/goalPendingObjectiveBubble';
 import { AgentMode, MediaItem, Permission, type ProjectInfo } from '../../types';
 import { NEW_CONVERSATION_ID } from '../../multi-session/state/newConversationLifecycle';
 import { ProjectCreateMenu, type ProjectCreateMode } from '../../multi-session/sidebar/ProjectCreateMenu';
@@ -26,6 +27,7 @@ import { ModelProviderIcon } from '../ModelProviderIcon';
 import { getEvolutionPillLabel } from './evolution-status';
 import { webRequest } from '../../services/webClient';
 import { getSkillAvatar } from '../../utils/skillAvatar';
+import { withUploadDocumentBlock } from '../../utils/documentMessage';
 import {
   isLikelyAbsolutePath,
   isProjectDirectoryPickerSupported,
@@ -350,11 +352,18 @@ function buildSubmitContent(text: string, attachments: AttachmentDraft[]): strin
     return text;
   }
   // Agent-facing hint only (stripped from chat bubble). List every file; no 说明 line.
-  const lines = docs.map((doc) => {
-    const path = pickString(doc.persistedMediaItem?.path) || '';
-    return path ? `- ${doc.filename}: ${path}` : `- ${doc.filename}`;
-  });
-  return [text, '【上传文档】', ...lines].filter(Boolean).join('\n');
+  // Paths are missing on a brand-new session (attachments cannot persist before
+  // the session exists); useWebSocket rewrites this block after persisting.
+  // Binary documents with a .txt sidecar (e.g. PDF) also carry originalPath, so
+  // the model can still reach the .pdf for page-level tools such as read_pdf.
+  return withUploadDocumentBlock(
+    text,
+    docs.map((doc) => ({
+      filename: doc.filename,
+      path: pickString(doc.persistedMediaItem?.path),
+      originalPath: pickString(doc.persistedMediaItem?.original_path),
+    })),
+  );
 }
 
 export function InputArea({
@@ -997,7 +1006,10 @@ export function InputArea({
     );
     const trimmed = buildSubmitContent(trimmedBase, readyDrafts);
     if ((!trimmed && readyMediaItems.length === 0) || hasUploadingAttachments || hasAttachmentErrors) return;
-    if (isInterruptible && !isTeamMode && readyMediaItems.length > 0) return;
+    // In agent mode attachments queue with the task (taskQueue carries mediaItems).
+    // Other non-team modes still go through the text-only onInterrupt channel where
+    // attachments would be lost, so keep blocking there.
+    if (isInterruptible && !isTeamMode && !isAgentMode && readyMediaItems.length > 0) return;
 
     if (isListening) {
       stopListening();
@@ -1005,15 +1017,14 @@ export function InputArea({
 
     const sid = useChatStore.getState().activeSessionId;
     if (goalArmed && trimmedBase && sid && onSetGoal && sid !== NEW_CONVERSATION_ID) {
-      // command.goal 是独立控制信令，不受聊天排队影响，跳过 team/queue/interrupt 判断；
-      // 消息仍要本地落进 chatStore 才能在气泡上显示"设为目标"徽章（见 MessageItem.tsx）
-      useChatStore.getState().addMessage(sid, {
-        id: `user-${Date.now()}`,
-        role: 'user',
-        content: trimmedBase,
-        timestamp: new Date().toISOString(),
-        isGoalObjectiveMessage: true,
-      });
+      // command.goal carries a text objective only; silently dropping attachments
+      // would make users believe they were sent, so block explicitly with an alert.
+      if (readyMediaItems.length > 0) {
+        pushAttachmentAlert(t('chat.goalAttachmentsBlocked'));
+        return;
+      }
+      // command.goal 立刻发出（GoalBar「已设置」）；忙碌时用户气泡暂存，答完再入列。
+      queueOrAddGoalObjectiveMessage(sid, trimmedBase);
       useGoalStore.getState().setArmed(sid, false);
       onSetGoal(sid, trimmedBase);
     } else if (goalArmed && trimmedBase && sid === NEW_CONVERSATION_ID) {
@@ -1033,12 +1044,12 @@ export function InputArea({
         onSubmit(trimmed, readyMediaItems);
       } else {
         // 保持队列，新消息加入队列
-        useChatStore.getState().addToTaskQueue(sid, trimmed);
+        useChatStore.getState().addToTaskQueue(sid, trimmed, readyMediaItems);
       }
     } else if (isInterruptible) {
       if (isAgentMode) {
         if (sid) {
-          useChatStore.getState().addToTaskQueue(sid, trimmed);
+          useChatStore.getState().addToTaskQueue(sid, trimmed, readyMediaItems);
           // 目标 active 但当前没有任务在处理时，常规的自动排空触发点不会命中，主动兜底一次
           onDrainTaskQueueIfIdle?.(sid);
         }
@@ -1078,12 +1089,14 @@ export function InputArea({
     goalArmed,
     onSetGoal,
     onDrainTaskQueueIfIdle,
+    pushAttachmentAlert,
     t,
   ]);
 
   const trimmedDraft = (inputValue + pendingVoiceText).trim();
   const hasDraft = trimmedDraft.length > 0 || attachments.length > 0 || isListening;
-  const isImageInterruptBlocked = isInterruptible && !isTeamMode && readyMediaItems.length > 0;
+  const isImageInterruptBlocked =
+    isInterruptible && !isTeamMode && !isAgentMode && readyMediaItems.length > 0;
   const showStop = isProcessing && !isPaused && !hasDraft;
   const canSubmit = showStop || (
     hasDraft &&
@@ -2110,6 +2123,7 @@ export function InputArea({
                   type="button"
                   className="chat-work-select__clear"
                   aria-label={t('multiSession.project.clearProject')}
+                  data-tooltip={t('multiSession.project.clearProject')}
                   onClick={() => {
                     setSelectedProject(null);
                     setWorkMenuOpen(null);
@@ -2212,7 +2226,11 @@ export function InputArea({
             >
               <WorkIcon name="close" />
             </button>
-            <div className="chat-work-dialog__title">{t('multiSession.project.newProject')}</div>
+            <div className="chat-work-dialog__title">
+              {projectCreateMode === 'existing'
+                ? t('multiSession.project.selectExisting')
+                : t('multiSession.project.createBlank')}
+            </div>
             <input
               className="chat-work-dialog__input"
               value={projectNameDraft}
@@ -2225,7 +2243,7 @@ export function InputArea({
                 className="chat-work-dialog__input"
                 value={projectDirDraft}
                 onChange={(event) => setProjectDirDraft(event.target.value)}
-                placeholder="/Users/name/work/project"
+                placeholder={t('multiSession.project.pathPlaceholder')}
               />
             ) : null}
             <div className="chat-work-dialog__actions">

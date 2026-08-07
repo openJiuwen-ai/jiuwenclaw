@@ -63,6 +63,7 @@ from jiuwenswarm.server.runtime.session.session_metadata import get_all_sessions
 from jiuwenswarm.server.runtime.session.session_history import (
     append_compact_history_records,
     history_exists,
+    is_valid_session_id,
     load_history_records,
     read_member_history_records,
     read_team_history_records,
@@ -492,6 +493,7 @@ def _sync_chat_request_metadata(
     project_dir: str | None,
     mode: str,
     explicit_mode_provided: bool = False,
+    user_id: str = "",
 ) -> str | None:
     """将本次 chat 请求的参数同步到会话元数据，返回生效的 project_dir。
 
@@ -562,6 +564,7 @@ def _sync_chat_request_metadata(
             project_dir=str(project_dir) if project_dir else None,
             project_id=request_project_id,
             cron_id=request_cron_id,
+            user_id=str(user_id or "").strip() or None,
             last_user_message_at=(
                 _dt.datetime.now(_dt.timezone.utc).timestamp() if is_chat_turn else None
             ),
@@ -702,6 +705,7 @@ def _payload_to_request(data: dict[str, Any]) -> AgentRequest:
         is_stream=data.get("is_stream", False),
         timestamp=data.get("timestamp", 0.0),
         metadata=metadata,
+        user_id=str(data.get("user_id") or "").strip(),
     )
 
 
@@ -906,6 +910,8 @@ class AgentWebSocketServer:
         self._jiuwenbox_runner = JiuwenBoxRunner.instance()
         # checkpointer 后台预热任务 (start() 里 fire-and-forget, stop() 时 cancel)
         self._checkpointer_warmup_task: Optional[asyncio.Task] = None
+        # 图像模态探针重探任务 (模型配置变更时拉起, stop() 时 cancel)
+        self._image_modality_refresh_task: Optional[asyncio.Task] = None
         # Proactive recommendation engine (set by app_agentserver for debug trigger)
         self._proactive_engine: Any = None
         get_acp_output_manager().set_send_push_callback(
@@ -1268,6 +1274,19 @@ class AgentWebSocketServer:
                 pass
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[AgentWebSocketServer] checkpointer warmup cancel failed: %s", exc)
+        # 同理取消图像模态重探任务.
+        image_modality_refresh = self._image_modality_refresh_task
+        self._image_modality_refresh_task = None
+        if image_modality_refresh is not None and not image_modality_refresh.done():
+            image_modality_refresh.cancel()
+            try:
+                await image_modality_refresh
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[AgentWebSocketServer] image modality refresh cancel failed: %s", exc
+                )
         had_server = self._server is not None
         if had_server:
             self._server.close()
@@ -2238,6 +2257,7 @@ class AgentWebSocketServer:
                 requested_project_dir,
                 canonical_mode if canonical_mode else mode,
                 explicit_mode_provided=explicit_mode_provided,
+                user_id=str(getattr(request, "user_id", "") or "").strip(),
             )
         else:
             # Read-only path (e.g. command.goal get): never create/update
@@ -7330,12 +7350,53 @@ class AgentWebSocketServer:
                 reload_kwargs["reload_scopes"] = reload_scopes
             agent_reload_scopes = {"model", "team", "permissions", "agent_runtime"}
             should_reload_agents = not reload_scopes or bool(reload_scopes & agent_reload_scopes)
+
+            # 模型配置变了就重探图像模态：同一个 (api_base, model_name) 背后可能已换
+            # 端点 / 密钥 / 后端，旧结论不能留。跑在后台任务里——探针每个最多 5s，不该
+            # 把 reload 响应拖在这里；这个 loop 活到进程结束，结论一定能落进缓存。
+            should_refresh_image_modality = not reload_scopes or "model" in reload_scopes
+            if should_refresh_image_modality:
+                from jiuwenswarm.server.runtime.image_modality_warmup import (
+                    refresh_image_modality_cache,
+                )
+
+                # 上一轮还没探完就又改了配置：旧结论已经作废，直接取消。
+                previous_task = self._image_modality_refresh_task
+                if previous_task is not None and not previous_task.done():
+                    previous_task.cancel()
+                self._image_modality_refresh_task = asyncio.create_task(
+                    refresh_image_modality_cache(
+                        get_config(),
+                        reason="model config change",
+                    )
+                )
             if should_reload_agents:
                 await self._agent_manager.reload_agents_config(
                     config_payload,
                     env_overrides,
                     **reload_kwargs,
                 )
+                try:
+                    from jiuwenswarm.agents.harness.team import (
+                        stop_all_paused_team_session_runtimes_across_managers,
+                    )
+
+                    stopped = await stop_all_paused_team_session_runtimes_across_managers(
+                        reason="agent.reload_config: ",
+                    )
+                    if stopped:
+                        logger.info(
+                            "[AgentWebSocketServer] stopped paused team runtimes after agent.reload_config: "
+                            "count=%s request_id=%s reload_scopes=%s",
+                            stopped,
+                            request.request_id,
+                            sorted(reload_scopes),
+                        )
+                except Exception as exc:  # noqa: BLE001 - cleanup must not reject config reload
+                    logger.warning(
+                        "[AgentWebSocketServer] failed to stop paused team runtimes after agent.reload_config: %s",
+                        exc,
+                    )
 
             # Hot-reload ProactiveEngine config if available
             should_reload_proactive = not reload_scopes or bool(reload_scopes & {"model", "proactive", "agent_runtime"})
@@ -7741,13 +7802,7 @@ class AgentWebSocketServer:
                     "bypassing prewarm compatibility path: session_id=%s",
                     requested_session_id,
                 )
-                from jiuwenswarm.server.runtime.prompt_attachment_loader import (
-                    sanitize_session_id,
-                )
-                if (
-                    sanitize_session_id(requested_session_id) != requested_session_id
-                    or len(requested_session_id) > 128
-                ):
+                if not is_valid_session_id(requested_session_id):
                     raise ValueError("invalid session_id")
 
                 lock_key = f"external-create:{requested_session_id}"
@@ -7968,7 +8023,7 @@ class AgentWebSocketServer:
                 init_session_metadata(
                     session_id=session_id,
                     channel_id=channel_id,
-                    user_id=params.get("user_id", ""),
+                    user_id=str(getattr(request, "user_id", "") or params.get("user_id", "") or "").strip(),
                     title=params.get("title", ""),
                     mode=canonical_mode,
                     project_dir=project_dir,
@@ -8515,12 +8570,10 @@ class AgentWebSocketServer:
 
     def _build_model_cache(self) -> None:
         """Build model cache from jiuwenswarm config.yaml (reuse interface_deep logic)."""
-        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
+        # Use the same model building function as interface_deep
+        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import build_model_from_entry
 
         config = get_config()
-
-        # Use the same model building method as interface_deep
-        build_model_from_entry = getattr(JiuWenSwarmDeepAdapter, '_build_model_from_entry')
 
         # Build from models.defaults list
         for entry in get_default_models(config):

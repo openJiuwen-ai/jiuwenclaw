@@ -59,6 +59,7 @@ def enrich_team_spec_for_swarm(
     session_id: str,
     mode: str,
     project_dir: str | None = None,
+    trusted_dirs: list[str] | None = None,
     request_id: str | None = None,
     channel_id: str | None = None,
     request_metadata: dict[str, Any] | None = None,
@@ -74,6 +75,7 @@ def enrich_team_spec_for_swarm(
         session_id: Active session id.
         mode: Request mode (e.g. "team").
         project_dir: Resolved project directory, if any.
+        trusted_dirs: Directories the client declared as trusted for this request.
         request_id: Originating request id, if any.
         channel_id: Raw channel id from the request, if any.
         request_metadata: Request metadata mapping (carries ``mode`` etc.).
@@ -98,6 +100,7 @@ def enrich_team_spec_for_swarm(
         request_metadata=request_metadata,
         mode=mode,
         project_dir=project_dir,
+        trusted_dirs=trusted_dirs,
         disable_teammate_worktree=str(channel_id or "").strip().lower() == "web",
         team_id=spec.team_name,
         team_ws_root=team_ws_root,

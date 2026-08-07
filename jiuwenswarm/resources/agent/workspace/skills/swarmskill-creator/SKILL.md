@@ -4,7 +4,8 @@ description: |
   Creates, converts, or modifies Swarm Skills — the multi-role (多角色团队) extension of the Skills standard, optionally with an executable SwarmFlow orchestration script.
   Use when building or refactoring a multi-agent team, generating workflow (工作流/编排) orchestration code, or upgrading a single-agent skill into a collaborating team.
   Do NOT use for ordinary single-agent skills — use create-skill instead.
-version: "0.6"
+description_cn: 创建、转换或修改多角色 Swarm Skill；普通单智能体技能使用 `skill-creator`。
+version: "0.5"
 ---
 
 # Swarm Skill Creator
@@ -161,11 +162,7 @@ Do not let the script invent a different workflow from `workflow.md`; do not let
 
 Generate `scripts/workflow.py` from [templates/scripts/workflow.py.template](templates/scripts/workflow.py.template). Before editing, read that template's `TEMPLATE AUTHORING CONSTRAINTS` block; it is the single full source for executable SwarmFlow script constraints. Keep this stage focused on routing and topology synchronization rather than restating those rules.
 
-Choose the interaction primitive from the requested participant and memory semantics: one-shot human input uses `human`, stateful multi-turn human or agent interaction uses the corresponding session primitive, and one-shot agent work continues to use `agent`. The template remains the canonical source for call, lifecycle, and resource rules.
-
-Choose composition by asset boundary: use `workflow(...)` only to reuse an existing persisted child workflow whose independent journal namespace is useful; keep ordinary code reuse in local helpers. The template is canonical for call shape, one-level composition, shared Runtime resources, and failure behavior.
-
-Choose budget behavior only when the user requests token-budget scaling: use dynamic depth for uncertain work, static fan-out for divisible work, or graceful completion when synthesis capacity must be reserved. The template is canonical for guards, read-only access, shared-ledger behavior, and exhaustion handling.
+Choose the interaction primitive from the requested participant and memory semantics: one-shot human input uses `human`, stateful multi-turn human or agent interaction uses the corresponding session primitive, and one-shot agent work continues to use `agent`. The template remains the canonical source for call, lifecycle, and resource rules. Nested `workflow(...)` composition remains outside the supported surface and must not be generated.
 
 For the full Markdown spec + SwarmFlow shape, the final script must match the topology in `workflow.md` and the executable constraints in `bind.md`: same phases, same parallel or sequential structure, same integration point, and no extra hidden workflow that the Markdown spec does not describe.
 

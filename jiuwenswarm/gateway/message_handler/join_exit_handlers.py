@@ -393,7 +393,18 @@ class JoinExitHandlers:
             if anchor_ts:
                 before_anchor = []
                 for r in records:
-                    if isinstance(r, dict) and float(r.get("timestamp") or 0) < anchor_ts:
+                    if not isinstance(r, dict):
+                        continue
+                    # chat.final 可能用首包时刻作 timestamp、收尾另存 completed_at；
+                    # 水位按「真正结束」判断，避免 join 前开写、join 后收尾的消息被历史+实时双推。
+                    try:
+                        completed = r.get("completed_at")
+                        record_ts = float(
+                            completed if completed is not None else (r.get("timestamp") or 0)
+                        )
+                    except (TypeError, ValueError):
+                        continue
+                    if record_ts < anchor_ts:
                         before_anchor.append(r)
                 records = before_anchor
                 if not records:

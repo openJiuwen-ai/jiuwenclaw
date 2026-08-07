@@ -2,8 +2,13 @@
 
 """Unit tests for CodeAdapter ACP tool registration."""
 
+import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
+import pytest
+
+from jiuwenswarm.common.coding_memory_paths import resolve_project_coding_memory_dir
 from jiuwenswarm.server.runtime.agent_adapter import interface_code
 from jiuwenswarm.server.runtime.agent_adapter.interface_code import JiuwenSwarmCodeAdapter
 
@@ -76,9 +81,157 @@ def test_code_adapter_builds_coding_memory_rail_without_embedding_config(monkeyp
     )
 
     assert isinstance(rail, _FakeCodingMemoryRail)
-    assert created["coding_memory_dir"] == str(
-        tmp_path / "agent_workspace" / "coding_memory" / "project"
+    assert created["coding_memory_dir"] == resolve_project_coding_memory_dir(
+        agent_workspace_dir=agent_workspace_dir,
+        project_dir=project_dir,
     )
     assert created["embedding_config"].model_name == "text-embedding-v3"
     assert created["embedding_config"].base_url == ""
     assert created["embedding_config"].api_key is None
+
+
+def test_workspace_and_coding_memory_rail_share_default_project(
+    monkeypatch,
+    tmp_path,
+):
+    created: dict[str, object] = {}
+
+    class _FakeCodingMemoryRail:
+        def __init__(self, *, coding_memory_dir, embedding_config, language):
+            created["coding_memory_dir"] = coding_memory_dir
+
+    class _FakeWorkspace:
+        def __init__(self):
+            self.root_path = str(tmp_path / "project-root")
+            self.directories: list[dict[str, object]] = []
+
+        def set_directory(self, directory):
+            self.directories.append(directory)
+
+    monkeypatch.setattr(interface_code, "CodingMemoryRail", _FakeCodingMemoryRail)
+
+    workspace = _FakeWorkspace()
+    agent_workspace_dir = tmp_path / "agent-workspace"
+    interface_code._set_workspace_coding_memory_directory(
+        workspace,
+        project_dir=None,
+        agent_workspace_dir=str(agent_workspace_dir),
+    )
+    interface_code.create_coding_memory_rail(
+        project_dir=None,
+        agent_workspace_dir=str(agent_workspace_dir),
+        config={"embed": {}},
+    )
+
+    expected_dir = resolve_project_coding_memory_dir(
+        agent_workspace_dir=agent_workspace_dir,
+        project_dir=None,
+    )
+    assert workspace.directories[0]["path"] == expected_dir
+    assert created["coding_memory_dir"] == expected_dir
+
+
+@pytest.mark.asyncio
+async def test_coding_memory_initialization_does_not_block_and_is_deduplicated(monkeypatch):
+    rail = interface_code.CodingMemoryRail(
+        coding_memory_dir="/tmp/coding-memory",
+        embedding_config=SimpleNamespace(model_name="test", base_url="", api_key=None),
+        language="en",
+    )
+    release = asyncio.Event()
+    calls = 0
+
+    async def initialize(_ctx):
+        nonlocal calls
+        calls += 1
+        await release.wait()
+
+    monkeypatch.setattr(rail, "_init_coding_memory_manager", initialize)
+    ctx = SimpleNamespace(
+        inputs=SimpleNamespace(is_cron=lambda: False, is_heartbeat=lambda: False)
+    )
+
+    await asyncio.wait_for(rail.before_invoke(ctx), timeout=0.2)
+    first_task = rail._manager_init_task
+    assert first_task is not None
+    await asyncio.sleep(0)
+    await rail.before_invoke(ctx)
+
+    assert rail._manager_init_task is first_task
+    assert calls == 1
+
+    release.set()
+    await asyncio.wait_for(first_task, timeout=0.2)
+
+
+@pytest.mark.asyncio
+async def test_coding_memory_initialization_failure_degrades_without_retry(monkeypatch):
+    rail = interface_code.CodingMemoryRail(
+        coding_memory_dir="/tmp/coding-memory",
+        embedding_config=SimpleNamespace(model_name="test", base_url="", api_key=None),
+        language="en",
+    )
+    ctx = SimpleNamespace(
+        agent=SimpleNamespace(card=SimpleNamespace(id="test-agent")),
+        inputs=SimpleNamespace(is_cron=lambda: False, is_heartbeat=lambda: False),
+    )
+    initializer = AsyncMock(side_effect=RuntimeError("embedding unavailable"))
+    monkeypatch.setattr(
+        "openjiuwen.harness.rails.memory.coding_memory_rail.init_memory_manager_async",
+        initializer,
+    )
+
+    await rail.before_invoke(ctx)
+    first_task = rail._manager_init_task
+    assert first_task is not None
+    await first_task
+
+    assert rail._manager_initialized
+    assert initializer.await_count == 1
+
+    await rail.before_invoke(ctx)
+    assert rail._manager_init_task is first_task
+    assert initializer.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_initialization_cannot_reset_reinitialized_state(monkeypatch):
+    rail = interface_code.CodingMemoryRail(
+        coding_memory_dir="/tmp/coding-memory",
+        embedding_config=SimpleNamespace(model_name="test", base_url="", api_key=None),
+        language="en",
+    )
+    ctx = SimpleNamespace(
+        agent=SimpleNamespace(card=SimpleNamespace(id="test-agent")),
+        inputs=SimpleNamespace(is_cron=lambda: False, is_heartbeat=lambda: False),
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def initialize(**_kwargs):
+        started.set()
+        await release.wait()
+        return None
+
+    monkeypatch.setattr(
+        "openjiuwen.harness.rails.memory.coding_memory_rail.init_memory_manager_async",
+        initialize,
+    )
+
+    await rail.before_invoke(ctx)
+    old_task = rail._manager_init_task
+    assert old_task is not None
+    await asyncio.wait_for(started.wait(), timeout=0.2)
+
+    rail.uninit(SimpleNamespace())
+    await asyncio.gather(old_task, return_exceptions=True)
+    assert rail._manager_init_task is None
+    assert not rail._manager_initialized
+
+    release.set()
+    await rail.before_invoke(ctx)
+    new_task = rail._manager_init_task
+    assert new_task is not None
+    assert new_task is not old_task
+    await new_task
+    assert rail._manager_initialized

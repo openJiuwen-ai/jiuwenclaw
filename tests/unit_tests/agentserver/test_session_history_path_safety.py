@@ -62,7 +62,7 @@ def test_create_does_not_mkdir_before_rejecting_traversal(patched_sessions_root,
     """
     # 让白名单失效（模拟被绕过），强制走第二道 relative_to 防线
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.session_history._is_valid_session_id",
+        "jiuwenswarm.server.runtime.session.session_history.is_valid_session_id",
         lambda _s: True,
     )
 
@@ -129,7 +129,7 @@ def test_second_line_defense_blocks_outside_root(patched_sessions_root, monkeypa
 
     # 让白名单失效，模拟"白名单被绕过"的假设场景
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.session_history._is_valid_session_id",
+        "jiuwenswarm.server.runtime.session.session_history.is_valid_session_id",
         lambda _s: True,
     )
 
@@ -229,7 +229,7 @@ def test_symlink_escape_blocked(patched_sessions_root, tmp_path, monkeypatch):
     # symlink 的链接名合法（字母数字），白名单会放行；重点测第二道防线。
     # 用 monkeypatch 让白名单放行，强制走 resolve 越界检查
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.session_history._is_valid_session_id",
+        "jiuwenswarm.server.runtime.session.session_history.is_valid_session_id",
         lambda _s: True,
     )
 

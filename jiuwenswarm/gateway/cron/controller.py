@@ -189,6 +189,9 @@ class CronController:
         resolved_project_id = binding.project_id
         work_mode = binding.work_mode
         app_id = str(params.get("app_id") or "").strip()
+        # user_id：web 端创建定时任务时由 handler 注入 params（见 _cron_job_create），
+        # 执行时透传给 faas 的 X-Session-Context。agent 内部创建的 cron 无 user_id 即存空串。
+        user_id = str(params.get("user_id") or "").strip()
         job = await self._store.create_job(
             job_id=str(params.get("id") or "").strip() or None,
             name=name,
@@ -207,6 +210,7 @@ class CronController:
             model_name=model_name,
             app_id=app_id,
             work_mode=work_mode,
+            user_id=user_id,
         )
         await self._scheduler.reload()
         return job.to_dict()

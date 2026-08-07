@@ -21,10 +21,25 @@ class DummyBus:
         return None
 
 
+class _FakeRequestHeaders:
+    def __init__(self, mapping: dict[str, str]) -> None:
+        self._mapping = {k.lower(): v for k, v in mapping.items()}
+
+    def get(self, key: str, default: str | None = None) -> str | None:
+        return self._mapping.get(key.lower(), default)
+
+
 class FakeWebSocket:
-    def __init__(self):
+    def __init__(self, *, user_id: str | None = None) -> None:
         self.sent_frames = []
         self.closed = False
+        if user_id is not None:
+            self._gateway_user_id = user_id
+            self.request = type(
+                "Request",
+                (),
+                {"headers": _FakeRequestHeaders({"X-User-Id": user_id})},
+            )()
 
     async def send(self, data):
         self.sent_frames.append(json.loads(data))
@@ -89,6 +104,11 @@ class GatewayServerProbe(GatewayServer):
     def get_acp_pending_request_contexts_for_test(self) -> list[Any]:
         return list(self._acp_bridge.request_contexts)
 
+    @classmethod
+    def extract_ws_user_id_for_test(cls, ws: Any) -> str | None:
+        """Expose _extract_ws_user_id for unit tests (G.CLS.11: subclass wrapper)."""
+        return cls._extract_ws_user_id(ws)
+
 
 def build_server() -> GatewayServerProbe:
     config = GatewayServerConfig(
@@ -129,6 +149,25 @@ def test_normalize_gateway_message_maps_chat_resume_to_interrupt_resume():
     assert normalized.req_method == ReqMethod.CHAT_CANCEL
     assert normalized.params["intent"] == "resume"
     assert normalized.session_id == "sess-1"
+
+
+def test_normalize_gateway_message_preserves_user_id():
+    msg = Message(
+        id="req-chat",
+        type="req",
+        channel_id="tui",
+        session_id="sess-1",
+        params={"session_id": "sess-1", "content": "hi"},
+        timestamp=time.time(),
+        ok=True,
+        req_method=ReqMethod.CHAT_SEND,
+        user_id="testuser",
+    )
+
+    normalized = _normalize_gateway_message(msg)
+
+    assert normalized.user_id == "testuser"
+    assert normalized.is_stream is True
 
 
 @pytest.mark.asyncio
