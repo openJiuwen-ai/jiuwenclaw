@@ -397,8 +397,28 @@ def _extract_legacy_params(
         context_mode = getattr(context, "mode", None)
         mode_resolved = context_mode or data.get("mode") or CRON_JOB_DEFAULT_MODE
         out["mode"] = coerce_cron_job_mode(mode_resolved, default=CRON_JOB_DEFAULT_MODE)
+
+        # 从 context 取 user_id，agent 内部调 cron_create_job 时无 web 连接来源，
+        # 靠 _bind_runtime_cron_context 从会话 metadata.user_id 注入。
+        context_user_id = getattr(context, "user_id", None)
+        if isinstance(context_user_id, str) and context_user_id.strip():
+            out["user_id"] = context_user_id.strip()
+            logger.info(
+                "[CronRuntimeBridge] _extract_legacy_params: added user_id=%s from context",
+                out["user_id"],
+            )
+
         return out
 
+    # 非 legacy 格式(直接传参): 同样从 context 注入 user_id
+    _user_id = getattr(context, "user_id", None)
+    if isinstance(_user_id, str) and _user_id.strip():
+        if "user_id" not in data:
+            data["user_id"] = _user_id.strip()
+            logger.info(
+                "[CronRuntimeBridge] _extract_legacy_params: added user_id=%s from context (flat params)",
+                data["user_id"],
+            )
     return data
 
 

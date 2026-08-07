@@ -15,6 +15,14 @@ export interface WorkflowAgentActivity {
 
 export type WorkflowNodeType = "agent" | "agent_session" | "human" | "human_session";
 
+export interface WorkflowBudget {
+  total: number | null;
+  spent: number;
+  remaining: number | null;
+  scope: "leader";
+  exhausted: boolean;
+}
+
 export interface WorkflowAgent {
   id: string;
   name: string;
@@ -45,6 +53,10 @@ export interface WorkflowPhase {
   agent_count?: number;
   completed_agent_count?: number;
   agents: WorkflowAgent[];
+  /** "child" for sub-workflow cards, null/undefined for author phases. */
+  phase_type?: "child" | null;
+  /** Parent author phase name (set on child phase declarations). */
+  parent_phase?: string | null;
 }
 
 export interface WorkflowRun {
@@ -63,6 +75,8 @@ export interface WorkflowRun {
   token_count?: number | null;
   duration_ms?: number | null;
   estimated_token_count?: number | null;
+  /** Leader-shared budget snapshot. This is deliberately not a per-run budget. */
+  budget?: WorkflowBudget | null;
   phases: WorkflowPhase[];
   /** List summary only — full detail not yet fetched via ``action=get``. */
   detail_pending?: boolean;
@@ -74,6 +88,60 @@ export interface WorkflowAgentLookup {
   workflow: WorkflowRun;
   phase: WorkflowPhase;
   agent: WorkflowAgent;
+}
+
+function trimCompactDecimal(value: string): string {
+  return value.endsWith(".0") ? value.slice(0, -2) : value;
+}
+
+/** Compact a real token count for TUI rows without inventing missing usage. */
+export function formatTokenCount(value?: number | null): string | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return null;
+  if (value < 1_000) return `${Math.round(value)}`;
+  if (value < 1_000_000) return `${trimCompactDecimal((value / 1_000).toFixed(1))}k`;
+  return `${trimCompactDecimal((value / 1_000_000).toFixed(1))}m`;
+}
+
+export function workflowBudgetUsedPercent(budget?: WorkflowBudget | null): number | null {
+  if (!budget || typeof budget.total !== "number" || budget.total <= 0) return null;
+  if (!Number.isFinite(budget.spent)) return null;
+  return Math.round((budget.spent / budget.total) * 100);
+}
+
+export function isWorkflowBudgetLow(budget?: WorkflowBudget | null): boolean {
+  return Boolean(
+    budget &&
+    budget.exhausted !== true &&
+    typeof budget.total === "number" &&
+    budget.total > 0 &&
+    typeof budget.remaining === "number" &&
+    budget.remaining / budget.total <= 0.2,
+  );
+}
+
+export function isWorkflowBudgetExhausted(
+  workflow: Pick<WorkflowRun, "status" | "budget" | "error">,
+): boolean {
+  if (workflow.status === "failed" && workflow.budget?.exhausted === true) return true;
+  return Boolean(workflow.error && /budget exhausted/i.test(workflow.error));
+}
+
+export function formatWorkflowBudgetInline(budget?: WorkflowBudget | null): string | null {
+  if (!budget) return null;
+  const spent = formatTokenCount(budget.spent);
+  if (!spent) return null;
+  const total = formatTokenCount(budget.total);
+  return total ? `team ${spent}/${total}` : `team spent ${spent} · unbounded`;
+}
+
+export function formatWorkflowBudgetDetail(budget?: WorkflowBudget | null): string | null {
+  if (!budget) return null;
+  const spent = formatTokenCount(budget.spent);
+  if (!spent) return null;
+  const total = formatTokenCount(budget.total);
+  if (!total) return `Team budget spent ${spent} (unbounded)`;
+  const percent = workflowBudgetUsedPercent(budget);
+  return `Team budget ${spent}/${total}${percent === null ? "" : ` (${percent}%)`}`;
 }
 
 /** Single-width “human waiting” marker (text symbol — not emoji 👤/🧑). */
@@ -217,16 +285,63 @@ export function workflowStatusBannerText(status: WorkflowStatus): string | null 
   return WORKFLOW_STATUS_BANNER[status] ?? null;
 }
 
-export function countWorkflowAgents(workflow: WorkflowRun): number {
-  return (workflow.phases ?? []).reduce((total, phase) => total + (phase.agents ?? []).length, 0);
+/** Child sub-workflow cards belonging to an author phase. */
+export function childPhasesOf(workflow: WorkflowRun, parent: WorkflowPhase): WorkflowPhase[] {
+  return (workflow.phases ?? []).filter(
+    (phase) => phase.phase_type === "child" && phase.parent_phase === parent.name,
+  );
 }
 
-export function countCompletedWorkflowAgents(workflow: WorkflowRun): number {
-  return (workflow.phases ?? []).reduce(
-    (total, phase) =>
-      total + (phase.agents ?? []).filter((agent) => agent.status === "completed").length,
-    0,
-  );
+/** Flat phase list for ↑/↓ selection — parent rows then indented child rows. */
+export interface WorkflowPhaseSelectEntry {
+  phaseId: string;
+  name: string;
+  status: WorkflowStatus;
+  completed: number;
+  total: number;
+  isChild: boolean;
+}
+
+export function workflowPhaseSelectEntries(workflow: WorkflowRun): WorkflowPhaseSelectEntry[] {
+  const childrenByParent = new Map<string, WorkflowPhase[]>();
+  const orderedParents: WorkflowPhase[] = [];
+  for (const phase of workflow.phases ?? []) {
+    if (phase.phase_type === "child") {
+      const parentName = phase.parent_phase || "";
+      if (!childrenByParent.has(parentName)) childrenByParent.set(parentName, []);
+      childrenByParent.get(parentName)!.push(phase);
+    } else {
+      orderedParents.push(phase);
+    }
+  }
+
+  const entries: WorkflowPhaseSelectEntry[] = [];
+  const appendPhase = (phase: WorkflowPhase, isChild: boolean) => {
+    entries.push({
+      phaseId: phase.id,
+      name: phase.name,
+      status: phase.status,
+      completed: phase.completed_agent_count ?? 0,
+      total: phase.agent_count ?? 0,
+      isChild,
+    });
+  };
+
+  for (const parent of orderedParents) {
+    appendPhase(parent, false);
+    for (const child of childrenByParent.get(parent.name) ?? []) {
+      appendPhase(child, true);
+    }
+  }
+
+  for (const [parentName, children] of childrenByParent) {
+    if (orderedParents.some((parent) => parent.name === parentName)) continue;
+    for (const child of children) {
+      appendPhase(child, true);
+    }
+  }
+
+  return entries;
 }
 
 export function findWorkflowAgent(

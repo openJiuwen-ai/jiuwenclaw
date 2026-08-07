@@ -24,7 +24,7 @@ import aiohttp
 from websockets.exceptions import ConnectionClosed as WebSocketConnectionClosed
 
 from jiuwenswarm.common.utils import get_agent_workspace_dir
-from jiuwenswarm.gateway.channel_manager.base import ChannelMetadata, RobotMessageRouter
+from jiuwenswarm.gateway.channel_manager.base import ChannelMetadata, RobotMessageRouter, ConnectHook
 from jiuwenswarm.gateway.routing.base_ws_channel import BaseWsChannel
 from jiuwenswarm.gateway.routing.keys import AgentRef, RoutingKey
 from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
@@ -90,8 +90,6 @@ _WEB_FULL_PAYLOAD_EVENT_TYPES = frozenset(
 # ── 类型别名 ──────────────────────────────────────────────
 # 方法处理器签名: (ws, req_id, params, session_id) -> None
 MethodHandler = Callable[..., Awaitable[None]]
-# 连接钩子签名: (ws) -> None | Awaitable[None]
-ConnectHook = Callable[..., Any]
 
 
 @dataclass(frozen=True)
@@ -250,17 +248,6 @@ class WebChannel(BaseWsChannel):
         handler 应通过 `send_response` / `send_event` 向客户端回复。
         """
         self._method_handlers[method] = handler
-
-    def on_connect(self, callback: ConnectHook) -> None:
-        """注册连接建立钩子，新客户端接入时依次调用."""
-        self._connect_hooks.append(callback)
-
-    def on_disconnect(self, callback: ConnectHook) -> None:
-        """注册连接断开钩子，客户端断连时依次调用.
-
-        callback 签名: ``async def callback(ws, session_ids: set[str]) -> None``
-        """
-        self._disconnect_hooks.append(callback)
 
     def on_message(self, callback: Callable[[Message], None]) -> None:
         """注册消息接收回调（替代默认的 router.publish_user_messages）。"""

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from openjiuwen.harness.schema.task import TodoItem, TodoStatus
 
 from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 from jiuwenswarm.common.schema.agent import AgentRequest
@@ -63,6 +64,56 @@ def _make_adapter(**state: object) -> JiuWenSwarmDeepAdapter:
     for name, value in state.items():
         setattr(adapter, name, value)
     return adapter
+
+
+@pytest.mark.asyncio
+async def test_cancel_pending_todos_uses_public_tool_api(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancel unfinished todos through TodoModifyTool.invoke, not its internals."""
+    from jiuwenswarm.agents.harness.common.tools.todo_compat import (
+        CompatibleTodoModifyTool,
+    )
+
+    todos = [
+        TodoItem(id="pending", status=TodoStatus.PENDING),
+        TodoItem(id="running", status=TodoStatus.IN_PROGRESS),
+        TodoItem(id="done", status=TodoStatus.COMPLETED),
+    ]
+    todo_tool = CompatibleTodoModifyTool(operation=MagicMock())
+    todo_tool.load_todos = AsyncMock(return_value=todos)
+    todo_tool.save_todos = AsyncMock()
+    todo_tool.invoke = AsyncMock(wraps=todo_tool.invoke)
+
+    resource_mgr = MagicMock()
+    resource_mgr.get_tool.return_value = todo_tool
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep.Runner.resource_mgr",
+        resource_mgr,
+    )
+
+    ability_manager = MagicMock()
+    ability_manager.get.return_value = MagicMock(id="todo_modify")
+    instance = MagicMock(ability_manager=ability_manager, card=None)
+    formatted_todos = [{"id": "pending", "status": "cancelled"}]
+    rail = MagicMock()
+    rail._format_todos_for_frontend.return_value = formatted_todos
+    adapter = _make_adapter(_instance=instance, _stream_event_rail=rail)
+
+    result = await adapter._cancel_pending_todos("session-1")
+
+    todo_tool.invoke.assert_awaited_once()
+    invoke_args, invoke_kwargs = todo_tool.invoke.await_args
+    assert invoke_args == ({"action": "cancel", "ids": ["pending", "running"]},)
+    assert invoke_kwargs["session"].get_session_id() == "session-1"
+    todo_tool.save_todos.assert_awaited_once_with("session-1", todos)
+    assert [todo.status for todo in todos] == [
+        TodoStatus.CANCELLED,
+        TodoStatus.CANCELLED,
+        TodoStatus.COMPLETED,
+    ]
+    rail._format_todos_for_frontend.assert_called_once_with(todos)
+    assert result == formatted_todos
 
 
 @pytest.mark.asyncio
@@ -422,6 +473,7 @@ def test_reset_runtime_cron_context_resets_shell_session(
         "_CRON_TOOL_METADATA",
         "_CRON_TOOL_SESSION_ID",
         "_CRON_TOOL_CHANNEL_ID",
+        "_CRON_TOOL_USER_ID",
     ):
         monkeypatch.setattr(
             f"jiuwenswarm.server.runtime.agent_adapter.interface_deep.{var_name}",
@@ -437,11 +489,10 @@ def test_reset_runtime_cron_context_resets_shell_session(
             mode=MagicMock(),
             bound=MagicMock(),
             shell=shell_token,
+            user_id=MagicMock(),
         )
     )
     reset_shell_mock.assert_called_once_with(shell_token)
-
-
 def test_bind_runtime_cron_context_fills_locked_session_project_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

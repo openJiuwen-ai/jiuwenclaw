@@ -113,6 +113,7 @@ _TEAM_SHARED_RAIL_NAMES: frozenset[str] = frozenset(
         registry.SECURITY,
         registry.HEARTBEAT,
         registry.AVATAR_PROMPT,
+        registry.MULTIMODAL_IMAGE,
         registry.TEAM_WORKSPACE_REPORT_PATH,
         registry.CONTEXT_PROCESSOR,
         registry.PLUGIN_RAILS,
@@ -438,7 +439,7 @@ def test_build_member_capability_specs_rail_names(
 
     assert _TEAM_SHARED_RAIL_NAMES <= rail_names
     assert extra_rails <= rail_names
-    assert len(_TEAM_SHARED_RAIL_NAMES) == 15
+    assert len(_TEAM_SHARED_RAIL_NAMES) == 16
     assert rail_names == expected
     # No DeepAgent is involved; every entry is a plain declarative RailSpec.
     assert all(isinstance(spec, RailSpec) for spec in rails_specs)
@@ -736,6 +737,7 @@ def test_enrich_team_spec_for_swarm_has_no_deep_agent_param() -> None:
         "session_id",
         "mode",
         "project_dir",
+        "trusted_dirs",
         "request_id",
         "channel_id",
         "request_metadata",
@@ -1074,7 +1076,7 @@ def test_symphony_toolkit_is_leader_only(monkeypatch: pytest.MonkeyPatch) -> Non
     """Symphony tools are built only for the team leader."""
     seen_configs: list[dict] = []
     fake_tool = types.SimpleNamespace(
-        card=types.SimpleNamespace(name="symphony_compose_score")
+        card=types.SimpleNamespace(name="symphony_compose_graph")
     )
 
     class FakeSymphonyToolkit:
@@ -1095,7 +1097,7 @@ def test_symphony_toolkit_is_leader_only(monkeypatch: pytest.MonkeyPatch) -> Non
 
     built = tools.build_symphony_toolkit({}, leader)
 
-    assert [tool.card.name for tool in built] == ["symphony_compose_score"]
+    assert [tool.card.name for tool in built] == ["symphony_compose_graph"]
     assert tools.build_symphony_toolkit({}, teammate) == []
     assert seen_configs == [{"symphony": {"enabled": True}}]
 
@@ -1550,22 +1552,22 @@ def test_leader_deep_agent_spec_forces_enable_task_planning_off(mode: str) -> No
 
 
 def test_code_subagent_specs_use_factory_names() -> None:
-    """Code modes declare plan (+ gated code) sub-agents via factory_name."""
+    """Code modes declare explore/plan (+ gated code) sub-agents via factory_name."""
     register_swarm_providers()
     config = {"react": {"subagents": {"code_agent": {"enabled": True}}}}
 
     subs = build_member_subagent_specs(config, "code.team", "leader")
     factory_names = [spec.factory_name for spec in subs]
 
-    assert registry.EXPLORE_AGENT not in factory_names
+    assert registry.EXPLORE_AGENT in factory_names
     assert registry.PLAN_AGENT in factory_names
     assert registry.CODE_AGENT in factory_names
     # Team mode has no code sub-agents.
     assert build_member_subagent_specs({}, "team", "leader") == []
 
 
-def test_code_member_deep_spec_removes_base_explore_agent() -> None:
-    """A base team spec cannot reintroduce explore_agent in code mode."""
+def test_code_member_deep_spec_dedupes_base_explore_agent() -> None:
+    """A base team spec's explore_agent gives way to the one we declare."""
     from openjiuwen.agent_teams.schema.deep_agent_spec import SubAgentSpec
     from openjiuwen.core.single_agent import AgentCard
 
@@ -1582,7 +1584,7 @@ def test_code_member_deep_spec_removes_base_explore_agent() -> None:
     spec = build_member_deep_agent_spec({}, "code.team", "leader", base)
     names = [sub.agent_card.name for sub in spec.subagents or []]
 
-    assert names == ["plan_agent"]
+    assert names == ["explore_agent", "plan_agent"]
 
 
 def test_code_runtime_language_by_mode_and_role() -> None:
@@ -1872,6 +1874,7 @@ def test_code_coding_memory_provider_mounts_workspace_node(
     workspace_root = tmp_path / "member-workspace"
     project_dir.mkdir()
     workspace_root.mkdir()
+    monkeypatch.setattr(code_rails, "get_agent_workspace_dir", lambda: workspace_root)
 
     created: dict[str, Any] = {}
     rail = object()
@@ -1950,7 +1953,10 @@ def test_code_coding_memory_provider_falls_back_to_workspace_root(
     import jiuwenswarm.server.runtime.agent_adapter.interface_code as interface_code
 
     workspace_root = tmp_path / "frontend"
+    agent_workspace = tmp_path / "agent-workspace"
     workspace_root.mkdir()
+    agent_workspace.mkdir()
+    monkeypatch.setattr(code_rails, "get_agent_workspace_dir", lambda: agent_workspace)
     created: dict[str, Any] = {}
     rail = object()
 
@@ -1989,10 +1995,10 @@ def test_code_coding_memory_provider_falls_back_to_workspace_root(
     assert code_rails.build_code_coding_memory({"embed_config": {}}, ctx) is rail
     assert created == {
         "project_dir": str(workspace_root),
-        "agent_workspace_dir": str(workspace_root),
+        "agent_workspace_dir": str(agent_workspace),
     }
     assert workspace.directories[0]["path"] == resolve_project_coding_memory_dir(
-        agent_workspace_dir=workspace_root,
+        agent_workspace_dir=agent_workspace,
         project_dir=workspace_root,
     )
 
@@ -2047,6 +2053,7 @@ def test_code_member_builds_declaratively_without_post_processing(
         trajectory_registry=InMemoryTrajectoryRegistry(),
         config=config,
     )
+    monkeypatch.setattr(code_rails, "get_agent_workspace_dir", lambda: tmp_path)
     agent = spec.build(context=ctx)
 
     rails = list(getattr(agent, "_pending_rails", [])) + list(
@@ -2268,7 +2275,7 @@ def test_rebuilt_member_spec_keeps_provider_declarations() -> None:
     leader_factory_names = {
         sub.factory_name for sub in rebuilt.agents["leader"].subagents
     }
-    assert registry.EXPLORE_AGENT not in leader_factory_names
+    assert registry.EXPLORE_AGENT in leader_factory_names
     assert registry.PLAN_AGENT in leader_factory_names
     # The code system prompt is carried declaratively on the spec.
     assert teammate.system_prompt

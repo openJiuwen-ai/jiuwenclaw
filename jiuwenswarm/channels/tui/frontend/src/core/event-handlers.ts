@@ -1505,7 +1505,6 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
     }
 
     default:
-      console.debug("[ws] unhandled event:", effectiveEvent);
       return connectionChanged;
   }
 }

@@ -20,11 +20,18 @@ import { planSwarmflowToggle } from "../dist/core/commands/builtins/swarmflow.js
 import { buildAppScreenLines } from "../dist/ui/screen-layout.js";
 import {
   canOpenSessionHistory,
+  formatTokenCount,
+  formatWorkflowBudgetDetail,
+  formatWorkflowBudgetInline,
   groupWorkflowAgentsByName,
+  isWorkflowBudgetExhausted,
+  isWorkflowBudgetLow,
   isSessionNode,
+  mergeWorkflowRun,
   shouldShowSessionTree,
   shouldShowTurnInDetailOrReply,
   sessionTurnLabelNumber,
+  workflowBudgetUsedPercent,
 } from "../dist/core/workflows.js";
 import { CommandKind } from "../dist/core/commands/types.js";
 
@@ -394,6 +401,38 @@ assert.deepEqual(
   ["swarmflows", "workspace"],
 );
 
+// Escape and left both move from the workflow's agents panel back to phases.
+for (const key of ["\x1b", "\x1b[D"]) {
+  let swarmNavigationRenderCount = 0;
+  const swarmNavigationScreen = Object.create(AppScreen.prototype);
+  Object.assign(swarmNavigationScreen, {
+    swarmWorkflowsViewState: {
+      phase: "workflow",
+      workflowId: "workflow-1",
+      selectedPhaseId: "phase-1",
+      focus: "agents",
+      agentList: { getSelectedItem: () => ({ value: "agent-2" }) },
+    },
+    buildSwarmWorkflowDetailState: (workflowId, phaseId, focus, agentId) => ({
+      phase: "workflow",
+      workflowId,
+      selectedPhaseId: phaseId,
+      focus,
+      selectedAgentId: agentId,
+    }),
+    tui: {
+      requestRender: () => {
+        swarmNavigationRenderCount += 1;
+      },
+    },
+  });
+
+  swarmNavigationScreen.handleSwarmWorkflowsInput(key);
+  assert.equal(swarmNavigationScreen.swarmWorkflowsViewState.focus, "phases");
+  assert.equal(swarmNavigationScreen.swarmWorkflowsViewState.selectedAgentId, "agent-2");
+  assert.equal(swarmNavigationRenderCount, 1);
+}
+
 const pendingQuestionScreen = Object.create(AppScreen.prototype);
 let pendingQuestionExitCount = 0;
 let pendingQuestionInterruptCount = 0;
@@ -657,12 +696,84 @@ assert.equal(
   null,
 );
 
+assert.equal(formatTokenCount(null), null);
+assert.equal(formatTokenCount(0), "0");
+assert.equal(formatTokenCount(999), "999");
+assert.equal(formatTokenCount(12_700), "12.7k");
+assert.equal(formatTokenCount(180_000), "180k");
+assert.equal(formatTokenCount(1_200_000), "1.2m");
+
+const lowBudget = {
+  total: 500_000,
+  spent: 412_340,
+  remaining: 87_660,
+  scope: "leader",
+  exhausted: false,
+};
+assert.equal(workflowBudgetUsedPercent(lowBudget), 82);
+assert.equal(isWorkflowBudgetLow(lowBudget), true);
+assert.equal(formatWorkflowBudgetInline(lowBudget), "team 412.3k/500k");
+assert.equal(formatWorkflowBudgetDetail(lowBudget), "Team budget 412.3k/500k (82%)");
+assert.equal(
+  formatWorkflowBudgetInline({
+    total: null,
+    spent: 12_700,
+    remaining: null,
+    scope: "leader",
+    exhausted: false,
+  }),
+  "team spent 12.7k · unbounded",
+);
+assert.equal(
+  isWorkflowBudgetExhausted({
+    status: "failed",
+    budget: { ...lowBudget, spent: 500_000, remaining: 0, exhausted: true },
+  }),
+  true,
+);
+assert.equal(
+  isWorkflowBudgetExhausted({ status: "stopped", error: "Token budget exhausted: 5/5" }),
+  true,
+);
+
+const mergedWorkflowUsage = mergeWorkflowRun(
+  {
+    id: "wf_merge",
+    name: "merge",
+    summary: "",
+    status: "running",
+    token_count: 12_700,
+    budget: lowBudget,
+    phases: [
+      {
+        id: "child",
+        name: "▸ child",
+        status: "running",
+        phase_type: "child",
+        parent_phase: "parent",
+        agents: [],
+      },
+    ],
+  },
+  {
+    id: "wf_merge",
+    name: "merge",
+    summary: "",
+    status: "running",
+    phases: [{ id: "child", name: "▸ child", status: "completed", agents: [] }],
+  },
+);
+assert.deepEqual(mergedWorkflowUsage.budget, lowBudget);
+assert.equal(mergedWorkflowUsage.token_count, 12_700);
+assert.equal(mergedWorkflowUsage.phases[0]?.phase_type, "child");
+assert.equal(mergedWorkflowUsage.phases[0]?.parent_phase, "parent");
+
 assert.deepEqual(
   planSwarmflowToggle({ target: "on", currentEnabled: true, mode: "team" }),
   {
     writeConfig: false,
     switchToTeam: false,
-    message: "SwarmFlow is already on in team mode. No changes were made.",
+    message: "Already on. No changes.",
   },
 );
 assert.deepEqual(
@@ -670,8 +781,7 @@ assert.deepEqual(
   {
     writeConfig: false,
     switchToTeam: true,
-    message:
-      "SwarmFlow is already on. Switched to team mode — the next workflow run uses the enabled setting.",
+    message: "Already on. Switched to team mode.",
   },
 );
 assert.deepEqual(
@@ -679,7 +789,7 @@ assert.deepEqual(
   {
     writeConfig: false,
     switchToTeam: false,
-    message: "SwarmFlow is already off. Mode remains team. No changes were made.",
+    message: "Already off. Mode remains team. No changes. Use /mode to leave team.",
   },
 );
 assert.equal(

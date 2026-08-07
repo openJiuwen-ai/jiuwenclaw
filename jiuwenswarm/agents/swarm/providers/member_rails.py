@@ -147,6 +147,10 @@ class RuntimePromptInput(ConstructionInput):
         resolver=_workspace_root,
         description="Current member workspace root (cwd fallback without a project).",
     )
+    trusted_dirs: list[str] | None = context_field(
+        attr="trusted_dirs",
+        description="Directories the client declared as trusted for this request.",
+    )
 
 
 @harness_element(
@@ -185,6 +189,9 @@ def _build_runtime_prompt_rail(
         project_dir=inp.project_dir,
         workspace_dir=inp.member_workspace_root,
     )
+    # Without this the member never renders the trusted_dirs policy section a
+    # single agent gets from ``_apply_runtime_config_stages``.
+    rail.set_trusted_dirs(inp.trusted_dirs)
     return rail
 
 

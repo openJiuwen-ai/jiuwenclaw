@@ -116,6 +116,7 @@ class FakeYuanRongClient:
 class FakeRegistryClient:
     def __init__(self) -> None:
         self.registered: list[AgentInfo] = []
+        self.unregistered: list[dict[str, str]] = []
         self.image_lookups = 0
         self.list_user_images_calls: list[str] = []
 
@@ -156,6 +157,21 @@ class FakeRegistryClient:
 
     async def register_agent(self, agent_info: AgentInfo) -> None:
         self.registered.append(agent_info)
+
+    async def unregister_agent(
+        self,
+        agent_id: str,
+        *,
+        user_id: str | None = None,
+        agent_type: str | None = None,
+    ) -> None:
+        self.unregistered.append(
+            {
+                "agent_id": str(agent_id or ""),
+                "user_id": str(user_id or ""),
+                "agent_type": str(agent_type or ""),
+            }
+        )
 
     async def close(self) -> None:
         return None
@@ -391,18 +407,30 @@ async def test_switch_to_jiuwenswarm_is_direct_without_create() -> None:
 @pytest.mark.asyncio
 async def test_delete_agent_releases_yuanrong_sandbox() -> None:
     yuanrong = FakeYuanRongClient()
+    registry = FakeRegistryClient()
     agent_manager = AgentManager()
-    client = AgentOSRouterClient(yuanrong, FakeRegistryClient(), agent_manager)
+    client = AgentOSRouterClient(yuanrong, registry, agent_manager)
 
     await client.send_request(_envelope(agent_type="opencode"))
     agents = await agent_manager.list_user_agents("u1")
     assert agents[0].info.sandbox_id == "sbx-1"
+    agent_id = agents[0].info.agent_id
 
-    await client.delete_agent("u1", "opencode")
+    assert await client.delete_agent("u1", "opencode") is True
 
     assert yuanrong.delete_calls == ["sbx-1"]
     assert await agent_manager.list_user_agents("u1") == []
+    assert registry.unregistered == [
+        {"agent_id": agent_id, "user_id": "u1", "agent_type": "opencode"}
+    ]
 
+
+@pytest.mark.asyncio
+async def test_delete_agent_missing_is_noop() -> None:
+    client = AgentOSRouterClient(
+        FakeYuanRongClient(), FakeRegistryClient(), AgentManager()
+    )
+    assert await client.delete_agent("u1", "opencode") is False
 
 class StubRelaySession:
     def __init__(self) -> None:
@@ -444,16 +472,19 @@ class StubSshRelay:
 @pytest.mark.asyncio
 async def test_reap_idle_once_deletes_idle_sandbox() -> None:
     yuanrong = FakeYuanRongClient()
+    registry = FakeRegistryClient()
     agent_manager = AgentManager()
     client = AgentOSRouterClient(
         yuanrong,
-        FakeRegistryClient(),
+        registry,
         agent_manager,
         sandbox_idle_timeout_seconds=0.01,
     )
 
     await client.send_request(_envelope(agent_type="opencode"))
     assert yuanrong.create_calls == 1
+    agents = await agent_manager.list_user_agents("u1")
+    agent_id = agents[0].info.agent_id
 
     await asyncio.sleep(0.05)
     reaped = await client._reap_idle_once()
@@ -462,7 +493,9 @@ async def test_reap_idle_once_deletes_idle_sandbox() -> None:
     assert reaped == 1
     assert yuanrong.delete_calls == ["sbx-1"]
     assert await agent_manager.list_user_agents("u1") == []
-
+    assert registry.unregistered == [
+        {"agent_id": agent_id, "user_id": "u1", "agent_type": "opencode"}
+    ]
 
 @pytest.mark.asyncio
 async def test_reap_idle_once_skips_recently_active_and_held_agents() -> None:

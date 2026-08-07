@@ -628,7 +628,7 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         )
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         req = urllib.request.Request(self._invoke_url(), data=data, headers=headers, method="POST")
-        return self._urlopen_request(req)
+        return self._urlopen_request(req, raise_on_timeout=True)
 
     async def send_request(self, envelope: E2AEnvelope) -> AgentResponse:
         """发送非流式请求.
@@ -642,12 +642,21 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         self._ensure_connected()
         payload = self._build_invoke_payload(envelope, stream=False)
         session_id = envelope.session_id or ""
-        status, body = await asyncio.to_thread(
-            self._do_invoke,
-            payload,
-            session_id,
-            envelope.user_id,
-        )
+        try:
+            status, body = await asyncio.to_thread(
+                self._do_invoke,
+                payload,
+                session_id,
+                envelope.user_id,
+            )
+        except YuanrongAgentApiError as e:
+            logger.warning("[YuanrongFrontendAgentClient] invoke failed: %s", e)
+            return AgentResponse(
+                request_id=envelope.request_id,
+                channel_id=envelope.channel_id,
+                ok=False,
+                payload={"error": str(e)},
+            )
         # 仍需 AgentRequest 形状供 _parse_invoke_response 填充 request_id/channel_id 兜底
         request = e2a_to_agent_request(envelope)
         return self._parse_invoke_response(body, status, request)
