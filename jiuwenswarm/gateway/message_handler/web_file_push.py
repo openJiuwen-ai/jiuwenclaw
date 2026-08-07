@@ -18,7 +18,10 @@ def resolve_web_server_push_url() -> str:
     if not os.getenv("AGENT_RUNTIME", "").strip():
         return ""
 
-    explicit = os.getenv("JIUWENCLAW_WEB_SERVER_URL", "").strip()
+    explicit = (
+        os.getenv("JIUWENCLAW_WEB_SERVER_URL", "").strip()
+        or os.getenv("ENTERPRISE_WEB_SERVICE_URL", "").strip()
+    )
     if explicit:
         return explicit.rstrip("/")
 

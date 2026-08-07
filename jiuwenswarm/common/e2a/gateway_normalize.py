@@ -488,6 +488,13 @@ def e2a_response_to_agent_response(e2a: E2AResponse) -> "AgentResponse":
     )
 
 
+def _is_hitl_stream_terminal_body(body: dict[str, Any]) -> bool:
+    """HITL 暂停帧：Agent 以 is_final=False 下发，但 Gateway 流式会话应在此结束。"""
+    if body.get("awaiting_user_input") is True:
+        return True
+    return body.get("event_type") == "chat.invocation_paused"
+
+
 def e2a_response_to_agent_chunk(e2a: E2AResponse) -> "AgentResponseChunk":
     """
     ``E2AResponse`` → ``AgentResponseChunk``（与 ``e2a_response_from_agent_chunk`` 对仗）。
@@ -545,6 +552,7 @@ def e2a_response_to_agent_chunk(e2a: E2AResponse) -> "AgentResponseChunk":
         et = body.get("event_type")
         delta = body.get("delta")
         sct_in = body.get("source_chunk_type")
+        hitl_terminal = _is_hitl_stream_terminal_body(body)
 
         if et == "chat.delta" or dk in ("text", "reasoning"):
             sct = "llm_reasoning" if dk == "reasoning" else sct_in
@@ -563,7 +571,7 @@ def e2a_response_to_agent_chunk(e2a: E2AResponse) -> "AgentResponseChunk":
                 request_id=rid,
                 channel_id=ch,
                 payload=pl,
-                is_complete=False,
+                is_complete=hitl_terminal,
             )
 
         if isinstance(delta, dict):
@@ -580,7 +588,7 @@ def e2a_response_to_agent_chunk(e2a: E2AResponse) -> "AgentResponseChunk":
             request_id=rid,
             channel_id=ch,
             payload=pl2,
-            is_complete=False,
+            is_complete=hitl_terminal,
         )
 
     if kind == E2A_RESPONSE_KIND_CRON:
