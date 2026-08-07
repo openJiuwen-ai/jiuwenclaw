@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
-import json
 
 import pytest
 from openjiuwen.core.session.stream import OutputSchema

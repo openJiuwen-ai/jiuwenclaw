@@ -9292,7 +9292,6 @@ class JiuWenSwarmDeepAdapter:
             if self._stream_event_rail is not None:
                 self._stream_event_rail.reset_abort(session_id)
             inputs = dict(inputs)
-            await self._sync_prompt_attachments_for_request(session_id)
             # 取 cancel 分支预置的 rewind session，让 core 复用其预置的 rewind history
             # 防丢上下文。None 时 core 新建 session (现状不变)。
             _runner_session = self._rewind_session.pop(

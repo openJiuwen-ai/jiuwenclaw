@@ -50,7 +50,6 @@ from jiuwenswarm.common.config import (
     update_heartbeat_in_config,
     update_channel_in_config,
     replace_channel_subsection_with_cleanup,
-    update_channel_in_config,  # compatibility export for existing integrations/tests
     update_browser_in_config,
     update_preferred_language_in_config,
     update_context_engine_enabled_in_config,

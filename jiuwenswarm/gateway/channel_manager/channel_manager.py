@@ -57,6 +57,9 @@ class ChannelManager(ABC):
         # 下一次 on_config_updated 时强制重启的 channel_id（例如微信解绑：YAML 中 bot_token 本就为空时配置 dict 对比不会变，但内存里仍有旧凭据）
         self._pending_channel_restart: set[str] = set()
         self._dispatch_diag_count: int = 0
+        self._channel_specs: dict[str, ChannelSpec] = {}
+        self._config_lock = asyncio.Lock()
+        self._persist_channel_config: Callable[[str, dict[str, Any]], Any] | None = None
 
     @staticmethod
     def _resolve_app_id(channel: Any) -> str:
@@ -74,9 +77,6 @@ class ChannelManager(ABC):
             if key.channel_id == channel_id:
                 return ch
         return None
-        self._channel_specs: dict[str, ChannelSpec] = {}
-        self._config_lock = asyncio.Lock()
-        self._persist_channel_config: Callable[[str, dict[str, Any]], Any] | None = None
 
     def mark_channel_restart_pending(self, channel_id: str) -> None:
         """请求在下次 set_conf / set_config 触发配置应用时，无论配置快照是否变化都重启该 channel。"""
