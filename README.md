@@ -34,7 +34,7 @@
   <img src="https://img.shields.io/badge/os-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20HarmonyOS-lightgrey.svg" alt="OS Support" />
 </p>
 
-<video src="docs/assets/videos/JiuwenSwarm Introduction.mp4" controls width="100%"></video>
+[JiuwenSwarm_Introduction.mp4](docs/assets/videos/JiuwenSwarm_Introduction.mp4)
 
 **JiuwenSwarm** is an Agent system that makes multi-agent collaboration truly work. Designed for developers and teams who need to automate complex tasks, it helps users drive multi-agent collaboration, Skill self-evolution, and tool invocation through natural language — delivering end-to-end from intent to result. It runs on a single machine or across a cluster, and you can reach it from a browser, a terminal, or the chat apps you already use.
 
@@ -189,7 +189,7 @@ Full index: [Documentation](docs/README_EN.md)
 ## Latest Updates
 
 - **2026-08-06** — `v0.2.4.beta3`  Focuses on cutting cold-start latency in the Agent instance launch path.
-- **2026-07-28** — `v0.2.4.beta2` xxxxxx
+- **2026-07-28** — `v0.2.4.beta2` Improves the scheduling mechanism for tasks and refines front-end interaction logic.
 - **2026-07-24** — `v0.2.4.beta1` Builds out the Code work-mode system and its front-end support: workspace selection and switching, and code-diff display.
 - **2026-07-14** — `v0.2.3` The collaboration capabilities in cluster mode have been enhanced, with new features such as browser sub-agent isolation and support for online sessions within the same session; image attachments and multimodal conversations; Skill-Omni turns visual knowledge into reusable multimodal Skills, with a usage-experience loop improving skill dispatch; new TUI commands (/keybindings, /simplify, /review, /security-review, /btw); stability fixes..
 
