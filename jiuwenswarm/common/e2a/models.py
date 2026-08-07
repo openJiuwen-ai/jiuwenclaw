@@ -126,6 +126,9 @@ class E2AEnvelope:
     agent_ref: dict | None = None
     chat_id: str | None = None
     source_agent_id: str | None = None
+    # 企业多租户路由（SessionMap / AGENT_RUNTIME）：可选，与 session_id 同源派生
+    service_id: str | None = None
+    agent_id: str | None = None
 
     # --- 网关 RPC（原 req_method）；ACP 转入时同字段承载 JSON-RPC method ---
     method: str | None = None

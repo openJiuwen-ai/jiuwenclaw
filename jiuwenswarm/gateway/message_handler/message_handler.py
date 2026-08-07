@@ -133,6 +133,9 @@ class ChannelMode(str, Enum):
 class ChannelControlState:
     session_id: str | None = None
     mode: ChannelMode = ChannelMode.AGENT
+    # SessionMap + 企业运行时：受控通道绑定后填充，供 E2A / 多租户路由
+    service_id: str | None = None
+    agent_id: str | None = None
 
 
 @dataclass
@@ -605,7 +608,12 @@ class MessageHandler(ABC):
         state = self._get_channel_default_state(ch)
         identity_key = self._extract_identity_tuple(msg)
         if identity_key and self._channel_id_matches_session_map_types(str(ch or "")):
-            state.session_id = self._session_map.find_session_id(*identity_key)
+            sess = self._session_map.find_session(*identity_key)
+            if sess is not None:
+                state.session_id = sess.session_id
+                if os.getenv("AGENT_RUNTIME", "").strip():
+                    state.service_id = sess.service_id
+                    state.agent_id = sess.agent_id
         self._channel_states[key] = state
         return state
 
@@ -661,6 +669,11 @@ class MessageHandler(ABC):
         identity_key = self._extract_identity_tuple(msg)
         if identity_key and self._channel_id_matches_session_map_types(str(msg.channel_id or "")):
             self._session_map.set_session_id(*identity_key, sid)
+            if os.getenv("AGENT_RUNTIME", "").strip():
+                sess = self._session_map.find_session(*identity_key)
+                if sess is not None:
+                    state.service_id = sess.service_id
+                    state.agent_id = sess.agent_id
         return sid
 
     async def _resolve_external_channel_session(self, msg: "Message") -> None:
@@ -2107,14 +2120,36 @@ class MessageHandler(ABC):
         cid = str(getattr(msg, "channel_id", "") or "")
         identity_key = self._extract_identity_tuple(msg)
         if identity_key and self._channel_id_matches_session_map_types(cid):
-            sid = self._session_map.find_session_id(*identity_key)
-            if sid:
-                state.session_id = sid
-                msg.session_id = sid
+            sess = self._session_map.find_session(*identity_key)
+            if sess is not None:
+                state.session_id = sess.session_id
+                msg.session_id = sess.session_id
+                if os.getenv("AGENT_RUNTIME", "").strip():
+                    state.service_id = sess.service_id
+                    state.agent_id = sess.agent_id
+                    if msg.params is None:
+                        msg.params = {}
+                    if isinstance(msg.params, dict):
+                        msg.params["service_id"] = sess.service_id
+                        if sess.agent_id:
+                            msg.params["agent_id"] = sess.agent_id
+                        else:
+                            msg.params.pop("agent_id", None)
+                else:
+                    state.service_id = None
+                    state.agent_id = None
+                    if isinstance(msg.params, dict):
+                        msg.params.pop("service_id", None)
+                        msg.params.pop("agent_id", None)
             else:
                 msg.session_id = None
+                state.service_id = None
+                state.agent_id = None
         elif state.session_id:
             msg.session_id = state.session_id
+            if isinstance(msg.params, dict):
+                msg.params.pop("service_id", None)
+                msg.params.pop("agent_id", None)
         else:
             msg.session_id = None
 
