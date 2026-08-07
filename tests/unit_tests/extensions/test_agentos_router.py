@@ -232,7 +232,9 @@ async def test_swarm_request_creates_builtin_supervisor_runtime() -> None:
     dyn_port = ports[0][len("tcp:"):]
     assert dyn_port.isdigit()
     # cmds 含动态端口，与 rootfs.ports 一致
-    assert spec["cmds"] == [["jiuwenswarm-agentserver", "--port", dyn_port]]
+    assert spec["cmds"] == [
+        ["sh", "-c", f"jiuwenswarm-init && exec jiuwenswarm-agentserver --port {dyn_port}"]
+    ]
     assert spec["cpu"] == 2000
     assert spec["memory"] == 4096
     assert spec["rootfs"]["imageurl"] == "jiuwenswarm-agent-runtime:latest"

@@ -706,7 +706,7 @@ class AgentOSRouterClient(AgentServerClient):
                     "user": "agentos",
                     "ports": [f"tcp:{port}"]
                 },
-                "cmds": [["jiuwenswarm-agentserver", "--port", f"{port}"]],
+                "cmds": [["sh", "-c", f"jiuwenswarm-init && exec jiuwenswarm-agentserver --port {port}"]],
                 "cpu": int(os.environ.get("AGENTOS_BUILTIN_AGENT_CPU", "2000")),
                 "memory": int(os.environ.get("AGENTOS_BUILTIN_AGENT_MEMORY", "4096"))
             }
