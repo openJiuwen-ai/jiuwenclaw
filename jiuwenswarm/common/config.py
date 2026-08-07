@@ -27,6 +27,18 @@ from jiuwenswarm.common.utils import get_config_dir, get_config_file
 
 logger = logging.getLogger(__name__)
 
+# --- config read cache ---
+# 生产模式：写后失效（零 IO）；开发模式（JIUWENSWARM_DEV=1）：每次 stat 检测文件变化
+
+
+def _config_cache_enabled() -> bool:
+    return os.getenv("JIUWENSWARM_DEV", "0") != "1"
+
+_config_cache: dict[str, Any] = {}  # {"data": <parsed config>} when valid
+_config_cache_valid: bool = False
+_config_cache_lock = threading.RLock()
+_ENV_VAR_PATTERN = re.compile(r'\$\{([^:}]+)(?::-([^}]*))?\}')
+
 _CONFIG_MODULE_DIR = Path(__file__).parent
 CONFIG_YAML_PATH = get_config_file()
 SWARMFLOW_ENABLED_CONFIG_PATH = ("modes", "team", "jiuwen_team", "enable_swarmflow")
@@ -55,8 +67,6 @@ def resolve_env_vars(value: Any) -> Any:
     """
     if isinstance(value, str):
         # 匹配 ${VAR:-default} 格式
-        pattern = r'\$\{([^:}]+)(?::-([^}]*))?\}'
-
         def replace_env(match):
             var_name = match.group(1)
             default = match.group(2)
@@ -83,7 +93,7 @@ def resolve_env_vars(value: Any) -> Any:
                 return current
             return current if current is not None else ""
 
-        return re.sub(pattern, replace_env, value)
+        return _ENV_VAR_PATTERN.sub(replace_env, value)
     elif isinstance(value, dict):
         return {k: resolve_env_vars(v) for k, v in value.items()}
     elif isinstance(value, list):
@@ -202,14 +212,80 @@ def _read_with_retry(filepath: Path, max_attempts: int = 3) -> dict[str, Any]:
     return {}
 
 
-def get_config():
-    """读取并解析 config.yaml（锁保护 + 跨进程降级重试）。"""
-    config_base = _read_with_retry(get_config_file())
-    # resolve_env_vars 和 _normalize_config 只操作内存数据，在锁外执行以缩短锁持有时间
-    config_base = resolve_env_vars(config_base)
-    _normalize_config(config_base)
+def _config_file_cache_key(path: Path) -> str | None:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return f"{st.st_mtime_ns}:{st.st_size}"
 
-    return config_base
+
+def _collect_env_var_names(value: Any, names: set[str] | None = None) -> set[str]:
+    if names is None:
+        names = set()
+    if isinstance(value, str):
+        names.update(match.group(1) for match in _ENV_VAR_PATTERN.finditer(value))
+    elif isinstance(value, dict):
+        for item in value.values():
+            _collect_env_var_names(item, names)
+    elif isinstance(value, list):
+        for item in value:
+            _collect_env_var_names(item, names)
+    return names
+
+
+def _env_cache_signature(names: set[str] | frozenset[str]) -> tuple[tuple[str, str | None], ...]:
+    return tuple((name, os.getenv(name)) for name in sorted(names))
+
+
+def invalidate_config_cache() -> None:
+    """清除已解析配置缓存，使下一次 get_config() 重新读取并解析 config.yaml."""
+    global _config_cache_valid
+    with _config_cache_lock:
+        _config_cache.clear()
+        _config_cache_valid = False
+
+
+def get_config():
+    global _config_cache_valid
+    path = get_config_file()
+    path_key = str(path.resolve())
+
+    with _config_cache_lock:
+        cache_enabled = _config_cache_enabled()
+        file_key = None
+
+        if not cache_enabled:
+            # 开发模式：stat 检测文件变化，外部编辑即时生效
+            file_key = _config_file_cache_key(path)
+
+        env_names = _config_cache.get("_env_names", frozenset())
+        env_signature = _env_cache_signature(env_names)
+        cache_matches = (
+            _config_cache_valid
+            and "data" in _config_cache
+            and _config_cache.get("_path") == path_key
+            and _config_cache.get("_env_signature") == env_signature
+            and (cache_enabled or (file_key and file_key == _config_cache.get("_key")))
+        )
+        if cache_matches:
+            # 只读返回，防止调用方意外改污染缓存
+            return deepcopy(_config_cache["data"])
+
+        config_base = _read_with_retry(path)
+        env_names = frozenset(_collect_env_var_names(config_base))
+        config_base = resolve_env_vars(config_base)
+        _normalize_config(config_base)
+
+        _config_cache.clear()
+        _config_cache["data"] = deepcopy(config_base)
+        _config_cache["_path"] = path_key
+        _config_cache["_env_names"] = env_names
+        _config_cache["_env_signature"] = _env_cache_signature(env_names)
+        if not cache_enabled:
+            _config_cache["_key"] = file_key
+        _config_cache_valid = True
+        return config_base
 
 
 def get_config_raw():
@@ -230,6 +306,7 @@ def validate_persisted_kv_cache_affinity() -> tuple[bool, list[str]]:
 def set_config(config):
     with open(CONFIG_YAML_PATH, "w", encoding="utf-8") as f:
         yaml.safe_dump(config, f, allow_unicode=True, sort_keys=False)
+    invalidate_config_cache()
 
 
 def _get_bool_env(value: str | None) -> bool | None:
@@ -338,6 +415,8 @@ def dump_yaml_round_trip(config_path: Path, data: Any) -> None:
         with open(tmp, "w", encoding="utf-8") as f:
             rt.dump(data, f)
         _atomic_replace(tmp, config_path)
+        if config_path.resolve() == get_config_file().resolve():
+            invalidate_config_cache()
     except BaseException:
         try:
             os.unlink(tmp)

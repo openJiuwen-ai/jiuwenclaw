@@ -3,11 +3,13 @@
 """Unit tests for config module."""
 
 import math
+import os
 from pathlib import Path
 
 import pytest
 import yaml
 
+import jiuwenswarm.common.config as config_mod
 from jiuwenswarm.common.config import (
     get_config_raw,
     get_evolution_auto_save_enabled,
@@ -15,9 +17,12 @@ from jiuwenswarm.common.config import (
     get_evolution_review_trigger_enabled,
     get_evolution_signal_trigger_enabled,
     get_skill_create_enabled,
+    get_config,
+    invalidate_config_cache,
     migrate_config_from_template,
     replace_teams_in_config,
     resolve_env_vars,
+    set_config,
     update_skill_retrieval_in_config,
     update_setup_guide_enabled_in_config,
     update_xiaoyi_runtime_in_config,
@@ -280,6 +285,144 @@ class TestConfigFunctions:
             monkeypatch.setenv("SKILL_CREATE", env_value)
 
         assert get_skill_create_enabled(config) is expected
+
+    @staticmethod
+    def test_get_config_uses_cached_parsed_config(
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("model: ${CONFIG_CACHE_MODEL:-first}\n", encoding="utf-8")
+        monkeypatch.setattr(config_mod, "get_config_file", lambda: config_file)
+        invalidate_config_cache()
+
+        load_calls = 0
+        original_safe_load = config_mod.yaml.safe_load
+
+        def counting_safe_load(*args, **kwargs):
+            nonlocal load_calls
+            load_calls += 1
+            return original_safe_load(*args, **kwargs)
+
+        monkeypatch.setattr(config_mod.yaml, "safe_load", counting_safe_load)
+
+        first = get_config()
+        second = get_config()
+
+        assert first == second
+        assert first["model"] == "first"
+        assert load_calls == 1
+
+    @staticmethod
+    def test_set_config_invalidates_get_config_cache(
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("model: old\n", encoding="utf-8")
+        monkeypatch.setattr(config_mod, "get_config_file", lambda: config_file)
+        monkeypatch.setattr(config_mod, "CONFIG_YAML_PATH", config_file)
+        invalidate_config_cache()
+
+        assert get_config()["model"] == "old"
+
+        set_config({"model": "new"})
+
+        assert get_config()["model"] == "new"
+
+    @staticmethod
+    def test_dump_main_config_invalidates_get_config_cache(
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("model: old\n", encoding="utf-8")
+        monkeypatch.setattr(config_mod, "get_config_file", lambda: config_file)
+        invalidate_config_cache()
+
+        assert get_config()["model"] == "old"
+
+        data = config_mod.load_yaml_round_trip(config_file)
+        data["model"] = "new"
+        config_mod.dump_yaml_round_trip(config_file, data)
+
+        assert get_config()["model"] == "new"
+
+    @staticmethod
+    def test_dump_other_yaml_preserves_get_config_cache(
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("model: main\n", encoding="utf-8")
+        other_file = tmp_path / "other.yaml"
+        other_file.write_text("value: old\n", encoding="utf-8")
+        monkeypatch.setattr(config_mod, "get_config_file", lambda: config_file)
+        invalidate_config_cache()
+
+        load_calls = 0
+        original_safe_load = config_mod.yaml.safe_load
+
+        def counting_safe_load(*args, **kwargs):
+            nonlocal load_calls
+            load_calls += 1
+            return original_safe_load(*args, **kwargs)
+
+        monkeypatch.setattr(config_mod.yaml, "safe_load", counting_safe_load)
+
+        assert get_config()["model"] == "main"
+        config_mod.dump_yaml_round_trip(other_file, {"value": "new"})
+        assert get_config()["model"] == "main"
+        assert load_calls == 1
+
+    @staticmethod
+    def test_get_config_cache_invalidates_when_env_value_changes(
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("model: ${CONFIG_CACHE_MODEL:-default}\n", encoding="utf-8")
+        monkeypatch.setattr(config_mod, "get_config_file", lambda: config_file)
+        invalidate_config_cache()
+
+        monkeypatch.setenv("CONFIG_CACHE_MODEL", "first")
+        assert get_config()["model"] == "first"
+
+        monkeypatch.setenv("CONFIG_CACHE_MODEL", "second")
+        assert get_config()["model"] == "second"
+
+    @staticmethod
+    def test_dev_mode_reloads_on_file_change(
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("model: old\n", encoding="utf-8")
+        monkeypatch.setattr(config_mod, "get_config_file", lambda: config_file)
+        monkeypatch.setattr(config_mod, "_config_cache_enabled", lambda: False)
+        invalidate_config_cache()
+
+        assert get_config()["model"] == "old"
+
+        config_file.write_text("model: newer-model\n", encoding="utf-8")
+        os.utime(config_file, None)
+
+        assert get_config()["model"] == "newer-model"
+
+    @staticmethod
+    def test_get_config_return_is_isolated_from_cache(
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("model: original\n", encoding="utf-8")
+        monkeypatch.setattr(config_mod, "get_config_file", lambda: config_file)
+        invalidate_config_cache()
+
+        cfg = get_config()
+        cfg["model"] = "mutated"
+
+        assert get_config()["model"] == "original"
 
     @staticmethod
     def test_get_config_raw(temp_config_file: Path):
