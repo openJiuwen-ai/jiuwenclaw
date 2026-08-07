@@ -2572,6 +2572,13 @@ async def _run(
     # cron jobs 的 work_mode 补全已改为惰性迁移:scheduler.start() → reload() →
     # list_jobs() 读取时按需推断并写回磁盘(见 CronJobStore.list_jobs),无需启动全量扫描。
     await cron_scheduler.start()
+
+    # ---------- LeaderElection 初始化（企业分布式 Redis）----------
+    from jiuwenswarm.gateway.leader_election import LeaderElection
+
+    leader_election = LeaderElection.get_instance()
+    await leader_election.start()
+
     try:
         from jiuwenswarm.infrastructure.log_masking.engine import LogMaskingEngine
 
@@ -2763,6 +2770,7 @@ async def _run(
         await channel_manager.stop_dispatch()
         await heartbeat_service.stop()
         await message_handler.stop_forwarding()
+        await leader_election.stop()
         await shutdown_gateway_redis()
         await client.disconnect()
 

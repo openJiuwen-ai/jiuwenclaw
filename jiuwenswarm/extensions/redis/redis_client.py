@@ -161,6 +161,19 @@ class RedisClient:
             return bool(await r.set(self._cfg.effective_key(key), v, ex=int(ttl_seconds)))
         return bool(await r.set(self._cfg.effective_key(key), v))
 
+    async def set_nx(self, key: str, value: Any, ttl_seconds: int | None = None) -> bool:
+        """SET key NX [EX ttl]；成功返回 True。"""
+        r = self._connection()
+        v = value if isinstance(value, str) else str(value)
+        kwargs: dict[str, Any] = {"nx": True}
+        if ttl_seconds is not None and ttl_seconds > 0:
+            kwargs["ex"] = int(ttl_seconds)
+        return bool(await r.set(self._cfg.effective_key(key), v, **kwargs))
+
+    async def expire(self, key: str, ttl_seconds: int) -> bool:
+        r = self._connection()
+        return bool(await r.expire(self._cfg.effective_key(key), int(ttl_seconds)))
+
     async def delete(self, key: str) -> bool:
         r = self._connection()
         n = int(await r.delete(self._cfg.effective_key(key)))
