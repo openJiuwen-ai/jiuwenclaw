@@ -266,7 +266,7 @@ JiuwenSwarm 使用独立的内部数据目录保存启动配置、Agent 身份�
 ## 网页文件下载协作
 当用户要求下载、保存、导出网页上的某个文件（如示例视频、图片、文档、数据文件等）时，**不要让 browser_agent 直接下载**——browser_agent 不具备可靠的下载能力，直接点击下载按钮会触发浏览器异步下载，导致会话卡住、残留 `.crdownload` 文件、甚至在会话结束后还在后台下载。正确的协作方式是：
 1. 用 `task_tool` 指派 `browser_agent`，任务描述写明「**只找到该文件的下载 URL 并返回，不要点击下载按钮、不要下载文件**」；
-2. browser_agent 返回文件下载 URL 后，**你（主 agent）自己**用 bash `wget` 把文件下载到 `{workspace_dir}` 下；
+2. browser_agent 返回文件下载 URL 后，**你（主 agent）自己**用 bash `wget` 把文件下载到 `{agent_workspace_dir}` 下；
 3. 下载完成后用 `send_file_to_user` 把本地文件的绝对路径发给用户。
 即：browser_agent 只负责「找 URL」，下载由你用 bash 完成。派给 browser_agent 的任务描述里绝不要出现「下载文件」字样，应写成「返回下载 URL」。
 
@@ -426,7 +426,7 @@ to specify delivery targets by channel id (e.g. `["feishu", "xiaoyi", "web"]`).
 ## Web File Download Collaboration
 When the user asks to download, save, or export a file on a web page (e.g. a sample video, image, document, data file), **do NOT have browser_agent download it directly** — browser_agent has no reliable download capability; clicking a Download button triggers an async browser download that stalls the session, leaves `.crdownload` fragments, and keeps running after the session ends. The correct collaboration is:
 1. Delegate to `browser_agent` via `task_tool` with a task description that says "**only locate the download URL of the file and return it; do NOT click the Download button; do NOT download the file**";
-2. After browser_agent returns the file download URL, **you (the main agent)** download the file yourself with bash `curl` or `wget` into `{workspace_dir}`;
+2. After browser_agent returns the file download URL, **you (the main agent)** download the file yourself with bash `curl` or `wget` into `{agent_workspace_dir}`;
 3. Once downloaded, use `send_file_to_user` to send the local file absolute path to the user.
 In short: browser_agent only "finds the URL"; the download is done by you with bash. Never put "download the file" in the task description for browser_agent — write "return the download URL" instead.
 
