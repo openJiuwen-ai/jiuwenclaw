@@ -409,7 +409,13 @@ class AgentOSRouterClient(AgentServerClient):
                 try:
                     await client.disconnect()
                 except Exception:
-                    pass
+                    logger.warning(
+                        "[AgentOSRouter] cleanup after failed ws connect: "
+                        "instance=%s attempt=%s",
+                        instance_id,
+                        attempt,
+                        exc_info=True,
+                    )
                 remaining = deadline - asyncio.get_running_loop().time()
                 if remaining <= 0 or not _is_ws_connect_retryable(exc):
                     raise
