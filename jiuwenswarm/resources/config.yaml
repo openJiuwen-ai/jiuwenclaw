@@ -546,8 +546,8 @@ task_memory:
   retrieval_algo: ACE
   summary_algo: ACE
 
-# ========== Redis（分布式 Gateway：状态存储 / Pub/Sub / Leader；standalone 下不连接）==========
-# 通过 gateway.deployment_mode 控制：standalone（不连接）/ distributed（连接 Redis）
+# ========== Redis（主备 Gateway：状态存储 / Pub/Sub / Leader；standalone 下不连接）==========
+# 通过 gateway.deployment_mode 控制：standalone（不连接）/ active-standby（连接 Redis）
 redis:
   host: ${REDIS_HOST:-localhost}
   port: ${REDIS_PORT:-6379}
@@ -566,9 +566,9 @@ gateway:
   # 取值：per_chat_bot（默认，同 chat+bot 共享会话）, per_chat_bot_user（按 user 分会话）
   session_map_scope: per_chat_bot
 
-  # ========== 分布式部署（standalone：默认，行为与仅单机一致；distributed：连接 Redis）==========
+  # ========== 主备部署（standalone：默认；active-standby：连接 Redis + 选主）==========
   deployment_mode: ${DEPLOYMENT_MODE:-standalone}
-  # 分布式下用于实例标识；空则启动时自动生成
+  # 主备下用于实例标识；空则启动时自动生成
   instance_id: ${GATEWAY_INSTANCE_ID:-}
 
   # AgentClient 配置 - Gateway 连接到 AgentServer 的方式

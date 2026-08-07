@@ -131,7 +131,7 @@ class SessionMap:
 
     支持两种部署模式:
     - standalone (单机模式): 所有读写走本地文件
-    - distributed (主备模式，且 AGENT_RUNTIME 开启): 所有读写走 Redis
+    - active-standby (主备模式，且 AGENT_RUNTIME 开启): 所有读写走 Redis
 
     不在 Gateway 侧分配 session_id；由 AgentServer ``session.create`` 创建后经 ``set_session_id`` 写入。
     """
@@ -140,10 +140,10 @@ class SessionMap:
         self._scope = scope if scope is not None else load_session_map_scope()
         self._storage: SessionStorage
 
-        # 企业版：AGENT_RUNTIME + distributed 时使用 Redis；否则本地文件
+        # 企业版：AGENT_RUNTIME + active-standby 时使用 Redis；否则本地文件
         if (
             os.getenv("AGENT_RUNTIME", "").strip()
-            and get_declared_deployment_mode() == "distributed"
+            and get_declared_deployment_mode() == "active-standby"
         ):
             self._storage = RedisSessionStorage()
         else:

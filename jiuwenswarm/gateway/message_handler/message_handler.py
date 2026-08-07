@@ -293,7 +293,7 @@ class MessageHandler(ABC):
             self.agent_client.set_server_push_handler(self._handle_agent_server_push)
 
     def reload_session_map(self) -> None:
-        """Reload distributed SessionMap cache after leader switchover."""
+        """Reload Redis-backed SessionMap cache after leader switchover (active-standby)."""
         self._session_map.reload()
 
     @classmethod

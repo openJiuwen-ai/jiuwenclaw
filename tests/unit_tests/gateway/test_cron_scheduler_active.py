@@ -1,5 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-"""Cron scheduler activation tests (standalone vs distributed PRIMARY/STANDBY)。
+"""Cron scheduler activation tests (standalone vs active-standby PRIMARY/STANDBY)。
 
 仅通过公开 API（is_active / set_active / start / stop / reload / trigger_run_now、
 注入的 agent_client 桩、store API）观测行为，不访问 CronSchedulerService 受保护成员。

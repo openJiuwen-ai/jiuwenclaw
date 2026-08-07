@@ -253,7 +253,7 @@ class LeaderElection:
             get_gateway_redis_client,
         )
 
-        if get_declared_deployment_mode() != "distributed":
+        if get_declared_deployment_mode() != "active-standby":
             logger.info("[LeaderElection] standalone mode; skip")
             return
         if get_gateway_redis_client() is None:

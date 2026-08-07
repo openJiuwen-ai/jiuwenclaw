@@ -2580,7 +2580,7 @@ async def _run(
         deployment_mode = str(
             (get_config().get("gateway") or {}).get("deployment_mode", "standalone")
         ).strip().lower()
-        if deployment_mode != "standalone":
+        if deployment_mode == "active-standby":
             from jiuwenswarm.gateway.leader_election import LeaderElection, Role
 
             leader_election = LeaderElection.get_instance()

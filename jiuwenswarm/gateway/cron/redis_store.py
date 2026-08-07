@@ -24,7 +24,7 @@ class _ProactiveJobProtected(RuntimeError):
 
 
 class RedisCronJobStore:
-    """Cron jobs in Redis Hash (distributed Gateway, scoped by ``gateway.instance_id``).
+    """Cron jobs in Redis Hash (active-standby Gateway, scoped by ``gateway.instance_id``).
 
     变更由本机 ``CronController`` 写后 ``scheduler.reload()`` 感知；不维护 rev / Pub/Sub。
     """
