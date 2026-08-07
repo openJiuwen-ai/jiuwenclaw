@@ -21,17 +21,13 @@ import logging.handlers
 import os
 import sys
 
-from openjiuwen.core.common.logging import LogManager
-
 # --- Early --dotenv parsing (before jiuwenswarm imports) ---
 from jiuwenswarm.dotenv_early import parse_dotenv_early, load_dotenv_runtime
 parse_dotenv_early("jiuwenswarm-agentserver")
 
-# --- Now safe to import jiuwenswarm modules ---
-from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.utils import (
     get_env_file,
-    get_root_dir,
+    get_logs_dir,
     get_user_workspace_dir,
     logger,
     prepare_workspace,
@@ -43,20 +39,18 @@ _workspace_dir = get_user_workspace_dir()
 _config_file = _workspace_dir / "config" / "config.yaml"
 _new_workspace = _workspace_dir / "agent" / "workspace"
 _old_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
-
-# Initialize if config doesn't exist, or if legacy workspace exists but new doesn't (migration)
 if not _config_file.exists() or (_old_workspace.exists() and not _new_workspace.exists()):
     prepare_workspace(overwrite=False)
 
-_logging_yaml = get_root_dir() / "config" / "logging.yaml"
-if _logging_yaml.exists():
-    from openjiuwen.core.common.logging.log_config import configure_log
-    configure_log(str(_logging_yaml))
-else:
-    for _lg in LogManager.get_all_loggers().values():
-        _lg.set_level(logging.CRITICAL)
+# Pin openjiuwen log dir before any openjiuwen-heavy imports
+from jiuwenswarm.common.openjiuwen_logging import bootstrap_openjiuwen_logging
 
-    from jiuwenswarm.common.utils import get_logs_dir
+_loaded_logging_yaml = bootstrap_openjiuwen_logging()
+
+# --- Now safe to import remaining jiuwenswarm modules ---
+from jiuwenswarm.common.debug_dump import install_async_dump_handler
+
+if not _loaded_logging_yaml:
     _logs_root = get_logs_dir()
     _logs_root.mkdir(parents=True, exist_ok=True)
     _perm_fmt = logging.Formatter(

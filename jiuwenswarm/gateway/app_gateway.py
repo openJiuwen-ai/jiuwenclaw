@@ -27,7 +27,6 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 from urllib.parse import urlparse
 
-from openjiuwen.core.common.logging import LogManager
 from websockets.exceptions import ConnectionClosed, ConnectionClosedError
 
 # --- Early --dotenv parsing (before jiuwenswarm imports) ---
@@ -35,43 +34,36 @@ from jiuwenswarm.dotenv_early import parse_dotenv_early, load_dotenv_runtime
 
 parse_dotenv_early("jiuwenswarm-gateway")
 
-# --- Now safe to import jiuwenswarm modules ---
-from jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect import AcpGatewayBridge
-from jiuwenswarm.gateway.routing.agent_request_timeout import coerce_client_timeout_ms
-from jiuwenswarm.common.security.ws_origin import get_header_value
-from jiuwenswarm.gateway.routing.route_binding import GatewayRouteBinding
-from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.utils import (
     get_cron_jobs_path,
     get_env_file,
-    get_root_dir,
     get_user_workspace_dir,
     prepare_workspace,
     reset_free_search_runtime_flags,
 )
-from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
-from jiuwenswarm.common.schema.message import ReqMethod, Message, Mode
-from jiuwenswarm.common.local_env_config import decrypt
 
 # Ensure workspace initialized
 _workspace_dir = get_user_workspace_dir()
 _config_file = _workspace_dir / "config" / "config.yaml"
 _new_workspace = _workspace_dir / "agent" / "workspace"
 _old_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
-
-# Initialize if config doesn't exist, or if legacy workspace exists but new doesn't (migration)
 if not _config_file.exists() or (_old_workspace.exists() and not _new_workspace.exists()):
     prepare_workspace(overwrite=False)
 
-_logging_yaml = get_root_dir() / "config" / "logging.yaml"
-if _logging_yaml.exists():
-    from openjiuwen.core.common.logging.log_config import configure_log
+# Pin openjiuwen log dir before any openjiuwen-heavy imports
+from jiuwenswarm.common.openjiuwen_logging import bootstrap_openjiuwen_logging
 
-    configure_log(str(_logging_yaml))
-else:
-    # Reduce openjiuwen internal logs (keep Gateway logs)
-    for _lg in LogManager.get_all_loggers().values():
-        _lg.set_level(logging.CRITICAL)
+bootstrap_openjiuwen_logging()
+
+# --- Now safe to import remaining jiuwenswarm modules ---
+from jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect import AcpGatewayBridge
+from jiuwenswarm.gateway.routing.agent_request_timeout import coerce_client_timeout_ms
+from jiuwenswarm.common.security.ws_origin import get_header_value
+from jiuwenswarm.gateway.routing.route_binding import GatewayRouteBinding
+from jiuwenswarm.common.debug_dump import install_async_dump_handler
+from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+from jiuwenswarm.common.schema.message import ReqMethod, Message, Mode
+from jiuwenswarm.common.local_env_config import decrypt
 
 load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
 reset_free_search_runtime_flags()
