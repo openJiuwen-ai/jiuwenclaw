@@ -1215,9 +1215,19 @@ class JiuWenSwarm:
         inputs["enable_memory"] = enable_memory
 
         # 传递 extension_config（供 Rails 消费；仅企业版）
+        # 优先从 metadata 读取，fallback 到 params（Gateway WebSocket 请求中放在 params）
+        ext_config = None
         if os.getenv("AGENT_RUNTIME", "").strip():
             if request.metadata and "extension_config" in request.metadata:
-                inputs["extension_config"] = request.metadata["extension_config"]
+                ext_config = request.metadata["extension_config"]
+            elif isinstance(params, dict) and "extension_config" in params:
+                ext_config = params["extension_config"]
+            if ext_config is not None:
+                inputs["extension_config"] = ext_config
+                logger.info(
+                    "[JiuWenSwarm] extension_config added to inputs: %s",
+                    ext_config,
+                )
 
         # 传递 trusted_dirs 参数（用于 RuntimePromptRail 添加路径限制策略）
         if trusted_dirs:
@@ -1240,6 +1250,29 @@ class JiuWenSwarm:
                 "kind": "cron",
                 "context": {"extra": {"cron": cron}},
             }
+
+        # 将 extension_config 放入 run_context.extra 中，供 Rails 消费
+        # 注意：openjiuwen 框架从 inputs["run"]["context"] 解析 RunContext
+        # _normalize_inputs 会用 RunContext(**context_data) 构造，因此传 dict
+        # 放在 run / cron 处理之后，避免被覆盖；与 cron 合并到同一 extra
+        if ext_config is not None:
+            run_payload = inputs.get("run")
+            if not isinstance(run_payload, dict):
+                run_payload = {}
+                inputs["run"] = run_payload
+            context = run_payload.get("context")
+            if not isinstance(context, dict):
+                context = {}
+                run_payload["context"] = context
+            extra = context.get("extra")
+            if not isinstance(extra, dict):
+                extra = {}
+                context["extra"] = extra
+            extra["extension_config"] = ext_config
+            logger.info(
+                "[JiuWenSwarm] run_context added to inputs[run][context]: %s",
+                context,
+            )
 
         # Per-request workspace_dir scopes one prompt's cwd to the given
         # directory; threaded into inputs["cwd"] which downstream init_cwd
@@ -1266,6 +1299,11 @@ class JiuWenSwarm:
 
         # 返回原始 query（未经 build_user_prompt 包装）
         # Team 模式需要使用原始 query，而不是 JSON 包装后的 prompt
+        if os.getenv("AGENT_RUNTIME", "").strip():
+            logger.info(
+                "[JiuWenSwarm] _build_inputs returning inputs keys=%s",
+                list(inputs.keys()),
+            )
         return inputs, memory_mode, query
 
     def _make_retry_without_a2ui_call(
