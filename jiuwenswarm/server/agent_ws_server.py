@@ -3995,16 +3995,6 @@ class AgentWebSocketServer:
                     is_team_session = self._is_team_metadata_mode(metadata)
                     team_name = str(metadata.get("team_name") or "").strip()
                     channel_id = str(metadata.get("channel_id") or request.channel_id or "").strip() or None
-                    if not is_team_session:
-                        from jiuwenswarm.server.runtime.session.kv_cache_product_hooks import (
-                            evict_plan_session,
-                        )
-
-                        await evict_plan_session(
-                            session_id=target,
-                            agent_manager=self._agent_manager,
-                            channel_id=channel_id,
-                        )
                     try:
                         if is_team_session:
                             team_manager = get_team_manager(channel_id)
@@ -4013,6 +4003,27 @@ class AgentWebSocketServer:
                                 reason="session.delete: ",
                             )
                         else:
+                            # The foreground chat stream may already be complete
+                            # while session-owned background work (for example
+                            # online Skill evolution) is still winding down.
+                            # Release the runtime first and require the manager's
+                            # post-cleanup check to prove that no session-scoped
+                            # adapter remains.  Only then is it safe to evict KVC
+                            # and remove checkpoint/history state.
+                            await self._agent_manager.cleanup_session_runtime(
+                                channel_id=channel_id or "",
+                                session_id=target,
+                            )
+
+                            from jiuwenswarm.server.runtime.session.kv_cache_product_hooks import (
+                                evict_plan_session,
+                            )
+
+                            await evict_plan_session(
+                                session_id=target,
+                                agent_manager=self._agent_manager,
+                                channel_id=channel_id,
+                            )
                             await Runner.release(target)
                             deleted = True
                     except Exception as exc:
