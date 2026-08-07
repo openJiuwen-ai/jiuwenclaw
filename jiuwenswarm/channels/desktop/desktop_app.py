@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import argparse
 import base64
+import ctypes
 import http.client
+import json
 import logging
+import mimetypes
 import os
 import shlex
 import shutil
@@ -14,8 +17,10 @@ import sys
 import tempfile
 import threading
 import time
+from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from logging.handlers import RotatingFileHandler
 
@@ -67,6 +72,117 @@ DATA_URL_EXPORT_SPECS = {
     ),
 }
 DesktopSaveResult = dict[str, bool]
+IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif", ".jfif"})
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
+# Keep in sync with frontend/document_attachments forbidden list.
+FORBIDDEN_DOCUMENT_EXTENSIONS = frozenset(
+    {
+        ".exe",
+        ".dll",
+        ".msi",
+        ".scr",
+        ".bat",
+        ".cmd",
+        ".ps1",
+        ".vbs",
+        ".wsf",
+        ".hta",
+        ".jar",
+        ".lnk",
+        ".bin",
+        ".so",
+        ".dylib",
+        ".app",
+        ".dmg",
+        ".pkg",
+        ".command",
+        ".scpt",
+        ".scptd",
+        ".workflow",
+        ".xpc",
+        ".bundle",
+        ".framework",
+        ".kext",
+        ".prefpane",
+        ".saver",
+        ".component",
+    }
+)
+# Dialog allow-list (UI filter only). Keep in sync with InputArea ATTACHMENT_ACCEPT.
+# Intentionally omits FORBIDDEN_DOCUMENT_EXTENSIONS and does NOT include *.* so
+# Windows/macOS pickers hide blacklist types the same way the browser accept= does.
+ATTACHMENT_DIALOG_EXTENSIONS: tuple[str, ...] = (
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".webp",
+    ".gif",
+    ".bmp",
+    ".svg",
+    ".ico",
+    ".jfif",
+    ".pdf",
+    ".doc",
+    ".docx",
+    ".xls",
+    ".xlsx",
+    ".ppt",
+    ".pptx",
+    ".txt",
+    ".md",
+    ".markdown",
+    ".csv",
+    ".tsv",
+    ".rtf",
+    ".odt",
+    ".ods",
+    ".odp",
+    ".json",
+    ".xml",
+    ".yaml",
+    ".yml",
+    ".html",
+    ".htm",
+    ".css",
+    ".js",
+    ".ts",
+    ".tsx",
+    ".jsx",
+    ".py",
+    ".java",
+    ".c",
+    ".cpp",
+    ".h",
+    ".go",
+    ".rs",
+    ".rb",
+    ".php",
+    ".sql",
+    ".ipynb",
+    ".toml",
+    ".ini",
+    ".log",
+    ".zip",
+    ".rar",
+    ".7z",
+    ".tar",
+    ".gz",
+    # audio/* / video/* from browser accept=
+    ".mp3",
+    ".wav",
+    ".flac",
+    ".aac",
+    ".ogg",
+    ".m4a",
+    ".wma",
+    ".mp4",
+    ".avi",
+    ".mov",
+    ".mkv",
+    ".webm",
+    ".wmv",
+    ".flv",
+)
 UPDATE_CLEANUP_PATTERNS = (
     "JiuwenSwarm-setup-*.exe",
     "JiuwenSwarm-*.dmg",
@@ -113,6 +229,16 @@ def _setup_logger() -> logging.Logger:
 
 
 logger = _setup_logger()
+
+
+def attachment_open_file_types() -> tuple[str, ...]:
+    """pywebview OPEN dialog filters that hide blacklist extensions.
+
+    Format must be ``Description (*.ext1;*.ext2)``. Do not append
+    ``All files (*.*)`` — that would re-expose ``.exe`` etc.
+    """
+    patterns = ";".join(f"*{ext}" for ext in ATTACHMENT_DIALOG_EXTENSIONS)
+    return (f"Allowed files ({patterns})",)
 
 
 def _format_ports_for_log(ports: dict[str, int]) -> str:
@@ -438,6 +564,105 @@ class _WindowApi:
         """打开系统目录选择器，返回用户选择的项目目录绝对路径。"""
         return self._runtime.select_project_directory()
 
+    def select_local_files(
+        self,
+        allow_multiple: bool = True,
+        initial_dir: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """打开系统文件选择器，返回本地绝对路径及附件元数据。
+
+        WebView2 / pywebview 的 ``<input type="file">`` 不会暴露 Electron 式
+        ``File.path``，文档上传必须走原生对话框拿绝对路径。
+        默认打开上次成功选择文件所在目录（无则用户主目录）。
+        """
+        return self._runtime.select_local_files(
+            allow_multiple=bool(allow_multiple),
+            initial_dir=initial_dir,
+        )
+
+    def describe_local_files(self, paths: list[str] | None = None) -> list[dict[str, Any]]:
+        """根据本机绝对路径返回与 select_local_files 同形的附件元数据。"""
+        return self._runtime.describe_local_files(paths or [])
+
+    def get_clipboard_files(self) -> list[dict[str, Any]]:
+        """读取系统剪贴板中的文件路径并描述为附件元数据。"""
+        return self._runtime.get_clipboard_files()
+
+
+def _clipboard_file_paths_windows() -> list[str]:
+    """Read CF_HDROP file paths from the Windows clipboard."""
+    # Win32 clipboard format CF_HDROP == 15
+    cf_hdrop = 15
+    user32 = ctypes.windll.user32
+    shell32 = ctypes.windll.shell32
+
+    user32.OpenClipboard.argtypes = [wintypes.HWND]
+    user32.OpenClipboard.restype = wintypes.BOOL
+    user32.CloseClipboard.argtypes = []
+    user32.CloseClipboard.restype = wintypes.BOOL
+    user32.IsClipboardFormatAvailable.argtypes = [wintypes.UINT]
+    user32.IsClipboardFormatAvailable.restype = wintypes.BOOL
+    user32.GetClipboardData.argtypes = [wintypes.UINT]
+    user32.GetClipboardData.restype = wintypes.HANDLE
+    shell32.DragQueryFileW.argtypes = [
+        wintypes.HANDLE,
+        wintypes.UINT,
+        wintypes.LPWSTR,
+        wintypes.UINT,
+    ]
+    shell32.DragQueryFileW.restype = wintypes.UINT
+
+    if not user32.OpenClipboard(None):
+        return []
+    try:
+        if not user32.IsClipboardFormatAvailable(cf_hdrop):
+            return []
+        h_drop = user32.GetClipboardData(cf_hdrop)
+        if not h_drop:
+            return []
+        count = shell32.DragQueryFileW(h_drop, 0xFFFFFFFF, None, 0)
+        paths: list[str] = []
+        for index in range(count):
+            length = shell32.DragQueryFileW(h_drop, index, None, 0)
+            if length <= 0:
+                continue
+            buffer = ctypes.create_unicode_buffer(length + 1)
+            shell32.DragQueryFileW(h_drop, index, buffer, length + 1)
+            value = buffer.value.strip()
+            if value:
+                paths.append(value)
+        return paths
+    finally:
+        user32.CloseClipboard()
+
+
+def _clipboard_file_paths_macos() -> list[str]:
+    """Read file paths from the macOS general pasteboard."""
+    try:
+        from AppKit import NSPasteboard  # type: ignore[import-not-found]
+    except Exception:  # noqa: BLE001
+        return []
+
+    try:
+        pasteboard = NSPasteboard.generalPasteboard()
+        items = pasteboard.propertyListForType_("NSFilenamesPboardType")
+        if not items:
+            return []
+        return [str(item).strip() for item in items if str(item).strip()]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _clipboard_file_paths() -> list[str]:
+    try:
+        if os.name == "nt":
+            return _clipboard_file_paths_windows()
+        if sys.platform == "darwin":
+            return _clipboard_file_paths_macos()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[desktop] clipboard file path read failed: %s", exc)
+    return []
+
 
 class DesktopRuntime:
     def __init__(
@@ -451,6 +676,7 @@ class DesktopRuntime:
         self.window = None
         self._lock = threading.Lock()
         self._is_shutting_down = False
+        self._desktop_dnd_bound = False
 
     @property
     def frontend_url(self) -> str:
@@ -614,6 +840,336 @@ class DesktopRuntime:
         except Exception:  # noqa: BLE001
             return str(Path(selected_path).expanduser())
 
+    def select_local_files(
+        self,
+        allow_multiple: bool = True,
+        initial_dir: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if self.window is None or not hasattr(self.window, "create_file_dialog"):
+            logger.error("[desktop] local file picker unavailable")
+            return []
+
+        from jiuwenswarm.channels.web.file_picker import (
+            remember_file_picker_dir,
+            resolve_file_picker_initial_dir,
+        )
+
+        start_dir = resolve_file_picker_initial_dir(initial_dir)
+        try:
+            selected_paths = self.window.create_file_dialog(
+                webview.FileDialog.OPEN,
+                directory=start_dir,
+                allow_multiple=bool(allow_multiple),
+                file_types=attachment_open_file_types(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[desktop] local file picker failed: %s", exc)
+            return []
+
+        if not selected_paths:
+            return []
+
+        if isinstance(selected_paths, (str, Path)):
+            path_list = [selected_paths]
+        else:
+            path_list = list(selected_paths)
+
+        results: list[dict[str, Any]] = []
+        for raw in path_list:
+            item = self._describe_local_file(raw)
+            if item is not None:
+                results.append(item)
+        if results:
+            remember_file_picker_dir(results[0].get("path") or path_list[0])
+        return results
+
+    @staticmethod
+    def _describe_local_file(raw_path: str | Path) -> dict[str, Any] | None:
+        try:
+            path = Path(raw_path).expanduser().resolve()
+        except Exception:  # noqa: BLE001
+            path = Path(raw_path).expanduser()
+
+        if not path.is_file():
+            logger.warning("[desktop] selected path is not a file: %s", path)
+            return None
+
+        filename = path.name
+        ext = path.suffix.lower()
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            logger.warning("[desktop] failed to stat selected file %s: %s", path, exc)
+            return None
+
+        mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        absolute = str(path)
+        if ext in IMAGE_EXTENSIONS:
+            if size > MAX_IMAGE_BYTES:
+                return {
+                    "path": absolute,
+                    "filename": filename,
+                    "size": size,
+                    "mime_type": mime_type,
+                    "kind": "image",
+                    "error": "image_too_large",
+                }
+            try:
+                payload = base64.b64encode(path.read_bytes()).decode("ascii")
+            except OSError as exc:
+                logger.warning("[desktop] failed to read image %s: %s", path, exc)
+                return {
+                    "path": absolute,
+                    "filename": filename,
+                    "size": size,
+                    "mime_type": mime_type,
+                    "kind": "image",
+                    "error": "read_failed",
+                }
+            return {
+                "path": absolute,
+                "filename": filename,
+                "size": size,
+                "mime_type": mime_type,
+                "kind": "image",
+                "base64": payload,
+            }
+
+        if ext in FORBIDDEN_DOCUMENT_EXTENSIONS:
+            return {
+                "path": absolute,
+                "filename": filename,
+                "size": size,
+                "mime_type": mime_type,
+                "kind": "document",
+                "error": "forbidden",
+            }
+
+        return {
+            "path": absolute,
+            "filename": filename,
+            "size": size,
+            "mime_type": mime_type,
+            "kind": "document",
+        }
+
+    def describe_local_files(self, paths: list[str] | Any) -> list[dict[str, Any]]:
+        if isinstance(paths, (str, Path)):
+            path_list = [paths]
+        elif paths:
+            path_list = list(paths)
+        else:
+            return []
+
+        results: list[dict[str, Any]] = []
+        for raw in path_list:
+            if raw is None:
+                continue
+            item = self._describe_local_file(str(raw))
+            if item is not None:
+                results.append(item)
+        return results
+
+    def get_clipboard_files(self) -> list[dict[str, Any]]:
+        return self.describe_local_files(_clipboard_file_paths())
+
+    def _evaluate_js(self, script: str) -> None:
+        if self.window is None:
+            return
+        try:
+            self.window.evaluate_js(script)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[desktop] evaluate_js failed: %s", exc)
+
+    def _run_js(self, script: str) -> Any:
+        """Run JS without pywebview's eval()/escape_string wrapping."""
+        if self.window is None:
+            return None
+        try:
+            run_js = getattr(self.window, "run_js", None)
+            if callable(run_js):
+                return run_js(script)
+            return self.window.evaluate_js(script)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[desktop] run_js failed: %s", exc)
+            return None
+
+    def _mark_desktop_shell(self) -> None:
+        """Mark desktop shell and force the page to accept OS file drags.
+
+        React may set ``dropEffect='none'`` during bubble; a window-level bubble
+        listener runs afterwards and restores ``copy`` so the forbidden cursor
+        does not appear inside the desktop webview. OS file drags into WebView2
+        require ``copy`` — ``move``/``none`` are rejected and show the forbidden
+        cursor.
+        """
+        self._run_js(
+            """
+(function () {
+  window.__JIUWEN_DESKTOP__ = true;
+  window.__JIUWEN_DROP_QUEUE__ = window.__JIUWEN_DROP_QUEUE__ || [];
+  // Durable stub: never leave Python without a callable ingest hook.
+  if (typeof window.__JIUWEN_INGEST_LOCAL_FILES__ !== 'function') {
+    window.__JIUWEN_INGEST_LOCAL_FILES__ = function (detail) {
+      try { window.__JIUWEN_DROP_QUEUE__.push(detail); } catch (err) {}
+      window.dispatchEvent(new CustomEvent('jiuwen-desktop-local-files', { detail: detail }));
+    };
+  }
+  window.dispatchEvent(new CustomEvent('jiuwen-desktop-ready'));
+  if (window.__JIUWEN_DESKTOP_DND__) return;
+  window.__JIUWEN_DESKTOP_DND__ = true;
+  function hasFiles(dt) {
+    if (!dt || !dt.types) return false;
+    try {
+      return Array.from(dt.types).indexOf('Files') !== -1;
+    } catch (err) {
+      return false;
+    }
+  }
+  function accept(e) {
+    if (!hasFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    try { e.dataTransfer.dropEffect = 'copy'; } catch (err) {}
+    window.dispatchEvent(new CustomEvent('jiuwen-desktop-file-drag', {detail:{active:true}}));
+  }
+  function endDrag() {
+    window.dispatchEvent(new CustomEvent('jiuwen-desktop-file-drag', {detail:{active:false}}));
+  }
+  // Capture: ensure preventDefault early. Bubble on window: win over React dropEffect=none.
+  window.addEventListener('dragenter', accept, true);
+  window.addEventListener('dragover', accept, true);
+  window.addEventListener('dragenter', accept, false);
+  window.addEventListener('dragover', accept, false);
+  window.addEventListener('drop', function (e) {
+    if (!hasFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    endDrag();
+  }, true);
+})();
+"""
+        )
+
+    def _dispatch_local_files_event(
+        self,
+        source: str,
+        files: list[dict[str, Any]],
+        *,
+        client_x: float | int | None = None,
+        client_y: float | int | None = None,
+    ) -> None:
+        if self.window is None or not files:
+            return
+        payload: dict[str, Any] = {
+            "source": source,
+            "files": files,
+            "trusted": True,
+            "dropId": f"{time.time_ns()}",
+        }
+        if isinstance(client_x, (int, float)):
+            payload["clientX"] = client_x
+        if isinstance(client_y, (int, float)):
+            payload["clientY"] = client_y
+        try:
+            detail = json.dumps(payload, ensure_ascii=False)
+            # Single JS round-trip per drop: end the drag overlay, then hand the
+            # files to the durable ingest bridge (frontend or the injected stub).
+            # Do not issue multiple concurrent evaluate_js calls here — racing JS
+            # calls from pywebview's DOMEventHandler thread can deadlock the
+            # WebView2 UI thread.
+            script = f"""
+(function () {{
+  var detail = {detail};
+  window.dispatchEvent(new CustomEvent('jiuwen-desktop-file-drag', {{ detail: {{ active: false }} }}));
+  if (typeof window.__JIUWEN_INGEST_LOCAL_FILES__ === 'function') {{
+    window.__JIUWEN_INGEST_LOCAL_FILES__(detail);
+  }} else {{
+    window.dispatchEvent(new CustomEvent('jiuwen-desktop-local-files', {{ detail: detail }}));
+  }}
+}})();
+"""
+            self._run_js(script)
+            logger.info(
+                "[desktop] dispatched %d local file(s) from %s", len(files), source
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[desktop] failed to dispatch local files event: %s", exc)
+
+    @staticmethod
+    def _on_desktop_drag(_event: Any) -> None:
+        # Overlay / cursor feedback is driven by the injected JS accept handlers.
+        return None
+
+    def _on_desktop_drop(self, event: Any) -> None:
+        # No standalone run_js here: the drag-end overlay event is folded into the
+        # dispatch script, and the page-side drop listener already ends the
+        # overlay. Extra concurrent JS calls at drop time can deadlock the UI thread.
+        try:
+            payload = event or {}
+            data_transfer = payload.get("dataTransfer") or {}
+            raw_files = data_transfer.get("files") or []
+        except Exception:  # noqa: BLE001
+            return
+        if not raw_files:
+            logger.info("[desktop] drop event without files")
+            return
+
+        paths: list[str] = []
+        for item in raw_files:
+            if not isinstance(item, dict):
+                continue
+            path = item.get("pywebviewFullPath")
+            if isinstance(path, str) and path.strip():
+                paths.append(path.strip())
+        if not paths:
+            logger.warning("[desktop] drop files missing pywebviewFullPath: %s", raw_files)
+            return
+        described = self.describe_local_files(paths)
+        if described:
+            logger.info("[desktop] dispatching %d dropped file(s)", len(described))
+            self._dispatch_local_files_event(
+                "drop",
+                described,
+                client_x=payload.get("clientX"),
+                client_y=payload.get("clientY"),
+            )
+
+    def _bind_desktop_file_dnd(self) -> None:
+        if self.window is None or self._desktop_dnd_bound:
+            return
+        try:
+            from webview.dom import DOMEventHandler
+
+            document = self.window.dom.document
+            # preventDefault so WebView2 accepts the drop and exposes full paths.
+            # Do not stopPropagation on dragenter/dragover — React needs those for
+            # the chat drop overlay; the injected window listeners fix the cursor.
+            document.events.dragenter += DOMEventHandler(self._on_desktop_drag, True, False)
+            document.events.dragover += DOMEventHandler(
+                self._on_desktop_drag, True, False, debounce=500
+            )
+            document.events.drop += DOMEventHandler(self._on_desktop_drop, True, True)
+            self._desktop_dnd_bound = True
+            logger.info("[desktop] file drag-and-drop handlers bound")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[desktop] failed to bind file drag-and-drop handlers: %s", exc)
+
+    def _schedule_desktop_file_dnd_bind(self) -> None:
+        self._mark_desktop_shell()
+        self._desktop_dnd_bound = False
+        self._bind_desktop_file_dnd()
+        if self._desktop_dnd_bound:
+            return
+
+        def _retry() -> None:
+            try:
+                self._mark_desktop_shell()
+                self._bind_desktop_file_dnd()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[desktop] retry bind file drag-and-drop failed: %s", exc)
+
+        threading.Timer(1.0, _retry).start()
+        threading.Timer(3.0, _retry).start()
+
     def save_data_url(self, data_url: str, filename: str) -> DesktopSaveResult:
         """选择保存位置并保存受支持的 base64 data URL。"""
         try:
@@ -716,7 +1272,6 @@ class DesktopRuntime:
         """下载完成后提醒用户并打开文件所在文件夹。"""
         try:
             if os.name == "nt":
-                import ctypes
                 # Windows: 弹窗询问是否打开文件夹
                 result = ctypes.windll.user32.MessageBoxW(
                     0,
@@ -1210,7 +1765,13 @@ setInterval(showTip,3500);
             self.window.events.loaded += self._on_loaded
 
     def _on_loaded(self) -> None:
-        pass
+        # Frontend navigation completed; bind OS file drop path bridge for the new document.
+        # Note: never touch the WebView2 controller (window.native.*) from this
+        # thread — pywebview fires `loaded` on a background thread and WebView2
+        # controller members are UI-thread-only. A cross-apartment COM call from
+        # here intermittently deadlocks the UI thread (window "not responding").
+        # AllowExternalDrop defaults to true, so no controller access is needed.
+        self._schedule_desktop_file_dnd_bind()
 
     def _on_closed(self) -> None:
         self.shutdown()

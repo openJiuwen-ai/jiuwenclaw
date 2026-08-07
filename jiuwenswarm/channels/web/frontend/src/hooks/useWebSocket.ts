@@ -1240,16 +1240,16 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         {
           session_id: sessionId,
           content,
-          parse: true,
           documents: mediaItems.map((item) => ({
             filename: item.filename,
             mime_type: getMediaMimeType(item),
-            base64_data: item.base64_data || item.base64Data,
+            path: item.path,
+            original_path: item.path,
+            size_bytes: item.size_bytes ?? item.sizeBytes,
           })),
         },
-        // Large documents (100+ page PDFs) take 10s+ to parse server-side; with
-        // transfer overhead this exceeds the 15s default timeout
-        { timeoutMs: 120_000 },
+        // Path validation only — no base64 transfer / parse
+        { timeoutMs: 30_000 },
       );
     },
     [request],
@@ -1376,7 +1376,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const sendMessage = useCallback(
     async (content: string, sessionId: string, mediaItems: MediaItem[] = []): Promise<boolean> => {
       const hasMedia = mediaItems.length > 0;
-      if (!content.trim() && !hasMedia) return false;
+      // User-visible text is required; attachment-only / 【上传文档】-only payloads
+      // must not send (matches InputArea canSubmit / handleSubmit).
+      if (!stripUploadDocumentBlocks(content).trim()) return false;
 
       const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
       const unsupportedEvolutionMode = unsupportedEvolutionModeMessage(content, currentMode ?? 'agent');
