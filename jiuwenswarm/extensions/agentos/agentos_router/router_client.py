@@ -65,6 +65,13 @@ _WORKSPACE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _WS_CONNECT_READY_TIMEOUT_SECONDS = 60.0
 _WS_CONNECT_RETRY_INTERVAL_SECONDS = 1.0
 _WS_CONNECT_RETRYABLE_HTTP_STATUS = frozenset({502, 503, 504})
+_WS_CONNECT_RETRYABLE_TEXT_TOKENS = (
+    "http 502",
+    "http 503",
+    "http 504",
+    "connection refused",
+    "temporarily unavailable",
+)
 
 
 def _is_ws_connect_retryable(exc: BaseException) -> bool:
@@ -75,16 +82,10 @@ def _is_ws_connect_retryable(exc: BaseException) -> bool:
     if isinstance(exc, (ConnectionError, TimeoutError, asyncio.TimeoutError, OSError)):
         return True
     text = str(exc).lower()
-    return any(
-        token in text
-        for token in (
-            "http 502",
-            "http 503",
-            "http 504",
-            "connection refused",
-            "temporarily unavailable",
-        )
-    )
+    for token in _WS_CONNECT_RETRYABLE_TEXT_TOKENS:
+        if token in text:
+            return True
+    return False
 
 
 class UnsupportedAgentType(ValueError):
