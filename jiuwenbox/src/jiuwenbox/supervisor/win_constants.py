@@ -5,8 +5,6 @@
 结构体字段常量. 模块顶层不加载任何 win32 库 (``ctypes``/``pywin32``),
 因此在 Linux 下可正常 import, 也可被单元测试直接断言常量值.
 
-运行时的 win32 API 调用统一延迟到 ``win_*.py`` 各功能模块内部, 并以
-``sys.platform == "win32"`` 守卫, 详见 ``docs/window沙箱.md`` 第6章.
 """
 
 from __future__ import annotations
@@ -62,21 +60,11 @@ TOKEN_SANDBOX_INERT = 29
 #   LUA_TOKEN            = 0x4 : 创建 UAC 筛选 token (低完整性), 非本项目所需.
 #   WRITE_RESTRICTED     = 0x8 : 只对写操作做 Restricted SID 双重 ACL 检查.
 #
-# 注意: 旧版误把 SANDBOX_INERT 标成 0x4 (实为 LUA_TOKEN 的值), RESTRICTED_TOKEN_FLAGS
-# 实际组合出 DISABLE_MAX_PRIVILEGE | LUA_TOKEN | WRITE_RESTRICTED, 与文档 6.5
-# 要求的 SANDBOX_INERT 语义不符. 已据 winnt.h 改回 0x2.
 # ---------------------------------------------------------------------------
 DISABLE_MAX_PRIVILEGE = 0x1
 SANDBOX_INERT = 0x2
 WRITE_RESTRICTED = 0x8
 
-# CreateRestrictedToken 组合: 文档 6.5 要求的受限 SID 列表 =
-# [Everyone, 当前 LogonSession, JHXSandboxWrite].
-# 受限 token 实跑验证失败 (2026-08-02): WRITE_RESTRICTED 下 bash/python 启动即
-# 0xC0000142 (STATUS_DLL_INIT_FAILED), 故 exec 不用受限 token (改用 runner 未受限
-# primary token). _create_restricted_token 仍被 runner_main 构造但 exec 不消费
-# (dead code). WRITE_RESTRICTED 暂不 OR 进 flags, 待受限 token 0xC0000142 根因
-# (desktop/全局对象机制) 解决后再恢复.
 RESTRICTED_TOKEN_FLAGS = DISABLE_MAX_PRIVILEGE | SANDBOX_INERT  # 去掉 WRITE_RESTRICTED(0x8)
 
 # ---------------------------------------------------------------------------
@@ -124,12 +112,6 @@ SecurityImpersonation = 2  # noqa: N806 - Win32 SDK 常量
 #   UF_PASSWD_CANT_CHANGE = 0x0040   (用户不能改密码)
 #   UF_NORMAL_ACCOUNT     = 0x0200   (普通账户类型)
 #   UF_DONT_EXPIRE_PASSWD = 0x10000  (密码不过期)
-#
-# 旧版误把 UF_DONT_EXPIRE_PASSWD 标成 0x0200 (实为 UF_NORMAL_ACCOUNT 的值),
-# 并声称"二者历史上同占 0x0200 但语义域不同故不冲突" — 这与 lmaccess.h 实际定义
-# 不符: UF_DONT_EXPIRE_PASSWD 是 0x10000, 与 UF_NORMAL_ACCOUNT(0x0200) 位宽
-# 完全不重叠. 旧值导致 SANDBOX_USER_FLAGS 漏设"密码不过期"位, 沙箱用户密码
-# 会按本地账户策略过期. 已据 lmaccess.h 改回 0x10000.
 # ---------------------------------------------------------------------------
 UF_SCRIPT = 0x0001
 UF_ACCOUNTDISABLE = 0x0002
@@ -138,10 +120,7 @@ UF_PASSWD_CANT_CHANGE = 0x0040
 UF_DONT_EXPIRE_PASSWD = 0x10000
 UF_NORMAL_ACCOUNT = 0x0200
 
-# 沙箱用户最终 flag: 脚本位 + 不改密码 + 不过期 + 普通账户. 不设 DISABLE.
-# 显式 OR UF_NORMAL_ACCOUNT: 旧值 UF_DONT_EXPIRE_PASSWD=0x0200 与 UF_NORMAL_ACCOUNT
-# 同值, 隐式带上了普通账户位; 改回 0x10000 后二者不再重叠, 必须显式列出
-# UF_NORMAL_ACCOUNT, 否则账户缺普通账户类型标记.
+# 沙箱用户最终 flag: 脚本位 + 不改密码 + 不过期 + 普通账户.
 SANDBOX_USER_FLAGS = (
     UF_SCRIPT | UF_PASSWD_CANT_CHANGE | UF_DONT_EXPIRE_PASSWD | UF_NORMAL_ACCOUNT
 )
@@ -195,6 +174,9 @@ FILE_GENERIC_WRITE = 0x00120116
 FILE_GENERIC_EXECUTE = 0x001200A0
 FILE_DELETE_ACCESS = 0x00010000  # DELETE 位
 FILE_READ_ATTRIBUTES = 0x00000080
+# 标准/特异权限位 (winnt.h): 改 DACL 需 READ_CONTROL 读 SD + WRITE_DAC 写 DACL.
+READ_CONTROL = 0x00020000
+WRITE_DAC = 0x00040000
 
 # allow_write 路径授予的写权限组合.
 ALLOW_WRITE_RIGHTS = FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | FILE_DELETE_ACCESS
@@ -209,11 +191,7 @@ INHERITED_ACE = 0x10
 # ACE 继承标志 (AceFlags), 用于容器/子对象继承.
 CONTAINER_INHERIT_ACE = 0x2
 OBJECT_INHERIT_ACE = 0x1
-# SUB_CONTAINERS_AND_OBJECTS_INHERIT: 容器+对象都继承. 注意: 这是 CONTAINER_INHERIT
-# | OBJECT_INHERIT 的组合常量 (=0x3), 不是单独的 0x7. 旧版误写成 0x7 (含
-# NO_PROPAGATE_INHERIT_ACE=0x4), 导致 recursive grant 的 ACE 只继承到直接子项、
-# 不向下传播到孙目录 (实测: workspace\.tmp\playwright-download-* 子目录没继承
-# 合成 SID/jbx-sandbox ACE → child 在子目录里写文件 EPERM).
+# SUB_CONTAINERS_AND_OBJECTS_INHERIT: 容器+对象都继承.
 SUB_CONTAINERS_AND_OBJECTS_INHERIT = CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE
 INHERIT_ONLY_ACE = 0x8
 NO_PROPAGATE_INHERIT_ACE = 0x4
@@ -236,7 +214,7 @@ SE_FILE_OBJECT = 1
 
 # ---------------------------------------------------------------------------
 # WFP (Windows Filtering Platform) 常量.
-# 详见 fwpmtypes.h / fwpsu.h. 文档 6.4.2 要求安装 Block + Permit filter.
+# 详见 fwpmtypes.h / fwpsu.h.
 # ---------------------------------------------------------------------------
 
 # RPC_C_AUTHN_WINNT 鉴别级别 (FwpmEngineOpen).
@@ -250,8 +228,7 @@ FWP_ACTION_PERMIT = 0x00000002 | FWP_ACTION_FLAG_TERMINATING
 FWP_ACTION_CALLOUT_TERMINATING = 0x00004000 | FWP_ACTION_FLAG_TERMINATING
 
 # FWP_ACTRL_* (条件匹配权限位). ALE_USER_ID 条件评估 SD 时, 检查
-# FWP_ACTRL_MATCH_FILTER 访问权是否被 DACL 授予 (SDK: Permitting and
-# Blocking Applications and Users).
+# FWP_ACTRL_MATCH_FILTER 访问权是否被 DACL 授予 (SDK: Permitting and Blocking Applications and Users).
 FWP_ACTRL_MATCH_FILTER = 0x00000001
 
 # Filter Weight (FWP_VALUE0.uint8 范围 0..15, 文档要求 Permit > Block).
@@ -259,11 +236,6 @@ FWP_WEIGHT_BLOCK = 0x0  # Block filter 权重最低
 FWP_WEIGHT_PERMIT = 0xF  # Permit filter 权重最高, 覆盖 Block
 
 # ALE (Application Layer Enforcement) Layer GUIDs (网络出站拦截层).
-# 取值对齐 fwpmu.h DEFINE_GUID (真实 SDK 值, 非 DCE UUID 字面量需注意
-# Windows GUID 内存布局 little-endian, 见 win_wfp._guid_from_str).
-# FWPM_LAYER_ALE_AUTH_CONNECT_V4 / V6 - 出站连接授权层.
-# S12 旧 bug: V4 的 GUID 第 4 段 904F 误写成 900F, BFE 返回
-# FWP_E_LAYER_NOT_FOUND (0x80320004). 对照 fwpmu.h DEFINE_GUID 修正.
 FWPM_LAYER_ALE_AUTH_CONNECT_V4 = "C38D57D1-05A7-4C33-904F-7FBCEEE60E82"
 FWPM_LAYER_ALE_AUTH_CONNECT_V6 = "4A72393B-319F-44BC-84C3-BA54DCB3B6B4"
 
@@ -286,8 +258,7 @@ FWP_MATCH_EQUAL_CASE_INSENSITIVE = 9
 FWP_MATCH_NOT_EQUAL = 10
 
 # FWP_DATA_TYPE (FWP_VALUE0.Type / FWP_CONDITION_VALUE0.Type).
-# 取值严格对齐 fwptypes.h FWP_DATA_TYPE 枚举 (注意: 旧版常量值与 SDK 错位,
-# FWP_SID 应为 13 而非 12; FWP_BYTE_BLOB_TYPE 应为 12 而非 16).
+# 取值严格对齐 fwptypes.h FWP_DATA_TYPE 枚举
 FWP_EMPTY = 0
 FWP_UINT8 = 1
 FWP_UINT16 = 2
@@ -319,7 +290,6 @@ FWP_V6_ADDR_AND_MASK_TYPE = FWP_V6_ADDR_AND_MASK
 # FWPM_SESSION0 flags (FWPM_SESSION_FLAG_*).
 FWPM_SESSION_FLAG_NONE = 0x0
 FWPM_SESSION_FLAG_DYNAMIC = 0x00000001  # session 内添加的对象随 session 结束自动删除
-# 别名: 旧代码用 FWP_SESSION_FLAG_NONE 命名 (SDK 实际为 FWPM_SESSION_FLAG_*).
 FWP_SESSION_FLAG_NONE = FWPM_SESSION_FLAG_NONE
 
 # FWPM_SUBLAYER0 flags.
@@ -331,7 +301,7 @@ FWPM_FILTER_FLAG_PERSISTENT = 0x00000001
 
 # Sublayer key (固定合法 GUID, 幂等安装/卸载时用同一 key). 必须是合法
 # UUID 字符串, win_wfp._guid_from_str 用 uuid.UUID() 解析, 非法字符串会
-# 直接 ValueError 导致 WFP 安装从未执行 (review CRITICAL #2).
+# 直接 ValueError 导致 WFP 安装从未执行
 JBX_SUBLAYER_KEY = "8F2A1B3C-4D5E-6F70-8190-123456789ABC"
 
 # Filter key (固定合法 GUID, 幂等安装/卸载时按 key 删除).
@@ -346,8 +316,7 @@ DEFAULT_PROXY_PORT_RANGE_END = 60089
 
 # Permit filter 放行的 loopback 地址 (IPv4 整数表示, 127.0.0.1).
 # WFP FWP_V4_ADDR_AND_MASK.addr 要求 host byte order (NOT network order).
-# host order: 127.0.0.1 -> 0x7F000001; 旧值 0x0100007F 是网络序, 会让
-# Permit filter 匹配 1.0.0.127 而非 127.0.0.1 (review CRITICAL #4).
+# host order: 127.0.0.1 -> 0x7F000001;
 LOOPBACK_IPV4_INT = 0x7F000001  # 127.0.0.1 in host byte order
 
 # ---------------------------------------------------------------------------

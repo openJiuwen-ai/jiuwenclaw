@@ -1,5 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Windows Job Object 资源限制 (等价 Linux cgroup).
+"""Windows Job Object 资源限制 (等价 Linux cgroup). 暂未支持
 
 对齐 docs/window沙箱.md 6.8:
   - 内存上限   -> JobObjectExtendedLimitInformation.ProcessMemoryLimit
@@ -106,23 +106,15 @@ def get_kernel32() -> ctypes.WinDLL:
             wintypes.DWORD, wintypes.BOOL, wintypes.DWORD,
         ]
         _kernel32.OpenProcess.restype = wintypes.HANDLE
-        # ResumeThread: 恢复 CREATE_SUSPENDED 挂起的 runner 主线程 (设计 6.8
-        # SUSPEND→Assign→Resume 的 Resume 步, 避免 Job 逃逸窗口).
         _kernel32.ResumeThread.argtypes = [wintypes.HANDLE]
         _kernel32.ResumeThread.restype = wintypes.DWORD
     return _kernel32
 
 
 def resume_process(thread_handle: int) -> None:
-    """ResumeThread 恢复 CREATE_SUSPENDED 挂起的进程主线程.
-
-    配合 two_hop_spawn(CREATE_SUSPENDED): runner 挂起 → assign_process →
-    resume_process, 确保进程在加入 Job 后才开始执行 (review MAJOR #1).
-    """
+    """ResumeThread 恢复 CREATE_SUSPENDED 挂起的进程主线程."""
     _require_windows()
     kernel32 = get_kernel32()
-    # ResumeThread 返回之前的 suspend count (非 0 表示曾挂起); 0xFFFFFFFF 表示
-    # 失败. 成功时 count 通常为 1 (挂起一次).
     prev = kernel32.ResumeThread(wintypes.HANDLE(thread_handle))
     if prev == 0xFFFFFFFF:
         raise ctypes.WinError(ctypes.get_last_error())
@@ -145,9 +137,6 @@ def create_job(
         raise ctypes.WinError(ctypes.get_last_error())
 
     # --- 1. 扩展限制: 内存上限 + KILL_ON_JOB_CLOSE ---
-    # memory_max 对齐 Linux cgroup memory.max (整个 job 的内存上限),
-    # 用 JOB_OBJECT_LIMIT_JOB_MEMORY + JobMemoryLimit; 同时设
-    # ProcessMemoryLimit 作为 per-process 上限双保险 (JOB_OBJECT_LIMIT_PROCESS_MEMORY).
     ext = JobObjExtenLimit()
     ext.BasicLimitInformation.LimitFlags = const.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
     if memory_max is not None and memory_max > 0:
@@ -215,7 +204,6 @@ def assign_process_by_pid(job_handle: int, pid: int) -> None:
     """按 pid 打开进程并加入 Job (用于无法直接拿到 handle 的子进程)."""
     _require_windows()
     kernel32 = get_kernel32()
-    # process_set_quota (0x0100) | process_terminate (0x0001) | PROCESS_QUERY_LIMITED_INFORMATION (0x1000)
     process_set_quota = 0x0100  # noqa: N806 - Win32 SDK 常量风格
     process_terminate = 0x0001  # noqa: N806 - Win32 SDK 常量风格
     proc_handle = kernel32.OpenProcess(
@@ -240,15 +228,7 @@ def close_job(job_handle: int) -> None:
 
 
 def create_exec_job() -> int:
-    """为单个 exec 创建专用 ephemeral Job (review #3).
-
-    exec 超时只 TerminateProcess 杀 child 不杀孙进程, 孙进程继续占用端口/资源
-    (node server / playwright). 用 ephemeral Job + KILL_ON_JOB_CLOSE: child
-    加入此 Job, 超时直接 close_job 触发内核一次性杀整个进程树 (child + 所有
-    孙进程). 不加内存/CPU 限制, 仅用于超时强杀整树.
-
-    Windows 7+ 支持嵌套 Job (child 同时属于全局 Job + 本 ephemeral Job 不冲突).
-    """
+    """为单个 exec 创建专用 ephemeral Job (review #3)."""
     _require_windows()
     kernel32 = get_kernel32()
     job_handle = kernel32.CreateJobObjectW(None, None)

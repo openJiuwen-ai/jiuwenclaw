@@ -2647,11 +2647,7 @@ class JiuWenClawDeepAdapter:
             return None
 
     def _resolve_project_dir_for_sandbox(self) -> str | None:
-        """Best-effort lookup of the user project directory for sandbox builds.
-
-        优先 ``self._instance_overrides['project_dir']``, 否则回落到
-        ``self._workspace_dir``。返回 ``None`` 让 sysop_builder 走自己的 fallback。
-        """
+        """Best-effort lookup of the user project directory for sandbox builds."""
         overrides = getattr(self, "_instance_overrides", None)
         if isinstance(overrides, dict):
             value = overrides.get("project_dir")
@@ -2663,14 +2659,7 @@ class JiuWenClawDeepAdapter:
         return None
 
     def _create_sys_operation(self) -> SysOperation | None:
-        """Create a sys operation with workspace as working directory.
-
-        是否走沙箱由 ``config.yaml::sandbox.enabled`` 决定（同时要求
-        ``sandbox.url`` / ``sandbox.type`` 已配置）。
-        isolation key 按 project_dir 摘要算（同 project 共享），跨 instance
-        复用守卫：add 之前/失败后都按 isolation_key 查已注册的 sysop，命中即复用，
-        避免撞 agent-core "isolation key already registered" 单例约束。
-        """
+        """Create a sys operation with workspace as working directory."""
         try:
             from jiuwenclaw.utils import get_multi_tenant_user_workspace_dir
 
@@ -2711,15 +2700,7 @@ class JiuWenClawDeepAdapter:
                 )
                 sysop_card = create_local_sysop_card(work_dir=work_dir)
             if sysop_card is None:
-                # 沙箱 sysop_card 创建失败 (create_sandbox_sysop_card 内部异常:
-                # 文件白名单路径不存在 / policy 校验失败 / Linux bind_mount 失败 等)
-                # 不阻塞任务 —— 回退 local 模式继续执行, 让用户任务跑完而非直接报错.
-                # 只有"进入沙箱执行后"失败 (sysop 已建好, 执行命令时失败) 才抛错,
-                # 那是执行阶段, 不在此处.
                 if sandbox_enabled and sandbox_url and sandbox_type:
-                    # P1-15: fallback_on_failure 开关控制是否降级到 local (在宿主机
-                    # 直接跑, 隔离失效). 默认 False = 不降级, 让任务失败而非静默绕过隔离.
-                    # 用户显式设 sandbox.fallback_on_failure=true 才允许降级 (兼容旧行为).
                     _allow_fallback = bool(runtime.get("fallback_on_failure"))
                     if _allow_fallback:
                         logger.warning(
@@ -2769,9 +2750,6 @@ class JiuWenClawDeepAdapter:
                         registered_sys_operation.id,
                     )
                     return registered_sys_operation
-                # 沙箱 sysop add 失败 (sandbox 进程创建失败 / provider 注册失败等):
-                # 不阻塞任务 —— 回退 local card 重试一次. local card 的 add 也失败
-                # 才真正 return None (留给调用方报错).
                 is_sandbox_card = (
                     sysop_card.mode == OperationMode.SANDBOX
                     and sandbox_enabled

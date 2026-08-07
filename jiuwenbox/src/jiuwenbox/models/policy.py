@@ -734,12 +734,7 @@ class TimeoutPolicy(BaseModel):
 
 
 class WindowsProxyPolicy(BaseModel):
-    """Windows 出站代理端口范围配置.
-
-    WFP Permit filter 仅放行指向 127.0.0.1:<port_range> 的流量, 沙箱所有
-    出网流量必须经过这个代理 (HTTP CONNECT + SOCKS5). 详见 docs/window沙箱.md
-    6.6.
-    """
+    """Windows 出站代理端口范围配置."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -766,13 +761,7 @@ class WindowsProxyPolicy(BaseModel):
 
 
 class WindowsToolPaths(BaseModel):
-    """Windows 沙箱非默认安装路径的工具目录/可执行.
-
-    当 Git/Node/Python 不在默认的 %ProgramFiles% / %SystemRoot% 下时, 受限
-    token 读不了这些路径. _create_windows 读到此配置后, 把存在的目录加进
-    allow_read (补受限 token 读权限) 并拼进子进程 PATH (补可执行名解析).
-    全部留空则跳过, 依赖系统 PATH + 默认预装目录.
-    """
+    """Windows 沙箱非默认安装路径的工具目录/可执行."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -794,19 +783,7 @@ class WindowsToolPaths(BaseModel):
 
 
 class WindowsFilesystemPolicy(BaseModel):
-    """Windows 文件系统 ACL 配置.
-
-    语义对齐 docs/window沙箱.md 6.7:
-      - read_acl_preinstall: 一次性预装读 ACL 的路径 (安装阶段).
-      - allow_write: allow-only 模式下允许写入的路径 (合成 SID 授 Allow ACE).
-      - deny_write: 在 allow 覆盖范围内精细化封锁 (如 .git/.env).
-      - allow_read: allow 列表施加 Allow Read ACE (deny-then-allow 覆盖 deny).
-      - deny_read:  deny 列表施加 Deny Read ACE.
-      - tool_paths: 非默认安装路径的工具目录/可执行. 受限 token 默认读不了这些
-        路径 → CreateProcessAsUserW 返回 WinError 2/5. 在此配置后: ① 加进
-        read ACL 预装 (含 Execute, FILE_GENERIC_READ 已含) ② 拼进子进程 PATH.
-        留空则跳过, 依赖系统 PATH + 默认预装目录 (适合工具装在默认路径的场景).
-    """
+    """Windows 文件系统 ACL 配置."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -831,35 +808,19 @@ class WindowsFilesystemPolicy(BaseModel):
 
 
 class WindowsNetworkPolicy(BaseModel):
-    """Windows 网络隔离配置.
-
-    mode:
-      - wfp_loopback_proxy: WFP Block 所有出站 + Permit loopback:port_range,
-        沙箱出网必须经代理层做域名/IP 白名单.
-      - disabled: 不安装 WFP filter, 沙箱可直接访问外网 (第一阶段可降级).
-    egress/ingress 复用 Linux 的 NetworkRulePolicy, 由 win_proxy 在
-    应用层过滤.
-    """
+    """Windows 网络隔离配置."""
 
     model_config = ConfigDict(extra="forbid")
 
     mode: Literal["wfp_loopback_proxy", "disabled"] = "wfp_loopback_proxy"
     # 网络总开关 (officeAce sandbox.network.set). True = 拒绝所有出站访问
-    # (win_proxy EgressFilter 检测到即短路拒绝, 不清空 allow/blocked_domains,
-    # 用户配置原样保留, 关掉总开关即恢复). 默认 false.
     disable_all: bool = False
     egress: NetworkRulePolicy = Field(default_factory=NetworkRulePolicy)
     ingress: NetworkRulePolicy = Field(default_factory=NetworkRulePolicy)
 
 
 class WindowsResourcePolicy(BaseModel):
-    """Windows 资源限制 (Job Object).
-
-    语义对齐 Linux cgroup:
-      - memory_max -> JobObjectExtendedLimitInformation.ProcessMemoryLimit
-      - cpu_rate  -> JobObjectCpuRateControlInformation.CpuRate (百分比)
-      - max_processes -> JobObjectBasicLimitInformation.ActiveProcessLimit
-    """
+    """Windows 资源限制 (Job Object)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -906,11 +867,7 @@ class WindowsResourcePolicy(BaseModel):
 
 
 class WindowsPolicy(BaseModel):
-    """Windows 沙箱专用配置 (docs/window沙箱.md 6.10).
-
-    仅在 ``sys.platform == "win32"`` 时被读取; Linux 下存在但忽略.
-    缺省时各子段走默认值 (空), 不会触发任何 Windows 隔离逻辑.
-    """
+    """Windows 沙箱专用配置 """
 
     model_config = ConfigDict(extra="forbid")
 

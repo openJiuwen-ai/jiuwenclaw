@@ -87,12 +87,7 @@ _SYSTEM_PROMPT_USER_HISTORY_PATTERN = re.compile(r"(\[[^\]\n]*用户\]\s*)(.*?)(
 
 
 def _is_std_cpython(python_exe: str) -> bool:
-    """判断 python.exe 是否标准 CPython 安装 (非 venv trampoline/launcher).
-
-    jbx-sandbox 跑不了 uv trampoline/venv launcher (WinError 5), runner 必须用
-    标准 CPython. 判定: 同目录有 python3*.dll (CPython 根目录特征), 且不在
-    .../Scripts/ 子目录 (venv 的 python.exe 在 Scripts/ 下, 无 python3*.dll).
-    """
+    """判断 python.exe 是否标准 CPython 安装 (非 venv trampoline/launcher)."""
     p = Path(python_exe)
     try:
         if not p.is_file():
@@ -417,16 +412,7 @@ class AgentWebSocketServer:
     # 共用, 照搬 jiuwenswarm PR #4088), 本类直接调用, 不再内联。
 
     async def _bootstrap_internal_jiuwenbox(self) -> None:
-        """启动时按 ``config.yaml::sandbox`` 自动拉起 jiuwenbox 子进程。
-
-        触发条件: ``sandbox.startup_mode`` **显式**写为 ``internal``
-        (走 :func:`get_sandbox_startup_mode_explicit`, 字段缺失不拉, 避免没在用
-        沙箱的用户突然多出 jiuwenbox 进程)。不单独依赖 ``sandbox.enabled``:
-        只要 ``startup_mode=internal`` 就拉, 成功后落盘真实 url。
-
-        平台: 支持 Linux 与 Windows (Windows 走 ``_create_windows`` 分支); 其他平台跳过。
-        best-effort: 任何失败只 warning, 不让 agent-server 自身启动失败。
-        """
+        """启动时按 ``config.yaml::sandbox`` 自动拉起 jiuwenbox 子进程。"""
         try:
             if sys.platform not in ("linux", "win32"):
                 logger.info(
@@ -487,10 +473,6 @@ class AgentWebSocketServer:
                     effective_policy_file, policy_path,
                 )
                 return
-
-            # Windows: policy = 打包基底 (windows-policy.yaml) + workspace 副本 (windows-policy.runtime.yaml) 合并,
-            # 由 box-server PolicyReader.load_policy 做 (机制对齐 config.yaml template+override). 副本路径作
-            # JIUWENBOX_POLICY_PATH 注入 (基底由 box-server 自己解析). 副本不存在则建空骨架. Linux 不走 windows-policy.
             if sys.platform == "win32":
                 try:
                     from jiuwenclaw.agentserver.sandbox_policy_render import (
@@ -524,10 +506,6 @@ class AgentWebSocketServer:
                     "preferred port %d busy, using %d",
                     preferred_port, port,
                 )
-
-            # 注入动态路径 env 给 box-server 子进程 (Windows 沙箱用): JIUWENBOX_BUNDLED_PYTHON / JIUWENBOX_VENV_DIR /
-            # JIUWENBOX_RUNNER_PYTHON (runner 用的标准 CPython, 非 uv venv — jbx-sandbox 跑不了 uv trampoline).
-            # P0-5: 不写 os.environ (主进程全局污染), 改构造 sandbox_env dict 经 ensure_running(extra_env=...) 传子进程.
             sandbox_env: dict[str, str] = {}
             try:
                 from jiuwenclaw.runtime.pip_env import (
@@ -590,10 +568,7 @@ class AgentWebSocketServer:
                 policy_path=policy_path,
                 extra_env=sandbox_env or None,
                 # Windows 沙箱首次起 box-server 时, lifespan 的 ensure_windows_setup
-                # 同步阻塞等 install 子进程 (UAC 弹窗 + 用户安装几十秒). 旧默认 30s
-                # 会在 install 未完成时把 box-server 判为不健康而杀掉 (实测日志:
-                # "health check timeout after 30.0s" → SetEvent 日志没打出主进程就
-                # 被杀). 提到 2min, 给 install 足够时间完成 SetEvent 解除阻塞.
+                # 同步阻塞等 install 子进程 (UAC 弹窗 + 用户安装几十秒).
                 timeout=120.0,
             )
             if not ok:

@@ -1376,9 +1376,6 @@ def _coerce_optional_positive_int(
 def _normalize_sandbox_startup_mode(value: Any) -> str:
     """归一化 ``sandbox.startup_mode``.
 
-    P1-16: 读取路径与写入路径校验一致. 旧版对非空非法值 (如 ``iternal`` 拼错)
-    静默回落默认, 用户无反馈. 现改为: None/空 → 默认; 非空但非法 → 抛 ValueError
-    (与 update_sandbox_startup_mode 写入路径一致), 启动时报错定位.
     """
     text = str(value or "").strip().lower()
     if not text:
@@ -1447,19 +1444,12 @@ def _ensure_sandbox_runtime_shape(runtime: Any) -> dict[str, Any]:
 
 
 def get_sandbox_runtime() -> dict[str, Any]:
-    """返回 sandbox runtime 当前内容 (含缺省字段填充)。
-
-    读取优先级: 当 task env overlay 已绑定 (reload_agent_config 把 yaml sandbox
-    翻译成 overlay) 时, ``enabled`` 优先读 overlay 的
-    ``JIUWENCLAW_SANDBOX_ENABLED`` (经 :func:`get_local_config`); 其余字段直接从
-    ``sandbox.<key>`` config dict 读。字段缺失时用 ``_SANDBOX_RUNTIME_DEFAULTS``。
-    """
+    """返回 sandbox runtime 当前内容 (含缺省字段填充)。"""
     cfg = get_config() or {}
     sandbox = cfg.get("sandbox")
     if not isinstance(sandbox, dict):
         sandbox = {}
     raw = {key: sandbox[key] for key in _SANDBOX_RUNTIME_KEYS if key in sandbox}
-    # overlay 优先读 enabled (reload_agent_config 把 yaml enabled 翻译成 env overlay).
     enabled_env = get_local_config("JIUWENCLAW_SANDBOX_ENABLED", None)
     if enabled_env is not None:
         text = str(enabled_env).strip().lower()
@@ -1481,14 +1471,7 @@ def get_sandbox_startup_mode() -> str:
 
 def get_sandbox_startup_mode_explicit() -> str | None:
     """同 :func:`get_sandbox_startup_mode`, 但仅返回 ``config.yaml`` 里**显式**
-    写出的合法值 (``internal`` / ``external``); 未配置 / 空串 / 非法值都返回
-    ``None``。
-
-    用途: agent-server boot 时判断要不要自动拉起 jiuwenbox 子进程。
-    ``get_sandbox_startup_mode`` 默认归一会把缺失字段变成 ``internal``, 那样
-    会让从来没碰过沙箱的用户在升级到带 bootstrap 逻辑的版本后, 突然多出一个
-    jiuwenbox 进程。靠这个 ``_explicit`` 变体可以严格区分 "用户主动选了 internal"
-    和 "字段不存在, 走的默认"。
+        写出的合法值 (``internal`` / ``external``); 未配置 / 空串 / 非法值都返回 ``None``。
     """
     cfg = get_config() or {}
     sandbox = cfg.get("sandbox") or {}
@@ -1517,21 +1500,14 @@ def update_sandbox_startup_mode(mode: str) -> str:
 
 
 def _looks_like_bare_filename(value: str) -> bool:
-    """``True`` 表示参数应该被解释为 ``jiuwenbox/configs/`` 下的文件名。
-
-    判据: 不含任何路径分隔符 (``/`` 或 ``\\``); 含分隔符或绝对路径一律按整路径处理。
-    """
+    """``True`` 表示参数应该被解释为 ``jiuwenbox/configs/`` 下的文件名。"""
     if not value:
         return False
     return "/" not in value and "\\" not in value and not Path(value).is_absolute()
 
 
 def _jiuwenbox_configs_dir() -> Path | None:
-    """探测仓库或安装位置上的 ``jiuwenbox/configs/`` 目录。
-
-    优先在仓库目录树里寻找 (开发场景, ``jiuwenbox/src/jiuwenbox/configs``);
-    失败再尝试已 ``pip install`` 的 jiuwenbox 包内 ``configs/``。
-    """
+    """探测仓库或安装位置上的 ``jiuwenbox/configs/`` 目录。"""
     here = Path(__file__).resolve()
     for ancestor in here.parents[1:7]:
         for candidate in (
@@ -1562,13 +1538,7 @@ def _jiuwenbox_configs_dir() -> Path | None:
 
 
 def resolve_sandbox_policy_path(value: str | None) -> Path | None:
-    r"""把 ``sandbox.policy_file`` 的取值解析为宿主机绝对路径。
-
-    - ``None`` / 空字符串 → 返回 None, 由调用方决定是否落到 jiuwenbox 自身默认 policy;
-    - 仅文件名 (不含路径分隔符) → 在 ``jiuwenbox/configs/`` 下拼接;
-      ``configs/`` 探测不到时返回 None;
-    - 含 ``/`` ``\\`` 或绝对路径 → 展开 ``~`` / ``$VAR`` 后按整路径返回。
-    """
+    r"""把 ``sandbox.policy_file`` 的取值解析为宿主机绝对路径。"""
     if not value:
         return None
     text = str(value).strip()
@@ -1614,27 +1584,11 @@ def update_sandbox_policy_file(value: str) -> str:
 
 def get_sandbox_endpoint() -> dict[str, Any]:
     """返回 ``sandbox.url`` / ``sandbox.type`` / ``sandbox.preserve_file_sharing_mode``
-    / ``sandbox.startup_mode`` / ``sandbox.policy_file``。
-
-    读取优先级: 当 task env overlay 已绑定 (reload_agent_config 把 yaml sandbox
-    翻译成 overlay) 时, 优先读 overlay 的 ``JIUWENCLAW_SANDBOX_URL`` /
-    ``JIUWENCLAW_SANDBOX_TYPE`` env var (经 :func:`get_local_config`); 否则
-    fallback 到 ``config.yaml::sandbox`` config dict。这让 hot-reload 的 yaml
-    sandbox 配置能即时生效, 不必写盘。
-
-    ``preserve_file_sharing_mode`` 缺省或为空时返回空串, 由调用方决定默认值
-    (当前只有 ``"mount"``)。 ``startup_mode`` 未配置时回落到 ``internal``;
-    ``policy_file`` 未配置时返回空串 (由调用方决定默认 policy)。
-
-    Raises:
-        ValueError: yaml 里 ``preserve_file_sharing_mode`` 写了非法值时, 直接
-            把 :func:`_normalize_preserve_file_sharing_mode` 的异常向上抛。
+        / ``sandbox.startup_mode`` / ``sandbox.policy_file``。
     """
     cfg = get_config() or {}
     sandbox = cfg.get("sandbox") or {}
     mode = _normalize_preserve_file_sharing_mode(sandbox.get("preserve_file_sharing_mode"))
-    # overlay 优先: reload_agent_config 把 yaml sandbox 翻译成 env overlay, 这里读回.
-    # 未绑定时 get_local_config 走 config dict/tip/os.environ, 仍能读到 yaml 写盘值.
     url = str(get_local_config("JIUWENCLAW_SANDBOX_URL", "") or sandbox.get("url") or "").strip()
     sb_type = str(get_local_config("JIUWENCLAW_SANDBOX_TYPE", "") or sandbox.get("type") or "").strip()
     return {
@@ -1657,8 +1611,6 @@ def update_sandbox_endpoint(
     """写入 ``sandbox.url`` / ``sandbox.type`` 以及可选的
     ``preserve_file_sharing_mode`` / ``startup_mode`` / ``policy_file``
     到 config.yaml; 返回实际写入的字段集合 (没有改动的字段不在返回里)。
-
-    所有 ``None`` 入参表示"本次不修改该字段, 保留 config.yaml 中既有值"。
     """
     url_value = str(url or "").strip()
     type_value = str(sandbox_type or "").strip()
@@ -1706,22 +1658,14 @@ def update_sandbox_endpoint(
 
 
 def get_sandbox_preserve_file_sharing_mode() -> str | None:
-    """返回 ``sandbox.preserve_file_sharing_mode`` (当前仅 ``"mount"``)。
-
-    未配置返回 ``None`` (调用方按默认走)。 非法取值不在这里兜底, 直接由
-    :func:`_normalize_preserve_file_sharing_mode` 抛 ``ValueError``。
-    """
+    """返回 ``sandbox.preserve_file_sharing_mode`` (当前仅 ``"mount"``)。"""
     cfg = get_config() or {}
     sandbox = cfg.get("sandbox") or {}
     return _normalize_preserve_file_sharing_mode(sandbox.get("preserve_file_sharing_mode"))
 
 
 def update_sandbox_preserve_file_sharing_mode(mode: str) -> str:
-    """写入 ``sandbox.preserve_file_sharing_mode``; 返回归一化后的值.
-
-    空值与非法值都会抛 ``ValueError``——写入路径不允许 "保留旧值" 语义, 必须
-    给出明确的合法 mode (当前仅 ``"mount"``)。
-    """
+    """写入 ``sandbox.preserve_file_sharing_mode``; 返回归一化后的值."""
     normalized = _normalize_preserve_file_sharing_mode(mode)
     if normalized is None:
         raise ValueError(
@@ -1736,18 +1680,7 @@ def update_sandbox_preserve_file_sharing_mode(mode: str) -> str:
 
 
 def update_sandbox_runtime(patch: dict[str, Any]) -> dict[str, Any]:
-    """合并 patch 到 sandbox runtime 字段, 写回 YAML, 返回合并后的完整 runtime。
-
-    持久化位置: ``sandbox`` 顶层 (扁平形式), 与 ``url`` / ``type`` /
-    ``startup_mode`` / ``policy_file`` / ``preserve_file_sharing_mode`` 并列。
-
-    Args:
-        patch: 部分字段更新；支持顶层键 ``enabled`` / ``excluded_commands``
-            / ``files`` / ``idle_ttl_seconds`` / ``idle_check_interval``
-            / ``fallback_on_failure``。 ``files`` 字典若提供则整体替换; 其余
-            键按值合并。 ``idle_*`` 字段接受整数秒数 (``<= 0`` 归一化为 ``None``
-            = 禁用淘汰) 或 ``None``。
-    """
+    """合并 patch 到 sandbox runtime 字段, 写回 YAML, 返回合并后的完整 runtime。"""
     if not isinstance(patch, dict):
         raise ValueError("patch must be an object")
 
@@ -1786,7 +1719,7 @@ def update_sandbox_runtime(patch: dict[str, Any]) -> dict[str, Any]:
     if "sandbox" not in data or not isinstance(data.get("sandbox"), dict):
         data["sandbox"] = {}
     sandbox_block = data["sandbox"]
-    # 写入扁平 runtime 字段, 每次 update 都把全集刷一遍, 保证 yaml 形状稳定。
+
     for key in _SANDBOX_RUNTIME_KEYS:
         sandbox_block[key] = merged[key]
     _dump_yaml_round_trip(_current_config_yaml_path(), data)
