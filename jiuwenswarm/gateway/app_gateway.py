@@ -2575,10 +2575,20 @@ async def _run(
     await cron_scheduler.start()
 
     # ---------- LeaderElection 初始化（企业分布式 Redis）----------
-    from jiuwenswarm.gateway.leader_election import LeaderElection
+    leader_election = None
+    if os.getenv("AGENT_RUNTIME", "").strip():
+        deployment_mode = str(
+            (get_config().get("gateway") or {}).get("deployment_mode", "standalone")
+        ).strip().lower()
+        if deployment_mode != "standalone":
+            from jiuwenswarm.gateway.leader_election import LeaderElection
 
-    leader_election = LeaderElection.get_instance()
-    await leader_election.start()
+            leader_election = LeaderElection.get_instance()
+            await leader_election.start()
+        else:
+            logger.info("[App] standalone mode, skip LeaderElection")
+    else:
+        logger.info("[App] AGENT_RUNTIME unset, skip LeaderElection")
 
     try:
         from jiuwenswarm.infrastructure.log_masking.engine import LogMaskingEngine
@@ -2771,7 +2781,8 @@ async def _run(
         await channel_manager.stop_dispatch()
         await heartbeat_service.stop()
         await message_handler.stop_forwarding()
-        await leader_election.stop()
+        if leader_election is not None:
+            await leader_election.stop()
         await shutdown_gateway_redis()
         await client.disconnect()
 
