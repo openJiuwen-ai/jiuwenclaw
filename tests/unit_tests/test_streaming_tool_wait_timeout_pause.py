@@ -6,6 +6,7 @@ import asyncio
 import importlib.util
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -57,12 +58,14 @@ async def test_wait_all_excludes_paused_hitl_time(monkeypatch):
         await asyncio.sleep(0.20)
         clock.resume()
         await asyncio.sleep(0.05)
-        return [("tool", "ok")]
+        return [(SimpleNamespace(name="tool"), "ok")]
 
     executor = _FakeExecutor()
     # Active budget 0.15s; wall ~0.30s but paused 0.20s => should succeed.
     results = await mod._wait_all_with_pauseable_timeout(executor, _slow_wait_all, 0.15)
-    assert results == [("tool", "ok")]
+    assert len(results) == 1
+    assert getattr(results[0][0], "name", None) == "tool"
+    assert results[0][1] == "ok"
     assert not executor.cancelled
 
 
@@ -81,7 +84,8 @@ async def test_wait_all_still_times_out_without_enough_budget():
 
     async def _hang_until_cancelled(executor):
         await executor._done.wait()
-        return [("tool", asyncio.CancelledError())]
+        # Match production shape: tool_call is an object with ``name``.
+        return [(SimpleNamespace(name="tool"), asyncio.CancelledError())]
 
     executor = _FakeExecutor()
     results = await mod._wait_all_with_pauseable_timeout(executor, _hang_until_cancelled, 0.05)
