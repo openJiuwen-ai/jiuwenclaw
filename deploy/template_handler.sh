@@ -191,20 +191,25 @@ mount_core_code_path() {
 add_resource_if_set() {
     local module=$1
     local file=$2
+    local kind_type="Deployment"
+
+    if [[ "${module}" == "MYSQL" || "${module}" == "POSTGRES" ]]; then
+        kind_type="StatefulSet"
+    fi
 
     if [ -n "${DEPLOY_VARS["${module}_CPU_REQUEST"]:-}" ]; then
-        yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].resources.requests.cpu = "'"${DEPLOY_VARS["${module}_CPU_REQUEST"]}"'"' -i "${file}"
+        yq eval 'select(.kind == "'"${kind_type}"'").spec.template.spec.containers[0].resources.requests.cpu = "'"${DEPLOY_VARS["${module}_CPU_REQUEST"]}"'"' -i "${file}"
     fi
 
     if [ -n "${DEPLOY_VARS["${module}_MEMORY_REQUEST"]:-}" ]; then
-        yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].resources.requests.memory = "'"${DEPLOY_VARS["${module}_MEMORY_REQUEST"]}"'"' -i "${file}"
+        yq eval 'select(.kind == "'"${kind_type}"'").spec.template.spec.containers[0].resources.requests.memory = "'"${DEPLOY_VARS["${module}_MEMORY_REQUEST"]}"'"' -i "${file}"
     fi
 
     if [ -n "${DEPLOY_VARS["${module}_CPU_LIMIT"]:-}" ]; then
-        yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].resources.limits.cpu = "'"${DEPLOY_VARS["${module}_CPU_LIMIT"]}"'"' -i "${file}"
+        yq eval 'select(.kind == "'"${kind_type}"'").spec.template.spec.containers[0].resources.limits.cpu = "'"${DEPLOY_VARS["${module}_CPU_LIMIT"]}"'"' -i "${file}"
     fi
 
     if [ -n "${DEPLOY_VARS["${module}_MEMORY_LIMIT"]:-}" ]; then
-        yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].resources.limits.memory = "'"${DEPLOY_VARS["${module}_MEMORY_LIMIT"]}"'"' -i "${file}"
+        yq eval 'select(.kind == "'"${kind_type}"'").spec.template.spec.containers[0].resources.limits.memory = "'"${DEPLOY_VARS["${module}_MEMORY_LIMIT"]}"'"' -i "${file}"
     fi
 }
