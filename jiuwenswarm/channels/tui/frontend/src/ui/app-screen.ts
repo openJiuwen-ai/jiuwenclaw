@@ -1714,6 +1714,15 @@ export class AppScreen implements Component, Focusable {
   /** Whether the eager skill-cache fetch on first WebSocket connection has already been fired. */
   private didEagerFetchSkills = false;
   private didEagerFetchSandboxMeta = false;
+  /**
+   * The workflow run the user most recently submitted a swarmflow human reply
+   * against, regardless of which swarm view they replied from. While the user
+   * is still on that run's session-detail view, this lets the refresh hook
+   * auto-jump back to the workflow detail page once the run reaches a terminal
+   * state — otherwise the user stays stranded on the session view and never
+   * sees that the workflow completed. Cleared after the jump fires.
+   */
+  private lastRepliedWorkflowId: string | null = null;
   private pendingSubmittedInput: string | null = null;
   private pendingSubmittedBaseline = 0;
   private pendingSubmittedSessionId: string | null = null;
@@ -5872,6 +5881,7 @@ export class AppScreen implements Component, Focusable {
   private closeSwarmWorkflowsView(): void {
     if (!this.swarmWorkflowsViewState) return;
     this.swarmWorkflowsViewState = null;
+    this.lastRepliedWorkflowId = null;
     this.state.flushDeferredTranscript();
     this.tui.requestRender();
   }
@@ -5917,6 +5927,35 @@ export class AppScreen implements Component, Focusable {
       return;
     }
     if (current.phase === "session-detail") {
+      // After the user submits a reply from the session-detail view, the run
+      // usually keeps executing other agents. Auto-leave only once that run
+      // reaches a terminal state, so the user lands back on the workflow
+      // detail page (with its ✓/× status, phases and agents) and actually
+      // sees that the workflow finished — instead of staying stranded on the
+      // session view with no completion signal. Bound to lastRepliedWorkflowId
+      // so merely opening a finished run's session history never triggers it.
+      if (this.lastRepliedWorkflowId === current.workflowId) {
+        const workflow = this.state
+          .getSnapshot()
+          .workflowRuns.find((item) => item.id === current.workflowId);
+        const status = workflow?.status;
+        if (
+          status === "completed" ||
+          status === "failed" ||
+          status === "stopped"
+        ) {
+          this.lastRepliedWorkflowId = null;
+          // Land on the workflow detail page focused on the agents of the phase
+          // the session belongs to, so the user sees the completed run plus the
+          // surrounding agent context (mirrors restoreFromSessionDetail).
+          this.swarmWorkflowsViewState = this.buildSwarmWorkflowDetailState(
+            current.workflowId,
+            current.phaseId,
+            "agents",
+          );
+          return;
+        }
+      }
       // Re-render only — buildSessionDetailLines reads live workflow snapshot.
       return;
     }
@@ -7235,6 +7274,9 @@ export class AppScreen implements Component, Focusable {
   }
 
   private restoreFromSessionDetail(returnTo: SessionDetailReturnTo): void {
+    // Manual leave clears the pending auto-jump so re-entering the session
+    // view later (e.g. to browse a finished run's history) never triggers it.
+    this.lastRepliedWorkflowId = null;
     switch (returnTo.kind) {
       case "pending-list":
         this.swarmWorkflowsViewState = this.buildPendingListState(returnTo.previous_phase ?? "list");
@@ -9826,6 +9868,10 @@ export class AppScreen implements Component, Focusable {
         correlation_id: correlationId,
         answer,
       });
+      // Remember the run we just replied to so the swarm-view refresh hook can
+      // auto-leave the session-detail view once this run reaches a terminal
+      // state (completed/failed/stopped) — see refreshSwarmWorkflowsView.
+      this.lastRepliedWorkflowId = workflowRunId;
       this.replyingToHumanPrompt = null;
       this.editor.setText("");
       this.editor.focused = false;
