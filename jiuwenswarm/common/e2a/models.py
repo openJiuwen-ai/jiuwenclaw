@@ -397,6 +397,8 @@ def _envelope_from_dict(data: dict[str, Any]) -> E2AEnvelope:
         agent_ref=data.get("agent_ref"),
         chat_id=data.get("chat_id"),
         source_agent_id=data.get("source_agent_id"),
+        service_id=data.get("service_id"),
+        agent_id=data.get("agent_id"),
         method=raw_method,
         params=params,
         ext_method=data.get("ext_method"),

@@ -161,6 +161,14 @@ async def _run(host: str, port: int) -> None:
     await extension_manager.load_all_extensions()
     logger.info("[AgentServer] 扩展加载完成，共 %d 个", len(extension_manager.list_extensions()))
 
+    try:
+        from jiuwenswarm.infrastructure.log_masking.engine import LogMaskingEngine
+
+        await LogMaskingEngine.reload_log_masking_rule()
+        logger.info("[AgentServer] log masking rules loaded from Gateway DB (if any)")
+    except Exception:  # noqa: BLE001
+        logger.warning("[AgentServer] log_masking_rule cold load skipped", exc_info=True)
+
     # 会话 metadata 的字段补全已改为惰性迁移:读取时按需推断并写回磁盘
     # (见 session_metadata._apply_metadata_defaults_with_inference),无需启动全量扫描。
 

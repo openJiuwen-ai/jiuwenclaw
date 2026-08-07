@@ -23,6 +23,7 @@ dependencies = [
     "websockets>=12.0",
     "psutil>=7.2.2",
     "aiosqlite>=0.22.1",
+    "asyncpg>=0.29",
     "croniter>=2.0.0",
     "python-telegram-bot>=20.0",
     "discord.py>=2.4.0",

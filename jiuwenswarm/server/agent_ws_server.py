@@ -834,7 +834,7 @@ class AgentWebSocketServer:
         self._current_ws: Any = None
         self._current_send_lock: asyncio.Lock | None = None
         self._acp_client_capabilities_by_ws: dict[int, dict[str, Any]] = {}
-        # AgentManager 实例
+        # AgentManager 实例（企业多租户入口见 TenantAgentPool，按 AGENT_RUNTIME 使用）
         self._agent_manager = AgentManager()
         # skills.* 等无状态 RPC：AgentManager 未缓存 agent 时复用的轻量 JiuWenSwarm，
         # 避免每次 cache miss 都 new 导致 SkillNet 异步安装等实例态断裂。
@@ -1173,6 +1173,19 @@ class AgentWebSocketServer:
         """在握手阶段执行 Origin 校验，兼容 legacy/new websockets APIs。"""
         path, request_headers = extract_handshake_request(args)
         origin = get_header_value(request_headers, "Origin")
+
+        # 企业版：握手阶段配置 AGENT_CLIENT_TYPE 时允许非浏览器客户端直连
+        if os.getenv("AGENT_RUNTIME", "").strip():
+            agent_client_type = os.getenv("AGENT_CLIENT_TYPE", "").strip()
+            if agent_client_type:
+                logger.info(
+                    "[AgentWebSocketServer] 握手允许 path=%s origin=%s reason=agent_client_type=%s",
+                    path,
+                    origin,
+                    agent_client_type,
+                )
+                return None
+
         enable_origin_check = is_origin_check_enabled()
         if not enable_origin_check:
             logger.info(
@@ -1262,7 +1275,15 @@ class AgentWebSocketServer:
 
         try:
             async for raw in ws:
-                task = asyncio.create_task(self._handle_message(ws, raw, send_lock))
+                async def _run(raw=raw):
+                    try:
+                        await self._handle_message(ws, raw, send_lock)
+                    except WebSocketConnectionClosed as e:
+                        logger.info("[AgentWebSocketServer] 连接已关闭: %s", e)
+                    except Exception:
+                        logger.exception("[AgentWebSocketServer] 处理消息失败")
+
+                task = asyncio.create_task(_run())
                 tasks.add(task)
                 task.add_done_callback(tasks.discard)
         except WebSocketConnectionClosed as e:
@@ -1742,6 +1763,12 @@ class AgentWebSocketServer:
                         describe_ws_peer(ws),
                         describe_ws_exception(send_exc),
                     ),
+                )
+            except Exception as send_err:
+                logger.warning(
+                    "[AgentWebSocketServer] 错误回写失败: request_id=%s: %s",
+                    request.request_id,
+                    send_err,
                 )
 
     @staticmethod
@@ -5147,8 +5174,12 @@ class AgentWebSocketServer:
                     logger.info("[command.model] os.environ 已更新, MODEL_NAME=%s", os.getenv("MODEL_NAME", "unknown"))
 
                     try:
-                        from jiuwenswarm.agents.harness.common.memory.config import clear_config_cache
+                        from jiuwenswarm.agents.harness.common.memory.config import (
+                            clear_config_cache,
+                            clear_embed_config_db_cache,
+                        )
                         clear_config_cache()
+                        clear_embed_config_db_cache()
                         logger.info("[command.model] config cache 已清除")
                     except Exception as e:
                         logger.debug("[command.model] clear_config_cache skipped: %s", e)
@@ -7077,9 +7108,13 @@ class AgentWebSocketServer:
 
     async def _handle_config_cache_clear(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
-            from jiuwenswarm.agents.harness.common.memory.config import clear_config_cache
+            from jiuwenswarm.agents.harness.common.memory.config import (
+                clear_config_cache,
+                clear_embed_config_db_cache,
+            )
 
             clear_config_cache()
+            clear_embed_config_db_cache()
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,

@@ -10,6 +10,7 @@ import logging
 import os
 import time
 import uuid
+from pathlib import Path
 from typing import Any, TYPE_CHECKING
 from weakref import WeakValueDictionary
 
@@ -81,9 +82,18 @@ class AgentManager:
     支持多种通道:
     - "acp": ACP 协议通道
     - "default": 默认通道
+
+    企业多租户（AGENT_RUNTIME）下可带 agent_id/service_id/user_workspace_dir 构造，
+    用于按租户隔离 workspace。
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        agent_id: str = "default",
+        service_id: str = "default",
+        user_workspace_dir: Path | str | None = None,
+        workspace_dir: Path | str | None = None,
+    ) -> None:
         self.agents: dict[str, dict[str, "JiuWenSwarm"]] = {}
         # 记录每个 (channel_id, mode) 的创建参数, 便于 recreate_agent 立刻重建
         self._agent_create_params: dict[str, dict[str, dict[str, Any]]] = {}
@@ -111,6 +121,19 @@ class AgentManager:
         from jiuwenswarm.server.runtime.agent_warm_pool import AgentWarmPool
 
         self.warm_pool = AgentWarmPool(self)
+        self.agent_id = agent_id
+        self.service_id = service_id
+        # user_workspace_dir 为租户根目录；workspace_dir 作为兼容别名
+        raw_uwd = user_workspace_dir if user_workspace_dir is not None else workspace_dir
+        self.user_workspace_dir = Path(raw_uwd) if raw_uwd else None
+        self.workspace_dir = self.user_workspace_dir
+        if self.user_workspace_dir is not None and os.getenv("AGENT_RUNTIME", "").strip():
+            logger.info(
+                "[AgentManager] enterprise init: agent_id=%s service_id=%s user_workspace=%s",
+                agent_id,
+                service_id,
+                self.user_workspace_dir,
+            )
 
     def _get_agent_create_lock(
         self,
@@ -402,7 +425,19 @@ class AgentManager:
             sub_mode_key or None,
             project_dir or None,
         )
-        agent = JiuWenSwarm()
+        user_workspace_dir = None
+        agent_id = None
+        service_id = None
+        if os.getenv("AGENT_RUNTIME", "").strip():
+            if self.user_workspace_dir is not None:
+                user_workspace_dir = str(self.user_workspace_dir)
+            agent_id = self.agent_id
+            service_id = self.service_id
+        agent = JiuWenSwarm(
+            user_workspace_dir=user_workspace_dir,
+            agent_id=agent_id,
+            service_id=service_id,
+        )
         await agent.create_instance(config, mode=mode_key, sub_mode=sub_mode_key or None)
         setattr(agent, "_jiuwenswarm_agent_cache_key", agent_cache_key)
         setattr(agent, "_jiuwenswarm_agent_mode", mode_key)
@@ -679,7 +714,8 @@ class AgentManager:
             channel_id: str = "",
             mode: str = "agent",
             project_dir: str = None,
-            sub_mode: str = None
+            sub_mode: str = None,
+            request: Any | None = None,
     ) -> "JiuWenSwarm | None":
         """获取 Agent 实例（自动创建）.
 
@@ -690,6 +726,7 @@ class AgentManager:
             mode: 每个模式对应的实例
             project_dir: user project dir (e.g. trusted_dirs[0])
             sub_mode: 子模式
+            request: 可选 AgentRequest，企业版用于模型策略 routing 上下文
 
         Returns:
             JiuWenSwarm | None: Agent 实例
@@ -717,6 +754,9 @@ class AgentManager:
                     **config,
                     **_build_acp_agent_config()
                 }
+            # 企业版：创建 agent 时附带完整 request，供 create_instance 加载企业配置
+            if request is not None and os.getenv("AGENT_RUNTIME", "").strip():
+                config = {**config, "request": request}
             agent = await self._create_agent(
                 channel_key,
                 mode_key,
@@ -1133,6 +1173,7 @@ class AgentManager:
                 channel_id=channel_id,
                 mode=mode,
                 project_dir=workspace_dir,
+                request=request,
             )
             if agent is None:
                 raise RuntimeError(f"[AgentManager] No agent available for channel {channel_id}")
@@ -1163,6 +1204,7 @@ class AgentManager:
                 channel_id=channel_id,
                 mode=mode,
                 project_dir=workspace_dir,
+                request=request,
             )
             if agent is None:
                 raise RuntimeError(f"[AgentManager] No agent available for channel {channel_id}")

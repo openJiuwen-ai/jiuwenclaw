@@ -24,6 +24,8 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 from jiuwenswarm.agents.harness.common.prompt.shell_environment import build_shell_environment_prompt
 from jiuwenswarm.common.utils import (
     get_agent_workspace_dir,
+    get_agent_workspace_relative_dir,
+    get_multi_tenant_user_workspace_dir,
     get_runtime_state_path,
     get_user_workspace_dir,
     logger,
@@ -42,6 +44,8 @@ class RuntimePromptRail(DeepAgentRail):
         language: str = "cn",
         channel: str = "web",
         timezone_offset: int = 8,
+        agent_id: str | None = None,
+        service_id: str | None = None,
     ) -> None:
         super().__init__()
         self._agent = None
@@ -57,6 +61,8 @@ class RuntimePromptRail(DeepAgentRail):
         self._mode: str = ""
         self._session_id: str | None = None
         self._force_english: bool = False
+        self._agent_id = agent_id
+        self._service_id = service_id
 
     def init(self, agent) -> None:
         """从 agent 获取 system_prompt_builder 引用。"""
@@ -141,6 +147,24 @@ class RuntimePromptRail(DeepAgentRail):
         follows the user's preferred language set via :meth:`set_language`.
         """
         self._force_english = force
+
+    def _resolve_agent_workspace_and_config(self) -> tuple[str, str]:
+        """Resolve agent workspace / config dirs; enterprise uses multi-tenant paths."""
+        if (
+            os.getenv("AGENT_RUNTIME", "").strip()
+            and self._agent_id
+            and self._service_id
+        ):
+            base = get_multi_tenant_user_workspace_dir(self._service_id, self._agent_id)
+            if base is not None:
+                return (
+                    str(base / get_agent_workspace_relative_dir()),
+                    str(base / "config"),
+                )
+        return (
+            str(get_agent_workspace_dir()),
+            str(get_user_workspace_dir() / "config"),
+        )
 
     @staticmethod
     def _existing_dirs(paths: list[str] | None) -> list[str]:
@@ -498,11 +522,9 @@ class RuntimePromptRail(DeepAgentRail):
         if self._channel in ("tui", "web"):
             # Trusted directories policy for TUI and Web mode
             trusted_dirs = self._existing_dirs(self._trusted_dirs)
-            # This agent's own workspace. Team members each own one; without
-            # it (single-agent runs) the process-wide agent workspace is the
-            # same directory anyway.
-            agent_workspace_dir = self._existing_dir(self._workspace_dir) or str(get_agent_workspace_dir())
-            config_dir = str(get_user_workspace_dir() / "config")
+            # Prefer explicit per-agent workspace; enterprise uses multi-tenant paths.
+            resolved_ws, config_dir = self._resolve_agent_workspace_and_config()
+            agent_workspace_dir = self._existing_dir(self._workspace_dir) or resolved_ws
             project_dir = self._existing_dir(self._project_dir)
             runtime_cwd = (
                 self._existing_dir(self._cwd)

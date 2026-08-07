@@ -23,7 +23,7 @@ from jiuwenswarm.server.runtime.session.work_mode import (
 logger = logging.getLogger(__name__)
 
 # ---------- 异步写入队列(与 session_history 保持一致的模式) ----------
-_METADATA_QUEUE: queue.Queue[tuple[str, dict[str, Any], bool]] = queue.Queue(maxsize=5000)
+_METADATA_QUEUE: queue.Queue[tuple[str, dict[str, Any], bool, str | None]] = queue.Queue(maxsize=5000)
 _WORKER_STARTED = False
 _WORKER_LOCK = threading.Lock()
 _FILE_LOCK = threading.Lock()
@@ -266,14 +266,19 @@ def _current_timestamp() -> float:
     return datetime.now(timezone.utc).timestamp()
 
 
-def _metadata_file(session_id: str) -> Path:
+def _metadata_file(session_id: str, sessions_root: str | None = None) -> Path:
     """获取会话元数据文件路径"""
-    session_dir = get_agent_sessions_dir() / session_id
+    root = Path(sessions_root) if sessions_root else get_agent_sessions_dir()
+    session_dir = root / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
     return session_dir / "metadata.json"
 
 
-def _read_metadata(session_id: str, cache_bust: bool = False) -> dict[str, Any]:
+def _read_metadata(
+    session_id: str,
+    cache_bust: bool = False,
+    sessions_root: str | None = None,
+) -> dict[str, Any]:
     """读取会话元数据(优先从内存缓存读取,避免异步写入未落盘时读到陈旧数据)
 
     读路径不应产生副作用：即便 session 目录不存在，也不触发 mkdir，
@@ -283,6 +288,7 @@ def _read_metadata(session_id: str, cache_bust: bool = False) -> dict[str, Any]:
     Args:
         session_id: 会话 ID
         cache_bust: 强制跳过缓存，直接从磁盘读取（用于跨进程同步场景，如 session.list）
+        sessions_root: 企业多租户下的 sessions 根目录
     """
     if not cache_bust:
         with _CACHE_LOCK:
@@ -290,7 +296,8 @@ def _read_metadata(session_id: str, cache_bust: bool = False) -> dict[str, Any]:
             if cached is not None:
                 return cached.copy()
     # cache_bust=True 或缓存没有数据时，强制读磁盘
-    fpath = get_agent_sessions_dir() / session_id / "metadata.json"
+    root = Path(sessions_root) if sessions_root else get_agent_sessions_dir()
+    fpath = root / session_id / "metadata.json"
     if not fpath.exists():
         return {}
     try:
@@ -306,6 +313,7 @@ def _write_metadata_sync(
     session_id: str,
     metadata: dict[str, Any],
     preserve_pin_fields: bool = False,
+    sessions_root: str | None = None,
 ) -> dict[str, Any]:
     """同步写入会话元数据(由后台 worker 或 fallback 调用)
 
@@ -313,7 +321,7 @@ def _write_metadata_sync(
     避免 gateway 进程的 init_session_metadata 污染缓存导致后续
     读取不到 agentserver 进程写入的最新数据。
     """
-    fpath = _metadata_file(session_id)
+    fpath = _metadata_file(session_id, sessions_root=sessions_root)
     to_write = metadata
     with _FILE_LOCK:
         if preserve_pin_fields and fpath.exists():
@@ -339,9 +347,14 @@ def _merge_pin_fields(current: dict[str, Any], metadata: dict[str, Any]) -> dict
     return merged
 
 
-def _merge_pin_fields_from_disk(session_id: str, metadata: dict[str, Any]) -> dict[str, Any]:
+def _merge_pin_fields_from_disk(
+    session_id: str,
+    metadata: dict[str, Any],
+    sessions_root: str | None = None,
+) -> dict[str, Any]:
     """Preserve latest disk pin state for async writes that do not own pin fields."""
-    fpath = get_agent_sessions_dir() / session_id / "metadata.json"
+    root = Path(sessions_root) if sessions_root else get_agent_sessions_dir()
+    fpath = root / session_id / "metadata.json"
     if not fpath.exists():
         return metadata
     try:
@@ -366,12 +379,13 @@ def _ensure_worker_started() -> None:
 
         def _worker() -> None:
             while True:
-                sid, metadata, preserve_pin_fields = _METADATA_QUEUE.get()
+                sid, metadata, preserve_pin_fields, sessions_root = _METADATA_QUEUE.get()
                 try:
                     written = _write_metadata_sync(
                         sid,
                         metadata,
                         preserve_pin_fields=preserve_pin_fields,
+                        sessions_root=sessions_root,
                     )
                     if preserve_pin_fields:
                         with _CACHE_LOCK:
@@ -391,6 +405,7 @@ def _enqueue_write(
     metadata: dict[str, Any],
     sync_write: bool = False,
     preserve_pin_fields: bool = False,
+    sessions_root: str | None = None,
 ) -> None:
     """将写入操作放入异步队列,队列满时退化为同步写。
 
@@ -403,7 +418,9 @@ def _enqueue_write(
     """
     # 立即更新缓存,确保后续读取能看到最新状态
     if preserve_pin_fields:
-        metadata = _merge_pin_fields_from_disk(session_id, metadata)
+        metadata = _merge_pin_fields_from_disk(
+            session_id, metadata, sessions_root=sessions_root
+        )
     with _CACHE_LOCK:
         _METADATA_CACHE[session_id] = metadata.copy()
     if sync_write:
@@ -411,6 +428,7 @@ def _enqueue_write(
             session_id,
             metadata,
             preserve_pin_fields=preserve_pin_fields,
+            sessions_root=sessions_root,
         )
         if preserve_pin_fields:
             with _CACHE_LOCK:
@@ -418,16 +436,21 @@ def _enqueue_write(
         return
     _ensure_worker_started()
     try:
-        _METADATA_QUEUE.put_nowait((session_id, metadata, preserve_pin_fields))
+        _METADATA_QUEUE.put_nowait(
+            (session_id, metadata, preserve_pin_fields, sessions_root)
+        )
     except queue.Full:
         if preserve_pin_fields:
-            metadata = _merge_pin_fields_from_disk(session_id, metadata)
+            metadata = _merge_pin_fields_from_disk(
+                session_id, metadata, sessions_root=sessions_root
+            )
             with _CACHE_LOCK:
                 _METADATA_CACHE[session_id] = metadata.copy()
         written = _write_metadata_sync(
             session_id,
             metadata,
             preserve_pin_fields=preserve_pin_fields,
+            sessions_root=sessions_root,
         )
         if preserve_pin_fields:
             with _CACHE_LOCK:
@@ -462,6 +485,7 @@ def init_session_metadata(
     cron_id: str = "",
     work_mode: str = "",
     channel_metadata: dict[str, Any] | None = None,
+    sessions_root: str | Path | None = None,
 ) -> None:
     """初始化会话元数据(同步写,确保创建后立即可读)
 
@@ -498,7 +522,8 @@ def init_session_metadata(
     }
     if isinstance(channel_metadata, dict) and channel_metadata:
         metadata["channel_metadata"] = channel_metadata
-    _write_metadata_sync(session_id, metadata)
+    sessions_root_s = str(sessions_root) if sessions_root else None
+    _write_metadata_sync(session_id, metadata, sessions_root=sessions_root_s)
 
 
 def update_session_metadata(
@@ -527,6 +552,7 @@ def update_session_metadata(
     sync: bool = False,
     sync_write: bool = False,
     work_mode: str | None = None,
+    sessions_root: str | Path | None = None,
 ) -> None:
     """更新会话元数据(异步写入,不阻塞调用方)
 
@@ -552,7 +578,9 @@ def update_session_metadata(
     ``True``:返回成功前落盘,否则只读磁盘的另一进程(AgentServer)在窗口期
     内会读到陈旧数据,后续整份 metadata 回写会覆盖刚写入的 ``pinned`` 状态。
     """
-    metadata = _read_metadata(session_id, cache_bust=cache_bust)
+    metadata = _read_metadata(
+        session_id, cache_bust=cache_bust, sessions_root=str(sessions_root) if sessions_root else None
+    )
 
     if not metadata:
         # 如果元数据不存在,创建新的(外部渠道隐式创建 session 的兜底)
@@ -668,6 +696,7 @@ def update_session_metadata(
         metadata,
         sync_write=sync_write or sync,
         preserve_pin_fields=pinned is None and pin_order is None,
+        sessions_root=str(sessions_root) if sessions_root else None,
     )
 
 

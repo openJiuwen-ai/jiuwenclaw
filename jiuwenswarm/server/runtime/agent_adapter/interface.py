@@ -15,6 +15,7 @@ from dataclasses import replace
 import inspect
 import json
 import logging
+import os
 import re
 import time
 from pathlib import Path
@@ -45,7 +46,9 @@ from jiuwenswarm.extensions.hooks_context import MemoryHookContext
 from jiuwenswarm.common.schema.message import EventType, ReqMethod
 from jiuwenswarm.common.utils import (
     get_agent_home_dir,
+    get_agent_sessions_relative_dir,
     get_agent_workspace_dir,
+    get_agent_workspace_relative_dir,
     get_env_file,
     reset_free_search_runtime_flags,
 )
@@ -719,6 +722,39 @@ def _handle_statusline_prompt_command(query: str) -> Tuple[str, str]:
     return "", query
 
 
+def _enterprise_file_download_hint(language: str) -> str:
+    if language == "zh":
+        return (
+            "附件中的 http/https url 是远程文件地址，不在本机 path 上。"
+            "请先用 bash/curl 等工具将 url 下载到当前工作区，再对下载后的本地文件使用 read_file；"
+            "不要根据 path 字段或文件名猜测并直接 read_file 本地路径。"
+        )
+    return (
+        "Attachments with http/https url point to remote files, not local path values. "
+        "Download the url to the workspace with bash/curl first, then use read_file on the "
+        "downloaded local file. Do not guess local paths from path or filename."
+    )
+
+
+def _normalize_files_for_agent_prompt(files: dict | list | Any) -> dict | list | Any:
+    """企业态：有 url 时去掉 Gateway 本地 path，避免 Agent 优先 read_file 失败。"""
+    if not os.getenv("AGENT_RUNTIME", "").strip():
+        return files
+    if isinstance(files, list):
+        normalized: list[Any] = []
+        for file_info in files:
+            if not isinstance(file_info, dict):
+                normalized.append(file_info)
+                continue
+            updated = dict(file_info)
+            file_url = str(updated.get("url") or updated.get("uri") or "").strip()
+            if file_url:
+                updated.pop("path", None)
+            normalized.append(updated)
+        return normalized
+    return files
+
+
 def build_user_prompt(content: str | dict, files: dict, channel: str, language: str, *,
     trusted_dirs: list[str] | None = None, metadata: dict[str, Any] | None = None,
     skills: list[str] | None = None) -> str:
@@ -762,6 +798,8 @@ def build_user_prompt(content: str | dict, files: dict, channel: str, language: 
     else:
         statusline_prompt = ""
 
+    files = _normalize_files_for_agent_prompt(files)
+
     if language == "zh":
         prompt = "你收到一条消息：\n"
         if channel == "cron":
@@ -789,6 +827,8 @@ def build_user_prompt(content: str | dict, files: dict, channel: str, language: 
             msg_data["sender"] = sender_name
     if channel not in ["cron", "heartbeat"]:
         msg_data["files_updated_by_user"] = json.dumps(files, ensure_ascii=False)
+        if os.getenv("AGENT_RUNTIME", "").strip() and files:
+            msg_data["file_handling_hint"] = _enterprise_file_download_hint(language)
     final_prompt = interaction_prefix + prompt + json.dumps(msg_data, ensure_ascii=False)
     if interaction_prefix:
         logger.info(
@@ -808,6 +848,8 @@ def build_user_prompt(content: str | dict, files: dict, channel: str, language: 
         "files_updated_by_user": json.dumps(files, ensure_ascii=False),
         "type": "user input",
     }
+    if os.getenv("AGENT_RUNTIME", "").strip() and files and channel not in ["cron", "heartbeat"]:
+        user_message_context["file_handling_hint"] = _enterprise_file_download_hint(language)
     if skills_to_use:
         user_message_context["skills_to_use"] = skills_to_use
     if trusted_dirs:
@@ -838,13 +880,41 @@ class JiuWenSwarm:
     - 公共编排（session 队列、Skills 路由、heartbeat、流式包装）
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        workspace_dir: str | None = None,
+        user_workspace_dir: str | None = None,
+        agent_id: str | None = None,
+        service_id: str | None = None,
+    ) -> None:
         self._adapter: AgentAdapter | None = None
         self._sdk_name: str | None = None
-        self._skill_manager = SkillManager(workspace_dir=str(get_agent_workspace_dir()))
+        # 企业多租户：AGENT_RUNTIME 下 user_workspace_dir 为租户根，再拼相对 workspace/sessions
+        enterprise = bool(os.getenv("AGENT_RUNTIME", "").strip())
+        self._agent_id = agent_id if enterprise else None
+        self._service_id = service_id if enterprise else None
+        tenant_root = user_workspace_dir or (workspace_dir if enterprise else None)
+        if enterprise and tenant_root:
+            user_ws = Path(tenant_root)
+            self._workspace_dir = str(user_ws / get_agent_workspace_relative_dir())
+            self._sessions_dir: Path | None = user_ws / get_agent_sessions_relative_dir()
+        else:
+            self._workspace_dir = str(get_agent_workspace_dir())
+            self._sessions_dir = None
+        self._skill_manager = SkillManager(workspace_dir=self._workspace_dir)
         self._session_manager = SessionManager()
         # SkillDev 模式：懒初始化，首次 skilldev.* 请求时构造
         self._skilldev_service = None
+
+    def _history_kwargs(self) -> dict[str, Any]:
+        """企业版 history/metadata 写入时附带 sessions_root."""
+        if self._sessions_dir is not None and os.getenv("AGENT_RUNTIME", "").strip():
+            return {"sessions_root": self._sessions_dir}
+        return {}
+
+    def _append_history_record(self, **kwargs: Any) -> None:
+        kwargs.update(self._history_kwargs())
+        append_history_record(**kwargs)
 
     def _get_skilldev_service(self):
         """懒初始化并返回 SkillDevService 实例.
@@ -884,13 +954,24 @@ class JiuWenSwarm:
         """确保 adapter 已初始化，如果未初始化则根据环境变量和 mode 创建."""
         if self._adapter is None:
             self._sdk_name = resolve_sdk_choice()
-            self._adapter = create_adapter(self._sdk_name, mode=mode)
+            self._adapter = create_adapter(
+                self._sdk_name,
+                mode=mode,
+                workspace_dir=self._workspace_dir,
+                agent_id=self._agent_id,
+                service_id=self._service_id,
+            )
             if hasattr(self._adapter, "set_skill_manager"):
                 self._adapter.set_skill_manager(self._skill_manager)
             self._skill_manager.set_skillnet_install_complete_hook(
                 self._on_skillnet_install_complete
             )
-            logger.info("[JiuWenSwarm] Initialized adapter: sdk=%s, mode=%s", self._sdk_name, mode)
+            logger.info(
+                "[JiuWenSwarm] Initialized adapter: sdk=%s, mode=%s, workspace_dir=%s",
+                self._sdk_name,
+                mode,
+                self._workspace_dir,
+            )
         return self._adapter
 
     @staticmethod
@@ -1132,6 +1213,11 @@ class JiuWenSwarm:
         # 传递 enable_memory 参数
         enable_memory = request.metadata.get("enable_memory", True) if request.metadata else True
         inputs["enable_memory"] = enable_memory
+
+        # 传递 extension_config（供 Rails 消费；仅企业版）
+        if os.getenv("AGENT_RUNTIME", "").strip():
+            if request.metadata and "extension_config" in request.metadata:
+                inputs["extension_config"] = request.metadata["extension_config"]
 
         # 传递 trusted_dirs 参数（用于 RuntimePromptRail 添加路径限制策略）
         if trusted_dirs:
@@ -1881,7 +1967,7 @@ class JiuWenSwarm:
                                 if isinstance(goal_obj, dict)
                                 else None
                             )
-                            append_history_record(
+                            self._append_history_record(
                                 session_id=session_id,
                                 request_id=request.request_id,
                                 channel_id=request.channel_id,
@@ -1971,7 +2057,7 @@ class JiuWenSwarm:
         # proactive_recommendation 是系统触发的推荐指令（不是用户说的话），不写 user
         # history——否则刷新页面会显示"[主动推荐指令] xxx"这种用户没说过的消息。
         if _should_record_user_history(request.params):
-            append_history_record(
+            self._append_history_record(
                 session_id=session_id,
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -2036,7 +2122,7 @@ class JiuWenSwarm:
             )
             if isinstance(content, str):
                 result.payload["content"] = content_str
-            append_history_record(
+            self._append_history_record(
                 session_id=session_id,
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -2212,7 +2298,7 @@ class JiuWenSwarm:
             request.req_method != ReqMethod.COMMAND_GOAL
             and _should_record_user_history(params_for_history)
         ):
-            append_history_record(
+            self._append_history_record(
                 session_id=session_id,
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -2326,7 +2412,7 @@ class JiuWenSwarm:
             durable_pending_final_chunks = []
             if not pending_text or pending_text == durable_final_content:
                 return
-            append_history_record(
+            self._append_history_record(
                 session_id=session_id,
                 request_id=rid,
                 channel_id=cid,
@@ -2434,7 +2520,7 @@ class JiuWenSwarm:
                     }
                     if error_type:
                         error_payload["error_type"] = error_type
-                    append_history_record(
+                    self._append_history_record(
                         session_id=session_id,
                         request_id=rid,
                         channel_id=cid,
@@ -2554,7 +2640,7 @@ class JiuWenSwarm:
                                 for pk in ("source", "proactive_type", "proactive_target"):
                                     if pk not in extra_fields and pk in request.params:
                                         extra_fields[pk] = request.params[pk]
-                                append_history_record(
+                                self._append_history_record(
                                     session_id=session_id,
                                     request_id=rid,
                                     channel_id=cid,
@@ -2665,7 +2751,7 @@ class JiuWenSwarm:
                             for pk in ("source", "proactive_type", "proactive_target"):
                                 if pk not in extra_fields and pk in request.params:
                                     extra_fields[pk] = request.params[pk]
-                            append_history_record(
+                            self._append_history_record(
                                 session_id=session_id,
                                 request_id=rid,
                                 channel_id=cid,
@@ -2726,7 +2812,7 @@ class JiuWenSwarm:
         if finalized_assistant_message and (
                 finalized_assistant_message != assistant_message or suppress_a2ui_stream
         ):
-            append_history_record(
+            self._append_history_record(
                 session_id=session_id,
                 request_id=rid,
                 channel_id=cid,

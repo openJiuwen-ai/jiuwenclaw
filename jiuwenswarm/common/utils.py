@@ -37,6 +37,8 @@ import datetime
 import shutil
 import socket
 import time
+import asyncio
+from collections import OrderedDict
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Literal, Optional
@@ -1483,6 +1485,105 @@ def get_agent_root_dir() -> Path:
     return get_user_workspace_dir() / "agent"
 
 
+def get_agent_root_relative_dir() -> Path:
+    """Get the agent root relative path under user workspace."""
+    return Path("agent")
+
+
+def get_agent_workspace_relative_dir() -> Path:
+    """Get the agent workspace relative path under user workspace."""
+    return get_agent_root_relative_dir() / "workspace"
+
+
+def get_agent_sessions_relative_dir() -> Path:
+    """Get the agent sessions relative path under user workspace."""
+    return get_agent_root_relative_dir() / "sessions"
+
+
+def get_multi_tenant_user_workspace_dir(
+    service_id: str | None, agent_id: str | None
+) -> Path | None:
+    """Get multi-tenant user workspace directory path.
+
+    Path format: <user_workspace>/service_{service_id}/agent_{agent_id}
+
+    二者皆空时返回 ``None``（供单租户分支判断）。仅一侧有值时返回 ``service/.../agents`` 等
+    不完整路径，**不要**用于 Skill 白名单；租户工作区请用 ``get_tenant_agent_*`` 系列（要求双 ID）。
+    Only meaningful for enterprise (AGENT_RUNTIME) multi-tenant isolation.
+    """
+    sid = _normalize_tenant_id(service_id)
+    aid = _normalize_tenant_id(agent_id)
+    if not sid and not aid:
+        return None
+    workspace_dir = get_user_workspace_dir()
+    workspace_dir = workspace_dir / f"service_{sid}" if sid else workspace_dir / "service"
+    workspace_dir = workspace_dir / f"agent_{aid}" if aid else workspace_dir / "agents"
+    return workspace_dir
+
+
+def _normalize_tenant_id(value: str | None) -> str:
+    return str(value or "").strip()
+
+
+def _require_tenant_ids(service_id: str | None, agent_id: str | None) -> tuple[str, str]:
+    """白名单 / 租户工作区要求 ``service_id`` 与 ``agent_id`` 均非空."""
+    sid = _normalize_tenant_id(service_id)
+    aid = _normalize_tenant_id(agent_id)
+    if not sid or not aid:
+        raise ValueError(
+            f"tenant id required: agent_id={agent_id!r}, service_id={service_id!r}"
+        )
+    return sid, aid
+
+
+def get_tenant_agent_workspace_dir(
+    service_id: str | None, agent_id: str | None,
+) -> Path:
+    """多租户 DeepAgent 工作区：``<tenant>/agent/workspace``.
+
+    ``service_id`` / ``agent_id`` 任一缺失时抛 ``ValueError``（不返回 ``None``）。
+    """
+    sid, aid = _require_tenant_ids(service_id, agent_id)
+    base = get_multi_tenant_user_workspace_dir(sid, aid)
+    if base is None:
+        raise ValueError(
+            f"get_multi_tenant_user_workspace_dir returned None for service_id={sid!r}, agent_id={aid!r}"
+        )
+    return base / get_agent_workspace_relative_dir()
+
+
+# 兼容旧命名（上游 jiuwenclaw_workspace）
+get_tenant_agent_jiuwenclaw_workspace_dir = get_tenant_agent_workspace_dir
+
+
+def get_tenant_agent_skills_dirs(
+    service_id: str | None, agent_id: str | None,
+) -> list[Path]:
+    """多租户 skills 目录（与 ``JiuWenSwarm`` / ``SkillManager`` 落盘路径一致）.
+
+    要求 ``service_id`` 与 ``agent_id`` 均非空。单租户请用 ``get_multi_tenant_skill_dirs``
+    或 ``get_agent_skills_dir()``。
+    """
+    workspace = get_tenant_agent_workspace_dir(service_id, agent_id)
+    return [workspace / "skills"]
+
+
+def get_multi_tenant_skill_dirs(
+    service_id: str | None, agent_id: str | None,
+) -> list[Path]:
+    """Resolve the skills directory list for multi-tenant / single-tenant mode.
+
+    - Multi-tenant (both ``service_id`` / ``agent_id`` provided): returns
+      ``[<tenant>/agent/workspace/skills]``.
+    - Single-tenant (both empty): returns ``[get_agent_skills_dir()]``.
+    """
+    sid = _normalize_tenant_id(service_id)
+    aid = _normalize_tenant_id(agent_id)
+    if sid or aid:
+        return get_tenant_agent_skills_dirs(service_id, agent_id)
+    return [get_agent_skills_dir()]
+
+
 def get_agent_home_dir() -> Path:
     return get_agent_root_dir() / "home"
 
@@ -1677,6 +1778,14 @@ def get_checkpoint_dir() -> Path:
 
 
 def get_logs_dir() -> Path:
+    """Get the logs directory path.
+
+    Prefer ``LOG_ROOT_PATH`` when set (e.g. container-local disk instead of NFS
+    workspace). Otherwise use ``~/.jiuwenswarm/agent/.logs`` after legacy migration.
+    """
+    log_root_path = os.getenv("LOG_ROOT_PATH", "").strip()
+    if log_root_path:
+        return Path(log_root_path).expanduser().resolve()
     _migrate_legacy_checkpoint_and_logs()
     return get_agent_root_dir() / ".logs"
 
@@ -1813,6 +1922,17 @@ def _masked_with_fp(value: Any) -> str:
 def _sanitize_log_text(text: str) -> str:
     if not text:
         return text
+
+    # 企业版：若已从 Gateway DB 下发脱敏规则，优先走 LogMaskingEngine。
+    if os.getenv("AGENT_RUNTIME", "").strip():
+        try:
+            from jiuwenswarm.infrastructure.log_masking.engine import LogMaskingEngine
+
+            engine = LogMaskingEngine.get_instance()
+            if engine.uses_external_rules:
+                return engine.sanitize(text)
+        except Exception:
+            pass
 
     masked = text
     masked = _DATA_IMAGE_PATTERN.sub("data:image/*;base64,******", masked)
@@ -1971,11 +2091,14 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     - ``jiuwenswarm.agents.*`` 或 ``jiuwenswarm.server.*`` → agent_server.log
     - 其余 ``jiuwenswarm.*``（含 ``jiuwenswarm.app``、gateway、evolution、utils 等）→ gateway.log
 
-    所有分类日志同时写入 ``full.log``。输出目录：``~/.jiuwenswarm/agent/.logs/``。
+    所有分类日志同时写入 ``full.log``。输出目录默认 ``~/.jiuwenswarm/agent/.logs/``；
+    也可通过环境变量 ``LOG_ROOT_PATH`` 覆盖。
 
     级别由 ``config.yaml`` 的 ``logging`` 段控制；环境变量 ``LOG_LEVEL`` 仅覆盖**控制台**级别
     （``log_level`` 参数为 ``None`` 时）。若传入 ``log_level``（如单测），则控制台与各文件级别均为该值。
     """
+    from jiuwenswarm.infrastructure.config import Settings
+
     logs_root = get_logs_dir()
     logs_root.mkdir(parents=True, exist_ok=True)
 
@@ -1992,7 +2115,9 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
         fmt="%(asctime)s.%(msecs)03d %(levelname)s %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    privacy_filter = SensitiveDataFilter()
+    privacy_filter: Optional[SensitiveDataFilter] = None
+    if Settings().gateway_log_masking_enabled:
+        privacy_filter = SensitiveDataFilter()
 
     def _add_rotating(
         filename: str,
@@ -2008,7 +2133,8 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
         )
         h.setLevel(level)
         h.setFormatter(custom_formatter if custom_formatter is not None else formatter)
-        h.addFilter(privacy_filter)
+        if privacy_filter is not None:
+            h.addFilter(privacy_filter)
         if name_filter is not None:
             h.addFilter(name_filter)
         root.addHandler(h)
@@ -2024,12 +2150,14 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     stream_handler = logging.StreamHandler()
     stream_handler.setLevel(levels.console)
     stream_handler.setFormatter(formatter)
-    stream_handler.addFilter(privacy_filter)
+    if privacy_filter is not None:
+        stream_handler.addFilter(privacy_filter)
     root.addHandler(stream_handler)
 
     # 源头脱敏：覆盖 jiuwenswarm 命名空间之外的第三方 logger（openjiuwen/openai/
     # httpx 等），在 LogRecord 创建时统一脱敏，保证任何来源的 api_key 都不明文落盘。
-    install_source_record_masking()
+    if privacy_filter is not None:
+        install_source_record_masking()
     return root
 
 
@@ -2118,6 +2246,64 @@ def wait_for_pid_exit(pid: int, timeout: float = 60.0) -> None:
                 return
             time.sleep(0.5)
     logger.warning("process %d did not exit within %.1f seconds", pid, timeout)
+
+
+class AsyncLRUCache:
+    """带过期时间的 LRU 缓存（异步并发安全）."""
+
+    def __init__(self, max_size: int = 100, ttl_seconds: int = 600) -> None:
+        self._cache: OrderedDict[str, tuple[Any, float]] = OrderedDict()
+        self._max_size = max_size
+        self._ttl = ttl_seconds
+        self._lock = asyncio.Lock()
+
+    async def get(self, key: str) -> Any | None:
+        """获取缓存值，如果不存在或已过期则返回 None."""
+        async with self._lock:
+            if key not in self._cache:
+                return None
+
+            value, timestamp = self._cache[key]
+            if time.time() - timestamp > self._ttl:
+                self._cache.pop(key, None)
+                return None
+
+            self._cache.move_to_end(key)
+            return value
+
+    async def put(self, key: str, value: Any) -> None:
+        """存入缓存值，如果超过容量则淘汰最久未使用的."""
+        async with self._lock:
+            if key in self._cache:
+                self._cache.pop(key)
+            elif len(self._cache) >= self._max_size:
+                self._cache.popitem(last=False)
+
+            self._cache[key] = (value, time.time())
+
+    async def remove(self, key: str) -> None:
+        """删除缓存项."""
+        async with self._lock:
+            self._cache.pop(key, None)
+
+    async def clear(self) -> None:
+        """清空缓存."""
+        async with self._lock:
+            self._cache.clear()
+
+    def __len__(self) -> int:
+        return len(self._cache)
+
+    async def keys(self) -> list[str]:
+        async with self._lock:
+            now = time.time()
+            expired_keys = [
+                key for key, (_, timestamp) in self._cache.items()
+                if now - timestamp > self._ttl
+            ]
+            for key in expired_keys:
+                del self._cache[key]
+            return list(self._cache.keys())
 
 
 logger = logging.getLogger(__name__)
