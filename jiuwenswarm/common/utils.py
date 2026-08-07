@@ -44,6 +44,10 @@ import logging
 from logging.handlers import BaseRotatingHandler
 from ruamel.yaml import YAML
 
+# read_file 工具：False 时不把图片字节注入主模型对话，改走 image_reading / VQA 等视觉工具。
+# 用于 create_deep_agent(enable_read_image_multimodal=...) 与 MultimodalImageRail(enable_image_multimodal=...)。
+DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL: bool = False
+
 _LOG_FILE_MAX_BYTES = 20 * 1024 * 1024
 _LOG_FILE_BACKUP_COUNT = 20
 

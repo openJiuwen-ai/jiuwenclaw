@@ -330,6 +330,7 @@ from jiuwenswarm.gateway.cron import CronTargetChannel
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.common.utils import (
+    DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL,
     get_agent_skills_dir,
     get_agent_workspace_dir,
     get_checkpoint_dir,
@@ -3935,38 +3936,17 @@ class JiuWenSwarmDeepAdapter:
             notice["model_name"] = model_name
         return notice
 
-    @staticmethod
-    def _native_image_support_from_model_name(model_name: str) -> bool | None:
-        normalized = model_name.strip().lower()
-        if not normalized:
-            return None
-
-        if re.search(r"(?:^|[/_:-])glm-[0-9]+(?:\.[0-9]+)*(?:$|[/_:-])", normalized):
-            return False
-        if re.search(r"(?:^|[/_:-])glm-[^/]*v(?:$|[/_.:-])", normalized):
-            return True
-        if any(token in normalized for token in ("vision", "vl", "omni")):
-            return True
-        return None
-
     def _native_image_input_enabled(self, config: dict[str, Any], model: Any | None) -> bool:
-        model_config = getattr(model, "model_config", None)
-        model_name = str(getattr(model_config, "model_name", "") or "").strip()
-        support = self._native_image_support_from_model_name(model_name)
-        if support is False:
-            return False
-        configured = config.get("enable_read_image_multimodal")
-        if isinstance(configured, bool):
-            return configured
-        if support is True:
-            return True
-        return self._vision_model_config is None
+        # read_file 默认不读取图片：不把图片字节内联进主模型对话，改走 image_reading / VQA 工具。
+        # 仅当 config.yaml 显式设置 enable_read_image_multimodal 时遵从配置；模型名启发式已移除。
+        return self._resolve_enable_read_image_multimodal(config)
 
-    def _resolve_enable_read_image_multimodal(self, config: dict[str, Any]) -> bool:
+    @staticmethod
+    def _resolve_enable_read_image_multimodal(config: dict[str, Any]) -> bool:
         configured = config.get("enable_read_image_multimodal")
         if isinstance(configured, bool):
             return configured
-        return self._vision_model_config is None
+        return DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL
 
     def _apply_model_to_react_agent(self, model: Model) -> None:
         """将指定模型应用到 react_agent 实例（替换 _llm 和 _config 字段）。

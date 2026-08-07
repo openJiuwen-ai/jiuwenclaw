@@ -24,7 +24,7 @@ from openjiuwen.harness.rails import SysOperationRail
 from openjiuwen.harness.schema.config import SubAgentConfig
 from jiuwenswarm.common.config import get_default_models
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
-from jiuwenswarm.common.utils import get_agent_workspace_dir
+from jiuwenswarm.common.utils import DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL, get_agent_workspace_dir
 
 
 logger = logging.getLogger(__name__)
@@ -201,6 +201,8 @@ class LLMWiki:
         )
         final_tools = tools if tools is not None else []
         final_rails = rails if rails is not None else [SysOperationRail()]
+        # read_file 默认不读取图片：关闭多模态内联（调用方显式传入时遵从）。
+        config_kwargs.setdefault("enable_read_image_multimodal", DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL)
 
         self.agent = create_deep_agent(
             model=model,

@@ -404,7 +404,7 @@ async def test_create_instance_continues_when_a2x_client_init_fails(monkeypatch:
     kwargs = create_agent_mock.call_args.kwargs
     assert "runtime_cwd" not in kwargs
     assert "project_root" not in kwargs
-    assert kwargs["enable_read_image_multimodal"] is True
+    assert kwargs["enable_read_image_multimodal"] is False
 
 
 @pytest.mark.asyncio
@@ -494,7 +494,7 @@ def test_make_deep_agent_config_keeps_read_image_multimodal_without_vision_model
             rails=[],
         )
 
-    assert deep_cfg.enable_read_image_multimodal is True
+    assert deep_cfg.enable_read_image_multimodal is False
 
 
 def test_make_deep_agent_config_disables_read_image_multimodal_with_vision_model(

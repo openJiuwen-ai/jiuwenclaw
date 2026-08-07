@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from jiuwenswarm.common.utils import DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL
+
 if TYPE_CHECKING:
     from openjiuwen.core.context_engine.engine import ContextEngine
     from jiuwenswarm.server.runtime.agent_adapter.agent_adapters import AgentAdapter
@@ -404,6 +406,7 @@ async def _run_memory_extraction_with_cache_sharing(
             max_iterations=10,  # Keep loose upper limit, actual rounds should be low
             rails=subagent_rails,  # Inherit parent's rails + restriction_rail
             context_engine_config=subagent_context_config,  # No limit for full history
+            enable_read_image_multimodal=DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL,  # read_file 不读取图片
         )
 
         logger.debug("[auto_memory] Subagent created (cache sharing mode)")
