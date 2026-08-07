@@ -29,6 +29,10 @@ def get_allowed_origin_hosts() -> set[str]:
 
 def is_allowed_browser_origin(origin: str | None) -> bool:
     """校验浏览器 Origin 是否允许访问 WebSocket 服务。"""
+    # 企业版：配置了 AGENT_RUNTIME 时允许所有连接（非浏览器场景）
+    if os.getenv("AGENT_RUNTIME", "").strip():
+        return True
+
     allowed_hosts = get_allowed_origin_hosts()
     if origin is None:
         return "none" in allowed_hosts

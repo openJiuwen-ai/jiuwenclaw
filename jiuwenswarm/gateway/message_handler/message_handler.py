@@ -2630,7 +2630,7 @@ class MessageHandler(ABC):
 
     @staticmethod
     def _response_to_message(
-        resp: "AgentResponse",
+        resp: "AgentResponse | AgentResponseChunk",
         session_id: str | None,
         *,
         request_metadata: dict[str, Any] | None = None,
@@ -2638,7 +2638,12 @@ class MessageHandler(ABC):
     ) -> "Message":
         from jiuwenswarm.common.schema.message import Message, EventType
 
-        metadata = MessageHandler._merge_agent_metadata(request_metadata, resp.metadata)
+        resp_metadata = getattr(resp, "metadata", None)
+        metadata = MessageHandler._merge_agent_metadata(request_metadata, resp_metadata)
+        request_id = str(getattr(resp, "request_id", ""))
+        channel_id = str(getattr(resp, "channel_id", ""))
+        raw_payload = getattr(resp, "payload", None)
+        ok = bool(getattr(resp, "ok", True))
 
         # ── V2: 合并 resp 的 agent_ref ──
         resp_agent_ref = getattr(resp, "agent_ref", None)
@@ -2650,11 +2655,11 @@ class MessageHandler(ABC):
 
         # 检查 payload 中是否包含 event_type，如果包含则创建事件消息
         event_type = None
-        payload = resp.payload
-        if resp.payload and isinstance(resp.payload, dict):
+        payload = raw_payload
+        if raw_payload and isinstance(raw_payload, dict):
             payload = apply_a2ui_text_fallback_to_gateway_payload(
-                dict(resp.payload),
-                channel_id=resp.channel_id,
+                dict(raw_payload),
+                channel_id=channel_id,
             )
             event_type_str = payload.get("event_type")
             if isinstance(event_type_str, str):
@@ -2662,9 +2667,9 @@ class MessageHandler(ABC):
                     event_type = EventType(event_type_str)
                     # 如果是事件类型，创建事件消息而不是响应消息
                     return Message(
-                        id=resp.request_id,
+                        id=request_id,
                         type="event",
-                        channel_id=resp.channel_id,
+                        channel_id=channel_id,
                         session_id=session_id,
                         params={},
                         timestamp=time.time(),
@@ -2683,13 +2688,13 @@ class MessageHandler(ABC):
 
         # 普通响应消息
         return Message(
-            id=resp.request_id,
+            id=request_id,
             type="res",
-            channel_id=resp.channel_id,
+            channel_id=channel_id,
             session_id=session_id,
             params={},
             timestamp=time.time(),
-            ok=resp.ok,
+            ok=ok,
             payload=payload,
             event_type=EventType.CHAT_FINAL,
             metadata=metadata,

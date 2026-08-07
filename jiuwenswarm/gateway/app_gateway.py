@@ -350,14 +350,25 @@ def _schedule_gateway_restart(
 async def _wait_for_gateway_tasks_or_restart(
         tasks_to_wait: list[asyncio.Task],
         restart_request: GatewayRestartRequest,
+        shutdown_requested: asyncio.Event | None = None,
 ) -> bool:
     restart_task = asyncio.create_task(restart_request.ready_event.wait(), name="gateway-restart")
+    shutdown_task: asyncio.Task | None = None
+    if shutdown_requested is not None:
+        shutdown_task = asyncio.create_task(
+            shutdown_requested.wait(),
+            name="gateway-await-sigterm",
+        )
     service_tasks = set(tasks_to_wait)
     wait_tasks = set(service_tasks)
     wait_tasks.add(restart_task)
+    if shutdown_task is not None:
+        wait_tasks.add(shutdown_task)
     try:
         while wait_tasks:
             done, _ = await asyncio.wait(wait_tasks, return_when=asyncio.FIRST_COMPLETED)
+            if shutdown_task is not None and shutdown_task in done:
+                return False
             if restart_task in done:
                 return restart_request.requested or restart_request.ready_event.is_set()
             for task in done:
@@ -375,12 +386,13 @@ async def _wait_for_gateway_tasks_or_restart(
                 return restart_request.requested or restart_request.ready_event.is_set()
         return restart_request.requested or restart_request.ready_event.is_set()
     finally:
-        if not restart_task.done():
-            restart_task.cancel()
-            try:
-                await restart_task
-            except asyncio.CancelledError:
-                pass
+        for extra in (restart_task, shutdown_task):
+            if extra is not None and not extra.done():
+                extra.cancel()
+                try:
+                    await extra
+                except asyncio.CancelledError:
+                    pass
 
 
 @dataclass
@@ -2591,12 +2603,23 @@ async def _run(
         )
 
     restart_requested = False
+    shutdown_requested: asyncio.Event | None = None
+    _setup_signals = getattr(agent_server_ext, "setup_gateway_shutdown_signals", None)
+    if agent_server_ext is not None and callable(_setup_signals):
+        shutdown_requested = asyncio.Event()
+        _setup_signals(shutdown_requested)
+
     try:
         tasks_to_wait = [task for task in (gateway_server_task, web_task) if task is not None]
-        if tasks_to_wait:
+        # 无扩展或未实现 setup_gateway_shutdown_signals：等价于原先 await gather（有任务时）
+        if not tasks_to_wait:
+            if shutdown_requested is not None:
+                await shutdown_requested.wait()
+        else:
             restart_requested = await _wait_for_gateway_tasks_or_restart(
                 tasks_to_wait,
                 restart_request,
+                shutdown_requested,
             )
     except KeyboardInterrupt:
         logger.info("received Ctrl+C, shutting down...")
