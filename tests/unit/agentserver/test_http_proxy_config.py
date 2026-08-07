@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
 from jiuwenclaw.http_proxy_config import (
+    read_no_proxy_list,
     read_proxy_url,
     resolve_requests_proxies,
+    resolve_requests_verify,
     requests_get,
     should_bypass_proxy,
+    ssl_verify_enabled,
 )
 import jiuwenclaw.http_proxy_config as proxy_cfg
 from jiuwenclaw.local_env_config import (
@@ -40,6 +44,8 @@ def _clear_proxy_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "http_proxy",
         "https_proxy",
         "no_proxy",
+        "REQUESTS_CA_BUNDLE",
+        "JIUWENCLAW_SSL_VERIFY",
         "default__default__HTTP_PROXY",
         "default__default__HTTPS_PROXY",
         "default__default__NO_PROXY",
@@ -55,7 +61,7 @@ def test_read_proxy_url_prefers_overlay() -> None:
         reset_task_env_overlay(token)
 
 
-def test_read_proxy_url_reads_namespaced_os_environ() -> None:
+def test_read_proxy_url_reads_namespaced_tip() -> None:
     set_os_environ(
         "HTTP_PROXY",
         "http://tenant:8080",
@@ -63,6 +69,22 @@ def test_read_proxy_url_reads_namespaced_os_environ() -> None:
         agent_id="default",
     )
     assert read_proxy_url() == "http://tenant:8080"
+
+
+def test_read_proxy_url_falls_back_to_bare_os_environ(monkeypatch: pytest.MonkeyPatch) -> None:
+    """HTTP_PROXY may only be in process env when tip is empty."""
+    monkeypatch.setenv("HTTP_PROXY", "http://spawn:8888")
+    assert read_proxy_url() == "http://spawn:8888"
+    assert resolve_requests_proxies("https://api.example.com") == {
+        "http": "http://spawn:8888",
+        "https": "http://spawn:8888",
+    }
+
+
+def test_tip_proxy_wins_over_bare_os_environ(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HTTP_PROXY", "http://bare:9999")
+    set_os_environ("HTTP_PROXY", "http://tip:7777")
+    assert read_proxy_url() == "http://tip:7777"
 
 
 def test_should_bypass_proxy_honors_overlay_no_proxy() -> None:
@@ -84,7 +106,17 @@ def test_should_bypass_proxy_honors_overlay_no_proxy() -> None:
         reset_task_env_overlay(token)
 
 
-def test_requests_request_ignores_bare_os_environ(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_no_proxy_falls_back_to_bare_os_environ(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HTTPS_PROXY", "http://spawn:8888")
+    monkeypatch.setenv("NO_PROXY", "internal.local")
+    assert "internal.local" in read_no_proxy_list()
+    assert should_bypass_proxy("https://internal.local/x") is True
+    assert resolve_requests_proxies("https://internal.local/x") is None
+
+
+def test_requests_request_prefers_overlay_over_bare_environ(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("HTTP_PROXY", "http://bare:9999")
 
     calls: list[dict] = []
@@ -94,6 +126,7 @@ def test_requests_request_ignores_bare_os_environ(monkeypatch: pytest.MonkeyPatc
 
         def request(self, method: str, url: str, **kwargs):
             calls.append({"method": method, "url": url, **kwargs})
+
             class _Resp:
                 status_code = 200
 
@@ -118,3 +151,60 @@ def test_requests_request_ignores_bare_os_environ(monkeypatch: pytest.MonkeyPatc
         "http": "http://overlay:3128",
         "https": "http://overlay:3128",
     }
+
+
+def test_requests_request_uses_spawn_proxy_when_tip_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HTTP_PROXY", "http://spawn:8888")
+
+    calls: list[dict] = []
+
+    class _FakeSession:
+        trust_env = True
+
+        def request(self, method: str, url: str, **kwargs):
+            calls.append(kwargs)
+
+            class _Resp:
+                status_code = 200
+
+            return _Resp()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(proxy_cfg.requests, "Session", lambda: _FakeSession())
+    requests_get("https://api.example.com/v1")
+    assert calls[0]["proxies"] == {
+        "http": "http://spawn:8888",
+        "https": "http://spawn:8888",
+    }
+
+
+def test_resolve_requests_verify_returns_ca_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ca = tmp_path / "cacert-bundle.pem"
+    ca.write_text("dummy-ca\n", encoding="utf-8")
+    monkeypatch.setenv("REQUESTS_CA_BUNDLE", str(ca))
+    monkeypatch.delenv("JIUWENCLAW_SSL_VERIFY", raising=False)
+    assert resolve_requests_verify() == str(ca)
+
+
+def test_resolve_requests_verify_false_skips_ca(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ca = tmp_path / "cacert-bundle.pem"
+    ca.write_text("dummy-ca\n", encoding="utf-8")
+    monkeypatch.setenv("REQUESTS_CA_BUNDLE", str(ca))
+    monkeypatch.setenv("JIUWENCLAW_SSL_VERIFY", "false")
+    assert ssl_verify_enabled() is False
+    assert resolve_requests_verify() is False
+
+
+def test_resolve_requests_verify_reads_ssl_flag_from_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JIUWENCLAW_SSL_VERIFY", "false")
+    assert ssl_verify_enabled() is False
+    assert resolve_requests_verify() is False

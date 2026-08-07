@@ -6,26 +6,21 @@ from __future__ import annotations
 
 import ssl
 
-from jiuwenclaw.local_env_config import get_local_config
-
-
-def _env_bool(key: str, default: bool = True) -> bool:
-    raw = str(get_local_config(key, "") or "").strip().lower()
-    if raw in ("0", "false", "no", "off"):
-        return False
-    if raw in ("1", "true", "yes", "on"):
-        return True
-    return default
+from jiuwenclaw.http_proxy_config import resolve_requests_verify, ssl_verify_enabled
 
 
 def get_ssl_verify() -> bool:
     """Return whether SSL certificate verification is enabled."""
-    return _env_bool("JIUWENCLAW_SSL_VERIFY", default=True)
+    return ssl_verify_enabled(default=True)
 
 
-def get_requests_verify() -> bool:
-    """Return the verify kwarg value for requests calls."""
-    return get_ssl_verify()
+def get_requests_verify() -> bool | str:
+    """Return the verify kwarg value for requests calls.
+
+    Delegates to :func:`jiuwenclaw.http_proxy_config.resolve_requests_verify`
+    so CA-bundle and tip/spawn SSL flags stay consistent with ``requests_request``.
+    """
+    return resolve_requests_verify()
 
 
 def get_insecure_ssl_context() -> ssl.SSLContext:
