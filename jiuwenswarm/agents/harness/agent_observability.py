@@ -241,6 +241,11 @@ def sync_agent_observability(*, force: bool = False) -> None:
     if force:
         _force_ever_enabled = True
 
+    # Single-agent spans carry a redundant agentteam.* block; drop it. Scoped
+    # to single-agent runs — real team members keep their team attrs.
+    if want_enabled:
+        _apply_single_agent_team_attr_suppression()
+
     if want_enabled and not _agent_observability_active:
         try:
             from openjiuwen.agent_teams.observability import (
@@ -372,6 +377,78 @@ def mark_single_agent_team(agent: Any) -> None:
         agent.team_name = SINGLE_AGENT_TEAM_NAME
     except Exception as exc:
         logger.debug("[AgentObservability] set team_name on agent failed: %s", exc)
+
+
+# Idempotency marker so the patch below is applied at most once per process.
+_RAIL_TEAMATTR_PATCH_ATTR = "jiuwenswarm_single_agent_attr_patch"
+
+# Private rail method this module rebinds via getattr/setattr.
+_RAIL_STAMP_METHOD = "_stamp_agent_attributes"
+
+
+def _apply_single_agent_team_attr_suppression() -> None:
+    """Drop the ``agentteam.*`` block from single-agent spans.
+
+    Patches ``ObservabilityRail._stamp_agent_attributes`` to rebind a
+    single-agent span's ``set_attribute`` so any ``agentteam.*`` key (incl. the
+    inline input/output) is discarded; real team members use the original.
+    """
+    try:
+        from openjiuwen.agent_teams.observability import rail as _rail
+        from openjiuwen.agent_teams.observability.semconv import (
+            LANGFUSE_OBSERVATION_TYPE,
+            LANGFUSE_SESSION_ID,
+        )
+    except Exception as exc:  # pragma: no cover - openjiuwen unavailable
+        logger.debug("[AgentObservability] rail patch import failed: %s", exc)
+        return
+
+    rail_cls = _rail.ObservabilityRail
+    if getattr(rail_cls, _RAIL_TEAMATTR_PATCH_ATTR, False):
+        return  # already patched
+
+    _orig_stamp = getattr(rail_cls, _RAIL_STAMP_METHOD)
+    _team_attr_prefix = "agentteam."
+
+    @staticmethod
+    def _stamped(span, *, agent, member_name, team_name, session_id, is_leader):
+        if team_name != SINGLE_AGENT_TEAM_NAME:
+            # Real team member: original stamping.
+            _orig_stamp(
+                span, agent=agent, member_name=member_name, team_name=team_name,
+                session_id=session_id, is_leader=is_leader,
+            )
+            return
+
+        # Rebind this span's set_attribute to drop agentteam.* keys. The rail's
+        # later inline input/output stamps hit the same span, so they're caught too.
+        try:
+            orig_set_attribute = span.set_attribute
+
+            def _filter_attribute(key, value):
+                if isinstance(key, str) and key.startswith(_team_attr_prefix):
+                    return
+                orig_set_attribute(key, value)
+
+            span.set_attribute = _filter_attribute  # type: ignore[method-assign]
+        except Exception as exc:
+            logger.debug(
+                "[AgentObservability] set_attribute rebind failed: %s", exc
+            )
+            _orig_stamp(
+                span, agent=agent, member_name=member_name, team_name=team_name,
+                session_id=session_id, is_leader=is_leader,
+            )
+            return
+
+        # Keep the two non-agentteam attrs; everything else the original would
+        # set is agentteam.* and gets dropped by the filter above.
+        span.set_attribute(LANGFUSE_OBSERVATION_TYPE, "agent")
+        if session_id:
+            span.set_attribute(LANGFUSE_SESSION_ID, session_id)
+
+    setattr(rail_cls, _RAIL_STAMP_METHOD, _stamped)
+    setattr(rail_cls, _RAIL_TEAMATTR_PATCH_ATTR, True)
 
 
 def attach_subagent_observability(subagent: Any) -> None:
