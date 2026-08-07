@@ -1486,6 +1486,7 @@ async def _run(
     from jiuwenswarm.gateway.channel_manager.tui.tui_channel import TuiChannel, TuiChannelConfig
     from jiuwenswarm.extensions.manager import ExtensionManager
     from jiuwenswarm.extensions.registry import ExtensionRegistry
+    from jiuwenswarm.extensions.redis import init_gateway_redis_from_config, shutdown_gateway_redis
     from jiuwenswarm.common.updater import UpdaterService
     from openjiuwen.core.runner import Runner
 
@@ -1565,6 +1566,8 @@ async def _run(
         logger.warning("[App] failed to read heartbeat config from config.yaml, using defaults: %s", e)
         heartbeat_cfg = None
         channels_cfg = None
+
+    await init_gateway_redis_from_config(dict(full_cfg or {}))
 
     client.set_or_update_server_config(
         config=dict(full_cfg or {}),
@@ -2760,6 +2763,7 @@ async def _run(
         await channel_manager.stop_dispatch()
         await heartbeat_service.stop()
         await message_handler.stop_forwarding()
+        await shutdown_gateway_redis()
         await client.disconnect()
 
         _cleanup_task.cancel()

@@ -98,6 +98,7 @@ harmony = [
 ]
 a2a = ["a2a-sdk[http-server]==1.0.0"]
 ssh = ["asyncssh>=2.14.0,<2.24"]
+redis = ["redis>=5.0.0"]
 desktop = ["pywebview>=5.4"]
 dev = ["pyinstaller>=6.0.0", "pywebview>=5.4"]
 tui = ["jiuwenswarm-tui==0.2.3"]
@@ -115,6 +116,9 @@ test = [
     "coverage>=7.7.1",
     "pyyaml>=6.0",
 ]
+
+[project.entry-points."jiuwenswarm.gateway.redis"]
+redis = "jiuwenswarm.extensions.redis.redis_client:RedisClient"
 
 [project.scripts]
 jiuwenswarm = "jiuwenswarm.cli.main:main"
