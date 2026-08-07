@@ -54,17 +54,22 @@ class RedisConfig:
     operation_timeout: float = 10.0
     health_check_interval: int = 30
 
+    @staticmethod
+    def _normalize_password(value: Any) -> str | None:
+        """处理 YAML 解析后的密码值（false/0 等应视为无密码）。"""
+        if value is None or value is False:
+            return None
+        if isinstance(value, str) and value.strip() == "":
+            return None
+        return str(value)
+
     @classmethod
     def from_mapping(cls, data: dict[str, Any] | None) -> RedisConfig:
         m = data or {}
         kp = str(m.get("key_prefix") if m.get("key_prefix") is not None else "jiuwenswarm:")
         if kp and not kp.endswith(":"):
             kp = f"{kp}:"
-        pw = m.get("password")
-        if pw is not None and str(pw).strip() == "":
-            pw = None
-        elif pw is not None:
-            pw = str(pw)
+        pw = cls._normalize_password(m.get("password"))
         return cls(
             host=str(m.get("host") if m.get("host") is not None else "localhost"),
             port=_coerce_int(m.get("port"), 6379),
@@ -160,6 +165,36 @@ class RedisClient:
         r = self._connection()
         n = int(await r.delete(self._cfg.effective_key(key)))
         return n > 0
+
+    async def mget(self, keys: list[str]) -> list[str | None]:
+        r = self._connection()
+        if not keys:
+            return []
+        full = [self._cfg.effective_key(k) for k in keys]
+        vals = await r.mget(*full)
+        out: list[str | None] = []
+        for v in vals or []:
+            if v is None:
+                out.append(None)
+            elif isinstance(v, str):
+                out.append(v)
+            else:
+                out.append(str(v))
+        return out
+
+    async def scan_iter(self, match: str) -> list[str]:
+        """扫描匹配相对 key 模式的键，返回去掉 ``key_prefix`` 后的相对名列表。"""
+        r = self._connection()
+        pattern = self._cfg.effective_key(match)
+        prefix = self._cfg.key_prefix or ""
+        keys: list[str] = []
+        async for raw in r.scan_iter(match=pattern):
+            k = raw if isinstance(raw, str) else str(raw)
+            if prefix and k.startswith(prefix):
+                keys.append(k[len(prefix):])
+            else:
+                keys.append(k)
+        return keys
 
     async def hget(self, key: str, field: str) -> str | None:
         r = self._connection()

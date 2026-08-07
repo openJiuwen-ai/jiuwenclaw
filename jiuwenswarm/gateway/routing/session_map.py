@@ -1,10 +1,15 @@
 from __future__ import annotations
 
-import json
+import os
 from enum import Enum
-from pathlib import Path
 
-from jiuwenswarm.common.utils import get_checkpoint_dir, logger
+from jiuwenswarm.common.utils import logger
+from jiuwenswarm.extensions.redis.redis_runtime import get_declared_deployment_mode
+from jiuwenswarm.gateway.routing.session_storage import (
+    LocalSessionStorage,
+    RedisSessionStorage,
+    SessionStorage,
+)
 
 
 class SessionMapScope(str, Enum):
@@ -44,32 +49,25 @@ def _make_key(
 
 
 class SessionMap:
-    """Map stable identity (per config scope) -> rotating agent ``session_id``."""
+    """Map stable identity (per config scope) -> rotating agent ``session_id``.
+
+    支持两种部署模式:
+    - standalone (单机模式): 所有读写走本地文件
+    - distributed (主备模式，且 AGENT_RUNTIME 开启): 所有读写走 Redis
+    """
 
     def __init__(self, *, scope: SessionMapScope | None = None) -> None:
         self._scope = scope if scope is not None else load_session_map_scope()
-        self._store_path: Path = get_checkpoint_dir() / "session_map.json"
-        self._mapping: dict[str, str] = {}
-        self._load()
+        self._storage: SessionStorage
 
-    def _load(self) -> None:
-        try:
-            if not self._store_path.exists():
-                return
-            with open(self._store_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                self._mapping = {str(k): str(v) for k, v in data.items() if isinstance(v, str) and v}
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("SessionMap load failed: %s", exc)
-
-    def _save(self) -> None:
-        try:
-            self._store_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._store_path, "w", encoding="utf-8") as f:
-                json.dump(self._mapping, f, ensure_ascii=False, indent=2)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("SessionMap save failed: %s", exc)
+        # 企业版：AGENT_RUNTIME + distributed 时使用 Redis；否则本地文件
+        if (
+            os.getenv("AGENT_RUNTIME", "").strip()
+            and get_declared_deployment_mode() == "distributed"
+        ):
+            self._storage = RedisSessionStorage()
+        else:
+            self._storage = LocalSessionStorage()
 
     def get_session_id(
         self,
@@ -81,7 +79,7 @@ class SessionMap:
         rotate: bool = False,
     ) -> str:
         key = _make_key(self._scope, provider, chat_id, bot_id, user_id)
-        existing = self._mapping.get(key)
+        existing = self._storage.get(key)
         if existing and not rotate:
             return existing
         raise RuntimeError(
@@ -96,7 +94,7 @@ class SessionMap:
         user_id: str,
     ) -> str | None:
         key = _make_key(self._scope, provider, chat_id, bot_id, user_id)
-        return self._mapping.get(key)
+        return self._storage.get(key)
 
     def set_session_id(
         self,
@@ -110,6 +108,5 @@ class SessionMap:
         sid = str(session_id).strip()
         if not sid:
             raise ValueError("session_id is required")
-        if self._mapping.get(key) != sid:
-            self._mapping[key] = sid
-            self._save()
+        if self._storage.get(key) != sid:
+            self._storage.set(key, sid)
