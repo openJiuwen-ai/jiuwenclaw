@@ -18,6 +18,7 @@ from .config import (
     get_embed_config,
     clear_embed_config_db_cache,
     set_embed_config_db_cache,
+    reload_embed_config_from_gateway_db,
     DEFAULT_WORKSPACE_DIR,
 )
 from .embeddings import EmbeddingProvider, create_embedding_provider
@@ -70,6 +71,7 @@ __all__ = [
     "get_embed_config",
     "clear_embed_config_db_cache",
     "set_embed_config_db_cache",
+    "reload_embed_config_from_gateway_db",
     "DEFAULT_WORKSPACE_DIR",
     "estimate_tokens",
     "get_external_memory_config",

@@ -109,7 +109,8 @@ def _load_config() -> Dict[str, Any]:
 def get_embed_config() -> Dict[str, Any]:
     """Get embedding configuration.
 
-    Priority: DB cache (enterprise ``embedding_template``) > YAML (config.yaml embed section).
+    Priority: DB cache (``embed_config`` table / enterprise ``embedding_template``)
+    > YAML (config.yaml embed section).
     """
     global _embed_config_db_cache
     if _embed_config_db_cache is not None:
@@ -357,3 +358,37 @@ def get_memory_mode(config: Optional[Dict[str, Any]] = None) -> str:
     memory_cfg = (config or {}).get("memory", {})
     mode = str(memory_cfg.get("mode") or "local").strip().lower()
     return "cloud" if mode == "cloud" else "local"
+
+
+async def reload_embed_config_from_gateway_db() -> None:
+    """从 Gateway 库加载 ``embed_config`` 并刷新 embedding 缓存（企业版）。"""
+    global _embed_config_db_cache
+    if not os.getenv("AGENT_RUNTIME", "").strip():
+        return
+    try:
+        from jiuwenswarm.server.runtime.enterprise_config import gateway_db
+
+        jid = gateway_db.resolve_jiuwenclaw_id()
+        if not jid:
+            _embed_config_db_cache = None
+            return
+
+        rows = await gateway_db.list_records(
+            "embed_config",
+            filters={"jiuwenclaw_id": jid},
+        )
+        row = rows[0] if rows else None
+        if row is not None:
+            _embed_config_db_cache = {
+                "api_key": row.get("embed_api_key"),
+                "base_url": row.get("embed_base_url"),
+                "model": row.get("embed_model"),
+            }
+        else:
+            _embed_config_db_cache = None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "embed_config read failed: %s",
+            exc,
+            exc_info=True,
+        )

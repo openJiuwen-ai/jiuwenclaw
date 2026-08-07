@@ -6192,6 +6192,7 @@ class JiuWenSwarmDeepAdapter:
             The normalized config snapshot that was cached on this adapter.
         """
         clear_config_cache()
+        clear_embed_config_db_cache()
         # 清 MemoryRail 实际使用的 openjiuwen lite INDEX_CACHE（而非仓内并行实现的那份），
         # 并 close 旧实例（db 连接 / watchdog observer / 定时任务），使下次
         # init_memory_manager_async 用最新 embedding_config 创建新 manager + 新 provider。
