@@ -7,6 +7,7 @@ render_mysql_files() {
 
     ensure_available_port "MYSQL_NODE_PORT"
     render_config_template "${template_file}" "${file}" "DEPLOY_VARS"
+    add_resource_if_set "MYSQL" "${file}"
 }
 
 deploy_mysql() {
