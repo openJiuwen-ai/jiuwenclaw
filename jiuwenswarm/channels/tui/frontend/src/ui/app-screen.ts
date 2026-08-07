@@ -1982,7 +1982,8 @@ export class AppScreen implements Component, Focusable {
   private handleFileViewerInput(data: string): void {
     if (!this.fileViewerState) return;
 
-    const contentLines = this.fileViewerState.content.split("\n");
+    const width = this.tui.terminal.columns || 80;
+    const contentLines = this.getWrappedViewerLines(width);
     const height = this.tui.terminal.rows;
     const availableHeight = Math.max(1, height - 2); // Reserve for title + hint
     const maxScroll = Math.max(0, contentLines.length - availableHeight);
@@ -2032,17 +2033,26 @@ export class AppScreen implements Component, Focusable {
     const titleText = `━━━ ${this.fileViewerState.title} ━━━`;
     lines.push(padToWidth(palette.border.panel(titleText), safeWidth));
 
-    // Content area
-    const contentLines = this.fileViewerState.content.split("\n");
+    // Content area — wrap each source line to the available width so long
+    // lines (e.g. a human prompt question) flow onto multiple rows instead
+    // of being truncated to a single clipped row that the user must widen
+    // the terminal to read.
+    const contentLines = this.getWrappedViewerLines(safeWidth);
     const availableHeight = Math.max(1, height - 2);
+    // Clamp scroll within range after a terminal resize changes the wrap row
+    // count (e.g. narrowing wraps into more rows), so the view never lands
+    // past the end of the content.
+    const maxScroll = Math.max(0, contentLines.length - availableHeight);
+    if (this.fileViewerState.scrollOffset > maxScroll) {
+      this.fileViewerState.scrollOffset = maxScroll;
+    }
     const scrollOffset = this.fileViewerState.scrollOffset;
 
     // Add visible content lines
     for (let i = 0; i < availableHeight; i++) {
       const lineIndex = scrollOffset + i;
       if (lineIndex < contentLines.length) {
-        const rawLine = contentLines[lineIndex] || "";
-        lines.push(truncateToWidth(rawLine, safeWidth, ""));
+        lines.push(padToWidth(contentLines[lineIndex] ?? "", safeWidth));
       } else {
         // Pad with empty lines
         lines.push(" ".repeat(safeWidth));
@@ -2057,6 +2067,30 @@ export class AppScreen implements Component, Focusable {
     lines.push(padToWidth(palette.text.dim(hintText), safeWidth));
 
     return lines;
+  }
+
+  /**
+   * Wrap the FileViewer's raw content to a given width, returning the logical
+   * rows the viewer should render and scroll over. Each source line is split
+   * by ``wrapTextWithAnsi`` (ANSI-aware, CJK-wide-char aware) and then each
+   * resulting row is truncated to the width as a safety net so a runaway row
+   * can never exceed the terminal columns.
+   */
+  private getWrappedViewerLines(safeWidth: number): string[] {
+    if (!this.fileViewerState) return [];
+    const maxWidth = Math.max(1, safeWidth - 1);
+    const out: string[] = [];
+    for (const rawLine of this.fileViewerState.content.split("\n")) {
+      const wrapped = wrapTextWithAnsi(rawLine, maxWidth);
+      if (wrapped.length > 0) {
+        for (const row of wrapped) {
+          out.push(truncateToWidth(row, safeWidth, ""));
+        }
+      } else {
+        out.push("");
+      }
+    }
+    return out;
   }
 
   /** Enter DiffViewer mode to browse git/turn diffs interactively */
@@ -5835,6 +5869,19 @@ export class AppScreen implements Component, Focusable {
       return;
     }
     if (current.phase === "pending-list") {
+      // The pending list exists solely to collect waiting-for-human turns.
+      // Once there are none left — typically because the user just submitted a
+      // reply and the backend resumed (or the run completed) — return to the
+      // previous screen instead of stranding the user on an empty "No pending
+      // replies" page that only Esc can leave.
+      const snapshot = this.state.getSnapshot();
+      const stillWaiting = snapshot.workflowRuns.some(
+        (wf) => countWaitingForHuman(wf) > 0,
+      );
+      if (!stillWaiting) {
+        this.restoreFromPendingList(current.previous_phase);
+        return;
+      }
       this.swarmWorkflowsViewState = this.buildPendingListState(
         current.previous_phase ?? "list",
         current.selectedIndex,
