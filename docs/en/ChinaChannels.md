@@ -4,7 +4,7 @@ JiuwenSwarm supports integration with multiple Chinese chat platforms. Below are
 
 ## Xiaoyi
 
-[Demo video](../assets/videos/xiaoyi_channel.mp4)
+[Demo video: Xiaoyi channel setup and conversation demo](../assets/videos/xiaoyi_channel.mp4)
 
 ### 1. Create a Xiaoyi Agent
 
@@ -74,9 +74,11 @@ channels:
     mode: xiaoyi_channel
     ak: "<ak from platform>"
     sk: "<sk from platform>"
-    agent_id: "<your agent id>"
     api_id: "<trigger apiId>"
     push_id: "<trigger push_id (required when push notifications are enabled)>"
+    agent_id: "<your agent id>"
+    ws_url1: "wss://hag.cloud.huawei.com/openclaw/v1/ws/link"
+    ws_url2: "wss://116.63.174.231/openclaw/v1/ws/link"
     uid: ""
     api_key: ""
     push_url: ""
@@ -223,6 +225,11 @@ channels:
   feishu:
     app_id: "your App ID"
     app_secret: "your App Secret"
+    encrypt_key: "event subscription encrypt key"
+    verification_token: "event subscription token"
+    allow_from: []
+    enable_streaming: false
+    send_file_allowed: true
     enabled: true
     group_digital_avatar: true
     my_user_id: "ou_xxxx"
@@ -364,9 +371,9 @@ On the **Permission management** page, enable the following permissions as neede
 
 ### 5. Configure DingTalk Channel
 
-Copy **Client ID** and **Client Secret** from **Credentials & basic info**.
+Copy **Client ID** and **Client Secret** from **Credentials & basic info** (mapped to `client_id` and `client_secret` in the config file).
 
-In JiuwenSwarm, open **Channels → DingTalk**, enable it, and configure **client_id** and **client_secret**, then save:
+In JiuwenSwarm, open **Channels → DingTalk**, enable it, and configure **Client ID** and **Client Secret**, then save:
 
 ![DingTalk channel](../assets/images/dingding_channel_enable.png)
 
@@ -461,6 +468,10 @@ channels:
   wecom:
     bot_id: "your Bot ID"
     secret: "your Secret"
+    ws_url: "wss://openws.work.weixin.qq.com"
+    allow_from: []
+    enable_streaming: true
+    send_thinking_message: false
     send_file_allowed: true
     enabled: true
     group_digital_avatar: true

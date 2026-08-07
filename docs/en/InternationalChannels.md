@@ -107,6 +107,8 @@ channels:
 
 Discord channel integration is supported in the current version. Configure and enable the Discord Bot in **Channel Management**, or manually edit `config.yaml`.
 
+For step-by-step instructions (Developer Portal bot creation, intents, install link, channel management), see [Discord.md](Discord.md).
+
 ### Configuration fields
 
 - `bot_token`
@@ -627,3 +629,4 @@ Check the connection state in logs:
 **Bluestacks or emulator linking issues**
 
 Scanning from a physical phone is usually more reliable than emulator camera passthrough.
+>>>>>>> origin/develop
