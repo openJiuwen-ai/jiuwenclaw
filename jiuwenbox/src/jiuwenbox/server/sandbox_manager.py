@@ -1465,13 +1465,12 @@ class SandboxManager:
     ) -> SecurityPolicy:
         """Apply egress/ingress update onto a sandbox's current effective policy."""
         if policy_mode == PolicyMode.APPEND:
-            fragment: dict[str, object] = {"network": {}}
-            network_fragment = fragment["network"]
-            assert isinstance(network_fragment, dict)
+            network_fragment: dict[str, object] = {}
             if egress is not None:
                 network_fragment["egress"] = egress
             if ingress is not None:
                 network_fragment["ingress"] = ingress
+            fragment: dict[str, object] = {"network": network_fragment}
             return self.policy_engine.merge_policy(current, fragment)
 
         new_network = current.network.model_copy(deep=True)
@@ -1561,7 +1560,10 @@ class SandboxManager:
                 policy_mode,
                 reject_host=True,
             )
-            assert updated is not None
+            if updated is None:
+                raise SandboxStateError(
+                    f"Failed to update network policy for sandbox '{sandbox_id}'"
+                )
             return updated
 
     async def update_all_policies(
