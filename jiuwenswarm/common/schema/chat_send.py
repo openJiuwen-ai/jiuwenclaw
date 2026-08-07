@@ -24,6 +24,9 @@ class ChatSendParams(TypedDict, total=False):
     content: str
     """用户消息正文（主字段）。保留 /skill 等标记原样，不剥离。"""
 
+    message: NotRequired[str]
+    """创建/修改 Skill 等场景的约定字段，与 content 等价。"""
+
     query: str
     """DEPRECATED: 历史双发字段，当前与 content 同值。
 
@@ -37,6 +40,12 @@ class ChatSendParams(TypedDict, total=False):
     - 语义：当前为 prompt 提示（塞入 user_message_context["skills_to_use"]），
             模型可见但非强制。真正强制生效需 A3 阶段（SkillSelectionRail）。
     - 空列表或缺失：不指定 skill，agent 自主判断。
+    - 创建/修改 Skill：固定传 ``["skill-creator-router"]``。
+    """
+
+    metadata: NotRequired[dict]
+    """请求级元数据。创建/修改 Skill 时含 ``scene``（create_skill|edit_skill）
+    与可选 ``target_skill``。
     """
 
     mode: NotRequired[str]

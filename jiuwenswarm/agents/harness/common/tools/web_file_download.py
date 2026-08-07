@@ -107,7 +107,20 @@ class WebFileDownloadManager:
         ).hexdigest()
         return f"{payload_b64}.{signature}"
 
-    def validate_token(self, token: str) -> dict[str, Any] | None:
+    def validate_token(
+        self,
+        token: str,
+        *,
+        session_id: str | None = None,
+        check_expiry: bool = True,
+    ) -> dict[str, Any] | None:
+        """校验下载令牌。
+
+        Args:
+            token: HMAC 签名令牌。
+            session_id: 若提供非空字符串，则要求 payload.sid 与之相等。
+            check_expiry: 是否校验 ``exp`` 过期时间（默认开启）。
+        """
         try:
             parts = token.split(".")
             if len(parts) != 2:
@@ -125,6 +138,16 @@ class WebFileDownloadManager:
             payload = json.loads(payload_json)
             if not isinstance(payload, dict):
                 return None
+            if check_expiry:
+                exp = payload.get("exp")
+                if not isinstance(exp, (int, float)) or int(exp) < int(time.time()):
+                    logger.warning("[WebFileDownload] 令牌已过期")
+                    return None
+            if session_id is not None and str(session_id).strip():
+                token_sid = str(payload.get("sid") or "").strip()
+                if token_sid != str(session_id).strip():
+                    logger.warning("[WebFileDownload] 令牌会话不匹配")
+                    return None
             return payload
         except Exception:
             logger.debug("[WebFileDownload] 令牌解析异常", exc_info=True)
@@ -145,8 +168,17 @@ def generate_file_download_token(
     )
 
 
-def validate_file_download_token(token: str) -> dict[str, Any] | None:
-    return WebFileDownloadManager.get_instance().validate_token(token)
+def validate_file_download_token(
+    token: str,
+    *,
+    session_id: str | None = None,
+    check_expiry: bool = True,
+) -> dict[str, Any] | None:
+    return WebFileDownloadManager.get_instance().validate_token(
+        token,
+        session_id=session_id,
+        check_expiry=check_expiry,
+    )
 
 
 def build_file_download_info(

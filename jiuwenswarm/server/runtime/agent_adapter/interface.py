@@ -15,6 +15,8 @@ from dataclasses import replace
 import json
 import logging
 import re
+import shutil
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, AsyncIterator, Tuple
@@ -39,6 +41,7 @@ from jiuwenswarm.server.runtime.agent_adapter.statusline_setup_agent import (
 )
 from jiuwenswarm.server.runtime.session.session_manager import SessionManager
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
+from jiuwenswarm.server.runtime.skill.archive_store import ARCHIVE_DIRNAME
 from jiuwenswarm.server.utils.utils import is_team_params
 from jiuwenswarm.common.config import get_config
 from jiuwenswarm.agents.harness.code.prompt.plan_approval import (
@@ -553,6 +556,10 @@ _SKILL_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.SKILLS_LIST: "handle_skills_list",
     ReqMethod.SKILLS_INSTALLED: "handle_skills_installed",
     ReqMethod.SKILLS_GET: "handle_skills_get",
+    ReqMethod.SKILLS_VERSIONS_LIST: "handle_skills_versions_list",
+    ReqMethod.SKILLS_FILES_LIST: "handle_skills_files_list",
+    ReqMethod.SKILLS_FILES_GET: "handle_skills_files_get",
+    ReqMethod.SKILLS_REBUILD: "handle_skills_rebuild",
     ReqMethod.SKILLS_TOGGLE: "handle_skills_toggle",
     ReqMethod.SKILLS_MARKETPLACE_LIST: "handle_skills_marketplace_list",
     ReqMethod.SKILLS_INSTALL: "handle_skills_install",
@@ -956,6 +963,12 @@ class JiuWenSwarm:
         query = params.get("query")
         if query is None or query == "":
             query = params.get("content", "")
+        if (query is None or query == "") and isinstance(params, dict):
+            message = params.get("message")
+            if isinstance(message, str):
+                query = message
+            elif message is not None:
+                query = message
         # /debug 请求级指令：仅 agent/code 在此剥离前缀；team 自行从
         # ``turn.text`` 解析 /debug（见 team_helpers），故此处对 team 不剥离。
         _request_debug = False
@@ -983,7 +996,11 @@ class JiuWenSwarm:
         raw_skills = params.get("skills")
         if isinstance(raw_skills, list):
             skills = [s.strip() for s in raw_skills if isinstance(s, str) and s.strip()] or None
-        metadata = request.metadata or {}
+        metadata = dict(request.metadata or {}) if isinstance(request.metadata, dict) else {}
+        # params.metadata.scene / target_skill 并入 prompt 上下文
+        param_metadata = params.get("metadata") if isinstance(params, dict) else None
+        if isinstance(param_metadata, dict):
+            metadata = {**metadata, **param_metadata}
         param_project_dir = params.get("project_dir")
         metadata_project_dir = metadata.get("project_dir") if isinstance(metadata, dict) else None
         project_dir = (
@@ -1018,7 +1035,7 @@ class JiuWenSwarm:
             files=params.get("files", {}) or {},
             trusted_dirs=trusted_dirs,
             skills=skills,
-            metadata=request.metadata,
+            metadata=metadata,
         )
 
         if isinstance(query, InteractiveInput):
@@ -1450,7 +1467,11 @@ class JiuWenSwarm:
         handler_name = _SKILL_ROUTES[request.req_method]
         handler = getattr(self._skill_manager, handler_name)
         try:
-            payload = await handler(request.params)
+            params = dict(request.params) if isinstance(request.params, dict) else {}
+            if handler_name == "handle_skills_import_local":
+                # download_token 校验需要绑定当前会话 sid
+                params["_session_id"] = str(request.session_id or "").strip()
+            payload = await handler(params)
             _reload_after_skills = handler_name in [
                 "handle_skills_install",
                 "handle_skills_import_local",
@@ -1475,13 +1496,28 @@ class JiuWenSwarm:
                 # skill rail 重新读一次 metadata，授权/撤权即刻生效。
                 await self._refresh_skill_rails_after_change()
                 await self._reload_team_skill_rails(request.session_id)
+            elif handler_name == "handle_skills_evolution_save" and payload.get("success"):
+                await self._refresh_skill_rails_after_change()
+            elif (
+                handler_name == "handle_skills_rebuild"
+                and isinstance(payload, dict)
+                and payload.get("result_type") == "followup"
+                and payload.get("success")
+            ):
+                # 与 /evolve_rebuild 一致：准备完成后由 Agent follow-up 改写 SKILL.md
+                self._schedule_skills_rebuild_followup(request, payload)
+                await self._refresh_skill_rails_after_change()
         except Exception as exc:
             logger.error("[JiuWenSwarm] skills 请求处理失败: %s", exc)
+            err_payload: dict = {"error": str(exc), "message": str(exc)}
+            code = getattr(exc, "code", None)
+            if isinstance(code, str) and code.strip():
+                err_payload["code"] = code.strip()
             return AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 ok=False,
-                payload={"error": str(exc)},
+                payload=err_payload,
                 metadata=request.metadata,
             )
         return AgentResponse(
@@ -1491,6 +1527,117 @@ class JiuWenSwarm:
             payload=payload,
             metadata=request.metadata,
         )
+
+    def _schedule_skills_rebuild_followup(
+        self,
+        request: AgentRequest,
+        payload: dict[str, Any],
+    ) -> None:
+        """后台启动与 slash evolve_rebuild 相同的 Agent follow-up."""
+        followup = str(payload.get("followup_prompt") or "").strip()
+        if not followup:
+            logger.warning("[JiuWenSwarm] skills.rebuild followup_prompt 为空，跳过 Agent")
+            return
+
+        async def _runner() -> None:
+            try:
+                await self._run_skills_rebuild_followup(request, payload)
+            except Exception:
+                logger.exception(
+                    "[JiuWenSwarm] skills.rebuild Agent follow-up 失败: request_id=%s skill=%s",
+                    request.request_id,
+                    payload.get("skill_name"),
+                )
+
+        task = asyncio.create_task(_runner(), name=f"skills-rebuild-followup:{request.request_id}")
+
+        def _log_task_result(done: asyncio.Task[None]) -> None:
+            if done.cancelled():
+                return
+            exc = done.exception()
+            if exc is not None:
+                logger.error(
+                    "[JiuWenSwarm] skills.rebuild followup task error: %s",
+                    exc,
+                    exc_info=exc,
+                )
+
+        task.add_done_callback(_log_task_result)
+
+    async def _run_skills_rebuild_followup(
+        self,
+        request: AgentRequest,
+        payload: dict[str, Any],
+    ) -> None:
+        """执行 rebuild Agent follow-up，并按版本目标同步 workspace / 版本副本."""
+        followup = str(payload.get("followup_prompt") or "").strip()
+        target = payload.get("rebuild_target") if isinstance(payload.get("rebuild_target"), dict) else {}
+        skill_dir_raw = str(target.get("skill_dir") or "").strip()
+        content_root_raw = str(target.get("content_root") or "").strip()
+        swap_workspace = bool(target.get("swap_workspace"))
+        is_default = bool(target.get("is_default"))
+        skill_dir = Path(skill_dir_raw) if skill_dir_raw else None
+        content_root = Path(content_root_raw) if content_root_raw else None
+
+        workspace_backup: Path | None = None
+        try:
+            if swap_workspace and skill_dir is not None and content_root is not None:
+                # 非默认版本：临时把版本 mid-state 放到 workspace，供 Agent 按 skill 名改写
+                workspace_backup = Path(tempfile.mkdtemp(prefix="skill-rebuild-ws-bak-"))
+                for child in list(skill_dir.iterdir()):
+                    if child.name == ARCHIVE_DIRNAME:
+                        continue
+                    dest = workspace_backup / child.name
+                    if child.is_dir() and not child.is_symlink():
+                        shutil.copytree(child, dest)
+                    elif child.is_file():
+                        shutil.copy2(child, dest)
+                self._skill_manager._sync_workspace_from_version_content(skill_dir, content_root)
+
+            params = dict(request.params) if isinstance(request.params, dict) else {}
+            params["query"] = followup
+            params.setdefault("mode", params.get("mode") or "agent")
+            chat_request = AgentRequest(
+                request_id=f"{request.request_id}-rebuild-followup",
+                channel_id=request.channel_id,
+                session_id=request.session_id,
+                chat_id=request.chat_id,
+                req_method=ReqMethod.CHAT_SEND,
+                params=params,
+                is_stream=True,
+                timestamp=request.timestamp,
+                metadata=request.metadata,
+            )
+            async for _chunk in self.process_message_stream(chat_request):
+                pass
+
+            if skill_dir is not None and content_root is not None and (is_default or swap_workspace):
+                # Agent 改写 workspace 后回写目标版本副本
+                self._skill_manager._copy_workspace_business_to_version(skill_dir, content_root)
+                version = target.get("version")
+                if isinstance(version, str) and version.strip():
+                    from jiuwenswarm.server.runtime.skill.archive_store import touch_version_metadata
+
+                    touch_version_metadata(skill_dir, version.strip())
+            await self._refresh_skill_rails_after_change()
+        finally:
+            if workspace_backup is not None and skill_dir is not None:
+                try:
+                    for child in list(skill_dir.iterdir()):
+                        if child.name == ARCHIVE_DIRNAME:
+                            continue
+                        if child.is_dir() and not child.is_symlink():
+                            shutil.rmtree(child, ignore_errors=True)
+                        else:
+                            child.unlink(missing_ok=True)
+                    for child in workspace_backup.iterdir():
+                        dest = skill_dir / child.name
+                        if child.is_dir() and not child.is_symlink():
+                            shutil.copytree(child, dest)
+                        elif child.is_file():
+                            shutil.copy2(child, dest)
+                finally:
+                    shutil.rmtree(workspace_backup, ignore_errors=True)
 
     async def _handle_plugins_request(self, request: AgentRequest) -> AgentResponse | None:
         """处理 Plugin 相关请求，返回 None 表示不是 Plugin 请求."""
