@@ -30,6 +30,7 @@ interface EnterpriseSkillItem {
 
 interface SkillPanelProps {
   sessionId: string;
+  ensureSessionId: () => Promise<string | null>;
 }
 
 function channelFromSkillSource(skillSource: string | null | undefined): string {
@@ -48,7 +49,7 @@ function displaySourceBody(skillSource: string | null | undefined): string {
   return raw.slice(idx + 1) || raw;
 }
 
-export default function SkillPanel({ sessionId }: SkillPanelProps) {
+export default function SkillPanel({ sessionId, ensureSessionId }: SkillPanelProps) {
   const { t } = useTranslation();
   const userId = useExtSettingsStore((s) => s.userId);
   const groupId = useExtSettingsStore((s) => s.groupId);
@@ -66,17 +67,34 @@ export default function SkillPanel({ sessionId }: SkillPanelProps) {
   const [installing, setInstalling] = useState(false);
   const [actionTarget, setActionTarget] = useState<string | null>(null);
 
+  const resolveSessionId = useCallback(async (): Promise<string | null> => {
+    const ensured = await ensureSessionId();
+    if (ensured && ensured !== 'new') {
+      return ensured;
+    }
+    if (sessionId && sessionId !== 'new') {
+      return sessionId;
+    }
+    return null;
+  }, [ensureSessionId, sessionId]);
+
   const loadSkills = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
+      const activeSessionId = await resolveSessionId();
+      if (!activeSessionId) {
+        setError(t('skills.enterprise.errors.sessionRequired'));
+        setSkills([]);
+        return;
+      }
       const payload = await webRequest<{
         skills?: EnterpriseSkillItem[];
         service_id?: string;
         agent_id?: string;
       }>('skills.enterprise.list', {
         ...routingParams,
-        session_id: sessionId,
+        session_id: activeSessionId,
       });
       setSkills(Array.isArray(payload.skills) ? payload.skills : []);
     } catch (loadError) {
@@ -87,7 +105,7 @@ export default function SkillPanel({ sessionId }: SkillPanelProps) {
     } finally {
       setLoading(false);
     }
-  }, [t, sessionId, routingParams.user_id, routingParams.group_id, routingParams.bot_id]);
+  }, [t, resolveSessionId, routingParams.user_id, routingParams.group_id, routingParams.bot_id]);
 
   useEffect(() => {
     void loadSkills();
@@ -140,9 +158,14 @@ export default function SkillPanel({ sessionId }: SkillPanelProps) {
     setInstalling(true);
     setError(null);
     try {
+      const activeSessionId = await resolveSessionId();
+      if (!activeSessionId) {
+        setError(t('skills.enterprise.errors.sessionRequired'));
+        return;
+      }
       const params: Record<string, unknown> = {
         url,
-        session_id: sessionId,
+        session_id: activeSessionId,
         ...routingParams,
       };
       if (signature) {
@@ -195,6 +218,11 @@ export default function SkillPanel({ sessionId }: SkillPanelProps) {
     setActionTarget(name);
     setError(null);
     try {
+      const activeSessionId = await resolveSessionId();
+      if (!activeSessionId) {
+        setError(t('skills.enterprise.errors.sessionRequired'));
+        return;
+      }
       const payload = await webRequest<{
         success?: boolean;
         error_code?: string;
@@ -202,7 +230,7 @@ export default function SkillPanel({ sessionId }: SkillPanelProps) {
         detail?: string;
       }>('skills.enterprise.uninstall', {
         name,
-        session_id: sessionId,
+        session_id: activeSessionId,
         ...routingParams,
       }, { timeoutMs: 60_000 });
 
@@ -250,6 +278,11 @@ export default function SkillPanel({ sessionId }: SkillPanelProps) {
         <div>
           <h2 className="text-lg font-semibold text-text">{t('skills.enterprise.title')}</h2>
           <p className="text-sm text-text-muted mt-1">{t('skills.enterprise.subtitle')}</p>
+          {sessionId && sessionId !== 'new' && (
+            <p className="text-xs text-text-muted mt-1 font-mono">
+              {t('skills.enterprise.boundSession', { sessionId })}
+            </p>
+          )}
         </div>
         <button
           type="button"
