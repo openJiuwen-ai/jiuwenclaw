@@ -234,6 +234,10 @@ _TEAM_RESUME_PROTOCOL_CN = """【团队暂停续跑协议】
 5. 必须基于已有产物/上下文继续，禁止忽略既有结果重做
 6. 在全部关键任务完成前，不要输出「结论」或宣布完成
 7. 用户消息仅表示「继续」，不是改目标
+8. 若对话上下文为空或 artifacts 仅有空目录骨架，仍须按下方「原任务目标」推进，禁止再向用户索要已给出的目标
+
+原任务目标：
+{original_query}
 
 用户续跑指示：
 {user_query}"""
@@ -247,12 +251,21 @@ This turn continues a paused team run via cold recovery — it is not a new deba
 5. Continue from existing products/context; do not ignore prior results and redo from scratch
 6. Do not emit a final "conclusion" or claim completion until critical tasks finish
 7. The user message only means "continue", not a goal change
+8. If conversation context is empty or artifacts only has empty skeleton dirs, still proceed from "Original task goal" below — do not ask the user to restate a goal they already gave
+
+Original task goal:
+{original_query}
 
 User continue instruction:
 {user_query}"""
 
 
-def _wrap_team_resume_protocol(query: Any, language: str) -> Any:
+def _wrap_team_resume_protocol(
+    query: Any,
+    language: str,
+    *,
+    original_query: str | None = None,
+) -> Any:
     """Wrap a continue query with a hard no-replan / no-premature-conclusion protocol."""
     if not isinstance(query, str):
         return query
@@ -266,7 +279,8 @@ def _wrap_team_resume_protocol(query: Any, language: str) -> Any:
         if str(language or '').lower() in ('en', 'english')
         else _TEAM_RESUME_PROTOCOL_CN
     )
-    return template.format(user_query=text)
+    original = str(original_query or '').strip() or text
+    return template.format(user_query=text, original_query=original)
 
 
 async def _session_has_resumable_runtime(team_manager: Any, session_id: str) -> bool:
@@ -277,6 +291,34 @@ async def _session_has_resumable_runtime(team_manager: Any, session_id: str) -> 
         return bool(await has_resumable(session_id))
     except Exception:
         return False
+
+
+async def _detect_resume_from_pause(
+    team_manager: Any,
+    session_id: str,
+    *,
+    force_resume_stream: bool = False,
+) -> bool:
+    """Return True when the next turn must open a pause-resume stream.
+
+    Stream end clears the session init marker, so the following message is a
+    first request. If the pool is still paused (or otherwise resumable), wrap
+    the query with the pause-resume protocol before opening the stream.
+    """
+    if force_resume_stream:
+        return True
+    get_paused = getattr(team_manager, 'get_paused_team_name', None)
+    if callable(get_paused):
+        try:
+            if get_paused(session_id):
+                return True
+        except Exception:
+            logger.debug(
+                '[TeamHelpers] get_paused_team_name failed session_id=%s',
+                session_id,
+                exc_info=True,
+            )
+    return await _session_has_resumable_runtime(team_manager, session_id)
 
 
 async def _deliver_followup_interact_across_boundary(
@@ -1243,11 +1285,36 @@ async def process_team_message_stream(request: Any,
                 exc,
             )
     language = _resolve_request_language(request)
-    # Pass user query through unchanged. After pause, history lives in the
-    # harness checkpoint / session; LLM interprets 「请继续」 from that context.
-    # Do not rewrite via todo_resume heuristics (plan/todo-mounted, not team).
+    # Keep the user query unchanged. Pause history lives in harness checkpoint /
+    # session; do not rewrite via plan/todo resume heuristics.
     query = _normalize_team_query(inputs.get('query', ''), channel_id=channel_id, language=language)
     query_text = query if isinstance(query, str) else ''
+    # Remember substantive goals for interrupt/reconnect continue enrichment.
+    # Do not overwrite with continue/reconnect phrases after pause.
+    if query_text:
+        try:
+            from openjiuwen.harness.tools.todo_resume import is_resume_user_query
+            remember = getattr(team_manager, 'remember_user_query', None)
+            getter = getattr(team_manager, 'get_last_user_query', None)
+            paused_name = None
+            get_paused = getattr(team_manager, 'get_paused_team_name', None)
+            if callable(get_paused):
+                paused_name = get_paused(session_id)
+            existing = getter(session_id) if callable(getter) else None
+            looks_like_continue = is_resume_user_query(query_text) or any(
+                token in query_text for token in ('继续', '接着', 'resume', 'continue')
+            )
+            if callable(remember) and not paused_name and not (
+                existing and looks_like_continue and len(query_text) <= len(existing) + 8
+            ):
+                if not looks_like_continue or not existing:
+                    remember(session_id, query_text)
+        except Exception:
+            logger.debug(
+                '[TeamHelpers] remember_user_query failed session_id=%s',
+                session_id,
+                exc_info=True,
+            )
     params = request.params if isinstance(getattr(request, 'params', None), dict) else {}
     raw_interactive = params.get('interactive_ask', params.get('interactiveAsk'))
     interactive_ask = bool(raw_interactive) if raw_interactive is not None else False
@@ -1266,7 +1333,13 @@ async def process_team_message_stream(request: Any,
     request_queue: asyncio.Queue | None = None
     hide_dm = False
     debug = False
-    resume_from_pause = bool(force_resume_stream)
+    # Clear-init makes continue a first request; still detect paused/resumable
+    # pool so we wrap the pause-resume protocol (wake IN_PROGRESS assignees).
+    resume_from_pause = await _detect_resume_from_pause(
+        team_manager,
+        session_id,
+        force_resume_stream=force_resume_stream,
+    )
     if is_first_request:
         from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
         # Hard protocol: paused pool + string continue → RESUME stream only.
@@ -1536,8 +1609,26 @@ async def process_team_message_stream(request: Any,
         if is_first_request:
             if resume_from_pause:
                 first_request_source = 'resume_from_pause'
-                query = _wrap_team_resume_protocol(query, language)
+                original_goal = None
+                getter = getattr(team_manager, 'get_last_user_query', None)
+                if callable(getter):
+                    original_goal = getter(session_id)
+                if not original_goal:
+                    original_goal = await _load_pending_resume_query(
+                        session_id=session_id,
+                        team_name=team_name,
+                    )
+                query = _wrap_team_resume_protocol(
+                    query,
+                    language,
+                    original_query=original_goal,
+                )
                 query_text = query if isinstance(query, str) else ''
+                logger.info(
+                    '[TeamHelpers] resume_from_pause wrapped with original_goal=%s session_id=%s',
+                    'yes' if original_goal else 'no',
+                    session_id,
+                )
             if callable(ensure_ready) and (not shared_skills_ready_prepared):
                 ensure_ready(session_id, team_spec)
                 shared_skills_ready_prepared = True
@@ -1611,30 +1702,16 @@ async def process_team_message_stream(request: Any,
                 is_complete=False,
             )
         yield AgentResponseChunk(request_id=rid, channel_id=channel_id, payload=None, is_complete=True)
-        # Keep init marker while pause is in flight: stream teardown happens
-        # after Runner.pause, but continue can still race; clearing init would
-        # make the next continue look like a cold first request mid-pause.
-        pause_in_flight = False
-        is_pausing = getattr(team_manager, 'is_pause_in_progress', None)
-        if callable(is_pausing):
-            try:
-                pause_in_flight = bool(is_pausing(session_id))
-            except Exception:
-                pause_in_flight = False
-        if pause_in_flight:
-            logger.info(
-                '[TeamHelpers] stream ended during pause; keep init marker: '
-                'channel_id=%s session_id=%s',
-                _resolve_channel_id(channel_id),
-                session_id,
-            )
-        else:
-            team_manager.clear_session_initialized(session_id)
-            logger.info(
-                '[TeamHelpers] stream ended, cleared init marker: channel_id=%s session_id=%s',
-                _resolve_channel_id(channel_id),
-                session_id,
-            )
+        # Clear init on every stream end (including interrupt pause). The next
+        # message opens a new first-request stream; paused pool still routes to
+        # RESUME_FROM_PAUSE via ``_detect_resume_from_pause``.
+        team_manager.clear_session_initialized(session_id)
+        logger.info(
+            '[TeamHelpers] stream ended, cleared init marker: '
+            'channel_id=%s session_id=%s',
+            _resolve_channel_id(channel_id),
+            session_id,
+        )
     finally:
         if request_queue is not None:
             team_manager.remove_waiter(session_id, rid)

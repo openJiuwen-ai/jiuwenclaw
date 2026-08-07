@@ -13,7 +13,7 @@ from jiuwenclaw.agentserver.agent_ws_server import (
 def test_normalize_drops_non_whitelisted_team_scalars() -> None:
     """Keep only whitelisted team-level scalars; nested structs pass through."""
     payload = {
-        "agents": {"expert_tpl": {"model": {"provider": "OpenAI", "api_base": "x",
+        "agents": {"expert-chief-researcher": {"model": {"provider": "OpenAI", "api_base": "x",
                                             "api_key": "y", "model": "glm-5"}, "skills": ["coding"]}},
         "team": [{
             "team_name": "debate_A",
@@ -26,10 +26,10 @@ def test_normalize_drops_non_whitelisted_team_scalars() -> None:
             "avatar": "a",
             "nickname": "n",
             "leader": {"member_name": "moderator", "persona": "p",
-                       "agent_key": "expert_tpl", "avatar": "z"},
+                       "agent_id": "expert-chief-researcher", "avatar": "z"},
             "predefined_members": [{"member_name": "eco", "role_type": "teammate",
                                     "persona": "pe", "prompt_hint": "ph",
-                                    "agent_key": "expert_tpl", "color": "red"}],
+                                    "agent_id": "expert-chief-researcher", "color": "red"}],
         }],
     }
     out = _normalize_relay_team_payload(payload)
@@ -46,7 +46,7 @@ def test_normalize_drops_non_whitelisted_team_scalars() -> None:
 def test_normalize_forces_enable_swarmflow_false() -> None:
     """Relay sync always forces enable_swarmflow=False, even when input is True."""
     payload = {"team": [{"team_name": "t1", "enable_swarmflow": True,
-                         "leader": {"member_name": "l", "agent_key": "expert_tpl"}}]}
+                         "leader": {"member_name": "l", "agent_id": "expert-chief-researcher"}}]}
     out = _normalize_relay_team_payload(payload)
     assert out["team"][0]["enable_swarmflow"] is False
 
@@ -54,13 +54,13 @@ def test_normalize_forces_enable_swarmflow_false() -> None:
 def test_normalize_defaults_team_mode_predefined_when_absent() -> None:
     """Missing team_mode defaults to predefined; explicit values are kept."""
     out_absent = _normalize_relay_team_payload(
-        {"team": [{"team_name": "t2", "leader": {"member_name": "l", "agent_key": "expert_tpl"}}]}
+        {"team": [{"team_name": "t2", "leader": {"member_name": "l", "agent_id": "expert-chief-researcher"}}]}
     )
     assert out_absent["team"][0]["team_mode"] == "predefined"
 
     out_explicit = _normalize_relay_team_payload(
         {"team": [{"team_name": "t3", "team_mode": "hybrid",
-                   "leader": {"member_name": "l", "agent_key": "expert_tpl"}}]}
+                   "leader": {"member_name": "l", "agent_id": "expert-chief-researcher"}}]}
     )
     assert out_explicit["team"][0]["team_mode"] == "hybrid"
 
@@ -71,7 +71,7 @@ def test_normalize_drops_team_enable_permissions() -> None:
         "team": [{
             "team_name": "t",
             "enable_permissions": True,
-            "leader": {"member_name": "l", "agent_key": "expert_tpl"},
+            "leader": {"member_name": "l", "agent_id": "expert-chief-researcher"},
         }]
     }
     out = _normalize_relay_team_payload(payload)
@@ -82,18 +82,18 @@ def test_normalize_passes_through_max_debate_rounds() -> None:
     """max_debate_rounds is passed through when present; not invented when absent."""
     with_value = _normalize_relay_team_payload(
         {"team": [{"team_name": "t", "max_debate_rounds": 5,
-                   "leader": {"member_name": "l", "agent_key": "expert_tpl"}}]}
+                   "leader": {"member_name": "l", "agent_id": "expert-chief-researcher"}}]}
     )
     assert with_value["team"][0]["max_debate_rounds"] == 5
     without = _normalize_relay_team_payload(
-        {"team": [{"team_name": "t", "leader": {"member_name": "l", "agent_key": "expert_tpl"}}]}
+        {"team": [{"team_name": "t", "leader": {"member_name": "l", "agent_id": "expert-chief-researcher"}}]}
     )
     assert "max_debate_rounds" not in without["team"][0]
 
 
 def test_normalize_does_not_mutate_input() -> None:
     payload = {"team": [{"team_name": "t", "enable_swarmflow": True,
-                         "leader": {"member_name": "l", "agent_key": "expert_tpl"}}]}
+                         "leader": {"member_name": "l", "agent_id": "expert-chief-researcher"}}]}
     _normalize_relay_team_payload(payload)
     assert payload["team"][0]["enable_swarmflow"] is True
 

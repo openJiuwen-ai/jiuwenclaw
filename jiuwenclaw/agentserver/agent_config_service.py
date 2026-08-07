@@ -512,19 +512,16 @@ def build_team_member_agent_params(
             if not isinstance(member_raw, dict):
                 raise ValueError(f"{field_name} must be an object")
             member_name = validate_agent_name(member_raw.get("member_name", ""))
-            agent_key = str(member_raw.get("agent_key") or "").strip()
-            if not agent_key or agent_key not in agents_raw:
-                raise ValueError(f"{field_name}.agent_key references unknown agent_key: {agent_key}")
-            agent_template = agents_raw[agent_key]
+            agent_id = str(member_raw.get("agent_id") or "").strip()
+            if not agent_id or agent_id not in agents_raw:
+                raise ValueError(f"{field_name}.agent_id references unknown agent_id: {agent_id}")
+            agent_template = agents_raw[agent_id]
             if not isinstance(agent_template, dict):
-                raise ValueError(f"agents.{agent_key} must be an object")
+                raise ValueError(f"agents.{agent_id} must be an object")
 
-            skills = agent_template.get("skills")
-            if skills is not None and not isinstance(skills, list):
-                raise ValueError(f"agents.{agent_key}.skills must be an array")
             max_iterations = agent_template.get("max_iterations")
             if max_iterations is not None and not isinstance(max_iterations, int):
-                raise ValueError(f"agents.{agent_key}.max_iterations must be an integer")
+                raise ValueError(f"agents.{agent_id}.max_iterations must be an integer")
 
             description_parts = [
                 str(member_raw.get("display_name") or member_name).strip(),
@@ -536,9 +533,14 @@ def build_team_member_agent_params(
                 description=" - ".join(part for part in description_parts if part),
                 prompt=_team_member_prompt(member_raw),
                 location=location,
-                model=_team_member_model_name(agent_template, f"agents.{agent_key}"),
+                model=_team_member_model_name(agent_template, f"agents.{agent_id}"),
                 max_iterations=max_iterations,
-                skills=list(skills) if skills is not None else None,
+                # skills from tip ENABLED_SKILLS (materialized onto agents.*.skills).
+                skills=(
+                    list(agent_template["skills"])
+                    if isinstance(agent_template.get("skills"), list)
+                    else None
+                ),
             )
             previous = by_name.get(member_name)
             if previous is not None and previous != params:

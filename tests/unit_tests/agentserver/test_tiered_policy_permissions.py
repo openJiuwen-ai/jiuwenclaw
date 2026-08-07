@@ -325,6 +325,38 @@ def test_unconfigured_tool_uses_configured_default_level(monkeypatch):
     )
 
 
+def test_team_orchestration_tools_allow_via_permissions_tools_config(monkeypatch):
+    """Team tools are allowlisted in permissions.tools (not intrinsic code)."""
+    _config_dir_with_builtin(_tmp_dir("team-orch-config-allow"), monkeypatch, [])
+
+    tools = {
+        "build_team": "allow",
+        "spawn_teammate": "allow",
+        "create_task": "allow",
+        "claim_task": "allow",
+        "submit_plan": "allow",
+        "view_task": "allow",
+        "send_message": "allow",
+    }
+    for tool_name, level_cfg in tools.items():
+        level, rule = evaluate_tiered_policy(
+            {"defaults": "guard", "tools": {tool_name: level_cfg}},
+            tool_name,
+            {},
+        )
+        assert level == PermissionLevel.ALLOW, tool_name
+        assert rule == f"tools.{tool_name}", (tool_name, rule)
+
+    # Without permissions.tools entry, non-shell still falls to defaults.guard ASK.
+    level, rule = evaluate_tiered_policy(
+        {"defaults": "guard", "tools": {}},
+        "build_team",
+        {},
+    )
+    assert level == PermissionLevel.ASK
+    assert rule == "defaults.guard"
+
+
 def test_shell_ast_fallback_keeps_simple_command(monkeypatch):
     shell_ast_module = importlib.import_module("jiuwenclaw.agentserver.permissions.shell_ast")
     monkeypatch.setattr(shell_ast_module, "_TREE_SITTER_BASH_READY", False)
