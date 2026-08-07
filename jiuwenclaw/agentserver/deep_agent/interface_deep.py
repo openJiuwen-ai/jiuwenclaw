@@ -203,6 +203,7 @@ from jiuwenclaw.agentserver.deep_agent.plan_pause_helpers import (
     resolve_context_engine,
     read_plan_pause_from_session,
     repair_task_plan_after_pause,
+    stamp_plan_pause_onto_live_session,
     write_plan_pause_to_session,
     _resolve_session_for_checkpoint,
     read_interrupt_artifacts_summary_from_session,
@@ -7726,6 +7727,27 @@ class JiuWenClawDeepAdapter:
             self._instance.save_state(session, state)
             write_plan_pause_to_session(session, paused=True, snapshot=snapshot)
             await post_agent_execute_for_session(session, self._checkpointer)
+
+            # Also stamp live loop_session so a later live checkpoint flush cannot
+            # overwrite CP without plan_paused (temp-session-only write race).
+            try:
+                stamped = await stamp_plan_pause_onto_live_session(
+                    self._instance,
+                    session_id,
+                    snapshot=snapshot,
+                    checkpointer=self._checkpointer,
+                )
+                logger.info(
+                    "[JiuWenClawDeepAdapter] plan pause live stamp session=%s stamped=%s",
+                    session_id,
+                    stamped,
+                )
+            except Exception as stamp_exc:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] plan pause live stamp failed session=%s: %s",
+                    session_id,
+                    stamp_exc,
+                )
 
             logger.info(
                 "[JiuWenClawDeepAdapter] plan pause persisted session=%s",

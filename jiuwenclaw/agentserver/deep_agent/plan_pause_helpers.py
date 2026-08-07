@@ -226,6 +226,39 @@ async def post_agent_execute_for_session(session: Any, checkpointer: Any | None 
     await cp.post_agent_execute(inner)
 
 
+async def stamp_plan_pause_onto_live_session(
+    instance: Any,
+    session_id: str,
+    *,
+    snapshot: dict[str, Any] | None,
+    checkpointer: Any | None = None,
+) -> bool:
+    """Mirror plan_paused (+ repaired task_plan) onto live ``loop_session`` memory.
+
+    Used after a temporary-session checkpoint write so a later live
+    ``post_agent_execute`` cannot overwrite the checkpoint without the pause
+    flag. Never ``post_run`` the live session.
+
+    Returns:
+        True if live session was stamped; False when there is no matching live.
+    """
+    if instance is None or not session_id:
+        return False
+
+    live = getattr(instance, "loop_session", None)
+    if live is None:
+        return False
+    if session_id_from_session(live) != session_id:
+        return False
+
+    state = instance.load_state(live)
+    repair_task_plan_after_pause(state)
+    instance.save_state(live, state)
+    write_plan_pause_to_session(live, paused=True, snapshot=snapshot)
+    await post_agent_execute_for_session(live, checkpointer)
+    return True
+
+
 def format_paused_plan_snapshot(todos: list[TodoItem]) -> str:
     if not todos:
         return ""
