@@ -2822,6 +2822,19 @@ class MessageHandler(ABC):
             _push_app_id,
         )
 
+    async def _push_file_to_web_and_get_token(
+        self,
+        file_path: str,
+        filename: str,
+        session_id: str,
+    ) -> dict[str, Any] | None:
+        """将文件推送到 Web Server 并获取下载 Token（企业版 AGENT_RUNTIME）。"""
+        from jiuwenswarm.gateway.message_handler.web_file_push import (
+            push_file_to_web_and_get_token,
+        )
+
+        return await push_file_to_web_and_get_token(file_path, filename, session_id)
+
     def set_cron_controller(self, controller: Any) -> None:
         self._cron_controller = controller
 
