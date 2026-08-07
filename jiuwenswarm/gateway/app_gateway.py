@@ -51,6 +51,7 @@ from jiuwenswarm.common.utils import (
 )
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenswarm.common.schema.message import ReqMethod, Message, Mode
+from jiuwenswarm.common.local_env_config import decrypt
 
 # Ensure workspace initialized
 _workspace_dir = get_user_workspace_dir()
@@ -1459,6 +1460,7 @@ async def _run(
         WebHandlersBindParams,
         _DummyBus,
         _CONFIG_SET_ENV_MAP,
+        _CONFIG_YAML_KEYS,
         _FORWARD_NO_LOCAL_HANDLER_METHODS,
         _FORWARD_REQ_METHODS,
         _normalize_feishu_conf,
@@ -1559,9 +1561,12 @@ async def _run(
         heartbeat_cfg = None
         channels_cfg = None
 
+    env_dict = {}
+    for env_key in _CONFIG_SET_ENV_MAP.values():
+        env_dict[env_key] = decrypt(env_key, os.getenv(env_key) or "")
     client.set_or_update_server_config(
         config=dict(full_cfg or {}),
-        env={env_key: (os.getenv(env_key) or "") for env_key in _CONFIG_SET_ENV_MAP.values()},
+        env=env_dict
     )
 
     if isinstance(heartbeat_cfg, dict):
@@ -1738,6 +1743,14 @@ async def _run(
             logger.warning("[App] hot config reload failed, scheduling restart: %s", e)
             _schedule_gateway_restart(restart_request)
             return False
+
+    callback_result = _on_config_saved(
+        set(_CONFIG_SET_ENV_MAP.values()) | _CONFIG_YAML_KEYS,
+        env_updates=dict(env_dict),
+        config_payload=dict(full_cfg or {})
+    )
+    if inspect.isawaitable(callback_result):
+        await callback_result
 
     web_channel = None
     tui_channel = None

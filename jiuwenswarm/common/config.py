@@ -24,6 +24,7 @@ from jiuwenswarm.common.kv_cache_affinity_config import (
     validate_affinity_invariant,
 )
 from jiuwenswarm.common.utils import get_config_dir, get_config_file
+from jiuwenswarm.common.local_env_config import get_local_config
 
 logger = logging.getLogger(__name__)
 
@@ -59,21 +60,7 @@ def resolve_env_vars(value: Any) -> Any:
         def replace_env(match):
             var_name = match.group(1)
             default = match.group(2)
-            current = os.getenv(var_name)
-            is_need_decrypt = ("api_key" in var_name.lower() or "token" in var_name.lower()) and current
-            reg_mod = sys.modules.get("jiuwenswarm.extensions.registry")
-            if reg_mod is not None and hasattr(reg_mod, "ExtensionRegistry"):
-                try:
-                    reg = reg_mod.ExtensionRegistry.get_instance()
-                    crypto = reg.get_crypto_provider()
-                    if is_need_decrypt and crypto:
-                        current = crypto.decrypt(current)
-                except Exception:
-                    logger.debug(
-                        "Crypto provider unavailable while resolving env var %s; using raw value",
-                        var_name,
-                        exc_info=True,
-                    )
+            current = get_local_config(var_name)
             # Bash: ${VAR:-default} uses default when VAR is unset OR empty.
             # ${VAR} (no :-) keeps getenv behavior; unset -> "".
             if default is not None:
