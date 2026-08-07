@@ -55,6 +55,7 @@ dependencies = [
     "numpy>=1.24.0",
     "tree-sitter>=0.25.0,<0.26.0",
     "tree-sitter-bash>=0.25.0,<0.26.0",
+    "minio>=7.2.0",
 ]
 
 [project.optional-dependencies]

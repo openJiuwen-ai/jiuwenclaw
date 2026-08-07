@@ -1098,9 +1098,24 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             )
             self._write_json(500, {"error": "push_failed", "detail": str(exc)})
 
+    def _handle_obs_upload(self) -> None:
+        """Upload browser file payload to self-hosted MinIO (企业版)."""
+        if not os.getenv("AGENT_RUNTIME", "").strip():
+            self._write_json(404, {"error": "not_available"})
+            return
+
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        raw = self.rfile.read(length) if length > 0 else b""
+        status, payload = _process_obs_upload_body(raw, logger=self.logger)
+        self._write_json(status, payload)
+
     def _handle_file_api_post(self, parsed) -> None:
         if parsed.path == "/file-api/push":
             self._handle_file_push()
+            return
+
+        if parsed.path == "/file-api/upload-obs":
+            self._handle_obs_upload()
             return
 
         if parsed.path == "/file-api/rebuild-agent-data":
@@ -1302,6 +1317,64 @@ def _wait_for_gateway(ws_target: str, logger: logging.Logger) -> None:
         logger.warning("[jiuwenswarm-web] gateway not available after 15 seconds")
 
 
+def _process_obs_upload_body(
+    raw: bytes, *, logger: logging.Logger | None = None
+) -> tuple[int, dict[str, Any]]:
+    try:
+        payload = json.loads(raw.decode("utf-8") if raw else "{}")
+    except json.JSONDecodeError:
+        return 400, {"ok": False, "error": "invalid_json"}
+    if not isinstance(payload, dict):
+        return 400, {"ok": False, "error": "invalid_payload"}
+    try:
+        from jiuwenswarm.channels.web.minio_upload import upload_base64_payload
+
+        return 200, upload_base64_payload(payload)
+    except Exception as exc:
+        if logger is not None:
+            logger.error("[WebServer] MinIO upload failed: %s", exc, exc_info=True)
+        return 500, {"ok": False, "error": str(exc)}
+
+
+def _run_upload_api_server(*, host: str, port: int, log_level: str) -> None:
+    """Minimal HTTP server for POST /file-api/upload-obs (企业版 Vite dev)."""
+    if not os.getenv("AGENT_RUNTIME", "").strip():
+        raise SystemExit("upload-api-only requires AGENT_RUNTIME")
+
+    logs_root = get_logs_dir().resolve()
+    logger = _setup_logger(logs_root, log_level)
+
+    class _UploadApiHandler(SimpleHTTPRequestHandler):
+        def log_message(self, fmt: str, *args: Any) -> None:
+            logger.debug(fmt, *args)
+
+        def do_POST(self) -> None:  # noqa: N802
+            if urlparse(self.path).path != "/file-api/upload-obs":
+                self.send_error(404)
+                return
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            raw = self.rfile.read(length) if length > 0 else b""
+            status, payload = _process_obs_upload_body(raw, logger=logger)
+            data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    server = ThreadingHTTPServer((host, port), _UploadApiHandler)
+    logger.info(
+        "[jiuwenswarm-upload-api] POST http://%s:%s/file-api/upload-obs", host, port
+    )
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+        logger.info("[jiuwenswarm-upload-api] server closed")
+
+
 def main() -> None:
     from jiuwenswarm.dotenv_early import get_parsed_dotenv
 
@@ -1359,6 +1432,11 @@ def main() -> None:
         help="Disable websocket compression for easier ws req/res/event debug logging.",
     )
     parser.add_argument(
+        "--upload-api-only",
+        action="store_true",
+        help="Run a minimal HTTP server that only serves POST /file-api/upload-obs (enterprise Vite dev).",
+    )
+    parser.add_argument(
         "--name",
         metavar="<name>",
         help="Start a named instance from instances.yaml.",
@@ -1369,6 +1447,10 @@ def main() -> None:
         help="Load environment from .env file (processed at startup, not used here).",
     )
     args = parser.parse_args()
+
+    if args.upload_api_only:
+        _run_upload_api_server(host=args.host, port=args.port, log_level=args.log_level)
+        return
 
     install_async_dump_handler("web")
 
