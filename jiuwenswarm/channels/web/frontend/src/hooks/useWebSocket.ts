@@ -74,7 +74,11 @@ import {
   findActiveTeamLeaderMessage as findActiveTeamLeaderMessageInTurn,
 } from '../features/teamLeaderMessages';
 import { buildGoalCompletedContent } from '../components/GoalBar/goalCompletedMessage';
-import { stripUploadDocumentBlocks } from '../utils/documentMessage';
+import {
+  stripUploadDocumentBlocks,
+  toUploadDocumentHints,
+  withUploadDocumentBlock,
+} from '../utils/documentMessage';
 
 const WS_RECONNECT_EVENT = 'jiuwenclaw:ws-reconnect-request';
 
@@ -1179,16 +1183,22 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
   const persistDocuments = useCallback(
     async (content: string, sessionId: string, mediaItems: MediaItem[]) => {
-      return request<PersistMediaResponse>('document.persist', {
-        session_id: sessionId,
-        content,
-        parse: true,
-        documents: mediaItems.map((item) => ({
-          filename: item.filename,
-          mime_type: getMediaMimeType(item),
-          base64_data: item.base64_data || item.base64Data,
-        })),
-      });
+      return request<PersistMediaResponse>(
+        'document.persist',
+        {
+          session_id: sessionId,
+          content,
+          documents: mediaItems.map((item) => ({
+            filename: item.filename,
+            mime_type: getMediaMimeType(item),
+            path: item.path,
+            original_path: item.path,
+            size_bytes: item.size_bytes ?? item.sizeBytes,
+          })),
+        },
+        // Path validation only — no base64 transfer / parse
+        { timeoutMs: 30_000 },
+      );
     },
     [request],
   );
@@ -1314,7 +1324,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const sendMessage = useCallback(
     async (content: string, sessionId: string, mediaItems: MediaItem[] = []): Promise<boolean> => {
       const hasMedia = mediaItems.length > 0;
-      if (!content.trim() && !hasMedia) return false;
+      // User-visible text is required; attachment-only / 【上传文档】-only payloads
+      // must not send (matches InputArea canSubmit / handleSubmit).
+      if (!stripUploadDocumentBlocks(content).trim()) return false;
 
       const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
       const unsupportedEvolutionMode = unsupportedEvolutionModeMessage(content, currentMode ?? 'agent');
@@ -1421,6 +1433,14 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               }
               if (persistedDocs.files && typeof persistedDocs.files === 'object') {
                 Object.assign(mergedFiles, persistedDocs.files);
+              }
+              // The composer could not persist these documents before send (a
+              // brand-new session has no id yet), so its hint block carries
+              // filenames without paths. Rewrite it now that paths exist —
+              // team mode reads paths from the message text only.
+              const documentHints = toUploadDocumentHints(persistedDocs.media_items);
+              if (documentHints.length) {
+                outgoingContent = withUploadDocumentBlock(outgoingContent, documentHints);
               }
             }
             outgoingMediaItems = mergedItems.length ? slimPersistedMediaRecords(mergedItems) : undefined;

@@ -64,6 +64,7 @@ import {
   registerCreatedConversation,
   resetNewConversationRuntime,
 } from './multi-session/state/newConversationLifecycle';
+import { toDisplaySessionTitle } from './utils/documentMessage';
 import { createConversationSession } from './multi-session/state/createConversationSession';
 import { useTranslation } from 'react-i18next';
 import {
@@ -442,7 +443,8 @@ function AppContent() {
     const session = currentSession?.session_id === sessionId
       ? currentSession
       : sessions.find((s) => s.session_id === sessionId);
-    return session?.title?.trim() ?? '';
+    const raw = session?.title?.trim() ?? '';
+    return toDisplaySessionTitle(raw);
   }, [currentSession, sessions, sessionId]);
   const sessionProjectName = useMemo(() => {
     const session = currentSession?.session_id === sessionId
