@@ -111,6 +111,10 @@ class YuanrongFrontendAgentClient(AgentServerClient):
     def agent_namespace(self) -> str:
         return self._agent_namespace
 
+    @property
+    def frontend_endpoint(self) -> str:
+        return self._frontend_endpoint
+
     def set_or_update_server_config(
         self,
         *,

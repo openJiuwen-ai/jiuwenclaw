@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import re
+import urllib.parse
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any, Mapping, Coroutine
@@ -49,7 +50,10 @@ from jiuwenswarm.extensions.yuanrong_frontend_client import (
 )
 from jiuwenswarm.gateway import ChannelManager
 from jiuwenswarm.gateway.channel_manager.base import ChannelType
-from jiuwenswarm.gateway.routing.agent_client import AgentServerClient
+from jiuwenswarm.gateway.routing.agent_client import (
+    AgentServerClient,
+    WebSocketAgentServerClient,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -70,6 +74,22 @@ def build_inline_runtime_spec(image_info: ImageInfo) -> AgentRuntimeSpec:
             f"runtime_spec is required from registry for agent_type={image_info.image_name}"
         )
     return dict(raw_spec)  # type: ignore[return-value]
+
+
+def _extract_runtime_spec_port(runtime_spec: Mapping[str, Any]) -> int | None:
+    """从 runtime_spec ``rootfs.ports``（如 ``["tcp:18092"]``）取第一个端口."""
+    rootfs = runtime_spec.get("rootfs")
+    ports = rootfs.get("ports") if isinstance(rootfs, Mapping) else None
+    if not isinstance(ports, (list, tuple)):
+        return None
+    for entry in ports:
+        text = str(entry or "")
+        candidate = text.rsplit(":", 1)[-1] if ":" in text else text
+        try:
+            return int(candidate)
+        except ValueError:
+            continue
+    return None
 
 
 def resolve_agent_workspace(user_id: str, *, workspace_root: str | None = None) -> str:
@@ -110,6 +130,7 @@ class AgentOSRouterClient(AgentServerClient):
         sandbox_idle_timeout_seconds: float = 600.0,
         sandbox_idle_check_interval_seconds: float = 30.0,
         auth_client: AgentOSAuthenticator | None = None,
+        ws_client_factory: Callable[[], WebSocketAgentServerClient] | None = None,
     ) -> None:
         self._yuanrong = yuanrong
         self._registry = registry
@@ -133,6 +154,12 @@ class AgentOSRouterClient(AgentServerClient):
         self._auth_client = auth_client
         # 延迟清理任务：user_id → pending cleanup task
         self._pending_cleanups: dict[str, asyncio.Task[None]] = {}
+        # create 后走 YuanRong frontend 的 WS 代理直连 instance（不走 invoke 链路）：
+        # instance_id(sandbox_id) → 已连接的 WebSocketAgentServerClient
+        self._ws_clients: dict[str, WebSocketAgentServerClient] = {}
+        self._ws_clients_lock = asyncio.Lock()
+        self._ws_client_factory = ws_client_factory or WebSocketAgentServerClient
+        self._push_handler: Callable[[dict[str, Any]], Awaitable[None]] | None = None
 
 
     def set_channel_manager(self, channel_manager: ChannelManager) -> None:
@@ -273,6 +300,7 @@ class AgentOSRouterClient(AgentServerClient):
                 task.cancel()
         self._pending_cleanups.clear()
         await self._drain_background_tasks()
+        await self._close_all_ws_clients()
         try:
             await self._yuanrong.disconnect()
         finally:
@@ -290,9 +318,99 @@ class AgentOSRouterClient(AgentServerClient):
         self,
         handler: Callable[[dict[str, Any]], Awaitable[None]] | None,
     ) -> None:
+        self._push_handler = handler
         setter = getattr(self._yuanrong, "set_server_push_handler", None)
         if callable(setter):
             setter(handler)
+        for ws_client in self._ws_clients.values():
+            ws_client.set_server_push_handler(handler)
+
+    def _agent_ws_url(self, instance_id: str, agent_port: int) -> str:
+        """YuanRong frontend 的 instance WS 代理地址.
+
+        形如 ``ws://<frontend-host>:8888/serverless/v1/ws?instance=<id>&tenant_id=default&port=<port>``，
+        其中 ``instance`` 是 create 返回的 instanceID，``port`` 是 create cmds 里
+        agentserver 监听的端口。
+        """
+        frontend = str(self._yuanrong.frontend_endpoint or "").rstrip("/")
+        parsed = urllib.parse.urlsplit(frontend)
+        ws_scheme = "wss" if parsed.scheme == "https" else "ws"
+        query = urllib.parse.urlencode(
+            {
+                "instance": instance_id,
+                "tenant_id": self._yuanrong.agent_namespace or "default",
+                "port": str(agent_port),
+            }
+        )
+        return f"{ws_scheme}://{parsed.netloc}/serverless/v1/ws?{query}"
+
+    async def _get_ws_client(self, runtime: AgentRuntime) -> WebSocketAgentServerClient:
+        """获取（或建立）到该 agent instance 的 WS 直连，不走 invoke 链路."""
+        info = runtime.info
+        instance_id = str(info.sandbox_id or "").strip()
+        if not instance_id:
+            raise ValueError(
+                f"agent has no sandbox instance for ws connect: "
+                f"user={info.user_id} agent_type={info.agent_type}"
+            )
+        raw_port = info.metadata.get("agent_port")
+        try:
+            agent_port = int(raw_port)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"agent has no agent_port metadata for ws connect: "
+                f"instance={instance_id} agent_type={info.agent_type}"
+            ) from None
+
+        async with self._ws_clients_lock:
+            client = self._ws_clients.get(instance_id)
+            if client is not None:
+                return client
+            client = self._ws_client_factory()
+            if self._push_handler is not None:
+                client.set_server_push_handler(self._push_handler)
+            uri = self._agent_ws_url(instance_id, agent_port)
+            logger.info(
+                "[AgentOSRouter] connecting agent instance via ws: instance=%s uri=%s",
+                instance_id,
+                uri,
+            )
+            try:
+                await client.connect(uri)
+            except Exception:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+                raise
+            self._ws_clients[instance_id] = client
+            return client
+
+    async def _close_ws_client(self, instance_id: str | None) -> None:
+        if not instance_id:
+            return
+        async with self._ws_clients_lock:
+            client = self._ws_clients.pop(str(instance_id), None)
+        if client is None:
+            return
+        try:
+            await client.disconnect()
+        except Exception:
+            logger.warning(
+                "[AgentOSRouter] close agent ws failed: instance=%s",
+                instance_id,
+                exc_info=True,
+            )
+
+    async def _close_all_ws_clients(self) -> None:
+        async with self._ws_clients_lock:
+            clients = list(self._ws_clients.values())
+            self._ws_clients.clear()
+        for client in clients:
+            try:
+                await client.disconnect()
+            except Exception:
+                logger.warning("[AgentOSRouter] close agent ws failed", exc_info=True)
 
     async def send_request(self, envelope: E2AEnvelope) -> AgentResponse:
         # 3rdagent.list / 3rdagent.switch are handled by Gateway ThirdAgent
@@ -305,7 +423,12 @@ class AgentOSRouterClient(AgentServerClient):
             return self._routing_error_response(envelope, str(exc))
         try:
             runtime.attach_to_envelope(envelope)
-            return await self._yuanrong.send_request(envelope)
+            # create 后通过 YuanRong frontend WS 代理直连 instance，不走 invoke。
+            try:
+                ws_client = await self._get_ws_client(runtime)
+            except ValueError as exc:
+                return self._routing_error_response(envelope, str(exc))
+            return await ws_client.send_request(envelope)
         finally:
             await self._agent_manager.release(runtime.key)
 
@@ -319,7 +442,13 @@ class AgentOSRouterClient(AgentServerClient):
             return
         try:
             runtime.attach_to_envelope(envelope)
-            async for chunk in self._yuanrong.send_request_stream(envelope):
+            # create 后通过 YuanRong frontend WS 代理直连 instance，不走 invoke。
+            try:
+                ws_client = await self._get_ws_client(runtime)
+            except ValueError as exc:
+                yield self._routing_error_chunk(envelope, str(exc))
+                return
+            async for chunk in ws_client.send_request_stream(envelope):
                 yield chunk
         finally:
             await self._agent_manager.release(runtime.key)
@@ -707,12 +836,13 @@ class AgentOSRouterClient(AgentServerClient):
                     "user": "agentos",
                     "ports": [f"tcp:{port}"]
                 },
-                "cmds": [["sh", "-c", f"jiuwenswarm-init && exec jiuwenswarm-agentserver --port {port}"]],
+                "cmds": [["sh", "-c", f"exec jiuwenswarm-agentserver --port {port}"]],
                 "cpu": int(os.environ.get("AGENTOS_BUILTIN_AGENT_CPU", "2000")),
                 "memory": int(os.environ.get("AGENTOS_BUILTIN_AGENT_MEMORY", "4096"))
             }
             env_vars = {"AGENT_SERVER_HOST": "127.0.0.1", "AGENT_SERVER_PORT": f"{port}"}
-            extra_metadata: dict[str, Any] = {}
+            # create 后 Gateway 通过 frontend WS 代理直连该端口（不走 invoke）。
+            extra_metadata: dict[str, Any] = {"agent_port": port}
         else:
             image_info = await self._registry.get_image_info(agent_info.agent_type)
             runtime_spec = build_inline_runtime_spec(image_info)
@@ -723,6 +853,9 @@ class AgentOSRouterClient(AgentServerClient):
                 else None
             )
             extra_metadata = {"image_info": dict(image_info.metadata)}
+            agent_port = _extract_runtime_spec_port(runtime_spec)
+            if agent_port is not None:
+                extra_metadata["agent_port"] = agent_port
 
         workspace = resolve_agent_workspace(
             agent_info.user_id,
@@ -792,6 +925,7 @@ class AgentOSRouterClient(AgentServerClient):
             resolved_key_values["session_id"] = agent_info.metadata.get(
                 "session_id"
             )
+        await self._close_ws_client(agent_info.sandbox_id)
         if agent_info.sandbox_id:
             await self._yuanrong.delete_sandbox(agent_info.sandbox_id)
         await self._agent_manager.delete_agent(
@@ -839,6 +973,7 @@ class AgentOSRouterClient(AgentServerClient):
         best_effort: bool = False,
     ) -> None:
         """Delete YuanRong sandbox and unregister the registry instance."""
+        await self._close_ws_client(agent_info.sandbox_id)
         if agent_info.sandbox_id:
             try:
                 await self._yuanrong.delete_sandbox(agent_info.sandbox_id)
