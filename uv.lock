@@ -2930,7 +2930,7 @@ wheels = [
 [[package]]
 name = "openjiuwen"
 version = "0.1.16"
-source = { git = "https://gitcode.com/openJiuwen/agent-core.git?branch=develop#6e52cf49a61b8f1176851be3d4f9dd6c119b3494" }
+source = { git = "https://gitcode.com/openJiuwen/agent-core.git?branch=develop#c1a58c097762ac136740c0e6e7b4276f34ac1f9d" }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp" },
