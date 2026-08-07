@@ -6697,6 +6697,21 @@ class JiuWenSwarmDeepAdapter:
         # web channel defaults to True, others default to False
         if send_file_enabled is None:
             send_file_enabled = (channel == "web")
+        agent_runtime_env = os.getenv("AGENT_RUNTIME", "").strip()
+        if agent_runtime_env:
+            send_file_enabled = True
+            if self._enterprise_config is not None:
+                enterprise_allowed = getattr(
+                    self._enterprise_config, "send_file_allowed", None
+                )
+                if enterprise_allowed is not None:
+                    send_file_enabled = bool(enterprise_allowed)
+                else:
+                    agent_policy = getattr(
+                        self._enterprise_config, "agent_policy", None
+                    )
+                    if isinstance(agent_policy, dict) and "send_file_allowed" in agent_policy:
+                        send_file_enabled = bool(agent_policy["send_file_allowed"])
         if send_file_enabled and request_id and session_id:
             channel_for_tool = _CRON_TOOL_CHANNEL_ID.get()
             metadata_for_tool = _CRON_TOOL_METADATA.get()

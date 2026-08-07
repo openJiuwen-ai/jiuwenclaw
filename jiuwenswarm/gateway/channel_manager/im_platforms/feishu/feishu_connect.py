@@ -1754,6 +1754,18 @@ class FeishuChannel(BaseChannel):
                         except Exception as file_err:
                             logger.error("飞书兜底文件发送失败: %s %s", fp, file_err)
 
+            if not content_str.strip():
+                if files_sent_in_fallback:
+                    return
+                logger.warning("飞书发送：消息内容为空，跳过发送")
+                return
+
+            request_id = str(msg.id or "").strip()
+            if request_id and msg.event_type != EventType.HEARTBEAT_RELAY:
+                self._clear_group_progress_state(request_id)
+
+            content_str = self._filter_user_info_for_group(content_str, meta)
+
             # 群聊数字分身回复到群聊时，@发送人
             if msg.group_digital_avatar and id_type == "chat_id":
                 mention_user_id = str(

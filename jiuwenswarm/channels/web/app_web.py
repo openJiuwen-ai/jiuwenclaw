@@ -8,6 +8,7 @@ Supports ``--dotenv <path>`` for multi-instance isolation.
 from __future__ import annotations
 
 import argparse
+import cgi
 import errno
 import http.client
 import json
@@ -1019,7 +1020,89 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 # Connection may already be closed or broken; nothing more we can do.
                 self.log_error("failed to send download error response")
 
+    def _handle_file_push(self) -> None:
+        """接收来自 Gateway 的文件推送（企业版 AGENT_RUNTIME 反向推送方案）."""
+        if not os.getenv("AGENT_RUNTIME", "").strip():
+            self._write_json(404, {"error": "not_available"})
+            return
+
+        from jiuwenswarm.agents.harness.common.tools.web_file_download import (
+            build_file_download_info,
+        )
+
+        content_type = self.headers.get("Content-Type", "")
+        if "multipart/form-data" not in content_type:
+            self._write_json(400, {"error": "expected_multipart_form_data"})
+            return
+
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length)
+
+            environ = {
+                "REQUEST_METHOD": "POST",
+                "CONTENT_TYPE": content_type,
+                "CONTENT_LENGTH": str(content_length),
+            }
+            fs = cgi.FieldStorage(
+                fp=io.BytesIO(body),
+                headers=self.headers,
+                environ=environ,
+            )
+
+            file_item = fs["file"]
+            session_id = fs.getvalue("session_id", "default")
+            filename = fs.getvalue("filename", file_item.filename or "unnamed")
+
+            if not file_item.file:
+                self._write_json(400, {"error": "missing_file_field"})
+                return
+
+            received_dir = Path("./web_received_files")
+            received_dir.mkdir(parents=True, exist_ok=True)
+
+            safe_name = f"{int(time.time())}_{filename}"
+            local_path = received_dir / safe_name
+
+            with open(local_path, "wb") as f:
+                while True:
+                    chunk = file_item.file.read(65536)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+
+            self.logger.info(
+                "[WebServer] 接收文件推送: %s -> %s", filename, local_path
+            )
+
+            download_info = build_file_download_info(
+                file_path=str(local_path),
+                file_name=filename,
+                session_id=session_id,
+            )
+
+            self._write_json(
+                200,
+                {
+                    "success": True,
+                    "file_path": str(local_path),
+                    "download_url": download_info["download_url"],
+                    "download_token": download_info["download_token"],
+                    "expires_at": download_info.get("expires_at"),
+                },
+            )
+
+        except Exception as exc:
+            self.logger.error(
+                "[WebServer] 处理文件推送失败: %s", exc, exc_info=True
+            )
+            self._write_json(500, {"error": "push_failed", "detail": str(exc)})
+
     def _handle_file_api_post(self, parsed) -> None:
+        if parsed.path == "/file-api/push":
+            self._handle_file_push()
+            return
+
         if parsed.path == "/file-api/rebuild-agent-data":
             try:
                 _generate_agent_data(self.project_root)

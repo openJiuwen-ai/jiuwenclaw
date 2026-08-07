@@ -253,6 +253,7 @@ class SendFileToolkit:
                         "mime_type": download_info["mime_type"],
                         "download_url": download_info["download_url"],
                         "download_token": download_info["download_token"],
+                        "expires_at": download_info.get("expires_at"),
                     })
             except Exception as download_err:
                 logger.warning(
