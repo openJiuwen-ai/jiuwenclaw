@@ -17,7 +17,13 @@ import {
 import { CheckboxList } from "../dist/ui/components/checkbox-list.js";
 import { visibleWidth } from "@mariozechner/pi-tui";
 import { planSwarmflowToggle } from "../dist/core/commands/builtins/swarmflow.js";
+import {
+  buildModeAutocompleteItems,
+  resolveModeTarget,
+} from "../dist/core/commands/builtins/mode.js";
+import { resolvePlanTarget } from "../dist/core/commands/builtins/plan.js";
 import { buildAppScreenLines } from "../dist/ui/screen-layout.js";
+import { buildWelcomeLines } from "../dist/ui/welcome.js";
 import {
   canOpenSessionHistory,
   formatTokenCount,
@@ -41,9 +47,32 @@ import {
 import { createHarmonyOSDevInitCommand } from "../dist/core/commands/builtins/harmonyos-dev-init.js";
 import { createHarmonyOSProjectInitCommand } from "../dist/core/commands/builtins/harmonyos-project-init.js";
 import { buildHarmonyOSProjectInitPrompt } from "../dist/core/commands/builtins/harmonyos-project-init.prompts.js";
+import { formatModeForDisplay } from "../dist/core/modes.js";
 
 const planQuestion = "**Plan Approval**\n\nThe agent has completed a plan.";
 const planApprovalKind = "plan_approval";
+
+const modeItems = buildModeAutocompleteItems();
+assert.ok(modeItems.some((item) => item.value === "team.work" && item.label === "    work"));
+assert.ok(modeItems.some((item) => item.value === "team.code" && item.label === "    code"));
+assert.equal(modeItems.some((item) => item.value === "team.plan.normal"), false);
+assert.equal(modeItems.some((item) => item.value === "team.plan.code"), false);
+assert.equal(modeItems.some((item) => item.value === "code.team"), false);
+
+assert.equal(resolveModeTarget("team.work"), "team");
+assert.equal(resolveModeTarget("team.code"), "code.team");
+assert.equal(resolveModeTarget("team"), "team");
+assert.equal(resolveModeTarget("code.team"), "code.team");
+assert.equal(formatModeForDisplay("code.team"), "team.code");
+assert.equal(formatModeForDisplay("team.plan.code"), "team.plan.code");
+
+assert.equal(resolvePlanTarget("team"), "team.plan.normal");
+assert.equal(resolvePlanTarget("team.plan"), "team.plan.normal");
+assert.equal(resolvePlanTarget("team.plan.normal"), "team.plan.normal");
+assert.equal(resolvePlanTarget("code.team"), "team.plan.code");
+assert.equal(resolvePlanTarget("team.plan.code"), "team.plan.code");
+assert.equal(resolvePlanTarget("code.normal"), "code.plan");
+assert.equal(resolvePlanTarget("agent.fast"), "agent.plan");
 
 assert.equal(isPlanApprovalRequest("confirm_interrupt", planApprovalKind), true);
 assert.equal(isPlanApprovalRequest("confirm_interrupt", "permission"), false);
@@ -237,9 +266,21 @@ const teamLayoutOptions = {
   animationPhase: 0,
   overlayTranscriptLines: [],
 };
+const stripAnsi = (value) => value.replace(/\u001b\[[0-9;]*m/g, "");
 const collapsedTeamLines = buildAppScreenLines(teamSnapshot, teamLayoutOptions);
 assert.equal(collapsedTeamLines.some((line) => line.includes("teammate")), false);
 assert.equal(collapsedTeamLines.some((line) => line.includes("Member 1")), false);
+
+const codeTeamDisplay = stripAnsi(
+  buildAppScreenLines({ ...teamSnapshot, mode: "code.team" }, teamLayoutOptions).join("\n"),
+);
+assert.equal(codeTeamDisplay.includes("mode:team.code"), true);
+assert.equal(codeTeamDisplay.includes("code.team"), false);
+const codeTeamWelcome = stripAnsi(
+  buildWelcomeLines(160, "connected", teamSnapshot.modelInfo, "code.team").join("\n"),
+);
+assert.equal(codeTeamWelcome.includes("Mode: team.code"), true);
+assert.equal(codeTeamWelcome.includes("code.team"), false);
 
 const expandedTeamLines = buildAppScreenLines(teamSnapshot, {
   ...teamLayoutOptions,
@@ -247,7 +288,6 @@ const expandedTeamLines = buildAppScreenLines(teamSnapshot, {
 });
 assert.equal(expandedTeamLines.some((line) => line.includes("teammate")), true);
 
-const stripAnsi = (value) => value.replace(/\u001b\[[0-9;]*m/g, "");
 const btwMarkdownLines = buildAppScreenLines(
   {
     ...teamSnapshot,

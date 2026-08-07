@@ -58,7 +58,7 @@ import type { McpListItem, McpListPayload } from "../core/commands/builtins/mcp.
 import { buildModeAutocompleteItems } from "../core/commands/builtins/mode.js";
 import { MemoryViewController, type MemoryViewTab } from "./memory-view.js";
 import { PIPELINE_VALUES, PIPELINE_OPTIONS, INTERVAL_VALUES, INTERVAL_OPTIONS, FLAG_OPTIONS } from "../core/commands/builtins/auto-harness.js";
-import { isClientMode, isTeamMode } from "../core/modes.js";
+import { formatModeForDisplay, isClientMode, isTeamMode } from "../core/modes.js";
 import {
   countWaitingForHuman,
   sessionTurnLabelNumber,
@@ -8382,7 +8382,7 @@ export class AppScreen implements Component, Focusable {
       { value: "__display__", label: `session: ${payload.session_id || snapshot.sessionId}`, description: "" },
       { value: "__display__", label: `name: ${snapshot.sessionTitle || "/rename to add a name"}`, description: "" },
       { value: "__display__", label: `cwd: ${payload.cwd || "unknown"}`, description: "" },
-      { value: "__display__", label: `mode: ${snapshot.mode}`, description: "" },
+      { value: "__display__", label: `mode: ${formatModeForDisplay(snapshot.mode)}`, description: "" },
       { value: "__display__", label: `model: ${payload.model || "unknown"}`, description: "" },
       { value: "__display__", label: `provider: ${payload.provider || "unknown"}`, description: "" },
       { value: "__display__", label: `api_base: ${payload.api_base || "unknown"}`, description: "" },

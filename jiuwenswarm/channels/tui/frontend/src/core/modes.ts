@@ -32,3 +32,8 @@ export function isTeamMode(mode: ClientMode): boolean {
     mode === "code.team"
   );
 }
+
+/** Keep runtime identifiers canonical while presenting the public TUI hierarchy. */
+export function formatModeForDisplay(mode: string): string {
+  return mode === "code.team" ? "team.code" : mode;
+}
