@@ -19,16 +19,19 @@ def session_map_hash_key(key_prefix: str, identity_key: str) -> str:
     return f"{_normalize_prefix(key_prefix)}gateway:session_map:{identity_key}"
 
 
-def cron_jobs_hash_key(key_prefix: str) -> str:
-    """``{key_prefix}gateway:cron_jobs`` Hash。"""
-    return f"{_normalize_prefix(key_prefix)}gateway:cron_jobs"
+def cron_jobs_hash_rel(gateway_instance_id: str) -> str:
+    """``gateway:cron_jobs:{gateway_instance_id}`` Hash（相对名，经 RedisClient 加 prefix）。"""
+    iid = str(gateway_instance_id or "").strip()
+    if not iid:
+        raise ValueError("gateway_instance_id is required")
+    return f"gateway:cron_jobs:{iid}"
+
+
+def cron_jobs_hash_key(key_prefix: str, gateway_instance_id: str) -> str:
+    """``{key_prefix}gateway:cron_jobs:{gateway_instance_id}`` Hash。"""
+    return f"{_normalize_prefix(key_prefix)}{cron_jobs_hash_rel(gateway_instance_id)}"
 
 
 def leader_lock_key(key_prefix: str, channel_id: str) -> str:
     """``{key_prefix}gateway:leader:{channel_id}`` String（带 TTL）。"""
     return f"{_normalize_prefix(key_prefix)}gateway:leader:{channel_id}"
-
-
-def cron_changes_pubsub_channel(key_prefix: str) -> str:
-    """``{key_prefix}gateway:cron_changes`` Pub/Sub 频道（方案 A：全局订阅）。"""
-    return f"{_normalize_prefix(key_prefix)}gateway:cron_changes"
