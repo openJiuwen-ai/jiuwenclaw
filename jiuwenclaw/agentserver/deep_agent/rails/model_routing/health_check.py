@@ -249,7 +249,15 @@ class ModelHealthChecker:
                         "role": "user",
                         "content": [
                             {"type": "text", "text": "主色调是什么？"},
-                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{_RED_SQUARE_PNG_BASE64}"}},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": (
+                                        f"data:image/png;base64,"
+                                        f"{_RED_SQUARE_PNG_BASE64}"
+                                    ),
+                                },
+                            },
                         ],
                     }
                 ],

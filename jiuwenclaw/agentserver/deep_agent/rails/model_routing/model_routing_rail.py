@@ -271,7 +271,6 @@ class ModelRoutingRail(DeepAgentRail):
         except Exception as exc:
             logger.debug("[ModelRouting] after_model_call failed: %s", exc)
 
-
     # ---- 内部 ---- #
 
     def _emit_decision(
