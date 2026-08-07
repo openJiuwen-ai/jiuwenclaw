@@ -20,6 +20,7 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.workspace.workspace import Workspace
 
+from jiuwenswarm.common.utils import DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL
 from jiuwenswarm.server.runtime.debug_trace import invoke_subagent_with_trace
 
 if TYPE_CHECKING:
@@ -253,6 +254,8 @@ class AgentTool(Tool):
         }
 
         factory_kwargs = dict(spec.factory_kwargs or {})
+        # read_file 默认不读取图片：关闭多模态内联（agent 定义显式开启时遵从）。
+        factory_kwargs.setdefault("enable_read_image_multimodal", DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL)
 
         sub_agent = create_deep_agent(**create_kwargs, **factory_kwargs)
         logger.info("[AgentTool] Created sub-agent for '%s' via create_deep_agent()", agent_def.name)
