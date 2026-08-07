@@ -15,6 +15,7 @@ from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.extensions.agentos.agentos_router.agent_manager import (
     BUILTIN_AGENT_TYPE,
+    AgentCreateFailed,
     AgentCreatingTimeout,
     AgentDeleted,
     AgentManager,
@@ -300,7 +301,7 @@ class AgentOSRouterClient(AgentServerClient):
             return await self._handle_ssh_relay(envelope)
         try:
             runtime = await self._resolve_agent(envelope, acquire=True)
-        except (ValueError, AgentCreatingTimeout) as exc:
+        except (ValueError, AgentCreatingTimeout, AgentCreateFailed) as exc:
             return self._routing_error_response(envelope, str(exc))
         try:
             runtime.attach_to_envelope(envelope)
@@ -313,7 +314,7 @@ class AgentOSRouterClient(AgentServerClient):
     ) -> AsyncIterator[AgentResponseChunk]:
         try:
             runtime = await self._resolve_agent(envelope, acquire=True)
-        except (ValueError, AgentCreatingTimeout) as exc:
+        except (ValueError, AgentCreatingTimeout, AgentCreateFailed) as exc:
             yield self._routing_error_chunk(envelope, str(exc))
             return
         try:
@@ -439,7 +440,7 @@ class AgentOSRouterClient(AgentServerClient):
                 creator=self._create_agent,
                 metadata={"session_id": session_id} if session_id else None,
             )
-        except (ValueError, AgentCreatingTimeout) as exc:
+        except (ValueError, AgentCreatingTimeout, AgentCreateFailed) as exc:
             return {
                 "ok": False,
                 "error": str(exc),
@@ -525,7 +526,7 @@ class AgentOSRouterClient(AgentServerClient):
                 )
                 return
             runtime = await self._resolve_agent(envelope, acquire=True)
-        except (ValueError, AgentCreatingTimeout, AgentDeleted) as exc:
+        except (ValueError, AgentCreatingTimeout, AgentCreateFailed, AgentDeleted) as exc:
             ssh_relay.fail_session(
                 relay_session, f"agent resolve failed: {exc}"
             )

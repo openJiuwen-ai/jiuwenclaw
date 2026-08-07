@@ -70,6 +70,10 @@ class AgentDeleted(RuntimeError):
     """Agent was deleted while creation was in flight."""
 
 
+class AgentCreateFailed(RuntimeError):
+    """Previous create failed; automatic retry is disabled to avoid double create."""
+
+
 @dataclass
 class AgentRuntime:
     """In-process agent record: business info plus create-wait signaling."""
@@ -112,12 +116,6 @@ class AgentRuntime:
         envelope.channel_context["agent_type"] = self.info.agent_type
         if self.info.sandbox_id:
             envelope.channel_context["sandbox_id"] = self.info.sandbox_id
-
-    def reset_for_retry(self) -> None:
-        self.info.status = AgentStatus.CREATING
-        self.info.error = None
-        self.info.updated_at = time.time()
-        self.creating_event = asyncio.Event()
 
     @staticmethod
     def apply_creator_result(created: AgentInfo | None, *, base: AgentInfo) -> AgentInfo:
@@ -247,6 +245,11 @@ class AgentManager:
     def key_fields(self) -> tuple[str, ...]:
         return self._key_fields
 
+    @staticmethod
+    def _failed_message(runtime: AgentRuntime, key_desc: str) -> str:
+        detail = str(runtime.info.error or "").strip() or "unknown error"
+        return f"AGENT_CREATE_FAILED: {key_desc}: {detail}"
+
     # ── 用户连接计数 ──
 
     def increment_user_connections(self, user_id: str) -> None:
@@ -346,8 +349,12 @@ class AgentManager:
                 else:
                     runtime = existing
                     if runtime.is_failed():
-                        runtime.reset_for_retry()
-                        owner = True
+                        # Do not reset_for_retry: a cancelled/failed create may
+                        # still have provisioned a YuanRong sandbox; retrying
+                        # here would spawn a second one.
+                        raise AgentCreateFailed(
+                            self._failed_message(runtime, key_desc)
+                        )
                 creator_base = runtime.info.copy()
 
             if owner:
@@ -367,6 +374,8 @@ class AgentManager:
                 ) from exc
             if runtime.is_deleted():
                 raise AgentDeleted(f"AGENT_DELETED: {key_desc}")
+            if runtime.is_failed():
+                raise AgentCreateFailed(self._failed_message(runtime, key_desc))
 
     async def get_agent(
         self,
