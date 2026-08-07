@@ -1,0 +1,72 @@
+export type RawLocalizedText = {
+  zh?: string;
+  en?: string;
+};
+
+export type RawAgentTemplateListItem = {
+  id: string;
+  displayName?: RawLocalizedText;
+  displayDescription?: RawLocalizedText;
+  category?: string;
+  source?: string;
+  installed?: boolean;
+  enabled?: boolean;
+};
+
+export type RawAgentCapability = {
+  id?: string;
+  displayName?: RawLocalizedText;
+  displayDescription?: RawLocalizedText;
+  avatar?: string;
+};
+
+export type RawAgentTag = RawLocalizedText & {
+  id?: string;
+};
+
+export type RawAgentTemplateDetail = RawAgentTemplateListItem & {
+  avatar?: string;
+  version?: string;
+  details?: string;
+  prompt?: string;
+  tags?: RawAgentTag[];
+  skills?: RawAgentCapability[];
+  tools?: RawAgentCapability[];
+  rails?: RawAgentCapability[];
+  mcps?: RawAgentCapability[];
+  quickInputs?: RawLocalizedText[];
+};
+
+export type RawAgentListPayload = {
+  templates?: RawAgentTemplateListItem[];
+};
+
+export type RawAgentDetailPayload = {
+  template?: RawAgentTemplateDetail;
+};
+
+export type RawAgentFileEntry = {
+  path: string;
+  type: 'file' | 'dir';
+  size?: number;
+  children?: RawAgentFileEntry[];
+};
+
+export type RawAgentFileListPayload = {
+  tree?: RawAgentFileEntry[];
+};
+
+export type RawAgentFileReadPayload = {
+  path?: string;
+  content?: string;
+};
+
+export type RawSkillOption = {
+  name?: string;
+  display_name?: string;
+  description?: string;
+};
+
+export type RawSkillListPayload = {
+  skills?: RawSkillOption[];
+};

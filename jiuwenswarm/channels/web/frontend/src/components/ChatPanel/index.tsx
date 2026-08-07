@@ -98,6 +98,8 @@ interface ChatPanelProps {
   autoFocusKey?: string | null;
   /** 跳转到技能管理页 */
   onNavigateToSkills?: () => void;
+  /** 跳转到智能体管理页 */
+  onNavigateToAgents?: () => void;
   /** 切换右侧紧缩面板展开状态，传 null 表示隐藏面板 */
   onToggleTeamArea?: (expanded: boolean | null) => void;
   /** 打开右侧面板并切换到代码审核 Tab */
@@ -757,6 +759,7 @@ export function ChatPanel({
   teamAreaExpanded = false,
   autoFocusKey = null,
   onNavigateToSkills,
+  onNavigateToAgents,
   onToggleTeamArea,
   onOpenCodeReview,
   heartbeatPanelOpen = false,
@@ -1401,6 +1404,7 @@ export function ChatPanel({
                   isProcessing={isProcessing}
                   autoFocusKey={autoFocusKey}
                   onNavigateToSkills={onNavigateToSkills}
+                  onNavigateToAgents={onNavigateToAgents}
                   permissionsEnabled={permissionsEnabled}
                   onSavePermission={onSavePermission}
                   onSetGoal={onSetGoal}
@@ -1444,6 +1448,7 @@ export function ChatPanel({
             isProcessing={isProcessing}
             autoFocusKey={autoFocusKey}
             onNavigateToSkills={onNavigateToSkills}
+            onNavigateToAgents={onNavigateToAgents}
             permissionsEnabled={permissionsEnabled}
             onSavePermission={onSavePermission}
             onSetGoal={onSetGoal}

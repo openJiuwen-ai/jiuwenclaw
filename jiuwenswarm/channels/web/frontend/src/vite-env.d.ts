@@ -8,6 +8,8 @@ interface ImportMetaEnv {
   readonly VITE_GITCODE_OAUTH_CLIENT_ID?: string;
   readonly VITE_GITCODE_OAUTH_CLIENT_SECRET?: string;
   readonly VITE_GITHUB_OAUTH_CLIENT_ID?: string;
+  readonly VITE_AGENT_MANAGEMENT_SOURCE?: 'fixture' | 'live';
+  readonly VITE_AGENT_MANAGEMENT_FIXTURE_ERROR?: string;
 }
 
 interface ImportMeta {

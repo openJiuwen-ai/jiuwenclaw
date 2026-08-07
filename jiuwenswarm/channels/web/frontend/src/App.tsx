@@ -8,7 +8,7 @@ import { useState, useCallback, useEffect, useRef, Component, ReactNode, useMemo
 import { ChatPanel } from './components/ChatPanel';
 import { SessionSidebar } from './components/SessionSidebar';
 import { SkillPanel } from './components/SkillPanel';
-import { AgentPanel } from './components/AgentPanel/index';
+import { AgentManagementPanel } from './components/AgentManagementPanel';
 import { TeamPanel } from './components/TeamPanel';
 import { SessionsPanel } from './components/SessionsPanel';
 import CronPanel from './components/CronPanel';
@@ -2111,6 +2111,15 @@ function AppContent({
     });
   }, [kvCacheAffinityEnabled, mode, request]);
 
+  const handleUseAgent = useCallback((agentId: string) => {
+    const currentSessionId = sessionIdRef.current || NEW_CONVERSATION_ID;
+    const sessionStore = useSessionStore.getState();
+    sessionStore.setAgentSelectionIntent(currentSessionId, { kind: 'select', id: agentId });
+    sessionStore.setMode(currentSessionId, 'agent');
+    setActiveNav('chat');
+    requestComposerFocus();
+  }, [requestComposerFocus]);
+
   const handleSendMessage = useCallback(async (content: string, mediaItems?: MediaItem[]) => {
     const currentSessionId = sessionIdRef.current;
     if (!currentSessionId) return;
@@ -2196,6 +2205,9 @@ function AppContent({
         const pendingEnabledMcps = useSessionStore.getState().getRuntime(NEW_CONVERSATION_ID)?.enabledMcps ?? [];
         pendingEnabledMcps.forEach((name) => useSessionStore.getState().addEnabledMcp(newSid, name));
         useSessionStore.getState().clearEnabledMcps(NEW_CONVERSATION_ID);
+        const pendingAgentSelection = useSessionStore.getState().getRuntime(NEW_CONVERSATION_ID)?.agentSelectionIntent ?? { kind: 'keep' as const };
+        useSessionStore.getState().setAgentSelectionIntent(newSid, pendingAgentSelection);
+        useSessionStore.getState().clearAgentSelectionIntent(NEW_CONVERSATION_ID);
         pendingNewConversationRef.current = false;
         useSessionStore.getState().removeRuntime(NEW_CONVERSATION_ID);
         // Plan 开关是按 session 存的。欢迎页上开关记在 'new' 名下，这里必须搬到真实
@@ -2781,7 +2793,11 @@ function AppContent({
   }, [clearChatPanelResize, showWorkspaceDivider]);
 
   return (
-    <div className="shell shell--icon-rail" data-testid="app-shell" data-session-id={sessionId}>
+    <div
+      className={`shell shell--icon-rail ${activeNav === 'agents' ? 'shell--agent-management' : ''}`}
+      data-testid="app-shell"
+      data-session-id={sessionId}
+    >
       {/* Navigation Sidebar */}
       <SessionSidebar
         activeNav={activeNav}
@@ -2867,6 +2883,7 @@ function AppContent({
                       teamAreaExpanded={toolPanelHidden ? null : isTeamAreaExpanded}
                       autoFocusKey={composerFocusKey}
                       onNavigateToSkills={() => handleNavigate('skills')}
+                      onNavigateToAgents={() => handleNavigate('agents')}
                       onToggleTeamArea={handleToggleDetailPanel}
                       onOpenCodeReview={handleOpenCodeReview}
                       permissionsEnabled={serverConfig?.permissions_enabled !== 'false'}
@@ -2939,7 +2956,7 @@ function AppContent({
         )}
         {activeNav === 'agents' && (
           <div className="app-section">
-            <AgentPanel sessionId={sessionId} />
+            <AgentManagementPanel onUseAgent={handleUseAgent} />
           </div>
         )}
         {activeNav === 'teams' && (

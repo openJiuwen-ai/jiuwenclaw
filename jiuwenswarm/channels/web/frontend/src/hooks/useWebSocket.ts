@@ -99,6 +99,7 @@ import {
   normalizeSubagentWaitResults,
   normalizeSubagentStatusEvent,
 } from '../features/subagent/subagentNormalizer';
+import { buildDefinitionSelectionPayload } from '../features/agentManagement/port';
 
 const WS_RECONNECT_EVENT = 'jiuwenclaw:ws-reconnect-request';
 
@@ -1517,7 +1518,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
       // 添加用户消息（附带输入栏选中的技能）
       // 气泡只展示用户原文；路径提示仅随 chat.send 发给 Agent。
-      const selectedSkills = useSessionStore.getState().getRuntime(sessionId)?.selectedSkills ?? [];
+      const sessionRuntime = useSessionStore.getState().getRuntime(sessionId);
+      const selectedSkills = sessionRuntime?.selectedSkills ?? [];
+      const agentSelectionIntent = sessionRuntime?.agentSelectionIntent ?? { kind: 'keep' as const };
       // 插件/MCP 是"+"菜单"扩展"面板里的会话级开关，和 selectedSkills 不同——不随发送清空，
       // 持续带在本会话之后每一条消息里，直到用户在面板里手动关闭开关（见 sessionStore.ts
       // SessionRuntime.enabledPlugins/enabledMcps 头部注释）。插件（plugin_names）后端还没有
@@ -1624,6 +1627,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           ...(selectedModel ? { model_name: selectedModel } : {}),
           ...workContext,
           skills: selectedSkills,
+          ...buildDefinitionSelectionPayload(agentSelectionIntent),
           // plugin_names/mcp 的组装+字段语义说明见 utils/enabledExtensions.ts 的
           // buildExtensionSendPayload 头注释（plugin_names 恒传含空数组，mcp 只在非空时才带）。
           ...extensionPayload,
@@ -1635,6 +1639,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           useSessionStore.getState().setSessionMetadata(sessionId, null);
         }
         consumePlanEntryMark(sessionId, outgoingMode);
+        useSessionStore.getState().clearAgentSelectionIntent(sessionId);
         return true;
       } catch (error) {
         const webError = error as WebError;
@@ -1691,9 +1696,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           ...(selectedModel ? { model_name: selectedModel } : {}),
           ...workContext,
           ...buildExtensionSendPayload(sessionId),
+          ...buildDefinitionSelectionPayload(currentSessionState.getRuntime(sessionId)?.agentSelectionIntent ?? { kind: 'keep' }),
           ...resolvePlanEntryPayload(sessionId, outgoingMode),
         });
         consumePlanEntryMark(sessionId, outgoingMode);
+        useSessionStore.getState().clearAgentSelectionIntent(sessionId);
       } catch (error) {
         const webError = error as WebError;
         useChatStore.getState().setProcessing(sessionId, false);
@@ -1989,6 +1996,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             ...getSessionWorkContext(sessionId),
             request_id: requestId,
             answers: answers,
+            ...buildDefinitionSelectionPayload(useSessionStore.getState().getRuntime(sessionId)?.agentSelectionIntent ?? { kind: 'keep' }),
             ...sourcePayload,
             ...structuredPlanPayload,
             ...approvalSchemaPayload,
@@ -1997,6 +2005,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             // 会话选中的插件/MCP 在 resume 后就丢了，见 buildExtensionSendPayload 头注释。
             ...buildExtensionSendPayload(sessionId),
           });
+          useSessionStore.getState().clearAgentSelectionIntent(sessionId);
         } else if (effectiveSource === 'activate_confirm') {
           const action = answers[0]?.selected_options[0] === '拒绝' ? 'reject' : 'accept';
           const interactionId = requestId || useHarnessStore.getState().getRuntime(sessionId)?.activateInteraction?.interactionId || '';
@@ -2008,6 +2017,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             content: '',
             mode: 'auto_harness',
             ...getSessionWorkContext(sessionId),
+            ...buildDefinitionSelectionPayload(useSessionStore.getState().getRuntime(sessionId)?.agentSelectionIntent ?? { kind: 'keep' }),
             activate_response: {
               interaction_id: interactionId,
               action,
@@ -2015,6 +2025,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             },
             ...buildExtensionSendPayload(sessionId),
           });
+          useSessionStore.getState().clearAgentSelectionIntent(sessionId);
           useHarnessStore.getState().setActivateInteraction(sessionId, null);
         } else {
           // 否则发送 chat.user_answer（自进化确认）
@@ -2058,6 +2069,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           },
           ...buildExtensionSendPayload(sessionId),
         });
+        useSessionStore.getState().clearAgentSelectionIntent(sessionId);
         useHarnessStore.getState().setActivateInteraction(sessionId, null);
       } catch {
         // Keep the activation interaction open so the user can retry.

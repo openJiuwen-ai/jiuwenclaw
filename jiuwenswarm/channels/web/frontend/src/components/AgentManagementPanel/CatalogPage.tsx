@@ -1,0 +1,165 @@
+import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
+import type { AgentCatalogItem, RequestStatus } from '../../features/agentManagement';
+import { DefinitionCard } from './DefinitionCard';
+
+const PAGE_SIZE = 12;
+const CATEGORIES = [
+  'IndustryConsultant',
+  'ProductDevelopment',
+  'Marketing',
+  'Efficiency',
+  'DataAnalysis',
+  'Design',
+  'SafetyCompliance',
+  'Communication',
+  'Engineering',
+  'Life',
+  'Custom',
+  'Other',
+];
+
+type CatalogPageProps = {
+  scope: 'catalog' | 'mine';
+  items: AgentCatalogItem[];
+  totalItems: number;
+  page: number;
+  totalPages: number;
+  query: string;
+  category: string;
+  status: RequestStatus;
+  error: string | null;
+  busyId: string | null;
+  onCategoryChange: (value: string) => void;
+  onPageChange: (page: number) => void;
+  onRetry: () => void;
+  onOpen: (id: string) => void;
+  onUse: (id: string) => void;
+  onInstall: (id: string) => void;
+  onUninstall: (id: string) => void;
+  onCreate: () => void;
+};
+
+function SkeletonCard() {
+  return <div className="agent-management-card agent-management-card--skeleton" aria-hidden="true" />;
+}
+
+export function CatalogPage({
+  scope,
+  items,
+  totalItems,
+  page,
+  totalPages,
+  query,
+  category,
+  status,
+  error,
+  busyId,
+  onCategoryChange,
+  onPageChange,
+  onRetry,
+  onOpen,
+  onUse,
+  onInstall,
+  onUninstall,
+  onCreate,
+}: CatalogPageProps) {
+  const { t } = useTranslation();
+  const isMine = scope === 'mine';
+  const isEmpty = status === 'success' && totalItems === 0;
+  const hasQuery = query.trim().length > 0 || Boolean(category);
+
+  return (
+    <section className="agent-management-catalog" data-testid={`agent-catalog-${scope}`}>
+      <div className={`agent-management-toolbar${isMine ? ' is-mine' : ''}`}>
+        <div className="agent-management-category-row" role="tablist" aria-label={t(isMine ? 'agentManagement.mineTabLabel' : 'agentManagement.categoryLabel')}>
+          {!isMine ? (
+            <>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={!category}
+                className={`agent-management-category${!category ? ' is-active' : ''}`}
+                onClick={() => onCategoryChange('')}
+              >
+                {t('agentManagement.categoryAll')}
+              </button>
+              {CATEGORIES.map((item) => (
+                <button
+                  key={item}
+                  type="button"
+                  role="tab"
+                  aria-selected={category === item}
+                  className={`agent-management-category${category === item ? ' is-active' : ''}`}
+                  onClick={() => onCategoryChange(item)}
+                >
+                  {t(`agentManagement.categories.${item}`, { defaultValue: item })}
+                </button>
+              ))}
+            </>
+          ) : (
+            <span className="agent-management-category agent-management-category--subtab is-active" role="tab" aria-selected="true">
+              {t('agentManagement.tabs.catalog')}
+            </span>
+          )}
+        </div>
+      </div>
+
+      {status === 'loading' ? (
+        <div className={`agent-management-card-grid ${isMine ? 'is-mine' : ''}`} aria-label={t('common.loading')}>
+          {Array.from({ length: isMine ? 6 : 12 }, (_, index) => <SkeletonCard key={index} />)}
+        </div>
+      ) : status === 'error' ? (
+        <div className="agent-management-state agent-management-state--error" role="alert">
+          <p>{error || t('agentManagement.states.loadError')}</p>
+          <button type="button" className="agent-management-button agent-management-button--secondary" onClick={onRetry}>
+            {t('common.retry')}
+          </button>
+        </div>
+      ) : isEmpty ? (
+        <div className="agent-management-state">
+          <div className="agent-management-state__icon" aria-hidden="true">⌁</div>
+          <p>{hasQuery ? t('agentManagement.states.noMatch') : t(isMine ? 'agentManagement.states.mineEmpty' : 'agentManagement.states.catalogEmpty')}</p>
+          {isMine && !hasQuery ? (
+            <button type="button" className="agent-management-button agent-management-button--primary" onClick={onCreate}>
+              {t('agentManagement.actions.createFirst')}
+            </button>
+          ) : null}
+        </div>
+      ) : (
+        <>
+          <div className={`agent-management-card-grid ${isMine ? 'is-mine' : ''}`}>
+            {items.map((item) => (
+              <DefinitionCard
+                key={item.id}
+                item={item}
+                scope={scope}
+                busy={busyId === item.id}
+                onOpen={onOpen}
+                onUse={onUse}
+                onInstall={onInstall}
+                onUninstall={onUninstall}
+              />
+            ))}
+          </div>
+          {totalPages > 1 ? (
+            <div className="agent-management-pagination" aria-label={t('agentManagement.pagination.label')}>
+              <span>{t('agentManagement.pagination.range', { start: (page - 1) * PAGE_SIZE + 1, end: Math.min(page * PAGE_SIZE, totalItems), total: totalItems })}</span>
+              <div className="agent-management-pagination__buttons">
+                <button type="button" disabled={page <= 1} onClick={() => onPageChange(page - 1)} aria-label={t('agentManagement.pagination.previous')}>
+                  <ChevronLeft size={16} aria-hidden="true" />
+                </button>
+                <span>{t('agentManagement.pagination.page', { page, total: totalPages })}</span>
+                <button type="button" disabled={page >= totalPages} onClick={() => onPageChange(page + 1)} aria-label={t('agentManagement.pagination.next')}>
+                  <ChevronRight size={16} aria-hidden="true" />
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </>
+      )}
+    </section>
+  );
+}
+
+export { PAGE_SIZE };

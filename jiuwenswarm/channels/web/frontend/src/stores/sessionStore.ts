@@ -20,6 +20,7 @@ import {
   registerConfirmedTaskCreation,
   type TaskProgressBaseline,
 } from '../features/teamTaskProgressBaseline';
+import type { AgentSelectionIntent } from '../features/agentManagement/types';
 import { isTeamAgentMode, stripPlanSuffix } from '../features/planMode/wireMode';
 
 const MODE_STORAGE_KEY = 'jiuwenclaw_mode';
@@ -334,6 +335,8 @@ export interface SessionRuntime {
   selectedSkills: string[];
   /** skill-creator 统一入口等场景的会话级元数据，随 chat.send 发送后清除 */
   metadata?: Record<string, unknown>;
+  /** 当前会话的智能体挂载草稿；keep 表示不修改后端当前挂载 */
+  agentSelectionIntent: AgentSelectionIntent;
   /**
    * 本会话期间持续启用的插件id/MCP名，由输入框"+"菜单"扩展"面板的开关控制。与
    * selectedSkills 不同：这两个字段发 chat.send 后不清空，会一直带在每条消息里，直到用户在
@@ -367,6 +370,7 @@ function createEmptyRuntime(): SessionRuntime {
     teamHistoryMessages: [],
     selectedSkills: [],
     metadata: undefined,
+    agentSelectionIntent: { kind: 'keep' },
     enabledPlugins: [],
     enabledMcps: [],
   };
@@ -429,6 +433,9 @@ interface SessionState {
   clearSelectedSkills: (sessionId: string) => void;
   /** 设置/清除会话级元数据（skill-creator 统一入口等场景） */
   setSessionMetadata: (sessionId: string, metadata: Record<string, unknown> | null) => void;
+  /** 输入栏智能体选择：选择、清空或恢复为不修改 */
+  setAgentSelectionIntent: (sessionId: string, intent: AgentSelectionIntent) => void;
+  clearAgentSelectionIntent: (sessionId: string) => void;
   /** 本会话启用插件：追加（去重） */
   addEnabledPlugin: (sessionId: string, pluginId: string) => void;
   /** 本会话启用插件：移除指定项 */
@@ -587,10 +594,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     set((state) => {
       const runtime = state.runtimes[sessionId];
       if (!runtime) return state;
+      const agentSelectionIntent = normalizedMode === 'agent'
+        ? runtime.agentSelectionIntent
+        : { kind: 'clear' as const };
       return {
         runtimes: {
           ...state.runtimes,
-          [sessionId]: { ...runtime, mode: normalizedMode },
+          [sessionId]: { ...runtime, mode: normalizedMode, agentSelectionIntent },
         },
       };
     });
@@ -987,6 +997,31 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         runtimes: {
           ...state.runtimes,
           [sessionId]: { ...runtime, metadata: metadata ?? undefined },
+        },
+      };
+    });
+  },
+
+  setAgentSelectionIntent: (sessionId, intent) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId] ?? createEmptyRuntime();
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, agentSelectionIntent: intent },
+        },
+      };
+    });
+  },
+
+  clearAgentSelectionIntent: (sessionId) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime || runtime.agentSelectionIntent.kind === 'keep') return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, agentSelectionIntent: { kind: 'keep' } },
         },
       };
     });

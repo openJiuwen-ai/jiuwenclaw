@@ -1,0 +1,83 @@
+import { useTranslation } from 'react-i18next';
+import { getAgentAvatarUrl, type AgentCatalogItem } from '../../features/agentManagement';
+
+type DefinitionCardProps = {
+  item: AgentCatalogItem;
+  scope: 'catalog' | 'mine';
+  busy: boolean;
+  onOpen: (id: string) => void;
+  onUse: (id: string) => void;
+  onInstall: (id: string) => void;
+  onUninstall: (id: string) => void;
+};
+
+function getAvatarLetter(name: string): string {
+  return name.trim().slice(0, 1).toUpperCase() || '?';
+}
+
+export function DefinitionCard({ item, scope, busy, onOpen, onUse, onInstall, onUninstall }: DefinitionCardProps) {
+  const { t } = useTranslation();
+  const canInstall = !item.installed;
+  const canUse = item.installed && item.enabled !== false;
+  const avatarUrl = getAgentAvatarUrl(item);
+
+  return (
+    <article className={`agent-management-card agent-management-card--${scope}`} data-testid={`agent-card-${item.id}`}>
+      <button
+        type="button"
+        className="agent-management-card__body"
+        onClick={() => onOpen(item.id)}
+        aria-label={t('agentManagement.card.open', { name: item.displayName })}
+      >
+        <span className="agent-management-card__heading">
+          <span className="agent-management-avatar" aria-hidden="true">
+            {avatarUrl ? <img src={avatarUrl} alt="" /> : <span className="agent-management-avatar__letter">{getAvatarLetter(item.displayName)}</span>}
+          </span>
+          <span className="agent-management-card__content">
+            <span className="agent-management-card__title">{item.displayName}</span>
+            {scope === 'mine' ? (
+              <span className="agent-management-card__meta">
+                <span className="agent-management-tag">
+                  {t(`agentManagement.categories.${item.category}`, { defaultValue: item.category || t('agentManagement.categoryOther') })}
+                </span>
+              </span>
+            ) : null}
+          </span>
+        </span>
+        <span className="agent-management-card__description">{item.description || t('agentManagement.unknownDescription')}</span>
+      </button>
+      <div className="agent-management-card__actions" aria-label={t('agentManagement.card.actions', { name: item.displayName })}>
+        <button
+          type="button"
+          className="agent-management-button agent-management-button--secondary agent-management-card-action--use"
+          disabled={!canUse || busy}
+          aria-disabled={!canUse}
+          onClick={() => onUse(item.id)}
+        >
+          {t('agentManagement.actions.use')}
+        </button>
+        {canInstall ? (
+          <button
+            type="button"
+            className="agent-management-button agent-management-button--primary"
+            disabled={busy}
+            aria-busy={busy}
+            onClick={() => onInstall(item.id)}
+          >
+            {busy ? t('agentManagement.actions.installing') : t('agentManagement.actions.install')}
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="agent-management-button agent-management-button--secondary"
+            disabled={busy}
+            aria-busy={busy}
+            onClick={() => onUninstall(item.id)}
+          >
+            {busy ? t('agentManagement.actions.uninstalling') : t('agentManagement.actions.uninstall')}
+          </button>
+        )}
+      </div>
+    </article>
+  );
+}
