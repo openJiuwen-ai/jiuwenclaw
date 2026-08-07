@@ -1,11 +1,17 @@
 """model_routing.stats — per-model token usage persistence."""
 from __future__ import annotations
-import json, os, threading
-from datetime import datetime
+import json
+import os
+import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
-from jiuwenclaw.utils import logger
+
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+
+from jiuwenclaw.utils import logger
+
+
 class _ModelUsageStats:
     """持久化「可选模型表 + 累积 token 用量」到一个 JSON 文件（跨会话）。
 
@@ -63,7 +69,7 @@ class _ModelUsageStats:
     def _save(self) -> None:
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            self._data["updated"] = datetime.now().isoformat()
+            self._data["updated"] = datetime.now(tz=timezone.utc).isoformat()
             tmp = self._path.with_suffix(self._path.suffix + ".tmp")
             tmp.write_text(
                 json.dumps(self._data, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -105,11 +111,15 @@ class _ModelUsageStats:
             entry["model_provider"] = model_provider
             entry["model_group"] = model_group
             entry["is_trusted"] = is_trusted
-            tu = entry.setdefault("token_used", {"input_tokens": 0, "output_tokens": 0, "call_count": 0, "last_used": None})
+            tu = entry.setdefault(
+                "token_used",
+                {"input_tokens": 0, "output_tokens": 0,
+                 "call_count": 0, "last_used": None},
+            )
             tu["input_tokens"] = int(tu.get("input_tokens", 0)) + int(input_tokens)
             tu["output_tokens"] = int(tu.get("output_tokens", 0)) + int(output_tokens)
             tu["call_count"] = int(tu.get("call_count", 0)) + 1
-            tu["last_used"] = datetime.now().isoformat()
+            tu["last_used"] = datetime.now(tz=timezone.utc).isoformat()
             self._save()
 
     def persist_table(self, caps: list) -> None:
@@ -144,7 +154,11 @@ class _ModelUsageStats:
                     "model_performance": int(cap.model_performance),
                     "model_score": int(cap.model_score),
                     "model_cost": int(cap.model_cost),
-                    "model_expertise_category": list(cap.model_expertise_category) if isinstance(cap.model_expertise_category, (list, tuple)) else [],
+                    "model_expertise_category": (
+                        list(cap.model_expertise_category)
+                        if isinstance(cap.model_expertise_category, (list, tuple))
+                        else []
+                    ),
                     "token_used": tu,
                 }
             self._data["models"] = new_models
@@ -163,7 +177,8 @@ def get_stats_store(path: Optional[str] = None) -> _ModelUsageStats:
     """进程级单例统计存储（所有 rail 实例共享，一个文件一把锁）。
 
     首次调用可传 ``path`` 指定统计文件路径（来自 config.yaml ``model_routing.stats_path``）；
-    后续调用忽略 path（单例已建）。"""
+    后续调用忽略 path（单例已建）。
+    """
     global _STATS_SINGLETON
     if _STATS_SINGLETON is None:
         with _STATS_SINGLETON_LOCK:

@@ -22,7 +22,8 @@ def _ensure_user_copy(filename: str) -> None:
     import shutil
     try:
         from jiuwenclaw.utils import get_config_dir, _find_package_root
-    except Exception:
+    except Exception as exc:
+        logger.debug("[ModelRouting] import utils failed in _ensure_user_copy: %s", exc)
         return
     try:
         pkg_root = _find_package_root()
@@ -71,13 +72,13 @@ def _load_privacy_patterns() -> tuple[list[re.Pattern], dict[str, str]]:
     try:
         from jiuwenclaw.utils import get_config_dir
         paths.append(get_config_dir() / "routing_state" / "model_routing_privacy.json")
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("[ModelRouting] get_config_dir failed: %s", exc)
     try:
         from jiuwenclaw.utils import _find_package_root
         paths.append(_find_package_root() / "resources" / "model_routing" / "model_routing_privacy.json")
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("[ModelRouting] _find_package_root failed: %s", exc)
 
     config_path = next((p for p in paths if p.exists()), None)
     if config_path is None:
@@ -95,7 +96,11 @@ def _load_privacy_patterns() -> tuple[list[re.Pattern], dict[str, str]]:
         return list(_FALLBACK_PATTERNS), {}
 
     if not isinstance(cfg, dict) or not isinstance(cfg.get("patterns"), list):
-        logger.warning("[ModelRouting] privacy config invalid (missing 'patterns' list): %s; using fallback", config_path)
+        logger.warning(
+            "[ModelRouting] privacy config invalid "
+            "(missing 'patterns' list): %s; using fallback",
+            config_path,
+        )
         return list(_FALLBACK_PATTERNS), {}
 
     compiled: list[re.Pattern] = []

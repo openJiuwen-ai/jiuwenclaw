@@ -8,6 +8,7 @@ from typing import Any, Optional
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from jiuwenclaw.utils import logger
 
+
 def _new_trace_id() -> str:
     """OTel trace_id：32 hex。"""
     return secrets.token_hex(16)
@@ -109,7 +110,7 @@ def _unwrap_user_message(text: str) -> str:
     if lo < 0 or hi <= lo:
         return text
     try:
-        obj = json.loads(s[lo : hi + 1])
+        obj = json.loads(s[lo:hi + 1])
     except Exception:
         return text
     if not isinstance(obj, dict):
@@ -192,7 +193,8 @@ def _get_session_id(ctx: AgentCallbackContext) -> str | None:
             continue
         try:
             value = attr() if callable(attr) else attr
-        except Exception:
+        except Exception as exc:
+            logger.debug("[ModelRouting] session_id access failed: %s", exc)
             continue
         if isinstance(value, str) and value.strip():
             return value.strip()

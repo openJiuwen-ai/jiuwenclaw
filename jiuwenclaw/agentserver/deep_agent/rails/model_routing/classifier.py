@@ -98,8 +98,8 @@ def _parse_classifier_response(
         cat = cat if cat in cats else "unknown"
         dif = dif if dif in diffs else "unknown"
         return cat, dif
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("[ModelRouting] parse classifier JSON failed: %s", exc)
     cat_m = re.search(r'"?category"?\s*[:=]\s"?([a-zA-Z]+)"?', text, re.IGNORECASE)
     dif_m = re.search(r'"?difficulty"?\s*[:=]\s"?([a-zA-Z]+)"?', text, re.IGNORECASE)
     cat = cat_m.group(1).lower() if cat_m and cat_m.group(1).lower() in cats else "unknown"
@@ -138,7 +138,8 @@ def ensure_routing_state_files() -> None:
     import shutil
     try:
         from jiuwenclaw.utils import get_config_dir, _find_package_root
-    except Exception:
+    except Exception as exc:
+        logger.debug("[ModelRouting] import utils failed in ensure_routing_state_files: %s", exc)
         return
     try:
         pkg_root = _find_package_root()
@@ -167,13 +168,13 @@ def _mapper_paths() -> list[Path]:
     try:
         from jiuwenclaw.utils import get_config_dir
         paths.append(get_config_dir() / "routing_state" / "classifier_mapper.json")
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("[ModelRouting] get_config_dir failed: %s", exc)
     try:
         from jiuwenclaw.utils import _find_package_root
         paths.append(_find_package_root() / "resources" / "model_routing" / "classifier_mapper.json")
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("[ModelRouting] _find_package_root failed: %s", exc)
     return paths
 
 
@@ -289,9 +290,9 @@ def load_classifier_impl(mapper: dict) -> tuple[Any, str]:
     # ── 注入 imports ──
     for mod_name in clf_cfg.get("imports", []):
         try:
-            ns[mod_name] = __import__(mod_name)
+            ns[mod_name] = importlib.import_module(mod_name)
         except ImportError as exc:
-            raise ImportError(f"classifier.imports module '{mod_name}' not found: {exc}")
+            raise ImportError(f"classifier.imports module '{mod_name}' not found: {exc}") from exc
 
     # ── 编译 ──
     func_src = f"async def classify(prompt_text):\n{textwrap.indent(source_text.strip(), '    ')}"

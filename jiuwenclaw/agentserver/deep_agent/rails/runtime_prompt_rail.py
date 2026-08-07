@@ -225,8 +225,8 @@ class RuntimePromptRail(DeepAgentRail):
                 cfg = getattr(ctx.agent, "_config", None) or getattr(ctx.agent, "config", None)
                 if cfg is not None:
                     routed_model = getattr(cfg, "model_name", "") or ""
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("[RuntimePromptRail] get routed model_name failed: %s", exc)
         current_model = routed_model or self._model_name
 
         if self._language == "cn":

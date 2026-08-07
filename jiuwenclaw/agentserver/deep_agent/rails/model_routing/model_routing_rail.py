@@ -1,7 +1,7 @@
 """model_routing.rail — ModelRoutingRail."""
 from __future__ import annotations
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timezone
 import re
 import time
 from typing import Any, Callable, Optional
@@ -15,7 +15,12 @@ from .stats import _ModelUsageStats, get_stats_store, reset_stats_store_for_test
 from .privacy import _check_privacy
 from .routing import _decide_and_select, _detect_model_type
 from .health_check import ModelHealthChecker, HealthCheckConfig
-from .types import PriorModelCall, TaskAnalysis, RoutingDecision, _extract_prompt_text, _message_text, _agent_model_name, _extract_agent_info, _get_session_id, _new_trace_id, _new_span_id
+from .types import (
+    PriorModelCall, TaskAnalysis, RoutingDecision,
+    _extract_prompt_text, _message_text, _agent_model_name,
+    _extract_agent_info, _get_session_id, _new_trace_id, _new_span_id,
+)
+
 
 class ModelRoutingRail(DeepAgentRail):
     """模型路由 Rail（穿刺版）—— 产出推荐模型 + 任务分析 + token 统计；apply_routing 控制是否真切换。"""
@@ -88,7 +93,7 @@ class ModelRoutingRail(DeepAgentRail):
         self._routed_this_invoke = False  # 新 invoke 允许再次路由
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
-        self._call_start = datetime.now().isoformat()
+        self._call_start = datetime.now(tz=timezone.utc).isoformat()
 
         # 对话级路由去重：同一 invoke 内的后续 model_call 跳过分类器/切换
         if self._routed_this_invoke:
@@ -174,7 +179,16 @@ class ModelRoutingRail(DeepAgentRail):
                     "[ModelRouting] PRIVACY-CANCEL (no trusted): session=%s -> cancel + leave message",
                     session_id,
                 )
-                ctx.request_force_finish({"output": "⚠️ 检测到隐私/敏感信息，且无可信(is_trusted)模型，已取消本次请求。请配置 is_trusted 模型后再试。", "result_type": "answer"})
+                ctx.request_force_finish(
+                    {
+                        "output": (
+                            "⚠️ 检测到隐私/敏感信息，"
+                            "且无可信(is_trusted)模型，已取消本次请求。"
+                            "请配置 is_trusted 模型后再试。"
+                        ),
+                        "result_type": "answer",
+                    }
+                )
                 self._routed_this_invoke = True
                 return
 
@@ -228,7 +242,7 @@ class ModelRoutingRail(DeepAgentRail):
             input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
             output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
             model_name = _agent_model_name(ctx) or "unknown"
-            end_time = datetime.now().isoformat()
+            end_time = datetime.now(tz=timezone.utc).isoformat()
             # 1) 累积到本次 invoke 的前置调用链（完整 OTel span）
             self._call_history.append(
                 PriorModelCall(
@@ -259,6 +273,7 @@ class ModelRoutingRail(DeepAgentRail):
 
 
     # ---- 内部 ---- #
+
     def _emit_decision(
         self,
         ctx: AgentCallbackContext,
@@ -303,16 +318,16 @@ class ModelRoutingRail(DeepAgentRail):
                             # 还是前端的 → 打到前端端点 → 返回前端模型名（set_llm 只设 _llm 不够）
                             setattr(cfg, "model_client_config", recommended_cap.model.model_client_config)
                             setattr(cfg, "model_config_obj", recommended_cap.model.model_config)
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.debug("[ModelRouting] setattr config failed: %s", exc)
                     # 补 set_llm 不更新 agent.model_name 的缺口：set_llm 只装 _llm，
                     # 不碰 model_name；这里同步成路由后的名字，让 RuntimePromptRail 的
                     # "当前模型"段读到实时模型（而非 runtime_state 的旧值）
                     try:
                         if hasattr(ctx.agent, "model_name"):
                             setattr(ctx.agent, "model_name", mname)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug("[ModelRouting] setattr agent.model_name failed: %s", exc)
                 logger.info("[ModelRouting] applied set_llm -> %s", mname or "unknown")
             except Exception as exc:
                 logger.warning("[ModelRouting] set_llm failed: %s", exc)

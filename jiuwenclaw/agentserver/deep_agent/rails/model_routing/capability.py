@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 from jiuwenclaw.utils import logger
 
+
 @dataclass
 class ModelCapability:
     """模型能力表条目。
@@ -66,7 +67,8 @@ def _ensure_user_copy(filename: str) -> None:
     import shutil
     try:
         from jiuwenclaw.utils import get_config_dir, _find_package_root
-    except Exception:
+    except Exception as exc:
+        logger.debug("[ModelRouting] import utils failed in _ensure_user_copy: %s", exc)
         return
     try:
         pkg_root = _find_package_root()
@@ -100,15 +102,15 @@ def _load_capability_map() -> dict:
     try:
         from jiuwenclaw.utils import get_config_dir
         paths.append(get_config_dir() / "routing_state" / "model_capability_map.json")
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("[ModelRouting] get_config_dir failed: %s", exc)
     try:
         from jiuwenclaw.utils import _find_package_root
         pr = _find_package_root()
         if pr is not None:
             paths.append(pr / "resources" / "model_routing" / "model_capability_map.json")
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("[ModelRouting] _find_package_root failed: %s", exc)
 
     path = next((p for p in paths if p.exists()), None)
     if path is None:
@@ -186,17 +188,17 @@ def _build_cap_from_entry(
     ovr = _CAP_MAP.get("models", {}).get(name) if isinstance(_CAP_MAP.get("models"), dict) else None
     ovr = ovr if isinstance(ovr, dict) else {}
 
-    def _int(field: str, default: int) -> int:
+    def _int(field_name: str, default: int) -> int:
         """能力数值：config 条目 > map 覆盖 > 默认。0 视为合法值（不误判为 falsy）。"""
-        ev = entry.get(field) if isinstance(entry, dict) else None
+        ev = entry.get(field_name) if isinstance(entry, dict) else None
         if ev is not None and ev != "":
             try:
                 return int(ev)
             except (TypeError, ValueError):
                 pass
-        if field in ovr and ovr[field] is not None:
+        if field_name in ovr and ovr[field_name] is not None:
             try:
-                return int(ovr[field])
+                return int(ovr[field_name])
             except (TypeError, ValueError):
                 return default
         return default
@@ -237,7 +239,11 @@ def _build_cap_from_entry(
         model_performance=_int("model_performance", 0),
         model_cost=_int("model_cost", 0),
         max_length=_int("max_length", 65535),
-        model_expertise_category=list(entry.get("model_expertise_category", []) or []) if isinstance(entry, dict) else [],
+        model_expertise_category=(
+            list(entry.get("model_expertise_category", []) or [])
+            if isinstance(entry, dict)
+            else []
+        ),
     )
 
 

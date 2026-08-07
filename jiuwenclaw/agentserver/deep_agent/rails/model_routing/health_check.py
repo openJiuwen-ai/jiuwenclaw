@@ -159,12 +159,11 @@ class ModelHealthChecker:
             return caps
 
         if len(healthy) < len(caps):
+            healthy_keys = {c.model_id or c.model_name for c in healthy}
             unhealthy_ids = [
                 cap.model_id or cap.model_name
                 for cap in caps
-                if (cap.model_id or cap.model_name) not in {
-                    c.model_id or c.model_name for c in healthy
-                }
+                if (cap.model_id or cap.model_name) not in healthy_keys
             ]
             logger.info("[ModelRouting] filtered %d unhealthy models: %s", len(unhealthy_ids), unhealthy_ids)
 
@@ -284,7 +283,7 @@ class ModelHealthChecker:
         lower = text.lower()
         if any(kw in lower for kw in keywords):
             return True, "ok"
-        return False, f"vision verification failed: response does not mention red"
+        return False, "vision verification failed: response does not mention red"
 
     @staticmethod
     def _verify_audio_response(text: str) -> tuple[bool, str]:
@@ -293,4 +292,4 @@ class ModelHealthChecker:
         lower = text.lower()
         if any(kw in lower for kw in keywords):
             return True, "ok"
-        return False, f"audio verification failed: response does not mention expected keywords"
+        return False, "audio verification failed: response does not mention expected keywords"

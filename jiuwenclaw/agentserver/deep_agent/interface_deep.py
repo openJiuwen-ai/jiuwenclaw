@@ -3676,7 +3676,8 @@ class JiuWenClawDeepAdapter:
     def _build_recent_tool_results_rail() -> RecentToolResultsRail:
         return RecentToolResultsRail()
 
-    def _build_model_routing(self, config: dict[str, Any] | None = None) -> Any | None:
+    @staticmethod
+    def _build_model_routing(config: dict[str, Any] | None = None) -> Any | None:
         """构建 ModelRoutingRail（模型路由）。
 
         - 使能：config.yaml ``model_routing.enabled`` = true。
