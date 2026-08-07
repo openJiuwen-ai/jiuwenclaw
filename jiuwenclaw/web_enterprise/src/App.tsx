@@ -1209,7 +1209,7 @@ function AppContent() {
 
         {activeNav === 'skills' && (
           <div className="flex-1 min-h-0 overflow-auto p-4">
-            <SkillPanel sessionId={sessionId} />
+            <SkillPanel sessionId={sessionId} ensureSessionId={ensureSessionForSend} />
           </div>
         )}
       </main>
