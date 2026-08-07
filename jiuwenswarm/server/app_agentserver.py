@@ -169,6 +169,15 @@ async def _run(host: str, port: int) -> None:
     except Exception:  # noqa: BLE001
         logger.warning("[AgentServer] log_masking_rule cold load skipped", exc_info=True)
 
+    if os.getenv("AGENT_RUNTIME", "").strip():
+        try:
+            from jiuwenswarm.common.utils import reload_logging_levels_from_gateway_db
+
+            await reload_logging_levels_from_gateway_db()
+            logger.info("[AgentServer] logging levels loaded from Gateway DB (if any)")
+        except Exception:  # noqa: BLE001
+            logger.warning("[AgentServer] logging_config cold load skipped", exc_info=True)
+
     # 会话 metadata 的字段补全已改为惰性迁移:读取时按需推断并写回磁盘
     # (见 session_metadata._apply_metadata_defaults_with_inference),无需启动全量扫描。
 

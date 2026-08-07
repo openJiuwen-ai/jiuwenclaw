@@ -2621,6 +2621,15 @@ async def _run(
         logger.info("[App] log masking rules loaded from Gateway DB (if any)")
     except Exception:  # noqa: BLE001
         logger.warning("[App] log_masking_rule cold load skipped", exc_info=True)
+
+    if os.getenv("AGENT_RUNTIME", "").strip():
+        try:
+            from jiuwenswarm.common.utils import reload_logging_levels_from_gateway_db
+
+            await reload_logging_levels_from_gateway_db()
+            logger.info("[App] logging levels loaded from Gateway DB (if any)")
+        except Exception:  # noqa: BLE001
+            logger.warning("[App] logging_config cold load skipped", exc_info=True)
     # 主动推荐：按 config 自动注册/删除 proactive.tick 定时 job
     try:
         from jiuwenswarm.gateway.cron.proactive_cron_sync import sync_proactive_tick_job
