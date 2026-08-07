@@ -4,6 +4,8 @@
 import os
 from jiuwenclaw.agentserver.permissions.file_guard import (
     FileGuardChecker,
+    _longest_prefix_match,
+    _posix_str,
     merged_file_guard_config,
     report_legacy_path_rules_at_load,
 )
@@ -101,6 +103,95 @@ def test_file_guard_global_read_allow(tmp_path):
         workspace_root=ws,
     )
     assert checker.check_external_paths("read_file", {"file_path": str(f)}) is None
+
+
+def test_file_guard_global_pathsep_env_key_allows_second_dir(tmp_path, monkeypatch):
+    """``${ENV}`` expanding to pathsep-joined roots must whitelist each root."""
+    dir_a = tmp_path / "skills_a"
+    dir_b = tmp_path / "skills_b"
+    dir_a.mkdir()
+    dir_b.mkdir()
+    target = dir_b / "tianqi-weather" / "SKILL.md"
+    target.parent.mkdir()
+    target.write_text("# skill\n", encoding="utf-8")
+
+    monkeypatch.setenv(
+        "JIUWENCLAW_SHARED_SKILLS_DIRS",
+        os.pathsep.join((str(dir_a.resolve()), str(dir_b.resolve()))),
+    )
+    entry = {"read_enable": True, "write_enable": True}
+    matched = _longest_prefix_match(
+        _posix_str(target),
+        {"${JIUWENCLAW_SHARED_SKILLS_DIRS}": entry},
+    )
+    assert matched is entry
+    # Unrelated path must still miss.
+    other = tmp_path / "elsewhere" / "x.txt"
+    other.parent.mkdir()
+    other.write_text("x", encoding="utf-8")
+    assert _longest_prefix_match(
+        _posix_str(other),
+        {"${JIUWENCLAW_SHARED_SKILLS_DIRS}": entry},
+    ) is None
+
+
+def test_file_guard_global_env_key_uses_read_env_when_os_environ_missing(tmp_path, monkeypatch):
+    """SHARED_SKILLS from tip/overlay alone still whitelists."""
+    from jiuwenclaw.local_env_config import bind_task_env_overlay, reset_task_env_overlay
+
+    dir_a = tmp_path / "skills_a"
+    dir_b = tmp_path / "skills_b"
+    dir_a.mkdir()
+    dir_b.mkdir()
+    target = dir_b / "tianqi-weather" / "SKILL.md"
+    target.parent.mkdir()
+    target.write_text("# skill\n", encoding="utf-8")
+
+    monkeypatch.delenv("JIUWENCLAW_SHARED_SKILLS_DIRS", raising=False)
+    joined = os.pathsep.join((str(dir_a.resolve()), str(dir_b.resolve())))
+    token = bind_task_env_overlay({"JIUWENCLAW_SHARED_SKILLS_DIRS": joined})
+    entry = {"read_enable": True, "write_enable": True}
+    try:
+        matched = _longest_prefix_match(
+            _posix_str(target),
+            {"${JIUWENCLAW_SHARED_SKILLS_DIRS}": entry},
+        )
+        assert matched is entry
+    finally:
+        reset_task_env_overlay(token)
+
+
+def test_file_guard_global_env_key_unions_read_env_and_os_environ(tmp_path, monkeypatch):
+    """tip/overlay and os.environ path lists are merged, not winner-take-all."""
+    from jiuwenclaw.local_env_config import bind_task_env_overlay, reset_task_env_overlay
+
+    dir_tip = tmp_path / "skills_tip"
+    dir_os = tmp_path / "skills_os"
+    dir_tip.mkdir()
+    dir_os.mkdir()
+    tip_target = dir_tip / "a" / "SKILL.md"
+    os_target = dir_os / "b" / "SKILL.md"
+    tip_target.parent.mkdir()
+    os_target.parent.mkdir()
+    tip_target.write_text("# tip\n", encoding="utf-8")
+    os_target.write_text("# os\n", encoding="utf-8")
+
+    monkeypatch.setenv("JIUWENCLAW_SHARED_SKILLS_DIRS", str(dir_os.resolve()))
+    token = bind_task_env_overlay(
+        {"JIUWENCLAW_SHARED_SKILLS_DIRS": str(dir_tip.resolve())},
+    )
+    entry = {"read_enable": True, "write_enable": True}
+    try:
+        assert _longest_prefix_match(
+            _posix_str(tip_target),
+            {"${JIUWENCLAW_SHARED_SKILLS_DIRS}": entry},
+        ) is entry
+        assert _longest_prefix_match(
+            _posix_str(os_target),
+            {"${JIUWENCLAW_SHARED_SKILLS_DIRS}": entry},
+        ) is entry
+    finally:
+        reset_task_env_overlay(token)
 
 
 def test_report_legacy_path_rules_flags_path_class_rules(caplog):
