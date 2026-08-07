@@ -1912,6 +1912,101 @@ class SkillManager:
                 "detail_key": "skills.teamskillshub.errors.searchFailed",
             }
 
+    async def handle_skills_team_skills_hub_recommend(self, params: dict) -> dict:
+        """转发 Team Skills Hub 个性化推荐（POST /api/v1/recommend）。"""
+        auth = self._resolve_teamskills_hub_auth_with_env(params)
+        if auth.get("error"):
+            return {
+                "success": False,
+                "detail": str(auth["error"]),
+                "detail_key": "skills.teamskillshub.errors.recommendFailed",
+            }
+
+        top_k_raw = params.get("top_k", params.get("limit", 10))
+        try:
+            top_k = max(1, min(int(top_k_raw), 500))
+        except Exception:
+            return {"success": False, "detail": "参数 top_k 必须是整数"}
+
+        user_id = str(params.get("user_id") or "").strip()
+        request_id = str(params.get("request_id") or "").strip()
+        category_id = str(params.get("category_id") or "").strip()
+        timestamp = params.get("timestamp")
+        enrich_raw = params.get("enrich", True)
+        if isinstance(enrich_raw, bool):
+            enrich = enrich_raw
+        else:
+            enrich = str(enrich_raw).strip().lower() not in {"0", "false", "no", "off"}
+        base_url = self._get_team_skills_hub_base_url(str(params.get("market_url") or "").strip() or None)
+
+        body: dict[str, Any] = {
+            "user_id": user_id,
+            "request_id": request_id,
+            "top_k": top_k,
+            "category_id": category_id,
+        }
+        if timestamp is not None:
+            body["timestamp"] = timestamp
+
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+        if auth.get("system_token"):
+            headers["X-System-Token"] = str(auth["system_token"])
+        else:
+            headers["Authorization"] = f"Bearer {auth['token']}"
+
+        try:
+            data = await self._team_skills_hub_http_post_data(
+                "/api/v1/recommend",
+                json_body=body,
+                headers=headers,
+                timeout=_TEAM_SKILLS_HUB_MARKET_TIMEOUT,
+                base_url=base_url,
+            )
+            raw_items = data.get("items", []) if isinstance(data, dict) else []
+            skills: list[dict[str, Any]] = []
+            for item in raw_items:
+                if not isinstance(item, dict):
+                    continue
+                asset_id = str(item.get("asset_id", "")).strip()
+                if not asset_id:
+                    continue
+                try:
+                    score = float(item.get("score", 0.0))
+                except Exception:
+                    score = 0.0
+                skills.append(
+                    {
+                        "asset_id": asset_id,
+                        "score": score,
+                        "name": asset_id,
+                        "display_name": asset_id,
+                        "summary": "",
+                        "version": "",
+                        "updated_at": 0,
+                    }
+                )
+
+            if enrich and skills:
+                skills = await self._enrich_teamskills_recommend_skills(skills, base_url=base_url)
+
+            return {
+                "success": True,
+                "request_id": str((data or {}).get("request_id") or request_id),
+                "user_id": str((data or {}).get("user_id") or user_id),
+                "source": str((data or {}).get("source") or ""),
+                "category_id": str((data or {}).get("category_id") or category_id),
+                "count": len(skills),
+                "skills": skills,
+                "items": skills,
+            }
+        except Exception as exc:
+            logger.error("Team Skills Hub 推荐失败: %s", exc)
+            return {
+                "success": False,
+                "detail": str(exc)[:500],
+                "detail_key": "skills.teamskillshub.errors.recommendFailed",
+            }
+
     async def handle_skills_team_skills_hub_install(self, params: dict) -> dict:
         """从 Team Skills Hub 安装技能（/api/v1/artifacts/{asset_id}）。"""
         asset_id = str(params.get("asset_id", "")).strip()
@@ -3187,6 +3282,27 @@ class SkillManager:
             return {"system_token": system_token}
         return {"token": token}
 
+    @staticmethod
+    def _resolve_teamskills_hub_auth_with_env(params: dict[str, Any]) -> dict[str, str]:
+        """推荐等需鉴权接口：params 优先；否则回落环境变量（优先 system token）。"""
+        token = str(params.get("token") or "").strip()
+        system_token = str(params.get("system_token") or "").strip()
+        if token or system_token:
+            return SkillManager._resolve_teamskills_hub_auth(params)
+
+        env_system = str(os.getenv("TEAM_SKILLS_HUB_SYSTEM_TOKEN") or "").strip()
+        if env_system:
+            return {"system_token": env_system}
+        env_user = str(os.getenv("TEAM_SKILLS_HUB_USER_TOKEN") or "").strip()
+        if env_user:
+            return {"token": env_user}
+        return {
+            "error": (
+                "未配置 Team Skills Hub 鉴权：请提供 token 或 system_token，"
+                "或设置 TEAM_SKILLS_HUB_SYSTEM_TOKEN / TEAM_SKILLS_HUB_USER_TOKEN"
+            )
+        }
+
     def _prepare_teamskills_publish_zip(
         self,
         *,
@@ -3463,6 +3579,82 @@ class SkillManager:
         if not isinstance(data, dict):
             raise RuntimeError("Team Skills Hub API 响应 data 格式错误")
         return data
+
+    async def _team_skills_hub_http_post_data(
+        self,
+        path: str,
+        *,
+        json_body: dict[str, Any],
+        headers: dict[str, str] | None = None,
+        timeout: float = _TEAM_SKILLS_HUB_MARKET_TIMEOUT,
+        base_url: str | None = None,
+    ) -> Any:
+        base_url = (base_url or self._get_team_skills_hub_base_url()).rstrip("/")
+        rel_path = path if path.startswith("/") else f"/{path}"
+        req_url = f"{base_url}{rel_path}"
+        try:
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+                resp = await client.post(req_url, json=json_body, headers=headers or {})
+        except Exception as exc:
+            raise RuntimeError(f"无法连接 Team Skills Hub: {exc}") from exc
+
+        if not resp.is_success:
+            detail = (resp.text or "").strip()[:300]
+            raise RuntimeError(f"Team Skills Hub API 错误 HTTP {resp.status_code}: {detail}")
+        try:
+            payload = resp.json()
+        except Exception as exc:
+            raise RuntimeError(f"Team Skills Hub API 响应不是合法 JSON: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("Team Skills Hub API 响应格式错误")
+
+        code = payload.get("code", 200)
+        if int(code) != 200:
+            message = str(payload.get("message", "")).strip() or "Team Skills Hub API 返回失败"
+            raise RuntimeError(message)
+
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            raise RuntimeError("Team Skills Hub API 响应 data 格式错误")
+        return data
+
+    async def _enrich_teamskills_recommend_skills(
+        self,
+        skills: list[dict[str, Any]],
+        *,
+        base_url: str,
+    ) -> list[dict[str, Any]]:
+        """用 /api/v1/plugins?asset_id= 补齐推荐结果的展示字段（失败则保留原项）。"""
+
+        async def _one(item: dict[str, Any]) -> dict[str, Any]:
+            asset_id = str(item.get("asset_id") or "").strip()
+            if not asset_id:
+                return item
+            try:
+                data = await self._team_skills_hub_http_get_data(
+                    "/api/v1/plugins",
+                    params={"asset_id": asset_id, "page": 1, "page_size": 1},
+                    timeout=_TEAM_SKILLS_HUB_MARKET_TIMEOUT,
+                    base_url=base_url,
+                )
+                rows = data.get("items", []) if isinstance(data, dict) else []
+                row = rows[0] if rows and isinstance(rows[0], dict) else None
+                if not row:
+                    return item
+                name = str(row.get("name", "")).strip() or asset_id
+                return {
+                    **item,
+                    "name": name,
+                    "display_name": str(row.get("display_name", "")).strip() or name,
+                    "summary": str(row.get("short_desc", "")).strip(),
+                    "version": str(row.get("latest_version", "")).strip(),
+                    "updated_at": int(row.get("update_time") or 0),
+                }
+            except Exception as exc:
+                logger.warning("推荐结果补齐失败 asset_id=%s: %s", asset_id, exc)
+                return item
+
+        return list(await asyncio.gather(*[_one(s) for s in skills]))
 
     @staticmethod
     def _safe_extract_zip_members_into(zf: zipfile.ZipFile, dest_root: Path) -> None:

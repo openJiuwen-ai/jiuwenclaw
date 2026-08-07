@@ -20,6 +20,9 @@ class TeamSkillsHubHarnessSkillManager(SkillManager):
     def set_mock_get_data(self, mock_func) -> None:
         self._team_skills_hub_http_get_data = mock_func
 
+    def set_mock_post_data(self, mock_func) -> None:
+        self._team_skills_hub_http_post_data = mock_func
+
     def set_mock_download(self, mock_func) -> None:
         self._download_zip_and_verify = mock_func
 
@@ -118,6 +121,77 @@ async def test_handle_skills_team_skills_hub_search_maps_response(tmp_path):
     assert payload["count"] == 1
     assert payload["skills"][0]["asset_id"] == "demo-skill"
     assert payload["skills"][0]["display_name"] == "Demo Skill"
+
+
+@pytest.mark.asyncio
+async def test_handle_skills_team_skills_hub_recommend_maps_response(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEAM_SKILLS_HUB_SYSTEM_TOKEN", "sys-token-demo")
+    manager = TeamSkillsHubHarnessSkillManager(workspace_dir=str(tmp_path))
+
+    async def _fake_post_data(path, **kwargs):  # noqa: ANN001
+        assert path == "/api/v1/recommend"
+        assert kwargs["json_body"]["user_id"] == "u-1"
+        assert kwargs["json_body"]["top_k"] == 5
+        assert kwargs["headers"]["X-System-Token"] == "sys-token-demo"
+        return {
+            "request_id": "r1",
+            "user_id": "u-1",
+            "source": "user_history",
+            "category_id": "",
+            "items": [{"asset_id": "demo-skill", "score": 0.9}],
+        }
+
+    async def _fake_get_data(path, **kwargs):  # noqa: ANN001
+        assert path == "/api/v1/plugins"
+        assert kwargs["params"]["asset_id"] == "demo-skill"
+        return {
+            "items": [
+                {
+                    "asset_id": "demo-skill",
+                    "name": "demo-skill",
+                    "display_name": "Demo Skill",
+                    "short_desc": "desc",
+                    "latest_version": "1.2.3",
+                    "update_time": 123,
+                }
+            ]
+        }
+
+    manager.set_mock_post_data(_fake_post_data)
+    manager.set_mock_get_data(_fake_get_data)
+    payload = await manager.handle_skills_team_skills_hub_recommend(
+        {"user_id": "u-1", "top_k": 5, "enrich": True}
+    )
+    assert payload["success"] is True
+    assert payload["source"] == "user_history"
+    assert payload["count"] == 1
+    assert payload["skills"][0]["asset_id"] == "demo-skill"
+    assert payload["skills"][0]["display_name"] == "Demo Skill"
+    assert payload["skills"][0]["score"] == 0.9
+
+
+@pytest.mark.asyncio
+async def test_handle_skills_team_skills_hub_recommend_requires_auth(tmp_path, monkeypatch):
+    monkeypatch.delenv("TEAM_SKILLS_HUB_SYSTEM_TOKEN", raising=False)
+    monkeypatch.delenv("TEAM_SKILLS_HUB_USER_TOKEN", raising=False)
+    manager = TeamSkillsHubHarnessSkillManager(workspace_dir=str(tmp_path))
+    payload = await manager.handle_skills_team_skills_hub_recommend({"top_k": 3})
+    assert payload["success"] is False
+    assert payload["detail_key"] == "skills.teamskillshub.errors.recommendFailed"
+
+
+@pytest.mark.asyncio
+async def test_handle_skills_team_skills_hub_recommend_hide_internal_error(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEAM_SKILLS_HUB_SYSTEM_TOKEN", "sys-token-demo")
+    manager = TeamSkillsHubHarnessSkillManager(workspace_dir=str(tmp_path))
+
+    async def _boom(path, **kwargs):  # noqa: ANN001
+        raise RuntimeError("secret-internal")
+
+    manager.set_mock_post_data(_boom)
+    payload = await manager.handle_skills_team_skills_hub_recommend({"top_k": 3, "enrich": False})
+    assert payload["success"] is False
+    assert payload["detail_key"] == "skills.teamskillshub.errors.recommendFailed"
 
 
 @pytest.mark.asyncio
