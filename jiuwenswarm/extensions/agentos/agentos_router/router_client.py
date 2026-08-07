@@ -60,6 +60,32 @@ logger = logging.getLogger(__name__)
 
 _WORKSPACE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
+# create_sandbox 返回后 agentserver 仍在进程内启动；YuanRong WS 代理此时会回
+# HTTP 502。在 deadline 内重试，避免首条 chat 立刻空失败（TUI "Worked for 0s"）。
+_WS_CONNECT_READY_TIMEOUT_SECONDS = 60.0
+_WS_CONNECT_RETRY_INTERVAL_SECONDS = 1.0
+_WS_CONNECT_RETRYABLE_HTTP_STATUS = frozenset({502, 503, 504})
+
+
+def _is_ws_connect_retryable(exc: BaseException) -> bool:
+    """冷启动期间 proxy/agentserver 未就绪的可重试错误."""
+    status = getattr(exc, "status_code", None)
+    if status in _WS_CONNECT_RETRYABLE_HTTP_STATUS:
+        return True
+    if isinstance(exc, (ConnectionError, TimeoutError, asyncio.TimeoutError, OSError)):
+        return True
+    text = str(exc).lower()
+    return any(
+        token in text
+        for token in (
+            "http 502",
+            "http 503",
+            "http 504",
+            "connection refused",
+            "temporarily unavailable",
+        )
+    )
+
 
 class UnsupportedAgentType(ValueError):
     pass
@@ -158,6 +184,8 @@ class AgentOSRouterClient(AgentServerClient):
         # instance_id(sandbox_id) → 已连接的 WebSocketAgentServerClient
         self._ws_clients: dict[str, WebSocketAgentServerClient] = {}
         self._ws_clients_lock = asyncio.Lock()
+        # instance_id → 正在进行的 connect Future（合并并发首连，避免多路同时打 502）
+        self._ws_connecting: dict[str, asyncio.Future[WebSocketAgentServerClient]] = {}
         self._ws_client_factory = ws_client_factory or WebSocketAgentServerClient
         self._push_handler: Callable[[dict[str, Any]], Awaitable[None]] | None = None
 
@@ -344,8 +372,64 @@ class AgentOSRouterClient(AgentServerClient):
         )
         return f"{ws_scheme}://{parsed.netloc}/serverless/v1/ws?{query}"
 
+    async def _connect_ws_until_ready(
+        self,
+        *,
+        instance_id: str,
+        agent_port: int,
+    ) -> WebSocketAgentServerClient:
+        """建立到 instance 的 WS；对冷启动 502 等做 deadline 内重试."""
+        uri = self._agent_ws_url(instance_id, agent_port)
+        deadline = asyncio.get_running_loop().time() + _WS_CONNECT_READY_TIMEOUT_SECONDS
+        attempt = 0
+
+        while True:
+            attempt += 1
+            client = self._ws_client_factory()
+            if self._push_handler is not None:
+                client.set_server_push_handler(self._push_handler)
+            logger.info(
+                "[AgentOSRouter] connecting agent instance via ws: "
+                "instance=%s attempt=%s uri=%s",
+                instance_id,
+                attempt,
+                uri,
+            )
+            try:
+                await client.connect(uri)
+                if attempt > 1:
+                    logger.info(
+                        "[AgentOSRouter] agent ws ready after retry: "
+                        "instance=%s attempts=%s",
+                        instance_id,
+                        attempt,
+                    )
+                return client
+            except Exception as exc:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0 or not _is_ws_connect_retryable(exc):
+                    raise
+                sleep_for = min(_WS_CONNECT_RETRY_INTERVAL_SECONDS, remaining)
+                logger.warning(
+                    "[AgentOSRouter] agent ws not ready, retrying: "
+                    "instance=%s attempt=%s sleep=%.1fs error=%s",
+                    instance_id,
+                    attempt,
+                    sleep_for,
+                    exc,
+                )
+                await asyncio.sleep(sleep_for)
+
     async def _get_ws_client(self, runtime: AgentRuntime) -> WebSocketAgentServerClient:
-        """获取（或建立）到该 agent instance 的 WS 直连，不走 invoke 链路."""
+        """获取（或建立）到该 agent instance 的 WS 直连，不走 invoke 链路.
+
+        冷启动时 create 返回早于 agentserver listen：对可重试错误做就绪等待。
+        同一 instance 的并发首连合并到一个 Future，避免多路同时打 502。
+        """
         info = runtime.info
         instance_id = str(info.sandbox_id or "").strip()
         if not instance_id:
@@ -363,34 +447,48 @@ class AgentOSRouterClient(AgentServerClient):
             ) from None
 
         async with self._ws_clients_lock:
-            client = self._ws_clients.get(instance_id)
-            if client is not None:
-                return client
-            client = self._ws_client_factory()
-            if self._push_handler is not None:
-                client.set_server_push_handler(self._push_handler)
-            uri = self._agent_ws_url(instance_id, agent_port)
-            logger.info(
-                "[AgentOSRouter] connecting agent instance via ws: instance=%s uri=%s",
-                instance_id,
-                uri,
+            existing = self._ws_clients.get(instance_id)
+            if existing is not None:
+                return existing
+            inflight = self._ws_connecting.get(instance_id)
+            if inflight is None:
+                inflight = asyncio.get_running_loop().create_future()
+                self._ws_connecting[instance_id] = inflight
+                is_leader = True
+            else:
+                is_leader = False
+
+        if not is_leader:
+            return await asyncio.shield(inflight)
+
+        try:
+            client = await self._connect_ws_until_ready(
+                instance_id=instance_id,
+                agent_port=agent_port,
             )
-            try:
-                await client.connect(uri)
-            except Exception:
-                try:
-                    await client.disconnect()
-                except Exception:
-                    pass
-                raise
+        except Exception as exc:
+            async with self._ws_clients_lock:
+                self._ws_connecting.pop(instance_id, None)
+                if not inflight.done():
+                    inflight.set_exception(exc)
+            raise
+
+        async with self._ws_clients_lock:
             self._ws_clients[instance_id] = client
-            return client
+            self._ws_connecting.pop(instance_id, None)
+            if not inflight.done():
+                inflight.set_result(client)
+        return client
 
     async def _close_ws_client(self, instance_id: str | None) -> None:
         if not instance_id:
             return
+        key = str(instance_id)
         async with self._ws_clients_lock:
-            client = self._ws_clients.pop(str(instance_id), None)
+            client = self._ws_clients.pop(key, None)
+            inflight = self._ws_connecting.pop(key, None)
+        if inflight is not None and not inflight.done():
+            inflight.cancel()
         if client is None:
             return
         try:
@@ -406,6 +504,11 @@ class AgentOSRouterClient(AgentServerClient):
         async with self._ws_clients_lock:
             clients = list(self._ws_clients.values())
             self._ws_clients.clear()
+            inflight = list(self._ws_connecting.values())
+            self._ws_connecting.clear()
+        for fut in inflight:
+            if not fut.done():
+                fut.cancel()
         for client in clients:
             try:
                 await client.disconnect()

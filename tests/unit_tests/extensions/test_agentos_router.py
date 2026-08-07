@@ -24,6 +24,7 @@ from jiuwenswarm.extensions.agentos.agentos_router.models import (
 from jiuwenswarm.extensions.agentos.agentos_router.router_client import (
     AgentOSRouterClient,
     resolve_agent_workspace,
+    _is_ws_connect_retryable,
 )
 from jiuwenswarm.extensions.yuanrong_frontend_client import SandboxInfo
 
@@ -147,6 +148,29 @@ class FakeAgentWsClient:
         self, envelope: E2AEnvelope
     ) -> AsyncIterator[AgentResponseChunk]:
         return self._yuanrong.send_request_stream(envelope)
+
+
+class _Http502(Exception):
+    status_code = 502
+
+
+class FlakyAgentWsClient(FakeAgentWsClient):
+    """前 N 次 connect 回 502，模拟 agentserver 冷启动未就绪."""
+
+    fail_times = 2
+    instances: list["FlakyAgentWsClient"] = []
+
+    def __init__(self, yuanrong: FakeYuanRongClient) -> None:
+        super().__init__(yuanrong)
+        self.connect_attempts = 0
+        type(self).instances.append(self)
+
+    async def connect(self, uri: str) -> None:
+        self.connect_attempts += 1
+        total = sum(c.connect_attempts for c in type(self).instances)
+        if total <= self.fail_times:
+            raise _Http502("server rejected WebSocket connection: HTTP 502")
+        await super().connect(uri)
 
 
 def _router_client(
@@ -309,6 +333,66 @@ async def test_swarm_request_creates_builtin_supervisor_runtime() -> None:
     assert envelope.channel_context["sandbox_id"] == "sbx-1"
 
     await client.shutdown()
+
+
+def test_is_ws_connect_retryable_for_cold_start_proxy_errors() -> None:
+    assert _is_ws_connect_retryable(_Http502("HTTP 502"))
+    assert _is_ws_connect_retryable(ConnectionRefusedError())
+    assert not _is_ws_connect_retryable(ValueError("bad port"))
+
+
+@pytest.mark.asyncio
+async def test_get_ws_client_retries_http_502_until_ready(monkeypatch) -> None:
+    """create 后首连 502 时，_get_ws_client 应退避重试直到 agentserver 就绪."""
+    import jiuwenswarm.extensions.agentos.agentos_router.router_client as router_mod
+
+    monkeypatch.setattr(router_mod, "_WS_CONNECT_RETRY_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(router_mod, "_WS_CONNECT_READY_TIMEOUT_SECONDS", 2.0)
+
+    yuanrong = FakeYuanRongClient()
+    FlakyAgentWsClient.instances = []
+    FlakyAgentWsClient.fail_times = 2
+    client = _router_client(
+        yuanrong,
+        ws_client_factory=lambda: FlakyAgentWsClient(yuanrong),
+    )
+
+    response = await client.send_request(_envelope())
+    await client.shutdown()
+
+    assert response.ok
+    assert yuanrong.send_calls == 1
+    assert len(yuanrong.ws_connect_uris) == 1
+    assert sum(c.connect_attempts for c in FlakyAgentWsClient.instances) == 3
+
+
+@pytest.mark.asyncio
+async def test_get_ws_client_coalesces_concurrent_first_connect(monkeypatch) -> None:
+    """同一 instance 并发首连只跑一轮就绪等待，其它请求等 Future."""
+    import jiuwenswarm.extensions.agentos.agentos_router.router_client as router_mod
+
+    monkeypatch.setattr(router_mod, "_WS_CONNECT_RETRY_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(router_mod, "_WS_CONNECT_READY_TIMEOUT_SECONDS", 2.0)
+
+    yuanrong = FakeYuanRongClient()
+    FlakyAgentWsClient.instances = []
+    FlakyAgentWsClient.fail_times = 1
+    client = _router_client(
+        yuanrong,
+        ws_client_factory=lambda: FlakyAgentWsClient(yuanrong),
+    )
+
+    results = await asyncio.gather(
+        client.send_request(_envelope()),
+        client.send_request(_envelope()),
+    )
+    await client.shutdown()
+
+    assert all(r.ok for r in results)
+    assert yuanrong.create_calls == 1
+    assert yuanrong.send_calls == 2
+    # leader 重试 2 次 connect；followers 共用结果，不再另起一轮 connect 风暴
+    assert sum(c.connect_attempts for c in FlakyAgentWsClient.instances) == 2
 
 
 @pytest.mark.asyncio
