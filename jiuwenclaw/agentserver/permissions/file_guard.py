@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Iterable, Literal
 
@@ -156,8 +157,61 @@ def _inject_system_default_trust(fg: dict[str, Any]) -> None:
         logger.debug("[file_guard] system_default_trust skip", exc_info=True)
 
 
+# Only for ``file_guard.global`` keys (e.g. ``${JIUWENCLAW_SHARED_SKILLS_DIRS}``).
+# Tip/overlay is via read_env; do not use this for tool-arg / trusted_exec paths.
+_ENV_PLACEHOLDER_RE = re.compile(
+    r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)|%([A-Za-z_][A-Za-z0-9_]*)%"
+)
+
+
 def _expand_path_str(s: str) -> str:
     return os.path.expandvars(os.path.expanduser(s.strip()))
+
+
+def _union_env_path_lists(*raw_values: str) -> str:
+    """Merge pathsep-separated path lists; preserve order, drop empty/dupes."""
+    seen: set[str] = set()
+    parts: list[str] = []
+    for raw in raw_values:
+        text = (raw or "").strip()
+        if not text:
+            continue
+        for part in text.split(os.pathsep):
+            part = part.strip()
+            if not part or part in seen:
+                continue
+            seen.add(part)
+            parts.append(part)
+    return os.pathsep.join(parts)
+
+
+def _expand_global_whitelist_key(key: str) -> str:
+    """Expand a ``file_guard.global`` map key (placeholders + pathsep lists).
+
+    Scoped to whitelist keys only so tool-arg resolution and trusted_exec keep
+    using plain ``os.path.expandvars`` / ``os.environ``.
+
+    Placeholder values are the **union** of tip/overlay (``read_env``) and
+    ``os.environ`` path lists — neither source alone wins.
+    """
+    text = key.strip()
+
+    def _repl(match: re.Match[str]) -> str:
+        name = match.group(1) or match.group(2) or match.group(3) or ""
+        if not name:
+            return match.group(0)
+        try:
+            from jiuwenclaw.local_env_config import read_env
+
+            tip_value = read_env(name, "")
+        except Exception:
+            tip_value = ""
+        os_value = os.environ.get(name, "") or ""
+        merged = _union_env_path_lists(tip_value, os_value)
+        return merged if merged else match.group(0)
+
+    text = _ENV_PLACEHOLDER_RE.sub(_repl, text)
+    return os.path.expandvars(os.path.expanduser(text))
 
 
 def _resolve_path_str(raw: str, workspace: Path) -> Path | None:
@@ -189,11 +243,18 @@ def _longest_prefix_match(abs_posix: str, global_map: dict[str, Any]) -> dict[st
             continue
         if not isinstance(entry, dict):
             continue
-        prefix = _posix_str(Path(_expand_path_str(key)))
-        if abs_posix == prefix or abs_posix.startswith(prefix + "/"):
-            ln = len(prefix)
-            if best is None or ln > best[0]:
-                best = (ln, entry)
+        # Support env keys that expand to pathsep-joined lists
+        # (e.g. ``${JIUWENCLAW_SHARED_SKILLS_DIRS}`` → ``dirA;dirB`` on Windows).
+        expanded = _expand_global_whitelist_key(key)
+        for part in expanded.split(os.pathsep):
+            part = part.strip()
+            if not part:
+                continue
+            prefix = _posix_str(Path(part))
+            if abs_posix == prefix or abs_posix.startswith(prefix + "/"):
+                ln = len(prefix)
+                if best is None or ln > best[0]:
+                    best = (ln, entry)
     return best[1] if best else None
 
 

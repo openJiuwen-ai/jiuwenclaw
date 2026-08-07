@@ -909,12 +909,15 @@ permissions:
   defaults: ask
 
   tools:
-    bash: ask
+    bash: allow
     mcp_exec_command: ask
     create_terminal: ask
     write: ask
-    write_file: ask
-    edit_file: ask
+    write_file: allow
+    edit_file: allow
+    skill_tool: allow
+    read_file: allow
+    skill_complete: allow
     search_replace: ask
     write_memory: allow
     edit_memory: allow
@@ -1050,7 +1053,10 @@ permissions:
     workspace:
       rw_enabled: true
       description: "Agent workspace 内默认放行 read / write"
-    global: {}
+    global:
+      "${JIUWENCLAW_SHARED_SKILLS_DIRS}":
+        read_enable: true
+        write_enable: true
     trusted_exec_directory: []
     tool_bindings: {}
 
