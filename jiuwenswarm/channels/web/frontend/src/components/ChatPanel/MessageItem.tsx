@@ -15,6 +15,7 @@ import {
   Volume2,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { contextCompressionRunningText } from '../../utils/contextCompression';
 import {
   Message,
   FileDownloadItem,
@@ -154,7 +155,9 @@ export function ContextCompressionLines({
           isFailed ? 'text-danger' : 'text-text-muted'
         )}>
           <span className={clsx(isRunning && 'context-compression-running-text')}>
-            {runtime?.summary}
+            {isRunning
+              ? contextCompressionRunningText(t, runtime?.processor, runtime?.summary ?? '')
+              : runtime?.summary}
           </span>
         </div>
       )}

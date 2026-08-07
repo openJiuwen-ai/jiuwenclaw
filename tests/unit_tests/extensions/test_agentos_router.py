@@ -83,6 +83,9 @@ class FakeYuanRongClient:
     async def delete_sandbox(self, sandbox_id: str) -> None:
         self.delete_calls.append(sandbox_id)
 
+    async def get_agent_info(self, instance_id: str) -> dict:
+        return {"instance_id": instance_id, "node_ip": "127.0.0.1", "sandbox_ip": "127.0.0.1"}
+
     async def send_request(self, envelope: E2AEnvelope) -> AgentResponse:
         self.send_calls += 1
         return AgentResponse(
@@ -116,6 +119,8 @@ class FakeYuanRongClient:
 class FakeRegistryClient:
     def __init__(self) -> None:
         self.registered: list[AgentInfo] = []
+        self.unregistered: list[dict[str, str]] = []
+        self.updated_instances: list[dict] = []
         self.image_lookups = 0
         self.list_user_images_calls: list[str] = []
 
@@ -157,6 +162,28 @@ class FakeRegistryClient:
     async def register_agent(self, agent_info: AgentInfo) -> None:
         self.registered.append(agent_info)
 
+    async def unregister_agent(
+        self,
+        agent_id: str,
+        *,
+        user_id: str | None = None,
+        agent_type: str | None = None,
+    ) -> None:
+        self.unregistered.append(
+            {
+                "agent_id": str(agent_id or ""),
+                "user_id": str(user_id or ""),
+                "agent_type": str(agent_type or ""),
+            }
+        )
+
+    async def update_instance(
+        self, service_id: str, *, node: str | None = None, address: str | None = None
+    ) -> None:
+        self.updated_instances.append(
+            {"service_id": service_id, "node": node, "address": address}
+        )
+
     async def close(self) -> None:
         return None
 
@@ -175,8 +202,9 @@ def _envelope(*, agent_type: str | None = None) -> E2AEnvelope:
 
 
 @pytest.mark.asyncio
-async def test_swarm_request_forwards_direct_yuanrong_without_create() -> None:
-    """jiuwenswarm uses URN invoke like agent_client.type=yuanrong."""
+async def test_swarm_request_creates_builtin_supervisor_runtime() -> None:
+    """jiuwenswarm (builtin) now goes through _resolve_agent/_create_agent,
+    using an inline supervisor+code_path runtime_spec (no registry image lookup)."""
     yuanrong = FakeYuanRongClient()
     registry = FakeRegistryClient()
     agent_manager = AgentManager()
@@ -184,32 +212,70 @@ async def test_swarm_request_forwards_direct_yuanrong_without_create() -> None:
     envelope = _envelope()
 
     response = await client.send_request(envelope)
-    await client.shutdown()
+    # _register_agent is fire-and-forget; yield so it completes before assertions
+    # (shutdown would cancel pending background tasks before they run).
+    await asyncio.sleep(0.05)
 
     assert response.ok
+    # Builtin path does not consult the image registry.
     assert registry.image_lookups == 0
-    assert yuanrong.create_calls == 0
+    # Builtin path creates a supervisor sandbox (no longer a direct yuanrong invoke).
+    assert yuanrong.create_calls == 1
     assert yuanrong.send_calls == 1
-    assert registry.registered == []
-    assert await agent_manager.list_user_agents("u1") == []
+    # The builtin runtime_spec uses supervisor + cmds (no registry image lookup).
+    spec = yuanrong.create_payloads[0]["runtime_spec"]
+    assert spec["sandbox_type"] == "supervisor"
+    assert spec["runtime"] == "python3.11"
+    # 动态端口：rootfs.ports 与 env_vars.AGENT_SERVER_PORT 必须一致
+    ports = spec["rootfs"]["ports"]
+    assert len(ports) == 1 and ports[0].startswith("tcp:")
+    dyn_port = ports[0][len("tcp:"):]
+    assert dyn_port.isdigit()
+    # cmds 含动态端口，与 rootfs.ports 一致
+    assert spec["cmds"] == [["jiuwenswarm-agentserver", "--port", dyn_port]]
+    assert spec["cpu"] == 2000
+    assert spec["memory"] == 4096
+    assert spec["rootfs"]["imageurl"] == "jiuwenswarm-agent-runtime:latest"
+    assert spec["rootfs"]["user"] == "agentos"
+    env = yuanrong.create_payloads[0]["env_vars"]
+    assert env["AGENT_SERVER_HOST"] == "127.0.0.1"
+    assert env["AGENT_SERVER_PORT"] == dyn_port
+    # Agent is registered with the registry (fire-and-forget background task).
+    assert len(registry.registered) == 1
+    assert registry.registered[0].agent_type == "jiuwenswarm"
+    # A builtin runtime is tracked in the agent manager.
+    agents = await agent_manager.list_user_agents("u1")
+    assert len(agents) == 1
+    assert agents[0].info.agent_type == "jiuwenswarm"
+    assert agents[0].info.sandbox_id == "sbx-1"
+    # attach_to_envelope populated the routing context.
     assert envelope.channel_context["agent_type"] == "jiuwenswarm"
-    assert "agent_id" not in envelope.channel_context
-    assert "sandbox_id" not in envelope.channel_context
+    assert envelope.channel_context["agent_id"] == agents[0].info.agent_id
+    assert envelope.channel_context["sandbox_id"] == "sbx-1"
+
+    await client.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_swarm_request_repeated_stays_direct() -> None:
+async def test_swarm_request_repeated_reuses_single_runtime() -> None:
+    """Repeated jiuwenswarm requests reuse a single runtime (single-flight create)."""
     yuanrong = FakeYuanRongClient()
     registry = FakeRegistryClient()
-    client = AgentOSRouterClient(yuanrong, registry, AgentManager())
+    agent_manager = AgentManager()
+    client = AgentOSRouterClient(yuanrong, registry, agent_manager)
 
     await client.send_request(_envelope())
     await client.send_request(_envelope())
     await client.shutdown()
 
     assert registry.image_lookups == 0
-    assert yuanrong.create_calls == 0
+    # Single-flight: only the first request creates the sandbox.
+    assert yuanrong.create_calls == 1
     assert yuanrong.send_calls == 2
+    # Only one runtime is tracked for the user.
+    agents = await agent_manager.list_user_agents("u1")
+    assert len(agents) == 1
+    assert agents[0].info.agent_type == "jiuwenswarm"
 
 
 def test_resolve_agent_workspace_defaults_under_agentos_users() -> None:
@@ -391,18 +457,30 @@ async def test_switch_to_jiuwenswarm_is_direct_without_create() -> None:
 @pytest.mark.asyncio
 async def test_delete_agent_releases_yuanrong_sandbox() -> None:
     yuanrong = FakeYuanRongClient()
+    registry = FakeRegistryClient()
     agent_manager = AgentManager()
-    client = AgentOSRouterClient(yuanrong, FakeRegistryClient(), agent_manager)
+    client = AgentOSRouterClient(yuanrong, registry, agent_manager)
 
     await client.send_request(_envelope(agent_type="opencode"))
     agents = await agent_manager.list_user_agents("u1")
     assert agents[0].info.sandbox_id == "sbx-1"
+    agent_id = agents[0].info.agent_id
 
-    await client.delete_agent("u1", "opencode")
+    assert await client.delete_agent("u1", "opencode") is True
 
     assert yuanrong.delete_calls == ["sbx-1"]
     assert await agent_manager.list_user_agents("u1") == []
+    assert registry.unregistered == [
+        {"agent_id": agent_id, "user_id": "u1", "agent_type": "opencode"}
+    ]
 
+
+@pytest.mark.asyncio
+async def test_delete_agent_missing_is_noop() -> None:
+    client = AgentOSRouterClient(
+        FakeYuanRongClient(), FakeRegistryClient(), AgentManager()
+    )
+    assert await client.delete_agent("u1", "opencode") is False
 
 class StubRelaySession:
     def __init__(self) -> None:
@@ -444,16 +522,19 @@ class StubSshRelay:
 @pytest.mark.asyncio
 async def test_reap_idle_once_deletes_idle_sandbox() -> None:
     yuanrong = FakeYuanRongClient()
+    registry = FakeRegistryClient()
     agent_manager = AgentManager()
     client = AgentOSRouterClient(
         yuanrong,
-        FakeRegistryClient(),
+        registry,
         agent_manager,
         sandbox_idle_timeout_seconds=0.01,
     )
 
     await client.send_request(_envelope(agent_type="opencode"))
     assert yuanrong.create_calls == 1
+    agents = await agent_manager.list_user_agents("u1")
+    agent_id = agents[0].info.agent_id
 
     await asyncio.sleep(0.05)
     reaped = await client._reap_idle_once()
@@ -462,7 +543,9 @@ async def test_reap_idle_once_deletes_idle_sandbox() -> None:
     assert reaped == 1
     assert yuanrong.delete_calls == ["sbx-1"]
     assert await agent_manager.list_user_agents("u1") == []
-
+    assert registry.unregistered == [
+        {"agent_id": agent_id, "user_id": "u1", "agent_type": "opencode"}
+    ]
 
 @pytest.mark.asyncio
 async def test_reap_idle_once_skips_recently_active_and_held_agents() -> None:

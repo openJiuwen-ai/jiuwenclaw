@@ -40,6 +40,10 @@ class SwarmBuildContext(BuildContext):
             ``_jiuwenswarm_adapter_mode`` lookup.
         project_dir: Resolved project directory (from request / session /
             config); replaces the old parent ``_jiuwenswarm_project_dir``.
+        trusted_dirs: Directories the client declared as trusted for this
+            request. Members feed them to the runtime-prompt and permission
+            rails so an external-directory check treats these subtrees as
+            internal, matching single-agent behaviour.
         team_id: Team name.
         team_ws_root: Team shared workspace root path.
         team_skills_dir: Team shared skills directory (``team_ws_root/skills``).
@@ -56,6 +60,7 @@ class SwarmBuildContext(BuildContext):
     request_metadata: dict[str, Any] | None = None
     mode: str = "team"
     project_dir: str | None = None
+    trusted_dirs: list[str] | None = None
     disable_teammate_worktree: bool = False
     team_id: str = ""
     team_ws_root: str | None = None
@@ -86,6 +91,7 @@ class SwarmBuildContext(BuildContext):
             "request_metadata": self.request_metadata,
             "mode": self.mode,
             "project_dir": self.project_dir,
+            "trusted_dirs": list(self.trusted_dirs) if self.trusted_dirs else None,
             "disable_teammate_worktree": self.disable_teammate_worktree,
             "team_id": self.team_id,
             "team_ws_root": self.team_ws_root,
@@ -120,6 +126,7 @@ class SwarmBuildContext(BuildContext):
             request_metadata=seed.get("request_metadata"),
             mode=seed.get("mode") or "team",
             project_dir=seed.get("project_dir"),
+            trusted_dirs=seed.get("trusted_dirs"),
             disable_teammate_worktree=bool(seed.get("disable_teammate_worktree", False)),
             team_id=seed.get("team_id", ""),
             team_ws_root=seed.get("team_ws_root"),

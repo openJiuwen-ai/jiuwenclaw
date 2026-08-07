@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jiuwenswarm"
-version = "0.2.3"
+version = "0.2.4.beta4"
 description = "JiuwenSwarm"
 requires-python = ">=3.11,<3.14"
 license = { text = "Apache-2.0" }
@@ -99,7 +99,7 @@ a2a = ["a2a-sdk[http-server]==1.0.0"]
 ssh = ["asyncssh>=2.14.0,<2.24"]
 desktop = ["pywebview>=5.4"]
 dev = ["pyinstaller>=6.0.0", "pywebview>=5.4"]
-tui = ["jiuwenswarm-tui==0.2.3"]
+tui = ["jiuwenswarm-tui==0.2.4.beta4"]
 distribute = ["openjiuwen[postgres,zmq]"]
 shell-ast = []
 # Same packages as [dependency-groups] test (pip install -e ".[test]")
@@ -122,6 +122,7 @@ jiuwenswarm-agentserver = "jiuwenswarm.server.app_agentserver:main"
 jiuwenswarm-gateway = "jiuwenswarm.gateway.app_gateway:main"
 jiuwenswarm-web = "jiuwenswarm.channels.web.app_web:main"
 jiuwenswarm-start = "jiuwenswarm.start_services:main"
+jiuwenswarm-stop = "jiuwenswarm.debug_launcher:main"
 jiuwenswarm-init = "jiuwenswarm.init_workspace:main"
 jiuwenswarm-desktop = "jiuwenswarm.channels.desktop.desktop_app:main"
 jiuwenswarm-acp = "jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect:main"

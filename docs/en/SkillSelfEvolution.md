@@ -12,7 +12,7 @@ JiuwenSwarm's skill self-evolution mechanism uses a built-in evolution signal de
 
 The core value of the skill self-evolution mechanism lies in:
 
-- **No manual intervention required**: The agent automatically improves itself during daily operation
+- **Lower day-to-day intervention cost**: The agent identifies reusable experience automatically and saves it according to the approval policy
 - **Continuous capability improvement**: Skills become more accurate and reliable with increased usage time
 - **Adaptive to scene changes**: Automatically adjusts and optimizes based on actual usage scenarios
 - **Reduced maintenance costs**: Decreases manual effort for updating and maintaining skills
@@ -21,31 +21,28 @@ The core value of the skill self-evolution mechanism lies in:
 
 ### 2.1 Self-Evolution Configuration Switch
 
-The skill auto-evolution feature is enabled by configuring `react.evolution.auto_scan: true` in `config.yaml`. The complete configuration options are:
+Automatic Skill learning is enabled with `react.evolution.skill_evolution`, which defaults to `false`. The Web and TUI configuration pages expose only this switch. When enabled, the system can extract experience automatically, suggest creating Skills, and provide the `/evolve` commands and evolution tools.
+
+Turning the switch off disables both automatic learning and manual evolution capabilities, but does not prevent explicit use of the general `skill-creator` or `swarmskill-creator` capabilities. Configurations that previously used `enabled`, `auto_scan`, `skill_create`, or the related environment variables do not automatically enable the new switch and must be migrated explicitly.
+
+The minimum configuration is:
 
 ```yaml
 react:
   evolution:
-    auto_scan: true      # Enable automatic evolution scanning
-    auto_save: false     # Auto-save evolution records (default: false, requires user approval)
-    skill_create: true   # Allow creating new skills from evolution
-    skill_base_dir: "agent/workspace/skills"  # Default skill storage directory
+    skill_evolution: true
+    auto_save: false
 ```
 
-**Environment variables** (alternative to config.yaml):
-- `EVOLUTION_AUTO_SCAN="true"` - Enable automatic scanning
-- `EVOLUTION_AUTO_SAVE="true"` - Enable auto-save
-- `SKILL_CREATE="true"` - Allow skill creation
+`auto_save` is an advanced YAML-only approval option. With `false`, regular evolution results for a Single Agent or Team leader require approval. With `true`, regular evolution results can be saved automatically. Teammates use a fixed automatic-approval policy.
 
 ![Enable auto-evolution detection](../assets/images/skill演进_自动检测开关.png)
 
-### 2.2 Automatic Evolution (With Approval Required)
+### 2.2 Automatic Evolution
 
 The system automatically detects evolution signals after each complete conversation ends (in the after_invoke phase). When execution exceptions or user corrections are detected, it generates evolution records.
 
-**Important**: With the default `auto_save: false`, generated records require user approval before being saved. Only with `auto_save: true` will evolution records be written silently.
-
-When the skill is called next time, it automatically loads content including evolution experience.
+The system identifies evolution signals and generates candidate experience automatically. Whether user confirmation is required depends on the role and the `auto_save` setting. After experience is saved, it is loaded automatically the next time the Skill is used.
 
 ![Auto-trigger](../assets/images/skill演进_自动触发.png)
 

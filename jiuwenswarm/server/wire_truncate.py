@@ -93,6 +93,7 @@ _WORKFLOW_SNAPSHOT_KEEP_KEYS = {
     "duration_ms",
     "token_count",
     "estimated_token_count",
+    "budget",
 }
 
 _WORKFLOW_LIST_SUMMARY_KEEP_KEYS = (
@@ -106,6 +107,7 @@ _WORKFLOW_LIST_SUMMARY_KEEP_KEYS = (
     "duration_ms",
     "token_count",
     "estimated_token_count",
+    "budget",
 )
 
 
@@ -346,6 +348,8 @@ def _workflow_agent_for_collapse(agent: dict[str, Any]) -> dict[str, Any]:
         "status": agent.get("status", "running"),
         "kind": agent.get("kind", "agent"),
     }
+    if agent.get("token_count") is not None:
+        collapsed_agent["token_count"] = agent["token_count"]
     if agent.get("model"):
         collapsed_agent["model"] = agent["model"]
     if agent.get("correlation_id"):
@@ -409,6 +413,9 @@ def _collapse_oversized_workflow_snapshot_item(item: dict[str, Any]) -> dict[str
                 "agent_count": phase.get("agent_count", 0),
                 "completed_agent_count": phase.get("completed_agent_count", 0),
             }
+            for child_key in ("phase_type", "nested_phase", "parent_phase"):
+                if child_key in phase:
+                    collapsed_phase[child_key] = phase[child_key]
             agents = phase.get("agents")
             if isinstance(agents, list):
                 collapsed_agents = []

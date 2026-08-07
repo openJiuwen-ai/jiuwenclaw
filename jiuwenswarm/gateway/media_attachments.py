@@ -6,15 +6,16 @@ from __future__ import annotations
 
 import base64
 import binascii
-import re
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
 from jiuwenswarm.common.utils import get_agent_sessions_dir
-
-_SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
-_SESSION_ID_RE = re.compile(r"[^A-Za-z0-9._-]+")
+from jiuwenswarm.gateway.upload_storage import (
+    safe_session_dirname,
+    safe_upload_filename,
+    unique_upload_path,
+)
 
 _SUPPORTED_IMAGE_MIME_TYPES = {
     "image/png": ".png",
@@ -84,17 +85,17 @@ def _store_image_item(item: dict[str, Any], *, session_id: str | None, index: in
     if not data or len(data) > _MAX_IMAGE_BYTES:
         return None
 
-    safe_session_id = _safe_session_id(session_id)
+    safe_session_id = safe_session_dirname(session_id)
     upload_dir = get_agent_sessions_dir() / safe_session_id / "uploads"
     upload_dir.mkdir(parents=True, exist_ok=True)
 
-    filename = _safe_filename(
+    filename = safe_upload_filename(
         str(item.get("filename") or f"image-{index + 1}{suffix}"),
         fallback=f"image-{index + 1}{suffix}",
     )
     if Path(filename).suffix.lower() not in set(_SUPPORTED_IMAGE_MIME_TYPES.values()):
         filename = f"{filename}{suffix}"
-    path = _unique_path(upload_dir / filename)
+    path = unique_upload_path(upload_dir / filename)
     path.write_bytes(data)
 
     return {
@@ -104,27 +105,3 @@ def _store_image_item(item: dict[str, Any], *, session_id: str | None, index: in
         "path": str(path),
         "size_bytes": len(data),
     }
-
-
-def _safe_session_id(session_id: str | None) -> str:
-    text = str(session_id or "default").strip() or "default"
-    return _SESSION_ID_RE.sub("_", text)[:120]
-
-
-def _safe_filename(filename: str, *, fallback: str) -> str:
-    name = Path(filename).name.strip()
-    if not name or name in {".", ".."}:
-        name = fallback
-    return _SAFE_FILENAME_RE.sub("_", name)[:180]
-
-
-def _unique_path(path: Path) -> Path:
-    if not path.exists():
-        return path
-    stem = path.stem
-    suffix = path.suffix
-    for idx in range(1, 1000):
-        candidate = path.with_name(f"{stem}-{idx}{suffix}")
-        if not candidate.exists():
-            return candidate
-    return path.with_name(f"{stem}-overflow{suffix}")

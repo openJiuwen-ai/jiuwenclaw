@@ -35,6 +35,7 @@ import {
   type FetchHistoryPageResult,
 } from './features/historyRestore';
 import { prefetchHistoryPages } from './features/historyPagination';
+import { queueOrAddGoalObjectiveMessage } from './features/goalPendingObjectiveBubble';
 import {
   normalizeToolCallPayload,
   normalizeToolResultPayload,
@@ -50,6 +51,7 @@ import {
   useTodoStore,
   useGoalStore,
   useHarnessStore,
+  usePlanStore,
   useWorkspaceStore,
   useCronStore,
 } from './stores';
@@ -364,7 +366,7 @@ function AppContent() {
   const historyPageCancelRef = useRef(new Map<string, () => void>());
   const historyBackgroundPrefetchTokensRef = useRef(new Map<string, number>());
   const creatingSessionRef = useRef(false);
-  const promotedFromNewSessionIdsRef = useRef(new Set<string>());
+  const sessionIdsCreatedInThisPageRef = useRef(new Set<string>());
   const shareExportRef = useRef<HTMLDivElement>(null);
   const shareExportFilenameRef = useRef('jiuwenswarm-share.png');
   const shareExportTokenRef = useRef(0);
@@ -1341,7 +1343,7 @@ function AppContent() {
   useEffect(() => {
     if (!isConnected || !sessionId || sessionId === NEW_CONVERSATION_ID) return;
     
-    if (promotedFromNewSessionIdsRef.current.has(sessionId)) {
+    if (sessionIdsCreatedInThisPageRef.current.has(sessionId)) {
       setHistoryPagerMeta(sessionId, null);
       setHistoryLoadingMore(false);
       setLoadingHistory(sessionId, false);
@@ -1357,8 +1359,8 @@ function AppContent() {
       return;
     }
 
-    // 已有完整历史恢复状态则跳过历史加载，直接使用内存数据。
-    // historyPagerMeta 是唯一可靠的"history 是否完整加载过"标记。
+    // 当前页面新建的会话已在上方复用实时内存数据；对于其他会话，
+    // historyPagerMeta 表示已完成 history 首屏恢复，可直接复用并继续补齐剩余分页。
     const existingRuntime = useChatStore.getState().getRuntime(sessionId);
     if (existingRuntime && existingRuntime.historyPagerMeta) {
       setLoadingHistory(sessionId, false);
@@ -1506,6 +1508,15 @@ function AppContent() {
       },
       onReasoningReplay: (items) => {
         restoreReasoningSegments(sessionId, items);
+      },
+      onCompactionReplay: (info) => {
+        // 回显「本轮完成上下文压缩 N 次」：恢复进 chatStore，渲染与实时事件同一处
+        const chatStore = useChatStore.getState();
+        chatStore.ensureRuntime(sessionId);
+        chatStore.setContextCompressionStatus(sessionId, undefined, {
+          count: info.count,
+          summaries: info.summaries,
+        });
       },
       onError: (message) => {
         console.warn('[history.restore]', message);
@@ -1707,8 +1718,21 @@ function AppContent() {
         const pendingSkills = useSessionStore.getState().getRuntime(NEW_CONVERSATION_ID)?.selectedSkills ?? [];
         pendingSkills.forEach((skill) => useSessionStore.getState().addSelectedSkill(newSid, skill));
         useSessionStore.getState().clearSelectedSkills(NEW_CONVERSATION_ID);
+        // Plan 开关是按 session 存的。欢迎页上开关记在 'new' 名下，这里必须搬到真实
+        // 会话，否则 sendMessage 取到的是新会话的默认值 false，这条消息就不会带
+        // `.plan`，整个 Plan 流程（只读约束、计划审批弹窗）全都不会触发。
+        if (usePlanStore.getState().isActive(NEW_CONVERSATION_ID)) {
+          // 连"用户手动打开开关"这个一次性标记一起搬过去：欢迎页那次点击就是显式
+          // 进入 Plan，标记决定这条消息是否带 plan_entry_source。
+          usePlanStore.getState().setActive(newSid, true, {
+            explicitEntry: usePlanStore
+              .getState()
+              .hasPendingExplicitEntry(NEW_CONVERSATION_ID),
+          });
+        }
+        usePlanStore.getState().removeRuntime(NEW_CONVERSATION_ID);
         useWorkspaceStore.getState().upsertSession(createdSession, { isNew: true });
-        promotedFromNewSessionIdsRef.current.add(newSid);
+        sessionIdsCreatedInThisPageRef.current.add(newSid);
         useChatStore.getState().setProcessing(NEW_CONVERSATION_ID, false);
         sessionIdRef.current = newSid;
         setSessionId(newSid);
@@ -1718,13 +1742,7 @@ function AppContent() {
         if (goalArmedOnNew) {
           // 欢迎页 "+" 选了「目标」：这条内容不走普通 chat.send，
           // 本地落一条 user 消息（供徽章匹配）后改调 command.goal（见 InputArea.tsx 的同款分流逻辑）
-          useChatStore.getState().addMessage(newSid, {
-            id: `user-${Date.now()}`,
-            role: 'user',
-            content,
-            timestamp: new Date().toISOString(),
-            isGoalObjectiveMessage: true,
-          });
+          queueOrAddGoalObjectiveMessage(newSid, content);
           setGoalObjective(newSid, content);
         } else {
           const sent = await sendMessage(content, newSid, mediaItems);
@@ -1932,7 +1950,6 @@ function AppContent() {
         }
       }
 
-      setHistoryPagerMeta(targetSessionId, null);
       setHistoryLoadingMore(false);
       const existingRuntime = useChatStore.getState().getRuntime(targetSessionId);
       if (!existingRuntime) {
@@ -1990,7 +2007,6 @@ function AppContent() {
       setActiveNav,
       setCurrentSession,
       setHistoryLoadingMore,
-      setHistoryPagerMeta,
       setMode,
       setPaused,
       setProcessing,
@@ -2216,7 +2232,7 @@ function AppContent() {
     && isConversationMissing(routeSessionId, true, sessions);
   const showConversationNotFound = route.kind === 'not-found' || routeSessionMissing;
   const showWorkspaceDivider = isTeamAreaExpanded && !showConversationNotFound;
-  const isNewSessionPromotion = Boolean(sessionId && promotedFromNewSessionIdsRef.current.has(sessionId));
+  const isNewSessionPromotion = Boolean(sessionId && sessionIdsCreatedInThisPageRef.current.has(sessionId));
   const composerFocusKey = showConversationNotFound ? null : `${sessionId}:${composerFocusNonce}`;
 
   useEffect(() => {
