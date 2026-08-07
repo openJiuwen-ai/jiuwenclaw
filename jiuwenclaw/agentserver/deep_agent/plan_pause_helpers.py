@@ -544,10 +544,16 @@ def clear_skip_invoke_task_update_sync(session: Any) -> None:
 
 # ---------------------------------------------------------------------------
 # Recovery file on disk (fallback when session state is lost, e.g. process restart)
+# Shared recovery.json fields:
+#   - summary: interrupt artifacts text (artifacts fallback)
+#   - plan_paused / plan_pause_snapshot: plan cancel flag (decision-prompt path)
 # ---------------------------------------------------------------------------
 
 _RECOVERY_DIR_NAME = "recovery"
 _RECOVERY_FILE_NAME = "recovery.json"
+_RECOVERY_KEY_SUMMARY = "summary"
+_RECOVERY_KEY_PLAN_PAUSED = "plan_paused"
+_RECOVERY_KEY_PLAN_PAUSE_SNAPSHOT = "plan_pause_snapshot"
 
 
 def _get_recovery_dir(workspace_dir: Path, session_id: str) -> Path:
@@ -558,30 +564,142 @@ def _get_recovery_dir(workspace_dir: Path, session_id: str) -> Path:
     return workspace_dir / "context" / session_id / _RECOVERY_DIR_NAME
 
 
-def write_interrupt_artifacts_to_file(workspace_dir: Path, session_id: str, summary: str) -> None:
-    """Write interrupt artifacts summary to a JSON file on disk (process-restart safe)."""
-    if not summary.strip():
-        return
+def _get_recovery_file(workspace_dir: Path, session_id: str) -> Path:
+    return _get_recovery_dir(workspace_dir, session_id) / _RECOVERY_FILE_NAME
+
+
+def _load_recovery_data(workspace_dir: Path, session_id: str) -> dict[str, Any]:
+    file_path = _get_recovery_file(workspace_dir, session_id)
+    if not file_path.exists():
+        return {}
+    with file_path.open(encoding="utf-8") as fh:
+        data = json.load(fh)
+    return data if isinstance(data, dict) else {}
+
+
+def _save_recovery_data(workspace_dir: Path, session_id: str, data: dict[str, Any]) -> None:
     recovery_dir = _get_recovery_dir(workspace_dir, session_id)
     recovery_dir.mkdir(parents=True, exist_ok=True)
-    file_path = recovery_dir / _RECOVERY_FILE_NAME
+    payload = dict(data)
+    payload["session_id"] = session_id
+    with _get_recovery_file(workspace_dir, session_id).open("w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False)
+
+
+def _has_recovery_payload(data: dict[str, Any]) -> bool:
+    summary = data.get(_RECOVERY_KEY_SUMMARY)
+    if isinstance(summary, str) and summary.strip():
+        return True
+    return data.get(_RECOVERY_KEY_PLAN_PAUSED) is True
+
+
+def _update_recovery_data(
+    workspace_dir: Path,
+    session_id: str,
+    updates: dict[str, Any],
+) -> None:
+    data = _load_recovery_data(workspace_dir, session_id)
+    data.update(updates)
+    _save_recovery_data(workspace_dir, session_id, data)
+
+
+def _clear_recovery_keys(workspace_dir: Path, session_id: str, *keys: str) -> None:
+    file_path = _get_recovery_file(workspace_dir, session_id)
+    if not file_path.exists():
+        return
+    data = _load_recovery_data(workspace_dir, session_id)
+    for key in keys:
+        data.pop(key, None)
+    if not _has_recovery_payload(data):
+        file_path.unlink()
+        return
+    _save_recovery_data(workspace_dir, session_id, data)
+
+
+def write_plan_pause_to_file(
+    workspace_dir: Path,
+    session_id: str,
+    snapshot: dict[str, Any] | None = None,
+) -> None:
+    """Merge plan_paused into recovery.json so checkpoint overwrite cannot drop it."""
+    if not session_id:
+        return
     try:
-        json.dump({"summary": summary, "session_id": session_id}, file_path.open("w", encoding="utf-8"))
+        _update_recovery_data(
+            workspace_dir,
+            session_id,
+            {
+                _RECOVERY_KEY_PLAN_PAUSED: True,
+                _RECOVERY_KEY_PLAN_PAUSE_SNAPSHOT: snapshot,
+            },
+        )
+    except Exception:
+        logger.warning("[recovery] write_plan_pause_to_file failed session=%s", session_id)
+
+
+def read_plan_pause_from_file(
+    workspace_dir: Path,
+    session_id: str,
+) -> tuple[bool, dict[str, Any] | None]:
+    """Read plan_paused flag/snapshot from recovery.json. Returns (False, None) when absent."""
+    try:
+        data = _load_recovery_data(workspace_dir, session_id)
+        if data.get(_RECOVERY_KEY_PLAN_PAUSED) is not True:
+            return False, None
+        snapshot = data.get(_RECOVERY_KEY_PLAN_PAUSE_SNAPSHOT)
+        if isinstance(snapshot, dict):
+            return True, snapshot
+        return True, None
+    except Exception:
+        logger.debug("[recovery] read_plan_pause_from_file failed session=%s", session_id)
+        return False, None
+
+
+def clear_plan_pause_file(workspace_dir: Path, session_id: str) -> None:
+    """Clear plan_pause fields from recovery.json (keeps artifacts summary if present)."""
+    try:
+        _clear_recovery_keys(
+            workspace_dir,
+            session_id,
+            _RECOVERY_KEY_PLAN_PAUSED,
+            _RECOVERY_KEY_PLAN_PAUSE_SNAPSHOT,
+        )
+    except Exception:
+        logger.debug("[recovery] clear_plan_pause_file failed session=%s", session_id)
+
+
+def clear_recovery_file(workspace_dir: Path, session_id: str) -> None:
+    """Delete recovery.json after any recovery path has consumed it for this turn."""
+    file_path = _get_recovery_file(workspace_dir, session_id)
+    try:
+        if file_path.exists():
+            file_path.unlink()
+    except Exception:
+        logger.debug("[recovery] clear_recovery_file failed session=%s", session_id)
+
+
+def write_interrupt_artifacts_to_file(workspace_dir: Path, session_id: str, summary: str) -> None:
+    """Merge interrupt artifacts summary into recovery.json (process-restart safe)."""
+    if not summary.strip():
+        return
+    try:
+        _update_recovery_data(
+            workspace_dir,
+            session_id,
+            {_RECOVERY_KEY_SUMMARY: summary},
+        )
     except Exception:
         logger.warning("[recovery] write_interrupt_artifacts_to_file failed session=%s", session_id)
 
 
 def read_interrupt_artifacts_from_file(workspace_dir: Path, session_id: str) -> str | None:
-    """Read interrupt artifacts summary from the JSON file on disk.
+    """Read interrupt artifacts summary from recovery.json.
 
     Returns the summary string, or None if the file doesn't exist or is invalid.
     """
-    file_path = _get_recovery_dir(workspace_dir, session_id) / _RECOVERY_FILE_NAME
     try:
-        if not file_path.exists():
-            return None
-        data = json.load(file_path.open(encoding="utf-8"))
-        summary = data.get("summary", "")
+        data = _load_recovery_data(workspace_dir, session_id)
+        summary = data.get(_RECOVERY_KEY_SUMMARY, "")
         if isinstance(summary, str) and summary.strip():
             return summary
     except Exception:
@@ -590,10 +708,8 @@ def read_interrupt_artifacts_from_file(workspace_dir: Path, session_id: str) -> 
 
 
 def clear_interrupt_artifacts_file(workspace_dir: Path, session_id: str) -> None:
-    """Delete the recovery file for a session (after successful injection)."""
-    file_path = _get_recovery_dir(workspace_dir, session_id) / _RECOVERY_FILE_NAME
+    """Clear artifacts summary from recovery.json after successful injection."""
     try:
-        if file_path.exists():
-            file_path.unlink()
+        _clear_recovery_keys(workspace_dir, session_id, _RECOVERY_KEY_SUMMARY)
     except Exception:
         logger.debug("[recovery] clear_interrupt_artifacts_file failed session=%s", session_id)
