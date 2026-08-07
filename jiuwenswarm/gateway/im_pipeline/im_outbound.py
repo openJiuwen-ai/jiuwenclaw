@@ -142,10 +142,12 @@ class IMOutboundPipeline:
 
     async def apply(self, msg: "Message") -> None:
         """对出站消息执行路由决策，结果写入 msg.metadata（原地修改）。"""
-        meta = dict(msg.metadata or {})
-        is_digital_avatar = msg.group_digital_avatar or bool(meta.get("avatar_mode"))
-        if not is_digital_avatar:
+        # 检查是否需要数字分身路由决策
+        # 优先使用 msg.group_digital_avatar，其次检查 metadata 中的 avatar_mode
+        if not msg.group_digital_avatar and not (msg.metadata or {}).get("avatar_mode"):
             return
+
+        meta = dict(msg.metadata or {})
 
         payload = msg.payload if isinstance(msg.payload, dict) else {}
         message_event_type = getattr(msg, "event_type", None)
