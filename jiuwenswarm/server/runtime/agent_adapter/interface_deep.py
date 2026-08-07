@@ -9549,32 +9549,49 @@ class JiuWenSwarmDeepAdapter:
                     interaction_stream_abort = False
                     return
             else:
-                interaction_stream = await self._instance.attach_output()
-                if interaction_stream is None:
-                    async for chunk in _yield_runtime_accepted():
-                        yield chunk
-                    interaction_stream_abort = False
-                    return
-                # Last stop before the message enters the single-agent runner
-                # streaming path. ``prepare_ms`` covers everything this adapter
-                # did with the turn before handing it over.
-                server_logger.info(
-                    "[AgentServer] message entering runner streaming: session_id=%s request_id=%s"
-                    " channel_id=%s mode=%s prepare_ms=%.1f query=%s",
-                    session_id,
-                    rid,
-                    cid,
-                    mode,
-                    (time.monotonic() - stream_impl_started_at) * 1000,
-                    preview_text(inputs.get("query", "")),
-                )
-                await self._instance.send_input(
-                    SendInputRequest(
-                        request_id=rid,
-                        inputs=inputs,
-                        mode=self._resolve_input_dispatch_mode(request.params),
+                if _runner_session is not None:
+                    # cancel-rewind 路径：cancel 后下一轮 invoke 发现有预置的 rewind session，
+                    # 直接走 Runner.run_agent_streaming(session=_runner_session)，绕过
+                    # attach_output+send_input，让 core 复用预置 session 中重建好的对话历史，
+                    # 避免 stale checkpointer 导致上下文丢失。
+                    server_logger.info(
+                        "[AgentServer] rewind path: using pre-built session to restore history"
+                        " session_id=%s request_id=%s channel_id=%s mode=%s",
+                        session_id, rid, cid, mode,
                     )
-                )
+                    interaction_stream = Runner.run_agent_streaming(
+                        self._instance, inputs, session=_runner_session
+                    )
+                    # run_agent_streaming 是普通 async generator，不需要 abort close，
+                    # 设 False 以防 finally 块调 close(abort_active_round=...) 出错。
+                    interaction_stream_abort = False
+                else:
+                    interaction_stream = await self._instance.attach_output()
+                    if interaction_stream is None:
+                        async for chunk in _yield_runtime_accepted():
+                            yield chunk
+                        interaction_stream_abort = False
+                        return
+                    # Last stop before the message enters the single-agent runner
+                    # streaming path. ``prepare_ms`` covers everything this adapter
+                    # did with the turn before handing it over.
+                    server_logger.info(
+                        "[AgentServer] message entering runner streaming: session_id=%s request_id=%s"
+                        " channel_id=%s mode=%s prepare_ms=%.1f query=%s",
+                        session_id,
+                        rid,
+                        cid,
+                        mode,
+                        (time.monotonic() - stream_impl_started_at) * 1000,
+                        preview_text(inputs.get("query", "")),
+                    )
+                    await self._instance.send_input(
+                        SendInputRequest(
+                            request_id=rid,
+                            inputs=inputs,
+                            mode=self._resolve_input_dispatch_mode(request.params),
+                        )
+                    )
             run_failure: tuple[str, str] | None = None
             # Start of the wait for the runner's first chunk; every branch above
             # has either handed the message over or attached to a running round.
