@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import os
 import re
 from typing import Any, List, Optional
 
@@ -55,6 +56,39 @@ from jiuwenswarm.common.tool_display import (
 from jiuwenswarm.common.utils import logger
 
 _TODO_TOOL_NAMES = frozenset(["todo_create", "todo_get", "todo_list", "todo_modify"])
+# When TOOL_RESULT_DISPLAY_MAX_CHARS is unset, keep the historical emit cap for
+# non-enterprise runs. Enterprise deploy normally sets the env (e.g. 500).
+_DEFAULT_TOOL_RESULT_DISPLAY_MAX_CHARS = 60000
+_TOOL_RESULT_DISPLAY_MAX_CHARS_LIMIT = 100_000
+
+
+def _resolve_tool_result_display_max_chars() -> int:
+    """Resolve streamed tool_result.result max chars.
+
+    - env configured and valid -> use TOOL_RESULT_DISPLAY_MAX_CHARS
+      (0 = no truncation; max 100000)
+    - unset / invalid -> 60000 (legacy default in jiuwenswarm)
+    """
+    raw = os.getenv("TOOL_RESULT_DISPLAY_MAX_CHARS")
+    if raw is None or str(raw).strip() == "":
+        return _DEFAULT_TOOL_RESULT_DISPLAY_MAX_CHARS
+    try:
+        parsed = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return _DEFAULT_TOOL_RESULT_DISPLAY_MAX_CHARS
+    if parsed < 0 or parsed > _TOOL_RESULT_DISPLAY_MAX_CHARS_LIMIT:
+        return _DEFAULT_TOOL_RESULT_DISPLAY_MAX_CHARS
+    return parsed
+
+
+def _format_tool_result_for_stream(result: Any) -> str:
+    if result is None:
+        return ""
+    text = str(result)
+    limit = _resolve_tool_result_display_max_chars()
+    if limit == 0 or len(text) <= limit:
+        return text
+    return text[:limit]
 
 
 def _structured_tool_result_payload(result: Any) -> Any | None:
@@ -851,7 +885,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             tool_result_payload = {
                 "tool_name": getattr(tool_call, "name", "") if tool_call else "",
                 "tool_call_id": getattr(tool_call, "id", "") if tool_call else "",
-                "result": str(result)[:60000] if result is not None else "",
+                "result": _format_tool_result_for_stream(result),
             }
             if raw_output is not None:
                 tool_result_payload["raw_output"] = raw_output
