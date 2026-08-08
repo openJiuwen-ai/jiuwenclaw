@@ -566,9 +566,12 @@ gateway:
   # 取值：per_chat_bot（默认，同 chat+bot 共享会话）, per_chat_bot_user（按 user 分会话）
   session_map_scope: per_chat_bot
 
-  # ========== 主备部署（standalone：默认；active-standby：连接 Redis + 选主）==========
+  # ========== 部署模式（企业/K8s；AGENT_RUNTIME 环境下生效）==========
+  # standalone（默认）：单机，不连 Redis
+  # active-standby：主备，连接 Redis + LeaderElection 选主
+  # distributed：多副本同时在线，连接 Redis 共享 session（无选主；cron 默认关闭；仅 web/tui 通道）
   deployment_mode: ${DEPLOYMENT_MODE:-standalone}
-  # 主备下用于实例标识；空则启动时自动生成
+  # 分布式下用于实例标识；空则启动时自动生成
   instance_id: ${GATEWAY_INSTANCE_ID:-}
 
   # AgentClient 配置 - Gateway 连接到 AgentServer 的方式
