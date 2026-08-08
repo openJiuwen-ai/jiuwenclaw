@@ -36,11 +36,19 @@ from jiuwenswarm.agents.harness.team.bootstrap import configure_agent_teams_home
 from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.ws_diagnostics import describe_ws_exception, format_ws_diagnostics
 from jiuwenswarm.common.utils import get_agent_root_dir, get_logs_dir, \
-    get_agent_sessions_dir, get_root_dir, get_user_workspace_dir, is_package_installation, \
-    wait_for_tcp_port, SensitiveDataFilter
+    get_agent_sessions_dir, get_multi_tenant_user_workspace_dir, get_root_dir, get_user_workspace_dir, \
+    is_package_installation, wait_for_tcp_port, SensitiveDataFilter
+from jiuwenswarm.channels.web.history_store import (
+    ChatHistoryStore,
+    HistoryFrameRunner,
+    get_session_detail_sync,
+    list_sessions_sync,
+)
 from jiuwenswarm.server.runtime.session.session_history import history_exists, load_history_records
 
 configure_agent_teams_home()
+
+_history_runner: HistoryFrameRunner | None = None
 
 
 def _get_agent_teams_root() -> Path:
@@ -194,6 +202,7 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
     agent_teams_root = _get_agent_teams_root()
     logs_root = get_logs_dir()
     auto_harness_root = project_root / "auto-harness"
+    history_db = ""
     logger = logging.getLogger(__name__)
 
     _HOP_BY_HOP_HEADERS = {
@@ -590,9 +599,13 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                     if sock is self.connection:
                         for text_message in client_parser.feed(data):
                             self._log_ws_business_message("frontend->backend", text_message)
+                            if _history_runner is not None:
+                                _history_runner.submit("browser", text_message)
                     else:
                         for text_message in server_parser.feed(data):
                             self._log_ws_business_message("backend->frontend", text_message)
+                            if _history_runner is not None:
+                                _history_runner.submit("uplink", text_message)
                     # 非阻塞 socket 写入：循环增量 send，缓冲区满时等待可写后继续，
                     # 跨平台覆盖 Windows WSAEWOULDBLOCK (10035) 与 POSIX EAGAIN/EWOULDBLOCK。
                     pending = data
@@ -777,6 +790,47 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             self._write_json(400, {"error": str(exc)})
             return
         self._write_json(200, {"filename": filename, "snapshot": snapshot})
+
+    def _handle_history_api_get(self, parsed) -> bool:
+        """Enterprise local session history (SQLite); not proxied to Gateway."""
+        if not os.getenv("AGENT_RUNTIME", "").strip():
+            return False
+        if not self.history_db:
+            return False
+        path = parsed.path
+        if path == "/api/sessions":
+            query = self._parse_query(parsed.query)
+            try:
+                limit = int(query.get("limit", "20") or 20)
+                offset = int(query.get("offset", "0") or 0)
+            except ValueError:
+                limit, offset = 20, 0
+            limit = max(1, min(limit, 100))
+            offset = max(0, offset)
+            user = query.get("user") or None
+            self._write_json(
+                200,
+                {
+                    "sessions": list_sessions_sync(
+                        self.history_db,
+                        limit=limit,
+                        offset=offset,
+                        user=user,
+                    ),
+                },
+            )
+            return True
+        if path.startswith("/api/sessions/"):
+            session_id = path[len("/api/sessions/") :]
+            query = self._parse_query(parsed.query)
+            user = query.get("user") or None
+            detail = get_session_detail_sync(self.history_db, session_id, user=user)
+            if detail is None:
+                self._write_json(404, {"error": "not_found"})
+            else:
+                self._write_json(200, detail)
+            return True
+        return False
 
     def _handle_file_api_get(self, parsed) -> None:
         path = parsed.path
@@ -1191,6 +1245,8 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if self._handle_history_api_get(parsed):
+            return
         if self._is_share_api_route():
             self._handle_share_api_get(parsed)
             return
@@ -1477,6 +1533,16 @@ def main() -> None:
     logs_root = get_logs_dir().resolve()
     logger = _setup_logger(logs_root, args.log_level)
 
+    global _history_runner
+    history_db = ""
+    if os.getenv("AGENT_RUNTIME", "").strip():
+        tenant_root = get_multi_tenant_user_workspace_dir("default", "default") or project_root
+        history_db = str(tenant_root / "web_history.db")
+        store = ChatHistoryStore(history_db)
+        _history_runner = HistoryFrameRunner(store)
+        _history_runner.start()
+        logger.info("[jiuwenswarm-web] enterprise history db: %s", history_db)
+
     class _ConfiguredHandler(_SpaStaticHandler):
         pass
 
@@ -1488,6 +1554,7 @@ def main() -> None:
     _ConfiguredHandler.agent_teams_root = agent_teams_root
     _ConfiguredHandler.logs_root = logs_root
     _ConfiguredHandler.logger = logger
+    _ConfiguredHandler.history_db = history_db
     handler = partial(_ConfiguredHandler, directory=str(dist_dir))
     server = ThreadingHTTPServer((args.host, args.port), handler)
 
