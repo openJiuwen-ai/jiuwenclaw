@@ -2,7 +2,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import json
-import ast
 
 
 def parse_json(output, header=None):
@@ -21,7 +20,7 @@ def parse_json(output, header=None):
         output = output[json_idx:json_end_idx].strip()
         output_json = json.loads(output)     
     except json.JSONDecodeError:
-        output_json = ast.literal_eval(output)
+        raise ValueError(f"Failed to parse JSON output: {output}")
     return output_json
 
 
