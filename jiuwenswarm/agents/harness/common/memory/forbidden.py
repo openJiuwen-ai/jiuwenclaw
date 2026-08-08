@@ -9,9 +9,8 @@ logger = logging.getLogger(__name__)
 def _get_memory_forbidden_config() -> Dict[str, Any]:
     """从 config.yaml 读取 memory.forbidden_memory_definition 配置."""
     try:
-        from jiuwenswarm.common.config import get_config
-        config = get_config()
-        memory_config = config.get("memory", {})
+        from jiuwenswarm.agents.harness.common.memory.config import get_memory_section
+        memory_config = get_memory_section()
         forbidden_config = memory_config.get("forbidden_memory_definition", {})
         return {
             "enabled": forbidden_config.get("enabled", False),

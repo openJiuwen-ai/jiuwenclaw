@@ -171,10 +171,13 @@ from jiuwenswarm.agents.harness.common.rails.permissions.owner_scopes import (
 from jiuwenswarm.agents.harness.common.memory.config import (
     clear_config_cache,
     clear_embed_config_db_cache,
+    clear_memory_config_db_cache,
     get_embed_config,
     get_memory_mode,
     is_memory_enabled,
     is_proactive_memory,
+    merge_memory_config_into_config,
+    reload_memory_config_from_gateway_db,
     set_embed_config_db_cache,
 )
 from jiuwenswarm.agents.harness.common.memory.external_memory_config import is_builtin_memory_allowed
@@ -5943,6 +5946,7 @@ class JiuWenSwarmDeepAdapter:
         bootstrap_request = self._instance_overrides.pop("request", None)
         if bootstrap_request is not None and os.getenv("AGENT_RUNTIME", "").strip():
             await self._load_enterprise_config(bootstrap_request)
+        config_base = merge_memory_config_into_config(config_base)
         config_base = self._merge_enterprise_models_into_config(config_base)
         self._config_base_cache = config_base.copy()
         self._startup_config_base = config_base.copy()
@@ -6232,6 +6236,7 @@ class JiuWenSwarmDeepAdapter:
         """
         clear_config_cache()
         clear_embed_config_db_cache()
+        clear_memory_config_db_cache()
         # 清 MemoryRail 实际使用的 openjiuwen lite INDEX_CACHE（而非仓内并行实现的那份），
         # 并 close 旧实例（db 连接 / watchdog observer / 定时任务），使下次
         # init_memory_manager_async 用最新 embedding_config 创建新 manager + 新 provider。
@@ -6262,6 +6267,7 @@ class JiuWenSwarmDeepAdapter:
 
         self._config_base_cache = config_base.copy()
         config_base = self._merge_enterprise_models_into_config(config_base)
+        config_base = merge_memory_config_into_config(config_base)
         self._config_base_cache = config_base.copy()
         self._startup_config_base = config_base.copy()
         self._refresh_multimodal_configs(config_base)
@@ -6333,6 +6339,14 @@ class JiuWenSwarmDeepAdapter:
                     own_sid,
                 )
                 return
+        if os.getenv("AGENT_RUNTIME", "").strip():
+            try:
+                await reload_memory_config_from_gateway_db()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] reload_memory_config_from_gateway_db failed: %s",
+                    exc,
+                )
         if self._instance is None:
             if self._is_session_scoped_adapter:
                 raise RuntimeError("JiuWenSwarmDeepAdapter 未初始化，请先调用 create_instance()")
@@ -6402,6 +6416,7 @@ class JiuWenSwarmDeepAdapter:
         try:
             mode = self._last_mode or "agent"
             await self._handle_memory_rail_by_config(mode)
+            await self._handle_external_memory_rail_by_config()
         except Exception as e:
             logger.warning(
                 "[JiuWenSwarmDeepAdapter] memory rail refresh on reload failed: %s", e
