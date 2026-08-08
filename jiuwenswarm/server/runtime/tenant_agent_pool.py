@@ -154,3 +154,7 @@ class TenantAgentPool:
         logger.info("[TenantAgentPool] Cleaning up...")
         await self._agent_manager.cleanup()
         logger.info("[TenantAgentPool] Cleanup complete")
+
+    def is_working(self) -> bool:
+        """返回是否有任何租户 Agent 正在工作."""
+        return self._agent_manager.is_working()

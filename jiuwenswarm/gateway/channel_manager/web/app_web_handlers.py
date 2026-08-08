@@ -103,6 +103,7 @@ from jiuwenswarm.agents.harness.common.auto_harness import AutoHarnessService
 from jiuwenswarm.agents.harness.common.tools.web_file_download import build_file_download_info
 from jiuwenswarm.common.version import __version__
 from jiuwenswarm.common.local_env_config import decrypt, encrypt
+from jiuwenswarm.extensions.extension_config_sync import update_extensions_in_config
 from jiuwenswarm.gateway.media_attachments import normalize_chat_media_attachments
 from jiuwenswarm.gateway.document_attachments import (
     coerce_document_parse_flag,
@@ -1949,6 +1950,22 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 yaml_updated.extend(k for k in _SKILL_RETRIEVAL_CONFIG_KEYS if k in params)
             except Exception as e:
                 logger.warning("[config.set] 写回 skill_retrieval 失败: %s", e)
+
+        ext_configs = params.get("extension_configs", None)
+        ext_security = params.get("extension_security_configs", None)
+        if not isinstance(ext_configs, str) and ext_configs is not None:
+            raise _ConfigBadRequest("extension_configs must be string")
+        if not isinstance(ext_security, str) and ext_security is not None:
+            raise _ConfigBadRequest("extension_security_configs must be string")
+        if ext_configs is not None or ext_security is not None:
+            try:
+                update_extensions_in_config(ext_configs, ext_security)
+                if ext_configs is not None:
+                    yaml_updated.append("extension_configs")
+                if ext_security is not None:
+                    yaml_updated.append("extension_security_configs")
+            except RuntimeError as e:
+                raise _ConfigInternalError(str(e)) from e
 
         for env_key, value in env_updates.items():
             os.environ[env_key] = value

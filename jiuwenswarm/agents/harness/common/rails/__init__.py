@@ -20,6 +20,7 @@ from jiuwenswarm.agents.harness.common.rails.ask_user_rail import StructuredAskU
 from jiuwenswarm.agents.harness.common.rails.multimodal_image_rail import MultimodalImageRail
 from jiuwenswarm.agents.harness.common.rails.stream_event_rail import JiuSwarmStreamEventRail
 from jiuwenswarm.agents.harness.common.rails.task_execution_rail import TaskExecutionRail
+from jiuwenswarm.agents.harness.common.rails.context_overflow_recovery_rail import ContextOverflowRecoveryRail
 
 __all__ = [
     "JiuSwarmStreamEventRail",
@@ -33,4 +34,5 @@ __all__ = [
     "SymphonyOrchestrationRail",
     "MemberSkillToolkitRail",
     "StructuredAskUserRail",
+    "ContextOverflowRecoveryRail"
 ]

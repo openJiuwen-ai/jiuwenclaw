@@ -41,6 +41,7 @@ from jiuwenswarm.common.utils import (
     prepare_workspace,
     reset_free_search_runtime_flags,
 )
+from jiuwenswarm.extensions.extension_config_sync import decrypt_extensions_sensitive_for_agent
 
 # Ensure workspace initialized
 _workspace_dir = get_user_workspace_dir()
@@ -1675,8 +1676,10 @@ async def _run(
             "VISION_API_KEY",
         }
         try:
+            # 发送给 AgentServer 前解密扩展敏感配置
+            decrypted_config = decrypt_extensions_sensitive_for_agent(config_payload or {})
             client.set_or_update_server_config(
-                config=dict(config_payload or {}),
+                config=dict(decrypted_config),
                 env=dict(env_updates or {}),
             )
 
@@ -1686,7 +1689,7 @@ async def _run(
                 req_method=ReqMethod.AGENT_RELOAD_CONFIG,
                 params={
                     # config: full config snapshot after save; Agent should prefer this over local yaml.
-                    "config": dict(config_payload or {}),
+                    "config": dict(decrypted_config),
                     # env: incremental environment updates; missing keys mean unchanged.
                     "env": dict(env_updates or {}),
                     **dict(reload_options or {}),
