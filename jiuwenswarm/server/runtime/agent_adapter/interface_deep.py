@@ -5602,7 +5602,7 @@ class JiuWenSwarmDeepAdapter:
         return f"{card_id}_root"
 
     @staticmethod
-    def _register_shared_tool(tool: Any) -> None:
+    def _register_shared_tool(tool: Any) -> Any:
         """Declare a tool instance shared across adapters, then register it.
 
         Shared here means one instance serves every adapter in the process: the
@@ -5615,12 +5615,15 @@ class JiuWenSwarmDeepAdapter:
 
         Args:
             tool: Tool instance to share process-wide.
+
+        Returns:
+            The process-global registered tool instance (may be an earlier one).
         """
         mark_stateless([tool])
-        register_tool(tool, None)
+        return register_tool(tool, None)
 
     @staticmethod
-    def _register_agent_owned_tool(tool: Any, owner_id: str) -> None:
+    def _register_agent_owned_tool(tool: Any, owner_id: str) -> Any:
         """Register a tool instance owned exclusively by this adapter's agent.
 
         ``_get_tool_cards`` runs before ``create_deep_agent``, so there is no
@@ -5637,6 +5640,9 @@ class JiuWenSwarmDeepAdapter:
         Args:
             tool: Per-agent tool instance to register.
             owner_id: Owner id that this adapter's agent registers under.
+
+        Returns:
+            The registered tool instance.
         """
         if getattr(tool.card, "stateless", False):
             logger.debug(
@@ -5644,29 +5650,29 @@ class JiuWenSwarmDeepAdapter:
                 " despite the agent-owned call site",
                 tool.card.name,
             )
-        register_tool(tool, owner_id)
+        return register_tool(tool, owner_id)
 
     async def _get_tool_cards(self, agent_id: str):
         """Get tool cards."""
         tool_cards = []
 
         for wtool in [wiki_ingest, wiki_query, wiki_lint]:
-            self._register_shared_tool(wtool)
-            tool_cards.append(wtool.card)
+            registered = self._register_shared_tool(wtool)
+            tool_cards.append(registered.card)
 
         # 付费搜索工具：有任意一个付费 key 就注册
         if is_paid_search_enabled():
             self._paid_search_tool = WebPaidSearchTool(
                 language=self._resolve_runtime_language(), agent_id=agent_id
             )
-            self._register_agent_owned_tool(self._paid_search_tool, agent_id)
+            self._paid_search_tool = self._register_agent_owned_tool(self._paid_search_tool, agent_id)
             tool_cards.append(self._paid_search_tool.card)
             self._paid_search_registered = True
 
         for tool_cls in [WebFreeSearchTool, WebFetchWebpageTool]:
             tool_instance = tool_cls(agent_id=agent_id)
-            self._register_agent_owned_tool(tool_instance, agent_id)
-            tool_cards.append(tool_instance.card)
+            registered = self._register_agent_owned_tool(tool_instance, agent_id)
+            tool_cards.append(registered.card)
 
         self._vision_tools = []
         self._vision_tools_registered = False
@@ -5677,9 +5683,9 @@ class JiuWenSwarmDeepAdapter:
                     vision_model_config=self._vision_model_config,
                     agent_id=agent_id,
                 ):
-                    self._register_agent_owned_tool(tool, agent_id)
-                    tool_cards.append(tool.card)
-                    self._vision_tools.append(tool)
+                    registered = self._register_agent_owned_tool(tool, agent_id)
+                    tool_cards.append(registered.card)
+                    self._vision_tools.append(registered)
                 self._vision_tools_registered = bool(self._vision_tools)
             except Exception as exc:
                 self._vision_tools = []
@@ -5691,10 +5697,11 @@ class JiuWenSwarmDeepAdapter:
         self._audio_tools = []
         self._audio_tools_registered = False
         try:
-            self._audio_tools = self._iter_runtime_audio_tools(agent_id)
-            for tool in self._audio_tools:
-                self._register_agent_owned_tool(tool, agent_id)
-                tool_cards.append(tool.card)
+            self._audio_tools = []
+            for tool in self._iter_runtime_audio_tools(agent_id):
+                registered = self._register_agent_owned_tool(tool, agent_id)
+                tool_cards.append(registered.card)
+                self._audio_tools.append(registered)
             self._audio_tools_registered = bool(self._audio_tools)
         except Exception as exc:
             self._audio_tools = []
@@ -5706,8 +5713,8 @@ class JiuWenSwarmDeepAdapter:
         self._video_tool_registered = False
         if self._video_model_config:
             try:
-                self._register_shared_tool(video_understanding)
-                tool_cards.append(video_understanding.card)
+                registered = self._register_shared_tool(video_understanding)
+                tool_cards.append(registered.card)
                 self._video_tool_registered = True
             except Exception as exc:
                 logger.warning(
@@ -5719,8 +5726,8 @@ class JiuWenSwarmDeepAdapter:
         self._image_gen_tool_registered = False
         if self._image_gen_model_config:
             try:
-                self._register_shared_tool(generate_image)
-                tool_cards.append(generate_image.card)
+                registered = self._register_shared_tool(generate_image)
+                tool_cards.append(registered.card)
                 self._image_gen_tool_registered = True
             except Exception as exc:
                 logger.warning(
@@ -5765,8 +5772,8 @@ class JiuWenSwarmDeepAdapter:
             ]
             try:
                 for xt in _xiaoyi_tools:
-                    self._register_shared_tool(xt)
-                    tool_cards.append(xt.card)
+                    registered = self._register_shared_tool(xt)
+                    tool_cards.append(registered.card)
                 self._xiaoyi_phone_tools_registered = True
                 logger.info(
                     "[JiuWenSwarmDeepAdapter] %d xiaoyi phone tools registered", len(_xiaoyi_tools)
@@ -5780,9 +5787,9 @@ class JiuWenSwarmDeepAdapter:
             skill_toolkit = SkillToolkit(manager=self._skill_manager)
             skill_tool_names: list[str] = []
             for tool in skill_toolkit.get_tools():
-                self._register_shared_tool(tool)
-                tool_cards.append(tool.card)
-                skill_tool_names.append(tool.card.name)
+                registered = self._register_shared_tool(tool)
+                tool_cards.append(registered.card)
+                skill_tool_names.append(registered.card.name)
             logger.info(
                 "[JiuWenSwarmDeepAdapter] SkillToolkit registered: tools=%s",
                 skill_tool_names,
@@ -5795,9 +5802,9 @@ class JiuWenSwarmDeepAdapter:
                 self._skill_retrieval_tools = self._create_skill_retrieval_tools()
                 skill_retrieval_tool_names: list[str] = []
                 for tool in self._skill_retrieval_tools:
-                    self._register_shared_tool(tool)
-                    tool_cards.append(tool.card)
-                    skill_retrieval_tool_names.append(tool.card.name)
+                    registered = self._register_shared_tool(tool)
+                    tool_cards.append(registered.card)
+                    skill_retrieval_tool_names.append(registered.card.name)
                 self._skill_retrieval_tools_registered = bool(self._skill_retrieval_tools)
                 logger.info(
                     "[JiuWenSwarmDeepAdapter] SkillRetrievalToolkit registered: tools=%s",
@@ -5817,9 +5824,9 @@ class JiuWenSwarmDeepAdapter:
             symphony_tool_names: list[str] = []
             symphony_tools = symphony_toolkit.get_tools(config_base)
             for tool in symphony_tools:
-                self._register_shared_tool(tool)
-                tool_cards.append(tool.card)
-                symphony_tool_names.append(tool.card.name)
+                registered = self._register_shared_tool(tool)
+                tool_cards.append(registered.card)
+                symphony_tool_names.append(registered.card.name)
             self._symphony_tools = list(symphony_tools)
             self._symphony_tools_registered = bool(symphony_tools)
             logger.info(
@@ -5838,8 +5845,8 @@ class JiuWenSwarmDeepAdapter:
         try:
             acp_cfg = get_config().get("acp_agents")
             if isinstance(acp_cfg, dict) and acp_cfg:
-                self._register_shared_tool(acp_chat)
-                tool_cards.append(acp_chat.card)
+                registered = self._register_shared_tool(acp_chat)
+                tool_cards.append(registered.card)
                 logger.info("[JiuWenSwarmDeepAdapter] acp_chat tool registered")
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] acp_chat registration failed: %s", exc)
