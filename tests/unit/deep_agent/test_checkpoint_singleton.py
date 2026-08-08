@@ -86,6 +86,19 @@ def test_gateway_db_pool_kwargs_from_env(monkeypatch):
     assert kwargs["pool_pre_ping"] is True
 
 
+def test_gateway_db_pool_kwargs_runtime_env_fallback(monkeypatch):
+    monkeypatch.delenv("GATEWAY_DB_POOL_SIZE", raising=False)
+    monkeypatch.delenv("GATEWAY_DB_MAX_OVERFLOW", raising=False)
+    monkeypatch.delenv("GATEWAY_DB_POOL_TIMEOUT", raising=False)
+    monkeypatch.setenv("RUNTIME_DB_POOL_SIZE", "4")
+    monkeypatch.setenv("RUNTIME_DB_MAX_OVERFLOW", "8")
+    monkeypatch.setenv("RUNTIME_DB_POOL_TIMEOUT", "12")
+    kwargs = iface._gateway_db_pool_kwargs()
+    assert kwargs["pool_size"] == 4
+    assert kwargs["max_overflow"] == 8
+    assert kwargs["pool_timeout"] == 12
+
+
 @pytest.mark.asyncio
 async def test_build_mysql_engine_reuses_process_singleton(monkeypatch):
     monkeypatch.setenv("AGENT_RUNTIME", "1")

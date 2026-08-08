@@ -401,20 +401,23 @@ def reset_shared_checkpoint_for_tests() -> None:
 
 
 def _gateway_db_pool_kwargs() -> dict[str, Any]:
-    """SQLAlchemy 连接池参数（``GATEWAY_DB_POOL_*``，企业 checkpoint 与文档默认一致）。"""
-    def _int_env(name: str, default: int) -> int:
-        raw = os.getenv(name, "").strip()
-        if not raw:
-            return default
-        try:
-            return int(raw)
-        except ValueError:
-            return default
+    """SQLAlchemy 连接池参数（``GATEWAY_DB_POOL_*`` / ``RUNTIME_DB_POOL_*``）。"""
+
+    def _int_env(*names: str, default: int) -> int:
+        for name in names:
+            raw = os.getenv(name, "").strip()
+            if not raw:
+                continue
+            try:
+                return int(raw)
+            except ValueError:
+                continue
+        return default
 
     return {
-        "pool_size": _int_env("GATEWAY_DB_POOL_SIZE", 2),
-        "max_overflow": _int_env("GATEWAY_DB_MAX_OVERFLOW", 20),
-        "pool_timeout": _int_env("GATEWAY_DB_POOL_TIMEOUT", 30),
+        "pool_size": _int_env("GATEWAY_DB_POOL_SIZE", "RUNTIME_DB_POOL_SIZE", default=2),
+        "max_overflow": _int_env("GATEWAY_DB_MAX_OVERFLOW", "RUNTIME_DB_MAX_OVERFLOW", default=20),
+        "pool_timeout": _int_env("GATEWAY_DB_POOL_TIMEOUT", "RUNTIME_DB_POOL_TIMEOUT", default=30),
         "pool_recycle": 3600,
         "pool_pre_ping": True,
     }
