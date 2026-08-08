@@ -35,6 +35,7 @@ from jiuwenswarm.common.utils import (
     logger,
     prepare_workspace,
     reset_free_search_runtime_flags,
+    update_config,
 )
 
 # Ensure workspace initialized
@@ -46,6 +47,11 @@ _old_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
 # Initialize if config doesn't exist, or if legacy workspace exists but new doesn't (migration)
 if not _config_file.exists() or (_old_workspace.exists() and not _new_workspace.exists()):
     prepare_workspace(overwrite=False)
+else:
+    # 企业级多 Pod 共享 PVC：各 AgentServer 启动时 merge 写 config.yaml 会与并发读竞态。
+    # 配置由部署侧/init 写入 PVC，运行时经 Gateway reload_config 热更新，不在此 merge。
+    if not os.getenv("AGENT_RUNTIME", "").strip():
+        update_config()
 
 _logging_yaml = get_root_dir() / "config" / "logging.yaml"
 if _logging_yaml.exists():

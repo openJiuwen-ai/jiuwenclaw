@@ -977,6 +977,33 @@ def cleanup_team_files(workspace_dir: Path) -> None:
                 logger.warning(f"[Cleanup] Failed to remove legacy team database file: {e}")
 
 
+def update_config() -> None:
+    """Merge new template fields into user config.yaml, preserving user values."""
+    package_root = _find_package_root()
+    if not package_root:
+        raise RuntimeError("package root not found")
+
+    workspace_dir = get_user_workspace_dir()
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    resources_dir = package_root / "resources"
+    config_yaml_src_candidates = [
+        resources_dir / "config.yaml",
+        package_root / "config" / "config.yaml",
+    ]
+    config_yaml_src = next((p for p in config_yaml_src_candidates if p.exists()), None)
+    if not config_yaml_src:
+        raise RuntimeError(
+            "config.yaml template not found; tried: "
+            + ", ".join(str(p) for p in config_yaml_src_candidates)
+        )
+
+    config_yaml_dest = workspace_dir / "config" / "config.yaml"
+    from jiuwenswarm.common.config import migrate_config_from_template
+
+    migrate_config_from_template(config_yaml_src, config_yaml_dest)
+
+
 def prepare_workspace(
     overwrite: bool = True,
     preferred_language: Optional[str] = None,
