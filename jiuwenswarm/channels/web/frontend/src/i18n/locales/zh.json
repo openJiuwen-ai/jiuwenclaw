@@ -1652,7 +1652,7 @@
       "searchPlaceholder": "搜索技能",
       "minConfidence": "最小置信度 {{percent}}%",
       "buildLogFallback": "构建日志",
-      "tokenUsage": "{{prompt}} 输入 / {{completion}} 输出 / {{total}} 总计",
+      "tokenUsage": "{{prompt}} in / {{completion}} out / {{total}} total",
       "required": "必需",
       "skillList": "技能列表",
       "noVisibleSkills": "没有可显示的技能。",
