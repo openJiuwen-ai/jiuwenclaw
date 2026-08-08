@@ -18,7 +18,6 @@ import { InputArea } from './InputArea';
 import chatIcon from '../../assets/chat.svg';
 import expandIcon from '../../assets/expand.svg';
 import lineUpIcon from '../../assets/lineUp.svg';
-import HeartbeatPanel from '../HeartbeatPanel';
 import { NEW_CONVERSATION_ID } from '../../multi-session/state/newConversationLifecycle';
 import loadSendIcon from '../../assets/load-send.svg';
 import editIcon from '../../assets/edit.svg';
@@ -91,6 +90,10 @@ interface ChatPanelProps {
   onToggleTeamArea?: (expanded: boolean) => void;
   /** 打开右侧面板并切换到代码审核 Tab */
   onOpenCodeReview?: (target: CodeReviewTarget) => void;
+  /** 心跳面板展开状态：由 App.tsx 统一管理，跟团队/代码审核面板一样占用右侧工作区一栏 */
+  heartbeatPanelOpen?: boolean;
+  /** 切换心跳面板展开状态 */
+  onToggleHeartbeatPanel?: () => void;
   permissionsEnabled: boolean;
   onSavePermission: (updates: Record<string, string>) => Promise<void>;
   /** Goal（持续目标）控制，见 GoalBar 组件 */
@@ -713,6 +716,8 @@ export function ChatPanel({
   onNavigateToSkills,
   onToggleTeamArea,
   onOpenCodeReview,
+  heartbeatPanelOpen = false,
+  onToggleHeartbeatPanel,
   permissionsEnabled,
   onSavePermission,
   onSetGoal,
@@ -780,7 +785,6 @@ export function ChatPanel({
   const shouldShowShareExport = Boolean(onExportShare);
   const shouldShowHumanShare = mode === 'team' && teamHumanShareCommands.length > 0;
   const [humanShareOpen, setHumanShareOpen] = React.useState(false);
-  const [heartbeatPanelOpen, setHeartbeatPanelOpen] = React.useState(false);
   // 新会话占位符 'new' 还没有真实 session_id，隐藏心跳入口，见接口规格说明 §16.2
   const heartbeatAvailable = Boolean(activeSessionId && activeSessionId !== NEW_CONVERSATION_ID);
   const {
@@ -1091,22 +1095,22 @@ export function ChatPanel({
               <button
                 type="button"
                 className={`chat-header-icon-btn ${heartbeatPanelOpen ? 'chat-header-icon-btn--active' : ''}`}
-                onClick={() => setHeartbeatPanelOpen((v) => !v)}
+                onClick={() => onToggleHeartbeatPanel?.()}
                 title={t('heartbeat.panel.title')}
               >
-                <Activity size={16} strokeWidth={2} />
+                <Activity size={14} strokeWidth={2} />
               </button>
             )}
             <button
               type="button"
-              className={`chat-header-icon-btn ${!teamAreaExpanded ? 'chat-header-icon-btn--active' : ''}`}
+              className={`chat-header-icon-btn ${!teamAreaExpanded && !heartbeatPanelOpen ? 'chat-header-icon-btn--active' : ''}`}
               onClick={() => onToggleTeamArea?.(false)}
             >
               <img src={chatIcon} alt="" className="chat-header-icon-btn__icon" />
             </button>
             <button
               type="button"
-              className={`chat-header-icon-btn ${teamAreaExpanded ? 'chat-header-icon-btn--active' : ''}`}
+              className={`chat-header-icon-btn ${teamAreaExpanded && !heartbeatPanelOpen ? 'chat-header-icon-btn--active' : ''}`}
               onClick={() => onToggleTeamArea?.(true)}
             >
               <img src={expandIcon} alt="" className="chat-header-icon-btn__icon" />
@@ -1124,9 +1128,6 @@ export function ChatPanel({
           commands={teamHumanShareCommands}
           onClose={() => setHumanShareOpen(false)}
         />
-      )}
-      {heartbeatPanelOpen && heartbeatAvailable && (
-        <HeartbeatPanel sessionId={activeSessionId as string} onClose={() => setHeartbeatPanelOpen(false)} />
       )}
       <div ref={scrollContainerRef} className="chat-scroll flex-1 overflow-y-auto" onScroll={handleScroll} onWheel={handleWheel}>
         <div className={chatContentClassName}>
