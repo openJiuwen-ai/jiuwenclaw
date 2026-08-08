@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+﻿# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import asyncio
 import threading
@@ -1626,3 +1626,103 @@ def test_update_channel_subsection_in_config_overwrites_existing(tmp_path, monke
     assert len(saved["channels"]["feishu"]["apps"]) == 1
     assert saved["channels"]["feishu"]["apps"][0]["name"] == "新应用"
     assert saved["channels"]["feishu"]["apps"][0]["app_id"] == "new_id"
+class _McpFakeAgentClient:
+    """Minimal agent_client fake: returns a canned AgentResponse."""
+
+    def __init__(self, *, ok: bool, payload: dict):
+        self._ok = ok
+        self._payload = payload
+        self.server_ready = True
+        self.sent: list = []
+
+    async def send_request(self, envelope):
+        self.sent.append(envelope)
+        return SimpleNamespace(ok=self._ok, payload=self._payload)
+
+
+@pytest.mark.asyncio
+async def test_connector_list_is_local_and_does_not_forward() -> None:
+    """mcp.list is handled in the gateway (marketplace read) and never forwarded."""
+    from jiuwenswarm.server.runtime.mcp.registry import list_marketplace_mcps
+
+    channel = FakeWebChannel()
+    agent_client = _McpFakeAgentClient(ok=True, payload={"type": "list", "items": []})
+
+    _register_web_handlers(
+        WebHandlersBindParams(channel=channel, agent_client=agent_client)
+    )
+
+    assert "mcp.list" in channel.methods
+
+    # If the marketplace catalog is empty the handler still returns an empty list
+    # without touching the agent client; if non-empty, every item carries a name.
+    expected = list_marketplace_mcps()
+    await channel.methods["mcp.list"](
+        object(), "req-conn-list", {}, "sess-1",
+    )
+    assert agent_client.sent == []
+    resp = channel.responses[-1]
+    assert resp["ok"] is True
+    assert resp["payload"]["type"] == "list"
+    assert resp["payload"]["items"] == expected
+
+
+@pytest.mark.asyncio
+async def test_connector_show_is_local_and_validates_name() -> None:
+    """mcp.show is local; missing name surfaces a bad_request error without forwarding."""
+    channel = FakeWebChannel()
+    agent_client = _McpFakeAgentClient(ok=True, payload={"type": "detail", "item": {}})
+
+    _register_web_handlers(
+        WebHandlersBindParams(channel=channel, agent_client=agent_client)
+    )
+
+    await channel.methods["mcp.show"](
+        object(), "req-conn-show", {}, "sess-1",
+    )
+    assert agent_client.sent == []
+    resp = channel.responses[-1]
+    assert resp["ok"] is False
+    assert resp["code"] == "MCP_BAD_REQUEST"
+
+
+@pytest.mark.asyncio
+async def test_connector_forward_propagates_agent_error() -> None:
+    """Forwarded methods (mcp.connect) surface AgentServer ok=False error/code."""
+    channel = FakeWebChannel()
+    agent_client = _McpFakeAgentClient(
+        ok=False, payload={"error": "not found", "code": "MCP_NOT_FOUND"}
+    )
+
+    _register_web_handlers(
+        WebHandlersBindParams(channel=channel, agent_client=agent_client)
+    )
+
+    await channel.methods["mcp.connect"](
+        object(), "req-conn-err", {"name": "nope"}, "sess-1",
+    )
+    assert len(agent_client.sent) == 1
+    resp = channel.responses[-1]
+    assert resp["ok"] is False
+    assert resp["error"] == "not found"
+    assert resp["code"] == "MCP_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_connector_forward_reports_when_agent_not_ready() -> None:
+    """Forwarded methods return AGENT_NOT_READY and skip the agent when not ready."""
+    channel = FakeWebChannel()
+    agent_client = _McpFakeAgentClient(ok=True, payload={})
+    agent_client.server_ready = False
+
+    _register_web_handlers(
+        WebHandlersBindParams(channel=channel, agent_client=agent_client)
+    )
+
+    await channel.methods["mcp.connect"](
+        object(), "req-conn-nr", {"name": "feishu"}, "sess-1",
+    )
+    resp = channel.responses[-1]
+    assert resp["ok"] is False
+    assert resp["code"] == "AGENT_NOT_READY"
+    assert agent_client.sent == []

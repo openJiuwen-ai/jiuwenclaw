@@ -1,0 +1,207 @@
+﻿# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
+"""Tests: MCP state store.
+
+state.json is the per-MCP connection/enabled store, decoupled from
+config.yaml. These tests cover upsert/remove/toggle/read + BOM tolerance
++ connector_to_mcp_entry shape + placeholder preservation.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+from jiuwenswarm.server.runtime.mcp import state_store as ss
+
+
+def _mk_entry(name="baidu", *, transport="sse", url="https://x/sse",
+              headers=None, command=None, args=None, env=None):
+    e: dict = {"name": name, "transport": transport, "enabled": True,
+               "server_id_scope": f"mcp:{name}"}
+    if url:
+        e["url"] = url
+    if headers is not None:
+        e["headers"] = headers
+    if command:
+        e["command"] = command
+    if args is not None:
+        e["args"] = args
+    if env is not None:
+        e["env"] = env
+    return e
+
+
+def test_upsert_then_read_roundtrip(tmp_path: Path) -> None:
+    with patch("jiuwenswarm.server.runtime.mcp.state_store.get_workspace_dir", return_value=tmp_path):
+        entry = _mk_entry(headers={"Authorization": "Bearer ${T}"})
+        rec = ss.upsert_mcp_record("baidu", entry)
+        assert rec["state"] == "connected"
+        assert rec["enabled"] is True
+        got = ss.get_mcp_record("baidu")
+        assert got is not None
+        assert got["transport"] == "sse"
+        assert got["headers"] == {"Authorization": "Bearer ${T}"}
+        assert got["state"] == "connected"
+
+
+def test_upsert_preserves_placeholders(tmp_path: Path) -> None:
+    """${VAR} must stay literal — state.json never resolves env vars.
+    Token resolution happens later at McpServerConfig build via CredentialStore."""
+    with patch("jiuwenswarm.server.runtime.mcp.state_store.get_workspace_dir", return_value=tmp_path):
+        entry = _mk_entry(headers={"Authorization": "Bearer ${GITHUB_TOKEN}"})
+        ss.upsert_mcp_record("github", entry)
+        rec = ss.get_mcp_record("github")
+        assert rec["headers"]["Authorization"] == "Bearer ${GITHUB_TOKEN}"
+
+
+def test_remove(tmp_path: Path) -> None:
+    with patch("jiuwenswarm.server.runtime.mcp.state_store.get_workspace_dir", return_value=tmp_path):
+        ss.upsert_mcp_record("baidu", _mk_entry())
+        removed = ss.remove_mcp_record("baidu")
+        assert removed is not None
+        assert ss.get_mcp_record("baidu") is None
+        # idempotent: removing again returns None
+        assert ss.remove_mcp_record("baidu") is None
+
+
+def test_set_enabled_flips_flag(tmp_path: Path) -> None:
+    with patch("jiuwenswarm.server.runtime.mcp.state_store.get_workspace_dir", return_value=tmp_path):
+        ss.upsert_mcp_record("baidu", _mk_entry(), enabled=True)
+        rec = ss.set_mcp_enabled("baidu", False)
+        assert rec["enabled"] is False
+        assert ss.get_mcp_record("baidu")["enabled"] is False
+        ss.set_mcp_enabled("baidu", True)
+        assert ss.get_mcp_record("baidu")["enabled"] is True
+
+
+def test_set_enabled_missing_raises(tmp_path: Path) -> None:
+    with patch("jiuwenswarm.server.runtime.mcp.state_store.get_workspace_dir", return_value=tmp_path):
+        with pytest.raises(KeyError):
+            ss.set_mcp_enabled("nope", True)
+
+
+def test_list_connected_filters_state(tmp_path: Path) -> None:
+    with patch("jiuwenswarm.server.runtime.mcp.state_store.get_workspace_dir", return_value=tmp_path):
+        ss.upsert_mcp_record("baidu", _mk_entry(), state="connected")
+        ss.upsert_mcp_record("github", _mk_entry("github"), state="disconnected")
+        connected = ss.list_connected_mcps()
+        names = {c["name"] for c in connected}
+        assert names == {"baidu"}
+
+
+def test_upsert_merges_fields_preserving_extras(tmp_path: Path) -> None:
+    """A second upsert preserves integration_type/skills from prior state if
+    not re-supplied (so enable/disable don't clobber metadata)."""
+    with patch("jiuwenswarm.server.runtime.mcp.state_store.get_workspace_dir", return_value=tmp_path):
+        ss.upsert_mcp_record("feishu", _mk_entry("feishu", transport="http", url=""),
+                                  integration_type="cli", skills=["feishu"])
+        # Re-upsert with just entry (no integration_type/skills) — prior values stay.
+        ss.upsert_mcp_record("feishu", _mk_entry("feishu", transport="http", url=""))
+        rec = ss.get_mcp_record("feishu")
+        assert rec["integration_type"] == "cli"
+        assert rec["skills"] == ["feishu"]
+
+
+def test_read_tolerates_bom(tmp_path: Path) -> None:
+    """A state.json written with a UTF-8 BOM must still parse (matching
+    CredentialStore's BOM tolerance)."""
+    with patch("jiuwenswarm.server.runtime.mcp.state_store.get_workspace_dir", return_value=tmp_path):
+        p = ss._state_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        body = json.dumps({"version": 1, "mcp": {
+            "baidu": {"transport": "sse", "state": "connected", "enabled": True}
+        }, "mounts": {}})
+        p.write_bytes(b"\xef\xbb\xbf" + body.encode("utf-8"))
+        rec = ss.get_mcp_record("baidu")
+        assert rec is not None
+        assert rec["state"] == "connected"
+
+
+def test_read_missing_returns_empty(tmp_path: Path) -> None:
+    with patch("jiuwenswarm.server.runtime.mcp.state_store.get_workspace_dir", return_value=tmp_path):
+        st = ss.read_mcp_state()
+        assert st["mcp"] == {}
+        assert ss.get_mcp_record("nope") is None
+
+
+def test_read_corrupt_returns_empty(tmp_path: Path) -> None:
+    with patch("jiuwenswarm.server.runtime.mcp.state_store.get_workspace_dir", return_value=tmp_path):
+        p = ss._state_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("not json {{{", encoding="utf-8")
+        st = ss.read_mcp_state()
+        assert st["mcp"] == {}
+
+
+def test_connector_to_mcp_entry_shape(tmp_path: Path) -> None:
+    """record_to_mcp_entry yields a dict the adapter's
+    _build_mcp_server_config can consume identically to a config.yaml entry."""
+    record = {
+        "transport": "sse", "url": "https://x/sse",
+        "headers": {"Authorization": "Bearer ${T}"},
+        "server_id_scope": "mcp:baidu", "enabled": True,
+    }
+    entry = ss.record_to_mcp_entry("baidu", record)
+    assert entry["name"] == "baidu"
+    assert entry["transport"] == "sse"
+    assert entry["url"] == "https://x/sse"
+    assert entry["headers"] == {"Authorization": "Bearer ${T}"}
+    assert entry["enabled"] is True
+    assert entry["server_id_scope"] == "mcp:baidu"
+
+
+def test_connector_to_mcp_entry_skill_only_returns_none() -> None:
+    """Skill-only connectors (no transport/url/command — only server_id_scope
+    + skills) return None. They have no MCP server to register, so they must
+    NOT appear in the merged mcp.servers list — otherwise the adapter tries to
+    build a McpServerConfig from a fake streamable-http entry with no url and
+    logs a spurious "invalid entry" warning on every reload."""
+    # skill-only record: only name + server_id_scope + skills, no MCP host
+    record = {
+        "server_id_scope": "mcp:ctrip-wendao",
+        "enabled": True,
+        "integration_type": "skill-only",
+        "skills": ["ctrip-wendao"],
+    }
+    assert ss.record_to_mcp_entry("ctrip-wendao", record) is None
+
+
+def test_connector_to_mcp_entry_pure_cli_returns_none() -> None:
+    """Pure CLI connectors (feishu: no mcp.json, tools via skill + CLI binary)
+    also return None — same as skill-only, they have no MCP server."""
+    record = {
+        "server_id_scope": "mcp:feishu",
+        "enabled": True,
+        "integration_type": "cli",
+        "skills": ["lark-doc", "lark-im"],
+    }
+    assert ss.record_to_mcp_entry("feishu", record) is None
+
+
+def test_connector_to_mcp_entry_stdio_has_host_returns_entry() -> None:
+    """stdio connectors (transport=stdio + command) DO return an entry —
+    they have a real MCP server to spawn."""
+    record = {
+        "transport": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-jira"],
+        "env": {"JIRA_TOKEN": "${JIRA_TOKEN}"},
+        "server_id_scope": "mcp:jira",
+        "enabled": True,
+    }
+    entry = ss.record_to_mcp_entry("jira", record)
+    assert entry is not None
+    assert entry["transport"] == "stdio"
+    assert entry["command"] == "npx"
+
+
+def test_persists_across_instances(tmp_path: Path) -> None:
+    """Two store accesses over the same workspace share state (file-backed)."""
+    with patch("jiuwenswarm.server.runtime.mcp.state_store.get_workspace_dir", return_value=tmp_path):
+        ss.upsert_mcp_record("baidu", _mk_entry())
+        # Simulate a "new process" by just calling read again (no in-memory cache).
+        assert ss.get_mcp_record("baidu") is not None

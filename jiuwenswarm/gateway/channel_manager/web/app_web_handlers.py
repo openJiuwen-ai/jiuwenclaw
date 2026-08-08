@@ -85,6 +85,7 @@ from jiuwenswarm.server.runtime.a2ui.integration import (
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.common.updater import DEFAULT_SOURCE_CONFIG, UpdaterService
+from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.common.utils import (
     get_agent_sessions_dir,
     get_env_file,
@@ -1103,7 +1104,6 @@ async def _clear_agent_config_cache(agent_client=None) -> None:
     try:
         if agent_client is not None:
             from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
-            from jiuwenswarm.common.schema.message import ReqMethod
 
             env = e2a_from_agent_fields(
                 request_id=f"cfg-reload-{uuid.uuid4().hex[:8]}",
@@ -1128,7 +1128,6 @@ async def _restart_agent_browser_runtime(
         return
 
     from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
-    from jiuwenswarm.common.schema.message import ReqMethod
 
     env = e2a_from_agent_fields(
         request_id=f"browser-restart-{uuid.uuid4().hex[:8]}",
@@ -2884,7 +2883,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
         from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
-        from jiuwenswarm.common.schema.message import ReqMethod
 
         ac = _resolve(agent_client)
         if ac is not None and getattr(ac, "server_ready", False):
@@ -6137,7 +6135,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         """permissions.*：优先经 E2A 转发到 AgentServer；Agent 未就绪时本地执行（与 config_rpc 同源）。"""
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
         from jiuwenswarm.common.schema.agent import AgentRequest
-        from jiuwenswarm.common.schema.message import ReqMethod
 
         if not isinstance(req_method, ReqMethod):
             await channel.send_response(ws, req_id, ok=False, error="invalid req_method", code="INTERNAL_ERROR")
@@ -6209,6 +6206,87 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         out = resp.payload if isinstance(resp.payload, dict) else {}
         await channel.send_response(ws, req_id, ok=True, payload=out)
 
+    async def _forward_mcp_to_agent(ws, req_id, params, session_id, *, req_method):
+        """mcp.* : 经 E2A 转发到 AgentServer。"""
+        from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+
+        if not isinstance(req_method, ReqMethod):
+            await channel.send_response(ws, req_id, ok=False, error="invalid req_method", code="INTERNAL_ERROR")
+            return
+
+        ac = _resolve(agent_client)
+        if ac is None or not getattr(ac, "server_ready", False):
+            await channel.send_response(ws, req_id, ok=False, error="AgentServer not ready", code="AGENT_NOT_READY")
+            return
+
+        env = e2a_from_agent_fields(
+            request_id=str(req_id) if req_id else "",
+            channel_id="",
+            session_id=session_id,
+            req_method=req_method,
+            params=dict(params) if isinstance(params, dict) else {},
+        )
+        try:
+            resp = await ac.send_request(env)
+        except Exception as e:
+            logger.exception("[mcp] forward to agent failed: %s", e)
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
+            return
+        if not resp.ok:
+            pl = resp.payload if isinstance(resp.payload, dict) else {}
+            await channel.send_response(ws, req_id, ok=False, error=str(pl.get("error") or "request failed"), code=str(pl.get("code") or "BAD_REQUEST"))
+            return
+        out = resp.payload if isinstance(resp.payload, dict) else {}
+        await channel.send_response(ws, req_id, ok=True, payload=out)
+
+    async def _mcp_list_local(ws, req_id, params, session_id):
+        # 本地处理(不转发 AgentServer)，避免被长连接 connect 阻塞。直接读 marketplace。
+        try:
+            from jiuwenswarm.server.runtime.mcp.registry import list_marketplace_mcps
+            items = await asyncio.to_thread(list_marketplace_mcps)
+            await channel.send_response(ws, req_id, ok=True, payload={"type": "list", "items": items})
+        except Exception as exc:
+            logger.exception("[mcp] mcp.list failed: %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="MCP_INTERNAL")
+
+    async def _mcp_show_local(ws, req_id, params, session_id):
+        try:
+            from jiuwenswarm.server.runtime.mcp.registry import get_mcp
+            name = str((params or {}).get("name", "")).strip()
+            if not name:
+                raise ValueError("mcp name is required")
+            item = await asyncio.to_thread(get_mcp, name)
+            if item is None:
+                raise KeyError("mcp '{0}' not found".format(name))
+            # Connected MCP but ToolMgr returned no tools: fall back to a
+            # temporary connection. Shared with the agent-layer show so the
+            # fallback logic lives in one place (fill_mcp_tools_fallback).
+            from jiuwenswarm.common.mcp_config import fill_mcp_tools_fallback
+            await fill_mcp_tools_fallback(item, name)
+            await channel.send_response(ws, req_id, ok=True, payload={"type": "detail", "item": item})
+        except ValueError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="MCP_BAD_REQUEST")
+        except KeyError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="MCP_NOT_FOUND")
+        except Exception as exc:
+            logger.exception("[mcp] mcp.show failed: %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="MCP_INTERNAL")
+
+    def _register_mcp_agent(method_name: str, rm: Any) -> None:
+        async def _handler(ws, req_id, params, session_id):
+            await _forward_mcp_to_agent(ws, req_id, params, session_id, req_method=rm)
+        channel.register_method(method_name, _handler)
+
+    channel.register_method("mcp.list", _mcp_list_local)
+    channel.register_method("mcp.show", _mcp_show_local)
+    _register_mcp_agent("mcp.connect", ReqMethod.MCP_CONNECT)
+    _register_mcp_agent("mcp.wait_auth", ReqMethod.MCP_WAIT_AUTH)
+    _register_mcp_agent("mcp.disconnect", ReqMethod.MCP_DISCONNECT)
+    _register_mcp_agent("mcp.enable", ReqMethod.MCP_ENABLE)
+    _register_mcp_agent("mcp.disable", ReqMethod.MCP_DISABLE)
+    _register_mcp_agent("mcp.register_custom", ReqMethod.MCP_REGISTER_CUSTOM)
+    _register_mcp_agent("mcp.delete_custom", ReqMethod.MCP_DELETE_CUSTOM)
+    _register_mcp_agent("mcp.save_credentials", ReqMethod.MCP_SAVE_CREDENTIALS)
     from jiuwenswarm.common.schema.message import ReqMethod as _PermReq
 
     def _register_perm(method_name: str, rm: Any) -> None:
