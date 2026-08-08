@@ -6,7 +6,16 @@ from zoneinfo import ZoneInfo
 
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 
-from jiuwenswarm.gateway.cron.cron_expr import normalize_cron_expr
+from jiuwenswarm.gateway.cron.cron_expr import clamp_wake_offset_for_delay_seconds, normalize_cron_expr
+from jiuwenswarm.gateway.cron.enterprise_gate import (
+    coerce_routing_id,
+    enterprise_cron_enabled,
+    extract_routing_triple,
+    is_enterprise_edition,
+    job_matches_routing,
+    routing_triple_complete,
+    strip_sticky_identity_fields,
+)
 from jiuwenswarm.gateway.cron.models import (
     CRON_JOB_DESCRIPTION_MAX_LENGTH,
     CRON_JOB_NAME_MAX_LENGTH,
@@ -20,6 +29,7 @@ from jiuwenswarm.gateway.cron.models import (
 )
 from jiuwenswarm.gateway.cron.scheduler import CronSchedulerService, _cron_next_push_dt
 from jiuwenswarm.gateway.cron.store_base import CronJobStoreBackend
+from jiuwenswarm.common.utils import logger
 
 
 class CronController:
@@ -77,6 +87,95 @@ class CronController:
         base = datetime.now(tz=tz)
         _ = _cron_next_push_dt(cron_expr, base)
 
+    @staticmethod
+    def _clamp_wake_offset_for_upcoming_run(
+        wake_offset_seconds: Any,
+        *,
+        cron_expr: str,
+        timezone: str,
+    ) -> Any:
+        """企业创建兜底：wake_offset 不得超过距下次 push 的剩余秒数。"""
+        try:
+            tz = ZoneInfo(timezone)
+            now = datetime.now(tz=tz)
+            push_dt = _cron_next_push_dt(cron_expr, now)
+            delay = float(push_dt.timestamp() - now.timestamp())
+            if delay <= 0:
+                return wake_offset_seconds
+            clamped = clamp_wake_offset_for_delay_seconds(wake_offset_seconds, delay)
+            if wake_offset_seconds is not None:
+                try:
+                    before = int(wake_offset_seconds)
+                except (TypeError, ValueError):
+                    before = wake_offset_seconds
+            else:
+                before = None
+            if before != clamped:
+                logger.info(
+                    "[Cron] clamp wake_offset for upcoming run delay≈%.1fs: %s -> %s",
+                    delay,
+                    before,
+                    clamped,
+                )
+            return clamped
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[Cron] skip wake_offset clamp: %s", exc)
+            return wake_offset_seconds
+
+    @staticmethod
+    def _parse_list_filters(params: dict[str, Any] | None) -> dict[str, Any]:
+        params = dict(params or {})
+        g, b, u = extract_routing_triple(params)
+        out: dict[str, Any] = {}
+        if g:
+            out["group_id"] = g
+        if b:
+            out["bot_id"] = b
+        if u:
+            out["user_id"] = u
+        match = str(params.get("match") or "and").strip().lower() or "and"
+        out["match"] = match if match in ("and", "or") else "and"
+        out["include_unbound"] = bool(params.get("include_unbound", False))
+        return out
+
+    @staticmethod
+    def _require_enterprise_routing(params: dict[str, Any] | None) -> tuple[str, str, str]:
+        if is_enterprise_edition() and not enterprise_cron_enabled():
+            raise PermissionError(
+                "enterprise cron is not ready: jiuwenclaw_id not bound "
+                "(refuse write path; will not fall back to file store)"
+            )
+        g, b, u = extract_routing_triple(params or {})
+        if enterprise_cron_enabled():
+            if not g or not b or not u:
+                raise ValueError(
+                    "enterprise cron requires group_id, bot_id and user_id"
+                )
+            return g, b, u
+        return g or "", b or "", u or ""
+
+    @staticmethod
+    def _assert_job_owned(
+        job: Any,
+        *,
+        group_id: str | None,
+        bot_id: str | None,
+        user_id: str | None,
+    ) -> None:
+        if not enterprise_cron_enabled():
+            return
+        if not routing_triple_complete(group_id, bot_id, user_id):
+            raise KeyError("job not found")
+        if not job_matches_routing(
+            job,
+            group_id=group_id,
+            bot_id=bot_id,
+            user_id=user_id,
+            match="and",
+            include_unbound=False,
+        ):
+            raise KeyError("job not found")
+
     _DESCRIPTION_TIME_KEYWORDS = ("每天", "每周", "每月", "上午", "下午", "早上", "晚上", "凌晨")
 
     def _normalize_targets(self, raw: Any) -> str:
@@ -122,19 +221,50 @@ class CronController:
             return raw_s
         return raw_s
 
-    async def list_jobs(self) -> list[dict[str, Any]]:
+    async def list_jobs(self, filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        parsed = self._parse_list_filters(filters)
+        if enterprise_cron_enabled():
+            if not routing_triple_complete(
+                parsed.get("group_id"),
+                parsed.get("bot_id"),
+                parsed.get("user_id"),
+            ):
+                raise ValueError(
+                    "enterprise cron list requires group_id, bot_id and user_id"
+                )
+            store_filters = {
+                "group_id": parsed["group_id"],
+                "bot_id": parsed["bot_id"],
+                "user_id": parsed["user_id"],
+            }
+            jobs = await self._store.list_jobs(filters=store_filters)
+            return [j.to_dict() for j in jobs]
         jobs = await self._store.list_jobs()
         return [j.to_dict() for j in jobs]
 
-    async def get_job(self, job_id: str) -> dict[str, Any] | None:
+    async def get_job(
+        self,
+        job_id: str,
+        *,
+        group_id: str | None = None,
+        bot_id: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, Any] | None:
         job = await self._store.get_job(job_id)
-        return job.to_dict() if job else None
+        if job is None:
+            return None
+        try:
+            self._assert_job_owned(job, group_id=group_id, bot_id=bot_id, user_id=user_id)
+        except KeyError:
+            return None
+        return job.to_dict()
 
     @staticmethod
     def job_metadata() -> dict[str, Any]:
         return cron_job_metadata()
 
     async def create_job(self, params: dict[str, Any]) -> dict[str, Any]:
+        params = dict(params or {})
         name = str(params.get("name") or "").strip()
         cron_expr = normalize_cron_expr(str(params.get("cron_expr") or "").strip())
         timezone = str(params.get("timezone") or "Asia/Shanghai").strip() or "Asia/Shanghai"
@@ -153,6 +283,13 @@ class CronController:
 
         self._validate_schedule(cron_expr=cron_expr, timezone=timezone)
         description = self._normalize_description(description, name)
+
+        if is_enterprise_edition():
+            wake_offset_seconds = self._clamp_wake_offset_for_upcoming_run(
+                wake_offset_seconds,
+                cron_expr=cron_expr,
+                timezone=timezone,
+            )
 
         routing_sid = self._routing_session_id(targets, params.get("session_id"))
         chat_type = params.get("chat_type")
@@ -189,30 +326,54 @@ class CronController:
         resolved_project_id = binding.project_id
         work_mode = binding.work_mode
         app_id = str(params.get("app_id") or "").strip()
-        job = await self._store.create_job(
-            job_id=str(params.get("id") or "").strip() or None,
-            name=name,
-            cron_expr=cron_expr,
-            timezone=timezone,
-            enabled=enabled,
-            wake_offset_seconds=int(wake_offset_seconds) if wake_offset_seconds is not None else None,
-            description=description,
-            targets=targets,
-            session_id=routing_sid,
-            chat_type=chat_type,
-            mode=mode,
-            delete_after_run=delete_after_run,
-            timeout_seconds=timeout_seconds,
-            project_id=resolved_project_id,
-            model_name=model_name,
-            app_id=app_id,
-            work_mode=work_mode,
-        )
+
+        g, b, u = self._require_enterprise_routing(params)
+        group_id = g or coerce_routing_id(params.get("group_id"))
+        bot_id = b or coerce_routing_id(params.get("bot_id"))
+        user_id = u or coerce_routing_id(params.get("user_id"))
+
+        create_kwargs: dict[str, Any] = {
+            "job_id": str(params.get("id") or "").strip() or None,
+            "name": name,
+            "cron_expr": cron_expr,
+            "timezone": timezone,
+            "enabled": enabled,
+            "wake_offset_seconds": int(wake_offset_seconds) if wake_offset_seconds is not None else None,
+            "description": description,
+            "targets": targets,
+            "session_id": routing_sid,
+            "chat_type": chat_type,
+            "mode": mode,
+            "delete_after_run": delete_after_run,
+            "timeout_seconds": timeout_seconds,
+            "project_id": resolved_project_id,
+            "model_name": model_name,
+            "app_id": app_id,
+            "work_mode": work_mode,
+        }
+        if enterprise_cron_enabled():
+            create_kwargs["group_id"] = group_id
+            create_kwargs["bot_id"] = bot_id
+            create_kwargs["user_id"] = user_id
+
+        job = await self._store.create_job(**create_kwargs)
         await self._scheduler.reload()
         return job.to_dict()
 
-    async def update_job(self, job_id: str, patch: dict[str, Any]) -> dict[str, Any]:
-        patch = dict(patch or {})
+    async def update_job(
+        self,
+        job_id: str,
+        patch: dict[str, Any],
+        *,
+        group_id: str | None = None,
+        bot_id: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        if is_enterprise_edition() and not enterprise_cron_enabled():
+            raise PermissionError(
+                "enterprise cron is not ready: jiuwenclaw_id not bound"
+            )
+        patch = strip_sticky_identity_fields(dict(patch or {}))
         if "mode" in patch:
             patch["mode"] = normalize_cron_job_mode(patch.get("mode"))
         if "model_name" in patch:
@@ -222,6 +383,7 @@ class CronController:
         existing = await self._store.get_job(job_id)
         if existing is None:
             raise KeyError("job not found")
+        self._assert_job_owned(existing, group_id=group_id, bot_id=bot_id, user_id=user_id)
         if "cron_expr" in patch:
             patch["cron_expr"] = normalize_cron_expr(str(patch["cron_expr"]).strip())
         if "cron_expr" in patch or "timezone" in patch:
@@ -256,21 +418,60 @@ class CronController:
         await self._scheduler.reload()
         return job.to_dict()
 
-    async def delete_job(self, job_id: str, *, force: bool = False) -> bool:
+    async def delete_job(
+        self,
+        job_id: str,
+        *,
+        force: bool = False,
+        group_id: str | None = None,
+        bot_id: str | None = None,
+        user_id: str | None = None,
+        skip_ownership: bool = False,
+    ) -> bool:
+        if is_enterprise_edition() and not enterprise_cron_enabled():
+            raise PermissionError(
+                "enterprise cron is not ready: jiuwenclaw_id not bound"
+            )
+        existing = await self._store.get_job(job_id)
+        if existing is None:
+            return False
+        if not skip_ownership:
+            self._assert_job_owned(existing, group_id=group_id, bot_id=bot_id, user_id=user_id)
         deleted = await self._store.delete_job(job_id, force=force)
         if deleted:
             await self._scheduler.reload()
         return deleted
 
-    async def toggle_job(self, job_id: str, enabled: bool) -> dict[str, Any]:
-        job = await self._store.update_job(job_id, {"enabled": bool(enabled)})
-        await self._scheduler.reload()
-        return job.to_dict()
+    async def toggle_job(
+        self,
+        job_id: str,
+        enabled: bool,
+        *,
+        group_id: str | None = None,
+        bot_id: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        return await self.update_job(
+            job_id,
+            {"enabled": bool(enabled)},
+            group_id=group_id,
+            bot_id=bot_id,
+            user_id=user_id,
+        )
 
-    async def preview_job(self, job_id: str, count: int = 5) -> list[dict[str, Any]]:
+    async def preview_job(
+        self,
+        job_id: str,
+        count: int = 5,
+        *,
+        group_id: str | None = None,
+        bot_id: str | None = None,
+        user_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         job = await self._store.get_job(job_id)
         if job is None:
             raise KeyError("job not found")
+        self._assert_job_owned(job, group_id=group_id, bot_id=bot_id, user_id=user_id)
         count = max(1, min(int(count), 50))
 
         tz = ZoneInfo(job.timezone)
@@ -291,7 +492,18 @@ class CronController:
             out.append({"wake_at": wake_dt.isoformat(), "push_at": push_dt.isoformat()})
         return out
 
-    async def run_now(self, job_id: str) -> str:
+    async def run_now(
+        self,
+        job_id: str,
+        *,
+        group_id: str | None = None,
+        bot_id: str | None = None,
+        user_id: str | None = None,
+    ) -> str:
+        job = await self._store.get_job(job_id)
+        if job is None:
+            raise KeyError("job not found")
+        self._assert_job_owned(job, group_id=group_id, bot_id=bot_id, user_id=user_id)
         run_id = await self._scheduler.trigger_run_now(job_id)
         return run_id
 

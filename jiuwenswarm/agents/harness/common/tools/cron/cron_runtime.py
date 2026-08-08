@@ -60,6 +60,9 @@ class _CronToolsCronBackend(CronToolBackend):
         project_id = str(metadata.get("project_id") or "").strip()
         work_mode = str(metadata.get("work_mode") or "").strip()
         app_id = str(metadata.get("app_id") or "").strip()
+        from jiuwenswarm.gateway.cron.enterprise_gate import extract_routing_triple
+
+        group_id, bot_id, user_id = extract_routing_triple(metadata, context)
         return CronToolRoute(
             request_id=request_id,
             channel_id=channel_id,
@@ -69,6 +72,9 @@ class _CronToolsCronBackend(CronToolBackend):
             project_id=project_id,
             work_mode=work_mode,
             app_id=app_id,
+            group_id=group_id,
+            bot_id=bot_id,
+            user_id=user_id,
         )
 
     async def list_jobs(self, *, include_disabled: bool = True) -> list[dict[str, Any]]:

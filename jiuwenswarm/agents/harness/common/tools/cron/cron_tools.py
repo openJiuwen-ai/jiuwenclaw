@@ -46,6 +46,9 @@ class CronToolRoute:
     project_dir: str = ""  # 当前 agent 工作目录，用于 cron 任务归属项目解析
     project_id: str = ""  # 当前会话锁定项目 ID；优先于 project_dir，避免同路径双模式误判
     work_mode: str = ""  # 当前会话锁定工作模式，用于 project_dir 归属消歧
+    group_id: str | None = None
+    bot_id: str | None = None
+    user_id: str | None = None
 
 
 class CronTools:
@@ -76,6 +79,8 @@ class CronTools:
 
     async def ensure_scheduler(self) -> CronSchedulerService | None:
         """Ensure the scheduler is started."""
+        if self._enterprise_ready():
+            return None
         if self._scheduler is not None and self._scheduler.is_running():
             return self._scheduler
         
@@ -154,10 +159,54 @@ class CronTools:
         r = _cron_route_ctx.get()
         return r if r is not None else CronToolRoute()
 
+    @staticmethod
+    def _enterprise_ready() -> bool:
+        from jiuwenswarm.gateway.cron.enterprise_gate import enterprise_cron_enabled
+
+        return enterprise_cron_enabled()
+
+    def _routing_identity_payload(self) -> dict[str, str]:
+        r = self._route()
+        out: dict[str, str] = {}
+        if r.group_id:
+            out["group_id"] = r.group_id
+        if r.bot_id:
+            out["bot_id"] = r.bot_id
+        if r.user_id:
+            out["user_id"] = r.user_id
+        return out
+
+    async def _list_jobs_enterprise(self) -> list[dict[str, Any]]:
+        from jiuwenswarm.gateway.cron.db_store import _row_to_job
+        from jiuwenswarm.gateway.cron.enterprise_gate import (
+            extract_routing_triple,
+            get_bound_jiuwenclaw_id,
+            routing_triple_complete,
+        )
+        from jiuwenswarm.server.runtime.enterprise_config import gateway_db
+
+        identity = self._routing_identity_payload()
+        g, b, u = extract_routing_triple(identity)
+        if not routing_triple_complete(g, b, u):
+            raise ValueError("enterprise cron list requires group_id, bot_id and user_id")
+        filters: dict[str, Any] = {"group_id": g, "bot_id": b, "user_id": u}
+        jid = get_bound_jiuwenclaw_id()
+        if jid:
+            filters["jiuwenclaw_id"] = jid
+        rows = await gateway_db.list_records("cron_job", filters=filters, order_by="updated_at DESC")
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            job = _row_to_job(row)
+            if job is not None:
+                out.append(job.to_dict())
+        return out
+
     async def _send_split(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
         from jiuwenswarm.common.e2a.constants import E2A_RESPONSE_KIND_CRON
 
         r = self._route()
+        data = dict(params or {})
+        data.update(self._routing_identity_payload())
         payload = {
             "request_id": r.request_id,
             "channel_id": r.channel_id,
@@ -166,7 +215,7 @@ class CronTools:
             "body": {
                 "action": action,
                 "status": "ok",
-                "data": dict(params or {}),
+                "data": data,
                 "message": "",
             },
         }
@@ -263,6 +312,8 @@ class CronTools:
         return payload
 
     async def list_jobs(self) -> Any:
+        if self._enterprise_ready():
+            return await self._list_jobs_enterprise()
         jobs = await self._local_store.list_jobs()
         # 给受保护的 proactive.tick job 标记 protected，让 LLM 在批量操作时
         # （如"删除所有定时任务"）能识别并优雅跳过，而不是删到一半才遇错。
@@ -278,6 +329,12 @@ class CronTools:
         return out
 
     async def get_job(self, job_id: str) -> Any:
+        if self._enterprise_ready():
+            jobs = await self._list_jobs_enterprise()
+            for item in jobs:
+                if str(item.get("id") or "") == str(job_id or "").strip():
+                    return item
+            return None
         job = await self._local_store.get_job(job_id)
         return job.to_dict() if job else None
 
@@ -349,6 +406,20 @@ class CronTools:
         resolved_project_id = binding.project_id
         work_mode = binding.work_mode
 
+        if self._enterprise_ready():
+            push_payload = {
+                **normalized,
+                "id": str(normalized.get("id") or "").strip() or None,
+                "project_id": resolved_project_id,
+                "work_mode": work_mode,
+                **session_kw,
+                **mode_kw,
+                **model_kw,
+            }
+            push_payload.update(self._routing_identity_payload())
+            await self._send("create", push_payload)
+            return push_payload
+
         job = await self._local_store.create_job(
             job_id=str(normalized.get("id") or "").strip() or None,
             name=str(normalized.get("name") or "").strip(),
@@ -417,6 +488,15 @@ class CronTools:
         if "session_id" in normalized_patch or "targets" in normalized_patch:
             chat_type = self._route().chat_type
             normalized_patch["chat_type"] = chat_type if chat_type else None
+
+        identity = self._routing_identity_payload()
+        if self._enterprise_ready():
+            await self._send(
+                "update",
+                {"job_id": job_id, "patch": self._sync_patch_payload(normalized_patch), **identity},
+            )
+            return {"job_id": job_id, "status": "forwarded"}
+
         job = await self._local_store.update_job(job_id, normalized_patch)
         try:
             await self._send(
@@ -432,6 +512,10 @@ class CronTools:
         return job.to_dict()
 
     async def delete_job(self, job_id: str) -> Any:
+        identity = self._routing_identity_payload()
+        if self._enterprise_ready():
+            await self._send("delete", {"job_id": job_id, **identity})
+            return True
         deleted = await self._local_store.delete_job(job_id)
         try:
             await self._send("delete", {"job_id": job_id})
@@ -451,6 +535,10 @@ class CronTools:
             raise RuntimeError(
                 "主动推荐定时任务由设置→主动推荐开关控制，不能手动启停；请到设置→主动推荐操作。"
             )
+        identity = self._routing_identity_payload()
+        if self._enterprise_ready():
+            await self._send("toggle", {"job_id": job_id, "enabled": bool(enabled), **identity})
+            return {"job_id": job_id, "enabled": bool(enabled), "status": "forwarded"}
         job = await self._local_store.update_job(job_id, {"enabled": bool(enabled)})
         try:
             await self._send("toggle", {"job_id": job_id, "enabled": bool(enabled)})

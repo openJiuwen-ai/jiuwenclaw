@@ -2838,6 +2838,12 @@ class MessageHandler(ABC):
     def set_cron_controller(self, controller: Any) -> None:
         self._cron_controller = controller
 
+    @staticmethod
+    def _cron_routing_from_params(params: dict[str, Any]) -> tuple[str | None, str | None, str | None]:
+        from jiuwenswarm.gateway.cron.enterprise_gate import extract_routing_triple
+
+        return extract_routing_triple(params)
+
     async def _handle_cron_push_payload(
         self,
         *,
@@ -2855,10 +2861,11 @@ class MessageHandler(ABC):
         if not isinstance(params, dict):
             params = {}
         try:
+            g, b, u = self._cron_routing_from_params(params)
             if action == "list":
-                data = await cc.list_jobs()
+                data = await cc.list_jobs(params)
             elif action == "get":
-                data = await cc.get_job(str(params.get("job_id") or ""))
+                data = await cc.get_job(str(params.get("job_id") or ""), group_id=g, bot_id=b, user_id=u)
             elif action == "create":
                 # 从原始请求中获取 mode，覆盖 LLM 工具调用的默认值
                 request_mode = self._stream_modes.get(request_id)
@@ -2866,15 +2873,33 @@ class MessageHandler(ABC):
                     params["mode"] = request_mode
                 data = await cc.create_job(params)
             elif action == "update":
-                data = await cc.update_job(str(params.get("job_id") or ""), dict(params.get("patch") or {}))
+                data = await cc.update_job(
+                    str(params.get("job_id") or ""),
+                    dict(params.get("patch") or {}),
+                    group_id=g,
+                    bot_id=b,
+                    user_id=u,
+                )
             elif action == "delete":
-                data = {"deleted": await cc.delete_job(str(params.get("job_id") or ""))}
+                data = {"deleted": await cc.delete_job(str(params.get("job_id") or ""), group_id=g, bot_id=b, user_id=u)}
             elif action == "toggle":
-                data = await cc.toggle_job(str(params.get("job_id") or ""), bool(params.get("enabled")))
+                data = await cc.toggle_job(
+                    str(params.get("job_id") or ""),
+                    bool(params.get("enabled")),
+                    group_id=g,
+                    bot_id=b,
+                    user_id=u,
+                )
             elif action == "preview":
-                data = await cc.preview_job(str(params.get("job_id") or ""), int(params.get("count", 5)))
+                data = await cc.preview_job(
+                    str(params.get("job_id") or ""),
+                    int(params.get("count", 5)),
+                    group_id=g,
+                    bot_id=b,
+                    user_id=u,
+                )
             elif action == "run_now":
-                data = {"run_id": await cc.run_now(str(params.get("job_id") or ""))}
+                data = {"run_id": await cc.run_now(str(params.get("job_id") or ""), group_id=g, bot_id=b, user_id=u)}
             else:
                 data = {"error": f"unknown cron action: {action}"}
         except Exception as exc:  # noqa: BLE001

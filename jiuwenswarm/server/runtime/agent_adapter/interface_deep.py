@@ -6411,10 +6411,12 @@ class JiuWenSwarmDeepAdapter:
         request_id: str | None,
         mode: str | None,
         project_dir: str | None = None,
+        params: dict[str, Any] | None = None,
     ) -> _RuntimeCronContextTokens:
         from openjiuwen.core.sys_operation.shell_process_registry import (
             set_shell_session_id,
         )
+        from jiuwenswarm.gateway.cron.enterprise_gate import extract_routing_triple
 
         normalized_channel = str(channel_id or "").strip() or CronTargetChannel.WEB.value
         normalized_mode = str(mode).strip() if isinstance(mode, str) and mode.strip() else None
@@ -6423,6 +6425,13 @@ class JiuWenSwarmDeepAdapter:
             normalized_metadata = {}
         if isinstance(request_id, str) and request_id.strip():
             normalized_metadata["request_id"] = request_id.strip()
+        g, b, u = extract_routing_triple(params, normalized_metadata)
+        if g:
+            normalized_metadata.setdefault("group_id", g)
+        if b:
+            normalized_metadata.setdefault("bot_id", b)
+        if u:
+            normalized_metadata.setdefault("user_id", u)
 
         session_metadata: dict[str, Any] = {}
         if isinstance(session_id, str) and session_id.strip():
@@ -9352,6 +9361,7 @@ class JiuWenSwarmDeepAdapter:
             request_id=request.request_id,
             mode=mode,
             project_dir=(request.params.get("project_dir") if isinstance(request.params, dict) else None),
+            params=request.params if isinstance(request.params, dict) else None,
         )
         self._runtime_cron_tool_context.remember_current_binding()
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
@@ -9879,6 +9889,7 @@ class JiuWenSwarmDeepAdapter:
             request_id=request.request_id,
             mode=mode,
             project_dir=(request.params.get("project_dir") if isinstance(request.params, dict) else None),
+            params=request.params if isinstance(request.params, dict) else None,
         )
         self._runtime_cron_tool_context.remember_current_binding()
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
