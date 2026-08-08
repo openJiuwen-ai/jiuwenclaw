@@ -32,9 +32,14 @@ class FakeAgent:
         self.prompt_attachment_manager = PromptAttachmentManager()
         self.config = SimpleNamespace(model_name="")
         self._llm = None
+        self._state = SimpleNamespace(task_plan=None)
 
     def set_llm(self, llm) -> None:
         self._llm = llm
+
+    def load_state(self, session):  # noqa: ARG002
+        """Match DeepAgent API used by TaskPlanningRail todo/plan sync."""
+        return self._state
 
 
 class FakeTodoTool(TodoTool):
