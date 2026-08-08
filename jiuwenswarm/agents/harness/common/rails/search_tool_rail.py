@@ -98,7 +98,8 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         "你正在一个渐进式工具环境中工作。\n"
         "\n"
         "1. 当你需要某个工具但它不在当前可用列表中时，"
-        "用 `search_tools` 搜索。导航中的隐藏工具类别提示了哪些工具可搜。\n"
+        "用 `search_tools` 搜索。导航中的隐藏工具已按类列出工具名和描述——"
+        "优先用其中的工具名当 query。\n"
         "\n"
         "2. `search_tools` 返回工具的完整定义（含参数 JSON Schema）。"
         "返回的工具不在你的 tools 列表中，但已注册，可直接按 name 调用——"
@@ -113,7 +114,10 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         "而非通用替代（如 bash、edit_file）。"
         "专业工具提供结构化数据和状态管理。\n"
         "\n"
-        "5. 工作流程：查看导航 → 搜索需要的工具 → 直接按名称调用。\n"
+        "5. 工作流程：查看导航（含隐藏工具，按类列出了工具名和描述）→"
+        "用工具名作为 query 调 `search_tools`（名搜走快路径，最准）→"
+        "拿到完整定义后直接按名称调用。\n"
+        "优先用导航里列出的工具名当 query；仅在不确定工具名时才用自然语言描述搜索。\n"
     )
 
     _RULES_EN = (
@@ -121,8 +125,9 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         "You are operating in a progressive tool environment.\n"
         "\n"
         "1. When you need a tool that isn't in your current available list, "
-        "use `search_tools` to find it. The hidden tool categories in the "
-        "navigation indicate what's searchable.\n"
+        "use `search_tools` to find it. Hidden tools in the navigation are "
+        "listed by category with names and descriptions — prefer using a "
+        "listed tool name as the query.\n"
         "\n"
         "2. `search_tools` returns full tool definitions (including parameter "
         "JSON Schema). The returned tools are NOT in your tools list but are "
@@ -137,8 +142,12 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         "over general substitutes (e.g. bash, edit_file). "
         "Specialized tools provide structured data and state management.\n"
         "\n"
-        "5. Workflow: check navigation → search for needed tools → call "
-        "directly by name.\n"
+        "5. Workflow: check navigation (includes hidden tools, with names "
+        "and descriptions listed by category) → call `search_tools` with the "
+        "tool name as the query (name search hits the fast path, most "
+        "accurate) → call directly by name after getting the full "
+        "definition. Prefer tool names listed in navigation as the query; "
+        "use natural-language descriptions only when the name is uncertain.\n"
     )
 
     def __init__(self, config):
@@ -737,22 +746,30 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
             name = str(getattr(tool, "name", "") or "")
             desc = str(getattr(tool, "description", "") or "")
             cat = self._hidden_tool_category(name, desc)
-            cats.setdefault(cat, []).append(name)
+            cats.setdefault(cat, []).append(tool)
         table = _HIDDEN_CATEGORY_CN if language != "en" else _HIDDEN_CATEGORY_EN
         entries = []
         for cat in sorted(cats.keys()):
             label, capability = table.get(cat, table["other"])
-            count = len(cats[cat])
-            names = ", ".join(sorted(cats[cat]))
+            tools_in_cat = sorted(cats[cat], key=lambda t: str(getattr(t, "name", "") or ""))
+            count = len(tools_in_cat)
             if language != "en":
-                entries.append(f"- {label}（{count} 个）：{capability}。工具：{names}")
+                entries.append(f"- {label}（{count} 个）：{capability}")
+                for tool in tools_in_cat:
+                    name = str(getattr(tool, "name", "") or "")
+                    summary = self._tool_summary_for_navigation(tool)
+                    entries.append(f"  - {name}：{summary}")
             else:
-                entries.append(f"- {label} ({count}): {capability}. Tools: {names}")
+                entries.append(f"- {label} ({count}): {capability}")
+                for tool in tools_in_cat:
+                    name = str(getattr(tool, "name", "") or "")
+                    summary = self._tool_summary_for_navigation(tool)
+                    entries.append(f"  - {name}: {summary}")
         if entries:
             if language != "en":
-                entries.insert(0, "### 隐藏工具（需 search_tools 发现）")
+                entries.insert(0, "### 隐藏工具（按类列出名字与描述，用工具名当 query 调 search_tools 即可发现并直接调用）")
             else:
-                entries.insert(0, "### Hidden Tools (use search_tools to discover)")
+                entries.insert(0, "### Hidden Tools (names + descriptions listed by category; use a tool name as the query to search_tools to discover and call directly)")
         return entries
 
     # ------------------------------------------------------------------
@@ -763,7 +780,8 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         "## 工具导航\n"
         "以下条目用于帮助你理解当前 session 下的工具生态。\n"
         "请注意：这里展示的是「工具地图」，不是「全部可立即调用的工具清单」。\n"
-        "工具分为两类：可直接调用、隐藏（需 search_tools 发现）。\n"
+        "工具分为两类：可直接调用、隐藏（已按类列出名字与描述，"
+        "用工具名当 query 调 search_tools 即可发现并直接调用）。\n"
         "调用 search_tools 搜索后，匹配的工具会以完整定义（含参数 JSON Schema）"
         "返回在结果中，可直接按名称调用，不会改变当前 tools 列表。\n"
     )
@@ -774,8 +792,9 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         "in the current session.\n"
         "Treat this section as a tool map, not as a full list of immediately "
         "callable tools.\n"
-        "Tools fall into two categories: directly callable and hidden (use "
-        "search_tools to discover).\n"
+        "Tools fall into two categories: directly callable and hidden (names "
+        "and descriptions listed by category; use a tool name as the query to "
+        "search_tools to discover and call directly).\n"
         "After calling search_tools, matched tools are returned with full "
         "definitions (including parameter JSON Schema) in the result and are "
         "directly callable by name. The tools list stays unchanged.\n"

@@ -276,3 +276,110 @@ def test_build_executable_corpus_refilters_when_sig_unchanged(monkeypatch):
     rail._build_executable_corpus(ctx)
     assert call_count["n"] == 2, "sig cache skipped re-filter (ghost misclassification locked in)"
     assert rail._search_corpus is not first_corpus, "corpus not reassigned (cache returned early)"
+
+
+# ---------------------------------------------------------------------------
+# Hidden tool summary format (v2 phase 3: each tool carries its description)
+# ---------------------------------------------------------------------------
+
+def _make_tool_with_desc(name: str, description: str) -> Any:
+    """Duck-typed tool with name + description (for hidden-summary tests)."""
+    t = SimpleNamespace(name=name, description=description, parameters={"type": "object"})
+    return t
+
+
+def _setup_hidden_rail(monkeypatch, *, visible: List[str] | None = None,
+                       always_visible: List[str] | None = None) -> Any:
+    """Rail with stubbed _get_real_tool_infos reading _cached_all_tool_infos.
+
+    Mirrors _make_rail but leaves nav/rules builders intact so
+    _build_hidden_tool_summary runs for real.
+    """
+    from jiuwenswarm.agents.harness.common.rails import search_tool_rail as mod
+
+    monkeypatch.setattr(
+        mod.tool_retrieval, "ensure_embedding_model", lambda *a, **k: None
+    )
+    config = SimpleNamespace(
+        progressive_tool_enabled=True,
+        progressive_tool_always_visible_tools=always_visible or ["bash", "read_file"],
+        progressive_tool_default_visible_tools=[],
+        progressive_tool_max_loaded_tools=16,
+        language="cn",
+        tool_retrieval_desc_cap=64,
+        tool_retrieval_embedding_model="BAAI/bge-small-zh-v1.5",
+        tool_retrieval_top_k_max=3,
+        tool_retrieval_min_sim=0.35,
+        tool_retrieval_method="hybrid",
+    )
+    rail = mod.JiuWenProgressiveToolRail(config)
+    # _get_real_tool_infos reads _cached_all_tool_infos (set per-test).
+    return rail
+
+
+def test_hidden_summary_lists_each_tool_with_description_cn(monkeypatch):
+    """v2 phase 3: hidden summary shows each tool's name + description on its
+    own indented line, not just a flat names list."""
+    rail = _setup_hidden_rail(monkeypatch, always_visible=["bash", "read_file"])
+    rail._meta_tool_names = {"search_tools"}
+    rail._cached_all_tool_infos = [
+        _make_tool_with_desc("bash", "执行 shell 命令"),       # always-visible
+        _make_tool_with_desc("read_file", "读取文件"),         # always-visible
+        _make_tool_with_desc("search_tools", "检索候选工具"),  # meta
+        _make_tool_with_desc("search_agent_run", "专注搜索的子agent"),  # hidden → search 类
+        _make_tool_with_desc("memory_search", "搜索记忆条目"),            # hidden → memory 类
+    ]
+
+    entries = asyncio.run(rail._build_hidden_tool_summary(_DummySession(visible=[]), language="cn"))
+
+    # Only the two hidden tools should appear.
+    joined = "\n".join(entries)
+    assert "search_agent_run" in joined
+    assert "memory_search" in joined
+    # Each hidden tool on its own indented line with its description.
+    assert "  - search_agent_run：专注搜索的子agent" in joined, joined
+    assert "  - memory_search：搜索记忆条目" in joined, joined
+    # Category header lines present.
+    assert "网络搜索" in joined
+    assert "记忆系统" in joined
+    # The flat "工具：{names}" form must be gone.
+    assert "工具：" not in joined
+
+
+def test_hidden_summary_falls_back_on_empty_description(monkeypatch):
+    """Empty description → _tool_summary_for_navigation returns the fallback
+    'No summary available.' rather than an empty/broken line."""
+    rail = _setup_hidden_rail(monkeypatch, always_visible=["bash"])
+    rail._meta_tool_names = {"search_tools"}
+    rail._cached_all_tool_infos = [
+        _make_tool_with_desc("bash", "执行命令"),       # always-visible
+        _make_tool_with_desc("search_tools", "检索"),   # meta
+        _make_tool_with_desc("ghost_tool", ""),         # hidden, empty desc
+    ]
+
+    entries = asyncio.run(rail._build_hidden_tool_summary(_DummySession(visible=[]), language="cn"))
+
+    joined = "\n".join(entries)
+    assert "  - ghost_tool：No summary available." in joined, joined
+
+
+def test_hidden_summary_en_branch_uses_ascii_colon(monkeypatch):
+    """English branch formats with ':' (ascii) and 2-space indent, not the
+    CN full-width '：'."""
+    rail = _setup_hidden_rail(monkeypatch, always_visible=["bash", "read_file"])
+    rail._meta_tool_names = {"search_tools"}
+    rail._cached_all_tool_infos = [
+        _make_tool_with_desc("bash", "run shell"),       # always-visible
+        _make_tool_with_desc("read_file", "read a file"),# always-visible
+        _make_tool_with_desc("search_tools", "search"), # meta
+        _make_tool_with_desc("search_agent_run", "search subagent"),  # hidden
+    ]
+
+    entries = asyncio.run(rail._build_hidden_tool_summary(_DummySession(visible=[]), language="en"))
+
+    joined = "\n".join(entries)
+    # English header + 2-space indent + ascii colon.
+    assert "### Hidden Tools" in joined
+    assert "  - search_agent_run: search subagent" in joined, joined
+    # CN full-width colon must not leak into the EN branch.
+    assert "：" not in joined
