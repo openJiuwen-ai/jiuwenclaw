@@ -1,12 +1,14 @@
 // src/components/HeartbeatPanel/index.tsx
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { X } from 'lucide-react';
+import { ArrowLeft, ChevronDown, X } from 'lucide-react';
 import { webRequest } from '../../services/webClient';
+import { useChatStore } from '../../stores';
 import type { WebError } from '../../types';
 import type {
   HeartbeatCancelResult,
   HeartbeatJobDTO,
+  HeartbeatJobStatus,
   HeartbeatMeta,
   HeartbeatRunNowResult,
   HeartbeatTaskUI,
@@ -21,6 +23,8 @@ import HeartbeatTaskDrawer, {
 } from './HeartbeatTaskDrawer';
 import { scheduleFormToDto } from './heartbeatScheduleConvert';
 import ConfirmDialog from '../CronPanel/ConfirmDialog';
+import SimpleSelect from '../CronPanel/SimpleSelect';
+import { useClickOutside } from '../CronPanel/useClickOutside';
 
 interface HeartbeatPanelProps {
   sessionId: string;
@@ -46,6 +50,13 @@ function heartbeatJobToUI(job: HeartbeatJobDTO): HeartbeatTaskUI {
     runCount: job.run_count,
     runState: job.run_state,
   };
+}
+
+/** Unix 秒 -> 本地可读时间；接口时间戳单位统一是秒，展示前需要 *1000，见接口规格说明 §3 */
+function formatHeartbeatTimestamp(seconds: number | null): string | null {
+  if (!seconds) return null;
+  const d = new Date(seconds * 1000);
+  return Number.isNaN(d.getTime()) ? null : d.toLocaleString();
 }
 
 export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelProps) {
@@ -85,6 +96,19 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
     return () => controller.abort();
   }, [loadAll]);
 
+  // 后端 list 按 created_at ASC 返回，前端本地按"最近更新/创建优先"重新排序 + 按状态/关键词筛选，
+  // 见接口规格说明 §16.8；只复制展示用副本，不改 jobs 本身
+  const [statusFilter, setStatusFilter] = useState<HeartbeatJobStatus | 'all'>('all');
+  const [searchQuery, setSearchQuery] = useState('');
+  const displayedJobs = [...jobs]
+    .filter((job) => statusFilter === 'all' || job.status === statusFilter)
+    .filter((job) => {
+      const q = searchQuery.trim().toLowerCase();
+      if (!q) return true;
+      return job.name.toLowerCase().includes(q) || job.prompt.toLowerCase().includes(q);
+    })
+    .sort((a, b) => (b.updatedAt ?? b.createdAt ?? 0) - (a.updatedAt ?? a.createdAt ?? 0));
+
   const [drawer, setDrawer] = useState<
     | { mode: 'create'; form: HeartbeatTaskFormValue; submitting: boolean; error: string | null }
     | { mode: 'edit'; jobId: string; form: HeartbeatTaskFormValue; submitting: boolean; error: string | null }
@@ -95,6 +119,23 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
     if (!meta) return;
     setDrawer({ mode: 'create', form: emptyHeartbeatTaskForm(meta), submitting: false, error: null });
   }, [meta]);
+
+  // "通过聊天创建"：心跳任务只能绑定当前会话（见方案设计 §1），因此不像 Cron 那样导航去新会话，
+  // 而是直接把预制提示词写回当前会话的聊天输入框，让用户在原会话里用 Agent Tool 创建。
+  // 只调 setInputValue 只更新 store，不会让已经挂载的 contenteditable 输入框跟着刷新——
+  // InputArea 只在"切会话"时才会用 store 的 inputValue 回填 DOM；同一会话内要让输入框
+  // 立即显示新内容，必须再派发 chat-input-sync 事件，跟"编辑排队任务"用的是同一套机制
+  // （见 ChatPanel/index.tsx 的 handleEditTask）。
+  const createViaChat = useCallback(() => {
+    const prompt = t('heartbeat.panel.createMenu.viaChatPrompt');
+    useChatStore.getState().setInputValue(sessionId, prompt);
+    window.dispatchEvent(new CustomEvent('chat-input-sync', { detail: { sessionId, value: prompt } }));
+    onClose();
+  }, [sessionId, onClose, t]);
+
+  const [createMenuOpen, setCreateMenuOpen] = useState(false);
+  const createMenuRef = useRef<HTMLDivElement>(null);
+  useClickOutside(createMenuRef, createMenuOpen, () => setCreateMenuOpen(false));
 
   const openEditDrawer = useCallback((job: HeartbeatTaskUI) => {
     setDrawer({ mode: 'edit', jobId: job.id, form: jobToHeartbeatTaskForm(job), submitting: false, error: null });
@@ -263,113 +304,189 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
 
   const drawerBusy = Boolean(drawer?.submitting);
 
+  const statusFilterOptions = [
+    { value: 'all', label: t('heartbeat.panel.filterAll') },
+    ...(meta?.statuses ?? []).map((status) => ({ value: status, label: <HeartbeatStatusBadge status={status} /> })),
+  ];
+
   return (
-    <div className="fixed inset-0 z-40 flex justify-end bg-overlay-cron-dialog" onClick={onClose}>
-      <div
-        className="flex h-full w-[520px] max-w-full flex-col bg-card shadow-xl"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <div className="flex h-full w-[420px] max-w-full flex-shrink-0 flex-col border-l border-border bg-card">
+      {drawer && meta ? (
+        <div className="flex items-center gap-2 border-b border-border p-4">
+          <button
+            type="button"
+            onClick={() => setDrawer(null)}
+            title={t('heartbeat.drawer.back')}
+            className="text-text-muted hover:text-text"
+          >
+            <ArrowLeft size={18} />
+          </button>
+          <h2 className="text-lg font-bold text-text-strong">
+            {t(drawer.mode === 'create' ? 'heartbeat.drawer.titleCreate' : 'heartbeat.drawer.titleEdit')}
+          </h2>
+          <button onClick={onClose} className="ml-auto text-text-muted hover:text-text">
+            <X size={20} />
+          </button>
+        </div>
+      ) : (
         <div className="flex items-center justify-between border-b border-border p-4">
           <h2 className="text-lg font-bold text-text-strong">{t('heartbeat.panel.title')}</h2>
           <div className="flex items-center gap-3">
-            <button
-              type="button"
-              disabled={!meta || drawerBusy}
-              onClick={openCreateDrawer}
-              className="rounded-full bg-cron-action px-4 py-1.5 text-sm font-bold text-cron-action-foreground hover:bg-cron-action-hover disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {t('heartbeat.panel.create')}
-            </button>
+            <div className="relative" ref={createMenuRef}>
+              <button
+                type="button"
+                disabled={!meta || drawerBusy}
+                onClick={() => setCreateMenuOpen((v) => !v)}
+                className="flex items-center gap-1.5 rounded-full bg-cron-action px-4 py-1.5 text-sm font-bold text-cron-action-foreground hover:bg-cron-action-hover disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {t('heartbeat.panel.create')}
+                <ChevronDown size={14} />
+              </button>
+              {createMenuOpen && (
+                <div className="absolute right-0 top-[calc(100%+6px)] z-20 w-44 rounded-lg border border-border bg-card py-1.5 shadow-lg">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCreateMenuOpen(false);
+                      openCreateDrawer();
+                    }}
+                    className="block w-full px-3 py-2 text-left text-sm font-semibold text-text hover:bg-bg-hover"
+                  >
+                    {t('heartbeat.panel.createMenu.manual')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCreateMenuOpen(false);
+                      createViaChat();
+                    }}
+                    className="block w-full px-3 py-2 text-left text-sm font-semibold text-text hover:bg-bg-hover"
+                  >
+                    {t('heartbeat.panel.createMenu.viaChat')}
+                  </button>
+                </div>
+              )}
+            </div>
             <button onClick={onClose} className="text-text-muted hover:text-text">
               <X size={20} />
             </button>
           </div>
         </div>
+      )}
 
-        <div className="flex-1 overflow-y-auto p-4">
-          {loading && <p className="text-sm text-text-muted">{t('heartbeat.panel.loading')}</p>}
-          {!loading && loadError && <p className="text-sm text-red-500">{loadError}</p>}
-          {!loading && !loadError && jobs.length === 0 && (
-            <p className="text-sm text-text-muted">{t('heartbeat.panel.empty')}</p>
+      {drawer && meta ? (
+        <div className="flex-1 overflow-y-auto">
+          <HeartbeatTaskDrawer
+            key={drawer.mode === 'edit' ? drawer.jobId : 'create'}
+            mode={drawer.mode}
+            initial={drawer.form}
+            meta={meta}
+            submitting={drawer.submitting}
+            error={drawer.error}
+            onSubmit={submitDrawer}
+            onCancel={() => setDrawer(null)}
+          />
+        </div>
+      ) : (
+        <>
+          {jobs.length > 0 && meta && (
+            <div className="flex items-center gap-2 px-4 py-2">
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder={t('heartbeat.panel.searchPlaceholder') ?? ''}
+                className="flex-1 rounded-md border border-border bg-card px-2 py-1.5 text-sm"
+              />
+              <SimpleSelect
+                value={statusFilter}
+                onChange={(v) => setStatusFilter(v as HeartbeatJobStatus | 'all')}
+                options={statusFilterOptions}
+                className="w-36"
+              />
+            </div>
           )}
-          {!loading && !loadError && jobs.length > 0 && meta && (
-            <ul className="space-y-3">
-              {jobs.map((job) => (
-                <li key={job.id} className="rounded-lg border border-border p-3">
-                  <div className="flex items-center justify-between">
-                    <span className="font-medium text-text-strong">{job.name}</span>
-                    <HeartbeatStatusBadge status={job.status} />
-                  </div>
-                  <p className="mt-1 line-clamp-2 text-sm text-text-muted">{job.prompt}</p>
-                  <p className="mt-1 text-xs text-text-muted">{summarizeHeartbeatSchedule(job.schedule, t)}</p>
-                  <div className="mt-2 flex flex-wrap justify-end gap-2">
-                    {job.status === 'running' && (
+          <div className="flex-1 overflow-y-auto p-4">
+            {loading && <p className="text-sm text-text-muted">{t('heartbeat.panel.loading')}</p>}
+            {!loading && loadError && <p className="text-sm text-red-500">{loadError}</p>}
+            {!loading && !loadError && jobs.length === 0 && (
+              <p className="text-sm text-text-muted">{t('heartbeat.panel.empty')}</p>
+            )}
+            {!loading && !loadError && jobs.length > 0 && displayedJobs.length === 0 && (
+              <p className="text-sm text-text-muted">{t('heartbeat.panel.emptyFiltered')}</p>
+            )}
+            {!loading && !loadError && displayedJobs.length > 0 && meta && (
+              <ul className="space-y-3">
+                {displayedJobs.map((job) => (
+                  <li key={job.id} className="rounded-lg border border-border bg-card p-3 shadow-sm">
+                    <div className="flex items-start justify-between gap-2">
+                      <span className="min-w-0 truncate font-medium text-text-strong" title={job.name}>
+                        {job.name}
+                      </span>
+                      <HeartbeatStatusBadge status={job.status} />
+                    </div>
+                    <p className="mt-1.5 line-clamp-2 text-sm text-text-muted">{job.prompt}</p>
+                    <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-text-muted">
+                      <span>{summarizeHeartbeatSchedule(job.schedule, t)}</span>
+                      {formatHeartbeatTimestamp(job.nextRunAt) && (
+                        <span>{t('heartbeat.panel.nextRunAt', { time: formatHeartbeatTimestamp(job.nextRunAt) })}</span>
+                      )}
+                      {job.runCount > 0 && <span>{t('heartbeat.panel.runCount', { count: job.runCount })}</span>}
+                    </div>
+                    <div className="mt-3 flex flex-wrap justify-end gap-2 border-t border-border pt-2">
+                      {job.status === 'running' && (
+                        <button
+                          type="button"
+                          disabled={actingJobId === job.id}
+                          onClick={() => void handleCancel(job, false)}
+                          className="rounded-full border border-border px-3 py-1 text-xs text-text hover:bg-bg-hover disabled:opacity-60"
+                        >
+                          {t('heartbeat.panel.cancelRun')}
+                        </button>
+                      )}
                       <button
                         type="button"
                         disabled={actingJobId === job.id}
-                        onClick={() => void handleCancel(job, false)}
+                        onClick={() => void handleRunNow(job)}
                         className="rounded-full border border-border px-3 py-1 text-xs text-text hover:bg-bg-hover disabled:opacity-60"
                       >
-                        {t('heartbeat.panel.cancelRun')}
+                        {t('heartbeat.panel.runNow')}
                       </button>
-                    )}
-                    <button
-                      type="button"
-                      disabled={actingJobId === job.id}
-                      onClick={() => void handleRunNow(job)}
-                      className="rounded-full border border-border px-3 py-1 text-xs text-text hover:bg-bg-hover disabled:opacity-60"
-                    >
-                      {t('heartbeat.panel.runNow')}
-                    </button>
-                    <button
-                      type="button"
-                      disabled={actingJobId === job.id || job.status === 'completed' || job.status === 'expired'}
-                      onClick={() => void handleToggle(job)}
-                      className="rounded-full border border-border px-3 py-1 text-xs text-text hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40"
-                    >
-                      {t(job.enabled ? 'heartbeat.panel.pause' : 'heartbeat.panel.resume')}
-                    </button>
-                    <button
-                      type="button"
-                      disabled={drawerBusy}
-                      onClick={() => openEditDrawer(job)}
-                      className="rounded-full border border-border px-3 py-1 text-xs text-text hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                      {t('heartbeat.panel.edit')}
-                    </button>
-                    <button
-                      type="button"
-                      disabled={actingJobId === job.id}
-                      onClick={() => {
-                        setDeleteError(null);
-                        setPendingDelete(job);
-                      }}
-                      className="rounded-full border border-red-300 px-3 py-1 text-xs text-red-500 hover:bg-red-50 disabled:opacity-60"
-                    >
-                      {t('heartbeat.panel.delete')}
-                    </button>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-
-        {drawer && meta && (
-          <div className="border-t border-border">
-            <HeartbeatTaskDrawer
-              key={drawer.mode === 'edit' ? drawer.jobId : 'create'}
-              mode={drawer.mode}
-              initial={drawer.form}
-              meta={meta}
-              submitting={drawer.submitting}
-              error={drawer.error}
-              onSubmit={submitDrawer}
-              onCancel={() => setDrawer(null)}
-            />
+                      <button
+                        type="button"
+                        disabled={actingJobId === job.id || job.status === 'completed' || job.status === 'expired'}
+                        onClick={() => void handleToggle(job)}
+                        className="rounded-full border border-border px-3 py-1 text-xs text-text hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        {t(job.enabled ? 'heartbeat.panel.pause' : 'heartbeat.panel.resume')}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={drawerBusy}
+                        onClick={() => openEditDrawer(job)}
+                        className="rounded-full border border-border px-3 py-1 text-xs text-text hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {t('heartbeat.panel.edit')}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={actingJobId === job.id}
+                        onClick={() => {
+                          setDeleteError(null);
+                          setPendingDelete(job);
+                        }}
+                        className="rounded-full border border-red-300 px-3 py-1 text-xs text-red-500 hover:bg-red-50 disabled:opacity-60"
+                      >
+                        {t('heartbeat.panel.delete')}
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
-        )}
-      </div>
+        </>
+      )}
       {toast && (
         <div className="pointer-events-none fixed bottom-6 right-6 z-50 rounded-md bg-text-strong px-4 py-2 text-sm text-card shadow-lg">
           {toast}
