@@ -366,6 +366,16 @@ def get_runtime_tool_session_id() -> str | None:
     """Session id bound for the current agent tool invocation (ContextVar)."""
     return _CRON_TOOL_SESSION_ID.get()
 
+
+def get_runtime_tool_channel_id() -> str:
+    """Channel id bound for the current agent tool invocation (ContextVar)."""
+    return _CRON_TOOL_CHANNEL_ID.get()
+
+
+def get_runtime_tool_metadata() -> dict[str, Any] | None:
+    """Request metadata bound for the current agent tool invocation (ContextVar)."""
+    return _CRON_TOOL_METADATA.get()
+
 logger = logging.getLogger(__name__)
 
 _PERSISTENT_CHECKPOINTER_LOCK: asyncio.Lock | None = None
@@ -6742,7 +6752,7 @@ class JiuWenSwarmDeepAdapter:
                     channel_id=channel_for_tool,
                     metadata=metadata_for_tool,
                 )
-                for sf_tool in self._send_file_toolkit.get_tools():
+                for sf_tool in self._send_file_toolkit.get_tools(tool_id="send_file_to_user"):
                     self._register_agent_owned_tool(sf_tool, self._tool_owner_id())
                     self._instance.ability_manager.add(sf_tool.card)
             else:

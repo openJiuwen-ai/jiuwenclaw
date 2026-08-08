@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import logging
+from dataclasses import dataclass
 from typing import Any, List, Union
 
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
@@ -61,6 +62,16 @@ def clear_sent_files_for_session(session_id: str | None) -> None:
     """Drop session dedup state when the session adapter is cleaned up."""
     sid = (session_id or "").strip() or "default"
     _SENT_FILE_PATHS_BY_SESSION.pop(sid, None)
+
+
+@dataclass
+class SendFileRoute:
+    """Per-request routing context for send_file (resolved from contextvars)."""
+
+    request_id: str
+    session_id: str
+    channel_id: str
+    metadata: dict[str, Any] | None
 
 
 class SendFileToolkit:
@@ -116,6 +127,36 @@ class SendFileToolkit:
             bool(self._request_metadata),
         )
 
+    def _resolve_route(self) -> SendFileRoute:
+        """Resolve per-request route from contextvars, falling back to instance attrs.
+
+        Reading from contextvars at execution time makes the toolkit safe to share
+        across concurrent requests: each async task sees its own request's values.
+        """
+        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+            get_runtime_tool_channel_id,
+            get_runtime_tool_metadata,
+            get_runtime_tool_session_id,
+        )
+
+        cv_session_id = get_runtime_tool_session_id()
+        cv_channel_id = get_runtime_tool_channel_id()
+        cv_metadata = get_runtime_tool_metadata()
+        session_id = cv_session_id or self.session_id
+        channel_id = cv_channel_id or self.channel_id
+        if cv_metadata:
+            metadata = dict(cv_metadata)
+            request_id = metadata.get("request_id") or self.request_id
+        else:
+            metadata = self._request_metadata
+            request_id = self.request_id
+        return SendFileRoute(
+            request_id=request_id,
+            session_id=session_id,
+            channel_id=channel_id,
+            metadata=metadata,
+        )
+
     @staticmethod
     def _normalize_target_channels(target_channels: Any) -> list[str]:
         """Normalize target_channels into a list of non-empty strings.
@@ -162,11 +203,12 @@ class SendFileToolkit:
         Returns:
             Success message or error description.
         """
+        route = self._resolve_route()
         target_channel_list = SendFileToolkit._normalize_target_channels(target_channels)
         if target_channel_list:
             logger.info(
                 "[SendFileToolkit] send_file target_channels=%s session_id=%s",
-                target_channel_list, self.session_id,
+                target_channel_list, route.session_id,
             )
         if isinstance(abs_file_path_list, str):
             try:
@@ -201,11 +243,11 @@ class SendFileToolkit:
                 msg_parts.append(f"  - {mf}")
             return "\n".join(msg_parts)
 
-        valid_files, skipped_files = _partition_sent_files(self.session_id, valid_files)
+        valid_files, skipped_files = _partition_sent_files(route.session_id, valid_files)
         if not valid_files:
             logger.info(
                 "[SendFileToolkit] skip duplicate send session_id=%s skipped=%s missing=%s",
-                self.session_id,
+                route.session_id,
                 skipped_files,
                 missing_files,
             )
@@ -224,7 +266,7 @@ class SendFileToolkit:
 
         logger.info(
             "[SendFileToolkit] send_file 开始 session_id=%s 有效文件=%d 缺失=%d 跳过重复=%d",
-            self.session_id,
+            route.session_id,
             len(valid_files),
             len(missing_files),
             len(skipped_files),
@@ -244,7 +286,7 @@ class SendFileToolkit:
                 for file_path in valid_files:
                     base_name = os.path.basename(file_path)
                     download_info = build_file_download_info(
-                        file_path, base_name, self.session_id
+                        file_path, base_name, route.session_id
                     )
                     files_payload.append({
                         "path": file_path,
@@ -273,9 +315,9 @@ class SendFileToolkit:
                 append_history_record,
             )
             append_history_record(
-                session_id=self.session_id,
-                request_id=self.request_id,
-                channel_id=self.channel_id,
+                session_id=route.session_id,
+                request_id=route.request_id,
+                channel_id=route.channel_id,
                 role="assistant",
                 event_type="chat.file",
                 content="",
@@ -284,9 +326,9 @@ class SendFileToolkit:
             )
 
             msg = {
-                "request_id": self.request_id,
-                "channel_id": self.channel_id,
-                "session_id": self.session_id,
+                "request_id": route.request_id,
+                "channel_id": route.channel_id,
+                "session_id": route.session_id,
                 "payload": {
                     "event_type": "chat.file",
                     "files": files_payload,
@@ -297,14 +339,14 @@ class SendFileToolkit:
             # send_file_targets 由 Gateway 的 dispatch 层解析为 fan_out_targets，
             # 使文件可跨 channel 投递到 team 会话已接入的 channel（如飞书）。
             merged_meta: dict[str, Any] = {}
-            if self._request_metadata:
-                merged_meta.update(self._request_metadata)
+            if route.metadata:
+                merged_meta.update(route.metadata)
             if target_channel_list:
                 merged_meta["send_file_targets"] = list(target_channel_list)
             if merged_meta:
                 msg["metadata"] = merged_meta
             await server.send_push(msg)
-            _mark_files_sent(self.session_id, valid_files)
+            _mark_files_sent(route.session_id, valid_files)
             result_parts = [f"成功发送 {len(valid_files)} 个文件"]
             if skipped_files:
                 result_parts.append("以下文件已在本次会话发送过，已跳过：")
@@ -318,29 +360,31 @@ class SendFileToolkit:
         except Exception as e:
             logger.exception(
                 "[SendFileToolkit] send_file 失败 session_id=%s error=%s",
-                self.session_id,
+                route.session_id,
                 str(e),
             )
             return f"提交文件失败: {str(e)}"
 
-    def get_tools(self) -> List[Tool]:
+    def get_tools(self, *, tool_id: str | None = None) -> List[Tool]:
         """Return tools for registration in Runner.
 
-        Returns:
-            List of tools for sending files.
+        Args:
+            tool_id: Optional stable id for the tool card before owner qualification.
         """
-
         def make_tool(
             name: str,
             description: str,
             input_params: dict,
             func,
         ) -> Tool:
-            card = ToolCard(
-                name=name,
-                description=description,
-                input_params=input_params,
-            )
+            card_kwargs: dict[str, Any] = {
+                "name": name,
+                "description": description,
+                "input_params": input_params,
+            }
+            if tool_id:
+                card_kwargs["id"] = tool_id
+            card = ToolCard(**card_kwargs)
             return LocalFunction(card=card, func=func)
 
         return [
