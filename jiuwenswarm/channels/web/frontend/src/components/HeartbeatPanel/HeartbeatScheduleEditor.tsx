@@ -63,6 +63,7 @@ export default function HeartbeatScheduleEditor({ value, onChange, minIntervalSe
             placeholder="0 9 * * 1-5"
             value={value.cronExpr}
             onChange={(e) => onChange({ ...value, cronExpr: e.target.value })}
+            title={t('heartbeat.schedule.cron.hint') ?? undefined}
             className="w-full rounded-md border border-border bg-card px-2 py-1 text-sm font-mono"
           />
           {cronError && <p className="text-xs text-red-500">{t(cronError)}</p>}
@@ -76,7 +77,7 @@ export default function HeartbeatScheduleEditor({ value, onChange, minIntervalSe
       )}
 
       {value.kind === 'once' && (
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2" title={t('heartbeat.schedule.once.hint') ?? undefined}>
           <input
             type="date"
             value={value.onceDate}

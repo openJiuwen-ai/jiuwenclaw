@@ -94,7 +94,9 @@ export default function HeartbeatTaskDrawer({ mode, initial, meta, submitting, e
         />
       </div>
       <div>
-        <label className="mb-1 block text-sm text-text-muted">{t('heartbeat.drawer.fieldPrompt')}</label>
+        <label className="mb-1 block text-sm text-text-muted" title={t('heartbeat.drawer.fieldPromptHint') ?? undefined}>
+          {t('heartbeat.drawer.fieldPrompt')}
+        </label>
         <textarea
           value={form.prompt}
           maxLength={PROMPT_MAX_LENGTH}
@@ -104,7 +106,9 @@ export default function HeartbeatTaskDrawer({ mode, initial, meta, submitting, e
         />
       </div>
       <div>
-        <label className="mb-1 block text-sm text-text-muted">{t('heartbeat.drawer.fieldSchedule')}</label>
+        <label className="mb-1 block text-sm text-text-muted" title={t('heartbeat.drawer.fieldScheduleHint') ?? undefined}>
+          {t('heartbeat.drawer.fieldSchedule')}
+        </label>
         <HeartbeatScheduleEditor
           value={form.schedule}
           onChange={(schedule) => setForm({ ...form, schedule })}
@@ -113,7 +117,12 @@ export default function HeartbeatTaskDrawer({ mode, initial, meta, submitting, e
       </div>
       <div className="flex gap-4">
         <div className="flex-1">
-          <label className="mb-1 block text-sm text-text-muted">{t('heartbeat.drawer.fieldConcurrencyPolicy')}</label>
+          <label
+            className="mb-1 block text-sm text-text-muted"
+            title={t('heartbeat.drawer.fieldConcurrencyPolicyHint') ?? undefined}
+          >
+            {t('heartbeat.drawer.fieldConcurrencyPolicy')}
+          </label>
           <SimpleSelect
             value={form.concurrencyPolicy}
             onChange={(v) => setForm({ ...form, concurrencyPolicy: v as HeartbeatConcurrencyPolicy })}
@@ -121,7 +130,12 @@ export default function HeartbeatTaskDrawer({ mode, initial, meta, submitting, e
           />
         </div>
         <div className="flex-1">
-          <label className="mb-1 block text-sm text-text-muted">{t('heartbeat.drawer.fieldSessionDeletedPolicy')}</label>
+          <label
+            className="mb-1 block text-sm text-text-muted"
+            title={t('heartbeat.drawer.fieldSessionDeletedPolicyHint') ?? undefined}
+          >
+            {t('heartbeat.drawer.fieldSessionDeletedPolicy')}
+          </label>
           <SimpleSelect
             value={form.sessionDeletedPolicy}
             onChange={(v) => setForm({ ...form, sessionDeletedPolicy: v as HeartbeatSessionDeletedPolicy })}
@@ -130,7 +144,9 @@ export default function HeartbeatTaskDrawer({ mode, initial, meta, submitting, e
         </div>
       </div>
       <div>
-        <label className="mb-1 block text-sm text-text-muted">{t('heartbeat.drawer.fieldMaxRuns')}</label>
+        <label className="mb-1 block text-sm text-text-muted" title={t('heartbeat.drawer.fieldMaxRunsHint') ?? undefined}>
+          {t('heartbeat.drawer.fieldMaxRuns')}
+        </label>
         <input
           type="number"
           min={1}

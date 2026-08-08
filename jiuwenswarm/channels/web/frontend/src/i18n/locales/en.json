@@ -2399,6 +2399,8 @@
     "schedule": {
       "tab": { "interval": "Interval", "cron": "Cron expression", "once": "Once" },
       "interval": { "label": "Every", "unit": "minutes, return to this session" },
+      "cron": { "hint": "Standard 5-field format: minute hour day month weekday (e.g. 0 9 * * 1-5 = weekdays at 9am)" },
+      "once": { "hint": "Pick a date and time; the job fires once at that moment and is then marked completed" },
       "summary": {
         "interval": "Return to this session every {{minutes}} min",
         "cron": "{{expr}} ({{timezone}}), return to this session",
@@ -2413,14 +2415,22 @@
       "fieldNameTooLong": "Name must be at most 64 characters",
       "fieldPrompt": "Follow-up prompt",
       "fieldPromptTooLong": "Prompt must be at most 2000 characters",
+      "fieldPromptHint": "When the heartbeat fires, this text is delivered back into the current session as a new message; the agent continues in the existing context instead of starting a new session",
       "fieldSchedule": "Schedule",
+      "fieldScheduleHint": "Choose how the heartbeat returns to this session: poll on an interval / fire on a cron schedule / fire once",
       "fieldConcurrencyPolicy": "Concurrency policy",
+      "fieldConcurrencyPolicyHint": "What happens if the previous run hasn't finished when the next trigger fires: skip it (default) / queue one follow-up run (queue) / cancel the previous run and start fresh (replace)",
       "fieldSessionDeletedPolicy": "On session deleted",
+      "fieldSessionDeletedPolicyHint": "If the bound session is deleted: disable the job and keep the record (default) / mark the job completed",
       "fieldMaxRuns": "Max runs",
       "fieldMaxRunsUnlimited": "Unlimited",
+      "fieldMaxRunsHint": "The job is marked completed automatically after this many runs; leave blank for no limit",
       "missingFields": "Still needed: {{fields}}",
       "submitCreate": "Create",
-      "submitUpdate": "Save"
+      "submitUpdate": "Save",
+      "titleCreate": "New heartbeat job",
+      "titleEdit": "Edit heartbeat job",
+      "back": "Back"
     },
     "concurrencyPolicy": { "skip": "Skip", "queue": "Queue", "replace": "Replace" },
     "sessionDeletedPolicy": { "disable": "Disable job", "completed": "Mark completed" },
@@ -2428,14 +2438,25 @@
       "title": "Heartbeat Jobs",
       "loading": "Loading…",
       "empty": "No heartbeat jobs in this session yet",
-      "create": "New heartbeat job",
+      "create": "Create",
       "edit": "Edit",
       "runNow": "Run now",
       "cancelRun": "Cancel this run",
       "pause": "Pause",
       "resume": "Resume",
       "delete": "Delete",
-      "deleteConfirm": "Delete heartbeat job \"{{name}}\"?"
+      "deleteConfirm": "Delete heartbeat job \"{{name}}\"?",
+      "filterLabel": "Status",
+      "filterAll": "All",
+      "searchPlaceholder": "Search by name or prompt",
+      "emptyFiltered": "No heartbeat jobs match this filter",
+      "nextRunAt": "Next run: {{time}}",
+      "runCount": "Ran {{count}} times",
+      "createMenu": {
+        "manual": "Create manually",
+        "viaChat": "Create via chat",
+        "viaChatPrompt": "Help me create a heartbeat reminder: "
+      }
     },
     "toast": {
       "paused": "Future schedule paused",
