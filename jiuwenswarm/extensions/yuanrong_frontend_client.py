@@ -55,6 +55,8 @@ class AgentRuntimeSpec(TypedDict, total=False):
     rootfs: AgentRootfsSpec
     cpu: int
     memory: int
+    code_path: str
+    cmds: list[list[str]]
 
 
 @dataclass
@@ -178,6 +180,9 @@ class YuanrongFrontendAgentClient(AgentServerClient):
             normalized["cpu"] = int(runtime_spec["cpu"])
         if runtime_spec.get("memory") is not None:
             normalized["memory"] = int(runtime_spec["memory"])
+        cmds = runtime_spec.get("cmds")
+        if isinstance(cmds, list) and cmds:
+            normalized["cmds"] = cmds
         return normalized
 
     async def create_sandbox(
@@ -277,6 +282,21 @@ class YuanrongFrontendAgentClient(AgentServerClient):
             "[YuanrongFrontendAgentClient] delete_sandbox: instance_id=%s",
             normalized_sandbox_id,
         )
+
+    async def get_agent_info(self, instance_id: str) -> dict[str, Any]:
+        """Query agent instance info via GET /api/agent/:instanceId.
+
+        Returns the ``instance`` dict (contains node_ip, sandbox_ip,
+        sandbox_type, rootfs, workspace, env_vars, etc.).
+        """
+        self._ensure_connected()
+        normalized_id = str(instance_id or "").strip()
+        if not normalized_id:
+            raise ValueError("instance_id is required to get agent info")
+        status, body = await asyncio.to_thread(self._do_agent_get, normalized_id)
+        parsed = self._parse_agent_api_response(body, status)
+        instance = parsed.get("instance")
+        return instance if isinstance(instance, dict) else {}
 
     def _ensure_connected(self) -> None:
         if not self._connected:
@@ -379,6 +399,17 @@ class YuanrongFrontendAgentClient(AgentServerClient):
             req,
             timeout=self._agent_timeout_s,
             raise_on_timeout=True,
+        )
+
+    def _do_agent_get(self, instance_id: str) -> tuple[int, str]:
+        req = urllib.request.Request(
+            self._agent_delete_url(instance_id),  # same URL: /api/agent/{instanceId}
+            headers={"Content-Type": "application/json"},
+            method="GET",
+        )
+        return self._urlopen_request(
+            req,
+            timeout=self._agent_timeout_s,
         )
 
     def _invoke_url(self) -> str:
@@ -628,7 +659,7 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         )
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         req = urllib.request.Request(self._invoke_url(), data=data, headers=headers, method="POST")
-        return self._urlopen_request(req)
+        return self._urlopen_request(req, raise_on_timeout=True)
 
     async def send_request(self, envelope: E2AEnvelope) -> AgentResponse:
         """发送非流式请求.
@@ -642,12 +673,21 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         self._ensure_connected()
         payload = self._build_invoke_payload(envelope, stream=False)
         session_id = envelope.session_id or ""
-        status, body = await asyncio.to_thread(
-            self._do_invoke,
-            payload,
-            session_id,
-            envelope.user_id,
-        )
+        try:
+            status, body = await asyncio.to_thread(
+                self._do_invoke,
+                payload,
+                session_id,
+                envelope.user_id,
+            )
+        except YuanrongAgentApiError as e:
+            logger.warning("[YuanrongFrontendAgentClient] invoke failed: %s", e)
+            return AgentResponse(
+                request_id=envelope.request_id,
+                channel_id=envelope.channel_id,
+                ok=False,
+                payload={"error": str(e)},
+            )
         # 仍需 AgentRequest 形状供 _parse_invoke_response 填充 request_id/channel_id 兜底
         request = e2a_to_agent_request(envelope)
         return self._parse_invoke_response(body, status, request)

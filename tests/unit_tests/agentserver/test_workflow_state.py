@@ -803,3 +803,94 @@ class TestAgentNodeType:
         assert state.phases[0].status == "running"
         assert [a.name for a in state.phases[0].agents] == ["coder", "reviewer"]
         assert state.phases[0].agent_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Task 11: Monitor 状态模型加字段
+# ---------------------------------------------------------------------------
+
+def test_workflow_progress_accepts_new_fields():
+    p = WorkflowProgress(kind="agent_completed", phase="review", tokens=12700,
+                         budget={"total": 5, "spent": 5, "remaining": 0, "scope": "leader", "exhausted": True},
+                         phase_type="child", nested_phase="intro")
+    assert p.tokens == 12700
+    assert p.budget["exhausted"] is True
+    assert p.phase_type == "child"
+
+
+def test_workflow_phase_state_carries_child_meta():
+    ph = WorkflowPhaseState(id="p1", name="▸ intro #0", phase_type="child", parent_phase="Phase1")
+    d = ph.to_dict()
+    assert d["phase_type"] == "child"
+    assert d["parent_phase"] == "Phase1"
+
+
+def test_workflow_run_state_has_budget():
+    r = WorkflowRunState(id="wf_1", name="onboarding")
+    r.budget = {"total": 500000, "spent": 412340, "remaining": 87660, "scope": "leader", "exhausted": False}
+    d = r.to_workflow_run_dict()
+    assert d["budget"]["remaining"] == 87660
+
+
+# ---------------------------------------------------------------------------
+# Task 12: _on_phase 分叉 + child 建卡
+# ---------------------------------------------------------------------------
+
+def test_child_phase_declared_builds_card(monkeypatch):
+    r = WorkflowRunState(id="wf_1", name="onboarding")
+    p = WorkflowProgress(kind="phase", phase="intro", phase_type="child", nested_phase="▸ intro #0")
+    r._on_phase(p)
+    assert len(r.phases) == 1
+    assert r.phases[0].name == "▸ intro #0"
+    assert r.phases[0].phase_type == "child"
+    assert r.phases[0].agents == []
+
+
+def test_author_phase_not_child_does_not_build_card():
+    r = WorkflowRunState(id="wf_1", name="onboarding")
+    p = WorkflowProgress(kind="phase", phase="review")  # no phase_type
+    ret = r._on_phase(p)
+    assert ret is None
+    assert len(r.phases) == 0
+
+
+def test_concurrent_same_name_child_cards_not_reused():
+    r = WorkflowRunState(id="wf_1", name="onboarding")
+    for nm in ["▸ intro #0", "▸ intro #1", "▸ intro #2"]:
+        r._on_phase(WorkflowProgress(kind="phase", phase="intro", phase_type="child", nested_phase=nm))
+    assert len(r.phases) == 3
+    assert [p.name for p in r.phases] == ["▸ intro #0", "▸ intro #1", "▸ intro #2"]
+
+
+def test_agent_started_hits_existing_child_card():
+    r = WorkflowRunState(id="wf_1", name="onboarding")
+    r._on_phase(WorkflowProgress(kind="phase", phase="intro", phase_type="child", nested_phase="▸ intro #0"))
+    r._on_agent_started(WorkflowProgress(kind="agent_started", phase="greeter", label="greeter", agent_id="k1", node_type="agent", nested_phase="▸ intro #0"))
+    assert len(r.phases) == 1
+    assert r.phases[0].agents[0].name == "greeter"
+
+
+# ---------------------------------------------------------------------------
+# Task 13: _finalize_agent/_on_workflow_failed 写 token/budget + delta emit
+# ---------------------------------------------------------------------------
+
+def test_finalize_agent_writes_token_count_and_budget():
+    r = WorkflowRunState(id="wf_1", name="review")
+    ph = WorkflowPhaseState(id="p1", name="review")
+    ph.agents.append(WorkflowAgentState(id="k1", name="analyst", status="running"))
+    r.phases.append(ph)
+    r._on_agent_started(WorkflowProgress(kind="agent_started", phase="review", label="analyst", agent_id="k1", node_type="agent"))
+    r._on_agent_completed(WorkflowProgress(kind="agent_completed", phase="review", label="analyst", agent_id="k1", outcome="ok", tokens=12700,
+                                           budget={"total": 500000, "spent": 412340, "remaining": 87660, "scope": "leader", "exhausted": False}))
+    # _resolve_agent matches the first agent by agent_id (the pre-appended one)
+    assert ph.agents[0].token_count == 12700
+    assert r.token_count == 12700
+    assert r.budget["spent"] == 412340
+
+
+def test_workflow_failed_freezes_budget():
+    r = WorkflowRunState(id="wf_1", name="credit-review")
+    r._on_workflow_failed(WorkflowProgress(kind="workflow_failed", text="boom",
+                                           budget={"total": 500000, "spent": 500000, "remaining": 0, "scope": "leader", "exhausted": True}))
+    assert r.budget["exhausted"] is True
+    assert r.status == "failed"

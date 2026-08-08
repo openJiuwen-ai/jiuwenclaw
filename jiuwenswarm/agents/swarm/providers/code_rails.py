@@ -35,6 +35,7 @@ from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.rails import SkillUseRail
 
 from jiuwenswarm.agents.swarm.context import SwarmBuildContext
+from jiuwenswarm.common.utils import get_agent_workspace_dir
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +210,10 @@ class PermissionInterruptInput(ConstructionInput):
         default="gpt-4",
         description="Model name from config models.default (drives permission policy).",
     )
+    trusted_dirs: list[str] | None = context_field(
+        attr="trusted_dirs",
+        description="Directories the client declared as trusted for this request.",
+    )
 
 
 class _TeamPlanPermissionInterruptRail:
@@ -267,6 +272,10 @@ def build_permission_interrupt(params: dict[str, Any], ctx: SwarmBuildContext) -
             llm=None,
             model_name=inp.model_name,
         )
+        if rail is not None and inp.trusted_dirs:
+            # Mirrors the single agent: trusted subtrees count as internal, so
+            # the external_directory check skips ask/deny inside them.
+            rail.set_trusted_dirs(inp.trusted_dirs)
         if rail is not None and _is_team_plan_leader(ctx):
             return _TeamPlanPermissionInterruptRail(rail)
         return rail
@@ -308,14 +317,18 @@ def build_code_coding_memory(params: dict[str, Any], ctx: SwarmBuildContext) -> 
 
         inp = CodeCodingMemoryInput.resolve(params, ctx)
         workspace_root = str(inp.workspace_root or "./")
+        effective_project_dir = inp.project_dir or workspace_root
+        # The build workspace identifies the project. Persistent Coding Memory
+        # belongs to the agent-owned system workspace instead.
+        agent_workspace_dir = str(get_agent_workspace_dir())
         _set_workspace_coding_memory_directory(
             ctx.workspace,
-            project_dir=inp.project_dir,
-            agent_workspace_dir=workspace_root,
+            project_dir=effective_project_dir,
+            agent_workspace_dir=agent_workspace_dir,
         )
         rail = create_coding_memory_rail(
-            project_dir=inp.project_dir,
-            agent_workspace_dir=workspace_root,
+            project_dir=effective_project_dir,
+            agent_workspace_dir=agent_workspace_dir,
             config={"embed": inp.embed_config},
         )
         # Share the instance with the code_agent sub-agent via the build context.

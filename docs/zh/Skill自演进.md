@@ -12,7 +12,7 @@ JiuwenSwarm 的 Skill 自演进机制通过内置的演进信号检测系统，�
 
 Skill 自演进机制的核心价值在于：
 
-- **无需人工干预**：智能体在日常运转过程中自动完成对自身的改进
+- **降低日常干预成本**：智能体自动识别可复用经验，再按审批配置保存
 - **持续能力提升**：随着使用时间增加，Skills 的准确性和可靠性不断提高
 - **自适应场景变化**：能够根据实际使用场景自动调整和优化
 - **降低维护成本**：减少了手动更新和维护 Skills 的工作量
@@ -21,15 +21,28 @@ Skill 自演进机制的核心价值在于：
 
 ### 2.1 自演进配置开关
 
-Skill 自动演进功能通过在配置信息中开启自演进配置项 `evolution_auto_scan` 开关启用。
+Skill 自动学习功能通过配置项 `react.evolution.skill_evolution` 启用，默认为 `false`。Web 和 TUI 的配置页只展示这一个开关；开启后，系统可以自动提炼经验、建议创建 Skill，并提供 `/evolve` 演进命令和工具。
+
+关闭开关会同时禁用上述自动学习和手动演进能力，但不影响用户显式使用通用 `skill-creator` 或 `swarmskill-creator` 能力。升级前使用 `enabled`、`auto_scan`、`skill_create` 或相关环境变量的配置不会自动启用新开关，需要显式迁移。
+
+最小配置如下：
+
+```yaml
+react:
+  evolution:
+    skill_evolution: true
+    auto_save: false
+```
+
+`auto_save` 是仅在 YAML 中使用的高级审批选项：`false` 时，Single Agent 和 Team leader 的常规演进结果需要审批；`true` 时可自动保存常规演进结果。Teammate 使用固定自动审批策略。
 
 ![打开自演进自动检测](../assets/images/skill演进_自动检测开关.png)
 
-### 2.2 自动演进（无需干预）
+### 2.2 自动演进
 
 系统会在每次工具执行和对话结束后自动检测演进信号。当检测到执行异常或用户纠错时，会自动生成演进记录并存入 `evolutions.json`。
 
-你无需做任何操作，演进在后台静默进行。下次调用该 Skill 时，会自动加载包含演进经验的内容。
+系统会自动识别可演进信号并生成候选经验。是否需要用户确认取决于角色和 `auto_save` 配置；经验保存后，下次调用该 Skill 时会自动加载。
 
 ![自动触发](../assets/images/skill演进_自动触发.png)
 

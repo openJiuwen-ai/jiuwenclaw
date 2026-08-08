@@ -169,10 +169,21 @@ class TeamMonitorHandler(BaseMonitorHandler):
     async def _handle_member_spawned(self, base: dict[str, Any], event: MonitorEvent) -> dict[str, Any]:
         base["member_id"] = event.member_name
         # 获取成员 role：human_agent → mode="human"，其他保留原 mode
+        # 同一次查询顺带带出 display_name：前端一切成员展示都用它，事件不带的话
+        # 界面只能退回显示 member_id（内部 slug），观感上像换了个人。
         try:
             member_info = await self._monitor.get_member(event.member_name or "")
             if member_info is not None:
                 base["mode"] = "human" if member_info.role == "human_agent" else member_info.role
+                base["role"] = member_info.role
+                display_name = str(getattr(member_info, "display_name", "") or "").strip()
+                if display_name:
+                    base["name"] = display_name
+                # 外部 CLI 成员（claude / codex）的 role 是 teammate，靠这个字段
+                # 才能选对头像。
+                cli_agent = str(getattr(member_info, "cli_agent", "") or "").strip()
+                if cli_agent:
+                    base["cli_agent"] = cli_agent
         except Exception as e:
             logger.warning(
                 "[TeamMonitorHandler] 获取成员 role 失败: member=%s, error=%s",
@@ -413,6 +424,9 @@ class TeamMonitorHandler(BaseMonitorHandler):
                         "mode": m.mode,
                         # role 字段：区分人类/AI（human_agent/teammate/leader）
                         "role": m.role,
+                        # 外部 CLI 成员的 role 就是 teammate，只有这个字段能区分
+                        # 它是哪种 CLI（claude / codex），前端据此选头像。
+                        "cli_agent": getattr(m, "cli_agent", None),
                     }
                     for m in members
                 ],
@@ -463,6 +477,7 @@ class TeamMonitorHandler(BaseMonitorHandler):
                     "execution_status": m.execution_status,
                     "mode": m.mode,
                     "role": m.role,
+                    "cli_agent": getattr(m, "cli_agent", None),
                 }
                 for m in members
             ]
@@ -475,7 +490,11 @@ class TeamMonitorHandler(BaseMonitorHandler):
             return None
 
     @staticmethod
-    async def get_member_list_from_db(team_name: str) -> list[dict[str, Any]] | None:
+    async def get_member_list_from_db(
+        team_name: str,
+        *,
+        exclude_leader: bool = False,
+    ) -> list[dict[str, Any]] | None:
         """monitor 不在时直查 ``team.db`` 取该 team 的全部成员（/join 成员校验降级）。
 
         monitor 是 runtime 运行态对象，runtime 被 chat.interrupt 中断 / 后端重启
@@ -483,7 +502,7 @@ class TeamMonitorHandler(BaseMonitorHandler):
         不依赖 monitor 存活。本方法在 monitor 不可达时供 server 层降级调用，
         使 /join 成员校验通过 runtime 间隙继续工作。
 
-        只查全局 ``team_member`` 表，返回该 team 的**全部**成员（不按 role 过滤、
+        只查全局 ``team_member`` 表，默认返回该 team 的**全部**成员（不按 role 过滤、
         不排除 leader）——业务过滤（``role == "human_agent"`` 等）由调用方做，
         与 ``get_member_list`` 的职责边界一致。member dict 形状（member_id/name/
         status/execution_status/mode/role）与 ``get_member_list`` 保持一致，便于
@@ -493,9 +512,17 @@ class TeamMonitorHandler(BaseMonitorHandler):
         时只建全局表（``create_cur_session_tables`` 无 session 上下文会跳过动态表，
         但本方法只查全局表，不受影响）。异常或 db 不可达返回 None，调用方按
         "未就绪"语义处理。
+
+        Args:
+            team_name: 要查询的 team 名。
+            exclude_leader: 是否剔除 leader 行，与 ``get_member_list`` 对齐。判据只
+                能是 team 行上的 ``leader_member_name``——leader 的成员行由
+                ``build_team`` 经默认 role 建出，``role`` 字段和普通 teammate 一样，
+                按 role 过滤筛不掉它。
         """
         from openjiuwen.agent_teams.spawn.shared_resources import get_shared_db
         from openjiuwen.agent_teams.tools.database.config import DatabaseConfig
+        from openjiuwen.agent_teams.tools.member_options import load_member_options
 
         from jiuwenswarm.common.config import get_config
         from jiuwenswarm.agents.harness.team.config_loader import resolve_team_sqlite_db_path
@@ -510,7 +537,13 @@ class TeamMonitorHandler(BaseMonitorHandler):
         # db.member dao 在 initialize() 后才挂载（未初始化时为 None），故必须先
         # initialize；幂等，runtime 已起过则 no-op。
         await db.initialize()
-        members = await db.member.get_team_members(team_name, status=None)
+        members = await db.member.get_team_members(team_name, status=None) or []
+
+        if exclude_leader:
+            team_info = await db.team.get_team(team_name)
+            leader_name = str(getattr(team_info, "leader_member_name", "") or "").strip()
+            if leader_name:
+                members = [m for m in members if m.member_name != leader_name]
 
         return [
             {
@@ -520,8 +553,11 @@ class TeamMonitorHandler(BaseMonitorHandler):
                 "execution_status": m.execution_status,
                 "mode": m.mode,
                 "role": m.role,
+                # 直查 DB 拿到的是原始行，cli_agent 埋在 options JSON 里；
+                # monitor 路径的 MemberInfo 已经把它解出来了，这里对齐字段形状。
+                "cli_agent": load_member_options(getattr(m, "options", None)).cli_agent,
             }
-            for m in members or []
+            for m in members
         ]
 
     @staticmethod
@@ -546,6 +582,7 @@ class TeamMonitorHandler(BaseMonitorHandler):
         from openjiuwen.agent_teams.context import reset_session_id, set_session_id
         from openjiuwen.agent_teams.spawn.shared_resources import get_shared_db
         from openjiuwen.agent_teams.tools.database.config import DatabaseConfig
+        from openjiuwen.agent_teams.tools.member_options import load_member_options
 
         from jiuwenswarm.agents.harness.team.config_loader import resolve_team_sqlite_db_path
         from jiuwenswarm.common.config import get_config
@@ -586,6 +623,9 @@ class TeamMonitorHandler(BaseMonitorHandler):
                         "execution_status": m.execution_status,
                         "mode": m.mode,
                         "role": m.role,
+                        # 外部 CLI 成员的 role 就是 teammate，只有这个字段能区分
+                        # 它是哪种 CLI（claude / codex），前端据此选头像。
+                        "cli_agent": load_member_options(getattr(m, "options", None)).cli_agent,
                     }
                     for m in members
                 ],

@@ -475,6 +475,33 @@ def _resolve_enable_permissions(config_base: dict[str, Any], team_raw: dict[str,
     return global_enabled and team_enabled
 
 
+def _apply_swarmflow_budget(spec_dict: dict[str, Any], raw_value: Any) -> None:
+    """Validate and apply ``swarmflow_budget`` to *spec_dict* in-place.
+
+    Only positive integers are accepted. Invalid / non-positive values are
+    logged and silently dropped (the key is removed from *spec_dict*).
+    """
+    if raw_value is None:
+        return
+    try:
+        budget_value = int(raw_value)
+    except (ValueError, TypeError):
+        logger.warning(
+            "[TeamConfigLoader] invalid swarmflow_budget %r, ignored",
+            raw_value,
+        )
+        spec_dict.pop("swarmflow_budget", None)
+        return
+    if budget_value <= 0:
+        logger.warning(
+            "[TeamConfigLoader] swarmflow_budget must be positive, got %r, ignored",
+            raw_value,
+        )
+        spec_dict.pop("swarmflow_budget", None)
+        return
+    spec_dict["swarmflow_budget"] = budget_value
+
+
 def load_team_spec_dict(
     config_base: dict[str, Any] | None = None,
     *,
@@ -525,6 +552,7 @@ def load_team_spec_dict(
     spec_dict["spawn_mode"] = team_raw.get("spawn_mode", "inprocess")
     spec_dict["enable_hitt"] = team_raw.get("enable_hitt", True)
     spec_dict["enable_permissions"] = _resolve_enable_permissions(config_base, team_raw)
+    _apply_swarmflow_budget(spec_dict, team_raw.get("swarmflow_budget"))
     spec_dict["leader"] = _build_leader_spec(team_raw)
     spec_dict["agents"] = agents
     spec_dict["language"] = str(config_base.get("preferred_language", "zh")).strip().lower()

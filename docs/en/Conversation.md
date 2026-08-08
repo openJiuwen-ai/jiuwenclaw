@@ -133,21 +133,7 @@ Agent: Task list updated:
 
 ![Conversation page after inserting new task](../assets/images/conversation/dynamic_insert_new_task.png)
 
-### 1.4 Input Area Controls
 
-The input area at the bottom of the conversation page provides several controls to configure how the Agent processes your requests:
-
-![Input Area Controls](../assets/images/current-ui-en/14-Input-Area-Controls.png)
-
-| Control | Description |
-|---------|-------------|
-| **Add Image** | Attach images to your message for visual context |
-| **Mode Selector** | Switch between Agent mode and Cluster mode |
-| **Permission Selector** | Configure permission level for the Agent |
-| **Skills Selector** | Select which skills to enable for the current conversation |
-| **Model Selector** | Choose which AI model to use |
-
-These controls allow you to customize the Agent's behavior without memorizing commands. For advanced users, the same configurations can be achieved via CLI commands (see [§3 CLI Commands](#3-cli-commands)).
 
 ---
 
@@ -155,52 +141,101 @@ These controls allow you to customize the Agent's behavior without memorizing co
 
 ### 2.1 Mode Overview
 
-JiuwenSwarm supports two execution modes in the Web frontend. Different modes fit different scenarios, and you can choose based on task characteristics.
+JiuwenSwarm supports multiple execution modes. Different modes fit different scenarios, and you can choose based on task characteristics.
 
-![Mode Selector](../assets/images/current-ui-en/02-Mode-Selector.png)
+![Conversation page execution modes](../assets/images/conversation/chat_execution_modes.png)
 
 **Mode Comparison**
 
 | Mode | How it runs | Best for | Characteristics |
 |:---|:---|:---|:---|
-| **Agent mode** | Single agent handles tasks independently, supports task planning and dynamic adjustment | Most daily tasks, Q&A, code generation, etc. | Simple and efficient; single agent handles everything |
-| **Cluster mode** | Multi-agent collaborative execution, with a Leader orchestrating multiple specialized agents | Large-scale tasks requiring specialized division of labor | Complementary capabilities; collaborative processing |
+| **Task Planning** | Decomposes requirements into concrete steps and executes by plan | Complex and multi-step tasks requiring progress tracking | Clear and controllable process; supports dynamic adjustment |
+| **Performance Mode** | Handles requests flexibly and supports parallel tasks | Clear goals where fast results are preferred | Fast response; efficiency-first |
+| **Cluster Mode** | Multi-agent collaborative execution | Large-scale tasks requiring specialized division of labor | Complementary capabilities; collaborative processing |
 
 **Mode Switching**
 
-You can switch execution modes using the **mode selector** at the bottom of the conversation page (in the input area controls).
+You can switch execution modes in the following ways:
 
-> **Note**: For IM controlled channels and TUI, you can also use `/mode` or `/switch` commands (see [CLI Commands](#3-cli-commands)) to switch to more granular modes.
+- **UI switch**: Select the execution mode at the bottom of the conversation page
+- **Command switch**: Use `/mode` or `/switch` (see [CLI Commands](#3-cli-commands))
 
 ---
 
-### 2.2 Agent Mode
+### 2.2 Task Planning Mode
 
 #### 2.2.1 Concept Overview
 
-**What is Agent mode?**
+**What is task planning?**
 
-Agent mode is the default working mode of JiuwenSwarm. In this mode, a single agent handles your tasks independently, with the following capabilities:
+Task planning is one of JiuwenSwarm's core capabilities. It gives the agent **structured task decomposition and dynamic management**. For complex or multi-step requests, the agent automatically parses them into executable subtasks and systematically records/tracks them through built-in todo tools.
 
-- **Task planning**: Complex requests are automatically decomposed into executable subtask sequences
-- **Dynamic adjustment**: Supports adding requirements or urgent insertions mid-execution
-- **Tool orchestration**: Automatically selects and combines suitable tools to complete tasks
-- **Real-time tracking**: Each subtask's status updates in real time, making progress visible and controllable
+**Core Value**
 
-**Applicable scenarios**
+| Capability | Description |
+|:---|:---|
+| **Dynamic decomposition** | Automatically splits complex requests into executable subtask sequences |
+| **Real-time tracking** | Updates subtask status as each step completes, making progress visible and controllable |
+| **Flexible intervention** | Supports adding requirements or urgent insertions mid-execution without breaking the overall flow |
+| **Goal preservation** | Reduces goal drift and execution gaps in long-running tasks |
 
-- Most daily tasks, Q&A, code generation
+**Applicable Scenarios**
+
 - Tasks with many steps that need phased completion
 - Tasks likely to change during execution
 - Tasks where process transparency is important
+- Tasks requiring confirmation at each stage
 
-**Performance optimization**: For simple and clear tasks, the agent automatically reduces planning overhead and responds quickly, supporting parallel execution when appropriate. You don't need to manually switch to a separate "fast mode" — the agent adapts to task complexity automatically.
+![Conversation page after assigning task](../assets/images/conversation/dynamic_insert_task.png)
 
 ---
 
-### 2.3 Cluster Mode
+### 2.3 Performance Mode
 
 #### 2.3.1 Concept Overview
+
+**What is performance mode?**
+
+Performance Mode (Fast Mode) is optimized for simple and clear tasks. In this mode, the agent will:
+
+- **Respond quickly**: Reduce planning overhead and execute directly
+- **Process in parallel**: Run multiple independent tasks at the same time
+- **Prioritize efficiency**: Complete work as fast as possible
+
+**Applicable scenarios**
+
+- Tasks with clear goals and straightforward steps
+- Tasks where fast results are preferred
+- Tasks that do not require detailed process decomposition
+- Multiple simple tasks that need batch processing
+
+#### 2.3.2 Practical Example
+
+**Case: Batch document rewriting**
+
+```
+User: Rewrite the following two technical docs so they are easier for beginners:
+1. docs/api.md
+2. docs/architecture.md
+
+Agent: 🔍 Processing docs in parallel...
+
+  Rewriting completed! Both beginner-friendly versions are saved.
+
+  Original file                 Beginner version
+  ContextCompression.md         ContextCompression_Beginner.md
+  Heartbeat.md                  Heartbeat_Beginner.md
+
+  🎉 Both beginner-friendly docs are saved in the same directories as the originals. Want me to refine anything else?
+```
+
+![Performance mode diagram](../assets/images/conversation/performance_mode_demo.png)
+
+---
+
+### 2.4 Cluster Mode
+
+#### 2.4.1 Concept Overview
 
 **What is cluster mode?**
 
@@ -219,7 +254,7 @@ Cluster Mode (Team Mode) is JiuwenSwarm's multi-agent collaboration mode. Multip
 - Tasks requiring multiple professional skill sets
 - Tasks difficult for a single agent to complete alone
 
-#### 2.3.2 Practical Example
+#### 2.4.2 Practical Example
 
 **Case: Full-stack project development**
 
@@ -244,7 +279,6 @@ The screenshots below are ordered roughly as the conversation unfolds.
    Conversation UI where the Team Leader confirms scope and key details with the user before cluster startup.
 
 ![Cluster mode diagram 1](../assets/images/conversation/chat_cluster_mode_1.png)
-
 
 2. **Pickup and parallel start**  
    Conversation and status UI when specialized agents pick up subtasks and start work in parallel.
@@ -272,250 +306,10 @@ The screenshots below are ordered roughly as the conversation unfolds.
 
 ## 3. CLI Commands
 
-### 3.1 Command Overview
+You can control sessions and switch modes through CLI commands during conversation:
 
-JiuwenSwarm supports controlling sessions and modes through "special prefix commands." These commands are recognized and processed by the system **before the message reaches the agent** — they do not need the agent to execute them, and instead directly change the system's running state (such as switching modes or creating new sessions).
-
-> **All CLI commands can be typed directly in the chat input box** — you do not need a separate command-line terminal. Enter a slash command starting with `/` in the message box and the system will recognize and execute it.
-
-> **Important: Whether a command takes effect depends on the channel.** Some commands are intercepted and handled by the system only on certain channels; on others they may be forwarded to the agent as ordinary messages. See "Channel Scope" below.
-
-**Channel Scope**
-
-JiuwenSwarm commands are categorized by handling layer:
-
-| Level | Handler | Applicable channels | Description |
-| :--- | :--- | :--- | :--- |
-| **Gateway interception** | Gateway layer | Feishu, DingTalk, WeCom, WeChat, WhatsApp, Xiaoyi | Intercepted at the gateway — not forwarded to the agent — and change system state directly |
-| **Client-side handling** | Client | TUI (terminal) | Handled locally by the TUI client; coordinates with AgentServer via `session.create` and similar calls |
-| **No interception** | — | Web conversation page | Not intercepted — sent to the agent as a normal chat message for the agent to interpret |
-
-> **Web conversation page**: Slash commands starting with `/` are **not** intercepted by the gateway and are treated as ordinary messages to the agent — they **will not truly switch sessions or modes**. To start a new chat or change modes in the Web UI, use on-page buttons and menus (such as **New Conversation** or the mode selector). For precise control via commands, use an IM-controlled channel or the TUI.
-
-**Primary Mode and Secondary Mode Explained**
-
-JiuwenSwarm's execution modes are organized in two levels:
-
-- **Primary mode**: Determines the agent's overall working style, such as agent mode (`agent`), code mode (`code`), or team collaboration mode (`team`)
-- **Secondary mode**: A finer execution strategy under the primary mode, such as planning mode (`plan`) which decomposes tasks before executing, or fast mode (`fast`) which executes directly
-
-> **Note**: Not all primary modes have secondary modes. Currently `agent` and `code` support secondary modes (`plan`/`fast`/`normal`), while `team` does not yet support secondary mode switching. You can use `/mode` to specify a primary+secondary combination directly (e.g., `/mode agent.plan`), or use `/switch` to change only the secondary mode under the current primary mode.
-
-**Command categories**
-
-| Type | Command | Description | Applicable channels |
-| :--- | :--- | :--- | :--- |
-| **Session control** | `/new_session` | Create a new session | IM controlled channels |
-| **Mode switching** | `/mode` | Switch primary mode (can also specify primary+secondary combination) | IM controlled channels |
-| **Mode switching** | `/switch` | Switch secondary mode (under the current primary mode) | IM controlled channels |
-| **Skill management** | `/skills list` | List available skills | IM controlled channels |
-| **Workspace** | `/workspace_dir` | Set workspace path | TUI |
-| **Session reset** | `/clear` (aliases `/new`, `/reset`) | Clear conversation history and create a new session | TUI |
-
-**Usage suggestions**
-
-- **Natural language first**: In most cases, describe your needs directly in natural language
-- **Use commands as support**: Use commands when you need quick switching or precise control
-- **Do not mix**: Avoid combining commands and natural language in a single message
-- **Mind the channel**: Make sure your channel supports the command; otherwise it will be treated as a regular message only
-
----
-
-### 3.2 Common Commands
-
-#### `/new_session` — Create a New Session
-
-**Purpose**
-
-Think of this as **starting a new blank conversation inside the same channel**. The new conversation **does not** inherit the prior session's chat history — the agent only continues from this new session context. Existing records from earlier sessions **are not deleted**; they remain in the system and can be recalled or reopened later via history or session lists as needed.
-
-On supported IM channels, the system switches to a new `session_id` before handling later messages and cancels still-running work on the old session. Under `workspace/session/`, the per-session directory is usually created **on first write** (e.g. todo or file save), so you do not need to rely on folders appearing the exact moment you issue the command.
-
-**Channel scope**
-
-| Channel | Description |
-| :--- | :--- |
-| **IM controlled channels** (Feishu, DingTalk, WeCom, WeChat, WhatsApp, Xiaoyi) | ✅ Supported: intercepted by gateway; subsequent messages run in the new session context |
-| **TUI (terminal)** | The TUI **does not** expose gateway `/new_session`. Use **`/clear`** (**`/reset`** and **`/new`** are aliases — see table above) to start a fresh blank session |
-| **Web conversation page** | ❌ **Do not rely on slash commands**: `/new_session` does not truly apply — use UI controls such as **New Conversation** |
-
-**Usage**
-
-On IM-controlled channels, send exactly one line consisting of **`/new_session` only**, with **no trailing parameters**.
-
-```
-/new_session
-```
-
-The TUI **does not** provide this gateway command. To start a new blank session in the TUI, send **`/clear`** (same behavior as **`/reset`** / **`/new`** — one built-in handler).
-
-**What happens on IM controlled channels** (gateway: recognize control commands, then refresh session binding)
-
-- The message **is not** passed to the agent for parsing.
-- A new `session_id` is generated for this channel and saved in state; the **previous session** has cancellation signaled on gateway and AgentServer sides (including in-flight tasks).
-- A fixed confirmation is echoed, e.g. `[CLI command received], session_id has been changed to <new_sid>`.
-- You can still see **earlier** messages in the IM window; **from your next outgoing message**, traffic uses the new `session_id` and the agent uses the new session context.
-
-**What happens in the TUI for `/clear`**
-
-- If no task is running: call `session.create` with a `create_token` and let AgentServer allocate the new `session_id`; after a successful response, switch the active session, **clear the on-screen message list**, fetch the new session's empty history, and show `Started a fresh conversation in <session_id>`. If creation fails, TUI stays on the original session.
-
-**workspace/session/ example (written on demand)**
-
-```
-workspace/session/
-  feishu_17f2b4b32e0_ab12cd/   ← new session dir (may appear once there is a write)
-    todo.md                     ← todo and similar (created on first write)
-```
-
-**Notes**
-
-- Old session data and history remain available; that is compatible with "open a new blank context"
-- On IM controlled channels, `/new_session` cancels tasks still running on the old session (gateway and AgentServer)
-- The command must be **on its own line and match exactly** `/new_session`; forms like `/new_session xxx` are invalid
-
----
-
-#### `/mode` — Switch Primary Mode
-
-**Purpose**
-
-Set the primary execution mode for the current channel, which affects the Agent's execution strategy. You can also specify a primary+secondary combination directly.
-
-**Channel scope**
-
-| Channel | Handling | Actual effect |
-| :--- | :--- | :--- |
-| **IM controlled channels** (Feishu, DingTalk, WeCom, WeChat, WhatsApp, Xiaoyi) | Gateway intercepts → updates channel state → cancels old tasks → not forwarded to agent | ✅ Truly switches mode |
-| **TUI (terminal)** | Client-side handling | ✅ Truly switches mode |
-| **Web conversation page** | Gateway **does not intercept** → forwarded to agent as a regular message | ❌ Does not actually switch mode |
-
-**Supported modes**
-
-| Mode | Description |
-| :--- | :--- |
-| `agent` | Agent mode (default) |
-| `code` | Code mode |
-| `team` | Team collaboration mode |
-| `agent.plan` | Agent mode + Planning secondary mode |
-| `agent.fast` | Agent mode + Fast secondary mode |
-| `code.plan` | Code mode + Planning secondary mode |
-| `code.normal` | Code mode + Normal secondary mode |
-
-> `/mode agent.plan` has the same effect as first running `/mode agent` then `/switch plan`, but is more concise.
-
-**Usage**
-
-**Template**: `/mode` + `<mode-field>`
-
-`<mode-field>` can be a primary mode name (such as `agent`, `code`, or `team`), or a dot-joined primary+secondary combination (consistent with the **Supported modes** table above).
-
-**Example**: Switch to Agent mode with Fast secondary mode:
-
-```
-/mode agent.fast
-```
-
-**System response**
-
-```
-mode has been changed to agent.fast
-```
-
----
-
-#### `/switch` — Switch Secondary Mode
-
-**Purpose**
-
-Switch the secondary execution strategy under the current primary mode. Only effective for primary modes that support secondary modes (currently `agent` and `code` support this; `team` does not yet).
-
-**Channel scope**
-
-Same as `/mode` — only truly effective on IM controlled channels and TUI; treated as a regular message on the Web conversation page.
-
-**Supported modes**
-
-| Mode | Description |
-| :--- | :--- |
-| `plan` | Planning mode — decompose tasks first, then execute step by step |
-| `fast` | Fast mode — reduce planning, execute directly |
-| `normal` | Normal mode — default execution strategy |
-
-**Usage**
-
-```
-/switch plan
-/switch fast
-/switch normal
-```
-
----
-
-#### `/skills list` — List Skills
-
-**Purpose**
-
-List all currently available skills.
-
-**Channel scope**
-
-| Channel | Handling | Actual effect |
-| :--- | :--- | :--- |
-| **IM controlled channels** (Feishu, DingTalk, WeCom, WeChat, WhatsApp, Xiaoyi) | Gateway intercepts → calls `skills.list` → replies with notification | ✅ Truly lists skills |
-| **TUI (terminal)** | Client-side handling | ✅ Truly lists skills |
-| **Web conversation page** | Gateway **does not intercept** → forwarded to agent as a regular message | ❌ Agent responds in natural language; may be inaccurate |
-
-**Usage**
-
-```
-/skills list
-```
-
-**System response**
-
-```
-[Skill List]
-1. document-writer (skillnet)
-   Document writing and optimization
-2. code-analyzer (skillnet)
-   Code analysis and refactoring
-3. data-processor (clawhub)
-   Data processing and transformation
-...
-```
-
----
-
-#### `/workspace` — Manage Project Scope and Trusted Directories (TUI Only)
-
-**Purpose**
-
-Manage the TUI project scope and the trusted directories available for file operations. This command is only available in TUI.
-
-**Channel scope**
-
-Only available in the TUI (terminal) client; not available on other channels.
-
-**Usage**
-
-```
-/workspace get                  # View workspace, project scope, and trusted directories
-/workspace add C:\Shared         # Add a trusted directory to the current project
-/workspace set C:\Projects       # Switch project scope and trust that directory
-/workspace remove C:\Shared      # Remove a trusted directory
-/workspace clear                # Clear trusted directories for the current project
-```
-
-Aliases: `/workspace_dir`, `/workspace-dir`.
-
-**Persistence**
-
-Trusted directories are stored per project in `~/.jiuwenswarm-tui/config.json`. A project-scope override selected with `/workspace set` lasts only for the current TUI process; after restart, the launch directory becomes the project scope again.
-
-TUI sends `trusted_dirs`, `project_dir`, and `cwd` with subsequent requests so Gateway and AgentServer can apply project context and file-access policy.
-
-📢 For a more detailed command reference, see [Slash Commands Reference](SlashCommands.md).
+- For mode introduction and switching commands, see: [Mode System](Modes.md)
+- For common CLI commands and usage, see: [Slash Commands](SlashCommands.md)
 
 ---
 
@@ -534,7 +328,8 @@ User Input → Intent Understanding → Mode Selection → Task Handling → Res
 1. **Intent understanding**: Parse natural language and identify real requirements
 2. **Mode selection**: Choose an execution strategy based on task traits and current mode
 3. **Task handling**:
-   - **Agent mode**: Single agent handles tasks, with automatic task planning and dynamic adjustment
+   - **Task planning mode**: Decompose into subtasks and execute by plan
+   - **Performance mode**: Execute quickly, with parallel support
    - **Cluster mode**: Delegate to multiple agents for collaboration
 4. **Result feedback**: Present results in a clear and understandable way
 

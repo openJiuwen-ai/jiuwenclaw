@@ -19,6 +19,7 @@ const { values } = parseArgs({
     url: { type: "string", default: "ws://127.0.0.1:19001/tui" },
     session: { type: "string" },
     token: { type: "string", default: "" },
+    "user-id": { type: "string", default: "" },
     help: { type: "boolean", short: "h" },
   },
   strict: true,
@@ -32,6 +33,7 @@ Options:
   --session <id>    Resume or create a specific session by id. id 需匹配
                     [A-Za-z0-9._-]、长度 ≤ 128（作为目录名落盘，受文件系统限制）
   --token <token>   Authentication token
+  --user-id <id>    User identifier for the session
   -h, --help        Show this help
 `);
   process.exit(0);
@@ -76,47 +78,6 @@ const wsClient = new WsClient(values.url ?? "ws://127.0.0.1:19001/tui", values.t
 
 // 读取 launcher 注入的监督协议快照（非托管启动时 supervised=false）。
 const supervisionEnv = readSupervisionEnv();
-
-const appState = new CliPiAppState(wsClient, values.session, {
-  // 在构造 AppState 之前无法直接构造 TaskLifecyclePort/HandoffPort/ReauthPort
-  // （它们依赖 AppState 的方法）；这里先传 null，构造后回填。
-  handoffPort: null,
-  taskLifecycle: null,
-  reauthPort: null,
-  uiLifecycle,
-});
-
-// AppState 已构造完成，现在构造依赖 AppState 的端口并回填。
-const taskLifecycle = new TaskLifecyclePortImpl({
-  getSnapshot: () => {
-    const snapshot = appState.getSnapshot();
-    return {
-      cancellableWork: snapshot.cancellableWork,
-      sessionId: snapshot.sessionId,
-    };
-  },
-  cancel: (opts) => appState.cancel(opts),
-  sendEventOnly: (method, params) => appState.sendEventOnly(method, params),
-  onInterruptResult: (h) => appState.onInterruptResult(h),
-  onConnectionLost: (h) => appState.onConnectionLost(h),
-  onStop: (h) => appState.onStop(h),
-  isConnectionAlive: () => appState.getSnapshot().connectionStatus === "connected",
-});
-const handoffPort = new HandoffPortImpl(supervisionEnv, uiLifecycle);
-const reauthPort = new ReauthenticationPortImpl(supervisionEnv, handoffPort, uiLifecycle);
-appState.setSupervisionPorts({ handoffPort, taskLifecycle, reauthPort, uiLifecycle });
-
-// 配置 ws-client 在权威认证过期（close code 1008）时触发重新认证。
-// 仅托管模式注入了 reauth exit code 时，reauthPort 才会以 89 退出；
-// 非托管模式下 reauthPort.requestReauthentication 会抛错，UI 保持 auth_failed 状态。
-wsClient.onAuthExpired = () => {
-  void reauthPort.requestReauthentication("access-token-expired").catch(() => {
-    // 非托管模式或 handoff 已在进行：保持原有 auth_failed UI，不强制退出。
-  });
-};
-
-const commandService = new CommandService();
-commandService.register(createBuiltinCommands({ switchEnabled: supervisionEnv.supervised }));
 
 const terminal = new ProcessTerminal();
 const tui = new TUI(terminal);

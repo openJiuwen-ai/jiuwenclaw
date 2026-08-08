@@ -24,7 +24,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="JiuwenSwarm.app"
 APP_PATH="$PROJECT_ROOT/dist/$APP_NAME"
 DMG_ROOT="$PROJECT_ROOT/dist/dmg-root"
-VERSION="0.2.3"
+VERSION="0.2.4.beta4"
 DMG_PATH="$PROJECT_ROOT/dist/JiuwenSwarm-$VERSION.dmg"
 
 # === 签名 + 公证配置 ===

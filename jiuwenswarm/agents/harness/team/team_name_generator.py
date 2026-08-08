@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import logging
 import re
 from typing import Any
 
@@ -13,9 +15,12 @@ from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 
 from jiuwenswarm.agents.harness.team.config_loader import load_team_spec_dict
 
-_TEAM_NAME_PATTERN = re.compile(
-    r"^(?=.{1,64}$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
-)
+logger = logging.getLogger(__name__)
+
+_DEFAULT_TIMEOUT_SECONDS = 60.0
+_DEFAULT_MAX_ATTEMPTS = 2
+
+_TEAM_NAME_PATTERN = re.compile(r"^(?=.{1,64}$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 _GENERIC_TEAM_NAMES = frozenset(
     {
         "default_team",
@@ -59,6 +64,12 @@ def _is_generic_team_name(team_name: str) -> bool:
     return stem in _GENERIC_TEAM_NAMES
 
 
+def _fallback_team_name(description: str) -> str:
+    """Build a stable valid identifier when model-based naming is unavailable."""
+    digest = hashlib.sha256(description.encode("utf-8")).hexdigest()[:10]
+    return f"task-{digest}"
+
+
 def _resolve_tiny_model(
     config_base: dict[str, Any],
     *,
@@ -87,12 +98,17 @@ async def generate_team_name(
     *,
     config_base: dict[str, Any],
     template_id: str,
-    timeout_seconds: float = 45.0,
+    timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
+    max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
 ) -> str:
-    """Generate one validated team name using the selected template's model."""
+    """Generate a team name, retrying transient failures before local fallback."""
     prompt = str(description or "").strip()
     if not prompt:
         raise TeamNameGenerationError("description is required")
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be greater than zero")
+    if max_attempts <= 0:
+        raise ValueError("max_attempts must be greater than zero")
 
     model_name, model_config = _resolve_tiny_model(
         config_base,
@@ -101,43 +117,63 @@ async def generate_team_name(
     agent = create_tiny_agent(
         system_prompt=_SYSTEM_PROMPT,
         model_name=model_name,
-        model_resolver=lambda requested: model_config if requested == model_name else None,
+        model_resolver=lambda requested: (
+            model_config if requested == model_name else None
+        ),
         default_schema=_TEAM_NAME_SCHEMA,
         name="tiny-team-name",
         language="en",
         max_iterations=3,
     )
 
-    async def run_generation() -> str:
-        async with agent:
-            current_prompt = prompt[:4000]
-            for _ in range(2):
-                result = await agent.run(current_prompt)
-                team_name = str(result.get("team_name") or "").strip() if isinstance(result, dict) else ""
-                if (
-                    _TEAM_NAME_PATTERN.fullmatch(team_name)
-                    and not _is_generic_team_name(team_name)
-                ):
+    current_prompt = prompt[:4000]
+    async with agent:
+        for attempt in range(1, max_attempts + 1):
+            team_name = ""
+            failure: BaseException | None = None
+            try:
+                result = await asyncio.wait_for(
+                    agent.run(current_prompt),
+                    timeout=timeout_seconds,
+                )
+                team_name = (
+                    str(result.get("team_name") or "").strip()
+                    if isinstance(result, dict)
+                    else ""
+                )
+                valid_team_name = bool(_TEAM_NAME_PATTERN.fullmatch(team_name))
+                if valid_team_name and not _is_generic_team_name(team_name):
                     return team_name
+                failure = TeamNameGenerationError(
+                    f"TinyAgent returned invalid team_name {team_name!r}"
+                )
+            except TimeoutError:
+                failure = TeamNameGenerationError(
+                    f"attempt timed out after {timeout_seconds:g} seconds"
+                )
+            except Exception as exc:  # noqa: BLE001
+                failure = exc
+
+            logger.warning(
+                "[team_name_generator] attempt %s/%s failed: %s",
+                attempt,
+                max_attempts,
+                failure,
+            )
+            if attempt < max_attempts:
                 current_prompt = (
                     f"用户命名需求：\n{prompt[:3500]}\n\n"
-                    f"候选名称 {team_name!r} 无效或过于通用。请重新生成一个符合约束且有辨识度的 team_name。"
+                    f"候选名称 {team_name!r} 无效或过于通用，或上次生成未完成。"
+                    "请重新提交一个符合约束且有辨识度的 team_name。"
                 )
-        raise TeamNameGenerationError("TinyAgent returned an invalid team_name")
 
-    try:
-        return await asyncio.wait_for(
-            run_generation(),
-            timeout=timeout_seconds,
-        )
-    except asyncio.CancelledError:
-        raise
-    except TimeoutError as exc:
-        raise TeamNameGenerationError("team_name generation timed out") from exc
-    except TeamNameGenerationError:
-        raise
-    except Exception as exc:
-        raise TeamNameGenerationError("team_name generation failed") from exc
+    fallback = _fallback_team_name(prompt)
+    logger.warning(
+        "[team_name_generator] using local fallback after %s failed attempts: %s",
+        max_attempts,
+        fallback,
+    )
+    return fallback
 
 
 __all__ = ["TeamNameGenerationError", "generate_team_name"]

@@ -146,6 +146,8 @@ export interface AppSnapshot {
   workflowRuns: WorkflowRun[];
   pendingHumanPrompts: Map<string, PendingHumanPrompt>;
   evolutionStatus: "idle" | "running";
+  /** 后端 config.get 成功读取到的技能自演进展示开关。 */
+  skillEvolutionEnabled: boolean;
   contextCompression: ContextCompressionStats | null;
   contextWindowLimit: number | null;
   contextUsedPercentage: number | null;
@@ -189,6 +191,13 @@ function formatElapsed(ms: number): string {
 
 function normalizePreferredLanguage(value: unknown): PreferredLanguage {
   return typeof value === "string" && value.trim().toLowerCase() === "en" ? "en" : "zh";
+}
+
+/** config.get 将技能自演进开关展平为 skill_evolution；未知/缺失值必须保持关闭。 */
+function parseSkillEvolutionEnabled(value: unknown): boolean {
+  if (value === true) return true;
+  if (typeof value !== "string") return false;
+  return ["true", "1", "yes", "on", "enabled"].includes(value.trim().toLowerCase());
 }
 
 const LOCAL_FILE_SEARCH_TOOL_NAMES = new Set([
@@ -362,6 +371,8 @@ export class CliPiAppState {
   private workflowRuns: WorkflowRun[] = [];
   private pendingHumanPrompts: Map<string, PendingHumanPrompt> = new Map();
   private evolutionStatus: "idle" | "running" = "idle";
+  /** 配置读取失败时保持 false，避免前端暴露不可用的演进命令。 */
+  private skillEvolutionEnabled = false;
   private contextCompression: ContextCompressionStats | null = null;
   private contextWindowLimit: number | null = null;
   private contextUsedPercentage: number | null = null;
@@ -728,6 +739,14 @@ export class CliPiAppState {
     this.wsClient.disconnect();
   }
 
+  private setSkillEvolutionEnabled(enabled: boolean): void {
+    if (this.skillEvolutionEnabled === enabled) {
+      return;
+    }
+    this.skillEvolutionEnabled = enabled;
+    this.emitChange();
+  }
+
   private async fetchModelInfo(): Promise<void> {
     try {
       const [configPayload, modelsPayload, memoryPayload] = await Promise.allSettled([
@@ -755,6 +774,7 @@ export class CliPiAppState {
         ? models.find((m) => m.model_name === activeModelName)
         : models[0];
       this.preferredLanguage = normalizePreferredLanguage(config.preferred_language);
+      this.setSkillEvolutionEnabled(parseSkillEvolutionEnabled(config.skill_evolution));
       this.autoRecapEnabled = config.auto_recap_enabled !== "false";
       // 同步 auto-recap timer：WS 连接后才拿到配置，需根据实际值启停 timer
       if (this.autoRecapEnabled) {
@@ -1105,6 +1125,7 @@ export class CliPiAppState {
       })),
       pendingHumanPrompts: new Map(this.pendingHumanPrompts),
       evolutionStatus: this.evolutionStatus,
+      skillEvolutionEnabled: this.skillEvolutionEnabled,
       contextCompression: this.contextCompression ? { ...this.contextCompression } : null,
       contextWindowLimit: this.contextWindowLimit,
       contextUsedPercentage: this.contextUsedPercentage,
@@ -1465,6 +1486,20 @@ export class CliPiAppState {
         },
         timeoutMs ?? 30000,
       );
+      if (method === "config.get") {
+        const payload = response.payload;
+        const enabled =
+          payload && typeof payload === "object" && !Array.isArray(payload)
+            ? parseSkillEvolutionEnabled((payload as Record<string, unknown>).skill_evolution)
+            : false;
+        this.setSkillEvolutionEnabled(enabled);
+      } else if (
+        method === "config.set" &&
+        Object.prototype.hasOwnProperty.call(params, "skill_evolution")
+      ) {
+        // config.set 响应只确认写盘；重新读取权威 payload，保证 hot reload 后 UI 与后端一致。
+        void this.fetchModelInfo();
+      }
       return response.payload as T;
     } finally {
       // 请求完成后清理追踪（无论成功/失败/取消）

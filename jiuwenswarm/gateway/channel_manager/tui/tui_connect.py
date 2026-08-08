@@ -21,7 +21,7 @@ from openjiuwen.core.foundation.llm.schema.config import (
     ModelClientConfig,
     ModelRequestConfig,
 )
-from openjiuwen.auto_harness.schema import load_auto_harness_config
+from openjiuwen.rsi.auto_harness.schema import load_auto_harness_config
 
 from jiuwenswarm.common.config import (
     get_config,
@@ -34,7 +34,9 @@ from jiuwenswarm.common.config import (
     update_permissions_enabled_in_config,
     get_model_names,
     update_preferred_language_in_config,
+    update_swarmflow_budget_in_config,
     update_swarmflow_enabled_in_config,
+    update_skill_evolution_enabled_in_config,
     update_config,
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
@@ -245,11 +247,6 @@ CLI_FORWARD_REQ_METHODS = frozenset(
         "skills.evolution.status",
         "skills.evolution.get",
         "skills.evolution.save",
-        "symphony.build_score",
-        "symphony.pause_build",
-        "symphony.score_status",
-        "symphony.graph",
-        "symphony.plan",
         "plugins.list",
         "plugins.install",
         "plugins.uninstall",
@@ -349,11 +346,6 @@ CLI_FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset(
         "skills.evolution.status",
         "skills.evolution.get",
         "skills.evolution.save",
-        "symphony.build_score",
-        "symphony.pause_build",
-        "symphony.score_status",
-        "symphony.graph",
-        "symphony.plan",
         "plugins.list",
         "plugins.install",
         "plugins.uninstall",
@@ -471,7 +463,6 @@ _CLI_CONFIG_SET_ENV_MAP = {
     "serper_api_key": "SERPER_API_KEY",
     "perplexity_api_key": "PERPLEXITY_API_KEY",
     "github_token": "GITHUB_TOKEN",
-    "evolution_auto_scan": "EVOLUTION_AUTO_SCAN",
     "teamskills_market_url": "TEAM_SKILLS_HUB_BASE_URL",
     "teamskills_user_token": "TEAM_SKILLS_HUB_USER_TOKEN",
     "teamskills_system_token": "TEAM_SKILLS_HUB_SYSTEM_TOKEN",
@@ -485,6 +476,8 @@ _CLI_CONFIG_YAML_SETTERS: dict[str, Any] = {
     "memory_forbidden_enabled": update_memory_forbidden_enabled_in_config,
     "preferred_language": update_preferred_language_in_config,
     "enable_swarmflow": update_swarmflow_enabled_in_config,
+    "swarmflow_budget": update_swarmflow_budget_in_config,
+    "skill_evolution": update_skill_evolution_enabled_in_config,
     # Auto-Harness config items (stored in ~/.jiuwenswarm/auto-harness/config.yaml)
     # 用户名同时设置 git.user_name, fork_owner, gitcode.username（三者合一）
     "auto_harness_git_user_name": _update_auto_harness_git_user_name,
@@ -590,8 +583,8 @@ def _build_config_schema() -> list[dict]:
          "options": ["zh", "en"], "source": "yaml", "default": "zh"},
         {"key": "auto_recap_enabled", "label": "自动回顾", "group": "Features",
          "type": "toggle", "source": "yaml", "default": "true"},
-        {"key": "evolution_auto_scan", "label": "自动扫描技能", "group": "Features",
-         "type": "toggle", "source": "env", "default": "false"},
+        {"key": "skill_evolution", "label": "技能演进与创建", "group": "Features",
+         "type": "toggle", "source": "yaml", "default": "false"},
         # Auto-Harness (定时任务配置) - 合并为三项
         {"key": "auto_harness_git_user_name", "label": "用户名", "group": "Auto-Harness",
          "type": "string", "source": "yaml", "default": empty,
@@ -832,6 +825,14 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             _jiuwen_team_cfg = _team_cfg.get("jiuwen_team") or {}
             _swarmflow_enabled = bool(_jiuwen_team_cfg.get("enable_swarmflow", False))
             payload["enable_swarmflow"] = "true" if _swarmflow_enabled else "false"
+            # swarmflow budget ceiling (integer token limit; absent/None → unbounded)
+            _swarmflow_budget = _jiuwen_team_cfg.get("swarmflow_budget")
+            if _swarmflow_budget is not None:
+                payload["swarmflow_budget"] = str(_swarmflow_budget)
+            evolution_cfg = (raw.get("react") or {}).get("evolution") or {}
+            payload["skill_evolution"] = (
+                "true" if evolution_cfg.get("skill_evolution", False) else "false"
+            )
 
             # Resolve model-related fields from config.yaml.
             # When models.defaults list is in use, it is the canonical source
@@ -893,6 +894,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             payload.setdefault("permissions_enabled", "false")
             payload.setdefault("memory_forbidden_enabled", "false")
             payload.setdefault("preferred_language", "zh")
+            payload.setdefault("skill_evolution", "false")
         
         # Auto-Harness config values (from ~/.jiuwenswarm/auto-harness/config.yaml)
         # 合并显示：用户名、邮箱、Access Token 三项
@@ -975,6 +977,9 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                     setter(raw_value)
                 elif param_key.startswith("auto_harness_"):
                     # Auto-harness config items are strings, not toggles
+                    setter(raw_value)
+                elif param_key == "swarmflow_budget":
+                    # Budget is an integer, not a boolean toggle
                     setter(raw_value)
                 else:
                     parsed = raw_value.lower() in ("true", "1", "yes")

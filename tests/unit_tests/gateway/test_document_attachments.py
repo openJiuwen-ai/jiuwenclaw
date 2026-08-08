@@ -240,6 +240,135 @@ async def test_persist_xlsx_writes_txt_sidecar_even_when_parse_false(
     assert Path(item["path"]).read_text(encoding="utf-8") == "sheet A1 value"
 
 
+@pytest.mark.asyncio
+async def test_persist_pdf_writes_txt_sidecar(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.document_attachments.get_agent_sessions_dir",
+        lambda: tmp_path,
+    )
+
+    async def fake_parse(file_path, *, max_chars=None, doc_id=""):
+        return {
+            "text": "parsed pdf body",
+            "truncated": False,
+            "parser": "PDFParser",
+            "file_ext": ".pdf",
+            "char_count": len("parsed pdf body"),
+            "documents_count": 1,
+        }
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.document_attachments.parse_document_file",
+        fake_parse,
+    )
+
+    payload = {
+        "documents": [
+            {
+                "filename": "paper.pdf",
+                "mime_type": "application/pdf",
+                "base64_data": base64.b64encode(b"%PDF-fake-bytes").decode("ascii"),
+            }
+        ]
+    }
+    result = await persist_and_parse_documents(payload, "sess_pdf", parse=True, max_chars=1000)
+    items = result.get("media_items") or []
+    assert len(items) == 1
+    item = items[0]
+    assert item["filename"] == "paper.pdf"
+    assert Path(item["original_path"]).suffix == ".pdf"
+    assert Path(item["original_path"]).is_file()
+    assert Path(item["text_path"]).suffix == ".txt"
+    assert item["path"] == item["text_path"]
+    assert Path(item["path"]).read_text(encoding="utf-8") == "parsed pdf body"
+    assert result["files"]["uploaded_documents"][0]["path"] == item["text_path"]
+    assert result["files"]["uploaded_documents"][0]["original_path"] == item["original_path"]
+
+
+@pytest.mark.asyncio
+async def test_persist_pdf_without_text_layer_keeps_original_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Scanned PDFs (no text layer) must keep path on the original binary."""
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.document_attachments.get_agent_sessions_dir",
+        lambda: tmp_path,
+    )
+
+    async def fake_parse(file_path, *, max_chars=None, doc_id=""):
+        return {
+            "text": "",
+            "truncated": False,
+            "parser": "PDFParser",
+            "file_ext": ".pdf",
+            "char_count": 0,
+            "documents_count": 1,
+        }
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.document_attachments.parse_document_file",
+        fake_parse,
+    )
+
+    payload = {
+        "documents": [
+            {
+                "filename": "scan.pdf",
+                "mime_type": "application/pdf",
+                "base64_data": base64.b64encode(b"%PDF-fake-scan").decode("ascii"),
+            }
+        ]
+    }
+    result = await persist_and_parse_documents(payload, "sess_scan", parse=True, max_chars=1000)
+    item = (result.get("media_items") or [])[0]
+    assert Path(item["path"]).suffix == ".pdf"
+    assert item.get("text_path") is None
+    assert item["char_count"] == 0
+    # No stray empty .txt sidecar on disk.
+    upload_dir = Path(item["path"]).parent
+    assert not list(upload_dir.glob("*.txt"))
+
+
+@pytest.mark.asyncio
+async def test_persist_empty_docx_still_writes_sidecar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Empty-text guard applies to .pdf only; docx/xlsx keep writing a sidecar even when empty."""
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.document_attachments.get_agent_sessions_dir",
+        lambda: tmp_path,
+    )
+
+    async def fake_parse(file_path, *, max_chars=None, doc_id=""):
+        return {
+            "text": "",
+            "truncated": False,
+            "parser": "FakeDocxParser",
+            "file_ext": ".docx",
+            "char_count": 0,
+            "documents_count": 1,
+        }
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.document_attachments.parse_document_file",
+        fake_parse,
+    )
+
+    payload = {
+        "documents": [
+            {
+                "filename": "empty.docx",
+                "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "base64_data": base64.b64encode(b"fake-empty-docx").decode("ascii"),
+            }
+        ]
+    }
+    result = await persist_and_parse_documents(payload, "sess_empty", parse=True, max_chars=1000)
+    item = (result.get("media_items") or [])[0]
+    assert Path(item["path"]).suffix == ".txt"
+    assert Path(item["path"]).read_text(encoding="utf-8") == ""
+
+
 def test_resolve_session_upload_path_blocks_traversal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

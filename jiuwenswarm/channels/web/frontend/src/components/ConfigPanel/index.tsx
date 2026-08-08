@@ -303,7 +303,7 @@ const THIRD_PARTY_API_KEYS = new Set([
 ]);
 const REQUIRED_MODEL_FIELDS = ["api_base", "api_key", "model", "model_provider"] as const;
 const REQUIRED_MODEL_FIELD_SET = new Set<string>(REQUIRED_MODEL_FIELDS);
-const EVOLUTION_KEYS = new Set(["evolution_auto_scan", "skill_create"]);
+const EVOLUTION_KEYS = new Set(["skill_evolution"]);
 
 // 模型字段长度校验常量
 const MAX_MODEL_NAME_LENGTH = 100;
@@ -648,8 +648,7 @@ function parseBoolValue(value: string): boolean {
 
 function getBooleanKeyLabel(key: string, t: (key: string) => string): string {
   const labels: Record<string, string> = {
-    evolution_auto_scan: t('config.booleanLabels.evolutionAutoScan'),
-    skill_create: t('config.booleanLabels.skillCreate'),
+    skill_evolution: t('config.booleanLabels.skillEvolution'),
     free_search_ddg_enabled: t('config.booleanLabels.freeSearchDdg'),
     free_search_bing_enabled: t('config.booleanLabels.freeSearchBing'),
     context_engine_enabled: t('config.booleanLabels.enabled'),
@@ -780,8 +779,7 @@ const KEY_LABEL_HINT_I18N: Record<string, string> = {
   // 免费搜索 / 演进
   free_search_ddg_enabled: "config.keyHelp.freeSearchDdg",
   free_search_bing_enabled: "config.keyHelp.freeSearchBing",
-  evolution_auto_scan: "config.keyHelp.evolutionAutoScan",
-  skill_create: "config.keyHelp.skillCreate",
+  skill_evolution: "config.keyHelp.skillEvolution",
   // 含义需补充（「启用」等不加）
   memory_forbidden_description: "config.keyHelp.memoryForbiddenDescription",
   symphony_dynamic_graph_enabled: "config.keyHelp.symphonyDynamicGraphEnabled",
@@ -808,8 +806,7 @@ const KEY_LABEL_HINT_I18N: Record<string, string> = {
 
 /** 组内字段排序优先级，数字越小越靠前 */
 const KEY_SORT_PRIORITY: Record<string, number> = {
-  evolution_auto_scan: 0,
-  skill_create: 1,
+  skill_evolution: 0,
   free_search_ddg_enabled: 0,
   free_search_bing_enabled: 1,
   symphony_enabled: 0,
@@ -850,6 +847,10 @@ function resolveKeyHelpI18nKey(key: string): string | undefined {
 function getKeyLabelHintText(key: string, t: (key: string) => string): string {
   const hintKey = resolveKeyHelpI18nKey(key);
   return hintKey ? t(hintKey) : "";
+}
+
+function shouldShowKeyHelpInline(key: string): boolean {
+  return key === 'skill_evolution';
 }
 
 function getKeySortPriority(key: string): number {
@@ -948,8 +949,9 @@ function GroupSection({
                     <ConfigFieldHintLabel
                       mono
                       label={getKeyDisplayLabel(key, t)}
-                      help={getKeyLabelHintText(key, t) || undefined}
+                      help={shouldShowKeyHelpInline(key) ? undefined : getKeyLabelHintText(key, t) || undefined}
                     />
+                    {shouldShowKeyHelpInline(key) ? <div className="mt-1 text-[11px] leading-4 text-text-muted">{getKeyLabelHintText(key, t)}</div> : null}
                     {PROACTIVE_INT_SPECS[key] ? (() => {
                       const e = validateProactiveInt(key, draftValues[key] ?? "", t);
                       return e ? (

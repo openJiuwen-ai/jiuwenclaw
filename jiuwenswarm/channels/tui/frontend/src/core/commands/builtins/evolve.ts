@@ -28,6 +28,7 @@ export function createEvolveCommand(): SlashCommand {
     example: "/evolve pptx improve error handling",
     kind: CommandKind.BUILT_IN,
     hidden: true,
+    requiresSkillEvolution: true,
     takesArgs: true,
     action: (ctx, args) => {
       const unsupportedMode = unsupportedEvolutionModeMessage(ctx.mode);
@@ -61,6 +62,7 @@ export function createEvolveListCommand(): SlashCommand {
     example: "/evolve_list pptx --sort score",
     kind: CommandKind.BUILT_IN,
     hidden: true,
+    requiresSkillEvolution: true,
     takesArgs: true,
     action: (ctx, args) => {
       const parsedArgs = parseArgs(args);
@@ -100,6 +102,7 @@ export function createEvolveSimplifyCommand(): SlashCommand {
     example: "/evolve_simplify pptx merge duplicate export-failure records",
     kind: CommandKind.BUILT_IN,
     hidden: true,
+    requiresSkillEvolution: true,
     takesArgs: true,
     action: (ctx, args) => {
       const unsupportedMode = unsupportedEvolutionModeMessage(ctx.mode);
@@ -145,6 +148,7 @@ export function createEvolveRebuildCommand(): SlashCommand {
     example: "/evolve_rebuild pptx improve error handling",
     kind: CommandKind.BUILT_IN,
     hidden: true,
+    requiresSkillEvolution: true,
     takesArgs: true,
     action: (ctx, args) => {
       const parsedArgs = parseArgs(args);

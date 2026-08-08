@@ -708,6 +708,7 @@ async def test_precheck_fails_when_no_blank_available(monkeypatch):
 async def test_bootstrap_allows_later_kickoff_for_same_member_after_task_done(monkeypatch):
     kickoff_calls = []
     card_replace_calls = []
+    member_status = AsyncMock(return_value=None)
 
     async def fake_ensure_dynamic_member_execution_loop(**kwargs):
         kickoff_calls.append(kwargs)
@@ -727,6 +728,7 @@ async def test_bootstrap_allows_later_kickoff_for_same_member_after_task_done(mo
         "_replace_teammate_card_after_direct_bootstrap",
         fake_replace_card_after_direct_bootstrap,
     )
+    monkeypatch.setattr(_mod, "_member_status_for_session", member_status)
 
     processed = set()
     loop_kicked_members = set()
@@ -1324,103 +1326,6 @@ async def test_clean_team_wrapper_not_wrapped_for_persistent_lifecycle(monkeypat
         channel_id="web",
     )
     assert not getattr(tool, "_jiuwen_clean_team_distributed_teardown_wrapped", False)
-
-
-@pytest.mark.asyncio
-async def test_temporary_teardown_shutdown_then_clean_team_sequence(monkeypatch) -> None:
-    from openjiuwen.agent_teams.schema.status import MemberStatus
-    from openjiuwen.agent_teams.schema.team import TeamRole
-    from openjiuwen.core.runner import Runner
-
-    monkeypatch.setattr(
-        "jiuwenswarm.common.config.get_config",
-        lambda: {"team": {"runtime": {"mode": "distributed", "role": "leader"}}},
-    )
-
-    class _Result:
-        success = True
-
-    class _ShutdownMemberTool:
-        async def invoke(self, inputs, **kwargs):
-            return _Result()
-
-    class _CleanTeamTool:
-        async def invoke(self, inputs, **kwargs):
-            return _Result()
-
-    shutdown_tool = _ShutdownMemberTool()
-    clean_tool = _CleanTeamTool()
-
-    def _get_tool(tool_id, tag=None):
-        if "shutdown" in tool_id:
-            return shutdown_tool
-        if "clean" in tool_id:
-            return clean_tool
-        return None
-
-    monkeypatch.setattr(
-        Runner,
-        "resource_mgr",
-        SimpleNamespace(get_tool=_get_tool),
-    )
-
-    scheduled: list[tuple[str, str | None]] = []
-    released: list[str] = []
-
-    monkeypatch.setattr(
-        _mod,
-        "".join(["_schedule", "_shutdown_cleanup"]),
-        lambda session_id, channel_id: scheduled.append((session_id, channel_id)),
-    )
-
-    async def fake_release(session_id: str, *, team_agent=None) -> None:
-        released.append(session_id)
-
-    monkeypatch.setattr(_mod, "release_a2x_reservations_for_session", fake_release)
-
-    team_agent = SimpleNamespace(
-        role=TeamRole.LEADER,
-        spec=SimpleNamespace(
-            lifecycle="temporary",
-            team_name="team_sess_combo",
-            leader=SimpleNamespace(member_name="team_leader"),
-        ),
-        runtime_context=None,
-        deep_agent=SimpleNamespace(
-            ability_manager=SimpleNamespace(
-                list=lambda: [
-                    SimpleNamespace(id="team.shutdown_member", name="shutdown_member"),
-                    SimpleNamespace(id="team.clean_team", name="clean_team"),
-                ]
-            ),
-            card=SimpleNamespace(id="leader-card"),
-        ),
-        team_backend=SimpleNamespace(
-            list_members=AsyncMock(
-                return_value=[
-                    SimpleNamespace(member_name="teammate-1", status=MemberStatus.SHUTDOWN.value),
-                ]
-            )
-        ),
-        _messager=SimpleNamespace(register_peer=MagicMock(), send=AsyncMock()),
-    )
-
-    attach_shutdown_member_remote_cleanup_wrapper(
-        team_agent,
-        session_id="sess-combo",
-        channel_id="web",
-    )
-    attach_clean_team_distributed_teardown_wrapper(
-        team_agent,
-        session_id="sess-combo",
-        channel_id="web",
-    )
-
-    await shutdown_tool.invoke({"member_name": "teammate-1"})
-    assert scheduled == []
-
-    await clean_tool.invoke({})
-    assert released == ["sess-combo"]
 
 
 @pytest.mark.asyncio

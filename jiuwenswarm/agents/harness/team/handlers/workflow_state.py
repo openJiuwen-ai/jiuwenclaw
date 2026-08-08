@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, ClassVar, Optional
 
@@ -78,6 +79,11 @@ class WorkflowProgress(BaseModel):
     node_type: Optional[str] = None
     agent_id: Optional[str] = None
     answer: Optional[str] = None
+    tokens: Optional[int] = None
+    budget: Optional[dict] = None
+    phase_type: Optional[str] = None
+    nested_phase: Optional[str] = None
+    parent_phase: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -160,10 +166,24 @@ class WorkflowPhaseState(BaseModel):
     agent_count: int = 0
     completed_agent_count: int = 0
     agents: list[WorkflowAgentState] = []
+    phase_type: Optional[str] = None
+    parent_phase: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict for event payload."""
         return self.model_dump(exclude_none=True)
+
+
+@dataclass
+class _BackfillTerminalCtx:
+    """Inputs for :meth:`WorkflowRunState._backfill_terminal`."""
+
+    phase: WorkflowPhaseState
+    agent: WorkflowAgentState
+    progress: WorkflowProgress
+    status: str
+    outcome: Optional[str]
+    error: Optional[str]
 
 
 class WorkflowRunState(BaseModel):
@@ -191,6 +211,7 @@ class WorkflowRunState(BaseModel):
     token_count: Optional[int] = None
     duration_ms: Optional[int] = None
     estimated_token_count: Optional[int] = None
+    budget: Optional[dict] = None
 
     # Private mutable state for ID generation sequencing (not serialized)
     _phase_counter: int = 0  # Global phase counter (1-based)
@@ -350,6 +371,7 @@ class WorkflowRunState(BaseModel):
         if error is not None:
             self.error = error
         self._finalize_running_phases(status)
+        self._refresh_run_agent_counts()
         return self._build_terminal_delta()
 
     def _generate_phase_id(self, phase_name: str) -> str:
@@ -543,6 +565,7 @@ class WorkflowRunState(BaseModel):
             error: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
         """Resolve agent from progress, mark terminal, bump counters, return phase delta."""
+        self._apply_nested_phase(progress, "finalize")
         phase, agent = self._resolve_agent_for_finalize(
             progress, status=status, outcome=outcome,
         )
@@ -553,46 +576,132 @@ class WorkflowRunState(BaseModel):
             )
             return None
 
-        already_terminal = agent.status in ("completed", "failed", "stopped")
-        if already_terminal:
-            if status == "completed" and agent.status == "completed":
-                updated = False
-                if outcome is not None and not agent.outcome:
-                    agent.outcome = outcome
-                    updated = True
-                if error is not None and not agent.error:
-                    agent.error = error
-                    updated = True
-                if updated:
-                    # Phase seal / workflow teardown can mark agents completed
-                    # without bumping counters; do it on the first real completion.
-                    if phase.completed_agent_count < phase.agent_count:
-                        phase.completed_agent_count += 1
-                        self.completed_agent_count += 1
-                    logger.info(
-                        "[WF_DBG WorkflowRunState] backfilled outcome for agent %s, phase=%s",
-                        agent.name, phase.name,
-                    )
-                    return self._build_phase_delta(phase)
-                return None
-            if status == "failed" and agent.status == "failed":
-                if error is not None and not agent.error:
-                    agent.error = error
-                    return self._build_phase_delta(phase)
-                return None
+        if self._is_terminal_status(agent.status):
+            return self._backfill_terminal(_BackfillTerminalCtx(
+                phase=phase, agent=agent, progress=progress,
+                status=status, outcome=outcome, error=error,
+            ))
 
         self._stamp_agent_terminal(agent, status)
         if outcome is not None:
             agent.outcome = outcome
         if error is not None:
             agent.error = error
-        phase.completed_agent_count += 1
-        self.completed_agent_count += 1
+
+        self._bump_completion(phase, progress, agent)
         logger.info(
             "[WF_DBG WorkflowRunState] agent %s -> %s, phase=%s outcome_len=%s",
             agent.name, status, phase.name,
             len(outcome) if isinstance(outcome, str) else 0,
         )
+        return self._seal_child_and_propagate(phase)
+
+    # -- _finalize_agent helpers ----------------------------------------------
+
+    def _leaf_agent_counts(self) -> tuple[int, int]:
+        """Run-level totals from real agents only — not parent aggregate fields."""
+        total = 0
+        completed = 0
+        for phase in self.phases:
+            total += len(phase.agents)
+            completed += sum(1 for a in phase.agents if a.status == "completed")
+        return completed, total
+
+    @staticmethod
+    def _all_agents_terminal(phase: WorkflowPhaseState) -> bool:
+        """True when every agent on the phase has reached a terminal status."""
+        return bool(phase.agents) and all(
+            WorkflowRunState._is_terminal_status(a.status) for a in phase.agents
+        )
+
+    def _refresh_run_agent_counts(self) -> None:
+        """Write de-duplicated run totals (for deltas / snapshots)."""
+        completed, total = self._leaf_agent_counts()
+        self.completed_agent_count = completed
+        self.agent_count = total
+
+    def _refresh_parent_counts(self, parent: WorkflowPhaseState) -> None:
+        """Recompute a parent phase's counts from its direct agents + child cards.
+
+        Direct agents (author-phase agents like the final merge agent) plus
+        every child phase's ``agent_count`` / ``completed_agent_count``. Derived,
+        not accumulated, so concurrent out-of-order agent events can't corrupt
+        the parent's totals the way scattered ``+= 1`` did.
+        """
+        parent.agent_count = len(parent.agents)
+        parent.completed_agent_count = sum(
+            1 for a in parent.agents if a.status == "completed"
+        )
+        for child in self.phases:
+            if child.phase_type == "child" and child.parent_phase == parent.name:
+                parent.agent_count += child.agent_count or 0
+                parent.completed_agent_count += child.completed_agent_count or 0
+
+    def _backfill_terminal(
+            self, ctx: _BackfillTerminalCtx,
+    ) -> Optional[dict[str, Any]]:
+        """Backfill outcome / error / counters for a late terminal event."""
+        phase, agent, progress = ctx.phase, ctx.agent, ctx.progress
+        status, outcome, error = ctx.status, ctx.outcome, ctx.error
+        if status == "completed" and agent.status == "completed":
+            updated = False
+            if outcome is not None and not agent.outcome:
+                agent.outcome = outcome
+                updated = True
+            if error is not None and not agent.error:
+                agent.error = error
+                updated = True
+            if updated:
+                if phase.completed_agent_count < phase.agent_count:
+                    phase.completed_agent_count += 1
+                if progress.tokens is not None:
+                    agent.token_count = progress.tokens
+                if progress.budget is not None:
+                    self.budget = progress.budget
+                self._refresh_run_agent_counts()
+                self.token_count = sum(a.token_count or 0 for ph in self.phases for a in ph.agents)
+                return self._build_phase_delta(phase)
+            return None
+        if status == "failed" and agent.status == "failed":
+            if error is not None and not agent.error:
+                agent.error = error
+                return self._build_phase_delta(phase)
+        return None
+
+    def _bump_completion(self, phase: WorkflowPhaseState, progress: WorkflowProgress,
+                         agent: WorkflowAgentState) -> None:
+        """Increment phase counters, write tokens / budget, refresh run totals."""
+        if agent.status == "completed":
+            phase.completed_agent_count += 1
+        if progress.tokens is not None:
+            agent.token_count = progress.tokens
+        if progress.budget is not None:
+            self.budget = progress.budget
+        self.token_count = sum(a.token_count or 0 for ph in self.phases for a in ph.agents)
+        if progress.tokens is not None and progress.tokens > 0:
+            logger.debug("[WF_DBG tok] agent=%s tokens=%s run_sum=%s",
+                         agent.name, progress.tokens, self.token_count)
+        if phase.phase_type == "child" and phase.parent_phase:
+            parent = self._find_parent_author_phase(name=phase.parent_phase)
+            if parent is not None:
+                self._refresh_parent_counts(parent)
+                logger.debug("[WF_DBG parent] parent=%s completed=%s/%s (refreshed after child=%s done)",
+                            parent.name, parent.completed_agent_count, parent.agent_count, phase.name)
+        self._refresh_run_agent_counts()
+
+    def _seal_child_and_propagate(self, phase: WorkflowPhaseState) -> dict:
+        """Seal child phase when all its agents are done, then try sealing parent."""
+        if phase.phase_type == "child" and self._all_agents_terminal(phase):
+            phase.status = "completed"
+            logger.info("[WF_DBG child] sealed child phase=%s (all agents done)", phase.name)
+            parent = self._propagate_child_completion_to_parent(phase)
+            if parent is not None:
+                # Parent just sealed — push parent + child together.
+                return self._build_phases_delta([parent, phase])
+        if phase.phase_type == "child" and phase.parent_phase:
+            parent = self._find_parent_author_phase(name=phase.parent_phase)
+            if parent is not None:
+                return self._build_phases_delta([parent, phase])
         return self._build_phase_delta(phase)
 
     # --- Kind handler dispatch table ---
@@ -628,56 +737,158 @@ class WorkflowRunState(BaseModel):
 
         return self._build_top_level_delta()
 
-    def _on_phase(self, progress: WorkflowProgress) -> Optional[dict[str, Any]]:
-        """Log the phase event without modifying state.
+    def _find_child_phase_by_name(self, name: str):
+        for ph in self.phases:
+            if ph.phase_type == "child" and ph.name == name:
+                return ph
+        return None
 
-        Phase transitions are driven by the ``phase`` field of agent events
-        (see ``_switch_to_phase``), not by explicit PHASE events.
+    def _find_parent_author_phase(self, name: str | None = None):
+        """Return the author phase with the given name, or the last non-child phase."""
+        if name:
+            for ph in self.phases:
+                if ph.phase_type != "child" and ph.name == name:
+                    return ph
+            return None
+        for ph in reversed(self.phases):
+            if ph.phase_type != "child":
+                return ph
+        return None
+
+    def _propagate_child_completion_to_parent(self, child_phase):
+        """If all child phases under the same parent are done, seal the parent.
+
+        Returns the sealed parent phase object, else ``None``. Caller builds the
+        combined delta — avoids the previous double-build where this returned a
+        delta only for the caller to discard it and rebuild ``[parent, phase]``.
         """
+        parent_name = child_phase.parent_phase
+        siblings = [
+            ph for ph in self.phases
+            if ph.phase_type == "child" and ph.parent_phase == parent_name
+        ]
+        if not siblings:
+            return None
+        if all(self._all_agents_terminal(ph) for ph in siblings):
+            parent = (
+                self._find_parent_author_phase(name=parent_name)
+                if parent_name
+                else self._find_parent_author_phase()
+            )
+            if parent is not None and parent.status == "running":
+                parent.status = "completed"
+                self._finalize_running_agents(parent, "completed")
+                logger.info("[WF_DBG child] sealed parent phase=%s (all sibling child phases done)", parent.name)
+                return parent
+        return None
+
+    def _on_child_phase_declared(self, progress) -> dict:
+        parent_name = progress.parent_phase
+        parent = self._find_parent_author_phase(name=parent_name) if parent_name else self._find_parent_author_phase()
+        if parent is None and parent_name:
+            logger.warning("[WF_DBG child] parent_phase=%s NOT FOUND in phases=%s",
+                           parent_name, [p.name for p in self.phases])
+        if parent is not None and parent.status == "planned":
+            parent.status = "running"
+        phase = WorkflowPhaseState(
+            id=self._generate_phase_id(progress.phase),
+            name=progress.phase,
+            phase_type="child",
+            parent_phase=parent_name,
+            status="running",
+        )
+        self.phases.append(phase)
+        logger.info("[WF_DBG child] run=%s card=%s parent=%s parent_status=%s",
+                    self.id, phase.name, parent_name,
+                    getattr(parent, "status", None))
+        if parent is not None:
+            return self._build_phases_delta([parent, phase])
+        return self._build_phase_delta(phase)
+
+    def _on_phase(self, progress: WorkflowProgress) -> Optional[dict[str, Any]]:
+        """Handle phase event: fork to child card builder when phase_type="child"."""
+        self._apply_nested_phase(progress, "on_phase")
+        if progress.phase_type == "child":
+            return self._on_child_phase_declared(progress)
         logger.info("[WF_DBG WorkflowRunState] id=%s name=%s phase event: %s (ignored, state unchanged)",
                     self.id, self.name, progress.phase or _UNNAMED_PHASE)
         return None
 
+    # -- nested_phase override (shared) --------------------------------------
+    @staticmethod
+    def _apply_nested_phase(progress: WorkflowProgress, caller: str) -> None:
+        if progress.nested_phase:
+            logger.debug("[WF_DBG nested] %s phase replaced: %s -> %s",
+                         caller, progress.phase, progress.nested_phase)
+            progress.phase = progress.nested_phase
+
     def _on_agent_started(self, progress: WorkflowProgress) -> dict[str, Any]:
-        """Add a new agent, entering its phase and sealing the previous one.
+        """Add a new agent, entering its phase and sealing the previous one."""
+        self._apply_nested_phase(progress, "agent_started")
 
-        The target phase is entered as ``running`` (created if missing). If
-        this agent's phase differs from the last observed phase, the previous
-        running phase is finalized — see ``_switch_to_phase``.
-        """
-        target_phase, sealed_phase = self._switch_to_phase(progress.phase or _UNNAMED_PHASE)
+        def _label() -> str:
+            if progress.label:
+                return progress.label
+            if progress.node_type in ("human", "human_session"):
+                return _UNNAMED_HUMAN
+            return _UNNAMED_AGENT
 
-        # No user-facing label provided — fall back to a kind-aware placeholder.
-        if progress.label:
-            agent_label = progress.label
-        elif progress.node_type in ("human", "human_session"):
-            agent_label = _UNNAMED_HUMAN
-        else:
-            agent_label = _UNNAMED_AGENT
-        if not progress.agent_id:
-            logger.warning(
-                "[WF_DBG WorkflowRunState] agent_started missing agent_id for %r; "
-                "generated slug may not match later agent_completed",
-                agent_label,
+        def _agent_id(label: str) -> str:
+            if not progress.agent_id:
+                logger.warning(
+                    "[WF_DBG WorkflowRunState] agent_started missing agent_id for %r; "
+                    "generated slug may not match later agent_completed",
+                    label,
+                )
+            return progress.agent_id or self._generate_agent_id(label)
+
+        def _make_state(aid: str, label: str) -> WorkflowAgentState:
+            return WorkflowAgentState(
+                id=aid, name=label, status="running",
+                prompt=progress.prompt, model=progress.model,
+                started_at=WorkflowRunState._now_iso(),
+                kind="human" if progress.node_type in ("human", "human_session") else "agent",
+                node_type=progress.node_type,
+                correlation_id=progress.correlation_id,
             )
-        agent_id = progress.agent_id or self._generate_agent_id(agent_label)
-        agent_state = WorkflowAgentState(
-            id=agent_id,
-            name=agent_label,
-            status="running",
-            prompt=progress.prompt,
-            model=progress.model,
-            started_at=self._now_iso(),
-            kind="human" if progress.node_type in ("human", "human_session") else "agent",
-            node_type=progress.node_type,
-            correlation_id=progress.correlation_id,
-        )
+
+        def _attach_child(child_phase: WorkflowPhaseState, agent_state: WorkflowAgentState) -> dict:
+            child_phase.agents.append(agent_state)
+            if self._is_terminal_status(child_phase.status):
+                child_phase.status = "running"
+                logger.info("[WF_DBG child] reactivated child phase=%s (new agent arrived)", child_phase.name)
+            child_phase.agent_count += 1
+            parent: Optional[WorkflowPhaseState] = None
+            if child_phase.parent_phase:
+                parent = self._find_parent_author_phase(name=child_phase.parent_phase)
+                if parent is not None:
+                    if self._is_terminal_status(parent.status):
+                        parent.status = "running"
+                        logger.info("[WF_DBG parent] reactivated parent=%s (new agent on child=%s)",
+                                    parent.name, child_phase.name)
+                    self._refresh_parent_counts(parent)
+                    logger.debug("[WF_DBG parent] parent=%s agent_count=%s (refreshed after child=%s start)",
+                                parent.name, parent.agent_count, child_phase.name)
+            self._refresh_run_agent_counts()
+            logger.debug("[WF_DBG WorkflowRunState] agent %s -> running, child_phase=%s",
+                         label, child_phase.name)
+            if parent is not None:
+                return self._build_phases_delta([parent, child_phase])
+            return self._build_phase_delta(child_phase)
+
+        label = _label()
+        agent_id = _agent_id(label)
+        agent_state = _make_state(agent_id, label)
+
+        child_phase = self._find_child_phase_by_name(progress.phase or _UNNAMED_PHASE)
+        if child_phase is not None:
+            return _attach_child(child_phase, agent_state)
+
+        target_phase, sealed_phase = self._switch_to_phase(progress.phase or _UNNAMED_PHASE)
         target_phase.agents.append(agent_state)
         target_phase.agent_count += 1
-        self.agent_count += 1
-        logger.info("[WF_DBG WorkflowRunState] agent %s -> running, phase=%s", agent_label,
-                    target_phase.name)
-
+        self._refresh_run_agent_counts()
+        logger.info("[WF_DBG WorkflowRunState] agent %s -> running, phase=%s", label, target_phase.name)
         if sealed_phase is not None:
             return self._build_phases_delta([sealed_phase, target_phase])
         return self._build_phase_delta(target_phase)
@@ -750,6 +961,12 @@ class WorkflowRunState(BaseModel):
 
     def _on_workflow_failed(self, progress: WorkflowProgress) -> dict[str, Any]:
         """Mark workflow as failed (terminal state) and finalize all running phases/agents."""
+        if progress.budget is not None:
+            self.budget = progress.budget
+            logger.warning("[WF_DBG budget] run=%s exhausted=%s spent=%s/%s",
+                           self.id, self.budget.get("exhausted") if self.budget else None,
+                           self.budget.get("spent") if self.budget else None,
+                           self.budget.get("total") if self.budget else None)
         return self._finalize_workflow(
             status="failed",
             error=progress.text or progress.outcome or "workflow failed",
@@ -783,6 +1000,8 @@ class WorkflowRunState(BaseModel):
             "agent_count": self.agent_count,
             "completed_agent_count": self.completed_agent_count,
             "started_at": self.started_at,
+            "token_count": self.token_count,
+            "budget": self.budget,
             "logs": [log_text],
         }
 
@@ -796,6 +1015,8 @@ class WorkflowRunState(BaseModel):
             "agent_count": self.agent_count,
             "completed_agent_count": self.completed_agent_count,
             "started_at": self.started_at,
+            "token_count": self.token_count,
+            "budget": self.budget,
             "phases": [p.to_dict() for p in self.phases],
             "logs": list(self.logs),
         }
@@ -813,6 +1034,8 @@ class WorkflowRunState(BaseModel):
             "agent_count": self.agent_count,
             "completed_agent_count": self.completed_agent_count,
             "started_at": self.started_at,
+            "token_count": self.token_count,
+            "budget": self.budget,
             "phases": [p.to_dict() for p in phases],
         }
 
@@ -828,6 +1051,8 @@ class WorkflowRunState(BaseModel):
             "started_at": self.started_at,
             "completed_at": self.completed_at,
             "duration_ms": self.duration_ms,
+            "token_count": self.token_count,
+            "budget": self.budget,
         }
         if self.error:
             result["error"] = self.error
@@ -844,6 +1069,7 @@ class WorkflowRunState(BaseModel):
         Structure matches the workflow.updated event's workflow field
         but includes ALL phases and ALL agents (not just deltas).
         """
+        self._refresh_run_agent_counts()
         result: dict[str, Any] = {
             "id": self.id,
             "name": self.name,
@@ -866,4 +1092,5 @@ class WorkflowRunState(BaseModel):
         # reserved fields — pending upstream token accounting
         result["token_count"] = self.token_count
         result["estimated_token_count"] = self.estimated_token_count
+        result["budget"] = self.budget
         return result

@@ -44,6 +44,7 @@ import {
   useCronStore,
 } from '../stores';
 import { isPlanWireMode, resolvePlanWireMode } from '../features/planMode/wireMode';
+import { flushPendingGoalObjectiveBubble } from '../features/goalPendingObjectiveBubble';
 import { normalizeTaskEvent } from '../stores/teamTaskNormalize';
 import { webClient, requestGoalAction, sendGoalStreamCommand } from '../services/webClient';
 import { createStreamDeltaBatcher } from '../services/streamDeltaBatcher';
@@ -75,7 +76,11 @@ import {
   findActiveTeamLeaderMessage as findActiveTeamLeaderMessageInTurn,
 } from '../features/teamLeaderMessages';
 import { buildGoalCompletedContent } from '../components/GoalBar/goalCompletedMessage';
-import { stripUploadDocumentBlocks } from '../utils/documentMessage';
+import {
+  stripUploadDocumentBlocks,
+  toUploadDocumentHints,
+  withUploadDocumentBlock,
+} from '../utils/documentMessage';
 
 const WS_RECONNECT_EVENT = 'jiuwenclaw:ws-reconnect-request';
 
@@ -1210,27 +1215,38 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
   const persistMedia = useCallback(
     async (content: string, sessionId: string, mediaItems: MediaItem[]) => {
-      return request<PersistMediaResponse>('media.persist', {
-        session_id: sessionId,
-        content,
-        media_items: mediaItems as unknown as Record<string, unknown>[],
-      });
+      return request<PersistMediaResponse>(
+        'media.persist',
+        {
+          session_id: sessionId,
+          content,
+          media_items: mediaItems as unknown as Record<string, unknown>[],
+        },
+        // Multiple base64 images can exceed the 15s default timeout
+        { timeoutMs: 60_000 },
+      );
     },
     [request],
   );
 
   const persistDocuments = useCallback(
     async (content: string, sessionId: string, mediaItems: MediaItem[]) => {
-      return request<PersistMediaResponse>('document.persist', {
-        session_id: sessionId,
-        content,
-        parse: true,
-        documents: mediaItems.map((item) => ({
-          filename: item.filename,
-          mime_type: getMediaMimeType(item),
-          base64_data: item.base64_data || item.base64Data,
-        })),
-      });
+      return request<PersistMediaResponse>(
+        'document.persist',
+        {
+          session_id: sessionId,
+          content,
+          parse: true,
+          documents: mediaItems.map((item) => ({
+            filename: item.filename,
+            mime_type: getMediaMimeType(item),
+            base64_data: item.base64_data || item.base64Data,
+          })),
+        },
+        // Large documents (100+ page PDFs) take 10s+ to parse server-side; with
+        // transfer overhead this exceeds the 15s default timeout
+        { timeoutMs: 120_000 },
+      );
     },
     [request],
   );
@@ -1464,6 +1480,14 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               if (persistedDocs.files && typeof persistedDocs.files === 'object') {
                 Object.assign(mergedFiles, persistedDocs.files);
               }
+              // The composer could not persist these documents before send (a
+              // brand-new session has no id yet), so its hint block carries
+              // filenames without paths. Rewrite it now that paths exist —
+              // team mode reads paths from the message text only.
+              const documentHints = toUploadDocumentHints(persistedDocs.media_items);
+              if (documentHints.length) {
+                outgoingContent = withUploadDocumentBlock(outgoingContent, documentHints);
+              }
             }
             outgoingMediaItems = mergedItems.length ? slimPersistedMediaRecords(mergedItems) : undefined;
             outgoingFiles = Object.keys(mergedFiles).length ? mergedFiles : undefined;
@@ -1586,7 +1610,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     const nextTask = runtime?.taskQueue[0];
     if (nextTask && sendMessageRef.current) {
       useChatStore.getState().removeFromTaskQueue(sessionId, nextTask.id);
-      sendMessageRef.current(nextTask.content, sessionId);
+      sendMessageRef.current(nextTask.content, sessionId, nextTask.mediaItems ?? []);
     }
   }, []);
 
@@ -2481,7 +2505,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
         // 未分段：合并进当前流。勿用 payload.timestamp 覆盖消息时间（会与 goal 完成卡抢序）；
         // 另写 completedAt，供「任务用时」与历史 final 落盘时间对齐。
-        if (streamId && !assistantStreamSplit) {
+        // 空正文的 final 只是收尾信号（用户轮答完、Goal 段答完），本轮即使已按工具边界
+        // 分过段也要走这里收尾：否则 currentStreamId 一直留着，紧接着的 Goal delta 会继续
+        // 追加进同一个气泡，最后只剩一个气泡（docs/zh/Goal持续目标Web前端对接.md §16
+        // 要求「永远可以收尾当前助手气泡」）。
+        if (streamId && (!assistantStreamSplit || !content)) {
           useChatStore.getState().updateMessage(sessionId, streamId, {
             ...(content ? { content } : {}),
             isStreaming: false,
@@ -2492,6 +2520,15 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           if (content && !content.includes('MEDIA:')) {
             handleTtsPlayback(sessionId, streamId, content);
           }
+          // 空 final = 用户轮→goal 轮拆气泡边界：此时入列目标用户气泡，不打断上一轮回答
+          if (!content) {
+            flushPendingGoalObjectiveBubble(sessionId);
+          }
+          return;
+        }
+        // 无流式气泡时的空 final（上一轮未吐字就被 goal 劫持）同样要入列
+        if (!streamId && !content) {
+          flushPendingGoalObjectiveBubble(sessionId);
           return;
         }
         if (streamId && assistantStreamSplit && content) {
@@ -3091,8 +3128,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             if (nextTask && sendMessageRef.current) {
               // 从队列中移除该任务
               useChatStore.getState().removeFromTaskQueue(sessionId, nextTask.id);
-              // 发送下一个任务
-              sendMessageRef.current(nextTask.content, sessionId);
+              // Send the next task (with any attachments stashed when it was queued)
+              sendMessageRef.current(nextTask.content, sessionId, nextTask.mediaItems ?? []);
             }
           }
         }
@@ -3198,11 +3235,15 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (!sessionId) return;
         if (shouldDropDuplicatedEvent('chat.error', payload)) return;
         useChatStore.getState().setThinking(sessionId, false);
+        // 任何 chat.error 都应解除历史加载态：faas 侧 history.get 流超时
+        // （旧 session runtime 过 TTL 被回收、init 超时）只回发 chat.error
+        // 而非结束帧，若不清 isLoadingHistory 会永久吞掉后续
+        // chat.processing_status(is_processing=false)，表现为「一直加载中」。
+        useChatStore.getState().setLoadingHistory(sessionId, false);
         const errorMsg =
           typeof payload.error === 'string' ? payload.error : t('network.unknownError');
         // 忽略 "invalid page_idx or session history not found" 错误，因为这是新会话的正常情况
         if (errorMsg.includes('invalid page_idx or session history not found')) {
-          useChatStore.getState().setLoadingHistory(sessionId, false);
           return;
         }
         useChatStore.getState().setExecutionError(sessionId, errorMsg);
@@ -3328,7 +3369,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
                 const nextTask = taskQueue[0];
                 if (nextTask && sendMessageRef.current) {
                   useChatStore.getState().removeFromTaskQueue(sessionId, nextTask.id);
-                  sendMessageRef.current(nextTask.content, sessionId);
+                  sendMessageRef.current(nextTask.content, sessionId, nextTask.mediaItems ?? []);
                 }
               }
             }
@@ -3604,6 +3645,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             name?: string;
             execution_status?: string | null;
             mode?: string;
+            role?: string;
+            cli_agent?: string | null;
           };
           const activeSessionId = getPayloadSessionId(payload) || undefined;
           upsertHumanShareCommandFromEvent(payload, e);
@@ -3633,7 +3676,15 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
                 mode: e.mode,
               });
             }
-          } else if (!e.type || e.type === 'team.member.spawned' || e.type === 'team.member.restarted') {
+          } else if (
+            !e.type ||
+            e.type === 'team.member.spawned' ||
+            e.type === 'team.member.restarted' ||
+            // 成员刚建好还没被拉起（status=unstarted）。后端在 leader 建人后主动
+            // 补广播这条，否则成员在被消息唤醒前对前端完全不存在——而"能 @ 到"
+            // 正是唤醒它的手段（运行时会先 auto_start 再投递）。
+            e.type === 'team.member.registered'
+          ) {
             useSessionStore.getState().addTeamMember(sessionId, {
               id: `member-${Date.now()}`,
               member_id: e.member_id || '',
@@ -3642,6 +3693,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               name: e.name,
               execution_status: e.execution_status,
               mode: e.mode,
+              role: e.role,
+              cli_agent: e.cli_agent,
             });
           }
         }

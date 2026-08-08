@@ -23,13 +23,17 @@ from jiuwenswarm.common.kv_cache_affinity_config import (
     set_default_model_provider_in_entries,
     validate_affinity_invariant,
 )
-from jiuwenswarm.common.utils import get_config_dir, get_config_file
+from jiuwenswarm.common.utils import (
+    get_config_dir,
+    get_config_file,
+)
 
 logger = logging.getLogger(__name__)
 
 _CONFIG_MODULE_DIR = Path(__file__).parent
 CONFIG_YAML_PATH = get_config_file()
 SWARMFLOW_ENABLED_CONFIG_PATH = ("modes", "team", "jiuwen_team", "enable_swarmflow")
+SWARMFLOW_BUDGET_CONFIG_PATH = ("modes", "team", "jiuwen_team", "swarmflow_budget")
 DEFAULT_SWARMFLOW_ENABLED = False
 # Check if user workspace exists and use it if configured via env
 _user_config = os.getenv("JIUWENSWARM_CONFIG_DIR")
@@ -231,79 +235,49 @@ def set_config(config):
         yaml.safe_dump(config, f, allow_unicode=True, sort_keys=False)
 
 
-def _get_bool_env(value: str | None) -> bool | None:
-    if value is None:
-        return None
-    return value.lower() in ("true", "1", "yes")
-
-
 def _get_evolution_config(config: dict[str, Any] | None) -> dict[str, Any]:
+    """Return the canonical ``react.evolution`` mapping.
+
+    Evolution settings deliberately have one source of truth.  In particular,
+    the historical top-level ``evolution`` mapping and the old environment
+    overrides are not consulted here; this keeps a stale deployment variable
+    from changing a running agent's capability set.
+    """
     if not isinstance(config, dict):
         return {}
     react_config = config.get("react")
-    if isinstance(react_config, dict) and isinstance(react_config.get("evolution"), dict):
-        return react_config["evolution"]
-    evolution_config = config.get("evolution")
-    if isinstance(evolution_config, dict):
-        return evolution_config
-    return {}
+    if not isinstance(react_config, dict):
+        return {}
+    evolution_config = react_config.get("evolution")
+    return evolution_config if isinstance(evolution_config, dict) else {}
 
 
-def get_evolution_auto_scan_enabled(config: dict[str, Any] | None) -> bool:
-    env_auto_scan = _get_bool_env(os.getenv("EVOLUTION_AUTO_SCAN"))
-    if env_auto_scan is not None:
-        return env_auto_scan
-    return _get_evolution_config(config).get("auto_scan") is True
-
-
-def get_evolution_signal_trigger_enabled(
-    config: dict[str, Any] | None,
-    *,
-    fallback: bool = False,
-) -> bool:
-    env_signal_trigger = _get_bool_env(os.getenv("EVOLUTION_SIGNAL_TRIGGER"))
-    if env_signal_trigger is not None:
-        return env_signal_trigger
-    signal_trigger = _get_evolution_config(config).get("signal_trigger")
-    if isinstance(signal_trigger, bool):
-        return signal_trigger
-    return fallback
-
-
-def get_evolution_review_trigger_enabled(
-    config: dict[str, Any] | None,
-    *,
-    fallback: bool = False,
-) -> bool:
-    env_review_trigger = _get_bool_env(os.getenv("EVOLUTION_REVIEW_TRIGGER"))
-    if env_review_trigger is not None:
-        return env_review_trigger
-    review_trigger = _get_evolution_config(config).get("review_trigger")
-    if isinstance(review_trigger, bool):
-        return review_trigger
-    return fallback
-
-
-def get_skill_create_enabled(config: dict[str, Any] | None) -> bool:
-    env_skill_create = _get_bool_env(os.getenv("SKILL_CREATE"))
-    if env_skill_create is not None:
-        return env_skill_create
-    return _get_evolution_config(config).get("skill_create", False)
+def get_skill_evolution_enabled(config: dict[str, Any] | None) -> bool:
+    """Return the canonical ``react.evolution.skill_evolution`` switch."""
+    return _get_evolution_config(config).get("skill_evolution") is True
 
 
 def get_evolution_auto_save_enabled(config: dict[str, Any] | None = None) -> bool:
-    """Return whether evolution approvals may auto-save without user action."""
-    try:
-        env_auto_save = _get_bool_env(os.getenv("EVOLUTION_AUTO_SAVE"))
-        if env_auto_save is not None:
-            return env_auto_save
-        if config is None:
-            config = get_config()
-        if not isinstance(config, dict):
-            return False
-        return _get_evolution_config(config).get("auto_save") is True
-    except Exception:
-        return False
+    """Return canonical ``react.evolution.auto_save`` without disk/env reads."""
+    return _get_evolution_config(config).get("auto_save") is True
+
+
+def update_skill_evolution_enabled_in_config(enabled: bool) -> None:
+    """Atomically update the canonical evolution capability switch."""
+
+    def mutator(data: dict[str, Any]) -> dict[str, Any]:
+        react = data.get("react")
+        if not isinstance(react, dict):
+            react = {}
+            data["react"] = react
+        evolution = react.get("evolution")
+        if not isinstance(evolution, dict):
+            evolution = {}
+            react["evolution"] = evolution
+        evolution["skill_evolution"] = bool(enabled)
+        return data
+
+    update_config(mutator)
 
 
 def set_auto_memory_enabled(enabled: bool) -> None:
@@ -1580,6 +1554,37 @@ def update_swarmflow_enabled_in_config(enabled: bool) -> None:
         path_so_far.append(segment)
         current = _ensure_config_object(current, segment, ".".join(path_so_far))
     current[SWARMFLOW_ENABLED_CONFIG_PATH[-1]] = bool(enabled)
+    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+
+
+def update_swarmflow_budget_in_config(budget: str) -> None:
+    """Update ``modes.team.jiuwen_team.swarmflow_budget`` in config.yaml.
+
+    Pass an empty string or ``"none"`` to remove the budget ceiling.
+    """
+    clear_budget = not budget or budget.strip().lower() in ("none", "null")
+    if clear_budget:
+        data = load_yaml_round_trip(CONFIG_YAML_PATH)
+        current = data
+        for segment in SWARMFLOW_BUDGET_CONFIG_PATH[:-1]:
+            if segment not in current or not isinstance(current, dict):
+                return  # path doesn't exist, nothing to clear
+            current = current[segment]
+        current.pop(SWARMFLOW_BUDGET_CONFIG_PATH[-1], None)
+        dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+        return
+
+    try:
+        value = int(budget)
+    except (ValueError, TypeError):
+        raise ValueError(f"swarmflow_budget must be a positive integer, got {budget!r}") from None
+    if value <= 0:
+        raise ValueError(f"swarmflow_budget must be a positive integer, got {value}")
+    data = load_yaml_round_trip(CONFIG_YAML_PATH)
+    current = data
+    for segment in SWARMFLOW_BUDGET_CONFIG_PATH[:-1]:
+        current = _ensure_config_object(current, segment, ".".join(SWARMFLOW_BUDGET_CONFIG_PATH))
+    current[SWARMFLOW_BUDGET_CONFIG_PATH[-1]] = value
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
 
 
