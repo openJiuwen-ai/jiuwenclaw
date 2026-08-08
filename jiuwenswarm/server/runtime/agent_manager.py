@@ -592,6 +592,123 @@ class AgentManager:
             )
         return cleaned
 
+    async def apply_mcp_change(
+        self, name: str, action: str, *, enabled: bool = True,
+        target_channel_id: str | None = None,
+    ) -> bool:
+        """Phase-2: targeted single-MCP change, no full config reload.
+
+        Fans out to every live agent instance (or just target_channel_id's
+        agents if given) and asks its adapter to add/remove/toggle that one
+        MCP — bypassing reload_agents_config's heavy resync of the entire
+        mcp.servers list. The agent reads the merged get_mcp_servers() so a
+        state.json write done just before this call is visible.
+
+        Returns True if at least one adapter applied it. Raises RuntimeError
+        when NO adapter applied it — so a failed register (e.g. the MCP
+        server returned an error, or the SDK raised a cancel-scope error
+        during add) surfaces to the caller instead of silently returning
+        False and letting the connect handler report "connected". The first
+        adapter's error reason is carried in the message. A single-adapter
+        failure among several successes still returns True (no raise).
+        """
+        if target_channel_id:
+            channels = [(target_channel_id, self.agents.get(target_channel_id, {}))]
+        else:
+            channels = list(self.agents.items())
+        applied_any = False
+        first_error: str = ""
+        for channel_key, channel_agents in channels:
+            if not isinstance(channel_agents, dict):
+                continue
+            for _cache_key, agent in list(channel_agents.items()):
+                try:
+                    ok = await agent.apply_mcp_change(name, action, enabled=enabled)
+                    if ok:
+                        applied_any = True
+                    elif not first_error:
+                        first_error = (
+                            f"adapter on {channel_key} returned ok=False for "
+                            f"'{name}'/{action} (register/unregister rejected)"
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    # register_mcp_by_name surfaces plain Exceptions only
+                    # (openjiuwen add_tool_server coerces cancel-scope errors to
+                    # WorkflowError). Collect the first failure so the caller
+                    # can report it; raise if none succeeded.
+                    logger.warning(
+                        "[AgentManager] apply_mcp_change '%s'/%s on %s failed: %s",
+                        name, action, channel_key, exc,
+                    )
+                    if not first_error:
+                        first_error = str(exc) or repr(exc)
+        if not applied_any:
+            # No adapter succeeded — surface the failure so the connect/
+            # disconnect handler reports failure to the frontend instead of
+            # a stale "connected"/"disconnected".
+            raise RuntimeError(first_error or f"MCP '{name}' {action} failed")
+        return applied_any
+
+    def sync_mcp_credentials(self) -> None:
+        """Sync connected MCPs' tokens into os.environ.
+
+        os.environ is process-global, so syncing on any one live agent covers
+        the whole process. Stops on the first agent that actually syncs
+        (returns True); if an agent has no adapter yet (cold-start race) or
+        throws, falls through to the next live agent instead of giving up
+        after the first. No-op if no agent can sync (the cold-start path
+        syncs inside _build_configured_subagents instead).
+        """
+        for channel_agents in self.agents.values():
+            if not isinstance(channel_agents, dict):
+                continue
+            for _cache_key, agent in channel_agents.items():
+                try:
+                    if agent.sync_mcp_credentials():
+                        return  # synced — env is process-global
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(
+                        "[AgentManager] sync_mcp_credentials on %s failed: %s",
+                        _cache_key, exc,
+                    )
+                    continue  # try the next live agent
+
+    def clear_mcp_credentials(self, name: str) -> None:
+        """Clear a disconnected MCP's token env vars from os.environ.
+
+        Stops on the first agent that clears (env is process-global); if an
+        agent has no adapter yet or throws, falls through to the next."""
+        for channel_agents in self.agents.values():
+            if not isinstance(channel_agents, dict):
+                continue
+            for _cache_key, agent in channel_agents.items():
+                try:
+                    if agent.clear_mcp_credentials(name):
+                        return  # cleared — env is process-global
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(
+                        "[AgentManager] clear_mcp_credentials '%s' on %s failed: %s",
+                        name, _cache_key, exc,
+                    )
+                    continue  # try the next live agent
+
+    async def refresh_skill_rails(self) -> None:
+        """Reload every live agent's SkillUseRail so MCP bundled skills
+        (installed/uninstalled by skill_installer) surface without a full
+        reload_agents_config. Fans out to all live agents; each agent's adapter
+        reloads its parent + session child skill rails."""
+        for channel_key, channel_agents in self.agents.items():
+            if not isinstance(channel_agents, dict):
+                continue
+            for _cache_key, agent in list(channel_agents.items()):
+                try:
+                    await agent.refresh_skill_rails()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[AgentManager] refresh_skill_rails on %s/%s failed: %s",
+                        channel_key, _cache_key, exc,
+                    )
+
     def get_client_capabilities(self, channel_id: str = "") -> dict[str, Any]:
         channel_key = str(channel_id or "").strip()
         caps = self._client_capabilities_by_channel.get(channel_key)
