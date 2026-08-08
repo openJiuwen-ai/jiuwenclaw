@@ -250,11 +250,17 @@ def build_permission_rail(
             }
 
             try:
-                response = await get_acp_output_manager().send_jsonrpc_request(
-                    "session/request_permission",
-                    request_params,
-                    session_id=session_id,
+                # ACP permission HITL must not consume StreamingToolExecutor.wait_all budget.
+                from jiuwenswarm.openjiuwen_streaming_tool_patch import (
+                    streaming_tool_wait_timeout_paused,
                 )
+
+                async with streaming_tool_wait_timeout_paused():
+                    response = await get_acp_output_manager().send_jsonrpc_request(
+                        "session/request_permission",
+                        request_params,
+                        session_id=session_id,
+                    )
             except Exception as exc:
                 logger.warning("[InterruptHelpers] ACP permission request failed: %s", exc)
                 return None
