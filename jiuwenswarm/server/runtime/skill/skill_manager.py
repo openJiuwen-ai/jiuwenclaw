@@ -77,6 +77,23 @@ ERROR_SKILL_IMPORT_OVERWRITE_REQUIRED = "SKILL_IMPORT_OVERWRITE_REQUIRED"
 ERROR_SKILL_BUILTIN_READ_ONLY = "SKILL_BUILTIN_READ_ONLY"
 ERROR_SKILL_ALREADY_EXISTS = "SKILL_ALREADY_EXISTS"
 ERROR_SKILL_UNSAFE_PATH = "SKILL_UNSAFE_PATH"
+ERROR_SKILL_FILE_TOO_LARGE = "SKILL_FILE_TOO_LARGE"
+ERROR_SKILL_KNOWLEDGE_INPUT_CONFLICT = "SKILL_KNOWLEDGE_INPUT_CONFLICT"
+ERROR_SKILL_PUBLISH_VERSION_CONFLICT = "SKILL_PUBLISH_VERSION_CONFLICT"
+ERROR_SKILLHUB_INSTALL_FAILED = "SKILLHUB_INSTALL_FAILED"
+ERROR_SKILLHUB_PUBLISH_FAILED = "SKILLHUB_PUBLISH_FAILED"
+ERROR_SKILLHUB_DETAIL_NOT_FOUND = "SKILLHUB_DETAIL_NOT_FOUND"
+ERROR_SKILLHUB_DETAIL_FAILED = "SKILLHUB_DETAIL_FAILED"
+
+_DETAIL_KEY_SKILLHUB_DETAIL_NOT_FOUND = "skills.swarmskillshub.errors.detailNotFound"
+_DETAIL_KEY_SKILLHUB_DETAIL_FAILED = "skills.swarmskillshub.errors.detailFailed"
+
+# ZIP 解包配额（防 zip bomb）
+_SKILL_ZIP_MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+_SKILL_ZIP_MAX_TOTAL_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
+_SKILL_ZIP_MAX_FILE_COUNT = 5000
+_SKILL_ZIP_MAX_SINGLE_FILE_BYTES = 32 * 1024 * 1024
+_SKILL_ZIP_MAX_PATH_DEPTH = 20
 
 
 class SkillRpcError(Exception):
@@ -2609,7 +2626,7 @@ class SkillManager:
         }
 
     async def handle_skills_team_skills_hub_pack(self, params: dict) -> dict:
-        """将 TeamSkills 目录打包为 zip。"""
+        """将 TeamSkills 目录打包为 zip（含 plugin.yaml，排除根级 ``.archive/``）."""
         path_raw = str(params.get("path") or "").strip()
         if not path_raw:
             return {"success": False, "detail": "缺少参数: path"}
@@ -2629,6 +2646,41 @@ class SkillManager:
         skill_md = self._try_find_skill_file(skill_root)
         if skill_md is None:
             return {"success": False, "detail": f"目录中未找到 SKILL.md: {skill_root}"}
+        meta = self._parse_skill_md(skill_md)
+        if meta is None:
+            return {"success": False, "detail": "无法解析 SKILL.md"}
+        skill_name = str(params.get("skill_name") or meta.get("name") or "").strip()
+        description = str(meta.get("description") or "").strip()
+        if not skill_name or not description:
+            return {
+                "success": False,
+                "detail": "SKILL.md YAML 须包含非空 name 与 description",
+                "code": ERROR_SKILL_INVALID_METADATA,
+            }
+        # 前端可传 version/display_name 覆盖 SKILL.md 值
+        plugin_version = str(params.get("version") or "").strip() or "1.0.0"
+        display_name = str(params.get("display_name") or meta.get("display_name") or "").strip() or skill_name
+        author = str(meta.get("author") or "").strip() or "unknown"
+        tags = meta.get("tags")
+        if isinstance(tags, list):
+            normalized_tags = [str(t).strip() for t in tags if str(t).strip()]
+        elif isinstance(tags, str) and tags.strip():
+            normalized_tags = [tags.strip()]
+        else:
+            normalized_tags = ["teamskills"]
+
+        # 生成 plugin.yaml（与 _build_teamskills_publish_zip_from_root 对齐）
+        plugin_yaml_payload = {
+            "name": skill_name,
+            "version": plugin_version,
+            "display_name": display_name,
+            "description": description,
+            "runtime": {"type": "skill"},
+            "metadata": {
+                "author": author,
+                "tags": normalized_tags,
+            },
+        }
 
         output_raw = str(params.get("output") or "out").strip() or "out"
         output_path = Path(output_raw).expanduser()
@@ -2641,12 +2693,23 @@ class SkillManager:
         zip_path = out_dir / f"{skill_root.name}.zip"
         try:
             with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                # plugin.yaml 放在 {skill_name}/plugin.yaml
+                zf.writestr(
+                    f"{skill_name}/plugin.yaml",
+                    yaml.safe_dump(plugin_yaml_payload, sort_keys=False, allow_unicode=True),
+                )
+                # README.md
+                readme = skill_root / "README.md"
+                if readme.is_file():
+                    zf.write(readme, arcname=f"{skill_name}/README.md")
+                # 技能文件
                 for child in skill_root.rglob("*"):
                     if not child.is_file():
                         continue
                     rel = child.relative_to(skill_root).as_posix()
-                    zf.write(child, arcname=rel)
-            return {"success": True, "path": str(zip_path)}
+                    zf.write(child, arcname=f"{skill_name}/{skill_name}/{rel}")
+            checksum = hashlib.sha256(zip_path.read_bytes()).hexdigest().lower()
+            return {"success": True, "path": str(zip_path), "checksum_sha256": checksum}
         except Exception as exc:
             logger.error("Team Skills Hub pack 失败: %s", exc)
             return {"success": False, "detail": str(exc)[:500]}
@@ -2952,6 +3015,83 @@ class SkillManager:
                 "success": False,
                 "detail": str(exc)[:500],
                 "detail_key": "skills.teamskillshub.errors.deleteFailed",
+            }
+
+    async def handle_skills_swarm_skills_hub_detail(self, params: dict) -> dict:
+        """按 asset_id 查询 SkillHub 最新公开版本详情（skills.swarmskillshub.detail）."""
+        try:
+            asset_id = _safe_path_name(str(params.get("asset_id") or ""), "asset_id")
+        except ValueError as exc:
+            _log_rejected_name("skills.swarmskillshub.detail", "asset_id", params.get("asset_id"), exc)
+            return {
+                "success": False,
+                "detail": "asset_id 无效",
+                "detail_key": _DETAIL_KEY_SKILLHUB_DETAIL_FAILED,
+                "code": ERROR_SKILLHUB_DETAIL_FAILED,
+            }
+
+        # 普通页面不得覆盖 market_url / token；统一使用后端 Team Skills Hub 配置。
+        base_url = self._get_team_skills_hub_base_url()
+        auth = self._resolve_teamskills_hub_server_auth()
+        try:
+            plugin_item = await self._team_skills_hub_get_public_plugin_item(
+                asset_id,
+                base_url=base_url,
+                token=auth.get("token"),
+                system_token=auth.get("system_token"),
+            )
+            public_latest_version = str(plugin_item.get("public_latest_version") or "").strip()
+            if not public_latest_version:
+                return {
+                    "success": False,
+                    "detail": "SkillHub 资产无公开版本",
+                    "detail_key": _DETAIL_KEY_SKILLHUB_DETAIL_NOT_FOUND,
+                    "code": ERROR_SKILLHUB_DETAIL_NOT_FOUND,
+                }
+
+            version_detail = await self._team_skills_hub_get_version_detail(
+                asset_id,
+                public_latest_version,
+                base_url=base_url,
+                token=auth.get("token"),
+                system_token=auth.get("system_token"),
+            )
+            resp_asset_id = str(version_detail.get("asset_id") or "").strip()
+            resp_version = str(version_detail.get("version") or "").strip()
+            if resp_asset_id != asset_id or resp_version != public_latest_version:
+                return {
+                    "success": False,
+                    "detail": "SkillHub 版本详情与解析结果不一致",
+                    "detail_key": _DETAIL_KEY_SKILLHUB_DETAIL_FAILED,
+                    "code": ERROR_SKILLHUB_DETAIL_FAILED,
+                }
+
+            data = self._merge_skillhub_public_detail(plugin_item, version_detail)
+            return {
+                "success": True,
+                "asset_id": asset_id,
+                "version": public_latest_version,
+                "data": data,
+            }
+        except SkillRpcError as exc:
+            detail_key = (
+                _DETAIL_KEY_SKILLHUB_DETAIL_NOT_FOUND
+                if exc.code == ERROR_SKILLHUB_DETAIL_NOT_FOUND
+                else _DETAIL_KEY_SKILLHUB_DETAIL_FAILED
+            )
+            return {
+                "success": False,
+                "detail": str(exc.message)[:300],
+                "detail_key": detail_key,
+                "code": exc.code,
+            }
+        except Exception as exc:
+            logger.error("SkillHub 详情查询失败: %s", exc)
+            return {
+                "success": False,
+                "detail": "SkillHub 详情请求失败",
+                "detail_key": _DETAIL_KEY_SKILLHUB_DETAIL_FAILED,
+                "code": ERROR_SKILLHUB_DETAIL_FAILED,
             }
 
     async def _skillnet_install_background(
@@ -4899,6 +5039,187 @@ class SkillManager:
             return {"system_token": system_token}
         return {"token": token}
 
+    @staticmethod
+    def _resolve_teamskills_hub_server_auth() -> dict[str, str]:
+        """从后端环境读取 Team Skills Hub 认证；不接受前端覆盖."""
+        system_token = (os.getenv("TEAM_SKILLS_HUB_SYSTEM_TOKEN") or "").strip()
+        if system_token:
+            return {"system_token": system_token}
+        user_token = (os.getenv("TEAM_SKILLS_HUB_USER_TOKEN") or "").strip()
+        if user_token:
+            return {"token": user_token}
+        return {}
+
+    @staticmethod
+    def _teamskills_hub_auth_headers(
+        *,
+        token: str | None = None,
+        system_token: str | None = None,
+    ) -> dict[str, str]:
+        headers: dict[str, str] = {}
+        system = str(system_token or "").strip()
+        user = str(token or "").strip()
+        if system:
+            headers["X-System-Token"] = system
+        elif user:
+            headers["Authorization"] = f"Bearer {user}"
+        return headers
+
+    @staticmethod
+    def _skillhub_nullable_str(raw: Any) -> str | None:
+        if raw is None:
+            return None
+        return str(raw)
+
+    @staticmethod
+    def _skillhub_required_str(raw: Any) -> str:
+        if raw is None:
+            return ""
+        return str(raw)
+
+    @staticmethod
+    def _skillhub_count(raw: Any) -> int:
+        if raw is None or raw == "":
+            return 0
+        try:
+            return int(raw)
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _skillhub_str_list(raw: Any) -> list[str]:
+        if raw is None:
+            return []
+        if not isinstance(raw, list):
+            return []
+        return [str(item) for item in raw]
+
+    @staticmethod
+    def _skillhub_review_summary(raw: Any) -> dict[str, Any] | None:
+        if isinstance(raw, dict):
+            return raw
+        return None
+
+    @staticmethod
+    def _skillhub_review_sections(raw: Any) -> list[Any]:
+        if raw is None:
+            return []
+        if isinstance(raw, list):
+            return raw
+        return []
+
+    @staticmethod
+    def _skillhub_average_rating(raw: Any) -> float | int | None:
+        if raw is None or raw == "":
+            return None
+        if isinstance(raw, bool):
+            return None
+        if isinstance(raw, (int, float)):
+            return raw
+        try:
+            return float(raw)
+        except Exception:
+            return None
+
+    @classmethod
+    def _merge_skillhub_public_detail(
+        cls,
+        plugin_item: dict[str, Any],
+        version_detail: dict[str, Any],
+    ) -> dict[str, Any]:
+        """按设计白名单合并资产列表字段与版本详情字段，禁止整体透传."""
+        return {
+            "asset_id": cls._skillhub_required_str(version_detail.get("asset_id")),
+            "version": cls._skillhub_required_str(version_detail.get("version")),
+            "asset_type": cls._skillhub_nullable_str(version_detail.get("asset_type")),
+            "plugin_type": cls._skillhub_nullable_str(version_detail.get("plugin_type")),
+            "name": cls._skillhub_required_str(version_detail.get("name")),
+            "display_name": cls._skillhub_required_str(version_detail.get("display_name")),
+            "short_desc": cls._skillhub_required_str(version_detail.get("short_desc")),
+            "detail_desc": cls._skillhub_required_str(version_detail.get("detail_desc")),
+            "icon_uri": cls._skillhub_nullable_str(version_detail.get("icon_uri")),
+            "publisher_id": cls._skillhub_nullable_str(version_detail.get("publisher_id")),
+            "publisher_name": cls._skillhub_nullable_str(version_detail.get("publisher_name")),
+            "tags": cls._skillhub_str_list(version_detail.get("tags")),
+            "category_id": cls._skillhub_nullable_str(version_detail.get("category_id")),
+            "category_name": cls._skillhub_nullable_str(version_detail.get("category_name")),
+            "certification": cls._skillhub_nullable_str(version_detail.get("certification")),
+            "changelog": cls._skillhub_nullable_str(version_detail.get("changelog")),
+            "install_count": cls._skillhub_count(version_detail.get("install_count")),
+            "view_count": cls._skillhub_count(version_detail.get("view_count")),
+            # 交互计数与创建时间来自资产列表接口
+            "like_count": cls._skillhub_count(plugin_item.get("like_count")),
+            "star_count": cls._skillhub_count(plugin_item.get("star_count")),
+            "review_count": cls._skillhub_count(plugin_item.get("review_count")),
+            "average_rating": cls._skillhub_average_rating(plugin_item.get("average_rating")),
+            "create_time": plugin_item.get("create_time")
+            if plugin_item.get("create_time") is not None
+            else None,
+            "update_time": version_detail.get("update_time")
+            if version_detail.get("update_time") is not None
+            else None,
+            "review_summary": cls._skillhub_review_summary(version_detail.get("review_summary")),
+            "review_sections": cls._skillhub_review_sections(version_detail.get("review_sections")),
+        }
+
+    async def _team_skills_hub_get_public_plugin_item(
+        self,
+        asset_id: str,
+        *,
+        base_url: str | None = None,
+        token: str | None = None,
+        system_token: str | None = None,
+    ) -> dict[str, Any]:
+        """按 asset_id 精确查询资产列表项，用于解析 public_latest_version."""
+        data = await self._team_skills_hub_http_get_data(
+            "/api/v1/plugins",
+            params={"asset_id": asset_id, "page": 1, "page_size": 1},
+            timeout=_TEAM_SKILLS_HUB_MARKET_TIMEOUT,
+            base_url=base_url,
+            token=token,
+            system_token=system_token,
+        )
+        items = data.get("items") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            raise SkillRpcError(ERROR_SKILLHUB_DETAIL_FAILED, "SkillHub 资产列表响应格式错误")
+        matched: dict[str, Any] | None = None
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("asset_id") or "").strip() == asset_id:
+                matched = item
+                break
+        if matched is None:
+            raise SkillRpcError(ERROR_SKILLHUB_DETAIL_NOT_FOUND, "SkillHub 资产不存在")
+        return matched
+
+    async def _team_skills_hub_get_version_detail(
+        self,
+        asset_id: str,
+        version: str,
+        *,
+        base_url: str | None = None,
+        token: str | None = None,
+        system_token: str | None = None,
+    ) -> dict[str, Any]:
+        """查询指定公开版本详情（原生 /plugins/{asset_id}/versions/{version}）."""
+        path = (
+            f"/api/v1/plugins/{quote(asset_id, safe='')}"
+            f"/versions/{quote(version, safe='')}"
+        )
+        data = await self._team_skills_hub_http_get_data(
+            path,
+            timeout=_TEAM_SKILLS_HUB_MARKET_TIMEOUT,
+            base_url=base_url,
+            token=token,
+            system_token=system_token,
+            not_found_code=ERROR_SKILLHUB_DETAIL_NOT_FOUND,
+        )
+        if not isinstance(data, dict):
+            raise SkillRpcError(ERROR_SKILLHUB_DETAIL_FAILED, "SkillHub 版本详情响应格式错误")
+        return data
+
+
     def _prepare_teamskills_publish_zip(
         self,
         *,
@@ -5337,19 +5658,28 @@ class SkillManager:
         params: dict[str, Any] | None = None,
         timeout: float = _TEAM_SKILLS_HUB_MARKET_TIMEOUT,
         base_url: str | None = None,
+        token: str | None = None,
+        system_token: str | None = None,
+        not_found_code: str | None = None,
     ) -> Any:
         base_url = (base_url or self._get_team_skills_hub_base_url()).rstrip("/")
         rel_path = path if path.startswith("/") else f"/{path}"
         req_url = f"{base_url}{rel_path}"
+        headers = self._teamskills_hub_auth_headers(token=token, system_token=system_token)
         try:
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
-                resp = await client.get(req_url, params=params)
+                resp = await client.get(req_url, params=params, headers=headers or None)
         except Exception as exc:
             raise RuntimeError(f"无法连接 Team Skills Hub: {exc}") from exc
 
+        if resp.status_code == 404:
+            if not_found_code:
+                raise SkillRpcError(not_found_code, "SkillHub 资源不存在")
+            raise RuntimeError("Team Skills Hub API 错误 HTTP 404")
+
         if not resp.is_success:
-            detail = (resp.text or "").strip()[:300]
-            raise RuntimeError(f"Team Skills Hub API 错误 HTTP {resp.status_code}: {detail}")
+            # 不向调用方透传上游响应体，避免泄露敏感信息。
+            raise RuntimeError(f"Team Skills Hub API 错误 HTTP {resp.status_code}")
         try:
             payload = resp.json()
         except Exception as exc:
@@ -5358,9 +5688,12 @@ class SkillManager:
             raise RuntimeError("Team Skills Hub API 响应格式错误")
 
         code = payload.get("code", 200)
-        if int(code) != 200:
-            message = str(payload.get("message", "")).strip() or "Team Skills Hub API 返回失败"
-            raise RuntimeError(message)
+        try:
+            code_int = int(code)
+        except Exception as exc:
+            raise RuntimeError("Team Skills Hub API 响应 code 格式错误") from exc
+        if code_int != 200:
+            raise RuntimeError("Team Skills Hub API 返回失败")
 
         data = payload.get("data")
         if not isinstance(data, dict):

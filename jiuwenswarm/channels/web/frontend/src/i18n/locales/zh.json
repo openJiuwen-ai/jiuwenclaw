@@ -15,7 +15,8 @@
     "and": "和",
     "modify": "修改",
     "delete": "删除",
-    "expandMore": "展开 {{count}} 个"
+    "expandMore": "展开 {{count}} 个",
+    "processing": "处理中…"
   },
   "a2ui": {
     "generating": "A2UI 界面生成中...",
@@ -1707,7 +1708,7 @@
       "skillIcon": "Skill图标",
       "skillIconOptional": "Skill图标（可选）",
       "skillIconHint": "PNG文件，不能超过5MB",
-      "sha256": "SHA-256 校验",
+      "sha256": "SHA-256 校验和",
       "versionNote": "版本说明",
       "versionNoteOptional": "版本说明（Swarm Skill，可选）",
       "confirm": "确认发布",
@@ -1717,7 +1718,21 @@
       "placeholderSha256": "打包完成后显示 64 位小写十六进制",
       "noticeText": "技能将会被发布到 JiuwenHub。",
       "noticeView": "去查看",
-      "noticeUrl": "https://swarmskills.openjiuwen.com/?type=swarmskill"
+      "noticeUrl": "https://swarmskills.openjiuwen.com/?type=swarmskill",
+      "errorNameTooLong": "名称不能超过 {{max}} 个字符",
+      "errorInvalidName": "名称须以小写字母开头，仅含小写字母、数字和连字符",
+      "errorInvalidVersion": "版本号格式应为 x.y.z（如 1.0.0）",
+      "errorDisplayNameTooLong": "显示名不能超过 {{max}} 个字符",
+      "pathNotFound": "无法确定技能目录",
+      "forceOverwrite": "强制覆盖（版本已存在时覆盖原插件）"
+    },
+    "oauthLogin": {
+      "title": "登录以发布技能",
+      "description": "需要登录账号才能发布技能到 SkillHub",
+      "gitcodeLogin": "使用 GitCode 登录",
+      "githubLogin": "使用 GitHub 登录",
+      "notConfigured": "GitCode OAuth 未配置，请在 .env.local 中设置 VITE_GITCODE_OAUTH_CLIENT_ID 和 VITE_GITCODE_OAUTH_CLIENT_SECRET",
+      "githubNotConfigured": "GitHub OAuth 未配置，请在 .env.local 中设置 VITE_GITHUB_OAUTH_CLIENT_ID"
     },
     "uploadSkillModal": {
       "title": "上传技能",
@@ -2177,12 +2192,20 @@
     "installPrompt": "请输入插件规格 (plugin@marketplace)",
     "importPrompt": "请输入服务端本地 skill 路径（SKILL.md 或目录）",
     "uninstallConfirm": "确认卸载 {{pluginName}} ?",
+    "overwriteConfirm": "是否覆盖保存？",
     "messages": {
       "installing": "安装中：{{name}}...",
       "installed": "已安装：{{spec}}",
       "imported": "已导入：{{name}}",
       "uninstalled": "已卸载：{{pluginName}}",
-      "skillNetInstalled": "已安装：{{name}}"
+      "skillNetInstalled": "已安装：{{name}}",
+      "knowledgeSkillCreated": "知识转技能已完成",
+      "knowledgeSkillCreating": "知识转技能处理中…",
+      "knowledgeSkillCreatingCount": "知识转技能处理中…（{{count}} 条任务）",
+      "packFailed": "打包失败",
+      "downloadFailed": "下载打包文件失败",
+      "published": "技能 {{name}} 发布成功",
+      "publishFailed": "发布失败"
     },
     "errors": {
       "installFailed": "安装失败",

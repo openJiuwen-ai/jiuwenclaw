@@ -7,6 +7,7 @@ interface ImportMetaEnv {
   readonly VITE_PLATFORM?: string;
   readonly VITE_GITCODE_OAUTH_CLIENT_ID?: string;
   readonly VITE_GITCODE_OAUTH_CLIENT_SECRET?: string;
+  readonly VITE_GITHUB_OAUTH_CLIENT_ID?: string;
 }
 
 interface ImportMeta {
