@@ -149,6 +149,10 @@ from jiuwenswarm.agents.harness.common.rails import (
     SymphonyOrchestrationRail,
     TaskExecutionRail,
 )
+from jiuwenswarm.agents.harness.common.rails.concurrent_safe_rails import (
+    ConcurrentSafeSysOperationRail,
+    ConcurrentSafeTaskPlanningRail,
+)
 from jiuwenswarm.agents.harness.common.rails.execution_guard import (
     CircuitBreakerRail,
     CircuitBreakerConfig,
