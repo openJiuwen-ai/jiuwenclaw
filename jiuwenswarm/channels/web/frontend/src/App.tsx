@@ -12,6 +12,7 @@ import { AgentPanel } from './components/AgentPanel/index';
 import { TeamPanel } from './components/TeamPanel';
 import { SessionsPanel } from './components/SessionsPanel';
 import CronPanel from './components/CronPanel';
+import HeartbeatPanel from './components/HeartbeatPanel';
 import { ToolPanel } from './components/ToolPanel';
 import { ConfigPanel } from './components/ConfigPanel';
 import { ChannelsPanel } from './components/ChannelsPanel';
@@ -631,12 +632,24 @@ function AppContent() {
   const [chatPanelWidthPct, setChatPanelWidthPct] = useState(CHAT_PANEL_DEFAULT_WIDTH_PCT);
   const chatPanelResizeDragRef = useRef<ChatPanelResizeDrag | null>(null);
   const [codeReviewTarget, setCodeReviewTarget] = useState<CodeReviewTarget | null>(null);
+  const [heartbeatPanelOpen, setHeartbeatPanelOpen] = useState(false);
 
   useEffect(() => {
     setCodeReviewTarget(null);
   }, [sessionId]);
 
+  // 心跳面板是会话级功能，切换会话时收起，避免带着上一个会话的任务列表进入新会话
+  useEffect(() => {
+    setHeartbeatPanelOpen(false);
+  }, [sessionId]);
+
+  const handleToggleHeartbeatPanel = useCallback(() => {
+    setHeartbeatPanelOpen((v) => !v);
+  }, []);
+
   const handleToggleDetailPanel = useCallback((expanded: boolean | null) => {
+    // 团队/代码审核面板和心跳面板互斥，共用右侧工作区同一栏
+    setHeartbeatPanelOpen(false);
     if (expanded === null) {
       setToolPanelHidden(true);
       setTeamAreaExpanded(false);
@@ -655,6 +668,7 @@ function AppContent() {
   }, [mode, setSingleAgentPanelExpanded, setTeamAreaActiveTab, setTeamAreaExpanded, teamAreaActiveTab]);
 
   const handleOpenCodeReview = useCallback((target: CodeReviewTarget) => {
+    setHeartbeatPanelOpen(false);
     setCodeReviewTarget(target);
     setToolPanelHidden(false);
     if (mode === 'team') {
@@ -833,7 +847,8 @@ function AppContent() {
   // 单 agent 模式同样复用集群模式的展开布局（百分比宽度 + 可拖拽分割线），
   // 避免右侧面板与聊天面板平分空间导致宽度与集群模式不一致；auto_harness 走收起态分支。
   const panelExpanded = mode === 'team' ? teamAreaExpanded : singleAgentPanelExpanded;
-  const isTeamAreaExpanded = mode !== 'auto_harness' && panelExpanded && toolPanelHasContent;
+  // 心跳面板打开时，团队/代码审核面板让出右侧工作区（两者互斥，不共同占用宽度）。
+  const isTeamAreaExpanded = mode !== 'auto_harness' && panelExpanded && toolPanelHasContent && !heartbeatPanelOpen;
 
   const { shouldFullscreen } = useResponsivePanelResize({
     isTeamAreaExpanded,
@@ -3094,6 +3109,8 @@ function AppContent() {
                       onToggleTeamArea={handleToggleDetailPanel}
                       onOpenCodeReview={handleOpenCodeReview}
                       permissionsEnabled={serverConfig?.permissions_enabled !== 'false'}
+                      heartbeatPanelOpen={heartbeatPanelOpen}
+                      onToggleHeartbeatPanel={handleToggleHeartbeatPanel}
                       onSavePermission={savePermissionSilent}
                       historyPager={chatHistoryPager}
                       isHistoryRestoring={isRestoringHistorySession}
@@ -3124,7 +3141,7 @@ function AppContent() {
                 )}
 
                 {/* Tool Panel / Expanded Team Panel */}
-                {(!toolPanelHidden && (toolPanelHasContent || isRestoringTeamHistory)) && !showConversationNotFound && (
+                {!toolPanelHidden && (toolPanelHasContent || isRestoringTeamHistory) && !showConversationNotFound && !heartbeatPanelOpen && (
                   <ToolPanel
                     sessionId={sessionId}
                     project={sessionProject}
@@ -3149,6 +3166,11 @@ function AppContent() {
                     setSingleAgentPanelSelectedArtifactId={setSingleAgentPanelSelectedArtifactId}
                     shouldFullscreen={shouldFullscreen}
                   />
+                )}
+
+                {/* 心跳面板：跟 ToolPanel 一样占用右侧工作区一栏，而不是浮在页面上方的浮层 */}
+                {heartbeatPanelOpen && sessionId && sessionId !== NEW_CONVERSATION_ID && !showConversationNotFound && (
+                  <HeartbeatPanel sessionId={sessionId} onClose={() => setHeartbeatPanelOpen(false)} />
                 )}
               </div>
             </div>
