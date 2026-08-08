@@ -444,6 +444,93 @@ def _build_plain_ask_user_question(value_obj: Any) -> dict | None:
     }
 
 
+_PERMISSION_DENY_DEFAULT_FEEDBACK = "用户拒绝"
+_PERMISSION_DENIED_PREFIX = "[PERMISSION_DENIED]"
+_PREMATURE_HITL_TOOL_RESULT_RE = re.compile(
+    r"^success=False data=None error=''$"
+)
+
+
+def is_premature_tool_hitl_stream_result(result: Any) -> bool:
+    """True for the empty ToolTimeoutResult repr emitted on ToolInterrupt ASK."""
+    return bool(_PREMATURE_HITL_TOOL_RESULT_RE.match(str(result or "").strip()))
+
+
+def is_permission_deny_tool_result(result: Any) -> bool:
+    text = str(result or "").strip()
+    return text.startswith(("[PERMISSION_DENIED]", "[PERMISSION_REJECTED]"))
+
+
+def extract_permission_deny_user_feedback(tool_result: Any) -> str:
+    """Return non-empty user guidance from a permission-deny tool_result envelope."""
+    text = str(tool_result or "").strip()
+    for prefix in ("User feedback: ", "用户说明："):
+        if prefix in text:
+            feedback = text.split(prefix, 1)[1].strip()
+            if feedback:
+                return feedback
+    return ""
+
+
+def should_force_finish_on_permission_deny(tool_result: Any) -> bool:
+    """Plain deny stops the turn; deny with user guidance lets ReAct continue."""
+    return not extract_permission_deny_user_feedback(tool_result)
+
+
+def build_permission_deny_user_answer(tool_result: Any, *, language: str | None = None) -> str:
+    """User-visible answer after deny — deterministic, no LLM continuation."""
+    text = str(tool_result or "").strip()
+    feedback = ""
+    for prefix in ("User feedback: ", "用户说明："):
+        if prefix in text:
+            feedback = text.split(prefix, 1)[1].strip()
+            break
+
+    use_en = resolve_permission_deny_language(language) == "en"
+    if use_en:
+        base = "Permission was denied, so the operation was not performed."
+        if feedback:
+            return f"{base} You noted: {feedback}"
+        return base
+
+    base = "权限已被拒绝，操作未执行。"
+    if feedback:
+        return f"{base}你的说明：{feedback}"
+    return base
+
+
+def format_permission_deny_tool_result(feedback: str, *, language: str | None = None) -> str:
+    """Wrap permission-deny feedback so the model treats it as a blocked tool call.
+
+    Only used for ``permission_interrupt`` rejects. Plan revise and other
+    ``confirm_interrupt`` flows keep raw feedback.
+    """
+    text = str(feedback or "").strip()
+    if text.startswith("[PERMISSION_"):
+        return text
+
+    use_en = resolve_permission_deny_language(language) == "en"
+
+    if use_en:
+        if not text or text == _PERMISSION_DENY_DEFAULT_FEEDBACK:
+            return (
+                f"{_PERMISSION_DENIED_PREFIX} User rejected the tool call. "
+                "The operation was NOT performed."
+            )
+        return (
+            f"{_PERMISSION_DENIED_PREFIX} User rejected the tool call. "
+            f"The operation was NOT performed. User feedback: {text}. "
+            "Follow the user's guidance and complete their alternative request."
+        )
+
+    if not text or text == _PERMISSION_DENY_DEFAULT_FEEDBACK:
+        return f"{_PERMISSION_DENIED_PREFIX} 用户拒绝了该工具调用，操作未执行。"
+    return (
+        f"{_PERMISSION_DENIED_PREFIX} 用户拒绝了该工具调用，操作未执行。"
+        f"用户说明：{text}。请按用户说明执行替代方案。"
+    )
+
+
 _PERMISSION_INTERRUPT_MARKERS = (
     "需要授权才能执行",
     "requires permission",
@@ -733,7 +820,145 @@ def _normalize_question_option(option: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def _default_interrupt_options() -> list[dict[str, str]]:
+def _preferred_language_code() -> str:
+    try:
+        from jiuwenswarm.common.config import get_config
+
+        lang = str(get_config().get("preferred_language") or "zh").strip().lower()
+    except Exception:
+        lang = "zh"
+    return "en" if lang.startswith("en") else "zh"
+
+
+def resolve_permission_deny_language(lang: str | None = None) -> str:
+    """Return ``en`` or ``zh`` for permission-deny user-visible copy."""
+    if lang is not None:
+        normalized = str(lang).strip().lower()
+        return "en" if normalized.startswith("en") else "zh"
+    return _preferred_language_code()
+
+
+def _extract_matched_rule(message: str) -> str:
+    for pattern in (r"匹配规则：`([^`]*)`", r"Matched rule: `([^`]*)`"):
+        match = re.search(pattern, message)
+        if match:
+            return match.group(1).strip()
+    return "N/A"
+
+
+def _format_tool_args_preview(tool_args: dict | None) -> str:
+    if not tool_args:
+        return ""
+    try:
+        return json.dumps(tool_args, ensure_ascii=False, indent=2)[:1000]
+    except (TypeError, ValueError):
+        return str(tool_args)[:1000]
+
+
+def _build_permission_persist_hint_en(
+    tool_name: str,
+    tool_args: dict | None,
+    *,
+    include_hint: bool,
+) -> str:
+    if not include_hint:
+        return ""
+    tool_args = tool_args or {}
+    path_hint = ""
+    for key in ("path", "file_path", "target_file", "file", "old_path", "new_path"):
+        val = tool_args.get(key)
+        if isinstance(val, str) and val.strip():
+            path_hint = val.strip()
+            break
+    path_desc = f" under `{path_hint}`" if path_hint else ""
+    return (
+        f'\n\n> Choosing **Remember for session** auto-allows `{tool_name}` calls{path_desc} '
+        "for the rest of this session; choosing **Always allow** writes the rule to disk "
+        "for all future sessions."
+    )
+
+
+def _build_permission_interrupt_message_en(
+    tool_name: str,
+    tool_args: dict | None,
+    matched_rule: str,
+    *,
+    include_persist_hint: bool,
+) -> str:
+    preview = _format_tool_args_preview(tool_args)
+    parts = [
+        f"**Tool `{tool_name}` requires your approval**\n\n",
+        "Please confirm whether to allow this action.\n\n",
+    ]
+    if preview and preview != "{}":
+        parts.append(f"Arguments:\n```json\n{preview}\n```\n")
+    parts.append(f"\nMatched rule: `{matched_rule or 'N/A'}`")
+    parts.append(
+        _build_permission_persist_hint_en(
+            tool_name,
+            tool_args,
+            include_hint=include_persist_hint,
+        )
+    )
+    return "".join(parts)
+
+
+def _localize_interrupt_question(
+    question: dict[str, Any],
+    *,
+    source: str,
+    tool_name: str,
+    tool_args: dict | None,
+    raw_message: str,
+    value_obj: Any,
+) -> dict[str, Any]:
+    if _preferred_language_code() != "en":
+        return question
+
+    if _classify_structured_approval(value_obj, question):
+        return question
+
+    localized = dict(question)
+    if source == "permission_interrupt":
+        localized["header"] = f"Permission: {tool_name}" if tool_name else "Permission"
+        localized["question"] = _build_permission_interrupt_message_en(
+            tool_name,
+            tool_args,
+            _extract_matched_rule(raw_message),
+            include_persist_hint="选择「会话内记住」" in raw_message,
+        )
+        if not _extract_ui_options(value_obj):
+            localized["options"] = _default_interrupt_options("en")
+    elif source == "confirm_interrupt" and not is_plan_approval_message(raw_message):
+        localized["header"] = f"Confirm: {tool_name}" if tool_name else "Confirm action"
+    return localized
+
+
+def _default_interrupt_options(lang: str | None = None) -> list[dict[str, str]]:
+    resolved = lang or _preferred_language_code()
+    if resolved == "en":
+        return [
+            {
+                "label": "Allow once",
+                "value": "本次允许",
+                "description": "Allow this action only this time",
+            },
+            {
+                "label": "Remember for session",
+                "value": "会话内记住",
+                "description": "Auto-allow similar actions this session",
+            },
+            {
+                "label": "Always allow",
+                "value": "永久记住",
+                "description": "Persist rule to disk for all sessions",
+            },
+            {
+                "label": "Reject",
+                "value": "拒绝",
+                "description": "Reject this tool call",
+            },
+        ]
     return [
         {"label": "本次允许", "description": "仅本次授权执行"},
         {"label": "会话内记住", "description": "本次会话内自动放行同类操作"},
@@ -834,7 +1059,10 @@ def extract_question_from_interaction(payload: Any) -> dict | None:
 
             message = build_confirm_interrupt_message(tool_name, tool_args or {})
         elif not message:
-            message = f"工具 `{tool_name}` 需要授权才能执行"
+            if _preferred_language_code() == "en":
+                message = f"Tool `{tool_name}` requires your approval"
+            else:
+                message = f"工具 `{tool_name}` 需要授权才能执行"
 
     plan_approval_options = _plan_approval_interrupt_options(source, tool_name, message)
     if plan_approval_options:
@@ -847,9 +1075,17 @@ def extract_question_from_interaction(payload: Any) -> dict | None:
         header = f"权限审批: {tool_name}" if tool_name else "权限审批"
         question = message
 
-    return {
+    question_data = {
         "question": question,
         "header": header,
         "options": _question_options_from_ui_options(value_obj, source, tool_name, message),
         "multi_select": False,
     }
+    return _localize_interrupt_question(
+        question_data,
+        source=source,
+        tool_name=tool_name,
+        tool_args=tool_args,
+        raw_message=message,
+        value_obj=value_obj,
+    )

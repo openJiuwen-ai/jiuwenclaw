@@ -32,7 +32,11 @@ from openjiuwen.harness.tools import TodoListTool
 from openjiuwen.harness.workspace.workspace import WorkspaceNode
 
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
+    build_permission_deny_user_answer,
+    resolve_permission_deny_language,
     convert_interactions_to_ask_user_question,
+    is_permission_deny_tool_result,
+    should_force_finish_on_permission_deny,
 )
 from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
     strip_image_content_from_model_context,
@@ -71,6 +75,19 @@ def _parse_tool_call_arguments(tool_call: Any) -> dict[str, Any]:
             return {}
         return parsed if isinstance(parsed, dict) else {}
     return {}
+
+
+def _is_interrupt_decision(value: Any) -> bool:
+    return value is not None and type(value).__name__ == "InterruptResult"
+
+
+def _should_skip_tool_result_emit(ctx: AgentCallbackContext) -> bool:
+    """Do not stream a fake tool_result while HITL is still waiting for the user."""
+    if _extract_tool_interrupt(getattr(ctx, "exception", None)) is not None:
+        return True
+    if _is_interrupt_decision(ctx.extra.get("_interrupt_decision")):
+        return True
+    return False
 
 
 def _extract_tool_interrupt(value: Any) -> Any | None:
@@ -206,7 +223,7 @@ def _infer_tool_result_error(value: Any) -> bool | None:
                 return parsed_error
         if re.search(r"\bsuccess\s*[:=]\s*False\b", text, re.IGNORECASE):
             return True
-        if text.startswith("[ERROR]"):
+        if text.startswith(("[ERROR]", "[PERMISSION_DENIED]", "[PERMISSION_REJECTED]")):
             return True
         exit_match = re.search(
             r"\b(?:exit(?:[_ ]?code)?|returncode|return[_ ]code)\s*[:= ]\s*(-?\d+)\b",
@@ -713,7 +730,30 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         if tc_id:
             self._inflight_tool_calls.pop(tc_id, None)
 
+        if _should_skip_tool_result_emit(ctx):
+            await self._emit_ask_user_question_if_interrupted(
+                session,
+                tc,
+                ctx.inputs.tool_name,
+                ctx.inputs.tool_result,
+                ctx.exception,
+            )
+            return
+
         await self._emit_tool_result(session, tc, ctx.inputs.tool_result)
+        if (
+            is_permission_deny_tool_result(ctx.inputs.tool_result)
+            and should_force_finish_on_permission_deny(ctx.inputs.tool_result)
+        ):
+            ctx.request_force_finish(
+                {
+                    "output": build_permission_deny_user_answer(
+                        ctx.inputs.tool_result,
+                        language=resolve_permission_deny_language(),
+                    ),
+                    "result_type": "answer",
+                }
+            )
         self._symphony_stream_handler.request_force_finish(
             ctx,
             tc,

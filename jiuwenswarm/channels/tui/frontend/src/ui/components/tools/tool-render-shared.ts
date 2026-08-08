@@ -1,4 +1,5 @@
 import { summarize } from "../../rendering/text.js";
+import { summarizePermissionDeniedToolResult } from "../../../core/tool-result-permission.js";
 import { isPlainObject, tryParseStructuredText } from "./tool-structured-data.js";
 
 export const MAX_VISIBLE_TOOLS = 3;
@@ -18,6 +19,10 @@ function summarizeStructuredPayload(value: string): string | undefined {
 }
 
 export function summarizeToolResultByKind(name: string, result: string): string | undefined {
+  const deniedSummary = summarizePermissionDeniedToolResult(result);
+  if (deniedSummary) {
+    return deniedSummary;
+  }
   const normalized = name.toLowerCase();
   const lines = result.split("\n").filter(Boolean).length;
   if (normalized.includes("read") || normalized.includes("view")) return `${lines} lines loaded`;

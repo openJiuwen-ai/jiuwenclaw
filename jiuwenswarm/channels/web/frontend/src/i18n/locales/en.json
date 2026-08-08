@@ -2389,10 +2389,18 @@
     "titleConfirm": "Confirm action",
     "allowOnce": "Allow once",
     "allowAlways": "Always allow",
+    "sessionAllow": "Remember for session",
+    "reject": "Reject",
     "skip": "Skip",
+    "denyFeedbackPlaceholder": "Optional: explain why or suggest a safer alternative",
+    "denySubmit": "Deny with note",
+    "denyWithoutNote": "Deny",
+    "denyBack": "Back",
     "tip": {
       "allowOnce": "Allow this action only this time",
       "allowAlways": "Remember this rule and auto-allow from now on",
+      "sessionAllow": "Remember this choice for the current session",
+      "reject": "Reject this action",
       "skip": "Reject this action"
     }
   },

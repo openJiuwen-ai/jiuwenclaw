@@ -648,6 +648,7 @@ Object.assign(pendingQuestionScreen, {
       pendingQuestion: {
         requestId: "plan-approval",
         source: "confirm_interrupt",
+        planApprovalKind: "plan_approval",
         questions: [{ header: "Exit Plan and Execute", question: planQuestion, options: [] }],
       },
     }),

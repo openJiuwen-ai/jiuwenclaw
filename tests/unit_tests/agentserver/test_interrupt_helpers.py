@@ -207,3 +207,49 @@ def test_build_multi_questions_appends_other_for_valid_options():
     )
 
     assert [opt["label"] for opt in questions[0]["options"]] == ["A", "B", "Other"]
+
+
+def test_permission_interrupt_localizes_when_preferred_language_is_en(monkeypatch):
+    from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
+        extract_question_from_interaction,
+    )
+
+    message = (
+        "**工具 `write_file` 需要授权才能执行**\n\n"
+        "请确认是否允许该操作。\n\n"
+        "参数：\n```json\n{\"file_path\": \"test-b10-deny.txt\"}\n```\n"
+        "\n匹配规则：`tools.write_file`"
+        "\n\n> 选择「会话内记住」可在本会话内自动放行 write_file 类工具在 test-b10-deny.txt 下的调用；"
+        "选择「永久记住」可将此规则写回磁盘，所有会话均自动放行。"
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.common.config.get_config",
+        lambda: {"preferred_language": "en"},
+    )
+
+    question = extract_question_from_interaction(
+        {
+            "id": "req_perm",
+            "value": {
+                "tool_name": "write_file",
+                "message": message,
+                "tool_args": {
+                    "file_path": "test-b10-deny.txt",
+                    "content": "hello world",
+                },
+            },
+        }
+    )
+
+    assert question is not None
+    assert question["header"] == "Permission: write_file"
+    assert "requires your approval" in question["question"]
+    assert "Please confirm whether to allow this action." in question["question"]
+    assert "Matched rule: `tools.write_file`" in question["question"]
+    assert "Remember for session" in question["question"]
+    assert [option["label"] for option in question["options"]] == [
+        "Allow once",
+        "Remember for session",
+        "Always allow",
+        "Reject",
+    ]

@@ -210,6 +210,8 @@ export type HistoryItem =
       at: string;
       /** 历史恢复期间携带原始事件类型（如 `chat.final` / `chat.delta`），用于在分页倒序场景下正确合并片段。 */
       eventType?: string;
+      /** `patch_segment` 时覆写同轮上一条 assistant 正文（如 permission deny 替换意图文案）。 */
+      finalMode?: string;
     }
   | { kind: "thinking"; id: string; sessionId: string; content: string; at: string }
   | {

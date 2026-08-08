@@ -47,6 +47,11 @@ from jiuwenswarm.agents.harness.code.prompt.plan_approval import (
     PLAN_SKIP_OPTION_VALUES,
     plan_skip_feedback,
 )
+from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
+    format_permission_deny_tool_result,
+    is_premature_tool_hitl_stream_result,
+    resolve_permission_deny_language,
+)
 from jiuwenswarm.common.mode_matrix import (
     canonicalize_mode_text,
     is_code_profile_mode,
@@ -138,6 +143,14 @@ def _history_user_content(params: Any, query: Any) -> Any:
     if isinstance(content, str):
         return collapse_file_content_blocks(content)
     return content
+
+
+def _is_premature_hitl_tool_result_event(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if str(payload.get("event_type") or "").strip() != "chat.tool_result":
+        return False
+    return is_premature_tool_hitl_stream_result(payload.get("result"))
 
 
 def _should_record_user_history(params: Any) -> bool:
@@ -1339,9 +1352,20 @@ class JiuWenSwarm:
             feedback = custom_input or (
                 "用户希望继续规划" if value in ("Keep planning", "继续规划", "其他意见") else "用户拒绝"
             )
+            if source == "permission_interrupt":
+                feedback = format_permission_deny_tool_result(
+                    feedback,
+                    language=resolve_permission_deny_language(),
+                )
             confirm_payload = {"approved": False, "auto_confirm": False, "feedback": feedback}
         elif custom_input:
-            confirm_payload = {"approved": False, "auto_confirm": False, "feedback": custom_input}
+            feedback = custom_input
+            if source == "permission_interrupt":
+                feedback = format_permission_deny_tool_result(
+                    feedback,
+                    language=resolve_permission_deny_language(),
+                )
+            confirm_payload = {"approved": False, "auto_confirm": False, "feedback": feedback}
         else:
             confirm_payload = {"approved": False, "auto_confirm": False, "feedback": f"未知选项: {value}"}
 
@@ -2196,6 +2220,7 @@ class JiuWenSwarm:
         # （见 interface_deep._should_emit_stream_end_chat_final），气泡里的正文
         # 就没人落盘；收尾时按这个标记补一次，只影响 Goal 流。
         saw_goal_stream_output = False
+        suppress_pending_final_persist = False
 
         def _note_durable_reasoning_delta() -> None:
             nonlocal durable_pending_reasoning_started_at, durable_pending_reasoning_updated_at
@@ -2662,6 +2687,12 @@ class JiuWenSwarm:
                                     continue
                                 _note_durable_pending_final_delta(payload_content)
                                 should_record = False
+                            elif et == "chat.tool_result":
+                                if _is_premature_hitl_tool_result_event(data.payload):
+                                    suppress_pending_final_persist = True
+                                    continue
+                            elif et == "chat.ask_user_question":
+                                suppress_pending_final_persist = True
                             elif et == "chat.reasoning":
                                 _note_durable_reasoning_delta()
                                 durable_pending_reasoning_chunks.append(payload_content)
@@ -2695,8 +2726,12 @@ class JiuWenSwarm:
                                 else:
                                     # 空 final 只是收尾/拆气泡信号（Goal 中间态 final 被降级成
                                     # chat.delta、流末尾的兜底 final），气泡里留下的正文就是前面
-                                    # 那些 delta。这里必须落盘同一份，否则历史里整段回答会消失。
-                                    _persist_pending_final_text()
+                                    # 那些 delta。权限 ASK 打断时丢弃已缓冲的意图文案（一次性）。
+                                    if suppress_pending_final_persist:
+                                        _reset_durable_pending_final()
+                                        suppress_pending_final_persist = False
+                                    else:
+                                        _persist_pending_final_text()
                                     final_segment_started_at = None
 
                             if should_record:
@@ -2834,6 +2869,12 @@ class JiuWenSwarm:
                                 continue
                             _note_durable_pending_final_delta(payload_content)
                             should_record = False
+                        elif et == "chat.tool_result":
+                            if _is_premature_hitl_tool_result_event(data):
+                                suppress_pending_final_persist = True
+                                continue
+                        elif et == "chat.ask_user_question":
+                            suppress_pending_final_persist = True
                         elif et == "chat.reasoning":
                             _note_durable_reasoning_delta()
                             durable_pending_reasoning_chunks.append(payload_content)
@@ -2862,8 +2903,11 @@ class JiuWenSwarm:
                             if payload_content:
                                 _reset_durable_pending_final()
                             else:
-                                # 同上：空 final 收尾时把气泡正文落盘，别丢历史。
-                                _persist_pending_final_text()
+                                if suppress_pending_final_persist:
+                                    _reset_durable_pending_final()
+                                    suppress_pending_final_persist = False
+                                else:
+                                    _persist_pending_final_text()
                                 final_segment_started_at = None
 
                         if should_record:
@@ -2934,6 +2978,9 @@ class JiuWenSwarm:
             if saw_goal_stream_output:
                 _persist_pending_final_text()
             else:
+                # Permission ASK HITL: discard buffered "I will create…" intent.
+                if suppress_pending_final_persist:
+                    _reset_durable_pending_final()
                 # 非 Goal 异常结束（LLM 错误/断连，或流结束无收尾事件）时，pending
                 # reasoning 不会随 tool_call/final 落盘；补落一条，刷新后思考内容
                 # 与耗时终点（末帧时刻）都能恢复。正文 final 故意不落——半截回答
