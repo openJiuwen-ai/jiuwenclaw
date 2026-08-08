@@ -741,7 +741,7 @@ class RuntimePromptRail(DeepAgentRail):
             self.system_prompt_builder.add_section(PromptSection(
                 name="request_system_prompt",
                 content={"cn": self._request_system_prompt, "en": self._request_system_prompt},
-                priority=10_000,
+                priority=110,
             ))
 
     async def _upsert_prompt_attachment(
