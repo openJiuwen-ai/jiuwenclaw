@@ -688,7 +688,10 @@ class MessageHandler(ABC):
         """Map A2A/SSH protocol IDs onto AgentServer-owned product Sessions."""
         channel_id = str(msg.channel_id or "").strip()
         external_id = str(msg.session_id or "").strip()
-        if channel_id not in {"a2a", "ssh"} or not external_id:
+        # xiaoyi 的入站 msg.session_id 是稳定的 conversation_id（跨多轮不变），
+        # 但并非 AgentServer 认识的 session id；这里按 (channel, conversation_id)
+        # 分配并缓存 AgentServer session，让同一对话复用同一 session、历史不丢。
+        if channel_id not in {"a2a", "ssh", "xiaoyi"} or not external_id:
             return
         key = (channel_id, external_id)
         resolved = self._external_session_aliases.get(key)
@@ -2152,6 +2155,10 @@ class MessageHandler(ABC):
                 msg.session_id = None
         elif state.session_id:
             msg.session_id = state.session_id
+        elif isinstance(msg.metadata, dict) and msg.metadata.get("external_session_id"):
+            # 已由 _resolve_external_channel_session 映射到 AgentServer session
+            # （如 a2a/ssh/xiaoyi），不要覆盖，否则会把已分配的 session_id 清成 None。
+            pass
         else:
             msg.session_id = None
 
