@@ -71,6 +71,9 @@ if _logging_yaml.exists():
     from openjiuwen.core.common.logging.log_config import configure_log
 
     configure_log(str(_logging_yaml))
+    from jiuwenswarm.openjiuwen_log_patch import apply_openjiuwen_log_to_file_setting
+
+    apply_openjiuwen_log_to_file_setting()
 else:
     # Reduce openjiuwen internal logs (keep Gateway logs)
     for _lg in LogManager.get_all_loggers().values():

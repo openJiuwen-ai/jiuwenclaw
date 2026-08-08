@@ -91,14 +91,41 @@ def test_validate_pattern_allows_simple_custom_pattern():
         ("false", False),
     ],
 )
-def test_gateway_log_masking_enabled(monkeypatch, env_value, expected):
+def test_log_masking_enabled(monkeypatch, env_value, expected):
+    from jiuwenswarm.infrastructure.config import Settings
+
+    monkeypatch.delenv("GATEWAY_LOG_MASKING_ENABLED", raising=False)
+    if env_value is None:
+        monkeypatch.delenv("LOG_MASK_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("LOG_MASK_ENABLED", env_value)
+    assert Settings().log_masking_enabled is expected
+
+
+def test_log_masking_enabled_falls_back_to_gateway_env(monkeypatch):
+    from jiuwenswarm.infrastructure.config import Settings
+
+    monkeypatch.delenv("LOG_MASK_ENABLED", raising=False)
+    monkeypatch.setenv("GATEWAY_LOG_MASKING_ENABLED", "false")
+    assert Settings().log_masking_enabled is False
+
+
+@pytest.mark.parametrize(
+    ("env_value", "expected"),
+    [
+        (None, True),
+        ("true", True),
+        ("false", False),
+    ],
+)
+def test_log_to_file_enabled(monkeypatch, env_value, expected):
     from jiuwenswarm.infrastructure.config import Settings
 
     if env_value is None:
-        monkeypatch.delenv("GATEWAY_LOG_MASKING_ENABLED", raising=False)
+        monkeypatch.delenv("LOG_TO_FILE_ENABLED", raising=False)
     else:
-        monkeypatch.setenv("GATEWAY_LOG_MASKING_ENABLED", env_value)
-    assert Settings().gateway_log_masking_enabled is expected
+        monkeypatch.setenv("LOG_TO_FILE_ENABLED", env_value)
+    assert Settings().log_to_file_enabled is expected
 
 
 @pytest.mark.asyncio

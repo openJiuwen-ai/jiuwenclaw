@@ -57,25 +57,33 @@ _logging_yaml = get_root_dir() / "config" / "logging.yaml"
 if _logging_yaml.exists():
     from openjiuwen.core.common.logging.log_config import configure_log
     configure_log(str(_logging_yaml))
+    from jiuwenswarm.openjiuwen_log_patch import apply_openjiuwen_log_to_file_setting
+    apply_openjiuwen_log_to_file_setting()
 else:
     for _lg in LogManager.get_all_loggers().values():
         _lg.set_level(logging.CRITICAL)
 
     from jiuwenswarm.common.utils import get_logs_dir
+    from jiuwenswarm.infrastructure.config import Settings
+
     _logs_root = get_logs_dir()
-    _logs_root.mkdir(parents=True, exist_ok=True)
+    _file_logging_enabled = Settings().log_to_file_enabled
+    if _file_logging_enabled:
+        _logs_root.mkdir(parents=True, exist_ok=True)
     _perm_fmt = logging.Formatter(
         "%(asctime)s.%(msecs)03d %(levelname)s %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    _perm_fh = logging.handlers.RotatingFileHandler(
-        _logs_root / "permissions.log",
-        maxBytes=20 * 1024 * 1024,
-        backupCount=5,
-        encoding="utf-8",
-    )
-    _perm_fh.setLevel(logging.INFO)
-    _perm_fh.setFormatter(_perm_fmt)
+    _perm_fh = None
+    if _file_logging_enabled:
+        _perm_fh = logging.handlers.RotatingFileHandler(
+            _logs_root / "permissions.log",
+            maxBytes=20 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+        )
+        _perm_fh.setLevel(logging.INFO)
+        _perm_fh.setFormatter(_perm_fmt)
     _perm_sh = logging.StreamHandler()
     _perm_sh.setLevel(logging.INFO)
     _perm_sh.setFormatter(_perm_fmt)
@@ -83,7 +91,8 @@ else:
     _sec_logger = logging.getLogger("openjiuwen.harness.security")
     _sec_logger.setLevel(logging.INFO)
     if not _sec_logger.handlers:
-        _sec_logger.addHandler(_perm_fh)
+        if _perm_fh is not None:
+            _sec_logger.addHandler(_perm_fh)
         _sec_logger.addHandler(_perm_sh)
     _sec_logger.propagate = False
 
@@ -95,27 +104,31 @@ else:
             return "[PermissionEngine]" in record.getMessage()
 
     _perm_filter = _PermissionEngineFilter()
-    _common_fh = logging.handlers.RotatingFileHandler(
-        _logs_root / "permissions.log",
-        maxBytes=20 * 1024 * 1024,
-        backupCount=5,
-        encoding="utf-8",
-    )
-    _common_fh.setLevel(logging.INFO)
-    _common_fh.setFormatter(_perm_fmt)
-    _common_fh.addFilter(_perm_filter)
+    _common_fh = None
+    if _file_logging_enabled:
+        _common_fh = logging.handlers.RotatingFileHandler(
+            _logs_root / "permissions.log",
+            maxBytes=20 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+        )
+        _common_fh.setLevel(logging.INFO)
+        _common_fh.setFormatter(_perm_fmt)
+        _common_fh.addFilter(_perm_filter)
     _common_sh = logging.StreamHandler()
     _common_sh.setLevel(logging.INFO)
     _common_sh.setFormatter(_perm_fmt)
     _common_sh.addFilter(_perm_filter)
-    _common_logger.addHandler(_common_fh)
+    if _common_fh is not None:
+        _common_logger.addHandler(_common_fh)
     _common_logger.addHandler(_common_sh)
     _common_logger.propagate = False
 
     _perm_ns_logger = logging.getLogger("jiuwenswarm.agents.harness.common.rails.permissions")
     _perm_ns_logger.setLevel(logging.INFO)
     if not _perm_ns_logger.handlers:
-        _perm_ns_logger.addHandler(_perm_fh)
+        if _perm_fh is not None:
+            _perm_ns_logger.addHandler(_perm_fh)
         _perm_ns_logger.addHandler(_perm_sh)
     _perm_ns_logger.propagate = False
 
