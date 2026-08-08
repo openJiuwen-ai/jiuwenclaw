@@ -134,6 +134,9 @@ class TestWorkflowRunStateLifecycle:
         delta = state.apply(progress)
         assert state.phases[0].agents[0].status == "failed"
         assert state.phases[0].agents[0].error is not None
+        # failed is a terminal status — completed_agent_count counts all terminal agents
+        assert state.phases[0].completed_agent_count == 1
+        assert state.completed_agent_count == 1
 
     @staticmethod
     def test_phase_sealed_on_switch_to_next_phase():
@@ -188,6 +191,11 @@ class TestWorkflowRunStateLifecycle:
         assert state.phases[0].agents[0].status == "completed"
         assert state.phases[1].status == "completed"
         assert state.phases[1].agents[0].status == "completed"
+        # teardown stamped both agents terminal — completed_agent_count counts them
+        assert state.phases[0].completed_agent_count == 1
+        assert state.phases[1].completed_agent_count == 1
+        assert state.completed_agent_count == 2
+        assert state.agent_count == 2
 
     @staticmethod
     def test_workflow_failed_finalizes_running_phases_and_agents():
@@ -200,6 +208,10 @@ class TestWorkflowRunStateLifecycle:
         assert state.status == "failed"
         assert state.phases[0].status == "failed"
         assert state.phases[0].agents[0].status == "failed"
+        # failed is terminal — teardown-stamped agent counts toward completed_agent_count
+        assert state.phases[0].completed_agent_count == 1
+        assert state.completed_agent_count == 1
+        assert state.agent_count == 1
 
     @staticmethod
     def test_log_event_produces_delta_with_logs():
@@ -531,6 +543,9 @@ class TestAgentIdResolution:
         assert changed is True
         assert agent.status == "stopped"
         assert state.status == "stopped"
+        # stopped is terminal — the node now counts toward completed_agent_count
+        assert state.phases[0].completed_agent_count == 1
+        assert state.completed_agent_count == 1
 
 
 class TestPhaseReuseAndJump:
@@ -645,7 +660,10 @@ class TestAgentOutcomeBackfill:
         sealed = state.phases[0].agents[0]
         assert sealed.status == "completed"
         assert sealed.outcome is None
-        assert state.phases[0].completed_agent_count == 0
+        # Seal stamps the worker terminal (completed) — derived counters reflect it,
+        # so completed_agent_count already counts this node even before the outcome
+        # backfill arrives.
+        assert state.phases[0].completed_agent_count == 1
         state.apply(_make_progress(
             "agent_completed", phase="P1", label="worker", agent_id="engine:1", outcome="done",
         ))
