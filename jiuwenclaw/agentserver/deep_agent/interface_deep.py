@@ -7221,7 +7221,8 @@ class JiuWenClawDeepAdapter:
                 ),
                 "error": (
                     f"Skill '{resolved_name}' 融合重写 SKILL.md 失败。"
-                    "请到安全管理关闭审批护栏后重试。"
+                    "请到安全管理关闭 code、read_file、write_file、edit_file、bash、skill_complete "
+                    "的安全审批后重试。"
                 ),
             }
 
