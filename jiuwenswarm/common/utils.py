@@ -1473,12 +1473,6 @@ def get_default_project_session_workspace_dir(session_id: str | None = None) -> 
     return workspace
 
 
-def get_prompt_attachment_dir() -> Path:
-    """Get the jiuwenswarm prompt attachment directory path."""
-
-    return get_agent_workspace_dir() / "prompt_attachment"
-
-
 def get_agent_root_dir() -> Path:
     return get_user_workspace_dir() / "agent"
 
@@ -1690,6 +1684,25 @@ def get_xy_tmp_dir() -> Path:
 
 def get_env_file() -> Path:
     return get_config_dir() / ".env"
+
+
+def env_url(name: str, default: str) -> str:
+    """Read an endpoint URL from the environment, falling back when blank.
+
+    ``os.environ.get(name, default)`` only falls back when the key is absent.
+    The shipped ``.env`` template declares the endpoint overrides as empty
+    values and documents "leave blank to use official default URLs", so a
+    plain ``get`` would hand back an empty URL and the request would fail with
+    a message-less transport error. Treat unset and blank alike.
+
+    Args:
+        name: Environment variable name holding the endpoint override.
+        default: Official endpoint used when the variable is unset or blank.
+
+    Returns:
+        The configured endpoint URL, or ``default`` when unset or blank.
+    """
+    return os.environ.get(name, "").strip() or default
 
 
 def reset_free_search_runtime_flags() -> None:

@@ -23,6 +23,7 @@ from jiuwenswarm.agents.harness.team.team_manager import (
     get_team_manager,
     refresh_team_shared_skill_links_across_managers,
     reset_team_manager,
+    stop_all_paused_team_session_runtimes_across_managers,
     stop_team_session_runtime_across_managers,
 )
 from jiuwenswarm.agents.harness.team.team_name_generator import (
@@ -43,6 +44,7 @@ __all__ = [
     "get_team_manager",
     "refresh_team_shared_skill_links_across_managers",
     "reset_team_manager",
+    "stop_all_paused_team_session_runtimes_across_managers",
     "stop_team_session_runtime_across_managers",
     "TeamNameGenerationError",
     "generate_team_name",

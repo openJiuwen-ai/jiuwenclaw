@@ -3,6 +3,7 @@ import { AlertCircle, ChevronLeft, ChevronRight, LoaderCircle } from 'lucide-rea
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 import { categoryCenter, categoryPoint, clusteredCategoryBand, ensureNonZeroAxisSpan, linearPosition, spanFromBaseline } from './chartGeometry';
+import { officeFontStack } from './officeFontStack';
 import {
   MAX_PRESENTATION_PREVIEW_BYTES,
   presentationLineHeight,
@@ -178,7 +179,10 @@ function PresentationViewer({ presentation, title }: { presentation: Presentatio
   useEffect(() => {
     const element = canvasRef.current;
     if (!element) return;
-    const update = () => setViewport({ width: element.clientWidth, height: element.clientHeight });
+    const update = () => {
+      const { width, height } = element.getBoundingClientRect();
+      setViewport({ width, height });
+    };
     update();
     const observer = new ResizeObserver(update);
     observer.observe(element);
@@ -226,8 +230,8 @@ function PresentationViewer({ presentation, title }: { presentation: Presentatio
       aria-label={title}
       data-testid="artifact-presentation-preview"
     >
-      <section className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <div ref={canvasRef} className="min-h-0 flex-1 overflow-auto bg-bg-muted p-6">
+      <section ref={canvasRef} className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <div className="min-h-0 flex-1 overflow-auto bg-bg-muted p-6">
           <div
             className="flex min-h-full min-w-full items-center justify-center"
             style={{ width: Math.max(viewport.width - 48, presentation.width * scale), height: Math.max(viewport.height - 48, presentation.height * scale) }}
@@ -583,7 +587,7 @@ function TextBox({ text }: { text: PresentationText }) {
     padding: `${text.margin.top}px ${text.margin.right}px ${text.margin.bottom}px ${text.margin.left}px`,
     overflow: text.autoFit === 'resize' ? 'visible' : 'hidden',
     color: text.color ?? '#000000',
-    fontFamily: fontStack(text.fontFamily, text.eastAsianFontFamily, text.complexScriptFontFamily),
+    fontFamily: officeFontStack(text.fontFamily, text.eastAsianFontFamily, text.complexScriptFontFamily),
     fontSize: scaledFontSize(text.fontSize),
     fontSynthesis: 'none',
     writingMode: text.vertical ? (text.verticalReverse ? 'vertical-lr' : 'vertical-rl') : undefined,
@@ -632,7 +636,7 @@ function TextRun({ run, defaults }: { run: PresentationParagraph['runs'][number]
   const fontSize = run.fontSize ?? defaults.fontSize;
   const style: CSSProperties = {
     color: run.color ?? defaults.color,
-    fontFamily: fontStack(
+    fontFamily: officeFontStack(
       run.fontFamily ?? defaults.fontFamily,
       run.eastAsianFontFamily ?? defaults.eastAsianFontFamily,
       run.complexScriptFontFamily ?? defaults.complexScriptFontFamily,
@@ -657,11 +661,6 @@ function paragraphSpacing(spacing: PresentationSpacing | undefined): string | nu
 
 function scaledFontSize(value: number | undefined): string | undefined {
   return value === undefined ? undefined : `calc(${value}px * var(--ppt-text-scale, 1))`;
-}
-
-function fontStack(...fonts: Array<string | undefined>): string {
-  const declared = [...new Set(fonts.map(font => font?.trim()).filter((font): font is string => Boolean(font)))];
-  return [...declared.map(font => `"${font.replace(/"/g, '')}"`), 'sans-serif'].join(', ');
 }
 
 function ImageNode({ image }: { image: PresentationImage }) {

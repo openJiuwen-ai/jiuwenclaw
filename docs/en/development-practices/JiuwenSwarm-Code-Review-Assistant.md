@@ -1397,9 +1397,8 @@ react:
   context_engine_config:
     enable_reload: true
   evolution:
-    enabled: true
-    auto_scan: false
-    skill_base_dir: "agent/skills"
+    skill_evolution: false
+    auto_save: false
 
 tools:
   - todo

@@ -85,6 +85,13 @@ _INTERRUPT_RESUME_SOURCES = frozenset({
     "evolution_interrupt",
 })
 _A2UI_OPEN_TAG_MARKER = "<a2ui-json>"
+# Shown when a channel with streaming disabled asks for a team round. The team
+# runtime streams member events as they happen and has no non-streaming entry
+# point, so the request is refused rather than silently downgraded.
+_NON_STREAM_TEAM_NOTICE = (
+    "集群模式需要开启流式输出才能运行（成员协作事件是流式下发的）。"
+    "请在该通道配置中开启 enable_streaming，或改用单 Agent 模式。"
+)
 _DELIVERY_IDENTITY_METADATA_KEYS = frozenset({
     "app_id",
     "chat_type",
@@ -121,12 +128,16 @@ class ChannelMode(str, Enum):
     CODE_NORMAL = "code.normal"
     CODE_TEAM = "code.team"
     TEAM = "team"
-    TEAM_PLAN = "team.plan"
+    TEAM_PLAN = "team.plan.normal"
+    TEAM_PLAN_NORMAL = "team.plan.normal"
+    TEAM_PLAN_CODE = "team.plan.code"
 
     @classmethod
     def is_team_mode(cls, mode: str) -> bool:
         """Return True if *mode* resolves to any team variant (case-insensitive)."""
-        return mode.strip().lower() in {cls.TEAM.value, cls.CODE_TEAM.value, cls.TEAM_PLAN.value}
+        from jiuwenswarm.common.mode_matrix import is_team_mode
+
+        return is_team_mode(mode)
 
 
 @dataclass
@@ -215,6 +226,9 @@ class MessageHandler(ABC):
         self._stream_app_ids: dict[str, str] = {}  # request_id -> app_id, 多应用流式精确路由
         self._fire_and_forget_tasks: set[asyncio.Task] = set()  # prevent GC of fire-and-forget tasks
         self._evolution_approval = EvolutionApprovalCoordinator()
+        # 配置仅在启动/成功热重载时解析；流式 chunk 热路径直接读取该内存值，
+        # 避免每个审批事件重新读取磁盘配置。
+        self._evolution_auto_save_enabled = False
         self._session_last_user_query: dict[str, str] = {}
         # session_id -> 最近一次人类发起请求的 (channel_id, member_name)。
         # team 模式下 file msg 不携带发起者身份（rid 固定为建会话那轮），send_file 定向
@@ -288,6 +302,17 @@ class MessageHandler(ABC):
 
         if isinstance(self.agent_client, WebSocketAgentServerClient):
             self.agent_client.set_server_push_handler(self._handle_agent_server_push)
+
+    def update_evolution_auto_save(self, config_payload: dict[str, Any] | None) -> None:
+        """Refresh the in-memory evolution auto-save flag from a config snapshot.
+
+        Callers should invoke this at startup and after a successful config hot
+        reload.  The stream/chunk path intentionally does not call the config
+        resolver so it never performs a disk read.
+        """
+        self._evolution_auto_save_enabled = get_evolution_auto_save_enabled(
+            config_payload if isinstance(config_payload, dict) else {}
+        )
 
     @classmethod
     def get_instance(cls, agent_client: "AgentServerClient | None" = None) -> "MessageHandler":
@@ -510,6 +535,56 @@ class MessageHandler(ABC):
         return ChannelMode.is_team_mode(str(msg.params.get("mode") or ""))
 
     @classmethod
+    def _is_unsupported_non_stream_team_send(cls, msg: "Message") -> bool:
+        """Whether this is a team ``chat.send`` on a non-streaming channel.
+
+        Team rounds only exist on the streaming path: ``process_message_impl``
+        has no team branch, so a non-streaming request would silently run as a
+        single agent. Rejecting at the gateway keeps that surprise out of the
+        conversation instead of answering as the wrong runtime.
+
+        Args:
+            msg: The inbound message, after ``_apply_channel_state`` injected mode.
+
+        Returns:
+            True when the request must be refused.
+        """
+        if getattr(msg, "enable_streaming", True):
+            return False
+        return cls._is_chat_send_message(msg) and cls._is_team_chat_send(msg)
+
+    async def _reject_non_stream_team_send(self, msg: "Message") -> None:
+        """Answer a non-streaming team request with an explanation."""
+        from jiuwenswarm.common.schema.message import EventType, Message
+
+        metadata = msg.metadata if isinstance(msg.metadata, dict) else None
+        out = Message(
+            id=msg.id,
+            type="event",
+            channel_id=msg.channel_id,
+            session_id=msg.session_id,
+            params={},
+            timestamp=time.time(),
+            ok=True,
+            payload={
+                "event_type": EventType.CHAT_FINAL.value,
+                "content": _NON_STREAM_TEAM_NOTICE,
+                "is_complete": True,
+            },
+            event_type=EventType.CHAT_FINAL,
+            metadata=metadata,
+            enable_streaming=False,
+        )
+        await self.publish_robot_messages(out)
+        logger.warning(
+            "[MessageHandler] rejected non-streaming team chat.send: "
+            "channel_id=%s session_id=%s mode=%s",
+            msg.channel_id,
+            msg.session_id,
+            (msg.params or {}).get("mode") if isinstance(msg.params, dict) else None,
+        )
+
+    @classmethod
     def _is_interrupt_resume_chat_send(cls, msg: "Message") -> bool:
         if not isinstance(msg.params, dict):
             return False
@@ -576,6 +651,8 @@ class MessageHandler(ABC):
             "code.team": ChannelMode.CODE_TEAM,
             "team": ChannelMode.TEAM,
             "team.plan": ChannelMode.TEAM_PLAN,
+            "team.plan.normal": ChannelMode.TEAM_PLAN_NORMAL,
+            "team.plan.code": ChannelMode.TEAM_PLAN_CODE,
         }
         mode = mode_map.get(mode_raw, ChannelMode.AGENT)
         return ChannelControlState(session_id=sid, mode=mode)
@@ -664,10 +741,13 @@ class MessageHandler(ABC):
         return sid
 
     async def _resolve_external_channel_session(self, msg: "Message") -> None:
-        """Map A2A/SSH protocol IDs onto AgentServer-owned product Sessions."""
+        """Map A2A protocol IDs onto AgentServer-owned product Sessions.
+
+        SSH is AgentOS relay-only and must not allocate a jiuwenswarm Session.
+        """
         channel_id = str(msg.channel_id or "").strip()
         external_id = str(msg.session_id or "").strip()
-        if channel_id not in {"a2a", "ssh"} or not external_id:
+        if channel_id != "a2a" or not external_id:
             return
         key = (channel_id, external_id)
         resolved = self._external_session_aliases.get(key)
@@ -1517,6 +1597,8 @@ class MessageHandler(ABC):
                 "code.normal",
                 "code.team",
                 "team.plan",
+                "team.plan.normal",
+                "team.plan.code",
             ):
                 asyncio.create_task(
                     self.send_channel_notice(
@@ -1547,6 +1629,10 @@ class MessageHandler(ABC):
                 state.mode = ChannelMode.CODE_TEAM
             elif mode_str == "team.plan":
                 state.mode = ChannelMode.TEAM_PLAN
+            elif mode_str == "team.plan.normal":
+                state.mode = ChannelMode.TEAM_PLAN_NORMAL
+            elif mode_str == "team.plan.code":
+                state.mode = ChannelMode.TEAM_PLAN_CODE
             new_label = state.mode.value
             if old_mode != state.mode:
                 asyncio.create_task(
@@ -3261,7 +3347,7 @@ class MessageHandler(ABC):
         """
         payload = getattr(chunk, "payload", None)
         auto_save_enabled = (
-            get_evolution_auto_save_enabled()
+            self._evolution_auto_save_enabled
             if (
                 isinstance(payload, dict)
                 and payload.get("event_type") == "chat.ask_user_question"
@@ -3424,6 +3510,14 @@ class MessageHandler(ABC):
                 ):
                     state = self.get_or_create_channel_state(msg)
                     msg.session_id = await self._allocate_channel_session(msg, state)
+
+                # mode is only known after _apply_channel_state, so the team /
+                # non-streaming combination is refused here — before GodView
+                # registration, which would otherwise subscribe for a round
+                # that never runs.
+                if self._is_unsupported_non_stream_team_send(msg):
+                    await self._reject_non_stream_team_send(msg)
+                    continue
 
                 # V2: _apply_channel_state has resolved msg.session_id to the real team
                 # session_id and injected params.mode; register GodView now so it lands

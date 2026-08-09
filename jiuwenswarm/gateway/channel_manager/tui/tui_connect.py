@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import logging
 import os
@@ -21,7 +22,7 @@ from openjiuwen.core.foundation.llm.schema.config import (
     ModelClientConfig,
     ModelRequestConfig,
 )
-from openjiuwen.auto_harness.schema import load_auto_harness_config
+from openjiuwen.rsi.auto_harness.schema import load_auto_harness_config
 
 from jiuwenswarm.common.config import (
     get_config,
@@ -34,7 +35,9 @@ from jiuwenswarm.common.config import (
     update_permissions_enabled_in_config,
     get_model_names,
     update_preferred_language_in_config,
+    update_swarmflow_budget_in_config,
     update_swarmflow_enabled_in_config,
+    update_skill_evolution_enabled_in_config,
     update_config,
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
@@ -50,6 +53,43 @@ from jiuwenswarm.gateway.routing.agent_request_timeout import (
 )
 
 logger = logging.getLogger(__name__)
+
+_HARMONYOS_DEV_INIT_TASKS_ATTR = "_jiuwenswarm_harmonyos_dev_init_tasks"
+
+
+def _get_harmonyos_dev_init_tasks(
+    ws: Any, *, create: bool
+) -> set[asyncio.Task[Any]] | None:
+    """Return the Dev Init tasks owned by a websocket."""
+    tasks = getattr(ws, _HARMONYOS_DEV_INIT_TASKS_ATTR, None)
+    if isinstance(tasks, set):
+        return tasks
+    if not create:
+        return None
+    tasks = set()
+    try:
+        setattr(ws, _HARMONYOS_DEV_INIT_TASKS_ATTR, tasks)
+    except Exception:
+        logger.debug(
+            "[harmonyos.dev_init] websocket does not support task tracking",
+            exc_info=True,
+        )
+        return None
+    return tasks
+
+
+async def _cancel_harmonyos_dev_init_tasks(ws: Any) -> None:
+    """Cancel and drain Dev Init tasks owned by a websocket."""
+    tracked = _get_harmonyos_dev_init_tasks(ws, create=False)
+    if tracked is None:
+        return
+    tasks = [task for task in tracked if isinstance(task, asyncio.Task)]
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    tracked.clear()
 
 
 class _ModelOpError(Exception):
@@ -245,11 +285,6 @@ CLI_FORWARD_REQ_METHODS = frozenset(
         "skills.evolution.status",
         "skills.evolution.get",
         "skills.evolution.save",
-        "symphony.build_score",
-        "symphony.pause_build",
-        "symphony.score_status",
-        "symphony.graph",
-        "symphony.plan",
         "plugins.list",
         "plugins.install",
         "plugins.uninstall",
@@ -349,11 +384,6 @@ CLI_FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset(
         "skills.evolution.status",
         "skills.evolution.get",
         "skills.evolution.save",
-        "symphony.build_score",
-        "symphony.pause_build",
-        "symphony.score_status",
-        "symphony.graph",
-        "symphony.plan",
         "plugins.list",
         "plugins.install",
         "plugins.uninstall",
@@ -471,7 +501,6 @@ _CLI_CONFIG_SET_ENV_MAP = {
     "serper_api_key": "SERPER_API_KEY",
     "perplexity_api_key": "PERPLEXITY_API_KEY",
     "github_token": "GITHUB_TOKEN",
-    "evolution_auto_scan": "EVOLUTION_AUTO_SCAN",
     "teamskills_market_url": "TEAM_SKILLS_HUB_BASE_URL",
     "teamskills_user_token": "TEAM_SKILLS_HUB_USER_TOKEN",
     "teamskills_system_token": "TEAM_SKILLS_HUB_SYSTEM_TOKEN",
@@ -485,6 +514,8 @@ _CLI_CONFIG_YAML_SETTERS: dict[str, Any] = {
     "memory_forbidden_enabled": update_memory_forbidden_enabled_in_config,
     "preferred_language": update_preferred_language_in_config,
     "enable_swarmflow": update_swarmflow_enabled_in_config,
+    "swarmflow_budget": update_swarmflow_budget_in_config,
+    "skill_evolution": update_skill_evolution_enabled_in_config,
     # Auto-Harness config items (stored in ~/.jiuwenswarm/auto-harness/config.yaml)
     # 用户名同时设置 git.user_name, fork_owner, gitcode.username（三者合一）
     "auto_harness_git_user_name": _update_auto_harness_git_user_name,
@@ -590,8 +621,8 @@ def _build_config_schema() -> list[dict]:
          "options": ["zh", "en"], "source": "yaml", "default": "zh"},
         {"key": "auto_recap_enabled", "label": "自动回顾", "group": "Features",
          "type": "toggle", "source": "yaml", "default": "true"},
-        {"key": "evolution_auto_scan", "label": "自动扫描技能", "group": "Features",
-         "type": "toggle", "source": "env", "default": "false"},
+        {"key": "skill_evolution", "label": "技能演进与创建", "group": "Features",
+         "type": "toggle", "source": "yaml", "default": "false"},
         # Auto-Harness (定时任务配置) - 合并为三项
         {"key": "auto_harness_git_user_name", "label": "用户名", "group": "Auto-Harness",
          "type": "string", "source": "yaml", "default": empty,
@@ -793,6 +824,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
     from jiuwenswarm.gateway.routing.third_agent import get_unsupported_third_agent
 
     third_agent = bind.third_agent if bind.third_agent is not None else get_unsupported_third_agent()
+    harmonyos_dev_init_tasks: dict[tuple[int, str], asyncio.Task[Any]] = {}
 
     async def _config_get(ws, req_id, params, session_id):
         payload = {
@@ -832,6 +864,14 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             _jiuwen_team_cfg = _team_cfg.get("jiuwen_team") or {}
             _swarmflow_enabled = bool(_jiuwen_team_cfg.get("enable_swarmflow", False))
             payload["enable_swarmflow"] = "true" if _swarmflow_enabled else "false"
+            # swarmflow budget ceiling (integer token limit; absent/None → unbounded)
+            _swarmflow_budget = _jiuwen_team_cfg.get("swarmflow_budget")
+            if _swarmflow_budget is not None:
+                payload["swarmflow_budget"] = str(_swarmflow_budget)
+            evolution_cfg = (raw.get("react") or {}).get("evolution") or {}
+            payload["skill_evolution"] = (
+                "true" if evolution_cfg.get("skill_evolution", False) else "false"
+            )
 
             # Resolve model-related fields from config.yaml.
             # When models.defaults list is in use, it is the canonical source
@@ -893,6 +933,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             payload.setdefault("permissions_enabled", "false")
             payload.setdefault("memory_forbidden_enabled", "false")
             payload.setdefault("preferred_language", "zh")
+            payload.setdefault("skill_evolution", "false")
         
         # Auto-Harness config values (from ~/.jiuwenswarm/auto-harness/config.yaml)
         # 合并显示：用户名、邮箱、Access Token 三项
@@ -975,6 +1016,9 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                     setter(raw_value)
                 elif param_key.startswith("auto_harness_"):
                     # Auto-harness config items are strings, not toggles
+                    setter(raw_value)
+                elif param_key == "swarmflow_budget":
+                    # Budget is an integer, not a boolean toggle
                     setter(raw_value)
                 else:
                     parsed = raw_value.lower() in ("true", "1", "yes")
@@ -2201,6 +2245,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
     async def _tui_disconnect_request(ws, req_id, params, session_id):
+        await _cancel_harmonyos_dev_init_tasks(ws)
         payload = {"accepted": True, "session_id": session_id}
         try:
             await channel.send_response(ws, req_id, ok=True, payload=payload)
@@ -2260,6 +2305,174 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             if "page_idx" in params:
                 payload["page_idx"] = params.get("page_idx")
         await channel.send_response(ws, req_id, ok=True, payload=payload)
+
+    async def _harmonyos_dev_init(ws, req_id, params, session_id):
+        if not isinstance(params, dict):
+            await channel.send_response(
+                ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST"
+            )
+            return
+        raw_operation_id = params.get("operationId")
+        operation_id = str(raw_operation_id or req_id).strip()
+        if (
+            not operation_id
+            or len(operation_id) > 128
+            or not all(char.isalnum() or char in "-_." for char in operation_id)
+        ):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="invalid HarmonyOS Dev Init operationId",
+                code="BAD_REQUEST",
+            )
+            return
+
+        task_key = (id(ws), operation_id)
+        existing = harmonyos_dev_init_tasks.get(task_key)
+        if existing is not None and not existing.done():
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=f"HarmonyOS Dev Init operation is already running: {operation_id}",
+                code="CONFLICT",
+            )
+            return
+
+        run_params = dict(params)
+        run_params.pop("operationId", None)
+        tracked_tasks = _get_harmonyos_dev_init_tasks(ws, create=True)
+        if tracked_tasks is None:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="websocket does not support HarmonyOS Dev Init task tracking",
+                code="INTERNAL_ERROR",
+            )
+            return
+
+        async def _run_harmonyos_dev_init_operation() -> None:
+            try:
+                from jiuwenswarm.gateway.channel_manager.tui.harmonyos_dev import (
+                    run_harmonyos_dev_init,
+                )
+
+                payload = await run_harmonyos_dev_init(run_params)
+                await channel.send_response(ws, req_id, ok=True, payload=payload)
+            except asyncio.CancelledError:
+                logger.info(
+                    "[harmonyos.dev_init] cancelled: operation_id=%s", operation_id
+                )
+                with contextlib.suppress(Exception):
+                    await channel.send_response(
+                        ws,
+                        req_id,
+                        ok=False,
+                        error="HarmonyOS Dev Init operation was cancelled",
+                        code="CANCELLED",
+                    )
+                raise
+            except Exception as exc:
+                logger.warning("[harmonyos.dev_init] failed: %s", exc)
+                with contextlib.suppress(Exception):
+                    await channel.send_response(
+                        ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR"
+                    )
+            finally:
+                current = asyncio.current_task()
+                if harmonyos_dev_init_tasks.get(task_key) is current:
+                    harmonyos_dev_init_tasks.pop(task_key, None)
+
+        task = asyncio.create_task(
+            _run_harmonyos_dev_init_operation(),
+            name=f"harmonyos-dev-init:{operation_id}",
+        )
+        harmonyos_dev_init_tasks[task_key] = task
+
+        def _forget_task(done_task: asyncio.Task[Any]) -> None:
+            if harmonyos_dev_init_tasks.get(task_key) is done_task:
+                harmonyos_dev_init_tasks.pop(task_key, None)
+
+        task.add_done_callback(_forget_task)
+        tracked_tasks.add(task)
+        task.add_done_callback(tracked_tasks.discard)
+
+    async def _harmonyos_dev_init_cancel(ws, req_id, params, session_id):
+        del session_id
+        if not isinstance(params, dict):
+            await channel.send_response(
+                ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST"
+            )
+            return
+        operation_id = str(params.get("operationId") or "").strip()
+        if (
+            not operation_id
+            or len(operation_id) > 128
+            or not all(char.isalnum() or char in "-_." for char in operation_id)
+        ):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="invalid HarmonyOS Dev Init operationId",
+                code="BAD_REQUEST",
+            )
+            return
+
+        task = harmonyos_dev_init_tasks.get((id(ws), operation_id))
+        if task is None or task.done():
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=True,
+                payload={
+                    "operationId": operation_id,
+                    "cancelRequested": False,
+                    "cancelled": bool(task and task.cancelled()),
+                },
+            )
+            return
+
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await channel.send_response(
+            ws,
+            req_id,
+            ok=True,
+            payload={
+                "operationId": operation_id,
+                "cancelRequested": True,
+                "cancelled": task.cancelled(),
+            },
+        )
+
+    async def _harmonyos_project_init(ws, req_id, params, session_id):
+        if not isinstance(params, dict):
+            await channel.send_response(
+                ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST"
+            )
+            return
+        try:
+            from jiuwenswarm.gateway.channel_manager.tui.harmonyos_project import (
+                HarmonyOSProjectError,
+            )
+            from jiuwenswarm.gateway.channel_manager.tui.harmonyos_dev import (
+                run_harmonyos_project_init,
+            )
+
+            payload = await run_harmonyos_project_init(params)
+            await channel.send_response(ws, req_id, ok=True, payload=payload)
+        except HarmonyOSProjectError as exc:
+            await channel.send_response(
+                ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST"
+            )
+        except Exception as exc:
+            logger.warning("[harmonyos.project_init] failed: %s", exc)
+            await channel.send_response(
+                ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR"
+            )
 
     async def _command_model(ws, req_id, params, session_id, user_id=None):
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
@@ -2836,6 +3049,12 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             config = get_config()
             models = get_default_models(config)
             result = []
+            # 显式配置的上下文窗口上限（react.context_engine_config.context_window_tokens）
+            # 优先级高于按模型名解析，与 AgentServer 侧 ContextEngine 行为保持一致
+            cec = (config.get("react", {}) or {}).get("context_engine_config", {}) or {}
+            cw_override = cec.get("context_window_tokens")
+            if not (isinstance(cw_override, int) and cw_override > 0):
+                cw_override = None
             for entry in models:
                 mcc = entry.get("model_client_config", {})
                 mco = entry.get("model_config_obj", {})
@@ -2844,7 +3063,10 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 context_window_tokens = 0
                 try:
                     from openjiuwen.core.context_engine.context.context_utils import ContextUtils
-                    context_window_tokens = ContextUtils.resolve_context_max(model_name=model_name)
+                    context_window_tokens = ContextUtils.resolve_context_max(
+                        model_name=model_name,
+                        fallback_context_window_tokens=cw_override,
+                    )
                 except Exception:
                     logger.debug("Failed to resolve context_window_tokens for model %s", model_name, exc_info=True)
                 result.append({
@@ -2964,6 +3186,11 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
     channel.register_local_handler(path, "chat.user_answer", _chat_user_answer)
     channel.register_local_handler(path, "chat.swarmflow_reply", _chat_swarmflow_reply)
     channel.register_local_handler(path, "history.get", _history_get)
+    channel.register_local_handler(path, "harmonyos.dev_init", _harmonyos_dev_init)
+    channel.register_local_handler(
+        path, "harmonyos.dev_init_cancel", _harmonyos_dev_init_cancel
+    )
+    channel.register_local_handler(path, "harmonyos.project_init", _harmonyos_project_init)
     channel.register_local_handler(path, "command.model", _command_model)
 
     # ── Hooks RPC handlers ─────────────────────────────────────────────
@@ -3318,6 +3545,7 @@ def build_cli_route_binding(bind: CliRouteBindParams) -> GatewayRouteBinding:
         stale_session_keys: list[tuple[str, str]],
         stale_request_keys: list[tuple[str, str]] | None = None,
     ) -> None:
+        await _cancel_harmonyos_dev_init_tasks(_ws)
         if bool(getattr(_ws, "_jiuwenswarm_tui_user_exit", False)):
             return
         mh = bind.message_handler
