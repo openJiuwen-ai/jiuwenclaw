@@ -456,6 +456,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const sendUserAnswer = useCallback(
     async (sessionId: string, requestId: string, answers: UserAnswer[], source?: string) => {
       try {
+        const agentScopeId = useChatStore.getState().pendingQuestion?.agent_scope_id;
         // 如果是工具权限确认，发送 chat.send
         if (source === 'permission_interrupt') {
           const outboundId = makeClientRequestId('perm');
@@ -468,6 +469,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               request_id: requestId,
               answers: answers,
               ...(source ? { source } : {}),
+              ...(agentScopeId ? { agent_scope_id: agentScopeId } : {}),
             },
             { requestId: outboundId }
           );
@@ -478,6 +480,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             request_id: requestId,
             answers,
             ...(source ? { source } : {}),
+            ...(agentScopeId ? { agent_scope_id: agentScopeId } : {}),
           });
         }
         setPendingQuestion(null);
@@ -993,7 +996,15 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       webClient.on('chat.ask_user_question', (event: WsEvent) => {
         if (!shouldHandleSessionEvent(event.payload)) return;
         if (!shouldHandleCurrentRequestEvent(event)) return;
-        setPendingQuestion(event.payload as unknown as AskUserQuestionPayload);
+        // Skill 加载审批卡：透传结构化数据（payload_schema["x-skill-approval-card"]，
+        // 若后端通道已携带）；缺失时由卡片组件回退渲染 message markdown。
+        const rawCard = event.payload['x-skill-approval-card'] ?? event.payload['skill_approval_card'];
+        const questionPayload = event.payload as unknown as AskUserQuestionPayload;
+        if (rawCard && typeof rawCard === 'object') {
+          questionPayload.skill_approval_card =
+            rawCard as AskUserQuestionPayload['skill_approval_card'];
+        }
+        setPendingQuestion(questionPayload);
       }),
       // 同时监听 session_result 事件，以处理后端可能发送的不同格式
       webClient.on('session_result', (event: WsEvent) => {

@@ -616,6 +616,19 @@ class SkillComplianceRail(DeepAgentRail):
                 "[SkillComplianceRail] deactivating '%s' (session=%s) after %d no-tool invokes",
                 state.active_skill, session_id, state.no_tool_invoke_count,
             )
+            # 仅主 Agent 在此回收动态授权 Grant。
+            if self._preset_session_id is None:
+                try:
+                    from jiuwenclaw.agentserver.permissions.skill_authorization.runtime import (
+                        revoke_deactivated_main_skill,
+                    )
+
+                    revoke_deactivated_main_skill(session_id, state.active_skill)
+                except Exception:  # noqa: BLE001 — 不影响原 Compliance 状态机
+                    logger.warning(
+                        "[SkillComplianceRail] dynamic authorization cleanup failed",
+                        exc_info=True,
+                    )
             state.reset()
 
     async def after_model_call(self, ctx: AgentCallbackContext) -> None:
