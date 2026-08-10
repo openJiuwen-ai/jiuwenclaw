@@ -308,12 +308,27 @@ def apply_permissions_config_payload(payload: dict[str, Any] | None) -> dict[str
         _set_cache(effective, "yaml_fallback")
 
     try:
-        get_permission_engine().update_config(effective)
+        engine = get_permission_engine()
+        old_config = engine.config
+        engine.update_config(effective)
     except Exception:  # noqa: BLE001
         logger.warning(
             "[permissions_config] permission engine hot-reload failed",
             exc_info=True,
         )
+    else:
+        # Skill 动态授权联动：功能开关运行中关闭时清空全部 Grant；普通热更新不清。
+        try:
+            from jiuwenclaw.agentserver.permissions.skill_authorization import (
+                sync_grants_on_permissions_reload,
+            )
+
+            sync_grants_on_permissions_reload(old_config, effective)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "[permissions_config] skill_authorization grant sync failed",
+                exc_info=True,
+            )
     return copy.deepcopy(effective)
 
 

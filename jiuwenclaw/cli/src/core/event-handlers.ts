@@ -11,6 +11,7 @@ import {
   type ContextCompressionStats,
   type HistoryItem,
   type JsonObject,
+  type SkillApprovalCard,
   type SubtaskState,
   type TeamMemberEvent,
   type TeamMessageEvent,
@@ -24,7 +25,9 @@ import { createId, findLastIndex, isIgnorableHistoryRestoreError } from "./app-s
 export interface PendingQuestion {
   requestId: string;
   source?: string;
+  agentScopeId?: string;
   questions: PendingQuestionItem[];
+  skillApprovalCard?: SkillApprovalCard;
 }
 
 export interface PendingQuestionItem {
@@ -147,6 +150,66 @@ function handleConnectionAck(delegate: AppEventDelegate, frame: EventFrame): boo
     delegate.safeFetchSessionTitle(sessionId);
   }
   return true;
+}
+
+export function normalizeSkillApprovalCard(raw: unknown): SkillApprovalCard | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const card = raw as Record<string, unknown>;
+  const diff = card.diff;
+  if (
+    card.kind !== "skill_approval" ||
+    card.schema_version !== 1 ||
+    typeof card.skill_name !== "string" ||
+    typeof card.source !== "string" ||
+    (card.trust !== "builtin" && card.trust !== "other") ||
+    typeof card.permissions_hash !== "string" ||
+    typeof card.agent_scope_id !== "string" ||
+    !Array.isArray(card.actions) ||
+    !diff ||
+    typeof diff !== "object"
+  ) {
+    return undefined;
+  }
+  const rawDiff = diff as Record<string, unknown>;
+  if (
+    !Array.isArray(rawDiff.widened) ||
+    !Array.isArray(rawDiff.tightened) ||
+    !Array.isArray(rawDiff.rejected)
+  ) {
+    return undefined;
+  }
+  if (
+    card.actions.length === 0 ||
+    !card.actions.every(
+      (action) =>
+      action === "approve_once" ||
+      action === "approve_session" ||
+      action === "continue_without_overlay",
+    )
+  ) {
+    return undefined;
+  }
+  const actions = card.actions as SkillApprovalCard["actions"];
+  return {
+    kind: "skill_approval",
+    schema_version: 1,
+    skill_name: card.skill_name,
+    source: card.source,
+    version: typeof card.version === "string" || card.version === null ? card.version : undefined,
+    trust: card.trust,
+    permissions_hash: card.permissions_hash,
+    agent_scope_id: card.agent_scope_id,
+    cached_decision:
+      card.cached_decision === "local" || card.cached_decision === "session"
+        ? card.cached_decision
+        : null,
+    diff: {
+      widened: rawDiff.widened.filter((item): item is string => typeof item === "string"),
+      tightened: rawDiff.tightened.filter((item): item is string => typeof item === "string"),
+      rejected: rawDiff.rejected.filter((item): item is string => typeof item === "string"),
+    },
+    actions,
+  };
 }
 
 function normalizePendingQuestion(payload: Record<string, unknown>): PendingQuestionItem[] {
@@ -632,7 +695,12 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
       delegate.setPendingQuestion({
         requestId,
         source: typeof payload.source === "string" ? payload.source : undefined,
+        agentScopeId:
+          typeof payload.agent_scope_id === "string" ? payload.agent_scope_id : undefined,
         questions,
+        skillApprovalCard: normalizeSkillApprovalCard(
+          payload["x-skill-approval-card"] ?? payload.skill_approval_card,
+        ),
       });
       delegate.setStreamingState(StreamingState.WaitingForConfirmation);
       return true;

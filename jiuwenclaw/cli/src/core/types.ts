@@ -11,6 +11,26 @@ export interface JsonObject {
   [key: string]: JsonValue;
 }
 
+export interface SkillApprovalDiff {
+  widened: string[];
+  tightened: string[];
+  rejected: string[];
+}
+
+export interface SkillApprovalCard {
+  kind: "skill_approval";
+  schema_version: 1;
+  skill_name: string;
+  source: string;
+  version?: string | null;
+  trust: "builtin" | "other";
+  permissions_hash: string;
+  agent_scope_id: string;
+  cached_decision?: "local" | "session" | null;
+  diff: SkillApprovalDiff;
+  actions: Array<"approve_once" | "approve_session" | "continue_without_overlay">;
+}
+
 export interface MediaItem {
   type: "image" | "audio" | "video" | "document";
   mimeType: string;

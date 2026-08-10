@@ -104,6 +104,17 @@ function isPermissionRequest(source: string | undefined, questionText: string): 
   return source === "permission" || PERMISSION_TOOL_RE.test(questionText);
 }
 
+/** Skill 审批动作 → 后端标签（与后端 _build_ui_options 一致），用于把用户选择映射回显式 action。 */
+const SKILL_ACTION_LABELS: Record<string, string> = {
+  approve_once: "本次允许",
+  approve_session: "会话内允许",
+  continue_without_overlay: "仅加载不授权",
+};
+
+function skillActionToLabel(action: string): string {
+  return SKILL_ACTION_LABELS[action] ?? action;
+}
+
 function parsePermissionSummary(questionText: string): PermissionSummary {
   const tool = PERMISSION_TOOL_RE.exec(questionText)?.[1]?.trim();
   const riskMatch = PERMISSION_RISK_RE.exec(questionText);
@@ -1477,10 +1488,30 @@ export class AppScreen implements Component, Focusable {
 
     const total = pendingQuestion.questions.length;
     const progress = total > 1 ? ` (${this.activeQuestionIndex + 1}/${total})` : "";
-    const permissionRequest = isPermissionRequest(pendingQuestion.source, question.question);
+    const permissionRequest = Boolean(pendingQuestion.skillApprovalCard) ||
+      isPermissionRequest(pendingQuestion.source, question.question);
     const lines: string[] = [];
 
-    if (permissionRequest) {
+    const skillCard = pendingQuestion.skillApprovalCard;
+    if (skillCard) {
+      const trust = skillCard.trust === "builtin" ? "builtin" : "external";
+      const version = skillCard.version ?? "local";
+      const summary = [
+        `[Skill Approval] ${skillCard.skill_name} (${trust}, ${version})`,
+        `Source: ${skillCard.source}`,
+        `Permissions: ${skillCard.permissions_hash.slice(0, 12)}`,
+        ...skillCard.diff.widened.map((item) => `Increase: ${item}`),
+        ...skillCard.diff.tightened.map((item) => `Restrict after approval: ${item}`),
+        ...skillCard.diff.rejected.map((item) => `Rejected: ${item}`),
+      ];
+      lines.push(
+        ...summary.flatMap((item) =>
+          wrapPlainText(item, width).map((line) =>
+            padToWidth(palette.status.warning(line), width),
+          ),
+        ),
+      );
+    } else if (permissionRequest) {
       const summary = parsePermissionSummary(question.question);
       const title = progress ? `Permission ${this.activeQuestionIndex + 1}/${total}` : "Permission";
       lines.push(...renderPermissionBlock(width, summary, title));
@@ -1521,6 +1552,8 @@ export class AppScreen implements Component, Focusable {
       this.questionList = null;
       return;
     }
+    const permissionRequest = Boolean(pendingQuestion.skillApprovalCard) ||
+      isPermissionRequest(pendingQuestion.source, question.question);
 
     const items: SelectItem[] = question.options.map((option) => ({
       value: option.label,
@@ -1530,7 +1563,7 @@ export class AppScreen implements Component, Focusable {
           : option.label,
       description: option.description,
     }));
-    const maxVisible = pendingQuestion.source === "permission" ? 4 : 6;
+    const maxVisible = permissionRequest ? 4 : 6;
     const list = new SelectList(
       items,
       Math.min(Math.max(items.length, 1), maxVisible),
@@ -1540,7 +1573,9 @@ export class AppScreen implements Component, Focusable {
       this.handleQuestionSelection(item.value);
     };
     list.onCancel = () => {
-      const reject = question.options.find((option) => option.label === "拒绝");
+      const reject = question.options.find(
+        (option) => option.label === "拒绝" || option.label === "仅加载不授权",
+      );
       if (reject) {
         this.handleQuestionSelection(reject.label);
       }
@@ -1570,11 +1605,22 @@ export class AppScreen implements Component, Focusable {
       return;
     }
 
-    const answers = pendingQuestion.questions.map((question, index) => ({
-      selected_options: [
-        this.pendingQuestionAnswers.get(index) ?? question.options[0]?.label ?? "",
-      ].filter((value) => value.length > 0),
-    }));
+    const skillCard = pendingQuestion.skillApprovalCard;
+    const answers = pendingQuestion.questions.map((question, index) => {
+      const label = this.pendingQuestionAnswers.get(index) ?? question.options[0]?.label ?? "";
+      const answer: { selected_options: string[]; action?: string } = {
+        selected_options: [label].filter((value) => value.length > 0),
+      };
+      // Skill 审批卡：携带显式 action，与普通权限卡的标签解耦
+      if (skillCard) {
+        const actionIdx = skillCard.actions[index] ?? skillCard.actions[0];
+        const matched = skillCard.actions.find((a) =>
+          label === skillActionToLabel(a),
+        );
+        answer.action = matched ?? actionIdx;
+      }
+      return answer;
+    });
     this.state.submitQuestionAnswers(answers);
   }
 }
