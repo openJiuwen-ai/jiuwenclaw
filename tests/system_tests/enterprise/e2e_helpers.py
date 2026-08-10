@@ -19,7 +19,6 @@ from pathlib import Path
 
 import websockets
 from dotenv import load_dotenv
-from openjiuwen_runtime.foundation.db.sqlite_handler import SQLiteHandler
 
 ENTERPRISE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = ENTERPRISE_DIR.parents[2]

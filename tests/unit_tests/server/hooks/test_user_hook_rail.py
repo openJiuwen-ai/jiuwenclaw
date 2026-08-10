@@ -6,9 +6,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
+from unittest.mock import AsyncMock, patch
+
 import pytest
 
 from jiuwenswarm.common.hooks_config import HooksConfig, HookMatcher
+from jiuwenswarm.server.hooks.executor import HookOutcome, HookResult
 from jiuwenswarm.server.hooks.user_hook_rail import UserHookRail
 
 
@@ -135,13 +138,33 @@ class TestBeforeToolCall:
                 "Bash",
                 [
                     {"command": "echo block >&2; exit 2", "timeout": 5},
-                    {"command": 'echo \'{"modifiedInput":{"safe":"yes"}}\'', "timeout": 5},
+                    {
+                        "command": 'echo \'{"modifiedInput":{"safe":"yes"}}\'',
+                        "timeout": 5,
+                    },
                 ]
             )]
         )
         rail = UserHookRail(config)
         ctx = MockCallbackContext(inputs=MockToolInputs(tool_name="Bash"))
-        await rail.before_tool_call(ctx)
+        with patch.object(
+            rail._executor,
+            "run_all",
+            new=AsyncMock(
+                return_value=[
+                    HookResult(
+                        outcome=HookOutcome.BLOCKING,
+                        error="blocked",
+                        show_to_model=True,
+                    ),
+                    HookResult(
+                        outcome=HookOutcome.SUCCESS,
+                        modified_input={"safe": "yes"},
+                    ),
+                ]
+            ),
+        ):
+            await rail.before_tool_call(ctx)
         assert ctx.extra["_skip_tool"] is True
         # modifiedInput 不应该被应用（因为早已 return）
         assert "safe" not in str(ctx.inputs.tool_args)

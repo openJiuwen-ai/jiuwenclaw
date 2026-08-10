@@ -193,6 +193,7 @@ async def test_web_channel_handle_raw_message_uses_connection_user_id():
         ),
         {"user_id": ["alice"]},
     )
+    await channel.unregister_ws(ws)
 
     assert len(seen) == 1
     assert seen[0].user_id == "alice"
@@ -224,6 +225,7 @@ async def test_web_channel_handle_raw_message_ignores_params_user_id():
         ),
         {"user_id": ["alice"]},
     )
+    await channel.unregister_ws(ws)
 
     assert len(seen) == 1
     assert seen[0].user_id == "alice"
@@ -253,6 +255,7 @@ async def test_web_channel_handle_raw_message_without_user_id():
         ),
         {},
     )
+    await channel.unregister_ws(ws)
 
     assert len(seen) == 1
     assert seen[0].user_id is None

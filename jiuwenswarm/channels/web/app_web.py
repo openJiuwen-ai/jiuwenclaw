@@ -821,7 +821,7 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             )
             return True
         if path.startswith("/api/sessions/"):
-            session_id = path[len("/api/sessions/") :]
+            session_id = path[len("/api/sessions/"):]
             query = self._parse_query(parsed.query)
             user = query.get("user") or None
             detail = get_session_detail_sync(self.history_db, session_id, user=user)
@@ -1395,7 +1395,7 @@ def _process_obs_upload_body(
 def _run_upload_api_server(*, host: str, port: int, log_level: str) -> None:
     """Minimal HTTP server for POST /file-api/upload-obs (企业版 Vite dev)."""
     if not os.getenv("AGENT_RUNTIME", "").strip():
-        raise SystemExit("upload-api-only requires AGENT_RUNTIME")
+        raise ValueError("upload-api-only requires AGENT_RUNTIME")
 
     logs_root = get_logs_dir().resolve()
     logger = _setup_logger(logs_root, log_level)
@@ -1505,7 +1505,10 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.upload_api_only:
-        _run_upload_api_server(host=args.host, port=args.port, log_level=args.log_level)
+        try:
+            _run_upload_api_server(host=args.host, port=args.port, log_level=args.log_level)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
         return
 
     install_async_dump_handler("web")

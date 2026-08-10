@@ -2881,7 +2881,14 @@ class MessageHandler(ABC):
                     user_id=u,
                 )
             elif action == "delete":
-                data = {"deleted": await cc.delete_job(str(params.get("job_id") or ""), group_id=g, bot_id=b, user_id=u)}
+                data = {
+                    "deleted": await cc.delete_job(
+                        str(params.get("job_id") or ""),
+                        group_id=g,
+                        bot_id=b,
+                        user_id=u,
+                    )
+                }
             elif action == "toggle":
                 data = await cc.toggle_job(
                     str(params.get("job_id") or ""),

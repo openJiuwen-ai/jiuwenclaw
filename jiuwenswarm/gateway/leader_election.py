@@ -139,7 +139,8 @@ class LeaderElection:
         """This Gateway instance's unique identifier."""
         return self._instance_id
 
-    def _get_redis_client(self):
+    @staticmethod
+    def _get_redis_client():
         from jiuwenswarm.extensions.redis.redis_runtime import get_gateway_redis_client
 
         return get_gateway_redis_client()

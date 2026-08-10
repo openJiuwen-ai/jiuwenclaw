@@ -165,8 +165,8 @@ async def init_gateway_redis_from_config(full_cfg: dict[str, Any] | None) -> Non
         return
 
     r_cfg = RedisConfig.from_mapping(cfg_in.get("redis") if isinstance(cfg_in.get("redis"), dict) else {})
-    RedisClientCls = _load_gateway_redis_client_class()
-    client = RedisClientCls(r_cfg)
+    redis_client_cls = _load_gateway_redis_client_class()
+    client = redis_client_cls(r_cfg)
     try:
         await client.open()
     except ImportError:

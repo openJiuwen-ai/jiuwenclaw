@@ -18,14 +18,15 @@ class _SqlAlchemyStyleCronJobRecord:
         self.name = "喝水提醒"
         self.enabled = True
         self.expired = False
-        self.cron_expr = "4 15 20 7 * 47 2026"
+        # Quartz 7-field: second minute hour day month dow year
+        self.cron_expr = "47 3 7 20 7 ? 2026"
         self.timezone = "Asia/Shanghai"
         self.wake_offset_seconds = 59
         self.description = "该喝水了！"
         self.targets = "web"
         self.session_id = "sess_x"
         self.chat_type = None
-        self.mode = "agent.plan"
+        self.mode = "agent"
         self.delete_after_run = True
         self.group_id = "1"
         self.bot_id = "122"
@@ -87,7 +88,8 @@ def test_row_to_job_accepts_plain_dict() -> None:
     assert job.id == "jid1"
 
 
-def test_record_to_mapping_falls_back_to_known_attrs() -> None:
+def test_record_to_mapping_without_dict_protocol_returns_empty() -> None:
+    """Plain objects without to_dict / model_dump / keys map to {} (no attr scrape)."""
     row = SimpleNamespace(
         job_id="x",
         name="n",
@@ -96,20 +98,9 @@ def test_record_to_mapping_falls_back_to_known_attrs() -> None:
         cron_expr="0 * * * *",
         timezone="UTC",
         wake_offset_seconds=10,
-        description="",
+        description="d",
         targets="web",
-        session_id=None,
-        chat_type=None,
-        mode="agent",
-        delete_after_run=False,
-        group_id=None,
-        bot_id=None,
-        user_id=None,
-        created_at=None,
-        updated_at=None,
-        data=None,
     )
-    # No to_dict / model_dump / annotations → attribute fallback
     mapping = _record_to_mapping(row)
-    assert mapping["job_id"] == "x"
-    assert _row_to_job(row) is not None
+    assert mapping == {}
+    assert _row_to_job(row) is None

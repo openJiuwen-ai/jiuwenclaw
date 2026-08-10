@@ -102,6 +102,7 @@ class _FakeResourceManager:
     def __init__(self) -> None:
         self.added: list[str] = []
         self.removed: list[str] = []
+        self.tools: dict[str, SimpleNamespace] = {}
 
     def add_tool(
         self,
@@ -112,9 +113,16 @@ class _FakeResourceManager:
         skip_if_exists: bool = False,
     ) -> None:
         self.added.append(tool.card.name)
+        if skip_if_exists and tool.card.id in self.tools:
+            return
+        self.tools[tool.card.id] = tool
+
+    def get_tool(self, tool_id: str) -> SimpleNamespace | None:
+        return self.tools.get(tool_id)
 
     def remove_tool(self, tool_id: str) -> None:
         self.removed.append(tool_id)
+        self.tools.pop(tool_id, None)
 
 
 class _FakeRuntimeInstance:

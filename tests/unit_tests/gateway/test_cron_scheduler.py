@@ -111,8 +111,8 @@ class _TestableScheduler(CronSchedulerService):
         return self._jobs
 
     @property
-    def last_store_mtime(self):
-        return self._last_store_mtime
+    def last_store_revision(self):
+        return self._last_store_revision
 
     @property
     def runs(self):
@@ -325,10 +325,10 @@ class TestCheckStoreChanged:
 
         svc = _make_scheduler(store)
         await svc.reload()
-        assert svc.last_store_mtime != 0.0
+        assert svc.last_store_revision != 0
         assert len(svc.jobs) == 1
 
-        # Delete file -> mtime becomes 0.0
+        # Delete file -> revision becomes 0
         store_file.unlink()
         assert not store_file.exists()
 
@@ -362,7 +362,7 @@ class TestCheckStoreChanged:
         svc = _make_scheduler(store)
         await svc.reload()
 
-        # Delete -> triggers first reload -> mtime becomes 0.0
+        # Delete -> triggers first reload -> revision becomes 0
         store_file.unlink()
         changed1 = await svc.check_store_changed()
         assert changed1 is True
@@ -398,7 +398,7 @@ class TestCheckStoreChanged:
 
         svc = _make_scheduler(store)
         await svc.reload()
-        assert svc.last_store_mtime == 0.0
+        assert svc.last_store_revision == 0
 
         changed = await svc.check_store_changed()
         assert changed is False

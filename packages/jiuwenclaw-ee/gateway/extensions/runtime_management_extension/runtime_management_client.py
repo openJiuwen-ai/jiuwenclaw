@@ -479,16 +479,20 @@ class RuntimeManagementAgentClient(AgentServerClient):
             if runtime_code_path and runtime_code_pod_path:
                 agent_host_mounts.append(
                     HostPathMount(
-                        host_path=runtime_code_path+"/management/openjiuwen_runtime/management",
-                        mount_path=runtime_code_pod_path+"/management",
+                        host_path=os.path.join(
+                            runtime_code_path, "management", "openjiuwen_runtime", "management"
+                        ),
+                        mount_path=os.path.join(runtime_code_pod_path, "management"),
                         read_only=False,
                         host_path_type="Directory"
                     )
                 )
                 agent_host_mounts.append(
                     HostPathMount(
-                        host_path=runtime_code_path+"/foundation/openjiuwen_runtime/foundation",
-                        mount_path=runtime_code_pod_path+"/foundation",
+                        host_path=os.path.join(
+                            runtime_code_path, "foundation", "openjiuwen_runtime", "foundation"
+                        ),
+                        mount_path=os.path.join(runtime_code_pod_path, "foundation"),
                         read_only=False,
                         host_path_type="Directory"
                     )
@@ -497,7 +501,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
             if core_code_path and core_code_pod_path:
                 agent_host_mounts.append(
                     HostPathMount(
-                        host_path=core_code_path+"/openjiuwen",
+                        host_path=os.path.join(core_code_path, "openjiuwen"),
                         mount_path=core_code_pod_path,
                         read_only=False,
                         host_path_type="Directory"
@@ -508,7 +512,9 @@ class RuntimeManagementAgentClient(AgentServerClient):
             agent_configmap_mounts.append(
                 ConfigMapMount(
                     config_map_name=configmap_name,
-                    mount_path=agent_server_home+"/.jiuwenclaw/config/config.yaml",
+                    mount_path=os.path.join(
+                        agent_server_home, ".jiuwenclaw", "config", "config.yaml"
+                    ),
                     sub_path="config.yaml",
                     items=[("config.yaml", "config.yaml")],
                 )
@@ -526,7 +532,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
         jiuwenbox_memory_request = os.getenv("JIUWENBOX_MEMORY_REQUEST")
         jiuwenbox_cpu_limit = os.getenv("JIUWENBOX_CPU_LIMIT")
         jiuwenbox_memory_limit = os.getenv("JIUWENBOX_MEMORY_LIMIT")
-        jiuwenbox_container_name = os.getenv("JIUWENBOX_CONTAINER_NAME", "jiuwenbox" )
+        jiuwenbox_container_name = os.getenv("JIUWENBOX_CONTAINER_NAME", "jiuwenbox")
         jiuwenbox_readiness_initial_delay = int(os.getenv("JIUWENBOX_READINESS_INITIAL_DELAY", "10"))
         jiuwenbox_readiness_period = int(os.getenv("JIUWENBOX_READINESS_PERIOD", "5"))
         jiuwenbox_listen = os.getenv("JIUWENBOX_LISTEN", f"tcp://0.0.0.0:{jiuwenbox_port}")
@@ -546,7 +552,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
             if claw_code_path and jiuwenbox_code_pod_path:
                 jiuwenbox_host_mounts.append(
                     HostPathMount(
-                        host_path=claw_code_path+"/jiuwenbox/src/jiuwenbox",
+                        host_path=os.path.join(claw_code_path, "jiuwenbox", "src", "jiuwenbox"),
                         mount_path=jiuwenbox_code_pod_path,
                         read_only=False,
                         host_path_type="Directory"
@@ -748,7 +754,8 @@ class RuntimeManagementAgentClient(AgentServerClient):
                         pvc=os.getenv("CLAW_PVC"),
                         nfs_server=cfg.get("nfs_server") or os.getenv("CLAW_NFS_SERVER", ""),
                         nfs_path=cfg.get("nfs_path") or os.getenv("CLAW_NFS_PATH", "/"),
-                        mount_path=cfg.get("nfs_mount_path") or agent_server_home+"/.jiuwenclaw",
+                        mount_path=cfg.get("nfs_mount_path")
+                        or os.path.join(agent_server_home, ".jiuwenclaw"),
                         mode=cfg.get("mode") or mode,
                         node_name=cfg.get("node_name") or node_name,
                     )

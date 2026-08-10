@@ -196,8 +196,6 @@ class ManagerWsClient:
                 await self._connect_once(uri)
                 consecutive_failures = 0
                 probe_mode_logged = False
-            except asyncio.CancelledError:
-                raise
             except Exception as exc:  # noqa: BLE001
                 consecutive_failures += 1
                 reconnect_delay = self._compute_reconnect_delay(consecutive_failures)

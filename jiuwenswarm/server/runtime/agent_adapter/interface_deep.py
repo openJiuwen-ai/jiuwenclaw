@@ -194,7 +194,9 @@ from jiuwenswarm.agents.harness.common.memory.external_memory_config import is_b
 from jiuwenswarm.common.model_config_validation import is_placeholder_api_base
 from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context import TOOL_PERMISSION_CHANNEL_ID
 from jiuwenswarm.agents.harness.common.rails.permissions.config_loader import (
+    get_base_permissions_config,
     get_effective_permissions_config,
+    is_enterprise_runtime,
     reset_permissions_session_scope,
     setup_permissions_session_scope,
 )
@@ -6088,12 +6090,6 @@ class JiuWenSwarmDeepAdapter:
 
     def _update_permission_rail(self, config_base: dict[str, Any] | None) -> None:
         """原地更新已有 PermissionRail 配置，或在首次启用时新建。"""
-        from jiuwenswarm.agents.harness.common.rails.permissions.config_loader import (
-            get_base_permissions_config,
-            get_effective_permissions_config,
-            is_enterprise_runtime,
-        )
-
         permission_config = (
             get_base_permissions_config()
             if is_enterprise_runtime()

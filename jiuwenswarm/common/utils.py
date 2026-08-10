@@ -1924,6 +1924,9 @@ def _fingerprint(value: str) -> str:
 # 导致跨日志关联失效（如 stream_logger._mask_secrets 先脱敏，_write_raw 再脱敏）。
 _ALREADY_MASKED_PATTERN = re.compile(rf"^{re.escape(_SENSITIVE_MASK)}(\(fp:[0-9a-f]{{8}}\))?$")
 
+# LogMaskingEngine 回退失败计数（避免在日志 Filter 热路径上静默吞异常）。
+_sanitize_engine_fallback_failures = 0
+
 
 def _is_already_masked(value: Any) -> bool:
     """判断 value 是否已是脱敏产物（纯掩码或带指纹），避免重复脱敏。"""
@@ -1964,8 +1967,17 @@ def _sanitize_log_text(text: str) -> str:
             engine = LogMaskingEngine.get_instance()
             if engine.uses_external_rules:
                 return engine.sanitize(text)
-        except Exception:
-            pass
+        except Exception as exc:
+            # 回退到本地正则脱敏。不能走 logging：本函数会被 SensitiveDataFilter 调用，
+            # 写日志会递归进脱敏路径。仅首次 stderr 提示，避免静默吞掉异常。
+            global _sanitize_engine_fallback_failures
+            _sanitize_engine_fallback_failures += 1
+            if _sanitize_engine_fallback_failures == 1:
+                print(
+                    "[jiuwenswarm] LogMaskingEngine sanitize failed, "
+                    f"falling back to local masking: {exc!r}",
+                    file=sys.stderr,
+                )
 
     masked = text
     masked = _DATA_IMAGE_PATTERN.sub("data:image/*;base64,******", masked)
@@ -2453,6 +2465,10 @@ class AsyncLRUCache:
 
     def __len__(self) -> int:
         return len(self._cache)
+
+    def values(self) -> list[Any]:
+        """返回当前缓存值快照（同步，不做 TTL 清理）."""
+        return [value for value, _ts in self._cache.values()]
 
     async def keys(self) -> list[str]:
         async with self._lock:

@@ -240,49 +240,56 @@ class TestTenantAgentPool(TestCase):
             asyncio.run(second_loop())
 
     def test_lock_with_waiters_across_event_loop(self) -> None:
-        """锁在有等待者时跨事件循环仍可重建后使用."""
+        """锁在有占用时跨事件循环仍可重建后使用（不复用旧 loop 的锁）。"""
         with patch.dict("os.environ", {"AGENT_RUNTIME": "k8s"}, clear=False):
             TenantAgentPool.reset_instance()
+            held_lock_id: int | None = None
 
             async def first_loop_hold_lock():
+                nonlocal held_lock_id
                 pool = TenantAgentPool.get_instance()
                 lock = pool._get_lock("test_key")
+                held_lock_id = id(lock)
                 await lock.acquire()
-                return lock
+                # 故意不 release：模拟旧 loop 上占用中的锁；新 loop 必须重建。
+                return True
 
-            asyncio.run(first_loop_hold_lock())
+            self.assertTrue(asyncio.run(first_loop_hold_lock()))
 
             async def second_loop_use_lock():
                 pool = TenantAgentPool.get_instance()
                 lock2 = pool._get_lock("test_key")
-                async with lock2:
-                    pass
+                self.assertIsNotNone(held_lock_id)
+                self.assertNotEqual(held_lock_id, id(lock2), "跨 loop 应重建锁")
+                # 新锁必须立即可用，否则说明误复用了仍被占用的旧锁。
+                async with asyncio.timeout(1):
+                    async with lock2:
+                        pass
 
             asyncio.run(second_loop_use_lock())
 
     def test_concurrent_waiters_across_event_loop(self) -> None:
-        """有等待者的锁在事件循环变化后仍可服务新请求."""
+        """有并发争用后，事件循环变化仍可服务新请求."""
         with patch.dict("os.environ", {"AGENT_RUNTIME": "k8s"}, clear=False):
             TenantAgentPool.reset_instance()
 
             async def first_loop_with_concurrent_requests():
                 pool = TenantAgentPool.get_instance()
-                tasks = [
-                    asyncio.create_task(
+                results = await asyncio.gather(
+                    *[
                         pool._ensure_agent_manager("shared_agent", "shared_service")
-                    )
-                    for _ in range(3)
-                ]
-                await asyncio.sleep(0.01)
-                return tasks
+                        for _ in range(3)
+                    ]
+                )
+                self.assertEqual(len(results), 3)
+                for result in results:
+                    self.assertIsNotNone(result)
 
             with patch(
                 "jiuwenswarm.server.runtime.tenant_agent_pool.AgentManager",
                 return_value=MagicMock(),
             ):
-                tasks = asyncio.run(first_loop_with_concurrent_requests())
-                for task in tasks:
-                    task.cancel()
+                asyncio.run(first_loop_with_concurrent_requests())
 
                 async def second_loop():
                     pool = TenantAgentPool.get_instance()
