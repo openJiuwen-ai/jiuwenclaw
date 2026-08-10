@@ -4,6 +4,7 @@ description: |
   Creates, converts, or modifies Swarm Skills — the multi-role (多角色团队) extension of the Skills standard, optionally with an executable SwarmFlow orchestration script.
   Use when building or refactoring a multi-agent team, generating workflow (工作流/编排) orchestration code, or upgrading a single-agent skill into a collaborating team.
   Do NOT use for ordinary single-agent skills — use create-skill instead.
+description_cn: 创建、转换或修改多角色 Swarm Skill；普通单智能体技能使用 `skill-creator`。
 version: "0.5"
 ---
 
@@ -221,7 +222,7 @@ The validator checks two output shapes:
 **Script-only SwarmFlow**
 - **Structural**: exactly `SKILL.md` + `scripts/workflow.py`; no `roles/`, `workflow.md`, `bind.md`, `dependencies.yaml`, or `prompts/`
 - **SKILL.md**: valid frontmatter plus `## Workflow` and `## Files`; `roles:` omitted or empty
-- **SwarmFlow script safety envelope**: standalone script shape, inline prompts, safe imports, phase/agent consistency, human/session call discipline, schema permissiveness, and blocked runtime patterns
+- **SwarmFlow script safety envelope**: standalone script shape, inline prompts, safe imports, phase/agent consistency, human/session call discipline, workflow composition, budget guard discipline, schema permissiveness, and blocked runtime patterns
 
 **Exit code 0 = compliant**. Non-zero exit prints the failing checks with file:line references.
 

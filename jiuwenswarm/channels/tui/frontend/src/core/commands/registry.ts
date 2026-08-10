@@ -20,6 +20,8 @@ import {
 } from "./builtins/evolve.js";
 import { createExitCommand } from "./builtins/exit.js";
 import { createHelpCommand } from "./builtins/help.js";
+import { createHarmonyOSDevInitCommand } from "./builtins/harmonyos-dev-init.js";
+import { createHarmonyOSProjectInitCommand } from "./builtins/harmonyos-project-init.js";
 import { createHooksCommand } from "./builtins/hooks.js";
 import { createKeybindingsCommand } from "./builtins/keybindings.js";
 import { createInitCommand } from "./builtins/init.js";
@@ -55,6 +57,11 @@ import { createSwitchCommand } from "./builtins/switch.js";
 
 export interface BuiltinCommandsOptions {
   /**
+   * Whether HarmonyOS development commands are visible and executable.
+   * The TUI enables this only when JIUWENSWARM_TUI_HARMONYOS_ENABLED=1.
+   */
+  harmonyosEnabled?: boolean;
+  /**
    * 是否激活 /switch 命令。
    * 仅一体机场景（launcher 注入 AGENTOS_TUI_SUPERVISED=1）时为 true，
    * 此时命令可见且可执行；否则不注册，命令在 help、补全、执行中均不可见。
@@ -62,10 +69,19 @@ export interface BuiltinCommandsOptions {
   switchEnabled?: boolean;
 }
 
+export function isHarmonyOSCommandsEnabled(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  return env.JIUWENSWARM_TUI_HARMONYOS_ENABLED === "1";
+}
+
 export function createBuiltinCommands(options: BuiltinCommandsOptions = {}): SlashCommand[] {
   const commands: SlashCommand[] = [
     createAgentsCommand(),
     createHelpCommand(() => commands),
+    ...(options.harmonyosEnabled
+      ? [createHarmonyOSDevInitCommand(), createHarmonyOSProjectInitCommand()]
+      : []),
     createHooksCommand(),
     createKeybindingsCommand(),
     createBranchCommand(),

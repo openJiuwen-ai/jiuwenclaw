@@ -1,4 +1,4 @@
-﻿// Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+// Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import { useEffect, useMemo, memo } from 'react';
 import { useA2UIActions } from '@a2ui/react';
@@ -165,6 +165,7 @@ export const A2UIMessageContent = memo(function A2UIMessageContent({
               key={part.key}
               content={part.text}
               className="chat-markdown"
+              isStreaming={isStreaming}
             />
           );
         }
@@ -207,7 +208,6 @@ export const A2UIMessageContent = memo(function A2UIMessageContent({
           </div>
         );
       })}
-      {isStreaming && <span className="streaming-cursor" />}
     </div>
   );
 });

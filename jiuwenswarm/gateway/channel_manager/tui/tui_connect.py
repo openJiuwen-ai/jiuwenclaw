@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import logging
 import os
+import secrets
 import shutil
 import sys
 import time
@@ -20,7 +22,7 @@ from openjiuwen.core.foundation.llm.schema.config import (
     ModelClientConfig,
     ModelRequestConfig,
 )
-from openjiuwen.auto_harness.schema import load_auto_harness_config
+from openjiuwen.rsi.auto_harness.schema import load_auto_harness_config
 
 from jiuwenswarm.common.config import (
     get_config,
@@ -33,11 +35,12 @@ from jiuwenswarm.common.config import (
     update_permissions_enabled_in_config,
     get_model_names,
     update_preferred_language_in_config,
+    update_swarmflow_budget_in_config,
     update_swarmflow_enabled_in_config,
+    update_skill_evolution_enabled_in_config,
     update_config,
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
-from jiuwenswarm.common.work_mode import DEFAULT_PROJECT_ID_CODE
 from jiuwenswarm.gateway.routing.route_binding import GatewayRouteBinding
 from jiuwenswarm.common.version import __version__
 from jiuwenswarm.common.utils import get_user_workspace_dir
@@ -50,6 +53,43 @@ from jiuwenswarm.gateway.routing.agent_request_timeout import (
 )
 
 logger = logging.getLogger(__name__)
+
+_HARMONYOS_DEV_INIT_TASKS_ATTR = "_jiuwenswarm_harmonyos_dev_init_tasks"
+
+
+def _get_harmonyos_dev_init_tasks(
+    ws: Any, *, create: bool
+) -> set[asyncio.Task[Any]] | None:
+    """Return the Dev Init tasks owned by a websocket."""
+    tasks = getattr(ws, _HARMONYOS_DEV_INIT_TASKS_ATTR, None)
+    if isinstance(tasks, set):
+        return tasks
+    if not create:
+        return None
+    tasks = set()
+    try:
+        setattr(ws, _HARMONYOS_DEV_INIT_TASKS_ATTR, tasks)
+    except Exception:
+        logger.debug(
+            "[harmonyos.dev_init] websocket does not support task tracking",
+            exc_info=True,
+        )
+        return None
+    return tasks
+
+
+async def _cancel_harmonyos_dev_init_tasks(ws: Any) -> None:
+    """Cancel and drain Dev Init tasks owned by a websocket."""
+    tracked = _get_harmonyos_dev_init_tasks(ws, create=False)
+    if tracked is None:
+        return
+    tasks = [task for task in tracked if isinstance(task, asyncio.Task)]
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    tracked.clear()
 
 
 class _ModelOpError(Exception):
@@ -245,11 +285,6 @@ CLI_FORWARD_REQ_METHODS = frozenset(
         "skills.evolution.status",
         "skills.evolution.get",
         "skills.evolution.save",
-        "symphony.build_score",
-        "symphony.pause_build",
-        "symphony.score_status",
-        "symphony.graph",
-        "symphony.plan",
         "plugins.list",
         "plugins.install",
         "plugins.uninstall",
@@ -268,6 +303,12 @@ CLI_FORWARD_REQ_METHODS = frozenset(
         "extensions.delete",
         "extensions.toggle",
         "session.switch",
+        "team.templates.list",
+        "team.bindings.list",
+        "team.binding.create",
+        "team.binding.generate",
+        "team.session.bind",
+        "team.mq.publish",
         "session.fork",
         # Agent configuration
         "agents.list",
@@ -343,11 +384,6 @@ CLI_FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset(
         "skills.evolution.status",
         "skills.evolution.get",
         "skills.evolution.save",
-        "symphony.build_score",
-        "symphony.pause_build",
-        "symphony.score_status",
-        "symphony.graph",
-        "symphony.plan",
         "plugins.list",
         "plugins.install",
         "plugins.uninstall",
@@ -366,6 +402,12 @@ CLI_FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset(
         "extensions.delete",
         "extensions.toggle",
         "session.switch",
+        "team.templates.list",
+        "team.bindings.list",
+        "team.binding.create",
+        "team.binding.generate",
+        "team.session.bind",
+        "team.mq.publish",
         "session.fork",
         # Agent configuration
         "agents.list",
@@ -462,7 +504,6 @@ _CLI_CONFIG_SET_ENV_MAP = {
     "serper_api_key": "SERPER_API_KEY",
     "perplexity_api_key": "PERPLEXITY_API_KEY",
     "github_token": "GITHUB_TOKEN",
-    "evolution_auto_scan": "EVOLUTION_AUTO_SCAN",
     "teamskills_market_url": "TEAM_SKILLS_HUB_BASE_URL",
     "teamskills_user_token": "TEAM_SKILLS_HUB_USER_TOKEN",
     "teamskills_system_token": "TEAM_SKILLS_HUB_SYSTEM_TOKEN",
@@ -476,6 +517,8 @@ _CLI_CONFIG_YAML_SETTERS: dict[str, Any] = {
     "memory_forbidden_enabled": update_memory_forbidden_enabled_in_config,
     "preferred_language": update_preferred_language_in_config,
     "enable_swarmflow": update_swarmflow_enabled_in_config,
+    "swarmflow_budget": update_swarmflow_budget_in_config,
+    "skill_evolution": update_skill_evolution_enabled_in_config,
     # Auto-Harness config items (stored in ~/.jiuwenswarm/auto-harness/config.yaml)
     # 用户名同时设置 git.user_name, fork_owner, gitcode.username（三者合一）
     "auto_harness_git_user_name": _update_auto_harness_git_user_name,
@@ -581,8 +624,8 @@ def _build_config_schema() -> list[dict]:
          "options": ["zh", "en"], "source": "yaml", "default": "zh"},
         {"key": "auto_recap_enabled", "label": "自动回顾", "group": "Features",
          "type": "toggle", "source": "yaml", "default": "true"},
-        {"key": "evolution_auto_scan", "label": "自动扫描技能", "group": "Features",
-         "type": "toggle", "source": "env", "default": "false"},
+        {"key": "skill_evolution", "label": "技能演进与创建", "group": "Features",
+         "type": "toggle", "source": "yaml", "default": "false"},
         # Auto-Harness (定时任务配置) - 合并为三项
         {"key": "auto_harness_git_user_name", "label": "用户名", "group": "Auto-Harness",
          "type": "string", "source": "yaml", "default": empty,
@@ -607,7 +650,7 @@ def _normalize_provider_value(value: str) -> str:
 
 
 
-async def _clear_agent_config_cache(agent_client=None) -> None:
+async def _clear_agent_config_cache(agent_client=None, user_id=None) -> None:
     try:
         if agent_client is not None:
             from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
@@ -618,6 +661,7 @@ async def _clear_agent_config_cache(agent_client=None) -> None:
                 request_id=f"cfg-reload-{uuid.uuid4().hex[:8]}",
                 channel_id="",
                 req_method=ReqMethod.AGENT_RELOAD_CONFIG,
+                user_id=user_id,
             )
             await _send_tui_agent_request(
                 _resolve_agent_client(agent_client),
@@ -785,6 +829,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
     from jiuwenswarm.gateway.routing.third_agent import get_unsupported_third_agent
 
     third_agent = bind.third_agent if bind.third_agent is not None else get_unsupported_third_agent()
+    harmonyos_dev_init_tasks: dict[tuple[int, str], asyncio.Task[Any]] = {}
 
     async def _config_get(ws, req_id, params, session_id):
         payload = {
@@ -824,6 +869,14 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             _jiuwen_team_cfg = _team_cfg.get("jiuwen_team") or {}
             _swarmflow_enabled = bool(_jiuwen_team_cfg.get("enable_swarmflow", False))
             payload["enable_swarmflow"] = "true" if _swarmflow_enabled else "false"
+            # swarmflow budget ceiling (integer token limit; absent/None → unbounded)
+            _swarmflow_budget = _jiuwen_team_cfg.get("swarmflow_budget")
+            if _swarmflow_budget is not None:
+                payload["swarmflow_budget"] = str(_swarmflow_budget)
+            evolution_cfg = (raw.get("react") or {}).get("evolution") or {}
+            payload["skill_evolution"] = (
+                "true" if evolution_cfg.get("skill_evolution", False) else "false"
+            )
 
             # Resolve model-related fields from config.yaml.
             # When models.defaults list is in use, it is the canonical source
@@ -885,6 +938,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             payload.setdefault("permissions_enabled", "false")
             payload.setdefault("memory_forbidden_enabled", "false")
             payload.setdefault("preferred_language", "zh")
+            payload.setdefault("skill_evolution", "false")
         
         # Auto-Harness config values (from ~/.jiuwenswarm/auto-harness/config.yaml)
         # 合并显示：用户名、邮箱、Access Token 三项
@@ -967,6 +1021,9 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                     setter(raw_value)
                 elif param_key.startswith("auto_harness_"):
                     # Auto-harness config items are strings, not toggles
+                    setter(raw_value)
+                elif param_key == "swarmflow_budget":
+                    # Budget is an integer, not a boolean toggle
                     setter(raw_value)
                 else:
                     parsed = raw_value.lower() in ("true", "1", "yes")
@@ -1154,7 +1211,10 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
 
             async def _config_set_reload_background() -> None:
                 try:
-                    await _clear_agent_config_cache(real_client)
+                    await _clear_agent_config_cache(
+                        real_client,
+                        user_id=getattr(ws, "_gateway_user_id", None),
+                    )
                 except Exception as _e_reload:
                     logger.warning(
                         "[cli config.set] AGENT_RELOAD_CONFIG failed: %s", _e_reload
@@ -1276,10 +1336,10 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
 
         try:
             try:
-                response = await _probe(1)
+                response = await _probe(3)
             except Exception as first_exc:  # noqa: BLE001
                 logger.info(
-                    "[cli config.validate_model] max_tokens=1 failed, retrying with 16: %s",
+                    "[cli config.validate_model] max_tokens=3 failed, retrying with 16: %s",
                     first_exc,
                 )
                 response = await _probe(16)
@@ -1300,8 +1360,12 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             content = response.get("content", "")
         else:
             content = str(response)
-
-        if not (isinstance(content, str) and content.strip()):
+        reasoning_content = getattr(response, "reasoning_content", None) if hasattr(response,
+                                                                                    "reasoning_content") else None
+        has_valid_response = (isinstance(content, str) and content) or (
+                isinstance(reasoning_content, str) and reasoning_content
+        )
+        if not has_valid_response:
             await channel.send_response(
                 ws,
                 req_id,
@@ -1389,8 +1453,8 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             s["session_id"] = session_id
             normalized_sessions.append(s)
         all_sessions = normalized_sessions
-        # 按项目目录过滤 + 排除当前会话（对齐 Claude Code /resume 行为）
-        # all_projects=True 时跳过项目过滤，列出所有项目的会话（对齐 CC 的 Ctrl+A）
+        # 按项目目录过滤 + 排除当前会话（对齐 /resume 行为）
+        # all_projects=True 时跳过项目过滤，列出所有项目的会话（Ctrl+A）
         show_all_projects = (
             bool(params.get("all_projects"))
             if isinstance(params, dict) else False
@@ -1462,173 +1526,71 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             payload={"sessions": cli_sessions, "current_branch": current_branch},
         )
 
-    async def _session_create(ws, req_id, params, session_id):
-        from jiuwenswarm.common.utils import get_agent_sessions_dir
-        from jiuwenswarm.server.runtime.session.session_metadata import (
-            get_session_metadata,
-            init_session_metadata,
-        )
-
+    async def _session_create(ws, req_id, params, session_id, user_id=None):
         if not isinstance(params, dict):
             await channel.send_response(
                 ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST"
             )
             return
-        target = str(params.get("session_id") or "").strip()
-        if not target:
-            await channel.send_response(
-                ws, req_id, ok=False, error="session_id is required", code="BAD_REQUEST"
-            )
-            return
-        # TUI 前置归属解析(设计文档 §4.1.6):按 cwd/project_dir 固定 work_mode="code"
-        # 查找/创建 code 项目并绑定真实 project_id;无目录或解析失败归 default_code
-        resolved_project_id = ""
-        resolved_project_dir = ""
-        work_mode = "code"
-        try:
-            from jiuwenswarm.server.runtime.session.project_store import (
-                find_or_create_code_project_for_tui_params,
-            )
-            proj = find_or_create_code_project_for_tui_params(params)
-            if proj is not None:
-                resolved_project_id = proj.project_id
-                resolved_project_dir = proj.project_dir
-                work_mode = proj.work_mode or "code"
-        except Exception:  # noqa: BLE001
-            # 解析失败(冲突/权限等)不阻断会话创建,会话归 default_code
-            logger.warning(
-                "[TUI] session.create project pre-resolution failed: "
-                "session_id=%s project_dir=%r cwd=%r",
-                target,
-                params.get("project_dir") if isinstance(params, dict) else None,
-                params.get("cwd") if isinstance(params, dict) else None,
-                exc_info=True,
-            )
-        workspace_session_dir = get_agent_sessions_dir()
-        workspace_session_dir.mkdir(parents=True, exist_ok=True)
-        session_dir = workspace_session_dir / target
-        if session_dir.exists():
+        real_client = _resolve_agent_client(agent_client)
+        if real_client is None:
             await channel.send_response(
                 ws,
                 req_id,
                 ok=False,
-                error="session already exists",
-                code="ALREADY_EXISTS",
+                error="AgentServer is unavailable",
+                code="SERVICE_UNAVAILABLE",
             )
             return
-        session_dir.mkdir()
-        # 初始化元数据（与 web channel 对齐）；同步写入 channel_metadata，
-        # 避免 /clear 后立刻 /resume（current dir）因缺少路径而被过滤（Issue #2503）
-        channel_meta = build_tui_session_create_channel_metadata(
-            params, resolved_project_dir
-        )
-        # 预解析失败但请求仍带路径时，顶层 project_dir 也用请求路径，便于读侧回退
-        top_project_dir = resolved_project_dir or (
-            (channel_meta or {}).get("project_dir") or ""
-        )
-        init_session_metadata(
-            session_id=target,
-            channel_id="tui",
-            title=str(params.get("title") or "").strip(),
-            mode=params.get("mode", "code.normal"),
-            project_dir=top_project_dir,
-            project_id=resolved_project_id,
-            work_mode=work_mode,
-            channel_metadata=channel_meta,
-        )
-        # 触发 SessionStart hook
-        mh = bind.message_handler
-        if mh:
-            mh.trigger_session_start_hook(target, source="tui")
-        # TUI /new and /clear switch away from the previous product session
-        # through this local handler. Prefer the canonical AgentServer owner
-        # dispatch so Plan and Team follow the same lifecycle as Web.
-        previous_session_id = str(params.get("previous_session_id") or "").strip()
-        lifecycle_forwarded = False
-        real_client = (
-            agent_client.get("value")
-            if isinstance(agent_client, dict)
-            else agent_client
-        )
-        if real_client is not None:
-            try:
-                from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
-                from jiuwenswarm.common.schema.message import ReqMethod
+        from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+        from jiuwenswarm.common.schema.message import ReqMethod
 
-                lifecycle_params = dict(params)
-                lifecycle_params["session_id"] = target
-                env = e2a_from_agent_fields(
-                    request_id=req_id,
-                    channel_id="tui",
-                    session_id=target,
-                    req_method=ReqMethod.SESSION_SWITCH,
-                    params=lifecycle_params,
-                    is_stream=False,
-                    timestamp=time.time(),
-                )
-                response = await real_client.send_request(env)
-                lifecycle_forwarded = bool(response.ok)
-                if not response.ok:
-                    logger.warning(
-                        "[cli session.create] session.switch lifecycle forward rejected; "
-                        "falling back locally: target_session_id=%s previous_session_id=%s",
-                        target,
-                        previous_session_id,
-                    )
-            except Exception as exc:
-                logger.warning(
-                    "[cli session.create] session.switch lifecycle forward failed; "
-                    "falling back locally: target_session_id=%s error=%s",
-                    target,
-                    exc,
-                )
-
-        previous_session_changed = (
-            bool(previous_session_id)
-            and previous_session_id not in {"new", target}
-        )
-        if not lifecycle_forwarded and previous_session_changed:
-            from jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle import (
-                dispatch_offload_session_kv_cache,
-                is_kv_cache_affinity_enabled,
+        create_params = dict(params)
+        requested_session_id = str(create_params.get("session_id") or "").strip()
+        if requested_session_id:
+            # TUI --session compatibility: preserve the supplied ID and let
+            # AgentServer resolve/persist its authoritative project binding.
+            create_params["session_id"] = requested_session_id
+        else:
+            create_params.pop("session_id", None)
+            from jiuwenswarm.server.runtime.session.project_store import (
+                find_or_create_code_project_for_tui_params,
             )
-
-            try:
-                affinity_enabled = is_kv_cache_affinity_enabled()
-            except Exception as exc:
-                affinity_enabled = False
-                logger.warning(
-                    "[cli session.create] affinity gate failed; KVC hook skipped: "
-                    "previous_session_id=%s error=%s",
-                    previous_session_id,
-                    exc,
-                )
-            if affinity_enabled:
-                try:
-                    previous_metadata = get_session_metadata(previous_session_id)
-                    previous_mode = str(previous_metadata.get("mode") or "").strip().lower()
-                    if previous_mode not in {"team", "team.plan", "code.team"}:
-                        dispatch_offload_session_kv_cache(
-                            session_id=previous_session_id,
-                            parent_session_id=previous_session_id,
-                        )
-                except Exception as exc:
-                    logger.warning(
-                        "[cli session.create] Plan KVC hook failed; continuing: "
-                        "previous_session_id=%s error=%s",
-                        previous_session_id,
-                        exc,
-                    )
-        # 响应带最终归属(设计文档 §4.1.6):未绑定真实项目时归 default_code
-        await channel.send_response(ws, req_id, ok=True, payload={
-            "session_id": target,
-            "project_id": resolved_project_id or DEFAULT_PROJECT_ID_CODE,
-            "project_dir": top_project_dir,
-            "work_mode": work_mode,
-        })
+            project = find_or_create_code_project_for_tui_params(create_params)
+            if project is not None:
+                create_params["project_id"] = project.project_id
+                create_params["project_dir"] = project.project_dir
+                create_params["work_mode"] = project.work_mode
+            create_params.setdefault("create_token", secrets.token_hex(16))
+        env = e2a_from_agent_fields(
+            request_id=req_id,
+            channel_id="tui",
+            req_method=ReqMethod.SESSION_CREATE,
+            params=create_params,
+            is_stream=False,
+            timestamp=time.time(),
+            user_id=user_id or getattr(ws, "_gateway_user_id", None),
+        )
+        try:
+            response = await _send_tui_agent_request(
+                real_client, env, label="session.create"
+            )
+        except Exception as exc:  # noqa: BLE001
+            await channel.send_response(
+                ws, req_id, ok=False, error=str(exc), code="SERVICE_UNAVAILABLE"
+            )
+            return
+        payload = dict(response.payload or {}) if isinstance(response.payload, dict) else {}
+        await channel.send_response(
+            ws,
+            req_id,
+            ok=bool(response.ok),
+            payload=payload if response.ok else None,
+            error=None if response.ok else str(payload.get("error") or "session.create failed"),
+            code=None if response.ok else str(payload.get("code") or "SESSION_CREATE_FAILED"),
+        )
 
     async def _session_delete(ws, req_id, params, session_id, user_id=None):
-        from jiuwenswarm.common.utils import get_agent_sessions_dir
         from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
         from jiuwenswarm.common.schema.message import ReqMethod
@@ -1714,7 +1676,17 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 code="AGENT_UNAVAILABLE",
             )
             return
-        session_dir = get_agent_sessions_dir() / target
+        from jiuwenswarm.common.utils import get_agent_sessions_dir
+        from jiuwenswarm.server.runtime.session.session_history import resolve_session_dir
+
+        session_dir, invalid_reason = resolve_session_dir(
+            target, sessions_root=get_agent_sessions_dir()
+        )
+        if session_dir is None:
+            await channel.send_response(
+                ws, req_id, ok=False, error=invalid_reason or "invalid session_id", code="BAD_REQUEST"
+            )
+            return
         if not session_dir.exists():
             await channel.send_response(
                 ws, req_id, ok=False, error="session not found", code="NOT_FOUND"
@@ -2299,6 +2271,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
     async def _tui_disconnect_request(ws, req_id, params, session_id):
+        await _cancel_harmonyos_dev_init_tasks(ws)
         payload = {"accepted": True, "session_id": session_id}
         try:
             await channel.send_response(ws, req_id, ok=True, payload=payload)
@@ -2312,7 +2285,10 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         if callable(is_bound_to_client):
             owns_session = bool(is_bound_to_client("tui", sid, ws))
         if mh is not None and sid and owns_session:
-            cleaned = await mh.cancel_agent_sessions_on_disconnect([("tui", sid)])
+            cleaned = await mh.cancel_agent_sessions_on_disconnect(
+                [("tui", sid)],
+                user_id=getattr(ws, "_gateway_user_id", None),
+            )
             if not cleaned:
                 logger.warning(
                     "[tui.disconnect] immediate cleanup failed; "
@@ -2355,6 +2331,174 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             if "page_idx" in params:
                 payload["page_idx"] = params.get("page_idx")
         await channel.send_response(ws, req_id, ok=True, payload=payload)
+
+    async def _harmonyos_dev_init(ws, req_id, params, session_id):
+        if not isinstance(params, dict):
+            await channel.send_response(
+                ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST"
+            )
+            return
+        raw_operation_id = params.get("operationId")
+        operation_id = str(raw_operation_id or req_id).strip()
+        if (
+            not operation_id
+            or len(operation_id) > 128
+            or not all(char.isalnum() or char in "-_." for char in operation_id)
+        ):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="invalid HarmonyOS Dev Init operationId",
+                code="BAD_REQUEST",
+            )
+            return
+
+        task_key = (id(ws), operation_id)
+        existing = harmonyos_dev_init_tasks.get(task_key)
+        if existing is not None and not existing.done():
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=f"HarmonyOS Dev Init operation is already running: {operation_id}",
+                code="CONFLICT",
+            )
+            return
+
+        run_params = dict(params)
+        run_params.pop("operationId", None)
+        tracked_tasks = _get_harmonyos_dev_init_tasks(ws, create=True)
+        if tracked_tasks is None:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="websocket does not support HarmonyOS Dev Init task tracking",
+                code="INTERNAL_ERROR",
+            )
+            return
+
+        async def _run_harmonyos_dev_init_operation() -> None:
+            try:
+                from jiuwenswarm.gateway.channel_manager.tui.harmonyos_dev import (
+                    run_harmonyos_dev_init,
+                )
+
+                payload = await run_harmonyos_dev_init(run_params)
+                await channel.send_response(ws, req_id, ok=True, payload=payload)
+            except asyncio.CancelledError:
+                logger.info(
+                    "[harmonyos.dev_init] cancelled: operation_id=%s", operation_id
+                )
+                with contextlib.suppress(Exception):
+                    await channel.send_response(
+                        ws,
+                        req_id,
+                        ok=False,
+                        error="HarmonyOS Dev Init operation was cancelled",
+                        code="CANCELLED",
+                    )
+                raise
+            except Exception as exc:
+                logger.warning("[harmonyos.dev_init] failed: %s", exc)
+                with contextlib.suppress(Exception):
+                    await channel.send_response(
+                        ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR"
+                    )
+            finally:
+                current = asyncio.current_task()
+                if harmonyos_dev_init_tasks.get(task_key) is current:
+                    harmonyos_dev_init_tasks.pop(task_key, None)
+
+        task = asyncio.create_task(
+            _run_harmonyos_dev_init_operation(),
+            name=f"harmonyos-dev-init:{operation_id}",
+        )
+        harmonyos_dev_init_tasks[task_key] = task
+
+        def _forget_task(done_task: asyncio.Task[Any]) -> None:
+            if harmonyos_dev_init_tasks.get(task_key) is done_task:
+                harmonyos_dev_init_tasks.pop(task_key, None)
+
+        task.add_done_callback(_forget_task)
+        tracked_tasks.add(task)
+        task.add_done_callback(tracked_tasks.discard)
+
+    async def _harmonyos_dev_init_cancel(ws, req_id, params, session_id):
+        del session_id
+        if not isinstance(params, dict):
+            await channel.send_response(
+                ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST"
+            )
+            return
+        operation_id = str(params.get("operationId") or "").strip()
+        if (
+            not operation_id
+            or len(operation_id) > 128
+            or not all(char.isalnum() or char in "-_." for char in operation_id)
+        ):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="invalid HarmonyOS Dev Init operationId",
+                code="BAD_REQUEST",
+            )
+            return
+
+        task = harmonyos_dev_init_tasks.get((id(ws), operation_id))
+        if task is None or task.done():
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=True,
+                payload={
+                    "operationId": operation_id,
+                    "cancelRequested": False,
+                    "cancelled": bool(task and task.cancelled()),
+                },
+            )
+            return
+
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await channel.send_response(
+            ws,
+            req_id,
+            ok=True,
+            payload={
+                "operationId": operation_id,
+                "cancelRequested": True,
+                "cancelled": task.cancelled(),
+            },
+        )
+
+    async def _harmonyos_project_init(ws, req_id, params, session_id):
+        if not isinstance(params, dict):
+            await channel.send_response(
+                ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST"
+            )
+            return
+        try:
+            from jiuwenswarm.gateway.channel_manager.tui.harmonyos_project import (
+                HarmonyOSProjectError,
+            )
+            from jiuwenswarm.gateway.channel_manager.tui.harmonyos_dev import (
+                run_harmonyos_project_init,
+            )
+
+            payload = await run_harmonyos_project_init(params)
+            await channel.send_response(ws, req_id, ok=True, payload=payload)
+        except HarmonyOSProjectError as exc:
+            await channel.send_response(
+                ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST"
+            )
+        except Exception as exc:
+            logger.warning("[harmonyos.project_init] failed: %s", exc)
+            await channel.send_response(
+                ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR"
+            )
 
     async def _command_model(ws, req_id, params, session_id, user_id=None):
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
@@ -2754,6 +2898,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                     _model_name = resolve_env_vars(str(mcc.get("model_name", "")))
                     _api_key = resolve_env_vars(str(mcc.get("api_key", "")))
                     return {
+                        "index": i,
                         "name": _resolved_alias or _model_name,
                         "alias": _resolved_alias,
                         "model_name": _model_name,
@@ -2930,6 +3075,12 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             config = get_config()
             models = get_default_models(config)
             result = []
+            # 显式配置的上下文窗口上限（react.context_engine_config.context_window_tokens）
+            # 优先级高于按模型名解析，与 AgentServer 侧 ContextEngine 行为保持一致
+            cec = (config.get("react", {}) or {}).get("context_engine_config", {}) or {}
+            cw_override = cec.get("context_window_tokens")
+            if not (isinstance(cw_override, int) and cw_override > 0):
+                cw_override = None
             for entry in models:
                 mcc = entry.get("model_client_config", {})
                 mco = entry.get("model_config_obj", {})
@@ -2938,7 +3089,10 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 context_window_tokens = 0
                 try:
                     from openjiuwen.core.context_engine.context.context_utils import ContextUtils
-                    context_window_tokens = ContextUtils.resolve_context_max(model_name=model_name)
+                    context_window_tokens = ContextUtils.resolve_context_max(
+                        model_name=model_name,
+                        fallback_context_window_tokens=cw_override,
+                    )
                 except Exception:
                     logger.debug("Failed to resolve context_window_tokens for model %s", model_name, exc_info=True)
                 result.append({
@@ -3058,6 +3212,11 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
     channel.register_local_handler(path, "chat.user_answer", _chat_user_answer)
     channel.register_local_handler(path, "chat.swarmflow_reply", _chat_swarmflow_reply)
     channel.register_local_handler(path, "history.get", _history_get)
+    channel.register_local_handler(path, "harmonyos.dev_init", _harmonyos_dev_init)
+    channel.register_local_handler(
+        path, "harmonyos.dev_init_cancel", _harmonyos_dev_init_cancel
+    )
+    channel.register_local_handler(path, "harmonyos.project_init", _harmonyos_project_init)
     channel.register_local_handler(path, "command.model", _command_model)
 
     # ── Hooks RPC handlers ─────────────────────────────────────────────
@@ -3679,6 +3838,7 @@ def build_cli_route_binding(bind: CliRouteBindParams) -> GatewayRouteBinding:
         stale_session_keys: list[tuple[str, str]],
         stale_request_keys: list[tuple[str, str]] | None = None,
     ) -> None:
+        await _cancel_harmonyos_dev_init_tasks(_ws)
         if bool(getattr(_ws, "_jiuwenswarm_tui_user_exit", False)):
             return
         mh = bind.message_handler
@@ -3690,13 +3850,19 @@ def build_cli_route_binding(bind: CliRouteBindParams) -> GatewayRouteBinding:
         request_keys = stale_request_keys or []
         if not stale_session_keys and not request_keys:
             return
+        _ws_user_id = getattr(_ws, "_gateway_user_id", None)
         if hasattr(mh, "schedule_cancel_agent_sessions_on_disconnect"):
             await mh.schedule_cancel_agent_sessions_on_disconnect(
                 stale_session_keys,
                 stale_request_keys=request_keys,
+                user_id=_ws_user_id,
             )
             return
-        await mh.cancel_agent_sessions_on_disconnect(stale_session_keys, stale_request_keys=request_keys)
+        await mh.cancel_agent_sessions_on_disconnect(
+            stale_session_keys,
+            stale_request_keys=request_keys,
+            user_id=_ws_user_id,
+        )
 
     def _tui_session_bound(channel_id: str, session_id: str) -> None:
         mh = bind.message_handler

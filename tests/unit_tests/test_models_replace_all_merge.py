@@ -261,7 +261,7 @@ def test_origin_index_out_of_range_falls_back_to_new_entry():
     assert out[0]["model_client_config"]["api_base"] == "https://api.example.com"
 
 
-def test_reordering_two_entries_keeps_each_entrys_placeholders():
+def test_reordering_two_entries_keeps_each_entries_placeholders():
     """User drags entry B above A; no field values change. Both placeholders survive."""
     raw_a = {
         "model_client_config": {

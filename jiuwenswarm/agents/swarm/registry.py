@@ -92,7 +92,7 @@ TEAM_SKILL_CREATE = _evolution_rails.TEAM_SKILL_CREATE
 MEMBER_SKILL_EVOLUTION = _evolution_rails.MEMBER_SKILL_EVOLUTION
 EVOLUTION_INTERRUPT = _evolution_rails.EVOLUTION_INTERRUPT
 
-# Code-mode (code.team / team.plan) swarm-owned rail provider names.
+# Code-profile (code.team / team.plan.code) swarm-owned rail provider names.
 CODE_EXTRA_TOOLS = _tools.CODE_EXTRA_TOOLS
 CODE_RUNTIME_PROMPT = _code_rails.CODE_RUNTIME_PROMPT
 CODE_PROJECT_MEMORY = _code_rails.CODE_PROJECT_MEMORY
@@ -119,6 +119,7 @@ SWARM_BROWSER_AGENT = _code_subagents.SWARM_BROWSER_AGENT
 RESPONSE_PROMPT = _builtin_rails.RESPONSE_PROMPT
 STREAM_EVENT = _builtin_rails.STREAM_EVENT
 AVATAR_PROMPT = _builtin_rails.AVATAR_PROMPT
+MULTIMODAL_IMAGE = _builtin_rails.MULTIMODAL_IMAGE
 
 # Generic rails provided + registered by openjiuwen (referenced by bare name).
 SYS_OPERATION = _OJ_SYS_OPERATION
@@ -219,6 +220,7 @@ __all__ = [
     "RESPONSE_PROMPT",
     "SYS_OPERATION",
     "STREAM_EVENT",
+    "MULTIMODAL_IMAGE",
     "TASK_PLANNING",
     "SECURITY",
     "HEARTBEAT",

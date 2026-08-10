@@ -235,6 +235,151 @@ class TestPortAvailability:
         # Small race window, but in practice the port is free immediately.
         assert is_port_available("127.0.0.1", port) is True
 
+    @staticmethod
+    def test_is_port_available_detects_ipv6_only_listener():
+        """IPv6-only listeners must count as occupied for 127.0.0.1 probes.
+
+        Vite on Windows often binds ``[::1]:5173`` only. An IPv4-only bind
+        probe would miss it, skip jiuwenswarm-start's port-group fallback, and
+        then Vite ``strictPort: true`` fails with "Port 5173 is already in use".
+        """
+        import socket as _socket
+        import pytest
+
+        s = None
+        try:
+            try:
+                s = _socket.socket(_socket.AF_INET6, _socket.SOCK_STREAM)
+                # Restrict to IPv6-only so we do not also claim IPv4 via dualstack.
+                if hasattr(_socket, "IPV6_V6ONLY"):
+                    s.setsockopt(_socket.IPPROTO_IPV6, _socket.IPV6_V6ONLY, 1)
+                s.bind(("::1", 0))
+                s.listen(1)
+            except OSError:
+                # Must close before skip: an unbound AF_INET6 socket still
+                # triggers ResourceWarning / PytestUnraisableExceptionWarning
+                # on the next test's setup (seen on Linux CI without ::1).
+                if s is not None:
+                    s.close()
+                    s = None
+                pytest.skip("IPv6 loopback unavailable on this host")
+            port = s.getsockname()[1]
+            assert is_port_available("127.0.0.1", port) is False
+        finally:
+            if s is not None:
+                s.close()
+
+    @staticmethod
+    def test_is_port_available_ignores_lingering_connection_sockets():
+        """A port held only by half-closed sockets (no listener) is available.
+
+        Reproduces the real trigger: the services are stopped while a browser
+        tab still holds the Web UI open. The kernel closes the server side, but
+        those sockets sit in FIN_WAIT_2 (local port = the service port) for as
+        long as the tab keeps its end open. A plain bind() then fails, while the
+        real services - which all set SO_REUSEADDR - would bind fine. Reporting
+        such a port as occupied made jiuwenswarm-start shift the whole port
+        group (5173 -> 6173) for no reason.
+        """
+        import socket as _socket
+
+        listener = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        listener.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+        listener.listen(8)
+
+        # A browser holding the page open.
+        client = _socket.create_connection(("127.0.0.1", port))
+        conn, _addr = listener.accept()
+
+        # The service exits: listener gone, server side actively closed. The
+        # client end stays open, so the server side parks in FIN_WAIT_2.
+        listener.close()
+        conn.close()
+
+        probe = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        try:
+            # Precondition: without SO_REUSEADDR the port really is unbindable.
+            # If this ever stops holding, the test below proves nothing.
+            with pytest.raises(OSError):
+                probe.bind(("127.0.0.1", port))
+                probe.listen(1)
+        finally:
+            probe.close()
+
+        try:
+            assert is_port_available("127.0.0.1", port) is True
+        finally:
+            client.close()
+
+    @staticmethod
+    def test_reuseaddr_probe_still_refuses_a_live_listener():
+        """The SO_REUSEADDR retry must not mask a real listener.
+
+        This is the guard that keeps zombie-listener detection working: a stuck
+        listener holds a LISTENING socket, and SO_REUSEADDR does not allow
+        binding over one on POSIX.
+        """
+        import socket as _socket
+
+        from jiuwenswarm.instance_manager.config import _reuseaddr_bind_probe
+
+        s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.listen(1)
+        try:
+            assert _reuseaddr_bind_probe("127.0.0.1", port, _socket.AF_INET) is False
+        finally:
+            s.close()
+
+    @staticmethod
+    def test_reuseaddr_retry_is_disabled_on_windows(monkeypatch):
+        """Windows SO_REUSEADDR allows binding over a live listener - never retry."""
+        import socket as _socket
+
+        from jiuwenswarm.instance_manager import config as config_mod
+
+        called = {"count": 0}
+
+        def _should_not_run(*_args, **_kwargs) -> bool:
+            called["count"] += 1
+            return True
+
+        monkeypatch.setattr(config_mod, "_REUSEADDR_PROBE_SUPPORTED", False)
+        monkeypatch.setattr(config_mod, "_reuseaddr_bind_probe", _should_not_run)
+
+        s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.listen(1)
+        try:
+            assert config_mod._bind_listen_probe("127.0.0.1", port, _socket.AF_INET) is False
+        finally:
+            s.close()
+
+        assert called["count"] == 0
+
+    @staticmethod
+    def test_family_unavailable_errnos_are_platform_correct():
+        """EADDRNOTAVAIL etc. must come from errno, not hardcoded Linux values.
+
+        macOS uses 49 for EADDRNOTAVAIL where Linux uses 99. Hardcoding the
+        Linux set made a probe against a disabled IPv6 stack read as "port
+        occupied" on macOS, which reported every port as taken.
+        """
+        import errno as _errno
+
+        from jiuwenswarm.instance_manager.config import _FAMILY_UNAVAILABLE_ERRNOS
+
+        assert _errno.EADDRNOTAVAIL in _FAMILY_UNAVAILABLE_ERRNOS
+        assert _errno.EAFNOSUPPORT in _FAMILY_UNAVAILABLE_ERRNOS
+        assert _errno.EPROTONOSUPPORT in _FAMILY_UNAVAILABLE_ERRNOS
+        # A port being taken must never be mistaken for an unusable family.
+        assert _errno.EADDRINUSE not in _FAMILY_UNAVAILABLE_ERRNOS
+
 
 class TestInstanceConfig:
     """Test InstanceConfig dataclass."""

@@ -27,29 +27,40 @@ import { SubtaskProgress } from './SubtaskProgress';
 import { InlineQuestionCard } from './InlineQuestionCard';
 import { InteractionSlot } from '../InteractionSlot';
 import { GoalBar } from '../GoalBar';
-import { HistoryPagerBar } from './HistoryPagerBar';
 import { HarnessProgressBar } from './HarnessProgressBar';
 import { AgentTeamActivityCard } from './TeamEventGroupDisplay';
 import { isTeamActivityMessage, parseTeamEventMessage } from './teamEventUtils';
-import { isTeamLeaderMember } from '../../utils/teamMemberAvatar';
+import { isTeamLeaderMember, type TeamMemberIdentity } from '../../utils/teamMemberAvatar';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import welcomeBanner from '../../assets/home-banner.svg';
 import './ChatPanel.css';
 import { CodeChangesCard } from '../../features/code-mode/CodeChangesCard';
 import { useCodeTurnDiffHistory } from '../../features/code-mode/useCodeTurnDiffHistory';
+import { turnDiffKey } from '../../features/code-mode/turnChangeState';
 import type { CodeReviewTarget } from '../../features/code-mode/types';
+import {
+  canLoadOlderHistory,
+  shouldShowHistoryRetry,
+} from '../../features/historyPagination';
 
 export interface ChatHistoryPagerProps {
   loadedPages: number;
   totalPages: number;
   loadingMore: boolean;
   prepending?: boolean;
+  retryAvailable?: boolean;
   onLoadMore: () => void | Promise<void>;
 }
 
 interface ChatPanelProps {
   onSendMessage: (content: string, mediaItems?: MediaItem[]) => void;
   onPersistMedia: (content: string, mediaItems: MediaItem[]) => Promise<{
+    content?: string;
+    query?: string;
+    media_items?: Record<string, unknown>[];
+    files?: Record<string, unknown>;
+  }>;
+  onPersistDocuments: (content: string, mediaItems: MediaItem[]) => Promise<{
     content?: string;
     query?: string;
     media_items?: Record<string, unknown>[];
@@ -90,19 +101,9 @@ interface ChatPanelProps {
   onDrainTaskQueueIfIdle?: (sessionId: string) => void;
 }
 
-function ThinkingIndicator() {
-  return (
-    <div className="flex justify-start animate-rise">
-      <div className="chat-bubble assistant chat-reading-indicator">
-        <div className="chat-reading-indicator__dots">
-          <span />
-          <span />
-          <span />
-        </div>
-      </div>
-    </div>
-  );
-}
+// 邀请指令只对 human_agent 成员存在（见 upsertHumanShareCommandFromEvent 的
+// mode === 'human' 闸门），所以这两处直接断言身份，不依赖成员名册是否已到齐。
+const HUMAN_SHARE_IDENTITY: TeamMemberIdentity = { role: 'human_agent' };
 
 function SuggestionCard({ text, onClick }: { text: string; onClick: () => void }) {
   return (
@@ -168,7 +169,7 @@ function ActiveTeamGroupEntry({ isProcessing, teamAreaExpanded }: { isProcessing
 }
 
 /** 单 Agent 模式的消息队列卡片，展示在输入框上方 */
-function AgentActivityCard({ isProcessing: _isProcessing, onSendTask }: { isProcessing: boolean; onSendTask?: (content: string) => void }) {
+function AgentActivityCard({ isProcessing: _isProcessing, onSendTask }: { isProcessing: boolean; onSendTask?: (content: string, mediaItems?: MediaItem[]) => void }) {
   const [expanded, setExpanded] = useState(true);
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
@@ -205,7 +206,7 @@ function AgentActivityCard({ isProcessing: _isProcessing, onSendTask }: { isProc
     const nextTask = runtime?.taskQueue[0];
     if (nextTask) {
       removeFromTaskQueue(sid, nextTask.id);
-      onSendTask?.(nextTask.content);
+      onSendTask?.(nextTask.content, nextTask.mediaItems);
     }
   };
 
@@ -217,23 +218,41 @@ function AgentActivityCard({ isProcessing: _isProcessing, onSendTask }: { isProc
     }
   };
 
-  const handleEditTask = (e: React.MouseEvent, taskId: string, content: string) => {
+  const handleEditTask = (
+    e: React.MouseEvent,
+    taskId: string,
+    content: string,
+    mediaItemCount = 0,
+  ) => {
     e.stopPropagation();
     const sid = useChatStore.getState().activeSessionId;
     if (sid) {
+      // Editing restores only the text into the input; attachments cannot follow
+      // and will be removed together with the task — confirm first.
+      if (
+        mediaItemCount > 0 &&
+        !window.confirm(t('chat.editTaskDropAttachments', { count: mediaItemCount }))
+      ) {
+        return;
+      }
       setInputValue(sid, content);
       removeFromTaskQueue(sid, taskId);
       window.dispatchEvent(new CustomEvent('chat-input-sync', { detail: { sessionId: sid, value: content } }));
     }
   };
 
-  const handleSendTask = (e: React.MouseEvent, taskId: string, content: string) => {
+  const handleSendTask = (
+    e: React.MouseEvent,
+    taskId: string,
+    content: string,
+    mediaItems?: MediaItem[],
+  ) => {
     e.stopPropagation();
     const sid = useChatStore.getState().activeSessionId;
     if (sid) {
       removeFromTaskQueue(sid, taskId);
     }
-    onSendTask?.(content);
+    onSendTask?.(content, mediaItems);
   };
 
   const handleDragStart = (index: number) => {
@@ -330,13 +349,31 @@ function AgentActivityCard({ isProcessing: _isProcessing, onSendTask }: { isProc
                   <span className="team-event-group-row__member" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {task.content}
                   </span>
+                  {(task.mediaItems?.length ?? 0) > 0 && (
+                    <span
+                      title={(task.mediaItems ?? [])
+                        .map((item) => item.filename)
+                        .filter(Boolean)
+                        .join('\n')}
+                      style={{
+                        flexShrink: 0,
+                        fontSize: '12px',
+                        color: 'var(--color-text-secondary)',
+                        background: 'var(--color-surface-hover)',
+                        borderRadius: '6px',
+                        padding: '0 6px',
+                      }}
+                    >
+                      📎{task.mediaItems?.length}
+                    </span>
+                  )}
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexShrink: 0 }}>
                   <button
                     type="button"
                     className="chat-input-task-action chat-input-task-action--send"
                     title={t('chat.sendTask')}
-                    onClick={(e) => handleSendTask(e, task.id, task.content)}
+                    onClick={(e) => handleSendTask(e, task.id, task.content, task.mediaItems)}
                   >
                     <img src={loadSendIcon} alt="" className="w-3.5 h-3.5" />
                   </button>
@@ -344,7 +381,7 @@ function AgentActivityCard({ isProcessing: _isProcessing, onSendTask }: { isProc
                     type="button"
                     className="chat-input-task-action chat-input-task-action--edit"
                     title={t('chat.editTask')}
-                    onClick={(e) => handleEditTask(e, task.id, task.content)}
+                    onClick={(e) => handleEditTask(e, task.id, task.content, task.mediaItems?.length ?? 0)}
                   >
                     <img src={editIcon} alt="" className="w-3 h-3" />
                   </button>
@@ -520,7 +557,11 @@ function HumanSharePanel({
             return (
               <section key={`${command.sessionId}:${command.memberName}`} className="human-share-modal__item">
                 <div className="human-share-modal__member">
-                  <TeamMemberAvatar member={command.memberName} className="human-share-modal__avatar" />
+                  <TeamMemberAvatar
+                    member={command.memberName}
+                    identity={HUMAN_SHARE_IDENTITY}
+                    className="human-share-modal__avatar"
+                  />
                   <div className="human-share-modal__member-copy">
                     <div className="human-share-modal__member-name">{displayName}</div>
                     {displayName !== command.memberName && (
@@ -600,7 +641,10 @@ function HumanShareCard({
   );
   const joinedCount = sortedCommands.filter((command) => command.status === 'joined').length;
   const pendingCount = sortedCommands.filter((command) => command.status !== 'joined').length;
-  const previewMembers = sortedCommands.slice(0, 3).map((command) => command.displayName || command.memberName);
+  // 保留整条 command：头像要按 member_id 解析（人类成员才认得出人类头像，
+  // 传展示名会查不到名册、退回哈希插画，还会和弹窗里同一个人对不上），
+  // 名字才用 displayName。
+  const previewCommands = sortedCommands.slice(0, 3);
 
   if (sortedCommands.length === 0) {
     return null;
@@ -621,14 +665,18 @@ function HumanShareCard({
           })}
         </div>
         <div className="human-share-card__members">
-          {previewMembers.map((member) => (
-            <span key={member} className="human-share-card__member-pill">
-              <TeamMemberAvatar member={member} className="human-share-card__avatar" />
-              <span>{member}</span>
+          {previewCommands.map((command) => (
+            <span key={command.memberName} className="human-share-card__member-pill">
+              <TeamMemberAvatar
+                member={command.memberName}
+                identity={HUMAN_SHARE_IDENTITY}
+                className="human-share-card__avatar"
+              />
+              <span>{command.displayName || command.memberName}</span>
             </span>
           ))}
-          {sortedCommands.length > previewMembers.length ? (
-            <span className="human-share-card__more">+{sortedCommands.length - previewMembers.length}</span>
+          {sortedCommands.length > previewCommands.length ? (
+            <span className="human-share-card__more">+{sortedCommands.length - previewCommands.length}</span>
           ) : null}
         </div>
       </div>
@@ -660,6 +708,7 @@ function scrollToBottom(el: HTMLDivElement): void {
 export function ChatPanel({
   onSendMessage,
   onPersistMedia,
+  onPersistDocuments,
   onInterrupt,
   onCancel,
   onSwitchMode,
@@ -714,21 +763,24 @@ export function ChatPanel({
   const historyTotalPages = historyPager?.totalPages ?? 0;
   const historyLoadingMore = historyPager?.loadingMore ?? false;
   const historyPrepending = historyPager?.prepending ?? false;
+  const historyRetryAvailable = historyPager?.retryAvailable ?? false;
   const historyOnLoadMore = historyPager?.onLoadMore;
   const hasHistoryPager = Boolean(historyPager);
-  const canLoadOlderHistory = Boolean(
-    historyOnLoadMore &&
-    historyLoadedPages < historyTotalPages &&
-    !historyLoadingMore &&
-    !historyPrepending
+  const historyLoadMoreState = {
+    loadedPages: historyLoadedPages,
+    totalPages: historyTotalPages,
+    loadingMore: historyLoadingMore,
+    prepending: historyPrepending,
+  };
+  const canRequestOlderHistory = Boolean(
+    historyOnLoadMore && canLoadOlderHistory(historyLoadMoreState)
   );
-  const showHistoryPager = Boolean(
-    !isHistoryRestoring &&
-    historyPager && (
-      historyLoadingMore ||
-      historyLoadedPages < historyTotalPages ||
-      !hasTimelineContent
-    )
+  const showHistoryRetry = Boolean(
+    historyOnLoadMore &&
+      shouldShowHistoryRetry({
+        ...historyLoadMoreState,
+        retryAvailable: historyRetryAvailable,
+      })
   );
   const chatContentClassName = hasConversation
     ? `chat-content${mode === 'team' ? ' chat-content--team' : ''}`
@@ -746,6 +798,12 @@ export function ChatPanel({
     turnsByMessageId: codeTurnsByMessageId,
     loading: codeTurnHistoryLoading,
     reload: reloadCodeTurnHistory,
+    latestTurnKey: latestCodeTurnKey,
+    turnChangeOperation,
+    turnChangeError,
+    turnChangeNotice,
+    discardLatestTurn,
+    redoLatestTurn,
   } = useCodeTurnDiffHistory({
     project: sessionProject,
     sessionId: activeSessionId,
@@ -755,16 +813,37 @@ export function ChatPanel({
   const renderCodeChangesAfterMessage = useCallback((message: Message) => {
     const turns = codeTurnsByMessageId.get(message.id);
     if (!turns?.length) return null;
-    return turns.map(turn => (
-      <CodeChangesCard
-        key={turn.change_set_id || `turn-${turn.turn_index}`}
-        diff={turn}
-        refreshing={codeTurnHistoryLoading}
-        onRefresh={() => void reloadCodeTurnHistory()}
-        onReview={target => onOpenCodeReview?.(target)}
-      />
-    ));
-  }, [codeTurnHistoryLoading, codeTurnsByMessageId, onOpenCodeReview, reloadCodeTurnHistory]);
+    return turns.map(turn => {
+      const turnKey = turnDiffKey(turn);
+      const isLatest = turnKey === latestCodeTurnKey;
+      return (
+        <CodeChangesCard
+          key={turnKey}
+          diff={turn}
+          refreshing={codeTurnHistoryLoading}
+          isLatest={isLatest}
+          isProcessing={isProcessing}
+          operation={isLatest ? turnChangeOperation?.action ?? null : null}
+          operationError={turnChangeError?.turnKey === turnKey ? turnChangeError.message : null}
+          onRefresh={() => void reloadCodeTurnHistory()}
+          onReview={target => onOpenCodeReview?.(target)}
+          onDiscard={() => void discardLatestTurn()}
+          onRedo={() => void redoLatestTurn()}
+        />
+      );
+    });
+  }, [
+    codeTurnHistoryLoading,
+    codeTurnsByMessageId,
+    discardLatestTurn,
+    isProcessing,
+    latestCodeTurnKey,
+    onOpenCodeReview,
+    redoLatestTurn,
+    reloadCodeTurnHistory,
+    turnChangeError,
+    turnChangeOperation,
+  ]);
 
   // 跟踪用户是否正在查看历史消息（不在底部）
   const userScrolledUpRef = useRef(false);
@@ -819,10 +898,10 @@ export function ChatPanel({
     rememberSessionScrollTop(currentSessionId, el);
 
     // 当滚动到顶部且有更多历史消息时，加载更多
-    if (el.scrollTop <= LOAD_OLDER_THRESHOLD_PX && canLoadOlderHistory && historyOnLoadMore) {
+    if (el.scrollTop <= LOAD_OLDER_THRESHOLD_PX && canRequestOlderHistory && historyOnLoadMore) {
       void historyOnLoadMore();
     }
-  }, [activeSessionId, canLoadOlderHistory, historyOnLoadMore, rememberSessionScrollTop]);
+  }, [activeSessionId, canRequestOlderHistory, historyOnLoadMore, rememberSessionScrollTop]);
 
   useEffect(() => {
     const el = scrollContainerRef.current;
@@ -854,14 +933,14 @@ export function ChatPanel({
     if (e.deltaY < 0) {
       stickToBottomUntilStableRef.current = false;
     }
-    if (e.deltaY < 0 && canLoadOlderHistory && historyOnLoadMore) {
+    if (e.deltaY < 0 && canRequestOlderHistory && historyOnLoadMore) {
       // 检查是否已经在顶部（没有滚动条时 scrollTop 始终为 0）
       const el = scrollContainerRef.current;
       if (el && el.scrollTop <= LOAD_OLDER_THRESHOLD_PX) {
         void historyOnLoadMore();
       }
     }
-  }, [canLoadOlderHistory, historyOnLoadMore]);
+  }, [canRequestOlderHistory, historyOnLoadMore]);
 
   // 监听浏览器 tab 可见性变化：隐藏时记录位置，恢复可见时抑制自动滚底
   useEffect(() => {
@@ -999,6 +1078,12 @@ export function ChatPanel({
   );
   return (
     <div className="chat-panel-shell flex flex-col h-full" data-testid="chat-panel">
+      {turnChangeNotice ? (
+        <div className="code-turn-change-toast" role="status" aria-live="polite">
+          <CheckCircle2 size={17} aria-hidden="true" />
+          <span>{turnChangeNotice}</span>
+        </div>
+      ) : null}
       {shouldShowChatHeader && (
         <div className="chat-panel-header">
           <div className="chat-panel-header__meta">
@@ -1078,13 +1163,16 @@ export function ChatPanel({
         <div className={chatContentClassName}>
           {hasConversation ? (
             <>
-              {showHistoryPager && historyPager && (
-                <HistoryPagerBar
-                  loadedPages={historyPager.loadedPages}
-                  totalPages={historyPager.totalPages}
-                  loadingMore={historyPager.loadingMore}
-                  onLoadMore={historyPager.onLoadMore}
-                />
+              {showHistoryRetry && historyOnLoadMore && (
+                <div className="flex justify-center pb-3">
+                  <button
+                    type="button"
+                    className="btn !px-3 !py-1.5 text-xs"
+                    onClick={() => void historyOnLoadMore()}
+                  >
+                    {t('chat.historyLoadMore')}
+                  </button>
+                </div>
               )}
               {hasTimelineContent ? (
                 <>
@@ -1098,20 +1186,18 @@ export function ChatPanel({
                   <SubtaskProgress />
                   {/* 内联审批卡片（演进审批 & 权限审批共用） */}
                   <InlineQuestionCard onSubmit={onUserAnswer} />
-                  {/* 思考中指示器 */}
-                  {isThinking && <ThinkingIndicator />}
                   <ContextCompressionLines
                     runtime={contextCompressionRuntime}
                     summary={contextCompressionSummary}
                   />
                 </>
-              ) : (
-                <div className="flex items-center justify-center h-32">
-                  <div className="text-text-muted text-sm">
-                    {t('connection.loadingConfig')}
+              ) : isHistoryRestoring ? (
+                <div className="flex h-32 items-center justify-center" role="status" aria-live="polite">
+                  <div className="text-sm text-text-muted">
+                    {t('chat.historyLoading')}
                   </div>
                 </div>
-              )}
+              ) : null}
             </>
           ) : (
             <div className="chat-welcome">
@@ -1125,6 +1211,7 @@ export function ChatPanel({
                 <InputArea
                   onSubmit={handleSendMessage}
                   onPersistMedia={onPersistMedia}
+                  onPersistDocuments={onPersistDocuments}
                   onInterrupt={onInterrupt}
                   onCancel={onCancel}
                   onSwitchMode={onSwitchMode}
@@ -1165,6 +1252,7 @@ export function ChatPanel({
           <InputArea
             onSubmit={handleSendMessage}
             onPersistMedia={onPersistMedia}
+            onPersistDocuments={onPersistDocuments}
             onInterrupt={onInterrupt}
             onCancel={onCancel}
             onSwitchMode={onSwitchMode}

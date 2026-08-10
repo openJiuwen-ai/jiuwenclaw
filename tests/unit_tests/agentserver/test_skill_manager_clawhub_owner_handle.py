@@ -75,6 +75,17 @@ class _FakeDownloadClient:
         return self._captured_params
 
 
+def _zip_bytes(entries: dict[str, str | bytes]) -> bytes:
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, content in entries.items():
+            zf.writestr(name, content)
+    return buf.getvalue()
+
+
 @pytest.mark.asyncio
 async def test_clawhub_search_returns_owner_handle(tmp_path, monkeypatch):
     manager = SkillManager(workspace_dir=str(tmp_path / "workspace"))
@@ -196,6 +207,62 @@ async def test_clawhub_download_empty_owner_handle_omits_param(tmp_path, monkeyp
     captured = fake_client.get_captured_params()
     assert captured is not None
     assert "ownerHandle" not in captured
+
+
+@pytest.mark.asyncio
+async def test_clawhub_download_records_owner_qualified_origin(tmp_path, monkeypatch):
+    manager = SkillManager(workspace_dir=str(tmp_path / "workspace"))
+    await manager.handle_skills_clawhub_set_token({"token": "test-token"})
+
+    zip_content = _zip_bytes(
+        {
+            "weather/SKILL.md": "---\nname: weather\nversion: 1.0.0\n---\nbody\n",
+        }
+    )
+    fake_client = _FakeDownloadClient(status_code=200, content=zip_content)
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.skill.skill_manager.httpx.AsyncClient",
+        lambda timeout: fake_client,
+    )
+
+    result = await manager.handle_skills_clawhub_download(
+        {"slug": "weather", "owner_handle": "openclaw", "display_name": "Weather"}
+    )
+
+    assert result["success"] is True
+    # 内部标识名须与磁盘解析出的规范名一致（此处等于 slug），
+    # 否则会被自动扫描逻辑当作"未登记的本地技能"重复注册一条幽灵记录。
+    assert result["skill"]["name"] == "weather"
+    assert result["skill"]["display_name"] == "Weather"
+    local = manager.get_local_skills()
+    assert any(
+        item.get("origin") == "clawhub:openclaw/weather" and item.get("name") == "weather"
+        for item in local
+    )
+    assert any(item.get("display_name") == "Weather" for item in local)
+
+
+@pytest.mark.asyncio
+async def test_clawhub_download_without_owner_keeps_slug_origin(tmp_path, monkeypatch):
+    manager = SkillManager(workspace_dir=str(tmp_path / "workspace"))
+    await manager.handle_skills_clawhub_set_token({"token": "test-token"})
+
+    zip_content = _zip_bytes(
+        {
+            "unique-skill/SKILL.md": "---\nname: unique-skill\nversion: 1.0.0\n---\nbody\n",
+        }
+    )
+    fake_client = _FakeDownloadClient(status_code=200, content=zip_content)
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.skill.skill_manager.httpx.AsyncClient",
+        lambda timeout: fake_client,
+    )
+
+    result = await manager.handle_skills_clawhub_download({"slug": "unique-skill"})
+
+    assert result["success"] is True
+    local = manager.get_local_skills()
+    assert any(item.get("origin") == "clawhub:unique-skill" for item in local)
 
 
 @pytest.mark.asyncio

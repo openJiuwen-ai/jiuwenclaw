@@ -2,12 +2,12 @@
 
 from jiuwenswarm.extensions.agentos.agentos_router.agent_manager import (
     BUILTIN_AGENT_TYPE,
+    AgentCreateFailed,
     AgentCreatingTimeout,
     AgentDeleted,
     AgentManager,
     AgentRuntime,
-    SUPPORTED_AGENT_TYPES,
-    THIRD_PARTY_AGENT_TYPES,
+    is_third_party_agent_type,
     normalize_agent_key_fields,
 )
 from jiuwenswarm.extensions.agentos.agentos_router.extension import AgentOSRouter
@@ -36,6 +36,7 @@ from jiuwenswarm.extensions.agentos.agentos_router.router_client import AgentOSR
 from jiuwenswarm.extensions.agentos.agentos_router.third_agent import AgentOSThirdAgent
 
 __all__ = [
+    "AgentCreateFailed",
     "AgentCreatingTimeout",
     "AgentInfo",
     "AgentManager",
@@ -58,9 +59,8 @@ __all__ = [
     "RegistryHTTPError",
     "RegistryNotFoundError",
     "RegistryValidationError",
-    "SUPPORTED_AGENT_TYPES",
-    "THIRD_PARTY_AGENT_TYPES",
     "instance_service_id",
+    "is_third_party_agent_type",
     "normalize_agent_key_fields",
     "resolve_instance_kind",
 ]

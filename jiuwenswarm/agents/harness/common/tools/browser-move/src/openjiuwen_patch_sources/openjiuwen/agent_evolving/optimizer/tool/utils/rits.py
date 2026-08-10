@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import asyncio
+import os
 from tenacity import retry, stop_after_attempt, wait_random_exponential
 
 from openjiuwen.core.foundation.llm import (
@@ -20,11 +21,11 @@ def get_rits_response(*args, **kwargs):
 
 @retry(wait=wait_random_exponential(min=1, max=5), stop=stop_after_attempt(2), reraise=True)
 def rits_response(
-        model_id: str, 
-        prompt: str, 
-        llm_api_key: str, 
-        verify_fn=None, 
-        verbose: bool = False,
+        model_id: str,
+        prompt: str,
+        llm_api_key: str,
+        verify_fn=None,
+        verify_ssl: bool = True,
         **kwargs
 ):
     model_config = ModelRequestConfig(
@@ -33,9 +34,11 @@ def rits_response(
     )
     model_client = ModelClientConfig(
         client_provider="OpenAI",
-        api_base="https://api.openai.com/v1",
+        # A present-but-blank RITS_API_URL must fall back to the official
+        # endpoint: the shipped .env template declares it empty on purpose.
+        api_base=os.environ.get("RITS_API_URL", "").strip() or "https://api.openai.com/v1",
         api_key=llm_api_key,
-        verify_ssl=False
+        verify_ssl=verify_ssl
     )
     client = OpenAIModelClient(
         model_config=model_config,

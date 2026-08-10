@@ -153,23 +153,20 @@ class SSHProxy:
             process.exit(1)
             return
 
-        # Interactive shell only; reject remote-command (exec) requests.
+        # Interactive shell, or exec command routed by its first token.
         command = (process.command or "").strip() or None
         if command:
-            logger.warning(
-                "[SSHChannel] exec request denied (shell only): user=%s cmd=%s",
-                username,
+            logger.info(
+                "[SSHChannel] exec accepted: cmd=%s",
                 command,
             )
-            process.stdout.write(b"SSH channel supports interactive shell only\r\n")
-            process.exit(1)
-            return
 
-        session_id = f"ssh_{username}_{uuid.uuid4().hex[:8]}"
-        metadata = {
+        session_id = f"ssh_{uuid.uuid4().hex[:12]}"
+        metadata: dict[str, Any] = {
             "username": username,
             "client_addr": client_addr,
             "ssh_session_id": session_id,
+            **({"command": command} if command else {}),
         }
 
         try:
@@ -185,12 +182,12 @@ class SSHProxy:
                 process.exit(exit_code)
             except Exception:  # noqa: BLE001 - may already be closed by southbound teardown
                 logger.debug(
-                    "[SSHChannel] process.exit after relay done failed for %s",
-                    username,
+                    "[SSHChannel] process.exit after relay done failed: session=%s",
+                    session_id,
                     exc_info=True,
                 )
         except asyncssh.Error as exc:
-            logger.error("[SSHChannel] session error for %s: %s", username, exc)
+            logger.error("[SSHChannel] session error: session=%s error=%s", session_id, exc)
             try:
                 process.stdout.write(f"Proxy error: {exc}\n".encode())
             except Exception:  # noqa: BLE001
@@ -200,7 +197,7 @@ class SSHProxy:
             except Exception:  # noqa: BLE001
                 pass
         except Exception:
-            logger.exception("[SSHChannel] SSH session failed for %s", username)
+            logger.exception("[SSHChannel] SSH session failed: session=%s", session_id)
             try:
                 process.exit(1)
             except Exception:  # noqa: BLE001

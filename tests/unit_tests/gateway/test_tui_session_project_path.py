@@ -149,11 +149,11 @@ class TestInitSessionMetadataChannelMetadata:
 
 
 @pytest.mark.asyncio
-async def test_session_create_seeds_channel_metadata_for_resume(
+async def test_session_create_uses_server_allocated_project_path_for_resume(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """/clear 等价路径：create 后 metadata 含 channel_metadata，current-dir 可匹配。"""
+    """AgentServer-owned create keeps a top-level project path usable by /resume."""
     sessions_root = tmp_path / "sessions"
     sessions_root.mkdir()
     project = tmp_path / "workspace"
@@ -176,34 +176,48 @@ async def test_session_create_seeds_channel_metadata_for_resume(
         lambda _path: "HEAD",
     )
 
-    fake_project = SimpleNamespace(
-        project_id="proj_code_1",
-        project_dir=project_dir,
-        work_mode="code",
-    )
+    class _CreateAgentClient:
+        def __init__(self) -> None:
+            self.requests = []
 
-    monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.project_store.find_or_create_code_project_for_tui_params",
-        lambda _params: fake_project,
-    )
-    monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle.is_kv_cache_affinity_enabled",
-        lambda: False,
-    )
+        async def send_request(self, env):
+            self.requests.append(env)
+            from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata
+
+            init_session_metadata(
+                session_id="tui_6a601aa3_f4ed87",
+                channel_id="tui",
+                project_dir=env.params["project_dir"],
+                project_id="proj_code_1",
+                work_mode="code",
+                mode=env.params["mode"],
+            )
+            return SimpleNamespace(
+                ok=True,
+                payload={
+                    "session_id": "tui_6a601aa3_f4ed87",
+                    "projectId": "proj_code_1",
+                    "projectDir": env.params["project_dir"],
+                    "workMode": "code",
+                    "prewarm_hit": True,
+                    "prewarm_status": "ready",
+                },
+            )
 
     channel = _TuiChannel()
+    agent_client = _CreateAgentClient()
     register_cli_handlers(
-        CliHandlersBindParams(channel=channel, agent_client=None, path="/tui")
+        CliHandlersBindParams(channel=channel, agent_client=agent_client, path="/tui")
     )
 
     await channel.local_handlers["/tui"]["session.create"](
         object(),
         "req-create",
         {
-            "session_id": "tui_6a601aa3_f4ed87",
             "cwd": project_dir,
             "project_dir": project_dir,
             "mode": "code.normal",
+            "create_token": "tui-project-path-create",
         },
         "previous",
     )
@@ -212,8 +226,9 @@ async def test_session_create_seeds_channel_metadata_for_resume(
     meta_path = sessions_root / "tui_6a601aa3_f4ed87" / "metadata.json"
     data = json.loads(meta_path.read_text(encoding="utf-8"))
     assert data["project_dir"] == project_dir
-    assert data["channel_metadata"]["project_dir"] == project_dir
-    assert data["channel_metadata"]["cwd"] == project_dir
+    assert agent_client.requests[0].method == "session.create"
+    assert agent_client.requests[0].params["cwd"] == project_dir
+    assert "session_id" not in agent_client.requests[0].params
 
     # 模拟 /resume current-dir：刚创建会话应命中（排除当前 sid 的逻辑由 list handler 负责）
     assert tui_session_matches_project_dir(data, project_dir) is True

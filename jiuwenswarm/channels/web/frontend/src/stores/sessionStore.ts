@@ -65,6 +65,33 @@ function normalizeSession(session: Session): Session {
   };
 }
 
+/**
+ * 按 `alias || model_name` 在可选模型列表里解析出"实际生效"的模型条目。
+ *
+ * 背景（bug003）：会话记录的 `selectedModelName` 只是一个名字字符串，模型改名/改别名后
+ * 这个字符串可能不再对应任何可选模型。之前 UI 显示（`InputArea.tsx` 的 `ModelSelector`）
+ * 会做兜底匹配，但实际发给后端的 `getEffectiveModelName` 没有做同样的兜底，导致"显示值"
+ * 和"实际请求的 model_name"可能不一致，且旧字符串失配后无法感知。抽成共享函数后两边统一
+ * 走同一次解析，谁都不会再吐出陈旧、未经校验的名字字符串。
+ *
+ * @param chatAvailableModels 当前可选的模型列表（is_default!==false 的模型）
+ * @param selectedModelName 该会话记录的模型名字字符串（可能是改名前的陈旧值）
+ * @param defaultModelName 后端配置的默认模型名字字符串
+ * @returns 解析命中的模型条目；`chatAvailableModels` 为空（模型列表尚未加载）时返回 null
+ */
+export function resolveEffectiveModel(
+  chatAvailableModels: ModelEntry[],
+  selectedModelName: string | null,
+  defaultModelName: string | null,
+): ModelEntry | null {
+  if (chatAvailableModels.length === 0) return null;
+  const displayed = selectedModelName || defaultModelName;
+  return (
+    chatAvailableModels.find((m) => (m.alias || m.model_name) === displayed) ??
+    chatAvailableModels[0]
+  );
+}
+
 const FINAL_EVENT_DUPLICATE_WINDOW_MS = 60_000;
 
 function normalizeExecutionContent(content?: string): string {
@@ -192,6 +219,19 @@ interface TeamMember {
   name?: string;
   execution_status?: string | null;
   mode?: string;
+  /** TeamRole 值：leader / teammate / human_agent / bridge_agent / worker */
+  role?: string;
+  /** 外部 CLI 后端名（claude / codex / ...），普通成员为空 */
+  cli_agent?: string | null;
+}
+
+/** 增量成员事件里的空字段不得覆盖已知值：返回 next，空则回退 prev。 */
+function keepKnownMemberField(
+  next: string | null | undefined,
+  prev: string | null | undefined
+): string | undefined {
+  if (typeof next === 'string' && next.trim() !== '') return next;
+  return typeof prev === 'string' && prev.trim() !== '' ? prev : undefined;
 }
 
 export type HumanShareStatus = 'pending' | 'joined' | 'left';
@@ -400,9 +440,16 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     const state = get();
     const runtime = state.runtimes[sessionId];
     if (!runtime) return null;
-    return runtime.mode === 'team'
-      ? state.defaultModelName
-      : runtime.selectedModelName;
+    if (runtime.mode === 'team') return state.defaultModelName;
+    // 不再原样吐出 runtime.selectedModelName（可能是模型改名后失配的陈旧字符串），
+    // 而是走与 UI 显示（ModelSelector）相同的解析逻辑，确保发给后端的 model_name
+    // 参数与界面上显示的模型永远一致（bug003）。
+    const resolved = resolveEffectiveModel(
+      state.chatAvailableModels,
+      runtime.selectedModelName,
+      state.defaultModelName,
+    );
+    return resolved ? (resolved.alias || resolved.model_name) : runtime.selectedModelName;
   },
 
   removeRuntime: (sessionId) => {
@@ -874,13 +921,21 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       if (existingIndex >= 0) {
         const updatedMembers = [...runtime.teamMembers];
         const existingMember = updatedMembers[existingIndex];
+        // 每类成员事件只带自己关心的字段（如 team.member.spawned 不带 name），
+        // 直接展开覆盖会把已知的展示名/模式抹成 undefined，界面就退回显示
+        // member_id。空值一律不覆盖已有值，规则同 ToolPanel 的 mergeById。
         updatedMembers[existingIndex] = {
           ...existingMember,
           ...member,
-          status:
-            typeof member.status === 'string' && member.status.trim() !== ''
-              ? member.status
-              : existingMember.status,
+          name: keepKnownMemberField(member.name, existingMember.name),
+          status: keepKnownMemberField(member.status, existingMember.status) ?? '',
+          execution_status: keepKnownMemberField(
+            member.execution_status,
+            existingMember.execution_status
+          ),
+          mode: keepKnownMemberField(member.mode, existingMember.mode),
+          role: keepKnownMemberField(member.role, existingMember.role),
+          cli_agent: keepKnownMemberField(member.cli_agent, existingMember.cli_agent),
         };
         return {
           runtimes: {

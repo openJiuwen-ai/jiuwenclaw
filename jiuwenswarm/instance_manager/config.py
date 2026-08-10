@@ -11,6 +11,7 @@ This module provides:
 
 from __future__ import annotations
 
+import errno as errno_codes
 import logging
 import os
 import platform
@@ -187,13 +188,112 @@ def calculate_instance_ports(index: int) -> Dict[str, int]:
     return {k: _resolved_base_port(k) + index * 1000 for k in BASE_PORTS}
 
 
+# Whether a SO_REUSEADDR retry may be used to classify an EADDRINUSE failure.
+#
+# POSIX: SO_REUSEADDR lets a listener bind a port that only *connection* sockets
+# still reference (TIME_WAIT, FIN_WAIT_2), while the kernel keeps refusing when
+# another socket is actively LISTENING. That is exactly the distinction the
+# probe needs, so the retry is safe and informative here.
+#
+# Windows: SO_REUSEADDR also permits binding on top of a live listener, so a
+# retry would mask a genuine conflict and reproduce the 10048 crash. Never
+# there — the plain bind stays the only verdict.
+_REUSEADDR_PROBE_SUPPORTED = platform.system().lower() != "windows"
+
+# Bind failures that mean "this address family / host is unusable on this
+# machine" rather than "the port is taken" — e.g. probing ``::1`` with IPv6
+# disabled. Taken from the errno module so the values are correct per platform
+# (EADDRNOTAVAIL is 99 on Linux but 49 on macOS; hardcoding one set made the
+# other platform misread a disabled stack as an occupied port).
+_FAMILY_UNAVAILABLE_ERRNOS = frozenset(
+    {
+        errno_codes.EADDRNOTAVAIL,
+        errno_codes.EAFNOSUPPORT,
+        errno_codes.EPROTONOSUPPORT,
+    }
+)
+
+
+def _reuseaddr_bind_probe(host: str, port: int, family: int) -> bool:
+    """Re-probe with SO_REUSEADDR to tell lingering sockets from real listeners.
+
+    Called only after a plain bind failed with EADDRINUSE, and only on POSIX.
+    Succeeding here means nothing is LISTENING on the port - it is merely still
+    referenced by half-closed or TIME_WAIT connection sockets left behind by a
+    service that has already exited. Every service this launcher starts sets
+    SO_REUSEADDR itself (``ThreadingHTTPServer.allow_reuse_address`` for the web
+    / frontend server, asyncio's POSIX default under ``websockets.serve`` for
+    the Gateway and AgentServer), so such a port really is usable for them.
+
+    Args:
+        host: Host address to probe.
+        port: Port number to probe.
+        family: Address family to probe with.
+
+    Returns:
+        True if the port binds once SO_REUSEADDR is set, False otherwise.
+    """
+    try:
+        sock = socket.socket(family, socket.SOCK_STREAM)
+    except OSError:
+        return False
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((host, port))
+        sock.listen(1)
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+def _bind_listen_probe(host: str, port: int, family: int) -> bool | None:
+    """Try bind()+listen() on ``host:port``.
+
+    Returns:
+        True if the port can be bound, False if occupied, None if this address
+        family / host is unsupported on the machine (caller should ignore).
+    """
+    try:
+        sock = socket.socket(family, socket.SOCK_STREAM)
+    except OSError:
+        return None
+    # The first probe deliberately omits SO_REUSEADDR so that a live or stuck
+    # listener still makes it fail; see _reuseaddr_bind_probe for how an
+    # EADDRINUSE result is then classified.
+    try:
+        sock.bind((host, port))
+        sock.listen(1)
+        return True
+    except OSError as exc:
+        # Windows: WinError 10022/10049; POSIX: EADDRNOTAVAIL / EAFNOSUPPORT
+        # when IPv6 is disabled — treat as "family unavailable", not occupied.
+        winerr = getattr(exc, "winerror", None)
+        err = getattr(exc, "errno", None)
+        if winerr in (10022, 10049) or err in _FAMILY_UNAVAILABLE_ERRNOS:
+            return None
+        if err == errno_codes.EADDRINUSE and _REUSEADDR_PROBE_SUPPORTED:
+            # Either a listener holds the port, or only lingering connection
+            # sockets do. Only the second case is actually bindable for the
+            # real services, and only SO_REUSEADDR can tell the two apart.
+            return _reuseaddr_bind_probe(host, port, family)
+        return False
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
 def is_port_available(host: str, port: int) -> bool:
     """Check if a port is available for binding on the given host.
 
-    Probes by attempting to ``bind()``+``listen()`` (without SO_REUSEADDR) and
-    immediately closing. This mirrors how the real services (AgentServer /
-    Gateway / Web / Frontend) actually acquire their ports, so it correctly
-    detects:
+    Probes by attempting to ``bind()``+``listen()`` and immediately closing, so
+    it correctly detects:
 
     - A live service listening on the port (bind fails -> occupied).
     - A *stuck/zombie* listener that is in LISTENING state but no longer
@@ -205,6 +305,21 @@ def is_port_available(host: str, port: int) -> bool:
     held by a dead-but-listening socket, causing the real service to crash
     with ``OSError [Errno 10048]`` on its own bind.
 
+    On POSIX an EADDRINUSE result is then re-probed with SO_REUSEADDR. A port
+    that only half-closed / TIME_WAIT *connection* sockets still reference is
+    reported as available, because that is what the real services see: they all
+    set SO_REUSEADDR and bind such a port fine. Without this, stopping the
+    services while a browser tab still held the Web UI open left the frontend
+    port unbindable by a plain bind for as long as that tab stayed open, and the
+    next launch needlessly shifted the entire port group (5173 -> 6173, and
+    every other service with it). A genuine listener still fails the retry, so
+    zombie detection is unaffected. See ``_reuseaddr_bind_probe``.
+
+    When ``host`` is IPv4 loopback / wildcard, also probes ``::1``: Vite on
+    Windows often listens on ``[::1]:5173`` only. An IPv4-only probe would
+    report the port free, skip ``jiuwenswarm-start`` port-group fallback, and
+    then ``strictPort: true`` would fail with "Port 5173 is already in use".
+
     Args:
         host: Host address to check
         port: Port number to check
@@ -212,22 +327,20 @@ def is_port_available(host: str, port: int) -> bool:
     Returns:
         True if the port can be bound (available), False if occupied.
     """
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    # Intentionally NOT setting SO_REUSEADDR: on Windows it permits multiple
-    # sockets to bind the same port, which would mask an occupied port and
-    # reproduce the very 10048 crash we are trying to avoid. The real services
-    # do not set it either.
-    try:
-        sock.bind((host, port))
-        sock.listen(1)
-        return True  # Port is available (we could bind it)
-    except OSError:
-        return False  # Port is occupied
-    finally:
-        try:
-            sock.close()
-        except OSError:
-            pass
+    family = socket.AF_INET6 if ":" in host and host.count(":") >= 2 else socket.AF_INET
+    primary = _bind_listen_probe(host, port, family)
+    if primary is False:
+        return False
+    if primary is None and family == socket.AF_INET6:
+        # Explicit IPv6 host but stack unavailable — fall back to IPv4 view.
+        return bool(_bind_listen_probe("127.0.0.1", port, socket.AF_INET))
+
+    # Dual-stack localhost: Vite / Node frequently bind ::1 only.
+    if host in ("127.0.0.1", "0.0.0.0", "", "localhost"):
+        ipv6 = _bind_listen_probe("::1", port, socket.AF_INET6)
+        if ipv6 is False:
+            return False
+    return primary is not False
 
 
 def check_port_conflicts(

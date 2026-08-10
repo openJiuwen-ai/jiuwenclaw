@@ -9,6 +9,7 @@ import logging
 import asyncio
 import time
 from abc import ABC
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from jiuwenswarm.gateway.routing.keys import ChannelKey
@@ -19,6 +20,15 @@ if TYPE_CHECKING:
     from jiuwenswarm.gateway.channel_manager.base import BaseChannel
     from jiuwenswarm.gateway.message_handler import MessageHandler
     from jiuwenswarm.common.schema.message import Message
+
+
+@dataclass
+class ChannelEvent:
+    """Channel 连接事件."""
+
+    event_type: str  # "connected" | "disconnected"
+    channel_type: str  # "tui" | "web" | ...
+    user_id: str
 
 
 def _build_mention_target(names: list[str]) -> dict[str, Any]:
@@ -56,6 +66,8 @@ class ChannelManager(ABC):
         # 下一次 on_config_updated 时强制重启的 channel_id（例如微信解绑：YAML 中 bot_token 本就为空时配置 dict 对比不会变，但内存里仍有旧凭据）
         self._pending_channel_restart: set[str] = set()
         self._dispatch_diag_count: int = 0
+        # Channel 连接事件订阅回调列表
+        self._channel_event_callbacks: list[Callable[[ChannelEvent], Awaitable[None]]] = []
 
     @staticmethod
     def _resolve_app_id(channel: Any) -> str:
@@ -112,6 +124,7 @@ class ChannelManager(ABC):
         key = ChannelKey(cid, self._resolve_app_id(channel))
         self._channels[key] = channel
         channel.on_message(self._on_channel_message)
+        self._try_set_event_reporter(channel)
         logger.info("[ChannelManager] 已注册 Channel: channel_id=%s, 当前共 %d 个", cid, len(self._channels))
 
     def register_channel_with_inbound(
@@ -123,6 +136,7 @@ class ChannelManager(ABC):
         key = ChannelKey(channel.channel_id, self._resolve_app_id(channel))
         self._channels[key] = channel
         channel.on_message(on_message)
+        self._try_set_event_reporter(channel)
 
     def register_external_channel(self, channel_id: str | ChannelKey, channel: Any) -> None:
         """登记一个已由外部完成入站装配的 channel 实例。"""
@@ -135,6 +149,36 @@ class ChannelManager(ABC):
     async def deliver_to_message_handler(self, msg: "Message") -> None:
         """将消息交给 MessageHandler（供自定义入站路径使用）。"""
         await self._message_handler.handle_message(msg)
+
+    # ── Channel 连接事件 ──
+
+    def subscribe_channel_events(
+        self,
+        callback: Callable[[ChannelEvent], Awaitable[None]],
+    ) -> None:
+        """订阅 Channel 连接事件（connected / disconnected）。"""
+        self._channel_event_callbacks.append(callback)
+
+    def report_channel_event(
+        self,
+        event_type: str,
+        channel_type: str,
+        user_id: str,
+    ) -> None:
+        """上报 Channel 连接事件，通知所有订阅者。"""
+        event = ChannelEvent(
+            event_type=event_type,
+            channel_type=channel_type,
+            user_id=user_id,
+        )
+        for cb in self._channel_event_callbacks:
+            asyncio.create_task(cb(event))
+
+    def _try_set_event_reporter(self, channel: Any) -> None:
+        """若 channel 支持 set_channel_event_reporter，则注入上报回调。"""
+        setter = getattr(channel, "set_channel_event_reporter", None)
+        if callable(setter):
+            setter(self.report_channel_event)
 
     def unregister_channel(self, channel_id: str | ChannelKey) -> None:
         """注销指定 Channel."""

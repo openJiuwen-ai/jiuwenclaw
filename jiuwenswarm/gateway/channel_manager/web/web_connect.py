@@ -24,7 +24,7 @@ import aiohttp
 from websockets.exceptions import ConnectionClosed as WebSocketConnectionClosed
 
 from jiuwenswarm.common.utils import get_agent_workspace_dir
-from jiuwenswarm.gateway.channel_manager.base import ChannelMetadata, RobotMessageRouter
+from jiuwenswarm.gateway.channel_manager.base import ChannelMetadata, RobotMessageRouter, ConnectHook
 from jiuwenswarm.gateway.routing.base_ws_channel import BaseWsChannel
 from jiuwenswarm.gateway.routing.keys import AgentRef, RoutingKey
 from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
@@ -56,6 +56,7 @@ _WEB_FULL_PAYLOAD_EVENT_TYPES = frozenset(
         "connection.ack",
         "todo.updated",
         "chat.tool_call",
+        "chat.tool_update",
         "chat.tool_result",
         "chat.processing_status",
         "chat.interrupt_result",
@@ -77,6 +78,9 @@ _WEB_FULL_PAYLOAD_EVENT_TYPES = frozenset(
         "security.alert",
         "goal.snapshot",
         "goal.updated",
+        # Web 的 Plan 开关靠该事件在计划执行后自动复位，需要完整 payload
+        # 才能拿到退出后应回到的 mode。
+        "plan.mode_exited",
         "runtime.accepted",
         "execution.error",
         "proactive_recommendation",
@@ -86,8 +90,6 @@ _WEB_FULL_PAYLOAD_EVENT_TYPES = frozenset(
 # ── 类型别名 ──────────────────────────────────────────────
 # 方法处理器签名: (ws, req_id, params, session_id) -> None
 MethodHandler = Callable[..., Awaitable[None]]
-# 连接钩子签名: (ws) -> None | Awaitable[None]
-ConnectHook = Callable[..., Any]
 
 
 @dataclass(frozen=True)
@@ -247,17 +249,6 @@ class WebChannel(BaseWsChannel):
         """
         self._method_handlers[method] = handler
 
-    def on_connect(self, callback: ConnectHook) -> None:
-        """注册连接建立钩子，新客户端接入时依次调用."""
-        self._connect_hooks.append(callback)
-
-    def on_disconnect(self, callback: ConnectHook) -> None:
-        """注册连接断开钩子，客户端断连时依次调用.
-
-        callback 签名: ``async def callback(ws, session_ids: set[str]) -> None``
-        """
-        self._disconnect_hooks.append(callback)
-
     def on_message(self, callback: Callable[[Message], None]) -> None:
         """注册消息接收回调（替代默认的 router.publish_user_messages）。"""
         self._on_message_cb = callback
@@ -372,6 +363,10 @@ class WebChannel(BaseWsChannel):
             return None
         text = str(uid).strip()
         return text or None
+
+    def _extract_ws_user_id(self, ws: Any) -> str:
+        """WebChannel: 从 ws 提取连接级 user_id。"""
+        return self._connection_user_id(ws) or ""
 
     @staticmethod
     def _routing_key_user_id(connection_user_id: str | None, remote: Any) -> str:
@@ -546,7 +541,7 @@ class WebChannel(BaseWsChannel):
 
             ws_serve = websockets.serve
 
-        ws_max_size = 8 * 2**20  # 8 MB — matches AgentServer link
+        from jiuwenswarm.common.ws_limits import WEB_WS_MAX_MESSAGE_BYTES
 
         self._server = await ws_serve(
             self._connection_handler,
@@ -555,7 +550,7 @@ class WebChannel(BaseWsChannel):
             process_request=self._process_request,
             ping_interval=20,
             ping_timeout=60,
-            max_size=ws_max_size,
+            max_size=WEB_WS_MAX_MESSAGE_BYTES,
         )
         self._running = True
         logger.info(
@@ -1009,6 +1004,9 @@ class WebChannel(BaseWsChannel):
         # 注：此 sid 仅为传输层占位，首条 chat.send 携带真实 session_id 时会 re-register 覆盖。
         setattr(ws, "_jiuwen_initial_sid", _initial_sid)
 
+        # 上报连接事件
+        self.report_connect(ws)
+
         # 触发连接钩子（如发送 connection.ack）
         for hook in self._connect_hooks:
             try:
@@ -1048,6 +1046,9 @@ class WebChannel(BaseWsChannel):
             )
         finally:
             await self.unregister_ws(ws)
+
+            # 上报断连事件
+            self.report_disconnect(ws)
 
             logger.info(
                 "WebChannel 连接清理完成: %s",

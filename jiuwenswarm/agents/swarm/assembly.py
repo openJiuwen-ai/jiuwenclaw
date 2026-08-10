@@ -25,7 +25,6 @@ from typing import Any
 
 from openjiuwen.agent_evolving.trajectory import InMemoryTrajectoryRegistry
 from openjiuwen.agent_teams.paths import team_home
-from openjiuwen.agent_teams.schema.deep_agent_spec import WorkspaceSpec
 
 from jiuwenswarm.agents.swarm.config_specs import build_member_deep_agent_spec
 from jiuwenswarm.agents.swarm.context import SwarmBuildContext
@@ -40,27 +39,18 @@ logger = logging.getLogger(__name__)
 _MEMBER_ROLES: tuple[str, ...] = ("leader", "teammate")
 
 
-def _with_project_workspace(member_spec: Any, project_dir: str | None) -> Any:
-    """Default a member workspace to the request project directory."""
+def _with_project_cwd(member_spec: Any, project_dir: str | None) -> Any:
+    """Point a member's cwd / project root at the request project directory.
+
+    Only the working directory moves: the member keeps its own workspace for
+    artifacts (memory, skills view, ``.team`` mount). When worktree isolation
+    is on, ``AgentConfigurator`` overrides cwd again with the member worktree,
+    which is why this is unconditional here.
+    """
     project_root = str(project_dir or "").strip()
     if not project_root:
         return member_spec
-
-    workspace = getattr(member_spec, "workspace", None)
-    if workspace is not None and str(getattr(workspace, "root_path", "") or "").strip() not in {"", "./"}:
-        return member_spec
-
-    if workspace is None:
-        workspace = WorkspaceSpec(root_path=project_root)
-    else:
-        workspace = workspace.model_copy(update={"root_path": project_root})
-    return member_spec.model_copy(update={"workspace": workspace})
-
-
-def _worktree_enabled(spec: Any) -> bool:
-    """Return whether the team spec requested managed worktree isolation."""
-    worktree = getattr(spec, "worktree", None)
-    return bool(worktree is not None and getattr(worktree, "enabled", False))
+    return member_spec.model_copy(update={"cwd": project_root, "project_root": project_root})
 
 
 def enrich_team_spec_for_swarm(
@@ -69,6 +59,7 @@ def enrich_team_spec_for_swarm(
     session_id: str,
     mode: str,
     project_dir: str | None = None,
+    trusted_dirs: list[str] | None = None,
     request_id: str | None = None,
     channel_id: str | None = None,
     request_metadata: dict[str, Any] | None = None,
@@ -84,6 +75,7 @@ def enrich_team_spec_for_swarm(
         session_id: Active session id.
         mode: Request mode (e.g. "team").
         project_dir: Resolved project directory, if any.
+        trusted_dirs: Directories the client declared as trusted for this request.
         request_id: Originating request id, if any.
         channel_id: Raw channel id from the request, if any.
         request_metadata: Request metadata mapping (carries ``mode`` etc.).
@@ -108,6 +100,8 @@ def enrich_team_spec_for_swarm(
         request_metadata=request_metadata,
         mode=mode,
         project_dir=project_dir,
+        trusted_dirs=trusted_dirs,
+        disable_teammate_worktree=str(channel_id or "").strip().lower() == "web",
         team_id=spec.team_name,
         team_ws_root=team_ws_root,
         team_skills_dir=team_skills_dir,
@@ -130,8 +124,7 @@ def enrich_team_spec_for_swarm(
                 enable_permissions=spec.enable_permissions,
                 mcp_configs=mcp_configs,
             )
-            if _worktree_enabled(spec):
-                member_spec = _with_project_workspace(member_spec, project_dir)
+            member_spec = _with_project_cwd(member_spec, project_dir)
             spec.agents[role] = member_spec
 
     spec.build_context = base

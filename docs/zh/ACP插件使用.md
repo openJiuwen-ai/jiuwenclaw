@@ -7,7 +7,7 @@
 * Python `>=3.11, <3.14`
 * 已安装 VS Code 扩展 `formulahendry.acp-client`
 
-![ACP插件](../assets/images/ACP插件.png)
+
 
 ---
 
@@ -76,7 +76,7 @@ python -m jiuwenswarm.app
 
 > 说明：仓库脚本默认使用仓库根目录下的 `.venv`。
 
-![ACP配置](../assets/images/ACP插件添加agent.png)
+![ACP配置](../assets/images/current-ui/09-Harness页面.png)
 
 
 ### 6. 建立连接
@@ -131,7 +131,7 @@ python -m jiuwenswarm.app
 
 > 说明：`jiuwenswarm-acp` 是 pip install 后自动生成的命令，与 `jiuwenswarm-init`、`jiuwenswarm-start` 同级。需确保 VS Code 在已安装 jiuwenswarm 的虚拟环境中运行，否则需填写完整路径，例如 Windows：`C:\path\to\venv\Scripts\jiuwenswarm-acp.exe`，Linux / macOS：`/path/to/venv/bin/jiuwenswarm-acp`。
 
-![ACP配置](../assets/images/ACP插件添加agent.png)
+![ACP配置](../assets/images/current-ui/09-Harness页面.png)
 
 ### 6. 建立连接
 

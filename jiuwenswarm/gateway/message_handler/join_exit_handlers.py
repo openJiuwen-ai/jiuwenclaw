@@ -60,14 +60,6 @@ _ALLOWED_WHEN_JOINED: frozenset[ParsedControlAction] = frozenset(
 )
 
 
-def _join_err_mismatch(team_name: str, session_id: str) -> str:
-    """/join session_ref 里 team_name 与 session_id 不匹配的对外文案。"""
-    return (
-        f"team_name **{team_name}** 与 session **{session_id}** 不匹配，无法加入。"
-        f"请核对 /join 指令中的 session_ref。"
-    )
-
-
 def _join_err_team_not_exist(team_name: str) -> str:
     """/join 后缀匹配通过但 DB 查不到 member 的对外文案（统一"不存在"）。"""
     return (
@@ -177,21 +169,10 @@ class JoinExitHandlers:
                         f"请先执行 **/exit** 再加入。",
                     )
                     return
-        # ── team/session 一致性校验（mismatch 本地判）+ 成员名校验 ──
-        # team_name 与 session_id 都从同一 session_ref 解析、同源。mismatch 判定是
-        # 纯字符串后缀比对：team_name 须已是 build_session_scoped_team_name 拼出的
-        # scoped 形式（即等于拼接结果）。后缀不匹配即 session_ref 里 team 与 session
-        # 错配，本地直接报错，不走 RPC。文案单一真相源在本模块。
+        # ── team/session 一致性校验 + 成员名校验 ──
+        # team_name 与 session_id 同源于 session_ref，真伪交由下游 fetch_team_human_members 的 RPC 仲裁：
+        # 按 team_name 直查 team.db，输错 team → 查不到席位 → 走"不存在"文案。
         _join_team_name = self._h.extract_team_name_from_ref(parsed.session_ref)
-        from jiuwenswarm.agents.harness.team.team_manager import TeamManager
-        if _join_team_name and _join_team_name != TeamManager.build_session_scoped_team_name(
-            _join_team_name, sid,
-        ):
-            await self._h.send_channel_notice(
-                user_infos, channel_id, msg.session_id,
-                f"⚠️ {_join_err_mismatch(_join_team_name, sid)}",
-            )
-            return
         # 检查席位占用状态（V2 §8.1）
         # 优先内存判断,同时发多条join将"无需重复加入"提示挤到后面
         joining_user_id = msg.user_id or msg.metadata.get("im_sender_user_id", "")
@@ -412,7 +393,18 @@ class JoinExitHandlers:
             if anchor_ts:
                 before_anchor = []
                 for r in records:
-                    if isinstance(r, dict) and float(r.get("timestamp") or 0) < anchor_ts:
+                    if not isinstance(r, dict):
+                        continue
+                    # chat.final 可能用首包时刻作 timestamp、收尾另存 completed_at；
+                    # 水位按「真正结束」判断，避免 join 前开写、join 后收尾的消息被历史+实时双推。
+                    try:
+                        completed = r.get("completed_at")
+                        record_ts = float(
+                            completed if completed is not None else (r.get("timestamp") or 0)
+                        )
+                    except (TypeError, ValueError):
+                        continue
+                    if record_ts < anchor_ts:
                         before_anchor.append(r)
                 records = before_anchor
                 if not records:
@@ -448,10 +440,9 @@ class JoinExitHandlers:
     ) -> list[str] | None:
         """向 AgentServer 查询 team human_agent 成员名列表。
 
-        mismatch 已由 join_slash_handler 本地挡掉，本方法只查 member：查到返回
-        席位名列表，查不到（server ok=False / members 空 / RPC 异常）返回 None，
-        由调用方统一拼"team 不存在"文案。channel_id 不参与业务查询，仅回填
-        E2A envelope 维持响应结构完整性（与其他 unary RPC 响应一致带 channel_id）。
+        team↔session 一致性真伪的唯一仲裁：按 team_name 直查 team.db 取 human_agent 席位。
+        查到返回席位名列表，查不到（server ok=False / members 空 / RPC 异常）返回 None，
+        由调用方统一拼"team 不存在"文案。channel_id 不参与业务查询，仅回填 E2A envelope。
         """
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
         from jiuwenswarm.common.schema.message import ReqMethod

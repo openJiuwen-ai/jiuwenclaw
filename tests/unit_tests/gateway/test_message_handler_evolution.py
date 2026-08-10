@@ -264,8 +264,15 @@ def _set_evolution_auto_save(
 ) -> None:
     monkeypatch.setattr(
         "jiuwenswarm.gateway.message_handler.message_handler.get_evolution_auto_save_enabled",
-        lambda: enabled,
+        lambda _config=None: enabled,
     )
+    original_init = MessageHandler.__init__
+
+    def _init_with_cached_auto_save(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        self._evolution_auto_save_enabled = enabled
+
+    monkeypatch.setattr(MessageHandler, "__init__", _init_with_cached_auto_save)
 
 
 async def _deliver_evolution_question(
@@ -1041,5 +1048,53 @@ async def test_forward_loop_cancel_intent_uses_fire_and_forget(
         while not notify_modes and asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(0.01)
         assert notify_modes == ["fire_and_forget"]
+    finally:
+        await handler.stop_forwarding()
+
+
+@pytest.mark.asyncio
+async def test_forward_loop_supplement_forwards_new_input_to_interrupt() -> None:
+    """AgentServer needs the text marker to discard a superseded ask_user round."""
+    handler = _TestMessageHandler.create()
+    await handler.start_forwarding()
+    try:
+        supplement_msg = Message(
+            id="supplement-ask-user",
+            type="req",
+            channel_id="tui",
+            session_id="sess-ask-user",
+            params={
+                "intent": "supplement",
+                "new_input": "再执行一次",
+                "mode": "agent.plan",
+            },
+            timestamp=0.0,
+            ok=True,
+            req_method=ReqMethod.CHAT_CANCEL,
+            is_stream=False,
+        )
+        await handler.publish_user_messages(supplement_msg)
+
+        deadline = asyncio.get_running_loop().time() + 2.0
+        while (
+            not _FakeAgentClient.sent_requests
+            and asyncio.get_running_loop().time() < deadline
+        ):
+            await asyncio.sleep(0.01)
+
+        assert _FakeAgentClient.sent_requests
+        interrupt_request = _FakeAgentClient.sent_requests[0]
+        assert interrupt_request.params["intent"] == "supplement"
+        assert interrupt_request.params["new_input"] == "再执行一次"
+
+        deadline = asyncio.get_running_loop().time() + 2.0
+        while (
+            not _FakeAgentClient.sent_stream_requests
+            and asyncio.get_running_loop().time() < deadline
+        ):
+            await asyncio.sleep(0.01)
+        assert len(_FakeAgentClient.sent_stream_requests) == 1
+        follow_up_request = _FakeAgentClient.sent_stream_requests[0]
+        assert follow_up_request.params["supplement_input"] == "再执行一次"
     finally:
         await handler.stop_forwarding()

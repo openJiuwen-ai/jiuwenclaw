@@ -112,7 +112,14 @@ export interface CommandContext {
     mode?: "edit" | "reset",
   ) => void;
   enterStatusView?: (tab?: StatusViewTab) => void;
-  openInEditor?: (filePath: string) => void;
+  /**
+   * Open a file in the user's external editor. The promise resolves after the
+   * editor closes. While it is open the TUI is frozen (non-operable),
+   * mirroring Claude Code's editFileInEditor. When the editor exits, onDone is
+   * called so the caller can report completion exactly once. A false result
+   * means neither the configured nor fallback editor launched.
+   */
+  openInEditor?: (filePath: string, onDone?: (success?: boolean) => void) => Promise<void>;
   /** Open a folder in system file explorer (Windows: explorer, macOS: open -R, Linux: xdg-open).
    * Returns true if an explorer was launched; false if no GUI explorer is
    * available (e.g. headless Linux server), so the caller can fall back to
@@ -155,6 +162,8 @@ export interface SlashCommand {
   argGuide?: string;
   /** 在/help中隐藏，但仍可执行 */
   hidden?: boolean;
+  /** 仅在后端开启技能自演进时显示在 help/补全中；直接输入仍可执行。 */
+  requiresSkillEvolution?: boolean;
   isSafeConcurrent?: boolean;
   kind: CommandKind;
   action: (ctx: CommandContext, args: string) => void | Promise<void>;
