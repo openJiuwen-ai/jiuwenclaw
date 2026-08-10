@@ -250,7 +250,13 @@ class MessageHandler(ABC):
             ChannelType.WECHAT.value,
         }
         # 使用 SessionMap 的 channel 族（由 config 中 gateway.session_map_scope 决定是否在 key 中含 user）
+        # feishu 普通通道同样纳入：否则 _apply_channel_state 把 msg.session_id 置 None 后，
+        # _forward_loop 用 None 做 key 重新 get_or_create_channel_state，sid 写进
+        # "feishu:None" 而复用查 "feishu:oc_xxx"，永远对不上，每条消息都新建 session、丢上下文。
+        # 走 SessionMap 用 identity_key(provider,chat_id,bot_id[,user_id]) 查找，不依赖
+        # msg.session_id，且落盘 session_map.json，顺带支持跨进程重启复用。
         self._session_map_channel_types = frozenset({
+            "feishu",
             "feishu_enterprise",
         })
         self._channel_states: Dict[str, ChannelControlState] = {}
