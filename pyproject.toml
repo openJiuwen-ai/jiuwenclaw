@@ -57,6 +57,7 @@ dependencies = [
     "tree-sitter-bash>=0.25.0,<0.26.0",
     "minio>=7.2.0",
     "uvloop==0.22.1; sys_platform != 'win32'",
+    "python-json-logger>=2.0.0",
 ]
 
 [project.optional-dependencies]
