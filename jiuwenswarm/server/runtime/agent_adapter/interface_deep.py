@@ -84,7 +84,7 @@ from openjiuwen.harness.rails.context_engineer.context_assemble_rail import Cont
 from openjiuwen.harness.rails.context_engineer.context_processor_rail import ContextProcessorRail
 from openjiuwen.harness.subagents.browser_agent import build_browser_agent_config
 from openjiuwen.harness.subagents.research_agent import build_research_agent_config
-from openjiuwen.harness.subagent_runtime import SUBAGENT_UPDATED_EVENT_TYPE
+from openjiuwen.harness.subagent_runtime import SUBAGENT_ACTIVITY_EVENT_TYPE, SUBAGENT_UPDATED_EVENT_TYPE
 from openjiuwen.harness.tools import (
     WebFetchWebpageTool,
     WebFreeSearchTool,
@@ -10429,6 +10429,14 @@ class JiuWenSwarmDeepAdapter:
                     if not isinstance(projection, dict):
                         return None
                     return {"event_type": "chat.subtask_update", **projection}
+
+                if chunk_type == SUBAGENT_ACTIVITY_EVENT_TYPE:
+                    projection = (
+                        payload.get("subagent_activity") if isinstance(payload, dict) else None
+                    )
+                    if not isinstance(projection, dict):
+                        return None
+                    return {"event_type": "chat.subagent_activity", **projection}
 
                 if chunk_type == "context.usage":
                     if isinstance(payload, dict):
