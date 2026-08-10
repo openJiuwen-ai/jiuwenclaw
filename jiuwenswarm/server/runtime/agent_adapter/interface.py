@@ -36,6 +36,9 @@ from jiuwenswarm.server.runtime.session.session_history import (
     append_history_record,
 )
 from jiuwenswarm.server.runtime.session.session_manager import SessionManager
+from jiuwenswarm.server.runtime.session.permission_response_ledger import (
+    PermissionResponseLedger,
+)
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
 from jiuwenswarm.server.utils.utils import is_team_params
 from jiuwenswarm.common.config import get_config
@@ -64,6 +67,44 @@ from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import 
 
 class _TeamPlanApprovalPayloadError(ValueError):
     """Raised when a structured team.plan approval payload is malformed."""
+
+
+def _permission_response_key(request: AgentRequest) -> str | None:
+    """Return the opaque request ID for a permission continuation."""
+    if request.req_method not in (ReqMethod.CHAT_SEND, ReqMethod.CHAT_RESUME):
+        return None
+    params = request.params if isinstance(request.params, dict) else {}
+    answers = params.get("answers")
+    if not isinstance(answers, list) or not answers:
+        return None
+    request_id = params.get("request_id")
+    if not isinstance(request_id, str):
+        return None
+    return request_id or None
+
+
+def _duplicate_permission_response(request: AgentRequest) -> AgentResponse:
+    return AgentResponse(
+        request_id=request.request_id,
+        channel_id=request.channel_id,
+        payload={
+            "code": "duplicate_permission_response",
+            "deduplicated": True,
+        },
+        metadata=request.metadata,
+    )
+
+
+def _duplicate_permission_chunk(request: AgentRequest) -> AgentResponseChunk:
+    return AgentResponseChunk(
+        request_id=request.request_id,
+        channel_id=request.channel_id,
+        payload={
+            "code": "duplicate_permission_response",
+            "deduplicated": True,
+        },
+        is_complete=True,
+    )
 
 
 def _schedule_symphony_session_feedback(session_id: str, request_id: str) -> None:
@@ -865,6 +906,7 @@ class JiuWenSwarm:
         self._sdk_name: str | None = None
         self._skill_manager = SkillManager(workspace_dir=str(get_agent_workspace_dir()))
         self._session_manager = SessionManager()
+        self._permission_response_ledger = PermissionResponseLedger()
         # SkillDev 模式：懒初始化，首次 skilldev.* 请求时构造
         self._skilldev_service = None
 
@@ -2085,10 +2127,43 @@ class JiuWenSwarm:
             memory_block = "\n\n".join(b for b in mem_ctx.memory_blocks if b)
             inputs["memory_block"] = memory_block
 
-        async def run_agent_task():
-            return await adapter.process_message_impl(request, inputs)
+        permission_key = _permission_response_key(request)
+        permission_reservation = None
+        if permission_key is not None:
+            permission_reservation = self._permission_response_ledger.reserve(
+                session_id,
+                permission_key,
+            )
+            if permission_reservation is None:
+                logger.info(
+                    "[JiuWenSwarm] permission response deduplicated: "
+                    "session_id=%s response_id=%s request_id=%s",
+                    session_id,
+                    permission_key,
+                    request.request_id,
+                )
+                return _duplicate_permission_response(request)
 
-        result = await self._session_manager.submit_and_wait(session_id, run_agent_task)
+        async def run_agent_task():
+            if (
+                permission_reservation is not None
+                and not permission_reservation.start()
+            ):
+                return _duplicate_permission_response(request)
+            try:
+                return await adapter.process_message_impl(request, inputs)
+            finally:
+                if permission_reservation is not None:
+                    permission_reservation.complete()
+
+        try:
+            result = await self._session_manager.submit_and_wait(
+                session_id,
+                run_agent_task,
+            )
+        finally:
+            if permission_reservation is not None:
+                permission_reservation.release_if_unstarted()
 
         if result.ok and result.payload.get("content"):
             content = result.payload["content"]
@@ -2371,6 +2446,26 @@ class JiuWenSwarm:
                 team_query_is_interactive_input,
             )
 
+        permission_key = _permission_response_key(request)
+        permission_reservation = None
+        if permission_key is not None and not (
+            is_team_mode and not is_team_first_request
+        ):
+            permission_reservation = self._permission_response_ledger.reserve(
+                session_id,
+                permission_key,
+            )
+            if permission_reservation is None:
+                logger.info(
+                    "[JiuWenSwarm] permission response deduplicated: "
+                    "session_id=%s response_id=%s request_id=%s",
+                    session_id,
+                    permission_key,
+                    request.request_id,
+                )
+                yield _duplicate_permission_chunk(request)
+                return
+
         stream_queue = asyncio.Queue()
         stream_done = asyncio.Event()
         final_answer_content = ""
@@ -2421,6 +2516,14 @@ class JiuWenSwarm:
             logger.info("[JiuWenSwarm] run_stream_task started: request_id=%s session_id=%s", rid, session_id)
             _put_count = 0
             try:
+                if (
+                    permission_reservation is not None
+                    and not permission_reservation.start()
+                ):
+                    await stream_queue.put(
+                        ("chunk", _duplicate_permission_chunk(request))
+                    )
+                    return
                 async for chunk in adapter.process_message_stream_impl(request, inputs):
                     _put_count += 1
                     if _put_count <= 3:
@@ -2438,6 +2541,8 @@ class JiuWenSwarm:
                 logger.exception("[JiuWenSwarm] 流式任务异常: %s", exc)
                 await stream_queue.put(("error", exc))
             finally:
+                if permission_reservation is not None:
+                    permission_reservation.complete()
                 logger.info(
                     "[JiuWenSwarm] run_stream_task finished: request_id=%s total_chunks=%s",
                     rid, _put_count,
@@ -2447,25 +2552,30 @@ class JiuWenSwarm:
         # Team 模式: 后续请求直接执行，绕过 Session Manager 队列
         # 因为 Team 是长期运行的(persistent)，interact 调用不需要等待前一个任务完成
         # 且 team_helpers 内部已有请求锁保证同一 session 的请求串行执行
-        if is_team_mode and not is_team_first_request:
-            logger.info(
-                "[JiuWenSwarm] Team模式后续请求，直接执行: request_id=%s session_id=%s",
-                rid, session_id,
-            )
-            stream_task = asyncio.create_task(run_stream_task())
-        elif is_auto_harness_resume:
-            logger.info(
-                "[JiuWenSwarm] Auto-Harness resume请求，绕过Session队列: request_id=%s session_id=%s",
-                rid, session_id,
-            )
-            stream_task = asyncio.create_task(run_stream_task())
-        else:
-            # DeepAgentRuntimeController is the session scheduler for ordinary
-            # chat.  Starting this facade task immediately lets runtime_send()
-            # atomically route an arriving user input as a steer, follow-up, or
-            # replacement round; an outer SessionManager queue would otherwise
-            # wait behind the long-lived output consumer.
-            stream_task = asyncio.create_task(run_stream_task())
+        try:
+            if is_team_mode and not is_team_first_request:
+                logger.info(
+                    "[JiuWenSwarm] Team模式后续请求，直接执行: request_id=%s session_id=%s",
+                    rid, session_id,
+                )
+                stream_task = asyncio.create_task(run_stream_task())
+            elif is_auto_harness_resume:
+                logger.info(
+                    "[JiuWenSwarm] Auto-Harness resume请求，绕过Session队列: request_id=%s session_id=%s",
+                    rid, session_id,
+                )
+                stream_task = asyncio.create_task(run_stream_task())
+            else:
+                # DeepAgentRuntimeController is the session scheduler for ordinary
+                # chat.  Starting this facade task immediately lets runtime_send()
+                # atomically route an arriving user input as a steer, follow-up, or
+                # replacement round; an outer SessionManager queue would otherwise
+                # wait behind the long-lived output consumer.
+                stream_task = asyncio.create_task(run_stream_task())
+        except BaseException:
+            if permission_reservation is not None:
+                permission_reservation.release_if_unstarted()
+            raise
 
         suppress_a2ui_stream = False
         a2ui_pending_render_sent = False
@@ -2780,6 +2890,8 @@ class JiuWenSwarm:
                     rid,
                     exc_info=True,
                 )
+            if permission_reservation is not None:
+                permission_reservation.release_if_unstarted()
 
         assistant_message = final_answer_content or "".join(final_answer_chunks)
         repair_call = getattr(adapter, "repair_model_response", None)
