@@ -9,11 +9,14 @@ is actually exposed and ``symphony.optimization.enabled`` is true. Mirrors
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable
 
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts import PromptSection
 from openjiuwen.harness.rails.base import DeepAgentRail
+
+LOGGER = logging.getLogger(__name__)
 
 _ConfigBaseProvider = dict[str, Any] | Callable[[], dict[str, Any] | None] | None
 
@@ -29,7 +32,10 @@ def _render_optimizer_prompt(config_base: dict[str, Any] | None = None) -> str:
         )
         if not config.enabled:
             return ""
-    except Exception:
+    except Exception as exc:
+        LOGGER.warning(
+            "PromptOptimizerPromptRail: config load failed, guidance suppressed: %s", exc
+        )
         return ""
     return """
 ## Prompt Optimization

@@ -84,7 +84,7 @@ class LLMPromptPolicy(PromptPolicy):
                 0, PromptCandidate(prompt=task.base_prompt, rationale="user base prompt")
             )
 
-        return candidates[: max(n, len(candidates))] or [
+        return candidates[:n] or [
             PromptCandidate(prompt=task.base_prompt or task.objective, rationale="fallback")
         ]
 
