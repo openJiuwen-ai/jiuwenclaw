@@ -63,7 +63,7 @@ from openjiuwen.harness import (
 from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.rails import (
-    LLMRetryRail,
+    ModelAnomalyDetectionRail,
     SkillUseRail,
     TaskPlanningRail,
     SecurityRail,
@@ -913,16 +913,6 @@ def _build_context_processor_rail(config: dict[str, Any]) -> ContextProcessorRai
         if isinstance(round_level_cfg, dict) and round_level_cfg:
             user_processors.append(("RoundLevelCompressor", round_level_cfg))
 
-        reasoning_loop_cfg = context_engine_cfg.get("reasoning_tool_loop_compact_config", {})
-        if isinstance(reasoning_loop_cfg, dict) and reasoning_loop_cfg:
-            reasoning_loop_cfg = {
-                **reasoning_loop_cfg,
-                "language": resolve_language(
-                    str(config.get("preferred_language", "zh")).strip().lower()
-                ),
-            }
-            user_processors.append(("ReasoningToolLoopCompactProcessor", reasoning_loop_cfg))
-
         context_rail = ContextProcessorRail(
             processors=user_processors if user_processors else None,
             preset=True,
@@ -1177,7 +1167,7 @@ class JiuWenSwarmDeepAdapter:
         self._last_mode: str | None = None
         # 延时重索引任务（debounce）：连续改多次 embedding 只在最后一次后跑一次。
         self._memory_reindex_task: asyncio.Task | None = None
-        self._llm_retry_rail: LLMRetryRail | None = None
+        self._model_anomaly_detection_rail: ModelAnomalyDetectionRail | None = None
         self._heartbeat_rail: HeartbeatRail | None = None
         self._skill_evolution_rail: SkillEvolutionRail | None = None
         self._evolution_interrupt_rail: EvolutionInterruptRail | None = None
@@ -4567,15 +4557,21 @@ class JiuWenSwarmDeepAdapter:
             return None
 
     @staticmethod
-    def _build_llm_retry_rail(config_base: dict[str, Any] | None = None) -> LLMRetryRail | None:
+    def _build_model_anomaly_detection_rail(
+        config_base: dict[str, Any] | None = None,
+    ) -> ModelAnomalyDetectionRail | None:
         try:
             config_base = config_base or get_config()
             guard_cfg = config_base.get("execution_guard", {}) if isinstance(config_base, dict) else {}
-            retry_cfg = guard_cfg.get("llm_retry_rail", {}) if isinstance(guard_cfg, dict) else {}
+            retry_cfg = (
+                guard_cfg.get("model_anomaly_detection_rail", {})
+                if isinstance(guard_cfg, dict)
+                else {}
+            )
             if retry_cfg.get("enabled", False) is not True:
-                logger.info("[JiuWenSwarmDeepAdapter] LLMRetryRail disabled by config")
+                logger.info("[JiuWenSwarmDeepAdapter] ModelAnomalyDetectionRail disabled by config")
                 return None
-            rail = LLMRetryRail(
+            rail = ModelAnomalyDetectionRail(
                 max_retries=retry_cfg.get("max_retries", 2),
                 repeat_min_pattern_chars=retry_cfg.get("repeat_min_pattern_chars", 2),
                 repeat_max_pattern_chars=retry_cfg.get("repeat_max_pattern_chars", 64),
@@ -4583,11 +4579,15 @@ class JiuWenSwarmDeepAdapter:
                 repeat_min_total_chars=retry_cfg.get("repeat_min_total_chars", 160),
                 repeat_window_chars=retry_cfg.get("repeat_window_chars", 1024),
                 single_char_repeat_count=retry_cfg.get("single_char_repeat_count", 100),
+                tool_loop_compact=retry_cfg.get("tool_loop_compact"),
             )
-            logger.info("[JiuWenSwarmDeepAdapter] LLMRetryRail create success")
+            logger.info("[JiuWenSwarmDeepAdapter] ModelAnomalyDetectionRail create success")
             return rail
         except Exception as exc:
-            logger.warning("[JiuWenSwarmDeepAdapter] LLMRetryRail create failed: %s", exc)
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] ModelAnomalyDetectionRail create failed: %s",
+                exc,
+            )
             return None
 
     def _build_circuit_breaker_rail(self) -> CircuitBreakerRail | None:
@@ -4810,8 +4810,8 @@ class JiuWenSwarmDeepAdapter:
             _RailBuildInfo("_security_rail", self._build_security_rail),
             _RailBuildInfo("_heartbeat_rail", self._build_heartbeat_rail),
             _RailBuildInfo(
-                "_llm_retry_rail",
-                self._build_llm_retry_rail,
+                "_model_anomaly_detection_rail",
+                self._build_model_anomaly_detection_rail,
                 {"config_base": config_base},
             ),
             _RailBuildInfo("_circuit_breaker_rail", self._build_circuit_breaker_rail),
@@ -5480,9 +5480,9 @@ class JiuWenSwarmDeepAdapter:
             vision_model_config=self._vision_model_config,
             audio_model_config=self._audio_model_config,
             enable_read_image_multimodal=self._resolve_enable_read_image_multimodal(config),
-            enable_llm_retry_rail=((config_base.get("execution_guard") or {}).get("llm_retry_rail") or {}).get(
-                "enabled", False
-            ),
+            enable_model_anomaly_detection_rail=(
+                (config_base.get("execution_guard") or {}).get("model_anomaly_detection_rail") or {}
+            ).get("enabled", False),
             completion_timeout=config.get("completion_timeout", 3600.0),
         )
 
