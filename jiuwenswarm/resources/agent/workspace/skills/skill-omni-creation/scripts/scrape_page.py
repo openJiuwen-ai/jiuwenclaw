@@ -35,7 +35,15 @@ def _load_runtime_dependencies(
     selected_profiles = sum(bool(value) for value in (require_web, require_video, require_video_probe))
     if selected_profiles > 1:
         raise ValueError("web, video, and video-probe environment profiles are mutually exclusive")
-    profile = "web" if require_web else ("video" if require_video else ("video-probe" if require_video_probe else "requests"))
+    profile = (
+       "web"
+       if require_web
+       else (
+           "video"
+           if require_video
+           else ("video-probe" if require_video_probe else "requests")
+       )
+    )
     ensure_environment(profile)
 
     import common as common_module
