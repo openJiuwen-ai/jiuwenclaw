@@ -14,6 +14,9 @@ from typing import Any, Callable
 
 from jiuwenswarm.gateway.channel_manager.base import BaseChannel, ChannelMetadata, RobotMessageRouter
 from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
+from jiuwenswarm.gateway.channel_manager.im_platforms.platform_adapter.text_delivery import (
+    is_stream_intermediate,
+)
 from jiuwenswarm.gateway.routing.keys import DeliveryTarget
 from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
 
@@ -104,27 +107,33 @@ class WhatsAppChannel(BaseChannel):
         self._set_connection_state("stopped", bridge_ws_connected=False, whatsapp_connected=False, qr_pending=False)
         logger.info("WhatsAppChannel stopped")
 
-    async def send(self, msg: Message, *, routing_target: RoutingTarget | None = None) -> None:
+    async def send(self, msg: Message, *, routing_target: RoutingTarget | None = None) -> bool:
         if self._ws is None:
-            return
+            return False
         if not self._whatsapp_connected:
             logger.warning("WhatsAppChannel send skipped: WhatsApp not connected (state=%s)", self._bridge_state)
-            return
+            return False
         if (
                 not self.config.enable_streaming
                 and msg.type == "event"
                 and msg.event_type == EventType.CHAT_DELTA
         ):
-            return
+            return False
+        # the inbound request now streams so ask_user is emitted at all,
+        # which also turns on reasoning and tool chunks. Those are dropped here.
+        # Deltas keep their own guard above: an operator who set
+        # enable_streaming wanted them, and this change must not take that away.
+        if msg.event_type != EventType.CHAT_DELTA and is_stream_intermediate(msg):
+            return False
 
         text = self._extract_outgoing_text(msg)
         if not text.strip():
-            return
+            return False
 
         target_jid = self._extract_target_jid(msg)
         if not target_jid:
             logger.warning("WhatsAppChannel send skipped: no target jid")
-            return
+            return False
 
         frame = {
             "type": "send",
@@ -133,6 +142,7 @@ class WhatsAppChannel(BaseChannel):
             "request_id": msg.id,
         }
         await self._send_frame(frame)
+        return True
 
     def get_metadata(self) -> ChannelMetadata:
         return ChannelMetadata(
@@ -295,6 +305,9 @@ class WhatsAppChannel(BaseChannel):
             timestamp=time.time(),
             ok=True,
             req_method=ReqMethod.CHAT_SEND,
+            # chat.ask_user_question is only produced as a stream chunk, so
+            # a non-streaming request never sees the question at all.
+            is_stream=True,
             metadata={
                 "whatsapp_jid": jid,
                 "whatsapp_sender": sender,

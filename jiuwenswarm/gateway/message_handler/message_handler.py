@@ -301,6 +301,76 @@ class MessageHandler(ABC):
     def set_inbound_pipeline(self, pipeline: Any) -> None:
         self._inbound_pipeline = pipeline
 
+    def _convert_pending_question_reply(self, msg: "Message") -> bool:
+        """Turn a reply to a text-rendered ``ask_user`` question into its answer.
+
+        Only ordinary ``chat.send`` text is considered: a channel that drew its
+        own card already emits ``chat.user_answer`` / an interrupt resume and
+        must not be touched.
+
+        The conversion keeps ``chat.send`` and injects
+        ``source="ask_user_interrupt"`` so the deep adapter resumes the blocked
+        tool call -- the same path Web and the CLI use. ``chat.user_answer``
+        would only hit evolution-approval handling and leave the tool hung.
+
+        A reply that does not select an option is left alone and reaches the
+        agent as an ordinary message. Swallowing it would be a new way to lose
+        a user's words -- the exact failure this fallback exists to fix -- and the question
+        stays pending so it can still be answered.
+
+        Returns whether the message was converted, for tests and logging.
+        """
+        # ReqMethod is not imported at module scope in this file; every other
+        # user imports it locally, and referencing it here would only fail at
+        # call time, which no import check would catch.
+        from jiuwenswarm.common.schema.message import ReqMethod
+
+        if getattr(msg, "req_method", None) != ReqMethod.CHAT_SEND:
+            return False
+        params = msg.params if isinstance(msg.params, dict) else {}
+        # Already an interrupt resume -- leave it alone.
+        if str(params.get("source") or "").strip() in _INTERRUPT_RESUME_SOURCES:
+            return False
+        text = str(params.get("query") or params.get("content") or "").strip()
+        if not text:
+            return False
+
+        try:
+            from jiuwenswarm.gateway.channel_manager.channel_manager import conversation_key_of
+            from jiuwenswarm.gateway.routing.pending_question import (
+                PENDING_QUESTIONS,
+                build_interrupt_resume_params,
+            )
+
+            resolved = PENDING_QUESTIONS.resolve(
+                str(getattr(msg, "channel_id", "") or ""),
+                conversation_key_of(msg),
+                text,
+            )
+        except Exception:  # noqa: BLE001 - a broken lookup must not drop the message
+            logger.exception("[MessageHandler] pending-question lookup failed")
+            return False
+
+        if resolved is None:
+            return False
+
+        question, answer, custom_input = resolved
+        # Keep chat.send; force streaming so the agent interaction lease is used.
+        msg.req_method = ReqMethod.CHAT_SEND
+        msg.is_stream = True
+        msg.params = build_interrupt_resume_params(
+            question.request_id,
+            answer,
+            source=question.source,
+            question=question.question,
+            custom_input=custom_input,
+        )
+        logger.info(
+            "[MessageHandler] ask_user text reply resolved: channel=%s request_id=%s answer=%s",
+            msg.channel_id, question.request_id, answer[:60],
+        )
+        return True
+
     def set_outbound_pipeline(self, pipeline: Any) -> None:
         self._outbound_pipeline = pipeline
 
@@ -1007,6 +1077,17 @@ class MessageHandler(ABC):
                     sid_mode[sid] = task_mode
             else:
                 unresolved_rids.append(rid)
+
+        # This chat.send is about to kill the AgentServer work behind any
+        # ask_user question pending on these sessions. PENDING_QUESTIONS.resolve
+        # only pops on a matched answer, so without this the record would
+        # outlive its request_id and a later "1"/"2" would be rewritten into a
+        # resume for a tool call that no longer exists.
+        if sid_mode:
+            from jiuwenswarm.gateway.routing.pending_question import PENDING_QUESTIONS
+
+            for old_sid in sid_mode:
+                PENDING_QUESTIONS.discard(channel_id, old_sid)
 
         # Stop gateway stream consumers first — never block on AgentServer RPC.
         tasks_to_stop = [task for _rid, task, _sess, _mode in candidates]
@@ -3532,6 +3613,10 @@ class MessageHandler(ABC):
                 # 将当前 Channel 的控制状态应用到消息上
                 await self._resolve_external_channel_session(msg)
                 self._apply_channel_state(msg)
+                # a reply to an ask_user question asked as plain text must
+                # become an interrupt resume (chat.send + ask_user_interrupt),
+                # not a new turn and not chat.user_answer.
+                self._convert_pending_question_reply(msg)
                 channel_type = self._resolve_control_channel_type(msg)
                 if (
                     channel_type in self._control_channel_types

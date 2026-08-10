@@ -493,7 +493,7 @@ class XiaoyiChannel(BaseChannel):
         session_id = self._session_task_map.get(task_id, task_id)
         return session_id, task_id
 
-    async def send(self, msg: Message, *, routing_target: RoutingTarget | None = None) -> None:
+    async def send(self, msg: Message, *, routing_target: RoutingTarget | None = None) -> bool:
         """发送消息到小艺服务端（A2A 格式，双通道发送）.
 
         V2 Stream Routing:
@@ -503,13 +503,13 @@ class XiaoyiChannel(BaseChannel):
         """
         # ── team 模式：双通道投递 ──
         if routing_target is not None:
-            await self._send_team(msg, routing_target)
-            return
+            return await self._send_team(msg, routing_target)
 
         # ── 非 team 模式：原有单值路径 ──
         if not self._ws_connections:
-            return
+            return False
         await self._send_legacy(msg)
+        return True
 
     async def _send_legacy(self, msg: Message) -> None:
         """非 team 模式原有单值投递路径（保留兼容）."""
@@ -699,19 +699,26 @@ class XiaoyiChannel(BaseChannel):
         EventType.CHAT_PROCESSING_STATUS,
     })
 
-    async def _send_team(self, msg: Message, routing_target: RoutingTarget) -> None:
-        """team 模式双通道投递：活跃会话走 ws 流式，非活跃走 push webhook 全文 final."""
+    async def _send_team(self, msg: Message, routing_target: RoutingTarget) -> bool:
+        """team 模式双通道投递：活跃会话走 ws 流式，非活跃走 push webhook 全文 final.
+
+        Returns whether a payload was actually handed off to ws/push/legacy.
+        The caller (``send()``) surfaces this to ``_channel_send_delivered``,
+        which gates ``register_ask_user_pending`` -- returning ``True`` for a
+        message this method silently dropped would register a pending
+        question for a notice the human never received.
+        """
         delivery = routing_target.delivery
         if delivery is None or not isinstance(delivery, XiaoyiDeliveryTarget):
             logger.warning(
                 "[XiaoyiChannel] _send_team drop: delivery invalid type=%s event=%s intent=%s",
                 type(delivery).__name__, msg.event_type, routing_target.intent,
             )
-            return
+            return False
 
         # 白名单过滤：team member 场景丢弃中间过程，只投递结果类消息
         if msg.event_type not in self._TEAM_ALLOWED_EVENTS:
-            return
+            return False
 
         agent_id = delivery.agent_id
         content = self._extract_team_content(msg)
@@ -734,25 +741,27 @@ class XiaoyiChannel(BaseChannel):
 
         # status_update / file 类事件透传（不参与 push 合并）
         if should_send_as_status_update(msg.event_type):
-            if ws_session and ws_task:
-                status_text = get_status_text_for_event(msg.event_type, msg.payload)
-                status_state = get_status_state_for_event(msg.event_type, msg.payload)
-                for url_key in list(self._ws_connections.keys()):
-                    await self._send_status_update_with_state(
-                        ws_task, ws_session, status_text, status_state, url_key
-                    )
-            return
+            if not (ws_session and ws_task):
+                return False
+            status_text = get_status_text_for_event(msg.event_type, msg.payload)
+            status_state = get_status_state_for_event(msg.event_type, msg.payload)
+            for url_key in list(self._ws_connections.keys()):
+                await self._send_status_update_with_state(
+                    ws_task, ws_session, status_text, status_state, url_key
+                )
+            return True
         if msg.event_type == EventType.CHAT_FILE:
-            if ws_session and ws_task:
-                files = msg.payload.get("files", {}) if isinstance(msg.payload, dict) else {}
-                for file_info in files:
-                    for url_key, ws in self._ws_connections.items():
-                        if ws:
-                            try:
-                                await self._send_file_response(ws_session, ws_task, file_info, url_key)
-                            except Exception as e:
-                                logger.warning(f"XiaoyiChannel 发送文件响应失败 ({url_key}): {e}")
-            return
+            if not (ws_session and ws_task):
+                return False
+            files = msg.payload.get("files", {}) if isinstance(msg.payload, dict) else {}
+            for file_info in files:
+                for url_key, ws in self._ws_connections.items():
+                    if ws:
+                        try:
+                            await self._send_file_response(ws_session, ws_task, file_info, url_key)
+                        except Exception as e:
+                            logger.warning(f"XiaoyiChannel 发送文件响应失败 ({url_key}): {e}")
+            return True
 
         # 判定投递通道
         if ws_active:
@@ -760,25 +769,29 @@ class XiaoyiChannel(BaseChannel):
             logger.info("[XiaoyiChannel] _send_team → ws: agent_id=%s sid=%s", (agent_id or "")[:8],
                         (ws_session or "")[:8])
             await self._send_ws_to_user(ws_session, ws_task, msg, content)
-        else:
-            # ② 后台 → push webhook 全文 final（带 per-agent_id 合并窗口）
-            # push_id 优先用 delivery 的，否则从活跃映射取（最后一次已知值）
-            push_id = delivery.push_id
-            if not push_id and agent_id:
-                active = self._active_push_sessions.get(agent_id)
-                if active:
-                    push_id = active[2]
-            if push_id and agent_id:
-                logger.info("[XiaoyiChannel] _send_team → push: agent_id=%s push_id=%s", (agent_id or "")[:8],
-                            push_id[:8])
-                await self._send_push_to_user(agent_id, push_id, content)
-            elif self._ws_connections:
-                # ③ 兜底：无 push_id 且无活跃会话，走 legacy（按 metadata 投递）
-                logger.info("[XiaoyiChannel] _send_team → legacy fallback: agent_id=%s", (agent_id or "")[:8])
-                await self._send_legacy(msg)
-            else:
-                logger.warning("[XiaoyiChannel] _send_team drop: no ws/push/legacy available agent_id=%s",
-                               (agent_id or "")[:8])
+            return True
+
+        # ② 后台 → push webhook 全文 final（带 per-agent_id 合并窗口）
+        # push_id 优先用 delivery 的，否则从活跃映射取（最后一次已知值）
+        push_id = delivery.push_id
+        if not push_id and agent_id:
+            active = self._active_push_sessions.get(agent_id)
+            if active:
+                push_id = active[2]
+        if push_id and agent_id:
+            logger.info("[XiaoyiChannel] _send_team → push: agent_id=%s push_id=%s", (agent_id or "")[:8],
+                        push_id[:8])
+            await self._send_push_to_user(agent_id, push_id, content)
+            return True
+        if self._ws_connections:
+            # ③ 兜底：无 push_id 且无活跃会话，走 legacy（按 metadata 投递）
+            logger.info("[XiaoyiChannel] _send_team → legacy fallback: agent_id=%s", (agent_id or "")[:8])
+            await self._send_legacy(msg)
+            return True
+
+        logger.warning("[XiaoyiChannel] _send_team drop: no ws/push/legacy available agent_id=%s",
+                        (agent_id or "")[:8])
+        return False
 
     def _resolve_active_ws(
             self, agent_id: str, delivery: XiaoyiDeliveryTarget

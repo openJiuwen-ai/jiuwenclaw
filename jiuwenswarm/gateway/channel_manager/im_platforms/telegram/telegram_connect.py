@@ -12,11 +12,85 @@ from typing import Any, Callable
 import logging
 
 from jiuwenswarm.gateway.channel_manager.base import BaseChannel, ChannelMetadata, RobotMessageRouter
-from jiuwenswarm.common.schema.message import Message, ReqMethod
+from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
 from jiuwenswarm.gateway.routing.keys import DeliveryTarget
 from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
 
 logger = logging.getLogger(__name__)
+
+# Telegram has no edit-in-place streaming UI. AgentServer must still be called
+# with is_stream=True so HITL events (ask_user, etc.) are emitted as chunks, but
+# only these final-like events are forwarded as Bot messages.
+_TELEGRAM_DELIVER_EVENTS = frozenset({
+    EventType.CHAT_FINAL,
+    EventType.CHAT_ERROR,
+    EventType.CHAT_INTERRUPT_RESULT,
+    EventType.HEARTBEAT_RELAY,
+    EventType.CHAT_FILE,
+    EventType.CHAT_MEDIA,
+    EventType.TEAM_MESSAGE,
+})
+
+
+def should_deliver_telegram_outbound(msg: Message) -> bool:
+    """Whether this outbound message should become a Telegram Bot API send.
+
+    Stream noise (deltas, tool calls, raw ask_user_question) is dropped here.
+    The plain-text fallback rewrites ask_user into ``chat.final`` before
+    ``send()``, so the numbered question still gets through as a final.
+    """
+    event_type = getattr(msg, "event_type", None)
+    if event_type in _TELEGRAM_DELIVER_EVENTS:
+        pass
+    elif event_type is None and getattr(msg, "type", None) == "res":
+        # Unary / plain response envelope without an event_type.
+        pass
+    else:
+        return False
+
+    content = (
+        (getattr(msg, "params", None) or {}).get("content")
+        or (getattr(msg, "payload", None) or {}).get("content")
+        or ""
+    )
+    if isinstance(content, dict):
+        content = content.get("output", "") or ""
+    return bool(str(content).strip())
+
+
+def build_telegram_inbound_message(
+    *,
+    message_id: str,
+    session_id: str,
+    text: str,
+    chat_id: int,
+    user_id: int,
+    username: str | None,
+    is_group_chat: bool,
+) -> Message:
+    """Build the gateway Message for an inbound Telegram chat.send.
+
+    ``is_stream=True`` is required so AgentServer emits stream chunks such as
+    ``chat.ask_user_question``. Outbound filtering keeps the chat quiet.
+    """
+    return Message(
+        id=str(message_id),
+        type="req",
+        channel_id="telegram",
+        session_id=session_id,
+        params={"content": text, "query": text},
+        timestamp=time.time(),
+        ok=True,
+        req_method=ReqMethod.CHAT_SEND,
+        is_stream=True,
+        metadata={
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "message_id": message_id,
+            "username": username,
+            "is_group_chat": is_group_chat,
+        },
+    )
 
 try:
     from telegram import Update
@@ -155,24 +229,33 @@ class TelegramChannel(BaseChannel):
 
         logger.info("Telegram Bot 已停止")
 
-    async def send(self, msg: Message, *, routing_target: RoutingTarget | None = None) -> None:
+    async def send(self, msg: Message, *, routing_target: RoutingTarget | None = None) -> bool:
         """通过 Telegram 发送消息."""
         if not self._application or not self._running:
             logger.warning("Telegram Bot not initialized or not running")
-            return
+            return False
+
+        # Drop stream intermediates; only finals / errors / ask_user text notices.
+        if not should_deliver_telegram_outbound(msg):
+            logger.debug(
+                "Telegram send: skip event_type=%s type=%s",
+                getattr(msg, "event_type", None),
+                getattr(msg, "type", None),
+            )
+            return False
 
         try:
             # 从 session_id 或 metadata 获取 chat_id
             chat_id = self._get_chat_id_from_message(msg)
             if not chat_id:
                 logger.warning("Telegram send: 无法确定 chat_id")
-                return
+                return False
 
             # 提取消息内容
             content = self._extract_content(msg)
             if not content:
                 logger.warning("Telegram send: content 为空，跳过发送")
-                return
+                return False
 
             # 发送消息
             parse_mode = (
@@ -199,9 +282,11 @@ class TelegramChannel(BaseChannel):
                     raise
 
             logger.debug("Telegram message sent to chat_id=%s", chat_id)
+            return True
 
         except Exception as e:
             logger.error(f"Error sending Telegram message: {type(e).__name__}: {e}")
+            return False
 
     def _get_chat_id_from_message(self, msg: Message) -> int | None:
         """从 Message 中提取 chat_id."""
@@ -355,23 +440,14 @@ class TelegramChannel(BaseChannel):
                 session_id = f"telegram_{chat_id}"
                 self._chat_sessions[chat_id] = session_id
 
-            # 创建 Message 对象
-            user_message = Message(
-                id=str(message_id),
-                type="req",
-                channel_id=self.channel_id,
+            user_message = build_telegram_inbound_message(
+                message_id=str(message_id),
                 session_id=session_id,
-                params={"content": text, "query": text},
-                timestamp=time.time(),
-                ok=True,
-                req_method=ReqMethod.CHAT_SEND,
-                metadata={
-                    "chat_id": chat_id,
-                    "user_id": user_id,
-                    "message_id": message_id,
-                    "username": update.effective_user.username,
-                    "is_group_chat": is_group_chat,
-                },
+                text=text,
+                chat_id=chat_id,
+                user_id=user_id,
+                username=update.effective_user.username,
+                is_group_chat=is_group_chat,
             )
 
             # 发送到 Gateway 或 Router

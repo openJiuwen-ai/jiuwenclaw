@@ -13,6 +13,7 @@ from jiuwenswarm.common.schema import Message
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.gateway.message_handler.message_handler import ChannelMode, MessageHandler
+from jiuwenswarm.gateway.routing.pending_question import PENDING_QUESTIONS
 from jiuwenswarm.gateway.routing.session_sharing import SubRole
 
 
@@ -336,6 +337,92 @@ async def test_tui_keeps_streams_on_different_session() -> None:
     assert not orphan_task.cancelled()
     await asyncio.sleep(0)
     assert len(_FakeAgentClient.sent_requests) == 0
+
+
+# ── cancelling the blocked stream must not leave a stale pending question ──
+#
+# An unmatched reply (e.g. "hold on") to a plain-text ask_user notice is left
+# as an ordinary chat.send. That chat.send then cancels the in-flight
+# AgentServer work that owns the ask_user interrupt -- the request_id the
+# pending question points at is now dead. A later "1"/"2" must not be
+# rewritten into a resume for that dead request_id; the cancellation must
+# also discard the pending question.
+
+
+@pytest.fixture(autouse=True)
+def _clean_pending_questions():
+    PENDING_QUESTIONS.discard("tui", "sess_ask")
+    PENDING_QUESTIONS.discard("tui", "sess_other_ask")
+    yield
+    PENDING_QUESTIONS.discard("tui", "sess_ask")
+    PENDING_QUESTIONS.discard("tui", "sess_other_ask")
+
+
+@pytest.mark.asyncio
+async def test_cancelling_the_blocked_stream_discards_its_pending_question() -> None:
+    handler = _TestMessageHandler.create()
+    PENDING_QUESTIONS.register(
+        request_id="call_ask_1",
+        channel_id="tui",
+        conversation_key="sess_ask",
+        options=("Alpha", "Beta"),
+    )
+    goal_task = _seed_stream_task(
+        handler, rid="rid-ask", channel_id="tui", session_id="sess_ask",
+    )
+    msg = _chat_send_message(channel_id="tui", session_id="sess_ask")
+    msg.params["query"] = "hold on, let me check"
+
+    try:
+        cancelled = await handler.cancel_stream_tasks_for_channel(msg)
+        assert cancelled == 1
+        assert goal_task.cancelled()
+        assert PENDING_QUESTIONS.peek("tui", "sess_ask") is None
+    finally:
+        if not goal_task.done():
+            goal_task.cancel()
+        await asyncio.gather(goal_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_different_channel_does_not_discard_unrelated_pending_questions() -> None:
+    handler = _TestMessageHandler.create()
+    PENDING_QUESTIONS.register(
+        request_id="call_ask_2",
+        channel_id="tui",
+        conversation_key="sess_other_ask",
+        options=("Alpha", "Beta"),
+    )
+    web_task = _seed_stream_task(
+        handler, rid="rid-web-ask", channel_id="web", session_id="sess_web_ask",
+    )
+    msg = _chat_send_message(channel_id="web", session_id="sess_web_ask")
+
+    try:
+        await handler.cancel_stream_tasks_for_channel(msg)
+        assert PENDING_QUESTIONS.peek("tui", "sess_other_ask") is not None
+    finally:
+        if not web_task.done():
+            web_task.cancel()
+        await asyncio.gather(web_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_no_candidates_to_cancel_leaves_the_pending_question_alone() -> None:
+    """A chat.send that cancels nothing (no in-flight stream) must not touch it."""
+    handler = _TestMessageHandler.create()
+    PENDING_QUESTIONS.register(
+        request_id="call_ask_3",
+        channel_id="tui",
+        conversation_key="sess_ask",
+        options=("Alpha", "Beta"),
+    )
+    msg = _chat_send_message(channel_id="tui", session_id="sess_ask")
+
+    cancelled = await handler.cancel_stream_tasks_for_channel(msg)
+
+    assert cancelled == 0
+    assert PENDING_QUESTIONS.peek("tui", "sess_ask") is not None
 
 
 def test_is_single_user_channel_acp_only() -> None:
