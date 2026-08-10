@@ -1483,9 +1483,9 @@
       "unpublished": "Unpublished"
     },
     "skillTypes": {
-      "industry": "Industry Skill Packs",
+      "skill": "Skill Pack",
       "team": "Team Skills",
-      "skill": "Multimodal"
+      "multimodal": "Multimodal"
     },
     "marketplaceCategories": {
       "all": "All",

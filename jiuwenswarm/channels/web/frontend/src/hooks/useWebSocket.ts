@@ -1484,6 +1484,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const activeGoal = useGoalStore.getState().getRuntime(sessionId)?.goal;
         const inputMode = activeGoal?.status === 'active' ? 'steer' : undefined;
         const outgoingMode = resolveOutgoingMode(sessionId, currentMode);
+        const sessionMetadata = useSessionStore.getState().getRuntime(sessionId)?.metadata;
         await request('chat.send', {
           session_id: sessionId,
           content: outgoingContent,
@@ -1495,7 +1496,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           skills: selectedSkills,
           ...(inputMode ? { input_mode: inputMode } : {}),
           ...resolvePlanEntryPayload(sessionId, outgoingMode),
+          ...(sessionMetadata ? { metadata: sessionMetadata } : {}),
         });
+        if (sessionMetadata) {
+          useSessionStore.getState().setSessionMetadata(sessionId, null);
+        }
         consumePlanEntryMark(sessionId, outgoingMode);
         return true;
       } catch (error) {
