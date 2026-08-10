@@ -72,6 +72,9 @@ class AgentRequest:
     channel_id: str = ""
     session_id: str | None = None
     chat_id: str | None = None
+    # 企业多租户：service_id / agent_id（由 AGENT_RUNTIME 场景使用）
+    service_id: str | None = None
+    agent_id: str | None = None
     req_method: ReqMethod | None = None
     params: dict = field(default_factory=dict)
     is_stream: bool = False

@@ -9,9 +9,8 @@ logger = logging.getLogger(__name__)
 def _get_memory_forbidden_config() -> Dict[str, Any]:
     """从 config.yaml 读取 memory.forbidden_memory_definition 配置."""
     try:
-        from jiuwenswarm.common.config import get_config
-        config = get_config()
-        memory_config = config.get("memory", {})
+        from jiuwenswarm.agents.harness.common.memory.config import get_memory_section
+        memory_config = get_memory_section()
         forbidden_config = memory_config.get("forbidden_memory_definition", {})
         return {
             "enabled": forbidden_config.get("enabled", False),
@@ -75,11 +74,11 @@ def get_forbidden_memory_prompt(language: str) -> str:
                 prompt_parts.append(f"{i}. `{pattern}`")
             prompt_parts.append("")
         prompt_parts.append("**Requirements:**")
-        prompt_parts.append("- Before calling `experience_learn` or `write_memory` to store memories, \
-            you must check if the content contains the above sensitive information")
-        prompt_parts.append("- If sensitive information is detected, it must be desensitized \
-            (e.g., replaced with ***) or storage must be refused")
-        prompt_parts.append("- Sensitive information such as passwords and keys explicitly provided by the user \
-            must not be stored in the memory system")
+        prompt_parts.append("- Before calling `experience_learn` or `write_memory` to store memories, "
+                            "you must check if the content contains the above sensitive information")
+        prompt_parts.append("- If sensitive information is detected, it must be desensitized "
+                            "(e.g., replaced with ***) or storage must be refused")
+        prompt_parts.append("- Sensitive information such as passwords and keys explicitly provided by the user "
+                            "must not be stored in the memory system")
         prompt_parts.append("")
         return "\n".join(prompt_parts)

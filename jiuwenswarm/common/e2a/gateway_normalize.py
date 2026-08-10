@@ -124,6 +124,10 @@ def message_to_e2a(msg: "Message") -> E2AEnvelope:
         "is_stream": bool(msg.is_stream),
         "timestamp": msg.timestamp,
     }
+    if getattr(msg, "bot_id", None):
+        params = d["params"]
+        if isinstance(params, dict) and "bot_id" not in params:
+            params["bot_id"] = msg.bot_id
     if msg.req_method is not None:
         d["method"] = msg.req_method.value
     # 合并 metadata 和独立字段（enable_memory, group_digital_avatar 等）
@@ -159,6 +163,16 @@ def message_to_e2a(msg: "Message") -> E2AEnvelope:
         d["agent_ref"] = msg.agent_ref
     if getattr(msg, "app_id", None):
         d["app_id"] = msg.app_id
+
+    # 企业版：SessionMap 写入的 service_id / agent_id 提升到信封顶层（供 AgentServer 多租户路由）
+    params = d.get("params")
+    if isinstance(params, dict):
+        svc = str(params.get("service_id") or "").strip()
+        if svc:
+            d["service_id"] = svc
+        if "agent_id" in params:
+            ag = params.get("agent_id")
+            d["agent_id"] = str(ag).strip() if ag is not None and str(ag).strip() else None
 
     return E2AEnvelope.from_dict(d)
 
@@ -474,6 +488,13 @@ def e2a_response_to_agent_response(e2a: E2AResponse) -> "AgentResponse":
     )
 
 
+def _is_hitl_stream_terminal_body(body: dict[str, Any]) -> bool:
+    """HITL 暂停帧：Agent 以 is_final=False 下发，但 Gateway 流式会话应在此结束。"""
+    if body.get("awaiting_user_input") is True:
+        return True
+    return body.get("event_type") == "chat.invocation_paused"
+
+
 def e2a_response_to_agent_chunk(e2a: E2AResponse) -> "AgentResponseChunk":
     """
     ``E2AResponse`` → ``AgentResponseChunk``（与 ``e2a_response_from_agent_chunk`` 对仗）。
@@ -531,6 +552,7 @@ def e2a_response_to_agent_chunk(e2a: E2AResponse) -> "AgentResponseChunk":
         et = body.get("event_type")
         delta = body.get("delta")
         sct_in = body.get("source_chunk_type")
+        hitl_terminal = _is_hitl_stream_terminal_body(body)
 
         if et == "chat.delta" or dk in ("text", "reasoning"):
             sct = "llm_reasoning" if dk == "reasoning" else sct_in
@@ -549,7 +571,7 @@ def e2a_response_to_agent_chunk(e2a: E2AResponse) -> "AgentResponseChunk":
                 request_id=rid,
                 channel_id=ch,
                 payload=pl,
-                is_complete=False,
+                is_complete=hitl_terminal,
             )
 
         if isinstance(delta, dict):
@@ -566,7 +588,7 @@ def e2a_response_to_agent_chunk(e2a: E2AResponse) -> "AgentResponseChunk":
             request_id=rid,
             channel_id=ch,
             payload=pl2,
-            is_complete=False,
+            is_complete=hitl_terminal,
         )
 
     if kind == E2A_RESPONSE_KIND_CRON:

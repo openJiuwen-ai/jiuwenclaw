@@ -594,10 +594,33 @@ task_memory:
   retrieval_algo: ACE
   summary_algo: ACE
 
+# ========== Redis（主备 Gateway：状态存储 / Pub/Sub / Leader；standalone 下不连接）==========
+# 通过 gateway.deployment_mode 控制：standalone（不连接）/ active-standby（连接 Redis）
+redis:
+  host: ${REDIS_HOST:-localhost}
+  port: ${REDIS_PORT:-6379}
+  password: ${REDIS_PASSWORD:-}
+  db: ${REDIS_DB:-0}
+  # Session 数据过期时间（秒）
+  session_ttl: ${REDIS_SESSION_TTL:-604800}
+  key_prefix: ${REDIS_KEY_PREFIX:-jiuwenswarm:}
+  pool_size: ${REDIS_POOL_SIZE:-10}
+  connect_timeout: ${REDIS_CONNECT_TIMEOUT:-5}
+  operation_timeout: ${REDIS_OPERATION_TIMEOUT:-10}
+  health_check_interval: ${REDIS_HEALTH_CHECK_INTERVAL:-30}
+
 gateway:
   # SessionMap 仅用于企业claw场景，如 feishu_enterprise 等通道：将平台身份映射为 Agent 的 session_id。
   # 取值：per_chat_bot（默认，同 chat+bot 共享会话）, per_chat_bot_user（按 user 分会话）
   session_map_scope: per_chat_bot
+
+  # ========== 部署模式（企业/K8s；AGENT_RUNTIME 环境下生效）==========
+  # standalone（默认）：单机，不连 Redis
+  # active-standby：主备，连接 Redis + LeaderElection 选主
+  # distributed：多副本同时在线，连接 Redis 共享 session（无选主；cron 默认关闭；仅 web/tui 通道）
+  deployment_mode: ${DEPLOYMENT_MODE:-standalone}
+  # 分布式下用于实例标识；空则启动时自动生成
+  instance_id: ${GATEWAY_INSTANCE_ID:-}
 
   # AgentClient 配置 - Gateway 连接到 AgentServer 的方式
   # type: websocket（默认） | yuanrong（直接函数调用） | agentos_router（AgentOS 扩展）
@@ -683,6 +706,17 @@ execution_guard:
     global_breaker_threshold: 30
     # 未知/错误工具连续调用达到该次数时停止重试并中断
     unknown_tool_threshold: 10
+
+# web_enterprise 聊天附件上传（自部署 MinIO / S3 兼容对象存储）
+# 环境变量可覆盖：JIUWENCLAW_MINIO_ENDPOINT / ACCESS_KEY / SECRET_KEY / BUCKET / SECURE / PUBLIC_BASE_URL
+minio:
+  endpoint:
+  access_key:
+  secret_key:
+  bucket: jiuwenclaw
+  secure: false
+  # 可选。设置后返回固定公网 URL（需 bucket 可读策略）；未设置则返回 presigned URL（默认 7 天）
+  public_base_url:
 
 channels:
   web:

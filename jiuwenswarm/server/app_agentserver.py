@@ -32,6 +32,7 @@ from jiuwenswarm.common.utils import (
     logger,
     prepare_workspace,
     reset_free_search_runtime_flags,
+    update_config,
 )
 
 # Ensure workspace initialized
@@ -41,6 +42,11 @@ _new_workspace = _workspace_dir / "agent" / "workspace"
 _old_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
 if not _config_file.exists() or (_old_workspace.exists() and not _new_workspace.exists()):
     prepare_workspace(overwrite=False)
+else:
+    # 企业级多 Pod 共享 PVC：各 AgentServer 启动时 merge 写 config.yaml 会与并发读竞态。
+    # 配置由部署侧/init 写入 PVC，运行时经 Gateway reload_config 热更新，不在此 merge。
+    if not os.getenv("AGENT_RUNTIME", "").strip():
+        update_config()
 
 # Pin openjiuwen log dir before any openjiuwen-heavy imports
 from jiuwenswarm.common.openjiuwen_logging import bootstrap_openjiuwen_logging
@@ -49,22 +55,27 @@ _loaded_logging_yaml = bootstrap_openjiuwen_logging()
 
 # --- Now safe to import remaining jiuwenswarm modules ---
 from jiuwenswarm.common.debug_dump import install_async_dump_handler
+from jiuwenswarm.infrastructure.config import Settings
 
 if not _loaded_logging_yaml:
     _logs_root = get_logs_dir()
-    _logs_root.mkdir(parents=True, exist_ok=True)
+    _file_logging_enabled = Settings().log_to_file_enabled
+    if _file_logging_enabled:
+        _logs_root.mkdir(parents=True, exist_ok=True)
     _perm_fmt = logging.Formatter(
         "%(asctime)s.%(msecs)03d %(levelname)s %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    _perm_fh = logging.handlers.RotatingFileHandler(
-        _logs_root / "permissions.log",
-        maxBytes=20 * 1024 * 1024,
-        backupCount=5,
-        encoding="utf-8",
-    )
-    _perm_fh.setLevel(logging.INFO)
-    _perm_fh.setFormatter(_perm_fmt)
+    _perm_fh = None
+    if _file_logging_enabled:
+        _perm_fh = logging.handlers.RotatingFileHandler(
+            _logs_root / "permissions.log",
+            maxBytes=20 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+        )
+        _perm_fh.setLevel(logging.INFO)
+        _perm_fh.setFormatter(_perm_fmt)
     _perm_sh = logging.StreamHandler()
     _perm_sh.setLevel(logging.INFO)
     _perm_sh.setFormatter(_perm_fmt)
@@ -72,7 +83,8 @@ if not _loaded_logging_yaml:
     _sec_logger = logging.getLogger("openjiuwen.harness.security")
     _sec_logger.setLevel(logging.INFO)
     if not _sec_logger.handlers:
-        _sec_logger.addHandler(_perm_fh)
+        if _perm_fh is not None:
+            _sec_logger.addHandler(_perm_fh)
         _sec_logger.addHandler(_perm_sh)
     _sec_logger.propagate = False
 
@@ -84,27 +96,31 @@ if not _loaded_logging_yaml:
             return "[PermissionEngine]" in record.getMessage()
 
     _perm_filter = _PermissionEngineFilter()
-    _common_fh = logging.handlers.RotatingFileHandler(
-        _logs_root / "permissions.log",
-        maxBytes=20 * 1024 * 1024,
-        backupCount=5,
-        encoding="utf-8",
-    )
-    _common_fh.setLevel(logging.INFO)
-    _common_fh.setFormatter(_perm_fmt)
-    _common_fh.addFilter(_perm_filter)
+    _common_fh = None
+    if _file_logging_enabled:
+        _common_fh = logging.handlers.RotatingFileHandler(
+            _logs_root / "permissions.log",
+            maxBytes=20 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+        )
+        _common_fh.setLevel(logging.INFO)
+        _common_fh.setFormatter(_perm_fmt)
+        _common_fh.addFilter(_perm_filter)
     _common_sh = logging.StreamHandler()
     _common_sh.setLevel(logging.INFO)
     _common_sh.setFormatter(_perm_fmt)
     _common_sh.addFilter(_perm_filter)
-    _common_logger.addHandler(_common_fh)
+    if _common_fh is not None:
+        _common_logger.addHandler(_common_fh)
     _common_logger.addHandler(_common_sh)
     _common_logger.propagate = False
 
     _perm_ns_logger = logging.getLogger("jiuwenswarm.agents.harness.common.rails.permissions")
     _perm_ns_logger.setLevel(logging.INFO)
     if not _perm_ns_logger.handlers:
-        _perm_ns_logger.addHandler(_perm_fh)
+        if _perm_fh is not None:
+            _perm_ns_logger.addHandler(_perm_fh)
         _perm_ns_logger.addHandler(_perm_sh)
     _perm_ns_logger.propagate = False
 
@@ -122,6 +138,12 @@ install_shell_tool_safety_hooks()
 from jiuwenswarm.llm_sse_patch import apply_openai_sse_invoke_patch
 
 apply_openai_sse_invoke_patch()
+
+from jiuwenswarm.openjiuwen_skip_tool_patch import apply_skip_tool_tool_message_patch
+from jiuwenswarm.openjiuwen_streaming_tool_patch import apply_streaming_tool_wait_timeout_patch
+
+apply_skip_tool_tool_message_patch()
+apply_streaming_tool_wait_timeout_patch()
 
 # /debug 模式下捕获 builtin TaskTool 分发的 subagent 流（reasoning/tool_call/usage），
 # 内联写入主 dump。非 debug 或 include_subagent_flow 关闭时走原始 invoke，零回归。
@@ -193,6 +215,67 @@ async def _run(host: str, port: int) -> None:
     )
     await extension_manager.load_all_extensions()
     logger.info("[AgentServer] 扩展加载完成，共 %d 个", len(extension_manager.list_extensions()))
+
+    try:
+        from jiuwenswarm.infrastructure.log_masking.engine import LogMaskingEngine
+
+        await LogMaskingEngine.reload_log_masking_rule()
+        logger.info("[AgentServer] log masking rules loaded from Gateway DB (if any)")
+    except Exception:  # noqa: BLE001
+        logger.warning("[AgentServer] log_masking_rule cold load skipped", exc_info=True)
+
+    if os.getenv("AGENT_RUNTIME", "").strip():
+        try:
+            from jiuwenswarm.agents.harness.common.memory.config import (
+                reload_embed_config_from_gateway_db,
+            )
+
+            await reload_embed_config_from_gateway_db()
+            logger.info("[AgentServer] embed_config loaded from Gateway DB (if any)")
+        except Exception:  # noqa: BLE001
+            logger.warning("[AgentServer] embed_config cold load skipped", exc_info=True)
+
+    if os.getenv("AGENT_RUNTIME", "").strip():
+        try:
+            from jiuwenswarm.agents.harness.common.memory.config import (
+                reload_task_memory_config_from_gateway_db,
+            )
+
+            await reload_task_memory_config_from_gateway_db()
+            logger.info("[AgentServer] task_memory_config loaded from Gateway DB (if any)")
+        except Exception:  # noqa: BLE001
+            logger.warning("[AgentServer] task_memory_config cold load skipped", exc_info=True)
+
+    if os.getenv("AGENT_RUNTIME", "").strip():
+        try:
+            from jiuwenswarm.agents.harness.common.memory.config import (
+                reload_memory_config_from_gateway_db,
+            )
+
+            await reload_memory_config_from_gateway_db()
+            logger.info("[AgentServer] memory_config loaded from Gateway DB (if any)")
+        except Exception:  # noqa: BLE001
+            logger.warning("[AgentServer] memory_config cold load skipped", exc_info=True)
+
+    if os.getenv("AGENT_RUNTIME", "").strip():
+        try:
+            from jiuwenswarm.common.utils import reload_logging_levels_from_gateway_db
+
+            await reload_logging_levels_from_gateway_db()
+            logger.info("[AgentServer] logging levels loaded from Gateway DB (if any)")
+        except Exception:  # noqa: BLE001
+            logger.warning("[AgentServer] logging_config cold load skipped", exc_info=True)
+
+    if os.getenv("AGENT_RUNTIME", "").strip():
+        try:
+            from jiuwenswarm.agents.harness.common.rails.permissions.config_loader import (
+                reload_permissions_from_gateway_db,
+            )
+
+            await reload_permissions_from_gateway_db()
+            logger.info("[AgentServer] permissions config loaded from Gateway DB (if any)")
+        except Exception:  # noqa: BLE001
+            logger.warning("[AgentServer] permissions_config cold load skipped", exc_info=True)
 
     # 会话 metadata 的字段补全已改为惰性迁移:读取时按需推断并写回磁盘
     # (见 session_metadata._apply_metadata_defaults_with_inference),无需启动全量扫描。
