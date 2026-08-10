@@ -140,5 +140,104 @@ class TestQABlockInterruptFreeze(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(response.ok)
 
 
+    async def test_freeze_binds_env_overlay_for_llm_auth(self) -> None:
+        """Regression: _freeze_qa_block_before_abort must bind env overlay so that
+        freeze_persist (async background task) inherits default_headers for LLM
+        summarization auth.  Without this, read_default_headers() returns None
+        → 401 APIG.0303.
+        """
+        with patch(
+            "jiuwenclaw.agentserver.deep_agent.interface_deep.bind_agent_env_ns",
+            return_value="ns_token",
+        ) as mock_bind_ns, patch(
+            "jiuwenclaw.agentserver.deep_agent.interface_deep.build_effective_env_overlay",
+            return_value={"KEY": "val"},
+        ) as mock_build_overlay, patch(
+            "jiuwenclaw.agentserver.deep_agent.interface_deep.bind_task_env_overlay",
+            return_value="overlay_token",
+        ) as mock_bind_overlay, patch(
+            "jiuwenclaw.agentserver.deep_agent.interface_deep.reset_task_env_overlay",
+        ) as mock_reset_overlay, patch(
+            "jiuwenclaw.agentserver.deep_agent.interface_deep.reset_agent_env_ns",
+        ) as mock_reset_ns, patch(
+            "jiuwenclaw.agentserver.deep_agent.interface_deep._resolve_session_for_checkpoint",
+            new=AsyncMock(return_value=(MagicMock(), False)),
+        ), patch(
+            "jiuwenclaw.agentserver.deep_agent.interface_deep.resolve_context_engine",
+            return_value=None,
+        ):
+            await _freeze_qa_block_before_abort(
+                self.adapter, "session-1", reason="cancel",
+            )
+
+        mock_bind_ns.assert_called_once()
+        mock_build_overlay.assert_called_once()
+        mock_bind_overlay.assert_called_once()
+        mock_reset_overlay.assert_called_once_with("overlay_token")
+        mock_reset_ns.assert_called_once_with("ns_token")
+
+    async def test_freeze_swallows_overlay_bind_failure(self) -> None:
+        """Overlay bind failure must skip freeze and not raise (abort must proceed)."""
+        freeze_rail = getattr(self.adapter, "_qa_block_freeze_rail")
+        with patch(
+            "jiuwenclaw.agentserver.deep_agent.interface_deep.bind_agent_env_ns",
+            return_value="ns_token",
+        ), patch(
+            "jiuwenclaw.agentserver.deep_agent.interface_deep.build_effective_env_overlay",
+            return_value={"KEY": "val"},
+        ), patch(
+            "jiuwenclaw.agentserver.deep_agent.interface_deep.bind_task_env_overlay",
+            side_effect=RuntimeError("bind failed"),
+        ), patch(
+            "jiuwenclaw.agentserver.deep_agent.interface_deep.reset_task_env_overlay",
+        ) as mock_reset_overlay, patch(
+            "jiuwenclaw.agentserver.deep_agent.interface_deep.reset_agent_env_ns",
+        ) as mock_reset_ns, patch(
+            "jiuwenclaw.agentserver.deep_agent.interface_deep._resolve_session_for_checkpoint",
+            new=AsyncMock(),
+        ) as mock_resolve:
+            await _freeze_qa_block_before_abort(
+                self.adapter, "session-1", reason="cancel",
+            )
+
+        # ns_token was bound before the failure, so it must be reset
+        mock_reset_ns.assert_called_once_with("ns_token")
+        # overlay_token was never bound, so it must NOT be reset
+        mock_reset_overlay.assert_not_called()
+        # Freeze must be skipped when overlay bind fails
+        freeze_rail.freeze_current_qa_sync.assert_not_called()
+        mock_resolve.assert_not_awaited()
+
+    async def test_process_interrupt_aborts_even_if_freeze_raises(self) -> None:
+        """Defense in depth: interrupt abort continues if freeze helper raises."""
+        request = AgentRequest(
+            request_id="req-1",
+            channel_id="ch-1",
+            session_id="session-1",
+            params={"intent": "cancel"},
+        )
+        abort_stream = MagicMock()
+        abort_instance = AsyncMock()
+        cancel_toolkits = AsyncMock()
+        setattr(self.adapter, "_stream_event_rail", SimpleNamespace(abort=abort_stream))
+        setattr(self.adapter, "_instance", SimpleNamespace(abort=abort_instance))
+        setattr(self.adapter, "_cancel_session_toolkits", cancel_toolkits)
+        setattr(self.adapter, "_abort_active_subagents", AsyncMock(return_value=0))
+        setattr(self.adapter, "_clear_session_persisted_interrupt_state", AsyncMock())
+        setattr(
+            self.adapter,
+            "_freeze_qa_block_before_abort",
+            AsyncMock(side_effect=RuntimeError("freeze boom")),
+        )
+
+        response = await self.adapter.process_interrupt(request)
+
+        self.assertTrue(response.ok)
+        abort_stream.assert_called_once()
+        abort_instance.assert_awaited_once()
+        cancel_toolkits.assert_awaited_once()
+        getattr(self.adapter, "_freeze_qa_block_before_abort").assert_awaited_once()
+
+
 if __name__ == "__main__":
     unittest.main()

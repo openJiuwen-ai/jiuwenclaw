@@ -36,6 +36,7 @@ ASSEMBLY_COMMITTED_QA_ID_KEY: str = getattr(_module, "_ASSEMBLY_COMMITTED_QA_ID_
 INTERRUPT_RESUME_TURN_KEY: str = getattr(_module, "_INTERRUPT_RESUME_TURN_KEY")
 _is_task_continuation = _module._is_task_continuation
 _last_n_history_qa_ids = _module._last_n_history_qa_ids
+_merge_hydrate_qa_ids = _module._merge_hydrate_qa_ids
 
 
 class FakeSession:
@@ -97,20 +98,19 @@ async def _run_first_assembly(
 ) -> QABlockRegistry:
     model_ctx = ctx or _make_model_call_ctx(session)
     with patch.object(_module, "load_registry", return_value=registry):
-        with patch.object(_module, "maybe_compact_catalog_l1", return_value=registry):
-            with patch.object(
-                _module,
-                "reconcile_orphan_l0_blocks",
-                new=AsyncMock(return_value=(registry, [])),
-            ):
-                with patch.object(_module, "allocate_qa_id", return_value=("qa_003", 3)):
-                    with patch.object(_module, "save_registry"):
-                        with patch.object(_module, "QABlockLayer") as mock_layer_cls:
-                            layer = MagicMock()
-                            layer.build_window_qas.return_value = []
-                            mock_layer_cls.return_value = layer
-                            layer.hydrate_history_into_window = AsyncMock()
-                            await rail.before_model_call(model_ctx)
+        with patch.object(
+            _module,
+            "reconcile_orphan_l0_blocks",
+            new=AsyncMock(return_value=(registry, [])),
+        ):
+            with patch.object(_module, "allocate_qa_id", return_value=("qa_003", 3)):
+                with patch.object(_module, "save_registry"):
+                    with patch.object(_module, "QABlockLayer") as mock_layer_cls:
+                        layer = MagicMock()
+                        layer.build_window_qas.return_value = []
+                        mock_layer_cls.return_value = layer
+                        layer.hydrate_history_into_window = AsyncMock()
+                        await rail.before_model_call(model_ctx)
     return registry
 
 
@@ -302,23 +302,22 @@ class TestQABlockAssemblyRailGuard(unittest.IsolatedAsyncioTestCase):
             "load_registry",
             side_effect=[registry, registry, salvaged, salvaged, salvaged],
         ):
-            with patch.object(_module, "maybe_compact_catalog_l1", return_value=salvaged):
-                with patch.object(
-                    _module,
-                    "reconcile_orphan_l0_blocks",
-                    new=AsyncMock(return_value=(salvaged, [])),
-                ):
-                    with patch.object(_module, "allocate_qa_id", return_value=("qa_010", 10)) as mock_allocate:
-                        with patch.object(_module, "save_registry"):
-                            with patch.object(
-                                _module, "post_agent_execute_for_session", new=AsyncMock()
-                            ):
-                                with patch.object(_module, "QABlockLayer") as mock_layer_cls:
-                                    layer = MagicMock()
-                                    layer.build_window_qas.return_value = []
-                                    mock_layer_cls.return_value = layer
-                                    layer.hydrate_history_into_window = AsyncMock()
-                                    await self.rail.before_model_call(ctx)
+            with patch.object(
+                _module,
+                "reconcile_orphan_l0_blocks",
+                new=AsyncMock(return_value=(salvaged, [])),
+            ):
+                with patch.object(_module, "allocate_qa_id", return_value=("qa_010", 10)) as mock_allocate:
+                    with patch.object(_module, "save_registry"):
+                        with patch.object(
+                            _module, "post_agent_execute_for_session", new=AsyncMock()
+                        ):
+                            with patch.object(_module, "QABlockLayer") as mock_layer_cls:
+                                layer = MagicMock()
+                                layer.build_window_qas.return_value = []
+                                mock_layer_cls.return_value = layer
+                                layer.hydrate_history_into_window = AsyncMock()
+                                await self.rail.before_model_call(ctx)
 
         freeze_rail.freeze_current_qa_sync.assert_awaited_once()
         self.assertIsNone(self.session.get_state(PENDING_ORPHAN_SALVAGE_KEY))
@@ -330,20 +329,19 @@ class TestQABlockAssemblyRailGuard(unittest.IsolatedAsyncioTestCase):
         self.session.update_state({PENDING_ORPHAN_SALVAGE_KEY: "qa_007"})
 
         with patch.object(_module, "load_registry", return_value=registry):
-            with patch.object(_module, "maybe_compact_catalog_l1", return_value=registry):
-                with patch.object(
-                    _module,
-                    "reconcile_orphan_l0_blocks",
-                    new=AsyncMock(return_value=(registry, [])),
-                ):
-                    with patch.object(_module, "allocate_qa_id", return_value=("qa_008", 8)) as mock_allocate:
-                        with patch.object(_module, "save_registry"):
-                            with patch.object(_module, "QABlockLayer") as mock_layer_cls:
-                                layer = MagicMock()
-                                layer.build_window_qas.return_value = []
-                                mock_layer_cls.return_value = layer
-                                layer.hydrate_history_into_window = AsyncMock()
-                                await self.rail.before_model_call(ctx)
+            with patch.object(
+                _module,
+                "reconcile_orphan_l0_blocks",
+                new=AsyncMock(return_value=(registry, [])),
+            ):
+                with patch.object(_module, "allocate_qa_id", return_value=("qa_008", 8)) as mock_allocate:
+                    with patch.object(_module, "save_registry"):
+                        with patch.object(_module, "QABlockLayer") as mock_layer_cls:
+                            layer = MagicMock()
+                            layer.build_window_qas.return_value = []
+                            mock_layer_cls.return_value = layer
+                            layer.hydrate_history_into_window = AsyncMock()
+                            await self.rail.before_model_call(ctx)
 
         mock_allocate.assert_called_once()
         self.assertEqual(registry.current_qa_id, "qa_008")
@@ -426,20 +424,19 @@ class TestQABlockAssemblyRailGuard(unittest.IsolatedAsyncioTestCase):
         rail = JiuClawQABlockAssemblyRail(QABlockConfig(enabled=True, selector_enabled=False))
 
         with patch.object(_module, "load_registry", return_value=registry):
-            with patch.object(_module, "maybe_compact_catalog_l1", return_value=registry):
-                with patch.object(
-                    _module,
-                    "reconcile_orphan_l0_blocks",
-                    new=AsyncMock(return_value=(registry, [])),
-                ):
-                    with patch.object(_module, "allocate_qa_id", return_value=("qa_011", 11)) as mock_allocate:
-                        with patch.object(_module, "save_registry"):
-                            with patch.object(_module, "QABlockLayer") as mock_layer_cls:
-                                layer = MagicMock()
-                                layer.build_window_qas.return_value = []
-                                mock_layer_cls.return_value = layer
-                                layer.hydrate_history_into_window = AsyncMock()
-                                await rail.before_model_call(ctx)
+            with patch.object(
+                _module,
+                "reconcile_orphan_l0_blocks",
+                new=AsyncMock(return_value=(registry, [])),
+            ):
+                with patch.object(_module, "allocate_qa_id", return_value=("qa_011", 11)) as mock_allocate:
+                    with patch.object(_module, "save_registry"):
+                        with patch.object(_module, "QABlockLayer") as mock_layer_cls:
+                            layer = MagicMock()
+                            layer.build_window_qas.return_value = []
+                            mock_layer_cls.return_value = layer
+                            layer.hydrate_history_into_window = AsyncMock()
+                            await rail.before_model_call(ctx)
 
         mock_allocate.assert_called_once()
         self.assertEqual(registry.current_qa_id, "qa_011")
@@ -449,20 +446,19 @@ class TestQABlockAssemblyRailGuard(unittest.IsolatedAsyncioTestCase):
         ctx = _make_model_call_ctx(self.session, messages=[])
 
         with patch.object(_module, "load_registry", return_value=registry):
-            with patch.object(_module, "maybe_compact_catalog_l1", return_value=registry):
-                with patch.object(
-                    _module,
-                    "reconcile_orphan_l0_blocks",
-                    new=AsyncMock(return_value=(registry, [])),
-                ):
-                    with patch.object(_module, "allocate_qa_id", return_value=("qa_011", 11)) as mock_allocate:
-                        with patch.object(_module, "save_registry"):
-                            with patch.object(_module, "QABlockLayer") as mock_layer_cls:
-                                layer = MagicMock()
-                                layer.build_window_qas.return_value = []
-                                mock_layer_cls.return_value = layer
-                                layer.hydrate_history_into_window = AsyncMock()
-                                await self.rail.before_model_call(ctx)
+            with patch.object(
+                _module,
+                "reconcile_orphan_l0_blocks",
+                new=AsyncMock(return_value=(registry, [])),
+            ):
+                with patch.object(_module, "allocate_qa_id", return_value=("qa_011", 11)) as mock_allocate:
+                    with patch.object(_module, "save_registry"):
+                        with patch.object(_module, "QABlockLayer") as mock_layer_cls:
+                            layer = MagicMock()
+                            layer.build_window_qas.return_value = []
+                            mock_layer_cls.return_value = layer
+                            layer.hydrate_history_into_window = AsyncMock()
+                            await self.rail.before_model_call(ctx)
 
         mock_allocate.assert_called_once()
         self.assertEqual(registry.current_qa_id, "qa_011")
@@ -501,20 +497,19 @@ class TestQABlockAssemblyRailGuard(unittest.IsolatedAsyncioTestCase):
         rail = JiuClawQABlockAssemblyRail(QABlockConfig(enabled=True, selector_enabled=False))
 
         with patch.object(_module, "load_registry", return_value=registry):
-            with patch.object(_module, "maybe_compact_catalog_l1", return_value=registry):
-                with patch.object(
-                    _module,
-                    "reconcile_orphan_l0_blocks",
-                    new=AsyncMock(return_value=(registry, [])),
-                ):
-                    with patch.object(_module, "allocate_qa_id", return_value=("qa_004", 4)) as mock_allocate:
-                        with patch.object(_module, "save_registry"):
-                            with patch.object(_module, "QABlockLayer") as mock_layer_cls:
-                                layer = MagicMock()
-                                layer.build_window_qas.return_value = []
-                                mock_layer_cls.return_value = layer
-                                layer.hydrate_history_into_window = AsyncMock()
-                                await rail.before_model_call(ctx)
+            with patch.object(
+                _module,
+                "reconcile_orphan_l0_blocks",
+                new=AsyncMock(return_value=(registry, [])),
+            ):
+                with patch.object(_module, "allocate_qa_id", return_value=("qa_004", 4)) as mock_allocate:
+                    with patch.object(_module, "save_registry"):
+                        with patch.object(_module, "QABlockLayer") as mock_layer_cls:
+                            layer = MagicMock()
+                            layer.build_window_qas.return_value = []
+                            mock_layer_cls.return_value = layer
+                            layer.hydrate_history_into_window = AsyncMock()
+                            await rail.before_model_call(ctx)
 
         mock_allocate.assert_called_once()
         self.assertEqual(registry.current_qa_id, "qa_004")
@@ -541,23 +536,22 @@ class TestQABlockAssemblyRailGuard(unittest.IsolatedAsyncioTestCase):
             "load_registry",
             side_effect=[registry, registry, salvaged, salvaged, salvaged],
         ):
-            with patch.object(_module, "maybe_compact_catalog_l1", return_value=salvaged):
-                with patch.object(
-                    _module,
-                    "reconcile_orphan_l0_blocks",
-                    new=AsyncMock(return_value=(salvaged, [])),
-                ):
-                    with patch.object(_module, "allocate_qa_id", return_value=("qa_010", 10)):
-                        with patch.object(_module, "save_registry"):
-                            with patch.object(
-                                _module, "post_agent_execute_for_session", new=AsyncMock()
-                            ):
-                                with patch.object(_module, "QABlockLayer") as mock_layer_cls:
-                                    layer = MagicMock()
-                                    layer.build_window_qas.return_value = []
-                                    mock_layer_cls.return_value = layer
-                                    layer.hydrate_history_into_window = AsyncMock()
-                                    await self.rail.before_model_call(ctx)
+            with patch.object(
+                _module,
+                "reconcile_orphan_l0_blocks",
+                new=AsyncMock(return_value=(salvaged, [])),
+            ):
+                with patch.object(_module, "allocate_qa_id", return_value=("qa_010", 10)):
+                    with patch.object(_module, "save_registry"):
+                        with patch.object(
+                            _module, "post_agent_execute_for_session", new=AsyncMock()
+                        ):
+                            with patch.object(_module, "QABlockLayer") as mock_layer_cls:
+                                layer = MagicMock()
+                                layer.build_window_qas.return_value = []
+                                mock_layer_cls.return_value = layer
+                                layer.hydrate_history_into_window = AsyncMock()
+                                await self.rail.before_model_call(ctx)
 
         freeze_rail.freeze_current_qa_sync.assert_awaited_once()
         self.assertEqual(
@@ -584,20 +578,19 @@ class TestQABlockAssemblyRailGuard(unittest.IsolatedAsyncioTestCase):
         )
 
         with patch.object(_module, "load_registry", return_value=registry):
-            with patch.object(_module, "maybe_compact_catalog_l1", return_value=registry):
-                with patch.object(
-                    _module,
-                    "reconcile_orphan_l0_blocks",
-                    new=AsyncMock(return_value=(registry, [])),
-                ):
-                    with patch.object(_module, "allocate_qa_id", return_value=("qa_009", 9)):
-                        with patch.object(_module, "save_registry"):
-                            with patch.object(_module, "QABlockLayer") as mock_layer_cls:
-                                layer = MagicMock()
-                                layer.build_window_qas.return_value = []
-                                mock_layer_cls.return_value = layer
-                                layer.hydrate_history_into_window = AsyncMock()
-                                await self.rail.before_model_call(ctx)
+            with patch.object(
+                _module,
+                "reconcile_orphan_l0_blocks",
+                new=AsyncMock(return_value=(registry, [])),
+            ):
+                with patch.object(_module, "allocate_qa_id", return_value=("qa_009", 9)):
+                    with patch.object(_module, "save_registry"):
+                        with patch.object(_module, "QABlockLayer") as mock_layer_cls:
+                            layer = MagicMock()
+                            layer.build_window_qas.return_value = []
+                            mock_layer_cls.return_value = layer
+                            layer.hydrate_history_into_window = AsyncMock()
+                            await self.rail.before_model_call(ctx)
 
         self.assertEqual(registry.current_qa_id, "qa_009")
 
@@ -606,20 +599,19 @@ class TestQABlockAssemblyRailGuard(unittest.IsolatedAsyncioTestCase):
         registry = _frozen_registry("qa_004")
 
         with patch.object(_module, "load_registry", return_value=registry):
-            with patch.object(_module, "maybe_compact_catalog_l1", return_value=registry):
-                with patch.object(
-                    _module,
-                    "reconcile_orphan_l0_blocks",
-                    new=AsyncMock(return_value=(registry, [])),
-                ):
-                    with patch.object(_module, "allocate_qa_id", return_value=("qa_005", 5)) as mock_allocate:
-                        with patch.object(_module, "save_registry"):
-                            with patch.object(_module, "QABlockLayer") as mock_layer_cls:
-                                layer = MagicMock()
-                                layer.build_window_qas.return_value = []
-                                mock_layer_cls.return_value = layer
-                                layer.hydrate_history_into_window = AsyncMock()
-                                await self.rail.before_model_call(ctx)
+            with patch.object(
+                _module,
+                "reconcile_orphan_l0_blocks",
+                new=AsyncMock(return_value=(registry, [])),
+            ):
+                with patch.object(_module, "allocate_qa_id", return_value=("qa_005", 5)) as mock_allocate:
+                    with patch.object(_module, "save_registry"):
+                        with patch.object(_module, "QABlockLayer") as mock_layer_cls:
+                            layer = MagicMock()
+                            layer.build_window_qas.return_value = []
+                            mock_layer_cls.return_value = layer
+                            layer.hydrate_history_into_window = AsyncMock()
+                            await self.rail.before_model_call(ctx)
 
         mock_allocate.assert_called_once()
         self.assertEqual(registry.current_qa_id, "qa_005")
@@ -846,6 +838,125 @@ class TestTaskContinuationFallbackIntegration(unittest.TestCase):
         if not selected_qa_ids and is_continuation:
             selected_qa_ids = _last_n_history_qa_ids(registry, n=QABlockConfig().max_preload_blocks)
         self.assertEqual(selected_qa_ids, [])
+
+
+class TestMergeHydrateQaIds(unittest.TestCase):
+    """Tests for _merge_hydrate_qa_ids: dedup, chronological order, token budget, max_total."""
+
+    @staticmethod
+    def _make_registry(entries: dict[str, tuple[int, int]]) -> QABlockRegistry:
+        """Create a registry from {qa_id: (qa_index, approx_tokens)}."""
+        registry = QABlockRegistry(session_id="test_session")
+        for qa_id, (qa_index, approx_tokens) in entries.items():
+            entry = QABlockEntry(
+                qa_id=qa_id,
+                qa_index=qa_index,
+                status="completed",
+                is_history=True,
+                approx_tokens=approx_tokens,
+            )
+            registry.blocks[qa_id] = entry
+        return registry
+
+    def test_dedup_default_and_selector_overlap(self) -> None:
+        """Overlapping qa_ids in default and selector are deduplicated."""
+        registry = self._make_registry({
+            "qa_1": (1, 100), "qa_2": (2, 100), "qa_3": (3, 100),
+        })
+        result = _merge_hydrate_qa_ids(
+            ["qa_2", "qa_3"], ["qa_1", "qa_2"], registry, max_total=10, max_tokens=999999,
+        )
+        self.assertEqual(result, ["qa_1", "qa_2", "qa_3"])
+
+    def test_chronological_order(self) -> None:
+        """Merged list is sorted by qa_index (oldest->newest)."""
+        registry = self._make_registry({
+            "qa_1": (1, 100), "qa_2": (2, 100), "qa_3": (3, 100),
+        })
+        result = _merge_hydrate_qa_ids(
+            ["qa_3"], ["qa_1", "qa_2"], registry, max_total=10, max_tokens=999999,
+        )
+        self.assertEqual(result, ["qa_1", "qa_2", "qa_3"])
+
+    def test_token_budget_drops_oldest_first(self) -> None:
+        """When total tokens exceed max_tokens, oldest blocks are dropped first."""
+        registry = self._make_registry({
+            "qa_1": (1, 5000), "qa_2": (2, 5000), "qa_3": (3, 5000),
+        })
+        result = _merge_hydrate_qa_ids(
+            ["qa_1", "qa_2", "qa_3"], None, registry, max_total=10, max_tokens=12000,
+        )
+        # total=15000 > 12000, drop qa_1 -> total=10000 <= 12000
+        self.assertEqual(result, ["qa_2", "qa_3"])
+
+    def test_token_budget_keeps_at_least_one(self) -> None:
+        """Even if a single block exceeds max_tokens, at least one (newest) is kept."""
+        registry = self._make_registry({
+            "qa_1": (1, 50000), "qa_2": (2, 50000),
+        })
+        result = _merge_hydrate_qa_ids(
+            ["qa_1", "qa_2"], None, registry, max_total=10, max_tokens=100,
+        )
+        self.assertEqual(result, ["qa_2"])
+
+    def test_max_total_keeps_newest(self) -> None:
+        """When merged list exceeds max_total, newest blocks are kept."""
+        registry = self._make_registry({
+            f"qa_{i}": (i, 100) for i in range(1, 12)
+        })
+        result = _merge_hydrate_qa_ids(
+            [f"qa_{i}" for i in range(1, 12)], None, registry, max_total=5, max_tokens=999999,
+        )
+        # 11 blocks, max_total=5 -> keep newest 5
+        self.assertEqual(result, ["qa_7", "qa_8", "qa_9", "qa_10", "qa_11"])
+
+    def test_empty_inputs(self) -> None:
+        """Empty default and selector ids return empty list."""
+        registry = QABlockRegistry(session_id="test_session")
+        result = _merge_hydrate_qa_ids([], None, registry, max_total=10, max_tokens=999999)
+        self.assertEqual(result, [])
+
+    def test_max_total_zero_returns_empty(self) -> None:
+        """max_total <= 0 returns empty list (guards against Python -0: quirk)."""
+        registry = self._make_registry({"qa_1": (1, 100)})
+        result = _merge_hydrate_qa_ids(
+            ["qa_1"], None, registry, max_total=0, max_tokens=999999,
+        )
+        self.assertEqual(result, [])
+
+    def test_all_zero_approx_tokens(self) -> None:
+        """When all blocks have approx_tokens=0, token budget doesn't drop any."""
+        registry = self._make_registry({
+            "qa_1": (1, 0), "qa_2": (2, 0), "qa_3": (3, 0),
+        })
+        result = _merge_hydrate_qa_ids(
+            ["qa_1", "qa_2", "qa_3"], None, registry, max_total=10, max_tokens=100,
+        )
+        self.assertEqual(result, ["qa_1", "qa_2", "qa_3"])
+
+    def test_selector_ids_none_default_only(self) -> None:
+        """selector_ids=None works correctly (default-only hydrate)."""
+        registry = self._make_registry({
+            "qa_1": (1, 100), "qa_2": (2, 100),
+        })
+        result = _merge_hydrate_qa_ids(
+            ["qa_1", "qa_2"], None, registry, max_total=10, max_tokens=999999,
+        )
+        self.assertEqual(result, ["qa_1", "qa_2"])
+
+    def test_missing_registry_ids_are_skipped(self) -> None:
+        """Ids absent from registry must not be merged (avoid qa_index=0 sort bias)."""
+        registry = self._make_registry({
+            "qa_1": (1, 100), "qa_2": (2, 100),
+        })
+        result = _merge_hydrate_qa_ids(
+            ["qa_missing", "qa_1"],
+            ["qa_ghost", "qa_2"],
+            registry,
+            max_total=10,
+            max_tokens=999999,
+        )
+        self.assertEqual(result, ["qa_1", "qa_2"])
 
 
 if __name__ == "__main__":
