@@ -44,7 +44,10 @@ def _remove_existing_target(target: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Publish package/SKILL.md using its kebab-case name as the final folder; existing target is overwritten."
+        description=(
+            "Publish package/SKILL.md using its kebab-case name as the final "
+            "folder; existing target is overwritten."
+        )
     )
     parser.add_argument("run_id")
     args = parser.parse_args()
