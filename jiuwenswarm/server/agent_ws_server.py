@@ -2764,12 +2764,28 @@ class AgentWebSocketServer:
         finally:
             # 停止心跳任务
             if heartbeat_task is not None:
+                logger.info(
+                    "[AgentWebSocketServer] cancelling heartbeat_task: request_id=%s",
+                    request.request_id,
+                )
                 heartbeat_task.cancel()
                 try:
                     await heartbeat_task
+                    logger.info(
+                        "[AgentWebSocketServer] heartbeat_task cancelled cleanly: request_id=%s",
+                        request.request_id,
+                    )
                 except asyncio.CancelledError:
+                    logger.info(
+                        "[AgentWebSocketServer] heartbeat_task cancelled (CancelledError): request_id=%s",
+                        request.request_id,
+                    )
                     pass
                 except WebSocketConnectionClosed:
+                    logger.info(
+                        "[AgentWebSocketServer] heartbeat_task cancelled (ConnectionClosed): request_id=%s",
+                        request.request_id,
+                    )
                     pass
             # 清除自身的宿主生命周期记录；同 session 的其它请求不受影响。
             entries = self._session_stream_tasks.get(session_id)
