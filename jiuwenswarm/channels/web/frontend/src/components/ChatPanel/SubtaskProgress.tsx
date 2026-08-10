@@ -22,11 +22,9 @@ export function SubtaskProgress() {
     return null;
   }
 
-  // 获取总数（从第一个子任务）
-  const total = subtasks[0]?.total || subtasks.length;
-
-  // 计算完成数量
-  const completedCount = total - subtasks.length;
+  // 并行批次里较早创建的 subtask 可能仍带着旧的 total=1，取最大值避免 (-1/N)
+  const total = Math.max(...subtasks.map((s) => s.total), subtasks.length);
+  const completedCount = Math.max(0, total - subtasks.length);
 
   return (
     <div className="mx-4 my-2 p-3 bg-accent-subtle rounded-lg border border-border">

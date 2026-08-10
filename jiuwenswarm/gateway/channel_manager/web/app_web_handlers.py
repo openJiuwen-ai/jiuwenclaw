@@ -568,7 +568,6 @@ class _DummyBus:
 # 仅转发到 Agent 的 Web method
 _FORWARD_REQ_METHODS = frozenset({
     "initialize",
-    "session.create",
     "session.switch",
     "acp.tool_response",
     "team.delete",
@@ -664,7 +663,6 @@ _FORWARD_REQ_METHODS = frozenset({
 
 _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "initialize",
-    "session.create",
     "session.switch",
     "acp.tool_response",
     "team.templates.list",

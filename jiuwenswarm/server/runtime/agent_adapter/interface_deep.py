@@ -1078,6 +1078,8 @@ class JiuWenSwarmDeepAdapter:
     SESSION_ADAPTER_EVICT_BATCH_SIZE = 3
     SESSION_ADAPTER_RELOAD_RETRY_INTERVAL_SEC = 30.0
     _subagent_runtime_supported: bool = True
+    _subagent_progress_batches: dict[str, list[str]] = {}
+    _subagent_progress_batches_lock = threading.Lock()
     _RUNTIME_STATE_WRITE_LIMIT = threading.BoundedSemaphore(2)
     # Goal stream bookkeeping (see __init__ for what each one tracks). Declared
     # on the class as well so the goal helpers stay safe to call on an instance
@@ -5381,6 +5383,7 @@ class JiuWenSwarmDeepAdapter:
         sid = self._session_adapter_key(session_id)
         if not sid:
             return
+        self._clear_subagent_progress_batch(sid)
         from openjiuwen.harness.tools.subagent import release_subagent_control
 
         deep_agent = self.get_live_session_instance(sid)
@@ -10224,6 +10227,88 @@ class JiuWenSwarmDeepAdapter:
 
         return None
 
+    @classmethod
+    def _clear_subagent_progress_batch(cls, parent_session_id: str | None) -> None:
+        if not parent_session_id:
+            return
+        with cls._subagent_progress_batches_lock:
+            cls._subagent_progress_batches.pop(parent_session_id, None)
+
+    @classmethod
+    def _resolve_subagent_parallel_fields(
+        cls,
+        *,
+        parent_session_id: str,
+        subagent_id: str,
+        legacy_status: str,
+    ) -> tuple[int, int, bool]:
+        """Assign stable 0-based index/total for legacy Web SubtaskProgress."""
+        if not parent_session_id or not subagent_id:
+            return 0, 1, False
+
+        with cls._subagent_progress_batches_lock:
+            order = cls._subagent_progress_batches.setdefault(parent_session_id, [])
+
+            if legacy_status in ("completed", "error"):
+                if subagent_id not in order:
+                    return 0, 1, False
+                index = order.index(subagent_id)
+                total = max(len(order), 1)
+                order.remove(subagent_id)
+                if not order:
+                    cls._subagent_progress_batches.pop(parent_session_id, None)
+                return index, total, total > 1
+
+            if subagent_id not in order:
+                order.append(subagent_id)
+            index = order.index(subagent_id)
+            total = len(order)
+            return index, total, total > 1
+
+    @staticmethod
+    def _project_subagent_updated_for_web(projection: dict) -> dict:
+        """Map runtime subagent_updated fields to legacy Web SubtaskUpdatePayload."""
+        subagent_id = str(projection.get("subagent_id") or "")
+        status = str(projection.get("status") or "running")
+        closed_reason = projection.get("closed_reason")
+        description = (
+            str(projection.get("display_name") or "").strip()
+            or str(projection.get("task_description") or "").strip()
+            or subagent_id
+        )
+        message = ""
+        if status == "closed":
+            if closed_reason == "failed":
+                legacy_status = "error"
+                error = projection.get("error")
+                if isinstance(error, dict):
+                    message = str(error.get("message") or "")
+            else:
+                legacy_status = "completed"
+        else:
+            legacy_status = "starting"
+
+        parent_session_id = str(projection.get("parent_session_id") or "")
+        index, total, is_parallel = JiuWenSwarmDeepAdapter._resolve_subagent_parallel_fields(
+            parent_session_id=parent_session_id,
+            subagent_id=subagent_id,
+            legacy_status=legacy_status,
+        )
+
+        payload = {
+            "event_type": "chat.subtask_update",
+            **projection,
+            "task_id": subagent_id,
+            "description": description,
+            "status": legacy_status,
+            "index": index,
+            "total": total,
+            "is_parallel": is_parallel,
+        }
+        if message:
+            payload["message"] = message
+        return payload
+
     @staticmethod
     def _parse_stream_chunk(
         chunk,
@@ -10428,7 +10513,7 @@ class JiuWenSwarmDeepAdapter:
                     )
                     if not isinstance(projection, dict):
                         return None
-                    return {"event_type": "chat.subtask_update", **projection}
+                    return JiuWenSwarmDeepAdapter._project_subagent_updated_for_web(projection)
 
                 if chunk_type == SUBAGENT_ACTIVITY_EVENT_TYPE:
                     projection = (
