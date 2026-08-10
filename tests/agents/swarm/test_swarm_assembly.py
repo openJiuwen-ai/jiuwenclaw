@@ -202,14 +202,14 @@ class _FakeEvolutionRail:
         self.args = args
         self.kwargs = kwargs
         self.swarm_context = {}
-        self.review_feedback_rail = None
+        self.review_feedback_config = None
         self.approval_submission_service = object()
 
     def bind_swarm_context(self, **kwargs) -> None:
         self.swarm_context.update(kwargs)
 
-    def bind_review_feedback_skill_rail(self, rail) -> None:
-        self.review_feedback_rail = rail
+    def configure_review_feedback_evolution(self, **kwargs) -> None:
+        self.review_feedback_config = kwargs
 
 
 class _FakeMemberSkillEvolutionRail(_FakeEvolutionRail):
@@ -647,35 +647,6 @@ def test_code_skill_use_prefers_member_skill_scope_before_global(
     )
 
     assert rail.skills_dir == [str(member_root / "skills"), str(global_root)]
-
-
-def test_member_skill_copy_replaces_global_link_and_preserves_private_updates(
-    tmp_path: Path,
-) -> None:
-    global_root = tmp_path / "global"
-    global_skill = global_root / "xlsx"
-    global_skill.mkdir(parents=True)
-    (global_skill / "SKILL.md").write_text("global", encoding="utf-8")
-    member_root = tmp_path / "member" / "skills"
-    member_root.mkdir(parents=True)
-    (member_root / "xlsx").symlink_to(global_skill, target_is_directory=True)
-
-    copied = evolution_rails.ensure_member_skill_copy(
-        member_skills_dir=member_root,
-        global_skills_dir=global_root,
-        skill_name="xlsx",
-    )
-
-    assert copied == member_root / "xlsx"
-    assert not copied.is_symlink()
-    (copied / "SKILL.md").write_text("member", encoding="utf-8")
-    evolution_rails.ensure_member_skill_copy(
-        member_skills_dir=member_root,
-        global_skills_dir=global_root,
-        skill_name="xlsx",
-    )
-    assert (copied / "SKILL.md").read_text(encoding="utf-8") == "member"
-    assert (global_skill / "SKILL.md").read_text(encoding="utf-8") == "global"
 
 
 @pytest.mark.parametrize("role", ["leader", "teammate"])
@@ -1327,7 +1298,6 @@ def test_team_skill_evolution_provider_passes_review_runtime(
         "SwarmTeamSkillEvolutionRail",
         _FakeEvolutionRail,
     )
-    monkeypatch.setattr(evolution_rails, "SkillEvolutionRail", _FakeEvolutionRail)
     monkeypatch.setattr(evolution_rails, "EvolutionInterruptRail", _FakeEvolutionInterruptRail)
     monkeypatch.setattr(
         evolution_rails,
@@ -1371,10 +1341,11 @@ def test_team_skill_evolution_provider_passes_review_runtime(
     assert rail.kwargs["signal_trigger"] is False
     assert rail.kwargs["auto_save"] is auto_save
     assert rail.kwargs["review_trigger"] is True
-    assert rail.review_feedback_rail.args == (str(tmp_path / "global-skills"),)
-    assert rail.review_feedback_rail.kwargs["signal_trigger"] is False
-    assert rail.review_feedback_rail.kwargs["review_trigger"] is False
-    assert rail.review_feedback_rail.kwargs["auto_save"] is auto_save
+    assert rail.review_feedback_config["global_skills_dir"] == str(
+        tmp_path / "global-skills"
+    )
+    assert rail.review_feedback_config["session_id"] == "sess"
+    assert rail.review_feedback_config["team_id"] == "t"
 
 
 def test_swarm_team_skill_evolution_registration_retries_deferred_watcher(
@@ -1390,10 +1361,6 @@ def test_swarm_team_skill_evolution_registration_retries_deferred_watcher(
         @staticmethod
         def register_team_skill_rail(session_id, rail) -> None:
             calls.append(f"skill:{session_id}")
-
-        @staticmethod
-        def register_review_feedback_skill_rail(session_id, rail) -> None:
-            calls.append(f"review-feedback:{session_id}")
 
         @staticmethod
         def consume_team_evolution_watcher_deferred(session_id) -> bool:
@@ -1424,14 +1391,11 @@ def test_swarm_team_skill_evolution_registration_retries_deferred_watcher(
         config={},
         trajectory_registry=object(),
     )
-    rail.bind_review_feedback_skill_rail(object())
-
     rail.init(SimpleNamespace(card=SimpleNamespace(name="leader")))
 
     assert calls == [
         "live:sess-1",
         "skill:sess-1",
-        "review-feedback:sess-1",
         "consume:sess-1",
         "watcher:web:sess-1:rail_registered",
     ]

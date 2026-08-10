@@ -10,102 +10,48 @@ from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmD
 
 
 @pytest.mark.anyio
-async def test_skill_evolution_approval_falls_back_to_review_feedback_sidecar(monkeypatch):
-    adapter = JiuWenSwarmDeepAdapter()
-    adapter._skill_evolution_rail = SimpleNamespace(  # pylint: disable=protected-access
-        _pending_approval_snapshots={}
-    )
-    sidecar = SimpleNamespace(
-        _pending_approval_snapshots={"skill_evolve_review_1": object()}
-    )
-    monkeypatch.setattr(adapter, "find_team_skill_rail", lambda _request_id: sidecar)
-    monkeypatch.setattr(
-        interface_deep_module,
-        "record_ids_from_pending_approval",
-        lambda _rail, _request_id: ["record-1"],
-    )
-    monkeypatch.setattr(
-        interface_deep_module,
-        "approved_record_ids_from_answers",
-        lambda _answers, _labels, _record_ids: (True, ["record-1"]),
-    )
-    approve = AsyncMock()
-    monkeypatch.setattr(interface_deep_module, "approve_evolution_records", approve)
-
-    handled = await adapter._handle_evolution_approval(  # pylint: disable=protected-access
-        "skill_evolve_review_1",
-        [{"value": "accept"}],
-    )
-
-    assert handled is True
-    approve.assert_awaited_once_with(
-        sidecar,
-        "skill_evolve_review_1",
-        ["record-1"],
-        legacy_fallback=True,
-    )
-
-
-@pytest.mark.anyio
-async def test_skill_creation_approval_dispatches_approved_creation_prompt(monkeypatch):
+async def test_team_evolution_approval_dispatches_core_continuation(monkeypatch):
     adapter = JiuWenSwarmDeepAdapter()
     rail = SimpleNamespace(
-        owns_external_proposal=lambda request_id: request_id == "skill_create_1",
-        resolve_external_proposal=lambda request_id, *, accepted: (
+        _pending_approval_snapshots={"team_skill_evolve_create_1": None},
+        pop_approval_continuation=lambda request_id: (
             "create the approved skill"
-            if request_id == "skill_create_1" and accepted
+            if request_id == "team_skill_evolve_create_1"
             else None
         ),
     )
-    manager = SimpleNamespace(
-        get_team_skill_create_rail=lambda _session_id: rail,
-        interact=AsyncMock(return_value=(True, None)),
-    )
+    manager = SimpleNamespace(interact=AsyncMock(return_value=(True, None)))
+    monkeypatch.setattr(adapter, "find_team_skill_rail", lambda *_args: rail)
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.team.team_manager.get_team_manager",
         lambda _channel_id: manager,
     )
+    monkeypatch.setattr(
+        interface_deep_module,
+        "approved_record_ids_from_answers",
+        lambda _answers, _labels, _record_ids: (True, None),
+    )
+    approve = AsyncMock()
+    monkeypatch.setattr(interface_deep_module, "approve_evolution_records", approve)
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.refresh_team_shared_skill_links_across_managers",
+        lambda _session_id: None,
+    )
 
-    handled = await adapter.handle_skill_create_approval(
-        "skill_create_1",
+    handled = await adapter.handle_team_skill_evolve_approval(
+        "team_skill_evolve_create_1",
         [{"selected_options": ["接收"]}],
         "sess-1",
         "web",
     )
 
     assert handled is True
+    approve.assert_awaited_once_with(
+        rail,
+        "team_skill_evolve_create_1",
+        None,
+    )
     manager.interact.assert_awaited_once_with("sess-1", "create the approved skill")
-
-
-@pytest.mark.anyio
-async def test_skill_creation_approval_reject_discards_without_interact(monkeypatch):
-    adapter = JiuWenSwarmDeepAdapter()
-    resolved: list[tuple[str, bool]] = []
-    rail = SimpleNamespace(
-        owns_external_proposal=lambda _request_id: True,
-        resolve_external_proposal=lambda request_id, *, accepted: resolved.append(
-            (request_id, accepted)
-        ),
-    )
-    manager = SimpleNamespace(
-        get_team_skill_create_rail=lambda _session_id: rail,
-        interact=AsyncMock(),
-    )
-    monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.team_manager.get_team_manager",
-        lambda _channel_id: manager,
-    )
-
-    handled = await adapter.handle_skill_create_approval(
-        "skill_create_2",
-        [{"selected_options": ["拒绝"]}],
-        "sess-1",
-        "web",
-    )
-
-    assert handled is True
-    assert resolved == [("skill_create_2", False)]
-    manager.interact.assert_not_awaited()
 
 
 @pytest.mark.anyio
