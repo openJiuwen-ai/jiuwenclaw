@@ -108,8 +108,6 @@ def _team_hide_teammate_enabled() -> bool:
 
 def _is_e2a_suppressed_event(event_type: Any) -> bool:
     """True when the event type is withheld from the E2A wire by interface.py.
-
-    被抑制的帧 relay 看不到，不会重置 relay team stall 看门狗；
     消费循环据此判定是否处于"wire 静默段"。
     """
     return str(event_type or '').strip() in E2A_SUPPRESSED_EVENT_TYPES
