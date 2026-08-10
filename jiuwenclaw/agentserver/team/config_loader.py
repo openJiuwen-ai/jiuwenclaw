@@ -11,7 +11,7 @@ from typing import Any
 
 from openjiuwen.agent_teams.paths import get_agent_teams_home
 
-from jiuwenclaw.config import get_config
+from jiuwenclaw.config import get_config, hydrate_team_agent_model_from_tip
 
 logger = logging.getLogger(__name__)
 
@@ -185,6 +185,12 @@ def _build_default_model_dict(
     if model_name and "model" not in model_request_config:
         model_request_config["model"] = model_name
 
+    # Shared default must not bake credentials: each member hydrates from its
+    # own catalog agent_id tip (plan-equivalent). Drop secrets that get_config()
+    # may have already resolved from the request-bound tip.
+    model_client_config.pop("api_base", None)
+    model_client_config.pop("api_key", None)
+
     logger.info(
         "[TeamConfigLoader] model config loaded: model_name=%s, provider=%s",
         model_name,
@@ -194,6 +200,157 @@ def _build_default_model_dict(
         "model_client_config": model_client_config,
         "model_request_config": model_request_config,
     }
+
+
+def _resolve_member_tip_agent_id(*, agent_id: Any = None) -> str | None:
+    """Tip bag id for a team member from roster ``agent_id``.
+
+    Must match ``sync_agents_configs`` / ``teams.agents`` keys
+    (e.g. ``expert-chief-researcher``). No ``tpl_*`` / ``member_name`` rewriting.
+    """
+    aid = str(agent_id or "").strip()
+    return aid or None
+
+
+def _member_tip_agent_id_by_role(team_raw: dict[str, Any]) -> dict[str, str]:
+    """Map ``modes.team.agents`` keys (leader / member_name) → catalog tip id."""
+    mapping: dict[str, str] = {}
+
+    def _put(role_key: str, *, agent_id: Any = None) -> None:
+        role = str(role_key or "").strip()
+        tip_id = _resolve_member_tip_agent_id(agent_id=agent_id)
+        if role and tip_id:
+            mapping[role] = tip_id
+
+    leader_raw = team_raw.get("leader")
+    if isinstance(leader_raw, dict):
+        member_name = leader_raw.get("member_name")
+        agent_id = leader_raw.get("agent_id")
+        # agents.leader block is keyed "leader"; also map member_name for safety.
+        _put("leader", agent_id=agent_id)
+        _put(str(member_name or "").strip(), agent_id=agent_id)
+
+    teammate_raw = team_raw.get("teammate")
+    if isinstance(teammate_raw, dict):
+        _put("teammate", agent_id=teammate_raw.get("agent_id"))
+
+    predefined = team_raw.get("predefined_members")
+    if isinstance(predefined, list):
+        for item in predefined:
+            if not isinstance(item, dict):
+                continue
+            member_name = item.get("member_name")
+            _put(str(member_name or "").strip(), agent_id=item.get("agent_id"))
+
+    return mapping
+
+
+def _skills_list_from_tip(tip_agent_id: str | None) -> list[str] | None:
+    """Parse tip ``ENABLED_SKILLS`` into a skill-name list (None if empty)."""
+    from jiuwenclaw.agentserver.skill_manager import resolve_string_or_list_config
+    from jiuwenclaw.config import resolve_model_credential_tip
+
+    aid = str(tip_agent_id or "").strip()
+    if not aid:
+        return None
+    tip = resolve_model_credential_tip(agent_id=aid) or {}
+    skills = resolve_string_or_list_config(tip.get("ENABLED_SKILLS"))
+    return skills or None
+
+
+def _normalize_skills_list(raw: Any) -> list[str] | None:
+    from jiuwenclaw.agentserver.skill_manager import resolve_string_or_list_config
+
+    skills = resolve_string_or_list_config(raw)
+    return skills or None
+
+
+def _hydrate_agent_skills_for_role(
+    skills_raw: Any,
+    *,
+    tip_agent_id: str | None,
+) -> list[str] | None:
+    """Load ``skills`` from yaml first; tip only if yaml empty."""
+    yaml_skills = _normalize_skills_list(skills_raw)
+    if yaml_skills is not None:
+        return yaml_skills
+    return _skills_list_from_tip(tip_agent_id)
+
+
+def _hydrate_agent_model_for_role(
+    model_raw: dict[str, Any] | None,
+    *,
+    tip_agent_id: str | None,
+) -> dict[str, Any]:
+    """Build runtime model from tip (MODEL_*/API_*) plus local client knobs.
+
+    Tip supplies identity and credentials. ``timeout`` / ``verify_ssl`` use
+    local defaults when absent.
+    """
+    from jiuwenclaw.config import resolve_model_credential_tip
+
+    if isinstance(model_raw, dict) and model_raw:
+        model = deepcopy(model_raw)
+    else:
+        model = {
+            "model_client_config": {
+                "timeout": 1800,
+                "verify_ssl": False,
+                "custom_headers": {},
+            },
+            "model_request_config": {},
+        }
+    mcc = model.get("model_client_config")
+    if isinstance(mcc, dict):
+        # Drop sticky secrets so the member tip always wins.
+        mcc.pop("api_base", None)
+        mcc.pop("api_key", None)
+        mcc.setdefault("timeout", 1800)
+        mcc.setdefault("verify_ssl", False)
+        mcc.setdefault("custom_headers", {})
+    else:
+        model["model_client_config"] = {
+            "timeout": 1800,
+            "verify_ssl": False,
+            "custom_headers": {},
+        }
+
+    tip = resolve_model_credential_tip(agent_id=tip_agent_id)
+    tip_keys_present = sorted(
+        key
+        for key in ("MODEL_NAME", "MODEL_PROVIDER", "API_BASE", "API_KEY", "ENABLED_SKILLS")
+        if str((tip or {}).get(key) or "").strip()
+    )
+    hydrated = hydrate_team_agent_model_from_tip(
+        model,
+        agent_id=tip_agent_id,
+    )
+    out_mcc = hydrated.get("model_client_config") or {}
+    if tip_agent_id and "MODEL_NAME" not in tip_keys_present:
+        logger.warning(
+            "[TeamConfigLoader] tip miss identity: tip_agent_id=%s tip_keys=%s "
+            "(expected MODEL_NAME in sync agents[].env)",
+            tip_agent_id,
+            tip_keys_present,
+        )
+    elif tip_agent_id and "API_BASE" not in tip_keys_present:
+        logger.warning(
+            "[TeamConfigLoader] tip miss credentials: tip_agent_id=%s tip_keys=%s",
+            tip_agent_id,
+            tip_keys_present,
+        )
+    # Stash for caller log (non-secret presence flags only).
+    hydrated["_tip_diag"] = {
+        "tip_agent_id": tip_agent_id,
+        "tip_keys": tip_keys_present,
+        "provider": str(out_mcc.get("client_provider") or "").strip() or None,
+        "model_name": str(out_mcc.get("model_name") or "").strip()
+        or str((hydrated.get("model_request_config") or {}).get("model") or "").strip()
+        or None,
+        "api_base_set": bool(str(out_mcc.get("api_base") or "").strip()),
+        "api_key_set": bool(str(out_mcc.get("api_key") or "").strip()),
+    }
+    return hydrated
 
 
 def _resolve_storage_config(storage_raw: dict[str, Any]) -> dict[str, Any]:
@@ -251,6 +408,7 @@ def _build_agents_config(
         requested_model_name=requested_model_name,
     )
     default_workspace, max_iterations, completion_timeout = _build_agent_defaults()
+    tip_by_role = _member_tip_agent_id_by_role(team_raw)
 
     agents_raw = team_raw.get("agents", {})
     if not isinstance(agents_raw, dict) or not agents_raw:
@@ -262,7 +420,7 @@ def _build_agents_config(
         top_agents = {}
 
     agents: dict[str, Any] = {}
-    for agent_key, raw_agent_config in agents_raw.items():
+    for role_key, raw_agent_config in agents_raw.items():
         if isinstance(raw_agent_config, str) and raw_agent_config.startswith("$"):
             ref_name = raw_agent_config[1:]
             if ref_name in top_agents:
@@ -290,7 +448,42 @@ def _build_agents_config(
             max_iterations=max_iterations,
             completion_timeout=completion_timeout,
         )
-        agents[agent_key] = agent_spec
+        # Credentials from tip via catalog agent_id.
+        tip_agent_id = tip_by_role.get(str(role_key))
+        # Always assemble model from tip (+ local timeout/verify_ssl knobs).
+        agent_spec["model"] = _hydrate_agent_model_for_role(
+            agent_spec.get("model") if isinstance(agent_spec.get("model"), dict) else None,
+            tip_agent_id=tip_agent_id,
+        )
+        # Tip ENABLED_SKILLS → agent.skills (yaml may already have a copy from sync).
+        hydrated_skills = _hydrate_agent_skills_for_role(
+            agent_spec.get("skills"),
+            tip_agent_id=tip_agent_id,
+        )
+        if hydrated_skills is not None:
+            agent_spec["skills"] = hydrated_skills
+        else:
+            agent_spec.pop("skills", None)
+        diag = agent_spec["model"].pop("_tip_diag", {}) if isinstance(agent_spec["model"], dict) else {}
+        if not tip_agent_id:
+            logger.warning(
+                "[TeamConfigLoader] agent role=%s missing catalog agent_id; "
+                "hydrating from bound tip only",
+                role_key,
+            )
+        logger.info(
+            "[TeamConfigLoader] agent role=%s tip_agent_id=%s provider=%s model=%s "
+            "api_base_set=%s api_key_set=%s skills=%s tip_keys=%s",
+            role_key,
+            tip_agent_id or "(bound)",
+            diag.get("provider"),
+            diag.get("model_name"),
+            diag.get("api_base_set"),
+            diag.get("api_key_set"),
+            len(hydrated_skills or []),
+            diag.get("tip_keys"),
+        )
+        agents[role_key] = agent_spec
 
     if "leader" not in agents:
         agents["leader"] = _build_agent_spec_dict(
@@ -300,11 +493,25 @@ def _build_agents_config(
             max_iterations=max_iterations,
             completion_timeout=completion_timeout,
         )
+        tip_id = tip_by_role.get("leader")
+        agents["leader"]["model"] = _hydrate_agent_model_for_role(
+            agents["leader"].get("model"),
+            tip_agent_id=tip_id,
+        )
+        if isinstance(agents["leader"].get("model"), dict):
+            agents["leader"]["model"].pop("_tip_diag", None)
+        leader_skills = _hydrate_agent_skills_for_role(None, tip_agent_id=tip_id)
+        if leader_skills is not None:
+            agents["leader"]["skills"] = leader_skills
 
-    if set(agents.keys()) == {"leader"}:
+    # Always ensure a teammate role template exists. Presets / tip sync may only
+    # ship ``agents.leader`` (or leader + unrelated keys); enrich only rewrites
+    # the fixed roles ``leader`` / ``teammate``.
+    if "teammate" not in agents:
         logger.info(
-            "[TeamConfigLoader] agents config contains only leader; "
-            "adding default teammate template"
+            "[TeamConfigLoader] agents config missing teammate; "
+            "adding default teammate template (existing_keys=%s)",
+            sorted(str(k) for k in agents.keys()),
         )
         agents["teammate"] = _build_agent_spec_dict(
             {},
@@ -313,6 +520,16 @@ def _build_agents_config(
             max_iterations=max_iterations,
             completion_timeout=completion_timeout,
         )
+        tip_id = tip_by_role.get("teammate")
+        agents["teammate"]["model"] = _hydrate_agent_model_for_role(
+            agents["teammate"].get("model"),
+            tip_agent_id=tip_id,
+        )
+        if isinstance(agents["teammate"].get("model"), dict):
+            agents["teammate"]["model"].pop("_tip_diag", None)
+        mate_skills = _hydrate_agent_skills_for_role(None, tip_agent_id=tip_id)
+        if mate_skills is not None:
+            agents["teammate"]["skills"] = mate_skills
 
     return agents
 
@@ -340,7 +557,7 @@ def _build_transport_spec(team_raw: dict[str, Any]) -> dict[str, Any]:
     return transport_spec
 
 
-def _build_leader_spec(team_raw: dict[str, Any]) -> dict[str, Any]:
+def _build_leader_spec(team_raw: dict[str, Any], *, language: str | None = None) -> dict[str, Any]:
     leader_raw = team_raw.get("leader", {})
     leader_name = (
         str(leader_raw.get("name", "")).strip()
@@ -352,14 +569,66 @@ def _build_leader_spec(team_raw: dict[str, Any]) -> dict[str, Any]:
         "display_name": leader_raw.get("display_name", "Team Leader"),
         "name": leader_name,
     }
-    leader_spec.update(_map_member_public_private_fields(leader_raw, default_desc="天才项目管理专家"))
+    leader_spec.update(
+        _map_member_public_private_fields(
+            leader_raw,
+            default_desc="天才项目管理专家",
+            language=language,
+        )
+    )
     return leader_spec
+
+
+# Appended to every team member private prompt (including leader).
+# Roster sections key on member_name; models may leak IDs into user-facing prose.
+# Require display_name in prose; member_name only in tool arguments.
+# Selected by preferred_language (same pattern as team resume protocol).
+_TEAM_MEMBER_DISPLAY_NAME_RULE_CN = (
+    "## 成员称呼规范\n"
+    "面向用户可见的内容（@提及、点名、广播、进展汇报、总结等正文）中提及团队成员时，"
+    "一律使用其显示名（display_name，如「用户研究员」）。member_name（如 user-researcher）"
+    "是系统内部标识，仅允许用于工具参数（如 send_message 的 to、create_task 的 assignee），"
+    "不得出现在正文里。"
+)
+_TEAM_MEMBER_DISPLAY_NAME_RULE_EN = (
+    "## Member naming convention\n"
+    "When mentioning team members in user-visible text (@-mentions, call-outs, "
+    "broadcasts, progress reports, summaries, etc.), always use their display name "
+    "(display_name, e.g. \"User Researcher\"). member_name (e.g. user-researcher) "
+    "is an internal identifier and may only appear in tool arguments "
+    "(e.g. send_message `to`, create_task `assignee`); it must not appear in prose."
+)
+# Default / backward-compatible alias (Chinese is primary when language is unset).
+_TEAM_MEMBER_DISPLAY_NAME_RULE = _TEAM_MEMBER_DISPLAY_NAME_RULE_CN
+
+
+def _normalize_prompt_language(language: str | None) -> str:
+    """Map config preferred_language to prompt locale ``cn`` or ``en``.
+
+    Aligns with ``swarm.config_specs._subagent_language`` and agent-core
+    ``resolve_language`` supported set (``cn`` / ``en``). Raw values like
+    ``zh`` must not be written onto ``TeamSpec.language``.
+    """
+    lang = str(language or "zh").strip().lower()
+    if lang in {"en", "english"}:
+        return "en"
+    if lang in {"zh", "cn", "zh-cn", "zh_cn", "chinese"}:
+        return "cn"
+    return "cn"
+
+
+def _team_member_display_name_rule(language: str | None = None) -> str:
+    """Return the display-name prompt rule for the configured language."""
+    if _normalize_prompt_language(language) == "en":
+        return _TEAM_MEMBER_DISPLAY_NAME_RULE_EN
+    return _TEAM_MEMBER_DISPLAY_NAME_RULE_CN
 
 
 def _map_member_public_private_fields(
     raw: dict[str, Any],
     *,
     default_desc: str = "",
+    language: str | None = None,
 ) -> dict[str, str]:
     """Map relay/legacy identity fields onto TeamMemberSpec ``desc`` / ``prompt``.
 
@@ -369,7 +638,10 @@ def _map_member_public_private_fields(
     ``desc``, so ``create_task`` omits ``assignee`` and members race one claim
     pool (assistant often wins). Swarm Leaders set assignees because their
     roster carries real capability text.
+
+    Append the language-selected display-name rule to the private prompt.
     """
+    rule = _team_member_display_name_rule(language)
     desc = str(raw.get("desc") or raw.get("persona") or default_desc or "").strip()
     prompt = str(raw.get("prompt") or "").strip()
     if not prompt:
@@ -378,10 +650,15 @@ def _map_member_public_private_fields(
             str(raw.get("prompt_hint") or "").strip(),
         ]
         prompt = "\n\n".join(part for part in prompt_parts if part)
+    prompt = f"{prompt}\n\n{rule}" if prompt else rule
     return {"desc": desc, "prompt": prompt}
 
 
-def _build_predefined_members(team_raw: dict[str, Any]) -> list[dict[str, Any]]:
+def _build_predefined_members(
+    team_raw: dict[str, Any],
+    *,
+    language: str | None = None,
+) -> list[dict[str, Any]]:
     predefined_members_raw = team_raw.get("predefined_members", [])
     if not isinstance(predefined_members_raw, list):
         logger.warning("[TeamConfigLoader] predefined_members must be a list, ignored")
@@ -408,11 +685,13 @@ def _build_predefined_members(team_raw: dict[str, Any]) -> list[dict[str, Any]]:
         member_spec = deepcopy(item)
         member_spec["member_name"] = member_name
         member_spec["display_name"] = str(identity_name).strip()
-        member_spec.update(_map_member_public_private_fields(member_spec))
+        member_spec.update(
+            _map_member_public_private_fields(member_spec, language=language)
+        )
         # Drop legacy keys so TeamMemberSpec does not silently ignore them.
         member_spec.pop("persona", None)
         member_spec.pop("prompt_hint", None)
-        # openjiuwen TeamMemberSpec 现按 role_type 判别联合类型，缺省补 teammate
+        # TeamMemberSpec discriminates on role_type; default missing values to teammate.
         role_type = str(member_spec.get("role_type") or "").strip()
         member_spec["role_type"] = role_type or "teammate"
 
@@ -495,9 +774,13 @@ def load_team_spec_dict(
     # modes.team.enable_hitt is explicitly set true in config.
     spec_dict["enable_hitt"] = team_raw.get("enable_hitt", False)
     spec_dict["enable_permissions"] = _resolve_enable_permissions(config_base, team_raw)
-    spec_dict["leader"] = _build_leader_spec(team_raw)
+    # Normalize before any consumer (prompt injection, TeamAgentSpec.build,
+    # rails). preferred_language is often ``zh``; agent-core / rails expect
+    # ``cn`` | ``en`` only.
+    language = _normalize_prompt_language(config_base.get("preferred_language"))
+    spec_dict["leader"] = _build_leader_spec(team_raw, language=language)
     spec_dict["agents"] = agents
-    spec_dict["language"] = str(config_base.get("preferred_language", "zh")).strip().lower()
+    spec_dict["language"] = language
 
     workspace_spec = _build_workspace_spec(team_raw)
     if workspace_spec is not None:
@@ -505,7 +788,7 @@ def load_team_spec_dict(
 
     spec_dict["transport"] = _build_transport_spec(team_raw)
 
-    predefined_members = _build_predefined_members(team_raw)
+    predefined_members = _build_predefined_members(team_raw, language=language)
     if predefined_members:
         spec_dict["predefined_members"] = predefined_members
     elif "predefined_members" in spec_dict:

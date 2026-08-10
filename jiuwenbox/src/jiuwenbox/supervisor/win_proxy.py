@@ -1,14 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Windows 出站代理 (HTTP CONNECT + SOCKS5, asyncio).
-
-对齐 docs/window沙箱.md 6.6:
-  - 监听 127.0.0.1:<port_range> 范围, WFP Permit filter 仅放行指向这些端口
-    的流量, 沙箱所有出网流量必须经过代理.
-  - HTTP CONNECT: 用于 HTTPS 流量 (透传 TLS, 不做 MITM).
-  - SOCKS5: 用于非 HTTP 协议 (Git SSH / DB 等).
-  - 过滤逻辑: 解析目标域名/IP -> 先查 deny (命中拒绝) -> 再查 allow (非空
-    且未命中拒绝则放行) -> 否则放行/拒绝 (按 default).
-
 过滤语义与 Linux supervisor/network.py 的 egress/ingress 完全对齐:
 deny 优先于 allow; 域名解析后比对 IP CIDR; 端口单独匹配.
 
@@ -55,15 +46,11 @@ class EgressFilter:
     ) -> None:
         self.egress = egress
         self.ingress = ingress
-        # 网络总开关 (officeAce sandbox.network.set disable_all). True 时短路拒绝所有
-        # 出站, 不清空 allow/blocked_domains (用户配置原样保留, 关掉总开关即恢复).
         self.disable_all = bool(disable_all)
-        # 预解析: 域名不在这里解析 (运行时按目标域名动态解析), 只预建 IP/端口集合.
         self._blocked_ips = self._parse_networks(egress.blocked_ips)
         self._allowed_ips = self._parse_networks(egress.allowed_ips)
         self._blocked_ports = set(egress.blocked_ports)
         self._allowed_ports = set(egress.allowed_ports)
-        # 域名规则保留原始字符串, 握手时匹配 (支持通配符).
         self._blocked_domains = list(egress.blocked_domains)
         self._allowed_domains = list(egress.allowed_domains)
 
@@ -79,18 +66,13 @@ class EgressFilter:
 
     @staticmethod
     def _domain_matches(pattern: str, host: str) -> bool:
-        """通配符域名匹配: '*.example.com' 匹配 'a.example.com' / 'example.com'?.
-
-        约定 (与 network.py resolve_domains 一致): 通配符前缀 '*' 匹配任意
-        子域; 无通配符则精确匹配.
-        """
+        """通配符域名匹配: '*.example.com' 匹配 'a.example.com' / 'example.com'?."""
         if not pattern or not host:
             return False
         pat = pattern.lower().strip()
         host = host.lower().strip()
         if pat.startswith("*."):
             base = pat[2:]
-            # *.example.com 匹配 sub.example.com, 也匹配 example.com (兼容写法).
             return host == base or host.endswith("." + base)
         return pat == host
 
@@ -103,19 +85,7 @@ class EgressFilter:
         return any(ip in net for net in nets)
 
     def allow(self, host: str, port: int) -> tuple[bool, str]:
-        """判定是否放行 (host, port). 返回 (allowed, reason).
-
-        语义对齐 Linux supervisor/network.py 的 iptables 规则:
-          0. disable_all 总开关置位 → 直接拒绝 (officeAce sandbox.network.set;
-             不清空 allow/blocked_domains, 用户配置原样保留, 关掉即恢复).
-          1. blocked_domains / blocked_ips / blocked_ports 命中 -> 拒绝.
-          2. allow 规则按维度独立判定 (OR), 任一命中即放行:
-             - allowed_domains / allowed_ips 是一条 ACCEPT-by-host 规则;
-             - allowed_ports 是另一条 ACCEPT-by-port 规则.
-             对齐 Linux iptables 的独立 ACCEPT 链 (review MAJOR #10:
-             旧版在 IP+port 同时存在时做 AND, 比 Linux 严).
-          3. 无任何 allow 规则: 按 default.
-        """
+        """判定是否放行 (host, port). 返回 (allowed, reason)."""
         if self.disable_all:
             return False, "network disabled (disable_all)"
         if not host:
@@ -167,9 +137,6 @@ class EgressFilter:
         )
         port_in_allow = port in self._allowed_ports if self._allowed_ports else False
 
-        # 4a. allow 规则按维度独立判定 (OR), 对齐 Linux iptables 独立 ACCEPT 链:
-        #     allowed_ips / allowed_ports 任一命中即放行,
-        #     不做 AND (旧版 AND 会错杀 {allowed_ips:[10/8], allowed_ports:[443]} 里的 10.1.2.3:8443).
         if has_ip_rules or has_port_rules:
             reasons: list[str] = []
             if domain_allowed:
@@ -182,7 +149,6 @@ class EgressFilter:
                 return True, f"explicitly allowed ({'+'.join(reasons)})"
             return False, f"{host}:{port} not in any allow rule"
 
-        # 5. 无任何 allow 规则: 按 default.
         if self.egress.default == "deny":
             return False, "default deny (no allow rules)"
         return True, "default allow"
@@ -207,7 +173,7 @@ async def _pipe_streams(
                 break
             writer.write(data)
             await writer.drain()
-    except OSError:  # ConnectionError/TimeoutError 均为 OSError 子类, 简化
+    except OSError:
         pass
     finally:
         try:
@@ -261,7 +227,6 @@ async def handle_http_connect(
     first_line 形如 ``b'CONNECT host:port HTTP/1.1'``.
     """
     try:
-        # 解析 CONNECT 目标.
         try:
             line = first_line.decode("latin-1").strip()
             parts = line.split()
@@ -275,7 +240,7 @@ async def handle_http_connect(
                 port = int(port_str)
             else:
                 host, port = host_port, 443
-        except ValueError:  # UnicodeDecodeError 为 ValueError 子类, 简化
+        except ValueError:
             client_writer.write(b"HTTP/1.1 400 Bad Request\r\n\r\n")
             await client_writer.drain()
             return
@@ -291,7 +256,6 @@ async def handle_http_connect(
             await client_writer.drain()
             return
 
-        # 读掉 CONNECT 之后到空行的剩余 HTTP 头.
         while True:
             header = await asyncio.wait_for(
                 client_reader.readline(), timeout=_HANDSHAKE_TIMEOUT,
@@ -301,7 +265,7 @@ async def handle_http_connect(
 
         try:
             target_reader, target_writer = await _connect_target(host, port)
-        except OSError as exc:  # asyncio.TimeoutError 为 OSError 子类, 简化
+        except OSError as exc:
             logger.info("CONNECT 目标连接失败 %s:%d (%s)", host, port, exc)
             client_writer.write(
                 b"HTTP/1.1 502 Bad Gateway\r\n"
@@ -314,7 +278,7 @@ async def handle_http_connect(
         client_writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         await client_writer.drain()
         await _relay(client_reader, client_writer, target_reader, target_writer)
-    except OSError as exc:  # asyncio.TimeoutError/ConnectionError 均为 OSError 子类, 简化
+    except OSError as exc:
         logger.debug("HTTP CONNECT handler 异常: %s", exc)
     finally:
         try:
@@ -376,17 +340,16 @@ async def handle_socks5(
 
         try:
             target_reader, target_writer = await _connect_target(host, port)
-        except OSError as exc:  # asyncio.TimeoutError 为 OSError 子类, 简化
+        except OSError as exc:
             logger.info("SOCKS5 目标连接失败 %s:%d (%s)", host, port, exc)
             client_writer.write(b"\x05\x05\x00\x01\x00\x00\x00\x00\x00\x00")
             await client_writer.drain()
             return
 
-        # 成功应答.
+        # 成功.
         client_writer.write(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
         await client_writer.drain()
         await _relay(client_reader, client_writer, target_reader, target_writer)
-    # asyncio.TimeoutError/ConnectionError 为 OSError 子类, 简化保留 IncompleteReadError
     except (asyncio.IncompleteReadError, OSError) as exc:
         logger.debug("SOCKS5 handler 异常: %s", exc)
     finally:
@@ -407,7 +370,6 @@ async def _handle_client(
             client_reader.readexactly(1), timeout=_HANDSHAKE_TIMEOUT,
         )
         if first == b"C":  # "CONNECT..." 起头.
-            # 读回第一行剩余部分 (用 readline 但已读了首字节, 拼回).
             rest = await asyncio.wait_for(
                 client_reader.readline(), timeout=_HANDSHAKE_TIMEOUT,
             )
@@ -417,11 +379,8 @@ async def _handle_client(
         elif first == b"\x05":  # SOCKS5 版本字节.
             await handle_socks5(client_reader, client_writer, egress_filter)
         else:
-            # 非 HTTP CONNECT / 非 SOCKS5: 透传当作纯 TCP? 文档要求仅放行代理
-            # 协议, 这里直接关闭未知协议连接.
             client_writer.write(b"HTTP/1.1 400 Bad Request\r\n\r\n")
             await client_writer.drain()
-    # asyncio.TimeoutError/ConnectionError 为 OSError 子类, 简化保留 IncompleteReadError
     except (asyncio.IncompleteReadError, OSError) as exc:
         logger.debug("client handler 异常: %s", exc)
     finally:
@@ -476,7 +435,7 @@ async def serve_windows_proxy(  # pylint: disable=huawei-too-many-arguments
     if stop_event is None:
         stop_event = asyncio.Event()
     egress_filter = EgressFilter(egress, ingress, disable_all=disable_all)
-    # 只绑 port_range_start (60080) 一个端口, 而不是整个范围.
+    # 只绑 port_range_start (60080) 一个端口.
     # HTTP_PROXY 始终指向 port_range_start, 其他端口绑了也没用.
     # 60081-60089 释放给沙箱内 render server 等本地服务用.
     tasks = [

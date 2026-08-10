@@ -8,7 +8,6 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from functools import cache
 from pathlib import Path
 from typing import Any, Optional
 from ruamel.yaml import YAML
@@ -491,86 +490,39 @@ def _resolve_ui_language() -> str:
     return "cn"
 
 
-@cache
-def _get_team_tool_translator(lang: str | None = None) -> Any:
-    """Lazily build the agent-team tool description translator (cached).
-
-    Config-only agent-team tools (``build_team``, ``spawn_teammate``, ...) are
-    registered to ``ability_manager`` only after ``build_team`` completes, so
-    they are absent from the runtime catalog until then. Their descriptions
-    are sourced from the upstream ``openjiuwen.agent_teams.tools.locales``
-    translator so they stay in sync with upstream changes without a
-    hand-maintained static mapping. Returns ``None`` when the upstream package
-    is unavailable (e.g. a jiuwenclaw runtime without agent-team support).
-
-    ``lang`` is the translator language (``cn``/``en``); when omitted it is
-    resolved from the global ``preferred_language`` config so the tool list
-    stays consistent with the runtime's language. A future request-level
-    language can be threaded through by passing ``lang`` explicitly.
-    """
-    try:
-        from openjiuwen.agent_teams.tools.locales import make_translator
-
-        return make_translator(lang or _resolve_ui_language())
-    except Exception:
-        return None
-
-
-def _resolve_config_only_tool_description(tool_name: str) -> str:
-    """Resolve description for a config-only tool absent from the runtime catalog.
-
-    Agent-team tools resolve via the upstream translator; tools whose
-    descriptions live elsewhere (e.g. ``office_claw_*`` MCP tools described by
-    the relay-claw MCP server) return an empty string so the UI can show a
-    placeholder.
-    """
-    translator = _get_team_tool_translator(_resolve_ui_language())
-    if translator is None:
-        return ""
-    try:
-        return str(translator(tool_name)) or ""
-    except (FileNotFoundError, KeyError):
-        return ""
-    except Exception:
-        return ""
-
-
 def build_permissions_tools_list_view(
     catalog_by_name: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, Any]:
-    """Build permissions UI list merging runtime catalog and config-only tools.
+    """List configured and initialized tools, enriched with stable metadata."""
+    from jiuwenclaw.agentserver.tool_catalog import (
+        get_stable_tools_catalog,
+        ui_list_short_description,
+    )
 
-    Tools are drawn from two sources, merged by name:
-
-    1. ``catalog_by_name`` — tools currently registered in the runtime
-       ``ability_manager`` (``registered=True``).
-    2. ``permissions.tools`` config keys absent from the runtime catalog
-       (``registered=False``). These are tools configured in advance but not
-       yet registered — e.g. agent-team tools only registered after
-       ``build_team`` completes. Surfacing them lets users pre-configure
-       approval levels before the tool is ever invoked; the level takes effect
-       once the tool registers and is called, because ``PermissionEngine``
-       reads ``config.tools[name]`` independent of registration state.
-
-    Descriptions for config-only agent-team tools are resolved via the
-    ``openjiuwen.agent_teams.tools.locales`` translator so they stay in sync
-    with upstream tool definitions without a hand-maintained mapping.
-    """
-    from jiuwenclaw.agentserver.tool_catalog import ui_list_short_description
-
-    catalog = dict(catalog_by_name or {})
+    runtime_catalog = dict(catalog_by_name or {})
+    stable_catalog = get_stable_tools_catalog(_resolve_ui_language())
     explicit = get_permissions_tools().get("tools")
     if not isinstance(explicit, dict):
         explicit = {}
     default_level = get_permissions_defaults_level()
 
-    seen: set[str] = set()
     tools_out: list[dict[str, Any]] = []
 
-    # 1. 已注册工具（runtime catalog）：registered=True
-    for name in sorted(catalog.keys()):
-        seen.add(name)
-        entry = catalog.get(name, {})
+    for name in sorted(set(runtime_catalog) | set(explicit)):
+        runtime_entry = runtime_catalog.get(name, {})
+        entry = {
+            **stable_catalog.get(name, {"name": name}),
+            **{
+                key: value
+                for key, value in runtime_entry.items()
+                if value is not None and str(value).strip()
+            },
+            "name": name,
+        }
+        runtime_description = str(runtime_entry.get("description", "") or "").strip()
+        runtime_short_description = str(runtime_entry.get("short_description", "") or "").strip()
+        if runtime_description and not runtime_short_description:
+            entry["short_description"] = ""
         raw_explicit = explicit.get(name)
         if raw_explicit is not None:
             level = normalize_permissions_tool_level(raw_explicit) or default_level
@@ -591,33 +543,7 @@ def build_permissions_tools_list_view(
                 "short_description": short,
                 "level": level,
                 "configured": configured,
-                "registered": True,
-            }
-        )
-
-    # 2. config 独有键（permissions.tools 里配过、但不在 runtime catalog）：
-    #    典型场景是 agent-team 工具——只在 build_team 成功后才注册到
-    #    ability_manager。提前暴露它们让用户可预配审批档位；档位在该工具
-    #    注册并被调用时即生效（PermissionEngine 读 config.tools[name]，
-    #    与注册状态无关）。
-    for name in sorted(explicit.keys()):
-        if name in seen:
-            continue
-        raw_explicit = explicit.get(name)
-        level = normalize_permissions_tool_level(raw_explicit) or default_level
-        description = _resolve_config_only_tool_description(name)
-        short = ui_list_short_description(
-            name,
-            description=description,
-            short_description="",
-        )
-        tools_out.append(
-            {
-                "name": name,
-                "short_description": short,
-                "level": level,
-                "configured": True,
-                "registered": False,
+                "registered": name in runtime_catalog,
             }
         )
 
@@ -870,6 +796,112 @@ _ENV_TO_MODEL_CLIENT_CONFIG: dict[str, str] = {
     "API_BASE": "api_base",
     "MODEL_PROVIDER": "client_provider",
 }
+
+# Tip → model_client_config (inverse of _ENV_TO_MODEL_CLIENT_CONFIG).
+_MODEL_CLIENT_CONFIG_FROM_TIP: dict[str, str] = {
+    mcc_key: env_key for env_key, mcc_key in _ENV_TO_MODEL_CLIENT_CONFIG.items()
+}
+
+
+def is_unresolved_model_credential(value: Any) -> bool:
+    """True when a model credential is empty or still a ``${VAR}`` placeholder."""
+    if value is None:
+        return True
+    text = str(value).strip()
+    if not text:
+        return True
+    return text.startswith("${") and text.endswith("}")
+
+
+def resolve_model_credential_tip(
+    *,
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> dict[str, Any]:
+    """Return the tip bag for ``(service_id, agent_id)`` via ``resolve_env_ns``.
+
+    Credential isolation keeps ``API_BASE`` / ``API_KEY`` in per-agent tip
+    memory (not ``os.environ``). Agent selection is entirely owned by
+    ``resolve_env_ns``; this helper does not rematch across tips.
+    """
+    from jiuwenclaw.local_env_config import effective_tip, resolve_env_ns
+
+    sid, aid = resolve_env_ns(service_id, agent_id)
+    return dict(effective_tip(sid, aid) or {})
+
+
+def hydrate_model_client_config_from_tip(
+    model_client_config: dict[str, Any] | None,
+    *,
+    service_id: str | None = None,
+    agent_id: str | None = None,
+    tip: dict[str, Any] | None = None,
+    force_tip_identity: bool = False,
+) -> dict[str, Any]:
+    """Fill empty / ``${VAR}`` model credentials from tip memory (no os.environ).
+
+    Mutates and returns ``model_client_config``. Non-dict input becomes ``{}``.
+    When ``force_tip_identity`` is True (team members), tip ``MODEL_NAME`` /
+    ``MODEL_PROVIDER`` / ``API_*`` always overwrite sticky yaml/default values.
+    """
+    mcc: dict[str, Any] = (
+        dict(model_client_config) if isinstance(model_client_config, dict) else {}
+    )
+    identity_keys = frozenset({"model_name", "client_provider", "api_base", "api_key"})
+    needs_any = force_tip_identity or any(
+        is_unresolved_model_credential(mcc.get(mcc_key))
+        for mcc_key in _MODEL_CLIENT_CONFIG_FROM_TIP
+    )
+    if not needs_any:
+        return mcc
+
+    source = tip if isinstance(tip, dict) else resolve_model_credential_tip(
+        service_id=service_id,
+        agent_id=agent_id,
+    )
+
+    for mcc_key, tip_key in _MODEL_CLIENT_CONFIG_FROM_TIP.items():
+        force = force_tip_identity and mcc_key in identity_keys
+        if not force and not is_unresolved_model_credential(mcc.get(mcc_key)):
+            continue
+        raw = source.get(tip_key)
+        if raw is None:
+            continue
+        text = str(raw).strip()
+        if text:
+            mcc[mcc_key] = text
+    return mcc
+
+
+def hydrate_team_agent_model_from_tip(
+    model: dict[str, Any] | None,
+    *,
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> dict[str, Any]:
+    """Hydrate a team agent ``model`` block from catalog tip (identity + credentials)."""
+    if not isinstance(model, dict):
+        model = _empty_team_agent_model_skeleton()
+    out = copy.deepcopy(model)
+    mcc = out.get("model_client_config")
+
+    hydrated = hydrate_model_client_config_from_tip(
+        mcc if isinstance(mcc, dict) else {},
+        service_id=service_id,
+        agent_id=agent_id,
+        force_tip_identity=True,
+    )
+    out["model_client_config"] = hydrated
+
+    # Keep request model name aligned when tip supplied model_name.
+    model_name = str(hydrated.get("model_name") or "").strip()
+    if model_name:
+        request = out.get("model_request_config")
+        if not isinstance(request, dict):
+            request = {}
+            out["model_request_config"] = request
+        request["model"] = model_name
+    return out
 
 
 def patch_model_config_from_env(
@@ -1376,9 +1408,6 @@ def _coerce_optional_positive_int(
 def _normalize_sandbox_startup_mode(value: Any) -> str:
     """归一化 ``sandbox.startup_mode``.
 
-    P1-16: 读取路径与写入路径校验一致. 旧版对非空非法值 (如 ``iternal`` 拼错)
-    静默回落默认, 用户无反馈. 现改为: None/空 → 默认; 非空但非法 → 抛 ValueError
-    (与 update_sandbox_startup_mode 写入路径一致), 启动时报错定位.
     """
     text = str(value or "").strip().lower()
     if not text:
@@ -1447,19 +1476,12 @@ def _ensure_sandbox_runtime_shape(runtime: Any) -> dict[str, Any]:
 
 
 def get_sandbox_runtime() -> dict[str, Any]:
-    """返回 sandbox runtime 当前内容 (含缺省字段填充)。
-
-    读取优先级: 当 task env overlay 已绑定 (reload_agent_config 把 yaml sandbox
-    翻译成 overlay) 时, ``enabled`` 优先读 overlay 的
-    ``JIUWENCLAW_SANDBOX_ENABLED`` (经 :func:`get_local_config`); 其余字段直接从
-    ``sandbox.<key>`` config dict 读。字段缺失时用 ``_SANDBOX_RUNTIME_DEFAULTS``。
-    """
+    """返回 sandbox runtime 当前内容 (含缺省字段填充)。"""
     cfg = get_config() or {}
     sandbox = cfg.get("sandbox")
     if not isinstance(sandbox, dict):
         sandbox = {}
     raw = {key: sandbox[key] for key in _SANDBOX_RUNTIME_KEYS if key in sandbox}
-    # overlay 优先读 enabled (reload_agent_config 把 yaml enabled 翻译成 env overlay).
     enabled_env = get_local_config("JIUWENCLAW_SANDBOX_ENABLED", None)
     if enabled_env is not None:
         text = str(enabled_env).strip().lower()
@@ -1481,14 +1503,7 @@ def get_sandbox_startup_mode() -> str:
 
 def get_sandbox_startup_mode_explicit() -> str | None:
     """同 :func:`get_sandbox_startup_mode`, 但仅返回 ``config.yaml`` 里**显式**
-    写出的合法值 (``internal`` / ``external``); 未配置 / 空串 / 非法值都返回
-    ``None``。
-
-    用途: agent-server boot 时判断要不要自动拉起 jiuwenbox 子进程。
-    ``get_sandbox_startup_mode`` 默认归一会把缺失字段变成 ``internal``, 那样
-    会让从来没碰过沙箱的用户在升级到带 bootstrap 逻辑的版本后, 突然多出一个
-    jiuwenbox 进程。靠这个 ``_explicit`` 变体可以严格区分 "用户主动选了 internal"
-    和 "字段不存在, 走的默认"。
+        写出的合法值 (``internal`` / ``external``); 未配置 / 空串 / 非法值都返回 ``None``。
     """
     cfg = get_config() or {}
     sandbox = cfg.get("sandbox") or {}
@@ -1517,21 +1532,14 @@ def update_sandbox_startup_mode(mode: str) -> str:
 
 
 def _looks_like_bare_filename(value: str) -> bool:
-    """``True`` 表示参数应该被解释为 ``jiuwenbox/configs/`` 下的文件名。
-
-    判据: 不含任何路径分隔符 (``/`` 或 ``\\``); 含分隔符或绝对路径一律按整路径处理。
-    """
+    """``True`` 表示参数应该被解释为 ``jiuwenbox/configs/`` 下的文件名。"""
     if not value:
         return False
     return "/" not in value and "\\" not in value and not Path(value).is_absolute()
 
 
 def _jiuwenbox_configs_dir() -> Path | None:
-    """探测仓库或安装位置上的 ``jiuwenbox/configs/`` 目录。
-
-    优先在仓库目录树里寻找 (开发场景, ``jiuwenbox/src/jiuwenbox/configs``);
-    失败再尝试已 ``pip install`` 的 jiuwenbox 包内 ``configs/``。
-    """
+    """探测仓库或安装位置上的 ``jiuwenbox/configs/`` 目录。"""
     here = Path(__file__).resolve()
     for ancestor in here.parents[1:7]:
         for candidate in (
@@ -1562,13 +1570,7 @@ def _jiuwenbox_configs_dir() -> Path | None:
 
 
 def resolve_sandbox_policy_path(value: str | None) -> Path | None:
-    r"""把 ``sandbox.policy_file`` 的取值解析为宿主机绝对路径。
-
-    - ``None`` / 空字符串 → 返回 None, 由调用方决定是否落到 jiuwenbox 自身默认 policy;
-    - 仅文件名 (不含路径分隔符) → 在 ``jiuwenbox/configs/`` 下拼接;
-      ``configs/`` 探测不到时返回 None;
-    - 含 ``/`` ``\\`` 或绝对路径 → 展开 ``~`` / ``$VAR`` 后按整路径返回。
-    """
+    r"""把 ``sandbox.policy_file`` 的取值解析为宿主机绝对路径。"""
     if not value:
         return None
     text = str(value).strip()
@@ -1614,27 +1616,11 @@ def update_sandbox_policy_file(value: str) -> str:
 
 def get_sandbox_endpoint() -> dict[str, Any]:
     """返回 ``sandbox.url`` / ``sandbox.type`` / ``sandbox.preserve_file_sharing_mode``
-    / ``sandbox.startup_mode`` / ``sandbox.policy_file``。
-
-    读取优先级: 当 task env overlay 已绑定 (reload_agent_config 把 yaml sandbox
-    翻译成 overlay) 时, 优先读 overlay 的 ``JIUWENCLAW_SANDBOX_URL`` /
-    ``JIUWENCLAW_SANDBOX_TYPE`` env var (经 :func:`get_local_config`); 否则
-    fallback 到 ``config.yaml::sandbox`` config dict。这让 hot-reload 的 yaml
-    sandbox 配置能即时生效, 不必写盘。
-
-    ``preserve_file_sharing_mode`` 缺省或为空时返回空串, 由调用方决定默认值
-    (当前只有 ``"mount"``)。 ``startup_mode`` 未配置时回落到 ``internal``;
-    ``policy_file`` 未配置时返回空串 (由调用方决定默认 policy)。
-
-    Raises:
-        ValueError: yaml 里 ``preserve_file_sharing_mode`` 写了非法值时, 直接
-            把 :func:`_normalize_preserve_file_sharing_mode` 的异常向上抛。
+        / ``sandbox.startup_mode`` / ``sandbox.policy_file``。
     """
     cfg = get_config() or {}
     sandbox = cfg.get("sandbox") or {}
     mode = _normalize_preserve_file_sharing_mode(sandbox.get("preserve_file_sharing_mode"))
-    # overlay 优先: reload_agent_config 把 yaml sandbox 翻译成 env overlay, 这里读回.
-    # 未绑定时 get_local_config 走 config dict/tip/os.environ, 仍能读到 yaml 写盘值.
     url = str(get_local_config("JIUWENCLAW_SANDBOX_URL", "") or sandbox.get("url") or "").strip()
     sb_type = str(get_local_config("JIUWENCLAW_SANDBOX_TYPE", "") or sandbox.get("type") or "").strip()
     return {
@@ -1657,8 +1643,6 @@ def update_sandbox_endpoint(
     """写入 ``sandbox.url`` / ``sandbox.type`` 以及可选的
     ``preserve_file_sharing_mode`` / ``startup_mode`` / ``policy_file``
     到 config.yaml; 返回实际写入的字段集合 (没有改动的字段不在返回里)。
-
-    所有 ``None`` 入参表示"本次不修改该字段, 保留 config.yaml 中既有值"。
     """
     url_value = str(url or "").strip()
     type_value = str(sandbox_type or "").strip()
@@ -1706,22 +1690,14 @@ def update_sandbox_endpoint(
 
 
 def get_sandbox_preserve_file_sharing_mode() -> str | None:
-    """返回 ``sandbox.preserve_file_sharing_mode`` (当前仅 ``"mount"``)。
-
-    未配置返回 ``None`` (调用方按默认走)。 非法取值不在这里兜底, 直接由
-    :func:`_normalize_preserve_file_sharing_mode` 抛 ``ValueError``。
-    """
+    """返回 ``sandbox.preserve_file_sharing_mode`` (当前仅 ``"mount"``)。"""
     cfg = get_config() or {}
     sandbox = cfg.get("sandbox") or {}
     return _normalize_preserve_file_sharing_mode(sandbox.get("preserve_file_sharing_mode"))
 
 
 def update_sandbox_preserve_file_sharing_mode(mode: str) -> str:
-    """写入 ``sandbox.preserve_file_sharing_mode``; 返回归一化后的值.
-
-    空值与非法值都会抛 ``ValueError``——写入路径不允许 "保留旧值" 语义, 必须
-    给出明确的合法 mode (当前仅 ``"mount"``)。
-    """
+    """写入 ``sandbox.preserve_file_sharing_mode``; 返回归一化后的值."""
     normalized = _normalize_preserve_file_sharing_mode(mode)
     if normalized is None:
         raise ValueError(
@@ -1736,18 +1712,7 @@ def update_sandbox_preserve_file_sharing_mode(mode: str) -> str:
 
 
 def update_sandbox_runtime(patch: dict[str, Any]) -> dict[str, Any]:
-    """合并 patch 到 sandbox runtime 字段, 写回 YAML, 返回合并后的完整 runtime。
-
-    持久化位置: ``sandbox`` 顶层 (扁平形式), 与 ``url`` / ``type`` /
-    ``startup_mode`` / ``policy_file`` / ``preserve_file_sharing_mode`` 并列。
-
-    Args:
-        patch: 部分字段更新；支持顶层键 ``enabled`` / ``excluded_commands``
-            / ``files`` / ``idle_ttl_seconds`` / ``idle_check_interval``
-            / ``fallback_on_failure``。 ``files`` 字典若提供则整体替换; 其余
-            键按值合并。 ``idle_*`` 字段接受整数秒数 (``<= 0`` 归一化为 ``None``
-            = 禁用淘汰) 或 ``None``。
-    """
+    """合并 patch 到 sandbox runtime 字段, 写回 YAML, 返回合并后的完整 runtime。"""
     if not isinstance(patch, dict):
         raise ValueError("patch must be an object")
 
@@ -1786,7 +1751,7 @@ def update_sandbox_runtime(patch: dict[str, Any]) -> dict[str, Any]:
     if "sandbox" not in data or not isinstance(data.get("sandbox"), dict):
         data["sandbox"] = {}
     sandbox_block = data["sandbox"]
-    # 写入扁平 runtime 字段, 每次 update 都把全集刷一遍, 保证 yaml 形状稳定。
+
     for key in _SANDBOX_RUNTIME_KEYS:
         sandbox_block[key] = merged[key]
     _dump_yaml_round_trip(_current_config_yaml_path(), data)
@@ -1873,9 +1838,10 @@ def _transform_front_team_model_config(model_raw: dict[str, Any]) -> dict[str, A
                 if isinstance(entry, dict):
                     mcc = entry.get("model_client_config")
                     if isinstance(mcc, dict):
+                        # Never copy api_base/api_key into modes.team / agent registry.
                         model_client_config.update({
                             k: v for k, v in mcc.items()
-                            if k not in ("model_name",) and v is not None
+                            if k not in ("model_name", "api_base", "api_key") and v is not None
                         })
                         model_request_config["model"] = resolve_env_vars(str(mcc.get("model_name", model_name_part)))
                     mco = entry.get("model_config_obj")
@@ -1885,10 +1851,6 @@ def _transform_front_team_model_config(model_raw: dict[str, Any]) -> dict[str, A
     # 前端字段覆盖（优先级高于 #index 解析）
     if "provider" in model_raw and model_raw["provider"] is not None:
         model_client_config["client_provider"] = model_raw["provider"]
-    if "api_base" in model_raw and model_raw["api_base"] is not None:
-        model_client_config["api_base"] = model_raw["api_base"]
-    if "api_key" in model_raw and model_raw["api_key"] is not None:
-        model_client_config["api_key"] = model_raw["api_key"]
     if "model" in model_raw and model_raw["model"] is not None:
         # 若包含 #index，提取纯 model_name
         raw_model = model_raw["model"]
@@ -1908,33 +1870,60 @@ def _transform_front_team_model_config(model_raw: dict[str, Any]) -> dict[str, A
     return transformed
 
 
-def _transform_front_team_agent_spec(agent_key: str, agent_raw: Any) -> dict[str, Any]:
-    agent_config = _require_dict(agent_raw, f"agents.{agent_key}")
+def _empty_team_agent_model_skeleton() -> dict[str, Any]:
+    """Empty runtime model shell for team agents.
+
+    Tip hydrates MODEL_*/API_*; timeout and verify_ssl keep local defaults.
+    """
+    return {
+        "model_client_config": {
+            "timeout": 1800,
+            "verify_ssl": False,
+            "custom_headers": {},
+        },
+        "model_request_config": {},
+    }
+
+
+def _transform_front_team_agent_spec(agent_id: str, agent_raw: Any) -> dict[str, Any]:
+    """Map a front team-agent dict into the persisted ``teams.agents`` shape.
+
+    - Catalog link uses ``agent_id`` (tip / sync id).
+    - Tip ``API_*`` / ``MODEL_*`` are not written to yaml; runtime tip hydrate
+      supplies them.
+    - ``skills`` is stored on ``agents.*.skills`` (front value, or tip
+      ``ENABLED_SKILLS`` when front omits it).
+    """
+    from jiuwenclaw.agentserver.skill_manager import resolve_string_or_list_config
+
+    agent_config = _require_dict(agent_raw, f"agents.{agent_id}")
     transformed: dict[str, Any] = {}
 
-    if "model" in agent_config:
-        model_raw = _require_dict(agent_config.get("model"), f"agents.{agent_key}.model")
-        transformed_model = _transform_front_team_model_config(model_raw)
-        if transformed_model:
-            transformed["model"] = transformed_model
-
+    # Persist known knobs only; model identity/credentials come from tip at runtime.
     for field_name in ("skills", "workspace", "max_iterations", "completion_timeout"):
         if field_name in agent_config:
             transformed[field_name] = copy.deepcopy(agent_config[field_name])
+
+    if not resolve_string_or_list_config(transformed.get("skills")):
+        tip = resolve_model_credential_tip(agent_id=str(agent_id or "").strip() or None)
+        tip_skills = resolve_string_or_list_config((tip or {}).get("ENABLED_SKILLS"))
+        if tip_skills:
+            transformed["skills"] = tip_skills
 
     return transformed
 
 
 def _resolve_front_team_agent_spec(
     agents_raw: dict[str, Any],
-    agent_key: Any,
+    agent_id: Any,
     *,
     field_name: str,
 ) -> dict[str, Any]:
-    resolved_key = _require_non_empty_string(agent_key, field_name)
-    if resolved_key not in agents_raw:
-        raise ValueError(f"{field_name} references unknown agent_key: {resolved_key}")
-    return _transform_front_team_agent_spec(resolved_key, agents_raw[resolved_key])
+    """Resolve ``teams.agents[<catalog agent_id>]`` — same id space as plan tip."""
+    resolved_id = _require_non_empty_string(agent_id, field_name)
+    if resolved_id not in agents_raw:
+        raise ValueError(f"{field_name} references unknown agent_id: {resolved_id}")
+    return _transform_front_team_agent_spec(resolved_id, agents_raw[resolved_id])
 
 
 def _build_modes_team_mapping(front_payload: dict[str, Any]) -> dict[str, Any]:
@@ -1969,28 +1958,36 @@ def _build_modes_team_mapping(front_payload: dict[str, Any]) -> dict[str, Any]:
             for key in ("member_name", "display_name", "persona")
             if key in leader_raw
         }
-        transformed_team["leader"]["agent_key"] = leader_raw.get("agent_key", "")
         leader_name = _require_non_empty_string(
             leader_raw.get("member_name"),
             f"team[{team_index}].leader.member_name",
         )
         transformed_team["leader"]["member_name"] = leader_name
+        leader_agent_id = _require_non_empty_string(
+            leader_raw.get("agent_id"),
+            f"team[{team_index}].leader.agent_id",
+        )
+        transformed_team["leader"]["agent_id"] = leader_agent_id
         leader_agent_spec = _resolve_front_team_agent_spec(
             agents_raw,
-            leader_raw.get("agent_key"),
-            field_name=f"team[{team_index}].leader.agent_key",
+            leader_agent_id,
+            field_name=f"team[{team_index}].leader.agent_id",
         )
 
         teammate_raw = team_raw.get("teammate")
         teammate_agent_spec: dict[str, Any] | None = None
         if teammate_raw is not None:
             teammate_raw = _require_dict(teammate_raw, f"team[{team_index}].teammate")
+            teammate_agent_id = _require_non_empty_string(
+                teammate_raw.get("agent_id"),
+                f"team[{team_index}].teammate.agent_id",
+            )
             teammate_agent_spec = _resolve_front_team_agent_spec(
                 agents_raw,
-                teammate_raw.get("agent_key"),
-                field_name=f"team[{team_index}].teammate.agent_key",
+                teammate_agent_id,
+                field_name=f"team[{team_index}].teammate.agent_id",
             )
-            transformed_team["teammate"] = {"agent_key": teammate_raw.get("agent_key", "")}
+            transformed_team["teammate"] = {"agent_id": teammate_agent_id}
 
         predefined_members_raw = team_raw.get("predefined_members", [])
         if predefined_members_raw is None:
@@ -2016,18 +2013,25 @@ def _build_modes_team_mapping(front_payload: dict[str, Any]) -> dict[str, Any]:
                     f"duplicate member_name in team[{team_index}]: {member_name}"
                 )
             seen_member_names.add(member_name)
+            member_agent_id = _require_non_empty_string(
+                member.get("agent_id"),
+                f"team[{team_index}].predefined_members[{member_index}].agent_id",
+            )
             transformed_member = {
                 key: member[key]
-                for key in ("member_name", "display_name", "role_type", "persona", "prompt_hint", "agent_key")
+                for key in ("member_name", "display_name", "role_type", "persona", "prompt_hint")
                 if key in member
             }
             transformed_member["member_name"] = member_name
+            transformed_member["agent_id"] = member_agent_id
             transformed_members.append(transformed_member)
 
             member_agent_spec = _resolve_front_team_agent_spec(
                 agents_raw,
-                member.get("agent_key"),
-                field_name=f"team[{team_index}].predefined_members[{member_index}].agent_key",
+                member_agent_id,
+                field_name=(
+                    f"team[{team_index}].predefined_members[{member_index}].agent_id"
+                ),
             )
             transformed_agents[member_name] = member_agent_spec
 
@@ -2043,19 +2047,12 @@ def _build_modes_team_mapping(front_payload: dict[str, Any]) -> dict[str, Any]:
     return team_mapping
 
 
-def _build_front_agent_registry(front_payload: dict[str, Any]) -> dict[str, Any]:
-    agents_raw = _require_dict(front_payload.get("agents"), "agents")
-    registry: dict[str, Any] = {}
-    for agent_key, agent_raw in agents_raw.items():
-        resolved_key = _require_non_empty_string(agent_key, f"agents.{agent_key}")
-        registry[resolved_key] = _transform_front_team_agent_spec(resolved_key, agent_raw)
-    return registry
-
-
 def replace_teams_in_config(front_payload: dict[str, Any]) -> None:
     """Replace ``modes.team`` using the frontend team-editor payload.
 
     If team array is empty, delete ``modes.team`` from config.
+    Drop legacy ``web_config_panel.agent_team_agents`` (write-only duplicate;
+    relay panel does not read it).
     """
     if not isinstance(front_payload, dict):
         raise ValueError("payload must be an object")
@@ -2063,24 +2060,15 @@ def replace_teams_in_config(front_payload: dict[str, Any]) -> None:
     teams_raw = front_payload.get("team")
     data = _load_yaml_round_trip(_current_config_yaml_path())
 
-    panel_cfg_modified = False
-    agent_registry = None
-    if "agents" in front_payload:
-        agent_registry = _build_front_agent_registry(front_payload)
-        panel_cfg = data.get("web_config_panel")
-        if not isinstance(panel_cfg, dict):
-            panel_cfg = {}
-            data["web_config_panel"] = panel_cfg
-        if agent_registry:
-            panel_cfg["agent_team_agents"] = agent_registry
-        else:
-            panel_cfg.pop("agent_team_agents", None)
-        panel_cfg_modified = True
-
     # 空数组：删除 modes.team 配置项
     if isinstance(teams_raw, list) and not teams_raw:
         if "modes" in data and isinstance(data["modes"], dict) and "team" in data["modes"]:
             del data["modes"]["team"]
+        panel = data.get("web_config_panel")
+        if isinstance(panel, dict):
+            panel.pop("agent_team_agents", None)
+            if not panel:
+                data.pop("web_config_panel", None)
         _dump_yaml_round_trip(_current_config_yaml_path(), data)
         return
 
@@ -2088,17 +2076,14 @@ def replace_teams_in_config(front_payload: dict[str, Any]) -> None:
     team_mapping = _build_modes_team_mapping(front_payload)
 
     data = _load_yaml_round_trip(_current_config_yaml_path())
-    # Merge web_config_panel back into reloaded data (it was written earlier in this function)
-    if panel_cfg_modified:
-        if "web_config_panel" not in data or not isinstance(data.get("web_config_panel"), dict):
-            data["web_config_panel"] = {}
-        if agent_registry:
-            data["web_config_panel"]["agent_team_agents"] = agent_registry
-        else:
-            data.get("web_config_panel", {}).pop("agent_team_agents", None)
     if "modes" not in data or not isinstance(data["modes"], dict):
         data["modes"] = {}
     data["modes"]["team"] = team_mapping
+    panel = data.get("web_config_panel")
+    if isinstance(panel, dict):
+        panel.pop("agent_team_agents", None)
+        if not panel:
+            data.pop("web_config_panel", None)
     _dump_yaml_round_trip(_current_config_yaml_path(), data)
 
 

@@ -909,12 +909,15 @@ permissions:
   defaults: ask
 
   tools:
-    bash: ask
+    bash: allow
     mcp_exec_command: ask
     create_terminal: ask
     write: ask
-    write_file: ask
-    edit_file: ask
+    write_file: allow
+    edit_file: allow
+    skill_tool: allow
+    read_file: allow
+    skill_complete: allow
     search_replace: ask
     write_memory: allow
     edit_memory: allow
@@ -948,6 +951,32 @@ permissions:
     cron_toggle_job: allow
     cron_preview_job: allow
     skill_acceleration_exec: ask
+    # Agent-team 编排工具：与 leader/member role gate 对齐，避免 defaults.guard
+    # 把 build_team 等变成 ASK 后卡死团队回合。
+    build_team: allow
+    clean_team: allow
+    spawn_teammate: allow
+    spawn_human_agent: allow
+    spawn_bridge_agent: allow
+    spawn_external_cli: allow
+    shutdown_member: allow
+    approve_plan: allow
+    approve_tool: allow
+    create_task: allow
+    list_members: allow
+    update_task: allow
+    claim_task: allow
+    submit_plan: allow
+    verify_task: allow
+    member_complete_task: allow
+    view_task: allow
+    send_message: allow
+    send_message_scheduled: allow
+    workspace_meta: allow
+    swarmflow: allow
+    async_tasks_list: allow
+    async_task_output: allow
+    async_task_cancel: allow
 
   rules:
     - id: shell_allow_dir
@@ -1026,7 +1055,10 @@ permissions:
     workspace:
       rw_enabled: true
       description: "Agent workspace 内默认放行 read / write"
-    global: {}
+    global:
+      "${JIUWENCLAW_SHARED_SKILLS_DIRS}":
+        read_enable: true
+        write_enable: true
     trusted_exec_directory: []
     tool_bindings: {}
 
@@ -1161,8 +1193,10 @@ enable_deepresearch: true
 
 
 # 沙箱配置 (officeAce 经 WS 控制: 开关 / 启动方式; 文件白黑名单 + 网络域名配置写进运行时 policy 副本)
+# enabled 默认 false: 不主动 install 沙箱用户 / 拉起 box-server, 仅在用户显式设
+# sandbox.enabled: true 时才 install + 创建沙箱进程 (opt-in, 避免开箱即拉起).
 sandbox:
-  enabled: true
+  enabled: false
   startup_mode: internal
   url: http://127.0.0.1:8321
   type: jiuwenbox

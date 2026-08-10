@@ -1,37 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Windows 沙箱运行时 policy 副本 (user_config) 读写.
-
-officeAce 经 WS 接口 (sandbox.files.set / sandbox.network.set) 配置的文件白/黑名单、
-网络域名白/黑名单, 直接写进 workspace 下的稀疏副本 (只存用户可配字段, 不 dump 基底),
-不存 config.yaml. box-server 启动时读**基底** (打包 windows-policy.yaml, 随 wheel,
-default) + **副本** (user_config) 合并 (``policy_engine.merge_policy``, list 去重并集)
-→ 不生成合并文件. 机制对齐 jiuwenclaw config.yaml 的 template+override.
-
-副本结构 (``<config_dir>/windows-policy.runtime.yaml``, 稀疏, 只存用户改的字段):
-    windows:
-      filesystem:
-        allow_read:  [<用户白名单>]   # merge 时去重并集到基底 allow_read (workspace/skills 必需集不丢)
-        allow_write: [<用户白名单>]
-        deny_read:   [<用户黑名单>]   # deny_read/deny_write 用户段
-        deny_write:  [<用户黑名单>]
-      network:
-        disable_all: false            # 总开关; true 传给 box-server, win_proxy 短路拒绝
-        egress:
-          allowed_domains: [<用户网络白名单>]   # merge 去重并集到基底 (pypi/npmmirror)
-          blocked_domains: [<用户网络黑名单>]   # 黑名单优先
-
-拷贝只一次: 副本不存在时建稀疏空骨架; 已存在不重新建 (exe 重启不重拷).
-热更新: 基底随 wheel 升级新增字段 → box-server load_policy 重读基底 → 新字段生效
-(副本只存用户配置, 不固化基底, 不挡升级).
-
-disable_all (总开关只压不删): true 时副本设 ``windows.network.disable_all=true``,
-box-server 传给 EgressFilter 短路拒绝所有出站; 用户 allow/blocked_domains 原样
-保留在副本 (不清空), 关掉总开关 (副本改 false) 即恢复. 不清空基底 allowed_domains.
-
-设计依据: docs/windows_sandbox_officeace_integration_design.md §1.3;
-box-server/server/policy_reader.py:load_policy (基底+副本合并);
-box-server/supervisor/win_proxy.py:EgressFilter (disable_all 短路).
-"""
+"""Windows 沙箱运行时 policy 副本 (user_config) 读写."""
 
 from __future__ import annotations
 
@@ -50,19 +18,12 @@ logger = logging.getLogger(__name__)
 
 _RUNTIME_COPY_NAME = "windows-policy.runtime.yaml"
 
-# P1-13: 同进程串行化副本读写 (防 lost-update). WS handler 虽串行, 但
-# sandbox.files.set + sandbox.network.set 可能并发触发 (officeAce 前端同时改文件
-# 和网络). 跨进程锁 (多 agent-server 实例) 收益低场景少, 暂不加 msvcrt/fcntl.
+
 _copy_lock = threading.Lock()
 
 
 def _config_dir() -> Path:
-    """副本所在目录: 与 config.yaml 同目录 (<workspace>/config/).
-
-    照搬 config.yaml 机制: 跟随 ``JIUWENCLAW_DATA_DIR`` / workspace 解析
-    (jiuwenclaw.utils.get_config_dir), 不引入新依赖. agent-server 启动时 workspace
-    已初始化, 该目录必然存在 (init_user_workspace 创建).
-    """
+    """副本所在目录: 与 config.yaml 同目录 (<workspace>/config/)."""
     from jiuwenclaw.utils import get_config_dir  # lazy import
     return get_config_dir()
 
@@ -94,11 +55,7 @@ def _empty_skeleton() -> dict[str, Any]:
 
 
 def _ensure_copy_exists() -> Path:
-    """副本不存在时建稀疏空骨架 (不 dump 基底). 返回副本路径.
-
-    拷贝只一次: 已存在不重建 (exe 重启 / box-server 重启不重拷). 基底内容由
-    box-server load_policy 每次重读刷新, 不固化进副本 (热更新安全).
-    """
+    """副本不存在时建稀疏空骨架 (不 dump 基底). 返回副本路径. """
     copy_p = _runtime_copy_path()
     copy_p.parent.mkdir(parents=True, exist_ok=True)
     if not copy_p.is_file():
@@ -115,7 +72,7 @@ def _ensure_copy_exists() -> Path:
 
 def _load_copy() -> dict[str, Any]:
     """读副本 (不存在则建空骨架并返回)."""
-    with _copy_lock:  # P1-13: 串行化, 防与 _save_copy 并发 lost-update
+    with _copy_lock:
         p = _ensure_copy_exists()
         try:
             data = yaml.safe_load(p.read_text(encoding="utf-8"))
@@ -124,7 +81,7 @@ def _load_copy() -> dict[str, Any]:
             return copy.deepcopy(_empty_skeleton())
     if not isinstance(data, dict):
         return copy.deepcopy(_empty_skeleton())
-    # 补齐结构 (兼容旧副本缺字段)
+    # 补齐结构
     skel = _empty_skeleton()
     win = data.setdefault("windows", {})
     win.setdefault("filesystem", {})
@@ -140,20 +97,16 @@ def _load_copy() -> dict[str, Any]:
 
 def _save_copy(data: dict[str, Any]) -> None:
     p = _runtime_copy_path()
-    with _copy_lock:  # P1-13: 串行化, 防并发写覆盖
+    with _copy_lock:
         try:
-            # 原子写: 先写 tmp 再 rename. 旧版直接 write_text 覆盖, 写中途崩溃
-            # 留半截 YAML → box-server load_policy 解析失败回落基底 (default:allow,
-            # 隔离形同虚设). tmp+rename 保证副本要么完整旧值要么完整新值.
             tmp = p.with_suffix(p.suffix + ".tmp")
             tmp.write_text(
                 yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
                 encoding="utf-8",
             )
-            os.replace(tmp, p)  # 原子 rename (同文件系统内)
+            os.replace(tmp, p)
         except OSError as exc:
             logger.warning("写副本 %s 失败: %s", p, exc)
-            # tmp 残留清理 (best-effort).
             try:
                 tmp.unlink(missing_ok=True)
             except OSError:
@@ -164,26 +117,16 @@ def _norm_str_list(values: list[Any]) -> list[str]:
     return [str(v) for v in values if str(v).strip()]
 
 
-# P0-7: 输入校验. 黑白名单经 WS 接口下发, 原实现只 str().strip() 无校验,
-# 含路径越界/控制字符/非法域名的串被原样写进副本 → 进 WFP/文件 ACL, 制造
-# 安全错觉. 这里分路径 (Path.resolve 防越界 + 绝对路径) 与域名 (正则校验) 两类.
-
-
 def _validate_file_path(value: str) -> str:
-    """校验单个文件路径白/黑名单条目, 返回规范化后的绝对路径.
-
-    要求绝对路径 (Windows 形如 C:\\... 或 POSIX /...), 拒绝相对路径与含
-    控制字符/空字节的串. 不要求路径当前存在 (黑名单路径可能尚未创建).
-    """
+    """校验单个文件路径白/黑名单条目, 返回规范化后的绝对路径."""
     from urllib.parse import unquote
     s = str(value).strip()
     if not s:
         raise ValueError("empty path")
-    # 解码 URL 编码后仍校验控制字符 (防 %00 等绕过).
     decoded = unquote(s)
     if "\x00" in s or "\x00" in decoded or any(ord(c) < 32 and c not in "\t" for c in s):
         raise ValueError(f"path contains control characters: {s!r}")
-    # 绝对路径校验: Windows 盘符 C:\\ 或 POSIX / 开头. 拒绝相对路径 (避免越界).
+    # 绝对路径校验
     from pathlib import PureWindowsPath, PurePosixPath
     is_abs = PureWindowsPath(s).is_absolute() or PurePosixPath(s).is_absolute()
     if not is_abs:
@@ -204,8 +147,6 @@ def _norm_file_paths(values: list[Any]) -> list[str]:
     return result
 
 
-# 域名格式: 通配 *.example.com / example.com / sub.example.com:port 不允许
-# (WFP 比对按域名不含端口, 端口在 win_proxy EgressFilter 另外控制).
 _DOMAIN_RE = re.compile(
     r"^(?:\*\.)?"
     r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
@@ -256,15 +197,9 @@ def get_sandbox_files_config() -> dict[str, Any]:
 
 
 def set_sandbox_files_config(allow: list[Any], deny: list[Any]) -> dict[str, Any]:
-    """整体替换用户文件白/黑名单.
-
-    白名单 allow → 副本 allow_read + allow_write (merge 时去重并集到基底必需集, 不丢).
-    黑名单 deny → 副本 deny_read + deny_write (NTFS 显式 Deny 优先).
-    空 list 表示清空用户段 (副本该字段置空 → merge 不追加 → 回落基底).
-    """
+    """整体替换用户文件白/黑名单."""
     if not isinstance(allow, list) or not isinstance(deny, list):
         raise ValueError("allow and deny must be lists")
-    # P0-7: 路径校验 (绝对路径 + 无控制字符), 非法条目 warning 跳过.
     allow_norm = _norm_file_paths(allow)
     deny_norm = _norm_file_paths(deny)
     data = _load_copy()
@@ -294,18 +229,11 @@ def set_sandbox_network_config(
     allow_domains: list[Any],
     deny_domains: list[Any],
 ) -> dict[str, Any]:
-    """整体替换用户网络配置.
-
-    disable_all → 副本 windows.network.disable_all (box-server 传给 EgressFilter 短路
-    拒绝所有出站; allow/blocked_domains 原样保留在副本, 不清空, 关掉即恢复).
-    allow_domains → 副本 egress.allowed_domains (merge 去重并集到基底 pypi/npmmirror).
-    deny_domains → 副本 egress.blocked_domains (黑名单优先).
-    """
+    """整体替换用户网络配置."""
     if not isinstance(disable_all, bool):
         raise ValueError("disable_all must be boolean")
     if not isinstance(allow_domains, list) or not isinstance(deny_domains, list):
         raise ValueError("allow_domains and deny_domains must be lists")
-    # P0-7: 域名校验 (格式 + 无端口/路径/控制字符), 非法条目 warning 跳过.
     allow_norm = _norm_domains(allow_domains)
     deny_norm = _norm_domains(deny_domains)
     data = _load_copy()
@@ -322,11 +250,7 @@ def set_sandbox_network_config(
 
 
 def fingerprint_runtime_policy() -> str | None:
-    """副本内容指纹 (sha256), 供 JiuwenBoxRunner 判断是否需重 spawn.
-
-    副本不存在返回 None. 用户改 files/network 配置后, runner 检测内容变 → 重 spawn
-    box-server (重读基底+副本合并, 新配置生效).
-    """
+    """副本内容指纹 (sha256), 供 JiuwenBoxRunner 判断是否需重 spawn."""
     p = _runtime_copy_path()
     if not p.is_file():
         return None

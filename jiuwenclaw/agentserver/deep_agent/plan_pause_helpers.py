@@ -548,6 +548,7 @@ def clear_skip_invoke_task_update_sync(session: Any) -> None:
 
 _RECOVERY_DIR_NAME = "recovery"
 _RECOVERY_FILE_NAME = "recovery.json"
+_PLAN_PAUSE_FILE_NAME = "plan_pause.json"
 
 
 def _get_recovery_dir(workspace_dir: Path, session_id: str) -> Path:
@@ -556,6 +557,60 @@ def _get_recovery_dir(workspace_dir: Path, session_id: str) -> Path:
     Path: <workspace_dir>/context/<session_id>/recovery/
     """
     return workspace_dir / "context" / session_id / _RECOVERY_DIR_NAME
+
+
+def write_plan_pause_to_file(
+    workspace_dir: Path,
+    session_id: str,
+    snapshot: dict[str, Any] | None = None,
+) -> None:
+    """Persist plan_paused to disk so a later live checkpoint overwrite cannot drop it."""
+    if not session_id:
+        return
+    recovery_dir = _get_recovery_dir(workspace_dir, session_id)
+    recovery_dir.mkdir(parents=True, exist_ok=True)
+    file_path = recovery_dir / _PLAN_PAUSE_FILE_NAME
+    try:
+        with file_path.open("w", encoding="utf-8") as fh:
+            json.dump(
+                {"paused": True, "snapshot": snapshot, "session_id": session_id},
+                fh,
+                ensure_ascii=False,
+            )
+    except Exception:
+        logger.warning("[recovery] write_plan_pause_to_file failed session=%s", session_id)
+
+
+def read_plan_pause_from_file(
+    workspace_dir: Path,
+    session_id: str,
+) -> tuple[bool, dict[str, Any] | None]:
+    """Read plan_paused flag/snapshot from disk. Returns (False, None) when absent."""
+    file_path = _get_recovery_dir(workspace_dir, session_id) / _PLAN_PAUSE_FILE_NAME
+    try:
+        if not file_path.exists():
+            return False, None
+        with file_path.open(encoding="utf-8") as fh:
+            data = json.load(fh)
+        if data.get("paused") is not True:
+            return False, None
+        snapshot = data.get("snapshot")
+        if isinstance(snapshot, dict):
+            return True, snapshot
+        return True, None
+    except Exception:
+        logger.debug("[recovery] read_plan_pause_from_file failed session=%s", session_id)
+        return False, None
+
+
+def clear_plan_pause_file(workspace_dir: Path, session_id: str) -> None:
+    """Delete the plan_pause recovery file after successful decision-prompt injection."""
+    file_path = _get_recovery_dir(workspace_dir, session_id) / _PLAN_PAUSE_FILE_NAME
+    try:
+        if file_path.exists():
+            file_path.unlink()
+    except Exception:
+        logger.debug("[recovery] clear_plan_pause_file failed session=%s", session_id)
 
 
 def write_interrupt_artifacts_to_file(workspace_dir: Path, session_id: str, summary: str) -> None:

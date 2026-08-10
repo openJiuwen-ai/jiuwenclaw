@@ -1,4 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+# coding: utf-8
 
 """Team lifecycle manager."""
 
@@ -62,6 +63,7 @@ from jiuwenclaw.agentserver.team.team_skill_links import (
 from jiuwenclaw.config import (
     get_config,
     get_default_models,
+    hydrate_model_client_config_from_tip,
 )
 from jiuwenclaw.utils import (
     get_agent_skills_dir,
@@ -537,6 +539,10 @@ class TeamManager:
             for entry in default_models:
                 mcc = entry.get("model_client_config") or {}
                 mco = entry.get("model_config_obj") or {}
+                if not isinstance(mcc, dict):
+                    continue
+                # Tip-only: fill pool credentials from memory tip, not ${API_*}.
+                mcc = hydrate_model_client_config_from_tip(mcc)
                 if not mcc.get("model_name"):
                     continue
                 # Drop internal-only hints before they reach ModelRequestConfig.
@@ -1408,6 +1414,10 @@ class TeamManager:
     def register_monitor(self, session_id: str, handler: TeamMonitorHandler) -> None:
         self._team_monitors[session_id] = handler
 
+    def pop_monitor(self, session_id: str) -> TeamMonitorHandler | None:
+        """Remove and return the monitor handler for the session (rebind path)."""
+        return self._team_monitors.pop(session_id, None)
+
     def register_workflow_handler(self, session_id: str, handler: Any) -> None:
         self._workflow_handlers[session_id] = handler
 
@@ -2054,15 +2064,187 @@ class TeamManager:
             # Caller cancelled; pause may still be running independently.
             return not self.is_pause_in_progress(session_id)
 
+    @staticmethod
+    def _abort_harness_llm_stream(harness: Any) -> None:
+        """Best-effort stop of one harness's in-flight model HTTP stream."""
+        if harness is None:
+            return
+        active = getattr(harness, "active_round", None)
+        if active is None:
+            return
+        try:
+            active.pause_requested = True
+        except Exception:
+            logger.debug(
+                "[TeamManager] set pause_requested failed",
+                exc_info=True,
+            )
+        ctx = getattr(active, "model_call_ctx", None)
+        if ctx is None:
+            return
+        request_abort = getattr(ctx, "request_abort_stream", None)
+        if callable(request_abort):
+            try:
+                request_abort()
+            except Exception:
+                logger.debug(
+                    "[TeamManager] request_abort_stream failed",
+                    exc_info=True,
+                )
+
+    async def _resolve_active_team_for_session(self, session_id: str) -> Any | None:
+        """Return the Runner-pooled TeamAgent for this session, if any."""
+        team_name = self._resolve_session_team_name(session_id)
+        if not team_name:
+            return None
+        try:
+            from openjiuwen.core.runner.runner import GLOBAL_RUNNER
+
+            runtime_mgr = _runner_team_runtime_manager(GLOBAL_RUNNER)
+            return await runtime_mgr.pool.get(team_name)
+        except Exception as exc:
+            logger.warning(
+                "[TeamManager] pool lookup failed session_id=%s: %s",
+                session_id,
+                exc,
+            )
+            return None
+
+    async def abort_team_llm_streams_before_pause(
+        self,
+        session_id: str,
+        reason: str = "",
+    ) -> bool:
+        """Cut leader + teammate LLM token burn before any freeze/teardown work.
+
+        Calls the host abort path and each member ``abort_llm_stream`` without
+        waiting for harness stop. Must run before ``freeze_leader_qa_before_pause``
+        so QA persist cannot delay stopping reasoning. Full park still happens
+        in ``Runner.pause_agent_team`` (idempotent).
+        """
+        active_team = await self._resolve_active_team_for_session(session_id)
+        if active_team is None:
+            return False
+
+        harness = None
+        resources = getattr(active_team, "resources", None)
+        if resources is not None:
+            harness = getattr(resources, "harness", None)
+        self._abort_harness_llm_stream(harness)
+
+        aborted_members = 0
+        spawn_manager = getattr(active_team, "spawn_manager", None)
+        handles = getattr(spawn_manager, "spawned_handles", None) or {}
+        for handle in list(handles.values()):
+            abort_fn = getattr(handle, "abort_llm_stream", None)
+            if callable(abort_fn):
+                try:
+                    abort_fn()
+                    aborted_members += 1
+                except Exception:
+                    logger.debug(
+                        "[TeamManager] %smember abort_llm_stream failed session_id=%s",
+                        reason,
+                        session_id,
+                        exc_info=True,
+                    )
+
+        logger.info(
+            "[TeamManager] %saborted team LLM streams before pause: "
+            "session_id=%s members=%s",
+            reason,
+            session_id,
+            aborted_members,
+        )
+        return True
+
+    async def freeze_leader_qa_before_pause(
+        self,
+        session_id: str,
+        reason: str = "",
+        *,
+        timeout_sec: float = 8.0,
+    ) -> bool:
+        """Best-effort freeze of the live leader QA block during team pause.
+
+        Persists the current QA block with interrupted status after LLM abort
+        so freeze latency cannot keep members streaming. Team interrupt still
+        skips DeepAgent ``process_interrupt``. Bound by ``timeout_sec`` so a
+        stuck summarizer cannot block park.
+        """
+        active_team = await self._resolve_active_team_for_session(session_id)
+        if active_team is None:
+            return False
+
+        team_name = self._resolve_session_team_name(session_id) or "?"
+        harness = None
+        resources = getattr(active_team, "resources", None)
+        if resources is not None:
+            harness = getattr(resources, "harness", None)
+        if harness is None:
+            return False
+
+        freeze_rail = None
+        for rail in list(getattr(harness, "_registered_rails", None) or []):
+            if callable(getattr(rail, "freeze_current_qa_sync", None)):
+                freeze_rail = rail
+                break
+        if freeze_rail is None:
+            return False
+
+        session = None
+        try:
+            session = getattr(harness, "_session", None) or getattr(harness, "session", None)
+        except Exception:
+            session = None
+        try:
+            await asyncio.wait_for(
+                freeze_rail.freeze_current_qa_sync(
+                    session_id,
+                    agent=harness,
+                    session=session,
+                    status="interrupted",
+                    persist_mode="sync",
+                ),
+                timeout=max(0.1, float(timeout_sec)),
+            )
+            logger.info(
+                "[TeamManager] %sfrozen leader QA before pause: session_id=%s team=%s",
+                reason,
+                session_id,
+                team_name,
+            )
+            return True
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[TeamManager] %sfreeze leader QA timed out (%.1fs); continue pause "
+                "session_id=%s",
+                reason,
+                timeout_sec,
+                session_id,
+            )
+            return False
+        except Exception as exc:
+            logger.warning(
+                "[TeamManager] %sfreeze leader QA failed session_id=%s: %s",
+                reason,
+                session_id,
+                exc,
+                exc_info=True,
+            )
+            return False
+
     async def pause_session_runtime(self, session_id: str, reason: str = "") -> bool:
         """Pause the current team runtime for this session (stop-work, keep-team).
 
         Behavior:
-        1. ``Runner.pause_agent_team`` to completion (no wall-clock abandon)
-        2. Wait for the foreground stream to exit after kernel ``close_stream``
-        3. Only cancel the stream task if it still has not exited after grace
+        1. Abort leader/member LLM streams immediately
+        2. Freeze leader QA for cold resume (bounded timeout)
+        3. ``Runner.pause_agent_team`` to completion
+        4. Wait for the foreground stream to exit after kernel ``close_stream``
+        5. Cancel the stream task only if it has not exited after grace
 
-        Do **not** remove the team from the pool or call ``clean_team``.
+        Does not remove the team from the pool or call ``clean_team``.
         """
         async with self._get_lifecycle_lock(session_id):
             has_stream_task = session_id in self._stream_tasks
@@ -2088,6 +2270,11 @@ class TeamManager:
                 reason,
                 session_id,
             )
+
+            # Fast-cut first (do not wait for freeze). Then snapshot context
+            # while harness is still alive; finally complete kernel park.
+            await self.abort_team_llm_streams_before_pause(session_id, reason=reason)
+            await self.freeze_leader_qa_before_pause(session_id, reason=reason)
 
             self._active_pause_tasks[session_id] = asyncio.current_task()
             runner_paused = False
@@ -2145,10 +2332,10 @@ class TeamManager:
                         )
 
                 await self._cleanup_runtime_locals(session_id, finalize_workflows=False)
-                self.clear_active_runtime(session_id)
+                # Bookmark paused runtime so the next first-request can detect
+                # RESUME_FROM_PAUSE and wrap the pause-resume protocol.
+                self.clear_active_runtime(session_id, bookmark_paused=True)
                 self.clear_pending_runtime(session_id)
-                # Interrupt reaches classic standby in-kernel
-                # (handles killed, harness stopped); no delayed warm degrade.
             finally:
                 self._active_pause_tasks.pop(session_id, None)
 

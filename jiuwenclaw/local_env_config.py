@@ -299,6 +299,25 @@ def effective_tip(
     return merged
 
 
+def iter_active_tip_agent_ids(service_id: str | None = None) -> list[str]:
+    """Return agent_ids that currently have an active tip bag for ``service_id``.
+
+    Used by team/model credential rematch when catalog registry is empty or
+    incomplete. Order is insertion order of tip bags (not sorted).
+    """
+    sid = normalize_env_ns_id(
+        service_id if service_id is not None else _DEFAULT_SERVICE_ID,
+        default=_DEFAULT_SERVICE_ID,
+    )
+    seen: list[str] = []
+    for bag_sid, bag_aid in _active_bags.keys():
+        if bag_sid != sid:
+            continue
+        if bag_aid not in seen:
+            seen.append(bag_aid)
+    return seen
+
+
 def _invalidate_resolved_config_cache(
     service_id: str | None = None,
     agent_id: str | None = None,

@@ -1,15 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Windows 文件系统 ACL 控制 (合成 SID + NTFS DACL).
-
-对齐 docs/window沙箱.md 6.7:
-  - 读控制: deny-then-allow (依赖安装阶段预装读 ACL; 本模块施加 Deny/Allow Read).
-  - 写控制: allow-only (合成 SID JHXSandboxWrite 对 allow_write 授 Allow Write
-    + Execute + Delete; 对 deny_write 施加 Deny Write ACE 精细化封锁).
-
-实现通过 ``pywin32`` 的 ``win32security`` 操作 DACL. 所有 win32 调用延迟到
-函数体内执行, 模块顶层不 import 任何 pywin32, 因此 Linux 下可 import (运行
-时函数会因 ``import win32security`` 失败而抛出明确错误, 由上层 ``sys.platform``
-守卫避免误触).
 """
 
 from __future__ import annotations
@@ -65,7 +55,7 @@ def get_synthetic_write_sid() -> str:
     """返回合成写权限 SID 字符串.
 
     SID 格式: S-1-5-21-<sub0>-<sub1>-<RID>. 固定 sub-authority 区段 +
-    固定 RID, 不关联任何真实账户. 详见 docs/window沙箱.md 2.2.
+    固定 RID, 不关联任何真实账户. 
     """
     sub_auths = "-".join(str(s) for s in const.SYNTHETIC_WRITE_SID_SUBAUTHS)
     return (
@@ -110,16 +100,8 @@ def _sid_dedup_key(sid) -> str:
         return repr(sid)
 
 
-def _rebuild_acl_with_order(
-    existing_dacl,
-    new_ace: "tuple[int, int, int, object] | None",
-) -> "object":
-    """重建 ACL: Deny ACE 在前, Allow 在后 (NTFS 显式 Deny 优先).
-
-    追加 new_ace 前按 (sid, type, mask, flags) 去重, 避免重复施加相同 ACE 致
-    DACL 膨胀 (review #5: 旧版每次建沙箱对 ~/.office-claw 递归 grant Read 各
-    追加一份, N 次循环后单文件 N 条重复 ACE).
-    """
+def _rebuild_acl_with_order(existing_dacl, new_ace: "tuple[int, int, int, object] | None") -> "object":
+    """重建 ACL: Deny ACE 在前, Allow 在后 (NTFS 显式 Deny 优先)."""
     win32security, _, _ = _ensure_pywin32()
     deny_aces: list[tuple[int, int, object]] = []  # (flags, mask, sid)
     allow_aces: list[tuple[int, int, object]] = []
@@ -153,7 +135,6 @@ def _rebuild_acl_with_order(
     acl = win32security.ACL()
     for flags, mask, sid in deny_aces:
         # AddAccess{Denied,Allowed}AceEx 新版 pywin32 要 (revision, flags, mask, sid);
-        # 旧版只收 (flags, mask, sid) 3 参. ACL_REVISION=2 (普通文件 ACE).
         acl.AddAccessDeniedAceEx(2, flags, mask, sid)
     for flags, mask, sid in allow_aces:
         acl.AddAccessAllowedAceEx(2, flags, mask, sid)
@@ -201,30 +182,29 @@ def grant_ace(
     )
     existing_dacl = sd.GetSecurityDescriptorDacl()
 
-    # 重建 ACL: 现有 ACE 按类型保留 + 新 ACE 按 Deny-then-Allow 顺序串接,
-    # 修正旧实现拷贝时把 Deny ACE 当 Allow 写回的 bug (文档 2.3: 显式 Deny 优先).
+    # 重建 ACL:
     acl = _rebuild_acl_with_order(
         existing_dacl,
         (ace_type, inherit_flags, rights, sid_obj),
     )
-
-    # 不设 PROTECTED_DACL_SECURITY_INFORMATION: 旧版 recursive 时切断继承且 revoke 不恢复, 致用户继承读写权限丢失 (review MAJOR #5).
-    # 现保留继承, 仅在 DACL 上增删显式 ACE.
     flags = win32security.DACL_SECURITY_INFORMATION
 
-    win32security.SetNamedSecurityInfo(
-        path,
-        win32security.SE_FILE_OBJECT,  # SE_FILE_OBJECT 在 win32security (非 win32con)
-        flags,
-        None,  # owner 不变
-        None,  # group 不变
-        acl,
-        None,  # SACL 不变
-    )
-    logger.debug(
-        "施加 ACE: path=%s mode=%s rights=0x%X recursive=%s",
-        path, mode, rights, recursive,
-    )
+    try:
+        win32security.SetNamedSecurityInfo(
+            path,
+            win32security.SE_FILE_OBJECT,
+            flags,
+            None,
+            None,
+            acl,
+            None,
+        )
+        logger.debug("施加 ACE: path=%s mode=%s rights=0x%X recursive=%s", path, mode, rights, recursive)
+    except Exception as exc:
+        raise OSError(
+            f"SetNamedSecurityInfo 失败 path={path} mode={mode} "
+            f"rights={rights:#x} recursive={recursive} ace_count={acl.GetAceCount()}: {exc}"
+        ) from exc
 
 
 def grant_read_ace(
@@ -233,12 +213,7 @@ def grant_read_ace(
     *,
     recursive: bool = True,
 ) -> None:
-    """施加 Allow Read ACE (合成 SID 或真实 SID).
-
-    对齐 docs/window沙箱.md 6.7 读控制 allow: 用 FILE_GENERIC_READ
-    (含 Read + Execute). deny-then-allow 模型里由 apply_sandbox_acl
-    控制 deny 在前 allow 在后的施加顺序, 本函数只负责单条 ACE.
-    """
+    """施加 Allow Read ACE (合成 SID 或真实 SID)."""
     grant_ace(
         path, sid,
         rights=const.FILE_GENERIC_READ,
@@ -253,11 +228,7 @@ def deny_read_ace(
     *,
     recursive: bool = True,
 ) -> None:
-    """施加 Deny Read ACE (合成 SID).
-
-    对齐 docs/window沙箱.md 6.7 读控制 deny: 用 FILE_GENERIC_READ
-    (NTFS Deny 优先于 Allow, 显式 deny_read 路径将被沙箱进程读不了).
-    """
+    """施加 Deny Read ACE (合成 SID)."""
     grant_ace(
         path, sid,
         rights=const.FILE_GENERIC_READ,
@@ -276,10 +247,7 @@ def apply_sandbox_acl(
     recursive: bool = True,
     sandbox_user_sid: str | None = None,
 ) -> list[str]:
-    """对沙箱工作区施加文件 ACL (写控制 allow-only + 读控制 deny-then-allow).
-
-    Returns: 施加过 ACE 的顶层路径列表, 供 revoke_sandbox_acl 按清单撤销.
-    """
+    """对沙箱工作区施加文件 ACL (写控制 allow-only + 读控制 deny-then-allow)."""
     _require_windows()
     sid = get_synthetic_write_sid()
     allow_read = list(allow_read) if allow_read else []
@@ -300,9 +268,6 @@ def apply_sandbox_acl(
             mode="ALLOW",
             recursive=recursive,
         )
-        # runner 是 jbx-sandbox 真实 SID + token 未受限, 合成 SID 的 ACE 对它不生效.
-        # runner 负责 upload 文件进沙箱 (写操作), 须给真实 SID grant Write 才能写.
-        # runner 是 box-server 起的可信代理, 给写权限符合预期.
         if sandbox_user_sid:
             grant_ace(
                 expanded, sandbox_user_sid,
@@ -322,9 +287,7 @@ def apply_sandbox_acl(
             mode="DENY",
             recursive=recursive,
         )
-        # child 用 jbx-sandbox 真实 SID + token 未受限 (受限 token 弃用, 0xC0000142),
-        # 合成 SID 的 Deny 对 child 不生效, 须给真实 SID 也加 Deny, 否则 deny_write (.git/.env) 被 child 绕过 (P0-3).
-        # Deny ACE 残留无害 (NTFS Deny 优先, 幂等施加).
+        # child 用 jbx-sandbox 真实 SID + token 未受限 (受限 token 暂时弃用, 0xC0000142),
         if sandbox_user_sid:
             grant_ace(
                 expanded, sandbox_user_sid,
@@ -358,26 +321,30 @@ def apply_sandbox_acl(
         if not os.path.exists(expanded):
             logger.warning("allow_read 路径不存在, 跳过 ACL: %s", expanded)
             continue
-        grant_ace(
-            expanded, sid,
-            rights=const.FILE_GENERIC_READ,
-            mode="ALLOW",
-            recursive=recursive,
-        )
-        # runner (jbx-sandbox 真实 SID, token 未受限) 读不了合成 SID 授权路径,
-        # 须给真实 SID 也 grant Read (含 Execute), 否则 runner 读不了 venv python/DLL.
-        if sandbox_user_sid:
+        try:
             grant_ace(
-                expanded, sandbox_user_sid,
+                expanded, sid,
                 rights=const.FILE_GENERIC_READ,
                 mode="ALLOW",
                 recursive=recursive,
             )
+        except OSError as exc:
+            logger.warning("allow_read grant_ace 失败, 跳过 (install 已预装?): %s", exc)
+            applied.append(expanded)
+            continue
+        # runner (jbx-sandbox 真实 SID, token 未受限) 读不了合成 SID 授权路径
+        if sandbox_user_sid:
+            try:
+                grant_ace(
+                    expanded, sandbox_user_sid,
+                    rights=const.FILE_GENERIC_READ,
+                    mode="ALLOW",
+                    recursive=recursive,
+                )
+            except OSError as exc:
+                logger.warning("allow_read grant_ace (sandbox SID) 失败, 跳过: %s", exc)
         applied.append(expanded)
 
-    # 数据根 traverse (非递归 Allow Read): child 访问 workspace/venv/产物时路径上每级父目录需 traverse,
-    # 残缺会 lstat EPERM 导致 playwright install 失败. 非递归 (只目录本身) 避免跨沙箱读其他 workspace.
-    # 非递归 ACE 不进 applied 清单 (revoke 会 rglob 递归扫误删其他沙箱 ACE). traverse read 残留无害.
     _traverse_roots: list[Path] = []
     for _root in (OFFICE_CLAW_DATA_ROOT, JIUWENCLAW_DATA_DIR_PATH, JIUWENBOX_HOME):
         if _root and _root not in _traverse_roots and os.path.isdir(str(_root)):
@@ -402,13 +369,6 @@ def apply_sandbox_acl(
             [str(r) for r in _traverse_roots],
         )
 
-    # ~/.office-claw 数据根的递归 Read ACL 不在此每次建沙箱补授:
-    # review #5 — 旧版每次建沙箱递归 grant Read 一份, revoke 不撤销,
-    # N 次循环后单文件 N 条重复 ACE 致 DACL 膨胀. 改由 win_setup.install
-    # install 时对整树递归 grant 一次 (合成 SID + 真实 SID 各一份, 与
-    # jbx-sandbox 用户生命周期绑定, reinstall 不变). 此处 traverse ACE
-    # (非递归, 不膨胀) 仍每次施加, 让 child 能 traverse 数据根.
-
     logger.info(
         "施加沙箱 ACL 完成: workspace=%s allow_write=%d deny_write=%d "
         "allow_read=%d deny_read=%d",
@@ -432,8 +392,6 @@ def revoke_sandbox_acl(paths: list[str] | str) -> None:
         paths: apply_sandbox_acl 返回的施加路径清单 (含 workspace + allow/
             deny 各项). 旧版只以 workspace 为根 rglob 扫描, 漏掉系统路径
             上预装的合成 SID ACE (review MAJOR #6). 现按清单逐路径递归撤销.
-
-    兼容旧调用: 传单个字符串 (workspace) 时退化为只扫该路径树.
     """
     _require_windows()
     win32security, win32con, _ = _ensure_pywin32()
@@ -461,7 +419,7 @@ def revoke_sandbox_acl(paths: list[str] | str) -> None:
         try:
             sd = win32security.GetNamedSecurityInfo(
                 path,
-                win32security.SE_FILE_OBJECT,  # SE_FILE_OBJECT 在 win32security (非 win32con)
+                win32security.SE_FILE_OBJECT,
                 win32security.DACL_SECURITY_INFORMATION,
             )
             existing_dacl = sd.GetSecurityDescriptorDacl()
@@ -471,7 +429,7 @@ def revoke_sandbox_acl(paths: list[str] | str) -> None:
             deny_aces: list[tuple[int, int, object]] = []
             allow_aces: list[tuple[int, int, object]] = []
             removed = 0
-            for i in range(existing_dacl.GetAceCount()):  # 见 _rebuild_acl_with_order 注释
+            for i in range(existing_dacl.GetAceCount()):
                 ace_type, ace_flags, ace_mask, ace_sid = _parse_getace_tuple(
                     existing_dacl.GetAce(i),
                 )
@@ -492,7 +450,7 @@ def revoke_sandbox_acl(paths: list[str] | str) -> None:
             # 不设 PROTECTED_DACL: 恢复继承, 不切断工作区继承链 (review MAJOR #5).
             win32security.SetNamedSecurityInfo(
                 path,
-                win32security.SE_FILE_OBJECT,  # SE_FILE_OBJECT 在 win32security (非 win32con)
+                win32security.SE_FILE_OBJECT,
                 win32security.DACL_SECURITY_INFORMATION,
                 None, None, acl, None,
             )

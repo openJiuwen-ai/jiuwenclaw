@@ -10,6 +10,7 @@ import copy
 import hashlib
 import importlib
 import logging
+import os
 import secrets
 import sys
 import time
@@ -64,6 +65,9 @@ if TYPE_CHECKING:
     from jiuwenclaw.schema.agent import AgentResponseChunk
 
 logger = logging.getLogger(__name__)
+
+# LLM 最大输出 token 数；可通过 LLM_MAX_TOKENS 环境变量覆盖，默认 65536
+_DEFAULT_LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "65536"))
 
 # ──────────────────────── 全局上下文变量 ────────────────────────
 # Session管理（用于发送事件）
@@ -1485,8 +1489,9 @@ class SkillTurboExecutor:
             await self._run_rail_hook('before_model_call', ctx)
 
             # 使用 Model.invoke() 调用 LLM（受实例级 Semaphore 限流保护）
+            logger.debug("[SkillTurboExecutor] call_llm max_tokens=%s node=%s", _DEFAULT_LLM_MAX_TOKENS, node_name)
             async with self._llm_concurrency_guard():
-                response = await client.invoke(messages)
+                response = await client.invoke(messages, max_tokens=_DEFAULT_LLM_MAX_TOKENS)
 
             # llm_usage 事件注入 source_id
             await self._emit_llm_usage(
@@ -1615,7 +1620,7 @@ class SkillTurboExecutor:
             # 使用 Model.stream() 流式调用 LLM
             # 流式调用整个生命周期都占用一个 LLM "槽位"，因此用 Semaphore 包裹整个流。
             async with self._llm_concurrency_guard():
-                async for chunk in client.stream(messages):
+                async for chunk in client.stream(messages, max_tokens=_DEFAULT_LLM_MAX_TOKENS):
                     # usage_metadata 通常只在最后一个 chunk 有值，避免对每个 chunk 都调用
                     chunk_usage = getattr(chunk, "usage_metadata", None)
                     if chunk_usage:

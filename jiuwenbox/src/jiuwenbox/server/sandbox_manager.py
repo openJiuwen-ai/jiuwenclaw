@@ -61,26 +61,7 @@ def _build_windows_exec_env(
     env: dict[str, str] | None,
     tool_paths=None,
 ) -> dict[str, str]:
-    """为 Windows 沙箱子进程补 PATH, 使裸名 ``bash``/``python``/``cmd`` 可解析.
-
-    docs §4.0: jbx-sandbox 子进程的 PATH 默认空 (LOGON_WITH_PROFILE 加载的
-    profile 无 PATH), agent-core 送的 ``command[0]`` 是裸名 (``bash``/``python``
-    /``cmd``), 靠子进程 PATH 解析。本函数把等价 PATH 塞进 env:
-      tool_paths 展开的目录    # bash/git/node/python 真实安装目录 (D:\\Files\\Git 等)
-                               # 必须用 policy 的 tool_paths, 不能写死 %ProgramFiles%\\Git\\bin
-                               # — Git 装在 D:\\Files\\Git 时前者解析到不存在路径 → 0xC0000142
-                               # (实测: install 预装了 D:\\Files\\Git 的读 ACL 但 PATH 没含它,
-                               #  预装白费, bash 裸名解析失败). 含 git_dir 的 usr/bin + bin 子目录.
-      <venv>\\Scripts          # python/pip 裸名解析到 venv (G3 落点, 见 docs §4.3)
-      %SystemRoot%\\System32    # cmd/powershell + 系统 dll 裸名解析 (默认 ACL 已允许读)
-      %SystemRoot%\\WindowsPowerShell\\v1.0
-      <打包 python 目录>        # python 裸名兜底
-
-    tool_paths 由 policy.windows.filesystem.tool_paths 传入 (exec 调用方
-    self.policy 取). venv 目录与打包 python 目录由 agent-server 经 env 注入
-    (``JIUWENBOX_VENV_DIR`` / ``JIUWENBOX_BUNDLED_PYTHON``, 见 docs §4.3),
-    缺失则跳过对应段。PATH 放最前, 覆盖 profile 任何残留。
-    """
+    """为 Windows 沙箱子进程补 PATH, 使裸名 ``bash``/``python``/``cmd`` 可解析."""
     base = dict(env) if env else {}
     parts: list[str] = []
     # tool_paths 展开 (和 _create_windows 给 runner 的 PATH 一致, 确保 exec
@@ -114,12 +95,6 @@ def _build_windows_exec_env(
         parts.append(existing_path)
     if parts:
         base["PATH"] = os.pathsep.join(parts)
-    # 补齐进程加载 DLL / 运行所需的基本环境变量. agent-core 传来的 env
-    # (request.env) 通常只有 PATH 片段, 缺 SystemRoot/TEMP 等 — 受限 token
-    # 子进程加载系统 DLL (kernel32 依赖 KnownDlls) 或 msys/cygwin runtime
-    # (msys-2.0.dll 初始化需 SystemRoot) 时会 STATUS_DLL_INIT_FAILED
-    # (0xC0000142, 实测: bash/python 启动即退). 用 setdefault 不覆盖已有值,
-    # 缺失则从本进程环境补 (和 _create_windows 给 runner 的 env 一致).
     for _var in ("SystemRoot", "windir", "TEMP", "TMP", "PATHEXT", "COMSPEC"):
         _val = os.environ.get(_var)
         if _val and _var not in base:
@@ -230,8 +205,7 @@ class SandboxManager:
         self._lock = asyncio.Lock()
         self._sandboxes: dict[str, SandboxRef] = {}
         self._policies: dict[str, SecurityPolicy] = {}
-        # 空闲沙箱淘汰: 后台 reaper task 句柄 + stop event。``None`` 表示当前没有
-        # reaper 在跑 (idle_timeout 未配置 / 已被禁用 / 服务尚未 startup)。
+        # 空闲沙箱淘汰:
         self._idle_reaper_task: asyncio.Task | None = None
         self._idle_reaper_stop: asyncio.Event | None = None
         # Sandbox state is treated as ephemeral: jiuwenbox starts up with an empty
@@ -774,19 +748,13 @@ class SandboxManager:
         # pre-call ``EXEC_COMMAND`` was dropped: it doubled the JSONL
         # volume without adding any information not already present here.
         start = time.monotonic()
-        # Windows: 给子进程 env 补 PATH, 使裸名 bash/python/cmd 可解析 (docs §4.0)。
-        # python/pip 裸名靠 PATH 前置 venv\Scripts 解析到 venv python (G3 落点,
-        # 见 docs §4.3)。Linux 不动 (R5)。
+        # Windows: 给子进程 env 补 PATH, 使裸名 bash/python/cmd 可解析
         exec_env = request.env
         if sys.platform == "win32":
             exec_env = _build_windows_exec_env(
                 request.env,
                 tool_paths=self.policy.windows.filesystem.tool_paths,
             )
-            # P2-19: 日志不含完整 command (可能含 prompt/API key/敏感路径) 和完整 PATH.
-            # 仅打 command[0] (可执行名) + 参数数量, 便于定位又不泄露. PATH 含工具目录
-            # 路径且极长, 不打. 旧版 INFO 全量打 request.command 且 debug 上调 info, 凭据
-            # 泄露面恶化.
             _cmd0 = request.command[0] if request.command else "<empty>"
             _cmd_len = len(request.command)
             logger.info(

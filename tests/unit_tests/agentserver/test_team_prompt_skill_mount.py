@@ -9,6 +9,7 @@ from jiuwenclaw.agentserver.team.team_runtime_inheritance import (
     RuntimeInfo,
     TeamWorkspaceInfo,
     build_member_rails,
+    merge_tip_enabled_skills_with_leader_prompt,
 )
 
 
@@ -146,8 +147,12 @@ def test_follow_up_without_phrase_keeps_prior_selection(tmp_path: Path, monkeypa
     assert follow_up.mounted_names == ("docx-craft",)
 
 
-def test_leader_uses_dedicated_prompt_skill_view(monkeypatch) -> None:
+def test_leader_uses_single_jiuwen_skill_rail_with_prompt_view(monkeypatch) -> None:
     from openjiuwen.harness.rails.skill_use_rail import SkillUseRail
+
+    from jiuwenclaw.agentserver.deep_agent.rails.jiuwen_skill_use_rail import (
+        JiuWenSkillUseRail,
+    )
 
     monkeypatch.setattr(
         "jiuwenclaw.agentserver.team.team_runtime_inheritance.HeartbeatRail",
@@ -158,12 +163,16 @@ def test_leader_uses_dedicated_prompt_skill_view(monkeypatch) -> None:
         lambda _config: False,
     )
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.team.team_runtime_inheritance._build_team_skill_rails",
-        lambda *_args, **_kwargs: [],
-    )
-    monkeypatch.setattr(
         "jiuwenclaw.agentserver.team.team_runtime_inheritance._build_team_disabled_tools_rail",
         lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "jiuwenclaw.utils.get_agent_skills_dir",
+        lambda: __import__("pathlib").Path("global-skills"),
+    )
+    monkeypatch.setattr(
+        "jiuwenclaw.utils.get_agent_workspace_dir",
+        lambda: __import__("pathlib").Path("global-workspace"),
     )
 
     rails = build_member_rails(
@@ -173,10 +182,53 @@ def test_leader_uses_dedicated_prompt_skill_view(monkeypatch) -> None:
             root_dir="team-root",
             skills_dir="team-root/skills",
             leader_skills_dir="team-root/leader-skills",
+            global_skills_dir="global-skills",
             config={},
         ),
     )
 
-    skill_rails = [rail for rail in rails if isinstance(rail, SkillUseRail)]
-    assert len(skill_rails) == 1
-    assert skill_rails[0].skills_dir == ["team-root/leader-skills"]
+    jiuwen_rails = [rail for rail in rails if isinstance(rail, JiuWenSkillUseRail)]
+    bare_skill_rails = [rail for rail in rails if type(rail) is SkillUseRail]
+    assert len(jiuwen_rails) == 1
+    assert bare_skill_rails == []
+    assert jiuwen_rails[0].skills_dir == [
+        "global-skills",
+        "team-root/skills",
+        "team-root/leader-skills",
+    ]
+
+
+def test_merge_tip_enabled_skills_with_leader_prompt_ui_plus_skill(
+    tmp_path: Path,
+) -> None:
+    """UI + skill: mounted under leader-skills but absent from tip whitelist."""
+    leader_skills = tmp_path / "leader-skills"
+    _make_skill(leader_skills, "docx-craft", "prompt")
+
+    # Tip whitelist does not include the UI-added skill.
+    merged = merge_tip_enabled_skills_with_leader_prompt(
+        "pptx-craft,coding",
+        leader_skills_dir=str(leader_skills),
+        role="leader",
+    )
+    assert merged is not None
+    names = {n.strip() for n in merged.split(",")}
+    assert names == {"pptx-craft", "coding", "docx-craft"}
+
+    # Members must not inherit prompt mounts via allowlist merge.
+    teammate = merge_tip_enabled_skills_with_leader_prompt(
+        "pptx-craft,coding",
+        leader_skills_dir=str(leader_skills),
+        role="teammate",
+    )
+    assert teammate == "pptx-craft,coding"
+
+    # No tip whitelist → keep open (all scanned dirs visible).
+    assert (
+        merge_tip_enabled_skills_with_leader_prompt(
+            None,
+            leader_skills_dir=str(leader_skills),
+            role="leader",
+        )
+        is None
+    )

@@ -381,6 +381,8 @@ class JiuClawQABlockFreezeRail(DeepAgentRail):
                         "session_id=%s",
                         session_id,
                     )
+                # Shared rail: leave QA mounted across HITL skip. Team pause
+                # persistence runs in TeamManager.freeze_leader_qa_before_pause.
                 return
 
         workspace_root = ""

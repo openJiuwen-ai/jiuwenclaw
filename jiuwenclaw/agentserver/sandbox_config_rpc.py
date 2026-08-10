@@ -1,25 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""沙箱配置 RPC: E2A / AgentRequest 入口, 返回 AgentResponse.
-
-与 :mod:`jiuwenclaw.agentserver.permissions.config_rpc` 同形态. 对外暴露 8 个
-``sandbox.*`` WS 方法 (经 ``agent_ws_server._handle_agent_request_body`` 派发):
-
-  - ``sandbox.enabled.get/set``        沙箱开关 (config.yaml::sandbox.enabled, 基础配置)
-  - ``sandbox.startup_mode.get/set``   沙箱启动方式 (config.yaml::sandbox.startup_mode)
-  - ``sandbox.files.get/set``          文件白/黑名单 (运行时副本 user_overrides.files)
-  - ``sandbox.network.get/set``        网络配置 (运行时副本 user_overrides.network)
-
-set 成功后异步触发生效 (``_apply_sandbox_change``):
-  - enabled: 关闭时清理 Runner.resource_mgr 里残留的沙箱 sysop (防 SkillTurbo 兜底命中),
-    不动 box-server (只影响新会话 _create_sys_operation 选 LOCAL/SANDBOX).
-  - startup_mode: 热重载 agent; internal→external 停掉自拉起的 box-server;
-    external→internal 下次 bootstrap 拉起.
-  - files: set_sandbox_files_config 已 render 副本; 显式销毁活沙箱 (新 ACL 只作用于新沙箱),
-    不重启 box-server (ACL 在沙箱创建时读).
-  - network: set_sandbox_network_config 已 render 副本; 重启 box-server (重跑 lifespan 重建
-    EgressFilter); 活沙箱由重启的 shutdown_all_sandboxes 副作用自动清.
-  - jbx-sandbox 用户从不重建 (安装期产物, ensure_windows_setup 幂等).
-"""
+"""沙箱配置 RPC: E2A / AgentRequest 入口, 返回 AgentResponse."""
 
 from __future__ import annotations
 
@@ -74,16 +54,7 @@ def _err(
 
 
 def _teardown_registered_sandbox_sysops() -> int:
-    """关闭沙箱开关时, 清理 Runner.resource_mgr 里残留的沙箱 sysop.
-
-    问题: 第一轮会话创建的沙箱 sysop 注册到全局 Runner.resource_mgr 后, 即使下轮
-    _create_sys_operation 读 enabled=False 选了 local, SkillTurbo 等经
-    Runner.resource_mgr.get_sys_operation() 无参兜底拿 sysop 的路径仍会命中上一轮残留的
-    沙箱 sysop → 关了开关照样进沙箱. 关闭开关时主动遍历已注册 sysop, 移除沙箱类型
-    (isolation_key_template 非空) 的, local 类型保留.
-
-    返回移除的沙箱 sysop 数.
-    """
+    """关闭沙箱开关时, 清理 Runner.resource_mgr 里残留的沙箱 sysop."""
     try:
         from openjiuwen.core.runner import Runner
     except Exception as exc:  # noqa: BLE001
@@ -111,7 +82,6 @@ def _teardown_registered_sandbox_sysops() -> int:
         except Exception:  # noqa: BLE001
             iso_key = None
         if not iso_key:
-            # local sysop (isolation_key_template 为 None), 不动.
             continue
         op_id = getattr(sysop, "id", None)
         try:
@@ -129,31 +99,12 @@ def _teardown_registered_sandbox_sysops() -> int:
 
 
 async def _apply_sandbox_change(kind: str) -> None:
-    """set 后的生效动作 (异步, 不阻塞 RPC 响应).
-
-    kind ∈ {'enabled', 'startup_mode', 'files', 'network'}.
-
-    关键认知: box-server 的 SandboxManager 在启动时一次性加载 root policy 到
-    ``self.policy`` (PolicyReader.load_policy, sandbox_manager.py:228), 之后**不重读文件**.
-    所以无论是文件 ACL (沙箱创建时经 _resolve_effective_policy(None)→deep-copy root) 还是
-    网络 egress (lifespan 启动时建 EgressFilter), 用户改运行时副本后, **必须重启 box-server**
-    才能让新副本被重新加载 + 应用到新沙箱. jbx-sandbox 用户不重建 (ensure_windows_setup 幂等),
-    活沙箱由重启的 shutdown_all_sandboxes 副作用自动清.
-    """
+    """set 后的生效动作 (异步, 不阻塞 RPC 响应)."""
     try:
         if kind == "enabled":
-            # enabled 只影响 _create_sys_operation 选 LOCAL/SANDBOX (读 config.yaml,
-            # update_sandbox_runtime 已 clear_config_cache, 下次读即新值), 不动 box-server.
-            # 但关闭时须清理两层残留, 否则 LOCAL sysop 仍会命中旧 sandbox_id 照样进沙箱:
-            #   1. Runner.resource_mgr 里残留的沙箱 sysop (_teardown_registered_sandbox_sysops)
-            #   2. jiuwenbox provider 的 _shared_sandbox_ids 缓存 + 对应的 box-server 沙箱进程
-            #      (shutdown_jiuwenbox_sandboxes 清缓存并 DELETE 远端沙箱)
-            # 只清第 1 层不够: provider 缓存的 sandbox_id 会被后续 LOCAL sysop 的 bash exec
-            # 复用 (provider _get_sandbox_id 命中缓存), 命令仍发到旧沙箱.
             from jiuwenclaw.config import get_sandbox_runtime
             if not bool(get_sandbox_runtime().get("enabled")):
                 removed = _teardown_registered_sandbox_sysops()
-                # 清 provider 缓存 + 删残留沙箱进程 (同步 HTTP 调用, 放 worker 线程不阻塞 event loop).
                 from jiuwenclaw.agentserver.sandbox_lifecycle import shutdown_jiuwenbox_sandboxes
                 released = await asyncio.to_thread(shutdown_jiuwenbox_sandboxes)
                 logger.info(
@@ -164,7 +115,6 @@ async def _apply_sandbox_change(kind: str) -> None:
                 logger.info("[sandbox] enabled 变更为开启, 下轮 _create_sys_operation 读新值生效")
             return
         if kind == "startup_mode":
-            # 模式切换: internal→external 停掉自拉起的 box-server; external→internal 下次拉起.
             from jiuwenclaw.config import get_sandbox_startup_mode
             from jiuwenclaw.agentserver.jiuwenbox_runner import JiuwenBoxRunner
 
@@ -178,9 +128,6 @@ async def _apply_sandbox_change(kind: str) -> None:
             # internal 时下次 _bootstrap_internal_jiuwenbox 拉起; 这里不主动拉.
             return
         if kind in ("files", "network"):
-            # 文件 ACL + 网络 egress 都需重启 box-server 重载 root policy 副本.
-            # 重启的 lifespan shutdown 调 shutdown_all_sandboxes 自动清活沙箱 (新配置只作
-            # 用于新沙箱); jbx-sandbox 用户不重建 (ensure_windows_setup 幂等).
             from jiuwenclaw.agentserver.jiuwenbox_runner import JiuwenBoxRunner
 
             runner = JiuwenBoxRunner.instance()
@@ -212,18 +159,13 @@ def _trigger_apply(kind: str) -> None:
         loop = asyncio.get_event_loop()
         loop.create_task(_apply_sandbox_change(kind))
     except RuntimeError:
-        # 无运行中的事件循环 (非主线程/测试): 同步降级 (files/network 的 IO 可能阻塞,
-        # 但至少把 enabled/startup_mode 的日志打出来). 正常路径不会走到.
         logger.warning(
             "[sandbox] 无运行事件循环, 跳过异步生效 (kind=%s)", kind
         )
 
 
 def dispatch_sandbox_config_request(request: AgentRequest) -> AgentResponse:
-    """执行一条 sandbox 配置 RPC (与 dispatch_permissions_config_request 同形态).
-
-    Returns: AgentResponse (ok + payload / error + code).
-    """
+    """执行一条 sandbox 配置 RPC (与 dispatch_permissions_config_request 同形态)."""
     from jiuwenclaw.config import (
         get_sandbox_runtime,
         update_sandbox_runtime,
@@ -242,7 +184,7 @@ def dispatch_sandbox_config_request(request: AgentRequest) -> AgentResponse:
     tag = m.value if m is not None else ""
 
     try:
-        # ---- 接口1a/1b: 沙箱开关 (存 config.yaml, 基础配置) ----
+        # ---- 沙箱开关 (存 config.yaml, 基础配置) ----
         if m == ReqMethod.SANDBOX_ENABLED_GET:
             return _ok(
                 request,
@@ -257,7 +199,7 @@ def dispatch_sandbox_config_request(request: AgentRequest) -> AgentResponse:
             _trigger_apply("enabled")
             return _ok(request, {"enabled": value})
 
-        # ---- 接口1c/1d: 沙箱启动方式 (存 config.yaml, 基础配置) ----
+        # ----沙箱启动方式 (存 config.yaml, 基础配置) ----
         if m == ReqMethod.SANDBOX_STARTUP_MODE_GET:
             return _ok(request, {"startup_mode": get_sandbox_startup_mode()})
 

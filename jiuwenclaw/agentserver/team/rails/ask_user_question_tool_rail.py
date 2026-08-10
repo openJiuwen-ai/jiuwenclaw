@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Register plan-aligned ``ask_user_question`` on the team leader."""
+"""Register ``ask_user_question`` on the team leader."""
 
 from __future__ import annotations
 

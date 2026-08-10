@@ -62,13 +62,24 @@ _LLM_PATH_AND_SLOTS_SYSTEM_PROMPT = """你是 PPT 任务分析助手。从用户
   当用户在消息中提到"用 XX 模板""用模板包""template pack"等，且给出了目录路径时提取该路径。
   路径可能是 Windows 格式（如 D:\\path\\to\\pack）或 Unix 格式（/path/to/pack）。
   仅提取用户明确给出的路径，不要编造。
+- structural_page_request: 用户是否要求中间结构页（目录页/章节页/分隔页）。字符串，取值：
+  "none"（默认，未要求任何中间结构页）；
+  "agenda"（用户要求目录页/议程页）；
+  "section"（用户要求章节页/章节分隔页/分节页）；
+  "chapter"（用户要求 PART 页/章首页/Chapter）；
+  "auto"（用户要求章节页但未指定类型，由大纲规划阶段自动选择 section 或 chapter）。
+  提取规则：仅当用户明确表达时才提取，例如"加章节页""每章一个章节页""需要目录页""加 PART 页""加章首页"。
+  普通章节结构、素材中的标题层级、模型自己觉得需要分节，都不构成触发条件 -> "none"。
+  用户指定数量时（如"加 2 页章节页"），数量信息保留在 structural_page_count 中。
+- structural_page_count: 用户指定的中间结构页数量（整数；未指定或"每章一个"等需自动计算时为 null）。
 
 重要：如果找到了文件路径，slots 各字段留空，不需要提取需求信息；
       如果没有找到任何文件路径，则必须提取 slots 信息。
 
 必须只输出 JSON，格式：
 {"doc_paths": ["路径1"], "slots": {"topic": "", "page_count": null, "audience": "",
-"presentation_purpose": "", "style_id": "", "pack_dir": ""}}
+"presentation_purpose": "", "style_id": "", "pack_dir": "",
+"structural_page_request": "none", "structural_page_count": null}}
 （page_count 为正整数或 null，禁止字符串）"""
 
 

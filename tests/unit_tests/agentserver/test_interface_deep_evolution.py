@@ -680,11 +680,9 @@ async def test_generate_evolution_merge_version_skips_complete_on_rewrite_failur
 
     assert result["ok"] is False
     assert "融合重写" in result["error"]
-    assert "read_file" in result["error"]
+    assert "安全管理" in result["error"]
+    assert "安全审批" in result["error"]
     assert "write_file" in result["error"]
-    assert "edit_file" in result["error"]
-    assert "不需要审批" in result["error"]
-    assert "审批护栏" in result["error"]
     assert _FakeRebuildService.prepare_calls
     assert _FakeRebuildService.complete_rebuild_calls == []
 
@@ -996,15 +994,15 @@ async def test_background_evolution_followup_waits_then_rebuilds(adapter, monkey
 
 
 @pytest.mark.asyncio
-async def test_background_evolution_followup_hitl_skips_rebuild(adapter, monkeypatch):
-    """HITL pause must drain the summary but must not auto-rebuild."""
+async def test_background_evolution_followup_rebuilds_after_drain(adapter, monkeypatch):
+    """Detached followup always auto-rebuilds after draining the evolution summary."""
     rebuilt: list[str] = []
 
     async def _wait(*, timeout=None):
         return None
 
     async def _rebuild(**_kwargs):
-        rebuilt.append("ran")
+        rebuilt.extend(adapter._pending_auto_rebuild_skills)  # pylint: disable=protected-access
 
     monkeypatch.setattr(
         interface_deep_module,
@@ -1024,13 +1022,11 @@ async def test_background_evolution_followup_hitl_skips_rebuild(adapter, monkeyp
     monkeypatch.setattr(adapter, "_run_auto_rebuild_skills_detached", _rebuild)
 
     await adapter._background_evolution_followup(  # pylint: disable=protected-access
-        request_id="req-hitl",
-        session_id="sess-hitl",
-        hitl_pending=True,
+        request_id="req-rebuild",
+        session_id="sess-rebuild",
     )
 
-    assert rebuilt == []
-    assert adapter._pending_auto_rebuild_skills == []  # pylint: disable=protected-access
+    assert rebuilt == ["weather"]
 
 
 @pytest.mark.asyncio
@@ -1125,7 +1121,6 @@ async def test_iter_auto_rebuild_followups_prepare_and_finalize(adapter, monkeyp
             stream_request_id="req-auto",
             channel_id="web",
             session_id="sess-auto",
-            hitl_pending=False,
         )
     ]
 
@@ -1143,29 +1138,6 @@ async def test_iter_auto_rebuild_followups_prepare_and_finalize(adapter, monkeyp
             "overflow_index": {},
         }
     ]
-    assert adapter._pending_auto_rebuild_skills == []  # pylint: disable=protected-access
-
-
-@pytest.mark.asyncio
-async def test_iter_auto_rebuild_followups_skips_on_hitl(adapter, monkeypatch):
-    generate = AsyncMock()
-    monkeypatch.setattr(adapter, "generate_evolution_merge_version", generate)
-    adapter._skill_evolution_rail = SimpleNamespace(auto_save=True, store=_FakeEvolutionStore())  # pylint: disable=protected-access
-    adapter._pending_auto_rebuild_skills = ["demo-skill"]  # pylint: disable=protected-access
-
-    chunks = [
-        chunk
-        async for chunk in adapter._iter_auto_rebuild_followups(  # pylint: disable=protected-access
-            base_inputs={"query": "hello"},
-            stream_request_id="req-hitl",
-            channel_id="web",
-            session_id="sess-hitl",
-            hitl_pending=True,
-        )
-    ]
-
-    assert chunks == []
-    generate.assert_not_awaited()
     assert adapter._pending_auto_rebuild_skills == []  # pylint: disable=protected-access
 
 
@@ -1188,7 +1160,6 @@ async def test_iter_auto_rebuild_followups_skips_when_suggest(adapter, monkeypat
             stream_request_id="req-suggest",
             channel_id="web",
             session_id="sess-suggest",
-            hitl_pending=False,
         )
     ]
 
@@ -1219,7 +1190,6 @@ async def test_iter_auto_rebuild_followups_merges_when_auto_despite_rail_auto_sa
             stream_request_id="req-auto",
             channel_id="web",
             session_id="sess-auto",
-            hitl_pending=False,
         )
     ]
 
@@ -1291,7 +1261,6 @@ async def test_iter_auto_rebuild_followups_skips_complete_on_followup_error(adap
             stream_request_id="req-fail",
             channel_id="web",
             session_id="sess-fail",
-            hitl_pending=False,
         )
     ]
 
