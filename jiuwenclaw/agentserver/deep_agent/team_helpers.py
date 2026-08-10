@@ -33,6 +33,7 @@ from jiuwenclaw.agentserver.session_history import append_history_record
 from jiuwenclaw.agentserver.team.handlers.team_monitor_handler import TeamMonitorHandler
 from jiuwenclaw.agentserver.stream_utils import parse_stream_chunk
 from jiuwenclaw.schema.agent import AgentResponseChunk
+from jiuwenclaw.schema.message import E2A_SUPPRESSED_EVENT_TYPES
 
 logger = logging.getLogger(__name__)
 DEBUG_PREFIX = '/debug'
@@ -103,6 +104,19 @@ def _safe_team_path_segment(value: str, fallback: str = '_') -> str:
 def _team_hide_teammate_enabled() -> bool:
     """Return whether non-leader teammate frames should be filtered out in team mode."""
     return os.environ.get(_HIDE_TEAMMATE_ENV_KEY, '').strip().lower() == 'true'
+
+
+def _is_e2a_suppressed_event(event_type: Any) -> bool:
+    """True when the event type is withheld from the E2A wire by interface.py.
+    消费循环据此判定是否处于"wire 静默段"。
+    """
+    return str(event_type or '').strip() in E2A_SUPPRESSED_EVENT_TYPES
+
+
+# chat.tool_calls.delta 被 interface.py E2A 抑制（只记 history 不上 wire），
+# 成员一次性流式写大文件会形成"健康但 wire 静默"的长段被误杀。
+# 静默超阈值时补发 processing_status（wire 业务帧）证明活性；阈值须远小于看门狗窗口。
+_TEAM_PROGRESS_PING_INTERVAL_SEC = 30.0
 
 
 _INTERACT_REASON_ERROR_MAP: dict[str, str] = {
@@ -2016,6 +2030,9 @@ async def _consume_stream_with_query_impl(
             envs=envs,
             stream_logger=lg,
         )
+        # 上次 relay 业务帧时间（monotonic）。流开始前的 chat.processing_status
+        # (is_processing=True) 即业务帧，计时起点即循环入口。
+        last_relay_business_at = time.monotonic()
         async for chunk in team_stream:
             received_chunks += 1
             if received_chunks == 1 or received_chunks % 30 == 0:
@@ -2075,6 +2092,22 @@ async def _consume_stream_with_query_impl(
                 # chat.ask_user_question; do not blanket-drop leader ask_user.
                 if (not is_leader) and _is_ask_user_tool_event(parsed):
                     continue
+                # 被 E2A 抑制的帧（chat.tool_calls.delta）relay 看不到；
+                # 连续 wire 静默超阈值时补发 ping 。is_complete 恒 False：
+                # True 会被 UI 当轮次结束 hint（saw_team_task 回退模式可能提前关流）。
+                if _is_e2a_suppressed_event(parsed.get('event_type')):
+                    _now = time.monotonic()
+                    if _now - last_relay_business_at >= _TEAM_PROGRESS_PING_INTERVAL_SEC:
+                        last_relay_business_at = _now
+                        _broadcast_event(channel_id, session_id, {
+                            'event_type': 'chat.processing_status',
+                            'session_id': session_id,
+                            'rid': round_id,
+                            'is_processing': True,
+                            'is_complete': False,
+                        })
+                else:
+                    last_relay_business_at = time.monotonic()
                 parsed['rid'] = round_id
                 if is_teammate:
                     parsed = _enrich_teammate_event(parsed, chunk)
