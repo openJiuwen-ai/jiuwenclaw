@@ -62,7 +62,6 @@ async def test_prepare_stale_todo_cleanup_cancels_and_sets_skip_flag() -> None:
 
     with (
         patch.object(helpers, "create_agent_session", return_value=session),
-        patch.object(helpers, "is_interrupt_recovery_injected", return_value=False),
         patch.object(
             helpers,
             "cancel_pending_todos_on_tool",
@@ -83,6 +82,56 @@ async def test_prepare_stale_todo_cleanup_cancels_and_sets_skip_flag() -> None:
     assert cancelled is True
     clear_skip.assert_called_once_with(session)
     cancel.assert_awaited_once_with(modify_tool, "sess-officeace")
+    clear_pending.assert_called_once_with(session, pending=False)
+    mark_skip.assert_called_once_with(session)
+    post_execute.assert_awaited_once_with(session)
+
+
+@pytest.mark.asyncio
+async def test_prepare_stale_todo_cleanup_new_task_not_blocked_by_interrupt_sentinel() -> None:
+    """BUG2026080900034: 新任务即使残留中断恢复哨兵，也必须清理旧任务的 active todo。
+
+    之前 prepare_interrupt_artifacts_for_request 兜底注入会把 is_interrupt_recovery_injected
+    置位，导致 prepare_stale_todo_cleanup 被一票否决、跳过清理，进而 before_invoke 把旧任务
+    （Root）的 todo 广播成新任务（Hook/RTK）的工具步骤。修复后该哨兵不再阻止新任务的清理。
+    """
+    session = MagicMock()
+    session.pre_run = AsyncMock()
+    session.post_run = AsyncMock()
+    modify_tool = MagicMock()
+    modify_tool.load_todos = AsyncMock(return_value=_active_todos())
+    agent_card = MagicMock()
+    params: dict = {
+        "mode": "agent.plan",
+        "query": "安装Hook、RTK这类的节省token的插件",
+    }
+    request = SimpleNamespace(session_id="sess-bug34", request_id="req-bug34", params=params)
+
+    with (
+        patch.object(helpers, "create_agent_session", return_value=session),
+        # 模拟"中断产物摘要兜底注入后哨兵被置位"的外部状态；修复后该状态不应阻止清理。
+        patch.object(
+            helpers,
+            "post_agent_execute_for_session",
+            new_callable=AsyncMock,
+        ) as post_execute,
+        patch.object(
+            helpers,
+            "cancel_pending_todos_on_tool",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as cancel,
+        patch.object(helpers, "set_todo_resume_snapshot_pending") as clear_pending,
+        patch.object(helpers, "mark_skip_invoke_task_update_sync") as mark_skip,
+    ):
+        cancelled = await helpers.prepare_stale_todo_cleanup_for_request(
+            request,
+            agent_card=agent_card,
+            get_todo_modify_tool=lambda _sid: modify_tool,
+        )
+
+    assert cancelled is True
+    cancel.assert_awaited_once_with(modify_tool, "sess-bug34")
     clear_pending.assert_called_once_with(session, pending=False)
     mark_skip.assert_called_once_with(session)
     post_execute.assert_awaited_once_with(session)
@@ -161,7 +210,6 @@ async def test_prepare_stale_todo_cleanup_noop_without_active_todos() -> None:
     with (
         patch.object(helpers, "create_agent_session", return_value=session),
         patch.object(helpers, "clear_skip_invoke_task_update_sync"),
-        patch.object(helpers, "is_interrupt_recovery_injected", return_value=False),
         patch.object(helpers, "cancel_pending_todos_on_tool", new_callable=AsyncMock) as cancel,
         patch.object(helpers, "post_agent_execute_for_session", new_callable=AsyncMock) as post_execute,
     ):
