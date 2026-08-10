@@ -5107,10 +5107,10 @@ class JiuWenSwarmDeepAdapter:
             tool_cards.append(self._paid_search_tool.card)
             self._paid_search_registered = True
 
-        for tool_cls in [WebFreeSearchTool, WebFetchWebpageTool]:
-            tool_instance = tool_cls(agent_id=agent_id)
-            self._register_agent_owned_tool(tool_instance, agent_id)
-            tool_cards.append(tool_instance.card)
+        # for tool_cls in [WebFreeSearchTool, WebFetchWebpageTool]:
+        #     tool_instance = tool_cls(agent_id=agent_id)
+        #     self._register_agent_owned_tool(tool_instance, agent_id)
+        #     tool_cards.append(tool_instance.card)
 
         # SearchAgent dispatch tool (optional; needs models.search configured).
         try:

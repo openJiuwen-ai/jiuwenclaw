@@ -5,6 +5,7 @@ from openai import AsyncOpenAI
 from typing import Any, AsyncGenerator, Dict, Optional, List
 import asyncio
 import logging
+import os
 
 from openai.types.chat import ChatCompletionFunctionToolParam
 
@@ -24,8 +25,10 @@ _shared_semaphore: Optional[asyncio.Semaphore] = None
 _rate_limit_lock = asyncio.Lock()
 _last_request_time: float = 0.0
 
-# 任意两次 LLM 请求之间的最小间隔（秒），用于削峰填谷
-_MIN_REQUEST_INTERVAL = 0.5
+# 任意两次 LLM 请求之间的最小间隔（秒），用于削峰填谷。
+# 默认 0.0：搜索子 agent 的 react loop 本身串行，固定间隔只是给每轮
+# LLM 调用加地板、无削峰收益；需要削峰时用 SEARCH_LLM_MIN_INTERVAL 调高。
+_MIN_REQUEST_INTERVAL = float(os.getenv("SEARCH_LLM_MIN_INTERVAL", "0.0"))
 
 
 def _is_rate_limit_error(exc: Exception) -> bool:
@@ -90,7 +93,7 @@ class OpenAIClient:
         self.client = AsyncOpenAI(api_key=api_key,
                                   base_url=base_url,
                                   timeout=timeout,
-                                  http_client=httpx.AsyncClient(verify=False))
+                                  http_client=httpx.AsyncClient(verify=False, trust_env=False))
 
         if _shared_semaphore is None:
             _shared_semaphore = asyncio.Semaphore(max_parallel)

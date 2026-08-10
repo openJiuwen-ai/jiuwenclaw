@@ -1,4 +1,5 @@
 import asyncio
+import os
 from typing import List, Dict, Any, Optional
 
 import httpx
@@ -7,7 +8,9 @@ import logging
 from jiuwenswarm.agents.harness.search.tools.tool_registry import tool
 
 MAX_CONNECTIONS = 1200
-Timeout = 120
+# 单次 web 请求超时（秒）。默认 60：web_fetch_and_summary 是服务端抓取+摘要，
+# 偏慢；若出现超时重试可调高 WEB_TOOL_TIMEOUT，反之调低加速失败暴露。
+Timeout = float(os.getenv("WEB_TOOL_TIMEOUT", "60"))
 
 # ---- 模块级共享 Semaphore，所有 WebSearcherAndFetchTool 实例共用 ----
 _shared_search_sem: Optional[asyncio.Semaphore] = None
@@ -48,7 +51,8 @@ class WebSearcherAndFetchTool:
             self._client = httpx.AsyncClient(
                 limits=httpx.Limits(max_connections=MAX_CONNECTIONS,
                                     max_keepalive_connections=min(MAX_CONNECTIONS, 200)),
-                timeout=httpx.Timeout(timeout=Timeout, connect=10.0)
+                timeout=httpx.Timeout(timeout=Timeout, connect=10.0),
+                trust_env=False
             )
         return self._client
 
@@ -65,6 +69,16 @@ class WebSearcherAndFetchTool:
         await self.close()
 
     async def _post_with_retry(self, url: str, payload: dict) -> httpx.Response:
+        if not url:
+            # web 服务端点未配置（WEB_*_URL 环境变量为空 / .env 缺失）。
+            # 这是确定性配置错误，非瞬时故障，重试只会空耗
+            # max_retry * retry_interval 秒（旧默认 3*3=9s，现 2*1=2s）——
+            # 直接抛出，让调用方按普通失败处理（毫秒级，不拖累 react loop）。
+            raise ValueError(
+                "web service URL is empty: set WEB_SEARCH_URL / WEB_FETCH_URL / "
+                "WEB_FETCH_AND_SUMMARY_URL in jiuwenswarm/resources/.env "
+                "(see .env.template)"
+            )
         client = await self._get_http_client()
         last_exc: Optional[Exception] = None
         for attempt in range(self.max_retry + 1):

@@ -10,6 +10,20 @@ class SystemPrompts:
         You must handle both broad, open-domain inquiries and queries within specialized academic fields. 
         For every request, synthesize information from credible, diverse sources to deliver a comprehensive, accurate, and objective response.
         When you have gathered sufficient information, provide a definitive final answer.
+
+        Tool-use economy (each web_fetch_and_summary is slow — think before fetching):
+        - web_search snippets already answer most questions. Read them carefully
+          and extract facts from them first; only fetch a page when the snippets
+          are genuinely insufficient for the claim you need.
+        - Fetch only decisive links: official/primary sources, or pages the
+          snippet explicitly indicates contain the answer. Skip aggregators, SEO
+          pages, and forums unless they are the only available sources.
+        - Never fetch the same domain/URL twice, and never fetch a URL whose
+          content the snippets already covered. If a prior fetch was
+          unproductive, pivot the query instead of re-fetching.
+        - Prefer at most one or two web_fetch_and_summary calls per question
+          unless two independent primary sources are truly required. If the
+          snippets plus one fetch already support the answer, stop and answer.
         """.strip()
         return SYSTEM_TEMPLATE_XIAOHAN0319
 

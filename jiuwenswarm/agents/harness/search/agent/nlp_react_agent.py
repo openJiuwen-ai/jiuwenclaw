@@ -93,6 +93,9 @@ class AgentConfig:
     max_iterations: int = 30
     # 输出目录，用于保存 sys_tool_dict.json 等调试文件
     output_dir: str = "."
+    # 是否将 system prompt / tools schema / query prompt 落盘到 output_dir/sys_tool_dict.json
+    # 供调试追溯。默认 False：生产路径不向 cwd 写调试文件。调试时置 True（并按需设 output_dir）。
+    save_debug_artifacts: bool = False
 
     # ---- 工具返回图片的输出模式 ----
     # "embed": OpenAI 官方多模态工具输出规范，图片直接内嵌在 tool role 的 content 数组中
@@ -198,11 +201,11 @@ class MMSearchAgent:
             web_search_url=os.getenv("WEB_SEARCH_URL", ""),
             web_fetch_url=os.getenv("WEB_FETCH_URL", ""),
             web_fetch_and_summary_url=os.getenv("WEB_FETCH_AND_SUMMARY_URL", ""),
-            max_retry=3,
+            max_retry=int(os.getenv("WEB_TOOL_MAX_RETRY", "2")),
             max_concurrency=self.config.tool_max_concurrency,
             logger=self.logger,
             use_cache=False,
-            retry_interval=3.0
+            retry_interval=float(os.getenv("WEB_TOOL_RETRY_INTERVAL", "1.0"))
         )
         self.tool_registry.register_plugin(self.web_searcher_tool)
 
@@ -355,16 +358,19 @@ class MMSearchAgent:
         tools_schema = self._build_tools_schema()
         query_prompt = self._build_question_prompt(search_input)
 
-        # 将 system prompt、tools schema、query prompt 保存到文件，便于调试和追溯
-        sys_tool_dict = {
-            "system_prompt": system_prompt,
-            "tools_schema": tools_schema,
-            "query_prompt": query_prompt,
-        }
-        save_path = os.path.join(self.config.output_dir, "sys_tool_dict.json")
-        os.makedirs(self.config.output_dir, exist_ok=True)
-        with open(save_path, "w", encoding="utf-8") as f:
-            json.dump(sys_tool_dict, f, ensure_ascii=False, indent=2)
+        # 将 system prompt、tools schema、query prompt 保存到文件，便于调试和追溯。
+        # 默认关闭（save_debug_artifacts=False），避免生产路径向 cwd 落盘调试文件；
+        # 调试时置 AgentConfig.save_debug_artifacts=True（并按需设 output_dir 指向非 cwd 路径）。
+        if self.config.save_debug_artifacts:
+            sys_tool_dict = {
+                "system_prompt": system_prompt,
+                "tools_schema": tools_schema,
+                "query_prompt": query_prompt,
+            }
+            save_path = os.path.join(self.config.output_dir, "sys_tool_dict.json")
+            os.makedirs(self.config.output_dir, exist_ok=True)
+            with open(save_path, "w", encoding="utf-8") as f:
+                json.dump(sys_tool_dict, f, ensure_ascii=False, indent=2)
 
         # ---- 第二步：构建初始用户消息，处理图片输入 ----
         # 初始 user content 包含文本问题 + 可选的图片信息

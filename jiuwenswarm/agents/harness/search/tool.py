@@ -15,6 +15,7 @@ fetch-and-summarize tool is needed.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from typing import Any
@@ -62,6 +63,10 @@ def build_search_agent_tool_card(agent_id: str | None = None) -> ToolCard:
             },
             "required": ["prompt"],
         },
+        properties={"resilience": {"timeout_s": None}},  # 豁免，靠内层 max_iterations 自管，兜底 3600s
+        # 复用单个 MMSearchAgent（共享 ContextManager 的可变 token 统计），
+        # 故不可与同一轮其他 search_agent_run 并发；由 harness 串行调度。
+        parallel_safe=False,
     )
 
 
@@ -85,15 +90,32 @@ def _extract_final_answer(result: ReactLoopResult) -> str:
 class SearchAgentTool(Tool):
     """Dispatch tool that runs the vendored ``MMSearchAgent.react_loop``.
 
-    A fresh ``MMSearchAgent`` is constructed per invoke (cheap: client + tool
-    registry), and ``close()`` is called in ``finally`` to release the httpx
-    pools held by the web tools.
+    A single ``MMSearchAgent`` is constructed lazily on first invoke and
+    **reused** across invokes — amortizes client/registry construction and,
+    more importantly, keeps the LLM + web httpx connection pools warm (no
+    per-invoke teardown/reconnect). ``close()`` is NOT called per invoke; see
+    :meth:`close` for shutdown cleanup.
+
+    ``parallel_safe=False`` because the reused agent shares a ContextManager
+    (mutable token stats); the harness therefore serializes concurrent
+    ``search_agent_run`` dispatches in the same turn.
     """
 
     def __init__(self, card: ToolCard, agent_config: AgentConfig, logger: logging.Logger) -> None:
         super().__init__(card)
         self._agent_config = agent_config
         self._logger = logger
+        self._agent: MMSearchAgent | None = None
+        self._init_lock = asyncio.Lock()
+
+    async def _get_agent(self) -> MMSearchAgent:
+        # 懒构造：tool-build 时不付 client/web-tool 初始化成本（asyncio.Semaphore
+        # 等需事件循环），首次 invoke 时才建，之后跨 invoke 复用。
+        if self._agent is None:
+            async with self._init_lock:
+                if self._agent is None:
+                    self._agent = MMSearchAgent(self._agent_config, logger=self._logger)
+        return self._agent
 
     async def invoke(self, inputs: Any, **kwargs: Any) -> ToolOutput:
         prompt = _get_input(inputs, "prompt") or _get_input(inputs, "query") or ""
@@ -103,8 +125,8 @@ class SearchAgentTool(Tool):
                 data={"output": "SearchAgent requires a non-empty `prompt`.", "agent_id": _AGENT_ID},
             )
 
-        agent = MMSearchAgent(self._agent_config, logger=self._logger)
         try:
+            agent = await self._get_agent()
             result: ReactLoopResult = await agent.react_loop(MMSearchInput(question=prompt))
             answer = _extract_final_answer(result) or "(no answer)"
             return ToolOutput(
@@ -123,11 +145,17 @@ class SearchAgentTool(Tool):
                 success=False,
                 data={"output": f"SearchAgent failed: {exc}", "agent_id": _AGENT_ID},
             )
-        finally:
+        # NOTE: 不在此 close() —— agent 跨 invoke 复用，保留 LLM/web httpx 连接池。
+        # 进程退出时由 SearchAgentTool.close() 统一释放。
+
+    async def close(self) -> None:
+        """释放复用 agent 的 httpx 连接池，退出时调用。"""
+        if self._agent is not None:
             try:
-                await agent.close()
+                await self._agent.close()
             except Exception:  # noqa: BLE001
                 self._logger.debug("[SearchAgentTool] agent.close() raised, ignoring", exc_info=True)
+            self._agent = None
 
     async def stream(self, inputs: Any, **kwargs: Any) -> None:
         # The custom loop is not a streaming-DeepAgent; the parent harness drives

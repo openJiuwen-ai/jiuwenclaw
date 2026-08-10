@@ -43,6 +43,9 @@ def _get_or_load_tokenizer(tokenizer_id: str, logger: logging.Logger) -> Optiona
             f"tokenizer 加载失败 ({tokenizer_id}): {e}，"
             "将使用字符数近似估算文本 token"
         )
+        # 缓存失败结果，避免后续每个 ContextManager 实例都重复尝试加载
+        # （MMSearchAgent 每次 invoke 都新建 ContextManager，不缓存会反复加载）
+        _tokenizer_cache[tokenizer_id] = None
         return None
 
 
@@ -84,9 +87,14 @@ class ContextManager:
         self.total_tokens = 0
         self.logger = logger or logging.getLogger(self.__class__.__name__)
 
-        # 通过全局缓存加载 tokenizer，同一 tokenizer_id 仅加载一次
-        tokenizer_id = tokenizer_name or self.DEFAULT_TOKENIZER_NAME
-        self.tokenizer = _get_or_load_tokenizer(tokenizer_id, self.logger)
+        # 通过全局缓存加载 tokenizer，同一 tokenizer_id 仅加载一次。
+        # tokenizer_name=None → 不加载 AutoTokenizer，直接降级为字符估算，
+        # 避免回退到 DEFAULT_TOKENIZER_NAME（本机通常不存在的路径）后每次
+        # MMSearchAgent 构造都重复尝试加载（失败不缓存、可能触发网络解析）。
+        tokenizer_id = tokenizer_name
+        self.tokenizer = (
+            _get_or_load_tokenizer(tokenizer_id, self.logger) if tokenizer_id else None
+        )
 
     def count_text_tokens(self, text: str) -> int:
         if not text:

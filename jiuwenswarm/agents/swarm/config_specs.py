@@ -158,9 +158,9 @@ _CODE_SHARED_RAIL_NAMES: tuple[str, ...] = (
 
 # Code member tools: the common tool set plus the code-exclusive acp_chat.
 _CODE_TOOL_NAMES: tuple[str, ...] = (
-    registry.WEB_SEARCH,
-    registry.WEB_FETCH,
-    registry.WEB_PAID_SEARCH,
+    # registry.WEB_SEARCH,
+    # registry.WEB_FETCH,
+    # registry.WEB_PAID_SEARCH,
     registry.VISION,
     registry.AUDIO,
     # See _COMMON_TOOL_NAMES: skill tools come from the MEMBER_SKILL_TOOLKIT
