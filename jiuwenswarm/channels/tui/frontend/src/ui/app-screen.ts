@@ -39,6 +39,7 @@ import {
   type InstalledSkillEntry,
 } from "../core/commands/CommandService.js";
 import type { SlashCommand } from "../core/commands/types.js";
+import { CommandKind } from "../core/commands/types.js";
 import { addCommandEcho, addError, addInfo } from "../core/commands/helpers.js";
 import { copyToClipboard } from "../core/commands/clipboard.js";
 import { CheckboxList, CheckboxGroup as CheckboxGroupType } from "./components/checkbox-list.js";
@@ -1752,7 +1753,7 @@ export class AppScreen implements Component, Focusable {
     // WebSocket connection and after every execute() call), rebuild the
     // CombinedAutocompleteProvider so that the /<skillName> shorthands appear
     // in the command-name dropdown.
-    this.commands.onInstalledSkillsChange = (skills: readonly InstalledSkillEntry[]) => {
+    this.commands.onCommandRegistryChange = (skills: readonly InstalledSkillEntry[]) => {
       this.composerAutocompleteProvider = this.rebuildAutocompleteProvider(skills);
       this.editor.setAutocompleteProvider(this.composerAutocompleteProvider);
     };
@@ -3457,16 +3458,31 @@ export class AppScreen implements Component, Focusable {
     }
 
     if (text.startsWith("/")) {
+      const slashMatch = text.match(/^\/(\S+)/);
+      const firstToken = slashMatch?.[1] ?? "";
       // /<installedSkill> 行首分流：命中已装 skill 时当普通消息发送（content 原样
       // 保留 /<skill> 前缀，skill 名由 extractSkillsFromContent 提取注入 params.skills）。
       // 未命中已装 skill 的 /xxx 不在此拦截，继续走下面的命令分支（仍可能 Unknown command）。
       {
-        const slashMatch = text.match(/^\/(\S+)/);
-        const firstToken = slashMatch?.[1] ?? "";
+        const tokenLower = firstToken.toLowerCase();
         const installedSkill = firstToken
-          ? this.commands.getInstalledSkills().find((s) => s.name === firstToken)
+          ? this.commands.getInstalledSkills().find(
+              (s) => s.name.toLowerCase() === tokenLower,
+            )
           : undefined;
-        if (installedSkill) {
+        // Refresh only when a skill might collide with a user command. Pure user
+        // commands refresh once in CommandService.execute(); a blanket refresh
+        // here duplicated that RPC on every non-built-in slash.
+        if (installedSkill && !this.commands.isTopLevelBuiltin(firstToken)) {
+          await this.commands.refreshUserCommands(this.state.getCommandContext());
+        }
+        const registeredCommand = firstToken
+          ? this.commands.resolve(firstToken)
+          : undefined;
+        if (
+          installedSkill &&
+          !(registeredCommand?.kind === CommandKind.USER)
+        ) {
           // 只有 /<skill> 而没有内容时没什么可发的。pi-tui 在补全弹窗上按回车会
           // 「应用补全」并顺势提交（见其 editor 的 tui.select.confirm 分支），这一下
           // 只是补全，所以把补全结果放回输入框等用户补内容；用户自己再回车才提示为空。
@@ -3735,6 +3751,9 @@ export class AppScreen implements Component, Focusable {
     if (!this.didEagerFetchSkills && snapshot.connectionStatus === "connected") {
       this.didEagerFetchSkills = true;
       void this.commands.refreshSkills(this.state.getCommandContext());
+      // User-defined commands have to be in the registry before the first
+      // /help or the first autocomplete, so they load on the same signal.
+      void this.commands.refreshUserCommands(this.state.getCommandContext());
     }
     // Hide /sandbox subcommand inline hints when sandbox.type=yuanrong.
     if (!this.didEagerFetchSandboxMeta && snapshot.connectionStatus === "connected") {

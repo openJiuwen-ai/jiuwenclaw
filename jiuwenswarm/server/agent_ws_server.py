@@ -492,6 +492,87 @@ def resolve_request_project_dir(request: AgentRequest) -> str | None:
     return None
 
 
+def resolve_command_workspace_dir(request: AgentRequest) -> str | None:
+    """Resolve the root that bounds ``@file`` embedding for slash commands.
+
+    The session's locked ``project_dir`` wins over anything in the request.
+    ``commands.expand`` returns file **contents**, so its root must not be a
+    per-request claim by the caller: a client free to name the root could name
+    ``/`` and read whatever the server can. The session already locks a
+    project identity on its first chat turn; reusing it means the boundary is
+    the one the user was working in, not the one this frame asked for.
+
+    ``resolve_request_project_dir`` remains the fallback, for a session that
+    has not locked a value yet -- refusing to list commands before the first
+    message would be a worse trade than trusting the same value agent
+    construction already trusts at that point.
+    """
+    session_id = (request.session_id or "").strip()
+    if session_id:
+        try:
+            from jiuwenswarm.server.runtime.session.session_metadata import (
+                get_session_metadata,
+            )
+
+            # enable_writeback=False: this is a read path. Inferring the value
+            # is welcome; persisting it as a side effect of listing commands
+            # is not.
+            metadata = get_session_metadata(session_id, enable_writeback=False)
+            locked = metadata.get("project_dir") if isinstance(metadata, dict) else None
+            if isinstance(locked, str) and locked.strip():
+                return locked.strip()
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "[AgentWebSocketServer] failed to read locked project_dir for %s: %s",
+                session_id, exc,
+            )
+    return resolve_request_project_dir(request)
+
+
+def resolve_locked_command_workspace_dir(request: AgentRequest) -> str | None:
+    """Return the session-locked ``project_dir`` only — no request fallback.
+
+    ``commands.expand`` returns file contents, so it must not trust a
+    per-request root the client names before the session has locked one.
+    """
+    session_id = (request.session_id or "").strip()
+    if not session_id:
+        return None
+    try:
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            get_session_metadata,
+        )
+
+        metadata = get_session_metadata(session_id, enable_writeback=False)
+        locked = metadata.get("project_dir") if isinstance(metadata, dict) else None
+        if isinstance(locked, str) and locked.strip():
+            return locked.strip()
+    except (OSError, ValueError) as exc:
+        logger.warning(
+            "[AgentWebSocketServer] failed to read locked project_dir for %s: %s",
+            session_id, exc,
+        )
+    return None
+
+
+def _request_builtin_names(request: AgentRequest) -> set[str]:
+    """Command names the calling client says it already owns.
+
+    Built-ins live in the client, so the server cannot enumerate them. A client
+    that sends nothing still gets ``RESERVED_NAMES`` enforced underneath.
+    """
+    from jiuwenswarm.server.runtime.command_config_service import RESERVED_NAMES
+
+    params = request.params or {}
+    raw = params.get("builtin_names")
+    declared: set[str] = set()
+    if isinstance(raw, (list, tuple)):
+        declared = {
+            n.strip().lower() for n in raw if isinstance(n, str) and n.strip()
+        }
+    return declared | set(RESERVED_NAMES)
+
+
 def _sync_chat_request_metadata(
     request: AgentRequest,
     project_dir: str | None,
@@ -1672,6 +1753,12 @@ class AgentWebSocketServer:
                 return
             if request.req_method == ReqMethod.AGENTS_LIST:
                 await self._handle_agents_list(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.COMMANDS_LIST:
+                await self._handle_commands_list(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.COMMANDS_EXPAND:
+                await self._handle_commands_expand(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.AGENTS_GET:
                 await self._handle_agents_get(ws, request, send_lock)
@@ -6928,6 +7015,123 @@ class AgentWebSocketServer:
             )
         except Exception as e:
             logger.exception("[AgentWebSocketServer] agents.list failed: %s", e)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(e)},
+            )
+
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    async def _handle_commands_list(
+        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock,
+    ) -> None:
+        """User-defined slash commands, mirroring ``agents.list``.
+
+        Returns every discovered command, including the shadowed and reserved
+        ones, so the client can explain why a file the user wrote does nothing
+        instead of leaving it silently absent.
+        """
+        from jiuwenswarm.server.runtime.command_config_service import (
+            CommandConfigService,
+            command_for_wire,
+        )
+
+        try:
+            workspace = resolve_command_workspace_dir(request)
+            if not workspace:
+                commands = []
+                workspace_resolved = False
+            else:
+                service = CommandConfigService(
+                    workspace,
+                    builtin_names=_request_builtin_names(request),
+                )
+                commands = [command_for_wire(c) for c in service.list_commands()]
+                workspace_resolved = True
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload={
+                    "commands": commands,
+                    "workspace_resolved": workspace_resolved,
+                },
+            )
+        except Exception as e:
+            logger.exception("[AgentWebSocketServer] commands.list failed: %s", e)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(e)},
+            )
+
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    async def _handle_commands_expand(
+        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock,
+    ) -> None:
+        """Expand one user-defined command into the prompt to send.
+
+        Deliberately separate from ``chat.send``. The client asks what the
+        command resolved to, then sends that text as an ordinary message, so a
+        command whose ``@file`` could not be read reports the failure instead of
+        sending a prompt with a hole in it -- and the send path keeps one
+        meaning rather than growing a second, command-shaped one.
+
+        Only **active** commands expand. A shadowed or reserved definition is
+        listed so the UI can explain it, never run.
+        """
+        from jiuwenswarm.common.command_expansion import expand_command
+        from jiuwenswarm.server.runtime.command_config_service import CommandConfigService
+
+        try:
+            params = request.params or {}
+            name = str(params.get("name") or "").strip().lower()
+            raw_args = str(params.get("args") or "")
+            if not name:
+                raise ValueError("command name is required")
+
+            workspace = resolve_locked_command_workspace_dir(request)
+            if not workspace:
+                raise ValueError(
+                    "session workspace not locked; cannot expand command with @file references"
+                )
+
+            service = CommandConfigService(
+                workspace,
+                builtin_names=_request_builtin_names(request),
+            )
+            command = next(
+                (c for c in service.active_commands() if c.name == name), None
+            )
+            if command is None:
+                raise ValueError(f"unknown or inactive command: /{name}")
+
+            expansion = expand_command(command.body, raw_args, service.file_resolver())
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload={
+                    "name": command.name,
+                    "text": expansion.text,
+                    "embedded": expansion.embedded,
+                    # Non-empty errors do not mean failure: the text is usable,
+                    # with each unreadable reference marked inline.
+                    "errors": expansion.errors,
+                    "source": command.source,
+                    "file_path": command.file_path,
+                },
+            )
+        except Exception as e:
+            logger.exception("[AgentWebSocketServer] commands.expand failed: %s", e)
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,

@@ -1,5 +1,14 @@
-import type { CommandContext, CommandSuggestion, SlashCommand } from "./types.js";
+import type {
+  CommandContext,
+  CommandSuggestion,
+  SlashCommand,
+  UserCommandDefinition,
+} from "./types.js";
 import { flattenArrayPayload, makeItem, parseArgs } from "./helpers.js";
+import {
+  buildUserCommands,
+  type InactiveUserCommand,
+} from "./user-commands.js";
 
 export function parseSlashCommand(raw: string, commands: readonly SlashCommand[]) {
   const trimmed = raw.trim();
@@ -58,17 +67,50 @@ export class CommandService {
   private installedSkills: InstalledSkillEntry[] = [];
   /** 配置未成功读取前保持关闭，避免演进命令意外暴露。 */
   private skillEvolutionEnabled = false;
+  /**
+   * Built-ins and user commands are kept apart because they refresh on
+   * different clocks: built-ins are registered once at boot, user commands are
+   * re-read from disk whenever `refreshUserCommands` runs. Rebuilding from the
+   * two lists is what lets a reload replace user commands without disturbing
+   * the built-ins.
+   */
+  private builtinCommands: SlashCommand[] = [];
+  private userCommands: SlashCommand[] = [];
+  private inactiveUserCommands: InactiveUserCommand[] = [];
 
   /**
-   * Optional callback invoked whenever the installed-skills cache is successfully
-   * refreshed.  The UI layer registers this to rebuild its autocomplete provider
-   * so that `/<skillName>` shorthands appear in the command-name dropdown.
+   * Optional callback invoked whenever the command registry changes (user
+   * commands loaded/refreshed or installed skills updated). The UI layer uses
+   * this to rebuild its autocomplete provider.
    */
+  onCommandRegistryChange?: (skills: readonly InstalledSkillEntry[]) => void;
+
+  /** @deprecated Use {@link onCommandRegistryChange}. */
   onInstalledSkillsChange?: (skills: readonly InstalledSkillEntry[]) => void;
 
   register(commands: readonly SlashCommand[]): void {
-    this.topLevelCommands = [...commands];
-    for (const command of commands) {
+    this.builtinCommands = [...commands];
+    this.rebuild();
+  }
+
+  /**
+   * Re-register everything from the two source lists.
+   *
+   * A colliding user command is dropped here rather than ordered around.
+   * Lookup happens two ways -- `resolve` reads the name map, `parseSlashCommand`
+   * scans the array -- and the two would disagree under any ordering that let
+   * both entries exist. `buildUserCommands` and the server already refuse these
+   * names, so this is the third guard, not the only one.
+   */
+  private rebuild(): void {
+    this.commands.clear();
+    this.aliases.clear();
+    const builtinNames = this.builtinNameSet();
+    this.topLevelCommands = [
+      ...this.builtinCommands,
+      ...this.userCommands.filter((command) => !builtinNames.has(command.name)),
+    ];
+    for (const command of this.topLevelCommands) {
       this.registerCommand(command);
     }
     this.applySkillEvolutionVisibility();
@@ -99,6 +141,21 @@ export class CommandService {
       }
     };
     visit(this.topLevelCommands);
+  }
+
+  /** Top-level built-in names only (not nested subcommands). */
+  private topLevelBuiltinNameSet(): Set<string> {
+    const names = new Set<string>();
+    for (const command of this.builtinCommands) {
+      names.add(command.name.toLowerCase());
+      for (const alias of command.altNames ?? []) names.add(alias.toLowerCase());
+    }
+    return names;
+  }
+
+  /** @deprecated Use {@link topLevelBuiltinNameSet}. Subcommand names are not reserved. */
+  private builtinNameSet(): Set<string> {
+    return this.topLevelBuiltinNameSet();
   }
 
   private registerCommand(command: SlashCommand): void {
@@ -149,18 +206,130 @@ export class CommandService {
       });
       // Notify the UI so it can rebuild the autocomplete provider with the
       // fresh `/<skillName>` shorthands.
-      this.onInstalledSkillsChange?.(this.installedSkills);
+      this.notifyRegistryChange();
     } catch {
       // Keep the previous cache if the RPC fails.
     }
+  }
+
+  private notifyRegistryChange(): void {
+    const skills = this.installedSkills;
+    this.onCommandRegistryChange?.(skills);
+    this.onInstalledSkillsChange?.(skills);
   }
 
   getInstalledSkills(): readonly InstalledSkillEntry[] {
     return this.installedSkills;
   }
 
+  isTopLevelBuiltin(name: string): boolean {
+    return this.topLevelBuiltinNameSet().has(name.toLowerCase());
+  }
+
+  /**
+   * Fetch user-defined commands from the backend and merge them in.
+   *
+   * Called from {@link execute} before every slash dispatch, and eagerly on
+   * WebSocket connect so autocomplete and `/help` see user commands before
+   * the first submit. Re-reading the directory is the whole reload story; the
+   * server globs disk per call, so there is no cache to invalidate.
+   *
+   * The built-in names travel with the request. The server cannot know them --
+   * they are defined here, not there -- so it can only refuse `model.md` if we
+   * say `model` is taken. Without that the server would report a command as
+   * active that this client silently never runs.
+   */
+  async refreshUserCommands(ctx: CommandContext): Promise<void> {
+    const builtinNames = this.topLevelBuiltinNameSet();
+    try {
+      const payload = await ctx.request<{
+        commands?: UserCommandDefinition[];
+        workspace_resolved?: boolean;
+      }>(
+        "commands.list",
+        { builtin_names: [...builtinNames] },
+      );
+      if (payload?.workspace_resolved === false) {
+        return;
+      }
+      const definitions = (payload?.commands ?? []) as UserCommandDefinition[];
+      const { commands, inactive } = buildUserCommands(
+        definitions,
+        builtinNames,
+        (def, args, runCtx) => this.runUserCommand(def, args, runCtx),
+      );
+      this.userCommands = commands;
+      this.inactiveUserCommands = inactive;
+      this.rebuild();
+      this.notifyRegistryChange();
+    } catch {
+      // Keep the previous set if the RPC fails. A dropped connection should not
+      // make the user's own commands disappear mid-session.
+    }
+  }
+
+  /** User commands that will not run, and why, for `/help` to explain. */
+  getInactiveUserCommands(): readonly InactiveUserCommand[] {
+    return this.inactiveUserCommands;
+  }
+
+  /**
+   * Expand a user command server-side, then send the result as a message.
+   *
+   * The expansion is a separate round trip so failures are visible before
+   * anything reaches the model: a `@file` that could not be read is reported
+   * here, next to the command that asked for it, instead of arriving as a gap
+   * in a prompt the user never sees.
+   */
+  private async runUserCommand(
+    def: UserCommandDefinition,
+    args: string,
+    ctx: CommandContext,
+  ): Promise<void> {
+    let payload: { text?: string; errors?: string[] };
+    try {
+      payload = await ctx.request<{ text?: string; errors?: string[] }>(
+        "commands.expand",
+        {
+          name: def.name,
+          args,
+          builtin_names: [...this.builtinNameSet()],
+        },
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      ctx.addItem(
+        makeItem(ctx.sessionId, "error", `/${def.name} failed to expand: ${message}`),
+      );
+      return;
+    }
+
+    const text = payload?.text ?? "";
+    if (!text.trim()) {
+      ctx.addItem(
+        makeItem(ctx.sessionId, "error", `/${def.name} expanded to nothing.`),
+      );
+      return;
+    }
+    // Errors do not block the send: the text is usable, with each unreadable
+    // reference marked inline. Say so, then send it.
+    for (const problem of payload?.errors ?? []) {
+      ctx.addItem(makeItem(ctx.sessionId, "error", `/${def.name}: ${problem}`));
+    }
+    ctx.sendMessage(text);
+  }
+
   async execute(raw: string, ctx: CommandContext): Promise<void> {
-    const parsed = parseSlashCommand(raw.trim(), this.getAll(true));
+    const trimmed = raw.trim();
+    // Re-read user commands before lookup when the first token is not a
+    // top-level built-in, so a newly created file is visible on first use.
+    if (trimmed.startsWith("/")) {
+      const firstToken = trimmed.substring(1).trim().split(/\s+/)[0]?.toLowerCase() ?? "";
+      if (!this.topLevelBuiltinNameSet().has(firstToken)) {
+        await this.refreshUserCommands(ctx);
+      }
+    }
+    const parsed = parseSlashCommand(trimmed, this.getAll(true));
     const command = parsed.command;
     if (!command) {
       // 注：/<skill> 已在 app-screen.handleSubmit 的行首分流里落到普通消息分支

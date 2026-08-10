@@ -644,6 +644,9 @@ _FORWARD_REQ_METHODS = frozenset({
     "agents.enable",
     "agents.disable",
     "agents.tools_list",
+    # User-defined slash commands
+    "commands.list",
+    "commands.expand",
     # Schedule task management
     "schedule.check_config",
     "schedule.update_config",
@@ -734,6 +737,9 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "agents.enable",
     "agents.disable",
     "agents.tools_list",
+    # User-defined slash commands
+    "commands.list",
+    "commands.expand",
 })
 
 # 配置信息：config.get 返回、config.set 可修改的键（前端 param 名 -> 环境变量名）

@@ -1,5 +1,6 @@
 /** 内置 slash 与 Gateway 受控指令对齐时参见仓库 `jiuwenswarm/gateway/slash_command.py`（SSOT）与 `docs/zh/CLI_COMMANDS.md`。 */
-import type { SlashCommand } from "./types.js";
+import type { SlashCommand, SlashCommandListProvider } from "./types.js";
+import type { InactiveUserCommand } from "./user-commands.js";
 import { createBranchCommand } from "./builtins/branch.js";
 import { createBtwCommand } from "./builtins/btw.js";
 import { createClearCommand } from "./builtins/clear.js";
@@ -62,6 +63,17 @@ export interface BuiltinCommandsOptions {
    */
   harmonyosEnabled?: boolean;
   /**
+   * Every registered command, user-defined ones included, for `/help` to list.
+   *
+   * Without it `/help` closes over the local built-in array and can only ever
+   * describe itself -- a user command would be runnable and undiscoverable at
+   * the same time. Defaults to the built-ins so a caller that does not have a
+   * registry yet still gets the old behaviour.
+   */
+  listAll?: SlashCommandListProvider;
+  /** User command files that were found but will not run, and why. */
+  getInactiveUserCommands?: () => readonly InactiveUserCommand[];
+  /**
    * 是否激活 /switch 命令。
    * 仅一体机场景（launcher 注入 AGENTOS_TUI_SUPERVISED=1）时为 true，
    * 此时命令可见且可执行；否则不注册，命令在 help、补全、执行中均不可见。
@@ -78,7 +90,7 @@ export function isHarmonyOSCommandsEnabled(
 export function createBuiltinCommands(options: BuiltinCommandsOptions = {}): SlashCommand[] {
   const commands: SlashCommand[] = [
     createAgentsCommand(),
-    createHelpCommand(() => commands),
+    createHelpCommand(options.listAll ?? (() => commands), options.getInactiveUserCommands),
     ...(options.harmonyosEnabled
       ? [createHarmonyOSDevInitCommand(), createHarmonyOSProjectInitCommand()]
       : []),
