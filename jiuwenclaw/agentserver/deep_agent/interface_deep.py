@@ -2477,22 +2477,111 @@ class JiuWenClawDeepAdapter:
             self._model = self._model_cache[first_name]
         self._model_client_config = self._model.model_client_config
         self._model_request_config = self._model.model_config
+        self._merge_service_model_cache()
         return self._model
 
-    def _resolve_model_for_request(self, request: AgentRequest) -> Model:
-        """根据请求中的 model_name 参数查找对应模型，未匹配则回退默认模型。"""
-        requested = (request.params.get("model_name") or "").strip()
-        if requested and requested in self._model_cache:
+    def _merge_service_model_cache(self) -> None:
+        """Merge service-level shared model entries into _model_cache after rebuild.
+
+        Reads from TenantAgentPool's service model cache and builds Model instances
+        via _build_model_from_entry. Skips keys already present in _model_cache.
+        """
+        from jiuwenclaw.agentserver.tenant_agent_pool import TenantAgentPool
+        pool = TenantAgentPool.peek_instance()
+        if pool is None:
+            return
+        service_cache = pool._service_model_cache.get(self._env_service_id, {})
+        if not service_cache:
+            return
+        merged = 0
+        for key, entry in service_cache.items():
+            if key in self._model_cache:
+                continue
+            if not isinstance(entry, dict):
+                continue
+            mcc = dict(entry.get("model_client_config") or {})
+            if not str(mcc.get("model_name") or "").strip():
+                continue
+            mco = entry.get("model_config_obj") or {}
+            try:
+                self._model_cache[key] = self._build_model_from_entry(mcc, mco)
+                merged += 1
+            except Exception:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] _merge_service_model_cache: "
+                    "failed to build model for key=%s",
+                    key, exc_info=True,
+                )
+        if merged:
             logger.info(
-                f"[JiuWenClawDeepAdapter] 模型配置解析: requested={requested} -> found_in_cache",
-                extra={'user_visible': 'progress'}
+                "[JiuWenClawDeepAdapter] _merge_service_model_cache: "
+                "service=%s merged=%d total=%d",
+                self._env_service_id, merged, len(self._model_cache),
+            )
+
+    def _resolve_from_shared_model_cache(self, name: str) -> Model | None:
+        """Resolve a model from TenantAgentPool's service-level shared cache on demand.
+
+        If found, builds a Model and caches it in _model_cache for subsequent requests.
+        Returns None if not found.
+        """
+        from jiuwenclaw.agentserver.tenant_agent_pool import TenantAgentPool
+        pool = TenantAgentPool.peek_instance()
+        if pool is None:
+            return None
+        service_cache = pool._service_model_cache.get(self._env_service_id, {})
+        entry = service_cache.get(name)
+        if entry is None:
+            return None
+        if not isinstance(entry, dict):
+            return None
+        mcc = dict(entry.get("model_client_config") or {})
+        if not str(mcc.get("model_name") or "").strip():
+            return None
+        mco = entry.get("model_config_obj") or {}
+        try:
+            model = self._build_model_from_entry(mcc, mco)
+        except Exception:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] _resolve_from_shared_model_cache: "
+                "failed to build model for key=%s",
+                name, exc_info=True,
+            )
+            return None
+        self._model_cache[name] = model
+        logger.info(
+            "[JiuWenClawDeepAdapter] _resolve_from_shared_model_cache: "
+            "lazy built model for key=%s service=%s",
+            name, self._env_service_id,
+        )
+        return model
+
+    def _resolve_model_for_request(self, request: AgentRequest) -> Model:
+        """根据请求中的 model_name 参数查找对应模型。
+
+        共享模型池按 alias 建索引（无 alias 时按 model_name），chat.send 传入
+        的 model_name 直接匹配 alias key。未传 model_name 则回退默认模型。
+        非法 model_name（非空但未命中缓存）抛出 ValueError，不静默回退。
+        """
+        params = request.params if isinstance(request.params, dict) else {}
+        requested = str(params.get("model_name") or "").strip()
+        if not requested:
+            return self._model
+        if requested in self._model_cache:
+            logger.info(
+                "[JiuWenClawDeepAdapter] model resolved by name: requested=%s",
+                requested,
+                extra={'user_visible': 'progress'},
             )
             return self._model_cache[requested]
-        logger.info(
-            f"[JiuWenClawDeepAdapter] 模型配置解析: using_default_model",
-            extra={'user_visible': 'progress'}
+        resolved = self._resolve_from_shared_model_cache(requested)
+        if resolved is not None:
+            return resolved
+        available = sorted(self._model_cache.keys())
+        raise ValueError(
+            f"model_name {requested!r} not found in service model cache; "
+            f"available: {available}"
         )
-        return self._model
 
     def _resolve_model(
         self,
@@ -8962,6 +9051,11 @@ class JiuWenClawDeepAdapter:
                 _RuntimeConfigParams.from_agent_request(request, mode)
             )
 
+            resolved_model = self._resolve_model_for_request(request)
+            self._apply_model_to_react_agent(resolved_model)
+            if self._runtime_prompt_rail:
+                self._runtime_prompt_rail.set_model_name(self._resolve_model_name())
+
             html_followup_result = (
                 await self._try_deepresearch_rewrite_html_followup(
                     query,
@@ -8992,6 +9086,24 @@ class JiuWenClawDeepAdapter:
             logger.info("[JiuWenClawDeepAdapter] Agent 任务被取消: request_id=%s session_id=%s", request.request_id,
                         session_id)
             raise
+        except ValueError as exc:
+            perf_summary_status = "error"
+            logger.warning(
+                "[JiuWenClawDeepAdapter] model resolution failed: request_id=%s error=%s",
+                request.request_id,
+                exc,
+            )
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={
+                    "event_type": "chat.error",
+                    "error": str(exc),
+                    "code": "model_not_found",
+                },
+                metadata=request.metadata,
+            )
         except IrreducibleContextError as exc:
             perf_summary_status = "error"
             logger.error(
@@ -9110,7 +9222,31 @@ class JiuWenClawDeepAdapter:
                 mode = "team"
             from jiuwenclaw.agentserver.deep_agent.team_helpers import process_team_message_stream
 
-            resolved_model = self._resolve_model_for_request(request)
+            try:
+                resolved_model = self._resolve_model_for_request(request)
+            except ValueError as exc:
+                reset_request_id(token_request_id)
+                _reset_llm_trace_tokens(
+                    token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model
+                )
+                await self._on_chat_request_end(
+                    chat_env_token,
+                    chat_fp_token,
+                    chat_skill_dirs_token,
+                    chat_ns_token,
+                    chat_browser_pin,
+                )
+                yield AgentResponseChunk(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    payload={
+                        "event_type": "chat.error",
+                        "error": str(exc),
+                        "code": "model_not_found",
+                    },
+                    is_complete=True,
+                )
+                return
             self._apply_model_to_react_agent(resolved_model)
             if self._runtime_prompt_rail:
                 self._runtime_prompt_rail.set_model_name(self._resolve_model_name())
@@ -9245,6 +9381,40 @@ class JiuWenClawDeepAdapter:
             await self._update_runtime_config(
                 _RuntimeConfigParams.from_agent_request(request, mode)
             )
+
+            try:
+                resolved_model = self._resolve_model_for_request(request)
+                self._apply_model_to_react_agent(resolved_model)
+                if self._runtime_prompt_rail:
+                    self._runtime_prompt_rail.set_model_name(self._resolve_model_name())
+            except ValueError as exc:
+                reset_request_id(token_request_id)
+                _reset_llm_trace_tokens(
+                    token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model
+                )
+                TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
+                cleanup_permission_context(token_perm)
+                self._reset_runtime_cron_context(cron_context_tokens)
+                await self._on_chat_request_end(
+                    chat_env_token,
+                    chat_fp_token,
+                    chat_skill_dirs_token,
+                    chat_ns_token,
+                    chat_browser_pin,
+                )
+                finalize_perf_summary_request(request.request_id, status="error")
+                clear_perf_summary_context()
+                yield AgentResponseChunk(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    payload={
+                        "event_type": "chat.error",
+                        "error": str(exc),
+                        "code": "model_not_found",
+                    },
+                    is_complete=True,
+                )
+                return
 
             html_followup_result = (
                 await self._try_deepresearch_rewrite_html_followup(

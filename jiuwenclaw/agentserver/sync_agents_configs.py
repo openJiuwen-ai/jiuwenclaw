@@ -251,6 +251,36 @@ def _validate_shared_env(shared_env: Any) -> None:
     )
 
 
+def _validate_top_level_models(models_raw: Any) -> list[dict[str, Any]]:
+    """Validate and normalize the top-level models array.
+
+    Returns the validated list, or raises ValueError on protocol errors.
+    """
+    if not isinstance(models_raw, list):
+        raise ValueError("models must be an array when provided")
+    validated: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
+    for i, entry in enumerate(models_raw):
+        if not isinstance(entry, dict):
+            raise ValueError(f"models[{i}] must be an object")
+        mcc = entry.get("model_client_config")
+        if not isinstance(mcc, dict):
+            raise ValueError(f"models[{i}].model_client_config is required and must be an object")
+        model_name = str(mcc.get("model_name") or "").strip()
+        if not model_name:
+            raise ValueError(f"models[{i}].model_client_config.model_name is required")
+        if model_name in seen_names:
+            raise ValueError(f"models[{i}].model_client_config.model_name duplicate: {model_name!r}")
+        seen_names.add(model_name)
+        alias = str(entry.get("alias") or "").strip()
+        if alias and alias in seen_names:
+            raise ValueError(f"models[{i}].alias duplicates an existing model_name or alias: {alias!r}")
+        if alias:
+            seen_names.add(alias)
+        validated.append(entry)
+    return validated
+
+
 def validate_sync_payload(params: Any) -> dict[str, Any]:
     """Validate sync_agents_configs params; raise ValueError on protocol errors."""
     if not isinstance(params, dict):
@@ -278,6 +308,15 @@ def validate_sync_payload(params: Any) -> dict[str, Any]:
     shared_env = params.get("shared_env")
     if shared_env is not None:
         _validate_shared_env(shared_env)
+
+    models_raw = params.get("models")
+    models_validated: list[dict[str, Any]] | None = None
+    if models_raw is not None:
+        models_validated = _validate_top_level_models(models_raw)
+        logger.info(
+            "sync_agents_configs: top-level models received (%d entries)",
+            len(models_validated),
+        )
 
     seen_ids: set[str] = set()
     normalized_agents: list[dict[str, Any]] = []
@@ -324,6 +363,7 @@ def validate_sync_payload(params: Any) -> dict[str, Any]:
         "service_id": service_id,
         "agents": normalized_agents,
         "shared_env": shared_env,
+        "models": models_validated,
     }
 
 
