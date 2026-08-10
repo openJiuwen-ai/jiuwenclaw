@@ -1,4 +1,4 @@
-﻿# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """Tests: enable/disable writes state.json enabled (single source of truth)
 and additionally toggles bundled skills for cli / skill-only MCPs.

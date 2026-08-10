@@ -1,4 +1,4 @@
-﻿# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """Tests: phase-2 targeted single-MCP control (no full reload).
 

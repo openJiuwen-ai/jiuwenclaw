@@ -1552,7 +1552,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 from jiuwenswarm.common.e2a.gateway_normalize import (
                     e2a_from_agent_fields,
                 )
-                from jiuwenswarm.common.schema.message import ReqMethod
 
                 real_client = _resolve(agent_client)
                 if real_client is None:
@@ -2762,7 +2761,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
-        from jiuwenswarm.common.schema.message import ReqMethod
 
         create_params = dict(params)
         create_params.pop("session_id", None)
@@ -6223,7 +6221,13 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return
         if not resp.ok:
             pl = resp.payload if isinstance(resp.payload, dict) else {}
-            await channel.send_response(ws, req_id, ok=False, error=str(pl.get("error") or "request failed"), code=str(pl.get("code") or "BAD_REQUEST"))
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=str(pl.get("error") or "request failed"),
+                code=str(pl.get("code") or "BAD_REQUEST"),
+            )
             return
         out = resp.payload if isinstance(resp.payload, dict) else {}
         await channel.send_response(ws, req_id, ok=True, payload=out)
@@ -6322,7 +6326,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     async def _forward_harness_to_agent(ws, req_id, params, session_id, *, req_method):
         """harness.*：优先经 E2A 转发到 AgentServer；Agent 未就绪时本地执行（无 agent 实例）。"""
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
-        from jiuwenswarm.common.schema.message import ReqMethod
 
         if not isinstance(req_method, ReqMethod):
             await channel.send_response(ws, req_id, ok=False, error="invalid req_method", code="INTERNAL_ERROR")

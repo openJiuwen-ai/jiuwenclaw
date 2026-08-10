@@ -18,10 +18,16 @@ from __future__ import annotations
 import logging
 import platform
 import re
+import shlex
 import subprocess
+from pathlib import Path
+from dataclasses import dataclass, field
+from typing import Any, Callable
+
 from jiuwenswarm.common.utils import get_workspace_dir  # re-export for test patches
 
-from pathlib import Path
+logger = logging.getLogger(__name__)
+
 
 def _packages_dir() -> Path:
     """Marketplace 包目录：<workspace>/mcp/mcp_builtins/."""
@@ -41,10 +47,6 @@ def _cleanup_stale_auth_proc(name: str) -> None:
             old.kill()
         except Exception:  # noqa: BLE001
             pass
-from dataclasses import dataclass, field
-from typing import Any, Callable
-
-logger = logging.getLogger(__name__)
 
 
 def _platform_key() -> str:
@@ -92,11 +94,34 @@ class CommandResult:
         return f"{self.stdout}\n{self.stderr}".strip()
 
 
+_SHELL_FORBIDDEN_FIRST = {"bash", "cmd", "/bin/sh", "sh"}
+_SHELL_FORBIDDEN_SECOND = "-c"
+
+
+def _safe_split_command(command: str) -> list[str]:
+    """Split a command string into an argv list for ``shell=False``.
+
+    Enforces the two hard rules G.EDV.04 requires for shell=False to be safe:
+    the first element must NOT be a shell binary (bash/cmd/sh/...), and the
+    second must NOT be ``-c``. cli.json commands are trusted (bin name +
+    args), but we assert this explicitly rather than relying on the data.
+    """
+    parts = shlex.split(command)
+    if not parts:
+        raise ValueError("empty command")
+    first = parts[0].lower()
+    if first in _SHELL_FORBIDDEN_FIRST:
+        raise ValueError(f"refusing to run shell binary '{first}' as first arg")
+    if len(parts) > 1 and parts[1] == _SHELL_FORBIDDEN_SECOND:
+        raise ValueError("refusing '-c' as second arg (shell invocation)")
+    return parts
+
+
 def default_runner(command: str, timeout: float = 120.0) -> CommandResult:
     try:
-        proc = subprocess.run(  # noqa: S603
-            command,
-            shell=True,
+        proc = subprocess.run(  # noqa: S603 - command from trusted cli.json
+            _safe_split_command(command),
+            shell=False,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -117,7 +142,7 @@ def default_runner(command: str, timeout: float = 120.0) -> CommandResult:
             stderr=(exc.stderr or "") if isinstance(exc.stderr, str) else "",
             timed_out=True,
         )
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         return CommandResult(command=command, returncode=-1, stderr=str(exc))
 
 
@@ -234,10 +259,18 @@ class CliManifest:
         top_wait = bool(data.get("authWaitForExit", False))
         # auth: list (feishu multi-step) or single object (awesun).
         if isinstance(auth, dict):
-            auth = [{**auth, "authUrlDomain": auth.get("authUrlDomain", top_domain), "authWaitForExit": auth.get("authWaitForExit", top_wait)}]
+            auth = [
+                {
+                    **auth,
+                    "authUrlDomain": auth.get("authUrlDomain", top_domain),
+                    "authWaitForExit": auth.get("authWaitForExit", top_wait)
+                }
+            ]
         auth_steps = [s for s in auth if isinstance(s, dict)]
         # status: {plat: cmd} map or plain string.
-        status_cmd = _pick_per_platform(status) if isinstance(status, dict) else (str(status) if isinstance(status, str) else "")
+        status_cmd = _pick_per_platform(status) \
+            if isinstance(status, dict) else \
+                (str(status) if isinstance(status, str) else "")
         # match: feishu statusMatchJson (dict, top-level) or awesun
         # statusMatch (substring). statusMatchJson lives at the cli.json top
         # level (sibling of ``status``), not inside the ``status`` object.
@@ -359,25 +392,44 @@ class CliDriver:
                 elif m.min_version:
                     version_ok = False
                     err = (err + "; " if err else "") + f"could not parse version after init: {res2.combined_output}"
-        return InstallResult(name=self.name, installed=True, version=version, min_version=m.min_version, version_ok=version_ok, error=err)
+        return InstallResult(
+            name=self.name, installed=True,
+            version=version, min_version=m.min_version,
+            version_ok=version_ok, error=err
+        )
 
     def auth_step(self, index: int = 0) -> AuthStepResult:
         m = self.manifest
         steps = m.auth_steps
         if index < 0 or index >= len(steps):
-            return AuthStepResult(name=self.name, step_index=index, command="", succeeded=False, needs_user_action=False, error=f"auth step {index} out of range (have {len(steps)})")
+            return AuthStepResult(
+                name=self.name,
+                step_index=index,
+                command="",
+                succeeded=False,
+                needs_user_action=False,
+                error=f"auth step {index} out of range (have {len(steps)})"
+            )
         step = steps[index]
         # feishu: step = {"command": {plat:cmd}, "skipIf":...};
         # awesun: step itself is the {plat:cmd} map (no "command" key).
         cmd_spec = step.get("command") if "command" in step else step
         cmd = _pick_per_platform(cmd_spec) or ""
         if not cmd:
-            return AuthStepResult(name=self.name, step_index=index, command="", succeeded=False, needs_user_action=False, error="no command for this platform")
+            return AuthStepResult(
+                name=self.name, step_index=index, command="",
+                succeeded=False, needs_user_action=False,
+                error="no command for this platform"
+            )
         skip_cmd = _pick_per_platform(step.get("skipIf")) or ""
         if skip_cmd:
             skip_res = self._runner(skip_cmd)
             if skip_res.succeeded:
-                return AuthStepResult(name=self.name, step_index=index, command=skip_cmd, succeeded=True, needs_user_action=False, output=skip_res.combined_output)
+                return AuthStepResult(
+                    name=self.name, step_index=index, command=skip_cmd,
+                    succeeded=True, needs_user_action=False,
+                    output=skip_res.combined_output
+                )
         domain = str(step.get("authUrlDomain", "")).strip()
         wait_for_exit = bool(step.get("authWaitForExit"))
         # authWaitForExit commands (e.g. awesun login) block until the user
@@ -387,7 +439,13 @@ class CliDriver:
             return self._start_auth_proc(index, cmd, domain)
         res = self._runner(cmd)
         url = _extract_url(res.combined_output, domain) if domain else None
-        return AuthStepResult(name=self.name, step_index=index, command=cmd, succeeded=res.succeeded, needs_user_action=bool(domain), auth_url=url, auth_domain=domain, output=res.combined_output, error="" if res.succeeded else f"rc={res.returncode}: {res.combined_output}")
+        return AuthStepResult(
+            name=self.name, step_index=index, command=cmd,
+            succeeded=res.succeeded, needs_user_action=bool(domain),
+            auth_url=url, auth_domain=domain,
+            output=res.combined_output,
+            error="" if res.succeeded else f"rc={res.returncode}: {res.combined_output}"
+        )
 
     def _start_auth_proc(self, index: int, cmd: str, domain: str) -> AuthStepResult:
         """Start an authWaitForExit command non-blocking, capture its auth URL.
@@ -403,20 +461,28 @@ class CliDriver:
             _cleanup_stale_auth_proc(self.name)
             _PENDING_AUTH_PROCS[self.name] = proc
             url = _extract_url(out, domain) if domain else None
-            return AuthStepResult(name=self.name, step_index=index, command=cmd, succeeded=True, needs_user_action=True, auth_url=url, auth_domain=domain, output=out)
+            return AuthStepResult(
+                name=self.name, step_index=index, command=cmd,
+                succeeded=True, needs_user_action=True,
+                auth_url=url, auth_domain=domain, output=out
+            )
         import time
         try:
             proc = subprocess.Popen(  # noqa: S603 - command from trusted cli.json
-                cmd,
-                shell=True,
+                _safe_split_command(cmd),
+                shell=False,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
             )
-        except OSError as exc:
-            return AuthStepResult(name=self.name, step_index=index, command=cmd, succeeded=False, needs_user_action=False, error=f"failed to start auth: {exc}")
+        except (OSError, ValueError) as exc:
+            return AuthStepResult(
+                name=self.name, step_index=index, command=cmd,
+                succeeded=False, needs_user_action=False,
+                error=f"failed to start auth: {exc}"
+            )
         _cleanup_stale_auth_proc(self.name)
         _PENDING_AUTH_PROCS[self.name] = proc
         url: str | None = None
@@ -437,7 +503,11 @@ class CliDriver:
                     break
                 time.sleep(0.2)
         out = "".join(chunks)
-        return AuthStepResult(name=self.name, step_index=index, command=cmd, succeeded=True, needs_user_action=True, auth_url=url, auth_domain=domain, output=out)
+        return AuthStepResult(
+            name=self.name, step_index=index, command=cmd,
+            succeeded=True, needs_user_action=True,
+            auth_url=url, auth_domain=domain, output=out
+        )
 
     def auth_proc_done(self) -> bool | None:
         """True if the pending auth proc exited, False if still running, None if none."""
@@ -469,7 +539,10 @@ class CliDriver:
                 authenticated = _re.search(m.status_match_str, out) is not None
             except _re.error:
                 authenticated = m.status_match_str in out
-            return StatusResult(name=self.name, authenticated=authenticated, matched={"substring": m.status_match_str}, output=out)
+            return StatusResult(
+                name=self.name, authenticated=authenticated,
+                matched={"substring": m.status_match_str}, output=out
+            )
         matched: dict[str, str] = {}
         authenticated = True
         if m.status_match:
@@ -500,6 +573,7 @@ class CliDriver:
                     # status JSON often has native booleans (authenticated:
                     # true). Normalize: compare lowercased string forms, and
                     # treat True/False as "true"/"false".
+
                     def _norm(v: Any) -> str:
                         if isinstance(v, bool):
                             return "true" if v else "false"

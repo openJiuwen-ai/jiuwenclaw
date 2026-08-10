@@ -1,4 +1,4 @@
-﻿# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """Tests for mcp.* handlers in AgentWebSocketServer.
 
@@ -580,7 +580,7 @@ class TestHandleMcpEnableDisable:
             "jiuwenswarm.server.runtime.mcp.registry.enable_mcp",
             return_value={"name": "github", "enabled": True},
         ), patch(
-            "jiuwenswarm.server.runtime.mcp.registry.get_mcp_server_config",
+            "jiuwenswarm.server.agent_ws_server.get_mcp_server_config",
             return_value={"name": "github", "enabled": False},
         ), patch(
             "jiuwenswarm.server.agent_ws_server.get_config",
@@ -609,7 +609,7 @@ class TestHandleMcpEnableDisable:
             "jiuwenswarm.server.runtime.mcp.registry.disable_mcp",
             return_value={"name": "github", "enabled": False},
         ), patch(
-            "jiuwenswarm.server.runtime.mcp.registry.get_mcp_server_config",
+            "jiuwenswarm.server.agent_ws_server.get_mcp_server_config",
             return_value={"name": "github", "enabled": False},
         ):
             await server._handle_mcp_disable(ws, request, asyncio.Lock())

@@ -1827,9 +1827,11 @@ class AgentWebSocketServer:
                 request.request_id,
                 e,
             )
-            await self._send_error_response(
-                ws, send_lock, request, str(e),
+            wire = AgentWebSocketServer._send_error_response(
+                ws, request, send_lock, str(e),
             )
+            async with send_lock:
+                await send_wire_payload(ws, wire)
         except BaseException as e:
             # Last-resort net for BaseExceptionGroup escapes. A
             # BaseExceptionGroup is only an Exception subclass when *every*
@@ -1850,6 +1852,10 @@ class AgentWebSocketServer:
             try:
                 reraise_as_exception(e)
             except KeyboardInterrupt:
+                logger.exception(
+                    "[AgentWebSocketServer] 处理请求失败(KeyboardInterrupt): request_id=%s",
+                    request.request_id
+                )
                 raise
             except Exception as coerced:
                 logger.exception(
@@ -1857,42 +1863,11 @@ class AgentWebSocketServer:
                     request.request_id,
                     coerced,
                 )
-                await self._send_error_response(
-                    ws, send_lock, request, str(coerced),
+                wire = AgentWebSocketServer._send_error_response(
+                    ws, request, send_lock, str(coerced),
                 )
-
-    async def _send_error_response(
-        self, ws: Any, send_lock: asyncio.Lock, request: AgentRequest, message: str,
-    ) -> None:
-        """Send an ok=False res frame for a failed request. Used by the
-        dispatch top-level except blocks so the error-response shape and
-        send-lock handling stay consistent."""
-        error_resp = AgentResponse(
-            request_id=request.request_id,
-            channel_id=request.channel_id,
-            ok=False,
-            payload={"error": message},
-        )
-        wire = encode_agent_response_for_wire(
-            error_resp, response_id=request.request_id
-        )
-        try:
-            async with send_lock:
-                await send_wire_payload(ws, wire)
-        except WebSocketConnectionClosed as send_exc:
-            logger.info(
-                "[AgentWebSocketServer] WebSocket 已关闭，错误响应未发送: %s",
-                format_ws_diagnostics(
-                    {
-                        "request_id": request.request_id,
-                        "channel_id": request.channel_id,
-                        "session_id": request.session_id,
-                        "is_stream": request.is_stream,
-                    },
-                    describe_ws_peer(ws),
-                    describe_ws_exception(send_exc),
-                ),
-            )
+                async with send_lock:
+                    await send_wire_payload(ws, wire)
 
     @staticmethod
     def _should_trigger_before_chat_request_hook(request: AgentRequest) -> bool:
@@ -6360,6 +6335,9 @@ class AgentWebSocketServer:
                 # disconnect) — propagate it so the request unwinds cleanly
                 # instead of dragging through clear/refresh and sending a
                 # response to a dead socket.
+                logger.warning(
+                    "[mcp] apply_mcp_change after disconnect CancelledError for '%s'", name
+                )
                 raise
             except Exception as reload_exc:  # noqa: BLE001
                 applied = False
@@ -6717,6 +6695,7 @@ class AgentWebSocketServer:
                     error_message = "MCP unregister timed out (state deleted; server will clear on next reload)"
                     logger.warning("[mcp] apply_mcp_change after delete timed out for '%s'", name)
                 except asyncio.CancelledError:
+                    logger.warning("[mcp] apply_mcp_change after delete CancelledError for '%s'", name)
                     raise  # outer ws-disconnect — don't reply to a dead socket
                 except Exception as reload_exc:  # noqa: BLE001
                     applied = False
@@ -6833,7 +6812,6 @@ class AgentWebSocketServer:
             from jiuwenswarm.server.runtime.mcp.registry import (
                 enable_mcp,
                 disable_mcp,
-                get_mcp_server_config,
             )
             params = request.params or {}
             name = str(params.get("name", "")).strip()

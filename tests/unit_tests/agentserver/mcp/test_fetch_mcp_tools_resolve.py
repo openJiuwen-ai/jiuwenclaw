@@ -1,4 +1,4 @@
-﻿# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """Tests: _fetch_mcp_tools_from_config resolves ${VAR} placeholders.
 

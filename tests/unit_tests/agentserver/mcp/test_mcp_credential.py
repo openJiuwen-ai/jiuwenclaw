@@ -1,4 +1,4 @@
-﻿# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """Tests for the credential layer: kind detection + ${VAR} resolution + store.
 

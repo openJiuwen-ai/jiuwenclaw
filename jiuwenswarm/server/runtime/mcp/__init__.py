@@ -1,7 +1,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """MCP runtime package: marketplace registry, CLI driver,
-credential store, skill installer, connection state store."""
+credential store, skill installer, connection state store.
+"""
 
 from jiuwenswarm.server.runtime.mcp.registry import (
     build_config_entry,
