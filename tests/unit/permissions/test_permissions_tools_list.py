@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from jiuwenclaw.agentserver.permissions.config_rpc import dispatch_permissions_config_request
+from jiuwenclaw.agentserver.tool_catalog import get_stable_tools_catalog
 from jiuwenclaw.config import (
     build_permissions_tools_list_view,
     get_permissions_defaults_level,
@@ -34,6 +35,14 @@ def test_get_permissions_defaults_level(monkeypatch: pytest.MonkeyPatch) -> None
         lambda: {"permissions": {"defaults": "guard"}},
     )
     assert get_permissions_defaults_level() == "ask"
+
+
+def test_stable_tools_catalog_includes_builtin_and_team_tools() -> None:
+    catalog = get_stable_tools_catalog("en")
+
+    assert catalog["bash"]["description"]
+    assert catalog["spawn_external_cli"]["description"]
+    assert catalog["async_task_cancel"]["description"]
 
 
 def test_build_permissions_tools_list_view_merges_catalog_and_config(
@@ -87,7 +96,38 @@ def test_build_permissions_tools_list_view_merges_catalog_and_config(
     assert by_name["manual_only"]["registered"] is False
 
 
-def test_build_permissions_tools_list_view_strips_placeholder_short_description(
+def test_build_permissions_tools_list_view_uses_stable_catalog_only_for_descriptions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "jiuwenclaw.config.get_config",
+        lambda: {
+            "preferred_language": "en",
+            "permissions": {
+                "defaults": "ask",
+                "tools": {"manual_only": "deny"},
+            },
+        },
+    )
+
+    payload = build_permissions_tools_list_view(
+        {
+            "bash": {
+                "name": "bash",
+                "description": "Runtime bash description.",
+            }
+        }
+    )
+
+    by_name = {item["name"]: item for item in payload["tools"]}
+    assert by_name["bash"]["short_description"] == "Runtime bash description."
+    assert by_name["bash"]["registered"] is True
+    assert by_name["manual_only"]["level"] == "deny"
+    assert by_name["manual_only"]["registered"] is False
+    assert set(by_name) == {"bash", "manual_only"}
+
+
+def test_build_permissions_tools_list_view_falls_back_from_runtime_placeholder(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -103,7 +143,9 @@ def test_build_permissions_tools_list_view_strips_placeholder_short_description(
             }
         }
     )
-    assert payload["tools"][0]["short_description"] == ""
+    by_name = {item["name"]: item for item in payload["tools"]}
+    assert by_name["bash"]["short_description"]
+    assert "暂无简短说明" not in by_name["bash"]["short_description"]
 
 
 def test_permissions_tools_list_rpc(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -130,6 +172,40 @@ def test_permissions_tools_list_rpc(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert resp.ok is True
     assert resp.payload["default_level"] == "ask"
-    assert resp.payload["tools"][0]["name"] == "bash"
-    assert resp.payload["tools"][0]["level"] == "allow"
-    assert resp.payload["tools"][0]["configured"] is True
+    by_name = {item["name"]: item for item in resp.payload["tools"]}
+    assert by_name["bash"]["level"] == "allow"
+    assert by_name["bash"]["configured"] is True
+
+
+def test_permissions_tools_list_rpc_includes_configured_tools_without_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "jiuwenclaw.config.get_config",
+        lambda: {
+            "preferred_language": "en",
+            "permissions": {
+                "defaults": "ask",
+                "tools": {"bash": "deny", "spawn_external_cli": "allow"},
+            },
+        },
+    )
+    request = AgentRequest(
+        request_id="cold-start",
+        channel_id="web",
+        session_id="default",
+        req_method=ReqMethod.PERMISSIONS_TOOLS_LIST,
+        params={},
+    )
+
+    resp = dispatch_permissions_config_request(request)
+
+    assert resp.ok is True
+    by_name = {item["name"]: item for item in resp.payload["tools"]}
+    assert set(by_name) == {"bash", "spawn_external_cli"}
+    assert by_name["bash"]["registered"] is False
+    assert by_name["bash"]["short_description"]
+    assert by_name["bash"]["level"] == "deny"
+    assert by_name["spawn_external_cli"]["registered"] is False
+    assert by_name["spawn_external_cli"]["short_description"]
+    assert by_name["spawn_external_cli"]["level"] == "allow"

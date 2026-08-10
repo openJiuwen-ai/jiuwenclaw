@@ -318,6 +318,17 @@ async def _detect_resume_from_pause(
                 session_id,
                 exc_info=True,
             )
+    has_paused = getattr(team_manager, 'has_paused_runtime', None)
+    if callable(has_paused):
+        try:
+            return bool(await has_paused(session_id))
+        except Exception:
+            logger.debug(
+                '[TeamHelpers] has_paused_runtime failed session_id=%s',
+                session_id,
+                exc_info=True,
+            )
+            return False
     return await _session_has_resumable_runtime(team_manager, session_id)
 
 
@@ -679,6 +690,21 @@ async def query_team_human_members_for_join(session_id: str, team_name: str) -> 
     return members or []
 
 
+async def _current_pool_team_agent(team_name: str) -> Any | None:
+    """Return the TeamAgent currently held by Runner's pool for team_name (None-safe)."""
+    try:
+        from openjiuwen.core.runner.runner import GLOBAL_RUNNER
+
+        from jiuwenclaw.agentserver.team.team_manager import _runner_team_runtime_manager
+
+        runtime_mgr = _runner_team_runtime_manager(GLOBAL_RUNNER)
+        active_team = await runtime_mgr.pool.get(team_name)
+        return getattr(active_team, 'agent', None) if active_team is not None else None
+    except Exception:
+        logger.debug('[TeamHelpers] resolve pool team agent failed: team_name=%s', team_name, exc_info=True)
+        return None
+
+
 async def ensure_monitor_handlers_for_active_runtime(
         channel_id: str | None,
         session_id: str,
@@ -692,6 +718,31 @@ async def ensure_monitor_handlers_for_active_runtime(
     """
     tm = get_team_manager(channel_id)
     existing_monitor = tm.get_monitor(session_id)
+    if existing_monitor is not None and existing_monitor.is_running:
+        # Pool CREATE may replace TeamAgent while the existing monitor still
+        # listens on the old instance; rebind when the bound agent differs.
+        bound_agent = getattr(getattr(existing_monitor, '_monitor', None), '_team_agent', None)
+        current_agent = await _current_pool_team_agent(team_name)
+        if (
+            bound_agent is not None
+            and current_agent is not None
+            and bound_agent is not current_agent
+        ):
+            logger.info(
+                '[TeamHelpers] monitor bound to a replaced TeamAgent; rebinding: '
+                'channel_id=%s session_id=%s team_name=%s',
+                _resolve_channel_id(channel_id),
+                session_id,
+                team_name)
+            try:
+                await existing_monitor.stop()
+            except Exception:
+                logger.debug(
+                    '[TeamHelpers] stale monitor stop failed: session_id=%s',
+                    session_id,
+                    exc_info=True)
+            tm.pop_monitor(session_id)
+            existing_monitor = None
     if existing_monitor is None or not existing_monitor.is_running:
         token = set_session_id(session_id)
         try:
@@ -1073,6 +1124,88 @@ def _truncate_team_tool_result_event(parsed: dict[str, Any]) -> dict[str, Any]:
     return next_event
 
 
+# Round-idle member statuses aligned with openjiuwen MEMBER_SETTLED_STATUSES;
+# task terminals aligned with TASK_TERMINAL_STATUSES.
+_TEAM_MEMBER_SETTLED_STATUSES = frozenset({'ready', 'paused', 'stopped', 'shut_down'})
+_TEAM_TASK_TERMINAL_STATUSES = frozenset({'completed', 'cancelled'})
+# Members registered by build_team but never spawned stay ``unstarted`` and
+# cannot have in-flight work. Pending start is covered by open tasks / unread
+# messages, so unstarted is exempted here and not folded into settled
+# (openjiuwen excludes UNSTARTED for spawn-race reasons; do not change that).
+_TEAM_MEMBER_UNSTARTED_STATUS = 'unstarted'
+
+
+async def _team_has_unread_messages(session_id: str, handler: Any) -> bool:
+    """Return True when the team DB reports unread messages for this session.
+
+    When the leader dispatches via ``send_message`` without creating tasks,
+    unread mail means a member is about to start — the round must not settle.
+
+    If monitor/backend is unavailable (direct-answer round with no team DB),
+    treat as no unread mail. Semantics match openjiuwen ``is_team_completed``
+    unread/broadcast watermark checks.
+    """
+    monitor = getattr(handler, '_monitor', None)
+    team_agent = getattr(monitor, '_team_agent', None)
+    backend = getattr(team_agent, 'team_backend', None) if team_agent is not None else None
+    if backend is None:
+        return False
+    message_manager = getattr(backend, 'message_manager', None)
+    if message_manager is None:
+        return False
+    token = set_session_id(session_id)
+    try:
+        return bool(await message_manager.has_unread_messages(include_broadcast=True))
+    finally:
+        reset_session_id(token)
+
+
+async def _team_round_settled(channel_id: str | None, session_id: str) -> bool:
+    """Return True when all members are settled and all tasks are terminal (or none).
+
+    Uses the monitor DB snapshot (not the event listener chain). Missing monitor,
+    bad snapshot, or query errors return False so we do not finish early.
+    Used on leader ``chat.final`` to decide whether to close the consume loop.
+    """
+    try:
+        team_manager = get_team_manager(channel_id)
+        handler = team_manager.get_monitor_handler(session_id)
+        if handler is None:
+            return False
+        snapshot = await handler.get_team_snapshot()
+        if not isinstance(snapshot, dict):
+            return False
+        for member in snapshot.get('members') or []:
+            status = str(member.get('status') or '').strip().lower() if isinstance(member, dict) else ''
+            if status in _TEAM_MEMBER_SETTLED_STATUSES:
+                continue
+            if status == _TEAM_MEMBER_UNSTARTED_STATUS:
+                continue
+            return False
+        for task in snapshot.get('tasks') or []:
+            status = str(task.get('status') or '').strip().lower() if isinstance(task, dict) else ''
+            if status not in _TEAM_TASK_TERMINAL_STATUSES:
+                return False
+        if await _team_has_unread_messages(session_id, handler):
+            return False
+        # While swarmflow runs in the leader process the board may be empty and
+        # members unspawned; do not finish while any workflow run is active.
+        get_wf_handler = getattr(team_manager, 'get_workflow_handler', None)
+        wf_handler = get_wf_handler(session_id) if callable(get_wf_handler) else None
+        if wf_handler is not None:
+            get_run_states = getattr(wf_handler, 'get_run_states', None)
+            runs = get_run_states() if callable(get_run_states) else {}
+            if any(not run.is_terminal() for run in runs.values()):
+                return False
+        return True
+    except Exception:
+        logger.debug(
+            '[TeamHelpers] team settled check failed: session_id=%s',
+            session_id,
+            exc_info=True)
+        return False
+
+
 def _tool_event_name(parsed: dict[str, Any]) -> str:
     """Best-effort tool name from chat.tool_call / tool_result / tool_update."""
     event_type = str(parsed.get('event_type') or '').strip()
@@ -1316,6 +1449,11 @@ async def process_team_message_stream(request: Any,
                 exc_info=True,
             )
     params = request.params if isinstance(getattr(request, 'params', None), dict) else {}
+    from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+    is_control_continuation = (
+        isinstance(query, InteractiveInput)
+        and params.get('source') in ('permission_interrupt', 'ask_user_interrupt')
+    )
     raw_interactive = params.get('interactive_ask', params.get('interactiveAsk'))
     interactive_ask = bool(raw_interactive) if raw_interactive is not None else False
     try:
@@ -1341,7 +1479,6 @@ async def process_team_message_stream(request: Any,
         force_resume_stream=force_resume_stream,
     )
     if is_first_request:
-        from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
         # Hard protocol: paused pool + string continue → RESUME stream only.
         # Skip soft first-request prep that looks like a new debate cold start.
         if resume_from_pause and not isinstance(query, InteractiveInput):
@@ -1560,11 +1697,44 @@ async def process_team_message_stream(request: Any,
                         )
                         yield AgentResponseChunk(request_id=rid, channel_id=channel_id, payload=None, is_complete=True)
                         return
+            if (
+                not is_first_request
+                and is_control_continuation
+                and team_manager.has_waiters(session_id)
+            ):
+                logger.info(
+                    '[TeamHelpers] control continuation submitted to existing waiter: '
+                    'channel_id=%s session_id=%s request_id=%s source=%s',
+                    _resolve_channel_id(channel_id),
+                    session_id,
+                    rid,
+                    params.get('source'),
+                )
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=channel_id,
+                    payload={
+                        'event_type': 'chat.processing_status_deferred',
+                        'session_id': session_id,
+                    },
+                    is_complete=False,
+                )
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=channel_id,
+                    payload=None,
+                    is_complete=True,
+                )
+                return
             # follow-up：注册自己的 waiter（当前 rid）+ 等待本轮 team 事件 +
             # yield（带 rid）+ remove_waiter。
             # 原实现只 yield deferred+done，依赖第 1 条 long-lived waiter + Gateway
             # fan_out；relay 直连 sidecar（无 fan_out）→ 第 2 轮事件带旧 rid 被丢。
             if not is_first_request:
+                # New logical round: clear prior-round flags so this turn's
+                # finish heuristics are evaluated independently.
+                team_manager.reset_seen_team_events(session_id)
+                team_manager.reset_workflow_completed(session_id)
                 request_queue = asyncio.Queue()
                 team_manager.add_waiter(session_id, rid, request_queue)
                 logger.info(
@@ -1819,6 +1989,7 @@ async def _consume_stream_with_query_impl(
         "input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "cache_tokens": 0,
         "input_cost": 0.0, "output_cost": 0.0, "total_cost": 0.0,
     }
+    team_stream: Any = None
     tm_ = get_team_manager(channel_id)
     tm_.reset_seen_team_events(session_id)
     tm_.reset_workflow_completed(session_id)
@@ -1838,13 +2009,14 @@ async def _consume_stream_with_query_impl(
             traces_dir = get_agent_teams_home() / 'traces'
             traces_dir.mkdir(parents=True, exist_ok=True)
             lg = TeamStreamLogger(file_path=str(traces_dir / f'dump-team-{session_id}.txt'))
-        async for chunk in Runner.run_agent_team_streaming(
+        team_stream = Runner.run_agent_team_streaming(
             agent_team=team_spec,
             inputs={'query': initial_query},
             session=session_id,
             envs=envs,
             stream_logger=lg,
-        ):
+        )
+        async for chunk in team_stream:
             received_chunks += 1
             if received_chunks == 1 or received_chunks % 30 == 0:
                 _role = getattr(chunk, 'role', None)
@@ -2002,6 +2174,17 @@ async def _consume_stream_with_query_impl(
                                           'rid': round_id,
                                           'is_processing': False,
                                           'is_complete': True})
+                    if is_leader and await _team_round_settled(channel_id, session_id):
+                        # Team is idle (settled members + terminal/empty tasks):
+                        # close the consume loop and let finally run normal
+                        # teardown. Snapshot-based, so it does not depend on
+                        # has_seen_team_events.
+                        logger.info(
+                            '[TeamHelpers] leader final with settled team; finish round '
+                            'and close stream: channel_id=%s session_id=%s',
+                            _resolve_channel_id(channel_id),
+                            session_id)
+                        break
                     continue
                 _broadcast_event(channel_id, session_id, parsed)
         # 流结束：广播 chat.usage_summary（与 plan 模式一致），让 relayclaw 端写入 SessionChainStore
@@ -2042,6 +2225,19 @@ async def _consume_stream_with_query_impl(
         _broadcast_event(channel_id, session_id, {'event_type': 'team.error',
                          'error': str(exc), 'session_id': session_id})
     finally:
+        # Early break leaves the runner generator suspended on yield; aclose
+        # runs its finalize (persistent team auto-pause). No-op if already
+        # exhausted.
+        if team_stream is not None:
+            _stream_aclose = getattr(team_stream, 'aclose', None)
+            if callable(_stream_aclose):
+                try:
+                    await _stream_aclose()
+                except Exception:
+                    logger.debug(
+                        '[TeamHelpers] team stream aclose failed: session_id=%s',
+                        session_id,
+                        exc_info=True)
         if lg is not None:
             try:
                 lg.flush()

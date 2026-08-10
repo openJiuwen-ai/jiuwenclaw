@@ -12,6 +12,7 @@ import logging
 from typing import Any
 
 from openjiuwen.agent_teams.harness.manifest import ElementKind, harness_element
+from openjiuwen.core.runner.runner import Runner
 from openjiuwen.harness.manifest.builtin_elements import (
     AUDIO,
     VISION,
@@ -20,6 +21,10 @@ from openjiuwen.harness.manifest.builtin_elements import (
     WEB_SEARCH,
 )
 
+from jiuwenclaw.agentserver.tools.harness_named_web_tools import (
+    JiuwenHarnessFetchWebpageTool,
+    JiuwenHarnessWebSearchTool,
+)
 from jiuwenclaw.agentserver.tools.multimodal_config import (
     apply_audio_model_config_from_yaml,
     apply_video_model_config_from_yaml,
@@ -31,6 +36,8 @@ from jiuwenclaw.local_env_config import read_env
 logger = logging.getLogger(__name__)
 
 PLATFORM_CATALOG_TOOLS = "swarm.platform_catalog_tools"
+JIUWEN_WEB_FETCH = "swarm.web_fetch"
+JIUWEN_WEB_SEARCH = "swarm.web_search"
 
 # Re-export core names for config_specs.
 CORE_WEB_SEARCH = WEB_SEARCH
@@ -38,6 +45,18 @@ CORE_WEB_FETCH = WEB_FETCH
 CORE_WEB_PAID_SEARCH = WEB_PAID_SEARCH
 CORE_VISION = VISION
 CORE_AUDIO = AUDIO
+
+
+def _reuse_registered_tool(candidate: Any) -> Any:
+    existing = Runner.resource_mgr.get_tool(candidate.card.id)
+    if existing is None:
+        return candidate
+    if type(existing) is not type(candidate) or existing.card.name != candidate.card.name:
+        raise ValueError(
+            "Registered tool is incompatible with catalog tool: "
+            f"tool_id='{candidate.card.id}', tool_name='{candidate.card.name}'"
+        )
+    return existing
 
 
 def _parse_int(raw: Any, default: int) -> int:
@@ -157,9 +176,11 @@ def _build_platform_catalog_tools(params: dict[str, Any], context: Any) -> list[
                 create_session_text_to_image_tool,
             )
 
-            tools.append(create_session_text_to_image_tool(agent_id or "team_member"))
+            image_tool = create_session_text_to_image_tool(agent_id or "team_member")
         except Exception as exc:
             logger.warning("[swarm.catalog_tools] image_gen failed: %s", exc)
+        else:
+            tools.append(_reuse_registered_tool(image_tool))
 
     if p.get("enable_deepresearch", True):
         try:
@@ -179,8 +200,57 @@ def _build_platform_catalog_tools(params: dict[str, Any], context: Any) -> list[
     return tools
 
 
+@harness_element(
+    kind=ElementKind.TOOL,
+    name=JIUWEN_WEB_FETCH,
+    description="JiuwenClaw web page fetch.",
+)
+def _build_jiuwen_web_fetch(params: dict[str, Any], context: Any) -> list[Any]:
+    agent_id = str(
+        getattr(context, "member_card_id", None)
+        or getattr(context, "member_name", None)
+        or ""
+    ).strip() or None
+    lang = str(getattr(context, "language", None) or "cn")
+    return [
+        _reuse_registered_tool(
+            JiuwenHarnessFetchWebpageTool(language=lang, agent_id=agent_id)
+        )
+    ]
+
+
+@harness_element(
+    kind=ElementKind.TOOL,
+    name=JIUWEN_WEB_SEARCH,
+    description="JiuwenClaw unified web search (paid chain includes petal).",
+)
+def _build_jiuwen_web_search(params: dict[str, Any], context: Any) -> list[Any]:
+    """Build jiuwenclaw web_search tool (paid chain: petal → bocha → …).
+
+    Replaces ``core.web_search`` (openjiuwen WebFreeSearchTool, no petal) so
+    team members use the same search path as plan-mode agents.
+    """
+    agent_id = str(
+        getattr(context, "member_card_id", None)
+        or getattr(context, "member_name", None)
+        or ""
+    ).strip() or None
+    lang = str(getattr(context, "language", None) or "cn")
+    tool = _reuse_registered_tool(
+        JiuwenHarnessWebSearchTool(language=lang, agent_id=agent_id)
+    )
+    logger.info(
+        "[swarm.catalog_tools] built jiuwen_web_search agent_id=%s lang=%s",
+        agent_id,
+        lang,
+    )
+    return [tool]
+
+
 __all__ = [
     "PLATFORM_CATALOG_TOOLS",
+    "JIUWEN_WEB_FETCH",
+    "JIUWEN_WEB_SEARCH",
     "CORE_WEB_SEARCH",
     "CORE_WEB_FETCH",
     "CORE_WEB_PAID_SEARCH",

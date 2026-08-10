@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
+from importlib import import_module
 from typing import Any, Iterable
 
 from openjiuwen.core.foundation.tool import ToolCard
@@ -22,6 +23,7 @@ _FALLBACK_UNKNOWN_TEMPLATE = "工具「{name}」（暂无简短说明）"
 __all__ = [
     "collect_tools_catalog_from_claws",
     "get_registered_tools_catalog",
+    "get_stable_tools_catalog",
     "is_placeholder_short_description",
     "merge_tools_catalog_entries",
     "resolve_short_description",
@@ -29,6 +31,83 @@ __all__ = [
     "tool_catalog_entry_from_card",
     "ui_list_short_description",
 ]
+
+
+def _metadata_entries_to_catalog(entries: Iterable[dict[str, str]]) -> list[dict[str, str]]:
+    catalog: list[dict[str, str]] = []
+    for item in entries or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "") or "").strip()
+        if not name:
+            continue
+        description = str(item.get("description", "") or "")
+        catalog.append(
+            {
+                "name": name,
+                "description": description,
+                "short_description": resolve_short_description(name, description),
+            }
+        )
+    return catalog
+
+
+def _list_upstream_tool_metadata(module_name: str, language: str) -> list[dict[str, str]]:
+    module = import_module(module_name)
+    list_metadata = getattr(module, "list_tool_metadata", None)
+    if callable(list_metadata):
+        return list_metadata(language)
+
+    # Compatibility with agent-core revisions before list_tool_metadata was public.
+    registry = getattr(module, "_REGISTRY", None)
+    if not isinstance(registry, dict):
+        raise RuntimeError(f"{module_name} does not expose tool metadata")
+    return [
+        {"name": name, "description": registry[name].get_description(language)}
+        for name in sorted(registry)
+    ]
+
+
+def get_stable_tools_catalog(language: str = "cn") -> dict[str, dict[str, str]]:
+    """Return built-in and Agent Team tool metadata without creating a runtime."""
+    catalogs: list[list[dict[str, str]]] = []
+
+    try:
+        entries = _list_upstream_tool_metadata("openjiuwen.harness.prompts.tools", language)
+        catalogs.append(_metadata_entries_to_catalog(entries))
+    except Exception:
+        logger.exception("[tool_catalog] failed to load built-in tool metadata")
+
+    try:
+        entries = _list_upstream_tool_metadata("openjiuwen.harness.prompts.sections.tools", language)
+        catalogs.append(_metadata_entries_to_catalog(entries))
+    except Exception:
+        logger.exception("[tool_catalog] failed to load legacy built-in tool metadata")
+
+    try:
+        from openjiuwen.agent_teams.tools.locales import make_translator
+        from openjiuwen.agent_teams.tools.tool_permissions import (
+            HUMAN_AGENT_TOOLS,
+            LEADER_TOOLS,
+            MEMBER_TOOLS_BY_DISPATCH,
+        )
+
+        team_names = set(LEADER_TOOLS) | set(HUMAN_AGENT_TOOLS)
+        for member_tools in MEMBER_TOOLS_BY_DISPATCH.values():
+            team_names.update(member_tools)
+        translator = make_translator(language)
+        team_entries = []
+        for name in sorted(team_names):
+            try:
+                description = str(translator(name))
+            except (FileNotFoundError, KeyError):
+                description = ""
+            team_entries.append({"name": name, "description": description})
+        catalogs.append(_metadata_entries_to_catalog(team_entries))
+    except Exception:
+        logger.exception("[tool_catalog] failed to load Agent Team tool metadata")
+
+    return merge_tools_catalog_entries(catalogs)
 
 
 def _is_sentence_terminal(index: int, char: str, text: str) -> bool:
