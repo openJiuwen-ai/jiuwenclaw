@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from openjiuwen.core.single_agent import AgentCard
+from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.rails.coding_memory_rail import CodingMemoryRail
 from openjiuwen.harness.rails.lsp_rail import LspRail
+from openjiuwen.harness.rails.task_planning_rail import TaskPlanningRail
 
 from jiuwenclaw.agentserver.deep_agent.interface_deep import (
     JiuWenClawDeepAdapter,
+    _AgentInitContext,
 )
 from jiuwenclaw.agentserver.deep_agent.rails.project_memory_rail import (
     ProjectMemoryRail,
@@ -42,6 +47,7 @@ def _adapter() -> JiuWenClawDeepAdapter:
     adapter._lsp_rail = None
     adapter._project_memory_rail = None
     adapter._coding_memory_rail = None
+    adapter._task_planning_rail = None
     adapter._instance_overrides = {}
     adapter._workspace_dir = "."
     adapter._resolve_runtime_language = MagicMock(return_value="cn")
@@ -55,9 +61,10 @@ async def test_switching_to_code_registers_code_rails(monkeypatch) -> None:
     project = _rail("ProjectMemoryRail")
     coding = _rail("CodingMemoryRail")
     mode = _rail("CodeAgentModeRail")
+    task_planning = TaskPlanningRail()
     monkeypatch.setattr(
         "jiuwenclaw.agentserver.deep_agent.interface_deep.build_code_mode_extra_rails",
-        MagicMock(return_value=[project, coding, mode]),
+        MagicMock(return_value=[project, coding, task_planning, mode]),
     )
 
     await adapter._register_code_mode_rails()
@@ -65,7 +72,8 @@ async def test_switching_to_code_registers_code_rails(monkeypatch) -> None:
     assert adapter._code_mode_rails_active is True
     assert adapter._project_memory_rail is project
     assert adapter._coding_memory_rail is coding
-    assert adapter._instance.register_rail.await_count == 4
+    assert adapter._task_planning_rail is task_planning
+    assert adapter._instance.register_rail.await_count == 5
 
 
 @pytest.mark.asyncio
@@ -107,6 +115,103 @@ async def test_leaving_code_unregisters_code_rails() -> None:
     assert adapter._code_mode_rails == []
     assert adapter._lsp_rail is None
     assert adapter._instance.unregister_rail.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_code_unregistration_failure_rolls_back_previous_state() -> None:
+    adapter = _adapter()
+    project = _rail("ProjectMemoryRail")
+    coding = _rail("CodingMemoryRail")
+    mode = _rail("CodeAgentModeRail")
+    adapter._project_memory_rail = project
+    adapter._coding_memory_rail = coding
+    adapter._code_mode_rails = [project, coding, mode]
+    adapter._code_mode_rails_active = True
+
+    async def unregister(rail) -> None:
+        if rail is mode:
+            raise RuntimeError("unregister failed")
+
+    adapter._instance.unregister_rail = AsyncMock(side_effect=unregister)
+
+    result = await adapter._unregister_code_mode_rails()
+
+    assert result is False
+    assert adapter._code_mode_rails == [project, coding, mode]
+    assert adapter._code_mode_rails_active is True
+    assert adapter._project_memory_rail is project
+    assert adapter._coding_memory_rail is coding
+    assert adapter._instance.register_rail.await_args_list[0].args == (coding,)
+    assert adapter._instance.register_rail.await_args_list[1].args == (project,)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["code.plan", "code.normal"])
+async def test_code_submode_keeps_code_rails_registered(mode: str) -> None:
+    adapter = _adapter()
+    adapter._code_mode_rails_active = True
+    adapter._register_code_mode_rails = AsyncMock()
+    adapter._unregister_code_mode_rails = AsyncMock()
+    adapter._update_plan_mode_rails = AsyncMock()
+    adapter._update_agent_mode_rails = AsyncMock()
+
+    await adapter._update_rails_for_mode(mode)
+
+    adapter._register_code_mode_rails.assert_awaited_once()
+    adapter._unregister_code_mode_rails.assert_not_awaited()
+    adapter._update_plan_mode_rails.assert_not_awaited()
+    adapter._update_agent_mode_rails.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_code_submode_is_forwarded_to_code_mode_rail() -> None:
+    adapter = _adapter()
+    code_mode_rail = MagicMock()
+    adapter._code_mode_rails = [code_mode_rail]
+    adapter._code_mode_rails_active = True
+    adapter._register_code_mode_rails = AsyncMock()
+
+    await adapter._update_rails_for_mode("code.plan", session_id="session-1")
+
+    code_mode_rail.set_requested_mode.assert_called_once_with(
+        "code.plan",
+        session_id="session-1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_incomplete_code_cleanup_does_not_enter_agent_mode() -> None:
+    adapter = _adapter()
+    adapter._unregister_code_mode_rails = AsyncMock(return_value=False)
+    adapter._update_agent_mode_rails = AsyncMock()
+
+    await adapter._update_rails_for_mode("agent.fast")
+
+    adapter._update_agent_mode_rails.assert_not_awaited()
+
+
+def test_task_planning_rail_exposes_todo_tools_on_real_deep_agent(tmp_path: Path) -> None:
+    agent = DeepAgent(card=AgentCard(name="code-test", id="code-test"))
+    workspace = MagicMock()
+    workspace.get_node_path.return_value = str(tmp_path / "todo")
+    agent._deep_config = SimpleNamespace(
+        sys_operation=MagicMock(),
+        workspace=workspace,
+    )
+    agent.system_prompt_builder = SimpleNamespace(
+        language="cn",
+        add_section=MagicMock(),
+        remove_section=MagicMock(),
+    )
+    rail = TaskPlanningRail()
+
+    rail.init(agent)
+    names = {getattr(tool, "name", "") for tool in agent.ability_manager.list()}
+
+    try:
+        assert {"todo_create", "todo_list", "todo_modify"} <= names
+    finally:
+        rail.uninit(agent)
 
 
 @pytest.mark.asyncio
@@ -350,6 +455,105 @@ def test_configured_code_agent_reuses_main_coding_memory(monkeypatch) -> None:
 
     assert result
     assert captured["rails"][1] is shared
+
+
+def _agent_init_adapter() -> JiuWenClawDeepAdapter:
+    """Adapter double for `_init_agent_instance_sync`, stubbing every collaborator
+    except the mode-based create_code_agent / create_deep_agent selection under test.
+    """
+    adapter = object.__new__(JiuWenClawDeepAdapter)
+    adapter._sync_registered_skill_dirs_snapshot = MagicMock()
+    adapter._build_agent_rails = MagicMock(return_value=[])
+    adapter._create_sys_operation = MagicMock(return_value=MagicMock())
+    adapter._sandbox_config_fingerprint = MagicMock(return_value="fp")
+    adapter._build_configured_subagents = MagicMock(return_value=[])
+    adapter._resolve_prompt_language = MagicMock(return_value="cn")
+    adapter._is_acp_tool_profile = MagicMock(return_value=False)
+    adapter._resolve_prompt_channel = MagicMock(return_value="default")
+    adapter._resolve_runtime_language = MagicMock(return_value="cn")
+    adapter._instance_overrides = {}
+    adapter._workspace_dir = "."
+    adapter._vision_model_config = None
+    adapter._audio_model_config = None
+    return adapter
+
+
+@pytest.mark.parametrize("mode", ["code.plan", "code.normal", "code"])
+def test_code_submode_cold_start_selects_code_agent(mode: str, monkeypatch) -> None:
+    """CR-001 regression: code.plan/code.normal must instantiate create_code_agent,
+    not create_deep_agent, even though rails were already normalized to 'code'.
+    """
+    adapter = _agent_init_adapter()
+    code_agent_result = object()
+    create_code_agent_mock = MagicMock(return_value=code_agent_result)
+    create_deep_agent_mock = MagicMock()
+    monkeypatch.setattr(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.create_code_agent",
+        create_code_agent_mock,
+    )
+    monkeypatch.setattr(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.create_deep_agent",
+        create_deep_agent_mock,
+    )
+    monkeypatch.setattr(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.build_identity_prompt",
+        MagicMock(return_value="prompt"),
+    )
+    monkeypatch.setattr(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep._agent_ras_kwargs_from_config",
+        MagicMock(return_value={}),
+    )
+    ctx = _AgentInitContext(
+        config={},
+        config_base={},
+        mode=mode,
+        model=MagicMock(),
+        agent_card=MagicMock(),
+        tool_cards=[],
+    )
+
+    adapter._init_agent_instance_sync(ctx)
+
+    create_code_agent_mock.assert_called_once()
+    create_deep_agent_mock.assert_not_called()
+    assert adapter._instance is code_agent_result
+
+
+def test_non_code_mode_cold_start_selects_deep_agent(monkeypatch) -> None:
+    adapter = _agent_init_adapter()
+    deep_agent_result = object()
+    create_code_agent_mock = MagicMock()
+    create_deep_agent_mock = MagicMock(return_value=deep_agent_result)
+    monkeypatch.setattr(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.create_code_agent",
+        create_code_agent_mock,
+    )
+    monkeypatch.setattr(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.create_deep_agent",
+        create_deep_agent_mock,
+    )
+    monkeypatch.setattr(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep.build_identity_prompt",
+        MagicMock(return_value="prompt"),
+    )
+    monkeypatch.setattr(
+        "jiuwenclaw.agentserver.deep_agent.interface_deep._agent_ras_kwargs_from_config",
+        MagicMock(return_value={}),
+    )
+    ctx = _AgentInitContext(
+        config={},
+        config_base={},
+        mode="agent.plan",
+        model=MagicMock(),
+        agent_card=MagicMock(),
+        tool_cards=[],
+    )
+
+    adapter._init_agent_instance_sync(ctx)
+
+    create_deep_agent_mock.assert_called_once()
+    create_code_agent_mock.assert_not_called()
+    assert adapter._instance is deep_agent_result
 
 
 def test_code_assembly_keeps_base_rails_and_excludes_code_rails_from_plan(

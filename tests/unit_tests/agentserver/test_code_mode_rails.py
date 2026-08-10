@@ -24,6 +24,42 @@ from jiuwenclaw.agentserver.deep_agent.rails.code.code_plan_approval_interrupt_r
 
 
 @pytest.mark.asyncio
+async def test_code_submode_syncs_session_plan_state_once_per_request() -> None:
+    rail = CodeAgentModeRail()
+    state = SimpleNamespace(plan_mode=SimpleNamespace(mode="auto"))
+    session = SimpleNamespace(get_session_id=lambda: "code-session")
+    agent = MagicMock()
+    agent.load_state.return_value = state
+
+    def switch_mode(_session, mode: str) -> None:
+        state.plan_mode.mode = mode
+
+    agent.switch_mode.side_effect = switch_mode
+    rail._agent = agent
+    parent = AsyncMock()
+    ctx = SimpleNamespace(
+        session=session,
+        inputs=SimpleNamespace(tools=[]),
+        extra={},
+    )
+
+    rail.set_requested_mode("code.plan", session_id="code-session")
+    with patch.object(CodeAgentModeRail.__bases__[0], "before_model_call", parent):
+        await rail.before_model_call(ctx)
+        await rail.before_model_call(ctx)
+
+    assert state.plan_mode.mode == "plan"
+    agent.switch_mode.assert_called_once_with(session, "plan")
+
+    rail.set_requested_mode("code.normal", session_id="code-session")
+    with patch.object(CodeAgentModeRail.__bases__[0], "before_model_call", parent):
+        await rail.before_model_call(ctx)
+
+    assert state.plan_mode.mode == "auto"
+    assert agent.switch_mode.call_args.args == (session, "auto")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("target_mode", ["normal", "auto"])
 async def test_code_mode_blocks_switch_mode_exit_in_plan(target_mode: str) -> None:
     rail = CodeAgentModeRail(allowed_tools=["switch_mode"])
@@ -277,6 +313,34 @@ async def test_plan_approval_rejects_exit_outside_plan_mode() -> None:
     decision = await rail.resolve_interrupt(ctx, tool_call, None)
 
     assert "plan mode" in str(decision.tool_result)
+
+
+@pytest.mark.asyncio
+async def test_plan_approval_reads_mode_from_initialized_deep_agent() -> None:
+    rail = PlanApprovalInterruptRail()
+    deep_agent = MagicMock()
+    deep_agent.load_state.return_value = SimpleNamespace(
+        plan_mode=SimpleNamespace(mode="plan")
+    )
+    deep_agent.system_prompt_builder = SimpleNamespace(language="en")
+    deep_agent.get_plan_file_path.return_value = None
+    callback_agent = MagicMock()
+    callback_agent.load_state.return_value = SimpleNamespace(
+        plan_mode=SimpleNamespace(mode="auto")
+    )
+    rail.init(deep_agent)
+    ctx = SimpleNamespace(
+        agent=callback_agent,
+        session=SimpleNamespace(),
+        extra={},
+    )
+    tool_call = SimpleNamespace(name="exit_plan_mode", arguments="{}")
+
+    decision = await rail.resolve_interrupt(ctx, tool_call, None)
+
+    assert decision.__class__.__name__ == "InterruptResult"
+    deep_agent.load_state.assert_called_once_with(ctx.session)
+    callback_agent.load_state.assert_not_called()
 
 
 @pytest.mark.asyncio

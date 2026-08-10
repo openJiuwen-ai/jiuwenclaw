@@ -43,11 +43,44 @@ class CodeAgentModeRail(AgentModeRail):
     Mode restoration happens inside ``ExitPlanModeTool.invoke()`` on approval.
     """
 
+    def __init__(self, allowed_tools: list[str] | None = None) -> None:
+        """Initialize request-level Code submode synchronization state."""
+        super().__init__(allowed_tools=allowed_tools)
+        self._requested_modes: dict[str, tuple[int, str]] = {}
+        self._applied_mode_generations: dict[str, int] = {}
+        self._mode_generation = 0
+
     def init(self, agent: DeepAgent) -> None:
         """Register tools. No exit_plan_mode patching needed —
         ``PlanApprovalInterruptRail`` handles the approval gate.
         """
         super().init(agent)
+
+    def set_requested_mode(
+        self,
+        mode: str,
+        *,
+        session_id: str | None = None,
+    ) -> None:
+        """Queue a Code submode for the next model turn.
+
+        The adapter's ``code.plan``/``code.normal`` mode is distinct from the
+        harness session's ``PlanModeState``. Apply it once per request so a
+        later plan approval or ``switch_mode`` call is not overwritten on
+        every model iteration.
+        """
+        normalized = str(mode or "").strip().lower()
+        if normalized not in {"code", "code.plan", "code.normal"}:
+            return
+        target = "plan" if normalized == "code.plan" else "auto"
+        key = self._session_key_from_value(session_id)
+        self._mode_generation += 1
+        self._requested_modes[key] = (self._mode_generation, target)
+
+    async def before_model_call(self, ctx: AgentCallbackContext) -> None:
+        """Synchronize the requested Code submode before parent enforcement."""
+        self._apply_requested_mode(ctx)
+        await super().before_model_call(ctx)
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         """Enforce plan-mode write blocks beyond the parent git-only guard."""
@@ -112,6 +145,34 @@ class CodeAgentModeRail(AgentModeRail):
                     logger.warning(
                         "[CodeAgentModeRail] Failed to restore mode: %s", exc
                     )
+
+    def _apply_requested_mode(self, ctx: AgentCallbackContext) -> None:
+        """Apply a queued adapter mode at most once for the current session."""
+        session = ctx.session
+        key = self._session_key_from_value(session)
+        pending = self._requested_modes.get(key)
+        if pending is None:
+            return
+        generation, target = pending
+        if self._applied_mode_generations.get(key) == generation:
+            return
+        self._agent.switch_mode(session, target)
+        self._applied_mode_generations[key] = generation
+
+    @staticmethod
+    def _session_key_from_value(value: Any) -> str:
+        """Return a stable session key for mode synchronization."""
+        if value is None:
+            return "default"
+        getter = getattr(value, "get_session_id", None)
+        if callable(getter):
+            try:
+                value = getter()
+            except Exception:  # noqa: BLE001 - best-effort session identity
+                value = None
+        if value is None:
+            value = getattr(value, "session_id", None)
+        return str(value or "default")
 
     def _language_is_cn(self) -> bool:
         """Return whether the active agent prompt language is Chinese."""
