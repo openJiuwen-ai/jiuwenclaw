@@ -34,6 +34,14 @@ def get_permissions_config_req_methods() -> frozenset[ReqMethod]:
     return _PERMISSIONS_CFG_METHODS
 
 
+def _hot_reload_permissions_config_cache() -> None:
+    from jiuwenswarm.agents.harness.common.rails.permissions.config_loader import (
+        clear_permissions_config_cache,
+    )
+
+    clear_permissions_config_cache()
+
+
 def _err(request: AgentRequest, message: str, *, code: str = "BAD_REQUEST") -> AgentResponse:
     return AgentResponse(
         request_id=request.request_id,
@@ -82,6 +90,7 @@ def dispatch_permissions_config_request(request: AgentRequest) -> AgentResponse:
                 return _err(request, "params must be object")
             tools = params.get("tools")
             replace_permissions_tools_in_config(tools)
+            _hot_reload_permissions_config_cache()
             return _ok(request, {"ok": True})
 
         if m == ReqMethod.PERMISSIONS_TOOLS_UPDATE:
@@ -93,6 +102,7 @@ def dispatch_permissions_config_request(request: AgentRequest) -> AgentResponse:
             if "level" not in params:
                 return _err(request, "level is required")
             payload = update_permissions_tool_in_config(tool, params.get("level"))
+            _hot_reload_permissions_config_cache()
             return _ok(request, dict(payload))
 
         if m == ReqMethod.PERMISSIONS_TOOLS_DELETE:
@@ -104,6 +114,7 @@ def dispatch_permissions_config_request(request: AgentRequest) -> AgentResponse:
             ok_del = delete_permissions_tool_in_config(tool)
             if not ok_del:
                 return _err(request, "tool not found in permissions.tools", code="NOT_FOUND")
+            _hot_reload_permissions_config_cache()
             return _ok(request, dict(get_permissions_tools()))
 
         if m == ReqMethod.PERMISSIONS_RULES_GET:
@@ -116,6 +127,7 @@ def dispatch_permissions_config_request(request: AgentRequest) -> AgentResponse:
             if not isinstance(rule, dict):
                 return _err(request, "rule must be object")
             stored = create_permissions_rule_in_config(rule)
+            _hot_reload_permissions_config_cache()
             return _ok(request, {"rule": stored})
 
         if m == ReqMethod.PERMISSIONS_RULES_UPDATE:
@@ -126,6 +138,7 @@ def dispatch_permissions_config_request(request: AgentRequest) -> AgentResponse:
             if not isinstance(patch, dict):
                 return _err(request, "patch must be object")
             merged = update_permissions_rule_in_config(str(rid or ""), patch)
+            _hot_reload_permissions_config_cache()
             return _ok(request, {"rule": merged})
 
         if m == ReqMethod.PERMISSIONS_RULES_DELETE:
@@ -134,6 +147,7 @@ def dispatch_permissions_config_request(request: AgentRequest) -> AgentResponse:
             ok_del = delete_permissions_rule_in_config(str(params.get("id") or ""))
             if not ok_del:
                 return _err(request, "rule not found", code="NOT_FOUND")
+            _hot_reload_permissions_config_cache()
             return _ok(request, {"ok": True})
 
         if m == ReqMethod.PERMISSIONS_APPROVAL_OVERRIDES_GET:
@@ -145,6 +159,7 @@ def dispatch_permissions_config_request(request: AgentRequest) -> AgentResponse:
             ok_del = delete_permissions_approval_override_in_config(str(params.get("id") or ""))
             if not ok_del:
                 return _err(request, "approval_override not found", code="NOT_FOUND")
+            _hot_reload_permissions_config_cache()
             return _ok(request, {"ok": True})
 
     except ValueError as e:
@@ -160,4 +175,3 @@ __all__ = [
     "dispatch_permissions_config_request",
     "get_permissions_config_req_methods",
 ]
-

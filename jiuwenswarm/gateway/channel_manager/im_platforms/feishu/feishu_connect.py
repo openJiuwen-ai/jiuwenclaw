@@ -1648,7 +1648,9 @@ class FeishuChannel(BaseChannel):
                     self._stream_text_buffers.pop(stream_key, None)
                 content_str = self._extract_message_content(msg)
                 is_complete = msg.payload.get("is_complete", False)
-                if is_complete:
+                # chat.final 常带空 content 且未必含 is_complete=True；但必须与上方 pop 出的流式缓冲合并，
+                # 否则缓冲已被弹出却未并入 content_str，会导致正文丢失（仅依赖 processing_status 冲刷时更明显）。
+                if event_name == "chat.final" or is_complete:
                     content_str = self._merge_stream_and_final_content(
                         buffered_text,
                         content_str,
@@ -1751,6 +1753,18 @@ class FeishuChannel(BaseChannel):
                                 await self._send_file_card(receive_id, id_type, fp, os.path.basename(fp))
                         except Exception as file_err:
                             logger.error("飞书兜底文件发送失败: %s %s", fp, file_err)
+
+            if not content_str.strip():
+                if files_sent_in_fallback:
+                    return
+                logger.warning("飞书发送：消息内容为空，跳过发送")
+                return
+
+            request_id = str(msg.id or "").strip()
+            if request_id and msg.event_type != EventType.HEARTBEAT_RELAY:
+                self._clear_group_progress_state(request_id)
+
+            content_str = self._filter_user_info_for_group(content_str, meta)
 
             # 群聊数字分身回复到群聊时，@发送人
             if msg.group_digital_avatar and id_type == "chat_id":

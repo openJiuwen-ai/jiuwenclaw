@@ -1,4 +1,4 @@
-"""CronJob create/update mutations (build, patch, sort) shared by file and Redis stores."""
+"""CronJob create/update mutations shared by file, Redis and Gateway DB stores."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import uuid
 from dataclasses import replace
 from typing import Any
 
+from jiuwenswarm.gateway.cron.enterprise_gate import strip_sticky_identity_fields
 from jiuwenswarm.gateway.cron.models import (
     CRON_JOB_DEFAULT_MODE,
     CronJob,
@@ -19,6 +20,10 @@ from jiuwenswarm.common.work_mode import DEFAULT_WEB_WORK_MODE, normalize_work_m
 def sort_cron_jobs(jobs: list[CronJob]) -> list[CronJob]:
     jobs.sort(key=lambda j: (j.updated_at or 0.0, j.created_at or 0.0), reverse=True)
     return jobs
+
+
+def _opt_str(value: Any) -> str | None:
+    return str(value).strip() if isinstance(value, str) and str(value).strip() else None
 
 
 def build_new_cron_job(
@@ -35,6 +40,9 @@ def build_new_cron_job(
     chat_type: str | None = None,
     mode: str | None = None,
     delete_after_run: bool | None = None,
+    group_id: str | None = None,
+    bot_id: str | None = None,
+    user_id: str | None = None,
     timeout_seconds: int | None = None,
     project_id: str = "",
     model_name: str | None = None,
@@ -42,8 +50,8 @@ def build_new_cron_job(
     work_mode: str = DEFAULT_WEB_WORK_MODE,
 ) -> CronJob:
     now = time.time()
-    sid = str(session_id).strip() if isinstance(session_id, str) and session_id.strip() else None
-    ct = str(chat_type).strip() if isinstance(chat_type, str) and chat_type.strip() else None
+    sid = _opt_str(session_id)
+    ct = _opt_str(chat_type)
     m = (
         normalize_cron_job_mode(mode)
         if mode is not None and str(mode).strip()
@@ -56,11 +64,7 @@ def build_new_cron_job(
         else None
     )
     pid = str(project_id).strip() if isinstance(project_id, str) and project_id.strip() else ""
-    model_name_val = (
-        str(model_name).strip()
-        if isinstance(model_name, str) and model_name.strip()
-        else None
-    )
+    model_name_val = _opt_str(model_name)
     job = CronJob(
         id=str(job_id or "").strip() or uuid.uuid4().hex,
         name=str(name or "").strip(),
@@ -76,6 +80,9 @@ def build_new_cron_job(
         chat_type=ct,
         mode=m,
         delete_after_run=dar,
+        group_id=_opt_str(group_id),
+        bot_id=_opt_str(bot_id),
+        user_id=_opt_str(user_id),
         timeout_seconds=timeout,
         project_id=pid,
         model_name=model_name_val,
@@ -87,7 +94,7 @@ def build_new_cron_job(
 
 
 def apply_cron_job_patch(existing: CronJob, patch: dict[str, Any]) -> CronJob:
-    patch = dict(patch or {})
+    patch = strip_sticky_identity_fields(dict(patch or {}))
     updated = existing
     if "name" in patch:
         updated = replace(updated, name=str(patch.get("name") or "").strip())
@@ -142,20 +149,11 @@ def apply_cron_job_patch(existing: CronJob, patch: dict[str, Any]) -> CronJob:
         updated = replace(updated, project_id=new_pid)
     if "last_session_id" in patch:
         raw_lsid = patch.get("last_session_id")
-        new_lsid = (
-            str(raw_lsid).strip()
-            if isinstance(raw_lsid, str) and str(raw_lsid).strip()
-            else None
-        )
-        updated = replace(updated, last_session_id=new_lsid)
+        updated = replace(updated, last_session_id=_opt_str(raw_lsid))
     if "model_name" in patch:
-        raw_model_name = patch.get("model_name")
-        new_model_name = (
-            str(raw_model_name).strip()
-            if isinstance(raw_model_name, str) and str(raw_model_name).strip()
-            else None
-        )
-        updated = replace(updated, model_name=new_model_name)
+        updated = replace(updated, model_name=_opt_str(patch.get("model_name")))
+    if "app_id" in patch:
+        updated = replace(updated, app_id=str(patch.get("app_id") or "").strip())
     if "work_mode" in patch:
         updated = replace(
             updated,

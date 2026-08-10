@@ -9,6 +9,7 @@ Embedding API settings are in the 'embed' section.
 import logging
 import os
 import re
+import copy
 from typing import Any, Optional, Dict, List
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,6 +25,18 @@ DEFAULT_WORKSPACE_DIR = str(get_agent_workspace_dir())
 
 _config_cache: Optional[Dict[str, Any]] = None
 _embed_config_db_cache: Optional[Dict[str, Any]] = None
+_task_memory_config_db_cache: Optional[Dict[str, Any]] = None
+_memory_config_db_cache: Optional[Dict[str, Any]] = None
+_memory_config_cache_source: str | None = None
+
+MEMORY_CONFIG_TABLE = "memory_config"
+MEMORY_CONFIG_SOURCE_DB = "gateway_db"
+MEMORY_CONFIG_SOURCE_YAML = "config.yaml"
+
+
+def is_enterprise_memory_config_enabled() -> bool:
+    """Manager 下发的 memory_config 仅在企业级部署（``AGENT_RUNTIME`` 非空）生效。"""
+    return bool(os.getenv("AGENT_RUNTIME", "").strip())
 
 
 def _resolve_env_vars(value: Any) -> Any:
@@ -48,6 +61,129 @@ def clear_config_cache() -> None:
     """清除配置缓存，使下次 _load_config() 重新从 config.yaml 读取并解析环境变量."""
     global _config_cache
     _config_cache = None
+
+
+def clear_memory_config_db_cache() -> None:
+    """清除 memory_config 的 DB 缓存，使下次重新从 DB 或 YAML 读取."""
+    global _memory_config_db_cache, _memory_config_cache_source
+    _memory_config_db_cache = None
+    _memory_config_cache_source = None
+
+
+def _deep_merge_dict(dst: Dict[str, Any], src: Dict[str, Any]) -> None:
+    for key, value in src.items():
+        if (
+            key in dst
+            and isinstance(dst[key], dict)
+            and isinstance(value, dict)
+        ):
+            _deep_merge_dict(dst[key], value)
+        else:
+            dst[key] = copy.deepcopy(value)
+
+
+def get_memory_config_overlay() -> Dict[str, Any] | None:
+    """Return Manager 下发的 memory 段 overlay（非企业级或未下发时为 None）。"""
+    if not is_enterprise_memory_config_enabled():
+        return None
+    if _memory_config_db_cache is not None:
+        return copy.deepcopy(_memory_config_db_cache)
+    return None
+
+
+def get_memory_section(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """读取 memory 段。
+
+    企业级（``AGENT_RUNTIME`` 非空）：Gateway DB overlay > config.yaml。
+    其他场景：仅 config.yaml。
+    """
+    base_cfg = config if config is not None else _load_config()
+    yaml_mem = (base_cfg or {}).get("memory", {})
+    if not is_enterprise_memory_config_enabled():
+        return copy.deepcopy(yaml_mem) if isinstance(yaml_mem, dict) else {}
+
+    merged = copy.deepcopy(yaml_mem) if isinstance(yaml_mem, dict) else {}
+    overlay = get_memory_config_overlay()
+    if overlay:
+        _deep_merge_dict(merged, overlay)
+    return merged
+
+
+def merge_memory_config_into_config(config_base: Dict[str, Any]) -> Dict[str, Any]:
+    """深拷贝 config；企业级时将 memory 段与 DB overlay 合并。"""
+    if not is_enterprise_memory_config_enabled():
+        return copy.deepcopy(config_base)
+    merged = copy.deepcopy(config_base)
+    merged["memory"] = get_memory_section(config_base)
+    return merged
+
+
+def apply_memory_config_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
+    """应用 Manager/Gateway 下发的 memory_config（热更新入口，仅企业级生效）。"""
+    global _memory_config_db_cache, _memory_config_cache_source
+
+    if not is_enterprise_memory_config_enabled():
+        return {"ok": True, "source": MEMORY_CONFIG_SOURCE_YAML}
+
+    clear_config_cache()
+
+    if not isinstance(payload, dict):
+        _memory_config_db_cache = None
+        _memory_config_cache_source = None
+        return {"ok": True, "source": MEMORY_CONFIG_SOURCE_YAML}
+
+    op = str(payload.get("op") or "").strip().lower()
+    if op == "delete":
+        _memory_config_db_cache = None
+        _memory_config_cache_source = None
+        return {"ok": True, "source": MEMORY_CONFIG_SOURCE_YAML}
+
+    body = payload.get("body")
+    if body is None and op == "upsert":
+        body = {k: v for k, v in payload.items() if k not in {"op", "source", "revision"}}
+    if not isinstance(body, dict):
+        _memory_config_db_cache = None
+        _memory_config_cache_source = None
+        return {"ok": True, "source": MEMORY_CONFIG_SOURCE_YAML}
+
+    _memory_config_db_cache = copy.deepcopy(body)
+    _memory_config_cache_source = MEMORY_CONFIG_SOURCE_DB
+    return {"ok": True, "source": MEMORY_CONFIG_SOURCE_DB}
+
+
+async def reload_memory_config_from_gateway_db() -> dict[str, Any]:
+    """从 Gateway 库加载 ``memory_config`` 更新缓存（冷启动/热重载，仅企业级）。"""
+    if not is_enterprise_memory_config_enabled():
+        return {"ok": True, "source": MEMORY_CONFIG_SOURCE_YAML}
+
+    global _memory_config_db_cache, _memory_config_cache_source
+    try:
+        from jiuwenswarm.server.runtime.enterprise_config import gateway_db
+
+        jid = gateway_db.resolve_jiuwenclaw_id()
+        if not jid:
+            return apply_memory_config_payload({"op": "delete"})
+
+        rows = await gateway_db.list_records(
+            MEMORY_CONFIG_TABLE,
+            filters={"jiuwenclaw_id": jid},
+        )
+        row = rows[0] if rows else None
+        body = row.get("body") if isinstance(row, dict) else None
+        if isinstance(body, dict) and body:
+            return apply_memory_config_payload({"op": "upsert", "body": body})
+
+        _memory_config_db_cache = None
+        _memory_config_cache_source = None
+        clear_config_cache()
+        return {"ok": True, "source": MEMORY_CONFIG_SOURCE_YAML}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "memory_config read failed: %s",
+            exc,
+            exc_info=True,
+        )
+        return {"ok": False, "source": _memory_config_cache_source or MEMORY_CONFIG_SOURCE_YAML}
 
 
 def clear_embed_config_db_cache() -> None:
@@ -109,7 +245,8 @@ def _load_config() -> Dict[str, Any]:
 def get_embed_config() -> Dict[str, Any]:
     """Get embedding configuration.
 
-    Priority: DB cache (enterprise ``embedding_template``) > YAML (config.yaml embed section).
+    Priority: DB cache (``embed_config`` table / enterprise ``embedding_template``)
+    > YAML (config.yaml embed section).
     """
     global _embed_config_db_cache
     if _embed_config_db_cache is not None:
@@ -190,7 +327,7 @@ def create_memory_settings(
     """
     config = _load_config()
     embed_config = get_embed_config()
-    memory_config = config.get("memory", {})
+    memory_config = get_memory_section(config)
     
     settings = MemorySettings()
     
@@ -354,6 +491,110 @@ def is_auto_memory_enabled(mode: str, config: Optional[Dict[str, Any]] = None) -
 
 def get_memory_mode(config: Optional[Dict[str, Any]] = None) -> str:
     """读取 ``memory.mode``：``cloud`` 或 ``local``（默认）。"""
-    memory_cfg = (config or {}).get("memory", {})
+    if config is None:
+        memory_cfg = get_memory_section()
+    else:
+        memory_cfg = get_memory_section(config)
     mode = str(memory_cfg.get("mode") or "local").strip().lower()
     return "cloud" if mode == "cloud" else "local"
+
+
+async def reload_embed_config_from_gateway_db() -> None:
+    """从 Gateway 库加载 ``embed_config`` 并刷新 embedding 缓存（企业版）。"""
+    global _embed_config_db_cache
+    if not os.getenv("AGENT_RUNTIME", "").strip():
+        return
+    try:
+        from jiuwenswarm.server.runtime.enterprise_config import gateway_db
+
+        jid = gateway_db.resolve_jiuwenclaw_id()
+        if not jid:
+            _embed_config_db_cache = None
+            return
+
+        rows = await gateway_db.list_records(
+            "embed_config",
+            filters={"jiuwenclaw_id": jid},
+        )
+        row = rows[0] if rows else None
+        if row is not None:
+            _embed_config_db_cache = {
+                "api_key": row.get("embed_api_key"),
+                "base_url": row.get("embed_base_url"),
+                "model": row.get("embed_model"),
+            }
+        else:
+            _embed_config_db_cache = None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "embed_config read failed: %s",
+            exc,
+            exc_info=True,
+        )
+
+
+def clear_task_memory_config_db_cache() -> None:
+    """清除 task_memory_config 的 DB 缓存，使下次重新从 DB 读取."""
+    global _task_memory_config_db_cache
+    _task_memory_config_db_cache = None
+
+
+def get_task_memory_config() -> Dict[str, Any]:
+    """Get task_memory configuration.
+
+    Priority: DB(task_memory_config table) > YAML (config.yaml task_memory section).
+    """
+    global _task_memory_config_db_cache
+    if _task_memory_config_db_cache is not None:
+        return _task_memory_config_db_cache
+
+    config = _load_config()
+    task_memory_cfg = config.get("task_memory", {})
+
+    return {
+        "enabled": task_memory_cfg.get("enabled", False),
+        "llm_model": task_memory_cfg.get("llm_model"),
+        "embedding_model": task_memory_cfg.get("embedding_model"),
+        "api_key": task_memory_cfg.get("api_key"),
+        "api_base": task_memory_cfg.get("api_base"),
+        "retrieval_algo": task_memory_cfg.get("retrieval_algo"),
+        "summary_algo": task_memory_cfg.get("summary_algo"),
+    }
+
+
+async def reload_task_memory_config_from_gateway_db() -> None:
+    """从 Gateway 库加载 ``task_memory_config`` 并刷新缓存（企业版）。"""
+    global _task_memory_config_db_cache
+    if not os.getenv("AGENT_RUNTIME", "").strip():
+        return
+    try:
+        from jiuwenswarm.server.runtime.enterprise_config import gateway_db
+
+        jid = gateway_db.resolve_jiuwenclaw_id()
+        if not jid:
+            _task_memory_config_db_cache = None
+            return
+
+        rows = await gateway_db.list_records(
+            "task_memory_config",
+            filters={"jiuwenclaw_id": jid},
+        )
+        row = rows[0] if rows else None
+        if row is not None:
+            _task_memory_config_db_cache = {
+                "enabled": row.get("enabled", False),
+                "llm_model": row.get("llm_model"),
+                "embedding_model": row.get("embedding_model"),
+                "api_key": row.get("api_key"),
+                "api_base": row.get("api_base"),
+                "retrieval_algo": row.get("retrieval_algo"),
+                "summary_algo": row.get("summary_algo"),
+            }
+        else:
+            _task_memory_config_db_cache = None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "task_memory_config read failed: %s",
+            exc,
+            exc_info=True,
+        )

@@ -149,6 +149,10 @@ from jiuwenswarm.agents.harness.common.rails import (
     SymphonyOrchestrationRail,
     TaskExecutionRail,
 )
+from jiuwenswarm.agents.harness.common.rails.concurrent_safe_rails import (
+    ConcurrentSafeSysOperationRail,
+    ConcurrentSafeTaskPlanningRail,
+)
 from jiuwenswarm.agents.harness.common.rails.execution_guard import (
     CircuitBreakerRail,
     CircuitBreakerConfig,
@@ -167,15 +171,23 @@ from jiuwenswarm.agents.harness.common.rails.permissions.owner_scopes import (
 from jiuwenswarm.agents.harness.common.memory.config import (
     clear_config_cache,
     clear_embed_config_db_cache,
+    clear_memory_config_db_cache,
     get_embed_config,
     get_memory_mode,
     is_memory_enabled,
     is_proactive_memory,
+    merge_memory_config_into_config,
+    reload_memory_config_from_gateway_db,
     set_embed_config_db_cache,
 )
 from jiuwenswarm.agents.harness.common.memory.external_memory_config import is_builtin_memory_allowed
 from jiuwenswarm.common.model_config_validation import is_placeholder_api_base
 from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context import TOOL_PERMISSION_CHANNEL_ID
+from jiuwenswarm.agents.harness.common.rails.permissions.config_loader import (
+    get_effective_permissions_config,
+    reset_permissions_session_scope,
+    setup_permissions_session_scope,
+)
 from jiuwenswarm.server.runtime.session.session_metadata import build_server_push_message
 from jiuwenswarm.server.runtime.session.session_history import append_history_record, load_history_records
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
@@ -361,6 +373,16 @@ def get_runtime_tool_session_id() -> str | None:
     """Session id bound for the current agent tool invocation (ContextVar)."""
     return _CRON_TOOL_SESSION_ID.get()
 
+
+def get_runtime_tool_channel_id() -> str:
+    """Channel id bound for the current agent tool invocation (ContextVar)."""
+    return _CRON_TOOL_CHANNEL_ID.get()
+
+
+def get_runtime_tool_metadata() -> dict[str, Any] | None:
+    """Request metadata bound for the current agent tool invocation (ContextVar)."""
+    return _CRON_TOOL_METADATA.get()
+
 logger = logging.getLogger(__name__)
 
 _PERSISTENT_CHECKPOINTER_LOCK: asyncio.Lock | None = None
@@ -386,20 +408,23 @@ def reset_shared_checkpoint_for_tests() -> None:
 
 
 def _gateway_db_pool_kwargs() -> dict[str, Any]:
-    """SQLAlchemy 连接池参数（``GATEWAY_DB_POOL_*``，企业 checkpoint 与文档默认一致）。"""
-    def _int_env(name: str, default: int) -> int:
-        raw = os.getenv(name, "").strip()
-        if not raw:
-            return default
-        try:
-            return int(raw)
-        except ValueError:
-            return default
+    """SQLAlchemy 连接池参数（``GATEWAY_DB_POOL_*`` / ``RUNTIME_DB_POOL_*``）。"""
+
+    def _int_env(*names: str, default: int) -> int:
+        for name in names:
+            raw = os.getenv(name, "").strip()
+            if not raw:
+                continue
+            try:
+                return int(raw)
+            except ValueError:
+                continue
+        return default
 
     return {
-        "pool_size": _int_env("GATEWAY_DB_POOL_SIZE", 2),
-        "max_overflow": _int_env("GATEWAY_DB_MAX_OVERFLOW", 20),
-        "pool_timeout": _int_env("GATEWAY_DB_POOL_TIMEOUT", 30),
+        "pool_size": _int_env("GATEWAY_DB_POOL_SIZE", "RUNTIME_DB_POOL_SIZE", default=2),
+        "max_overflow": _int_env("GATEWAY_DB_MAX_OVERFLOW", "RUNTIME_DB_MAX_OVERFLOW", default=20),
+        "pool_timeout": _int_env("GATEWAY_DB_POOL_TIMEOUT", "RUNTIME_DB_POOL_TIMEOUT", default=30),
         "pool_recycle": 3600,
         "pool_pre_ping": True,
     }
@@ -5450,7 +5475,17 @@ class JiuWenSwarmDeepAdapter:
 
     def _update_permission_rail(self, config_base: dict[str, Any] | None) -> None:
         """原地更新已有 PermissionRail 配置，或在首次启用时新建。"""
-        permission_config = config_base.get("permissions", {}) if config_base else {}
+        from jiuwenswarm.agents.harness.common.rails.permissions.config_loader import (
+            get_base_permissions_config,
+            get_effective_permissions_config,
+            is_enterprise_runtime,
+        )
+
+        permission_config = (
+            get_base_permissions_config()
+            if is_enterprise_runtime()
+            else get_effective_permissions_config()
+        )
         if self._permission_rail is not None:
             self._permission_rail.update_config(permission_config)
             logger.info("[JiuWenSwarmDeepAdapter] _permission_rail config hot-updated")
@@ -5570,7 +5605,7 @@ class JiuWenSwarmDeepAdapter:
         return f"{card_id}_root"
 
     @staticmethod
-    def _register_shared_tool(tool: Any) -> None:
+    def _register_shared_tool(tool: Any) -> Any:
         """Declare a tool instance shared across adapters, then register it.
 
         Shared here means one instance serves every adapter in the process: the
@@ -5583,12 +5618,15 @@ class JiuWenSwarmDeepAdapter:
 
         Args:
             tool: Tool instance to share process-wide.
+
+        Returns:
+            The process-global registered tool instance (may be an earlier one).
         """
         mark_stateless([tool])
-        register_tool(tool, None)
+        return register_tool(tool, None)
 
     @staticmethod
-    def _register_agent_owned_tool(tool: Any, owner_id: str) -> None:
+    def _register_agent_owned_tool(tool: Any, owner_id: str) -> Any:
         """Register a tool instance owned exclusively by this adapter's agent.
 
         ``_get_tool_cards`` runs before ``create_deep_agent``, so there is no
@@ -5605,6 +5643,9 @@ class JiuWenSwarmDeepAdapter:
         Args:
             tool: Per-agent tool instance to register.
             owner_id: Owner id that this adapter's agent registers under.
+
+        Returns:
+            The registered tool instance.
         """
         if getattr(tool.card, "stateless", False):
             logger.debug(
@@ -5612,29 +5653,29 @@ class JiuWenSwarmDeepAdapter:
                 " despite the agent-owned call site",
                 tool.card.name,
             )
-        register_tool(tool, owner_id)
+        return register_tool(tool, owner_id)
 
     async def _get_tool_cards(self, agent_id: str):
         """Get tool cards."""
         tool_cards = []
 
         for wtool in [wiki_ingest, wiki_query, wiki_lint]:
-            self._register_shared_tool(wtool)
-            tool_cards.append(wtool.card)
+            registered = self._register_shared_tool(wtool)
+            tool_cards.append(registered.card)
 
         # 付费搜索工具：有任意一个付费 key 就注册
         if is_paid_search_enabled():
             self._paid_search_tool = WebPaidSearchTool(
                 language=self._resolve_runtime_language(), agent_id=agent_id
             )
-            self._register_agent_owned_tool(self._paid_search_tool, agent_id)
+            self._paid_search_tool = self._register_agent_owned_tool(self._paid_search_tool, agent_id)
             tool_cards.append(self._paid_search_tool.card)
             self._paid_search_registered = True
 
         for tool_cls in [WebFreeSearchTool, WebFetchWebpageTool]:
             tool_instance = tool_cls(agent_id=agent_id)
-            self._register_agent_owned_tool(tool_instance, agent_id)
-            tool_cards.append(tool_instance.card)
+            registered = self._register_agent_owned_tool(tool_instance, agent_id)
+            tool_cards.append(registered.card)
 
         self._vision_tools = []
         self._vision_tools_registered = False
@@ -5645,9 +5686,9 @@ class JiuWenSwarmDeepAdapter:
                     vision_model_config=self._vision_model_config,
                     agent_id=agent_id,
                 ):
-                    self._register_agent_owned_tool(tool, agent_id)
-                    tool_cards.append(tool.card)
-                    self._vision_tools.append(tool)
+                    registered = self._register_agent_owned_tool(tool, agent_id)
+                    tool_cards.append(registered.card)
+                    self._vision_tools.append(registered)
                 self._vision_tools_registered = bool(self._vision_tools)
             except Exception as exc:
                 self._vision_tools = []
@@ -5659,10 +5700,11 @@ class JiuWenSwarmDeepAdapter:
         self._audio_tools = []
         self._audio_tools_registered = False
         try:
-            self._audio_tools = self._iter_runtime_audio_tools(agent_id)
-            for tool in self._audio_tools:
-                self._register_agent_owned_tool(tool, agent_id)
-                tool_cards.append(tool.card)
+            self._audio_tools = []
+            for tool in self._iter_runtime_audio_tools(agent_id):
+                registered = self._register_agent_owned_tool(tool, agent_id)
+                tool_cards.append(registered.card)
+                self._audio_tools.append(registered)
             self._audio_tools_registered = bool(self._audio_tools)
         except Exception as exc:
             self._audio_tools = []
@@ -5674,8 +5716,8 @@ class JiuWenSwarmDeepAdapter:
         self._video_tool_registered = False
         if self._video_model_config:
             try:
-                self._register_shared_tool(video_understanding)
-                tool_cards.append(video_understanding.card)
+                registered = self._register_shared_tool(video_understanding)
+                tool_cards.append(registered.card)
                 self._video_tool_registered = True
             except Exception as exc:
                 logger.warning(
@@ -5687,8 +5729,8 @@ class JiuWenSwarmDeepAdapter:
         self._image_gen_tool_registered = False
         if self._image_gen_model_config:
             try:
-                self._register_shared_tool(generate_image)
-                tool_cards.append(generate_image.card)
+                registered = self._register_shared_tool(generate_image)
+                tool_cards.append(registered.card)
                 self._image_gen_tool_registered = True
             except Exception as exc:
                 logger.warning(
@@ -5733,8 +5775,8 @@ class JiuWenSwarmDeepAdapter:
             ]
             try:
                 for xt in _xiaoyi_tools:
-                    self._register_shared_tool(xt)
-                    tool_cards.append(xt.card)
+                    registered = self._register_shared_tool(xt)
+                    tool_cards.append(registered.card)
                 self._xiaoyi_phone_tools_registered = True
                 logger.info(
                     "[JiuWenSwarmDeepAdapter] %d xiaoyi phone tools registered", len(_xiaoyi_tools)
@@ -5748,9 +5790,9 @@ class JiuWenSwarmDeepAdapter:
             skill_toolkit = SkillToolkit(manager=self._skill_manager)
             skill_tool_names: list[str] = []
             for tool in skill_toolkit.get_tools():
-                self._register_shared_tool(tool)
-                tool_cards.append(tool.card)
-                skill_tool_names.append(tool.card.name)
+                registered = self._register_shared_tool(tool)
+                tool_cards.append(registered.card)
+                skill_tool_names.append(registered.card.name)
             logger.info(
                 "[JiuWenSwarmDeepAdapter] SkillToolkit registered: tools=%s",
                 skill_tool_names,
@@ -5763,9 +5805,9 @@ class JiuWenSwarmDeepAdapter:
                 self._skill_retrieval_tools = self._create_skill_retrieval_tools()
                 skill_retrieval_tool_names: list[str] = []
                 for tool in self._skill_retrieval_tools:
-                    self._register_shared_tool(tool)
-                    tool_cards.append(tool.card)
-                    skill_retrieval_tool_names.append(tool.card.name)
+                    registered = self._register_shared_tool(tool)
+                    tool_cards.append(registered.card)
+                    skill_retrieval_tool_names.append(registered.card.name)
                 self._skill_retrieval_tools_registered = bool(self._skill_retrieval_tools)
                 logger.info(
                     "[JiuWenSwarmDeepAdapter] SkillRetrievalToolkit registered: tools=%s",
@@ -5785,9 +5827,9 @@ class JiuWenSwarmDeepAdapter:
             symphony_tool_names: list[str] = []
             symphony_tools = symphony_toolkit.get_tools(config_base)
             for tool in symphony_tools:
-                self._register_shared_tool(tool)
-                tool_cards.append(tool.card)
-                symphony_tool_names.append(tool.card.name)
+                registered = self._register_shared_tool(tool)
+                tool_cards.append(registered.card)
+                symphony_tool_names.append(registered.card.name)
             self._symphony_tools = list(symphony_tools)
             self._symphony_tools_registered = bool(symphony_tools)
             logger.info(
@@ -5806,8 +5848,8 @@ class JiuWenSwarmDeepAdapter:
         try:
             acp_cfg = get_config().get("acp_agents")
             if isinstance(acp_cfg, dict) and acp_cfg:
-                self._register_shared_tool(acp_chat)
-                tool_cards.append(acp_chat.card)
+                registered = self._register_shared_tool(acp_chat)
+                tool_cards.append(registered.card)
                 logger.info("[JiuWenSwarmDeepAdapter] acp_chat tool registered")
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] acp_chat registration failed: %s", exc)
@@ -5904,6 +5946,7 @@ class JiuWenSwarmDeepAdapter:
         bootstrap_request = self._instance_overrides.pop("request", None)
         if bootstrap_request is not None and os.getenv("AGENT_RUNTIME", "").strip():
             await self._load_enterprise_config(bootstrap_request)
+        config_base = merge_memory_config_into_config(config_base)
         config_base = self._merge_enterprise_models_into_config(config_base)
         self._config_base_cache = config_base.copy()
         self._startup_config_base = config_base.copy()
@@ -6192,6 +6235,8 @@ class JiuWenSwarmDeepAdapter:
             The normalized config snapshot that was cached on this adapter.
         """
         clear_config_cache()
+        clear_embed_config_db_cache()
+        clear_memory_config_db_cache()
         # 清 MemoryRail 实际使用的 openjiuwen lite INDEX_CACHE（而非仓内并行实现的那份），
         # 并 close 旧实例（db 连接 / watchdog observer / 定时任务），使下次
         # init_memory_manager_async 用最新 embedding_config 创建新 manager + 新 provider。
@@ -6222,6 +6267,7 @@ class JiuWenSwarmDeepAdapter:
 
         self._config_base_cache = config_base.copy()
         config_base = self._merge_enterprise_models_into_config(config_base)
+        config_base = merge_memory_config_into_config(config_base)
         self._config_base_cache = config_base.copy()
         self._startup_config_base = config_base.copy()
         self._refresh_multimodal_configs(config_base)
@@ -6293,6 +6339,14 @@ class JiuWenSwarmDeepAdapter:
                     own_sid,
                 )
                 return
+        if os.getenv("AGENT_RUNTIME", "").strip():
+            try:
+                await reload_memory_config_from_gateway_db()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] reload_memory_config_from_gateway_db failed: %s",
+                    exc,
+                )
         if self._instance is None:
             if self._is_session_scoped_adapter:
                 raise RuntimeError("JiuWenSwarmDeepAdapter 未初始化，请先调用 create_instance()")
@@ -6362,6 +6416,7 @@ class JiuWenSwarmDeepAdapter:
         try:
             mode = self._last_mode or "agent"
             await self._handle_memory_rail_by_config(mode)
+            await self._handle_external_memory_rail_by_config()
         except Exception as e:
             logger.warning(
                 "[JiuWenSwarmDeepAdapter] memory rail refresh on reload failed: %s", e
@@ -6378,10 +6433,12 @@ class JiuWenSwarmDeepAdapter:
         request_id: str | None,
         mode: str | None,
         project_dir: str | None = None,
+        params: dict[str, Any] | None = None,
     ) -> _RuntimeCronContextTokens:
         from openjiuwen.core.sys_operation.shell_process_registry import (
             set_shell_session_id,
         )
+        from jiuwenswarm.gateway.cron.enterprise_gate import extract_routing_triple
 
         normalized_channel = str(channel_id or "").strip() or CronTargetChannel.WEB.value
         normalized_mode = str(mode).strip() if isinstance(mode, str) and mode.strip() else None
@@ -6390,6 +6447,13 @@ class JiuWenSwarmDeepAdapter:
             normalized_metadata = {}
         if isinstance(request_id, str) and request_id.strip():
             normalized_metadata["request_id"] = request_id.strip()
+        g, b, u = extract_routing_triple(params, normalized_metadata)
+        if g:
+            normalized_metadata.setdefault("group_id", g)
+        if b:
+            normalized_metadata.setdefault("bot_id", b)
+        if u:
+            normalized_metadata.setdefault("user_id", u)
 
         session_metadata: dict[str, Any] = {}
         if isinstance(session_id, str) and session_id.strip():
@@ -6697,6 +6761,21 @@ class JiuWenSwarmDeepAdapter:
         # web channel defaults to True, others default to False
         if send_file_enabled is None:
             send_file_enabled = (channel == "web")
+        agent_runtime_env = os.getenv("AGENT_RUNTIME", "").strip()
+        if agent_runtime_env:
+            send_file_enabled = True
+            if self._enterprise_config is not None:
+                enterprise_allowed = getattr(
+                    self._enterprise_config, "send_file_allowed", None
+                )
+                if enterprise_allowed is not None:
+                    send_file_enabled = bool(enterprise_allowed)
+                else:
+                    agent_policy = getattr(
+                        self._enterprise_config, "agent_policy", None
+                    )
+                    if isinstance(agent_policy, dict) and "send_file_allowed" in agent_policy:
+                        send_file_enabled = bool(agent_policy["send_file_allowed"])
         if send_file_enabled and request_id and session_id:
             channel_for_tool = _CRON_TOOL_CHANNEL_ID.get()
             metadata_for_tool = _CRON_TOOL_METADATA.get()
@@ -6711,7 +6790,7 @@ class JiuWenSwarmDeepAdapter:
                     channel_id=channel_for_tool,
                     metadata=metadata_for_tool,
                 )
-                for sf_tool in self._send_file_toolkit.get_tools():
+                for sf_tool in self._send_file_toolkit.get_tools(tool_id="send_file_to_user"):
                     self._register_agent_owned_tool(sf_tool, self._tool_owner_id())
                     self._instance.ability_manager.add(sf_tool.card)
             else:
@@ -9304,10 +9383,16 @@ class JiuWenSwarmDeepAdapter:
             request_id=request.request_id,
             mode=mode,
             project_dir=(request.params.get("project_dir") if isinstance(request.params, dict) else None),
+            params=request.params if isinstance(request.params, dict) else None,
         )
         self._runtime_cron_tool_context.remember_current_binding()
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         token_perm = setup_permission_context(request)
+        token_perm_sid = setup_permissions_session_scope(session_id)
+        if self._permission_rail is not None:
+            self._permission_rail.update_config(
+                get_effective_permissions_config(session_id=session_id),
+            )
         resolved_model = self._resolve_model_for_request(request)
         self._apply_model_to_react_agent(resolved_model)
         self._mark_session_active(session_id)
@@ -9467,6 +9552,7 @@ class JiuWenSwarmDeepAdapter:
             self._unregister_session_agent_task(session_id)
             TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
             cleanup_permission_context(token_perm)
+            reset_permissions_session_scope(token_perm_sid)
             self._reset_runtime_cron_context(cron_context_tokens)
             self._unmark_session_active(session_id)
             # [CRON-CTX] 非流式 cron 执行收尾补 commit：对齐流式路径的自动落盘。
@@ -9825,6 +9911,7 @@ class JiuWenSwarmDeepAdapter:
             request_id=request.request_id,
             mode=mode,
             project_dir=(request.params.get("project_dir") if isinstance(request.params, dict) else None),
+            params=request.params if isinstance(request.params, dict) else None,
         )
         self._runtime_cron_tool_context.remember_current_binding()
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
@@ -10516,6 +10603,7 @@ class JiuWenSwarmDeepAdapter:
             self._unregister_session_agent_task(session_id)
             TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
             cleanup_permission_context(token_perm)
+            reset_permissions_session_scope(token_perm_sid)
             if not stream_consumer_cancelled:
                 self._reset_runtime_cron_context(cron_context_tokens)
             # Always clean up rail state — process_interrupt's

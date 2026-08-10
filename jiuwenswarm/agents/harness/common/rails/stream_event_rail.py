@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import os
 import re
 from typing import Any, List, Optional
 
@@ -41,6 +42,12 @@ from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
 from jiuwenswarm.agents.harness.common.rails.symphony import (
     SymphonyToolStreamHandler,
 )
+from jiuwenswarm.agents.harness.common.rails.read_file_validation import (
+    extract_path_from_arguments,
+    handle_read_file_before_tool_call,
+    is_read_file_tool,
+    normalize_read_file_tool_outcome,
+)
 from jiuwenswarm.common.tool_display import (
     build_tool_display_name,
     extract_call_goal,
@@ -49,6 +56,39 @@ from jiuwenswarm.common.tool_display import (
 from jiuwenswarm.common.utils import logger
 
 _TODO_TOOL_NAMES = frozenset(["todo_create", "todo_get", "todo_list", "todo_modify"])
+# When TOOL_RESULT_DISPLAY_MAX_CHARS is unset, keep the historical emit cap for
+# non-enterprise runs. Enterprise deploy normally sets the env (e.g. 500).
+_DEFAULT_TOOL_RESULT_DISPLAY_MAX_CHARS = 60000
+_TOOL_RESULT_DISPLAY_MAX_CHARS_LIMIT = 100_000
+
+
+def _resolve_tool_result_display_max_chars() -> int:
+    """Resolve streamed tool_result.result max chars.
+
+    - env configured and valid -> use TOOL_RESULT_DISPLAY_MAX_CHARS
+      (0 = no truncation; max 100000)
+    - unset / invalid -> 60000 (legacy default in jiuwenswarm)
+    """
+    raw = os.getenv("TOOL_RESULT_DISPLAY_MAX_CHARS")
+    if raw is None or str(raw).strip() == "":
+        return _DEFAULT_TOOL_RESULT_DISPLAY_MAX_CHARS
+    try:
+        parsed = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return _DEFAULT_TOOL_RESULT_DISPLAY_MAX_CHARS
+    if parsed < 0 or parsed > _TOOL_RESULT_DISPLAY_MAX_CHARS_LIMIT:
+        return _DEFAULT_TOOL_RESULT_DISPLAY_MAX_CHARS
+    return parsed
+
+
+def _format_tool_result_for_stream(result: Any) -> str:
+    if result is None:
+        return ""
+    text = str(result)
+    limit = _resolve_tool_result_display_max_chars()
+    if limit == 0 or len(text) <= limit:
+        return text
+    return text[:limit]
 
 
 def _structured_tool_result_payload(result: Any) -> Any | None:
@@ -711,6 +751,13 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         session = ctx.session
         if session is not None and isinstance(ctx.inputs, ToolCallInputs):
             tc = ctx.inputs.tool_call
+            tool_name = str(
+                getattr(ctx.inputs, "tool_name", "") or getattr(tc, "name", "") or ""
+            )
+            if is_read_file_tool(tool_name):
+                path = extract_path_from_arguments(getattr(tc, "arguments", {}))
+                if path:
+                    handle_read_file_before_tool_call(ctx, path)
             # 主模型随 tool_call 产出的目标文案（call_goal）：取出后剥掉，避免 schema 拒收。
             # 绝不碰 display_name（team 成员名等业务字段）。
             model_display, cleaned_args = extract_call_goal(
@@ -728,7 +775,8 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                     )
                 ctx.inputs.tool_args = cleaned_args
             await self._emit_tool_call(session, tc, model_display_name=model_display)
-            await self._emit_tool_update(session, tc, status="in_progress")
+            if not ctx.extra.get("_skip_tool"):
+                await self._emit_tool_update(session, tc, status="in_progress")
             self._symphony_stream_handler.bind_progress(ctx, session, tc)
             # Track in-flight tool call for cancellation
             tc_id = getattr(tc, "id", "")
@@ -755,6 +803,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         if tc_id:
             self._inflight_tool_calls.pop(tc_id, None)
 
+        normalize_read_file_tool_outcome(ctx)
         await self._emit_tool_result(session, tc, ctx.inputs.tool_result)
         self._symphony_stream_handler.request_force_finish(
             ctx,
@@ -836,7 +885,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             tool_result_payload = {
                 "tool_name": getattr(tool_call, "name", "") if tool_call else "",
                 "tool_call_id": getattr(tool_call, "id", "") if tool_call else "",
-                "result": str(result)[:60000] if result is not None else "",
+                "result": _format_tool_result_for_stream(result),
             }
             if raw_output is not None:
                 tool_result_payload["raw_output"] = raw_output

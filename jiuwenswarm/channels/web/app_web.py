@@ -8,6 +8,7 @@ Supports ``--dotenv <path>`` for multi-instance isolation.
 from __future__ import annotations
 
 import argparse
+import cgi
 import errno
 import http.client
 import json
@@ -35,11 +36,19 @@ from jiuwenswarm.agents.harness.team.bootstrap import configure_agent_teams_home
 from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.ws_diagnostics import describe_ws_exception, format_ws_diagnostics
 from jiuwenswarm.common.utils import get_agent_root_dir, get_logs_dir, \
-    get_agent_sessions_dir, get_root_dir, get_user_workspace_dir, is_package_installation, \
-    wait_for_tcp_port, SensitiveDataFilter
+    get_agent_sessions_dir, get_multi_tenant_user_workspace_dir, get_root_dir, get_user_workspace_dir, \
+    is_package_installation, wait_for_tcp_port, SensitiveDataFilter
+from jiuwenswarm.channels.web.history_store import (
+    ChatHistoryStore,
+    HistoryFrameRunner,
+    get_session_detail_sync,
+    list_sessions_sync,
+)
 from jiuwenswarm.server.runtime.session.session_history import history_exists, load_history_records
 
 configure_agent_teams_home()
+
+_history_runner: HistoryFrameRunner | None = None
 
 
 def _get_agent_teams_root() -> Path:
@@ -193,6 +202,7 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
     agent_teams_root = _get_agent_teams_root()
     logs_root = get_logs_dir()
     auto_harness_root = project_root / "auto-harness"
+    history_db = ""
     logger = logging.getLogger(__name__)
 
     _HOP_BY_HOP_HEADERS = {
@@ -589,9 +599,13 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                     if sock is self.connection:
                         for text_message in client_parser.feed(data):
                             self._log_ws_business_message("frontend->backend", text_message)
+                            if _history_runner is not None:
+                                _history_runner.submit("browser", text_message)
                     else:
                         for text_message in server_parser.feed(data):
                             self._log_ws_business_message("backend->frontend", text_message)
+                            if _history_runner is not None:
+                                _history_runner.submit("uplink", text_message)
                     # 非阻塞 socket 写入：循环增量 send，缓冲区满时等待可写后继续，
                     # 跨平台覆盖 Windows WSAEWOULDBLOCK (10035) 与 POSIX EAGAIN/EWOULDBLOCK。
                     pending = data
@@ -776,6 +790,47 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             self._write_json(400, {"error": str(exc)})
             return
         self._write_json(200, {"filename": filename, "snapshot": snapshot})
+
+    def _handle_history_api_get(self, parsed) -> bool:
+        """Enterprise local session history (SQLite); not proxied to Gateway."""
+        if not os.getenv("AGENT_RUNTIME", "").strip():
+            return False
+        if not self.history_db:
+            return False
+        path = parsed.path
+        if path == "/api/sessions":
+            query = self._parse_query(parsed.query)
+            try:
+                limit = int(query.get("limit", "20") or 20)
+                offset = int(query.get("offset", "0") or 0)
+            except ValueError:
+                limit, offset = 20, 0
+            limit = max(1, min(limit, 100))
+            offset = max(0, offset)
+            user = query.get("user") or None
+            self._write_json(
+                200,
+                {
+                    "sessions": list_sessions_sync(
+                        self.history_db,
+                        limit=limit,
+                        offset=offset,
+                        user=user,
+                    ),
+                },
+            )
+            return True
+        if path.startswith("/api/sessions/"):
+            session_id = path[len("/api/sessions/") :]
+            query = self._parse_query(parsed.query)
+            user = query.get("user") or None
+            detail = get_session_detail_sync(self.history_db, session_id, user=user)
+            if detail is None:
+                self._write_json(404, {"error": "not_found"})
+            else:
+                self._write_json(200, detail)
+            return True
+        return False
 
     def _handle_file_api_get(self, parsed) -> None:
         path = parsed.path
@@ -1019,7 +1074,104 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 # Connection may already be closed or broken; nothing more we can do.
                 self.log_error("failed to send download error response")
 
+    def _handle_file_push(self) -> None:
+        """接收来自 Gateway 的文件推送（企业版 AGENT_RUNTIME 反向推送方案）."""
+        if not os.getenv("AGENT_RUNTIME", "").strip():
+            self._write_json(404, {"error": "not_available"})
+            return
+
+        from jiuwenswarm.agents.harness.common.tools.web_file_download import (
+            build_file_download_info,
+        )
+
+        content_type = self.headers.get("Content-Type", "")
+        if "multipart/form-data" not in content_type:
+            self._write_json(400, {"error": "expected_multipart_form_data"})
+            return
+
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length)
+
+            environ = {
+                "REQUEST_METHOD": "POST",
+                "CONTENT_TYPE": content_type,
+                "CONTENT_LENGTH": str(content_length),
+            }
+            fs = cgi.FieldStorage(
+                fp=io.BytesIO(body),
+                headers=self.headers,
+                environ=environ,
+            )
+
+            file_item = fs["file"]
+            session_id = fs.getvalue("session_id", "default")
+            filename = fs.getvalue("filename", file_item.filename or "unnamed")
+
+            if not file_item.file:
+                self._write_json(400, {"error": "missing_file_field"})
+                return
+
+            received_dir = Path("./web_received_files")
+            received_dir.mkdir(parents=True, exist_ok=True)
+
+            safe_name = f"{int(time.time())}_{filename}"
+            local_path = received_dir / safe_name
+
+            with open(local_path, "wb") as f:
+                while True:
+                    chunk = file_item.file.read(65536)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+
+            self.logger.info(
+                "[WebServer] 接收文件推送: %s -> %s", filename, local_path
+            )
+
+            download_info = build_file_download_info(
+                file_path=str(local_path),
+                file_name=filename,
+                session_id=session_id,
+            )
+
+            self._write_json(
+                200,
+                {
+                    "success": True,
+                    "file_path": str(local_path),
+                    "download_url": download_info["download_url"],
+                    "download_token": download_info["download_token"],
+                    "expires_at": download_info.get("expires_at"),
+                },
+            )
+
+        except Exception as exc:
+            self.logger.error(
+                "[WebServer] 处理文件推送失败: %s", exc, exc_info=True
+            )
+            self._write_json(500, {"error": "push_failed", "detail": str(exc)})
+
+    def _handle_obs_upload(self) -> None:
+        """Upload browser file payload to self-hosted MinIO (企业版)."""
+        if not os.getenv("AGENT_RUNTIME", "").strip():
+            self._write_json(404, {"error": "not_available"})
+            return
+
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        raw = self.rfile.read(length) if length > 0 else b""
+        status, payload = _process_obs_upload_body(raw, logger=self.logger)
+        self._write_json(status, payload)
+
     def _handle_file_api_post(self, parsed) -> None:
+        if parsed.path == "/file-api/push":
+            self._handle_file_push()
+            return
+
+        if parsed.path == "/file-api/upload-obs":
+            self._handle_obs_upload()
+            return
+
         if parsed.path == "/file-api/rebuild-agent-data":
             try:
                 _generate_agent_data(self.project_root)
@@ -1093,6 +1245,8 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if self._handle_history_api_get(parsed):
+            return
         if self._is_share_api_route():
             self._handle_share_api_get(parsed)
             return
@@ -1219,6 +1373,64 @@ def _wait_for_gateway(ws_target: str, logger: logging.Logger) -> None:
         logger.warning("[jiuwenswarm-web] gateway not available after 15 seconds")
 
 
+def _process_obs_upload_body(
+    raw: bytes, *, logger: logging.Logger | None = None
+) -> tuple[int, dict[str, Any]]:
+    try:
+        payload = json.loads(raw.decode("utf-8") if raw else "{}")
+    except json.JSONDecodeError:
+        return 400, {"ok": False, "error": "invalid_json"}
+    if not isinstance(payload, dict):
+        return 400, {"ok": False, "error": "invalid_payload"}
+    try:
+        from jiuwenswarm.channels.web.minio_upload import upload_base64_payload
+
+        return 200, upload_base64_payload(payload)
+    except Exception as exc:
+        if logger is not None:
+            logger.error("[WebServer] MinIO upload failed: %s", exc, exc_info=True)
+        return 500, {"ok": False, "error": str(exc)}
+
+
+def _run_upload_api_server(*, host: str, port: int, log_level: str) -> None:
+    """Minimal HTTP server for POST /file-api/upload-obs (企业版 Vite dev)."""
+    if not os.getenv("AGENT_RUNTIME", "").strip():
+        raise SystemExit("upload-api-only requires AGENT_RUNTIME")
+
+    logs_root = get_logs_dir().resolve()
+    logger = _setup_logger(logs_root, log_level)
+
+    class _UploadApiHandler(SimpleHTTPRequestHandler):
+        def log_message(self, fmt: str, *args: Any) -> None:
+            logger.debug(fmt, *args)
+
+        def do_POST(self) -> None:  # noqa: N802
+            if urlparse(self.path).path != "/file-api/upload-obs":
+                self.send_error(404)
+                return
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            raw = self.rfile.read(length) if length > 0 else b""
+            status, payload = _process_obs_upload_body(raw, logger=logger)
+            data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    server = ThreadingHTTPServer((host, port), _UploadApiHandler)
+    logger.info(
+        "[jiuwenswarm-upload-api] POST http://%s:%s/file-api/upload-obs", host, port
+    )
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+        logger.info("[jiuwenswarm-upload-api] server closed")
+
+
 def main() -> None:
     from jiuwenswarm.dotenv_early import get_parsed_dotenv
 
@@ -1276,6 +1488,11 @@ def main() -> None:
         help="Disable websocket compression for easier ws req/res/event debug logging.",
     )
     parser.add_argument(
+        "--upload-api-only",
+        action="store_true",
+        help="Run a minimal HTTP server that only serves POST /file-api/upload-obs (enterprise Vite dev).",
+    )
+    parser.add_argument(
         "--name",
         metavar="<name>",
         help="Start a named instance from instances.yaml.",
@@ -1286,6 +1503,10 @@ def main() -> None:
         help="Load environment from .env file (processed at startup, not used here).",
     )
     args = parser.parse_args()
+
+    if args.upload_api_only:
+        _run_upload_api_server(host=args.host, port=args.port, log_level=args.log_level)
+        return
 
     install_async_dump_handler("web")
 
@@ -1312,6 +1533,16 @@ def main() -> None:
     logs_root = get_logs_dir().resolve()
     logger = _setup_logger(logs_root, args.log_level)
 
+    global _history_runner
+    history_db = ""
+    if os.getenv("AGENT_RUNTIME", "").strip():
+        tenant_root = get_multi_tenant_user_workspace_dir("default", "default") or project_root
+        history_db = str(tenant_root / "web_history.db")
+        store = ChatHistoryStore(history_db)
+        _history_runner = HistoryFrameRunner(store)
+        _history_runner.start()
+        logger.info("[jiuwenswarm-web] enterprise history db: %s", history_db)
+
     class _ConfiguredHandler(_SpaStaticHandler):
         pass
 
@@ -1323,6 +1554,7 @@ def main() -> None:
     _ConfiguredHandler.agent_teams_root = agent_teams_root
     _ConfiguredHandler.logs_root = logs_root
     _ConfiguredHandler.logger = logger
+    _ConfiguredHandler.history_db = history_db
     handler = partial(_ConfiguredHandler, directory=str(dist_dir))
     server = ThreadingHTTPServer((args.host, args.port), handler)
 

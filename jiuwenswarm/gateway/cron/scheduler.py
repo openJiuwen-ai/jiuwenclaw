@@ -1030,6 +1030,12 @@ class CronSchedulerService:
                 }
                 if job.model_name:
                     params["model_name"] = job.model_name
+                if getattr(job, "group_id", None):
+                    params["group_id"] = job.group_id
+                if getattr(job, "bot_id", None):
+                    params["bot_id"] = job.bot_id
+                if getattr(job, "user_id", None):
+                    params["user_id"] = job.user_id
                 envelope = e2a_from_agent_fields(
                     request_id=f"cron-{run_id}",
                     channel_id=channel_id,

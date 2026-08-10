@@ -40,7 +40,7 @@ import time
 import asyncio
 from collections import OrderedDict
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal, Optional
 import logging
 from logging.handlers import BaseRotatingHandler
@@ -975,6 +975,33 @@ def cleanup_team_files(workspace_dir: Path) -> None:
                 logger.info(f"[Cleanup] Removed legacy team database file: {db_file}")
             except OSError as e:
                 logger.warning(f"[Cleanup] Failed to remove legacy team database file: {e}")
+
+
+def update_config() -> None:
+    """Merge new template fields into user config.yaml, preserving user values."""
+    package_root = _find_package_root()
+    if not package_root:
+        raise RuntimeError("package root not found")
+
+    workspace_dir = get_user_workspace_dir()
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    resources_dir = package_root / "resources"
+    config_yaml_src_candidates = [
+        resources_dir / "config.yaml",
+        package_root / "config" / "config.yaml",
+    ]
+    config_yaml_src = next((p for p in config_yaml_src_candidates if p.exists()), None)
+    if not config_yaml_src:
+        raise RuntimeError(
+            "config.yaml template not found; tried: "
+            + ", ".join(str(p) for p in config_yaml_src_candidates)
+        )
+
+    config_yaml_dest = workspace_dir / "config" / "config.yaml"
+    from jiuwenswarm.common.config import migrate_config_from_template
+
+    migrate_config_from_template(config_yaml_src, config_yaml_dest)
 
 
 def prepare_workspace(
@@ -2096,11 +2123,17 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
 
     级别由 ``config.yaml`` 的 ``logging`` 段控制；环境变量 ``LOG_LEVEL`` 仅覆盖**控制台**级别
     （``log_level`` 参数为 ``None`` 时）。若传入 ``log_level``（如单测），则控制台与各文件级别均为该值。
+
+    环境变量 ``LOG_TO_FILE_ENABLED`` 设为 ``false`` 时，跳过所有文件 handler 的创建与
+    日志目录写入，仅保留控制台输出。
     """
     from jiuwenswarm.infrastructure.config import Settings
 
+    settings = Settings()
     logs_root = get_logs_dir()
-    logs_root.mkdir(parents=True, exist_ok=True)
+    file_logging_enabled = settings.log_to_file_enabled
+    if file_logging_enabled:
+        logs_root.mkdir(parents=True, exist_ok=True)
 
     levels = _resolve_logging_levels(log_level)
 
@@ -2116,7 +2149,7 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     privacy_filter: Optional[SensitiveDataFilter] = None
-    if Settings().gateway_log_masking_enabled:
+    if settings.log_masking_enabled:
         privacy_filter = SensitiveDataFilter()
 
     def _add_rotating(
@@ -2139,13 +2172,14 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
             h.addFilter(name_filter)
         root.addHandler(h)
 
-    _add_rotating("gateway.log", levels.gateway, _ComponentNameFilter("gateway"))
-    _add_rotating("channel.log", levels.channel, _ComponentNameFilter("channel"))
-    _add_rotating("agent_server.log", levels.agent_server,
-        _CompositeFilter([_ComponentNameFilter("agent_server"), _ComponentNameFilter("permissions")]))
-    _add_rotating("full.log", levels.full, None)
-    json_formatter = JsonOnlyFormatter()
-    _add_rotating("permissions.log", levels.agent_server, _ComponentNameFilter("permissions"), json_formatter)
+    if file_logging_enabled:
+        _add_rotating("gateway.log", levels.gateway, _ComponentNameFilter("gateway"))
+        _add_rotating("channel.log", levels.channel, _ComponentNameFilter("channel"))
+        _add_rotating("agent_server.log", levels.agent_server,
+            _CompositeFilter([_ComponentNameFilter("agent_server"), _ComponentNameFilter("permissions")]))
+        _add_rotating("full.log", levels.full, None)
+        json_formatter = JsonOnlyFormatter()
+        _add_rotating("permissions.log", levels.agent_server, _ComponentNameFilter("permissions"), json_formatter)
 
     stream_handler = logging.StreamHandler()
     stream_handler.setLevel(levels.console)
@@ -2246,6 +2280,126 @@ def wait_for_pid_exit(pid: int, timeout: float = 60.0) -> None:
                 return
             time.sleep(0.5)
     logger.warning("process %d did not exit within %.1f seconds", pid, timeout)
+
+
+
+_FILE_HANDLER_LEVEL_MAP: dict[str, str] = {
+    "gateway.log": "gateway",
+    "channel.log": "channel",
+    "agent_server.log": "agent_server",
+    "full.log": "full",
+    "permissions.log": "agent_server",
+}
+
+
+def update_log_levels(
+    log_level: Optional[str] = None,
+    *,
+    console_level: Optional[str] = None,
+    gateway: Optional[str] = None,
+    channel: Optional[str] = None,
+    agent_server: Optional[str] = None,
+    full: Optional[str] = None,
+) -> logging.Logger:
+    """运行时动态更新 ``jiuwenswarm`` 根日志及各 handler 的级别，无需重建 handler。"""
+    levels = _resolve_logging_levels(log_level)
+
+    if console_level is not None:
+        levels = replace(levels, console=_parse_log_level(console_level, levels.console))
+    if gateway is not None:
+        levels = replace(levels, gateway=_parse_log_level(gateway, levels.gateway))
+    if channel is not None:
+        levels = replace(levels, channel=_parse_log_level(channel, levels.channel))
+    if agent_server is not None:
+        levels = replace(levels, agent_server=_parse_log_level(agent_server, levels.agent_server))
+    if full is not None:
+        levels = replace(levels, full=_parse_log_level(full, levels.full))
+
+    logger_level = min(levels.gateway, levels.channel, levels.agent_server, levels.full)
+    levels = replace(levels, logger=logger_level)
+
+    root = logging.getLogger("jiuwenswarm")
+    root.setLevel(levels.logger)
+
+    for h in root.handlers:
+        if isinstance(h, SafeRotatingFileHandler):
+            fname = Path(h.baseFilename).name
+            attr = _FILE_HANDLER_LEVEL_MAP.get(fname)
+            if attr is not None:
+                h.setLevel(getattr(levels, attr))
+        elif isinstance(h, logging.StreamHandler):
+            h.setLevel(levels.console)
+
+    return root
+
+
+_LOGGING_CONFIG_TABLE = "logging_config"
+
+
+def _logging_config_row_to_dict(obj: dict[str, Any] | Any) -> dict[str, Any]:
+    if isinstance(obj, dict):
+        return {
+            "level": obj.get("level", "INFO"),
+            "console_level": obj.get("console_level"),
+            "gateway": obj.get("gateway"),
+            "channel": obj.get("channel"),
+            "agent_server": obj.get("agent_server"),
+            "full": obj.get("full"),
+        }
+    return {
+        "level": getattr(obj, "level", "INFO"),
+        "console_level": getattr(obj, "console_level", None),
+        "gateway": getattr(obj, "gateway", None),
+        "channel": getattr(obj, "channel", None),
+        "agent_server": getattr(obj, "agent_server", None),
+        "full": getattr(obj, "full", None),
+    }
+
+
+def apply_logging_config_payload(payload: dict[str, Any] | None) -> None:
+    """将 DB 行 / WS payload 转为 :func:`update_log_levels` 调用。"""
+    if not payload or payload.get("op") == "delete":
+        update_log_levels()
+        return
+
+    kwargs: dict[str, Any] = {}
+    if payload.get("level") is not None:
+        kwargs["log_level"] = str(payload["level"])
+    for key in ("console_level", "gateway", "channel", "agent_server", "full"):
+        if payload.get(key) is not None:
+            kwargs[key] = str(payload[key])
+    update_log_levels(**kwargs)
+
+
+async def reload_logging_levels_from_gateway_db() -> None:
+    """从 Gateway 库加载 ``logging_config`` 并刷新**本进程**日志级别。"""
+    if not os.getenv("AGENT_RUNTIME", "").strip():
+        update_log_levels()
+        return
+    try:
+        from jiuwenswarm.server.runtime.enterprise_config import gateway_db
+
+        jid = gateway_db.resolve_jiuwenclaw_id()
+        if not jid:
+            update_log_levels()
+            return
+
+        rows = await gateway_db.list_records(
+            _LOGGING_CONFIG_TABLE,
+            filters={"jiuwenclaw_id": jid},
+        )
+        row = rows[0] if rows else None
+        apply_logging_config_payload(
+            _logging_config_row_to_dict(row) if row is not None else None,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[logging_config_db] logging_config read failed: %s",
+            exc,
+            exc_info=True,
+        )
+        update_log_levels()
+
 
 
 class AsyncLRUCache:

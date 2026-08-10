@@ -27,6 +27,11 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 from urllib.parse import urlparse
 
+if sys.platform != "win32":
+    import uvloop
+
+    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+
 from openjiuwen.core.common.logging import LogManager
 from websockets.exceptions import ConnectionClosed, ConnectionClosedError
 
@@ -66,6 +71,9 @@ if _logging_yaml.exists():
     from openjiuwen.core.common.logging.log_config import configure_log
 
     configure_log(str(_logging_yaml))
+    from jiuwenswarm.openjiuwen_log_patch import apply_openjiuwen_log_to_file_setting
+
+    apply_openjiuwen_log_to_file_setting()
 else:
     # Reduce openjiuwen internal logs (keep Gateway logs)
     for _lg in LogManager.get_all_loggers().values():
@@ -2621,6 +2629,38 @@ async def _run(
         logger.info("[App] log masking rules loaded from Gateway DB (if any)")
     except Exception:  # noqa: BLE001
         logger.warning("[App] log_masking_rule cold load skipped", exc_info=True)
+
+    if os.getenv("AGENT_RUNTIME", "").strip():
+        try:
+            from jiuwenswarm.common.utils import reload_logging_levels_from_gateway_db
+
+            await reload_logging_levels_from_gateway_db()
+            logger.info("[App] logging levels loaded from Gateway DB (if any)")
+        except Exception:  # noqa: BLE001
+            logger.warning("[App] logging_config cold load skipped", exc_info=True)
+
+    if os.getenv("AGENT_RUNTIME", "").strip():
+        try:
+            from jiuwenswarm.agents.harness.common.rails.permissions.config_loader import (
+                reload_permissions_from_gateway_db,
+            )
+
+            await reload_permissions_from_gateway_db()
+            logger.info("[App] permissions config loaded from Gateway DB (if any)")
+        except Exception:  # noqa: BLE001
+            logger.warning("[App] permissions_config cold load skipped", exc_info=True)
+
+    if os.getenv("AGENT_RUNTIME", "").strip():
+        try:
+            from jiuwenswarm.agents.harness.common.memory.config import (
+                reload_memory_config_from_gateway_db,
+            )
+
+            await reload_memory_config_from_gateway_db()
+            logger.info("[App] memory_config loaded from Gateway DB (if any)")
+        except Exception:  # noqa: BLE001
+            logger.warning("[App] memory_config cold load skipped", exc_info=True)
+
     # 主动推荐：按 config 自动注册/删除 proactive.tick 定时 job
     try:
         from jiuwenswarm.gateway.cron.proactive_cron_sync import sync_proactive_tick_job
