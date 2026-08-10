@@ -47,6 +47,8 @@ type SkillItem = {
   is_builtin_source?: boolean;
   /** 本地技能目录是否存在 evolutions.json */
   has_evolutions?: boolean;
+  /** 技能类型：skill / swarm_skill / multimodal_skill */
+  skill_type?: string;
   /** 是否启用 */
   enabled?: boolean;
 };
@@ -71,6 +73,83 @@ type MarketplaceItem = {
 type SkillDetail = SkillItem & {
   content: string;
   file_path: string;
+};
+
+type SkillVersion = {
+  version: string;
+  is_default: boolean;
+  source: string;
+  available: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+type SkillVersionsListResponse = {
+  success: boolean;
+  name: string;
+  default_version: string | null;
+  versions: SkillVersion[];
+};
+
+type SkillFileEntry = {
+  path: string;
+  type: 'file' | 'directory';
+  size: number | null;
+  mime_type: string | null;
+};
+
+type SkillFilesListResponse = {
+  name: string;
+  files: SkillFileEntry[];
+};
+
+type SkillFilePreview = {
+  name: string;
+  path: string;
+  type: 'file';
+  mime_type: string;
+  size: number;
+  encoding?: string;
+  content?: string;
+  download_url?: string;
+};
+
+type SkillRebuildResponse = {
+  success: boolean;
+  result_type: 'followup';
+  action: string;
+  followup_prompt: string;
+  skill_name: string;
+  rebuild_target: {
+    version: string | null;
+    is_default: boolean;
+    skill_dir: string;
+    content_root: string | null;
+    swap_workspace: boolean;
+  };
+};
+
+type EvolutionChange = {
+  section?: string;
+  action?: string;
+  content: string;
+  target?: string;
+};
+
+type EvolutionEntry = {
+  id: string;
+  source?: string;
+  timestamp?: string;
+  context?: string;
+  change: EvolutionChange;
+  applied?: boolean;
+};
+
+type EvolutionGetResponse = {
+  exists: boolean;
+  valid?: boolean;
+  detail?: string;
+  entries?: EvolutionEntry[];
 };
 
 type LoadState = "idle" | "loading" | "success" | "error";
@@ -609,6 +688,7 @@ export function SkillPanel({
   const skillGraphPanelRef = useRef<SkillGraphPanelHandle | null>(null);
   const graphReadingStartedAtRef = useRef<number | null>(null);
   const graphReadingTimerRef = useRef<number | null>(null);
+  const evolutionSaveTimerRef = useRef<number | null>(null);
   const [graphReading, setGraphReading] = useState(false);
   const [symphonyEnabledDraft, setSymphonyEnabledDraft] = useState(symphonyEnabled);
   const [symphonySaving, setSymphonySaving] = useState(false);
@@ -740,6 +820,22 @@ export function SkillPanel({
   const [teamSkillsHubModalOpen, setTeamSkillsHubModalOpen] = useState(false);
   const [evolutionModalOpen, setEvolutionModalOpen] = useState(false);
   const [evolutionSkillName, setEvolutionSkillName] = useState<string | null>(null);
+  const [detailTab, setDetailTab] = useState<"content" | "files" | "experience">("content");
+  const [evolutionEntries, setEvolutionEntries] = useState<EvolutionEntry[]>([]);
+  const [evolutionListState, setEvolutionListState] = useState<LoadState>("idle");
+  const [, setEvolutionSaving] = useState(false);
+  const [evolutionMessage, setEvolutionMessage] = useState<string | null>(null);
+  const [evolutionMessageType, setEvolutionMessageType] = useState<"success" | "error" | null>(null);
+  const [evolutionFormatError, setEvolutionFormatError] = useState<string | null>(null);
+  const [skillVersions, setSkillVersions] = useState<SkillVersion[]>([]);
+  const [skillVersionsDefault, setSkillVersionsDefault] = useState<string | null>(null);
+  const [versionsLoadState, setVersionsLoadState] = useState<LoadState>("idle");
+  const [skillFiles, setSkillFiles] = useState<SkillFileEntry[]>([]);
+  const [filesLoadState, setFilesLoadState] = useState<LoadState>("idle");
+  const [filePreview, setFilePreview] = useState<SkillFilePreview | null>(null);
+  const [filePreviewPath, setFilePreviewPath] = useState<string | null>(null);
+  const [expandedFileFolders, setExpandedFileFolders] = useState<Set<string>>(new Set([""]));
+  const [rebuildLoading, setRebuildLoading] = useState(false);
   const withSession = useCallback(
     (params?: Record<string, unknown>) => ({
       ...(params || {}),
@@ -886,6 +982,9 @@ export function SkillPanel({
           withSession({ name: skillName })
         );
         setSelectedSkill(normalizeSkillItem(data));
+        setDetailTab("content");
+        setFilePreview(null);
+        setFilePreviewPath(null);
         setDetailState("success");
       } catch (error) {
         console.error(error);
@@ -894,6 +993,189 @@ export function SkillPanel({
     },
     [withSession]
   );
+
+  const fetchSkillVersions = useCallback(
+    async (skillName: string) => {
+      setVersionsLoadState("loading");
+      try {
+        const data = await webRequest<SkillVersionsListResponse>(
+          "skills.versions.list",
+          withSession({ name: skillName })
+        );
+        setSkillVersions(data.versions || []);
+        setSkillVersionsDefault(data.default_version);
+        setVersionsLoadState("success");
+      } catch (error) {
+        console.error(error);
+        setVersionsLoadState("error");
+      }
+    },
+    [withSession]
+  );
+
+  const fetchSkillFiles = useCallback(
+    async (skillName: string) => {
+      setFilesLoadState("loading");
+      try {
+        const data = await webRequest<SkillFilesListResponse>(
+          "skills.files.list",
+          withSession({ name: skillName })
+        );
+        setSkillFiles(data.files || []);
+        setFilesLoadState("success");
+      } catch (error) {
+        console.error(error);
+        setFilesLoadState("error");
+      }
+    },
+    [withSession]
+  );
+
+  const fetchFilePreview = useCallback(
+    async (skillName: string, filePath: string) => {
+      try {
+        const data = await webRequest<SkillFilePreview>(
+          "skills.files.get",
+          withSession({ name: skillName, path: filePath })
+        );
+        setFilePreview(data);
+        setFilePreviewPath(filePath);
+      } catch (error) {
+        console.error(error);
+        setFilePreview(null);
+      }
+    },
+    [withSession]
+  );
+
+  interface FileTreeNode {
+    name: string;
+    path: string;
+    type: 'file' | 'directory';
+    size: number | null;
+    mime_type: string | null;
+    children: FileTreeNode[];
+  }
+
+  const skillFileTree = useMemo(() => {
+    const root: FileTreeNode = { name: '', path: '', type: 'directory', size: null, mime_type: null, children: [] };
+    const dirMap = new Map<string, FileTreeNode>();
+    dirMap.set('', root);
+    for (const entry of skillFiles) {
+      const parts = entry.path.split('/').filter(Boolean);
+      let currentPath = '';
+      let currentNode = root;
+      for (let i = 0; i < parts.length; i++) {
+        const part = parts[i];
+        const isLast = i === parts.length - 1;
+        currentPath = currentPath ? `${currentPath}/${part}` : part;
+        if (isLast && entry.type === 'file') {
+          currentNode.children.push({ name: part, path: entry.path, type: 'file', size: entry.size, mime_type: entry.mime_type, children: [] });
+        } else {
+          if (!dirMap.has(currentPath)) {
+            const dirNode: FileTreeNode = { name: part, path: currentPath, type: 'directory', size: null, mime_type: null, children: [] };
+            dirMap.set(currentPath, dirNode);
+            currentNode.children.push(dirNode);
+          }
+          currentNode = dirMap.get(currentPath)!;
+        }
+      }
+    }
+    const sortNode = (node: FileTreeNode) => {
+      node.children.sort((a, b) => {
+        if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      });
+      node.children.forEach(sortNode);
+    };
+    sortNode(root);
+    return root;
+  }, [skillFiles]);
+
+  const isFilePreviewable = useCallback((entry: { type: string; mime_type: string | null; name: string }) => {
+    if (entry.type !== 'file') return false;
+    const mime = entry.mime_type || '';
+    if (mime.startsWith('text/')) return true;
+    const previewableMimes = ['application/json', 'application/xml', 'application/javascript', 'application/x-yaml'];
+    if (previewableMimes.includes(mime)) return true;
+    const ext = entry.name.split('.').pop()?.toLowerCase() || '';
+    return ['md', 'txt', 'json', 'yaml', 'yml', 'xml', 'js', 'ts', 'py', 'sh', 'csv', 'ini', 'toml', 'css', 'html'].includes(ext);
+  }, []);
+
+  const toggleFileFolder = useCallback((path: string) => {
+    setExpandedFileFolders(prev => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path); else next.add(path);
+      return next;
+    });
+  }, []);
+
+  const renderFileTree = useCallback((node: FileTreeNode, depth: number): ReactNode => {
+    if (node.type === 'file') {
+      const previewable = isFilePreviewable(node);
+      const selected = filePreviewPath === node.path;
+      return (
+        <button key={node.path} type="button"
+          onClick={() => { if (previewable && selectedSkill) fetchFilePreview(selectedSkill.name, node.path); }}
+          className={`w-full min-h-9 flex items-center gap-2 rounded-lg px-2 text-left text-sm border ${selected ? 'bg-accent-subtle text-text border-[var(--color-border-accent)]' : previewable ? 'text-text-muted hover:bg-secondary/40 hover:text-text border-transparent' : 'text-text-muted/60 border-transparent cursor-not-allowed'}`}
+          style={{ paddingLeft: `${depth * 14 + 8}px` }} title={node.name}>
+          <span className="w-4 h-4" />
+          <svg className="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path strokeLinecap="round" strokeLinejoin="round" d="M6.75 3.75h7.5l4.5 4.5v12a1.5 1.5 0 01-1.5 1.5h-10.5a1.5 1.5 0 01-1.5-1.5v-15a1.5 1.5 0 011.5-1.5zM14.25 3.75v4.5h4.5" /></svg>
+          <span className="flex-1 min-w-0 truncate">{node.name}</span>
+          {!previewable ? <span className="text-[10px] px-1.5 py-0.5 rounded border border-border bg-secondary/40">不可预览</span> : null}
+        </button>
+      );
+    }
+    const isExpanded = expandedFileFolders.has(node.path);
+    const hasChildren = node.children.length > 0;
+    return (
+      <div key={node.path || 'root'}>
+        {node.path !== '' ? (
+          <button type="button" onClick={() => toggleFileFolder(node.path)}
+            className="w-full min-h-9 flex items-center gap-2 rounded-lg px-2 text-left text-sm text-text-muted hover:bg-secondary/40 hover:text-text"
+            style={{ paddingLeft: `${depth * 14 + 8}px` }} title={node.name}>
+            <span className="w-4 h-4 flex items-center justify-center text-text-muted/80">
+              {hasChildren ? <svg className={`w-3 h-3 ${isExpanded ? 'rotate-90' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M9 6l6 6-6 6" /></svg> : null}
+            </span>
+            <svg className="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h4.5l1.5 2.25h10.5v8.25A2.25 2.25 0 0118 19.5H6A2.25 2.25 0 013.75 17.25V6.75z" /></svg>
+            <span className="flex-1 min-w-0 truncate">{node.name}</span>
+          </button>
+        ) : null}
+        {isExpanded || node.path === '' ? (
+          <div>{node.children.map(child => renderFileTree(child, node.path === '' ? 0 : depth + 1))}</div>
+        ) : null}
+      </div>
+    );
+  }, [expandedFileFolders, filePreviewPath, selectedSkill, isFilePreviewable, toggleFileFolder, fetchFilePreview]);
+
+  const handleRebuild = useCallback(
+    async (skillName: string, version: string | null) => {
+      setRebuildLoading(true);
+      try {
+        const data = await webRequest<SkillRebuildResponse>(
+          "skills.rebuild",
+          withSession({ name: skillName, version })
+        );
+        if (data.success) {
+          showMessage("success", t('skills.messages.rebuildStarted', { defaultValue: '技能重建已启动，Agent 正在改写 SKILL.md…' }));
+          setTimeout(() => fetchSkillDetail(skillName), 3000);
+        }
+      } catch (error) {
+        console.error(error);
+        showMessage("error", t('skills.errors.rebuildFailed', { defaultValue: `重建失败: ${error}` }));
+      } finally {
+        setRebuildLoading(false);
+      }
+    },
+    [withSession, fetchSkillDetail, showMessage, t]
+  );
+
+  useEffect(() => {
+    if (selectedSkill) {
+      void fetchSkillVersions(selectedSkill.name);
+    }
+  }, [selectedSkill, fetchSkillVersions]);
+
 
   const fetchRetrievalStatus = useCallback(async (options?: { silent?: boolean }) => {
     const requestId = ++retrievalStatusRequestRef.current;
@@ -1114,14 +1396,23 @@ export function SkillPanel({
 
   const handleEditSkill = useCallback((skillName: string) => {
     window.dispatchEvent(new CustomEvent('jiuwen:new-conversation', {
-      detail: { skillName: 'skill_creator', suffixText: '帮我修改这个技能', secondSkillName: skillName }
+      detail: {
+        skillName: 'skill-creator-router',
+        suffixText: '帮我修改这个技能',
+        secondSkillName: skillName,
+        metadata: { scene: 'edit_skill', target_skill: skillName }
+      }
     }));
   }, []);
 
-  // 通过聊天创建：新建会话，选中 skill_creator 技能并入 chip 后追加创建提示文案
+  // 通过聊天创建：新建会话，选中 skill-creator-router 技能并在 chip 后追加创建提示文字
   const handleCreateViaChat = useCallback(() => {
     window.dispatchEvent(new CustomEvent('jiuwen:new-conversation', {
-      detail: { skillName: 'skill_creator', suffixText: '请帮我创建一个具备xxx功能的技能/团队技能/多模态技能' }
+      detail: {
+        skillName: 'skill-creator-router',
+        suffixText: '请帮我创建一个可以实现xxx功能的技能/团队技能/多模态技能',
+        metadata: { scene: 'create_skill' }
+      }
     }));
   }, []);
 
@@ -1146,6 +1437,111 @@ export function SkillPanel({
     setEvolutionModalOpen(false);
     setEvolutionSkillName(null);
   }, []);
+
+  const sortedEvolutionEntries = useMemo(
+    () =>
+      [...evolutionEntries].sort((a, b) => {
+        const ta = a.timestamp || "";
+        const tb = b.timestamp || "";
+        return tb.localeCompare(ta);
+      }),
+    [evolutionEntries]
+  );
+
+  const fetchEvolutionEntries = useCallback(async () => {
+    if (!selectedSkill) return;
+    setEvolutionListState("loading");
+    setEvolutionMessage(null);
+    setEvolutionMessageType(null);
+    setEvolutionFormatError(null);
+    try {
+      const data = await webRequest<EvolutionGetResponse>(
+        "skills.evolution.get",
+        withSession({ name: selectedSkill.name })
+      );
+      if (!data.exists) {
+        setEvolutionEntries([]);
+        setEvolutionListState("success");
+        return;
+      }
+      if (data.valid === false) {
+        setEvolutionEntries([]);
+        setEvolutionFormatError(data.detail || t("skills.evolution.errors.invalidFile"));
+        setEvolutionListState("success");
+        return;
+      }
+      setEvolutionEntries(data.entries || []);
+      setEvolutionListState("success");
+    } catch (error) {
+      console.error(error);
+      setEvolutionListState("error");
+    }
+  }, [selectedSkill, t, withSession]);
+
+  useEffect(() => {
+    if (detailTab === "experience" && selectedSkill?.has_evolutions) {
+      void fetchEvolutionEntries();
+    }
+  }, [detailTab, selectedSkill, fetchEvolutionEntries]);
+
+  const handleEvolutionContentChange = useCallback((entryId: string, value: string) => {
+    setEvolutionEntries((prev) =>
+      prev.map((entry) =>
+        entry.id === entryId
+          ? { ...entry, change: { ...entry.change, content: value } }
+          : entry
+      )
+    );
+  }, []);
+
+  const handleEvolutionDeleteEntry = useCallback(
+    (entryId: string) => {
+      const confirmed = window.confirm(t("skills.evolution.deleteConfirm"));
+      if (!confirmed) return;
+      setEvolutionEntries((prev) => prev.filter((entry) => entry.id !== entryId));
+    },
+    [t]
+  );
+
+  const saveEvolutionEntries = useCallback(async (entries: EvolutionEntry[]) => {
+    if (!selectedSkill) return;
+    setEvolutionSaving(true);
+    try {
+      const data = await webRequest<{
+        success: boolean;
+        detail?: string;
+        message?: string;
+      }>("skills.evolution.save", withSession({ name: selectedSkill.name, entries }));
+      if (!data.success) {
+        throw new Error(data.detail || data.message || t("skills.evolution.errors.saveFailed"));
+      }
+      await fetchSkills();
+    } catch (error) {
+      console.error(error);
+      setEvolutionMessage(t("skills.evolution.errors.saveFailed"));
+      setEvolutionMessageType("error");
+    } finally {
+      setEvolutionSaving(false);
+    }
+  }, [selectedSkill, t, withSession, fetchSkills]);
+
+  useEffect(() => {
+    if (detailTab !== "experience" || !selectedSkill?.has_evolutions || evolutionEntries.length === 0) {
+      return;
+    }
+    if (evolutionSaveTimerRef.current) {
+      clearTimeout(evolutionSaveTimerRef.current);
+    }
+    evolutionSaveTimerRef.current = window.setTimeout(() => {
+      saveEvolutionEntries(evolutionEntries);
+    }, 500);
+    return () => {
+      if (evolutionSaveTimerRef.current) {
+        clearTimeout(evolutionSaveTimerRef.current);
+      }
+    };
+  }, [evolutionEntries, detailTab, selectedSkill, saveEvolutionEntries]);
+
 
   const handleInstall = useCallback(
     async (skillName?: string) => {
@@ -2357,14 +2753,204 @@ export function SkillPanel({
                     </div>
                   </div>
 
-                  <div data-testid="skill-panel-my-detail-content-preview" className="mt-4">
-                    <div data-testid="skill-panel-my-detail-content-title" className="text-sm font-medium text-text mb-2">
-                      {t('skills.contentPreview')}
-                    </div>
-                    <div data-testid="skill-panel-my-detail-content-text" className="text-sm text-text whitespace-pre-wrap bg-secondary border border-border rounded-md p-3">
-                      {selectedSkill.content || t('skills.noContent')}
-                    </div>
+
+                  <div className="mt-4 flex items-center gap-2 flex-wrap">
+                    {versionsLoadState === "success" && skillVersions.length > 0 && (
+                      <select
+                        value={selectedSkill.version || skillVersionsDefault || ""}
+                        onChange={(event) => {
+                          const ver = event.target.value;
+                          if (ver) void fetchSkillDetail(selectedSkill.name);
+                        }}
+                        data-testid="skill-panel-my-detail-version-select"
+                        className="appearance-none rounded-[6px] border border-border bg-panel text-sm text-text outline-none"
+                        style={{ minWidth: '160px', height: '28px', paddingLeft: '12px', paddingRight: '12px' }}
+                      >
+                        {skillVersions.map((v) => (
+                          <option key={v.version} value={v.version}>
+                            {v.version}{v.is_default ? " (默认)" : ""}{!v.available ? " (不可用)" : ""}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                    {selectedSkill.has_evolutions ? (
+                      <button
+                        type="button"
+                        onClick={() => handleRebuild(selectedSkill.name, selectedSkill.version || null)}
+                        disabled={rebuildLoading}
+                        className="flex items-center justify-center rounded-[6px] text-xs text-text-muted border border-border hover:bg-secondary whitespace-nowrap disabled:opacity-50"
+                        style={{ height: '28px', padding: '0 12px' }}
+                      >
+                        {rebuildLoading ? t('common.processing', { defaultValue: '处理中…' }) : t('skills.actions.rebuild', { defaultValue: '重建' })}
+                      </button>
+                    ) : null}
                   </div>
+
+                  <div className="mt-4 flex items-center mb-4 flex-shrink-0">
+                    <div className="flex items-center gap-8 flex-1 border-b border-border">
+                      <button
+                        type="button"
+                        onClick={() => setDetailTab("content")}
+                        className={`pb-2 text-sm ${
+                          detailTab === "content"
+                            ? "text-text font-semibold border-b-2 border-text"
+                            : "text-text-muted hover:text-text"
+                        }`}
+                      >
+                        {t('skills.detail.tabs.contentDetail', { defaultValue: '内容详情' })}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDetailTab("files");
+                          void fetchSkillFiles(selectedSkill.name);
+                        }}
+                        className={`pb-2 text-sm ${
+                          detailTab === "files"
+                            ? "text-text font-semibold border-b-2 border-text"
+                            : "text-text-muted hover:text-text"
+                        }`}
+                      >
+                        {t('skills.detail.tabs.filePreview', { defaultValue: '文件预览' })}
+                      </button>
+                      {selectedSkill.has_evolutions ? (
+                        <button
+                          type="button"
+                          onClick={() => setDetailTab("experience")}
+                          className={`pb-2 text-sm ${
+                            detailTab === "experience"
+                              ? "text-text font-semibold border-b-2 border-text"
+                              : "text-text-muted hover:text-text"
+                          }`}
+                        >
+                          {t('skills.detail.tabs.skillExperience', { defaultValue: '技能经验' })}
+                        </button>
+                      ) : null}
+                    </div>
+                    {detailTab === "experience" && selectedSkill.has_evolutions ? (
+                      <button
+                        type="button"
+                        onClick={() => handleRebuild(selectedSkill.name, selectedSkill.version || null)}
+                        disabled={rebuildLoading}
+                        className="mb-1 flex items-center justify-center rounded-[16px] text-xs font-medium border border-border hover:bg-secondary/30 whitespace-nowrap disabled:opacity-50"
+                        style={{ width: '118px', height: '32px' }}
+                      >
+                        {rebuildLoading ? t('common.processing', { defaultValue: '处理中…' }) : t('skills.actions.synthesizeNewVersion')}
+                      </button>
+                    ) : null}
+                  </div>
+
+                  {detailTab === "content" && (
+                    <div data-testid="skill-panel-my-detail-content-preview" className="mt-4">
+                      <div data-testid="skill-panel-my-detail-content-title" className="text-sm font-medium text-text mb-2">
+                        {t('skills.contentPreview')}
+                      </div>
+                      <div data-testid="skill-panel-my-detail-content-text" className="text-sm text-text whitespace-pre-wrap bg-secondary border border-border rounded-md p-3">
+                        {selectedSkill.content || t('skills.noContent')}
+                      </div>
+                    </div>
+                  )}
+
+                  {detailTab === "files" && (
+                    <div className="flex-1 min-h-0 grid grid-cols-[minmax(0,3fr)_minmax(0,7fr)] gap-3">
+                      <div className="rounded-xl border border-border bg-card/70 overflow-hidden flex flex-col min-h-0">
+                        <div className="px-3 py-2 bg-secondary/30 border-b border-border flex items-center justify-between">
+                          <span className="text-sm font-medium text-text">{t('skills.detail.fileTree', { defaultValue: '文件列表' })}</span>
+                          <button type="button" onClick={() => void fetchSkillFiles(selectedSkill.name)} className="text-xs text-text-muted hover:text-text px-2 py-0.5 rounded border border-border hover:bg-secondary">{t('common.refresh')}</button>
+                        </div>
+                        <div className="flex-1 overflow-auto p-2">
+                          {filesLoadState === 'loading' ? (
+                            <div className="h-full flex items-center justify-center text-sm text-text-muted">{t('common.loading')}</div>
+                          ) : filesLoadState === 'error' ? (
+                            <div className="h-full flex items-center justify-center text-sm text-text-muted">{t('skills.detail.filesLoadFailed', { defaultValue: '文件列表加载失败' })}</div>
+                          ) : skillFiles.length === 0 ? (
+                            <div className="h-full flex items-center justify-center text-sm text-text-muted">{t('skills.detail.noFiles', { defaultValue: '暂无文件' })}</div>
+                          ) : (
+                            <div className="space-y-0.5">{skillFileTree.children.map(child => renderFileTree(child, 0))}</div>
+                          )}
+                        </div>
+                      </div>
+                      <div className="rounded-xl border border-border bg-card/70 overflow-hidden flex flex-col min-h-0">
+                        {filePreview ? (
+                          <>
+                            <div className="px-3 py-2 bg-secondary/30 border-b border-border flex items-center justify-between flex-shrink-0">
+                              <span className="text-sm font-medium text-text truncate">{filePreview.path.split('/').pop()}</span>
+                              {filePreview.download_url ? <a href={filePreview.download_url} download className="text-xs text-text-link hover:underline">{t('common.download', { defaultValue: '下载' })}</a> : null}
+                            </div>
+                            {filePreview.content != null ? (
+                              <pre className="flex-1 min-h-0 overflow-auto text-xs text-text p-3 whitespace-pre-wrap font-mono">{filePreview.content}</pre>
+                            ) : (
+                              <div className="flex-1 flex items-center justify-center text-sm text-text-muted">{t('skills.detail.noPreview', { defaultValue: '无法预览此文件' })}</div>
+                            )}
+                          </>
+                        ) : (
+                          <div className="flex-1 min-h-0 flex items-center justify-center text-sm text-text-muted">
+                            {t('skills.detail.selectFileToPreview', { defaultValue: '请选择左侧文件进行预览' })}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {detailTab === "experience" && selectedSkill.has_evolutions && (
+                    <div className="flex-1 min-h-0 overflow-y-auto">
+                      {evolutionMessage && (
+                        <div className={`mb-3 px-3 py-2 rounded-md text-sm ${evolutionMessageType === "error" ? "bg-secondary text-danger" : "bg-secondary text-text"}`}>
+                          {evolutionMessage}
+                        </div>
+                      )}
+                      {evolutionFormatError && (
+                        <div className="mb-3 px-3 py-2 rounded-md bg-secondary text-sm text-danger">{evolutionFormatError}</div>
+                      )}
+                      {evolutionListState === "loading" && (
+                        <div className="flex items-center justify-center text-text-muted">{t('common.loading')}</div>
+                      )}
+                      {evolutionListState === "error" && (
+                        <div className="text-sm text-text-muted">{t('skills.evolution.errors.loadFailed')}</div>
+                      )}
+                      {evolutionListState === "success" && !evolutionFormatError && sortedEvolutionEntries.length === 0 && (
+                        <div className="text-sm text-text-muted">{t('skills.evolution.empty')}</div>
+                      )}
+                      {evolutionListState === "success" && !evolutionFormatError && sortedEvolutionEntries.length > 0 && (
+                        <div className="space-y-4">
+                          {sortedEvolutionEntries.map((entry) => (
+                            <div key={entry.id} className="border border-border py-4 px-4" style={{ backgroundColor: '#FAFAFA', borderRadius: '8px' }}>
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0 text-xs space-y-1 w-[90%]">
+                                  <div className="grid grid-cols-3 gap-4">
+                                    <div>
+                                      <span style={{ color: '#777777' }}>{t('skills.evolution.fields.section')}:</span>
+                                      <span className="ml-1">{entry.change?.section || "-"}</span>
+                                    </div>
+                                    <div>
+                                      <span style={{ color: '#777777' }}>{t('skills.evolution.fields.target')}:</span>
+                                      <span className="ml-1">{entry.change?.target || "-"}</span>
+                                    </div>
+                                    <div>
+                                      <span style={{ color: '#777777' }}>{t('skills.evolution.fields.timestamp')}:</span>
+                                      <span className="ml-1">{entry.timestamp ? new Date(entry.timestamp).toLocaleString(i18n.language) : "-"}</span>
+                                    </div>
+                                  </div>
+                                </div>
+                                <button type="button" onClick={() => handleEvolutionDeleteEntry(entry.id)} className="w-7 h-7 flex items-center justify-center rounded-lg hover:opacity-80" title={t('skills.evolution.actions.delete')}>
+                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                  </svg>
+                                </button>
+                              </div>
+                              <div className="mt-3">
+                                <textarea
+                                  value={entry.change?.content || ""}
+                                  onChange={(event) => handleEvolutionContentChange(entry.id, event.target.value)}
+                                  className="w-full min-h-28 px-3 py-2 rounded-md bg-card border border-border text-sm text-text"
+                                />
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
             ) : (

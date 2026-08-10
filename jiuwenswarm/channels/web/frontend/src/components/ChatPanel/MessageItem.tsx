@@ -42,6 +42,8 @@ import { fileArtifactId } from '../ArtifactsPanel';
 import { openArtifactPanel } from '../../features/teamPanelState';
 import { executeDesktopSave, type DesktopSaveApiResult } from '../../utils/desktopSave';
 import { FileIcon } from '../FileIcon';
+import { webRequest } from '../../services/webClient';
+import { useChatStore } from '../../stores/chatStore';
 
 export const MarkdownMessageBody = memo(function MarkdownMessageBody({
   content,
@@ -779,6 +781,10 @@ function getFileExtension(name: string): string {
   return parts[parts.length - 1].toUpperCase();
 }
 
+function isSkillMdFile(file: FileDownloadItem): boolean {
+  return Boolean(file.path && /skill\.md$/i.test(file.path));
+}
+
 function FileDownloadList({
   files,
   className,
@@ -790,6 +796,10 @@ function FileDownloadList({
 }) {
   const { t } = useTranslation();
   const [expiredSet, setExpiredSet] = useState<Set<number>>(new Set());
+  const [savingIndex, setSavingIndex] = useState<number | null>(null);
+  const [savedIndex, setSavedIndex] = useState<Set<number>>(new Set());
+  const [saveSuccessIndex, setSaveSuccessIndex] = useState<number | null>(null);
+  const sessionId = useChatStore((s) => s.activeSessionId);
 
   useEffect(() => {
     let cancelled = false;
@@ -812,10 +822,8 @@ function FileDownloadList({
   const handleDownload = async (file: FileDownloadItem, index: number) => {
     if (expiredSet.has(index)) return;
 
-    // 检查是否在 PyWebView 桌面环境中
     const pywebviewApi = (window as Window & { pywebview?: { api?: { download_file?: (url: string, filename: string) => DesktopSaveApiResult } } }).pywebview?.api;
     if (pywebviewApi?.download_file) {
-      // 桌面端：通过 webview API 下载
       const outcome = await executeDesktopSave(() =>
         pywebviewApi.download_file!(file.download_url, file.name || 'download')
       );
@@ -824,7 +832,6 @@ function FileDownloadList({
       }
       return;
     }
-    // 浏览器模式：使用标准 <a> 标签下载
     const link = document.createElement('a');
     link.href = file.download_url;
     link.download = file.name || '';
@@ -833,12 +840,49 @@ function FileDownloadList({
     document.body.removeChild(link);
   };
 
+  const handleSaveSkill = async (file: FileDownloadItem, index: number) => {
+    if (expiredSet.has(index) || savingIndex !== null || savedIndex.has(index)) return;
+    if (!file.path) return;
+
+    setSavingIndex(index);
+    try {
+      await webRequest('skills.import_local', { path: file.path, force: false, session_id: sessionId });
+      setSavedIndex((prev) => new Set(prev).add(index));
+      setSaveSuccessIndex(index);
+      setTimeout(() => setSaveSuccessIndex(null), 2000);
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      if (errorMsg.includes('已存在') || errorMsg.includes('force=true')) {
+        const overwrite = window.confirm(`${errorMsg}\n是否覆盖保存？`);
+        if (!overwrite) return;
+        try {
+          await webRequest('skills.import_local', { path: file.path, force: true, session_id: sessionId });
+          setSavedIndex((prev) => new Set(prev).add(index));
+          setSaveSuccessIndex(index);
+          setTimeout(() => setSaveSuccessIndex(null), 2000);
+        } catch (err2) {
+          console.error('skills.import_local force error:', err2);
+        }
+      } else {
+        console.error('skills.import_local error:', error);
+      }
+    } finally {
+      setSavingIndex(null);
+    }
+  };
+
   return (
     <div data-testid="chat-panel-file-download-list"
     className={clsx('mt-2 space-y-2', className)}>
       {files.map((file, index) => {
         const ext = getFileExtension(file.name);
         const expired = expiredSet.has(index);
+        const isSkill = isSkillMdFile(file);
+        const displayName = isSkill
+          ? (file.path!.replace(/[\\/][^\\/]+$/, '').split(/[\\/]/).pop() || file.name)
+          : file.name;
+        const isSaving = savingIndex === index;
+        const isSaved = savedIndex.has(index);
         return (
           <div
             key={`${file.name}-${index}`}
@@ -866,16 +910,26 @@ function FileDownloadList({
                 event.stopPropagation();
                 onPreview?.(index);
               }}
-              title={onPreview ? t('artifacts.openPreview', { name: file.name }) : undefined}
-              aria-label={onPreview ? t('artifacts.openPreview', { name: file.name }) : undefined}
+              title={onPreview ? t('artifacts.openPreview', { name: displayName }) : undefined}
+              aria-label={onPreview ? t('artifacts.openPreview', { name: displayName }) : undefined}
             >
-              <FileIcon fileName={file.name} size={40} className="flex-shrink-0 select-none" />
+              {isSkill ? (
+                <div className="flex-shrink-0 w-10 h-10 rounded-lg bg-accent-subtle flex items-center justify-center">
+                  <svg className="w-5 h-5 text-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" />
+                  </svg>
+                </div>
+              ) : (
+                <FileIcon fileName={file.name} size={40} className="flex-shrink-0 select-none" />
+              )}
               <div className="flex-1 min-w-0" data-testid="chat-panel-file-download-info">
-                <div className="text-sm font-medium text-text leading-snug truncate" data-testid="chat-panel-file-download-name">{file.name}</div>
+                <div className="text-sm font-medium text-text leading-snug truncate" data-testid="chat-panel-file-download-name">{displayName}</div>
                 <div className="flex items-center gap-1.5 mt-0.5" data-testid="chat-panel-file-download-meta">
-                  <span className="inline-flex items-center px-1 py-px rounded text-[10px] font-mono font-medium text-text-muted bg-secondary leading-none" data-testid="chat-panel-file-download-ext">
-                    {ext || 'FILE'}
-                  </span>
+                  {!isSkill && (
+                    <span className="inline-flex items-center px-1 py-px rounded text-[10px] font-mono font-medium text-text-muted bg-secondary leading-none" data-testid="chat-panel-file-download-ext">
+                      {ext || 'FILE'}
+                    </span>
+                  )}
                   <span className="text-xs text-text-muted" data-testid="chat-panel-file-download-size">{formatFileSize(file.size)}</span>
                   {expired && (
                     <span className="inline-flex items-center px-1 py-px rounded text-[10px] font-mono font-medium text-danger bg-danger/10 leading-none" data-testid="chat-panel-file-download-expired">
@@ -885,33 +939,60 @@ function FileDownloadList({
                 </div>
               </div>
             </button>
-            <button
-              type="button"
-              data-testid="chat-panel-file-download-btn"
-              className={clsx(
-                'flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center  ',
-                expired
-                  ? 'text-text-muted/40'
-                  : 'text-text-muted hover:text-accent hover:bg-accent-subtle'
-              )}
-              disabled={expired}
-              onClick={(event) => {
-                event.stopPropagation();
-                void handleDownload(file, index);
-              }}
-              title={t('artifacts.download')}
-              aria-label={t('artifacts.download')}
-            >
-              {expired ? (
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
-                </svg>
-              ) : (
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
-                </svg>
-              )}
-            </button>
+            {isSkill ? (
+              <div className="flex-shrink-0 flex items-center gap-2">
+                {saveSuccessIndex === index && (
+                  <span className="text-xs font-medium text-green-600 whitespace-nowrap">保存成功</span>
+                )}
+                <button
+                  type="button"
+                  className={clsx(
+                    'flex-shrink-0 px-3 h-8 rounded-lg flex items-center justify-center text-sm font-medium transition-colors',
+                    expired || isSaved
+                      ? 'text-text-muted/40 cursor-not-allowed'
+                      : isSaving
+                        ? 'text-text-muted cursor-wait'
+                        : 'text-accent hover:bg-accent-subtle'
+                  )}
+                  disabled={expired || isSaving || isSaved || !file.path}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void handleSaveSkill(file, index);
+                  }}
+                  title={isSaved ? '已保存' : '保存'}
+                >
+                  {isSaving ? '保存中...' : isSaved ? '已保存' : '保存'}
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                data-testid="chat-panel-file-download-btn"
+                className={clsx(
+                  'flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center  ',
+                  expired
+                    ? 'text-text-muted/40'
+                    : 'text-text-muted hover:text-accent hover:bg-accent-subtle'
+                )}
+                disabled={expired}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void handleDownload(file, index);
+                }}
+                title={t('artifacts.download')}
+                aria-label={t('artifacts.download')}
+              >
+                {expired ? (
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
+                  </svg>
+                ) : (
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+                  </svg>
+                )}
+              </button>
+            )}
           </div>
         );
       })}

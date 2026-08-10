@@ -1027,11 +1027,6 @@ export default defineConfig({
         target: webTarget,
         changeOrigin: true,
       },
-      '/skillhub-api': {
-        target: 'http://localhost:9002',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/skillhub-api/, '/api/v1'),
-      },
       '/ws': {
         target: webTarget,
         ws: true,

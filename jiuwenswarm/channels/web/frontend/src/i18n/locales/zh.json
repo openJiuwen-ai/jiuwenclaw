@@ -1571,9 +1571,9 @@
       "unpublished": "未发布"
     },
     "skillTypes": {
-      "industry": "行业技能包",
+      "skill": "技能包",
       "team": "团队技能",
-      "skill": "多模态"
+      "multimodal": "多模态"
     },
     "marketplaceCategories": {
       "all": "全部",
