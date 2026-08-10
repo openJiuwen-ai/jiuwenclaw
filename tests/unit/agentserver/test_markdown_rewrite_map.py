@@ -559,13 +559,49 @@ def test_ambiguous_inline_topology_fails_closed(markdown):
 
 
 @pytest.mark.parametrize(
+    ("markdown", "strong_text"),
+    [
+        ("这是“**重点**”内容", "重点"),
+        ("这是**“重点**”内容", "“重点"),
+        ("这是“**重点”**内容", "重点”"),
+        ("这是**“重点”**内容", "“重点”"),
+        ("每周**≤2次**。", "≤2次"),
+        ("增长**+6.9%**左右", "+6.9%"),
+        ("超**20℃**昼夜温差。", "20℃"),
+    ],
+)
+def test_cjk_adjacent_strong_uses_preview_parser_boundaries(markdown, strong_text):
+    rewrite_map = rewrite_map_module.build_rewrite_map(markdown)
+
+    assert rewrite_map.unsupported_regions == ()
+    strong_slots = [
+        slot
+        for unit in rewrite_map.units
+        for slot in unit.slots
+        if slot.formats == ("strong",)
+    ]
+    assert [slot.text for slot in strong_slots] == [strong_text]
+    assert [anchor.source for anchor in rewrite_map.units[0].protected] == [
+        "**",
+        "**",
+    ]
+
+
+def test_non_cjk_symbol_boundary_remains_literal():
+    rewrite_map = rewrite_map_module.build_rewrite_map("x**≤**y")
+
+    assert rewrite_map.unsupported_regions == ()
+    assert [slot.text for slot in rewrite_map.units[0].slots] == ["x**≤**y"]
+    assert rewrite_map.units[0].protected == ()
+
+
+@pytest.mark.parametrize(
     ("markdown", "expects_literal_stars"),
     [
-        # CommonMark flanking rules decline to treat a paired `**` as emphasis
-        # when the opener is followed by punctuation (here the math symbol `<=`),
-        # so markdown-it emits the `**` as literal text. The engine must consume
-        # those literal markers as text instead of demoting the whole paragraph.
-        ("每周**≤2次**。", True),
+        # The rewrite parser intentionally promotes CJK-adjacent symbol boundaries
+        # to the same strong topology used by the OfficeClaw preview.
+        ("每周**≤2次**。", False),
+        # Non-CJK outer text keeps markdown-it's literal balanced-marker behavior.
         ("x**≤**y", True),
         # When flanking succeeds the `**` parses as emphasis and the markers are
         # stripped from the slot text; the paragraph is still supported.
