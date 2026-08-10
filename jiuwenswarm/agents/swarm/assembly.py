@@ -29,7 +29,6 @@ from openjiuwen.agent_teams.paths import team_home
 from jiuwenswarm.agents.swarm.config_specs import build_member_deep_agent_spec
 from jiuwenswarm.agents.swarm.context import SwarmBuildContext
 from jiuwenswarm.agents.swarm.registry import register_swarm_providers
-from jiuwenswarm.agents.swarm.review_feedback_evolution import attach_review_feedback_handler
 from jiuwenswarm.common.config import get_config
 from jiuwenswarm.common.mcp_config import build_enabled_mcp_server_configs
 from jiuwenswarm.common.utils import get_agent_skills_dir
@@ -110,7 +109,6 @@ def enrich_team_spec_for_swarm(
         trajectory_registry=InMemoryTrajectoryRegistry(),
         config=config,
     )
-    attach_review_feedback_handler(base)
     mcp_configs = build_enabled_mcp_server_configs(
         config,
         server_id_scope=f"team:{spec.team_name}",

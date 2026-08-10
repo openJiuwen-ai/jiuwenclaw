@@ -299,8 +299,6 @@ class TeamManager:
         self._team_skill_rails: dict[str, Any] = {}
         # session_id → member SkillEvolutionRail instances
         self._team_member_skill_evolution_rails: dict[str, list[Any]] = {}
-        # session_id → global regular-Skill sidecar for terminal feedback aggregation
-        self._review_feedback_skill_rails: dict[str, Any] = {}
         # session_id → TeamSkillCreateRail instance
         self._team_skill_create_rails: dict[str, Any] = {}
         # session_id → context used to rebuild team rails on config enable
@@ -1376,10 +1374,10 @@ class TeamManager:
 
     def find_team_skill_rail_for_request(self, request_id: str) -> Any | None:
         """Find the TeamSkillEvolutionRail that owns a pending approval with this request_id."""
-        candidate_rails = list(self._team_skill_rails.values()) + list(
-            self._review_feedback_skill_rails.values()
-        )
-        for rail in candidate_rails:
+        for rail in self._team_skill_rails.values():
+            owns_request = getattr(rail, "owns_approval_request", None)
+            if callable(owns_request) and owns_request(request_id):
+                return rail
             if request_id in getattr(rail, "_pending_approval_snapshots", {}):
                 return rail
             if request_id in getattr(rail, "_pending_governance", {}):
@@ -1402,16 +1400,6 @@ class TeamManager:
         rails = self._team_member_skill_evolution_rails.setdefault(session_id, [])
         if rail not in rails:
             rails.append(rail)
-
-    def register_review_feedback_skill_rail(self, session_id: str, rail: Any) -> None:
-        """Register the global regular-Skill sidecar used by team feedback."""
-
-        self._review_feedback_skill_rails[session_id] = rail
-
-    def get_review_feedback_skill_rail(self, session_id: str) -> Any | None:
-        """Return the global feedback-aggregation sidecar for one team session."""
-
-        return self._review_feedback_skill_rails.get(session_id)
 
     def register_team_skill_create_rail(self, session_id: str, rail: Any) -> None:
         """Register a TeamSkillCreateRail instance for hot config updates."""
@@ -1450,7 +1438,6 @@ class TeamManager:
     def _clear_team_rail_registries(self, session_id: str) -> None:
         self._team_skill_rails.pop(session_id, None)
         self._team_member_skill_evolution_rails.pop(session_id, None)
-        self._review_feedback_skill_rails.pop(session_id, None)
         self._team_skill_create_rails.pop(session_id, None)
         self._team_rail_contexts.pop(session_id, None)
         self._team_evolution_enabled.pop(session_id, None)
