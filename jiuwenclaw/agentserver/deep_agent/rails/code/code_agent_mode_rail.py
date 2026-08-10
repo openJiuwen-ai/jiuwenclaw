@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+from openjiuwen.harness.prompts import PromptSection
 from openjiuwen.harness.rails.agent_mode_rail import AgentModeRail
 
 if TYPE_CHECKING:
@@ -34,6 +35,36 @@ _NON_GIT_WRITE_RE = re.compile(
     r"|>>"
 )
 
+_CODE_MODE_WORKFLOW_SECTION = "code_mode_workflow"
+_CODE_MODE_WORKFLOW_PRIORITY = 125
+_CODE_MODE_WORKFLOW_PROMPT = {
+    "cn": """# Code 模式切换流程
+
+进入和退出规划阶段时，必须严格按以下顺序调用工具：
+
+1. 进入前先调用 `switch_mode(mode=\"plan\")`。
+2. 仅在该调用成功后调用 `enter_plan_mode()`，再编写计划。
+3. 计划完成后调用 `exit_plan_mode()` 并等待审批结果。
+4. 仅当 `exit_plan_mode()` 获批且成功返回后，立即调用
+   `switch_mode(mode=\"auto\")`，然后才能声称已退出规划阶段或开始执行。
+
+不要跳过前后的 `switch_mode`。如果退出被拒绝，保持 plan 模式并继续修改计划，
+不要调用 `switch_mode(mode=\"auto\")`。""",
+    "en": """# Code mode transition workflow
+
+When entering or leaving the planning phase, call the tools in this exact order:
+
+1. Before entering, call `switch_mode(mode=\"plan\")`.
+2. Only after it succeeds, call `enter_plan_mode()` and then write the plan.
+3. When the plan is complete, call `exit_plan_mode()` and wait for approval.
+4. Only after `exit_plan_mode()` is approved and returns successfully, immediately
+   call `switch_mode(mode=\"auto\")` before claiming that planning has ended or
+   beginning implementation.
+
+Do not skip either `switch_mode` call. If exit is rejected, remain in plan mode,
+continue revising the plan, and do not call `switch_mode(mode=\"auto\")`.""",
+}
+
 
 class CodeAgentModeRail(AgentModeRail):
     """AgentModeRail variant for jiuwenswarm code mode.
@@ -47,7 +78,7 @@ class CodeAgentModeRail(AgentModeRail):
         """Initialize request-level Code submode synchronization state."""
         super().__init__(allowed_tools=allowed_tools)
         self._requested_modes: dict[str, tuple[int, str]] = {}
-        self._applied_mode_generations: dict[str, int] = {}
+        self._applied_mode_generations: dict[str, tuple[int, int]] = {}
         self._mode_generation = 0
 
     def init(self, agent: DeepAgent) -> None:
@@ -55,6 +86,15 @@ class CodeAgentModeRail(AgentModeRail):
         ``PlanApprovalInterruptRail`` handles the approval gate.
         """
         super().init(agent)
+
+    def uninit(self, agent: DeepAgent) -> None:
+        """Remove Code-only prompt state when the rail is unregistered."""
+        builder = getattr(agent, "system_prompt_builder", None)
+        if builder is None:
+            builder = getattr(self, "system_prompt_builder", None)
+        if builder is not None:
+            builder.remove_section(_CODE_MODE_WORKFLOW_SECTION)
+        super().uninit(agent)
 
     def set_requested_mode(
         self,
@@ -79,11 +119,16 @@ class CodeAgentModeRail(AgentModeRail):
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """Synchronize the requested Code submode before parent enforcement."""
+        self._inject_code_mode_workflow(ctx)
         self._apply_requested_mode(ctx)
         await super().before_model_call(ctx)
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         """Enforce plan-mode write blocks beyond the parent git-only guard."""
+        # Approval resumes may execute the pending tool on a freshly recovered
+        # Session before another model callback.  Restore the remembered
+        # dynamic submode before AgentModeRail validates enter/exit tools.
+        self._apply_requested_mode(ctx)
         agent = self._agent
         session = ctx.session
         plan_state = agent.load_state(session).plan_mode
@@ -131,8 +176,10 @@ class CodeAgentModeRail(AgentModeRail):
             return
 
         await super().after_tool_call(ctx)
+        session = ctx.session
+        if tool_name == "switch_mode":
+            self._remember_effective_mode(session)
         if tool_name == "exit_plan_mode" and ctx.extra.get("_plan_approved"):
-            session = ctx.session
             state = agent.load_state(session)
             if state.plan_mode.mode == "plan" and ctx.inputs.tool_result is not None:
                 try:
@@ -145,6 +192,7 @@ class CodeAgentModeRail(AgentModeRail):
                     logger.warning(
                         "[CodeAgentModeRail] Failed to restore mode: %s", exc
                     )
+            self._remember_effective_mode(session)
 
     def _apply_requested_mode(self, ctx: AgentCallbackContext) -> None:
         """Apply a queued adapter mode at most once for the current session."""
@@ -154,10 +202,49 @@ class CodeAgentModeRail(AgentModeRail):
         if pending is None:
             return
         generation, target = pending
-        if self._applied_mode_generations.get(key) == generation:
+        session_identity = id(session)
+        if self._applied_mode_generations.get(key) == (
+            generation,
+            session_identity,
+        ):
             return
         self._agent.switch_mode(session, target)
-        self._applied_mode_generations[key] = generation
+        self._applied_mode_generations[key] = (generation, session_identity)
+
+    def _remember_effective_mode(self, session: Any) -> None:
+        """Carry a tool-driven mode switch across interrupt Session objects."""
+        state = self._agent.load_state(session)
+        target = getattr(getattr(state, "plan_mode", None), "mode", None)
+        if target not in {"auto", "plan"}:
+            return
+        key = self._session_key_from_value(session)
+        self._mode_generation += 1
+        generation = self._mode_generation
+        self._requested_modes[key] = (generation, target)
+        # The current Session already owns this state.  A resumed callback with
+        # a new Session object but the same id must apply it again.
+        self._applied_mode_generations[key] = (generation, id(session))
+
+    def _inject_code_mode_workflow(self, ctx: AgentCallbackContext) -> None:
+        """Keep the explicit enter/exit transition sequence in the model prompt."""
+        current_agent = getattr(ctx, "agent", None)
+        builder = getattr(current_agent, "system_prompt_builder", None)
+        if builder is None:
+            builder = getattr(self, "system_prompt_builder", None)
+        if builder is None:
+            return
+
+        # A prompt hot reload can replace the builder without reinitializing
+        # retained rails. Refresh the parent rail's reference as well.
+        self.system_prompt_builder = builder
+        language = "en" if getattr(builder, "language", "cn") == "en" else "cn"
+        builder.add_section(
+            PromptSection(
+                name=_CODE_MODE_WORKFLOW_SECTION,
+                content={language: _CODE_MODE_WORKFLOW_PROMPT[language]},
+                priority=_CODE_MODE_WORKFLOW_PRIORITY,
+            )
+        )
 
     @staticmethod
     def _session_key_from_value(value: Any) -> str:

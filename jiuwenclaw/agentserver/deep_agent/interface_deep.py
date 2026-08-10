@@ -409,6 +409,7 @@ from jiuwenclaw.agentserver.stream_utils import propagate_stream_source_id, tool
 from jiuwenclaw.agentserver.extensions import get_rail_manager
 from jiuwenclaw.gateway.cron.models import CronTargetChannel
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
+from jiuwenclaw.schema.message import ReqMethod
 from jiuwenclaw.utils import (
     deep_merge_dicts,
     get_agent_evolution_trajectories_dir,
@@ -535,6 +536,7 @@ class _RuntimeConfigParams:
     request_system_prompt: str | None = None
     request_identify: str | None = None
     request_soul: str | None = None
+    sync_code_submode: bool = True
 
     @classmethod
     def _read_param_str(cls, params: Any, *keys: str) -> str | None:
@@ -556,6 +558,11 @@ class _RuntimeConfigParams:
     @classmethod
     def from_agent_request(cls, request: AgentRequest, mode: str) -> Self:
         params = request.params if isinstance(request.params, dict) else {}
+        is_interrupt_resume = (
+            request.req_method == ReqMethod.CHAT_RESUME
+            or bool(params.get("answers"))
+            or isinstance(params.get("query"), InteractiveInput)
+        )
         return cls(
             session_id=request.session_id,
             mode=mode,
@@ -567,6 +574,10 @@ class _RuntimeConfigParams:
                 cls._read_param_str(params, "identify", "identity", "IDENTITY"),
             ),
             request_soul=normalize_soul_override(cls._read_param_str(params, "soul", "SOUL")),
+            # A resume continues the session state that the interrupted tool
+            # mutated.  Replaying the request's entry mode here would undo a
+            # dynamic switch_mode(plan/auto) before the tool can continue.
+            sync_code_submode=not is_interrupt_resume,
         )
 
 
@@ -5138,13 +5149,18 @@ class JiuWenClawDeepAdapter:
         mode: str,
         *,
         session_id: str | None = None,
+        sync_code_submode: bool = True,
     ) -> None:
         """按 mode 注册或卸载 rails。"""
         requested_mode = mode
         mode = self._normalize_rail_mode(mode)
         if mode == "code":
             await self._register_code_mode_rails()
-            self._sync_code_submode_to_rails(requested_mode, session_id=session_id)
+            if sync_code_submode:
+                self._sync_code_submode_to_rails(
+                    requested_mode,
+                    session_id=session_id,
+                )
         else:
             if not await self._unregister_code_mode_rails():
                 logger.error(
@@ -5712,6 +5728,7 @@ class JiuWenClawDeepAdapter:
         await self._update_rails_for_mode(
             params.mode,
             session_id=params.session_id,
+            sync_code_submode=params.sync_code_submode,
         )
 
         if self._context_engineering_rail is not None:
