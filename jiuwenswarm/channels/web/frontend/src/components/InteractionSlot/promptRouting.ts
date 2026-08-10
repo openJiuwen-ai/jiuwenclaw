@@ -22,11 +22,7 @@ const AUTHORIZATION_SOURCES = new Set([
 /** 演进审批：source 或 request_id 前缀识别。 */
 export function isEvolutionPrompt(pq: AskUserQuestionPayload | null | undefined): boolean {
   if (!pq) return false;
-  if (
-    pq.source === 'evolution_interrupt' ||
-    pq.source === 'skill_evolution_approval' ||
-    pq.source === 'skill_creation_approval'
-  ) {
+  if (pq.source === 'evolution_interrupt' || pq.source === 'skill_evolution_approval') {
     return true;
   }
   const rid = pq.request_id ?? '';
