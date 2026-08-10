@@ -33,6 +33,7 @@ from jiuwenclaw.agentserver.session_history import append_history_record
 from jiuwenclaw.agentserver.team.handlers.team_monitor_handler import TeamMonitorHandler
 from jiuwenclaw.agentserver.stream_utils import parse_stream_chunk
 from jiuwenclaw.schema.agent import AgentResponseChunk
+from jiuwenclaw.schema.message import E2A_SUPPRESSED_EVENT_TYPES
 
 logger = logging.getLogger(__name__)
 DEBUG_PREFIX = '/debug'
@@ -103,6 +104,15 @@ def _safe_team_path_segment(value: str, fallback: str = '_') -> str:
 def _team_hide_teammate_enabled() -> bool:
     """Return whether non-leader teammate frames should be filtered out in team mode."""
     return os.environ.get(_HIDE_TEAMMATE_ENV_KEY, '').strip().lower() == 'true'
+
+
+def _is_e2a_suppressed_event(event_type: Any) -> bool:
+    """True when the event type is withheld from the E2A wire by interface.py.
+
+    被抑制的帧 relay 看不到，不会重置 relay team stall 看门狗；
+    消费循环据此判定是否处于"wire 静默段"。
+    """
+    return str(event_type or '').strip() in E2A_SUPPRESSED_EVENT_TYPES
 
 
 _INTERACT_REASON_ERROR_MAP: dict[str, str] = {
