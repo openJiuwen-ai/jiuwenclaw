@@ -84,13 +84,23 @@ def test_set_enabled_missing_raises(tmp_path: Path) -> None:
             ss.set_mcp_enabled("nope", True)
 
 
-def test_list_connected_filters_state(tmp_path: Path) -> None:
+def test_list_connected_includes_connecting(tmp_path: Path) -> None:
+    """list_connected_mcps returns connected AND connecting (both are "live":
+    registered-with-agent-or-in-progress), but NOT registered/disconnected."""
     with patch("jiuwenswarm.server.runtime.mcp.state_store.get_workspace_dir", return_value=tmp_path):
         ss.upsert_mcp_record("baidu", _mk_entry(), state="connected")
         ss.upsert_mcp_record("github", _mk_entry("github"), state="disconnected")
+        ss.upsert_mcp_record("feishu", _mk_entry("feishu"), state="connecting")
+        ss.upsert_mcp_record("dingtalk", _mk_entry("dingtalk"), state="registered")
         connected = ss.list_connected_mcps()
         names = {c["name"] for c in connected}
-        assert names == {"baidu"}
+        assert names == {"baidu", "feishu"}
+        # truly_connected excludes connecting — frontend "connected" badge.
+        truly = ss.list_truly_connected_mcps()
+        assert {c["name"] for c in truly} == {"baidu"}
+        # connecting-only helper drives the "connecting" badge.
+        conn_ing = ss.list_connecting_mcps()
+        assert {c["name"] for c in conn_ing} == {"feishu"}
 
 
 def test_upsert_merges_fields_preserving_extras(tmp_path: Path) -> None:

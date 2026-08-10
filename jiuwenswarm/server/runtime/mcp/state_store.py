@@ -127,17 +127,70 @@ def get_mcp_record(name: str) -> dict[str, Any] | None:
 
 
 def list_connected_mcps() -> list[dict[str, Any]]:
-    """All MCPs with state==connected (regardless of enabled).
+    """All MCPs that should be treated as live (state in {connected, connecting}).
 
-    Used by get_mcp_servers (MCP registration) and credential sync — these
-    paths only care about truly-connected MCPs (registered-but-not-
-    connected custom MCPs have no MCP server spawned and no token to inject).
+    Both states mean "the MCP has an entry the agent should register / a token
+    it should inject / skills it should see":
+
+    * ``connected`` — fully registered, tools available.
+    * ``connecting`` — connect in progress (apply_mcp_change(add) not yet
+      done, or CLI OAuth in flight). The entry was persisted so a restart
+      re-registers it (connecting is treated like connected for the reload/
+      init path), but the frontend must show "connecting" until apply succeeds.
+
+    ``registered`` (custom MCP freshly created, never connected) and
+    ``disconnected`` are excluded — they have no live MCP server and no
+    reason to be registered on restart.
+
+    Used by get_mcp_servers (MCP registration), init, and credential sync.
+    For the frontend's "is this connected" check, use
+    :func:`list_truly_connected_mcps` (connected only) — ``connecting`` must
+    render as "connecting", not "connected".
+    """
+    with _lock:
+        cons = _load().get("mcp", {})
+    out: list[dict[str, Any]] = []
+    for name, c in cons.items():
+        if isinstance(c, dict) and c.get("state") in ("connected", "connecting"):
+            rec = dict(c)
+            rec["name"] = name
+            out.append(rec)
+    return out
+
+
+def list_truly_connected_mcps() -> list[dict[str, Any]]:
+    """MCPs with state==connected ONLY (``connecting`` excluded).
+
+    The frontend's "connected" badge reflects only fully-registered MCPs —
+    an MCP mid-connect (state==connecting) must show "connecting", so the
+    user doesn't see "connected" while apply is still running or may fail.
+    Use this for connection_state derivation; use :func:`list_connected_mcps`
+    for registration/credential paths that must include connecting MCPs too.
     """
     with _lock:
         cons = _load().get("mcp", {})
     out: list[dict[str, Any]] = []
     for name, c in cons.items():
         if isinstance(c, dict) and c.get("state") == "connected":
+            rec = dict(c)
+            rec["name"] = name
+            out.append(rec)
+    return out
+
+
+def list_connecting_mcps() -> list[dict[str, Any]]:
+    """MCPs with state==connecting (connect in progress, not yet connected).
+
+    Drives the frontend's "connecting" badge. Distinct from connected (the
+    apply/register is not done) and from registered (the user did initiate
+    connect, so a restart should re-register it — list_connected_mcps
+    includes both connected and connecting for that reason).
+    """
+    with _lock:
+        cons = _load().get("mcp", {})
+    out: list[dict[str, Any]] = []
+    for name, c in cons.items():
+        if isinstance(c, dict) and c.get("state") == "connecting":
             rec = dict(c)
             rec["name"] = name
             out.append(rec)
@@ -313,6 +366,8 @@ __all__ = [
     "read_mcp_state",
     "get_mcp_record",
     "list_connected_mcps",
+    "list_truly_connected_mcps",
+    "list_connecting_mcps",
     "connected_mcp_skill_dirs",
     "list_registered_mcps",
     "upsert_mcp_record",

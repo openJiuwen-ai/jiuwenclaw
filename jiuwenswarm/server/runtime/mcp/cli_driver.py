@@ -20,6 +20,7 @@ import platform
 import re
 import shlex
 import subprocess
+import sys
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -105,6 +106,14 @@ def _safe_split_command(command: str) -> list[str]:
     the first element must NOT be a shell binary (bash/cmd/sh/...), and the
     second must NOT be ``-c``. cli.json commands are trusted (bin name +
     args), but we assert this explicitly rather than relying on the data.
+
+    On Windows, resolves a bare first arg (e.g. ``npm``) to its full path via
+    ``shutil.which`` (which searches PATHEXT — finds ``npm.CMD``). CreateProcess
+    does NOT do PATHEXT resolution, so a bare ``npm`` fails with WinError 2
+    even though ``npm.CMD`` is on PATH. This is the price of ``shell=False``;
+    the lookup here restores what the cmd shell used to do. No-op on POSIX
+    (execvp already searches PATH). The shell-binary ban above runs on the
+    bare name, before resolution, so ``cmd``/``sh`` are still refused.
     """
     parts = shlex.split(command)
     if not parts:
@@ -114,6 +123,11 @@ def _safe_split_command(command: str) -> list[str]:
         raise ValueError(f"refusing to run shell binary '{first}' as first arg")
     if len(parts) > 1 and parts[1] == _SHELL_FORBIDDEN_SECOND:
         raise ValueError("refusing '-c' as second arg (shell invocation)")
+    if sys.platform == "win32":
+        import shutil
+        resolved = shutil.which(parts[0])
+        if resolved:
+            parts[0] = resolved
     return parts
 
 

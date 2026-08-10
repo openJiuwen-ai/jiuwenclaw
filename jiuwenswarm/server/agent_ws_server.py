@@ -6119,6 +6119,16 @@ class AgentWebSocketServer:
                     applied = True
                     error_message = ""
                     connect_failed = False
+                    # connect_mcp wrote state=connecting. get_mcp_servers
+                    # merges connecting (and connected), so apply_mcp_change
+                    # can read the entry WITHOUT a pre-flip here — that's the
+                    # point of connecting: apply can proceed, while the
+                    # frontend still shows "connecting" (not the phantom
+                    # "connected" a pre-flip would create). Promote to
+                    # connected only AFTER apply succeeds (below); on failure
+                    # roll back (marketplace → remove record; custom →
+                    # registered) so a bad MCP doesn't stay "connecting"
+                    # forever and re-trigger on every restart.
                     try:
                         # Phase-2: targeted single-MCP register (no full reload).
                         # apply_mcp_change raises RuntimeError when NO adapter
@@ -6145,13 +6155,16 @@ class AgentWebSocketServer:
                             name, reload_msg,
                         )
                         # Roll back the connect so a failed connect doesn't
-                        # leave a phantom "connected" record. For a custom MCP
-                        # (no marketplace package) the definition was created
-                        # by register_custom — flip its state back to
-                        # "registered" so the user can retry connect or edit
-                        # it instead of losing the whole definition. For a
-                        # marketplace MCP (connect_mcp upserted a fresh
-                        # "connected" record) delete the record.
+                        # leave a phantom "connecting" record (which, like
+                        # connected, would re-trigger on every restart).
+                        # For a custom MCP (no marketplace package) the
+                        # definition was created by register_custom — flip its
+                        # state back to "registered" so the user can retry
+                        # connect or edit it instead of losing the whole
+                        # definition. For a marketplace MCP (connect_mcp
+                        # upserted a fresh "connecting" record) delete the
+                        # record — its entry is rebuildable from the package
+                        # on next connect.
                         try:
                             from jiuwenswarm.server.runtime.mcp.registry import (
                                 _packages_dir,
@@ -6188,6 +6201,20 @@ class AgentWebSocketServer:
                             },
                         )
                     else:
+                        # apply succeeded — promote connecting → connected.
+                        # Only now (after the live MCP server registered) is
+                        # the MCP truly connected; before this flip the
+                        # frontend showed "connecting".
+                        try:
+                            from jiuwenswarm.server.runtime.mcp.state_store import (
+                                set_mcp_state,
+                            )
+                            set_mcp_state(name, state="connected")
+                        except Exception as flip_exc:  # noqa: BLE001
+                            logger.warning(
+                                "[mcp] flip connecting→connected after apply failed for '%s': %s",
+                                name, flip_exc,
+                            )
                         # Skill-only connectors' bundled scripts read tokens from
                         # os.environ; sync the just-provisioned token into the agent
                         # process env so BashTool inherits it. No-op for MCP-type
@@ -6404,6 +6431,16 @@ class AgentWebSocketServer:
         bundled skill scripts (BashTool inherits os.environ) see their token env
         vars, then reloads the agent's SkillUseRail so the CLI MCP's skills
         surface immediately. Returns a payload dict for the push signal.
+
+        State handling: ``_finalize_cli`` wrote ``state="connecting`` (NOT
+        connected) — the MCP server is not registered with the agent until
+        apply_mcp_change runs here. connecting lets get_mcp_servers merge the
+        entry (so apply can register it) while the frontend shows "connecting";
+        promote to connected only AFTER apply succeeds. If apply fails, roll
+        back (marketplace → remove record + uninstall skills; custom → flip to
+        registered) instead of leaving a phantom "connecting" record (which,
+        like connected, would re-trigger on every restart), and return
+        ``auth_failed`` so the handler reports failure honestly.
         """
         applied = True
         error_message = ""
@@ -6413,6 +6450,51 @@ class AgentWebSocketServer:
             applied = False
             error_message = str(reload_exc)
             logger.warning("[mcp] apply_mcp_change after CLI auth failed: %s", reload_exc)
+            # Roll back the state.json entry so a failed CLI connect doesn't
+            # leave a phantom "connecting" record. Marketplace MCP (has a
+            # package dir) → remove record + uninstall skills (entry is
+            # rebuildable from the package on next connect); custom MCP →
+            # flip back to registered so the user-edited definition survives
+            # for retry / edit.
+            try:
+                from jiuwenswarm.server.runtime.mcp.registry import (
+                    _packages_dir,
+                )
+                if (_packages_dir() / name).is_dir():
+                    from jiuwenswarm.server.runtime.mcp.skill_installer import (
+                        uninstall_mcp_skills,
+                    )
+                    from jiuwenswarm.server.runtime.mcp.state_store import (
+                        remove_mcp_record,
+                    )
+                    uninstall_mcp_skills(name)
+                    remove_mcp_record(name)
+                else:
+                    from jiuwenswarm.server.runtime.mcp.state_store import (
+                        set_mcp_state,
+                    )
+                    set_mcp_state(name, state="registered")
+            except Exception as rollback_exc:  # noqa: BLE001
+                logger.warning(
+                    "[mcp] rollback after CLI auth failure '%s' failed: %s",
+                    name, rollback_exc,
+                )
+            return {
+                "type": "auth_failed",
+                "name": name,
+                "error": error_message or f"MCP '{name}' register failed",
+            }
+        # apply succeeded — promote connecting → connected.
+        try:
+            from jiuwenswarm.server.runtime.mcp.state_store import (
+                set_mcp_state,
+            )
+            set_mcp_state(name, state="connected")
+        except Exception as flip_exc:  # noqa: BLE001
+            logger.warning(
+                "[mcp] flip connecting→connected after CLI auth failed for '%s': %s",
+                name, flip_exc,
+            )
         try:
             self._agent_manager.sync_mcp_credentials()
         except Exception as sync_exc:  # noqa: BLE001
@@ -6526,12 +6608,17 @@ class AgentWebSocketServer:
             was_connected = bool(entry.pop("was_connected", False))
             transport = str(entry.get("transport", "") or "").strip().lower()
             is_remote = transport in {"sse", "http", "streamable-http", "streamable_http"}
-            # Flip state to connected so get_mcp_servers() (which only merges
-            # state==connected records) exposes the entry to apply_mcp_change.
+            # Flip state to connecting (NOT connected): get_mcp_servers merges
+            # connecting (and connected) so apply_mcp_change can read the
+            # entry, while the frontend shows "connecting" until apply
+            # succeeds. register_custom wrote "registered" (new) or preserved
+            # "connected" (edit); either way promote to connecting here, then
+            # to connected after apply succeeds (below), or back to
+            # registered on failure.
             from jiuwenswarm.server.runtime.mcp.state_store import (
                 set_mcp_state,
             )
-            set_mcp_state(name, state="connected")
+            set_mcp_state(name, state="connecting")
             # Remote reachability probe before reload — same logic as
             # _handle_mcp_connect: on failure roll back the state.json entry
             # and report failure honestly rather than reporting "connected"
@@ -6621,6 +6708,17 @@ class AgentWebSocketServer:
                         },
                     )
                 else:
+                    # apply succeeded — promote connecting → connected.
+                    try:
+                        from jiuwenswarm.server.runtime.mcp.state_store import (
+                            set_mcp_state,
+                        )
+                        set_mcp_state(name, state="connected")
+                    except Exception as flip_exc:  # noqa: BLE001
+                        logger.warning(
+                            "[mcp] flip connecting→connected after register_custom failed for '%s': %s",
+                            name, flip_exc,
+                        )
                     try:
                         self._agent_manager.sync_mcp_credentials()
                     except Exception as sync_exc:  # noqa: BLE001

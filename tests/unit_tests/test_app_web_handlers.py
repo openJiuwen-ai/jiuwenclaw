@@ -1640,22 +1640,50 @@ async def test_connector_list_is_local_and_does_not_forward() -> None:
 
 
 @pytest.mark.asyncio
-async def test_connector_show_is_local_and_validates_name() -> None:
-    """mcp.show is local; missing name surfaces a bad_request error without forwarding."""
+async def test_connector_show_forwards_to_agent() -> None:
+    """mcp.show forwards to AgentServer so tools are read from the live MCP
+    connection in the agent process (the gateway process has no registered MCP,
+    so a local handler would always see an empty ToolMgr and force a temp
+    reconnect on every detail view). The agent's _handle_mcp_show owns both
+    name validation and the tools lookup."""
     channel = FakeWebChannel()
-    agent_client = _McpFakeAgentClient(ok=True, payload={"type": "detail", "item": {}})
+    agent_client = _McpFakeAgentClient(ok=True, payload={"type": "detail", "item": {"name": "github"}})
 
     _register_web_handlers(
         WebHandlersBindParams(channel=channel, agent_client=agent_client)
     )
 
     await channel.methods["mcp.show"](
-        object(), "req-conn-show", {}, "sess-1",
+        object(), "req-conn-show", {"name": "github"}, "sess-1",
     )
-    assert agent_client.sent == []
+    # forwarded exactly once to the agent
+    assert len(agent_client.sent) == 1
+    resp = channel.responses[-1]
+    assert resp["ok"] is True
+    assert resp["payload"]["type"] == "detail"
+    assert resp["payload"]["item"]["name"] == "github"
+
+
+@pytest.mark.asyncio
+async def test_connector_show_propagates_agent_not_found() -> None:
+    """mcp.show surfaces the agent's not-found error code (name validation +
+    lookup live in the agent handler, not the gateway)."""
+    channel = FakeWebChannel()
+    agent_client = _McpFakeAgentClient(
+        ok=False, payload={"error": "mcp 'nope' not found", "code": "MCP_NOT_FOUND"}
+    )
+
+    _register_web_handlers(
+        WebHandlersBindParams(channel=channel, agent_client=agent_client)
+    )
+
+    await channel.methods["mcp.show"](
+        object(), "req-conn-show", {"name": "nope"}, "sess-1",
+    )
+    assert len(agent_client.sent) == 1
     resp = channel.responses[-1]
     assert resp["ok"] is False
-    assert resp["code"] == "MCP_BAD_REQUEST"
+    assert resp["code"] == "MCP_NOT_FOUND"
 
 
 @pytest.mark.asyncio
