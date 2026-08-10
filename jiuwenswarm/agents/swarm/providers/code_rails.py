@@ -383,8 +383,9 @@ def build_code_agent_mode(params: dict[str, Any], ctx: SwarmBuildContext) -> Any
             CodeAgentModeRail,
         )
         from jiuwenswarm.server.runtime.agent_adapter.interface_code import (
-            _ENTER_PLAN_MODE_INSTRUCTIONS_EN,
+            _CODE_PLAN_ALLOWED_TOOLS,
             _PLAN_MODE_SYSTEM_NOTE,
+            _code_enter_plan_instructions,
         )
 
         exit_notification = (
@@ -393,21 +394,9 @@ def build_code_agent_mode(params: dict[str, Any], ctx: SwarmBuildContext) -> Any
             else None
         )
         return CodeAgentModeRail(
-            allowed_tools=[
-                "enter_plan_mode",
-                "exit_plan_mode",
-                "ask_user",
-                "task_tool",
-                "read_file",
-                "grep",
-                "list_files",
-                "glob",
-                "bash",
-                "write_file",
-                "edit_file",
-            ],
+            allowed_tools=list(_CODE_PLAN_ALLOWED_TOOLS),
             plan_mode_system_note=_PLAN_MODE_SYSTEM_NOTE,
-            enter_plan_instructions=_ENTER_PLAN_MODE_INSTRUCTIONS_EN,
+            enter_plan_instructions=_code_enter_plan_instructions(ctx.config),
             exit_plan_notification=exit_notification,
         )
     except Exception as exc:
