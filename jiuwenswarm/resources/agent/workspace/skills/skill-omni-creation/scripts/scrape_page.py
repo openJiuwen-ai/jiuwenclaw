@@ -10,15 +10,13 @@ import sys
 from pathlib import Path
 from urllib.parse import urljoin
 
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8")
 logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
 # The environment gate uses only the standard library. It selects/re-executes
 # the correct virtual-environment interpreter and repairs missing packages or
 # Chromium before common.py (which imports requests) is loaded.
-from environment_gate import EnvironmentGateError, ensure_environment
+from environment_gate import ensure_environment
 
 BeautifulSoup = None
 common = None
@@ -26,13 +24,18 @@ _Stealth = None
 _has_stealth = False
 
 
-def _load_runtime_dependencies(*, require_web: bool) -> None:
+def _load_runtime_dependencies(*, require_web: bool, require_video: bool = False, require_video_probe: bool = False) -> None:
     global BeautifulSoup, common, _Stealth, _has_stealth
 
-    ensure_environment("web" if require_web else "requests")
+    selected_profiles = sum(bool(value) for value in (require_web, require_video, require_video_probe))
+    if selected_profiles > 1:
+        raise ValueError("web, video, and video-probe environment profiles are mutually exclusive")
+    profile = "web" if require_web else ("video" if require_video else ("video-probe" if require_video_probe else "requests"))
+    ensure_environment(profile)
 
     import common as common_module
     common = common_module
+    common.configure_console_output()
 
     if require_web:
         from bs4 import BeautifulSoup as BeautifulSoupClass
@@ -48,7 +51,6 @@ def _load_runtime_dependencies(*, require_web: bool) -> None:
 PLATFORM_PATTERNS = [
     r"youtube\.com/watch", r"youtu\.be/",
     r"bilibili\.com/video", r"vimeo\.com/\d+",
-    r"twitter\.com/.+/status", r"x\.com/.+/status",
 ]
 
 # XHS URLs are probed first (may be video or image post)
@@ -119,43 +121,10 @@ def is_xhs_url(url: str) -> bool:
 
 
 def fetch_video_title(url: str, fallback: str) -> str:
-    """Fetch real video title. Tries yt-dlp first, then platform-specific APIs, falls back to slug."""
+    """Fetch real video title. Bilibili uses its public API first; yt-dlp is the fallback."""
     import requests as _requests
 
-    # 1. yt-dlp — try browser cookies first, then no-cookie fallback
-    _ytdlp_base = [sys.executable, "-m", "yt_dlp", "--js-runtimes", "node", "--no-playlist", "--print", "title"]
-    _browsers = ["chrome", "firefox", "edge"]
-    for _browser in _browsers:
-        try:
-            result = subprocess.run(
-                _ytdlp_base + ["--cookies-from-browser", _browser, url],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=common.OPERATION_TIMEOUT_SECONDS,
-            )
-            title = result.stdout.strip().splitlines()[0] if result.returncode == 0 else ""
-            if title:
-                logger.info("[scrape_page] video title (yt-dlp/%s): %r", _browser, title)
-                return title
-            if "cookie" in result.stderr.lower() or "could not copy" in result.stderr.lower():
-                continue
-        except Exception as exc:
-            logger.debug("yt-dlp %s failed: %s", _browser, exc)
-    try:
-        result = subprocess.run(
-            _ytdlp_base + [url],
-            capture_output=True, text=True, timeout=common.OPERATION_TIMEOUT_SECONDS,
-        )
-        title = result.stdout.strip().splitlines()[0] if result.returncode == 0 else ""
-        if title:
-            logger.info("[scrape_page] video title (yt-dlp/no-cookie): %r", title)
-            return title
-    except Exception as exc:
-        logger.debug("yt-dlp no-cookie failed: %s", exc)
-
-    # 2. Bilibili public API (no auth required)
+    # 1. Bilibili public API first (no auth required).
     bvid_match = re.search(r"bilibili\.com/video/(BV[A-Za-z0-9]+)", url)
     if bvid_match:
         try:
@@ -171,8 +140,44 @@ def fetch_video_title(url: str, fallback: str) -> str:
         except Exception as exc:
             logger.warning("[scrape_page] Bilibili API title fetch failed: %s", exc)
 
-    logger.info("[scrape_page] could not fetch title, using fallback: %r", fallback)
-    return fallback
+    # 2. yt-dlp fallback — browser cookies first, then no-cookie.
+    # Child Python stdio and parent decoding are both forced to UTF-8.
+    _ytdlp_base = [sys.executable, "-m", "yt_dlp", "--js-runtimes", "node", "--no-playlist", "--print", "title"]
+    _ytdlp_env = common.utf8_subprocess_env()
+    _browsers = ["chrome", "firefox", "edge"]
+    for _browser in _browsers:
+        try:
+            result = subprocess.run(
+                _ytdlp_base + ["--cookies-from-browser", _browser, url],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                env=_ytdlp_env, timeout=common.OPERATION_TIMEOUT_SECONDS,
+            )
+            title = result.stdout.strip().splitlines()[0] if result.returncode == 0 else ""
+            if title:
+                logger.info("[scrape_page] video title (yt-dlp/%s): %r", _browser, title)
+                return title
+            if "cookie" in result.stderr.lower() or "could not copy" in result.stderr.lower():
+                continue
+        except Exception as exc:
+            logger.debug("yt-dlp %s failed: %s", _browser, exc)
+    try:
+        result = subprocess.run(
+            _ytdlp_base + [url],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            env=_ytdlp_env, timeout=common.OPERATION_TIMEOUT_SECONDS,
+        )
+        title = result.stdout.strip().splitlines()[0] if result.returncode == 0 else ""
+        if title:
+            logger.info("[scrape_page] video title (yt-dlp/no-cookie): %r", title)
+            return title
+    except Exception as exc:
+        logger.debug("yt-dlp no-cookie failed: %s", exc)
+
+    if fallback:
+        logger.info("[scrape_page] could not fetch title, using fallback: %r", fallback)
+        return fallback
+    logger.warning("[scrape_page] could not obtain a real video TITLE")
+    return ""
 
 
 # ── DOM helpers ───────────────────────────────────────────────────────────────
@@ -372,33 +377,6 @@ def _is_leaf_js_text_container(el) -> bool:
 
 # ── Core: build unified blocks[] ─────────────────────────────────────────────
 
-_CANDIDATE_TAG_NAMES = {
-    "h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "img",
-    "pre", "code", "table", "dl", "textarea", "canvas",
-}
-_CANDIDATE_ROLES = {"heading", "listitem", "code"}
-_STRUCTURED_TAG_NAMES = {"pre", "code", "table", "dl", "textarea", "canvas"}
-
-
-def _is_candidate_element(el) -> bool:
-    return (
-        el.name in _CANDIDATE_TAG_NAMES
-        or el.get("role") in _CANDIDATE_ROLES
-        or _is_contenteditable(el)
-        or _is_custom_editor(el)
-        or _is_leaf_js_text_container(el)
-    )
-
-
-def _is_structured_element(el) -> bool:
-    return (
-        el.name in _STRUCTURED_TAG_NAMES
-        or _is_custom_editor(el)
-        or _is_contenteditable(el)
-        or _is_leaf_js_text_container(el)
-    )
-
-
 def build_blocks(soup, page_url: str, source: str) -> list[dict]:
     """Walk DOM in order, output interleaved heading / text / image blocks."""
     root = (
@@ -413,7 +391,19 @@ def build_blocks(soup, page_url: str, source: str) -> list[dict]:
     seen_text: set[str] = set()
     blocks: list[dict] = []
 
-    candidates = [el for el in root.find_all(True, recursive=True) if _is_candidate_element(el)]
+    candidates = []
+    for el in root.find_all(True, recursive=True):
+        if (
+            el.name in {
+                "h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "img",
+                "pre", "code", "table", "dl", "textarea", "canvas",
+            }
+            or el.get("role") in {"heading", "listitem", "code"}
+            or _is_contenteditable(el)
+            or _is_custom_editor(el)
+            or _is_leaf_js_text_container(el)
+        ):
+            candidates.append(el)
 
     for el in candidates:
         panel_id, tab_label = _tabpanel_info(el, root, tabpanel_labels)
@@ -457,7 +447,12 @@ def build_blocks(soup, page_url: str, source: str) -> list[dict]:
             alt = el.get("alt", "").strip() or resolve_remote_reference(el, soup)
             blocks.append({"type": "image", "url": url, "alt": alt, "source": source, "path": None})
 
-        elif _is_structured_element(el):
+        elif (
+            el.name in {"pre", "code", "table", "dl", "textarea", "canvas"}
+            or _is_custom_editor(el)
+            or _is_contenteditable(el)
+            or _is_leaf_js_text_container(el)
+        ):
             if el.name != "canvas" and _is_inside_container(el, root, include_paragraphs=(el.name == "code")):
                 continue
             structured = _structured_text(el)
@@ -608,7 +603,7 @@ def _serialized_chars(payload: dict) -> int:
 def build_bounded_stage01_payload(
     *,
     url: str,
-    slug: str,
+    run_id: str,
     title: str,
     blocks: list[dict],
     video_urls: list[str],
@@ -632,7 +627,7 @@ def build_bounded_stage01_payload(
         )
         return {
             "url": url,
-            "slug": slug,
+            "run_id": run_id,
             "title": title,
             "blocks": current_blocks,
             "video_urls": video_urls,
@@ -687,7 +682,6 @@ def build_bounded_stage01_payload(
 
     payload["content_limits"]["serialized_chars"] = _serialized_chars(payload)
     return payload
-
 
 def parse_page_html(html: str, page_url: str, source: str) -> list[dict]:
     soup = BeautifulSoup(html, "html.parser")
@@ -885,72 +879,80 @@ def scrape_page(url: str) -> tuple[list[dict], list[str], str]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Stage 1 (new): scrape page into unified blocks[].")
     parser.add_argument("url", nargs="?")
-    parser.add_argument("slug", nargs="?", default=None)
+    parser.add_argument("run_id", nargs="?", default=None, help="optional UUID workspace id for explicit resume")
     parser.add_argument("--out", default=None)
-    parser.add_argument(
-        "--check-deps",
-        action="store_true",
-        help="Run the shared environment gate with auto-repair, then exit.",
-    )
+    parser.add_argument("--check-deps", action="store_true", help="Run the shared environment gate with auto-repair, then exit.")
     args = parser.parse_args()
 
     if args.check_deps:
-        try:
-            _load_runtime_dependencies(require_web=True)
-        except EnvironmentGateError:
-            sys.exit(2)
+        _load_runtime_dependencies(require_web=True)
         logger.info("[scrape_page] DEPENDENCIES_OK: %s", Path(sys.executable).resolve())
         return
     if not args.url:
         parser.error("url is required unless --check-deps is used")
 
-    require_web = not is_platform_url(args.url)
-    try:
-        _load_runtime_dependencies(require_web=require_web)
-    except EnvironmentGateError:
-        sys.exit(2)
+    direct_video_url = is_platform_url(args.url)
+    xhs_url = is_xhs_url(args.url)
+    xhs_video_title = ""
 
-    if args.slug:
-        slug = args.slug
+    if direct_video_url:
+        _load_runtime_dependencies(require_web=False, require_video=True)
+    elif xhs_url:
+        # XHS can be video or image/text. Probe metadata with only yt-dlp + Node
+        # before creating UUID state; then enter exactly one full pipeline gate.
+        _load_runtime_dependencies(require_web=False, require_video_probe=True)
+        xhs_video_title = fetch_video_title(args.url, "")
+        if xhs_video_title:
+            ensure_environment("video")
+        else:
+            _load_runtime_dependencies(require_web=True)
     else:
-        base_slug = common.url_to_slug(args.url)
-        slug = base_slug
-        counter = 2
-        while common.work_path(slug, "stage01.json").exists():
-            slug = f"{base_slug}_v{counter}"
-            counter += 1
-    out = Path(args.out) if args.out else common.work_path(slug, "stage01.json")
+        _load_runtime_dependencies(require_web=True)
+
+    # Runtime identity is deliberately independent from the final Skill name.
+    # Reuse an unfinished run for this URL, otherwise allocate one UUID. The
+    # final folder name is created only after package/SKILL.md is written once.
+    try:
+        run_id = common.resolve_run_id(args.url, args.run_id)
+    except ValueError as exc:
+        parser.error(str(exc))
+    common.ensure_run_metadata(run_id, args.url)
+    logger.info("[scrape_page] RUN_ID: %s", run_id)
 
     # Pure video platform URLs (B站/YouTube/Vimeo): skip scraping entirely.
     # These pages have no useful text/image content for the pipeline;
     # stage_04b handles the video directly via yt-dlp.
     if is_platform_url(args.url):
-        title = fetch_video_title(args.url, slug.replace("_", " "))
+        title = fetch_video_title(args.url, "")
+        if not title:
+            logger.warning("[scrape_page] TITLE unavailable; keeping UUID workspace for retry/fallback")
+            return
+        out = Path(args.out) if args.out else common.work_path(run_id, "stage01.json")
         common.write_json(out, {
             "url": args.url,
-            "slug": slug,
+            "run_id": run_id,
             "title": title,
             "blocks": [],
             "video_urls": [args.url],
         })
+        logger.info("[scrape_page] ACTIVE_RUN_ID: %s", run_id)
         logger.info("[scrape_page] video platform URL — skipping scrape, handing off to stage_04b: %s", args.url)
         return
 
-    # XHS URLs (xiaohongshu.com / xhslink.com): probe with yt-dlp first.
-    # If yt-dlp finds a real title, it's a video post → hand off to stage_04b.
-    # Otherwise it's an image/text post → fall through to Playwright scrape.
-    if is_xhs_url(args.url):
-        fallback = slug.replace("_", " ")
-        title = fetch_video_title(args.url, fallback)
-        if title != fallback:
+    # XHS type was probed before UUID creation so its dependencies match the
+    # actual branch: video-probe → video for video posts, otherwise web.
+    if xhs_url:
+        if xhs_video_title:
+            out = Path(args.out) if args.out else common.work_path(run_id, "stage01.json")
             common.write_json(out, {
                 "url": args.url,
-                "slug": slug,
-                "title": title,
+                "run_id": run_id,
+                "title": xhs_video_title,
                 "blocks": [],
                 "video_urls": [args.url],
             })
-            logger.info("[scrape_page] XHS video confirmed: %r — handing off to stage_04b", title)
+            logger.info("[scrape_page] ACTIVE_RUN_ID: %s", run_id)
+            logger.info("[scrape_page] XHS video confirmed: %r — handing off to stage_04b", xhs_video_title)
             return
         logger.info("[scrape_page] XHS URL appears to be image/text post — proceeding with Playwright scrape")
 
@@ -959,10 +961,7 @@ def main() -> None:
     except Exception as exc:
         message = str(exc).lower()
         logger.error("[scrape_page] Playwright startup failed: %s", exc)
-        logger.error(
-            "[scrape_page] Environment gate had passed; this is a runtime "
-            "browser/page failure, not a missing-package fallback."
-        )
+        logger.error("[scrape_page] Environment gate had passed; this is a runtime browser/page failure, not a missing-package fallback.")
         raise SystemExit(4) from exc
 
     _blocked_markers = ("the request is blocked", "access denied", "403 forbidden", "enable javascript")
@@ -972,18 +971,32 @@ def main() -> None:
 
     if not blocks or _is_blocked:
         logger.warning("[scrape_page] WARNING: Playwright returned empty/blocked content for %s", args.url)
+        logger.warning("[scrape_page] content blocked/empty; keep RUN_ID and obtain real TITLE/content through fallback")
         logger.warning("[scrape_page] Tip: use web_fetch_webpage in the agent to fetch raw text as fallback")
+        return
+
+    resolved_title = page_title.strip()
+    if not resolved_title:
+        resolved_title = next(
+            (str(block.get("text", "")).strip() for block in blocks if block.get("type") == "heading" and str(block.get("text", "")).strip()),
+            "",
+        )
+    if not resolved_title:
+        logger.warning("[scrape_page] no real page TITLE resolved; keeping UUID workspace for retry/fallback")
+        return
+    out = Path(args.out) if args.out else common.work_path(run_id, "stage01.json")
 
     payload = build_bounded_stage01_payload(
         url=args.url,
-        slug=slug,
-        title=page_title,
+        run_id=run_id,
+        title=resolved_title,
         blocks=blocks,
         video_urls=video_urls,
     )
     bounded_blocks = payload["blocks"]
     img_count = sum(1 for b in bounded_blocks if b["type"] == "image")
     common.write_json(out, payload)
+    logger.info("[scrape_page] ACTIVE_RUN_ID: %s", run_id)
     limits = payload["content_limits"]
     logger.info(
         "[scrape_page] wrote %s: %d/%d blocks (%d images), %d/%d text chars, serialized=%d, title: %r",
