@@ -315,18 +315,44 @@ def _mcp_add_result_error_text(result: Any) -> str:
 
 
 async def _add_mcp_server_and_ability(agent: Any, mcp_cfg: Any, *, tag: str) -> None:
-    """调用 ``add_mcp_server``，按返回值决定是否 ``ability_manager.add``；失败抛 ``RuntimeError``。"""
-    result = await Runner.resource_mgr.add_mcp_server(mcp_cfg, tag=tag)
+    """
+    调用 ``add_mcp_server``，按返回值决定是否 ``ability_manager.add``；失败抛 ``RuntimeError``。
+
+    CancelledError 会被转换为 RuntimeError，因为业务上需要将 MCP 服务器不可达导致的取消视为连接失败。
+    """
+    try:
+        result = await Runner.resource_mgr.add_mcp_server(mcp_cfg, tag=tag)
+    except Exception as e:
+        error_msg = (
+            f"add_mcp_server 失败: "
+            f"name={mcp_cfg.server_name} url={mcp_cfg.server_path}: {e}"
+        )
+        logger.error(error_msg)
+        raise RuntimeError(error_msg) from e
+
     if _mcp_add_result_is_ok(result):
         agent.ability_manager.add(mcp_cfg)
+        logger.debug(
+            f"[ToolManager] add_mcp_server 成功: "
+            f"name={mcp_cfg.server_name} url={mcp_cfg.server_path}"
+        )
         return
+
     err = _mcp_add_result_error_text(result)
     if "already exist" in err.lower():
         agent.ability_manager.add(mcp_cfg)
-        logger.info("[ToolManager] add_mcp_server 已存在，仍加入 ability_manager: %s", err)
+        logger.info(
+            "[ToolManager] add_mcp_server 已存在，仍加入 ability_manager: "
+            f"name={mcp_cfg.server_name}, 错误信息: {err}"
+        )
         return
-    raise RuntimeError(f"add_mcp_server 失败: {err}" if err else "add_mcp_server 失败")
 
+    error_msg = f"add_mcp_server 失败: {err}" if err else "add_mcp_server 失败"
+    logger.error(
+        f"[ToolManager] {error_msg}: "
+        f"name={mcp_cfg.server_name} url={mcp_cfg.server_path}"
+    )
+    raise RuntimeError(error_msg)
 
 # ---------------------------------------------------------------------------
 # 落盘 JSON 模板：列表顺序即写入顺序；每项为 (disk_key, default, kind)。
@@ -700,7 +726,12 @@ class ToolManager:
                     cfg.get("url", ""),
                     bool(cfg.get("auth_headers") or cfg.get("auth_query_params")),
                 )
-                await _add_mcp_server_and_ability(agent, mcp_cfg, tag=server_name)
+                # 这里捕获异常并继续
+                try:
+                    await _add_mcp_server_and_ability(agent, mcp_cfg, tag=server_name)
+                except Exception as e:
+                    logger.error(f"MCP 服务器注册失败，跳过: {server_name} error={e}")
+                    continue  # 继续处理下一个服务器
                 reg = {
                     "kind": "shared",
                     "server_name": server_name,
