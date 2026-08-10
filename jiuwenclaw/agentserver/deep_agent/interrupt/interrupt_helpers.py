@@ -96,12 +96,36 @@ def convert_interactions_to_ask_user_question(state_outputs: list) -> dict | Non
 
     request_id = getattr(payload, 'id', '') if hasattr(payload, 'id') else payload.get('id', '')
 
-    return {
+    result = {
         "event_type": "chat.ask_user_question",
         "request_id": request_id,
         "questions": [question_data],
         "source": "permission_interrupt",
     }
+    value_obj = _get_interaction_value(payload)
+    payload_schema = _get_field(value_obj, "payload_schema", {})
+    if isinstance(payload_schema, dict):
+        from jiuwenclaw.agentserver.permissions.skill_authorization import (
+            SKILL_APPROVAL_CARD_EXTENSION_KEY,
+        )
+
+        card = payload_schema.get(SKILL_APPROVAL_CARD_EXTENSION_KEY)
+        if isinstance(card, dict):
+            result[SKILL_APPROVAL_CARD_EXTENSION_KEY] = card
+            ui_options = _get_field(value_obj, "ui_options", [])
+            if isinstance(ui_options, list):
+                question_data["options"] = ui_options
+    return result
+
+
+def _get_field(value: Any, name: str, default: Any = None) -> Any:
+    if isinstance(value, dict):
+        return value.get(name, default)
+    return getattr(value, name, default)
+
+
+def _get_interaction_value(payload: Any) -> Any:
+    return _get_field(payload, "value", {})
 
 
 def extract_question_from_interaction(payload: Any) -> dict | None:

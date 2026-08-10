@@ -870,6 +870,7 @@ class JiuWenClawDeepAdapter:
         self._response_prompt_rail: ResponsePromptRail | None = None
         self._skill_protocol_prompt_rail: SkillProtocolPromptRail | None = None
         self._skill_compliance_rail: SkillComplianceRail | None = None
+        self._skill_authorization_rail: Any = None
         self._security_rail: SecurityRail | None = None
         self._memory_rail: MemoryRail | None = None
         self._last_runtime_mode: str = "agent.plan"
@@ -2074,6 +2075,36 @@ class JiuWenClawDeepAdapter:
             )
             return None
 
+    def _build_skill_authorization_rail(self):
+        """Build SkillAuthorizationRail；rail 内部按实时 feature flag 惰性启停。"""
+        try:
+            from jiuwenclaw.agentserver.deep_agent.rails.skill_authorization_rail import (
+                SkillAuthorizationRail,
+                build_skill_registry_resolver,
+            )
+
+            rail = SkillAuthorizationRail(
+                engine=self._permission_rail.engine
+                if self._permission_rail is not None else None,
+                skill_resolver=build_skill_registry_resolver(
+                    # 延迟到调用时取最新实例：热更新/重建会替换 self._skill_rail，
+                    # 若绑定构建期实例，可能拿到未扫盘的旧实例导致 manifest_unresolved
+                    lambda: (
+                        self._skill_rail.get_skills_meta()
+                        if self._skill_rail is not None
+                        else []
+                    ),
+                    skill_dirs_provider=lambda: self._resolve_skill_dirs(),
+                ),
+            )
+            logger.info("[JiuWenClawDeepAdapter] SkillAuthorizationRail create success")
+            return rail
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] SkillAuthorizationRail create failed: %s", exc
+            )
+            return None
+
     def _build_runtime_prompt_rail(
         self,
         custom_home_dir: str | None = None,
@@ -2166,6 +2197,7 @@ class JiuWenClawDeepAdapter:
                                                                            "default", {}).get("model_client_config",
                                                                                               {}).get("model_name",
                                                                                                       "gpt-4")}),
+            _RailBuildInfo("_skill_authorization_rail", self._build_skill_authorization_rail),
             # DisabledToolsRail - highest priority (100), runs last to filter disabled tools
             _RailBuildInfo("_disabled_tools_rail", self._build_disabled_tools_rail, {"config": config}),
         ]
@@ -3566,6 +3598,24 @@ class JiuWenClawDeepAdapter:
                 selected_names.append(name)
         return selected_names
 
+    @staticmethod
+    def _revoke_main_skill_authorization(
+        session_id: str | None,
+        *,
+        reason: str,
+    ) -> None:
+        try:
+            from jiuwenclaw.agentserver.permissions.skill_authorization.runtime import (
+                revoke_main_scope,
+            )
+
+            revoke_main_scope(session_id, reason=reason)
+        except Exception:  # noqa: BLE001 — 不影响原取消/异常流程
+            logger.warning(
+                "[JiuWenClawDeepAdapter] dynamic authorization cleanup failed",
+                exc_info=True,
+            )
+
     async def process_interrupt(self, request: AgentRequest) -> AgentResponse:
         """处理 interrupt 请求.
 
@@ -3619,6 +3669,10 @@ class JiuWenClawDeepAdapter:
                 await self._instance.abort()
             # 3. 取消当前会话关联的 MultiSessionToolkit 子任务（按 request 跟踪，避免误停其它会话）
             await self._cancel_session_toolkits(request.session_id, "interrupt(supplement): ")
+            self._revoke_main_skill_authorization(
+                request.session_id,
+                reason="task_supplemented",
+            )
             AskUserQuestionRegistry.get_instance().cancel_for_session(str(request.session_id or ""))
             # 4. 标记未完成的 todo 为 cancelled 并清空 todo.json（与 cancel 一致）
             if request.session_id:
@@ -3648,6 +3702,10 @@ class JiuWenClawDeepAdapter:
             await self._cancel_session_toolkits(
                 request.session_id,
                 f"interrupt(cancel) request_id={request.request_id}: ",
+            )
+            self._revoke_main_skill_authorization(
+                request.session_id,
+                reason="task_cancelled",
             )
             AskUserQuestionRegistry.get_instance().cancel_for_session(str(request.session_id or ""))
             # 4. 标记未完成的 todo 为 cancelled（通知前端），并清空 todo.json
@@ -3969,6 +4027,10 @@ class JiuWenClawDeepAdapter:
 
     async def handle_user_answer(self, request: AgentRequest) -> AgentResponse:
         """Handle chat.user_answer request with explicit source-based routing."""
+        from jiuwenclaw.agentserver.permissions.skill_authorization.runtime import (
+            resolve_subagent_approval,
+        )
+
         params = request.params if isinstance(request.params, dict) else {}
         request_id = params.get("request_id", "")
         answers = params.get("answers", [])
@@ -3980,6 +4042,17 @@ class JiuWenClawDeepAdapter:
             resolved = await self._handle_skill_create_approval(request_id, answers)
         elif source == "ask_tool":
             resolved = AskUserQuestionRegistry.get_instance().resolve(request_id, answers)
+        elif source in {
+            "subagent_skill_load",
+            "subagent_tool_permission",
+        }:
+            resolved = resolve_subagent_approval(
+                request_id=request_id,
+                session_id=str(request.session_id or params.get("session_id") or ""),
+                source=source,
+                answers=answers,
+                agent_scope_id=str(params.get("agent_scope_id") or ""),
+            )
         else:
             # Backward compatibility: keep request_id-prefix routing for old channels/frontends.
             if request_id.startswith("skill_evolve_"):
@@ -3988,6 +4061,17 @@ class JiuWenClawDeepAdapter:
                 resolved = await self._handle_skill_create_approval(request_id, answers)
             elif isinstance(request_id, str) and request_id.startswith(ASK_REQUEST_PREFIX):
                 resolved = AskUserQuestionRegistry.get_instance().resolve(request_id, answers)
+            elif isinstance(request_id, str) and (
+                request_id.startswith("subagent_skill_load_")
+                or request_id.startswith("subagent_tool_permission_")
+            ):
+                resolved = resolve_subagent_approval(
+                    request_id=request_id,
+                    session_id=str(request.session_id or params.get("session_id") or ""),
+                    source="",
+                    answers=answers,
+                    agent_scope_id=str(params.get("agent_scope_id") or ""),
+                )
 
         return AgentResponse(
             request_id=request.request_id,
@@ -4591,9 +4675,17 @@ class JiuWenClawDeepAdapter:
         except asyncio.CancelledError:
             logger.info("[JiuWenClawDeepAdapter] Agent 任务被取消: request_id=%s session_id=%s", request.request_id,
                         session_id)
+            self._revoke_main_skill_authorization(
+                session_id,
+                reason="task_cancelled",
+            )
             raise
         except Exception as e:
             logger.error("[JiuWenClawDeepAdapter] Agent 任务执行异常: %s", e)
+            self._revoke_main_skill_authorization(
+                session_id,
+                reason="task_error",
+            )
             raise
         finally:
             TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
@@ -5025,9 +5117,17 @@ class JiuWenClawDeepAdapter:
                 evolution_status_ended = True
         except asyncio.CancelledError:
             logger.info("[JiuWenClawDeepAdapter] 流式任务被取消: request_id=%s session_id=%s", rid, session_id)
+            self._revoke_main_skill_authorization(
+                session_id,
+                reason="task_cancelled",
+            )
             raise
         except Exception as exc:
             logger.exception("[JiuWenClawDeepAdapter] 流式任务异常: %s", exc)
+            self._revoke_main_skill_authorization(
+                session_id,
+                reason="task_error",
+            )
             if evolution_status_started and not evolution_status_ended:
                 yield AgentResponseChunk(
                     request_id=rid,
