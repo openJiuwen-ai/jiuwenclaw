@@ -285,8 +285,14 @@ class PlanApprovalInterruptRail(ConfirmInterruptRail):
         return "cn"
 
     def _is_plan_mode(self, ctx: AgentCallbackContext) -> bool:
-        """Fail closed unless the current session is explicitly in plan mode."""
-        agent = getattr(ctx, "agent", None) or self._agent
+        """Fail closed unless the rail-bound DeepAgent is in plan mode.
+
+        Interrupt callbacks may expose an inner/runtime agent through
+        ``ctx.agent``.  Mode tools and ``CodeAgentModeRail`` both mutate the
+        DeepAgent captured by ``init()``, so validation must read that same
+        state owner or the two exit guards can contradict each other.
+        """
+        agent = self._agent or getattr(ctx, "agent", None)
         session = getattr(ctx, "session", None)
         if agent is None or session is None:
             return False

@@ -30,6 +30,7 @@ def test_memory_enabled_builds_project_and_coding_memory_before_plan_rails() -> 
     assert [type(rail).__name__ for rail in rails] == [
         "ProjectMemoryRail",
         "CodingMemoryRail",
+        "TaskPlanningRail",
         "CodeAgentModeRail",
         "CodeConfirmInterruptRail",
         "PlanApprovalInterruptRail",
@@ -45,6 +46,7 @@ def test_memory_disabled_keeps_plan_rails() -> None:
     )
 
     assert [type(rail).__name__ for rail in rails] == [
+        "TaskPlanningRail",
         "CodeAgentModeRail",
         "CodeConfirmInterruptRail",
         "PlanApprovalInterruptRail",
@@ -65,6 +67,7 @@ def test_coding_memory_failure_does_not_block_plan_rails() -> None:
 
     assert [type(rail).__name__ for rail in rails] == [
         "ProjectMemoryRail",
+        "TaskPlanningRail",
         "CodeAgentModeRail",
         "CodeConfirmInterruptRail",
         "PlanApprovalInterruptRail",
@@ -88,6 +91,7 @@ def test_project_memory_failure_does_not_block_plan_rails(monkeypatch) -> None:
     )
 
     assert [type(rail).__name__ for rail in rails] == [
+        "TaskPlanningRail",
         "CodeAgentModeRail",
         "CodeConfirmInterruptRail",
         "PlanApprovalInterruptRail",
@@ -112,7 +116,7 @@ def test_agent_mode_import_failure_disables_only_plan_rail_group(monkeypatch) ->
         workspace_dir=".",
     )
 
-    assert rails == []
+    assert [type(rail).__name__ for rail in rails] == ["TaskPlanningRail"]
 
 
 def test_single_plan_rail_failure_does_not_drop_other_plan_rails(monkeypatch) -> None:
@@ -129,6 +133,7 @@ def test_single_plan_rail_failure_does_not_drop_other_plan_rails(monkeypatch) ->
     )
 
     assert [type(rail).__name__ for rail in rails] == [
+        "TaskPlanningRail",
         "CodeAgentModeRail",
         "PlanApprovalInterruptRail",
     ]
