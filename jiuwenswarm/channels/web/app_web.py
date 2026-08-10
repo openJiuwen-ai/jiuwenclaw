@@ -35,7 +35,7 @@ from jiuwenswarm.agents.harness.team.bootstrap import configure_agent_teams_home
 from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.ws_diagnostics import describe_ws_exception, format_ws_diagnostics
 from jiuwenswarm.common.utils import get_agent_root_dir, get_logs_dir, \
-    get_agent_sessions_dir, get_root_dir, get_user_workspace_dir, is_package_installation, \
+    get_agent_sessions_dir, get_user_workspace_dir, \
     wait_for_tcp_port, SensitiveDataFilter
 from jiuwenswarm.server.runtime.session.session_history import history_exists, load_history_records
 
@@ -57,18 +57,23 @@ def _get_package_dir() -> Path:
 
 
 def _default_dist_dir() -> Path:
-    """Return default dist directory for frontend static files."""
-    # Priority 1: user workspace channels/web/frontend/dist
-    root = get_root_dir()
-    user_dist = root / "channels" / "web" / "frontend" / "dist"
-    if user_dist.exists():
-        return user_dist
-    # Priority 2: package internal channels/web/frontend/dist
+    """Return default dist directory for frontend static files.
+
+    The version-controlled frontend build ships alongside the code in all
+    three run modes, so the package-internal dist is the only correct
+    source of truth:
+    - source dev: <repo>/jiuwenswarm/channels/web/frontend/dist
+      (overwritten by ``npm run build``, loaded live)
+    - whl install: <site-packages>/jiuwenswarm/channels/web/frontend/dist
+    - frozen exe: <_MEIPASS>/jiuwenswarm/channels/web/frontend/dist
+
+    A user-data dist (e.g. ``~/.jiuwenswarm/channels/web/frontend/dist``)
+    is never code, is not maintained by any build/upgrade flow, and once
+    stale silently overrides the shipped version — causing the
+    "backend upgraded but frontend still old" mismatch. Do not load it.
+    """
     package_dir = _get_package_dir()
     dist_dir = package_dir / "frontend" / "dist"
-    if dist_dir.exists():
-        return dist_dir
-    # Fallback: return package internal path
     return dist_dir
 
 

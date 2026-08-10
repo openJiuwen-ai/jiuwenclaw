@@ -109,22 +109,30 @@ class SwarmSymphonyService:
                 return payload
             if task is not None:
                 self._active_build_task = None
+            build_logger = _BuildProcessLogger(graph_dir / "build_log.jsonl")
+            build_logger.reset()
+            build_logger.record(
+                "update.start",
+                skills_root=str(config.paths.skills_root),
+                out_dir=str(graph_dir),
+                force=force,
+            )
             task = asyncio.create_task(
-                self._build_graph(force=force, progress=None),
+                self._build_graph(force=force, progress=None, prestarted=True),
                 name="symphony-graph-build",
             )
             self._active_build_task = task
             task.add_done_callback(self._consume_background_build_result)
 
-        return {
+        payload = {
             "success": True,
             "background": True,
             "build_status": "running",
             "graph_dir": str(graph_dir),
             "detail": "技能总谱后台构建已启动。",
-            "build_progress": _starting_build_progress(),
-            "build_log": [],
         }
+        payload.update(_build_log_payload(graph_dir))
+        return payload
 
     async def cancel_build(
         self,
@@ -295,6 +303,7 @@ class SwarmSymphonyService:
         *,
         force: bool,
         progress: ProgressCallback | None,
+        prestarted: bool = False,
     ) -> dict[str, Any]:
         config = load_symphony_config()
         skills_root = config.paths.skills_root
@@ -323,13 +332,14 @@ class SwarmSymphonyService:
         )
         abort_progress = False
         try:
-            build_logger.reset()
-            build_logger.record(
-                "update.start",
-                skills_root=str(skills_root),
-                out_dir=str(graph_dir),
-                force=force,
-            )
+            if not prestarted:
+                build_logger.reset()
+                build_logger.record(
+                    "update.start",
+                    skills_root=str(skills_root),
+                    out_dir=str(graph_dir),
+                    force=force,
+                )
             try:
                 result = (
                     await service_build_graph(
@@ -366,8 +376,12 @@ class SwarmSymphonyService:
                 }
                 payload.update(_build_log_payload(graph_dir))
                 return payload
+            if result.get("success") is not True:
+                result["success"] = False
+                build_logger.record("update.failed", **result)
+                result.update(_build_log_payload(graph_dir))
+                return result
             build_logger.record("update.done", **result)
-            result["success"] = True
             result.update(_build_log_payload(graph_dir))
             return result
         finally:
@@ -777,7 +791,7 @@ def _build_progress(entries: list[dict[str, Any]]) -> dict[str, Any]:
     stage = str(latest.get("stage") or "")
     status = "running"
     if stage == "update.done":
-        status = "success"
+        status = "error" if latest.get("success") is False else "success"
     elif stage == "update.failed":
         status = "error"
     elif stage == "update.cancelled":
@@ -785,7 +799,7 @@ def _build_progress(entries: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "stage": stage,
         "label": str(latest.get("label") or _BUILD_STAGE_LABELS.get(stage, stage)),
-        "percent": _build_stage_percent(stage, latest),
+        "percent": _build_stage_percent(stage, latest, entries=entries),
         "status": status,
         "current": latest.get("current"),
         "total": latest.get("total"),
@@ -875,12 +889,48 @@ def _has_token_usage(usage: dict[str, Any]) -> bool:
         return False
 
 
-def _build_stage_percent(stage: str, entry: dict[str, Any]) -> int:
+def _build_stage_percent(
+    stage: str,
+    entry: dict[str, Any],
+    *,
+    entries: list[dict[str, Any]] | None = None,
+) -> int:
     if stage == "graph.resolve.progress":
-        return _progress_between(entry, start=72, end=84)
+        return _graph_resolve_percent(entries or ())
+    if stage == "fingerprint.done":
+        return 48
     if stage.startswith("fingerprint."):
         return _progress_between(entry, start=24, end=48)
     return int(_BUILD_STAGE_PROGRESS.get(stage, 0))
+
+
+def _graph_resolve_percent(
+    entries: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+) -> int:
+    """Advance relation progress only after a matcher batch has completed."""
+
+    completed: list[tuple[int, int]] = []
+    for candidate in entries:
+        if candidate.get("stage") != "graph.resolve.progress":
+            continue
+        if candidate.get("matcher_event") not in {"batch_done", "matching_done"}:
+            continue
+        try:
+            current = int(candidate.get("current") or 0)
+            total = int(candidate.get("total") or 0)
+        except (TypeError, ValueError):
+            continue
+        if total > 0:
+            completed.append((max(0, min(current, total)), total))
+
+    if not completed:
+        return 72
+    current, total = max(completed, key=lambda item: item[0] / item[1])
+    return _progress_between(
+        {"current": current, "total": total},
+        start=72,
+        end=84,
+    )
 
 
 def _progress_between(entry: dict[str, Any], *, start: int, end: int) -> int:
