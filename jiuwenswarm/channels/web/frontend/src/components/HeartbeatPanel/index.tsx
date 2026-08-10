@@ -14,7 +14,7 @@ import type {
   HeartbeatTaskUI,
 } from '../../types/heartbeat';
 import { summarizeHeartbeatSchedule } from './heartbeatScheduleConvert';
-import { heartbeatRunNowMessageKey, heartbeatCancelMessageKey } from './heartbeatStatusText';
+import { heartbeatRunNowMessageKey, heartbeatCancelMessageKey, heartbeatLastRunStatusLabelKey } from './heartbeatStatusText';
 import HeartbeatStatusBadge from './HeartbeatStatusBadge';
 import HeartbeatTaskDrawer, {
   emptyHeartbeatTaskForm,
@@ -95,6 +95,20 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
     void loadAll(controller.signal);
     return () => controller.abort();
   }, [loadAll]);
+
+  // 自动触发结束时（useWebSocket 在 Heartbeat 轮 processing_status(false) 派发此事件），
+  // 静默刷新 list/get 以同步本轮 run_state（last_run_status/skipped_count 等），
+  // 见接口规格说明2 §8 步骤5。只在当前会话面板可见时刷新，避免无关会话的刷新请求。
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ sessionId?: string }>).detail;
+      if (!detail || detail.sessionId !== sessionId) return;
+      const controller = new AbortController();
+      void loadAll(controller.signal, { silent: true });
+    };
+    window.addEventListener('heartbeat-list-refresh', handler);
+    return () => window.removeEventListener('heartbeat-list-refresh', handler);
+  }, [sessionId, loadAll]);
 
   // 后端 list 按 created_at ASC 返回，前端本地按"最近更新/创建优先"重新排序 + 按状态/关键词筛选，
   // 见接口规格说明 §16.8；只复制展示用副本，不改 jobs 本身
@@ -432,6 +446,15 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
                         <span>{t('heartbeat.panel.nextRunAt', { time: formatHeartbeatTimestamp(job.nextRunAt) })}</span>
                       )}
                       {job.runCount > 0 && <span>{t('heartbeat.panel.runCount', { count: job.runCount })}</span>}
+                      {/* §5.1：展示最近一次运行状态与错误；忙等待超时后显示 skipped + session_busy_timeout */}
+                      {(() => {
+                        const lastStatusKey = heartbeatLastRunStatusLabelKey(job.runState.last_run_status);
+                        if (!lastStatusKey) return null;
+                        const lastError = job.runState.last_error;
+                        const errorText = lastError ? t('heartbeat.panel.lastError', { error: lastError }) : '';
+                        const sep = lastStatusKey && errorText ? ' · ' : '';
+                        return <span>{t(lastStatusKey)}{sep}{errorText}</span>;
+                      })()}
                     </div>
                     <div className="mt-3 flex flex-wrap justify-end gap-2 border-t border-border pt-2">
                       {job.status === 'running' && (
@@ -446,16 +469,21 @@ export default function HeartbeatPanel({ sessionId, onClose }: HeartbeatPanelPro
                       )}
                       <button
                         type="button"
-                        disabled={actingJobId === job.id}
+                        disabled={actingJobId === job.id || job.status === 'completed' || job.status === 'expired'}
                         onClick={() => void handleRunNow(job)}
-                        className="rounded-full border border-border px-3 py-1 text-xs text-text hover:bg-bg-hover disabled:opacity-60"
+                        className="rounded-full border border-border px-3 py-1 text-xs text-text hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40"
                       >
                         {t('heartbeat.panel.runNow')}
                       </button>
                       <button
                         type="button"
-                        disabled={actingJobId === job.id || job.status === 'completed' || job.status === 'expired'}
+                        disabled={actingJobId === job.id}
                         onClick={() => void handleToggle(job)}
+                        title={
+                          job.status === 'completed' || job.status === 'expired'
+                            ? t('heartbeat.panel.resumeFromCompletedHint')
+                            : undefined
+                        }
                         className="rounded-full border border-border px-3 py-1 text-xs text-text hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40"
                       >
                         {t(job.enabled ? 'heartbeat.panel.pause' : 'heartbeat.panel.resume')}

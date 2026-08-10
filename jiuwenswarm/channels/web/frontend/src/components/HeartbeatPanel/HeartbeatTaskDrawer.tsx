@@ -84,7 +84,10 @@ export default function HeartbeatTaskDrawer({ mode, initial, meta, submitting, e
   return (
     <div className="space-y-4 p-4">
       <div>
-        <label className="mb-1 block text-sm text-text-muted">{t('heartbeat.drawer.fieldName')}</label>
+        <label className="mb-1 block text-sm text-text-muted">
+          {t('heartbeat.drawer.fieldName')}
+          <span className="text-red-500">*</span>
+        </label>
         <input
           type="text"
           value={form.name}
@@ -96,6 +99,7 @@ export default function HeartbeatTaskDrawer({ mode, initial, meta, submitting, e
       <div>
         <label className="mb-1 block text-sm text-text-muted" title={t('heartbeat.drawer.fieldPromptHint') ?? undefined}>
           {t('heartbeat.drawer.fieldPrompt')}
+          <span className="text-red-500">*</span>
         </label>
         <textarea
           value={form.prompt}
@@ -108,6 +112,7 @@ export default function HeartbeatTaskDrawer({ mode, initial, meta, submitting, e
       <div>
         <label className="mb-1 block text-sm text-text-muted" title={t('heartbeat.drawer.fieldScheduleHint') ?? undefined}>
           {t('heartbeat.drawer.fieldSchedule')}
+          <span className="text-red-500">*</span>
         </label>
         <HeartbeatScheduleEditor
           value={form.schedule}

@@ -32,6 +32,7 @@ const KNOWN_RUN_NOW_REJECT_REASONS = [
   'replacement_pending',
   'replacement_cancel_failed',
   'job_disabled_during_replace',
+  'job_completed', // §6：Once/delete_after_run/max_runs 已满足停止条件，需禁用并提示先恢复任务
 ];
 
 /**
