@@ -1,0 +1,165 @@
+"""Agent-facing prompt-optimizer tool.
+
+Exposes the optimizer as a single model-callable tool that runs the RLAF-P loop and
+returns the best prompt. Structurally mirrors
+:class:`jiuwenswarm.agents.harness.common.tools.symphony_toolkits.SymphonyToolkit`:
+the tool is a thin ``LocalFunction`` that dispatches to the ``optimizer.optimize``
+extension RPC, and it is gated by ``symphony.optimization.enabled``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import inspect
+import logging
+from typing import Any, Callable
+
+from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
+
+from jiuwenswarm.extensions.registry import ExtensionRegistry
+from jiuwenswarm.symphony.optimization.config import load_optimization_config
+
+logger = logging.getLogger(__name__)
+
+_OPTIMIZE_TIMEOUT_S = 1800.0
+
+
+class PromptOptimizerToolkit:
+    """Expose the prompt optimizer's ``optimize`` RPC as a model-callable tool."""
+
+    @staticmethod
+    def is_enabled(config: dict[str, Any] | None = None) -> bool:
+        try:
+            return bool(load_optimization_config(config).enabled)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("failed to load optimization config; tool disabled: %s", exc)
+            return False
+
+    async def _call_rpc(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        try:
+            registry = ExtensionRegistry.get_instance()
+        except RuntimeError as exc:
+            return {"success": False, "detail": f"optimizer RPC unavailable: {method}: {exc}"}
+
+        handler = registry.get_rpc_handler(method)
+        if handler is None:
+            return {
+                "success": False,
+                "detail": f"optimizer RPC unavailable: {method}: handler not registered",
+            }
+        try:
+            result = handler(params, request=None)
+            payload = await asyncio.wait_for(
+                result if inspect.isawaitable(result) else _wrap(result),
+                timeout=_OPTIMIZE_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            return {"success": False, "detail": f"{method}: timeout after {_OPTIMIZE_TIMEOUT_S}s"}
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("optimizer RPC failed: %s", method)
+            return {"success": False, "detail": f"{method}: {exc}"}
+        return payload if isinstance(payload, dict) else {"success": True, "result": payload}
+
+    async def optimize_prompt(
+        self,
+        objective: str,
+        cases: list[dict[str, Any]] | None = None,
+        constraints: list[str] | None = None,
+        base_prompt: str = "",
+        candidate_prompts: int | None = None,
+        max_iterations: int | None = None,
+    ) -> dict[str, Any]:
+        if not self.is_enabled():
+            return {
+                "success": False,
+                "disabled": True,
+                "detail": "Prompt optimizer disabled: symphony.optimization.enabled=false",
+            }
+        params: dict[str, Any] = {
+            "objective": str(objective or "").strip(),
+            "cases": cases or [],
+            "constraints": constraints or [],
+            "base_prompt": base_prompt or "",
+        }
+        if candidate_prompts:
+            params["candidate_prompts"] = candidate_prompts
+        if max_iterations:
+            params["max_iterations"] = max_iterations
+        return await self._call_rpc("optimizer.optimize", params)
+
+    def get_tools(self, config: dict[str, Any] | None = None) -> list[Tool]:
+        if not self.is_enabled(config):
+            return []
+
+        def make_tool(
+            name: str,
+            description: str,
+            input_params: dict[str, Any],
+            func: Callable[..., Any],
+        ) -> Tool:
+            card = ToolCard(
+                id=name, name=name, description=description, input_params=input_params
+            )
+            return LocalFunction(card=card, func=func)
+
+        return [
+            make_tool(
+                "optimize_prompt",
+                (
+                    "Improve a SYSTEM PROMPT for a repeatable task via an RL-style feedback "
+                    "loop (RLAF-P): it generates candidate prompts, executes them, scores the "
+                    "results, and returns the best-performing prompt. Use when the user wants a "
+                    "prompt tuned/optimized for a task, or when the same task is run repeatedly "
+                    "and a stronger system prompt would help. Provide the task 'objective' and, "
+                    "when available, a few 'cases' (input/expected) to evaluate against."
+                ),
+                {
+                    "type": "object",
+                    "properties": {
+                        "objective": {
+                            "type": "string",
+                            "description": "The task the prompt must accomplish (kept fixed; drift is penalized).",
+                        },
+                        "cases": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "input": {"type": "string"},
+                                    "expected": {"type": "string"},
+                                    "hidden": {"type": "boolean"},
+                                },
+                                "required": ["input"],
+                            },
+                            "description": "Evaluation cases. Mark some 'hidden' to guard against reward hacking.",
+                        },
+                        "constraints": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Hard requirements every candidate prompt must satisfy.",
+                        },
+                        "base_prompt": {
+                            "type": "string",
+                            "description": "Optional starting prompt to improve on.",
+                        },
+                        "candidate_prompts": {
+                            "type": "integer",
+                            "description": "Candidates per iteration (default from config).",
+                        },
+                        "max_iterations": {
+                            "type": "integer",
+                            "description": "Maximum optimization iterations (default from config).",
+                        },
+                    },
+                    "required": ["objective"],
+                },
+                self.optimize_prompt,
+            )
+        ]
+
+
+async def _wrap(value: Any) -> Any:
+    return value
+
+
+__all__ = ["PromptOptimizerToolkit"]
