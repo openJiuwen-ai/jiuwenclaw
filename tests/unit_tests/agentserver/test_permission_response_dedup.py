@@ -62,6 +62,7 @@ def _permission_request(
     request_id: str,
     req_method: ReqMethod = ReqMethod.CHAT_SEND,
     stream: bool = False,
+    mode: str = "agent",
 ) -> AgentRequest:
     return AgentRequest(
         request_id=request_id,
@@ -72,7 +73,8 @@ def _permission_request(
             "query": "",
             "request_id": continuation_id,
             "answers": [{"selected_options": ["approve"]}],
-            "mode": "agent",
+            "source": "permission_interrupt",
+            "mode": mode,
         },
         is_stream=stream,
     )
@@ -121,7 +123,23 @@ def _build_swarm(monkeypatch: pytest.MonkeyPatch, adapter: _PermissionAdapter):
     swarm = interface_module.JiuWenSwarm()
     swarm._adapter = adapter
     swarm._sdk_name = "harness"
-    monkeypatch.setattr(swarm, "_build_inputs", lambda _request: ({}, "local", ""))
+
+    def _build_inputs(request: AgentRequest):
+        if request.params.get("mode") == "team":
+            return (
+                {
+                    "query": swarm._build_interactive_input_from_answers(
+                        request.params["request_id"],
+                        request.params["answers"],
+                        request.params["source"],
+                    )
+                },
+                "local",
+                "",
+            )
+        return {}, "local", ""
+
+    monkeypatch.setattr(swarm, "_build_inputs", _build_inputs)
     monkeypatch.setattr(interface_module, "append_history_record", lambda **_kwargs: None)
     monkeypatch.setattr(interface_module, "_schedule_symphony_session_feedback", lambda *_args: None)
     return swarm
@@ -159,9 +177,13 @@ async def test_unary_duplicate_permission_runs_runtime_once(monkeypatch) -> None
 
 
 @pytest.mark.asyncio
-async def test_stream_duplicate_permission_runs_runtime_once(monkeypatch) -> None:
+async def test_team_stream_duplicate_permission_runs_runtime_once(monkeypatch) -> None:
     adapter = _PermissionAdapter()
     swarm = _build_swarm(monkeypatch, adapter)
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.get_team_manager",
+        lambda _channel_id: object(),
+    )
 
     async def collect(request: AgentRequest) -> list[AgentResponseChunk]:
         return [chunk async for chunk in swarm.process_message_stream(request)]
@@ -172,6 +194,7 @@ async def test_stream_duplicate_permission_runs_runtime_once(monkeypatch) -> Non
                 "permission-1",
                 request_id=f"stream-{index}",
                 stream=True,
+                mode="team",
             )
         )
         for index in range(3)

@@ -2448,9 +2448,7 @@ class JiuWenSwarm:
 
         permission_key = _permission_response_key(request)
         permission_reservation = None
-        if permission_key is not None and not (
-            is_team_mode and not is_team_first_request
-        ):
+        if permission_key is not None:
             permission_reservation = self._permission_response_ledger.reserve(
                 session_id,
                 permission_key,

@@ -6294,11 +6294,6 @@ class JiuWenSwarmDeepAdapter:
             return ReloadResult(applied=True)
 
         overlay_token = self._bind_request_env_overlay(env_overrides)
-        previous_config_base_cache = self._config_base_cache
-        previous_config_cache = self._config_cache
-        previous_progressive_tool_rail = self._progressive_tool_rail
-        previous_filesystem_rail = self._filesystem_rail
-        configure_succeeded = False
         try:
             # TaskMemory: clear when env keys that feed the fingerprint change.
             if env_touches_task_memory(env_overrides):
@@ -6337,7 +6332,6 @@ class JiuWenSwarmDeepAdapter:
             omitted_fields, reload_fingerprints = self._omit_unchanged_reload_fields(deep_cfg)
             try:
                 self._instance.configure(deep_cfg)
-                configure_succeeded = True
             finally:
                 self._restore_omitted_reload_fields(deep_cfg, omitted_fields)
 
@@ -6391,13 +6385,6 @@ class JiuWenSwarmDeepAdapter:
 
             logger.info("[JiuWenSwarmDeepAdapter] 配置已热更新（configure），未重启进程")
             return ReloadResult(applied=True)
-        except Exception:
-            if not configure_succeeded:
-                self._config_base_cache = previous_config_base_cache
-                self._config_cache = previous_config_cache
-                self._progressive_tool_rail = previous_progressive_tool_rail
-                self._filesystem_rail = previous_filesystem_rail
-            raise
         finally:
             if overlay_token is not None:
                 reset_task_env_overlay(overlay_token)

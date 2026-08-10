@@ -90,10 +90,31 @@ def test_code_adapter_reload_plan_preserves_parent_retirement_plan(monkeypatch):
     assert rails_to_unregister == [retired_rail]
 
 
+@pytest.mark.asyncio
+async def test_code_adapter_reconcile_only_removes_evolution_rails(monkeypatch):
+    from jiuwenswarm.server.runtime.agent_adapter.interface_code import (
+        JiuwenSwarmCodeAdapter,
+    )
+
+    adapter = JiuwenSwarmCodeAdapter()
+    adapter._config_cache = {"evolution": {"enabled": True}}
+    adapter._skill_evolution_rail = object()
+    adapter._evolution_interrupt_rail = object()
+    ensure = AsyncMock()
+    unconfigure = AsyncMock()
+    monkeypatch.setattr(adapter, "_ensure_active_evolution_rails_registered", ensure)
+    monkeypatch.setattr(adapter, "_unconfigure_active_evolution_rails", unconfigure)
+
+    await adapter._reconcile_evolution_rails()
+
+    ensure.assert_not_awaited()
+    unconfigure.assert_awaited_once_with()
+
+
 def _prepare_reload_adapter(
     monkeypatch: pytest.MonkeyPatch,
     *,
-    configure_error: Exception | None = None,
+    configure_error: BaseException | None = None,
 ) -> tuple[JiuWenSwarmDeepAdapter, list[str], object, object]:
     adapter = JiuWenSwarmDeepAdapter()
     old_progressive = object()
@@ -198,7 +219,7 @@ async def test_reload_unregisters_retired_rails_only_after_configure(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_reload_keeps_rails_and_previous_config_when_configure_fails(monkeypatch):
+async def test_reload_does_not_unregister_staged_rails_when_configure_fails(monkeypatch):
     adapter, events, old_progressive, old_filesystem = _prepare_reload_adapter(
         monkeypatch,
         configure_error=RuntimeError("configure failed"),
@@ -216,8 +237,12 @@ async def test_reload_keeps_rails_and_previous_config_when_configure_fails(monke
     assert events == ["configure"]
     assert adapter._progressive_tool_rail is old_progressive
     assert adapter._filesystem_rail is old_filesystem
-    assert adapter._config_base_cache is previous_base
-    assert adapter._config_cache is previous_react
+    assert adapter._config_base_cache is not previous_base
+    assert adapter._config_cache is not previous_react
+    assert adapter._config_cache == {
+        "agent_name": "main_agent",
+        "tool_lazy_load": {"enabled": False},
+    }
 
 
 @pytest.mark.asyncio

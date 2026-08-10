@@ -1065,6 +1065,14 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                     mode,
                 )
 
+    async def _reconcile_evolution_rails(self) -> None:
+        """Keep evolution rails disabled for every Code adapter reload."""
+        if (
+            self._skill_evolution_rail is not None
+            or self._evolution_interrupt_rail is not None
+        ):
+            await self._unconfigure_active_evolution_rails()
+
     def _build_code_agent_rail(self) -> CodeAgentRail | None:
         """构建 CodeAgentRail，管理 /agents 创建的自定义 agent。"""
         try:
