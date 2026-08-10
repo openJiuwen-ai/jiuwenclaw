@@ -29,6 +29,7 @@
     )
 """
 from __future__ import annotations
+import importlib
 import json
 import textwrap
 from pathlib import Path
