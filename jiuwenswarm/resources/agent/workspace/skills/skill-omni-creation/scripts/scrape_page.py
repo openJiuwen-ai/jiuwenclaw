@@ -24,7 +24,12 @@ _Stealth = None
 _has_stealth = False
 
 
-def _load_runtime_dependencies(*, require_web: bool, require_video: bool = False, require_video_probe: bool = False) -> None:
+def _load_runtime_dependencies(
+    *,
+    require_web: bool,
+    require_video: bool = False,
+    require_video_probe: bool = False,
+) -> None:
     global BeautifulSoup, common, _Stealth, _has_stealth
 
     selected_profiles = sum(bool(value) for value in (require_web, require_video, require_video_probe))
