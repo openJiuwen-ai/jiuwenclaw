@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Finalize generated scripts after verification without blocking SKILL.md creation.
 
-Only paths listed with --keep survive. Every other generated file under this run's package/scripts/ directory is deleted. The command always emits the mode the final
-SKILL.md must use: with_scripts or text_images_only.
+Only paths listed with --keep survive. Every other generated file under this
+run's package/scripts/ directory is deleted. The command always emits the mode
+the final SKILL.md must use: with_scripts or text_images_only.
 """
 import argparse
 import logging
