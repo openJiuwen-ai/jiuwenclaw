@@ -50,11 +50,6 @@ _PROFILE_EXECUTABLES: dict[str, tuple[str, ...]] = {
 class EnvironmentGateError(RuntimeError):
     """Raised when the runtime cannot be made ready."""
 
-
-def _log(message: str) -> None:
-    print(f"[environment_gate] {message}", flush=True)
-
-
 def _resolved(path: Path | str) -> Path:
     return Path(path).expanduser().resolve()
 
@@ -129,7 +124,6 @@ def _create_project_venv(root: Path) -> Path | None:
     target = _venv_python(venv_dir)
     try:
         root.mkdir(parents=True, exist_ok=True)
-        _log(f"No usable virtual environment found; creating {venv_dir}")
         result = subprocess.run(
             [sys.executable, "-m", "venv", str(venv_dir)],
             check=False,
@@ -138,7 +132,7 @@ def _create_project_venv(root: Path) -> Path | None:
         if result.returncode == 0 and _is_executable_python(target):
             return _absolute_executable(target)
     except (OSError, subprocess.SubprocessError) as exc:
-        _log(f"Virtual-environment creation failed: {exc}")
+        print(f"Virtual-environment creation failed: {exc}")
     return None
 
 
@@ -188,7 +182,7 @@ def _reexec_with_selected(selected: Path) -> None:
     caller = Path(sys.argv[0]).resolve()
     env = os.environ.copy()
     env[_REEXEC_FLAG] = "1"
-    _log(f"Re-executing with selected interpreter: {selected}")
+
     try:
         result = subprocess.run(
             [str(selected), str(caller), *sys.argv[1:]],
@@ -201,7 +195,7 @@ def _reexec_with_selected(selected: Path) -> None:
 
 
 def _run(command: list[str], *, timeout: int, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    _log("Running: " + subprocess.list2cmdline(command))
+    print("Running: " + subprocess.list2cmdline(command))
     return subprocess.run(
         command,
         check=False,
@@ -228,7 +222,6 @@ def _ensure_pip() -> None:
     )
     if check.returncode == 0:
         return
-    _log("pip is unavailable; attempting ensurepip.")
     result = _run([sys.executable, "-m", "ensurepip", "--upgrade"], timeout=_OPERATION_TIMEOUT_SECONDS)
     if result.returncode != 0:
         raise EnvironmentGateError(
@@ -332,7 +325,6 @@ def _ensure_chromium() -> None:
     if error is None:
         return
 
-    _log(f"Chromium is not ready: {error}")
     install = _run(
         [sys.executable, "-m", "playwright", "install", "chromium"],
         timeout=900,
@@ -466,7 +458,6 @@ def ensure_environment(
         if missing:
             if not auto_install:
                 raise EnvironmentGateError("Missing Python packages: " + ", ".join(missing))
-            _log("Installing missing Python packages into: " + str(_absolute_executable(sys.executable)))
             _install_python_packages(missing)
 
         if profile in {"web", "web-images"}:
@@ -481,16 +472,13 @@ def ensure_environment(
 
         selected = _absolute_executable(sys.executable)
         _write_status(profile=profile, ready=True)
-        _log(f"ENVIRONMENT_READY profile={profile} python={selected}")
         return selected
     except EnvironmentGateError as exc:
         _write_status(profile=profile, ready=False, error=str(exc))
-        _log(f"ENVIRONMENT_BLOCKED profile={profile}: {exc}")
         raise SystemExit(2) from exc
     except subprocess.TimeoutExpired as exc:
         message = f"Environment repair command timed out: {exc}"
         _write_status(profile=profile, ready=False, error=message)
-        _log(f"ENVIRONMENT_BLOCKED profile={profile}: {message}")
         raise SystemExit(2) from exc
 
 
