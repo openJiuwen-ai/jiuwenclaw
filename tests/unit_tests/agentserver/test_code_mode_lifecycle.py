@@ -17,10 +17,13 @@ from openjiuwen.harness.rails.task_planning_rail import TaskPlanningRail
 from jiuwenclaw.agentserver.deep_agent.interface_deep import (
     JiuWenClawDeepAdapter,
     _AgentInitContext,
+    _RuntimeConfigParams,
 )
 from jiuwenclaw.agentserver.deep_agent.rails.project_memory_rail import (
     ProjectMemoryRail,
 )
+from jiuwenclaw.schema.agent import AgentRequest
+from jiuwenclaw.schema.message import ReqMethod
 
 
 _RAIL_BASES = {
@@ -177,6 +180,67 @@ async def test_code_submode_is_forwarded_to_code_mode_rail() -> None:
         "code.plan",
         session_id="session-1",
     )
+
+
+@pytest.mark.asyncio
+async def test_code_resume_preserves_dynamic_session_submode() -> None:
+    adapter = _adapter()
+    code_mode_rail = MagicMock()
+    adapter._code_mode_rails = [code_mode_rail]
+    adapter._code_mode_rails_active = True
+    adapter._register_code_mode_rails = AsyncMock()
+
+    await adapter._update_rails_for_mode(
+        "code.normal",
+        session_id="session-1",
+        sync_code_submode=False,
+    )
+
+    adapter._register_code_mode_rails.assert_awaited_once()
+    code_mode_rail.set_requested_mode.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("req_method", "params"),
+    [
+        (ReqMethod.CHAT_RESUME, {"mode": "code.normal", "query": ""}),
+        (
+            ReqMethod.CHAT_SEND,
+            {
+                "mode": "code.normal",
+                "query": "",
+                "answers": [{"selected_options": ["always_allow"]}],
+            },
+        ),
+    ],
+)
+def test_interrupt_resume_does_not_replay_code_entry_mode(
+    req_method: ReqMethod,
+    params: dict,
+) -> None:
+    request = AgentRequest(
+        request_id="resume-1",
+        session_id="session-1",
+        req_method=req_method,
+        params=params,
+    )
+
+    runtime = _RuntimeConfigParams.from_agent_request(request, "code.normal")
+
+    assert runtime.sync_code_submode is False
+
+
+def test_new_chat_request_applies_code_entry_mode() -> None:
+    request = AgentRequest(
+        request_id="send-1",
+        session_id="session-1",
+        req_method=ReqMethod.CHAT_SEND,
+        params={"mode": "code.normal", "query": "hello"},
+    )
+
+    runtime = _RuntimeConfigParams.from_agent_request(request, "code.normal")
+
+    assert runtime.sync_code_submode is True
 
 
 @pytest.mark.asyncio

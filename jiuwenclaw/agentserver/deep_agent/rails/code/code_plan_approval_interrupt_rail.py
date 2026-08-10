@@ -212,7 +212,11 @@ class PlanApprovalInterruptRail(ConfirmInterruptRail):
             user_input: User response from resume (None on first call).
             auto_confirm_config: Current auto-confirm settings.
         """
-        if tool_call is not None and not self._is_plan_mode(ctx):
+        # Validate only when creating the interrupt.  A resume is the response
+        # to an exit request that already passed this guard; checkpoint recovery
+        # may expose a fresh Session whose transient plan state is not hydrated
+        # yet.  Re-validating here deadlocks an otherwise valid approval.
+        if user_input is None and tool_call is not None and not self._is_plan_mode(ctx):
             language = self._detect_language()
             message = (
                 "exit_plan_mode is only available while the agent is in plan mode."
