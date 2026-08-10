@@ -20,7 +20,6 @@ from jiuwenclaw.agentserver.deep_agent.interrupt_resume_helpers import (
 from jiuwenclaw.agentserver.deep_agent.plan_pause_helpers import (
     cancel_pending_todos_on_tool,
     clear_skip_invoke_task_update_sync,
-    is_interrupt_recovery_injected,
     mark_skip_invoke_task_update_sync,
     post_agent_execute_for_session,
 )
@@ -109,9 +108,13 @@ async def prepare_stale_todo_cleanup_for_request(
             await post_agent_execute_for_session(session)
             return False
 
-        if is_interrupt_recovery_injected(session):
-            await post_agent_execute_for_session(session)
-            return False
+        # NOTE: 这里特意不再用 is_interrupt_recovery_injected(session) 一票否决。
+        # 该哨兵会被 "prepare_interrupt_artifacts_for_request" 兜底注入时置位——它只表示
+        # "session 残留了上一次中断的产物摘要"，并不等于"用户本条消息是在续跑旧任务"。
+        # 新任务（非续跑）走到这里时，如果残留了 pending/in_progress 的旧 todo，仍应清理，
+        # 否则 before_invoke 会把旧任务 todo 广播成当前任务的工具步骤（跨请求串台）。
+        # 是否续跑已由 should_cancel_stale_active_todos() 内的 is_resume_user_query() 判定：
+        # 续跑消息会在上面就返回 False，不会走到本轮清理。
 
         todos = await load_session_todo_items(modify_tool, session_id)
         if not has_active_todo_items(todos):
