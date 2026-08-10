@@ -428,6 +428,26 @@ def test_prepare_preserves_emoji_combining_and_cjk_visible_boundaries(tmp_path, 
     assert prepared["units"][0]["slots"][0]["text"] == selected
 
 
+def test_prepare_accepts_cjk_adjacent_temperature_strong_selection(tmp_path):
+    body = "应对超**20℃**昼夜温差。\n"
+    report, _ = _write_document(tmp_path, body)
+
+    prepared = _prepare(
+        tmp_path,
+        report,
+        body.rstrip("\n"),
+        visible="应对超20℃昼夜温差。",
+        action="polish",
+    )
+
+    slots = prepared["units"][0]["slots"]
+    assert "".join(slot["text"] for slot in slots) == "应对超20℃昼夜温差。"
+    assert [
+        slot["text"] for slot in slots if slot["format"] == ["strong"]
+    ] == ["20℃"]
+    assert all("**" not in slot["text"] for slot in slots)
+
+
 @pytest.mark.parametrize("field", ["source_sha256", "selected_text"])
 def test_prepare_rejects_hash_or_visible_text_mismatch(tmp_path, field):
     report, _ = _write_document(tmp_path, "first second\n")
