@@ -3002,6 +3002,7 @@
       "cancelRun": "停止本次运行",
       "pause": "暂停",
       "resume": "恢复",
+      "resumeFromCompletedHint": "任务已完成或到期，点击恢复将按当前调度重新激活（需先编辑为未来时间）",
       "delete": "删除",
       "deleteConfirm": "确定删除心跳任务「{{name}}」吗？",
       "filterLabel": "状态",
@@ -3010,6 +3011,7 @@
       "emptyFiltered": "没有符合筛选条件的心跳任务",
       "nextRunAt": "下次触发：{{time}}",
       "runCount": "已触发 {{count}} 次",
+      "lastError": "上次错误：{{error}}",
       "createMenu": {
         "manual": "手动创建",
         "viaChat": "通过聊天创建",
@@ -3024,12 +3026,13 @@
       "runNowQueued": "已加入待执行队列",
       "runNowRejected": {
         "session_missing": "原会话不存在，未执行",
-        "session_busy": "当前会话忙碌，未执行",
+        "session_busy": "当前会话正在运行，请稍后重试",
         "previous_run_active": "上一轮尚未结束，已跳过",
         "already_queued": "已有一个待执行触发，未重复排队",
         "replacement_pending": "正在替换上一轮运行，请稍候",
         "replacement_cancel_failed": "无法取消上一轮运行，未执行",
         "job_disabled_during_replace": "替换期间任务已被停用，未执行",
+        "job_completed": "任务已完成，请先编辑调度/停止条件并恢复任务",
         "unknown": "未执行，原因未知"
       },
       "cancel": {
@@ -3038,6 +3041,12 @@
         "not_found": "当前执行已结束或不存在",
         "failed": "取消失败，状态待确认"
       }
+    },
+    "runState": {
+      "succeeded": "上次运行成功",
+      "failed": "上次运行失败",
+      "skipped": "上次运行已跳过",
+      "cancelled": "上次运行已取消"
     }
   }
 }

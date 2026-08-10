@@ -3005,6 +3005,7 @@
       "cancelRun": "Cancel this run",
       "pause": "Pause",
       "resume": "Resume",
+      "resumeFromCompletedHint": "Job completed or expired. Click to reactivate with its current schedule (edit to a future time first)",
       "delete": "Delete",
       "deleteConfirm": "Delete heartbeat job \"{{name}}\"?",
       "filterLabel": "Status",
@@ -3013,6 +3014,7 @@
       "emptyFiltered": "No heartbeat jobs match this filter",
       "nextRunAt": "Next run: {{time}}",
       "runCount": "Ran {{count}} times",
+      "lastError": "Last error: {{error}}",
       "createMenu": {
         "manual": "Create manually",
         "viaChat": "Create via chat",
@@ -3027,12 +3029,13 @@
       "runNowQueued": "Queued for execution",
       "runNowRejected": {
         "session_missing": "Original session missing, not executed",
-        "session_busy": "Session busy, not executed",
+        "session_busy": "Session is running, please try again later",
         "previous_run_active": "Previous run still active, skipped",
         "already_queued": "A run is already queued, not duplicated",
         "replacement_pending": "Replacing the previous run, please wait",
         "replacement_cancel_failed": "Could not cancel the previous run, not executed",
         "job_disabled_during_replace": "Job was disabled during replacement, not executed",
+        "job_completed": "Job already completed. Edit the schedule/stop conditions and resume it first",
         "unknown": "Not executed, reason unknown"
       },
       "cancel": {
@@ -3041,6 +3044,12 @@
         "not_found": "Current run already finished or missing",
         "failed": "Cancel failed, status unconfirmed"
       }
+    },
+    "runState": {
+      "succeeded": "Last run succeeded",
+      "failed": "Last run failed",
+      "skipped": "Last run skipped",
+      "cancelled": "Last run cancelled"
     }
   }
 }

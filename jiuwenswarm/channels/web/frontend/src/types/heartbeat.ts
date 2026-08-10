@@ -12,6 +12,23 @@ export type HeartbeatScheduleDTO =
   | { type: 'cron'; cron_expr: string; timezone: string }
   | { type: 'once'; run_at: number };
 
+/**
+ * Heartbeat 自动触发的执行身份标记。后端在自动触发时把它塞进
+ * `payload.metadata.automation`（见 scheduler.py 的 _build_message），
+ * 并随 user/assistant 历史一起落盘，刷新/切会话/后端重启后仍能识别同一条自动轮。
+ * 前端实时事件（chat.delta/final/error、processing_status、execution.error）和
+ * 历史恢复（historyRestore.ts）必须共用同一个提取逻辑读取它，而不是各自重判。
+ * 对齐「心跳任务前端开发与接口规格说明2」§7。
+ */
+export interface HeartbeatAutomationMetadata {
+  kind: 'heartbeat';
+  job_id: string;
+  run_id: string;
+  triggered_at: number; // Unix 秒
+  source: 'agent_tool' | 'web_rpc' | 'tui_rpc' | 'schedule_recovery';
+  trigger: 'scheduler' | 'run_now';
+}
+
 export interface HeartbeatRunState {
   current_run_id: string | null;
   current_run_started_at: number | null;
@@ -104,7 +121,8 @@ export interface HeartbeatRunNowResult {
     | 'already_queued'
     | 'replacement_pending'
     | 'replacement_cancel_failed'
-    | 'job_disabled_during_replace';
+    | 'job_disabled_during_replace'
+    | 'job_completed'; // §6：Once/delete_after_run/max_runs 已满足停止条件，前端需禁用并提示先恢复任务
 }
 
 export type HeartbeatCancelStatus = 'idle' | 'cancelled' | 'not_found' | 'failed';
