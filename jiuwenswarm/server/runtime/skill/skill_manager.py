@@ -1926,7 +1926,11 @@ class SkillManager:
         try:
             top_k = max(1, min(int(top_k_raw), 500))
         except Exception:
-            return {"success": False, "detail": "参数 top_k 必须是整数"}
+            return {
+                "success": False,
+                "detail": "参数 top_k 必须是整数",
+                "detail_key": "skills.swarmskillshub.errors.recommendFailed",
+            }
 
         user_id = str(params.get("user_id") or "").strip()
         request_id = str(params.get("request_id") or "").strip()
