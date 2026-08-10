@@ -213,6 +213,14 @@ class EventType(Enum):
     SKILLDEV_TOOL_RESULT = "skilldev.tool_result"
 
 
+# Recorded to history.json but not emitted on the E2A WebSocket wire.
+# 单一事实源：interface.py（E2A 转发层抑制）与 team_helpers.py（stall 看门狗补发判定）共用，
+# 防止两处名单漂移。
+E2A_SUPPRESSED_EVENT_TYPES: frozenset[str] = frozenset({
+    EventType.CHAT_TOOL_CALLS_DELTA.value,
+})
+
+
 class Mode(Enum):
     AGENT_PLAN = "agent.plan"
     AGENT_FAST = "agent.fast"
