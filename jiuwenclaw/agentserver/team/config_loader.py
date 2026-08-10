@@ -557,7 +557,7 @@ def _build_transport_spec(team_raw: dict[str, Any]) -> dict[str, Any]:
     return transport_spec
 
 
-def _build_leader_spec(team_raw: dict[str, Any]) -> dict[str, Any]:
+def _build_leader_spec(team_raw: dict[str, Any], *, language: str | None = None) -> dict[str, Any]:
     leader_raw = team_raw.get("leader", {})
     leader_name = (
         str(leader_raw.get("name", "")).strip()
@@ -569,14 +569,66 @@ def _build_leader_spec(team_raw: dict[str, Any]) -> dict[str, Any]:
         "display_name": leader_raw.get("display_name", "Team Leader"),
         "name": leader_name,
     }
-    leader_spec.update(_map_member_public_private_fields(leader_raw, default_desc="天才项目管理专家"))
+    leader_spec.update(
+        _map_member_public_private_fields(
+            leader_raw,
+            default_desc="天才项目管理专家",
+            language=language,
+        )
+    )
     return leader_spec
+
+
+# Appended to every team member private prompt (including leader).
+# Roster sections key on member_name; models may leak IDs into user-facing prose.
+# Require display_name in prose; member_name only in tool arguments.
+# Selected by preferred_language (same pattern as team resume protocol).
+_TEAM_MEMBER_DISPLAY_NAME_RULE_CN = (
+    "## 成员称呼规范\n"
+    "面向用户可见的内容（@提及、点名、广播、进展汇报、总结等正文）中提及团队成员时，"
+    "一律使用其显示名（display_name，如「用户研究员」）。member_name（如 user-researcher）"
+    "是系统内部标识，仅允许用于工具参数（如 send_message 的 to、create_task 的 assignee），"
+    "不得出现在正文里。"
+)
+_TEAM_MEMBER_DISPLAY_NAME_RULE_EN = (
+    "## Member naming convention\n"
+    "When mentioning team members in user-visible text (@-mentions, call-outs, "
+    "broadcasts, progress reports, summaries, etc.), always use their display name "
+    "(display_name, e.g. \"User Researcher\"). member_name (e.g. user-researcher) "
+    "is an internal identifier and may only appear in tool arguments "
+    "(e.g. send_message `to`, create_task `assignee`); it must not appear in prose."
+)
+# Default / backward-compatible alias (Chinese is primary when language is unset).
+_TEAM_MEMBER_DISPLAY_NAME_RULE = _TEAM_MEMBER_DISPLAY_NAME_RULE_CN
+
+
+def _normalize_prompt_language(language: str | None) -> str:
+    """Map config preferred_language to prompt locale ``cn`` or ``en``.
+
+    Aligns with ``swarm.config_specs._subagent_language`` and agent-core
+    ``resolve_language`` supported set (``cn`` / ``en``). Raw values like
+    ``zh`` must not be written onto ``TeamSpec.language``.
+    """
+    lang = str(language or "zh").strip().lower()
+    if lang in {"en", "english"}:
+        return "en"
+    if lang in {"zh", "cn", "zh-cn", "zh_cn", "chinese"}:
+        return "cn"
+    return "cn"
+
+
+def _team_member_display_name_rule(language: str | None = None) -> str:
+    """Return the display-name prompt rule for the configured language."""
+    if _normalize_prompt_language(language) == "en":
+        return _TEAM_MEMBER_DISPLAY_NAME_RULE_EN
+    return _TEAM_MEMBER_DISPLAY_NAME_RULE_CN
 
 
 def _map_member_public_private_fields(
     raw: dict[str, Any],
     *,
     default_desc: str = "",
+    language: str | None = None,
 ) -> dict[str, str]:
     """Map relay/legacy identity fields onto TeamMemberSpec ``desc`` / ``prompt``.
 
@@ -586,7 +638,10 @@ def _map_member_public_private_fields(
     ``desc``, so ``create_task`` omits ``assignee`` and members race one claim
     pool (assistant often wins). Swarm Leaders set assignees because their
     roster carries real capability text.
+
+    Append the language-selected display-name rule to the private prompt.
     """
+    rule = _team_member_display_name_rule(language)
     desc = str(raw.get("desc") or raw.get("persona") or default_desc or "").strip()
     prompt = str(raw.get("prompt") or "").strip()
     if not prompt:
@@ -595,10 +650,15 @@ def _map_member_public_private_fields(
             str(raw.get("prompt_hint") or "").strip(),
         ]
         prompt = "\n\n".join(part for part in prompt_parts if part)
+    prompt = f"{prompt}\n\n{rule}" if prompt else rule
     return {"desc": desc, "prompt": prompt}
 
 
-def _build_predefined_members(team_raw: dict[str, Any]) -> list[dict[str, Any]]:
+def _build_predefined_members(
+    team_raw: dict[str, Any],
+    *,
+    language: str | None = None,
+) -> list[dict[str, Any]]:
     predefined_members_raw = team_raw.get("predefined_members", [])
     if not isinstance(predefined_members_raw, list):
         logger.warning("[TeamConfigLoader] predefined_members must be a list, ignored")
@@ -625,7 +685,9 @@ def _build_predefined_members(team_raw: dict[str, Any]) -> list[dict[str, Any]]:
         member_spec = deepcopy(item)
         member_spec["member_name"] = member_name
         member_spec["display_name"] = str(identity_name).strip()
-        member_spec.update(_map_member_public_private_fields(member_spec))
+        member_spec.update(
+            _map_member_public_private_fields(member_spec, language=language)
+        )
         # Drop legacy keys so TeamMemberSpec does not silently ignore them.
         member_spec.pop("persona", None)
         member_spec.pop("prompt_hint", None)
@@ -712,9 +774,13 @@ def load_team_spec_dict(
     # modes.team.enable_hitt is explicitly set true in config.
     spec_dict["enable_hitt"] = team_raw.get("enable_hitt", False)
     spec_dict["enable_permissions"] = _resolve_enable_permissions(config_base, team_raw)
-    spec_dict["leader"] = _build_leader_spec(team_raw)
+    # Normalize before any consumer (prompt injection, TeamAgentSpec.build,
+    # rails). preferred_language is often ``zh``; agent-core / rails expect
+    # ``cn`` | ``en`` only.
+    language = _normalize_prompt_language(config_base.get("preferred_language"))
+    spec_dict["leader"] = _build_leader_spec(team_raw, language=language)
     spec_dict["agents"] = agents
-    spec_dict["language"] = str(config_base.get("preferred_language", "zh")).strip().lower()
+    spec_dict["language"] = language
 
     workspace_spec = _build_workspace_spec(team_raw)
     if workspace_spec is not None:
@@ -722,7 +788,7 @@ def load_team_spec_dict(
 
     spec_dict["transport"] = _build_transport_spec(team_raw)
 
-    predefined_members = _build_predefined_members(team_raw)
+    predefined_members = _build_predefined_members(team_raw, language=language)
     if predefined_members:
         spec_dict["predefined_members"] = predefined_members
     elif "predefined_members" in spec_dict:
