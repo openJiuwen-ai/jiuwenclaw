@@ -1912,14 +1912,14 @@ class SkillManager:
                 "detail_key": "skills.teamskillshub.errors.searchFailed",
             }
 
-    async def handle_skills_team_skills_hub_recommend(self, params: dict) -> dict:
-        """转发 Team Skills Hub 个性化推荐（POST /api/v1/recommend）。"""
+    async def handle_skills_swarm_skills_hub_recommend(self, params: dict) -> dict:
+        """转发 Swarm Skills Hub 个性化推荐（POST /api/v1/recommend）。"""
         auth = self._resolve_teamskills_hub_auth_with_env(params)
         if auth.get("error"):
             return {
                 "success": False,
                 "detail": str(auth["error"]),
-                "detail_key": "skills.teamskillshub.errors.recommendFailed",
+                "detail_key": "skills.swarmskillshub.errors.recommendFailed",
             }
 
         top_k_raw = params.get("top_k", params.get("limit", 10))
@@ -1987,7 +1987,7 @@ class SkillManager:
                 )
 
             if enrich and skills:
-                skills = await self._enrich_teamskills_recommend_skills(skills, base_url=base_url)
+                skills = await self._enrich_swarmskills_recommend_skills(skills, base_url=base_url)
 
             return {
                 "success": True,
@@ -2000,11 +2000,11 @@ class SkillManager:
                 "items": skills,
             }
         except Exception as exc:
-            logger.error("Team Skills Hub 推荐失败: %s", exc)
+            logger.error("Swarm Skills Hub 推荐失败: %s", exc)
             return {
                 "success": False,
                 "detail": str(exc)[:500],
-                "detail_key": "skills.teamskillshub.errors.recommendFailed",
+                "detail_key": "skills.swarmskillshub.errors.recommendFailed",
             }
 
     async def handle_skills_team_skills_hub_install(self, params: dict) -> dict:
@@ -3618,7 +3618,7 @@ class SkillManager:
             raise RuntimeError("Team Skills Hub API 响应 data 格式错误")
         return data
 
-    async def _enrich_teamskills_recommend_skills(
+    async def _enrich_swarmskills_recommend_skills(
         self,
         skills: list[dict[str, Any]],
         *,

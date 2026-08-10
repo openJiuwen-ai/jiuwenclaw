@@ -124,7 +124,7 @@ async def test_handle_skills_team_skills_hub_search_maps_response(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_handle_skills_team_skills_hub_recommend_maps_response(tmp_path, monkeypatch):
+async def test_handle_skills_swarm_skills_hub_recommend_maps_response(tmp_path, monkeypatch):
     monkeypatch.setenv("TEAM_SKILLS_HUB_SYSTEM_TOKEN", "sys-token-demo")
     manager = TeamSkillsHubHarnessSkillManager(workspace_dir=str(tmp_path))
 
@@ -159,7 +159,7 @@ async def test_handle_skills_team_skills_hub_recommend_maps_response(tmp_path, m
 
     manager.set_mock_post_data(_fake_post_data)
     manager.set_mock_get_data(_fake_get_data)
-    payload = await manager.handle_skills_team_skills_hub_recommend(
+    payload = await manager.handle_skills_swarm_skills_hub_recommend(
         {"user_id": "u-1", "top_k": 5, "enrich": True}
     )
     assert payload["success"] is True
@@ -171,17 +171,17 @@ async def test_handle_skills_team_skills_hub_recommend_maps_response(tmp_path, m
 
 
 @pytest.mark.asyncio
-async def test_handle_skills_team_skills_hub_recommend_requires_auth(tmp_path, monkeypatch):
+async def test_handle_skills_swarm_skills_hub_recommend_requires_auth(tmp_path, monkeypatch):
     monkeypatch.delenv("TEAM_SKILLS_HUB_SYSTEM_TOKEN", raising=False)
     monkeypatch.delenv("TEAM_SKILLS_HUB_USER_TOKEN", raising=False)
     manager = TeamSkillsHubHarnessSkillManager(workspace_dir=str(tmp_path))
-    payload = await manager.handle_skills_team_skills_hub_recommend({"top_k": 3})
+    payload = await manager.handle_skills_swarm_skills_hub_recommend({"top_k": 3})
     assert payload["success"] is False
-    assert payload["detail_key"] == "skills.teamskillshub.errors.recommendFailed"
+    assert payload["detail_key"] == "skills.swarmskillshub.errors.recommendFailed"
 
 
 @pytest.mark.asyncio
-async def test_handle_skills_team_skills_hub_recommend_hide_internal_error(tmp_path, monkeypatch):
+async def test_handle_skills_swarm_skills_hub_recommend_hide_internal_error(tmp_path, monkeypatch):
     monkeypatch.setenv("TEAM_SKILLS_HUB_SYSTEM_TOKEN", "sys-token-demo")
     manager = TeamSkillsHubHarnessSkillManager(workspace_dir=str(tmp_path))
 
@@ -189,9 +189,9 @@ async def test_handle_skills_team_skills_hub_recommend_hide_internal_error(tmp_p
         raise RuntimeError("secret-internal")
 
     manager.set_mock_post_data(_boom)
-    payload = await manager.handle_skills_team_skills_hub_recommend({"top_k": 3, "enrich": False})
+    payload = await manager.handle_skills_swarm_skills_hub_recommend({"top_k": 3, "enrich": False})
     assert payload["success"] is False
-    assert payload["detail_key"] == "skills.teamskillshub.errors.recommendFailed"
+    assert payload["detail_key"] == "skills.swarmskillshub.errors.recommendFailed"
 
 
 @pytest.mark.asyncio
