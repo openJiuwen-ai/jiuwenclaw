@@ -42,7 +42,6 @@ INSTALLED_SKILL_TABLE_DEF = TableDefinition(
             unique=True,
         ),
         IndexDefinition(["jiuwenclaw_id", "service_id", "agent_id"]),
-        IndexDefinition(["jiuwenclaw_id", "service_id", "agent_id", "source_type"]),
     ],
 )
 
