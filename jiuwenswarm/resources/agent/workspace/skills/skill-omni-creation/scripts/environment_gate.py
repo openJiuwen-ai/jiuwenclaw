@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Cross-platform runtime gate for the web/image pipeline.
+"""Cross-platform runtime gate for the web/image/video pipeline.
 
 This module uses only the Python standard library.  It can therefore run before
-requests, Pillow, BeautifulSoup, or Playwright are importable.  It selects a
+requests, Pillow, yt-dlp, BeautifulSoup, or Playwright are importable.  It selects a
 stable interpreter, re-executes the caller when necessary, repairs missing
-Python packages and the Playwright Chromium binary, and aborts before any stage
-files are touched when the environment cannot be repaired safely.
+Python packages and the Playwright Chromium binary, and aborts before the gated operation proceeds when the environment cannot be repaired safely.
 """
 from __future__ import annotations
 
@@ -13,20 +12,17 @@ import argparse
 import importlib
 import importlib.util
 import json
-import logging
 import os
 import platform
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Iterable
 
-logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
-logger = logging.getLogger(__name__)
-
 _REEXEC_FLAG = "SKILL_OMNI_ENV_REEXEC"
-_STATUS_DIR = Path(__file__).resolve().parent / "work"
+_STATUS_DIR = Path(tempfile.gettempdir()) / "skill-omni-creation"
 _STATUS_FILE = _STATUS_DIR / "environment_status.json"
 _OPERATION_TIMEOUT_SECONDS = 600
 
@@ -40,6 +36,13 @@ _PROFILE_MODULES: dict[str, dict[str, str]] = {
         "bs4": "beautifulsoup4",
         "playwright": "playwright",
     },
+    "video-probe": {"requests": "requests", "yt_dlp": "yt-dlp"},
+    "video": {"requests": "requests", "PIL": "Pillow", "yt_dlp": "yt-dlp"},
+}
+
+_PROFILE_EXECUTABLES: dict[str, tuple[str, ...]] = {
+    "video-probe": ("node",),
+    "video": ("node", "ffmpeg", "ffprobe"),
 }
 
 
@@ -48,7 +51,7 @@ class EnvironmentGateError(RuntimeError):
 
 
 def _log(message: str) -> None:
-    logger.info("[environment_gate] %s", message)
+    print(f"[environment_gate] {message}", flush=True)
 
 
 def _resolved(path: Path | str) -> Path:
@@ -182,15 +185,18 @@ def _reexec_with_selected(selected: Path) -> None:
         )
 
     caller = Path(sys.argv[0]).resolve()
-    os.environ[_REEXEC_FLAG] = "1"
+    env = os.environ.copy()
+    env[_REEXEC_FLAG] = "1"
     _log(f"Re-executing with selected interpreter: {selected}")
     try:
-        # Replace this process outright rather than spawning a child and
-        # exiting with its return code — avoids a lingering wrapper process
-        # and keeps termination out of this non-entry-point function.
-        os.execv(str(selected), [str(selected), str(caller), *sys.argv[1:]])
+        result = subprocess.run(
+            [str(selected), str(caller), *sys.argv[1:]],
+            env=env,
+            check=False,
+        )
     except OSError as exc:
         raise EnvironmentGateError(f"Could not start selected interpreter {selected}: {exc}") from exc
+    raise SystemExit(result.returncode)
 
 
 def _run(command: list[str], *, timeout: int, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -357,6 +363,65 @@ def _ensure_chromium() -> None:
     raise EnvironmentGateError(f"Chromium remains unable to start after installation: {error}")
 
 
+def _external_tool_hint(tools: Iterable[str]) -> str:
+    tools = set(tools)
+    hints: list[str] = []
+    if "node" in tools:
+        if os.name == "nt":
+            hints.append("Install Node.js with winget/chocolatey or nodejs.org, then ensure node.exe is in PATH.")
+        elif sys.platform == "darwin":
+            hints.append("Install Node.js, for example: brew install node.")
+        else:
+            hints.append("Install Node.js with the system package manager, for example on Debian/Ubuntu: sudo apt-get install -y nodejs.")
+    if {"ffmpeg", "ffprobe"} & tools:
+        if os.name == "nt":
+            hints.append(
+                "Install FFmpeg (which also provides ffprobe) with winget/chocolatey/scoop "
+                "or an official Windows build, then ensure ffmpeg.exe and ffprobe.exe are in PATH."
+            )
+        elif sys.platform == "darwin":
+            hints.append("Install FFmpeg (which also provides ffprobe), for example: brew install ffmpeg.")
+        else:
+            hints.append(
+                "Install FFmpeg (which also provides ffprobe) with the system package manager, "
+                "for example on Debian/Ubuntu: sudo apt-get update && sudo apt-get install -y ffmpeg."
+            )
+    return " ".join(hints)
+
+
+def _tool_version_command(tool: str) -> list[str]:
+    return [tool, "--version"] if tool == "node" else [tool, "-version"]
+
+
+def _ensure_external_tools(profile: str) -> None:
+    required = _PROFILE_EXECUTABLES.get(profile, ())
+    if not required:
+        return
+
+    missing = [tool for tool in required if shutil.which(tool) is None]
+    if missing:
+        raise EnvironmentGateError(
+            "Missing external tools: " + ", ".join(missing) + ". " + _external_tool_hint(missing)
+        )
+
+    for tool in required:
+        try:
+            result = subprocess.run(
+                _tool_version_command(tool),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=_OPERATION_TIMEOUT_SECONDS,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise EnvironmentGateError(f"External tool {tool!r} could not be executed: {exc}") from exc
+        if result.returncode != 0:
+            raise EnvironmentGateError(
+                f"External tool {tool!r} is on PATH but failed its version check. "
+                + _external_tool_hint([tool])
+            )
+
+
 def _write_status(*, profile: str, ready: bool, error: str | None = None) -> None:
     try:
         _STATUS_DIR.mkdir(parents=True, exist_ok=True)
@@ -411,6 +476,8 @@ def ensure_environment(
                 if error is not None:
                     raise EnvironmentGateError(error)
 
+        _ensure_external_tools(profile)
+
         selected = _absolute_executable(sys.executable)
         _write_status(profile=profile, ready=True)
         _log(f"ENVIRONMENT_READY profile={profile} python={selected}")
@@ -418,16 +485,16 @@ def ensure_environment(
     except EnvironmentGateError as exc:
         _write_status(profile=profile, ready=False, error=str(exc))
         _log(f"ENVIRONMENT_BLOCKED profile={profile}: {exc}")
-        raise
+        raise SystemExit(2) from exc
     except subprocess.TimeoutExpired as exc:
         message = f"Environment repair command timed out: {exc}"
         _write_status(profile=profile, ready=False, error=message)
         _log(f"ENVIRONMENT_BLOCKED profile={profile}: {message}")
-        raise EnvironmentGateError(message) from exc
+        raise SystemExit(2) from exc
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Select, repair, and validate the Skill web/image runtime.")
+    parser = argparse.ArgumentParser(description="Select, repair, and validate the Skill web/image/video runtime.")
     parser.add_argument(
         "--profile",
         choices=sorted(_PROFILE_MODULES),
@@ -439,15 +506,12 @@ def main() -> None:
     parser.add_argument("--no-create-venv", action="store_true", help="Do not create a project .venv when none exists.")
     args = parser.parse_args()
 
-    try:
-        ensure_environment(
-            args.profile,
-            project_dir=args.project_dir,
-            auto_install=not args.check,
-            create_venv=not args.no_create_venv,
-        )
-    except EnvironmentGateError:
-        sys.exit(2)
+    ensure_environment(
+        args.profile,
+        project_dir=args.project_dir,
+        auto_install=not args.check,
+        create_venv=not args.no_create_venv,
+    )
 
 
 if __name__ == "__main__":
