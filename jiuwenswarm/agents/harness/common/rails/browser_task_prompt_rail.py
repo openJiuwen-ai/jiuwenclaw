@@ -15,9 +15,19 @@ from jiuwenswarm.agents.harness.common.prompt.browser_task_prompt import (
 class BrowserTaskPromptRail(SubagentRail):
     """Append browser policy to ``task_tool`` only for the Web channel."""
 
-    def __init__(self, channel: str = "web") -> None:
+    def __init__(
+        self,
+        channel: str = "web",
+        *,
+        enable_async_subagent: bool = False,
+        enable_subagent_runtime: bool = False,
+    ) -> None:
         self._channel = self._normalize_channel(channel)
-        super().__init__(task_prompt_extension=self._task_prompt_extension)
+        super().__init__(
+            enable_async_subagent=enable_async_subagent,
+            enable_subagent_runtime=enable_subagent_runtime,
+            task_prompt_extension=self._task_prompt_extension,
+        )
 
     def set_channel(self, channel: str) -> None:
         """Update the channel for the current request."""

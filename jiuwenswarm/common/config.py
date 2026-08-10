@@ -257,6 +257,14 @@ def get_skill_evolution_enabled(config: dict[str, Any] | None) -> bool:
     return _get_evolution_config(config).get("skill_evolution") is True
 
 
+def is_subagent_runtime_enabled(config: dict[str, Any] | None = None) -> bool:
+    """Return ``react.subagent_runtime.enabled`` for persistent subagent tools."""
+    cfg = config or get_config()
+    react = cfg.get("react") if isinstance(cfg, dict) else None
+    runtime_cfg = react.get("subagent_runtime") if isinstance(react, dict) else None
+    return bool(runtime_cfg.get("enabled")) if isinstance(runtime_cfg, dict) else False
+
+
 def get_evolution_auto_save_enabled(config: dict[str, Any] | None = None) -> bool:
     """Return canonical ``react.evolution.auto_save`` without disk/env reads."""
     return _get_evolution_config(config).get("auto_save") is True

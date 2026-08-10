@@ -3807,6 +3807,19 @@ class AgentWebSocketServer:
                                 reason="session.delete: ",
                             )
                         else:
+                            agent = self._agent_manager.get_agent_nowait(channel_id=channel_id)
+                            if agent is not None:
+                                adapter = self._resolve_adapter(agent)
+                                release_runtime = getattr(
+                                    adapter,
+                                    "release_subagent_runtime_for_session",
+                                    None,
+                                )
+                                if callable(release_runtime):
+                                    await release_runtime(
+                                        target,
+                                        reason="session_deleted",
+                                    )
                             await Runner.release(target)
                             deleted = True
                     except Exception as exc:

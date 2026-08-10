@@ -84,6 +84,7 @@ from openjiuwen.harness.rails.context_engineer.context_assemble_rail import Cont
 from openjiuwen.harness.rails.context_engineer.context_processor_rail import ContextProcessorRail
 from openjiuwen.harness.subagents.browser_agent import build_browser_agent_config
 from openjiuwen.harness.subagents.research_agent import build_research_agent_config
+from openjiuwen.harness.subagent_runtime import SUBAGENT_UPDATED_EVENT_TYPE
 from openjiuwen.harness.tools import (
     WebFetchWebpageTool,
     WebFreeSearchTool,
@@ -310,6 +311,7 @@ from jiuwenswarm.common.config import (
     get_sandbox_endpoint,
     get_sandbox_runtime,
     get_sandbox_startup_mode,
+    is_subagent_runtime_enabled,
     resolve_env_vars,
 )
 from jiuwenswarm.common.mcp_config import (
@@ -1075,6 +1077,7 @@ class JiuWenSwarmDeepAdapter:
     SESSION_ADAPTER_IDLE_TTL_SEC = 2 * 60 * 60
     SESSION_ADAPTER_EVICT_BATCH_SIZE = 3
     SESSION_ADAPTER_RELOAD_RETRY_INTERVAL_SEC = 30.0
+    _subagent_runtime_supported: bool = True
     _RUNTIME_STATE_WRITE_LIMIT = threading.BoundedSemaphore(2)
     # Goal stream bookkeeping (see __init__ for what each one tracks). Declared
     # on the class as well so the goal helpers stay safe to call on an instance
@@ -4349,12 +4352,20 @@ class JiuWenSwarmDeepAdapter:
             task_planning_rail = None
         return task_planning_rail
 
-    @staticmethod
-    def _build_subagent_rail() -> SubagentRail | None:
+    def _build_subagent_rail(
+        self,
+        config_base: dict[str, Any] | None = None,
+    ) -> SubagentRail | None:
         """Build SubagentRail for subagent delegation."""
         try:
-            subagent_rail = BrowserTaskPromptRail()
-            logger.info("[JiuWenSwarmDeepAdapter] SubagentRail create success")
+            subagent_rail = BrowserTaskPromptRail(
+                enable_subagent_runtime=self._resolve_enable_subagent_runtime(config_base),
+            )
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] SubagentRail create success "
+                "(subagent_runtime=%s)",
+                self._resolve_enable_subagent_runtime(config_base),
+            )
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] SubagentRail create failed: %s", exc)
             subagent_rail = None
@@ -4804,7 +4815,11 @@ class JiuWenSwarmDeepAdapter:
             _RailBuildInfo("_circuit_breaker_rail", self._build_circuit_breaker_rail),
             _RailBuildInfo("_avatar_rail", self._build_avatar_rail),
             _RailBuildInfo("_memory_forbidden_rail", self._build_memory_forbidden_rail),
-            _RailBuildInfo("_subagent_rail", self._build_subagent_rail),
+            _RailBuildInfo(
+                "_subagent_rail",
+                self._build_subagent_rail,
+                {"config_base": config_base},
+            ),
             _RailBuildInfo(
                 "_permission_rail",
                 build_permission_rail,
@@ -4902,6 +4917,15 @@ class JiuWenSwarmDeepAdapter:
             return True
         return configured_value
 
+    def _resolve_enable_subagent_runtime(
+        self,
+        config_base: dict[str, Any] | None = None,
+    ) -> bool:
+        """Return whether persistent subagent runtime tools should be enabled."""
+        if not getattr(self, "_subagent_runtime_supported", True):
+            return False
+        return is_subagent_runtime_enabled(config_base or get_config())
+
     def _make_deep_agent_config(
         self,
         *,
@@ -4930,6 +4954,7 @@ class JiuWenSwarmDeepAdapter:
             context_engine_config=_deep_agent_context_engine_config(config),
             kv_cache_affinity_config=_deep_agent_kv_cache_affinity_config(config, model),
             enable_task_loop=self._resolve_enable_task_loop(config, config_base),
+            enable_subagent_runtime=self._resolve_enable_subagent_runtime(config_base),
             max_iterations=config.get("max_iterations", 15),
             subagents=configured_subagents,
             add_general_purpose_agent=should_add_general_agent,
@@ -5346,6 +5371,32 @@ class JiuWenSwarmDeepAdapter:
         # 实例，不会再往下递归。
         return adapter.get_live_session_instance(session_id)
 
+    async def release_subagent_runtime_for_session(
+        self,
+        session_id: str | None,
+        *,
+        reason: str = "session_deleted",
+    ) -> None:
+        """Cancel cached subagents and flush persistence for one parent session."""
+        sid = self._session_adapter_key(session_id)
+        if not sid:
+            return
+        from openjiuwen.harness.tools.subagent import release_subagent_control
+
+        deep_agent = self.get_live_session_instance(sid)
+        if deep_agent is None:
+            deep_agent = self._instance
+        if deep_agent is None:
+            return
+        try:
+            await release_subagent_control(deep_agent, sid, reason=reason)
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] release_subagent_runtime failed: session_id=%s error=%s",
+                sid,
+                exc,
+            )
+
     async def ensure_instance(self) -> Any:
         """Return this adapter's own DeepAgent, building it on first use.
 
@@ -5449,6 +5500,7 @@ class JiuWenSwarmDeepAdapter:
             subagents=configured_subagents,
             rails=rails_list if rails_list else [],
             enable_task_loop=self._resolve_enable_task_loop(config, config_base),
+            enable_subagent_runtime=self._resolve_enable_subagent_runtime(config_base),
             add_general_purpose_agent=should_enable_general_agent,
             max_iterations=config.get("max_iterations", 15),
             workspace=Workspace(
@@ -6506,6 +6558,11 @@ class JiuWenSwarmDeepAdapter:
             self._session_adapter_reload_failures.clear()
         else:
             try:
+                if self._parent_session_id:
+                    await self.release_subagent_runtime_for_session(
+                        self._parent_session_id,
+                        reason="adapter_cleanup",
+                    )
                 await self.stop_interaction()
             except Exception as exc:
                 logger.warning(
@@ -10364,6 +10421,14 @@ class JiuWenSwarmDeepAdapter:
                 if chunk_type == "todo.updated":
                     todos = payload.get("todos", []) if isinstance(payload, dict) else []
                     return {"event_type": "todo.updated", "todos": todos}
+
+                if chunk_type == SUBAGENT_UPDATED_EVENT_TYPE:
+                    projection = (
+                        payload.get("subagent_updated") if isinstance(payload, dict) else None
+                    )
+                    if not isinstance(projection, dict):
+                        return None
+                    return {"event_type": "chat.subtask_update", **projection}
 
                 if chunk_type == "context.usage":
                     if isinstance(payload, dict):

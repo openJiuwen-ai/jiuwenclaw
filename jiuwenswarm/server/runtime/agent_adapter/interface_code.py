@@ -418,7 +418,7 @@ _CODE_PLAN_ALLOWED_TOOLS: list[str] = [
 class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
     """Code 模式适配器 — 配置驱动注册 rails/tools.
 
-    继承 JiuWenSwarmDeepAdapter，只重写：
+    继承 JiuWenSwarmDeepAdapter，只重写:
     - create_instance(): 统一使用 create_deep_agent()（completion_timeout 从配置读取）
     - _build_agent_rails(): 固定 Rails (含 LspRail/ProjectMemoryRail/CodingMemoryRail) + 从 config.yaml 读取动态 Rails
     - _get_tool_cards(): 从 config.yaml 读取动态 Tools
@@ -426,6 +426,8 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
     - _update_rails_for_mode(): code 模式 rail 生命周期
     - _update_runtime_config(): 保留 ProjectMemoryRail 语言同步
     """
+
+    _subagent_runtime_supported = False
 
     # 固定 Rails 名字集合 — 用于动态 Rails 去重
     _FIXED_RAIL_NAMES = frozenset({
