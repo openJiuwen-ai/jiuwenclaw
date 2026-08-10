@@ -20,18 +20,24 @@ import inspect
 import json
 import logging
 import os
+import re
 import sys
 import time
 import uuid as uuid_module
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from openjiuwen.core.common.logging import LogManager
 from websockets.exceptions import ConnectionClosed, ConnectionClosedError
 
+from jiuwenswarm.common.ws_diagnostics import format_ws_diagnostics, describe_ws_peer, describe_ws_exception
+
+# user_id 白名单: 仅允许字母数字及 _-, 拒绝路径遍历字符
+_SAFE_USER_ID_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 # --- Early --dotenv parsing (before jiuwenswarm imports) ---
 from jiuwenswarm.dotenv_early import parse_dotenv_early, load_dotenv_runtime
+from jiuwenswarm.gateway.channel_manager.base import BaseWebChannel
 
 parse_dotenv_early("jiuwenswarm-gateway")
 
@@ -432,7 +438,7 @@ class _LocalHandlerContext:
     user_id: str | None
 
 
-class GatewayServer:
+class GatewayServer(BaseWebChannel):
     """通用多路路由 WebSocket Gateway Server。
 
     支持多个路径（如 /acp、/cli），每条路径可以有独立的 channel_id 和本地 handler。
@@ -440,6 +446,7 @@ class GatewayServer:
     """
 
     def __init__(self, config: GatewayServerConfig, router) -> None:
+        super().__init__(config, router)
         self.config = config
         self.bus = router
         self._server = None
@@ -463,16 +470,34 @@ class GatewayServer:
 
     @staticmethod
     def _extract_ws_user_id(ws: Any) -> str | None:
-        """从 WebSocket 握手 HTTP Header 读取 X-User-Id（大小写不敏感）。"""
+        """从 WebSocket 握手 Header 或 URL 查询参数读取 user_id。
+
+        优先从 X-User-Id Header 读取（TUI / 代理注入场景）；
+        浏览器 ``new WebSocket()`` 无法设置自定义 Header，回退到 URL query string。
+        """
         headers = (
             getattr(getattr(ws, "request", None), "headers", None)
             or getattr(ws, "request_headers", None)
         )
         raw = get_header_value(headers, "X-User-Id")
-        if raw is None:
-            return None
-        text = str(raw).strip()
-        return text or None
+        if raw is not None:
+            text = str(raw).strip()
+            if text and _SAFE_USER_ID_RE.match(text):
+                return text
+
+        raw_path = (
+            getattr(ws, "path", "")
+            or getattr(getattr(ws, "request", None), "path", "")
+        )
+        if raw_path:
+            parsed = urlparse(raw_path)
+            qs = parse_qs(parsed.query)
+            user_ids = qs.get("user_id", [])
+            if user_ids:
+                candidate = str(user_ids[0]).strip()
+                if candidate and _SAFE_USER_ID_RE.match(candidate):
+                    return candidate
+        return None
 
     @staticmethod
     def _connection_user_id(ws: Any) -> str | None:
@@ -1016,6 +1041,7 @@ class GatewayServer:
         raw_path = path if path is not None else getattr(ws, "path", "")
         parsed = urlparse(raw_path)
         request_path = parsed.path or raw_path
+        remote = getattr(ws, "remote_address", None)
 
         route, matched_path = self._resolve_route(request_path)
         if route is None:
@@ -1035,6 +1061,28 @@ class GatewayServer:
             route.channel_id,
             matched_path,
         )
+
+        # 触发连接钩子（如发送 connection.ack）
+        for hook in self._connect_hooks:
+            try:
+                result = hook(ws)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as e:  # pragma: no cover
+                logger.warning(
+                    "WebChannel on_connect hook error: %s",
+                    format_ws_diagnostics(
+                        {"remote": remote, "path": request_path},
+                        describe_ws_peer(ws),
+                        describe_ws_exception(e),
+                    ),
+                )
+
+        # 上报连接事件
+        if route.ws_channel is not None:
+            reporter = getattr(route.ws_channel, "report_connect", None)
+            if callable(reporter):
+                reporter(ws)
 
         # connection.ack
         try:
@@ -1090,6 +1138,10 @@ class GatewayServer:
                         "GatewayServer delegate unregister_ws to ws_channel failed: path=%s",
                         request_path, exc_info=True,
                     )
+                # 上报断连事件
+                reporter = getattr(route.ws_channel, "report_disconnect", None)
+                if callable(reporter):
+                    reporter(ws)
             if route.disconnect_handler is not None:
                 try:
                     # Pass stale_request_keys so the handler can recover session_ids
@@ -1117,6 +1169,16 @@ class GatewayServer:
                     )
             for session_key in stale_session_keys:
                 await self._promote_pending_session_client(route, session_key)
+
+            for hook in self._disconnect_hooks:
+                try:
+                    result = hook(ws, None)
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception as e:  # pragma: no cover
+                    logger.warning(
+                        "%s on_disconnect hook error: %s",
+                    )
 
     async def _handle_raw_message(self, ws: Any, raw: str, request_path: str, route: RouteConfig) -> None:
 
@@ -1547,6 +1609,7 @@ async def _run(
     channels_cfg: dict | None = None
     try:
         full_cfg = get_config()
+        message_handler.update_evolution_auto_save(full_cfg)
         heartbeat_cfg = full_cfg.get("heartbeat") if isinstance(full_cfg, dict) else None
         channels_cfg = full_cfg.get("channels") if isinstance(full_cfg, dict) else None
     except Exception as e:  # noqa: BLE001
@@ -1596,6 +1659,7 @@ async def _run(
     channel_manager = ChannelManager(message_handler, config=initial_channels_conf)
     # 回填引用：MessageHandler 实例化早于 ChannelManager，广播全局事件时需经它取 web channel。
     message_handler.set_channel_manager(channel_manager)
+
     updater_service = UpdaterService()
     prewarm_sync_debounce_task: asyncio.Task[None] | None = None
 
@@ -1672,26 +1736,45 @@ async def _run(
             "VISION_API_BASE",
             "VISION_API_KEY",
         }
-        try:
-            client.set_or_update_server_config(
-                config=dict(config_payload or {}),
-                env=dict(env_updates or {}),
-            )
+        _reload_max_retries = 3
+        _reload_retry_backoff_base = 2.0  # seconds: 2, 4, 8
 
-            reload_env = e2a_from_agent_fields(
-                request_id=f"agent-reload-{uuid_module.uuid4().hex[:8]}",
-                channel_id="",
-                req_method=ReqMethod.AGENT_RELOAD_CONFIG,
-                params={
-                    # config: full config snapshot after save; Agent should prefer this over local yaml.
-                    "config": dict(config_payload or {}),
-                    # env: incremental environment updates; missing keys mean unchanged.
-                    "env": dict(env_updates or {}),
-                    **dict(reload_options or {}),
-                },
-            )
-            reload_resp = await client.send_request(reload_env)
-            if not getattr(reload_resp, "ok", False):
+        client.set_or_update_server_config(
+            config=dict(config_payload or {}),
+            env=dict(env_updates or {}),
+        )
+
+        # reload 是全局配置热重载，不绑定特定 user。但 faas 沙箱 acquire instance
+        # 需要 X-Session-Context（由 envelope.user_id 透传成 sessionCtxID）；user_id 为空
+        # 时 faas 拿不到 sessionCtxID，acquire lease 走 init 路径失败
+        # （"connect runtime failed"），invocation 60s 超时，首登 config.set 后前端卡死+1001。
+        # user_id 还必须是 faas 沙箱配置了可工作区的真实用户：faas 沙箱按 user_id
+        # 映射 /home/<user>/.jiuwenswarm 工作区，非配置用户（system/root）建沙箱失败
+        # （code 80004 "Failed to create sandbox"）。agentos_test 是 agentos 部署的默认
+        # 用户（gateway-config.yaml ssh username），有完整工作区，复用其 warm instance。
+        reload_env = e2a_from_agent_fields(
+            request_id=f"agent-reload-{uuid_module.uuid4().hex[:8]}",
+            channel_id="",
+            session_id="sess_reload",
+            user_id="agentos_test",
+            req_method=ReqMethod.AGENT_RELOAD_CONFIG,
+            params={
+                # config: full config snapshot after save; Agent should prefer this over local yaml.
+                "config": dict(config_payload or {}),
+                # env: incremental environment updates; missing keys mean unchanged.
+                "env": dict(env_updates or {}),
+                **dict(reload_options or {}),
+            },
+        )
+
+        reload_ok = False
+        last_error: Exception | None = None
+        for attempt in range(_reload_max_retries + 1):
+            try:
+                reload_resp = await client.send_request(reload_env)
+                if getattr(reload_resp, "ok", False):
+                    reload_ok = True
+                    break
                 err_payload = getattr(reload_resp, "payload", None) or {}
                 err_msg = (
                     err_payload.get("error")
@@ -1699,40 +1782,64 @@ async def _run(
                     else err_payload
                 )
                 err_str = str(err_msg or "")
-                # ValidationError 是配置格式问题，不需要重启 gateway
+                # ValidationError 是配置格式问题，不需要重试也不需要重启 gateway
                 if any(kw in err_str for kw in ("ValidationError", "validation error", "Field required")):
                     logger.warning("[App] agent.reload_config validation error (non-fatal): %s", err_str)
                     return False
-                raise RuntimeError(f"agent.reload_config rejected: {err_msg}")
+                last_error = RuntimeError(f"agent.reload_config rejected: {err_msg}")
+            except Exception as e:  # noqa: BLE001
+                last_error = e
 
-            _schedule_agent_prewarm_sync(
-                "agent-prewarm-sync-after-config",
-                delay_seconds=3.0,
-            )
-
-            if updated_env_keys and (browser_runtime_keys & set(updated_env_keys)):
-                restart_env = e2a_from_agent_fields(
-                    request_id=f"browser-restart-{uuid_module.uuid4().hex[:8]}",
-                    channel_id="",
-                    req_method=ReqMethod.BROWSER_RUNTIME_RESTART,
+            if attempt < _reload_max_retries:
+                delay = _reload_retry_backoff_base ** (attempt + 1)
+                logger.warning(
+                    "[App] agent.reload_config attempt %d/%d failed, retrying in %.1fs: %s",
+                    attempt + 1, _reload_max_retries + 1, delay, last_error,
                 )
-                await client.send_request(restart_env)
+                await asyncio.sleep(delay)
 
-            # 主动推荐：enabled 变更时同步 proactive.tick job（创建/删除）
-            proactive_keys = {
-                "proactive_recommendation_enabled",
-            }
-            if updated_env_keys and (proactive_keys & set(updated_env_keys)):
-                try:
-                    from jiuwenswarm.gateway.cron.proactive_cron_sync import sync_proactive_tick_job
-                    await sync_proactive_tick_job(cron_controller, config_payload)
-                except Exception as e:  # noqa: BLE001  # 兜底：proactive 同步失败不阻断配置保存
-                    logger.warning("[App] proactive.tick sync on config save failed: %s", e)
-            return True
-        except Exception as e:  # noqa: BLE001
-            logger.warning("[App] hot config reload failed, scheduling restart: %s", e)
+        if not reload_ok:
+            logger.critical(
+                "[App] agent.reload_config failed after %d attempts, scheduling restart: %s",
+                _reload_max_retries + 1, last_error,
+            )
             _schedule_gateway_restart(restart_request)
             return False
+
+        # AgentServer 已确认热重载成功后，再刷新 Gateway 内存中的值。
+        # MessageHandler 的流式 chunk 热路径只读取该值，不重新读盘。
+        message_handler.update_evolution_auto_save(config_payload)
+
+        # reload 成功：config 变更后让 agent 侧 prewarm channels 落到新配置。
+        _schedule_agent_prewarm_sync(
+            "agent-prewarm-sync-after-config",
+            delay_seconds=3.0,
+        )
+
+        if updated_env_keys and (browser_runtime_keys & set(updated_env_keys)):
+            restart_env = e2a_from_agent_fields(
+                request_id=f"browser-restart-{uuid_module.uuid4().hex[:8]}",
+                channel_id="",
+                session_id="sess_reload",
+                user_id="agentos_test",
+                req_method=ReqMethod.BROWSER_RUNTIME_RESTART,
+            )
+            try:
+                await client.send_request(restart_env)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[App] browser runtime restart failed (non-fatal): %s", e)
+
+        # 主动推荐：enabled 变更时同步 proactive.tick job（创建/删除）
+        proactive_keys = {
+            "proactive_recommendation_enabled",
+        }
+        if updated_env_keys and (proactive_keys & set(updated_env_keys)):
+            try:
+                from jiuwenswarm.gateway.cron.proactive_cron_sync import sync_proactive_tick_job
+                await sync_proactive_tick_job(cron_controller, config_payload)
+            except Exception as e:  # noqa: BLE001  # 兜底：proactive 同步失败不阻断配置保存
+                logger.warning("[App] proactive.tick sync on config save failed: %s", e)
+        return True
 
     web_channel = None
     tui_channel = None
@@ -1807,6 +1914,11 @@ async def _run(
         "TUI",
     )
     channel_manager.register_channel_with_inbound(tui_channel, tui_norm_and_forward)
+
+    # Web/TUI 注册后再订阅连接钩子，否则 get_channel 拿不到 channel。
+    subscribe_fn = getattr(client, "set_channel_manager", None)
+    if callable(subscribe_fn):
+        subscribe_fn(channel_manager)
 
     acp_inbound_server = _InboundGatewayServer(
         lambda msg: _normalize_and_forward_message(msg, channel_manager)

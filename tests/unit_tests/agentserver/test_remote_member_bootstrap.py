@@ -708,6 +708,7 @@ async def test_precheck_fails_when_no_blank_available(monkeypatch):
 async def test_bootstrap_allows_later_kickoff_for_same_member_after_task_done(monkeypatch):
     kickoff_calls = []
     card_replace_calls = []
+    member_status = AsyncMock(return_value=None)
 
     async def fake_ensure_dynamic_member_execution_loop(**kwargs):
         kickoff_calls.append(kwargs)
@@ -727,6 +728,7 @@ async def test_bootstrap_allows_later_kickoff_for_same_member_after_task_done(mo
         "_replace_teammate_card_after_direct_bootstrap",
         fake_replace_card_after_direct_bootstrap,
     )
+    monkeypatch.setattr(_mod, "_member_status_for_session", member_status)
 
     processed = set()
     loop_kicked_members = set()

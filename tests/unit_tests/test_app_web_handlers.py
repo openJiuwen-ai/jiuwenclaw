@@ -1,7 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import asyncio
-import os
 import threading
 import time
 from pathlib import Path
@@ -699,13 +698,14 @@ async def test_config_set_routes_team_payload_to_modes_team_helper(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("value", ["true", "false"])
-async def test_config_set_syncs_auto_scan_to_review_trigger_only(
+async def test_config_set_updates_canonical_skill_evolution(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
     value: str,
 ) -> None:
     channel = FakeWebChannel()
-    saved_updates: list[dict[str, str]] = []
+    saved_updates: list[dict] = []
+    evolution_updates: list[bool] = []
 
     monkeypatch.setattr(
         "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._ENV_FILE",
@@ -717,17 +717,18 @@ async def test_config_set_syncs_auto_scan_to_review_trigger_only(
     )
     monkeypatch.setattr(
         "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config",
-        lambda: {"evolution": {}},
+        lambda: {"react": {"evolution": {"skill_evolution": value == "true"}}},
     )
-    monkeypatch.setenv("EVOLUTION_AUTO_SCAN", "")
-    monkeypatch.setenv("EVOLUTION_REVIEW_TRIGGER", "")
-    monkeypatch.setenv("EVOLUTION_SIGNAL_TRIGGER", "manual")
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_skill_evolution_enabled_in_config",
+        lambda enabled: evolution_updates.append(enabled),
+    )
 
     _register_web_handlers(
         WebHandlersBindParams(
             channel=channel,
-            on_config_saved=lambda _, **kwargs: saved_updates.append(
-                kwargs["env_updates"]
+            on_config_saved=lambda _, **kwargs: (
+                saved_updates.append(kwargs) or True
             ),
         )
     )
@@ -735,23 +736,16 @@ async def test_config_set_syncs_auto_scan_to_review_trigger_only(
     await channel.methods["config.set"](
         object(),
         "req-evolution",
-        {"evolution_auto_scan": value},
+        {"skill_evolution": value},
         "sess-evolution",
     )
 
-    expected = {
-        "EVOLUTION_AUTO_SCAN": value,
-        "EVOLUTION_REVIEW_TRIGGER": value,
-    }
-    assert saved_updates == [expected]
-    assert {key: os.environ[key] for key in expected} == expected
-    assert os.environ["EVOLUTION_SIGNAL_TRIGGER"] == "manual"
-    assert set((tmp_path / ".env").read_text(encoding="utf-8").splitlines()) == {
-        f'{key}="{env_value}"' for key, env_value in expected.items()
-    }
+    assert evolution_updates == [value == "true"]
+    assert saved_updates and saved_updates[0]["env_updates"] == {}
+    assert saved_updates[0]["config_payload"]["react"]["evolution"]["skill_evolution"] is (value == "true")
     assert channel.responses[-1]["payload"] == {
-        "updated": ["evolution_auto_scan"],
-        "applied_without_restart": False,
+        "updated": ["skill_evolution"],
+        "applied_without_restart": True,
     }
 
 
@@ -987,10 +981,26 @@ async def test_config_set_routes_symphony_payload_to_config_helper(monkeypatch):
     }
 
 
-def test_web_does_not_expose_symphony_evolution_rpc_methods():
-    assert "symphony.evolution_status" not in app_web_handlers._FORWARD_REQ_METHODS
-    assert "symphony.evolution_record_outcome" not in app_web_handlers._FORWARD_REQ_METHODS
-    assert "symphony.evolution_rebuild" not in app_web_handlers._FORWARD_REQ_METHODS
+def test_web_exposes_graph_methods_and_rejects_legacy_symphony_methods():
+    skill_graph_methods = {
+        "skills.graph.build",
+        "skills.graph.status",
+        "skills.graph.get",
+        "skills.graph.cancel",
+    }
+    assert skill_graph_methods.issubset(app_web_handlers._FORWARD_REQ_METHODS)
+
+    legacy_symphony_methods = {
+        "symphony.build_score",
+        "symphony.pause_build",
+        "symphony.score_status",
+        "symphony.graph",
+        "symphony.plan",
+        "symphony.evolution_status",
+        "symphony.evolution_record_outcome",
+        "symphony.evolution_rebuild",
+    }
+    assert legacy_symphony_methods.isdisjoint(app_web_handlers._FORWARD_REQ_METHODS)
 
 
 # =====================================================================

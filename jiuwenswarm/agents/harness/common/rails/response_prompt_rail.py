@@ -14,7 +14,8 @@ from jiuwenswarm.common.context_keys import JIUWENSWARM_CHANNEL_CONTEXT_KEY
 from jiuwenswarm.agents.harness.common.prompt.prompt_builder import (
     LocalSectionName,
     PromptPriority,
-    _response_prompt,
+    _input_prompt,
+    _output_prompt,
 )
 from jiuwenswarm.server.runtime.a2ui.prompt_instructions import (
     is_a2ui_browser_workflow_request,
@@ -27,7 +28,7 @@ A2UI_BROWSER_WORKFLOW_CONTEXT_KEY = "a2ui_browser_workflow"
 
 
 class ResponsePromptRail(DeepAgentRail):
-    """Inject the response section as an independent prompt section."""
+    """Inject stable input and output instruction sections."""
 
     priority = 5
 
@@ -42,6 +43,8 @@ class ResponsePromptRail(DeepAgentRail):
     def uninit(self, agent) -> None:
         if self.system_prompt_builder is not None:
             self.system_prompt_builder.remove_section("response")
+            self.system_prompt_builder.remove_section("input")
+            self.system_prompt_builder.remove_section("output")
             self.system_prompt_builder.remove_section(LocalSectionName.A2UI)
         self.system_prompt_builder = None
         self._runtime_channel = None
@@ -73,7 +76,9 @@ class ResponsePromptRail(DeepAgentRail):
             return
 
         language = self.system_prompt_builder.language or "cn"
-        self.system_prompt_builder.add_section(_response_prompt(language))
+        self.system_prompt_builder.remove_section("response")
+        self.system_prompt_builder.add_section(_input_prompt(language))
+        self.system_prompt_builder.add_section(_output_prompt(language))
         self._sync_a2ui_prompt_section(
             self._resolve_channel(ctx),
             skip_a2ui=self._should_skip_a2ui(ctx),

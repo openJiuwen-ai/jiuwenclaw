@@ -7,7 +7,6 @@ from __future__ import annotations
 import base64
 import binascii
 import logging
-import re
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -21,11 +20,13 @@ from jiuwenswarm.common.document_parser import (
     supported_formats,
 )
 from jiuwenswarm.common.utils import get_agent_sessions_dir
+from jiuwenswarm.gateway.upload_storage import (
+    safe_session_dirname,
+    safe_upload_filename,
+    unique_upload_path,
+)
 
 logger = logging.getLogger(__name__)
-
-_SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
-_SESSION_ID_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 _MAX_DOCUMENT_BYTES = 30 * 1024 * 1024
 _MAX_DOCUMENT_COUNT = 20
@@ -184,7 +185,7 @@ async def parse_existing_document(
 
 def session_uploads_dir(session_id: str | None) -> Path:
     """Return the canonical uploads directory for a session."""
-    return (get_agent_sessions_dir() / _safe_session_id(session_id) / "uploads").resolve()
+    return (get_agent_sessions_dir() / safe_session_dirname(session_id) / "uploads").resolve()
 
 
 def resolve_session_upload_path(path: str | Path, *, session_id: str | None) -> Path:
@@ -293,15 +294,15 @@ async def _store_and_maybe_parse_item(
             f"{filename_hint or f'document-{index + 1}'}"
         )
 
-    safe_session_id = _safe_session_id(session_id)
+    safe_session_id = safe_session_dirname(session_id)
     upload_dir = get_agent_sessions_dir() / safe_session_id / "uploads"
     upload_dir.mkdir(parents=True, exist_ok=True)
 
     fallback = f"document-{index + 1}{suffix}"
-    filename = _safe_filename(filename_hint or fallback, fallback=fallback)
+    filename = safe_upload_filename(filename_hint or fallback, fallback=fallback)
     if Path(filename).suffix.lower() not in SUPPORTED_DOCUMENT_EXTENSIONS:
         filename = f"{filename}{suffix}"
-    path = _unique_path(upload_dir / filename)
+    path = unique_upload_path(upload_dir / filename)
     path.write_bytes(data)
 
     stored = {
@@ -382,7 +383,7 @@ async def _attach_parse_and_text_sidecar(
 def _write_text_sidecar(original_path: Path, text: str) -> Path:
     """Write parsed document content next to the original as ``stem.txt``."""
     candidate = original_path.with_suffix(".txt")
-    txt_path = _unique_path(candidate)
+    txt_path = unique_upload_path(candidate)
     txt_path.write_text(text if isinstance(text, str) else str(text or ""), encoding="utf-8")
     logger.info(
         "[document.persist] wrote text sidecar original=%s text=%s chars=%s",
@@ -413,25 +414,3 @@ def _mime_from_suffix(suffix: str) -> str:
     return _SUFFIX_TO_MIME.get(suffix.lower(), "application/octet-stream")
 
 
-def _safe_session_id(session_id: str | None) -> str:
-    text = str(session_id or "default").strip() or "default"
-    return _SESSION_ID_RE.sub("_", text)[:120]
-
-
-def _safe_filename(filename: str, *, fallback: str) -> str:
-    name = Path(filename).name.strip()
-    if not name or name in {".", ".."}:
-        name = fallback
-    return _SAFE_FILENAME_RE.sub("_", name)[:180]
-
-
-def _unique_path(path: Path) -> Path:
-    if not path.exists():
-        return path
-    stem = path.stem
-    suffix = path.suffix
-    for idx in range(1, 1000):
-        candidate = path.with_name(f"{stem}-{idx}{suffix}")
-        if not candidate.exists():
-            return candidate
-    return path.with_name(f"{stem}-overflow{suffix}")

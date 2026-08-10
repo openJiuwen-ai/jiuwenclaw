@@ -78,6 +78,15 @@ from jiuwenswarm.server.runtime.agent_adapter.sysop_builder import (
     validate_sandbox_files_runtime,
 )
 from jiuwenswarm.server.utils.utils import is_team_params
+from jiuwenswarm.common.mode_matrix import (
+    ResolvedMode,
+    TEAM_PLAN_CODE_MODE,
+    TEAM_PLAN_NORMAL_MODE,
+    canonicalize_mode_text,
+    is_plan_mode,
+    is_team_mode,
+    resolve_request_mode,
+)
 from jiuwenswarm.agents.harness.common.rails.permissions.permissions_config_rpc import (
     get_permissions_config_req_methods,
 )
@@ -114,11 +123,6 @@ from jiuwenswarm.common.security.ws_origin import (
 from jiuwenswarm.agents.harness.code.prompt.plan_approval import (
     PLAN_MODE_EXITED_EVENT_TYPE,
     PLAN_REMINDER_ORIGINAL_QUERY_KEY,
-)
-from jiuwenswarm.common.mode_matrix import (
-    ResolvedMode,
-    is_plan_mode,
-    resolve_request_mode,
 )
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.common.log_preview import preview_text
@@ -448,7 +452,7 @@ def _is_restorable_history_record(record: Any) -> bool:
 
     if role == "user":
         mode = record.get("mode", "")
-        if mode in ("team", "team.plan", "code.team"):
+        if is_team_mode(mode):
             channel_id = record.get("channel_id", "")
             if channel_id not in ("web", "tui"):
                 return False
@@ -493,6 +497,7 @@ def _sync_chat_request_metadata(
     project_dir: str | None,
     mode: str,
     explicit_mode_provided: bool = False,
+    user_id: str = "",
 ) -> str | None:
     """将本次 chat 请求的参数同步到会话元数据，返回生效的 project_dir。
 
@@ -563,6 +568,7 @@ def _sync_chat_request_metadata(
             project_dir=str(project_dir) if project_dir else None,
             project_id=request_project_id,
             cron_id=request_cron_id,
+            user_id=str(user_id or "").strip() or None,
             last_user_message_at=(
                 _dt.datetime.now(_dt.timezone.utc).timestamp() if is_chat_turn else None
             ),
@@ -606,10 +612,7 @@ def resolve_agent_request_mode(
     ``fast``（无 ``agent.`` 前缀，如旧 cron job 存量数据）同样归一到 ``agent``，
     与 CLI ``MODE_ALIASES``、记忆配置 ``_resolve_mode_memory`` 的裸 token 处理保持一致。
     """
-    raw_value = getattr(raw_mode, "value", raw_mode)
-    mode_text = raw_value.strip().lower() if isinstance(raw_value, str) else ""
-    if not mode_text:
-        mode_text = "agent"
+    mode_text = canonicalize_mode_text(raw_mode)
     normalized_work_mode = (
         work_mode.strip().lower() if isinstance(work_mode, str) else ""
     )
@@ -618,6 +621,11 @@ def resolve_agent_request_mode(
         if normalized_work_mode == "code":
             return "code", "normal", "code.normal"
         return "agent", None, "agent"
+
+    if mode_text == TEAM_PLAN_NORMAL_MODE:
+        return "team", "plan", TEAM_PLAN_NORMAL_MODE
+    if mode_text == TEAM_PLAN_CODE_MODE:
+        return "code", "team", TEAM_PLAN_CODE_MODE
 
     parts = mode_text.split(".")
     mode = parts[0] or "agent"
@@ -628,11 +636,9 @@ def resolve_agent_request_mode(
         return "agent", None, "agent"
     if mode == "team":
         sub_mode = parts[1] if len(parts) > 1 and parts[1] else None
-        if sub_mode not in {None, "plan"}:
+        if sub_mode not in {None}:
             sub_mode = None
         canonical_mode = f"team.{sub_mode}" if sub_mode else "team"
-        if sub_mode == "plan":
-            return "code", "team", canonical_mode
         return "team", sub_mode, canonical_mode
 
     default_sub_modes = {
@@ -703,6 +709,7 @@ def _payload_to_request(data: dict[str, Any]) -> AgentRequest:
         is_stream=data.get("is_stream", False),
         timestamp=data.get("timestamp", 0.0),
         metadata=metadata,
+        user_id=str(data.get("user_id") or "").strip(),
     )
 
 
@@ -907,6 +914,8 @@ class AgentWebSocketServer:
         self._jiuwenbox_runner = JiuwenBoxRunner.instance()
         # checkpointer 后台预热任务 (start() 里 fire-and-forget, stop() 时 cancel)
         self._checkpointer_warmup_task: Optional[asyncio.Task] = None
+        # 图像模态探针重探任务 (模型配置变更时拉起, stop() 时 cancel)
+        self._image_modality_refresh_task: Optional[asyncio.Task] = None
         # Proactive recommendation engine (set by app_agentserver for debug trigger)
         self._proactive_engine: Any = None
         get_acp_output_manager().set_send_push_callback(
@@ -1269,6 +1278,19 @@ class AgentWebSocketServer:
                 pass
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[AgentWebSocketServer] checkpointer warmup cancel failed: %s", exc)
+        # 同理取消图像模态重探任务.
+        image_modality_refresh = self._image_modality_refresh_task
+        self._image_modality_refresh_task = None
+        if image_modality_refresh is not None and not image_modality_refresh.done():
+            image_modality_refresh.cancel()
+            try:
+                await image_modality_refresh
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[AgentWebSocketServer] image modality refresh cancel failed: %s", exc
+                )
         had_server = self._server is not None
         if had_server:
             self._server.close()
@@ -2239,6 +2261,7 @@ class AgentWebSocketServer:
                 requested_project_dir,
                 canonical_mode if canonical_mode else mode,
                 explicit_mode_provided=explicit_mode_provided,
+                user_id=str(getattr(request, "user_id", "") or "").strip(),
             )
         else:
             # Read-only path (e.g. command.goal get): never create/update
@@ -3260,8 +3283,7 @@ class AgentWebSocketServer:
 
     @staticmethod
     def _is_team_metadata_mode(metadata: dict[str, Any]) -> bool:
-        mode = str(metadata.get("mode") or "").strip().lower()
-        return mode in {"team", "team.plan", "code.team"}
+        return is_team_mode(metadata.get("mode"))
 
     @staticmethod
     def _active_team_session_map() -> dict[str, str]:
@@ -3764,10 +3786,10 @@ class AgentWebSocketServer:
                     resp = checkpoint_resp
                 else:
                     metadata = get_session_metadata(target)
-                    is_team_mode = self._is_team_metadata_mode(metadata)
+                    is_team_session = self._is_team_metadata_mode(metadata)
                     team_name = str(metadata.get("team_name") or "").strip()
                     channel_id = str(metadata.get("channel_id") or request.channel_id or "").strip() or None
-                    if not is_team_mode:
+                    if not is_team_session:
                         from jiuwenswarm.server.runtime.session.kv_cache_product_hooks import (
                             evict_plan_session,
                         )
@@ -3778,7 +3800,7 @@ class AgentWebSocketServer:
                             channel_id=channel_id,
                         )
                     try:
-                        if is_team_mode:
+                        if is_team_session:
                             team_manager = get_team_manager(channel_id)
                             deleted = await team_manager.delete_session_runtime(
                                 target,
@@ -3808,7 +3830,7 @@ class AgentWebSocketServer:
                         _plan_exited_sessions.discard(target)
                         _plan_active_sessions.discard(target)
                         remove_session_metadata_cache(target)
-                        if is_team_mode:
+                        if is_team_session:
                             try:
                                 from jiuwenswarm.server.runtime.team_binding_store import get_team_binding_store
 
@@ -7331,12 +7353,53 @@ class AgentWebSocketServer:
                 reload_kwargs["reload_scopes"] = reload_scopes
             agent_reload_scopes = {"model", "team", "permissions", "agent_runtime"}
             should_reload_agents = not reload_scopes or bool(reload_scopes & agent_reload_scopes)
+
+            # 模型配置变了就重探图像模态：同一个 (api_base, model_name) 背后可能已换
+            # 端点 / 密钥 / 后端，旧结论不能留。跑在后台任务里——探针每个最多 5s，不该
+            # 把 reload 响应拖在这里；这个 loop 活到进程结束，结论一定能落进缓存。
+            should_refresh_image_modality = not reload_scopes or "model" in reload_scopes
+            if should_refresh_image_modality:
+                from jiuwenswarm.server.runtime.image_modality_warmup import (
+                    refresh_image_modality_cache,
+                )
+
+                # 上一轮还没探完就又改了配置：旧结论已经作废，直接取消。
+                previous_task = self._image_modality_refresh_task
+                if previous_task is not None and not previous_task.done():
+                    previous_task.cancel()
+                self._image_modality_refresh_task = asyncio.create_task(
+                    refresh_image_modality_cache(
+                        get_config(),
+                        reason="model config change",
+                    )
+                )
             if should_reload_agents:
                 await self._agent_manager.reload_agents_config(
                     config_payload,
                     env_overrides,
                     **reload_kwargs,
                 )
+                try:
+                    from jiuwenswarm.agents.harness.team import (
+                        stop_all_paused_team_session_runtimes_across_managers,
+                    )
+
+                    stopped = await stop_all_paused_team_session_runtimes_across_managers(
+                        reason="agent.reload_config: ",
+                    )
+                    if stopped:
+                        logger.info(
+                            "[AgentWebSocketServer] stopped paused team runtimes after agent.reload_config: "
+                            "count=%s request_id=%s reload_scopes=%s",
+                            stopped,
+                            request.request_id,
+                            sorted(reload_scopes),
+                        )
+                except Exception as exc:  # noqa: BLE001 - cleanup must not reject config reload
+                    logger.warning(
+                        "[AgentWebSocketServer] failed to stop paused team runtimes after agent.reload_config: %s",
+                        exc,
+                    )
 
             # Hot-reload ProactiveEngine config if available
             should_reload_proactive = not reload_scopes or bool(reload_scopes & {"model", "proactive", "agent_runtime"})
@@ -7884,11 +7947,7 @@ class AgentWebSocketServer:
             params["project_dir"] = project_dir
             params["work_mode"] = final_work_mode
 
-            is_swarm = bool(params.get("is_swarm")) or canonical_mode in {
-                "team",
-                "team.plan",
-                "code.team",
-            }
+            is_swarm = bool(params.get("is_swarm")) or is_team_mode(canonical_mode)
             if not is_swarm:
                 mode, _, canonical_mode = resolve_agent_request_mode(
                     canonical_mode,
@@ -7963,7 +8022,7 @@ class AgentWebSocketServer:
                 init_session_metadata(
                     session_id=session_id,
                     channel_id=channel_id,
-                    user_id=params.get("user_id", ""),
+                    user_id=str(getattr(request, "user_id", "") or params.get("user_id", "") or "").strip(),
                     title=params.get("title", ""),
                     mode=canonical_mode,
                     project_dir=project_dir,
@@ -8510,12 +8569,10 @@ class AgentWebSocketServer:
 
     def _build_model_cache(self) -> None:
         """Build model cache from jiuwenswarm config.yaml (reuse interface_deep logic)."""
-        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
+        # Use the same model building function as interface_deep
+        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import build_model_from_entry
 
         config = get_config()
-
-        # Use the same model building method as interface_deep
-        build_model_from_entry = getattr(JiuWenSwarmDeepAdapter, '_build_model_from_entry')
 
         # Build from models.defaults list
         for entry in get_default_models(config):

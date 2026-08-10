@@ -218,6 +218,25 @@ wheels = [
 ]
 
 [[package]]
+name = "anthropic"
+version = "0.120.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "distro" },
+    { name = "docstring-parser" },
+    { name = "httpx" },
+    { name = "jiter" },
+    { name = "pydantic" },
+    { name = "sniffio" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d7/10/4ca013cb166f226bd89e0aeb0fcaff94f45ddf716d4925ce89475d3c587b/anthropic-0.120.2.tar.gz", hash = "sha256:9722efc10c27a30a69f5338ddacdb35bc6a64297a4e4ba729bf83af873d5fb3a", size = 1008421, upload-time = "2026-07-28T17:38:26.986Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/63/af/0f5db57b9397a0f3b7fc204cbef143401a7cadaf982330f97f1ce3d39f34/anthropic-0.120.2-py3-none-any.whl", hash = "sha256:0f0bc2b381dc0eb41c8d886b815d79c2041cd2374f83aed36f574b6dc9c579c1", size = 1022851, upload-time = "2026-07-28T17:38:25.466Z" },
+]
+
+[[package]]
 name = "anyio"
 version = "4.13.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1783,7 +1802,7 @@ wheels = [
 
 [[package]]
 name = "jiuwenswarm"
-version = "0.2.4b3"
+version = "0.2.4b4"
 source = { editable = "." }
 dependencies = [
     { name = "a2ui-agent-sdk" },
@@ -1972,9 +1991,9 @@ requires-dist = [
     { name = "mutagen", specifier = ">=1.47.0" },
     { name = "mutagen", marker = "extra == 'harmony'", specifier = ">=1.47.0" },
     { name = "numpy", specifier = ">=1.24.0" },
-    { name = "openjiuwen", marker = "extra == 'harmony'", specifier = "==0.1.16.post2" },
-    { name = "openjiuwen", extras = ["claude", "codex"], specifier = "==0.1.16.post2" },
-    { name = "openjiuwen", extras = ["postgres", "zmq"], marker = "extra == 'distribute'" },
+    { name = "openjiuwen", marker = "extra == 'harmony'", git = "https://gitcode.com/openJiuwen/agent-core.git?branch=develop" },
+    { name = "openjiuwen", extras = ["claude", "codex"], git = "https://gitcode.com/openJiuwen/agent-core.git?branch=develop" },
+    { name = "openjiuwen", extras = ["postgres", "zmq"], marker = "extra == 'distribute'", git = "https://gitcode.com/openJiuwen/agent-core.git?branch=develop" },
     { name = "opentelemetry-api", specifier = ">=1.28.0" },
     { name = "opentelemetry-api", marker = "extra == 'harmony'", specifier = ">=1.28.0" },
     { name = "opentelemetry-exporter-otlp-proto-grpc", specifier = ">=1.28.0" },
@@ -2063,7 +2082,7 @@ test = [
 
 [[package]]
 name = "jiuwenswarm-tui"
-version = "0.2.4b3"
+version = "0.2.4b4"
 source = { directory = "packages/jiuwenswarm-tui" }
 
 [[package]]
@@ -2910,12 +2929,13 @@ wheels = [
 
 [[package]]
 name = "openjiuwen"
-version = "0.1.16.post2"
-source = { registry = "https://pypi.org/simple" }
+version = "0.1.16"
+source = { git = "https://gitcode.com/openJiuwen/agent-core.git?branch=develop#c1a58c097762ac136740c0e6e7b4276f34ac1f9d" }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp" },
     { name = "alembic" },
+    { name = "anthropic" },
     { name = "anyio" },
     { name = "beautifulsoup4" },
     { name = "cacheout" },
@@ -2942,6 +2962,7 @@ dependencies = [
     { name = "python-dateutil" },
     { name = "python-docx" },
     { name = "python-dotenv" },
+    { name = "pyyaml" },
     { name = "requests" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "sqlmodel" },
@@ -2949,10 +2970,6 @@ dependencies = [
     { name = "tiktoken" },
     { name = "trafilatura" },
     { name = "transformers" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/72/de/b5c372ba31fdc7d5c802759a2d23f418eef2431dd3c0026f695da59fab01/openjiuwen-0.1.16.post2.tar.gz", hash = "sha256:fe87d0a6c6242419c45427d6a72466c142c484eaff83c975fed192e7ce0d806e", size = 4142561, upload-time = "2026-08-04T11:33:35.756Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/16/0f/445d8ce111f0a451f6781cbd312d8358887390669a4145882d3f3761823c/openjiuwen-0.1.16.post2-py3-none-any.whl", hash = "sha256:8d7a33396cab97285847c950c395535d531daa9eecbabbc165d0bb5655301176", size = 5318603, upload-time = "2026-08-04T11:33:33.087Z" },
 ]
 
 [package.optional-dependencies]

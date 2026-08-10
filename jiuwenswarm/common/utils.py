@@ -1686,6 +1686,25 @@ def get_env_file() -> Path:
     return get_config_dir() / ".env"
 
 
+def env_url(name: str, default: str) -> str:
+    """Read an endpoint URL from the environment, falling back when blank.
+
+    ``os.environ.get(name, default)`` only falls back when the key is absent.
+    The shipped ``.env`` template declares the endpoint overrides as empty
+    values and documents "leave blank to use official default URLs", so a
+    plain ``get`` would hand back an empty URL and the request would fail with
+    a message-less transport error. Treat unset and blank alike.
+
+    Args:
+        name: Environment variable name holding the endpoint override.
+        default: Official endpoint used when the variable is unset or blank.
+
+    Returns:
+        The configured endpoint URL, or ``default`` when unset or blank.
+    """
+    return os.environ.get(name, "").strip() or default
+
+
 def reset_free_search_runtime_flags() -> None:
     """Start each process with free-search engines disabled unless reopened via config UI."""
     os.environ["FREE_SEARCH_DDG_ENABLED"] = "false"

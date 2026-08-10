@@ -13,6 +13,16 @@ import {
 export const HISTORY_GET_METHOD = 'history.get';
 export const HISTORY_MESSAGE_EVENT = 'history.message';
 
+/**
+ * 历史加载兜底超时（毫秒）。
+ * faas 侧 history.get 流若因旧 session runtime 过 TTL 被回收而 init 超时
+ * （60s timed out），后端不会发 done/batch_end 结束帧，也不会发匹配的
+ * chat.error；前端若无限等待会让 isLoadingHistory 永久卡 true，进而吞掉
+ * 后续所有 chat.processing_status(is_processing=false)，表现为「一直加载中」。
+ * 到期强制 finalize，让调用方 setLoadingHistory(false) 恢复可交互。
+ */
+const HISTORY_RESTORE_TIMEOUT_MS = 30_000;
+
 /** 助手侧仅恢复这些事件；用户消息无 event_type，单独保留 */
 const ALLOWED_ASSISTANT_EVENT_TYPES = new Set([
   'chat.final',
@@ -518,7 +528,14 @@ function parseHistoryTimelineEntry(
   const payload = buildEventPayloadForRecord(record);
 
   if (eventType === 'chat.final') {
-    let content = normalizeFinalContent(payload);
+    // Goal 完成卡片落盘的是 `goal.completed:` + JSON 信封，不是展示文本。
+    // normalizeFinalContent 会把字面 `\n` 还原成真换行（GFM 表格要靠这个），信封里的
+    // JSON 字符串于是带上非法控制符，parseGoalCompletedContent 解析失败 →
+    // GoalCompletedCard 返回 null → 整张卡片在历史里凭空消失。信封原样透传。
+    const rawContent = typeof payload.content === 'string' ? payload.content : '';
+    let content = isGoalCompletedContent(rawContent)
+      ? rawContent
+      : normalizeFinalContent(payload);
     const isGoalCompletedMessage =
       isTruthyHistoryFlag(record.is_goal_completed_message) ||
       isTruthyHistoryFlag(record.isGoalCompletedMessage) ||
@@ -560,6 +577,14 @@ function parseHistoryTimelineEntry(
     const histSource = typeof payload.source === 'string' ? payload.source : '';
     const isProactiveRecommendation = histSource === 'proactive_recommendation';
     const histProactiveType = typeof payload.proactive_type === 'string' ? payload.proactive_type : '';
+    // completed_at：收尾时刻（耗时）；timestamp 已是气泡出现/首包时刻（排序）
+    const completedAt =
+      (typeof record.completed_at === 'number' || typeof record.completed_at === 'string'
+        ? recordTimestampIso({ timestamp: record.completed_at })
+        : undefined) ||
+      (typeof payload.completed_at === 'number' || typeof payload.completed_at === 'string'
+        ? recordTimestampIso({ timestamp: payload.completed_at })
+        : undefined);
     return {
       kind: 'message',
       message: {
@@ -567,6 +592,7 @@ function parseHistoryTimelineEntry(
         role: 'assistant',
         content,
         timestamp: at,
+        ...(completedAt ? { completedAt } : {}),
         ...(isProactiveRecommendation ? { isProactiveRecommendation } : {}),
         ...(isProactiveRecommendation && histProactiveType
           ? { proactiveType: histProactiveType as 'skill_recommend' | 'task_reminder' | 'need_exploration' }
@@ -704,8 +730,65 @@ interface MaterializedHistoryTimeline {
   reasoningReplay: HistoryReasoningReplayItem[];
 }
 
-/** 将已按时间升序的 history 条目折叠成消息/工具/思考，供 restore / page / 文件预览共用。 */
-function materializeHistoryTimeline(entries: HistoryTimelineEntry[]): MaterializedHistoryTimeline {
+function entryTimestamp(entry: HistoryTimelineEntry): string {
+  return entry.kind === 'message' ? entry.message.timestamp : entry.at;
+}
+
+/**
+ * Goal 完成卡片沉到本轮末尾。
+ *
+ * 实时侧这张卡是「本轮内容都落地后」才插进对话流的（见 useWebSocket 的
+ * scheduleAfterTurnSettles），历史里它的落盘时刻却可能早于同轮后续的收尾正文。
+ * 不重新盖章，历史就会把完成卡片排到最后一句回答上面，和实时反过来。
+ */
+function sinkGoalCompletionCardsToTurnEnd(
+  entries: HistoryTimelineEntry[]
+): HistoryTimelineEntry[] {
+  const out = [...entries];
+  let changed = false;
+
+  for (let i = 0; i < out.length; i += 1) {
+    const entry = out[i];
+    if (entry.kind !== 'message' || !isGoalCompletedContent(entry.message.content)) {
+      continue;
+    }
+    const cardMs = safeTimestampMs(entryTimestamp(entry));
+    let turnEndMs = cardMs;
+    for (let j = i + 1; j < out.length; j += 1) {
+      const next = out[j];
+      if (next.kind === 'message' && next.message.role === 'user') {
+        break;
+      }
+      turnEndMs = Math.max(turnEndMs, safeTimestampMs(entryTimestamp(next)));
+    }
+    if (turnEndMs <= cardMs) {
+      continue;
+    }
+    const iso = timestampMsToIso(turnEndMs + 1);
+    if (!iso) {
+      continue;
+    }
+    out[i] = { ...entry, message: { ...entry.message, timestamp: iso } };
+    changed = true;
+  }
+
+  if (!changed) {
+    return entries;
+  }
+  return out.sort(
+    (a, b) => safeTimestampMs(entryTimestamp(a)) - safeTimestampMs(entryTimestamp(b))
+  );
+}
+
+/** 将 history 条目折叠成消息/工具/思考，供 restore / page / 文件预览共用。入口统一升序。 */
+function materializeHistoryTimeline(
+  rawEntries: HistoryTimelineEntry[]
+): MaterializedHistoryTimeline {
+  // restore 用 unshift 倒序入列；sink / 折叠依赖时间升序，这里统一排一次。
+  const sortedEntries = [...rawEntries].sort(
+    (a, b) => safeTimestampMs(entryTimestamp(a)) - safeTimestampMs(entryTimestamp(b))
+  );
+  const entries = sinkGoalCompletionCardsToTurnEnd(sortedEntries);
   const messages: Message[] = [];
   const toolReplay: HistoryToolReplayItem[] = [];
   const harnessReplay: HistoryHarnessReplayItem[] = [];
@@ -1041,6 +1124,8 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
   const entries: HistoryTimelineEntry[] = [];
   let totalPages: number | null = null;
   let disposed = false;
+  let finalized = false;
+  let restoreTimer: ReturnType<typeof setTimeout> | null = null;
 
   const unsubscribe = webClient.on(HISTORY_MESSAGE_EVENT, (event: WsEvent) => {
     if (disposed) {
@@ -1082,6 +1167,10 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
   function dispose(): void {
     if (disposed) return;
     disposed = true;
+    if (restoreTimer) {
+      clearTimeout(restoreTimer);
+      restoreTimer = null;
+    }
     unsubscribe();
     if (activeHistoryRequests.get(requestKey)?.generation === generation) {
       activeHistoryRequests.delete(requestKey);
@@ -1089,7 +1178,8 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
   }
 
   function finalize(): void {
-    if (disposed) return;
+    if (disposed || finalized) return;
+    finalized = true;
 
     const { messages, toolReplay, harnessReplay, teamReplay, reasoningReplay } =
       materializeHistoryTimeline(entries);
@@ -1124,6 +1214,13 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
 
   const handle: HistoryRestoreHandle = { generation, dispose };
   activeHistoryRequests.set(requestKey, handle);
+  // 兜底：后端 history.get 流超时（faas 旧 session runtime 过 TTL 被
+  // 回收、init 60s 超时）时不发结束帧，强制 finalize 恢复 isLoadingHistory，
+  // 避免前端永久转圈、吞掉后续 chat.processing_status(is_processing=false)。
+  restoreTimer = setTimeout(() => {
+    if (disposed || finalized) return;
+    finalize();
+  }, HISTORY_RESTORE_TIMEOUT_MS);
   return handle;
 }
 
@@ -1158,6 +1255,8 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
   const entries: HistoryTimelineEntry[] = [];
   let totalPages: number | null = null;
   let disposed = false;
+  let finalized = false;
+  let restoreTimer: ReturnType<typeof setTimeout> | null = null;
 
   const unsubscribe = webClient.on(HISTORY_MESSAGE_EVENT, (event: WsEvent) => {
     if (disposed) {
@@ -1199,6 +1298,10 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
   function dispose(): void {
     if (disposed) return;
     disposed = true;
+    if (restoreTimer) {
+      clearTimeout(restoreTimer);
+      restoreTimer = null;
+    }
     unsubscribe();
     if (activeHistoryRequests.get(requestKey)?.generation === generation) {
       activeHistoryRequests.delete(requestKey);
@@ -1206,7 +1309,8 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
   }
 
   function finalize(): void {
-    if (disposed) return;
+    if (disposed || finalized) return;
+    finalized = true;
 
     const { messages, toolReplay, harnessReplay, teamReplay, reasoningReplay } =
       materializeHistoryTimeline(entries);
@@ -1222,5 +1326,10 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
 
   const handle: HistoryRestoreHandle = { generation, dispose };
   activeHistoryRequests.set(requestKey, handle);
+  // 同 beginHistoryRestore：兜底超时，避免分页 history.get 流卡死。
+  restoreTimer = setTimeout(() => {
+    if (disposed || finalized) return;
+    finalize();
+  }, HISTORY_RESTORE_TIMEOUT_MS);
   return handle;
 }

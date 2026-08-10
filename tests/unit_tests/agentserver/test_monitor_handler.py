@@ -295,6 +295,7 @@ async def test_get_team_snapshot_filters_leader_member() -> None:
                 "execution_status": None,
                 "mode": "normal",
                 "role": "teammate",
+                "cli_agent": None,
             }
         ],
         "tasks": [
@@ -333,6 +334,7 @@ async def test_get_team_snapshot_keeps_members_when_team_info_unavailable() -> N
                 "execution_status": None,
                 "mode": "normal",
                 "role": "teammate",
+                "cli_agent": None,
             },
             {
                 "member_id": "worker-2",
@@ -341,6 +343,7 @@ async def test_get_team_snapshot_keeps_members_when_team_info_unavailable() -> N
                 "execution_status": None,
                 "mode": "normal",
                 "role": "teammate",
+                "cli_agent": None,
             },
         ],
         "tasks": [],
@@ -485,6 +488,114 @@ async def test_member_spawned_event_includes_mode_for_human_agent() -> None:
 
         assert converted["event"]["member_id"] == "HumanPlayer_A"
         assert converted["event"]["mode"] == "human"
+    finally:
+        await handler.stop()
+
+
+@pytest.mark.anyio
+async def test_member_spawned_event_carries_display_name() -> None:
+    """成员事件必须带 display_name：前端一切展示都用它，缺了就退回显示 member_id。"""
+    event = MonitorEvent(
+        event_type=MonitorEventType.MEMBER_SPAWNED,
+        team_name="team-1",
+        timestamp=123,
+        member_name="research-specialist",
+    )
+    handler = TeamMonitorHandler(
+        _FakeMonitor(
+            members=[_FakeMember("research-specialist", display_name="研究专家")],
+            leader_member_name=None,
+            events=[event],
+        ),
+        "sess-monitor",
+    )
+
+    await handler.start()
+    try:
+        converted = await anext(handler.events())
+
+        assert converted["event"]["member_id"] == "research-specialist"
+        assert converted["event"]["name"] == "研究专家"
+    finally:
+        await handler.stop()
+
+
+@pytest.mark.anyio
+async def test_member_spawned_event_carries_cli_agent_and_role() -> None:
+    """外部 CLI 成员的 role 是 teammate，只有 cli_agent 能让前端认出该用哪套头像。"""
+    event = MonitorEvent(
+        event_type=MonitorEventType.MEMBER_SPAWNED,
+        team_name="team-1",
+        timestamp=123,
+        member_name="codex-1",
+    )
+    member = _FakeMember("codex-1", display_name="Codex 工程师")
+    member.cli_agent = "codex"
+    handler = TeamMonitorHandler(
+        _FakeMonitor(members=[member], leader_member_name=None, events=[event]),
+        "sess-monitor",
+    )
+
+    await handler.start()
+    try:
+        converted = await anext(handler.events())
+
+        assert converted["event"]["role"] == "teammate"
+        assert converted["event"]["cli_agent"] == "codex"
+    finally:
+        await handler.stop()
+
+
+@pytest.mark.anyio
+async def test_member_spawned_event_omits_cli_agent_for_ordinary_member() -> None:
+    """普通成员不带 cli_agent，免得空值覆盖前端已知值。"""
+    event = MonitorEvent(
+        event_type=MonitorEventType.MEMBER_SPAWNED,
+        team_name="team-1",
+        timestamp=123,
+        member_name="researcher-1",
+    )
+    handler = TeamMonitorHandler(
+        _FakeMonitor(
+            members=[_FakeMember("researcher-1", display_name="调研专员")],
+            leader_member_name=None,
+            events=[event],
+        ),
+        "sess-monitor",
+    )
+
+    await handler.start()
+    try:
+        converted = await anext(handler.events())
+
+        assert "cli_agent" not in converted["event"]
+    finally:
+        await handler.stop()
+
+
+@pytest.mark.anyio
+async def test_member_spawned_event_omits_blank_display_name() -> None:
+    """display_name 为空时不要塞空字符串——空值会覆盖前端已知的展示名。"""
+    event = MonitorEvent(
+        event_type=MonitorEventType.MEMBER_SPAWNED,
+        team_name="team-1",
+        timestamp=123,
+        member_name="research-specialist",
+    )
+    handler = TeamMonitorHandler(
+        _FakeMonitor(
+            members=[_FakeMember("research-specialist", display_name="  ")],
+            leader_member_name=None,
+            events=[event],
+        ),
+        "sess-monitor",
+    )
+
+    await handler.start()
+    try:
+        converted = await anext(handler.events())
+
+        assert "name" not in converted["event"]
     finally:
         await handler.stop()
 

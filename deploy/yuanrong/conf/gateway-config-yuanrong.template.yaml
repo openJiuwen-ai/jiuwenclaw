@@ -16,7 +16,7 @@ symphony:
   enabled: false
   paths:
     skills_root: ""
-    score_dir: ""
+    graph_dir: ""
 
   fingerprint:
     scan:
@@ -393,11 +393,8 @@ react:
       keep_recent_messages: 4
   # Skills 在线自演进配置
   evolution:
-    enabled: true             # true = 启用在线 Skills 自演进
-    auto_scan: false           # true = 每轮对话后自动扫描（建议先用手动 /evolve）
-    auto_save: false           # true = 自演进审批无需用户点击自动通过（内部开关）
-    skill_create: false        # true = 注册 SkillCreateRail（单 agent）及 TeamSkillCreateRail（leader）
-    skill_base_dir: "agent/skills"  # Skill 根目录
+    skill_evolution: false     # true = 启用技能演进与创建（自动及手动）
+    auto_save: false           # true = 自演进审批无需用户点击自动通过
   a2x_registry:
     base_url: "http://127.0.0.1:8000"
     timeout: 30.0
@@ -491,6 +488,10 @@ gateway:
       port: 2222
       user_template: "yr:instance:{instance}"
       connect_timeout_s: 30
+    auth_service_url: ${AGENTOS_AUTH_SERVICE_URL:-http://iam-agentos:8080}
+    timeout: ${AGENTOS_AUTH_TIMEOUT:-10}
+    # Web/TUI token 鉴权总开关；默认关闭。true 时创建 AgentOSAuthenticator 校验连接。
+    auth_enabled: false
 
 heartbeat:
   # 心跳间隔（秒），默认 3600

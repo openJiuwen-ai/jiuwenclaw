@@ -73,6 +73,7 @@ class _FakeEvolutionRail:
         self.drain_waits: list[bool] = []
         self.cleanup_calls = 0
         self.signal_trigger = True
+        self.auto_save = False
         self.llm_updates: list[tuple[object, str | None]] = []
 
     def update_llm(self, model: object, model_name: str | None) -> None:
@@ -150,6 +151,25 @@ async def test_normal_evolution_watcher_skips_status_when_signal_trigger_disable
     )
 
     await adapter.watch_evolution_and_push("stream-rid", "web", "sess-disabled")
+
+    assert _FakeTransport.pushes == []
+    assert rail.drain_waits == []
+    assert rail.cleanup_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_normal_evolution_watcher_skips_status_when_auto_save_enabled(monkeypatch):
+    _FakeTransport.pushes = []
+    rail = _FakeEvolutionRail()
+    rail.auto_save = True
+    adapter = _TestAdapter.build_with_rail(rail)
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        _FakeTransport,
+    )
+
+    await adapter.watch_evolution_and_push("stream-rid", "web", "sess-auto-save")
 
     assert _FakeTransport.pushes == []
     assert rail.drain_waits == []
