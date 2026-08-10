@@ -22,6 +22,7 @@ _USER_AGENT = (
 _REQUEST_HEADERS = {"User-Agent": _USER_AGENT}
 _FREE_SEARCH_PROXY_URL_ENV = "FREE_SEARCH_PROXY_URL"
 _FREE_SEARCH_SSL_VERIFY_ENV = "FREE_SEARCH_SSL_VERIFY"
+_JINA_FETCH_ENABLED_ENV = "JIUWENSWARM_ENABLE_JINA_FETCH"
 _FREE_SEARCH_DEFAULT_NO_PROXY = (
     "127.0.0.1,.huawei.com,localhost,local,.local,10.155.97.247,.myhuaweicloud.com"
 )
@@ -202,7 +203,10 @@ def _fetch_via_jina_reader_sync(url: str, timeout_seconds: int) -> dict[str, str
 
 def _fetch_webpage_sync(url: str, timeout_seconds: int) -> dict[str, str | int]:
     response = _http_get(url, headers=_REQUEST_HEADERS, timeout=timeout_seconds)
-    if response.status_code in {401, 403, 429}:
+    if response.status_code in {401, 403, 429} and _env_bool(
+        _JINA_FETCH_ENABLED_ENV,
+        default=False,
+    ):
         return _fetch_via_jina_reader_sync(url, timeout_seconds)
     response.raise_for_status()
 
