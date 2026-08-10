@@ -11,7 +11,7 @@ from typing import Any
 
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.single_agent import create_agent_session
-from openjiuwen.harness.tools.todo_resume import has_active_todo_items, is_resume_user_query
+from openjiuwen.harness.tools.todo_resume import is_resume_user_query
 
 from jiuwenclaw.agentserver.deep_agent.interrupt_resume_helpers import (
     load_session_todo_items,
@@ -117,23 +117,29 @@ async def prepare_stale_todo_cleanup_for_request(
         # 续跑消息会在上面就返回 False，不会走到本轮清理。
 
         todos = await load_session_todo_items(modify_tool, session_id)
-        if not has_active_todo_items(todos):
+        if not todos:
             await post_agent_execute_for_session(session)
             return False
 
         todo_json_str = _serialize_todos_for_log(todos)
         logger.info(
-            "[JiuWenClaw] 因旧任务已停止、新消息不是续跑，取消上一轮的 active todo; "
+            "[JiuWenClaw] 因旧任务已停止、新消息不是续跑，清理上一轮的残留 todo; "
             "session_id=%s request_id=%s todo.json=%s",
             session_id,
             getattr(request, "request_id", ""),
             todo_json_str,
         )
 
+        # cancel active todo（如果有）；即使只有 completed/cancelled 残留，
+        # 也要 mark skip 让广播层过滤旧 todo，防止跨请求串台。
         cancelled = await cancel_pending_todos_on_tool(modify_tool, session_id)
-        if not cancelled:
-            await post_agent_execute_for_session(session)
-            return False
+        logger.debug(
+            "[JiuWenClaw] cancel_pending_todos_on_tool returned %s, "
+            "session_id=%s request_id=%s",
+            cancelled,
+            session_id,
+            getattr(request, "request_id", ""),
+        )
 
         set_todo_resume_snapshot_pending(session, pending=False)
         mark_skip_invoke_task_update_sync(session)
