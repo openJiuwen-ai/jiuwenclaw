@@ -16,6 +16,7 @@ Manifest variants supported:
 from __future__ import annotations
 
 import logging
+import os
 import platform
 import re
 import shlex
@@ -131,7 +132,7 @@ def _safe_split_command(command: str) -> list[str]:
     return parts
 
 
-def default_runner(command: str, timeout: float = 120.0) -> CommandResult:
+def default_runner(command: str, timeout: float = 120.0, env: dict[str, str] | None = None) -> CommandResult:
     try:
         proc = subprocess.run(  # noqa: S603 - command from trusted cli.json
             _safe_split_command(command),
@@ -141,6 +142,7 @@ def default_runner(command: str, timeout: float = 120.0) -> CommandResult:
             encoding="utf-8",
             errors="replace",
             timeout=timeout,
+            env=env,
         )
         return CommandResult(
             command=command,
@@ -366,9 +368,62 @@ class CliDriver:
     ) -> None:
         self.name = str(name or "").strip()
         self.manifest = manifest or load_cli_manifest(self.name) or CliManifest()
-        self._runner = runner or (lambda cmd: default_runner(cmd))
+        # Credential-derived env to inject into spawned CLI subprocesses. Some
+        # CLI MCPs (gitcode) authenticate via an env-var token the CLI's own
+        # ``auth status`` reads (gitcode reads GITCODE_TOKEN/GC_TOKEN from env)
+        # — NOT via OAuth. token-schema.json declares the required env keys;
+        # CliDriver merges the stored tokens into the subprocess env so
+        # ``status``/``install`` run with the token visible, and the absent
+        # ``auth login`` step never needs to run. None when the MCP has no
+        # token-schema (feishu/dingtalk/wecom — pure OAuth) → env inherits the
+        # parent process unchanged, so OAuth CLIs are unaffected.
+        self._cred_env = self._build_cred_env()
+        if runner is not None:
+            # Test path: caller injects its own runner; don't touch env (tests
+            # are pure logic and don't stand up a real workspace/credential store).
+            self._runner = runner
+        else:
+            cred_env = self._cred_env
+            self._runner = (
+                (lambda cmd: default_runner(cmd, env=cred_env))
+                if cred_env is not None
+                else (lambda cmd: default_runner(cmd))
+            )
         # Optional injector for authWaitForExit start (tests); default uses real Popen.
         self._proc_runner = proc_runner
+
+    def _build_cred_env(self) -> dict[str, str] | None:
+        """Merge this MCP's CredentialStore tokens (keyed by its token-schema
+        required fields) onto os.environ for the CLI subprocess.
+
+        Returns None when the MCP has no token-schema (no env injection —
+        OAuth CLIs) or the store is unreadable; None means "inherit parent
+        env", the pre-existing behavior.
+        """
+        if not self.name:
+            return None
+        try:
+            from jiuwenswarm.server.runtime.mcp.credential import (
+                CredentialStore,
+                required_tokens_from_schema,
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        keys = required_tokens_from_schema(self.name)
+        if not keys:
+            return None
+        try:
+            stored = CredentialStore().get_all(self.name)
+        except Exception:  # noqa: BLE001
+            return None
+        if not stored:
+            return None
+        env = dict(os.environ)
+        for k in keys:
+            v = stored.get(k)
+            if v is not None:
+                env[k] = str(v)
+        return env
 
     def install(self) -> InstallResult:
         m = self.manifest
@@ -490,6 +545,7 @@ class CliDriver:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                env=self._cred_env,
             )
         except (OSError, ValueError) as exc:
             return AuthStepResult(

@@ -768,6 +768,31 @@ def connect_mcp(name: str, *, install_only: bool = False) -> dict[str, Any]:
         result = dict(entry)
         result["installed_skills"] = skills
         return result
+    # CLI form: some CLI MCPs (gitcode) authenticate via an environment-
+    # variable token read by the CLI's own ``auth status`` (gitcode reads
+    # GITCODE_TOKEN/GC_TOKEN from env) — NOT via the OAuth auth steps in
+    # cli.json. For those, token-schema.json declares the required env keys;
+    # surface a credentials_required prompt BEFORE install/auth so the user
+    # provisions the token first. 
+    if not install_only:
+        from jiuwenswarm.server.runtime.mcp.credential import (
+            CredentialStore,
+            required_tokens_from_schema,
+        )
+        schema_tokens = required_tokens_from_schema(n)
+        if schema_tokens:
+            store = CredentialStore()
+            stored = set(store.get_all(n).keys()) if n else set()
+            missing = [k for k in schema_tokens if k not in stored]
+            if missing:
+                from jiuwenswarm.server.runtime.mcp.credential import (
+                    build_credentials_prompt,
+                )
+                return {
+                    "name": n,
+                    "integration_type": "cli",
+                    **build_credentials_prompt(n, missing),
+                }
     return _connect_cli(n, 0, install_only=install_only)
 
 
