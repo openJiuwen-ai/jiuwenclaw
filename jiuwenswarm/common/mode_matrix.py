@@ -43,22 +43,86 @@ MODE_ALIASES: dict[str, str] = {
     "team.plan": TEAM_PLAN_NORMAL_MODE,
 }
 
+# ── 新三段命名：8 种 canonical 模式 ──
+# <角色>.<环境>.<状态>：work/code 已折叠进 mode 串，不再依赖 work_mode 组合。
+# 旧串经 :func:`deprecate_mode` 静默转译到这里，详见模式重构 P1。
+NEW_AGENT_WORK_NORMAL = "agent.work.normal"
+NEW_AGENT_WORK_PLAN = "agent.work.plan"
+NEW_AGENT_CODE_NORMAL = "agent.code.normal"
+NEW_AGENT_CODE_PLAN = "agent.code.plan"
+NEW_TEAM_WORK_NORMAL = "team.work.normal"
+NEW_TEAM_WORK_PLAN = "team.work.plan"
+NEW_TEAM_CODE_NORMAL = "team.code.normal"
+NEW_TEAM_CODE_PLAN = "team.code.plan"
+
+NEW_CANONICAL_MODES: frozenset[str] = frozenset(
+    {
+        NEW_AGENT_WORK_NORMAL,
+        NEW_AGENT_WORK_PLAN,
+        NEW_AGENT_CODE_NORMAL,
+        NEW_AGENT_CODE_PLAN,
+        NEW_TEAM_WORK_NORMAL,
+        NEW_TEAM_WORK_PLAN,
+        NEW_TEAM_CODE_NORMAL,
+        NEW_TEAM_CODE_PLAN,
+    }
+)
+
+# 旧 canonical → 新 canonical，静默转译（决策 3：不提示用户）。
+# 仅给持久化层把旧串升级用，路由谓词一律走 :func:`is_*` 集合判断，方向不能反。
+DEPRECATION_MAP: dict[str, str] = {
+    "agent": NEW_AGENT_WORK_NORMAL,
+    "agent.plan": NEW_AGENT_WORK_PLAN,
+    "agent.fast": NEW_AGENT_WORK_NORMAL,  # 历史已归一 agent
+    "code.normal": NEW_AGENT_CODE_NORMAL,
+    "code.plan": NEW_AGENT_CODE_PLAN,
+    "code.team": NEW_TEAM_CODE_NORMAL,
+    "team": NEW_TEAM_WORK_NORMAL,
+    TEAM_PLAN_NORMAL_MODE: NEW_TEAM_WORK_PLAN,  # team.plan.normal
+    TEAM_PLAN_CODE_MODE: NEW_TEAM_CODE_PLAN,  # team.plan.code
+}
+
 # 所有表示"集群"的 canonical 模式。
+# P1.5：新 team.* 四个成员就地扩展进来，旧成员保留（现有用例只断言旧串）。
 TEAM_CANONICAL_MODES: frozenset[str] = frozenset(
-    {"team", TEAM_PLAN_NORMAL_MODE, "code.team", TEAM_PLAN_CODE_MODE}
+    {
+        "team",
+        TEAM_PLAN_NORMAL_MODE,
+        "code.team",
+        TEAM_PLAN_CODE_MODE,
+        NEW_TEAM_WORK_NORMAL,
+        NEW_TEAM_WORK_PLAN,
+        NEW_TEAM_CODE_NORMAL,
+        NEW_TEAM_CODE_PLAN,
+    }
 )
 
 # 所有表示"正处于 plan"的 canonical 模式。
+# P1.5：新 4 个 plan 变体就地扩展进来，旧成员保留。
 PLAN_CANONICAL_MODES: frozenset[str] = frozenset(
-    {"agent.plan", "code.plan", TEAM_PLAN_NORMAL_MODE, TEAM_PLAN_CODE_MODE}
+    {
+        "agent.plan",
+        "code.plan",
+        TEAM_PLAN_NORMAL_MODE,
+        TEAM_PLAN_CODE_MODE,
+        NEW_AGENT_WORK_PLAN,
+        NEW_AGENT_CODE_PLAN,
+        NEW_TEAM_WORK_PLAN,
+        NEW_TEAM_CODE_PLAN,
+    }
 )
 
 # canonical plan 模式退出 plan 后应回到的普通模式。
+# P1.5：新 plan 变体的退出映射就地扩展进来，旧映射保留。
 _PLAN_EXIT_MODES: dict[str, str] = {
     "agent.plan": "agent",
     "code.plan": "code.normal",
     TEAM_PLAN_NORMAL_MODE: "team",
     TEAM_PLAN_CODE_MODE: "code.team",
+    NEW_AGENT_WORK_PLAN: NEW_AGENT_WORK_NORMAL,
+    NEW_AGENT_CODE_PLAN: NEW_AGENT_CODE_NORMAL,
+    NEW_TEAM_WORK_PLAN: NEW_TEAM_WORK_NORMAL,
+    NEW_TEAM_CODE_PLAN: NEW_TEAM_CODE_NORMAL,
 }
 
 # (mode, work_mode) -> (manager_mode, sub_mode, canonical_mode)
@@ -147,20 +211,35 @@ def is_team_mode(canonical_mode: Any) -> bool:
 
 
 def is_team_plan_mode(mode: Any) -> bool:
-    """Return whether *mode* is either normal or code Team Plan."""
+    """Return whether *mode* is either normal or code Team Plan.
+
+    P1.5：新 ``team.work.plan`` / ``team.code.plan`` 就地扩展进集合，
+    旧成员保留——P4 rail 路由谓词（``code_rails.build_code_agent_mode``）
+    依赖此函数对新串返回 True，否则 team plan leader 分支被静默跳过。
+    """
     return canonicalize_mode_text(mode) in {
         TEAM_PLAN_NORMAL_MODE,
         TEAM_PLAN_CODE_MODE,
+        NEW_TEAM_WORK_PLAN,
+        NEW_TEAM_CODE_PLAN,
     }
 
 
 def is_code_profile_mode(mode: Any) -> bool:
-    """Return whether *mode* selects the code profile."""
+    """Return whether *mode* selects the code profile.
+
+    P1.5：新 ``agent.code.*`` / ``team.code.*`` 四个就地产 code profile 的变体
+    就地扩展进集合，旧成员保留。P4 rail 路由依赖此函数对新串返回 True。
+    """
     return canonicalize_mode_text(mode) in {
         "code.normal",
         "code.plan",
         "code.team",
         TEAM_PLAN_CODE_MODE,
+        NEW_AGENT_CODE_NORMAL,
+        NEW_AGENT_CODE_PLAN,
+        NEW_TEAM_CODE_NORMAL,
+        NEW_TEAM_CODE_PLAN,
     }
 
 
@@ -168,6 +247,39 @@ def base_mode_without_plan(canonical_mode: Any) -> str:
     """canonical plan 模式退出后应回到的普通模式。非 plan 模式原样返回。"""
     text = canonicalize_mode_text(canonical_mode)
     return _PLAN_EXIT_MODES.get(text, text)
+
+
+def is_new_canonical_mode(mode: Any) -> bool:
+    """是否为新三段命名 canonical（``<角色>.<环境>.<状态>``）。"""
+    return canonicalize_mode_text(mode) in NEW_CANONICAL_MODES
+
+
+def deprecate_mode(mode: Any) -> str:
+    """旧 canonical 静默映射到新 canonical；非旧串原样返回。
+
+    方向固定为旧→新，仅用于持久化层把旧串升级。路由谓词请直接走
+    :func:`is_team_mode` / :func:`is_plan_mode` 等集合判断——
+    P1.5 已把新串加进这些集合，不要在这里把新串降级回旧串。
+    """
+    text = canonicalize_mode_text(mode)
+    return DEPRECATION_MAP.get(text, text)
+
+
+def is_plan_mode_new(mode: Any) -> bool:
+    """新命名下是否 plan（第三段为 ``plan``）。
+
+    与 :func:`is_plan_mode` 的区别：仅认新三段命名串，旧串不在其中。
+    """
+    text = canonicalize_mode_text(mode)
+    return text in NEW_CANONICAL_MODES and text.endswith(".plan")
+
+
+def base_mode_without_plan_new(canonical_mode: Any) -> str:
+    """新命名 plan 退出后的 normal 变体。非新 plan 模式原样返回。"""
+    text = canonicalize_mode_text(canonical_mode)
+    if text in NEW_CANONICAL_MODES and text.endswith(".plan"):
+        return text.removesuffix(".plan") + ".normal"
+    return text
 
 
 def compose_web_mode(mode_text: str, work_mode: str) -> tuple[str, str | None, str] | None:
@@ -251,10 +363,24 @@ __all__ = [
     "TEAM_PLAN_NORMAL_MODE",
     "TEAM_CANONICAL_MODES",
     "WEB_COMPOSABLE_MODES",
+    "NEW_CANONICAL_MODES",
+    "DEPRECATION_MAP",
+    "NEW_AGENT_WORK_NORMAL",
+    "NEW_AGENT_WORK_PLAN",
+    "NEW_AGENT_CODE_NORMAL",
+    "NEW_AGENT_CODE_PLAN",
+    "NEW_TEAM_WORK_NORMAL",
+    "NEW_TEAM_WORK_PLAN",
+    "NEW_TEAM_CODE_NORMAL",
+    "NEW_TEAM_CODE_PLAN",
     "base_mode_without_plan",
+    "base_mode_without_plan_new",
     "canonicalize_mode_text",
     "compose_web_mode",
+    "deprecate_mode",
     "is_plan_mode",
+    "is_plan_mode_new",
+    "is_new_canonical_mode",
     "is_code_profile_mode",
     "is_team_plan_mode",
     "is_team_mode",

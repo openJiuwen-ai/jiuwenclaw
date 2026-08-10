@@ -4,8 +4,17 @@ import pytest
 
 from jiuwenswarm.common.mode_matrix import (
     base_mode_without_plan,
+    base_mode_without_plan_new,
+    deprecate_mode,
+    DEPRECATION_MAP,
+    is_code_profile_mode,
+    is_new_canonical_mode,
     is_plan_mode,
+    is_plan_mode_new,
     is_team_mode,
+    is_team_plan_mode,
+    NEW_AGENT_WORK_NORMAL,
+    NEW_CANONICAL_MODES,
     resolve_request_mode,
 )
 from jiuwenswarm.server.agent_ws_server import resolve_agent_request_mode
@@ -220,3 +229,209 @@ def test_team_modes_are_team_params(mode):
     from jiuwenswarm.server.utils.utils import is_team_params
 
     assert is_team_params({"mode": mode})
+
+
+# ── P1：新三段命名 canonical + 旧→新静默映射（纯加法）──────────────────────
+#
+# 五条兼容铁律：旧输入→新输出 / 新输入直通 / 未知值不动 / 持久化旧数据可读 / 写回不丢失。
+# 详见 PLAN_mode_refactor_phased.md P1 与「历史兼容性横切约束」。
+
+
+def test_deprecation_map_covers_all_legacy_canonical():
+    """铁律 1 前置：9 个旧 canonical 全部在 DEPRECATION_MAP 里。"""
+    legacy = {
+        "agent",
+        "agent.plan",
+        "agent.fast",
+        "code.normal",
+        "code.plan",
+        "code.team",
+        "team",
+        "team.plan.normal",
+        "team.plan.code",
+    }
+    assert legacy <= DEPRECATION_MAP.keys()
+
+
+@pytest.mark.parametrize(("old", "new"), sorted(DEPRECATION_MAP.items()))
+def test_deprecate_mode_silently_maps(old, new):
+    """铁律 1：旧输入 → 新输出，且目标是新 canonical。"""
+    assert deprecate_mode(old) == new
+    assert is_new_canonical_mode(new)
+
+
+@pytest.mark.parametrize("mode", sorted(NEW_CANONICAL_MODES))
+def test_new_mode_is_idempotent(mode):
+    """铁律 2：新输入直通，不被二次转译。"""
+    assert deprecate_mode(mode) == mode
+
+
+def test_unknown_mode_passes_through():
+    """铁律 3：未识别串原样返回，不破坏未知值。
+
+    注意空值/None 不在此列——``normalize_mode_text`` 既有行为把空值回落到
+    ``agent``，再经 ``DEPRECATION_MAP`` 映射成 ``agent.work.normal``。这是
+    归一化在映射之前的正确顺序，不是"未知值不动"的违反。
+    """
+    assert deprecate_mode("unknown_mode") == "unknown_mode"
+    assert deprecate_mode("custom.profile") == "custom.profile"
+
+
+def test_empty_and_none_normalize_before_deprecate():
+    """空值/None 经 normalize_mode_text 回落 agent，再映射成新 canonical。
+
+    钉住"归一化先于弃用映射"的既有顺序，避免有人改成空串原样返回破坏默认值语义。
+    """
+    assert deprecate_mode("") == NEW_AGENT_WORK_NORMAL
+    assert deprecate_mode(None) == NEW_AGENT_WORK_NORMAL
+
+
+@pytest.mark.parametrize(
+    ("mode", "plan"),
+    [
+        ("agent.work.normal", False),
+        ("agent.work.plan", True),
+        ("agent.code.normal", False),
+        ("agent.code.plan", True),
+        ("team.work.normal", False),
+        ("team.work.plan", True),
+        ("team.code.normal", False),
+        ("team.code.plan", True),
+    ],
+)
+def test_new_plan_detection(mode, plan):
+    """新命名下第三段为 plan 即 plan 模式。"""
+    assert is_plan_mode_new(mode) is plan
+
+
+def test_new_plan_exit():
+    """新命名 plan 退出后回到对应 normal 变体。"""
+    assert base_mode_without_plan_new("agent.work.plan") == "agent.work.normal"
+    assert base_mode_without_plan_new("team.code.plan") == "team.code.normal"
+    assert base_mode_without_plan_new("agent.code.plan") == "agent.code.normal"
+    assert base_mode_without_plan_new("team.work.plan") == "team.work.normal"
+
+
+def test_new_plan_exit_identity_for_non_plan():
+    """非新 plan 模式原样返回。"""
+    assert base_mode_without_plan_new("agent.work.normal") == "agent.work.normal"
+    assert base_mode_without_plan_new("agent") == "agent"
+    assert base_mode_without_plan_new("unknown") == "unknown"
+
+
+# ── P1.5：新串接入旧判断集合（现有用例只断言旧串，此处补新串断言）────────────
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        # 新串也必须是 team（P1.5 扩 TEAM_CANONICAL_MODES）
+        ("team.work.normal", True),
+        ("team.work.plan", True),
+        ("team.code.normal", True),
+        ("team.code.plan", True),
+        # 旧串仍在集合里（回归）
+        ("team", True),
+        ("team.plan.normal", True),
+        ("team.plan.code", True),
+        ("code.team", True),
+        # 非 team 新串
+        ("agent.work.normal", False),
+        ("agent.code.plan", False),
+    ],
+)
+def test_is_team_mode_covers_new_canonical(mode, expected):
+    assert is_team_mode(mode) is expected
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        # 新 plan 变体（P1.5 扩 PLAN_CANONICAL_MODES）
+        ("agent.work.plan", True),
+        ("agent.code.plan", True),
+        ("team.work.plan", True),
+        ("team.code.plan", True),
+        # 新 normal 变体非 plan
+        ("agent.work.normal", False),
+        ("agent.code.normal", False),
+        ("team.work.normal", False),
+        ("team.code.normal", False),
+        # 旧串仍在（回归）
+        ("agent.plan", True),
+        ("code.plan", True),
+        ("team.plan.normal", True),
+        ("agent", False),
+    ],
+)
+def test_is_plan_mode_covers_new_canonical(mode, expected):
+    assert is_plan_mode(mode) is expected
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        # P1.5 扩 is_team_plan_mode：新 team plan 变体返 True
+        ("team.work.plan", True),
+        ("team.code.plan", True),
+        # 旧 team plan 仍在
+        ("team.plan.normal", True),
+        ("team.plan.code", True),
+        # 非 team plan
+        ("agent.work.plan", False),
+        ("agent.code.plan", False),
+        ("team.work.normal", False),
+        ("team.code.normal", False),
+    ],
+)
+def test_is_team_plan_mode_covers_new_canonical(mode, expected):
+    """P4 rail 路由依赖：新 team plan 串必须返 True，否则 leader 分支被跳过。"""
+    assert is_team_plan_mode(mode) is expected
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        # P1.5 扩 is_code_profile_mode：新 code 变体返 True
+        ("agent.code.normal", True),
+        ("agent.code.plan", True),
+        ("team.code.normal", True),
+        ("team.code.plan", True),
+        # 旧 code 仍在
+        ("code.normal", True),
+        ("code.plan", True),
+        ("code.team", True),
+        ("team.plan.code", True),
+        # 非 code profile
+        ("agent.work.normal", False),
+        ("agent.work.plan", False),
+        ("team.work.normal", False),
+        ("team.work.plan", False),
+    ],
+)
+def test_is_code_profile_mode_covers_new_canonical(mode, expected):
+    """P4 rail 路由依赖：新 code 串必须返 True，否则 rail 分流错。"""
+    assert is_code_profile_mode(mode) is expected
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        # 新 plan 变体退出映射（P1.5 扩 _PLAN_EXIT_MODES）
+        ("agent.work.plan", "agent.work.normal"),
+        ("agent.code.plan", "agent.code.normal"),
+        ("team.work.plan", "team.work.normal"),
+        ("team.code.plan", "team.code.normal"),
+        # 旧映射仍在（回归）
+        ("agent.plan", "agent"),
+        ("code.plan", "code.normal"),
+        ("team.plan.normal", "team"),
+        ("team.plan.code", "code.team"),
+        # 非 plan 原样返回
+        ("agent.work.normal", "agent.work.normal"),
+        ("agent", "agent"),
+    ],
+)
+def test_base_mode_without_plan_covers_new_canonical(mode, expected):
+    """base_mode_without_plan 查 _PLAN_EXIT_MODES，P1.5 扩后对新串自动生效。"""
+    assert base_mode_without_plan(mode) == expected
