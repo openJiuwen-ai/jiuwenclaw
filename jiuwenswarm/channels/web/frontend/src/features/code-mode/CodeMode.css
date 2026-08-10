@@ -744,6 +744,18 @@ button.code-environment__row:disabled {
   color: var(--color-feedback-danger);
 }
 
+.code-review__discarded-status {
+  display: inline-flex;
+  min-height: 20px;
+  align-items: center;
+  margin-left: 3px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--color-feedback-warning-subtle);
+  color: var(--color-feedback-warning);
+  line-height: 18px;
+}
+
 .code-review__icon-button {
   display: inline-flex;
   width: 30px;

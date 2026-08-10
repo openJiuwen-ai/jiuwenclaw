@@ -5,6 +5,7 @@ import { gitWatchClient } from './gitWatchClient';
 import { latestTurnDiffKeyForMessages, turnChangeErrorMessage, turnDiffKey, updateTurnChangeStatus } from './turnChangeState';
 import type { GitDiscardTurnChangesResult, GitRedoTurnChangesResult, GitTurnChangeAction, GitTurnDiff } from './types';
 import { bindTurnDiffsToMessages } from './codeTurnDiffBinding';
+import { emitCodeTurnChange } from './codeTurnChangeEvents';
 export { bindTurnDiffsToMessages } from './codeTurnDiffBinding';
 
 interface UseCodeTurnDiffHistoryOptions {
@@ -106,7 +107,15 @@ export function useCodeTurnDiffHistory({ project, sessionId, isProcessing, messa
                 timeoutMs: 60_000,
               });
         if (operationSequenceRef.current !== operationSequence) return;
-        setTurns(previous => updateTurnChangeStatus(previous, result, action === 'discard' ? 'discarded' : 'completed'));
+        const nextStatus = action === 'discard' ? 'discarded' : 'completed';
+        setTurns(previous => updateTurnChangeStatus(previous, result, nextStatus));
+        emitCodeTurnChange({
+          projectId,
+          sessionId,
+          changeSetId: result.change_set_id,
+          turnIndex: result.turn_index,
+          status: nextStatus,
+        });
         setTurnChangeNotice(action === 'discard' ? '已撤销修改' : '已重新应用修改');
         void loadHistory();
       } catch (nextError) {
