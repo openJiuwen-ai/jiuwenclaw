@@ -32,7 +32,11 @@ if TYPE_CHECKING:
     from jiuwenswarm.server.runtime.agent_config_service import AgentDefinition
 
 import yaml
-from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig, ContextEngineConfig
+from openjiuwen.core.context_engine.schema.config import (
+    CompressionRecallConfig,
+    ContextEngineConfig,
+)
+from openjiuwen.core.context_engine.token.tokenizer_spec import TokenizerSpec
 from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
 from openjiuwen.core.foundation.llm.utils.provider_utils import is_openai_account_provider
@@ -280,7 +284,10 @@ from jiuwenswarm.server.runtime.agent_adapter.evolution_slash import (
     EvolutionSlashContext,
     handle_evolution_slash_command,
 )
-from jiuwenswarm.server.utils.stream_utils import parse_ask_user_question_payload
+from jiuwenswarm.server.utils.stream_utils import (
+    normalize_context_usage_payload,
+    parse_ask_user_question_payload,
+)
 from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
     apply_audio_model_config_from_yaml,
     apply_image_gen_model_config_from_yaml,
@@ -881,8 +888,29 @@ def parse_int(value: Any, default: int) -> int:
         return default
 
 
+def _parse_bool(value: Any, default: bool = False) -> bool:
+    """Parse persisted YAML/API boolean values without truthiness surprises."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if normalized in {"0", "false", "no", "off", "disabled"}:
+        return False
+    return default
+
+
 def _deep_agent_context_engine_config(
     react_cfg: dict[str, Any] | None,
+    full_config: dict[str, Any] | None = None,
+    model_name: str | None = None,
+    model: Any = None,
+    *,
+    config_base: dict[str, Any] | None = None,
 ) -> ContextEngineConfig:
     """Build the agent-core Context Engine configuration.
 
@@ -901,12 +929,12 @@ def _deep_agent_context_engine_config(
     model_context_windows = cec.get("model_context_window_tokens")
     if isinstance(model_context_windows, dict):
         valid_model_context_windows = {}
-        for model_name, raw_window in model_context_windows.items():
-            if not isinstance(model_name, str):
+        for configured_model_name, raw_window in model_context_windows.items():
+            if not isinstance(configured_model_name, str):
                 continue
             parsed_window = parse_positive_int(raw_window)
             if parsed_window is not None:
-                valid_model_context_windows[model_name] = parsed_window
+                valid_model_context_windows[configured_model_name] = parsed_window
         model_context_windows = valid_model_context_windows
         if not model_context_windows:
             model_context_windows = None
@@ -914,6 +942,77 @@ def _deep_agent_context_engine_config(
         model_context_windows = None
     recall = cec.get("compression_recall_config")
     recall = recall if isinstance(recall, dict) else {}
+    tokenizer_enabled = _parse_bool(cec.get("enable_tiktoken_counter"), False)
+    raw_registry = cec.get("tokenizer_registry")
+    tokenizer_registry: list[TokenizerSpec] = []
+    if isinstance(raw_registry, list):
+        for raw_spec in raw_registry:
+            try:
+                tokenizer_registry.append(
+                    raw_spec
+                    if isinstance(raw_spec, TokenizerSpec)
+                    else TokenizerSpec.model_validate(raw_spec)
+                )
+            except Exception as exc:  # noqa: BLE001 - bad optional metadata must not stop startup
+                logger.warning("[JiuWenSwarmDeepAdapter] invalid tokenizer registry entry: %s", exc)
+
+    # Model profiles may carry their tokenizer declaration next to
+    # model_client_config. Copy those declarations into the core registry so
+    # the context engine can select the same artifact that the AgentServer
+    # prewarmed, including for non-OpenAI providers.
+    effective_config = config_base if isinstance(config_base, dict) else full_config
+    if isinstance(effective_config, dict):
+        try:
+            from jiuwenswarm.server.runtime.tokenizer_service import (
+                configured_tokenizer_profiles,
+            )
+
+            known_keys = {
+                (spec.provider.strip().lower(), spec.model.strip().lower())
+                for spec in tokenizer_registry
+            }
+            for profile in configured_tokenizer_profiles(effective_config):
+                if not profile.spec:
+                    continue
+                try:
+                    spec = TokenizerSpec.model_validate(profile.spec)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] invalid model tokenizer spec for %s: %s",
+                        profile.model,
+                        exc,
+                    )
+                    continue
+                key = (spec.provider.strip().lower(), spec.model.strip().lower())
+                if key not in known_keys:
+                    tokenizer_registry.append(spec)
+                    known_keys.add(key)
+        except Exception as exc:  # noqa: BLE001 - optional warm-up metadata must be fail-open
+            logger.debug("[JiuWenSwarmDeepAdapter] tokenizer registry enrichment skipped: %s", exc)
+
+    raw_spec = cec.get("tokenizer_spec")
+    tokenizer_spec = None
+    if raw_spec is not None:
+        try:
+            if isinstance(raw_spec, str):
+                raw_spec = {"id": raw_spec}
+            tokenizer_spec = (
+                raw_spec
+                if isinstance(raw_spec, TokenizerSpec)
+                else TokenizerSpec.model_validate(raw_spec)
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[JiuWenSwarmDeepAdapter] invalid tokenizer_spec: %s", exc)
+
+    tokenizer_cache_dir = None
+    try:
+        from jiuwenswarm.server.runtime.tokenizer_service import resolve_tokenizer_cache_dir
+
+        cache_config = effective_config if isinstance(effective_config, dict) else {"react": react_cfg}
+        tokenizer_cache_dir = str(resolve_tokenizer_cache_dir(cache_config))
+    except Exception:  # noqa: BLE001
+        tokenizer_cache_dir = cec.get("tokenizer_cache_dir") or None
+
     defaults = ReActAgentConfig().context_engine_config
     supported = {
         key: value
@@ -927,16 +1026,62 @@ def _deep_agent_context_engine_config(
     # 压缩召回：压缩时归档原始消息，供模型按需召回。
     if "compression_recall_config" in ContextEngineConfig.model_fields:
         supported["compression_recall_config"] = CompressionRecallConfig(
-            enabled=bool(recall.get("enabled", False)),
+            enabled=_parse_bool(recall.get("enabled"), False),
             chunk_size_tokens=parse_int(recall.get("chunk_size_tokens"), 3000),
             chunk_overlap_tokens=parse_int(recall.get("chunk_overlap_tokens"), 300),
         )
-    return ContextEngineConfig.model_validate(
-        {
-            **defaults.model_dump(),
-            **supported,
-        }
+    # Preserve tolerant handling for malformed values from YAML/API payloads.
+    supported["enable_reload"] = _parse_bool(
+        cec.get("enable_reload"), bool(getattr(defaults, "enable_reload", False))
     )
+    supported["enable_tiktoken_counter"] = tokenizer_enabled
+    supported["tokenizer_spec"] = tokenizer_spec
+    supported["tokenizer_registry"] = tokenizer_registry
+    supported["tokenizer_cache_dir"] = tokenizer_cache_dir
+    # Context creation is deliberately read-only. TokenizerService owns the
+    # only download-capable warm-up path before this config is consumed.
+    supported["enable_tokenizer_download"] = False
+    supported["tokenizer_offline"] = True
+    supported["enable_openrouter_model_context_window_tokens"] = _parse_bool(
+        cec.get("enable_openrouter_model_context_window_tokens"),
+        bool(getattr(defaults, "enable_openrouter_model_context_window_tokens", False)),
+    )
+    supported["enable_context_debug"] = _parse_bool(
+        cec.get("enable_context_debug"), bool(getattr(defaults, "enable_context_debug", False))
+    )
+    if cec.get("context_debug_dir") not in (None, ""):
+        supported["context_debug_dir"] = cec.get("context_debug_dir")
+
+    # Prefer the selected Model object so duplicate AgentOS entries with the
+    # same model name cannot borrow another entry's max_tokens value.
+    selected_model_name = model_name or ""
+    if not selected_model_name and model is not None:
+        selected_model_name = str(
+            getattr(getattr(model, "model_config", None), "model_name", "")
+            or getattr(getattr(model, "model_client_config", None), "model_name", "")
+            or ""
+        )
+    agentos_cw: int | None = None
+    if model is not None:
+        agentos_cw = parse_int(getattr(model, "_agentos_ctx_window", None), None)
+    elif isinstance(effective_config, dict) and selected_model_name:
+        agentos_raw = (effective_config.get("models") or {}).get("agentos")
+        agentos_list = agentos_raw if isinstance(agentos_raw, list) else []
+        for block in agentos_list:
+            if not isinstance(block, dict):
+                continue
+            model_client_config = block.get("model_client_config") or {}
+            if (
+                isinstance(model_client_config, dict)
+                and model_client_config.get("model_name") == selected_model_name
+            ):
+                model_config = block.get("model_config_obj") or {}
+                agentos_cw = parse_int(model_config.get("max_tokens"), None)
+                break
+    if agentos_cw is not None:
+        supported["context_window_tokens"] = agentos_cw
+
+    return ContextEngineConfig.model_validate({**defaults.model_dump(), **supported})
 
 
 def _deep_agent_kv_cache_affinity_config(
@@ -7039,6 +7184,10 @@ class JiuWenSwarmDeepAdapter:
             ),
             context_engine_config=_deep_agent_context_engine_config(
                 config,
+                full_config=config_base,
+                model_name=getattr(getattr(model, "model_config", None), "model_name", ""),
+                model=model,
+                config_base=config_base,
             ),
             kv_cache_affinity_config=_deep_agent_kv_cache_affinity_config(config, model),
             enable_task_loop=self._resolve_enable_task_loop(config, config_base),
@@ -7681,6 +7830,10 @@ class JiuWenSwarmDeepAdapter:
             **common_kwargs,
             context_engine_config=_deep_agent_context_engine_config(
                 config,
+                full_config=config_base,
+                model_name=getattr(getattr(model, "model_config", None), "model_name", ""),
+                model=model,
+                config_base=config_base,
             ),
             kv_cache_affinity_config=_deep_agent_kv_cache_affinity_config(config, model),
             vision_model_config=self._vision_model_config,
@@ -13203,17 +13356,8 @@ class JiuWenSwarmDeepAdapter:
                     return {"event_type": "chat.subagent_activity", **projection}
 
                 if chunk_type == "context.usage":
-                    if isinstance(payload, dict):
-                        usage_payload = {
-                            "event_type": "context.usage",
-                            "rate": payload.get("rate", 0),
-                            "context_max": payload.get("context_max") or 0,
-                            "tokens_used": payload.get("tokens_used") or 0,
-                        }
-                        for key in ("role", "member_name"):
-                            value = payload.get(key)
-                            if value is not None:
-                                usage_payload[key] = value
+                    usage_payload = normalize_context_usage_payload(payload)
+                    if usage_payload is not None:
                         return usage_payload
                     return {"event_type": "context.usage", "rate": 0}
 

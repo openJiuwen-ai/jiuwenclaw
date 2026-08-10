@@ -1465,6 +1465,17 @@ class WebChannel(BaseWsChannel):
                 error=f"unknown method: {method}", code="METHOD_NOT_FOUND",
             )
 
+    @staticmethod
+    def _log_frontend_context_usage(frame: dict[str, Any]) -> None:
+        """Record the final context usage frame delivered to the Web client."""
+        if frame.get("event") != "context.usage":
+            return
+        try:
+            serialized = json.dumps(frame, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError):
+            serialized = repr(frame)
+        logger.info("[WebChannel][frontend][context.usage] %s", serialized)
+
     async def _broadcast_to(self, frame: dict[str, Any], clients: set[Any]) -> None:
         """向指定 clients 集合广播帧（走 per-ws writer，非阻塞入队）.
 
@@ -1472,6 +1483,10 @@ class WebChannel(BaseWsChannel):
         """
         if not clients:
             return
+        # context.usage 是发给前端的完整上下文 Token 使用信息。它不写入
+        # 会话 history，因此在真正进入 WebSocket writer 前记录最终帧，便于
+        # 核对前端实际收到的 context_window、parts 及兼容别名。
+        self._log_frontend_context_usage(frame)
         for client in clients:
             self._enqueue_send(client, frame)
 

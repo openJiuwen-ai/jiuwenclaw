@@ -128,6 +128,22 @@ async def test_context_usage_keeps_zero_input_tokens_instead_of_falling_back(mon
 
 
 @pytest.mark.asyncio
+async def test_context_usage_rail_does_not_duplicate_core_snapshot():
+    session = _FakeSession()
+    ctx = SimpleNamespace(
+        session=session,
+        context=SimpleNamespace(),
+        context_usage_report=SimpleNamespace(parts={"tools": {"tokens": 1}}),
+        agent=None,
+        inputs=SimpleNamespace(response=None),
+    )
+
+    await _TestRail().after_model_call(ctx)
+
+    assert session.outputs == []
+
+
+@pytest.mark.asyncio
 async def test_context_usage_keeps_runtime_context_limit_fallback(monkeypatch):
     captured_kwargs = {}
 

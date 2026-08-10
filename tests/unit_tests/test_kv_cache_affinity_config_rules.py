@@ -92,6 +92,26 @@ def test_runtime_policy_preserves_ascend_affinity() -> None:
     assert result.enable_kv_cache_release is False
 
 
+def test_model_provider_prefers_original_provider_after_transport_normalization() -> None:
+    model = SimpleNamespace(
+        model_client_config=SimpleNamespace(
+            client_provider="OpenAI",
+            legacy_client_provider="DeepSeek",
+        )
+    )
+
+    assert model_provider(model) == "DeepSeek"
+
+
+def test_default_model_provider_prefers_original_provider_after_normalization() -> None:
+    config = _config("OpenAI")
+    config["models"]["defaults"][0]["model_client_config"][
+        "legacy_client_provider"
+    ] = "DeepSeek"
+
+    assert config_module.get_default_model_provider(config) == "DeepSeek"
+
+
 def test_runtime_policy_fails_closed_for_other_provider() -> None:
     result = build_kv_cache_affinity_config(
         _config("OpenAI", release=True)["react"],

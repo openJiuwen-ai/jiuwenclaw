@@ -7,6 +7,63 @@ from __future__ import annotations
 from typing import Any
 
 
+def normalize_context_usage_payload(payload: Any) -> dict[str, Any] | None:
+    """Keep the complete Core context-usage snapshot on the wire.
+
+    Newer ``agent-core`` versions send a ``ContextUsageSnapshot`` containing
+    ``context_window`` and per-category ``parts``.  Older Swarm code reduced
+    that payload to three legacy fields, which made the category breakdown
+    disappear before it reached the Web channel.  Preserve every field and
+    only add the legacy aliases still consumed by the existing frontend.
+    """
+    if hasattr(payload, "model_dump"):
+        try:
+            payload = payload.model_dump(mode="json")
+        except Exception:
+            payload = payload.model_dump()
+    if not isinstance(payload, dict):
+        return None
+
+    usage_payload = _serialize_chunk_recursive(dict(payload))
+    if not isinstance(usage_payload, dict):
+        return None
+
+    usage_payload["event_type"] = "context.usage"
+    context_window = usage_payload.get("context_window")
+    if isinstance(context_window, dict):
+        # Compatibility aliases: the frontend's summary card still reads
+        # these names while the full category breakdown is carried in parts.
+        if usage_payload.get("rate") is None:
+            occupancy_rate = context_window.get("occupancy_rate")
+            # Core protocol percentages are ratios in [0, 1], while the
+            # legacy frontend alias is displayed as a percentage in [0, 100].
+            usage_payload["rate"] = (
+                occupancy_rate * 100
+                if isinstance(occupancy_rate, (int, float))
+                and not isinstance(occupancy_rate, bool)
+                and 0 <= occupancy_rate <= 1
+                else occupancy_rate or 0
+            )
+        if usage_payload.get("context_max") is None:
+            usage_payload["context_max"] = context_window.get("limit_tokens") or 0
+        if usage_payload.get("tokens_used") is None:
+            usage_payload["tokens_used"] = context_window.get("input_tokens") or 0
+    else:
+        for key in ("rate", "context_max", "tokens_used"):
+            if usage_payload.get(key) is None:
+                usage_payload[key] = 0
+
+    # The Core snapshot exposes the token-weighted session average as a
+    # top-level scalar.  Backfill it for older Core payloads that only have
+    # the nested aggregate, keeping the frontend protocol version-tolerant.
+    if usage_payload.get("session_kv_cache_hit_rate") is None:
+        kv_cache = usage_payload.get("kv_cache")
+        session_usage = kv_cache.get("session") if isinstance(kv_cache, dict) else None
+        if isinstance(session_usage, dict):
+            usage_payload["session_kv_cache_hit_rate"] = session_usage.get("weighted_hit_rate")
+    return usage_payload
+
+
 def parse_stream_chunk(chunk: Any, *, _has_streamed_content: bool = False) -> dict[str, Any] | None:
     """Parse agent output chunk to frontend-consumable payload dict.
 
@@ -118,6 +175,10 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
         return JiuWenSwarmDeepAdapter.parse_stream_chunk(chunk)
 
     if isinstance(chunk_type, str) and "." in chunk_type:
+        if chunk_type == "context.usage":
+            usage_payload = normalize_context_usage_payload(payload)
+            if usage_payload is not None:
+                return usage_payload
         if chunk_type == "context.compression_state":
             if hasattr(payload, "model_dump"):
                 try:
@@ -330,20 +391,6 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
             else []
         )
         return {"event_type": "todo.updated", "todos": todos}
-
-    if chunk_type == "context.usage":
-        if isinstance(payload, dict):
-            usage_payload = {
-                "event_type": "context.usage",
-                "rate": payload.get("rate", 0),
-                "context_max": payload.get("context_max") or 0,
-                "tokens_used": payload.get("tokens_used") or 0,
-            }
-            for key in ("role", "member_name"):
-                value = payload.get(key)
-                if value is not None:
-                    usage_payload[key] = value
-            return usage_payload
 
     if chunk_type == "chat.retract":
         if isinstance(payload, dict):

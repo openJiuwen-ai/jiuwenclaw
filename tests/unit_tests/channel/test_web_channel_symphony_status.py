@@ -1,5 +1,6 @@
 import asyncio
 import json
+from unittest.mock import patch
 
 import pytest
 
@@ -11,6 +12,50 @@ from jiuwenswarm.gateway.channel_manager.web.web_connect import (
 )
 from jiuwenswarm.gateway.routing.keys import RoutingKey
 from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
+
+
+def test_web_channel_logs_frontend_context_usage_payload():
+    channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+
+    frame = {
+        "type": "event",
+        "event": "context.usage",
+        "payload": {
+            "event_type": "context.usage",
+            "session_id": "sess-context",
+            "rate": 12.5,
+            "context_max": 200000,
+            "tokens_used": 25000,
+            "parts": {
+                "system_prompt": {
+                    "tokens": 10000,
+                    "percentage_of_window": 5.0,
+                },
+                "tools": {
+                    "tokens": 15000,
+                    "percentage_of_window": 7.5,
+                },
+            },
+            "kv_cache": {
+                "request": {"cache_read_tokens": 15000, "hit_rate": 0.75},
+                "session": {"calls_observed": 1, "weighted_hit_rate": 0.75},
+            },
+        },
+    }
+
+    with patch("jiuwenswarm.gateway.channel_manager.web.web_connect.logger.info") as log_info:
+        channel._log_frontend_context_usage(frame)
+
+    assert log_info.call_count == 1
+    message = log_info.call_args.args[1]
+    assert log_info.call_args.args[0] == "[WebChannel][frontend][context.usage] %s"
+    assert '"rate":12.5' in message
+    assert '"context_max":200000' in message
+    assert '"tokens_used":25000' in message
+    assert '"system_prompt":{"tokens":10000,"percentage_of_window":5.0}' in message
+    assert '"tools":{"tokens":15000,"percentage_of_window":7.5}' in message
+    assert '"cache_read_tokens":15000' in message
+    assert '"weighted_hit_rate":0.75' in message
 
 
 class _FakeClient:
