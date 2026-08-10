@@ -409,6 +409,7 @@ from jiuwenclaw.agentserver.stream_utils import propagate_stream_source_id, tool
 from jiuwenclaw.agentserver.extensions import get_rail_manager
 from jiuwenclaw.gateway.cron.models import CronTargetChannel
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
+from jiuwenclaw.schema.message import ReqMethod
 from jiuwenclaw.utils import (
     deep_merge_dicts,
     get_agent_evolution_trajectories_dir,
@@ -535,6 +536,7 @@ class _RuntimeConfigParams:
     request_system_prompt: str | None = None
     request_identify: str | None = None
     request_soul: str | None = None
+    sync_code_submode: bool = True
 
     @classmethod
     def _read_param_str(cls, params: Any, *keys: str) -> str | None:
@@ -556,6 +558,11 @@ class _RuntimeConfigParams:
     @classmethod
     def from_agent_request(cls, request: AgentRequest, mode: str) -> Self:
         params = request.params if isinstance(request.params, dict) else {}
+        is_interrupt_resume = (
+            request.req_method == ReqMethod.CHAT_RESUME
+            or bool(params.get("answers"))
+            or isinstance(params.get("query"), InteractiveInput)
+        )
         return cls(
             session_id=request.session_id,
             mode=mode,
@@ -567,6 +574,10 @@ class _RuntimeConfigParams:
                 cls._read_param_str(params, "identify", "identity", "IDENTITY"),
             ),
             request_soul=normalize_soul_override(cls._read_param_str(params, "soul", "SOUL")),
+            # A resume continues the session state that the interrupted tool
+            # mutated.  Replaying the request's entry mode here would undo a
+            # dynamic switch_mode(plan/auto) before the tool can continue.
+            sync_code_submode=not is_interrupt_resume,
         )
 
 
@@ -3519,6 +3530,7 @@ class JiuWenClawDeepAdapter:
             mode: Agent mode (agent.plan, agent.fast, code)
             extra_skill_dir: Optional extra skill directory from extension hook
         """
+        mode = self._normalize_rail_mode(mode)
 
         @dataclass
         class _RailBuildInfo:
@@ -3538,7 +3550,6 @@ class JiuWenClawDeepAdapter:
             _RailBuildInfo("_task_execution_rail", self._build_task_execution_rail),
             _RailBuildInfo("_context_overflow_recovery_rail", self._build_context_overflow_recovery_rail),
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
-            _RailBuildInfo("_task_planning_rail", self._build_task_planning_rail, {"config": config_base}),
             _RailBuildInfo("_security_rail", self._build_security_rail),
             _RailBuildInfo("_heartbeat_rail", self._build_heartbeat_rail),
             _RailBuildInfo("_avatar_rail", self._build_avatar_rail),
@@ -3554,6 +3565,15 @@ class JiuWenClawDeepAdapter:
             _RailBuildInfo("_disabled_tools_rail", self._build_disabled_tools_rail, {"config": config}),
             _RailBuildInfo("_recent_tool_results_rail", self._build_recent_tool_results_rail),
         ]
+        if mode != "code":
+            rail_infos.insert(
+                7,
+                _RailBuildInfo(
+                    "_task_planning_rail",
+                    self._build_task_planning_rail,
+                    {"config": config_base},
+                ),
+            )
         # ContextEngineeringRail 不在冷启动时挂载，由 _update_rails_for_mode 按 mode 按需注册/注销
 
         # SkillEvolutionRail 不在冷启动时挂载，由 _update_rails_for_mode 按 mode 按需注册/注销
@@ -3653,6 +3673,14 @@ class JiuWenClawDeepAdapter:
             self._code_mode_rails = code_mode_rails
             self._code_mode_rails_active = True
             self._code_mode_workspace = str(Path(self._workspace_dir or "./").resolve())
+            self._task_planning_rail = next(
+                (
+                    rail
+                    for rail in code_mode_rails
+                    if isinstance(rail, TaskPlanningRail)
+                ),
+                None,
+            )
             for rail in code_mode_rails:
                 rail_name = type(rail).__name__
                 if isinstance(rail, ProjectMemoryRail):
@@ -4116,7 +4144,11 @@ class JiuWenClawDeepAdapter:
         # agent_ras applies to both code and claw paths (create_code_agent
         # forwards **config_kwargs into create_deep_agent).
         common_kwargs.update(_agent_ras_kwargs_from_config(ctx.config_base))
-        if ctx.mode == "code":
+        # ctx.mode may still be an unnormalized Code submode (code.plan /
+        # code.normal); normalize it the same way _build_agent_rails() did so
+        # the constructor choice matches the rails that were just built.
+        ctx_mode = self._normalize_rail_mode(ctx.mode)
+        if ctx_mode == "code":
             self._instance = create_code_agent(**common_kwargs)
         else:
             self._instance = create_deep_agent(
@@ -4881,6 +4913,20 @@ class JiuWenClawDeepAdapter:
         if self._instance is None or self._code_mode_rails_active:
             return
 
+        reusable_task_planning: TaskPlanningRail | None = None
+        if self._task_planning_rail is not None:
+            try:
+                await self._instance.unregister_rail(self._task_planning_rail)
+            except Exception as exc:  # noqa: BLE001 - mode transition boundary
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] TaskPlanningRail unregister before "
+                    "Code-mode registration failed: %s",
+                    exc,
+                )
+                reusable_task_planning = self._task_planning_rail
+            else:
+                self._task_planning_rail = None
+
         config_base = getattr(self, "_latest_config_base", None) or get_config()
         new_rails: list[Any] = []
         lsp_rail = self._build_lsp_rail()
@@ -4895,8 +4941,14 @@ class JiuWenClawDeepAdapter:
                 language=self._resolve_runtime_language(),
             )
         )
+        if reusable_task_planning is not None:
+            new_rails = [
+                rail for rail in new_rails if not isinstance(rail, TaskPlanningRail)
+            ]
 
-        registered: list[Any] = []
+        registered: list[Any] = (
+            [reusable_task_planning] if reusable_task_planning is not None else []
+        )
         for rail in new_rails:
             try:
                 await self._instance.register_rail(rail)
@@ -4924,6 +4976,10 @@ class JiuWenClawDeepAdapter:
             (rail for rail in registered if isinstance(rail, CodingMemoryRail)),
             None,
         )
+        self._task_planning_rail = next(
+            (rail for rail in registered if isinstance(rail, TaskPlanningRail)),
+            None,
+        )
         self._code_mode_rails_active = bool(registered)
         if registered:
             self._code_mode_workspace = str(Path(self._workspace_dir or "./").resolve())
@@ -4932,44 +4988,49 @@ class JiuWenClawDeepAdapter:
             [type(rail).__name__ for rail in registered],
         )
 
-    async def _unregister_code_mode_rails(self) -> None:
+    async def _unregister_code_mode_rails(self) -> bool:
         """Unload Code-only rails before leaving code mode."""
         if self._instance is None:
-            return
+            return True
 
         current = list(self._code_mode_rails)
         if self._lsp_rail is not None:
             current.append(self._lsp_rail)
-        remaining: list[Any] = []
+        removed: list[Any] = []
         for rail in current:
             try:
                 await self._instance.unregister_rail(rail)
             except Exception as exc:  # noqa: BLE001 - retain failed rail
-                remaining.append(rail)
                 logger.warning(
                     "[JiuWenClawDeepAdapter] Code-mode rail %s unregister failed: %s",
                     type(rail).__name__,
                     exc,
                 )
+                for removed_rail in reversed(removed):
+                    try:
+                        await self._instance.register_rail(removed_rail)
+                    except Exception as rollback_exc:  # noqa: BLE001 - preserve state
+                        logger.error(
+                            "[JiuWenClawDeepAdapter] Code-mode rail %s rollback "
+                            "register failed: %s",
+                            type(removed_rail).__name__,
+                            rollback_exc,
+                        )
+                logger.error(
+                    "[JiuWenClawDeepAdapter] Code-mode rail cleanup aborted; "
+                    "retaining the previous rail state"
+                )
+                return False
+            removed.append(rail)
 
-        self._code_mode_rails = [
-            rail for rail in remaining if not isinstance(rail, LspRail)
-        ]
-        self._lsp_rail = next(
-            (rail for rail in remaining if isinstance(rail, LspRail)),
-            None,
-        )
-        self._project_memory_rail = next(
-            (rail for rail in remaining if isinstance(rail, ProjectMemoryRail)),
-            None,
-        )
-        self._coding_memory_rail = next(
-            (rail for rail in remaining if isinstance(rail, CodingMemoryRail)),
-            None,
-        )
-        self._code_mode_rails_active = bool(remaining)
-        if not remaining:
-            self._code_mode_workspace = None
+        self._code_mode_rails = []
+        self._lsp_rail = None
+        self._project_memory_rail = None
+        self._coding_memory_rail = None
+        self._task_planning_rail = None
+        self._code_mode_rails_active = False
+        self._code_mode_workspace = None
+        return True
 
     async def _reload_code_mode_memory_rails(
         self,
@@ -5075,24 +5136,99 @@ class JiuWenClawDeepAdapter:
             [type(rail).__name__ for rail in desired_memory],
         )
 
-    async def _update_rails_for_mode(self, mode: str) -> None:
+    @staticmethod
+    def _normalize_rail_mode(mode: str) -> str:
+        """Normalize Code submodes for shared rail lifecycle handling."""
+        normalized = str(mode or "").strip().lower()
+        if normalized in {"code.plan", "code.normal"}:
+            return "code"
+        return normalized
+
+    async def _update_rails_for_mode(
+        self,
+        mode: str,
+        *,
+        session_id: str | None = None,
+        sync_code_submode: bool = True,
+    ) -> None:
         """按 mode 注册或卸载 rails。"""
+        requested_mode = mode
+        mode = self._normalize_rail_mode(mode)
         if mode == "code":
             await self._register_code_mode_rails()
+            if sync_code_submode:
+                self._sync_code_submode_to_rails(
+                    requested_mode,
+                    session_id=session_id,
+                )
         else:
-            await self._unregister_code_mode_rails()
+            if not await self._unregister_code_mode_rails():
+                error_msg = (
+                    "Mode transition aborted because Code-mode rail cleanup "
+                    "was incomplete"
+                )
+                # process_message_impl/process_message_stream_impl publish the
+                # requested mode before runtime reconciliation so a pending
+                # config reload sees the current request.  The transition did
+                # not commit, so restore the last known rail mode before
+                # failing the request and blocking all downstream mode setup.
+                self._last_runtime_mode = "code"
+                logger.error("[JiuWenClawDeepAdapter] %s", error_msg)
+                raise RuntimeError(error_msg)
             if mode == "agent.plan":
                 await self._update_plan_mode_rails()
             else:
                 await self._update_agent_mode_rails()
 
+    def _sync_code_submode_to_rails(
+        self,
+        mode: str,
+        *,
+        session_id: str | None = None,
+    ) -> None:
+        """Forward the raw Code submode to the active mode rail.
+
+        Rail lifecycle uses canonical ``code`` mode, but plan-vs-normal is a
+        session state consumed by ``CodeAgentModeRail``. Keep this handoff at
+        the request boundary so cold start and hot switching share it.
+        """
+        if self._normalize_rail_mode(mode) != "code":
+            return
+        for rail in getattr(self, "_code_mode_rails", []):
+            setter = getattr(rail, "set_requested_mode", None)
+            if callable(setter):
+                setter(mode, session_id=session_id)
+
+    async def _register_mode_rail(
+        self,
+        attr_name: str,
+        rail: Any,
+        label: str,
+    ) -> bool:
+        """Register a mode rail before publishing its cached reference."""
+        try:
+            await self._instance.register_rail(rail)
+        except Exception as exc:  # noqa: BLE001 - mode rail boundary
+            logger.warning(
+                "[JiuWenClawDeepAdapter] %s register failed: %s",
+                label,
+                exc,
+            )
+            return False
+        setattr(self, attr_name, rail)
+        logger.info("[JiuWenClawDeepAdapter] %s registered", label)
+        return True
+
     async def _update_plan_mode_rails(self) -> None:
         """plan 模式：注册 plan 专属 rails，卸载 agent 专属资源。"""
         if self._task_planning_rail is None:
-            self._task_planning_rail = self._build_task_planning_rail()
-            if self._task_planning_rail is not None:
-                await self._instance.register_rail(self._task_planning_rail)
-                logger.info("[JiuWenClawDeepAdapter] TaskPlanningRail registered for plan mode")
+            task_planning_rail = self._build_task_planning_rail()
+            if task_planning_rail is not None:
+                await self._register_mode_rail(
+                    "_task_planning_rail",
+                    task_planning_rail,
+                    "TaskPlanningRail for plan mode",
+                )
         # 卸载 multi-session 工具
         for existing in list(self._instance.ability_manager.list() or []):
             if getattr(existing, "name", "").startswith(("session_new", "session_cancel", "session_list")):
@@ -5108,11 +5244,14 @@ class JiuWenClawDeepAdapter:
                 self._context_engineering_rail = None
                 self._context_engineering_rail_mode = None
             if self._context_engineering_rail is None:
-                self._context_engineering_rail = _build_context_engineering_rail(
+                context_rail = _build_context_engineering_rail(
                     self._config_cache, mode="agent.plan")
-                if self._context_engineering_rail is not None:
+                if context_rail is not None and await self._register_mode_rail(
+                    "_context_engineering_rail",
+                    context_rail,
+                    "ContextEngineeringRail for plan mode",
+                ):
                     self._context_engineering_rail_mode = "agent.plan"
-                    await self._instance.register_rail(self._context_engineering_rail)
         elif self._context_engineering_rail is not None:
             await self._instance.unregister_rail(self._context_engineering_rail)
             self._context_engineering_rail = None
@@ -5120,10 +5259,13 @@ class JiuWenClawDeepAdapter:
             logger.info("[JiuWenClawDeepAdapter] ContextEngineeringRail unregistered for plan mode (disabled)")
         # 恢复自演进 rail（仅配置启用时）
         if self._skill_evolution_rail is None and self._config_cache.get("evolution", {}).get("enabled", False):
-            self._skill_evolution_rail = self._build_skill_evolution_rail(self._config_cache)
-            if self._skill_evolution_rail is not None:
-                await self._instance.register_rail(self._skill_evolution_rail)
-                logger.info("[JiuWenClawDeepAdapter] SkillEvolutionRail registered for plan mode")
+            evolution_rail = self._build_skill_evolution_rail(self._config_cache)
+            if evolution_rail is not None:
+                await self._register_mode_rail(
+                    "_skill_evolution_rail",
+                    evolution_rail,
+                    "SkillEvolutionRail for plan mode",
+                )
         # 已使用subagent tool替代subagent rail
         if self._subagent_rail is None:
             self._subagent_rail = self._build_subagent_rail()
@@ -5132,27 +5274,30 @@ class JiuWenClawDeepAdapter:
                 logger.info("[JiuWenClawDeepAdapter] SubagentRail unregistered for plan mode")
         # plan 模式下注册 skill 合规相关 rail
         if self._skill_protocol_prompt_rail is None:
-            self._skill_protocol_prompt_rail = self._build_skill_protocol_prompt_rail()
-            if self._skill_protocol_prompt_rail is not None:
-                await self._instance.register_rail(self._skill_protocol_prompt_rail)
-                logger.info(
-                    "[JiuWenClawDeepAdapter] SkillProtocolPromptRail registered for plan mode"
+            skill_protocol_rail = self._build_skill_protocol_prompt_rail()
+            if skill_protocol_rail is not None:
+                await self._register_mode_rail(
+                    "_skill_protocol_prompt_rail",
+                    skill_protocol_rail,
+                    "SkillProtocolPromptRail for plan mode",
                 )
         if self._skill_compliance_rail is None:
-            self._skill_compliance_rail = self._build_skill_compliance_rail()
-            if self._skill_compliance_rail is not None:
-                await self._instance.register_rail(self._skill_compliance_rail)
-                logger.info(
-                    "[JiuWenClawDeepAdapter] SkillComplianceRail registered for plan mode"
+            skill_compliance_rail = self._build_skill_compliance_rail()
+            if skill_compliance_rail is not None:
+                await self._register_mode_rail(
+                    "_skill_compliance_rail",
+                    skill_compliance_rail,
+                    "SkillComplianceRail for plan mode",
                 )
         if self._skill_credential_injection_rail is None:
-            self._skill_credential_injection_rail = self._build_skill_credential_injection_rail(
+            credential_rail = self._build_skill_credential_injection_rail(
                 self._config_cache
             )
-            if self._skill_credential_injection_rail is not None:
-                await self._instance.register_rail(self._skill_credential_injection_rail)
-                logger.info(
-                    "[JiuWenClawDeepAdapter] SkillCredentialInjectionRail registered for plan mode"
+            if credential_rail is not None:
+                await self._register_mode_rail(
+                    "_skill_credential_injection_rail",
+                    credential_rail,
+                    "SkillCredentialInjectionRail for plan mode",
                 )
         await self._handle_qa_block_rails_for_plan()
 
@@ -5177,20 +5322,29 @@ class JiuWenClawDeepAdapter:
             self._wire_qa_artifact_to_freeze_rail()
             return
         if self._qa_block_freeze_rail is None:
-            self._qa_block_freeze_rail = self._build_qa_block_freeze_rail(react_cfg)
-            if self._qa_block_freeze_rail is not None:
-                await self._instance.register_rail(self._qa_block_freeze_rail)
-                logger.info("[JiuWenClawDeepAdapter] QABlockFreezeRail registered for plan mode")
+            freeze_rail = self._build_qa_block_freeze_rail(react_cfg)
+            if freeze_rail is not None:
+                await self._register_mode_rail(
+                    "_qa_block_freeze_rail",
+                    freeze_rail,
+                    "QABlockFreezeRail for plan mode",
+                )
         if self._qa_block_assembly_rail is None:
-            self._qa_block_assembly_rail = self._build_qa_block_assembly_rail(react_cfg)
-            if self._qa_block_assembly_rail is not None:
-                await self._instance.register_rail(self._qa_block_assembly_rail)
-                logger.info("[JiuWenClawDeepAdapter] QABlockAssemblyRail registered for plan mode")
+            assembly_rail = self._build_qa_block_assembly_rail(react_cfg)
+            if assembly_rail is not None:
+                await self._register_mode_rail(
+                    "_qa_block_assembly_rail",
+                    assembly_rail,
+                    "QABlockAssemblyRail for plan mode",
+                )
         if self._qa_artifact_rail is None:
-            self._qa_artifact_rail = self._build_qa_artifact_rail(react_cfg, session_memory)
-            if self._qa_artifact_rail is not None:
-                await self._instance.register_rail(self._qa_artifact_rail)
-                logger.info("[JiuWenClawDeepAdapter] QAArtifactRail registered for plan mode")
+            artifact_rail = self._build_qa_artifact_rail(react_cfg, session_memory)
+            if artifact_rail is not None:
+                await self._register_mode_rail(
+                    "_qa_artifact_rail",
+                    artifact_rail,
+                    "QAArtifactRail for plan mode",
+                )
         self._wire_qa_artifact_to_freeze_rail()
 
     def _wire_qa_artifact_to_freeze_rail(self) -> None:
@@ -5578,7 +5732,11 @@ class JiuWenClawDeepAdapter:
             self._runtime_prompt_rail.set_request_system_prompt(params.request_system_prompt)
             self._runtime_prompt_rail.set_workspace_dir(resolved_workspace_dir)
 
-        await self._update_rails_for_mode(params.mode)
+        await self._update_rails_for_mode(
+            params.mode,
+            session_id=params.session_id,
+            sync_code_submode=params.sync_code_submode,
+        )
 
         if self._context_engineering_rail is not None:
             if hasattr(self._context_engineering_rail, "set_request_identify"):
@@ -8653,7 +8811,8 @@ class JiuWenClawDeepAdapter:
         session_id = request.session_id or "default"
         query = request.params.get("query", "")
         mode = request.params.get("mode", "agent.plan")
-        self._last_runtime_mode = mode
+        runtime_mode = self._normalize_rail_mode(mode)
+        self._last_runtime_mode = runtime_mode
         (
             chat_env_token,
             chat_fp_token,
@@ -8739,7 +8898,9 @@ class JiuWenClawDeepAdapter:
         perf_summary_status = "ok"
         response_ok = True
         try:
-            await self._update_runtime_config(_RuntimeConfigParams.from_agent_request(request, mode))
+            await self._update_runtime_config(
+                _RuntimeConfigParams.from_agent_request(request, mode)
+            )
 
             html_followup_result = (
                 await self._try_deepresearch_rewrite_html_followup(
@@ -8862,7 +9023,8 @@ class JiuWenClawDeepAdapter:
 
         query = request.params.get("query", "")
         mode = request.params.get("mode", "agent.plan")
-        self._last_runtime_mode = mode
+        runtime_mode = self._normalize_rail_mode(mode)
+        self._last_runtime_mode = runtime_mode
         (
             chat_env_token,
             chat_fp_token,
@@ -9020,7 +9182,9 @@ class JiuWenClawDeepAdapter:
         token_perm = setup_permission_context(request)
         perf_summary_status = "ok"
         try:
-            await self._update_runtime_config(_RuntimeConfigParams.from_agent_request(request, mode))
+            await self._update_runtime_config(
+                _RuntimeConfigParams.from_agent_request(request, mode)
+            )
 
             html_followup_result = (
                 await self._try_deepresearch_rewrite_html_followup(
