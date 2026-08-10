@@ -40,7 +40,7 @@ from jiuwenswarm.server.runtime.agent_adapter.statusline_setup_agent import (
     build_statusline_setup_dispatch,
 )
 from jiuwenswarm.server.runtime.session.session_manager import SessionManager
-from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
+from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager, SkillRpcError
 from jiuwenswarm.server.runtime.skill.archive_store import ARCHIVE_DIRNAME
 from jiuwenswarm.server.utils.utils import is_team_params
 from jiuwenswarm.common.config import get_config
@@ -1504,9 +1504,22 @@ class JiuWenSwarm:
                 and payload.get("result_type") == "followup"
                 and payload.get("success")
             ):
-                # 与 /evolve_rebuild 一致：准备完成后由 Agent follow-up 改写 SKILL.md
-                self._schedule_skills_rebuild_followup(request, payload)
-                await self._refresh_skill_rails_after_change()
+                # 与 /evolve_rebuild 同 prompt+Agent，但 RPC 内同步静默跑完，不经 Gateway chat.send
+                try:
+                    await self._run_skills_rebuild_followup(request, payload)
+                except SkillRpcError:
+                    raise
+                except Exception as exc:
+                    logger.exception(
+                        "[JiuWenSwarm] skills.rebuild 静默 Agent 失败: request_id=%s skill=%s",
+                        request.request_id,
+                        payload.get("skill_name"),
+                    )
+                    raise SkillRpcError(
+                        "SKILL_REBUILD_FAILED",
+                        f"rebuild Agent 失败: {exc}",
+                    ) from exc
+                payload = {"success": True}
         except Exception as exc:
             logger.error("[JiuWenSwarm] skills 请求处理失败: %s", exc)
             err_payload: dict = {"error": str(exc), "message": str(exc)}
@@ -1528,49 +1541,20 @@ class JiuWenSwarm:
             metadata=request.metadata,
         )
 
-    def _schedule_skills_rebuild_followup(
-        self,
-        request: AgentRequest,
-        payload: dict[str, Any],
-    ) -> None:
-        """后台启动与 slash evolve_rebuild 相同的 Agent follow-up."""
-        followup = str(payload.get("followup_prompt") or "").strip()
-        if not followup:
-            logger.warning("[JiuWenSwarm] skills.rebuild followup_prompt 为空，跳过 Agent")
-            return
-
-        async def _runner() -> None:
-            try:
-                await self._run_skills_rebuild_followup(request, payload)
-            except Exception:
-                logger.exception(
-                    "[JiuWenSwarm] skills.rebuild Agent follow-up 失败: request_id=%s skill=%s",
-                    request.request_id,
-                    payload.get("skill_name"),
-                )
-
-        task = asyncio.create_task(_runner(), name=f"skills-rebuild-followup:{request.request_id}")
-
-        def _log_task_result(done: asyncio.Task[None]) -> None:
-            if done.cancelled():
-                return
-            exc = done.exception()
-            if exc is not None:
-                logger.error(
-                    "[JiuWenSwarm] skills.rebuild followup task error: %s",
-                    exc,
-                    exc_info=exc,
-                )
-
-        task.add_done_callback(_log_task_result)
-
     async def _run_skills_rebuild_followup(
         self,
         request: AgentRequest,
         payload: dict[str, Any],
     ) -> None:
-        """执行 rebuild Agent follow-up，并按版本目标同步 workspace / 版本副本."""
+        """同步静默执行 rebuild Agent follow-up，并按版本目标同步 workspace / 版本副本.
+
+        不经外层 process_message_stream（避免写用户会话 history / 推 UI），
+        直接走 adapter.process_message_stream_impl，并使用临时 session 隔离 checkpointer。
+        """
         followup = str(payload.get("followup_prompt") or "").strip()
+        if not followup:
+            raise SkillRpcError("SKILL_REBUILD_FAILED", "evolve_rebuild follow-up prompt 为空")
+
         target = payload.get("rebuild_target") if isinstance(payload.get("rebuild_target"), dict) else {}
         skill_dir_raw = str(target.get("skill_dir") or "").strip()
         content_root_raw = str(target.get("content_root") or "").strip()
@@ -1596,19 +1580,27 @@ class JiuWenSwarm:
 
             params = dict(request.params) if isinstance(request.params, dict) else {}
             params["query"] = followup
+            params["log_as_user"] = False
             params.setdefault("mode", params.get("mode") or "agent")
+
+            metadata = dict(request.metadata) if isinstance(request.metadata, dict) else {}
+            metadata["skills_rebuild_silent"] = True
+
+            rebuild_session_id = f"skills-rebuild:{request.request_id}"
             chat_request = AgentRequest(
                 request_id=f"{request.request_id}-rebuild-followup",
                 channel_id=request.channel_id,
-                session_id=request.session_id,
+                session_id=rebuild_session_id,
                 chat_id=request.chat_id,
                 req_method=ReqMethod.CHAT_SEND,
                 params=params,
                 is_stream=True,
                 timestamp=request.timestamp,
-                metadata=request.metadata,
+                metadata=metadata,
             )
-            async for _chunk in self.process_message_stream(chat_request):
+            adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(chat_request))
+            inputs, _, _ = self._build_inputs(chat_request)
+            async for _chunk in adapter.process_message_stream_impl(chat_request, inputs):
                 pass
 
             if skill_dir is not None and content_root is not None and (is_default or swap_workspace):

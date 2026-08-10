@@ -273,8 +273,13 @@ async def test_rebuild_unversioned_returns_followup(
     assert result["result_type"] == "followup"
     assert result["action"] == "run_rebuild_followup"
     assert "Please rebuild local-doc" in result["followup_prompt"]
-    # RPC 本身不改写 SKILL.md，交给 Agent follow-up
+    # prepare 层不改写 SKILL.md，交给 interface 静默 Agent follow-up
     assert "# original" in (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    # rebuild 后清除经验文件，详情不再展示经验入口
+    assert not (skill_dir / "evolutions.json").exists()
+    listed = await manager.handle_skills_list({})
+    card = next(s for s in listed["skills"] if s["name"] == "local-doc")
+    assert card["has_evolutions"] is False
 
 
 @pytest.mark.asyncio
@@ -321,11 +326,10 @@ async def test_rebuild_default_version_returns_followup_and_syncs_mid_state(
     assert result["rebuild_target"]["is_default"] is True
     assert result["rebuild_target"]["swap_workspace"] is False
 
-    ws_evo = json.loads((skill_dir / "evolutions.json").read_text(encoding="utf-8"))
-    ver_evo = json.loads((content / "evolutions.json").read_text(encoding="utf-8"))
-    assert ws_evo["entries"] == []
-    assert ver_evo["entries"] == []
-    assert (skill_dir / ARCHIVE_DIRNAME).is_dir()
+    assert not (skill_dir / "evolutions.json").exists()
+    assert not (content / "evolutions.json").exists()
+    detail = await manager.handle_skills_get({"name": "document-review"})
+    assert detail["has_evolutions"] is False
 
 
 @pytest.mark.asyncio
@@ -418,12 +422,10 @@ async def test_rebuild_non_default_sets_swap_workspace(
     assert result["result_type"] == "followup"
     assert result["rebuild_target"]["swap_workspace"] is True
     assert result["rebuild_target"]["is_default"] is False
-    # prepare 后非默认版本副本 evolutions 已清空；workspace 仍保留原经验待 Agent 临时切换
+    # prepare 后目标版本与 workspace 的 evolutions 均已清除
     assert "# workspace untouched" in (skill_dir / "SKILL.md").read_text(encoding="utf-8")
-    old_evo = json.loads((old_content / "evolutions.json").read_text(encoding="utf-8"))
-    assert old_evo["entries"] == []
-    ws_evo = json.loads((skill_dir / "evolutions.json").read_text(encoding="utf-8"))
-    assert len(ws_evo["entries"]) == 1
+    assert not (old_content / "evolutions.json").exists()
+    assert not (skill_dir / "evolutions.json").exists()
 
 
 @pytest.mark.asyncio

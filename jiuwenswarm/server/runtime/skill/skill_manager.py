@@ -154,6 +154,35 @@ class _ImportLocalTLSAdapter(HTTPAdapter):
 _EVOLUTION_FILENAME = "evolutions.json"
 
 
+def _has_effective_evolutions(skill_dir: Path | None) -> bool:
+    """是否存在可展示/可应用的有效经验（文件存在且 entries 非空）."""
+    if skill_dir is None or not skill_dir.is_dir():
+        return False
+    evo_path = skill_dir / _EVOLUTION_FILENAME
+    if not evo_path.is_file():
+        return False
+    try:
+        raw = json.loads(evo_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if not isinstance(raw, dict):
+        return False
+    entries = raw.get("entries")
+    return isinstance(entries, list) and len(entries) > 0
+
+
+def _clear_evolutions_file(skill_dir: Path | None) -> None:
+    """删除目录下的 evolutions.json（rebuild 消耗经验后隐藏经验入口）."""
+    if skill_dir is None or not skill_dir.is_dir():
+        return
+    evo_path = skill_dir / _EVOLUTION_FILENAME
+    if evo_path.is_file():
+        try:
+            evo_path.unlink()
+        except OSError:
+            logger.warning("删除 evolutions.json 失败: path=%s", evo_path)
+
+
 def _get_agent_root_dir() -> "Path":
     return get_agent_root_dir()
 
@@ -809,7 +838,9 @@ class SkillManager:
         meta["is_builtin_source"] = bool(base_meta.get("is_builtin_source", False))
         if "marketplace" in base_meta:
             meta["marketplace"] = base_meta.get("marketplace")
-        meta["has_evolutions"] = (read_root / _EVOLUTION_FILENAME).is_file()
+        meta["has_evolutions"] = _has_effective_evolutions(
+            skill_dir if version_requested is None else read_root
+        )
         self._apply_enabled_config(meta, name)
         meta["version"] = response_version
         meta["skill_type"] = detect_skill_type(skill_dir if version_requested is None else read_root)
@@ -1318,9 +1349,10 @@ class SkillManager:
             _log_rejected_name("skills.evolution.status", "skill", name, exc)
             raise ValueError(str(exc)) from exc
         evo_path = self._get_skill_evolution_path(name)
+        skill_dir = evo_path.parent if evo_path is not None else None
         return {
             "name": name,
-            "exists": bool(evo_path and evo_path.is_file()),
+            "exists": _has_effective_evolutions(skill_dir),
         }
 
     async def handle_skills_evolution_get(self, params: dict) -> dict:
@@ -3948,7 +3980,8 @@ class SkillManager:
             meta["is_builtin_source"] = builtin_skill_path.exists() and builtin_skill_path.is_dir()
         else:
             meta["is_builtin_source"] = False
-        meta["has_evolutions"] = (child / _EVOLUTION_FILENAME).is_file()
+        meta["has_evolutions"] = _has_effective_evolutions(child)
+        self._apply_archive_version_and_type(meta, child)
         # 不在列表中返回 body
         meta.pop("body", None)
         return meta
@@ -4188,7 +4221,7 @@ class SkillManager:
                 language=language,
                 subject=subject,
             )
-            return self._rebuild_followup_to_payload(
+            payload = self._rebuild_followup_to_payload(
                 prepare_result,
                 version=None,
                 is_default=False,
@@ -4196,6 +4229,9 @@ class SkillManager:
                 content_root=None,
                 swap_workspace=False,
             )
+            # 经验已消费：删除 evolutions，使 has_evolutions=false，详情不再展示经验入口
+            _clear_evolutions_file(skill_dir)
+            return payload
 
         content_root = resolve_version_content_root(skill_dir, version)
         is_default = default_version is not None and version == default_version
@@ -4236,12 +4272,17 @@ class SkillManager:
                     swap_workspace=False,
                 )
 
+            # prepare 后 mid-state 可能仍留空 evolutions.json；写回前去掉，避免 has_evolutions 误判
+            _clear_evolutions_file(staged)
             self._atomic_replace_dir(content_root, staged)
 
             if is_default:
                 self._sync_workspace_from_version_content(skill_dir, content_root)
 
         touch_version_metadata(skill_dir, version)
+        # workspace 侧经验已用于本次 rebuild，统一清除，列表/详情 has_evolutions=false
+        _clear_evolutions_file(skill_dir)
+        _clear_evolutions_file(content_root)
 
         return self._rebuild_followup_to_payload(
             prepare_result,

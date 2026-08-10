@@ -1,6 +1,10 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
-"""skills.rebuild 与 evolve_rebuild slash 对齐的契约测试."""
+"""skills.rebuild prepare 层与 evolve_rebuild slash 对齐的契约测试.
+
+对外 RPC 由 interface 同步静默 Agent 后收敛为 {success:true}；
+本文件覆盖 SkillManager 返回 followup payload 的领域准备契约。
+"""
 
 from __future__ import annotations
 
@@ -123,8 +127,9 @@ async def test_rebuild_returns_slash_followup(manager: SkillManager, monkeypatch
     assert result["action"] == "run_rebuild_followup"
     assert result["followup_prompt"] == "Please rebuild local-doc"
     assert result["skill_name"] == "local-doc"
-    # slash 路径不在 RPC 内直接改写 SKILL.md
+    # prepare 层不直接改写 SKILL.md（交给 interface 静默 Agent）
     assert "# original" in (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    assert not (skill_dir / "evolutions.json").exists()
 
 
 @pytest.mark.asyncio
@@ -207,6 +212,7 @@ async def test_rebuild_default_version_prepares_and_returns_followup(
     assert result["result_type"] == "followup"
     assert result["rebuild_target"]["is_default"] is True
     assert result["rebuild_target"]["swap_workspace"] is False
-    # 默认版本 mid-state 已同步到 workspace（evolutions 被清空）
-    ws_evo = json.loads((skill_dir / "evolutions.json").read_text(encoding="utf-8"))
-    assert ws_evo["entries"] == []
+    # 默认版本 mid-state 同步后清除 evolutions，has_evolutions=false
+    assert not (skill_dir / "evolutions.json").exists()
+    detail = await manager.handle_skills_get({"name": "document-review"})
+    assert detail["has_evolutions"] is False
