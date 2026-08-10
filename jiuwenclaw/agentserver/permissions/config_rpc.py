@@ -67,8 +67,23 @@ def _hot_reload_permission_engine_from_config() -> None:
     )
     from jiuwenclaw.agentserver.permissions.core import get_permission_engine
 
+    engine = get_permission_engine()
+    old_config = engine.config
     clear_permissions_config_cache()
-    get_permission_engine().update_config(get_base_permissions_config(force_reload=True))
+    new_config = get_base_permissions_config(force_reload=True)
+    engine.update_config(new_config)
+
+    # Skill 动态授权联动：开关从开启切回关闭时清空全部 Grant。
+    try:
+        from jiuwenclaw.agentserver.permissions.skill_authorization import (
+            sync_grants_on_permissions_reload,
+        )
+
+        sync_grants_on_permissions_reload(old_config, new_config)
+    except Exception:
+        logger.warning(
+            "[permissions_config] skill_authorization grant sync failed", exc_info=True,
+        )
 
 
 def _err(request: AgentRequest, message: str, *, code: str = "BAD_REQUEST") -> AgentResponse:

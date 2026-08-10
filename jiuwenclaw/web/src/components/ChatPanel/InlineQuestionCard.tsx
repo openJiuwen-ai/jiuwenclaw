@@ -14,6 +14,7 @@ import { useChatStore } from '../../stores';
 import { UserAnswer } from '../../types';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { isValidSkillApprovalCard, SkillApprovalCard } from './SkillApprovalCard';
 
 interface InlineQuestionCardProps {
   onSubmit: (requestId: string, answers: UserAnswer[], source?: string) => void;
@@ -92,15 +93,25 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
   const isEvolution = (pendingQuestion?.request_id?.startsWith('skill_evolve_') ||
                        pendingQuestion?.request_id?.startsWith('skill_create_')) ?? false;
   const isAskTool = pendingQuestion?.source === 'ask_tool';
+  // 工具审批卡（主 Agent 与子 Agent）统一使用同一种视觉风格；子 Agent 额外带来源标识。
+  const isToolPermission = isAskTool || pendingQuestion?.source === 'subagent_tool_permission';
+  const isSubagentTool = pendingQuestion?.source === 'subagent_tool_permission';
+  const skillApprovalCard = isValidSkillApprovalCard(pendingQuestion?.skill_approval_card)
+    ? pendingQuestion.skill_approval_card
+    : null;
+  const isSkillApproval = Boolean(skillApprovalCard);
 
   if (!pendingQuestion) {
     return null;
+  }
+  if (isSkillApproval) {
+    return <SkillApprovalCard onSubmit={onSubmit} card={skillApprovalCard} />;
   }
 
   const infoColor = 'var(--info, #3b82f6)';
   const borderColor = isEvolution
     ? 'var(--warning, #f59e0b)'
-    : isAskTool
+    : isToolPermission
       ? infoColor
       : 'var(--accent)';
 
@@ -137,7 +148,7 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
                   d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z"
                 />
               </svg>
-            ) : isAskTool ? (
+            ) : isToolPermission ? (
               <svg
                 className="w-3.5 h-3.5 flex-shrink-0"
                 fill="none"
@@ -170,10 +181,21 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
             )}
             <span
               className="text-xs font-semibold"
-              style={{ color: isEvolution || isAskTool ? borderColor : 'var(--accent)' }}
+              style={{ color: isEvolution || isToolPermission ? borderColor : 'var(--accent)' }}
             >
               {pendingQuestion.questions[0]?.header ?? t('chatUi.inlineQuestion.header')}
             </span>
+            {isSubagentTool && (
+              <span
+                className="text-[10px] px-1.5 py-0.5 rounded"
+                style={{
+                  color: 'var(--accent-2)',
+                  border: '1px solid var(--accent-2)',
+                }}
+              >
+                来自子Agent
+              </span>
+            )}
             {isBatch && (
               <span
                 className="text-xs"
@@ -196,7 +218,7 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
             </button>
           )}
         </div>
-        {isAskTool &&
+        {isToolPermission &&
         typeof pendingQuestion.expires_at_ms === 'number' &&
         Number.isFinite(pendingQuestion.expires_at_ms) ? (
           <div className="px-4 pb-2 text-[11px] leading-snug" style={{ color: 'var(--muted)' }}>

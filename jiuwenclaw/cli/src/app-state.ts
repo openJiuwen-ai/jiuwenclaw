@@ -614,11 +614,18 @@ readonly request = async <T = Record<string, unknown>>(
         query: "",
         request_id: this.pendingQuestion.requestId,
         answers,
+        source: this.pendingQuestion.source,
+        ...(this.pendingQuestion.agentScopeId
+          ? { agent_scope_id: this.pendingQuestion.agentScopeId }
+          : {}),
       });
     } else {
       this.sendEventOnly("chat.user_answer", {
         request_id: this.pendingQuestion.requestId,
         answers,
+        ...(this.pendingQuestion.agentScopeId
+          ? { agent_scope_id: this.pendingQuestion.agentScopeId }
+          : {}),
       });
     }
     this.pendingQuestion = null;

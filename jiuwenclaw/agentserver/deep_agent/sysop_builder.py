@@ -12,13 +12,21 @@
 
 from __future__ import annotations
 
-import grp
 import json
 import logging
 import os
-import pwd
 from pathlib import Path
 from typing import Any, Literal
+
+# grp/pwd 是 Unix-only 模块，Windows 上不存在；沙箱模式才需要，本地模式用不到。
+try:
+    import grp
+except ImportError:  # pragma: no cover - Windows
+    grp = None  # type: ignore[assignment]
+try:
+    import pwd
+except ImportError:  # pragma: no cover - Windows
+    pwd = None  # type: ignore[assignment]
 
 from openjiuwen.core.sys_operation import (
     LocalWorkConfig,
@@ -192,8 +200,14 @@ def build_process_policy() -> dict[str, Any]:
     """获取当前进程的有效用户名与用户组名。
 
     使用 ``geteuid`` / ``getegid`` 解析有效身份；若 passwd/group 中无对应条目,
-    则回退为 UID/GID 的字符串形式。
+    则回退为 UID/GID 的字符串形式。Windows 下无 geteuid/grp/pwd，回退为当前用户名。
     """
+    if not hasattr(os, "geteuid") or pwd is None or grp is None:
+        # Windows: 无 POSIX uid/gid 概念
+        return {
+            "run_as_user": os.environ.get("USERNAME") or "",
+            "run_as_group": os.environ.get("USERNAME") or "",
+        }
     uid = os.geteuid()
     gid = os.getegid()
     try:

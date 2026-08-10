@@ -286,6 +286,42 @@ class PermissionInterruptRail(ConfirmInterruptRail):
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         tool_name = ctx.inputs.tool_name
         tool_call = ctx.inputs.tool_call
+
+        # skill_tool / skill_complete 由 SkillAuthorizationRail 专属处理，本 rail 跳过避免重复弹卡。
+        # skill_complete 无条件跳过；skill_tool 按 tool_call_id 精确匹配，避免 ctx.extra 残留标记泄漏到后续工具。
+        preserve_legacy_scene = False
+        if tool_name in ("skill_tool", "skill_complete"):
+            try:
+                from jiuwenclaw.agentserver.deep_agent.permissions.owner_scopes import (
+                    TOOL_PERMISSION_CONTEXT,
+                )
+
+                permission_context = TOOL_PERMISSION_CONTEXT.get()
+                preserve_legacy_scene = (
+                    permission_context is not None
+                    and permission_context.scene == "group_digital_avatar"
+                )
+            except Exception:  # noqa: BLE001 — 后续原有裁决仍会处理
+                preserve_legacy_scene = True
+
+        if tool_name in ("skill_tool", "skill_complete") and not preserve_legacy_scene:
+            from jiuwenclaw.agentserver.deep_agent.skill_lifecycle_events import (
+                SKILL_AUTHORIZATION_GATE_HANDLED_KEY,
+            )
+
+            marker = getattr(ctx, "extra", {}).get(SKILL_AUTHORIZATION_GATE_HANDLED_KEY)
+            tool_call_id = self._resolve_tool_call_id(tool_call)
+            handled_this_call = marker is True or (
+                isinstance(marker, str) and bool(marker) and marker == tool_call_id
+            )
+            if handled_this_call:
+                logger.info(
+                    "[PermissionEngine] permission.rail.skip "
+                    "reason=skill_authorization_gate tool=%s",
+                    tool_name,
+                )
+                return
+
         normalized_name = self._normalize_tool_name(tool_name)
         logger.info(
             "[PermissionEngine] permission.rail.before_tool_call tool=%s normalized=%s tracked_tools=%s",
@@ -774,17 +810,61 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                     cid = perm_ctx.channel_id.strip()
                     uid = perm_ctx.principal_user_id.strip()
                     scope_cfg = (owner_scopes.get(cid) or {}).get(uid)
-                    owner_level = _resolve_owner_scope_level(scope_cfg, normalized_name, tool_args)
+                    owner_level = _resolve_owner_scope_level(
+                        scope_cfg,
+                        normalized_name,
+                        tool_args,
+                    )
                     if owner_level is not None:
                         logger.info(
-                            "[PermissionEngine] permission.rail.owner_scope_match tool=%s normalized=%s level=%s",
-                            tool_name, normalized_name, owner_level
+                            "[PermissionEngine] permission.rail.owner_scope_match "
+                            "tool=%s normalized=%s level=%s",
+                            tool_name,
+                            normalized_name,
+                            owner_level,
                         )
                         if owner_level == "allow":
-                            return self.approve()
-                        return self.reject(
-                            tool_result=f"[PERMISSION_DENIED] 该工具未被授权 (owner_scopes: {owner_level})"
-                        )
+                            # 有 ACTIVE Skill overlay 时强制走 engine，避免 owner allow 绕过 overlay 收紧。
+                            active_skill = False
+                            try:
+                                from jiuwenclaw.agentserver.permissions.config_loader import (
+                                    get_effective_permissions_config,
+                                )
+                                from jiuwenclaw.agentserver.permissions.skill_authorization import (
+                                    get_skill_authorization_context,
+                                    get_skill_grant_store,
+                                    is_skill_authorization_enabled,
+                                )
+
+                                if is_skill_authorization_enabled(
+                                    get_effective_permissions_config(),
+                                ):
+                                    authz = get_skill_authorization_context()
+                                    if (
+                                        authz is not None
+                                        and authz.session_id
+                                        and authz.agent_scope_id
+                                    ):
+                                        active_skill = get_skill_grant_store().get_active(
+                                            authz.session_id,
+                                            authz.agent_scope_id,
+                                        ) is not None
+                            except Exception:  # noqa: BLE001 — 不确定时不允许绕过引擎
+                                active_skill = True
+                                logger.warning(
+                                    "[PermissionEngine] active Skill lookup failed; "
+                                    "owner allow falls through to engine",
+                                    exc_info=True,
+                                )
+                            if not active_skill:
+                                return self.approve()
+                        else:
+                            return self.reject(
+                                tool_result=(
+                                    "[PERMISSION_DENIED] 该工具未被授权 "
+                                    f"(owner_scopes: {owner_level})"
+                                ),
+                            )
 
         if user_input is None:
             logger.info(
