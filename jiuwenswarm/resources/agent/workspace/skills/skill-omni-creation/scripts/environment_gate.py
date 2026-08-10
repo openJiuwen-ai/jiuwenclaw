@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Cross-platform runtime gate for the web/image/video pipeline.
 
-This module uses only the Python standard library.  It can therefore run before
-requests, Pillow, yt-dlp, BeautifulSoup, or Playwright are importable.  It selects a
-stable interpreter, re-executes the caller when necessary, repairs missing
-Python packages and the Playwright Chromium binary, and aborts before the gated operation proceeds when the environment cannot be repaired safely.
+This module uses only the Python standard library. It can therefore run before
+requests, Pillow, yt-dlp, BeautifulSoup, or Playwright are importable. It
+selects a stable interpreter, re-executes the caller when necessary, repairs
+missing Python packages and the Playwright Chromium binary, and aborts before
+the gated operation proceeds when the environment cannot be repaired safely.
 """
 from __future__ import annotations
 
