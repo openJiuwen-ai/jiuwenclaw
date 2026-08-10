@@ -417,7 +417,7 @@ def _build_optimizer_tools(ctx: SwarmBuildContext) -> list[Any]:
     if getattr(ctx, "role", "") != "leader":
         return []
     try:
-        return list(PromptOptimizerToolkit().get_tools(get_config()))
+        return list(PromptOptimizerToolkit().get_tools(ctx.config or get_config()))
     except Exception as exc:
         logger.warning("[swarm.optimizer_toolkit] construction failed: %s", exc)
         return []
