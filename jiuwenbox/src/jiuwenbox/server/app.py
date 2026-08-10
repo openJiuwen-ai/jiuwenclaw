@@ -283,10 +283,14 @@ async def lifespan(_application: FastAPI):
                 _preinstall = win_setup.collect_preinstall_paths(_root_policy)
                 _proxy_start = _root_policy.windows.proxy.port_range_start
                 _proxy_end = _root_policy.windows.proxy.port_range_end
+                # 传 policy 磁盘路径给 install 子进程, install 时读 deny/allow 路径
+                # 给当前用户预授 WRITE_DAC, 运行时 box-server 才能改这些目录 DACL.
+                _policy_path = str(getattr(policy_reader, "policy_path", "") or "")
             except Exception:  # noqa: BLE001
                 _preinstall = None
                 _proxy_start = None
                 _proxy_end = None
+                _policy_path = ""
             import jiuwenbox.supervisor.win_constants as _wconst
             try:
                 win_setup.ensure_windows_setup(
@@ -301,11 +305,24 @@ async def lifespan(_application: FastAPI):
                         if _proxy_end is not None
                         else _wconst.DEFAULT_PROXY_PORT_RANGE_END
                     ),
+                    policy_path=_policy_path or None,
                 )
             except Exception:  # noqa: BLE001
                 logger.exception(
                     "ensure_windows_setup 失败; Windows 沙箱可能不可用",
                 )
+            # 启动时差集清理: 清掉历史 apply 过但当前 policy 不再包含的路径上的残留 ACE,
+            # 避免配置变更 (路径从 allow_read 移除) 后旧 ACE 残留导致配置不生效
+            try:
+                _stale_sid = win_setup.get_sandbox_user_sid()
+                _stale_policy_paths: list[str] = []
+                _stale_policy_paths += list(_root_policy.windows.filesystem.allow_read or [])
+                _stale_policy_paths += list(_root_policy.windows.filesystem.deny_read or [])
+                _stale_policy_paths += list(_root_policy.windows.filesystem.allow_write or [])
+                _stale_policy_paths += list(_root_policy.windows.filesystem.deny_write or [])
+                win_setup.revoke_stale_acl(_stale_policy_paths, workspace="", sandbox_user_sid=_stale_sid)
+            except Exception:  # noqa: BLE001
+                logger.debug("启动差集清理失败 (非致命)", exc_info=True)
             # 启动出站代理 (egress 规则取根 policy 的 windows.network; 基底+副本已合并).
             try:
                 root_policy = policy_reader.load_policy()

@@ -7,6 +7,7 @@ import sys
 
 from openjiuwen.harness.prompts import SystemPromptBuilder, PromptSection, resolve_language
 from jiuwenclaw.agentserver.cron_config import should_register_cron_tools
+from jiuwenclaw.config import get_sandbox_runtime
 from jiuwenclaw.runtime.pip_env import get_runtime_python, get_runtime_venv_dir
 from jiuwenclaw.utils import logger, resolve_tenant_agent_root_dir
 
@@ -192,6 +193,36 @@ def _pip_isolation_prompt_section(language: str) -> PromptSection:
 def _runtime_environment_prompt(language: str) -> str:
     """OS / shell command hints shared by main agent identity and subagent / fork / spawn base prompts."""
     os_type = sys.platform
+    # 沙箱权限提示词仅在 sandbox.enabled=True 时注入; 关闭沙箱时命令可自由访问全盘.
+    sandbox_enabled = bool(get_sandbox_runtime().get("enabled"))
+    sandbox_perm_cn = ""
+    sandbox_perm_en = ""
+    if sandbox_enabled:
+        sandbox_perm_cn = (
+            "\n\n## 命令执行环境与权限\n\n"
+            "- 你的命令在一个**受限沙箱**中执行，只能读写你自己的工作区目录，工作区之外的路径"
+            "（例如 `C:\\\\` 系统盘、其他用户目录、桌面）很可能**没有访问权限**。\n"
+            "- 一旦命令返回**权限拒绝**类错误（如 `拒绝访问` / `PermissionError` / `WinError 5` / "
+            "`Access is denied`），**立即停止**对该路径的进一步尝试。"
+            "**不要**换一种命令（改 `dir`/`powershell`/`wsl`/换路径写法）反复重试同一目标——"
+            "权限是按路径授予的，换命令语法不会改变结果，只会浪费轮次。\n"
+            "- 正确做法：将该路径视为不可达，向用户说明权限受限并给出替代方案"
+            "（例如请用户把文件放进工作区，或在工作区内完成等效任务）。\n"
+        )
+        sandbox_perm_en = (
+            "\n\n## Command Execution Environment and Permissions\n\n"
+            "- Your commands run inside a **restricted sandbox**. You can read/write your own "
+            "workspace directory, but paths outside it (e.g. `C:\\\\` system drive, other user "
+            "directories, the Desktop) very likely have **no access**.\n"
+            "- As soon as a command returns a **permission-denied** error "
+            "(`PermissionError` / `WinError 5` / `Access is denied`), **stop immediately**. "
+            "Do NOT retry the same target with a different command (switching "
+            "`dir`/`powershell`/`wsl`/path syntax) — permissions are granted per-path, so "
+            "changing command syntax will not change the result; it only wastes turns.\n"
+            "- Correct action: treat that path as unreachable, tell the user about the "
+            "restriction, and offer an alternative (e.g. ask the user to place the file in "
+            "the workspace, or complete the equivalent task within the workspace).\n"
+        )
     if language == "cn":
         return f"""## 运行环境
 
@@ -210,7 +241,7 @@ def _runtime_environment_prompt(language: str) -> str:
 | 删除目录 | `rmdir folder` 或 PowerShell `Remove-Item -Recurse folder` | `rm -rf folder` |
 | 查找文件 | `dir /s pattern` 或 PowerShell `Get-ChildItem -Recurse -Filter pattern` | `find . -name pattern` |
 
-**特别注意**：Windows 的 `mkdir` 不支持 `-p` 参数！在 Windows 上使用 `mkdir -p folder` 会错误创建名为 `-p` 的目录。如需创建嵌套目录，请使用 PowerShell `New-Item -ItemType Directory -Path "parent/child" -Force`，或使用 cmd 分步创建 `mkdir parent && mkdir parent\\child`。
+**特别注意**：Windows 的 `mkdir` 不支持 `-p` 参数！在 Windows 上使用 `mkdir -p folder` 会错误创建名为 `-p` 的目录。如需创建嵌套目录，请使用 PowerShell `New-Item -ItemType Directory -Path "parent/child" -Force`，或使用 cmd 分步创建 `mkdir parent && mkdir parent\\child`。{sandbox_perm_cn}
 """
     return f"""## Runtime Environment
 
@@ -229,7 +260,7 @@ Common command differences:
 | Delete directory | `rmdir folder` or PowerShell `Remove-Item -Recurse folder` | `rm -rf folder` |
 | Find file | `dir /s pattern` or PowerShell `Get-ChildItem -Recurse -Filter pattern` | `find . -name pattern` |
 
-**WARNING**: Windows `mkdir` does NOT support the `-p` flag! Using `mkdir -p folder` on Windows will incorrectly create a directory named `-p`. To create nested directories on Windows, use either PowerShell `New-Item -ItemType Directory -Path "parent/child" -Force` or cmd with step-by-step creation `mkdir parent && mkdir parent\\child`.
+**WARNING**: Windows `mkdir` does NOT support the `-p` flag! Using `mkdir -p folder` on Windows will incorrectly create a directory named `-p`. To create nested directories on Windows, use either PowerShell `New-Item -ItemType Directory -Path "parent/child" -Force` or cmd with step-by-step creation `mkdir parent && mkdir parent\\child`.{sandbox_perm_en}
 """
 
 

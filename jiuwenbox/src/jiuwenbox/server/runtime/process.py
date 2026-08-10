@@ -26,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 if sys.platform != "win32":
     # Unix-only; Windows 走 _create_windows 分支, 不触达 grp/pwd 用法.
@@ -189,6 +190,13 @@ def _osfhandle_to_fd(kernel32, handle: int) -> int:
 DAEMON_CONNECT_TIMEOUT_SECONDS = 2.0
 DAEMON_SHUTDOWN_TIMEOUT_SECONDS = 3.0
 DAEMON_STARTUP_GRACE_SECONDS = 0.3
+# Windows runner 在 resume 后才自行 bind/listen 控制端口 (与 Linux box-server
+# 先 listen 再 spawn 相反), _create_windows 必须主动 TCP 探活确认就绪, 否则首个
+# exec 请求会在 DAEMON_CONNECT_TIMEOUT_SECONDS 内撞上 connect 超时 (runner 尚未
+# 进入 accept). 给探活一个独立预算: 实测 runner 从 resume 到 listen < 1s, 5s
+# 上限已足够覆盖 CreateRestrictedToken + makedirs(TEMP) + bind + listen(64).
+WIN_RUNNER_READY_TIMEOUT_SECONDS = 5.0
+WIN_RUNNER_READY_PROBE_INTERVAL = 0.1
 DAEMON_MAX_RESPONSE_BYTES = 256 * 1024 * 1024
 # Upper bound on how much of the daemon's spawn-time stdout/stderr we
 # include in the ``RuntimeError`` raised when the supervisor exits before
@@ -621,6 +629,7 @@ class ProcessRuntime(RuntimeAdapter):
         self._win_runners: dict[str, dict] = {}
         self._win_job_handles: dict[str, int] = {}
         self._win_acl_paths: dict[str, list[str]] = {}
+        self._win_sandbox_sids: dict[str, str | None] = {}
         self._win_policies: dict[str, SecurityPolicy] = {}
         self._win_exec_sem: asyncio.Semaphore | None = None
         self._win_pipe_locks: dict[str, asyncio.Lock] = {}
@@ -2780,12 +2789,7 @@ class ProcessRuntime(RuntimeAdapter):
         )
 
         policy_pre = self._load_policy(policy_path)
-        _read_preinstall = win_setup.collect_preinstall_paths(policy_pre)
-        win_setup.ensure_windows_setup(
-            preinstall_paths=_read_preinstall or None,
-            proxy_port_start=policy_pre.windows.proxy.port_range_start,
-            proxy_port_end=policy_pre.windows.proxy.port_range_end,
-        )
+        # install 仅由 box-server lifespan 启动时调一次 (app.py), 避免反复弹窗
         policy = policy_pre
         self._win_policies[sandbox_id] = policy
         workspace = self._win_workspace_for(policy, sandbox_id)
@@ -2851,6 +2855,9 @@ class ProcessRuntime(RuntimeAdapter):
                 sandbox_id, win_tool_dirs, _bash_path or "<未配置>", extra,
             )
         env = dict(env) if env else {}
+        # bash 绝对路径经 env 注入 runner: 避免出现裸 bash
+        if _bash_path:
+            env.setdefault("JIUWENBOX_BASH_PATH", _bash_path)
         _sandbox_sub = sandbox_id
         _profile_root = (env.get("USERPROFILE") or "").strip()
         if not _profile_root:
@@ -2859,13 +2866,6 @@ class ProcessRuntime(RuntimeAdapter):
         win_tmp_dir = os.path.join(
             _profile_root, "AppData", "Local", "Temp", "jiuwenbox", _sandbox_sub,
         )
-        try:
-            os.makedirs(win_tmp_dir, exist_ok=True)
-        except OSError as _e:
-            logger.warning(
-                "[SandboxWin] %s 创建沙箱临时目录失败 %s: %s",
-                sandbox_id, win_tmp_dir, _e,
-            )
         env.setdefault("TEMP", win_tmp_dir)
         env.setdefault("TMP", win_tmp_dir)
         # 补 profile 变量
@@ -2877,6 +2877,12 @@ class ProcessRuntime(RuntimeAdapter):
             sandbox_id, win_tmp_dir,
         )
         sandbox_user_sid = win_setup.get_sandbox_user_sid()
+        # install 预装读 ACL 的路径
+        try:
+            _preinstalled = win_setup.get_preinstalled_read_paths()
+        except Exception:  # noqa: BLE001 - best-effort, 读注册表失败不阻断创建
+            _preinstalled = set()
+        _t_acl0 = time.perf_counter()
         acl_paths = win_acl.apply_sandbox_acl(
             workspace,
             allow_write_paths,
@@ -2884,8 +2890,22 @@ class ProcessRuntime(RuntimeAdapter):
             allow_read=allow_read_paths,
             deny_read=deny_read_paths,
             sandbox_user_sid=sandbox_user_sid,
+            preinstalled_read_paths=_preinstalled,
+        )
+        _t_acl1 = time.perf_counter()
+        # apply_sandbox_acl 整体耗时打点
+        logger.info(
+            "[SandboxWin] %s apply_sandbox_acl 总耗时=%.2fs (paths=%d); "
+            "段级分解见 win_acl 段汇总日志",
+            sandbox_id, _t_acl1 - _t_acl0, len(acl_paths or []),
         )
         self._win_acl_paths[sandbox_id] = acl_paths or [workspace]
+        self._win_sandbox_sids[sandbox_id] = sandbox_user_sid
+        # 记录施加路径到历史清单, 供启动时差集清理兜底 (避免配置变更后旧 ACE 残留放行).
+        try:
+            win_setup.record_applied_acl_paths(acl_paths or [], workspace)
+        except Exception:  # noqa: BLE001
+            logger.debug("record_applied_acl_paths 失败 sandbox=%s", sandbox_id, exc_info=True)
         logger.debug(
             "[SandboxWin] %s ACL applied: workspace=%s, allow_read=%s, allow_write=%s "
             "(bundled_python=%s, venv=%s)",
@@ -2909,6 +2929,7 @@ class ProcessRuntime(RuntimeAdapter):
         control_port = _alloc_loopback_port()
         import secrets as _secrets
         control_token = _secrets.token_urlsafe(32)
+        _t_spawn0 = time.perf_counter()
         runner_pid, proc_handle = win_exec.two_hop_spawn_and_authorize(
             sandbox_id,
             sandbox_user=user,
@@ -2922,8 +2943,10 @@ class ProcessRuntime(RuntimeAdapter):
         )
         logger.info(
             "[SandboxWin] %s runner spawned (two-hop): pid=%s, workspace=%s, "
-            "proxy_port=%s-%s, control_port=%s, token_via=pipe, state=RUNNING",
+            "proxy_port=%s-%s, control_port=%s, token_via=pipe, state=RUNNING, "
+            "t_spawn=%.2fs",
             sandbox_id, runner_pid, workspace, proxy_start, proxy_end, control_port,
+            time.perf_counter() - _t_spawn0,
         )
         self._win_runners[sandbox_id] = {
             "pid": runner_pid,
@@ -2944,8 +2967,73 @@ class ProcessRuntime(RuntimeAdapter):
         self._win_log_threads[sandbox_id] = log_thread
         log_thread.start()
 
+        try:
+            await self._wait_win_runner_ready(sandbox_id)
+        except Exception as exc:  # noqa: BLE001
+            # 对齐 Linux _verify_daemon_alive: runner 启动期就失败, 必须把已起
+            # 的 runner / 日志线程 / ACL 清理干净
+            logger.error(
+                "Windows runner 启动就绪检查失败, 清理半启动沙箱 (sandbox=%s): %s",
+                sandbox_id, exc,
+            )
+            try:
+                await self._stop_windows(sandbox_id)
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "半启动沙箱清理异常 sandbox=%s", sandbox_id, exc_info=True,
+                )
+            raise
+
         logger.info("Windows 沙箱已创建: %s runner_pid=%d", sandbox_id, runner_pid)
         return runner_pid
+
+    async def _wait_win_runner_ready(self, sandbox_id: str) -> None:
+        """等待 Windows runner 控制端口进入 listen() 并标记就绪."""
+        import time as _t
+        from jiuwenbox.supervisor import win_exec
+
+        runner = self._win_runners.get(sandbox_id)
+        if runner is None:  # 防御: 并发 stop 已清掉
+            raise RuntimeError(
+                f"Windows runner 就绪检查失败: runner 已不在 _win_runners (sandbox={sandbox_id})"
+            )
+        control_port = runner["control_port"]
+        process_handle = runner["process_handle"]
+
+        loop = asyncio.get_running_loop()
+        deadline = _t.perf_counter() + WIN_RUNNER_READY_TIMEOUT_SECONDS
+
+        while True:
+            # 1. 进程存活兜底 (对齐 _verify_daemon_alive: 进程已死立即失败).
+            alive = await loop.run_in_executor(
+                None, win_exec.is_runner_alive, process_handle,
+            )
+            if not alive:
+                raise RuntimeError(
+                    f"Windows runner 启动期退出 (sandbox={sandbox_id}, "
+                    f"pid={runner['pid']}); 请查看 runner 日志确认 bind/listen "
+                    f"前的 _create_restricted_token / makedirs 是否报错"
+                )
+            # 2. TCP connect 探活: 连上即 listen 就绪.
+            listening = await loop.run_in_executor(
+                None, win_exec.probe_runner_listen, control_port,
+            )
+            if listening:
+                self._daemon_socket_ready[sandbox_id] = True
+                logger.info(
+                    "Windows runner 已就绪 (listen 确认): sandbox=%s "
+                    "control_port=%d pid=%d",
+                    sandbox_id, control_port, runner["pid"],
+                )
+                return
+
+            if _t.perf_counter() >= deadline:
+                raise RuntimeError(
+                    f"Windows runner 就绪超时: {WIN_RUNNER_READY_TIMEOUT_SECONDS}s "
+                    f"内 control_port={control_port} 未进入 listen "
+                    f"(sandbox={sandbox_id}, pid={runner['pid']})"
+                )
+            await asyncio.sleep(WIN_RUNNER_READY_PROBE_INTERVAL)
 
     async def _stop_windows(self, sandbox_id: str, timeout: float = 10.0) -> None:
         from jiuwenbox.supervisor import win_acl, win_exec, win_job
@@ -2975,9 +3063,10 @@ class ProcessRuntime(RuntimeAdapter):
                 win_job.teardown(job)
 
         acl_paths = self._win_acl_paths.pop(sandbox_id, None)
+        sandbox_user_sid = self._win_sandbox_sids.pop(sandbox_id, None)
         if acl_paths:
             try:
-                win_acl.revoke_sandbox_acl(acl_paths)
+                win_acl.revoke_sandbox_acl(acl_paths, sandbox_user_sid=sandbox_user_sid)
             except Exception:  # noqa: BLE001
                 logger.debug("撤销 ACL 失败 sandbox=%s", sandbox_id, exc_info=True)
         self._win_pipe_locks.pop(sandbox_id, None)
@@ -2993,12 +3082,7 @@ class ProcessRuntime(RuntimeAdapter):
             return False
         from jiuwenbox.supervisor import win_exec
         try:
-            kernel32 = win_exec.get_kernel32()
-            wait_timeout = 0x102
-            result = kernel32.WaitForSingleObject(
-                wintypes.HANDLE(runner["process_handle"]), 0,
-            )
-            return result == wait_timeout
+            return win_exec.is_runner_alive(runner["process_handle"])
         except Exception:  # noqa: BLE001
             return False
 
@@ -3185,26 +3269,28 @@ class ProcessRuntime(RuntimeAdapter):
         body_bytes: bytes | None,
         read_timeout: float | None = None,
     ) -> dict[str, Any] | None:
-        """发送请求帧 + (可选) body 帧, 读回单个响应帧 (JSON)."""
-        lock = self._win_pipe_lock(sandbox_id)
+        """发送请求帧 + (可选) body 帧, 读回单个响应帧 (JSON).
+
+        独立 TCP socket (``_win_roundtrip_blocking``内 ``socket.socket()``), 
+        无共享连接状态，runner 多 worker并行。
+        """
         loop = asyncio.get_running_loop()
-        async with lock:
-            try:
-                response, _ = await loop.run_in_executor(
-                    None,
-                    lambda: self._win_roundtrip_blocking(
-                        runner["control_port"],
-                        request_type, payload, body_bytes, False,
-                        read_timeout=read_timeout,
-                        control_token=runner.get("control_token"),
-                    ),
-                )
-                return response
-            except (OSError, ValueError) as exc:
-                logger.warning(
-                    "Windows runner IPC 失败 (sandbox=%s): %s", sandbox_id, exc,
-                )
-                return None
+        try:
+            response, _ = await loop.run_in_executor(
+                None,
+                lambda: self._win_roundtrip_blocking(
+                    runner["control_port"],
+                    request_type, payload, body_bytes, False,
+                    read_timeout=read_timeout,
+                    control_token=runner.get("control_token"),
+                ),
+            )
+            return response
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "Windows runner IPC 失败 (sandbox=%s): %s", sandbox_id, exc,
+            )
+            return None
 
     async def _win_runner_roundtrip_with_body(
         self,
@@ -3213,25 +3299,23 @@ class ProcessRuntime(RuntimeAdapter):
         request_type: str,
         payload: dict[str, Any],
     ) -> "tuple[dict[str, Any] | None, bytes]":
-        """发送请求帧, 读回响应帧 + (若 ok) body 帧 (read_file)."""
-        lock = self._win_pipe_lock(sandbox_id)
+        """发送请求帧, 读回响应帧 + (若 ok) body 帧 (read_file). 不加锁, 同上."""
         loop = asyncio.get_running_loop()
-        async with lock:
-            try:
-                response, content = await loop.run_in_executor(
-                    None,
-                    lambda: self._win_roundtrip_blocking(
-                        runner["control_port"],
-                        request_type, payload, None, True,
-                        control_token=runner.get("control_token"),
-                    ),
-                )
-                return response, content
-            except (OSError, ValueError) as exc:
-                logger.warning(
-                    "Windows runner IPC 失败 (sandbox=%s): %s", sandbox_id, exc,
-                )
-                return None, b""
+        try:
+            response, content = await loop.run_in_executor(
+                None,
+                lambda: self._win_roundtrip_blocking(
+                    runner["control_port"],
+                    request_type, payload, None, True,
+                    control_token=runner.get("control_token"),
+                ),
+            )
+            return response, content
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "Windows runner IPC 失败 (sandbox=%s): %s", sandbox_id, exc,
+            )
+            return None, b""
 
     async def _send_runner_shutdown(self, sandbox_id: str, runner: dict) -> None:
         """发 shutdown 请求让 runner 优雅退出 (复用持久化 pipe 文件对象)."""
@@ -3564,6 +3648,8 @@ class ProcessRuntime(RuntimeAdapter):
         if sys.platform == "win32":
             self._win_runners.pop(sandbox_id, None)
             self._win_policies.pop(sandbox_id, None)
+            self._win_acl_paths.pop(sandbox_id, None)
+            self._win_sandbox_sids.pop(sandbox_id, None)
             return
         self._processes.pop(sandbox_id, None)
         policy_path = self._policy_paths.pop(sandbox_id, None)

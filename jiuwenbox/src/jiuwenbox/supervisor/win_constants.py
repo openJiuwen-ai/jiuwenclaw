@@ -178,8 +178,17 @@ FILE_READ_ATTRIBUTES = 0x00000080
 READ_CONTROL = 0x00020000
 WRITE_DAC = 0x00040000
 
-# allow_write 路径授予的写权限组合.
-ALLOW_WRITE_RIGHTS = FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | FILE_DELETE_ACCESS
+# allow_write 路径授予的写权限组合. 含 FILE_GENERIC_READ 是因写前通常需读,
+# 含 FILE_DELETE_ACCESS 是因删除是写操作的伴生能力.
+ALLOW_WRITE_RIGHTS = (
+    FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | FILE_DELETE_ACCESS | FILE_GENERIC_READ
+)
+# deny_write 路径施加的写拒绝掩码: 必须与 ALLOW_WRITE_RIGHTS 对称, 否则
+# "能删不能写"的路径会绕过 deny (只堵 WRITE 不堵 DELETE). FILE_GENERIC_READ
+# 一并 deny, 避免被拒路径经读路径间接写 (如编辑器读后另存为).
+DENY_WRITE_RIGHTS = (
+    FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | FILE_DELETE_ACCESS | FILE_GENERIC_READ
+)
 # read 控制中 deny 施加的读权限.
 DENY_READ_RIGHTS = FILE_GENERIC_READ
 
@@ -333,6 +342,9 @@ REG_VALUE_READ_ACL_PROGRESS = "read_acl_progress"
 # 本次 preinstall_paths, 若有新增路径 (如用户改了 tool_paths 后首次起 sandbox)
 # 则提示需 --force 重装让管理员补预装; 运行时普通用户无权改外部目录 DACL.
 REG_VALUE_PREINSTALLED_PATHS = "preinstalled_paths"
+# apply_sandbox_acl 施加过的非 workspace 路径历史 (JSON list[str]).
+# 服务启动时跟当前 policy 路径求差集, 清掉"曾配过现移除"的路径上残留的 ACE
+REG_VALUE_APPLIED_ACL_PATHS = "applied_acl_paths"
 
 # UAC 提权子进程的命令行标记.
 INSTALL_SUBCOMMAND = "--install"

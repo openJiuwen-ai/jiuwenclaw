@@ -11,11 +11,13 @@ UAC 提权: 若当前进程非管理员, 通过 ShellExecuteW "runas" verb 拉�
 from __future__ import annotations
 
 import ctypes
+import json
 import logging
 import os
 import secrets
 import sys
 import threading
+import argparse
 from pathlib import Path
 from ctypes import wintypes
 
@@ -39,6 +41,46 @@ def _require_windows() -> None:
         raise RuntimeError(
             f"win_setup 仅在 Windows 平台可用; 当前平台 {sys.platform!r}"
         )
+
+
+# ShellExecuteW 的 nShowWindow 取值: 0=SW_HIDE (不弹 CMD), 1=SW_SHOWNORMAL.
+# install/uninstall 提权子进程默认静默运行, 用户无感; 失败诊断靠 install_force.log.
+SW_HIDE = 0
+SW_SHOWNORMAL = 1
+
+
+def _resolve_install_log_dir() -> str:
+    """返回 install_force.log 应落盘的目录 (绝对路径)."""
+    try:
+        home = Path(os.environ.get("USERPROFILE") or "") or Path.home()
+    except Exception:  # noqa: BLE001
+        home = Path.home()
+    office_root_env = os.environ.get("OFFICE_CLAW_DATA_DIR", "").strip()
+    jiuwen_env = os.environ.get("JIUWENCLAW_DATA_DIR", "").strip()
+    office_root = (
+        Path(office_root_env).expanduser().resolve()
+        if office_root_env
+        else home / ".office-claw"
+    )
+    if jiuwen_env:
+        data_dir = Path(jiuwen_env).expanduser().resolve()
+    else:
+        data_dir = office_root / ".jiuwenclaw"
+    return str(data_dir / "jiuwenbox")
+
+
+def _install_log_path() -> str:
+    """install_force.log 的绝对路径, 落在用户数据目录而非包目录."""
+    return os.path.join(_resolve_install_log_dir(), "install_force.log")
+
+
+def is_install_completed() -> bool:
+    """据 install_force.log 是否含完成标志判断 install 是否成功."""
+    try:
+        with open(_install_log_path(), "r", encoding="utf-8") as fh:
+            return "Windows 沙箱安装完成" in fh.read()
+    except OSError:
+        return False
 
 
 def _get_netapi32() -> ctypes.WinDLL:
@@ -234,6 +276,25 @@ def reg_get_str(name: str) -> str | None:
         return buf.value
     finally:
         advapi32.RegCloseKey(hkey)
+
+
+def get_preinstalled_read_paths() -> "set[str]":
+    """读 install 写入注册表的"已预装读 ACL 路径"清单.
+
+    Returns: 已预装读 ACL 的路径集合 (展开后, 规范化小写比较). 读不到/解析失败
+             返回空集 (空集 = 不跳过任何路径 = 行为同现状, 安全降级).
+    """
+    import json as _json
+    raw = reg_get_str(const.REG_VALUE_PREINSTALLED_PATHS)
+    if not raw:
+        return set()
+    try:
+        paths = _json.loads(raw)
+    except (ValueError, TypeError):  # noqa: BLE001
+        return set()
+    if not isinstance(paths, list):
+        return set()
+    return {os.path.expandvars(p).rstrip("\\/").lower() for p in paths if isinstance(p, str) and p}
 
 
 def _reg_set_dword_under(full_subkey: str, name: str, value: int) -> None:
@@ -554,6 +615,29 @@ def _load_policy_preinstall_paths(policy_path: str) -> list[str]:
     return out
 
 
+def _load_policy_acl_paths(policy_path: str) -> list[str]:
+    """从 windows-policy.yaml 读所有需要施加 ACE 的用户配置路径."""
+    import yaml as _yaml
+    with open(policy_path, encoding="utf-8") as f:
+        data = _yaml.safe_load(f) or {}
+    win_fs = ((data.get("windows") or {}).get("filesystem") or {})
+    keys = ("allow_read", "deny_read", "allow_write", "deny_write")
+    paths: list[str] = []
+    for k in keys:
+        for p in win_fs.get(k) or []:
+            if isinstance(p, str) and p:
+                paths.append(p)
+    # 去重保序.
+    seen: set[str] = set()
+    out: list[str] = []
+    for p in paths:
+        ep = os.path.expandvars(p)
+        if ep and ep not in seen:
+            seen.add(ep)
+            out.append(ep)
+    return out
+
+
 def _elevate_and_run_install(
     force: bool = False,
     preinstall_paths: list[str] | None = None,
@@ -562,7 +646,6 @@ def _elevate_and_run_install(
     policy_path: str | None = None,
 ) -> int:
     """通过 UAC 拉起提权子进程执行 install, 并同步阻塞等待其完成."""
-    import json
     shell32 = _get_shell32()
     kernel32 = get_kernel32()
     py = (os.environ.get("JIUWENBOX_RUNNER_PYTHON") or "").strip() or sys.executable
@@ -581,6 +664,10 @@ def _elevate_and_run_install(
     parts.append(str(proxy_port_end))
     parts.append("--install-done-event")
     parts.append(event_name)
+    # install_force.log 落盘到用户数据目录 (~/.office-claw/.jiuwenclaw/jiuwenbox),
+    # 子进程需显式接收路径, 否则会 fallback 回包目录写日志.
+    parts.append("--install-log-path")
+    parts.append(_install_log_path())
     if preinstall_paths:
         import base64
         encoded = base64.b64encode(
@@ -598,10 +685,10 @@ def _elevate_and_run_install(
     )
 
     # ShellExecuteW(parent, verb, file, parameters, directory, show).
-    sw_shown_normal = 1  # noqa: N806 - Win32 常量
-    result = shell32.ShellExecuteW(None, "runas", py, params, None, sw_shown_normal)
+    # SW_HIDE: 提权子进程不弹 CMD, 全过程静默; 安装结果据 install_force.log
+    result = shell32.ShellExecuteW(None, "runas", py, params, None, SW_HIDE)
     logger.info(
-        "ShellExecuteW(runas) 返回 %s (>32=已发起 UAC, 不代表用户已点确认)",
+        "ShellExecuteW(runas, SW_HIDE) 返回 %s (>32=已发起 UAC, 不代表用户已点确认)",
         result,
     )
     if result <= 32:  # <= 32 表示失败.
@@ -657,10 +744,20 @@ def _quote_arg(arg: str) -> str:
 # ---------------------------------------------------------------------------
 # 读 ACL 预装 (异步后台线程).
 # ---------------------------------------------------------------------------
-def _preinstall_read_acl(paths: list[str], sid: str) -> None:
-    """对指定路径列表递归施加 Allow Read ACE (合成/沙箱用户 SID). """
-    import json
+def _preinstall_read_acl(
+    paths: list[str], sid: str, skip_paths: "set[str] | None" = None,
+) -> None:
+    """对指定路径列表递归施加 Allow Read ACE (合成/沙箱用户 SID).
+
+    Args:
+        paths: 待预装读 ACL 的路径列表.
+        sid: 沙箱用户 SID 字符串.
+        skip_paths: 主线程已合并授权的路径集 (normcase 规范化), 这些路径
+            的 GENERIC_READ ACE 已由 grant_aces 合并写入, 直接跳过省一遍递归.
+            跳过时仍记入断点续传 done, 保证重装时幂等.
+    """
     from jiuwenbox.supervisor import win_acl
+    skip_norm = {os.path.normcase(p) for p in (skip_paths or [])}
     # 读已完成进度, 跳过已完成路径.
     done: set[str] = set()
     raw_progress = reg_get_str(const.REG_VALUE_READ_ACL_PROGRESS)
@@ -677,6 +774,16 @@ def _preinstall_read_acl(paths: list[str], sid: str) -> None:
                 continue
             if not os.path.exists(expanded):
                 logger.debug("预装读 ACL: 路径不存在 %s", expanded)
+                continue
+            if os.path.normcase(expanded) in skip_norm:
+                # 主线程 grant_aces 已合并写入该路径的 GENERIC_READ ACE,
+                # 直接记入 done (断点续传幂等), 不再重复递归施加.
+                done.add(expanded)
+                _reg_set_str(
+                    const.REG_VALUE_READ_ACL_PROGRESS,
+                    json.dumps(sorted(done)),
+                )
+                logger.debug("预装读 ACL: 已由主线程合并授权, 跳过 %s", expanded)
                 continue
             # Allow Read ACE 给沙箱用户 SID (使其能读这些目录).
             win_acl.grant_ace(
@@ -696,7 +803,9 @@ def _preinstall_read_acl(paths: list[str], sid: str) -> None:
         logger.warning("预装读 ACL 失败", exc_info=True)
 
 
-def _preinstall_read_acl_async(paths: list[str], sid: str) -> threading.Thread:
+def _preinstall_read_acl_async(
+    paths: list[str], sid: str, skip_paths: "set[str] | None" = None,
+) -> threading.Thread:
     """后台线程预装读 ACL.
 
     返回线程对象供调用方 join. install() 作为提权子进程必须等预装完成再
@@ -704,12 +813,15 @@ def _preinstall_read_acl_async(paths: list[str], sid: str) -> threading.Thread:
     """
     thread = threading.Thread(
         target=_preinstall_read_acl,
-        args=(paths, sid),
+        args=(paths, sid, skip_paths),
         name="jbx-read-acl-preinstall",
         daemon=True,
     )
     thread.start()
-    logger.info("读 ACL 预装已在后台线程启动 (%d 路径)", len(paths))
+    logger.info(
+        "读 ACL 预装已在后台线程启动 (%d 路径, %d 已合并跳过)",
+        len(paths), len(skip_paths or []),
+    )
     return thread
 
 
@@ -876,28 +988,92 @@ def install(
         except Exception as exc:  # noqa: BLE001
             logger.warning("预装数据根 ACL 失败 (非致命): %s", exc)
 
-        # 打包工具目录 (tools/python, tools/node 等) owner 可能是 Administrators,
-        # 运行时 box-server 进程 (普通用户) 对它们无 WRITE_DAC → apply_sandbox_acl
-        # 施加 Allow Read ACE 时 WinError 5. install 阶段给当前用户授予改 DACL 所需
-        # 最小权限 (READ_CONTROL 读 SD + WRITE_DAC 改 DACL), 让运行时能改这些目录的 DACL.
         _current_user_sid = _lookup_current_user_sid()
+        # 主线程合并授权的读 ACL 路径集: 打包目录同时 grant WRITE_DAC (当前用户)
+        # 和 GENERIC_READ (沙箱用户), 后台预装线程对这些路径直接跳过, 省一遍重复递归.
+        _merged_read_paths: set[str] = set()
         if _current_user_sid:
-            _bundled_py = (os.environ.get("JIUWENBOX_BUNDLED_PYTHON") or "").strip()
             _bundled_dirs: list[str] = []
-            if _bundled_py:
-                _bundled_dirs.append(_bundled_py)
+            _env_bundled = (os.environ.get("JIUWENBOX_BUNDLED_PYTHON") or "").strip()
+            if _env_bundled:
+                _bundled_dirs.append(_env_bundled)
+            try:
+                _exe_dir = str(Path(sys.executable).resolve().parent)
+            except Exception:  # noqa: BLE001
+                _exe_dir = ""
+            if _exe_dir and _exe_dir not in _bundled_dirs:
+                _bundled_dirs.append(_exe_dir)
+            # 打包目录集与预装读 ACL 路径集的交集
+            _preinstall_norm: set[str] = {
+                os.path.normcase(os.path.expandvars(p)) for p in paths_to_preinstall if p
+            }
             for _p in list(_bundled_dirs):
-                if os.path.isdir(_p):
-                    try:
+                if not os.path.isdir(_p):
+                    logger.debug("打包工具目录不存在, 跳过预授权: %s", _p)
+                    continue
+                _p_norm = os.path.normcase(_p)
+                _is_preinstall_target = _p_norm in _preinstall_norm
+                try:
+                    if _is_preinstall_target:
+                        # 合并: WRITE_DAC 给当前用户 + GENERIC_READ 给沙箱用户, 一次 Get/Set.
+                        _wa.grant_aces(
+                            _p,
+                            [
+                                (_current_user_sid, _wc.WRITE_DAC | _wc.READ_CONTROL, "ALLOW"),
+                                (sid, _wc.FILE_GENERIC_READ, "ALLOW"),
+                            ],
+                            recursive=True,
+                        )
+                        _merged_read_paths.add(_p_norm)
+                        logger.info(
+                            "grant WRITE_DAC|READ_CONTROL + GENERIC_READ (合并) 给当前用户+沙箱 (打包目录): %s",
+                            _p,
+                        )
+                    else:
                         _wa.grant_ace(
                             _p, _current_user_sid,
                             rights=_wc.WRITE_DAC | _wc.READ_CONTROL,
                             mode="ALLOW", recursive=True,
                         )
-                        logger.info("grant WRITE_DAC|READ_CONTROL 给当前用户: %s", _p)
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning("grant WRITE_DAC 失败 (非致命): %s=%s", _p, exc)
-        preinstall_thread = _preinstall_read_acl_async(paths_to_preinstall, sid)
+                        logger.info("grant WRITE_DAC|READ_CONTROL 给当前用户 (打包目录): %s", _p)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("grant 失败 (打包目录, 非致命): %s=%s", _p, exc)
+
+        # 用户 policy 的 deny/allow 路径 (allow_read/deny_read/allow_write/deny_write)
+        if _current_user_sid and policy_path:
+            _acl_paths: list[str] = []
+            try:
+                _acl_paths = _load_policy_acl_paths(policy_path)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("install 读 policy deny/allow 路径失败 (非致命): %s", exc)
+            _granted_acl = 0
+            for _p in _acl_paths:
+                if not os.path.exists(_p):
+                    logger.debug("policy deny/allow 路径不存在, 跳过预授权: %s", _p)
+                    continue
+                try:
+                    _wa.grant_ace(
+                        _p, _current_user_sid,
+                        rights=_wc.WRITE_DAC | _wc.READ_CONTROL,
+                        mode="ALLOW", recursive=True,
+                    )
+                    _granted_acl += 1
+                    logger.info(
+                        "grant WRITE_DAC|READ_CONTROL 给当前用户 (policy deny/allow): %s",
+                        _p,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "grant WRITE_DAC 失败 (policy 路径, 非致命): %s=%s", _p, exc,
+                    )
+            if _acl_paths:
+                logger.info(
+                    "policy deny/allow 路径预授权完成: 总 %d 条, 成功 %d 条",
+                    len(_acl_paths), _granted_acl,
+                )
+        preinstall_thread = _preinstall_read_acl_async(
+            paths_to_preinstall, sid, skip_paths=_merged_read_paths,
+        )
         preinstall_thread.join(timeout=PREINSTALL_JOIN_TIMEOUT_SECONDS)
         if preinstall_thread.is_alive():
             logger.warning(
@@ -908,10 +1084,9 @@ def install(
         # 5. 全部致命步骤通过, 写完成标记; 清进度标记 (断点续传已无用)。
         _reg_set_str(const.REG_VALUE_INSTALLED, "1")
         _reg_set_str(const.REG_VALUE_READ_ACL_PROGRESS, "")
-        import json as _json5
         _reg_set_str(
             const.REG_VALUE_PREINSTALLED_PATHS,
-            _json5.dumps(sorted({os.path.expandvars(p) for p in paths_to_preinstall})),
+            json.dumps(sorted({os.path.expandvars(p) for p in paths_to_preinstall})),
         )
         logger.info("Windows 沙箱安装完成")
     except Exception:
@@ -975,8 +1150,7 @@ def ensure_windows_setup(
             recorded: set[str] = set()
             if recorded_raw:
                 try:
-                    import json as _json_chk
-                    recorded = set(_json_chk.loads(recorded_raw))
+                    recorded = set(json.loads(recorded_raw))
                 except (ValueError, TypeError):
                     recorded = set()
             new_paths = self_check_paths - recorded
@@ -1131,6 +1305,166 @@ def _install_rollback(steps_done: "set[str]") -> None:
     logger.info("install 局部回滚完成 (steps_done=%s)", steps_done)
 
 
+def _data_root_paths() -> list[str]:
+    """沙箱数据根路径 (apply 会 grant traverse, 不进差集清理)."""
+    try:
+        from jiuwenbox.server.workspace import (
+            JIUWENBOX_HOME,
+            JIUWENCLAW_DATA_DIR_PATH,
+            OFFICE_CLAW_DATA_ROOT,
+        )
+        return [str(p) for p in (OFFICE_CLAW_DATA_ROOT, JIUWENCLAW_DATA_DIR_PATH, JIUWENBOX_HOME) if p]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _applied_acl_paths_file() -> Path:
+    """施加路径历史清单的文件存储位置 (用户目录, 普通用户可写)."""
+    try:
+        from jiuwenbox.server.workspace import JIUWENBOX_HOME
+        home = Path(JIUWENBOX_HOME)
+    except Exception:  # noqa: BLE001
+        home = Path(os.path.expanduser("~")) / ".jiuwenclaw" / "jiuwenbox"
+    home.mkdir(parents=True, exist_ok=True)
+    return home / "applied_acl_paths.json"
+
+
+def _load_applied_acl_paths() -> list[str]:
+    """读历史施加路径清单 (文件优先, 兼容旧注册表数据)."""
+    f = _applied_acl_paths_file()
+    if f.exists():
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return [p for p in data if isinstance(p, str) and p]
+        except (ValueError, OSError):
+            pass
+    #
+    raw = reg_get_str(const.REG_VALUE_APPLIED_ACL_PATHS)
+    if raw:
+        try:
+            return [p for p in json.loads(raw) if isinstance(p, str) and p]
+        except (ValueError, TypeError):
+            pass
+    return []
+
+
+def _save_applied_acl_paths(paths: list[str]) -> None:
+    """写历史施加路径清单到文件 (用户目录, 普通用户可写)."""
+    f = _applied_acl_paths_file()
+    try:
+        f.write_text(json.dumps(paths, ensure_ascii=False), encoding="utf-8")
+    except OSError as exc:
+        logger.warning("写施加路径历史文件失败 path=%s: %s", f, exc)
+
+
+def record_applied_acl_paths(paths: list[str], workspace: str) -> None:
+    """把 apply 施加过的非 workspace 路径追加进注册表历史清单 (去重)."""
+    _require_windows()
+    # 只记非 workspace 路径 (按 posix 归一比较).
+    ws_norm = workspace.replace("\\", "/").rstrip("/").lower() if workspace else ""
+    new_paths: list[str] = []
+    new_seen: set[str] = set()  # 小写键, 大小写不敏感去重 (Windows FS 大小写不敏感)
+    for p in paths:
+        norm = p.replace("\\", "/").rstrip("/")
+        if ws_norm and (norm.lower() == ws_norm or norm.lower().startswith(ws_norm + "/")):
+            continue
+        if norm.lower() not in new_seen:
+            new_seen.add(norm.lower())
+            new_paths.append(norm)
+
+    if not new_paths:
+        return
+
+    existing = _load_applied_acl_paths()
+    # 合并去重保序: seen 用小写键判断存在性, merged 保留首次出现的原始大小写.
+    merged: list[str] = []
+    seen: set[str] = set()
+    for p in existing + new_paths:
+        key = p.lower()
+        if key in seen:
+            continue  # 已有同一路径 (任意大小写), 跳过重复添加
+        seen.add(key)
+        merged.append(p)
+    _save_applied_acl_paths(merged)
+
+
+def revoke_stale_acl(
+    current_policy_paths: list[str],
+    workspace: str = "",
+    sandbox_user_sid: str | None = None,
+) -> list[str]:
+    """启动时差集清理: 历史施加路径 − 当前 policy 路径 − 数据根 → 对差集 revoke."""
+    _require_windows()
+    from jiuwenbox.supervisor import win_acl
+
+    historical = _load_applied_acl_paths()
+    if not historical:
+        return []
+
+    # current: 当前 policy 路径 + workspace + 数据根.
+    current: set[str] = set()
+    ws_norm = workspace.replace("\\", "/").rstrip("/").lower() if workspace else ""
+    if ws_norm:
+        current.add(ws_norm)
+    for p in current_policy_paths:
+        if p:
+            current.add(p.replace("\\", "/").rstrip("/").lower())
+    for p in _data_root_paths():
+        current.add(p.replace("\\", "/").rstrip("/").lower())
+
+    # 差集: 历史里有、current 里没有的.
+    stale = [p for p in historical if p.replace("\\", "/").rstrip("/").lower() not in current]
+    if not stale:
+        return []
+
+    try:
+        win_acl.revoke_sandbox_acl(stale, sandbox_user_sid=sandbox_user_sid)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("revoke_stale_acl 清理失败 (差集=%s): %s", stale, exc)
+        return []
+
+    # 清理成功: 从历史清单移除已清的差集路径, 只留仍有效的.
+    stale_set = {p.replace("\\", "/").rstrip("/").lower() for p in stale}
+    remaining = [p for p in historical if p.replace("\\", "/").rstrip("/").lower() not in stale_set]
+    remaining = _gc_applied_acl_paths(remaining, current)
+    _save_applied_acl_paths(remaining)
+
+    logger.info("启动差集清理: 清除 %d 个残留路径的 ACE: %s", len(stale), stale)
+    return stale
+
+
+# 历史施加路径清单软上限. 超过则 GC: 路径不存在 + 不在当前 policy 的条目裁掉.
+# 防止用户频繁改 policy 后清单只增不减 (差集清理只清"移除"的, 不清"替换"的).
+_APPLIED_ACL_PATHS_SOFT_LIMIT = 256
+
+
+def _gc_applied_acl_paths(paths: list[str], current_norm: "set[str]") -> list[str]:
+    """超软上限时裁剪历史施加路径清单.
+
+    保留两类: (1) 路径仍存在的 (载体在, ACE 可能在, 需保留以供下次差集清理);
+    (2) 仍在当前 policy/workspace/数据根内的 (current_norm). 其余裁掉——
+    这些是路径已删且不在当前配置的陈旧条目, ACE 随载体消失, 清单记录已无意义.
+    未超上限原样返回 (GC 只在超限时触发, 避免每次启动都做存在性 stat).
+    """
+    if len(paths) <= _APPLIED_ACL_PATHS_SOFT_LIMIT:
+        return paths
+    kept: list[str] = []
+    pruned = 0
+    for p in paths:
+        norm = p.replace("\\", "/").rstrip("/").lower()
+        if norm in current_norm or os.path.exists(p):
+            kept.append(p)
+        else:
+            pruned += 1
+    if pruned:
+        logger.info(
+            "历史施加路径清单 GC: %d 条超限, 裁掉 %d 条陈旧路径, 保留 %d 条",
+            len(paths), pruned, len(kept),
+        )
+    return kept
+
+
 def uninstall() -> None:
     """卸载: 删除 WFP filter + profile + 用户 + 注册表标记 (管理员)."""
     _require_windows()
@@ -1173,8 +1507,9 @@ def _elevate_uninstall() -> None:
     shell32 = _get_shell32()
     py = sys.executable
     params = f'-m jiuwenbox.supervisor.win_setup {const.UNINSTALL_SUBCOMMAND}'
+    # SW_HIDE: 与 install 一致, 卸载提权子进程也静默, 不弹 CMD.
     result = shell32.ShellExecuteW(
-        None, "runas", py, params, None, 1,
+        None, "runas", py, params, None, SW_HIDE,
     )
     if result <= 32:
         raise RuntimeError(f"UAC 提权卸载失败 (返回 {result})")
@@ -1219,13 +1554,31 @@ def _main(argv: list[str]) -> int:
       --proxy-port-end   N     范围终点
       --preinstall-paths JSON  读 ACL 预装路径列表 (JSON 编码字符串)
     """
-    import argparse
-    import json
     try:
-        _install_log_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "..", "install_force.log",
-        )
-        _install_log_path = os.path.normpath(_install_log_path)
+        # install_force.log 优先用命令行 --install-log-path 指定的路径,
+        # 否则 fallback 到用户数据目录 (~/.office-claw/.jiuwenclaw/jiuwenbox)
+        _install_log_path_arg: str | None = None
+        _strip_indices: list[int] = []
+        for _i, _a in enumerate(argv):
+            if _a == "--install-log-path" and _i + 1 < len(argv):
+                _install_log_path_arg = argv[_i + 1]
+                _strip_indices = [_i, _i + 1]
+                break
+            if _a.startswith("--install-log-path="):
+                _install_log_path_arg = _a[len("--install-log-path="):]
+                _strip_indices = [_i]
+                break
+        if _strip_indices:
+            for _idx in sorted(_strip_indices, reverse=True):
+                del argv[_idx]
+        if _install_log_path_arg:
+            _install_log_path = os.path.normpath(os.path.abspath(_install_log_path_arg))
+        else:
+            _install_log_path = _install_log_path()
+        try:
+            os.makedirs(os.path.dirname(_install_log_path), exist_ok=True)
+        except OSError:
+            pass
         _fh = logging.FileHandler(_install_log_path, mode="w", encoding="utf-8")
         _fh.setLevel(logging.DEBUG)
         _fh.setFormatter(logging.Formatter(
