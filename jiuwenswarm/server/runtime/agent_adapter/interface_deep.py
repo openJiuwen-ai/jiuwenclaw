@@ -6085,7 +6085,7 @@ class JiuWenSwarmDeepAdapter:
             vision_model_config=self._vision_model_config,
             audio_model_config=self._audio_model_config,
             enable_read_image_multimodal=self._resolve_enable_read_image_multimodal(config),
-            completion_timeout=config.get("completion_timeout", 3600.0),
+            completion_timeout=config.get("completion_timeout", 21600.0),
         )
 
     def _update_permission_rail(self, config_base: dict[str, Any] | None) -> None:
@@ -6666,7 +6666,7 @@ class JiuWenSwarmDeepAdapter:
             enable_llm_retry_rail=((config_base.get("execution_guard") or {}).get("llm_retry_rail") or {}).get(
                 "enabled", False
             ),
-            completion_timeout=config.get("completion_timeout", 3600.0),
+            completion_timeout=config.get("completion_timeout", 21600.0),
         )
 
         _apply_llm_io_trace_patch()
