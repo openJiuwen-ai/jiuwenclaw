@@ -14,6 +14,8 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from openjiuwen.harness.rails import TaskPlanningRail
+
 from jiuwenclaw.agentserver.deep_agent.rails.project_memory_rail import (
     ProjectMemoryRail,
 )
@@ -147,6 +149,21 @@ def _build_plan_approval_rail() -> Any:
     return PlanApprovalInterruptRail()
 
 
+def _build_task_planning_rail(
+    adapter: Any,
+    config_base: dict[str, Any],
+) -> TaskPlanningRail | None:
+    """Build the generic Todo rail for Code mode."""
+    try:
+        builder = getattr(adapter, "_build_task_planning_rail", None)
+        if callable(builder):
+            return builder(config_base)
+        return TaskPlanningRail()
+    except Exception as exc:  # noqa: BLE001 - optional rail boundary
+        logger.warning("[CodeRails] TaskPlanningRail build failed: %s", exc)
+        return None
+
+
 def build_code_mode_extra_rails(
     adapter: Any,
     config_base: dict[str, Any],
@@ -183,6 +200,10 @@ def build_code_mode_extra_rails(
         logger.info(
             "[CodeRails] CodingMemoryRail disabled by modes.code.memory.enabled"
         )
+
+    task_planning = _build_task_planning_rail(adapter, config_base)
+    if task_planning is not None:
+        rails.append(task_planning)
 
     rails.extend(_build_plan_rails())
     logger.info(

@@ -212,7 +212,11 @@ class PlanApprovalInterruptRail(ConfirmInterruptRail):
             user_input: User response from resume (None on first call).
             auto_confirm_config: Current auto-confirm settings.
         """
-        if tool_call is not None and not self._is_plan_mode(ctx):
+        # Validate only when creating the interrupt.  A resume is the response
+        # to an exit request that already passed this guard; checkpoint recovery
+        # may expose a fresh Session whose transient plan state is not hydrated
+        # yet.  Re-validating here deadlocks an otherwise valid approval.
+        if user_input is None and tool_call is not None and not self._is_plan_mode(ctx):
             language = self._detect_language()
             message = (
                 "exit_plan_mode is only available while the agent is in plan mode."
@@ -285,8 +289,14 @@ class PlanApprovalInterruptRail(ConfirmInterruptRail):
         return "cn"
 
     def _is_plan_mode(self, ctx: AgentCallbackContext) -> bool:
-        """Fail closed unless the current session is explicitly in plan mode."""
-        agent = getattr(ctx, "agent", None) or self._agent
+        """Fail closed unless the rail-bound DeepAgent is in plan mode.
+
+        Interrupt callbacks may expose an inner/runtime agent through
+        ``ctx.agent``.  Mode tools and ``CodeAgentModeRail`` both mutate the
+        DeepAgent captured by ``init()``, so validation must read that same
+        state owner or the two exit guards can contradict each other.
+        """
+        agent = self._agent or getattr(ctx, "agent", None)
         session = getattr(ctx, "session", None)
         if agent is None or session is None:
             return False
