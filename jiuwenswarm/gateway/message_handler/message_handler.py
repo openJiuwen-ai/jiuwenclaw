@@ -1429,6 +1429,31 @@ class MessageHandler(ABC):
                 run_id,
             )
 
+    async def _defer_heartbeat_run_for_busy_session(
+        self,
+        request_id: str,
+        metadata: dict[str, Any] | None,
+    ) -> bool:
+        """Return a raced Heartbeat dispatch to the scheduler's idle wait path."""
+        automation = metadata.get("automation") if isinstance(metadata, dict) else None
+        if not isinstance(automation, dict) or automation.get("kind") != "heartbeat":
+            return False
+        job_id = str(automation.get("job_id") or "").strip()
+        run_id = str(automation.get("run_id") or request_id or "").strip()
+        scheduler = self._heartbeat_scheduler_service
+        callback = getattr(scheduler, "on_session_busy_after_dispatch", None)
+        if not callable(callback) or not job_id or not run_id:
+            return False
+        try:
+            return bool(await callback(job_id, run_id))
+        except Exception:
+            logger.exception(
+                "[MessageHandler] heartbeat busy deferral failed: job=%s run=%s",
+                job_id,
+                run_id,
+            )
+            return False
+
     def _merge_disconnect_session_keys(
         self,
         session_keys: list[tuple[str, str]],
@@ -4282,17 +4307,21 @@ class MessageHandler(ABC):
                             )
                         ):
                             logger.info(
-                                "[MessageHandler] heartbeat dispatch skipped because "
-                                "the bound session is busy: request_id=%s session_id=%s",
+                                "[MessageHandler] heartbeat dispatch deferred because "
+                                "the bound session became busy: request_id=%s session_id=%s",
                                 stream_rid,
                                 msg.session_id,
                             )
-                            await self._notify_heartbeat_run_finished(
-                                stream_rid,
-                                msg.metadata,
-                                outcome="skipped",
-                                error="session_busy",
+                            deferred = await self._defer_heartbeat_run_for_busy_session(
+                                stream_rid, msg.metadata
                             )
+                            if not deferred:
+                                await self._notify_heartbeat_run_finished(
+                                    stream_rid,
+                                    msg.metadata,
+                                    outcome="skipped",
+                                    error="session_busy_deferral_failed",
+                                )
                             continue
                         # 取消同一 channel 上已有的流式任务，避免会话孤岛
                         # （例如 TUI 发送新消息时，旧 session 仍在后台空跑）
@@ -4375,6 +4404,7 @@ class MessageHandler(ABC):
         stream_app_id = self._stream_app_ids.get(rid, "")  # 提前捕获，_pop_stream_tracking 后会清除
         cancelled = False
         stream_error: str | None = None
+        execution_error: str | None = None
         has_processing_status_false = False
         _proc_count = 0
         logger.info(
@@ -4393,6 +4423,21 @@ class MessageHandler(ABC):
                     )
                 if self._is_terminal_stream_chunk(chunk):
                     continue
+                payload = chunk.payload or {}
+                if (
+                    isinstance(payload, dict)
+                    and payload.get("event_type") == "execution.error"
+                    and execution_error is None
+                ):
+                    # execution.error 是协议内的语义失败，AgentServer 会继续
+                    # 正常收尾流，因此不会通过异常分支被感知。保留事件
+                    # 给前端，同时将心跳 run 正确结算为 failed。
+                    execution_error = str(
+                        payload.get("message")
+                        or payload.get("error")
+                        or payload.get("code")
+                        or "execution error"
+                    )
                 published = await self.publish_stream_chunk(
                     chunk,
                     session_id=session_id,
@@ -4400,7 +4445,6 @@ class MessageHandler(ABC):
                 )
                 if not published:
                     continue
-                payload = chunk.payload or {}
                 if isinstance(payload, dict):
                     event_type = payload.get("event_type")
                     if event_type == "chat.processing_status":
@@ -4457,11 +4501,18 @@ class MessageHandler(ABC):
             )
             raise  # 重新抛出，让调用者知道任务被取消
         finally:
+            heartbeat_error = stream_error or execution_error
             await self._notify_heartbeat_run_finished(
                 rid,
                 request_metadata,
-                outcome=("cancelled" if cancelled else "failed" if stream_error else "succeeded"),
-                error=stream_error,
+                outcome=(
+                    "cancelled"
+                    if cancelled
+                    else "failed"
+                    if heartbeat_error
+                    else "succeeded"
+                ),
+                error=heartbeat_error,
             )
             if (
                 not cancelled
@@ -4534,6 +4585,7 @@ class MessageHandler(ABC):
                     await self._send_processing_status(
                         rid, session_id, channel_id,
                         is_processing=False, app_id=stream_app_id,
+                        request_metadata=request_metadata,
                     )
                     logger.info(
                         "[MessageHandler] 该 session 流式任务已结束（cancelled=%s），已发送 is_processing=false: session_id=%s",
@@ -4587,12 +4639,21 @@ class MessageHandler(ABC):
             msg.params.get("mode", "plan") if isinstance(msg.params, dict) else "plan"
         )
         if emit_processing_status:
+            heartbeat_prompt = None
+            metadata = msg.metadata if isinstance(msg.metadata, dict) else None
+            automation = metadata.get("automation") if metadata else None
+            if isinstance(automation, dict) and automation.get("kind") == "heartbeat":
+                raw_prompt = (msg.params or {}).get("query")
+                if isinstance(raw_prompt, str):
+                    heartbeat_prompt = raw_prompt
             await self._send_processing_status(
                 stream_rid,
                 msg.session_id,
                 msg.channel_id,
                 is_processing=True,
                 app_id=msg.app_id or "",
+                request_metadata=metadata,
+                content=heartbeat_prompt,
             )
         task = asyncio.create_task(
             self.process_stream(
@@ -4701,10 +4762,20 @@ class MessageHandler(ABC):
     async def _send_processing_status(
         self, request_id: str, session_id: str | None, channel_id: str, *,
         is_processing: bool, app_id: str = "",
+        request_metadata: dict[str, Any] | None = None,
+        content: str | None = None,
     ) -> None:
         """发送 chat.processing_status 事件到客户端。"""
         from jiuwenswarm.common.schema.message import Message, EventType
 
+        payload: dict[str, Any] = {
+            "event_type": "chat.processing_status",
+            "session_id": session_id,
+            "is_processing": is_processing,
+            "is_complete": not is_processing,
+        }
+        if content is not None:
+            payload["content"] = content
         status_msg = Message(
             id=request_id,
             type="event",
@@ -4714,14 +4785,9 @@ class MessageHandler(ABC):
             params={},
             timestamp=time.time(),
             ok=True,
-            payload={
-                "event_type": "chat.processing_status",
-                "session_id": session_id,
-                "is_processing": is_processing,
-                "is_complete": not is_processing
-            },
+            payload=payload,
             event_type=EventType.CHAT_PROCESSING_STATUS,
-            metadata=None,
+            metadata=request_metadata,
         )
         await self.publish_robot_messages(status_msg)
         # 广播全局运行态快照给所有 ws 客户端（不按 session 路由），用于多窗口配置保存锁。

@@ -62,6 +62,10 @@ _T = TypeVar("_T")
 _FILE_LOCK_TIMEOUT_SEC = 10.0
 
 
+class HeartbeatStoreDataError(ValueError):
+    """The persisted Heartbeat store is unreadable or structurally invalid."""
+
+
 class HeartbeatJobStore:
     """Persist heartbeat jobs to ``heartbeat_jobs.json``."""
 
@@ -99,16 +103,36 @@ class HeartbeatJobStore:
             if not path.exists():
                 return empty_heartbeat_jobs_doc()
             raw = path.read_text(encoding="utf-8")
-            data = json.loads(raw) if raw.strip() else {}
+            if not raw.strip():
+                raise HeartbeatStoreDataError(
+                    f"heartbeat store is empty: {path}"
+                )
+            data = json.loads(raw)
             if not isinstance(data, dict):
-                return empty_heartbeat_jobs_doc()
+                raise HeartbeatStoreDataError(
+                    f"heartbeat store root must be an object: {path}"
+                )
             if "version" not in data:
                 data["version"] = HEARTBEAT_JOBS_VERSION
-            if "jobs" not in data or not isinstance(data["jobs"], list):
+            if "jobs" not in data:
                 data["jobs"] = []
+            elif not isinstance(data["jobs"], list):
+                raise HeartbeatStoreDataError(
+                    f"heartbeat store jobs must be an array: {path}"
+                )
             return data
-        except Exception:
-            return empty_heartbeat_jobs_doc()
+        except HeartbeatStoreDataError:
+            logger.error("[HeartbeatStore] invalid persisted store: %s", path)
+            raise
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.error(
+                "[HeartbeatStore] failed to read persisted store %s: %s",
+                path,
+                exc,
+            )
+            raise HeartbeatStoreDataError(
+                f"heartbeat store cannot be read safely: {path}"
+            ) from exc
 
     def _write_json_unlocked(self, data: dict[str, Any]) -> None:
         path = self._path
@@ -133,10 +157,11 @@ class HeartbeatJobStore:
                     continue
                 try:
                     jobs.append(HeartbeatJob.from_dict(item))
-                except Exception:
+                except Exception as exc:
                     logger.warning(
-                        "[HeartbeatStore] skip invalid job entry: %s",
+                        "[HeartbeatStore] reject invalid job entry %s: %s",
                         item.get("id") if isinstance(item, dict) else item,
+                        exc,
                     )
                     continue
             return jobs
@@ -535,6 +560,57 @@ class HeartbeatJobStore:
         result = await self._mutate_job(job_id, _finish)
         return matched, result
 
+    async def defer_claimed_run_for_busy(
+        self,
+        job_id: str,
+        run_id: str,
+        *,
+        now: float,
+    ) -> tuple[bool, HeartbeatJob]:
+        """Roll back an exact claim when the session became busy before dispatch."""
+        matched = False
+
+        def _defer(job: HeartbeatJob) -> HeartbeatJob:
+            nonlocal matched
+            rs = job.run_state
+            if rs.current_run_id != run_id:
+                return job
+            matched = True
+            cleared = replace(
+                rs,
+                current_run_id=None,
+                current_run_started_at=None,
+                current_trigger=None,
+                current_reschedule=False,
+                resume_status=None,
+                resume_enabled=None,
+                resume_next_run_at=None,
+            )
+            if not job.enabled or job.status == STATUS_DISABLED:
+                return replace(
+                    job,
+                    status=STATUS_DISABLED,
+                    enabled=False,
+                    next_run_at=None,
+                    run_state=cleared,
+                    updated_at=float(now),
+                )
+            return replace(
+                job,
+                status=rs.resume_status or STATUS_SCHEDULED,
+                enabled=(
+                    rs.resume_enabled
+                    if rs.resume_enabled is not None
+                    else True
+                ),
+                next_run_at=rs.resume_next_run_at,
+                run_state=cleared,
+                updated_at=float(now),
+            )
+
+        result = await self._mutate_job(job_id, _defer)
+        return matched, result
+
     async def pop_queued_run(
         self, job_id: str
     ) -> tuple[str, str, bool] | None:
@@ -650,6 +726,10 @@ class HeartbeatJobStore:
 
         controller 负责按入口强制写入合法 ``source``(枚举校验);store 层兜底校验。
         """
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled must be boolean")
+        if not isinstance(delete_after_run, bool):
+            raise ValueError("delete_after_run must be boolean")
         ts = float(now) if now is not None else time.time()
         # source 校验:controller 应已校验,此处再校一遍防绕过。
         src = validate_metadata_source(source)
@@ -690,7 +770,7 @@ class HeartbeatJobStore:
         job = HeartbeatJob(
             id=job_id_clean,
             name=str(name or "").strip(),
-            enabled=bool(enabled),
+            enabled=enabled,
             channel_id=str(channel_id or "").strip(),
             session_id=str(session_id or "").strip(),
             prompt=str(prompt or "").strip(),
@@ -702,7 +782,7 @@ class HeartbeatJobStore:
                 session_deleted_policy or DEFAULT_SESSION_DELETED_POLICY
             ),
             max_runs=max_runs,
-            delete_after_run=bool(delete_after_run),
+            delete_after_run=delete_after_run,
             created_at=ts,
             updated_at=ts,
             next_run_at=(
@@ -924,7 +1004,9 @@ class HeartbeatJobStore:
 
     async def toggle_job(self, job_id: str, enabled: bool) -> HeartbeatJob:
         """启停;联动 status / next_run_at(语义同 update enabled)。"""
-        return await self.update_job(job_id, {"enabled": bool(enabled)})
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled must be boolean")
+        return await self.update_job(job_id, {"enabled": enabled})
 
     # ---- 状态机写方法(方案 §7.9 / 接口设计 §1.4) ----
 

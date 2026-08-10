@@ -690,19 +690,6 @@ _CRON_TOOL_NAMES = frozenset(
     }
 )
 
-
-def _clean_heartbeat_content(content: str) -> str:
-    """Remove HTML comments and blank lines from HEARTBEAT.md content."""
-    cleaned_lines: list[str] = []
-    for line in content.splitlines():
-        stripped_line = line.strip()
-        if stripped_line.startswith("<!--") and stripped_line.endswith("-->"):
-            continue
-        if stripped_line:
-            cleaned_lines.append(stripped_line)
-    return "\n".join(cleaned_lines)
-
-
 def _assemble_run_answer(deltas: list[str], final: str) -> str:
     """Join a streaming run's assistant text into its final answer.
 
@@ -7704,52 +7691,24 @@ class JiuWenSwarmDeepAdapter:
         return approval_kind in (None, "", "evolve") and rail_kind in (None, "", "regular")
 
     async def handle_heartbeat(self, request: AgentRequest) -> AgentResponse | None:
-        """Handle heartbeat request. Returns None to continue normal flow.
-
-        Injects a heartbeat prompt into the query to ensure the LLM receives
-        a non-empty user message. Reading HEARTBEAT.md and injecting its content
-        into the system prompt is handled by HeartbeatRail in before_model_call.
-        """
+        """Answer a HealthCheck probe without executing workspace user tasks."""
         sid = str(request.session_id or "")
         if not sid.startswith(("health_check_", "heartbeat_")):
             return None
-        if not self._is_session_scoped_adapter:
-            session_adapter = await self._get_or_create_session_adapter(request.session_id)
-            try:
-                return await session_adapter.handle_heartbeat(request)
-            finally:
-                await self._evict_idle_session_adapters()
 
-        content = ""
-        try:
-            deep_config = getattr(self._instance, "deep_config", None) if self._instance else None
-            workspace = getattr(deep_config, "workspace", None)
-            sys_operation = getattr(deep_config, "sys_operation", None) or self._sys_operation
-            if workspace is not None and sys_operation is not None:
-                heartbeat_path = str(workspace.get_node_path(WorkspaceNode.HEARTBEAT_MD))
-                read_res = await sys_operation.fs().read_file(heartbeat_path, mode="text")
-                if read_res.code == 0:
-                    content = _clean_heartbeat_content(read_res.data.content)
-                else:
-                    logger.warning("[JiuWenSwarmDeepAdapter] heartbeat failed to read HEARTBEAT.md")
-            else:
-                logger.warning("[JiuWenSwarmDeepAdapter] heartbeat workspace/sys_operation not available")
-        except Exception as exc:
-            logger.warning("[JiuWenSwarmDeepAdapter] heartbeat failed to prepare HEARTBEAT.md content: %s", exc)
-
-        health_check_task = content or "未配置 HEARTBEAT.md，仅回复 HEALTH_CHECK_OK。"
-        request.params["query"] = (
-            "这是一次探活请求，请根据 <health_check_user_task> 标签中的内容回复。\n"
-            "<health_check_user_task>\n"
-            f"{health_check_task}\n"
-            "</health_check_user_task>"
-        )
         logger.info(
-            "[JiuWenSwarmDeepAdapter] heartbeat query injected:" " request_id=%s session_id=%s",
+            "[JiuWenSwarmDeepAdapter] health check acknowledged: "
+            "request_id=%s session_id=%s",
             request.request_id,
             request.session_id,
         )
-        return None
+        return AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=True,
+            payload={"health_check": "HEALTH_CHECK_OK"},
+            metadata=request.metadata,
+        )
 
     async def _handle_evolution_approval(self, request_id: str, answers: list) -> bool:
         """Handle evolution approval via SkillEvolutionRail.on_approve/on_reject.

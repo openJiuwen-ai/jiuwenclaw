@@ -641,7 +641,7 @@ heartbeat:
     # 默认会话删除后处理策略:disable | completed
     default_session_deleted_policy: disable
 
-# 旧探活(HealthCheck/Probe):HEARTBEAT.md 驱动的全局周期探活,只做连通性检查。
+# 旧 heartbeat.* 配置迁移后的 HealthCheck/Probe，只做连通性检查，不执行用户任务。
 # 由 gateway/health_check/ 实现,与上方 heartbeat.jobs 严格区分。
 health_check:
   # 探活间隔（秒），默认 3600

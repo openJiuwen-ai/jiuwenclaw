@@ -114,6 +114,7 @@ async def test_prepare_chat_without_mode_restores_locked_session_mode() -> None:
     agent = MagicMock()
     manager = MagicMock()
     manager.get_agent = AsyncMock(return_value=agent)
+    manager.wait_for_session_prewarm = AsyncMock()
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
     server._agent_manager = manager
     request = AgentRequest(
@@ -121,7 +122,21 @@ async def test_prepare_chat_without_mode_restores_locked_session_mode() -> None:
         channel_id="web",
         session_id="heartbeat-session",
         req_method=ReqMethod.CHAT_SEND,
-        params={"query": "continue", "run": {"kind": "heartbeat_job"}},
+        params={
+            "query": "continue",
+            "automation": {
+                "kind": "heartbeat",
+                "job_id": "hb-1",
+                "run_id": "run-1",
+            },
+        },
+        metadata={
+            "automation": {
+                "kind": "heartbeat",
+                "job_id": "hb-1",
+                "run_id": "run-1",
+            }
+        },
     )
 
     with (

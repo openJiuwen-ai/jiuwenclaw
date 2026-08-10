@@ -16,6 +16,7 @@ from jiuwenswarm.common.schema.message import EventType, Message
 from jiuwenswarm.gateway.app_gateway import _resolve_health_check_config
 from jiuwenswarm.gateway.health_check.health_check import (
     HEALTH_CHECK_OK,
+    HEALTH_CHECK_PROMPT,
     GatewayHealthCheckService,
     HealthCheckConfig,
 )
@@ -73,6 +74,8 @@ async def test_health_check_writes_new_internal_protocol_and_relay() -> None:
     assert "HEALTH_CHECK_OK" in envelope.params["health_check"]
     assert relay.messages[0].payload == {"health_check": HEALTH_CHECK_OK}
     assert relay.messages[0].event_type == EventType.HEALTH_CHECK_RELAY
+    assert "HEARTBEAT.md" not in HEALTH_CHECK_PROMPT
+    assert "不要执行用户任务" in HEALTH_CHECK_PROMPT
 
 
 async def test_health_check_reads_legacy_agent_response_during_upgrade() -> None:
@@ -131,6 +134,8 @@ async def test_agent_heartbeat_runtime_builds_nine_tools_and_forwards_context() 
     assert {item.card.name for item in tools} == HEARTBEAT_TOOL_NAMES
     create_tool = next(item for item in tools if item.card.name == "heartbeat_create_job")
     assert "cron_create_job" in create_tool.card.description
+    assert "finite max_runs" in create_tool.card.description
+    assert "do not add run-count bookkeeping" in create_tool.card.description
     assert "heartbeat_update_job(enabled=false)" in create_tool.card.description
     assert "heartbeat_cancel_run(pause_schedule=true)" in create_tool.card.description
     result = await bridge._send(context, "list", {"scope": "current"})
@@ -139,6 +144,51 @@ async def test_agent_heartbeat_runtime_builds_nine_tools_and_forwards_context() 
     assert sent["channel_id"] == "tui"
     assert sent["session_id"] == "session-1"
     assert sent["response_kind"] == "heartbeat"
+    del tools
+    __import__("gc").collect()
+
+
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
+async def test_agent_heartbeat_runtime_restores_omitted_optional_defaults() -> None:
+    push = _Push()
+    bridge = HeartbeatRuntimeBridge(gateway_push=push)
+    context = SimpleNamespace(
+        channel_id="web",
+        session_id="session-1",
+        metadata={"request_id": "request-1"},
+    )
+    tools = bridge.build_tools(context=context)
+    create_tool = next(
+        item for item in tools if item.card.name == "heartbeat_create_job"
+    )
+
+    await create_tool.invoke(
+        {
+            "name": "finite follow-up",
+            "prompt": "say three animal words",
+            "schedule": {"type": "interval", "interval_seconds": 60},
+        }
+    )
+
+    sent_data = push.messages[0]["body"]["data"]
+    assert sent_data["name"] == "finite follow-up"
+    assert sent_data["prompt"] == "say three animal words"
+    assert sent_data["schedule"]["interval_seconds"] == 60
+    assert sent_data.get("enabled", True) is True
+    assert sent_data.get("delete_after_run", False) is False
+    assert all(value is not None for value in sent_data.values())
+
+    tool_by_name = {item.card.name: item for item in tools}
+    await tool_by_name["heartbeat_list_jobs"].invoke({})
+    await tool_by_name["heartbeat_preview_job"].invoke({"job_id": "hb-1"})
+    await tool_by_name["heartbeat_run_now"].invoke({"job_id": "hb-1"})
+    await tool_by_name["heartbeat_cancel_run"].invoke({"job_id": "hb-1"})
+    assert [message["body"]["data"] for message in push.messages[1:]] == [
+        {"scope": "current"},
+        {"job_id": "hb-1", "count": 5},
+        {"job_id": "hb-1", "reschedule": False},
+        {"job_id": "hb-1", "pause_schedule": False},
+    ]
     del tools
     __import__("gc").collect()
 
@@ -404,6 +454,38 @@ async def test_message_handler_reports_exact_heartbeat_completion() -> None:
     assert handler._heartbeat_scheduler_service.calls == [
         (("job-1", "run-1"), {"outcome": "failed", "error": "boom"})
     ]
+
+
+async def test_message_handler_defers_exact_heartbeat_claim_after_busy_race() -> None:
+    class Scheduler:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def on_session_busy_after_dispatch(
+            self, job_id: str, run_id: str
+        ) -> bool:
+            self.calls.append((job_id, run_id))
+            return True
+
+    class Handler:
+        def __init__(self) -> None:
+            self._heartbeat_scheduler_service = Scheduler()
+
+    handler = Handler()
+    deferred = await MessageHandler._defer_heartbeat_run_for_busy_session(
+        handler,
+        "request-fallback",
+        {
+            "automation": {
+                "kind": "heartbeat",
+                "job_id": "job-1",
+                "run_id": "run-1",
+            }
+        },
+    )
+
+    assert deferred is True
+    assert handler._heartbeat_scheduler_service.calls == [("job-1", "run-1")]
 
 
 @pytest.mark.parametrize(

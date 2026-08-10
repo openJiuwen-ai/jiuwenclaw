@@ -194,6 +194,33 @@ def _history_media_record(value: Any, *, default_type: str = "image") -> dict[st
     return record
 
 
+def _with_heartbeat_history_metadata(
+    extra: dict[str, Any] | None,
+    params: Any,
+) -> dict[str, Any] | None:
+    """Persist the public Heartbeat marker in the same shape Web events use."""
+    result = dict(extra or {})
+    if not isinstance(params, dict):
+        return result or None
+    automation = params.get("automation")
+    if not isinstance(automation, dict) or automation.get("kind") != "heartbeat":
+        return result or None
+
+    # Some event payloads may already contain metadata.  Preserve it while
+    # ensuring restored history exposes ``metadata.automation`` just like the
+    # live Web stream.
+    metadata = (
+        dict(result.get("metadata"))
+        if isinstance(result.get("metadata"), dict)
+        else {}
+    )
+    metadata["automation"] = dict(automation)
+    result["metadata"] = metadata
+    # Do not retain a second top-level copy added by generic parameter merging.
+    result.pop("automation", None)
+    return result
+
+
 def _history_user_extra(params: Any) -> dict[str, Any] | None:
     if not isinstance(params, dict):
         return None
@@ -224,7 +251,7 @@ def _history_user_extra(params: Any) -> dict[str, Any] | None:
         if files:
             extra["files"] = files
 
-    return extra or None
+    return _with_heartbeat_history_metadata(extra, params)
 
 
 def _compact_stats_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1958,6 +1985,7 @@ class JiuWenSwarm:
                 event_type="chat.final",
                 content=content_str,
                 timestamp=time.time(),
+                extra=_with_heartbeat_history_metadata(None, request.params),
                 mode=request.params.get("mode", "unknown"),
             )
 
@@ -2261,10 +2289,13 @@ class JiuWenSwarm:
                 return
             extra_fields = _attach_reasoning_content({
                 k: v for k, v in request.params.items()
-                if k in ("source", "proactive_type", "proactive_target")
+                if k in ("source", "proactive_type", "proactive_target", "automation")
             })
             if not isinstance(extra_fields, dict):
                 extra_fields = {}
+            extra_fields = _with_heartbeat_history_metadata(
+                extra_fields, request.params
+            ) or {}
             record_timestamp = _resolve_final_record_timestamp(
                 event_type="chat.final",
                 segment_started_at=segment_started_at,
@@ -2536,7 +2567,10 @@ class JiuWenSwarm:
                         content=str(data),
                         timestamp=time.time(),
                         mode=request.params.get("mode", "unknown"),
-                        extra={"error_type": error_type} if error_type else None,
+                        extra=_with_heartbeat_history_metadata(
+                            {"error_type": error_type} if error_type else None,
+                            request.params,
+                        ),
                     )
                     yield AgentResponseChunk(
                         request_id=rid,
@@ -2683,11 +2717,19 @@ class JiuWenSwarm:
                                 if et in {"chat.final", "chat.tool_call"}:
                                     extra_fields = _attach_reasoning_content(extra_fields)
                                 # 透传 proactive 标记——刷新页面时前端靠 source 识别卡片
-                                for pk in ("source", "proactive_type", "proactive_target"):
+                                for pk in (
+                                    "source",
+                                    "proactive_type",
+                                    "proactive_target",
+                                    "automation",
+                                ):
                                     if pk not in extra_fields and pk in request.params:
                                         extra_fields[pk] = request.params[pk]
                                 if not isinstance(extra_fields, dict):
                                     extra_fields = {}
+                                extra_fields = _with_heartbeat_history_metadata(
+                                    extra_fields, request.params
+                                ) or {}
                                 record_timestamp = _resolve_final_record_timestamp(
                                     event_type=et,
                                     segment_started_at=(
@@ -2842,11 +2884,19 @@ class JiuWenSwarm:
                             if et in {"chat.final", "chat.tool_call"}:
                                 extra_fields = _attach_reasoning_content(extra_fields)
                             # 透传 proactive 标记——刷新页面时前端靠 source 识别卡片
-                            for pk in ("source", "proactive_type", "proactive_target"):
+                            for pk in (
+                                "source",
+                                "proactive_type",
+                                "proactive_target",
+                                "automation",
+                            ):
                                 if pk not in extra_fields and pk in request.params:
                                     extra_fields[pk] = request.params[pk]
                             if not isinstance(extra_fields, dict):
                                 extra_fields = {}
+                            extra_fields = _with_heartbeat_history_metadata(
+                                extra_fields, request.params
+                            ) or {}
                             record_timestamp = _resolve_final_record_timestamp(
                                 event_type=et,
                                 segment_started_at=(
@@ -2939,10 +2989,18 @@ class JiuWenSwarm:
                 event_type="chat.final",
                 content=finalized_assistant_message,
                 timestamp=time.time(),
-                extra=_attach_reasoning_content({
-                    k: v for k, v in request.params.items()
-                    if k in ("source", "proactive_type", "proactive_target")
-                }),
+                extra=_with_heartbeat_history_metadata(
+                    _attach_reasoning_content({
+                        k: v for k, v in request.params.items()
+                        if k in (
+                            "source",
+                            "proactive_type",
+                            "proactive_target",
+                            "automation",
+                        )
+                    }),
+                    request.params,
+                ),
                 mode=request.params.get("mode", "unknown"),
             )
             final_answer_content = finalized_assistant_message

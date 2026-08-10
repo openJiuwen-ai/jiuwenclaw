@@ -3,10 +3,11 @@
 """HealthCheck(旧 Heartbeat 探活)— Gateway 内周期性向 AgentServer 发送探活请求.
 
 本模块是旧 ``gateway/heartbeat/heartbeat.py`` 的迁移目标(方案 §2.3 命名铁律):
-旧 ``HEARTBEAT.md`` 驱动的全局周期探活本质是健康检查,改名到 ``health_check.*``
-命名空间,与新 Heartbeat 任务(线程续跑,``gateway/heartbeat/``)严格区分。
+旧 ``heartbeat.*`` 探活协议改名到 ``health_check.*`` 命名空间,与新
+Heartbeat 任务(线程续跑,``gateway/heartbeat/``)严格区分。探活不再读取
+``HEARTBEAT.md`` 或执行其中的用户任务。
 
-语义不变:按固定间隔向 AgentServer 发探活请求,检测 Agent 是否存活,
+按固定间隔向 AgentServer 发探活请求,检测 Agent 是否存活,
 结果通过 ``health_check.relay`` 事件回传到指定 channel(默认 web)。
 只做连通性检查,不再作为任务系统。
 
@@ -37,11 +38,8 @@ HEALTH_CHECK_CHANNEL_ID = "__health_check__"
 
 HEALTH_CHECK_OK = "HEALTH_CHECK_OK"
 
-# 探活请求发送的 content,AgentServer 可识别为探活。
-HEALTH_CHECK_PROMPT = (
-    "如果你的workspace目录存在HEARTBEAT.md文件, 读取文件内容并且根据文件内容执行任务. "
-    "如果没有HEARTBEAT.md文件, 仅回复HEALTH_CHECK_OK"
-)
+# 探活请求只验证 AgentServer 请求链路，不读取或执行任何用户任务文件。
+HEALTH_CHECK_PROMPT = "这是一次系统连通性检查。不要执行用户任务，仅回复 HEALTH_CHECK_OK。"
 
 
 def normalize_active_hours(active_hours: dict[str, str] | None) -> dict[str, str] | None:

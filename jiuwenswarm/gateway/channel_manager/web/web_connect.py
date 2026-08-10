@@ -625,6 +625,24 @@ class WebChannel(BaseWsChannel):
             or event_name.startswith("harness.")
         )
 
+    @staticmethod
+    def _attach_automation_metadata(
+        payload: dict[str, Any], msg: Message
+    ) -> dict[str, Any]:
+        """Expose only the public automation marker, not routing metadata."""
+        message_metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
+        automation = message_metadata.get("automation")
+        if not isinstance(automation, dict) or automation.get("kind") != "heartbeat":
+            return payload
+        payload_metadata = (
+            dict(payload.get("metadata"))
+            if isinstance(payload.get("metadata"), dict)
+            else {}
+        )
+        payload_metadata["automation"] = dict(automation)
+        payload["metadata"] = payload_metadata
+        return payload
+
     @classmethod
     def _build_event_payload(cls, msg: Message, event_name: str) -> dict[str, Any]:
         """Build the Web event payload without dropping structured control fields."""
@@ -635,7 +653,7 @@ class WebChannel(BaseWsChannel):
                     payload["session_id"] = msg.session_id
                 if event_name.startswith("chat.") and "request_id" not in payload and msg.id:
                     payload["request_id"] = msg.id
-                return payload
+                return cls._attach_automation_metadata(payload, msg)
 
             content = str(msg.payload.get("content", "") or "")
             if not content and not getattr(msg, "ok", True) and msg.payload.get("error"):
@@ -664,13 +682,13 @@ class WebChannel(BaseWsChannel):
                         "content_len=%d payload_keys=%s",
                         source, ptype, len(str(payload.get("content", ""))), list(payload.keys()),
                     )
-            return payload
+            return cls._attach_automation_metadata(payload, msg)
 
         content = str((msg.params or {}).get("content", "") or "")
-        return {
+        return cls._attach_automation_metadata({
             "session_id": msg.session_id,
             "content": content,
-        }
+        }, msg)
 
     async def send(
         self,
@@ -1328,6 +1346,8 @@ class WebChannel(BaseWsChannel):
             payload = {"session_id": getattr(msg, "session_id", None), "content": str(msg.payload)}
         else:
             payload = {"session_id": getattr(msg, "session_id", None), "content": ""}
+
+        payload = self._attach_automation_metadata(payload, msg)
 
         agent_ref = getattr(msg, "agent_ref", None)
         if agent_ref:

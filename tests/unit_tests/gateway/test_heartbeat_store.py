@@ -23,7 +23,10 @@ from jiuwenswarm.gateway.heartbeat.models import (
     STATUS_RUNNING,
     STATUS_SCHEDULED,
 )
-from jiuwenswarm.gateway.heartbeat.store import HeartbeatJobStore
+from jiuwenswarm.gateway.heartbeat.store import (
+    HeartbeatJobStore,
+    HeartbeatStoreDataError,
+)
 
 
 @pytest.fixture
@@ -354,6 +357,90 @@ async def test_invalid_entries_ignored_in_list(store: HeartbeatJobStore, tmp_pat
     jobs = await store.list_jobs()
     assert len(jobs) == 1
     assert jobs[0].id == "hb_good"
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    [
+        ("enabled", "false"),
+        ("enabled", 0),
+        ("delete_after_run", "false"),
+        ("delete_after_run", 0),
+    ],
+)
+async def test_invalid_persisted_boolean_job_is_not_loaded(
+    store: HeartbeatJobStore,
+    field: str,
+    invalid_value: object,
+) -> None:
+    valid = {
+        "id": "hb_invalid_bool",
+        "kind": "heartbeat",
+        "name": "invalid",
+        "enabled": True,
+        "status": "scheduled",
+        "channel_id": "web",
+        "session_id": "s1",
+        "prompt": "p",
+        "schedule": {"type": "interval", "interval_seconds": 120},
+        "metadata": {"source": "agent_tool"},
+        "run_state": {},
+    }
+    valid[field] = invalid_value
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_text(
+        json.dumps({"version": 1, "jobs": [valid]}),
+        encoding="utf-8",
+    )
+
+    assert await store.list_jobs() == []
+
+
+async def test_invalid_persisted_run_status_is_not_loaded(
+    store: HeartbeatJobStore,
+) -> None:
+    raw_job = {
+        "id": "hb_invalid_status",
+        "kind": "heartbeat",
+        "name": "invalid",
+        "enabled": True,
+        "status": "scheduled",
+        "channel_id": "web",
+        "session_id": "s1",
+        "prompt": "p",
+        "schedule": {"type": "interval", "interval_seconds": 120},
+        "metadata": {"source": "agent_tool"},
+        "run_state": {"last_run_status": "unknown"},
+    }
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_text(
+        json.dumps({"version": 1, "jobs": [raw_job]}),
+        encoding="utf-8",
+    )
+
+    assert await store.list_jobs() == []
+
+
+async def test_corrupt_store_is_rejected_without_overwrite(
+    store: HeartbeatJobStore,
+) -> None:
+    original = "{broken json"
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_text(original, encoding="utf-8")
+
+    with pytest.raises(HeartbeatStoreDataError):
+        await store.list_jobs()
+    with pytest.raises(HeartbeatStoreDataError):
+        await store.create_job(
+            name="must-not-overwrite",
+            channel_id="web",
+            session_id="s1",
+            prompt="p",
+            schedule=_interval_schedule(),
+            source="agent_tool",
+        )
+
+    assert store.path.read_text(encoding="utf-8") == original
 
 
 async def test_count_active_jobs(store: HeartbeatJobStore) -> None:

@@ -1718,7 +1718,7 @@ async def _run(
     await heartbeat_service.start()
 
     # 新 Heartbeat 任务:读取 heartbeat.jobs.* 资源限制,启动 scheduler。
-    # 该段独立于旧探活 heartbeat.every/target/active_hours(后者将迁移到 health_check 段)。
+    # 该段独立于旧探活配置；后者仅由 health_check 段承载。
     try:
         hb_jobs_cfg = (
             full_cfg.get("heartbeat", {}).get("jobs")

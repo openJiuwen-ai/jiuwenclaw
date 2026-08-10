@@ -75,6 +75,13 @@ def test_schedule_cron_rejects_invalid_expr() -> None:
         HeartbeatSchedule.from_dict({"type": "cron", "cron_expr": "not a cron"})
 
 
+def test_schedule_cron_rejects_seven_field_expression() -> None:
+    with pytest.raises(ValueError, match="must have exactly 5 fields"):
+        HeartbeatSchedule.from_dict(
+            {"type": "cron", "cron_expr": "0 0 9 * * ? *"}
+        )
+
+
 def test_schedule_cron_requires_expr() -> None:
     with pytest.raises(ValueError, match="cron_expr is required"):
         HeartbeatSchedule.from_dict({"type": "cron"})
@@ -212,6 +219,52 @@ def test_job_run_state_roundtrip() -> None:
     assert job2.run_state.current_run_id == "r1"
     assert job2.run_state.skipped_count == 3
     assert job2.run_state.last_run_status == "succeeded"
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    [
+        ("enabled", "false"),
+        ("enabled", 0),
+        ("delete_after_run", "false"),
+        ("delete_after_run", 0),
+    ],
+)
+def test_job_from_dict_rejects_non_boolean_persisted_flags(
+    field: str,
+    invalid_value: object,
+) -> None:
+    data = _make_interval_job().to_dict()
+    data[field] = invalid_value
+
+    with pytest.raises(ValueError, match=rf"{field} must be boolean"):
+        HeartbeatJob.from_dict(data)
+
+
+def test_run_state_rejects_invalid_last_run_status() -> None:
+    with pytest.raises(ValueError, match="last_run_status must be one of"):
+        HeartbeatRunState.from_dict({"last_run_status": "unknown"})
+
+
+def test_run_state_accepts_null_last_run_status() -> None:
+    state = HeartbeatRunState.from_dict({"last_run_status": None})
+    assert state.last_run_status is None
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    [
+        ("queued_reschedule", "false"),
+        ("current_reschedule", 0),
+        ("resume_enabled", "true"),
+    ],
+)
+def test_run_state_rejects_non_boolean_persisted_flags(
+    field: str,
+    invalid_value: object,
+) -> None:
+    with pytest.raises(ValueError, match=rf"{field} must be boolean"):
+        HeartbeatRunState.from_dict({field: invalid_value})
 
 
 def test_job_source_property_falls_back_to_schedule_recovery() -> None:

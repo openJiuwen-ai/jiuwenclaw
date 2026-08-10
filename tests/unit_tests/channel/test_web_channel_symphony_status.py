@@ -23,6 +23,35 @@ class _FakeClient:
         self.frames.append(json.loads(data))
 
 
+def test_web_channel_exposes_heartbeat_marker_without_routing_metadata():
+    automation = {
+        "kind": "heartbeat",
+        "job_id": "hb-1",
+        "run_id": "run-1",
+        "trigger": "scheduler",
+    }
+    msg = Message(
+        id="run-1",
+        type="event",
+        channel_id="web",
+        session_id="session-1",
+        params={},
+        timestamp=1.0,
+        ok=True,
+        payload={"event_type": "chat.final", "content": "done"},
+        event_type=EventType.CHAT_FINAL,
+        metadata={"automation": automation, "ws_id": "private-route"},
+    )
+
+    payload = WebChannel._build_event_payload(msg, "chat.final")
+    frame = WebChannel._serialize_frame(object.__new__(WebChannel), msg)
+
+    assert payload["metadata"] == {"automation": automation}
+    assert frame["payload"]["metadata"] == {"automation": automation}
+    assert "ws_id" not in payload["metadata"]
+    assert "ws_id" not in frame["payload"]["metadata"]
+
+
 def test_web_channel_preserves_goal_structured_payloads():
     goal = {
         "goal_id": "goal-1",

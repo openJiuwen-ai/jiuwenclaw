@@ -29,7 +29,10 @@ from jiuwenswarm.gateway.heartbeat.models import (
 )
 from jiuwenswarm.gateway.heartbeat.scheduler import HeartbeatSchedulerService
 from jiuwenswarm.gateway.heartbeat.session_resolver import SessionSummary
-from jiuwenswarm.gateway.heartbeat.store import HeartbeatJobStore
+from jiuwenswarm.gateway.heartbeat.store import (
+    HeartbeatJobStore,
+    HeartbeatStoreDataError,
+)
 
 
 class _FakeMH:
@@ -87,6 +90,18 @@ def setup(tmp_path: Path):
     # 注入可控 resolver(默认会尝试读真实 session 目录,测试里都返回 None)
     sched._session_resolver = _FakeResolver()
     return store, mh, sched
+
+
+async def test_start_rejects_corrupt_store_without_false_running_state(
+    setup,
+) -> None:
+    store, _, sched = setup
+    store.path.write_text("{broken", encoding="utf-8")
+
+    with pytest.raises(HeartbeatStoreDataError):
+        await sched.start()
+
+    assert sched.is_running() is False
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +179,8 @@ async def test_dispatch_does_not_set_mode_param(setup) -> None:
     assert msg.metadata["automation"]["kind"] == "heartbeat"
     assert msg.metadata["automation"]["job_id"] == job.id
     assert msg.metadata["automation"]["run_id"] == "run1"
+    assert msg.params["automation"] == msg.metadata["automation"]
+    assert "run" not in msg.params
 
 
 async def test_dispatch_full_flow_marks_succeeded_and_reschedules(setup) -> None:
@@ -294,6 +311,32 @@ async def test_max_runs_reached_marks_completed(setup) -> None:
     assert j.enabled is False
 
 
+async def test_run_now_rejects_completed_job_without_exceeding_max_runs(setup) -> None:
+    store, mh, sched = setup
+    job = await store.create_job(
+        name="n", channel_id="web", session_id="s1", prompt="p",
+        schedule=HeartbeatSchedule.from_dict(
+            {"type": "interval", "interval_seconds": 120}
+        ),
+        source="agent_tool", max_runs=1,
+    )
+    first = await sched.trigger_run_now(job.id)
+    await sched.on_run_finished(job.id, first["run_id"], outcome="succeeded")
+
+    rejected = await sched.trigger_run_now(job.id)
+
+    current = await store.get_job(job.id)
+    assert rejected == {
+        "accepted": False,
+        "run_id": "",
+        "session_id": "s1",
+        "reason": "job_completed",
+    }
+    assert current.status == STATUS_COMPLETED
+    assert current.run_count == 1
+    assert len(mh.messages) == 1
+
+
 async def test_delete_after_run_marks_completed(setup) -> None:
     store, mh, sched = setup
     job = await store.create_job(
@@ -395,7 +438,7 @@ async def test_concurrency_queue_keeps_one_pending_and_consumes_it(setup) -> Non
     assert len(mh.messages) == 2
 
 
-async def test_busy_manual_session_is_not_preempted_by_due_heartbeat(setup) -> None:
+async def test_due_heartbeat_waits_until_bound_session_is_idle(setup) -> None:
     store, mh, sched = setup
     mh.busy_sessions.add("s1")
     job = await store.create_job(
@@ -412,9 +455,103 @@ async def test_busy_manual_session_is_not_preempted_by_due_heartbeat(setup) -> N
     current = await store.get_job(job.id)
     assert mh.messages == []
     assert current.run_state.current_run_id is None
+    assert current.run_state.last_run_status is None
+    assert current.next_run_at == 1.0
+
+    sched._now_fn = lambda: 200.0
+    await sched._tick_once()
+    still_waiting = await store.get_job(job.id)
+    assert mh.messages == []
+    assert still_waiting.next_run_at == 1.0
+    assert still_waiting.run_state.last_run_status is None
+
+    mh.busy_sessions.remove("s1")
+    sched._now_fn = lambda: 250.0
+    await sched._tick_once()
+
+    running = await store.get_job(job.id)
+    assert len(mh.messages) == 1
+    assert running.status == "running"
+    assert running.run_state.current_run_id == mh.messages[0].id
+
+
+async def test_due_heartbeat_skips_current_run_after_session_busy_timeout(setup) -> None:
+    store, mh, sched = setup
+    mh.busy_sessions.add("s1")
+    job = await store.create_job(
+        name="n", channel_id="web", session_id="s1", prompt="p",
+        schedule=HeartbeatSchedule.from_dict(
+            {"type": "interval", "interval_seconds": 120}
+        ),
+        source="agent_tool", concurrency_policy="queue",
+        next_run_at=1.0, now=1.0,
+    )
+    sched._now_fn = lambda: 301.0
+
+    await sched._tick_once()
+
+    current = await store.get_job(job.id)
+    assert mh.messages == []
+    assert current.run_state.current_run_id is None
     assert current.run_state.last_run_status == "skipped"
-    assert current.run_state.last_error == "session_busy"
-    assert current.next_run_at == 220.0
+    assert current.run_state.last_error == "session_busy_timeout"
+    assert current.run_state.queued_run_id is None
+    assert current.next_run_at == 421.0
+
+
+async def test_once_heartbeat_expires_after_session_busy_timeout(setup) -> None:
+    store, mh, sched = setup
+    mh.busy_sessions.add("s1")
+    job = await store.create_job(
+        name="once", channel_id="web", session_id="s1", prompt="p",
+        schedule=HeartbeatSchedule.from_dict({"type": "once", "run_at": 1.0}),
+        source="agent_tool", now=0.0,
+    )
+    sched._now_fn = lambda: 301.0
+
+    await sched._tick_once()
+
+    current = await store.get_job(job.id)
+    assert mh.messages == []
+    assert current.enabled is False
+    assert current.status == "expired"
+    assert current.next_run_at is None
+    assert current.run_state.last_run_status == "skipped"
+    assert current.run_state.last_error == "session_busy_timeout"
+
+
+async def test_dispatch_race_returns_claim_to_busy_wait_path(setup) -> None:
+    store, mh, sched = setup
+    job = await store.create_job(
+        name="n", channel_id="web", session_id="s1", prompt="p",
+        schedule=HeartbeatSchedule.from_dict(
+            {"type": "interval", "interval_seconds": 120}
+        ),
+        source="agent_tool", next_run_at=1.0, now=1.0,
+    )
+    sched._now_fn = lambda: 100.0
+
+    await sched._tick_once()
+    running = await store.get_job(job.id)
+    run_id = running.run_state.current_run_id
+    assert run_id is not None
+    assert run_id in sched._active_runs
+
+    deferred = await sched.on_session_busy_after_dispatch(job.id, run_id)
+
+    waiting = await store.get_job(job.id)
+    assert deferred is True
+    assert waiting.status == STATUS_SCHEDULED
+    assert waiting.next_run_at == 1.0
+    assert waiting.run_state.current_run_id is None
+    assert run_id not in sched._active_runs
+
+    # The queued message was consumed by MessageHandler in the real race.  Once
+    # it reports busy, the next scheduler tick must wait rather than duplicate it.
+    mh.messages.clear()
+    mh.busy_sessions.add("s1")
+    await sched._tick_once()
+    assert mh.messages == []
 
 
 async def test_run_now_rejects_busy_manual_session(setup) -> None:

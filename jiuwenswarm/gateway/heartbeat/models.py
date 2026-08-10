@@ -133,6 +133,18 @@ def validate_metadata_source(raw: Any) -> str:
     return value
 
 
+def _persisted_bool(
+    data: dict[str, Any], key: str, *, default: bool | None
+) -> bool | None:
+    """Read a persisted boolean without coercing strings or numbers."""
+    value = data.get(key, default)
+    if value is None and default is None:
+        return None
+    if not isinstance(value, bool):
+        raise ValueError(f"{key} must be boolean")
+    return value
+
+
 # ---------------------------------------------------------------------------
 # Schedule
 # ---------------------------------------------------------------------------
@@ -194,11 +206,17 @@ class HeartbeatSchedule:
             cron_expr = str(data.get("cron_expr") or "").strip()
             if not cron_expr:
                 raise ValueError("schedule.cron_expr is required for cron type")
+            field_count = len(cron_expr.split())
+            if field_count != 5:
+                raise ValueError(
+                    "heartbeat schedule.cron_expr must have exactly 5 fields, "
+                    f"got {field_count}"
+                )
             tz = _validate_timezone(
                 str(data.get("timezone") or "").strip() or default_timezone,
                 default=default_timezone,
             )
-            # 复用 Cron 的校验逻辑(5/7 字段归一化 + croniter)。
+            # Heartbeat 只允许 5 字段；表达式内容继续复用 Cron helper 校验。
             validate_cron_expression(cron_expr, timezone=tz)
             return HeartbeatSchedule(
                 type=SCHEDULE_CRON,
@@ -279,6 +297,15 @@ class HeartbeatRunState:
     def from_dict(data: dict[str, Any] | None) -> "HeartbeatRunState":
         if not isinstance(data, dict) or not data:
             return HeartbeatRunState()
+        raw_last_run_status = data.get("last_run_status")
+        if (
+            raw_last_run_status is not None
+            and raw_last_run_status not in HEARTBEAT_RUN_STATUSES
+        ):
+            raise ValueError(
+                "last_run_status must be one of "
+                f"{', '.join(HEARTBEAT_RUN_STATUSES)} or null"
+            )
         return HeartbeatRunState(
             current_run_id=data.get("current_run_id") or None,
             current_run_started_at=(
@@ -286,25 +313,21 @@ class HeartbeatRunState:
                 if isinstance(data.get("current_run_started_at"), (int, float))
                 else None
             ),
-            last_run_status=(
-                str(data["last_run_status"]).strip()
-                if isinstance(data.get("last_run_status"), str) and str(data["last_run_status"]).strip()
-                else None
-            ),
+            last_run_status=raw_last_run_status,
             last_error=data.get("last_error") or None,
             last_cancel_status=data.get("last_cancel_status") or None,
             last_cancel_error=data.get("last_cancel_error") or None,
             queued_run_id=data.get("queued_run_id") or None,
             queued_trigger=data.get("queued_trigger") or None,
-            queued_reschedule=bool(data.get("queued_reschedule", False)),
-            current_trigger=data.get("current_trigger") or None,
-            current_reschedule=bool(data.get("current_reschedule", False)),
-            resume_status=data.get("resume_status") or None,
-            resume_enabled=(
-                data.get("resume_enabled")
-                if isinstance(data.get("resume_enabled"), bool)
-                else None
+            queued_reschedule=bool(
+                _persisted_bool(data, "queued_reschedule", default=False)
             ),
+            current_trigger=data.get("current_trigger") or None,
+            current_reschedule=bool(
+                _persisted_bool(data, "current_reschedule", default=False)
+            ),
+            resume_status=data.get("resume_status") or None,
+            resume_enabled=_persisted_bool(data, "resume_enabled", default=None),
             resume_next_run_at=(
                 float(data["resume_next_run_at"])
                 if isinstance(data.get("resume_next_run_at"), (int, float))
@@ -418,7 +441,8 @@ class HeartbeatJob:
             default_timezone=job_timezone,
         )
 
-        enabled = bool(data.get("enabled", True))
+        enabled = _persisted_bool(data, "enabled", default=True)
+        assert isinstance(enabled, bool)
         status = str(data.get("status") or STATUS_SCHEDULED).strip()
         if status not in HEARTBEAT_STATUSES:
             raise ValueError(f"invalid status {status!r}")
@@ -451,7 +475,10 @@ class HeartbeatJob:
             if max_runs < 1:
                 raise ValueError("max_runs must be at least 1")
 
-        delete_after_run = bool(data.get("delete_after_run", False))
+        delete_after_run = _persisted_bool(
+            data, "delete_after_run", default=False
+        )
+        assert isinstance(delete_after_run, bool)
 
         created_at = data.get("created_at", None)
         updated_at = data.get("updated_at", None)

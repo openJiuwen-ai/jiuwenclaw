@@ -42,6 +42,7 @@ from jiuwenswarm.gateway.heartbeat.models import (
     SCHEDULE_INTERVAL,
     SCHEDULE_ONCE,
     SESSION_DELETED_COMPLETED,
+    STATUS_COMPLETED,
     STATUS_RUNNING,
     STATUS_SCHEDULED,
 )
@@ -52,6 +53,10 @@ if TYPE_CHECKING:
     from jiuwenswarm.gateway.heartbeat.store import HeartbeatJobStore
 
 logger = logging.getLogger(__name__)
+
+# Product policy: waiting for the bound session is distinct from a heartbeat
+# run's concurrency_policy.  Keep this internal and uniform across all jobs.
+_SESSION_BUSY_WAIT_TIMEOUT_SECONDS = 300.0
 
 
 def _now_ts() -> float:
@@ -103,7 +108,13 @@ class HeartbeatSchedulerService:
         if self._running:
             return
         self._running = True
-        await self.reload()
+        try:
+            await self.reload()
+        except Exception:
+            # A corrupt/unreadable store is intentionally fail-closed, but a
+            # failed start must not leave a scheduler that claims to be running.
+            self._running = False
+            raise
         self._task = asyncio.create_task(self._loop(), name="heartbeat-scheduler-loop")
 
     async def stop(self) -> None:
@@ -309,10 +320,23 @@ class HeartbeatSchedulerService:
             await self._handle_missing_session(job, now)
             return
         if self._session_is_busy(job):
+            due_at = float(job.next_run_at if job.next_run_at is not None else now)
+            waited = max(0.0, now - due_at)
+            wait_timeout = _SESSION_BUSY_WAIT_TIMEOUT_SECONDS
+            if waited < wait_timeout:
+                logger.debug(
+                    "[HeartbeatScheduler] waiting for bound session to become idle: "
+                    "job=%s session=%s waited=%.1fs timeout=%.1fs",
+                    job.id,
+                    job.session_id,
+                    waited,
+                    wait_timeout,
+                )
+                return
             await self._store.skip_and_reschedule(
                 job.id,
                 now=now,
-                reason="session_busy",
+                reason="session_busy_timeout",
                 next_run_at=self._compute_next_run(job, now),
             )
             return
@@ -387,7 +411,7 @@ class HeartbeatSchedulerService:
         session = self._session_resolver.resolve(job.channel_id, job.session_id)
         route = dict(session.route_metadata or {}) if session is not None else {}
         metadata = dict(route)
-        metadata["automation"] = {
+        automation = {
             "kind": "heartbeat",
             "job_id": job.id,
             "run_id": run_id,
@@ -395,6 +419,7 @@ class HeartbeatSchedulerService:
             "source": source,
             "trigger": job.run_state.current_trigger or "scheduler",
         }
+        metadata["automation"] = automation
         return Message(
             id=run_id,
             type="req",
@@ -408,14 +433,11 @@ class HeartbeatSchedulerService:
                 "query": job.prompt,
                 "content": job.prompt,
                 # 不设置 params.mode:web/tui 由原 session 当前配置决定。
-                "run": {
-                    "kind": "heartbeat_job",
-                    "context": {
-                        "job_id": job.id,
-                        "run_id": run_id,
-                        "triggered_at": now,
-                    },
-                },
+                # 心跳仍是普通 CHAT_SEND，不引入底层 RunKind；
+                # 执行身份只由 metadata.automation 关联。
+                # Persist the same marker with user/assistant history so a later
+                # session restore can identify this complete automated turn.
+                "automation": dict(automation),
             },
             metadata=metadata,
             provider=str(route.get("provider") or "") or None,
@@ -618,6 +640,21 @@ class HeartbeatSchedulerService:
         await self._consume_queued_run(job.id)
         return matched
 
+    async def on_session_busy_after_dispatch(
+        self, job_id: str, run_id: str
+    ) -> bool:
+        """Return an exact claim to its original due time after a dispatch race."""
+        try:
+            matched, _ = await self._store.defer_claimed_run_for_busy(
+                job_id,
+                run_id,
+                now=self._now_fn(),
+            )
+        except KeyError:
+            matched = False
+        self._active_runs.pop(run_id, None)
+        return matched
+
     async def _consume_queued_run(self, job_id: str) -> None:
         """Start the single queued run, if the job is still runnable."""
         queued = await self._store.pop_queued_run(job_id)
@@ -713,6 +750,18 @@ class HeartbeatSchedulerService:
         job = await self._store.get_job(job_id)
         if job is None:
             raise KeyError("job not found")
+        # completed 表示 once/delete_after_run/max_runs 已经达成。run_now
+        # 不能绕过这些停止条件；需要再次执行时必须先由显式 update/toggle
+        # 重新激活任务（方案 §3 status 不变量、§7.10 停止条件）。
+        if job.status == STATUS_COMPLETED or (
+            job.max_runs is not None and int(job.run_count) >= int(job.max_runs)
+        ):
+            return {
+                "accepted": False,
+                "run_id": "",
+                "session_id": job.session_id,
+                "reason": "job_completed",
+            }
         # 与 _handle_due_job 一致:先校验 session 存在性。
         session = self._session_resolver.resolve(job.channel_id, job.session_id)
         if session is None:

@@ -393,6 +393,7 @@ async def test_get_meta(ctrl: HeartbeatController) -> None:
     assert "skip" in meta["concurrency_policies"]
     assert meta["run_count_semantics"].startswith("increments for succeeded")
     assert "delete_after_run" in meta["deprecated_fields"]
+    assert "session_busy_wait_timeout_seconds" not in meta["limits"]
 
 
 def test_limits_are_normalized_for_meta(ctrl: HeartbeatController) -> None:
@@ -444,7 +445,10 @@ def test_create_job_description_contains_decision_tree_and_stop_obligation(ctrl:
     desc = create_tool.card.description
     # 决策树:何时用 heartbeat vs cron
     assert "cron_create_job" in desc
-    # 停止义务:必须实际调用工具停止
+    # 有限次数由 scheduler 停止，不重复写入计数/自停逻辑。
+    assert "finite max_runs" in desc
+    assert "do not add run-count bookkeeping" in desc
+    # 开放式语义完成仍必须实际调用工具停止。
     assert "heartbeat_update_job(enabled=false)" in desc
     assert "heartbeat_cancel_run(pause_schedule=true)" in desc
 

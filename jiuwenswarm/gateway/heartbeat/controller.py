@@ -778,7 +778,9 @@ class HeartbeatController:
                 "no current session; heartbeat_create_job must bind to a session"
             )
         return await self.create_job_for_session(
-            kwargs, channel_id=ctx.get("channel_id", "web"), session_id=ctx["session_id"]
+            {key: value for key, value in kwargs.items() if value is not None},
+            channel_id=ctx.get("channel_id", "web"),
+            session_id=ctx["session_id"],
         )
 
     async def _tool_update_job(self, job_id: str, patch: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
@@ -802,14 +804,16 @@ class HeartbeatController:
     async def _tool_preview_job(self, job_id: str, count: int = 5, **kwargs: Any) -> dict[str, Any]:
         ctx = self.get_session_ctx()
         return await self.preview_job(
-            job_id, count=count, access_session_id=ctx.get("session_id") or None
+            job_id,
+            count=5 if count is None else count,
+            access_session_id=ctx.get("session_id") or None,
         )
 
     async def _tool_run_now(self, job_id: str, reschedule: bool = False, **kwargs: Any) -> dict[str, Any]:
         ctx = self.get_session_ctx()
         return await self.run_now(
             job_id,
-            reschedule=reschedule,
+            reschedule=False if reschedule is None else reschedule,
             access_session_id=ctx.get("session_id") or None,
         )
 
@@ -817,7 +821,7 @@ class HeartbeatController:
         ctx = self.get_session_ctx()
         return await self.cancel_run(
             job_id,
-            pause_schedule=pause_schedule,
+            pause_schedule=False if pause_schedule is None else pause_schedule,
             access_session_id=ctx.get("session_id") or None,
         )
 
@@ -850,24 +854,30 @@ _CREATE_JOB_SCHEMA: dict = {
         "session runtime settings; future runs execute directly in the original session. "
         "Do not use this for standalone scheduled tasks such as daily reports, periodic "
         "channel notifications, or jobs that should start independently from a saved "
-        "prompt; use cron_create_job for those. If a future heartbeat run determines the "
-        "task is complete, the assistant must actually stop the schedule by calling "
-        "heartbeat_update_job(enabled=false) or heartbeat_cancel_run(pause_schedule=true), "
-        "not merely state that it has stopped."
+        "prompt; use cron_create_job for those. A finite max_runs is enforced by the "
+        "scheduler; do not add run-count bookkeeping or self-disable instructions solely "
+        "for that limit. For an open-ended task with semantic completion, the assistant "
+        "must actually stop the schedule by calling heartbeat_update_job(enabled=false) "
+        "or heartbeat_cancel_run(pause_schedule=true), not merely state that it has stopped."
     ),
     "properties": {
         "name": {"type": "string", "description": "Heartbeat job name describing what to follow up in current session."},
         "prompt": {
             "type": "string",
             "description": (
-                "Follow-up prompt delivered to the current session each run. Must include "
-                "stop obligation: when the task is complete, call heartbeat_update_job"
-                "(enabled=false) or heartbeat_cancel_run(pause_schedule=true)."
+                "Concise follow-up prompt delivered to the current session each run. When "
+                "max_runs is finite, do not duplicate its limit or add self-stop bookkeeping. "
+                "For an open-ended task with semantic completion, require the future run to "
+                "stop the schedule."
             ),
         },
         "schedule": _SCHEDULE_SCHEMA,
         "max_runs": {"type": "integer", "description": "Max trigger count; omit for system default."},
-        "delete_after_run": {"type": "boolean", "description": "Auto-complete after one run."},
+        "delete_after_run": {
+            "type": "boolean",
+            "description": "Auto-complete after one run.",
+            "default": False,
+        },
         "concurrency_policy": {
             "type": "string",
             "enum": list(HEARTBEAT_CONCURRENCY_POLICIES),

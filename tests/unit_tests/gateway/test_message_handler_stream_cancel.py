@@ -47,6 +47,33 @@ class _DisconnectingStreamAgentClient:
         raise RuntimeError("AgentServer WebSocket connection closed")
 
 
+class _SemanticExecutionErrorAgentClient:
+    @staticmethod
+    async def send_request(env: object) -> SimpleNamespace:
+        raise AssertionError("semantic stream error test should not call send_request")
+
+    @staticmethod
+    async def send_request_stream(env: object):
+        yield SimpleNamespace(
+            request_id=env.request_id,
+            channel_id=env.channel,
+            payload={
+                "event_type": "execution.error",
+                "code": "round_execution_error",
+                "message": "invalid heartbeat execution",
+            },
+            metadata=None,
+            is_complete=False,
+        )
+        yield SimpleNamespace(
+            request_id=env.request_id,
+            channel_id=env.channel,
+            payload={"event_type": "chat.final", "content": ""},
+            metadata=None,
+            is_complete=False,
+        )
+
+
 class _HangingAgentClient:
     @staticmethod
     async def send_request(env: object) -> SimpleNamespace:
@@ -252,6 +279,50 @@ async def test_process_stream_publishes_error_and_stops_processing_on_connection
         and payload.get("is_processing") is False
         for payload in payloads
         if isinstance(payload, dict)
+    )
+
+
+@pytest.mark.asyncio
+async def test_process_stream_marks_heartbeat_failed_on_execution_error_event() -> None:
+    handler = _TestMessageHandler.create_with_client(_SemanticExecutionErrorAgentClient())
+
+    class _Scheduler:
+        def __init__(self) -> None:
+            self.calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+        async def on_run_finished(self, *args, **kwargs) -> None:
+            self.calls.append((args, kwargs))
+
+    scheduler = _Scheduler()
+    handler._heartbeat_scheduler_service = scheduler
+    env = SimpleNamespace(
+        request_id="heartbeat-run-1",
+        channel="web",
+        params={"query": "continue"},
+    )
+    automation = {
+        "kind": "heartbeat",
+        "job_id": "heartbeat-job-1",
+        "run_id": "heartbeat-run-1",
+    }
+
+    await handler.process_stream(
+        env,
+        session_id="heartbeat-session",
+        request_metadata={"automation": automation},
+    )
+
+    assert scheduler.calls == [
+        (
+            ("heartbeat-job-1", "heartbeat-run-1"),
+            {"outcome": "failed", "error": "invalid heartbeat execution"},
+        )
+    ]
+    outputs = await _drain_robot_messages(handler)
+    assert any(
+        isinstance(message.payload, dict)
+        and message.payload.get("event_type") == "execution.error"
+        for message in outputs
     )
 
 

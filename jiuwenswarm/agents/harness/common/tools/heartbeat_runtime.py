@@ -25,6 +25,16 @@ HEARTBEAT_TOOL_NAMES: frozenset[str] = frozenset(
 )
 
 
+def _without_omitted_optional_values(data: dict[str, Any]) -> dict[str, Any]:
+    """Drop SDK-injected ``None`` while preserving explicit false and zero.
+
+    OpenJiuwen materializes absent optional tool properties as ``None``. At the
+    Agent tool boundary that still means "omitted"; the Gateway API remains
+    strict for explicitly supplied strings, numbers, and other invalid values.
+    """
+    return {key: value for key, value in data.items() if value is not None}
+
+
 class HeartbeatRuntimeBridge:
     """Agent-side heartbeat tools forwarding authoritative mutations to Gateway."""
 
@@ -77,13 +87,17 @@ class HeartbeatRuntimeBridge:
             )
 
         async def list_jobs(scope: str = "current", **_: Any) -> dict[str, Any]:
-            return await self._send(context, "list", {"scope": scope})
+            return await self._send(
+                context, "list", {"scope": "current" if scope is None else scope}
+            )
 
         async def get_job(job_id: str, **_: Any) -> dict[str, Any]:
             return await self._send(context, "get", {"job_id": job_id})
 
         async def create_job(**kwargs: Any) -> dict[str, Any]:
-            return await self._send(context, "create", kwargs)
+            return await self._send(
+                context, "create", _without_omitted_optional_values(kwargs)
+            )
 
         async def update_job(job_id: str, patch: dict[str, Any], **_: Any) -> dict[str, Any]:
             return await self._send(context, "update", {"job_id": job_id, "patch": patch})
@@ -98,7 +112,9 @@ class HeartbeatRuntimeBridge:
 
         async def preview_job(job_id: str, count: int = 5, **_: Any) -> dict[str, Any]:
             return await self._send(
-                context, "preview", {"job_id": job_id, "count": count}
+                context,
+                "preview",
+                {"job_id": job_id, "count": 5 if count is None else count},
             )
 
         async def run_now(
@@ -107,7 +123,10 @@ class HeartbeatRuntimeBridge:
             return await self._send(
                 context,
                 "run_now",
-                {"job_id": job_id, "reschedule": reschedule},
+                {
+                    "job_id": job_id,
+                    "reschedule": False if reschedule is None else reschedule,
+                },
             )
 
         async def cancel_run(
@@ -116,7 +135,12 @@ class HeartbeatRuntimeBridge:
             return await self._send(
                 context,
                 "cancel",
-                {"job_id": job_id, "pause_schedule": pause_schedule},
+                {
+                    "job_id": job_id,
+                    "pause_schedule": (
+                        False if pause_schedule is None else pause_schedule
+                    ),
+                },
             )
 
         schedule = {
@@ -139,7 +163,7 @@ class HeartbeatRuntimeBridge:
             tool(
                 "heartbeat_list_jobs",
                 "List heartbeat follow-up jobs for the current session.",
-                {"type": "object", "properties": {"scope": {"type": "string", "enum": ["current", "all_visible"]}}},
+                {"type": "object", "properties": {"scope": {"type": "string", "enum": ["current", "all_visible"], "default": "current"}}},
                 list_jobs,
             ),
             tool("heartbeat_get_job", "Get a heartbeat job in the current session.", job_id_schema, get_job),
@@ -149,8 +173,10 @@ class HeartbeatRuntimeBridge:
                 "Use it only to return later to continue the existing task with the original "
                 "conversation and runtime configuration. For standalone daily reports, "
                 "periodic notifications, or independent saved-prompt tasks, use "
-                "cron_create_job instead. When the followed task is complete, actually stop "
-                "the schedule with heartbeat_update_job(enabled=false) or "
+                "cron_create_job instead. A finite max_runs is enforced by the scheduler; do "
+                "not add run-count bookkeeping or self-disable instructions solely for that "
+                "limit. For an open-ended task with semantic completion, actually stop the "
+                "schedule with heartbeat_update_job(enabled=false) or "
                 "heartbeat_cancel_run(pause_schedule=true).",
                 {
                     "type": "object",
@@ -159,15 +185,17 @@ class HeartbeatRuntimeBridge:
                         "prompt": {
                             "type": "string",
                             "description": (
-                                "Follow-up prompt for the current session. It should require "
-                                "the future run to stop the schedule when work is complete."
+                                "Concise follow-up prompt for the current session. When "
+                                "max_runs is finite, do not duplicate its limit or add "
+                                "self-stop bookkeeping. For an open-ended task with semantic "
+                                "completion, require the future run to stop the schedule."
                             ),
                         },
                         "schedule": schedule,
                         "max_runs": {"type": "integer"},
-                        "delete_after_run": {"type": "boolean"},
+                        "delete_after_run": {"type": "boolean", "default": False},
                         "concurrency_policy": {"type": "string", "enum": ["skip", "queue", "replace"]},
-                        "enabled": {"type": "boolean"},
+                        "enabled": {"type": "boolean", "default": True},
                     },
                     "required": ["name", "prompt", "schedule"],
                 },
@@ -189,19 +217,19 @@ class HeartbeatRuntimeBridge:
             tool(
                 "heartbeat_preview_job",
                 "Preview future heartbeat trigger times.",
-                {"type": "object", "properties": {"job_id": {"type": "string"}, "count": {"type": "integer"}}, "required": ["job_id"]},
+                {"type": "object", "properties": {"job_id": {"type": "string"}, "count": {"type": "integer", "default": 5}}, "required": ["job_id"]},
                 preview_job,
             ),
             tool(
                 "heartbeat_run_now",
                 "Run a heartbeat job now; reschedule=false preserves its schedule.",
-                {"type": "object", "properties": {"job_id": {"type": "string"}, "reschedule": {"type": "boolean"}}, "required": ["job_id"]},
+                {"type": "object", "properties": {"job_id": {"type": "string"}, "reschedule": {"type": "boolean", "default": False}}, "required": ["job_id"]},
                 run_now,
             ),
             tool(
                 "heartbeat_cancel_run",
                 "Cancel only the current heartbeat run; optionally pause future scheduling.",
-                {"type": "object", "properties": {"job_id": {"type": "string"}, "pause_schedule": {"type": "boolean"}}, "required": ["job_id"]},
+                {"type": "object", "properties": {"job_id": {"type": "string"}, "pause_schedule": {"type": "boolean", "default": False}}, "required": ["job_id"]},
                 cancel_run,
             ),
         ]
