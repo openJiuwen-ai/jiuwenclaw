@@ -412,7 +412,6 @@ def _search_agent_tool_params(config: dict[str, Any]) -> dict[str, Any]:
         "tool_names": sa_cfg.get("tool_names") or [
             "web_search",
             "web_fetch_and_summary",
-            "python_code_interpreter",
             "check_confidence_gate",
         ],
         "max_iterations": int(sa_cfg.get("max_iterations", 15)),

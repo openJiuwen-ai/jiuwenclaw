@@ -5,7 +5,7 @@ NLP ReAct Agent 模块
 Agent 通过多轮"LLM 推理 → 工具调用 → 结果反馈"循环，自主完成复杂的搜索任务。
 
 与 mm_react_agent.py 的区别：
-1. 额外注册了 python_code_interpreter（沙箱代码解释器）和 check_confidence_gate（置信度门控）工具
+1. 按需注册 python_code_interpreter（沙箱代码解释器，仅当 tool_names 包含时）和 check_confidence_gate（置信度门控）工具
 2. 到达最大迭代轮次时，强制注入提示消息要求模型给出最终答案
 3. 使用 create_llm_client() 工厂函数创建客户端（支持 Qwen/Gemini/OpenAI）
 
@@ -160,7 +160,7 @@ class MMSearchAgent:
     3. 返回 ReactLoopResult：包含完整轨迹、成功状态、token 用量等
 
     与 mm_react_agent.py 中 MMSearchAgent 的差异：
-    - 额外注册了 python_code_interpreter 和 check_confidence_gate 工具
+    - 按需注册 python_code_interpreter（仅当 tool_names 包含时）和 check_confidence_gate 工具
     - 最大迭代轮次时强制注入终止提示（而非仅标记为 other_info 警告）
     - 使用 create_llm_client() 工厂函数（支持 Qwen/Gemini/OpenAI 自动选择）
     """
@@ -233,17 +233,20 @@ class MMSearchAgent:
             _vl_names = {"text_to_image_web_search", "image_to_image_web_search", "image_crop"}
             self.config.tool_names = [t for t in self.config.tool_names if t not in _vl_names]
 
-        # 注册沙箱 Python 代码解释器（可选：opensandbox 未安装时跳过）
+        # 注册沙箱 Python 代码解释器（可选）。仅当 tool_names 显式包含
+        # python_code_interpreter 时才构造并注册；默认不启用，避免无谓地
+        # 导入 opensandbox 与构造空 domain 的 ConnectionConfig。
         self.python_code_interpreter = None
-        try:
-            from jiuwenswarm.agents.harness.search.tools.python_code_interpreter import PythonCodeInterpreter
-            self.python_code_interpreter = PythonCodeInterpreter(logger=self.logger)
-            self.tool_registry.register_plugin(self.python_code_interpreter)
-        except ImportError:
-            # opensandbox 未装：不仅要跳过注册，还要从 tool_names 移除，否则
-            # _build_tools_schema 会因“tool_names 指定但 tool_registry 未注册”抛 ValueError。
-            self.logger.info("opensandbox not installed; python_code_interpreter skipped.")
-            self.config.tool_names = [t for t in self.config.tool_names if t != "python_code_interpreter"]
+        if "python_code_interpreter" in self.config.tool_names:
+            try:
+                from jiuwenswarm.agents.harness.search.tools.python_code_interpreter import PythonCodeInterpreter
+                self.python_code_interpreter = PythonCodeInterpreter(logger=self.logger)
+                self.tool_registry.register_plugin(self.python_code_interpreter)
+            except ImportError:
+                # opensandbox 未装：不仅要跳过注册，还要从 tool_names 移除，否则
+                # _build_tools_schema 会因“tool_names 指定但 tool_registry 未注册”抛 ValueError。
+                self.logger.info("opensandbox not installed; python_code_interpreter skipped.")
+                self.config.tool_names = [t for t in self.config.tool_names if t != "python_code_interpreter"]
 
         # 注册置信度门控工具（NLP Agent 特有，mm_react_agent 中未注册）
         # check_answer 是一个独立函数（非类方法），使用 register_function 注册
@@ -566,12 +569,12 @@ class MMSearchAgent:
                                        total_usage=total_usage)
             except Exception as E:
                 # 其他异常：视为失败
-                self.logger.error(f'Error in loop {cur_loop_step}: {E} | traceback:{traceback.print_exc()}')
+                self.logger.error(f'Error in loop {cur_loop_step}: {E} | traceback:{traceback.format_exc()}')
                 return ReactLoopResult(success=False,
                                        trace_list=normalized_results,
                                        turn_num=cur_loop_step,
                                        finish_reason=finish_reason,
-                                       failure_reason=f"{type(E).__name__}: {E} | traceback:{traceback.print_exc()}",
+                                       failure_reason=f"{type(E).__name__}: {E} | traceback:{traceback.format_exc()}",
                                        ctx_status=self._build_final_ctx_status(last_ctx_status, has_repeated_truncation, has_compacted_truncation),
                                        total_usage=total_usage)
 
@@ -928,7 +931,7 @@ class MMSearchAgent:
 
                 return tool_result
             except Exception as E:
-                self.logger.error(f'Error in execute_tool: {E} | traceback:{traceback.print_exc()}')
+                self.logger.error(f'Error in execute_tool: {E} | traceback:{traceback.format_exc()}')
                 return None
 
         # 并行执行所有工具调用

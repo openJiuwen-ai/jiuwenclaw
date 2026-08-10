@@ -553,7 +553,6 @@ class SearchAgentToolInput(ConstructionInput):
         default_factory=lambda: [
             "web_search",
             "web_fetch_and_summary",
-            "python_code_interpreter",
             "check_confidence_gate",
         ],
         description="Tool subset exposed to the SearchAgent's ReAct loop.",

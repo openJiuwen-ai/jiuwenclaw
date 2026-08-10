@@ -1,5 +1,6 @@
 import base64
 import logging
+import os
 from datetime import timedelta
 from typing import Optional
 
@@ -18,9 +19,9 @@ class PythonCodeInterpreter:
 
     def __init__(
         self,
-        domain: str = "7.216.53.54:60217",
+        domain: str = os.getenv("SANDBOX_DOMAIN", ""),
         protocol: str = "http",
-        api_key: str = "dev-secret",
+        api_key: str = os.getenv("SANDBOX_API_KEY", ""),
         image: str = "23.10-trtllm-python-py3:zhihan_cuda122_verl_0508",
         request_timeout: int = 120,
         sandbox_timeout: int = 5,

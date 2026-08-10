@@ -501,7 +501,7 @@ react:
       # max_iterations: 15
       # system_prompt_name: SYSTEM_TEMPLATE_XIAOHAN0319
       # query_prompt_name: QUERY_TEMPLATE
-      # tool_names: [web_search, web_fetch_and_summary, python_code_interpreter, check_confidence_gate]
+      # tool_names: [web_search, web_fetch_and_summary, check_confidence_gate]
   answer_chunk_size: 500
   stream_chunk_threshold: 50
   stream_character_threshold: 2000

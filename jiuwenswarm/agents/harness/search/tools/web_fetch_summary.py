@@ -202,7 +202,7 @@ class WebSearcherAndFetchTool:
             return results[:k] if k and k > 0 else results
         except Exception as E:
             self.logger.error(f"web_search error: {E}")
-            return [f"Failed to Search for query:{query} due to an error:{E}"]
+            return []
 
     # 并行调用
     async def web_fetch(self, urls: List[str]):

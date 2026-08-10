@@ -22,7 +22,6 @@ _DEFAULT_QUERY_PROMPT_NAME = "QUERY_TEMPLATE"
 _DEFAULT_TOOL_NAMES = [
     "web_search",
     "web_fetch_and_summary",
-    "python_code_interpreter",
     "check_confidence_gate",
 ]
 _DEFAULT_MAX_ITERATIONS = 15

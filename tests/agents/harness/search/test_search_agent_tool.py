@@ -87,7 +87,7 @@ def test_search_agent_tool_invoke_returns_answer() -> None:
     assert out.success is True
     assert out.data["output"] == "42"
     assert out.data["agent_id"] == "search_agent"
-    instance.close.assert_awaited()
+    instance.close.assert_not_awaited()
 
 
 def test_search_agent_tool_invoke_empty_prompt() -> None:
@@ -115,7 +115,7 @@ def test_search_agent_tool_invoke_surfaces_failure() -> None:
 
     assert out.success is False
     assert "kaboom" in out.data["output"]
-    instance.close.assert_awaited()
+    instance.close.assert_not_awaited()
 
 
 def test_config_adapter_returns_none_without_search_model() -> None:
