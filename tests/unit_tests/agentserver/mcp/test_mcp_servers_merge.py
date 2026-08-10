@@ -70,6 +70,26 @@ def test_state_disconnected_excluded(tmp_path: Path) -> None:
     assert names == {"baidu"}
 
 
+def test_state_connecting_merged_like_connected(tmp_path: Path) -> None:
+    """state==connecting is merged into get_mcp_servers (so apply_mcp_change /
+    init can register the entry) — same as connected, NOT excluded like
+    disconnected/registered. This is what lets the connect handler call
+    apply_mcp_change(add) without a pre-flip to connected."""
+    _write_config_yaml(tmp_path, [])
+    _write_state_json(tmp_path, {
+        "baidu": {"transport": "sse", "state": "connected", "enabled": True},
+        "feishu": {"transport": "http", "state": "connecting", "enabled": True},
+        "github": {"transport": "http", "state": "registered", "enabled": True}
+    })
+    with patch.object(cfg_mod, "CONFIG_YAML_PATH", tmp_path / "config.yaml"), \
+         patch.object(common_utils, "get_workspace_dir", return_value=tmp_path), \
+         patch.object(ss, "get_workspace_dir", return_value=tmp_path):
+        servers = cfg_mod.get_mcp_servers()
+    names = {s["name"] for s in servers}
+    # connected AND connecting merge; registered does NOT.
+    assert names == {"baidu", "feishu"}
+
+
 def test_skill_only_connector_excluded_from_mcp_servers(tmp_path: Path) -> None:
     """Skill-only connectors (no transport/url/command — only skills) do NOT
     appear in get_mcp_servers. They have no MCP server to register; surfacing

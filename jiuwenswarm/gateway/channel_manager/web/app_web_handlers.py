@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+﻿# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """WebChannel RPC handlers and shared constants (used by app gateway; single source with app.py)."""
 
 from __future__ import annotations
@@ -6253,36 +6253,13 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             logger.exception("[mcp] mcp.list failed: %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="MCP_INTERNAL")
 
-    async def _mcp_show_local(ws, req_id, params, session_id):
-        try:
-            from jiuwenswarm.server.runtime.mcp.registry import get_mcp
-            name = str((params or {}).get("name", "")).strip()
-            if not name:
-                raise ValueError("mcp name is required")
-            item = await asyncio.to_thread(get_mcp, name)
-            if item is None:
-                raise KeyError("mcp '{0}' not found".format(name))
-            # Connected MCP but ToolMgr returned no tools: fall back to a
-            # temporary connection. Shared with the agent-layer show so the
-            # fallback logic lives in one place (fill_mcp_tools_fallback).
-            from jiuwenswarm.common.mcp_config import fill_mcp_tools_fallback
-            await fill_mcp_tools_fallback(item, name)
-            await channel.send_response(ws, req_id, ok=True, payload={"type": "detail", "item": item})
-        except ValueError as exc:
-            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="MCP_BAD_REQUEST")
-        except KeyError as exc:
-            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="MCP_NOT_FOUND")
-        except Exception as exc:
-            logger.exception("[mcp] mcp.show failed: %s", exc)
-            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="MCP_INTERNAL")
-
     def _register_mcp_agent(method_name: str, rm: Any) -> None:
         async def _handler(ws, req_id, params, session_id):
             await _forward_mcp_to_agent(ws, req_id, params, session_id, req_method=rm)
         channel.register_method(method_name, _handler)
 
     channel.register_method("mcp.list", _mcp_list_local)
-    channel.register_method("mcp.show", _mcp_show_local)
+    _register_mcp_agent("mcp.show", ReqMethod.MCP_SHOW)
     _register_mcp_agent("mcp.connect", ReqMethod.MCP_CONNECT)
     _register_mcp_agent("mcp.wait_auth", ReqMethod.MCP_WAIT_AUTH)
     _register_mcp_agent("mcp.disconnect", ReqMethod.MCP_DISCONNECT)

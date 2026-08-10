@@ -29,7 +29,5 @@ def load_json(path: Path) -> dict[str, Any] | None:
 
 
 def has_skill_file(directory: Path) -> bool:
-    """True if a directory holds a skill entry (``SKILL.md`` or any ``.md``)."""
-    if (directory / "SKILL.md").is_file():
-        return True
-    return any(p.is_file() and p.suffix == ".md" for p in directory.glob("*.md"))
+    """True if a directory holds a skill entry (``SKILL.md``)."""
+    return (directory / "SKILL.md").is_file()

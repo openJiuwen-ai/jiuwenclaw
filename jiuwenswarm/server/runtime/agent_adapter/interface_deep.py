@@ -2727,15 +2727,21 @@ class JiuWenSwarmDeepAdapter:
         adapter's error reason (e.g. the runner's "add mcp server failed"
         message) so the connect handler can report failure to the frontend
         instead of a silent "connected".
+
+        Skill-only / pure-CLI MCPs have no server entry (no mcp.json command,
+        no stdio bin) — get_mcp_server_config returns None. They expose tools
+        via bundled skills, not via an MCP server, so there is nothing to
+        register; return True so the connect handler's apply_mcp_change
+        succeeds instead of raising "register rejected".
         """
         entry = get_mcp_server_config(name)
         if not entry:
             logger.debug(
                 "[JiuWenSwarmDeepAdapter] register_mcp_by_name: " \
-                "'%s' has no MCP entry (CLI/skill-only, skipping)",
+                "'%s' has no MCP entry (CLI/skill-only, no-op)",
                 name
             )
-            return False
+            return True
         applied_any = False
         first_error: str = ""
         for adapter in self._iter_mcp_target_adapters():
@@ -2823,6 +2829,29 @@ class JiuWenSwarmDeepAdapter:
     async def _register_mcp_servers_from_config(
         self, config_base: dict[str, Any], *, tag: str = "agent.main"
     ) -> None:
+        """Register every live MCP (connected OR connecting) from state.json.
+
+        The merged list (get_mcp_servers via list_connected_mcps) includes
+        both ``connected`` (fully registered) and ``connecting`` (connect was
+        in progress when the process last exited — a restart should re-register
+        it). A connecting MCP that registers OK here is promoted to connected;
+        one that fails is degraded to disconnected (no infinite retry on the
+        next restart).
+
+        Per-MCP failure isolation: a single bad MCP (unreachable host, register
+        rejected, SDK cancel-scope error) must NOT abort the whole loop and
+        starve the remaining MCPs of registration. Each entry's register call
+        is wrapped so one failure logs + degrades that MCP's state to
+        ``disconnected`` (so init on the next restart doesn't retry it —
+        disconnected is excluded from list_connected_mcps), then the loop
+        continues to the next MCP. This also fixes the "phantom connected"
+        symptom: previously a failed register left state==connected, so every
+        restart re-tried the same unreachable MCP forever.
+
+        Only the init path degrades to ``disconnected`` (persistent failure).
+        The connect handler rolls back to ``registered`` (a one-shot retry is
+        fine for an interactive connect) — see ``_handle_mcp_connect``.
+        """
         enabled_entries = self._extract_enabled_mcp_server_entries(config_base)
         for entry in enabled_entries:
             cfg = self._build_mcp_server_config(entry)
@@ -2832,7 +2861,60 @@ class JiuWenSwarmDeepAdapter:
                     entry.get("name", "<unknown>"),
                 )
                 continue
-            await self._register_mcp_server(cfg, tag=tag)
+            server_name = str(getattr(cfg, "server_name", "") or "").strip()
+            try:
+                ok = await self._register_mcp_server(cfg, tag=tag)
+                if not ok:
+                    # _register_mcp_server returns False on preflight
+                    # unreachability (HTTP host down) — a real failure, not a
+                    # skip. Normalize it into the except path so it degrades
+                    # state just like a raised register error.
+                    raise RuntimeError(
+                        f"MCP '{server_name}' preflight unreachable "
+                        f"(host down / DNS failed) — skipping registration"
+                    )
+                # Register succeeded — promote connecting → connected. A
+                # connecting MCP (left over from a connect interrupted by a
+                # restart) just proved it can register, so it is now truly
+                # connected. A connected MCP stays connected (idempotent flip).
+                # Without this, a restart-while-connecting MCP would stay
+                # connecting forever (frontend stuck on "connecting") even
+                # though its server is live.
+                if server_name:
+                    try:
+                        from jiuwenswarm.server.runtime.mcp.state_store import (
+                            get_mcp_record,
+                            set_mcp_state,
+                        )
+                        rec = get_mcp_record(server_name)
+                        if rec and rec.get("state") == "connecting":
+                            set_mcp_state(server_name, state="connected")
+                    except Exception as prom_exc:  # noqa: BLE001
+                        logger.debug(
+                            "[JiuWenSwarmDeepAdapter] connecting→connected "
+                            "promote for '%s' failed: %s",
+                            server_name, prom_exc,
+                        )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] MCP '%s' register failed on "
+                    "startup, marking disconnected (one-shot; won't retry on "
+                    "next restart): %s",
+                    server_name, exc,
+                )
+                if server_name:
+                    try:
+                        from jiuwenswarm.server.runtime.mcp.state_store import (
+                            set_mcp_state,
+                        )
+                        set_mcp_state(server_name, state="disconnected")
+                    except Exception as degr_exc:  # noqa: BLE001
+                        logger.debug(
+                            "[JiuWenSwarmDeepAdapter] state degrade for '%s' failed: %s",
+                            server_name, degr_exc,
+                        )
+                # continue to next MCP — one failure must not starve the rest
+
 
     async def _sync_mcp_servers_for_runtime(
         self, config_base: dict[str, Any], *, tag: str = "agent.reload"

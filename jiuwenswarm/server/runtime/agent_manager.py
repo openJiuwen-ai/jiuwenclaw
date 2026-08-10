@@ -643,6 +643,22 @@ class AgentManager:
                     if not first_error:
                         first_error = str(exc) or repr(exc)
         if not applied_any:
+            # No adapter succeeded. For "remove" on a skill-only / pure-CLI MCP
+            # (no server entry — get_mcp_server_config returns None), there was
+            # never a server to unregister, so ok=False from every adapter is
+            # the expected no-op, not a failure. Treating it as a failure would
+            # make disconnect raise "register/unregister rejected" for MCPs
+            # that legitimately have no MCP server. register_mcp_by_name mirrors
+            # this: it returns True (no-op) when the entry is None.
+            if action in ("remove", "toggle"):
+                from jiuwenswarm.common.config import get_mcp_server_config
+                if get_mcp_server_config(name) is None:
+                    logger.debug(
+                        "[AgentManager] apply_mcp_change '%s'/%s: no server entry "
+                        "(skill-only / pure-CLI); no-op success",
+                        name, action,
+                    )
+                    return True
             # No adapter succeeded — surface the failure so the connect/
             # disconnect handler reports failure to the frontend instead of
             # a stale "connected"/"disconnected".

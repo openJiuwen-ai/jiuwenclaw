@@ -96,7 +96,9 @@ def _bundled_skills(pkg_dir: Path) -> list[tuple[Path, str]]:
     if not skills_dir.is_dir():
         return []
     out: list[tuple[Path, str]] = []
-    # flat layout: SKILL.md (or *.md) sits directly under skills/
+    # flat layout: SKILL.md sits directly under skills/ (a stray README.md
+    # must NOT trigger this — it would swallow every nested skill into one
+    # bogus skill and the agent would see none of them).
     if _has_skill_file(skills_dir):
         out.append((skills_dir, pkg_dir.name))
         return out

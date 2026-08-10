@@ -16,7 +16,6 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from jiuwenswarm.common.config import get_mcp_servers
 from jiuwenswarm.common.utils import get_workspace_dir  # re-export for test patches
 
 from jiuwenswarm.server.runtime.mcp.paths import (
@@ -125,10 +124,8 @@ def _load_meta(pkg_dir: Path) -> dict[str, Any]:
 
 
 def _has_skill_file(directory: Path) -> bool:
-    """True if directory has SKILL.md (or any .md, per SkillManager compat)."""
-    if (directory / "SKILL.md").is_file():
-        return True
-    return any(p.is_file() and p.suffix == ".md" for p in directory.glob("*.md"))
+    """True if directory has SKILL.md (a stray README.md is NOT a skill)."""
+    return (directory / "SKILL.md").is_file()
 
 
 def _bundled_skill_names(pkg_dir: Path) -> list[str]:
@@ -188,12 +185,24 @@ def _build_summary(
     pkg_dir: Path,
     meta: dict[str, Any],
     connected_names: set[str],
+    connecting_names: set[str] | None = None,
     *,
     enabled: bool = True,
 ) -> dict[str, Any]:
     integration_type = _detect_integration_type(pkg_dir)
     bundled = _bundled_skill_names(pkg_dir)
     is_connected = name in connected_names
+    is_connecting = name in (connecting_names or set())
+    # connection_state: connected (apply done) > connecting (connect in
+    # progress, apply not yet run / OAuth in flight) > disconnected. The
+    # "connecting" badge lets the user reload the tab mid-connect and still
+    # see "connecting" — not a phantom "connected" before apply finishes.
+    if is_connected:
+        connection_state = "connected"
+    elif is_connecting:
+        connection_state = "connecting"
+    else:
+        connection_state = "disconnected"
     # Icon: source meta.icon is unreliable (mostly unset); probe disk for
     # icon.svg/icon.png and inline as data URL so the frontend renders it
     # without an extra HTTP route.
@@ -206,7 +215,7 @@ def _build_summary(
         "description": meta.get("description_zh") or meta.get("description", ""),
         "category": meta.get("category", ""),
         "integration_type": integration_type,
-        "connection_state": "connected" if is_connected else "disconnected",
+        "connection_state": connection_state,
         "has_bundled_skills": bool(bundled),
         "icon": icon,
         # source: built_in (marketplace package on disk) vs customize
@@ -230,8 +239,9 @@ def _build_detail(
     pkg_dir: Path,
     meta: dict[str, Any],
     connected_names: set[str],
+    connecting_names: set[str] | None = None,
 ) -> dict[str, Any] | None:
-    summary = _build_summary(name, pkg_dir, meta, connected_names)
+    summary = _build_summary(name, pkg_dir, meta, connected_names, connecting_names)
     mcp_spec_raw = _load_json(pkg_dir / "mcp.json")
     mcp_spec: dict[str, Any] = {}
     if mcp_spec_raw and isinstance(mcp_spec_raw.get("mcpServers"), dict):
@@ -260,30 +270,47 @@ def _build_detail(
 
 
 def _connected_server_names() -> set[str]:
-    """Names of MCPs currently connected in state.json.
+    """Names of MCPs currently connected (state==connected) in state.json.
 
-    An MCP is "connected" when it has a state.json record with
-    state==connected — independent of the enabled soft-switch. disable keeps
-    the connection (config + credentials stay), only hiding tools from the
-    agent; disconnect removes the record.
+    This drives the frontend's "connected" badge, so it must NOT include
+    ``connecting`` MCPs — an MCP mid-connect (apply not done / OAuth in
+    flight) renders as "connecting", not "connected". get_mcp_servers merges
+    both connected and connecting (so apply/init can register a connecting
+    MCP), but the badge reads only connected.
+
+    disable keeps the connection (config + credentials stay), only hiding
+    tools from the agent; disconnect removes the record.
     """
     names: set[str] = set()
-    for entry in get_mcp_servers():
-        if not isinstance(entry, dict):
-            continue
-        # present in the merged list == connected (state.json state==connected).
-        n = str(entry.get("name", "")).strip()
-        if n:
-            names.add(n)
-    # Also include cli / skill-only MCPs whose state.json record exists but
-    # record_to_mcp_entry returned None (no MCP server to merge). They are
-    # connected (skills installed) even though they don't appear in the
-    # merged mcp.servers list.
     try:
         from jiuwenswarm.server.runtime.mcp.state_store import (
-            list_connected_mcps,
+            list_truly_connected_mcps,
         )
-        for rec in list_connected_mcps():
+        for rec in list_truly_connected_mcps():
+            n = str(rec.get("name", "") or "").strip()
+            if n:
+                names.add(n)
+    except Exception:  # noqa: BLE001
+        pass
+    return names
+
+
+def _connecting_server_names() -> set[str]:
+    """Names of MCPs in the ``connecting`` state (connect in progress).
+
+    Drives the frontend's "connecting" badge. An MCP lands here between
+    ``connect_mcp`` (which writes state=connecting) and the handler's
+    successful apply_mcp_change (which flips it to connected). On a restart
+    while still connecting, the record stays connecting — so the frontend
+    shows "connecting" (not "connected"), while get_mcp_servers still merges
+    it (list_connected_mcps includes connecting) so init re-registers it.
+    """
+    names: set[str] = set()
+    try:
+        from jiuwenswarm.server.runtime.mcp.state_store import (
+            list_connecting_mcps,
+        )
+        for rec in list_connecting_mcps():
             n = str(rec.get("name", "") or "").strip()
             if n:
                 names.add(n)
@@ -296,6 +323,7 @@ def list_marketplace_mcps() -> list[dict[str, Any]]:
     """List all MCP packages in the marketplace cache as summaries."""
     root = _packages_dir()
     connected = _connected_server_names()
+    connecting = _connecting_server_names()
     # Read all state.json records once so _build_summary can report each
     # MCP's enabled flag without a per-package get_mcp_record lookup.
     state_records: dict[str, dict[str, Any]] = {}
@@ -322,7 +350,7 @@ def list_marketplace_mcps() -> list[dict[str, Any]]:
             # when a record exists, honor its enabled flag (so a disabled
             # MCP shows disabled in the list without a separate query).
             enabled = bool(rec.get("enabled", True)) if rec else True
-            out.append(_build_summary(name, pkg_dir, meta, connected, enabled=enabled))
+            out.append(_build_summary(name, pkg_dir, meta, connected, connecting, enabled=enabled))
             seen_names.add(name)
     else:
         logger.debug("[mcp.registry] marketplace packages dir not found: %s", root)
@@ -337,14 +365,22 @@ def list_marketplace_mcps() -> list[dict[str, Any]]:
             if not name or name in seen_names:
                 continue
             itype = str(rec.get("integration_type", "") or "remote-mcp").strip() or "remote-mcp"
-            is_conn = str(rec.get("state", "") or "").strip() == "connected"
+            state_val = str(rec.get("state", "") or "").strip()
+            is_conn = state_val == "connected"
+            is_conn_ing = state_val == "connecting"
+            if is_conn:
+                connection_state = "connected"
+            elif is_conn_ing:
+                connection_state = "connecting"
+            else:
+                connection_state = "disconnected"
             out.append({
                 "name": name,
                 "display_name": name,
                 "description": "User-defined custom MCP server",
                 "category": "custom",
                 "integration_type": itype,
-                "connection_state": "connected" if is_conn else "disconnected",
+                "connection_state": connection_state,
                 "has_bundled_skills": False,
                 "icon": None,
                 "source": "customize",
@@ -372,7 +408,8 @@ def get_mcp(name: str) -> dict[str, Any] | None:
     if pkg_dir.is_dir():
         meta = _load_meta(pkg_dir)
         connected = _connected_server_names()
-        return _build_detail(target, pkg_dir, meta, connected)
+        connecting = _connecting_server_names()
+        return _build_detail(target, pkg_dir, meta, connected, connecting)
     # Custom MCP: no marketplace package — synthesize a detail from state.json
     # so the frontend can show it and render its tools panel.
     try:
@@ -385,7 +422,15 @@ def get_mcp(name: str) -> dict[str, Any] | None:
     if rec is None:
         return None
     itype = str(rec.get("integration_type", "") or "remote-mcp").strip() or "remote-mcp"
-    is_conn = str(rec.get("state", "") or "").strip() == "connected"
+    state_val = str(rec.get("state", "") or "").strip()
+    is_conn = state_val == "connected"
+    is_conn_ing = state_val == "connecting"
+    if is_conn:
+        connection_state = "connected"
+    elif is_conn_ing:
+        connection_state = "connecting"
+    else:
+        connection_state = "disconnected"
     # Echo the connection fields back so the frontend's edit dialog can
     # pre-fill the form (transport/command/args/env/url/headers/timeout_s).
     # Custom MCPs have no package on disk, so state.json is the only source
@@ -396,7 +441,7 @@ def get_mcp(name: str) -> dict[str, Any] | None:
         "display_name": target,
         "category": "custom",
         "integration_type": itype,
-        "connection_state": "connected" if is_conn else "disconnected",
+        "connection_state": connection_state,
         "has_bundled_skills": False,
         "icon": None,
         "source": "customize",
@@ -598,11 +643,19 @@ def connect_mcp(name: str, *, install_only: bool = False) -> dict[str, Any]:
         rec = get_mcp_record(n)
         if rec is None:
             raise KeyError(f"mcp '{n}' not found")
-        # Persist the connected state; the definition fields stay as-is.
+        # Persist as connecting (NOT connected): the MCP server is not yet
+        # registered with the agent (apply_mcp_change(add) runs in the
+        # handler, after this returns). connecting means "connect in
+        # progress" — get_mcp_servers merges it (so apply/init can register),
+        # the frontend shows "connecting" (not the phantom "connected"), and a
+        # restart re-registers it (like connected) so a crash mid-connect
+        # doesn't silently drop the connection. The handler flips state to
+        # connected once apply_mcp_change succeeds, and rolls back to
+        # registered on failure.
         from jiuwenswarm.server.runtime.mcp.state_store import (
             set_mcp_state,
         )
-        set_mcp_state(n, state="connected")
+        set_mcp_state(n, state="connecting")
         # Return the definition so the handler can build McpServerConfig from it.
         itype = str(rec.get("integration_type", "") or "remote-mcp").strip() or "remote-mcp"
         mcp_entry = {
@@ -697,13 +750,19 @@ def connect_mcp(name: str, *, install_only: bool = False) -> dict[str, Any]:
         # install_mcp_skills is a no-op for packages without skills/, so form
         # A/B MCPs with skills (e.g. notion's 4 skills) get them too.
         skills = _install_bundled_skills_safe(n)
-        # Write to state.json (the per-MCP connection store; get_mcp_servers
-        # merges it for reads). One upsert carries entry + skills together.
+        # Write to state.json as connecting (NOT connected): apply_mcp_change
+        # (the actual MCP server registration) runs in the handler after this
+        # returns. connecting means "connect in progress" — get_mcp_servers
+        # merges it (so apply/init can register the entry), the frontend shows
+        # "connecting" until apply succeeds (not the phantom "connected" a
+        # premature write would leave), and a restart re-registers it (like
+        # connected). The handler flips to connected once apply_mcp_change
+        # succeeds, and rolls back on failure.
         from jiuwenswarm.server.runtime.mcp.state_store import (
             upsert_mcp_record,
         )
         upsert_mcp_record(
-            n, entry, state="connected", enabled=True,
+            n, entry, state="connecting", enabled=True,
             integration_type=itype, skills=skills or None,
         )
         result = dict(entry)
@@ -830,12 +889,21 @@ def _finalize_cli(name: str, install_result: Any, *, install_only: bool = False)
     if mcp_cfg and mcp_cfg.get("command"):
         entry = build_config_entry(n)
         if entry is not None:
-            # Hybrid CLI+MCP also writes the stdio entry to state.json.
+            # Hybrid CLI+MCP also writes the stdio entry to state.json. Write
+            # as connecting, NOT connected: the MCP server is registered with
+            # the agent by _finalize_cli_auth's apply_mcp_change(add), which
+            # runs after this returns (CLI auth already succeeded here).
+            # connecting lets get_mcp_servers merge the entry (so apply can
+            # register it), shows "connecting" on the frontend until apply
+            # succeeds, and re-registers on restart. The handler flips to
+            # connected once apply_mcp_change succeeds; a failed apply rolls
+            # back (remove record / flip to registered) instead of leaving a
+            # phantom "connected" entry.
             from jiuwenswarm.server.runtime.mcp.state_store import (
                 upsert_mcp_record,
             )
             upsert_mcp_record(
-                n, entry, state="connected", enabled=True,
+                n, entry, state="connecting", enabled=True,
                 integration_type="cli", skills=skills_installed or None,
             )
     # Pure CLI (no mcp.json command) still needs a state.json record so
@@ -846,7 +914,7 @@ def _finalize_cli(name: str, install_result: Any, *, install_only: bool = False)
         )
         upsert_mcp_record(
             n, {"name": n, "server_id_scope": f"mcp:{n}"},
-            state="connected", enabled=True,
+            state="connecting", enabled=True,
             integration_type="cli", skills=skills_installed or None,
         )
     return {

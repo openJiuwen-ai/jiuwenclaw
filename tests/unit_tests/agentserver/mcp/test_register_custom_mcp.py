@@ -219,12 +219,23 @@ def test_list_enabled_false_when_disconnected_even_if_state_enabled_true(tmp_pat
     assert by_name["stale-custom"]["enabled"] is False
 
 
-def test_connect_custom_mcp_flips_registered_to_connected(tmp_path: Path, monkeypatch) -> None:
-    """connect on a registered custom MCP (no marketplace package) flips its
-    state to connected and returns the definition — no longer raises KeyError.
+def test_connect_custom_mcp_writes_connecting_until_handler_promotes(tmp_path: Path, monkeypatch) -> None:
+    """connect on a registered custom MCP (no marketplace package) returns the
+    definition and persists it as ``connecting`` (NOT connected).
+
+    The MCP server is registered with the agent by the connect handler's
+    ``apply_mcp_change(add)`` AFTER connect_mcp returns — so connect_mcp must
+    not pre-write ``connected`` (a phantom connected record would survive any
+    later apply failure and drive infinite retries on restart). It writes
+    ``connecting`` instead: get_mcp_servers merges connecting (so apply can
+    read the entry), the frontend shows "connecting" (not the phantom
+    "connected"), and a restart re-registers it (like connected). The handler
+    flips state to connected once apply succeeds, and rolls back to registered
+    on failure. This test pins the connect_mcp half: state is connecting here;
+    the handler-side promotion is covered by the handler tests.
+
     Regression: clicking connect on a registered custom MCP used to fail with
-    "mcp not found" because connect_mcp only looked for a package
-    dir."""
+    "mcp not found" because connect_mcp only looked for a package dir."""
     from jiuwenswarm.server.runtime.mcp import state_store
     monkeypatch.setattr(registry, "get_workspace_dir", lambda: tmp_path)
     monkeypatch.setattr(state_store, "get_workspace_dir", lambda: tmp_path)
@@ -241,7 +252,7 @@ def test_connect_custom_mcp_flips_registered_to_connected(tmp_path: Path, monkey
     assert result["name"] == "my-custom"
     assert result["integration_type"] == "stdio-mcp"
     rec = state_store.get_mcp_record("my-custom")
-    assert rec["state"] == "connected"
+    assert rec["state"] == "connecting"
 
 
 def test_connect_custom_mcp_not_in_state_raises_keyerror(tmp_path: Path, monkeypatch) -> None:
