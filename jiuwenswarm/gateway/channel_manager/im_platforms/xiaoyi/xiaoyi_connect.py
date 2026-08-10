@@ -476,6 +476,12 @@ class XiaoyiChannel(BaseChannel):
         except asyncio.CancelledError:
             pass
 
+    @staticmethod
+    def _is_standalone_notice(msg: Message) -> bool:
+        """System lines (e.g. compaction) must not close or merge into the reply stream."""
+        meta = getattr(msg, "metadata", None) or {}
+        return isinstance(meta, dict) and bool(meta.get("standalone_notice"))
+
     def _extract_platform_receive_info(self, msg: Message) -> tuple[str, str]:
         """
         从消息中提取小艺平台会话 ID 与任务 ID。
@@ -608,6 +614,26 @@ class XiaoyiChannel(BaseChannel):
         # 推送消息发送
         if msg.id.startswith("cron-push"):
             await self._send_push_notification(cron_job_name, content)
+            return
+
+        # Standalone system lines (compaction notices): own artifact id, never
+        # clobber the in-flight answer accumulator or finalize the session.
+        if self._is_standalone_notice(msg):
+            notice_task_id = str(msg.id or task_id or session_id)
+            for url_key, ws in self._ws_connections.items():
+                if ws:
+                    try:
+                        await self._send_text_response(
+                            session_id,
+                            notice_task_id,
+                            content,
+                            url_key,
+                            append=True,
+                            last_chunk=True,
+                            is_final=False,
+                        )
+                    except Exception as e:
+                        logger.warning(f"XiaoyiChannel 发送 standalone notice 失败 ({url_key}): {e}")
             return
 
         # 如果禁用流式，总是作为完整消息发送
@@ -771,7 +797,14 @@ class XiaoyiChannel(BaseChannel):
             if push_id and agent_id:
                 logger.info("[XiaoyiChannel] _send_team → push: agent_id=%s push_id=%s", (agent_id or "")[:8],
                             push_id[:8])
-                await self._send_push_to_user(agent_id, push_id, content)
+                # Compaction notices must ship as their own push, not join the
+                # per-agent merge window (which would delay/concat with replies).
+                await self._send_push_to_user(
+                    agent_id,
+                    push_id,
+                    content,
+                    merge=not self._is_standalone_notice(msg),
+                )
             elif self._ws_connections:
                 # ③ 兜底：无 push_id 且无活跃会话，走 legacy（按 metadata 投递）
                 logger.info("[XiaoyiChannel] _send_team → legacy fallback: agent_id=%s", (agent_id or "")[:8])
@@ -832,6 +865,29 @@ class XiaoyiChannel(BaseChannel):
         缓解高频小 chunk 导致的客户端卡顿，同时保持人眼连续的流式实时性。
         final 消息立即冲刷缓冲并发送，保证结尾不延迟。
         """
+        # Compaction (and similar) notices must not flush the in-flight answer
+        # buffer or mark the A2A artifact complete under the active task_id.
+        if self._is_standalone_notice(msg):
+            notice_task_id = str(msg.id or task_id or session_id)
+            for url_key, ws in self._ws_connections.items():
+                if ws:
+                    try:
+                        await self._send_text_response(
+                            session_id, notice_task_id, content, url_key,
+                            append=True, last_chunk=True, is_final=False,
+                        )
+                        logger.info(
+                            "[XiaoyiChannel] team ws standalone notice: sid=%s "
+                            "notice_task=%s active_task=%s len=%d",
+                            (session_id or "")[:8], notice_task_id, task_id,
+                            len(content or ""),
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"XiaoyiChannel team ws standalone notice 失败 ({url_key}): {e}"
+                        )
+            return
+
         last_chunk = msg.event_type == EventType.CHAT_FINAL
         is_final = False
         if isinstance(msg.payload, dict):
@@ -919,17 +975,31 @@ class XiaoyiChannel(BaseChannel):
         finally:
             self._ws_flush_tasks.pop(task_id, None)
 
-    async def _send_push_to_user(self, agent_id: str, push_id: str, content: str) -> None:
+    async def _send_push_to_user(
+        self,
+        agent_id: str,
+        push_id: str,
+        content: str,
+        *,
+        merge: bool = True,
+    ) -> None:
         """后台 push webhook 投递全文 final，带 per-agent_id 合并窗口。
 
         同一 agent_id 在 message_merge_window_ms 内的多条消息累积进 buffer，
         第一条到达时调度延迟 flush 任务，窗口到期统一合并发送一次，
         避免短时多条 mention 轰炸。push_id 作为 webhook 寻址 token 随 flush 一并发出。
+
+        When ``merge`` is False (standalone system notices), send immediately and
+        leave any pending merge buffer untouched.
         """
         if not self.config.api_id:
             logger.debug("[PUSH] team push 跳过：api_id 未配置")
             return
         if not content.strip():
+            return
+
+        if not merge:
+            await self._emit_push(agent_id, push_id, content)
             return
 
         now = time.time()
@@ -942,6 +1012,37 @@ class XiaoyiChannel(BaseChannel):
             self._push_flush_tasks[agent_id] = asyncio.create_task(
                 self._flush_push_buffer(agent_id, window_ms / 1000)
             )
+
+    async def _emit_push(
+        self,
+        agent_id: str,
+        push_id: str,
+        content: str,
+        *,
+        summary: str | None = None,
+    ) -> None:
+        """Send one push webhook (used for immediate notices and merge flush)."""
+        if not push_id:
+            logger.warning("[PUSH] team push skip: empty push_id (agent_id=%s)", (agent_id or "")[:8])
+            return
+        if summary is None:
+            summary = self._build_push_summary(content) or (
+                content[:30] + "..." if len(content) > 30 else content
+            )
+        push_config = PushConfig(
+            mode=self.config.mode,
+            api_id=self.config.api_id,
+            push_id=push_id,
+            push_url=self.config.push_url,
+            ak=self.config.ak,
+            sk=self.config.sk,
+            uid=self.config.uid,
+            api_key=self.config.api_key,
+        )
+        try:
+            await XiaoYiPushService(push_config).send_push(summary, content)
+        except Exception as e:
+            logger.error("[PUSH] team push send failed (agent_id=%s): %s", (agent_id or "")[:8], e)
 
     async def _flush_push_buffer(self, agent_id: str, window_s: float) -> None:
         """延迟 window 秒后合并发送 buffer 全部内容。"""
@@ -963,17 +1064,7 @@ class XiaoyiChannel(BaseChannel):
             if not push_id:
                 logger.warning("[PUSH] team push flush 跳过：buffer 中无有效 push_id (agent_id=%s)", agent_id[:8])
                 return
-            push_config = PushConfig(
-                mode=self.config.mode,
-                api_id=self.config.api_id,
-                push_id=push_id,
-                push_url=self.config.push_url,
-                ak=self.config.ak,
-                sk=self.config.sk,
-                uid=self.config.uid,
-                api_key=self.config.api_key,
-            )
-            await XiaoYiPushService(push_config).send_push(summary, merged_content)
+            await self._emit_push(agent_id, push_id, merged_content, summary=summary)
         except asyncio.CancelledError:
             pass
         except Exception as e:

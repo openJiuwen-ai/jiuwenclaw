@@ -484,9 +484,19 @@ class SessionDispatcher:
             return
 
         routing_target = SessionDispatcher._build_routing_target(target, group_subs, delivery)
+        from jiuwenswarm.gateway.channel_manager.im_platforms.platform_adapter.compression_notice import (
+            prepare_outbound_message,
+        )
+
+        outbound = prepare_outbound_message(
+            msg,
+            delivery_channel_id=container_key.channel_id,
+        )
+        if outbound is None:
+            return
         try:
             await asyncio.wait_for(
-                channel.send(msg, routing_target=routing_target),
+                channel.send(outbound, routing_target=routing_target),
                 timeout=10.0,
             )
         except asyncio.TimeoutError:

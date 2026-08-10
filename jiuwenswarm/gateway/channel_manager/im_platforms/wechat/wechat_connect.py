@@ -576,13 +576,19 @@ class WechatChannel(BaseChannel):
             self._stash_overflow_content(msg, content_str)
             return
         await self._send_text_chunks_to_user(msg, content_str)
-        self._clear_delta_session(msg)
-        mk = self._message_session_key(msg)
-        if mk:
-            self._streaming_sessions.discard(mk)
-            self._continue_active_sessions.discard(mk)
-        self.current_round = 0
-        self._current_round_session_key = ""
+        # Standalone system lines (e.g. compaction notices) share the session
+        # but must not wipe the in-flight delta accumulator, streaming guards,
+        # or per-round send counters for the real reply.
+        meta = getattr(msg, "metadata", None) or {}
+        standalone = isinstance(meta, dict) and meta.get("standalone_notice")
+        if not standalone:
+            self._clear_delta_session(msg)
+            mk = self._message_session_key(msg)
+            if mk:
+                self._streaming_sessions.discard(mk)
+                self._continue_active_sessions.discard(mk)
+            self.current_round = 0
+            self._current_round_session_key = ""
 
     def _delta_session_key(self, msg: Message) -> str:
         return str(msg.session_id or msg.id or "")

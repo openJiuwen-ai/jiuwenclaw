@@ -1643,6 +1643,88 @@ async def test_jsonrpc_session_prompt_emits_plan_update(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_jsonrpc_session_prompt_emits_compression_state_as_session_update(monkeypatch):
+    """P2 fix: stdio ACP must surface context.compression_state, not drop it.
+
+    Rewriting it as CHAT_FINAL is not safe here: it would reuse this
+    request's msg.id and end the turn early.
+    """
+    fake_stdin = FakeStdin(
+        [
+            json_line(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 34,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": "sess-compaction",
+                        "prompt": [{"type": "text", "text": "hello"}],
+                    },
+                }
+            )
+        ]
+    )
+    fake_stdout = FakeStdout()
+    channel = AcpChannel(AcpChannelConfig(enabled=True), DummyBus())
+
+    monkeypatch.setattr("sys.stdin", fake_stdin)
+    monkeypatch.setattr("sys.stdout", fake_stdout)
+    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
+
+    async def _on_message(msg):
+        await channel.send(
+            Message(
+                id=msg.id,
+                type="event",
+                channel_id="acp",
+                session_id=msg.session_id,
+                params={},
+                timestamp=time.time(),
+                ok=True,
+                payload={
+                    "event_type": "context.compression_state",
+                    "status": "completed",
+                    "processor": "DialogueCompressor",
+                    "before": {"tokens": 100_000},
+                    "after": {"tokens": 25_000},
+                },
+                event_type=EventType.CONTEXT_COMPRESSION_STATE,
+            )
+        )
+        await channel.send(
+            Message(
+                id=msg.id,
+                type="event",
+                channel_id="acp",
+                session_id=msg.session_id,
+                params={},
+                timestamp=time.time(),
+                ok=True,
+                payload={"is_processing": False},
+                event_type=EventType.CHAT_PROCESSING_STATUS,
+            )
+        )
+
+    channel.on_message(_on_message)
+    await channel.start()
+
+    responses = fake_stdout.buffer.json_lines()
+    assert len(responses) == 3
+
+    compression_update = responses[0]["params"]["update"]
+    assert compression_update["sessionUpdate"] == "agent_message_chunk"
+    assert "75%" in compression_update["content"]["text"]
+    # Must not be smuggled through as chat.final-shaped JSON-RPC.
+    assert "result" not in responses[0]
+    assert "error" not in responses[0]
+
+    idle_update = responses[1]["params"]["update"]
+    assert idle_update["sessionUpdate"] == "session_info_update"
+
+    assert responses[2]["result"]["stopReason"] == "end_turn"
+
+
+@pytest.mark.asyncio
 async def test_jsonrpc_session_prompt_emits_processing_status_update(monkeypatch):
     fake_stdin = FakeStdin(
         [

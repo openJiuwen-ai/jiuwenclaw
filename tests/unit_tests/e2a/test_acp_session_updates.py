@@ -235,6 +235,50 @@ def test_build_acp_session_update_embeds_terminal_for_create_terminal_result():
     }
 
 
+def test_build_acp_session_update_maps_compression_state_to_agent_message_chunk():
+    """Auto-compact defaults on now; ACP must surface it, not drop it.
+
+    A CHAT_FINAL rewrite is not safe here (same msg.id would end_turn), so
+    compaction must come through as an ordinary, non-final session/update.
+    """
+    state = _build_state()
+    update = build_acp_session_update(
+        _build_message(EventType.CONTEXT_COMPRESSION_STATE),
+        {
+            "event_type": "context.compression_state",
+            "status": "completed",
+            "processor": "DialogueCompressor",
+            "before": {"tokens": 100_000},
+            "after": {"tokens": 25_000},
+        },
+        state,
+    )
+
+    assert update is not None
+    assert update["sessionUpdate"] == "agent_message_chunk"
+    assert "content" in update and update["content"]["type"] == "text"
+    assert "75%" in update["content"]["text"]
+    # A standalone message id, not the turn's own assistant_message_id --
+    # otherwise this would corrupt the running text-delta accumulator.
+    assert update["messageId"] != state.assistant_message_id
+    assert state.assistant_message_id is None
+
+
+def test_build_acp_session_update_drops_noop_compression_state():
+    """noop must stay silent for ACP too, same as the IM notice path."""
+    state = _build_state()
+    update = build_acp_session_update(
+        _build_message(EventType.CONTEXT_COMPRESSION_STATE),
+        {
+            "event_type": "context.compression_state",
+            "status": "noop",
+            "processor": "DialogueCompressor",
+        },
+        state,
+    )
+    assert update is None
+
+
 def test_build_acp_final_text_update_maps_reasoning_final_to_agent_thought_chunk():
     state = _build_state()
 

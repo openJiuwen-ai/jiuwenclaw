@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import importlib
 import hashlib
 import json
 import logging
@@ -396,6 +397,71 @@ _PERSISTENT_CHECKPOINTER_LOCK: asyncio.Lock | None = None
 _PERSISTENT_CHECKPOINTER_LOCK_LOOP: asyncio.AbstractEventLoop | None = None
 _PERSISTENT_CHECKPOINTER_LOCK_INIT = threading.Lock()
 _PERSISTENT_CHECKPOINTER_READY = False
+
+
+_COMPRESSOR_CONFIG_CLASSES: dict[str, str] = {
+    "DialogueCompressor":
+        "openjiuwen.core.context_engine.processor.forked.compressor.dialogue_compressor"
+        ":DialogueCompressorConfig",
+    "CurrentRoundCompressor":
+        "openjiuwen.core.context_engine.processor.forked.compressor.current_round_compressor"
+        ":CurrentRoundCompressorConfig",
+    "RoundLevelCompressor":
+        "openjiuwen.core.context_engine.processor.forked.compressor.round_level_compressor"
+        ":RoundLevelCompressorConfig",
+}
+
+try:
+    importlib.import_module(
+        "openjiuwen.core.context_engine.processor.forked.compressor.session_memory_compressor"
+    )
+except Exception:  # noqa: BLE001 - optional compressor config class
+    pass
+else:
+    _COMPRESSOR_CONFIG_CLASSES["SessionMemoryCompressor"] = (
+        "openjiuwen.core.context_engine.processor.forked.compressor.session_memory_compressor"
+        ":SessionMemoryCompressorConfig"
+    )
+
+
+def _warn_unknown_processor_keys(processor: str, cfg: dict) -> None:
+    """Say so when a configured key is not a field of the receiving class.
+
+    These configs are Pydantic models without ``extra="forbid"``, so an unknown
+    key is dropped in silence. That is how a live config can carry
+    ``tokens_threshold: 100000`` for the dialogue compressor and still compress
+    at the class default ratio: the compressor tree moved to ratio-based
+    triggering and the config was never migrated, so six keys per section stop
+    doing anything without a word.
+
+    Warning rather than raising is deliberate. ``extra="forbid"`` would turn
+    every stale config into a startup crash, and the keys cannot simply be
+    honoured either -- a token threshold has no meaning in a ratio-based
+    compressor. Making the loss audible is the part that is safe to do here.
+    """
+    target = _COMPRESSOR_CONFIG_CLASSES.get(processor)
+    if not target:
+        return
+    module_path, _, class_name = target.partition(":")
+    try:
+        module = importlib.import_module(module_path)
+        config_cls = getattr(module, class_name)
+        known = set(config_cls.model_fields.keys())
+    except Exception:  # noqa: BLE001 - never block startup over a diagnostic
+        return
+
+    unknown = sorted(k for k in cfg if k not in known)
+    if not unknown:
+        return
+    logger.warning(
+        "[ContextEngine] %s: ignoring %d unsupported config key(s): %s. "
+        "Those settings are not applied -- the processor uses its defaults "
+        "for them (other keys in this section still apply). Supported keys: %s",
+        processor,
+        len(unknown),
+        ", ".join(unknown),
+        ", ".join(sorted(known)),
+    )
 
 
 def _running_loop() -> asyncio.AbstractEventLoop | None:
@@ -883,6 +949,8 @@ def _build_context_processor_rail(config: dict[str, Any]) -> ContextProcessorRai
         raw_context_engine_cfg = config.get("context_engine_config", {})
         context_engine_cfg = raw_context_engine_cfg if isinstance(raw_context_engine_cfg, dict) else {}
         session_memory_cfg = _resolve_session_memory_config(context_engine_cfg)
+        if isinstance(session_memory_cfg, dict) and session_memory_cfg:
+            _warn_unknown_processor_keys("SessionMemoryCompressor", session_memory_cfg)
 
         offloader_cfg = context_engine_cfg.get("message_summary_offloader_config", {})
         if isinstance(offloader_cfg, dict) and offloader_cfg:
@@ -890,14 +958,17 @@ def _build_context_processor_rail(config: dict[str, Any]) -> ContextProcessorRai
 
         compressor_cfg = context_engine_cfg.get("dialogue_compressor_config", {})
         if isinstance(compressor_cfg, dict) and compressor_cfg:
+            _warn_unknown_processor_keys("DialogueCompressor", compressor_cfg)
             user_processors.append(("DialogueCompressor", compressor_cfg))
 
         current_round_cfg = context_engine_cfg.get("current_round_compressor_config", {})
         if isinstance(current_round_cfg, dict) and current_round_cfg:
+            _warn_unknown_processor_keys("CurrentRoundCompressor", current_round_cfg)
             user_processors.append(("CurrentRoundCompressor", current_round_cfg))
 
         round_level_cfg = context_engine_cfg.get("round_level_compressor_config", {})
         if isinstance(round_level_cfg, dict) and round_level_cfg:
+            _warn_unknown_processor_keys("RoundLevelCompressor", round_level_cfg)
             user_processors.append(("RoundLevelCompressor", round_level_cfg))
 
         reasoning_loop_cfg = context_engine_cfg.get("reasoning_tool_loop_compact_config", {})
@@ -5853,7 +5924,7 @@ class JiuWenSwarmDeepAdapter:
         # 外接记忆 rail（mode-independent，注册一次，跨 reload 持久）
         await self._handle_external_memory_rail_by_config()
         # 上下文 rail
-        context_enabled = self._config_cache.get("context_engine_config", {}).get("enabled", False)
+        context_enabled = self._config_cache.get("context_engine_config", {}).get("enabled", True)
 
         if self._context_assemble_rail is None or self._context_assemble_mode != "agent":
             if self._context_assemble_rail is not None:

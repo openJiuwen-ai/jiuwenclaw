@@ -844,7 +844,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                     payload[key] = crypto_provider.decrypt(val)
             ctx_cfg = (raw.get("react") or {}).get("context_engine_config") or {}
             payload["context_engine_enabled"] = (
-                "true" if ctx_cfg.get("enabled", False) else "false"
+                "true" if ctx_cfg.get("enabled", True) else "false"
             )
             perm_cfg = raw.get("permissions") or {}
             payload["permissions_enabled"] = (

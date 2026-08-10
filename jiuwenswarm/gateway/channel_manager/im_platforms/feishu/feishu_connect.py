@@ -1603,8 +1603,15 @@ class FeishuChannel(BaseChannel):
                 await self._send_ask_user_question_card(msg)
                 return
 
-            if streaming_enabled and await self._handle_cardkit_streaming_event(
-                msg, event_name, payload, meta, route_delivery
+            # Compaction / system lines share the session but must not open a
+            # second CardKit card keyed by msg.id (…-compaction).
+            standalone_notice = bool(meta.get("standalone_notice"))
+            if (
+                streaming_enabled
+                and not standalone_notice
+                and await self._handle_cardkit_streaming_event(
+                    msg, event_name, payload, meta, route_delivery
+                )
             ):
                 return
 

@@ -370,6 +370,7 @@ class AcpGatewayBridge:
             EventType.CHAT_SYMPHONY_STATUS,
             EventType.TODO_UPDATED,
             EventType.CHAT_SUBTASK_UPDATE,
+            EventType.CONTEXT_COMPRESSION_STATE,
         ):
             update = build_acp_session_update(msg, payload, ctx)
             if update is None:
@@ -1365,6 +1366,7 @@ class AcpChannel(BaseChannel):
             EventType.CHAT_SYMPHONY_STATUS,
             EventType.TODO_UPDATED,
             EventType.CHAT_SUBTASK_UPDATE,
+            EventType.CONTEXT_COMPRESSION_STATE,
         ):
             update = self._build_acp_session_update(msg, payload, ctx)
             if update is None:

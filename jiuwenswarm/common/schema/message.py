@@ -233,6 +233,7 @@ class EventType(Enum):
     CHAT_TOOL_RESULT = "chat.tool_result"
     CHAT_SYMPHONY_STATUS = "chat.symphony_status"
     CONTEXT_USAGE = "context.usage"
+    CONTEXT_COMPRESSION_STATE = "context.compression_state"
     TODO_UPDATED = "todo.updated"
     CHAT_PROCESSING_STATUS = "chat.processing_status"
     CHAT_ERROR = "chat.error"

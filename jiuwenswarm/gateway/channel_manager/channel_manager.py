@@ -200,6 +200,13 @@ class ChannelManager(ABC):
         """按 ChannelKey 精确查找 Channel。"""
         return self._channels.get(channel_key)
 
+    def _prepare_outbound(self, msg: "Message", *, delivery_channel_id: str | None = None) -> "Message | None":
+        from jiuwenswarm.gateway.channel_manager.im_platforms.platform_adapter.compression_notice import (
+            prepare_outbound_message,
+        )
+        channel = delivery_channel_id or getattr(msg, "channel_id", None)
+        return prepare_outbound_message(msg, delivery_channel_id=channel)
+
     def pop_channels_by_id(self, channel_id: str) -> list["BaseChannel"]:
         """弹出并返回所有匹配 channel_id 的 Channel 实例（多应用场景下同一 channel_id 对应多个 app）。
 
@@ -375,7 +382,11 @@ class ChannelManager(ABC):
                     )
                     for ch in targets:
                         try:
-                            await ch.send(fanout_msg)
+                            delivery_id = getattr(ch, "channel_id", msg.channel_id)
+                            outbound = self._prepare_outbound(fanout_msg, delivery_channel_id=delivery_id)
+                            if outbound is None:
+                                continue
+                            await ch.send(outbound)
                         except Exception as e:
                             logger.error(
                                 "[ChannelManager] 飞书 fan-out 投递失败: channel_id=%s app=%s id=%s: %s",
@@ -407,7 +418,16 @@ class ChannelManager(ABC):
                 )
                 if channel:
                     try:
-                        await channel.send(msg)
+                        # Context compaction reaches Web and the TUI as a rich
+                        # inline event; every IM channel drops it, so the agent
+                        # rewrites the conversation's history and the human is
+                        # never told. Substitute a plain-text line here, at the
+                        # single dispatch point, rather than teaching ten
+                        # delivery paths a new message type.
+                        outbound = self._prepare_outbound(msg)
+                        if outbound is None:
+                            continue
+                        await channel.send(outbound)
                     except Exception as e:
                         logger.error("send to channel %s: %s", msg.channel_id, e, exc_info=True)
                         if msg.id and msg.id.startswith("cron-push-"):

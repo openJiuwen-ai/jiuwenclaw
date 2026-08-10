@@ -1660,7 +1660,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             react_cfg = raw.get("react") or {}
             ctx_cfg = react_cfg.get("context_engine_config") or {}
             kv_cfg = react_cfg.get("kv_cache_affinity_config") or {}
-            payload["context_engine_enabled"] = "true" if ctx_cfg.get("enabled", False) else "false"
+            payload["context_engine_enabled"] = "true" if ctx_cfg.get("enabled", True) else "false"
             payload["kv_cache_release_enabled"] = (
                 "true" if kv_cfg.get("enable_kv_cache_release", False) else "false"
             )
