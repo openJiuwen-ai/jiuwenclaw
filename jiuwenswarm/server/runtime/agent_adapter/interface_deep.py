@@ -2304,7 +2304,8 @@ class JiuWenSwarmDeepAdapter:
         except Exception:
             return True
 
-    def _sync_mcp_credentials_environment(self) -> bool:
+    @staticmethod
+    def _sync_mcp_credentials_environment() -> bool:
         """Inject MCP tokens into ``os.environ``.
 
         Skill-only MCPs (ctrip-wendao, netease-mail) run their bundled skill
@@ -2368,7 +2369,8 @@ class JiuWenSwarmDeepAdapter:
                 CredentialStore,
                 required_tokens_from_schema,
             )
-            keys.update(store_keys := set(CredentialStore().get_all(n).keys()))
+            store_keys = set(CredentialStore().get_all(n).keys())
+            keys.update(store_keys)
             keys.update(required_tokens_from_schema(n))
         except Exception:  # noqa: BLE001
             pass
@@ -2560,6 +2562,7 @@ class JiuWenSwarmDeepAdapter:
                 stored = store.get_all(name)
                 if stored:
                     import os as _os
+
                     def resolver(key: str) -> str | None:
                         if key in stored:
                             return stored[key]
@@ -2644,6 +2647,7 @@ class JiuWenSwarmDeepAdapter:
             # above raises a RuntimeError — both are plain Exceptions, so
             # ``except Exception`` suffices. Re-raise so register_mcp_by_name
             # collects the failure as first_error.
+            logger.warning("MCP server register mcp server failed.")
             raise
 
     async def _unregister_mcp_server(self, server_id: str) -> None:
@@ -2726,7 +2730,11 @@ class JiuWenSwarmDeepAdapter:
         """
         entry = get_mcp_server_config(name)
         if not entry:
-            logger.debug("[JiuWenSwarmDeepAdapter] register_mcp_by_name: '%s' has no MCP entry (CLI/skill-only, skipping)", name)
+            logger.debug(
+                "[JiuWenSwarmDeepAdapter] register_mcp_by_name: " \
+                "'%s' has no MCP entry (CLI/skill-only, skipping)",
+                name
+            )
             return False
         applied_any = False
         first_error: str = ""

@@ -3200,7 +3200,8 @@ class JiuWenSwarm:
         """Clear a disconnected MCP's token env vars.
 
         Returns False when no adapter is live yet so the caller can fall
-        through to another live agent."""
+        through to another live agent.
+        """
         adapter = self._adapter
         if adapter is None:
             return False

@@ -1,4 +1,4 @@
-﻿# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """MCP marketplace registry.
 
@@ -16,10 +16,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from jiuwenswarm.common.config import (
-    get_mcp_servers,
-    get_mcp_server_config,
-)
+from jiuwenswarm.common.config import get_mcp_servers
 from jiuwenswarm.common.utils import get_workspace_dir  # re-export for test patches
 
 from jiuwenswarm.server.runtime.mcp.paths import (
@@ -501,9 +498,7 @@ def get_mcp_tools(name: str) -> list[dict[str, Any]]:
         return []
 
 
-
 # --- F-1: connect / disconnect / enable / disable / status ---
-
 def _marketplace_mcp_cfg(name: str) -> dict[str, Any] | None:
     """Read marketplace mcp.json, return first server cfg (marketplace format)."""
     pkg = _packages_dir() / str(name or "").strip()
@@ -512,6 +507,7 @@ def _marketplace_mcp_cfg(name: str) -> dict[str, Any] | None:
         return None
     first = next(iter(raw["mcpServers"].values()), {})
     return first if isinstance(first, dict) else None
+
 
 def _normalize_transport(raw: str, cfg: dict[str, Any]) -> str:
     """Map a marketplace mcp.json transport value to one openjiuwen accepts.
@@ -569,6 +565,7 @@ def build_config_entry(name: str) -> dict[str, Any] | None:
     entry["server_id_scope"] = f"mcp:{n}"
     return entry
 
+
 def connect_mcp(name: str, *, install_only: bool = False) -> dict[str, Any]:
     """Install a marketplace MCP (dispatch by integration_type).
 
@@ -608,17 +605,21 @@ def connect_mcp(name: str, *, install_only: bool = False) -> dict[str, Any]:
         set_mcp_state(n, state="connected")
         # Return the definition so the handler can build McpServerConfig from it.
         itype = str(rec.get("integration_type", "") or "remote-mcp").strip() or "remote-mcp"
+        mcp_entry = {
+            "name": n,
+            "transport": rec.get("transport", "streamable-http"),
+            "enabled": True,
+        }
+
+        for key in ("url", "headers", "command", "args", "env", "timeout_s", "server_id_scope"):
+            if key in rec:
+                mcp_entry[key] = rec[key]
+
         return {
             "name": n,
             "integration_type": itype,
             "auth_required": False,
-            "mcp_entry": {
-                "name": n,
-                "transport": rec.get("transport", "streamable-http"),
-                **{k: rec[k] for k in ("url", "headers", "command", "args", "env",
-                                       "timeout_s", "server_id_scope") if k in rec},
-                "enabled": True,
-            },
+            "mcp_entry": mcp_entry,
         }
     itype = _detect_integration_type(pkg_dir)
     if itype != "cli":
@@ -1075,13 +1076,16 @@ def delete_custom_mcp(name: str) -> dict[str, Any]:
 
 def enable_mcp(name: str) -> dict[str, Any]:
     """Enable an MCP. CLI/skill-only types toggle bundled skills on;
-    remote/stdio types flip the state.json enabled flag (MCP soft-register)."""
+    remote/stdio types flip the state.json enabled flag (MCP soft-register).
+    """
     return _set_mcp_enabled(name, True)
+
 
 def disable_mcp(name: str) -> dict[str, Any]:
     """Disable an MCP. CLI/skill-only types toggle bundled skills off
     (CLI binary + auth stay installed; tools become invisible to the agent);
-    remote/stdio types flip the state.json enabled flag (MCP soft-unregister)."""
+    remote/stdio types flip the state.json enabled flag (MCP soft-unregister).
+    """
     return _set_mcp_enabled(name, False)
 
 

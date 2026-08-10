@@ -677,7 +677,8 @@ class AgentManager:
         """Clear a disconnected MCP's token env vars from os.environ.
 
         Stops on the first agent that clears (env is process-global); if an
-        agent has no adapter yet or throws, falls through to the next."""
+        agent has no adapter yet or throws, falls through to the next.
+        """
         for channel_agents in self.agents.values():
             if not isinstance(channel_agents, dict):
                 continue
@@ -696,7 +697,8 @@ class AgentManager:
         """Reload every live agent's SkillUseRail so MCP bundled skills
         (installed/uninstalled by skill_installer) surface without a full
         reload_agents_config. Fans out to all live agents; each agent's adapter
-        reloads its parent + session child skill rails."""
+        reloads its parent + session child skill rails.
+        """
         for channel_key, channel_agents in self.agents.items():
             if not isinstance(channel_agents, dict):
                 continue

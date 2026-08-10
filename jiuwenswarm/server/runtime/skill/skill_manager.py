@@ -4220,7 +4220,8 @@ class SkillManager:
     # state.json's connected records (see state_store.connected_mcp_skill_dirs)
     # — an MCP's skills surface only while it is connected.
 
-    def _mcp_skills_dirs(self) -> list[dict[str, str]]:
+    @staticmethod
+    def _mcp_skills_dirs() -> list[dict[str, str]]:
         """MCP skills dirs to scan: derived from state.json's connected records.
 
         Returns ``[{"name", "dir"}]`` for each connected MCP whose
