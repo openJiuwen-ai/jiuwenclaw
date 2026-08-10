@@ -310,6 +310,70 @@ def _last_n_history_qa_ids(registry: Any, n: int = 1) -> list[str]:
     return [entry.qa_id for entry in entries[-n:]]
 
 
+def _merge_hydrate_qa_ids(
+    default_ids: list[str],
+    selector_ids: list[str] | None,
+    registry: Any,
+    *,
+    max_total: int,
+    max_tokens: int,
+) -> list[str]:
+    """Merge default recent blocks with selector selections (dedup, chronological).
+
+    Token budget safety: if total approx_tokens exceeds *max_tokens*, drop oldest
+    blocks first.  Always keeps at least the most recent block.
+    """
+    seen: set[str] = set()
+    merged: list[str] = []
+    for qa_id in default_ids or []:
+        if qa_id not in seen:
+            merged.append(qa_id)
+            seen.add(qa_id)
+    for qa_id in selector_ids or []:
+        if qa_id not in seen:
+            merged.append(qa_id)
+            seen.add(qa_id)
+
+    if not merged:
+        return []
+
+    # Sort by qa_index (chronological order)
+    def _qa_index(qa_id: str) -> int:
+        entry = registry.blocks.get(qa_id)
+        return entry.qa_index if entry else 0
+
+    merged.sort(key=_qa_index)
+
+    # Token budget check: drop oldest first if exceeded
+    total_tokens = sum(
+        (registry.blocks[qa_id].approx_tokens or 0)
+        for qa_id in merged
+        if qa_id in registry.blocks
+    )
+    dropped: list[str] = []
+    while len(merged) > 1 and total_tokens > max_tokens:
+        dropped_qa = merged.pop(0)
+        dropped.append(dropped_qa)
+        entry = registry.blocks.get(dropped_qa)
+        if entry:
+            total_tokens -= entry.approx_tokens or 0
+
+    if dropped:
+        logger.warning(
+            "[QABlockAssemblyRail] hydrate token budget exceeded, dropped oldest "
+            "blocks=%s remaining_tokens=%s budget=%s",
+            dropped,
+            total_tokens,
+            max_tokens,
+        )
+
+    # Keep the newest max_total blocks (merged is sorted oldest→newest).
+    # Guard against max_total <= 0: merged[-0:] returns the full list (Python quirk).
+    if max_total <= 0:
+        return []
+    return merged[-max_total:]
+
+
 class JiuClawQABlockAssemblyRail(DeepAgentRail):
     priority = 82
 
@@ -629,7 +693,7 @@ class JiuClawQABlockAssemblyRail(DeepAgentRail):
                 recovered,
             )
 
-        catalog_text = build_catalog_text(registry)
+        catalog_text = build_catalog_text(registry, max_tokens=self._config.catalog_max_tokens)
         prompt_builder = getattr(agent, "system_prompt_builder", None)
         if prompt_builder is not None:
             lang = getattr(prompt_builder, "language", None) or "cn"
@@ -698,11 +762,54 @@ class JiuClawQABlockAssemblyRail(DeepAgentRail):
                     session_id,
                     selected_qa_ids,
                 )
+
+            # Always hydrate recent N blocks + selector selections (dedup, token-budgeted)
+            default_qa_ids = _last_n_history_qa_ids(
+                registry, n=self._config.default_hydrate_recent_blocks
+            )
+            merged_qa_ids = _merge_hydrate_qa_ids(
+                default_qa_ids,
+                selected_qa_ids,
+                registry,
+                max_total=self._config.max_total_hydrate_blocks,
+                max_tokens=self._config.hydrate_max_tokens,
+            )
+            if merged_qa_ids != list(selected_qa_ids or []):
+                logger.info(
+                    "[QABlockAssemblyRail] default+selector merge "
+                    "session_id=%s default=%s selector=%s merged=%s",
+                    session_id,
+                    default_qa_ids,
+                    selected_qa_ids,
+                    merged_qa_ids,
+                )
+            selected_qa_ids = merged_qa_ids
+
             ctx.extra[_PRELOADED_QA_IDS_KEY] = list(selected_qa_ids or [])
             await layer.hydrate_history_into_window(context, selected_qa_ids=selected_qa_ids)
         else:
-            ctx.extra[_PRELOADED_QA_IDS_KEY] = []
-            await layer.hydrate_history_into_window(context)
+            # selector disabled: still apply default recent blocks + token budget
+            # (previously hydrated ALL history blocks without limit, risking context blowup)
+            default_qa_ids = _last_n_history_qa_ids(
+                registry, n=self._config.default_hydrate_recent_blocks
+            )
+            merged_qa_ids = _merge_hydrate_qa_ids(
+                default_qa_ids,
+                None,
+                registry,
+                max_total=self._config.max_total_hydrate_blocks,
+                max_tokens=self._config.hydrate_max_tokens,
+            )
+            if merged_qa_ids != default_qa_ids:
+                logger.info(
+                    "[QABlockAssemblyRail] selector disabled, default-only merge "
+                    "session_id=%s default=%s merged=%s",
+                    session_id,
+                    default_qa_ids,
+                    merged_qa_ids,
+                )
+            ctx.extra[_PRELOADED_QA_IDS_KEY] = list(merged_qa_ids or [])
+            await layer.hydrate_history_into_window(context, selected_qa_ids=merged_qa_ids)
 
         if _is_interrupt_resume_turn(session) and not extract_next_user_query(
             context.get_messages()

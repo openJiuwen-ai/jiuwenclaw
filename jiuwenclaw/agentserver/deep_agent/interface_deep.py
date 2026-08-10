@@ -5712,50 +5712,63 @@ class JiuWenClawDeepAdapter:
         if self._task_planning_rail is None:
             return
 
-        freeze_session = None
-        freeze_owned = False
-        if self._qa_block_freeze_rail is not None:
-            try:
-                freeze_session, freeze_owned = await _resolve_session_for_checkpoint(
+        # Bind request-scoped env overlay so freeze_persist (esp. async background
+        # task via asyncio.create_task) inherits default_headers for LLM summarization
+        # auth. process_interrupt does not call _on_chat_request_start, so the overlay
+        # would be unbound here without this bind — read_default_headers() returns
+        # None → AsyncOpenAI default_headers=None → 401 APIG.0303.
+        sid, aid = self._env_ns_ids()
+        ns_token = bind_agent_env_ns(sid, aid)
+        overlay = build_effective_env_overlay(service_id=sid, agent_id=aid)
+        overlay_token = bind_task_env_overlay(overlay)
+        try:
+            freeze_session = None
+            freeze_owned = False
+            if self._qa_block_freeze_rail is not None:
+                try:
+                    freeze_session, freeze_owned = await _resolve_session_for_checkpoint(
+                        self._instance,
+                        session_id,
+                        card=self._instance.card,
+                    )
+                    if freeze_owned:
+                        await freeze_session.pre_run(inputs=None)
+                    await self._qa_block_freeze_rail.freeze_current_qa_sync(
+                        session_id,
+                        agent=self._instance,
+                        session=freeze_session,
+                        status="interrupted",
+                        persist_mode="sync" if freeze_owned else "async",
+                    )
+                    context_engine = resolve_context_engine(self._instance)
+                    if context_engine is not None and freeze_session is not None:
+                        actual_session = getattr(freeze_session, "_parent", freeze_session) or freeze_session
+                        await context_engine.save_contexts(actual_session)
+                        await post_agent_execute_for_session(freeze_session, self._checkpointer)
+                except Exception as exc:
+                    logger.warning(
+                        "[JiuWenClawDeepAdapter] qa_block %s freeze failed session_id=%s: %s",
+                        reason,
+                        session_id,
+                        exc,
+                        exc_info=True,
+                    )
+                finally:
+                    if freeze_owned and freeze_session is not None:
+                        await freeze_session.post_run()
+
+            if persist_checkpoint:
+                # freeze_session stays None when freeze_rail is absent or freeze failed;
+                # persist_checkpoint_for_session accepts session=None in that case.
+                await persist_checkpoint_for_session(
                     self._instance,
                     session_id,
                     card=self._instance.card,
+                    session=freeze_session if freeze_session is not None and not freeze_owned else None,
                 )
-                if freeze_owned:
-                    await freeze_session.pre_run(inputs=None)
-                await self._qa_block_freeze_rail.freeze_current_qa_sync(
-                    session_id,
-                    agent=self._instance,
-                    session=freeze_session,
-                    status="interrupted",
-                    persist_mode="sync" if freeze_owned else "async",
-                )
-                context_engine = resolve_context_engine(self._instance)
-                if context_engine is not None and freeze_session is not None:
-                    actual_session = getattr(freeze_session, "_parent", freeze_session) or freeze_session
-                    await context_engine.save_contexts(actual_session)
-                    await post_agent_execute_for_session(freeze_session, self._checkpointer)
-            except Exception as exc:
-                logger.warning(
-                    "[JiuWenClawDeepAdapter] qa_block %s freeze failed session_id=%s: %s",
-                    reason,
-                    session_id,
-                    exc,
-                    exc_info=True,
-                )
-            finally:
-                if freeze_owned and freeze_session is not None:
-                    await freeze_session.post_run()
-
-        if persist_checkpoint:
-            # freeze_session stays None when freeze_rail is absent or freeze failed;
-            # persist_checkpoint_for_session accepts session=None in that case.
-            await persist_checkpoint_for_session(
-                self._instance,
-                session_id,
-                card=self._instance.card,
-                session=freeze_session if freeze_session is not None and not freeze_owned else None,
-            )
+        finally:
+            reset_task_env_overlay(overlay_token)
+            reset_agent_env_ns(ns_token)
 
     async def process_interrupt(self, request: AgentRequest) -> AgentResponse:
         """处理 interrupt 请求.
