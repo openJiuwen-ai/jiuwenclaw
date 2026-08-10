@@ -248,10 +248,43 @@ async def test_incomplete_code_cleanup_does_not_enter_agent_mode() -> None:
     adapter = _adapter()
     adapter._unregister_code_mode_rails = AsyncMock(return_value=False)
     adapter._update_agent_mode_rails = AsyncMock()
+    adapter._last_runtime_mode = "agent.fast"
 
-    await adapter._update_rails_for_mode("agent.fast")
+    with pytest.raises(RuntimeError, match="Mode transition aborted"):
+        await adapter._update_rails_for_mode("agent.fast")
 
     adapter._update_agent_mode_rails.assert_not_awaited()
+    assert adapter._last_runtime_mode == "code"
+
+
+@pytest.mark.asyncio
+async def test_failed_code_cleanup_aborts_downstream_runtime_updates() -> None:
+    adapter = _adapter()
+    adapter._runtime_prompt_rail = None
+    adapter._last_runtime_mode = "agent.fast"
+    adapter._unregister_code_mode_rails = AsyncMock(return_value=False)
+    adapter._update_agent_mode_rails = AsyncMock()
+    adapter._update_tools_for_mode = AsyncMock()
+    adapter._update_session_tools = AsyncMock()
+    adapter._refresh_acp_runtime_tools = MagicMock()
+    adapter._update_prompt_for_mode = MagicMock()
+
+    with pytest.raises(RuntimeError, match="Mode transition aborted"):
+        await adapter._update_runtime_config(
+            _RuntimeConfigParams(
+                session_id="code-session",
+                mode="agent.fast",
+                request_id="request-1",
+                channel_id="web",
+            )
+        )
+
+    adapter._update_agent_mode_rails.assert_not_awaited()
+    adapter._update_tools_for_mode.assert_not_awaited()
+    adapter._update_session_tools.assert_not_awaited()
+    adapter._refresh_acp_runtime_tools.assert_not_called()
+    adapter._update_prompt_for_mode.assert_not_called()
+    assert adapter._last_runtime_mode == "code"
 
 
 def test_task_planning_rail_exposes_todo_tools_on_real_deep_agent(tmp_path: Path) -> None:

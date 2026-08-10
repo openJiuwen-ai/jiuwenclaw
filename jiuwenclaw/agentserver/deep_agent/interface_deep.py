@@ -5163,11 +5163,18 @@ class JiuWenClawDeepAdapter:
                 )
         else:
             if not await self._unregister_code_mode_rails():
-                logger.error(
-                    "[JiuWenClawDeepAdapter] Mode transition aborted because "
-                    "Code-mode rail cleanup was incomplete"
+                error_msg = (
+                    "Mode transition aborted because Code-mode rail cleanup "
+                    "was incomplete"
                 )
-                return
+                # process_message_impl/process_message_stream_impl publish the
+                # requested mode before runtime reconciliation so a pending
+                # config reload sees the current request.  The transition did
+                # not commit, so restore the last known rail mode before
+                # failing the request and blocking all downstream mode setup.
+                self._last_runtime_mode = "code"
+                logger.error("[JiuWenClawDeepAdapter] %s", error_msg)
+                raise RuntimeError(error_msg)
             if mode == "agent.plan":
                 await self._update_plan_mode_rails()
             else:
