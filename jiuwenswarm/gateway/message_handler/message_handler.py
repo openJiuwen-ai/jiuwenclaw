@@ -3901,7 +3901,6 @@ class MessageHandler(ABC):
                         )
 
                         # 3. 发送 supplement intent 到 AgentServer（取消任务但保留 todo）
-                        #    用 await 确保 agent 侧先完成取消再启动新任务
                         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 
                         agent_msg = await self._prepare_agent_dispatch_message(msg)
@@ -3942,15 +3941,6 @@ class MessageHandler(ABC):
                             metadata=msg.metadata,
                             user_id=getattr(msg, "user_id", None),
                         )
-                        try:
-                            resp = await self._send_non_stream_agent_request(supplement_env)
-                            # 发送被中断工具的 tool_result 给前端
-                            payload = resp.payload if isinstance(resp.payload, dict) else {}
-                            await self._send_cancelled_tool_results(
-                                msg.channel_id, msg.session_id, payload, msg.metadata
-                            )
-                        except Exception:
-                            pass  # 即使失败也继续启动新任务
 
                         # 4. 入队新任务（单一任务，不并发）
                         from jiuwenswarm.common.schema.message import Message
@@ -3994,11 +3984,46 @@ class MessageHandler(ABC):
                             bot_id=msg.bot_id,
                             metadata=sup_meta,
                         )
-                        self._user_messages.put_nowait(new_msg)
-                        logger.info(
-                            "[MessageHandler] supplement: 旧任务已取消，新任务已入队: id=%s session_id=%s",
-                            new_msg.id, msg.session_id,
+
+                        async def _send_supplement_interrupt() -> None:
+                            try:
+                                resp = await self._send_non_stream_agent_request(supplement_env)
+                                payload = resp.payload if isinstance(resp.payload, dict) else {}
+                                await self._send_cancelled_tool_results(
+                                    msg.channel_id, msg.session_id, payload, msg.metadata
+                                )
+                            except Exception as exc:
+                                logger.warning(
+                                    "[MessageHandler] supplement 中断处理失败,仍入队新流: error=%s",
+                                    exc,
+                                )
+
+                        def _enqueue_supplement_after_interrupt(
+                            _t: asyncio.Task,
+                            *,
+                            _new_msg=new_msg,
+                            _sid=msg.session_id,
+                        ) -> None:
+                            try:
+                                _t.result()
+                            except Exception as exc:
+                                logger.warning(
+                                    "[MessageHandler] supplement 中断处理失败,仍入队新流: error=%s",
+                                    exc,
+                                )
+                            self._user_messages.put_nowait(_new_msg)
+                            logger.info(
+                                "[MessageHandler] supplement: 中断已处理，新任务已入队: id=%s session_id=%s",
+                                _new_msg.id,
+                                _sid,
+                            )
+
+                        # 不能 await，否则会阻塞 forward_loop，拖累所有 session
+                        _supp_task = asyncio.create_task(
+                            _send_supplement_interrupt(),
+                            name=f"gw-agent-supplement-{(supplement_env.session_id or 'x')[:24]}",
                         )
+                        _supp_task.add_done_callback(_enqueue_supplement_after_interrupt)
 
                     elif intent == "cancel":
                         # fire_and_forget：避免慢 cancel 阻塞 _forward_loop，

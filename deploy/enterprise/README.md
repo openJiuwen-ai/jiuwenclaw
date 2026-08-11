@@ -763,6 +763,9 @@ pod_logs_20260707_163022/
 # 本地执行机器≠CCE集群节点，关闭本地宿主机端口占用检测，避免端口状态误判阻断渲染
 NO_CHECK_PORTS=true
 
+# 当启用日志模块、NFS模块，或运行模式MODE=dev时必填；值为CCE集群内某个目标节点名称，用于将模块调度到该节点运行
+CURRENT_NODE_NAME=
+
 # 选取CCE节点的空闲端口（端口区间30000-32767）
 GATEWAY_NODE_PORT=
 MANAGER_SERVER_NODE_PORT=
