@@ -254,7 +254,9 @@ class WebClient {
       throw this.createWebError(i18n.t('network.connectionUnavailable'), 'WS_NOT_READY', undefined, true);
     }
 
-    const id = this.generateRequestId();
+    const explicitId =
+      typeof options.requestId === 'string' ? options.requestId.trim() : '';
+    const id = explicitId || this.generateRequestId();
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const message: WsRequest = {
       type: 'req',

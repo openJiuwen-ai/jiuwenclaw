@@ -12,6 +12,20 @@ class ReqMethod(Enum):
     ACP_TOOL_RESPONSE = "acp.tool_response"
 
     CHAT_SEND = "chat.send"
+    # Steering: text injected into an already-running round. Text-only, never
+    # replaces the active output stream, and only valid while a round is live.
+    #
+    # Legacy clients express a *related* intent as CHAT_SEND + input_mode="steer",
+    # but the two do NOT converge: that form routes through
+    # _should_inject_into_existing_interaction -> attach_output() -> send_input(),
+    # and its attach_output is how an ACTIVE Goal's output finds a reader while
+    # the interaction is idle between attempts. CHAT_STEER never attaches. They
+    # share a steering *service*, not a lease behaviour, and folding one into the
+    # other leaves an ACTIVE Goal's output with nobody consuming it.
+    #
+    # Answered by a plain RPC reply with no event_type -- see
+    # JiuWenSwarmDeepAdapter._steer_ack for why that matters.
+    CHAT_STEER = "chat.steer"
     CHAT_RESUME = "chat.resume"
     CHAT_CANCEL = "chat.interrupt"
     CHAT_ANSWER = "chat.user_answer"
@@ -238,6 +252,23 @@ class EventType(Enum):
     CHAT_PROCESSING_STATUS = "chat.processing_status"
     CHAT_ERROR = "chat.error"
     CHAT_INTERRUPT_RESULT = "chat.interrupt_result"
+    # NOTE: there is deliberately no CHAT_STEER_ACK member. The steer
+    # acknowledgement travels as the RPC reply, and a member here would be an
+    # active hazard rather than dead weight: _response_to_message turns any
+    # unary payload whose event_type parses as an EventType into an event frame,
+    # so declaring the name is half of what it takes to break the awaited reply
+    # again. See JiuWenSwarmDeepAdapter._steer_ack.
+    #
+    # This one, by contrast, is load-bearing despite having no code reference --
+    # both producers use the literal in stream_utils. The gateway needs
+    # EventType("chat.steer_applied") to parse or the frame goes out with
+    # event_type=None and no client subscription matches. Do not remove it for
+    # looking unused.
+    #
+    # The text reached model context. Carries the ids that were applied and the
+    # ids a rail dropped, so a client can tell a slow model from a discarded
+    # instruction. Rides the steered turn's own stream.
+    CHAT_STEER_APPLIED = "chat.steer_applied"
     CHAT_EVOLUTION_STATUS = "chat.evolution_status"
     CHAT_SUBTASK_UPDATE = "chat.subtask_update"
     CHAT_ASK_USER_QUESTION = "chat.ask_user_question"

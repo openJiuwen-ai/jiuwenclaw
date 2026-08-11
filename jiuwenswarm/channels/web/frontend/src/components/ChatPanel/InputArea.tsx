@@ -26,6 +26,7 @@ import {
   resolveEffectiveModel,
 } from '../../stores';
 import { supportsPlanMode } from '../../features/planMode/wireMode';
+import { canSteer, needsIdleDrain, resolveInputRoute } from '../../features/inputRouting';
 import { queueOrAddGoalObjectiveMessage } from '../../features/goalPendingObjectiveBubble';
 import { AgentMode, MediaItem, Permission, type ProjectInfo } from '../../types';
 import { NEW_CONVERSATION_ID } from '../../multi-session/state/newConversationLifecycle';
@@ -154,6 +155,8 @@ interface InputAreaProps {
    * 真的空闲，空闲才会真正发送，不会重复触发。
    */
   onDrainTaskQueueIfIdle?: (sessionId: string) => void;
+  /** Inject text into the streaming turn; resolves false when it arrived too late. */
+  onSteer?: (content: string, sessionId: string) => Promise<boolean>;
 }
 
 export type InputAreaHandle = {
@@ -492,6 +495,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     onSetGoal,
     onClearGoal,
     onDrainTaskQueueIfIdle,
+    onSteer,
   },
   ref,
 ) {
@@ -564,7 +568,10 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const hasHistory = (currentSession?.message_count ?? 0) > 0 || loadedMsgLen > 0;
   const goalArmed = useGoalStore((s) => s.runtimes[activeSessionId ?? '']?.armed ?? false);
   const currentGoal = useGoalStore((s) => s.runtimes[activeSessionId ?? '']?.goal ?? null);
-  // 目标 active 时普通发送改走排队，而不是文档 §5.1 原定的 input_mode:'steer' 实时插话——
+  // ACTIVE Goal between attempts: ordinary input queues (see inputRouting).
+  // Mid-stream Agent text uses chat.steer; idle Goal still cannot, because
+  // handle_steer never attach_output. Legacy input_mode:'steer' remains only
+  // for paths that still need that lease behaviour — not for composer steer.
   // 用户明确要求改成这个语义（steer 目前收不到任何反馈，体验上等同于消息发出去石沉大海，
   // 见 backend-requests.md #1）。走排队后消息复用现有的通用队列机制，行为和普通排队一致。
   const isGoalActive = currentGoal?.status === 'active';
@@ -1301,7 +1308,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     return text.replace(/\u200B/g, '');
   }, []);
 
-  const handleSubmit = useCallback(() => {
+  const handleSubmit = useCallback((options?: { preferQueue?: boolean }) => {
     // 用富文本（含 chip 标记）作为发送内容，气泡可交织渲染技能
     const richContent = extractRichContent();
     const trimmedBase = (richContent + pendingVoiceText).trim();
@@ -1339,33 +1346,79 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       // 欢迎页尚无真实 session，armed 状态先保留，交给 App.tsx 的 handleSendMessage
       // 在 session.create 成功、拿到真实 session id 后再落地消息 + 调 onSetGoal
       onSubmit(trimmed, readyMediaItems);
-    } else if (isTeamMode) {
-      onSubmit(trimmed, readyMediaItems);
-    } else if (queuePaused && isAgentMode && sid) {
-      // 队列已暂停时，弹窗提示用户选择
-      const queueLen = useChatStore.getState().getRuntime(sid)?.taskQueue.length ?? 0;
-      const shouldClear = window.confirm(t('chat.queuePausedConfirm', { count: queueLen }));
-      if (shouldClear) {
-        // 清空队列并发送
-        useChatStore.getState().clearTaskQueue(sid);
-        useChatStore.getState().setQueuePaused(sid, false);
-        onSubmit(trimmed, readyMediaItems);
-      } else {
-        // 保持队列，新消息加入队列
-        useChatStore.getState().addToTaskQueue(sid, trimmed, readyMediaItems);
+    } else {
+      // One decision, made in one place. See features/inputRouting.ts for why
+      // each state routes where it does — in particular why an ACTIVE Goal
+      // between attempts keeps queueing instead of steering.
+      const routingContext = {
+        mode,
+        isProcessing,
+        isPaused,
+        isGoalActive,
+        queuePaused,
+        goalArmed,
+        hasSession: Boolean(sid),
+        hasAttachments: readyMediaItems.length > 0,
+        hasQueuedWork: Boolean(
+          sid && (useChatStore.getState().getRuntime(sid)?.taskQueue.length ?? 0) > 0,
+        ),
+        preferQueue: Boolean(options?.preferQueue),
+      };
+      const route = resolveInputRoute(routingContext);
+
+      if (route === 'steer' && sid && !onSteer) {
+        // Fail closed, and return before the input is cleared below.
+        //
+        // `onSteer` is optional and one of this component's two render sites
+        // does not pass it. Falling through to the chain's final `onSubmit(...)`
+        // would start an ordinary chat.send, which *cancels* the stream this
+        // text was meant to adjust -- the silent downgrade into a fresh turn
+        // that this path exists to remove, with nothing reported anywhere. Calling
+        // `onInterrupt` instead would be the same cancellation with a different
+        // name.
+        //
+        // So: do nothing to the stream, keep the text, and say so. A missing
+        // prop is a wiring bug; the right response is to refuse and be loud,
+        // not to pick a destructive fallback on the user's behalf. Unreachable
+        // today only because the site without the prop is the welcome screen,
+        // which is never processing -- an implicit coupling, not a guarantee.
+        console.error(
+          '[chat] steer route reached without an onSteer handler; refusing to send',
+        );
+        return;
       }
-    } else if (isInterruptible) {
-      if (isAgentMode) {
-        if (sid) {
+
+      if (route === 'steer' && sid && onSteer) {
+        // Fire and forget: sendSteer settles the transcript from the ACK and
+        // puts the draft back if the turn finished before the text arrived.
+        void onSteer(trimmed, sid);
+      } else if (route === 'queue-paused-prompt' && sid) {
+        const queueLen = useChatStore.getState().getRuntime(sid)?.taskQueue.length ?? 0;
+        const shouldClear = window.confirm(t('chat.queuePausedConfirm', { count: queueLen }));
+        if (shouldClear) {
+          useChatStore.getState().clearTaskQueue(sid);
+          useChatStore.getState().setQueuePaused(sid, false);
+          onSubmit(trimmed, readyMediaItems);
+        } else {
+          // readyMediaItems comes from upstream: a queued message keeps the
+          // attachments it was written with, instead of arriving as bare text
+          // whenever the turn it waited for finally ends.
           useChatStore.getState().addToTaskQueue(sid, trimmed, readyMediaItems);
-          // 目标 active 但当前没有任务在处理时，常规的自动排空触发点不会命中，主动兜底一次
+        }
+      } else if (route === 'queue' && sid) {
+        useChatStore.getState().addToTaskQueue(sid, trimmed, readyMediaItems);
+        if (needsIdleDrain(routingContext, route)) {
+          // Load-bearing for the Goal supplement: the ordinary drain fires on
+          // terminal processing events, which never arrive between Goal
+          // attempts, so without this the message waits for a turn that is
+          // not coming.
           onDrainTaskQueueIfIdle?.(sid);
         }
-      } else {
+      } else if (route === 'interrupt') {
         onInterrupt(trimmed);
+      } else {
+        onSubmit(trimmed, readyMediaItems);
       }
-    } else {
-      onSubmit(trimmed, readyMediaItems);
     }
     if (sid) {
       useChatStore.getState().setInputValue(sid, '');
@@ -1386,17 +1439,24 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     readyMediaItems,
     hasUploadingAttachments,
     hasAttachmentErrors,
-    isInterruptible,
     isListening,
     onSubmit,
     onInterrupt,
     stopListening,
-    isAgentMode,
+    // Still read directly by the media guard near the top of the handler.
+    isInterruptible,
     isTeamMode,
+    // Routing inputs: the send decision itself now comes from
+    // resolveInputRoute, which derives it from these.
+    mode,
+    isProcessing,
+    isPaused,
+    isGoalActive,
     queuePaused,
     goalArmed,
     onSetGoal,
     onDrainTaskQueueIfIdle,
+    onSteer,
     pushAttachmentAlert,
     t,
   ]);
@@ -1410,6 +1470,19 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     isInterruptible && !isTeamMode && !isAgentMode && readyMediaItems.length > 0;
   const showStop = isProcessing && !isPaused && !hasDraft;
   const hasReadyMedia = readyMediaItems.length > 0;
+  // Hint + Alt+Enter only apply in agent mode (task queue drains there).
+  const showSteerQueueHint =
+    isAgentMode &&
+    canSteer({
+      mode,
+      isProcessing,
+      isPaused,
+      isGoalActive,
+      queuePaused,
+      goalArmed,
+      hasSession: Boolean(activeSessionId),
+      hasAttachments: hasReadyMedia,
+    });
   const canSubmit = showStop || (
     (hasTextDraft || hasReadyMedia) &&
     !isLoadingHistory &&
@@ -1585,7 +1658,11 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       if (e.key !== 'Enter' || e.shiftKey) return;
       if (isComposingRef.current || e.nativeEvent.isComposing) return;
       e.preventDefault();
-      handleSubmit();
+      // Alt+Enter queues a follow-up while a turn streams (agent task queue only).
+      // Plain Enter steers. Do not bind bare Tab — it inserts composer suggestions.
+      handleSubmit(
+        e.altKey && isAgentMode ? { preferQueue: true } : undefined,
+      );
     },
     [
       composerSuggestion,
@@ -1593,6 +1670,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       composerSuggestionItems,
       handleSubmit,
       insertComposerToken,
+      isAgentMode,
     ]
   );
 
@@ -2492,6 +2570,12 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
             lockedToDefault={isTeamMode}
           />
 
+          {showSteerQueueHint && (
+            <span className="chat-input-steer-hint" title={t('chat.steerQueueHint')}>
+              {t('chat.steerQueueHint')}
+            </span>
+          )}
+
           <button
             type="button"
             onClick={handleSendButtonClick}
@@ -2501,7 +2585,13 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
               showStop && 'chat-input-btn--stop',
               canSubmit ? 'chat-input-btn--send-active' : 'chat-input-btn--disabled',
             )}
-            title={showStop ? t('chat.stop') : t('chat.send')}
+            title={
+              showStop
+                ? t('chat.stop')
+                : showSteerQueueHint
+                  ? t('chat.steerQueueHint')
+                  : t('chat.send')
+            }
             data-testid="chat-send"
           >
             {showStop ? (

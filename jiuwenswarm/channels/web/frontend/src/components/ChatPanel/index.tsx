@@ -109,6 +109,8 @@ interface ChatPanelProps {
   onClearGoal?: (sessionId: string) => void;
   /** 目标 active 但当前无处理中任务时，消息入队后主动排空一次，见 InputArea.tsx 对应调用点 */
   onDrainTaskQueueIfIdle?: (sessionId: string) => void;
+  /** Inject text into the streaming turn; resolves false when it arrived too late. */
+  onSteer?: (content: string, sessionId: string) => Promise<boolean>;
 }
 
 // 邀请指令只对 human_agent 成员存在（见 upsertHumanShareCommandFromEvent 的
@@ -744,6 +746,7 @@ export function ChatPanel({
   onResumeGoal,
   onClearGoal,
   onDrainTaskQueueIfIdle,
+  onSteer,
 }: ChatPanelProps) {
   const { t } = useTranslation();
   const activeSessionId = useChatStore((s) => s.activeSessionId);
@@ -1403,6 +1406,7 @@ export function ChatPanel({
             onSetGoal={onSetGoal}
             onClearGoal={onClearGoal}
             onDrainTaskQueueIfIdle={onDrainTaskQueueIfIdle}
+            onSteer={onSteer}
           />
         </div>
       )}

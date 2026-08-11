@@ -135,6 +135,11 @@ export interface ChatRuntime {
   };
   taskQueue: TaskItem[];
   queuePaused: boolean;
+  /**
+   * Request id of the chat.send that started the live round. Steers send this
+   * as expected_round_id so a race past turn end cannot silently accept.
+   */
+  activeRoundRequestId: string | null;
   pendingQuestion: AskUserQuestionPayload | null;
   /**
    * 忙碌时设目标：用户气泡暂存在此（界面不立刻显示）；
@@ -182,6 +187,7 @@ function createEmptyRuntime(): ChatRuntime {
     },
     taskQueue: [],
     queuePaused: false,
+    activeRoundRequestId: null,
     pendingQuestion: null,
     pendingGoalObjectiveBubble: null as ChatRuntime['pendingGoalObjectiveBubble'],
     inputValue: '',
@@ -222,7 +228,11 @@ interface ChatState {
   setGlobalTaskRunning: (running: boolean) => void;
   removeRuntime: (sessionId: string) => void;
 
-  addMessage: (sessionId: string, message: Message) => void;
+  addMessage: (
+    sessionId: string,
+    message: Message,
+    options?: { preserveLiveReasoning?: boolean },
+  ) => void;
   replaceHistoryMessages: (sessionId: string, messages: Message[]) => void;
   updateMessage: (sessionId: string, id: string, updates: Partial<Message>) => void;
   appendStreamContent: (sessionId: string, content: string, streamKey?: string) => void;
@@ -241,6 +251,7 @@ interface ChatState {
   bumpThinkingAnchor: (sessionId: string) => void;
   setExecutionError: (sessionId: string, error: string | null) => void;
   setProcessing: (sessionId: string, status: boolean) => void;
+  setActiveRoundRequestId: (sessionId: string, requestId: string | null) => void;
   setThinking: (sessionId: string, status: boolean) => void;
   setLoadingHistory: (sessionId: string, status: boolean) => void;
   setHistoryPagerMeta: (sessionId: string, meta: HistoryPagerMeta | null) => void;
@@ -328,11 +339,16 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
     });
   },
 
-  addMessage: (sessionId, message) => {
+  addMessage: (sessionId, message, options) => {
     set((state) => {
       const runtime = state.runtimes[sessionId];
       if (!runtime) return state;
       const { messages, messageRenderKeySeq } = assignMessageRenderKeys(runtime, [message]);
+      // Clearing live reasoning belongs to "a new turn is starting", not to
+      // "a user message exists". Steering adds a user bubble mid-turn; wiping
+      // reasoningSegments there removes thinking blocks already on screen.
+      const resetLiveReasoning =
+        message.role === 'user' && !options?.preserveLiveReasoning;
       return {
         runtimes: {
           ...state.runtimes,
@@ -340,8 +356,13 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
             ...runtime,
             messages: [...runtime.messages, ...messages],
             messageRenderKeySeq,
-            ...(message.role === 'user' ? { assistantStreamSplit: false, reasoningSegments: runtime.reasoningSegments.filter((s) => s.closed) } : {}),
-          },  
+            ...(resetLiveReasoning
+              ? {
+                  assistantStreamSplit: false,
+                  reasoningSegments: runtime.reasoningSegments.filter((s) => s.closed),
+                }
+              : {}),
+          },
         },
       };
     });
@@ -384,6 +405,7 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
               toolResultDedupDropped: 0,
             },
             taskQueue: [],
+            activeRoundRequestId: null,
             pendingQuestion: null,
             pendingGoalObjectiveBubble: null,
           },
@@ -750,6 +772,7 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
             executionError: status ? null : runtime.executionError,
             ...(status ? { error: null } : {}),
             ...(turnStart ? { thinkingAnchorAt: Date.now() } : {}),
+            ...(!status ? { activeRoundRequestId: null } : {}),
           },
         },
       };
@@ -758,6 +781,21 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
     if (!status) {
       get().flushPendingGoalObjectiveBubble(sessionId);
     }
+  },
+
+  setActiveRoundRequestId: (sessionId, requestId) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const next = requestId && requestId.trim() ? requestId.trim() : null;
+      if (runtime.activeRoundRequestId === next) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, activeRoundRequestId: next },
+        },
+      };
+    });
   },
 
   setSessionError: (sessionId, error) => {
@@ -1458,6 +1496,7 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
               toolResultDedupDropped: 0,
             },
             taskQueue: [],
+            activeRoundRequestId: null,
             pendingQuestion: null,
             pendingGoalObjectiveBubble: null,
           },

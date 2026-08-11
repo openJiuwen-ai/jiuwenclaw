@@ -104,6 +104,16 @@ if _ERROR_EVENT is None:
     _ERROR_EVENT = getattr(InteractionEventType, "RUNTIME_ERROR")
 ERROR_EVENT_TYPE = _ERROR_EVENT.value
 
+# The harness event that reports which steers reached model context is compared
+# as the wire string (``STEER_APPLIED_CORE_TYPE``, imported from
+# ``stream_utils``) rather than read off ``InteractionEventType``. The enum
+# member only exists on agent-core versions carrying the steering work and the
+# commit pinned in ``uv.lock`` predates it, so a reference here would either
+# raise at import or need a getattr dance -- and buy nothing, because what
+# arrives on the queue is this string either way. It also keeps this parser and
+# the generic one in ``stream_utils`` (which the Team stream uses) comparing the
+# same value, instead of one of them going quiet on an older pin.
+
 # SDK chunk types that close one interaction round's output. ``answer`` carries
 # every round result (normal answer, empty answer, goal attempt boundary); HITL
 # interrupt frames replace it when a round stops for a human decision.
@@ -129,6 +139,7 @@ def _strip_whitespace(text: str) -> str:
     space at the point where a newline was inserted.
     """
     return re.sub(r"\s+", "", text or "")
+
 
 try:
     from openjiuwen.harness.tools import is_paid_search_enabled
@@ -252,7 +263,11 @@ from jiuwenswarm.server.runtime.agent_adapter.evolution_slash import (
     EvolutionSlashContext,
     handle_evolution_slash_command,
 )
-from jiuwenswarm.server.utils.stream_utils import parse_ask_user_question_payload
+from jiuwenswarm.server.utils.stream_utils import (
+    STEER_APPLIED_CORE_TYPE,
+    parse_ask_user_question_payload,
+    steer_applied_payload,
+)
 from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
     apply_audio_model_config_from_yaml,
     apply_image_gen_model_config_from_yaml,
@@ -7605,6 +7620,210 @@ class JiuWenSwarmDeepAdapter:
             metadata=request.metadata,
         )
 
+    # Fields a chat request may carry that steering cannot honour. Named here
+    # rather than inline so the list stays visible when clients add a new one.
+    _STEER_UNSUPPORTED_INPUT_FIELDS = ("attachments", "files", "media_items")
+
+    async def handle_steer(self, request: AgentRequest) -> AgentResponse:
+        """Handle chat.steer — inject text into a round that is already running.
+
+        Text-only, and deliberately **never** attaches output.  The turn being
+        steered already has a consumer; claiming a lease here would replace the
+        stream the user is watching, which is the behaviour this path exists to remove.
+
+        The reply reports the dispatch outcome rather than a bare success flag.
+        ``accepted`` alone cannot distinguish text injected into the live round
+        from text queued as a follow-up on a running Goal, and those differ for
+        the user: the first affects the answer streaming now, the second the
+        next attempt.
+        """
+        if not self._is_session_scoped_adapter:
+            session_adapter = await self._get_or_create_session_adapter(request.session_id)
+            try:
+                return await session_adapter.handle_steer(request)
+            finally:
+                await self._evict_idle_session_adapters()
+
+        params = request.params if isinstance(request.params, dict) else {}
+        query = params.get("query")
+        if not isinstance(query, str) or not query.strip():
+            return self._steer_ack(
+                request, accepted=False, reason="empty_query", disposition=None
+            )
+
+        # Steering is text-only: the queue carries strings and the injection
+        # site joins them into one message, so anything else would be accepted
+        # and then dropped without trace. Say so instead of silently discarding
+        # a file the user believed they sent.
+        if any(params.get(field) for field in self._STEER_UNSUPPORTED_INPUT_FIELDS):
+            return self._steer_ack(
+                request, accepted=False, reason="attachments_not_supported",
+                disposition=None,
+            )
+
+        instance = self._instance
+        if instance is None:
+            return self._steer_ack(
+                request, accepted=False, reason="no_agent_instance", disposition=None
+            )
+
+        inputs: dict[str, object] = {"query": query}
+        skills = params.get("skills")
+        if isinstance(skills, list):
+            # Same field chat.send carries; SendInputRequest keeps the full
+            # inputs mapping so skill activation travels with the steered text.
+            cleaned_skills = [s for s in skills if isinstance(s, str) and s.strip()]
+            if cleaned_skills:
+                inputs["skills"] = cleaned_skills
+
+        expected_round_raw = params.get("expected_round_id")
+        expected_round_id = (
+            expected_round_raw.strip()
+            if isinstance(expected_round_raw, str) and expected_round_raw.strip()
+            else None
+        )
+
+        try:
+            result = await instance.send_input(
+                SendInputRequest(
+                    request_id=request.request_id,
+                    inputs=inputs,
+                    mode=InputDispatchMode.STEER,
+                    expected_round_id=expected_round_id,
+                )
+            )
+        except RuntimeError as exc:
+            # Only a terminated interaction is a normal rejection: the client
+            # asked to steer something that is not running.  Every other
+            # RuntimeError from this path is a server fault -- an active round
+            # without a loop_controller, for instance -- and swallowing it here
+            # would report a healthy "nothing to steer" while the session is
+            # actually broken.  Let those propagate.
+            if str(exc) != "interaction_terminated":
+                raise
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] steer rejected: request_id=%s session_id=%s err=%s",
+                request.request_id,
+                request.session_id,
+                exc,
+            )
+            return self._steer_ack(
+                request,
+                accepted=False,
+                reason="interaction_terminated",
+                disposition=None,
+            )
+
+        # Merge blocker: chat.steer requires agent-core that returns
+        # SendInputResult. Older builds can enqueue then return None; crashing
+        # on result.accepted would restore the draft and duplicate the text.
+        # Duck-type the result (tests use a stand-in); None / missing accepted
+        # is the unsupported-runtime signal. The real fix is the pin bump.
+        if result is None or not hasattr(result, "accepted"):
+            logger.error(
+                "[JiuWenSwarmDeepAdapter] steer unsupported_runtime: request_id=%s "
+                "session_id=%s result=%r — publish/bump agent-core with "
+                "SendInputResult before merge",
+                request.request_id,
+                request.session_id,
+                result,
+            )
+            return self._steer_ack(
+                request,
+                accepted=False,
+                reason="unsupported_runtime",
+                disposition=None,
+            )
+
+        logger.info(
+            "[JiuWenSwarmDeepAdapter] steer dispatched: request_id=%s session_id=%s "
+            "accepted=%s disposition=%s reason=%s",
+            request.request_id,
+            request.session_id,
+            result.accepted,
+            result.disposition.value,
+            result.reason,
+        )
+        if result.accepted:
+            self._persist_steer_history(request, query, result.disposition.value)
+        return self._steer_ack(
+            request,
+            accepted=result.accepted,
+            reason=result.reason,
+            disposition=result.disposition.value,
+        )
+
+    @staticmethod
+    def _persist_steer_history(
+        request: AgentRequest, query: str, disposition: str
+    ) -> None:
+        """Persist an accepted steer as a user turn.
+
+        Written *after* dispatch returns, never before: a rejected steer changed
+        nothing, so a record of it would claim the user said something the agent
+        never received.  Reloading the session must not resurrect it.
+
+        ``input_kind`` records the **disposition**, not the wire method.  Input
+        that arrived over the steer path but landed as a follow-up -- what the
+        Web sends while a Goal is ACTIVE -- is not steering, and tagging it
+        ``steer`` would write a false classification to disk, where it outlives
+        the request and misleads whoever reads the transcript later.
+        """
+        params = request.params if isinstance(request.params, dict) else {}
+        append_history_record(
+            session_id=request.session_id or "default",
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            role="user",
+            content=query,
+            timestamp=time.time(),
+            channel_metadata=request.metadata,
+            mode=params.get("mode", "unknown"),
+            extra={"input_kind": disposition},
+        )
+
+    @staticmethod
+    def _steer_ack(
+        request: AgentRequest,
+        *,
+        accepted: bool,
+        reason: str | None,
+        disposition: str | None,
+    ) -> AgentResponse:
+        """Build the steer acknowledgement, as the RPC reply.
+
+        ``ok`` stays true even for a rejection: the request was understood and
+        answered.  ``accepted`` is what says whether the text was queued, and
+        conflating the two would make a stale steer look like a server error.
+
+        **No ``event_type`` key, deliberately, and it must stay that way.**
+        ``MessageHandler._response_to_message`` converts any unary response whose
+        payload carries a parseable ``EventType`` into a ``type="event"`` frame.
+        Both clients ``await`` this as an RPC response correlated by frame id, so
+        an event frame means no ``res`` ever arrives and the call times out --
+        while the steer has in fact already been queued, which is the worst of
+        both outcomes.  ``handle_user_answer`` is the precedent: a bare payload.
+        ``chat.interrupt_result`` is not, because ``chat.interrupt`` is
+        fire-and-forget and consumes its result *as* an event.
+        """
+        payload: dict[str, Any] = {
+            "request_id": request.request_id,
+            "session_id": request.session_id,
+            "accepted": accepted,
+            "target": "agent",
+        }
+        if disposition is not None:
+            payload["disposition"] = disposition
+        if reason is not None:
+            payload["reason"] = reason
+        return AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=True,
+            payload=payload,
+            metadata=request.metadata,
+        )
+
     async def handle_swarmflow_reply(self, request: AgentRequest) -> AgentResponse:
         """Handle chat.swarmflow_reply — deliver a person's reply to a human turn.
 
@@ -8357,6 +8576,17 @@ class JiuWenSwarmDeepAdapter:
             "event_type": GOAL_UPDATED_EVENT_TYPE,
             "goal": payload or None,
         }
+
+    @staticmethod
+    def _interaction_steer_applied_payload(payload: Any) -> dict[str, Any]:
+        """Normalize a steer.applied event to the public Web/TUI payload shape.
+
+        Delegates to ``stream_utils`` rather than holding its own copy: the Team
+        stream goes through the generic parser there, and while the mapping lived
+        only here Team clients received the raw ``steer.applied`` name and
+        ignored it. One normaliser means the two paths cannot drift.
+        """
+        return steer_applied_payload(payload)
 
     def _get_goal_manager(self) -> Any:
         if self._instance is None:
@@ -10266,6 +10496,9 @@ class JiuWenSwarmDeepAdapter:
                 if chunk_type == GOAL_UPDATED_EVENT_TYPE:
                     return JiuWenSwarmDeepAdapter._interaction_goal_updated_payload(payload)
 
+                if chunk_type == STEER_APPLIED_CORE_TYPE:
+                    return JiuWenSwarmDeepAdapter._interaction_steer_applied_payload(payload)
+
                 if chunk_type == ERROR_EVENT_TYPE:
                     err_payload = payload if isinstance(payload, dict) else {}
                     return {
@@ -10598,6 +10831,10 @@ class JiuWenSwarmDeepAdapter:
                 interaction_evt = chunk.get("type")
                 if interaction_evt == GOAL_UPDATED_EVENT_TYPE:
                     return JiuWenSwarmDeepAdapter._interaction_goal_updated_payload(
+                        chunk.get("payload")
+                    )
+                if interaction_evt == STEER_APPLIED_CORE_TYPE:
+                    return JiuWenSwarmDeepAdapter._interaction_steer_applied_payload(
                         chunk.get("payload")
                     )
                 if interaction_evt == ERROR_EVENT_TYPE:

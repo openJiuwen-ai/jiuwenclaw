@@ -26,6 +26,7 @@ import {
 import type { ConnectionStatus } from "./ws-client.js";
 import { createId, findLastIndex, isIgnorableHistoryRestoreError } from "./app-state-helpers.js";
 import { isClientMode, type ClientMode } from "./modes.js";
+import { countDroppedSteers, formatSteerDropped } from "./steering.js";
 import type { WorkflowRun } from "./workflows.js";
 
 type PreferredLanguage = "zh" | "en";
@@ -1186,6 +1187,29 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
         delegate.clearInterruptRequested();
       }
       return true;
+
+    case "chat.steer_applied": {
+      // Reports which steers reached model context. The stream is untouched:
+      // steering never interrupted it, so there is no state to restore here.
+      //
+      // Silent on the happy path. The user's message is already in the
+      // transcript from the ACK, and repeating "it arrived" for every steer
+      // would be noise. Only a drop is news -- their message is on screen but
+      // the agent never read it.
+      const dropped = countDroppedSteers(payload.dropped);
+      if (dropped > 0) {
+        appendEntry(delegate, {
+          kind: "info",
+          id: createId("info"),
+          sessionId: activeSessionId,
+          content: formatSteerDropped(delegate.getPreferredLanguage(), dropped),
+          icon: "i",
+          at: new Date().toISOString(),
+        });
+        return true;
+      }
+      return false;
+    }
 
     case "chat.interrupt_result": {
       const intent = typeof payload.intent === "string" ? payload.intent : "cancel";

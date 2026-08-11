@@ -31,6 +31,7 @@ import {
   type HarnessActivateInteraction,
 } from "./core/event-handlers.js";
 import { isTeamMode, type ClientMode } from "./core/modes.js";
+import { formatSteerQueuedNote, formatSteerRejection } from "./core/steering.js";
 import { isEventFrame, type EventFrame, type FileAttachment } from "./core/protocol.js";
 import {
   StreamingState,
@@ -418,6 +419,8 @@ export class CliPiAppState {
   private runningCommand: string | null = null;
   private pendingPlanEntrySource: "slash_command" | null = null;
   private lastVisibleUserRequest: VisibleUserRequest | null = null;
+  /** chat.send request id for the live round; used as chat.steer expected_round_id. */
+  private activeRoundRequestId: string | null = null;
   /** 保存 askQuestions 之前的 streamingState，用于在对话框关闭后恢复。 */
   private streamingStateBeforeQuestion: StreamingState | null = null;
   /** 当前回合的起始时间戳，用于在回合结束时计算执行耗时。 */
@@ -857,6 +860,9 @@ export class CliPiAppState {
   private setStreamingStateInternal(state: StreamingState): void {
     const wasActiveResponseStream = this.hasActiveResponseStream();
     this.streamingState = state;
+    if (state === StreamingState.Idle) {
+      this.activeRoundRequestId = null;
+    }
     this.handleStreamingStateChanged(wasActiveResponseStream);
   }
 
@@ -2063,6 +2069,9 @@ export class CliPiAppState {
       params,
       true,
     );
+    // Round identity for chat.steer expected_round_id (same id the server uses
+    // as ActiveInteractionRound.work.request_id).
+    this.activeRoundRequestId = requestId;
     if (planEntrySource) {
       this.pendingPlanEntrySource = null;
     }
@@ -2123,6 +2132,141 @@ export class CliPiAppState {
       },
     ];
     this.setStreamingStateInternal(StreamingState.Responding);
+    this.emitChange();
+    return requestId;
+  }
+
+  /**
+   * Inject text into the round that is running now, via `chat.steer`.
+   *
+   * The difference from {@link supplement} is what is *not* here: no
+   * `chat.interrupt` is sent, and the streaming state is never touched. The
+   * stream the user is watching has to stay continuous -- interrupting it to
+   * deliver a correction is what made the old path produce false processing
+   * transitions.
+   *
+   * Resolves with the request id once the backend acknowledges the text as
+   * queued, or `null` when it was not queued. "Queued" is the whole claim: a
+   * rail can still drop the text before the model sees it, and
+   * `chat.steer_applied` is what reports what actually reached model context.
+   *
+   * Unlike the rest of the chat family this uses the request/response path
+   * rather than `sendEventOnly`, because the ACK comes back as the RPC response
+   * and `handleFrame` drops `res` frames -- an ACK sent fire-and-forget would
+   * never be seen. It deliberately does not go through `this.request()` either:
+   * that helper parks the id in `activeCommandRequestId` for Ctrl+C, and a
+   * steer sent while a command is in flight would evict the command's id there.
+   */
+  async steer(content: string, skills?: string[]): Promise<string | null> {
+    if (this.connectionStatus !== "connected") {
+      // Caller assumes steer() already explained a null return. Offline used to
+      // be silent here while supplement()'s caller printed the reconnect note.
+      this.addItem({
+        kind: "error",
+        id: `offline-${Date.now()}`,
+        sessionId: this.sessionId,
+        content: "offline: waiting for reconnect",
+        at: new Date().toISOString(),
+      });
+      this.emitChange();
+      return null;
+    }
+    const trimmed = content.trim();
+    if (!trimmed) return null;
+
+    // Pin the session before awaiting. supplement() had no await and so no way
+    // to drift; this does, and if the user switches session during the round
+    // trip then `this.sessionId` names a different conversation by the time the
+    // ACK lands. Every entry and message below is addressed to the session the
+    // text was actually typed into.
+    const steerSessionId = this.sessionId;
+    const expectedRoundId = this.activeRoundRequestId;
+    const trustedDirs = getTrustedDirs();
+    const projectDir = getCurrentProjectDir() || process.cwd();
+    const cwd = getCurrentCwd() || projectDir;
+    const params: Record<string, unknown> = {
+      query: trimmed,
+      mode: this.mode,
+      session_id: steerSessionId,
+      ...(skills?.length ? { skills } : {}),
+      ...(expectedRoundId ? { expected_round_id: expectedRoundId } : {}),
+      ...(trustedDirs.length > 0 ? { trusted_dirs: trustedDirs } : {}),
+      ...(projectDir ? { project_dir: projectDir } : {}),
+      ...(cwd ? { cwd } : {}),
+    };
+    // Same oversized-frame pre-check as sendMessage and supplement. Estimate
+    // the real params (incl. session/cwd paths) so the 7 MB gate matches the
+    // frame that will actually go out.
+    const estimatedSize = JSON.stringify({
+      type: "req",
+      method: "chat.steer",
+      params,
+    }).length;
+    if (estimatedSize > 7 * 1024 * 1024) {
+      this.addItem(addError(this.sessionId, `消息过大（约 ${Math.round(estimatedSize / 1024 / 1024)} MB），请缩短输入内容。`));
+      this.emitChange();
+      return null;
+    }
+
+    const requestId = `tui_steer_${Date.now().toString(16)}_${Math.random().toString(36).slice(2, 6)}`;
+    let payload: Record<string, unknown>;
+    try {
+      const response = await this.wsClient.request(requestId, "chat.steer", params);
+      payload = response.payload ?? {};
+    } catch (error) {
+      // A transport failure is not a rejection. Reporting it as one would claim
+      // the backend refused text that it may well have queued before the frame
+      // was lost, and the user would send it twice.
+      const detail = error instanceof Error ? error.message : String(error);
+      this.addItem(addError(
+        steerSessionId,
+        this.preferredLanguage === "en"
+          ? `Could not confirm the steer: ${detail}`
+          : `插入消息未收到确认：${detail}`,
+      ));
+      this.emitChange();
+      return null;
+    }
+
+    if (payload.accepted !== true) {
+      const reason = typeof payload.reason === "string" ? payload.reason : undefined;
+      this.addItem(addInfo(
+        steerSessionId,
+        formatSteerRejection(this.preferredLanguage, reason),
+        "i",
+      ));
+      this.emitChange();
+      return null;
+    }
+
+    // 用户发言后重置自动回顾状态（steer 也是用户消息）
+    // Only for the session still on screen: these two are view state, and
+    // resetting them for a session the user has already left would clear the
+    // wrong screen.
+    if (this.sessionId === steerSessionId) {
+      this.lastError = null;
+      this.autoRecapState = "idle";
+    }
+    // Note what is missing relative to supplement(): resetCurrentUsageTokens().
+    // The round is still running and the tokens counted so far belong to it, so
+    // zeroing the counter here would understate the cost of a live turn.
+    this.entries = [
+      ...this.entries,
+      {
+        kind: "user",
+        id: `user-${requestId}`,
+        sessionId: steerSessionId,
+        content: trimmed,
+        at: new Date().toISOString(),
+      },
+    ];
+    const queuedNote = formatSteerQueuedNote(
+      this.preferredLanguage,
+      typeof payload.disposition === "string" ? payload.disposition : undefined,
+    );
+    if (queuedNote) {
+      this.addItem(addInfo(steerSessionId, queuedNote, "i"));
+    }
     this.emitChange();
     return requestId;
   }

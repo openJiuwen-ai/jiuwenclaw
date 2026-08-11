@@ -41,6 +41,12 @@ export interface WebRequestOptions {
   signal?: AbortSignal;
   /** 对应协议里请求消息的顶层 is_stream 字段（如 command.goal 的 set/resume） */
   isStream?: boolean;
+  /**
+   * Stable WS frame id. When set, used as the AgentRequest.request_id that
+   * becomes the interaction round id — needed so chat.steer can send
+   * expected_round_id.
+   */
+  requestId?: string;
 }
 
 export interface WebConnectOptions {

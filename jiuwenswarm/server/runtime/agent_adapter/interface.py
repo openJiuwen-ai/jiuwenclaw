@@ -1542,6 +1542,103 @@ class JiuWenSwarm:
             metadata=request.metadata,
         )
 
+    async def _process_team_steer(self, request: AgentRequest) -> AgentResponse:
+        """Steer the team leader's in-flight round.
+
+        Untargeted steering goes to the leader. Member-addressed and broadcast
+        messages are not steering and keep using the ordinary Team interaction
+        router -- member-targeted steering is out of scope here.
+
+        The ACK carries ``target="team_leader"`` so a client can tell which
+        round its text reached; single-agent steering answers with ``agent``.
+        """
+        params = request.params if isinstance(request.params, dict) else {}
+        query = params.get("query")
+        if not isinstance(query, str) or not query.strip():
+            return self._team_steer_ack(request, accepted=False, reason="empty_query")
+
+        session_id = self._session_manager.get_session_id(request.session_id)
+        from jiuwenswarm.agents.harness.team import get_team_manager
+
+        # The request id rides along so chat.steer_applied can name which steer a
+        # rail dropped. Without it the event's dropped list is always empty.
+        ok, reason = await get_team_manager().steer_leader(
+            session_id, query, steer_id=request.request_id
+        )
+        if ok:
+            self._persist_team_steer_history(request, query)
+        return self._team_steer_ack(
+            request,
+            accepted=ok,
+            reason=None if ok else (reason or "steer_failed"),
+        )
+
+    @staticmethod
+    def _persist_team_steer_history(request: AgentRequest, query: str) -> None:
+        """Persist an accepted Team steer as a user turn.
+
+        Without this the text reaches the leader's round but never disk, so it
+        is in the transcript while the session is live and gone after a reload
+        -- leaving a conversation where the leader visibly changed course for no
+        recorded reason.
+
+        Written only after acceptance, for the same reason the single-agent path
+        is: a rejected steer changed nothing, and recording it would claim the
+        user said something the leader never received.
+
+        ``input_kind`` is fixed at ``steer_queued`` here, unlike the single-agent
+        path which reads it off the dispatch result. The Team route has no
+        follow-up disposition to distinguish -- ``steer_leader`` either reaches a
+        running round or fails -- so there is nothing else it could be.
+        """
+        params = request.params if isinstance(request.params, dict) else {}
+        append_history_record(
+            session_id=request.session_id or "default",
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            role="user",
+            content=query,
+            timestamp=time.time(),
+            channel_metadata=request.metadata,
+            mode=params.get("mode", "team"),
+            extra={"input_kind": "steer_queued", "target": "team_leader"},
+        )
+
+    @staticmethod
+    def _team_steer_ack(
+        request: AgentRequest, *, accepted: bool, reason: str | None
+    ) -> AgentResponse:
+        """Build the Team-mode steer acknowledgement, as the RPC reply.
+
+        Same shape the single-agent path returns, so a client parses one
+        payload. ``ok`` stays true on rejection: the request was understood and
+        answered, and only ``accepted`` reports whether the text was queued.
+
+        Carries no ``event_type``, for the reason spelled out on
+        ``JiuWenSwarmDeepAdapter._steer_ack``: a payload with one is turned into
+        an event frame by the gateway, and the client's awaited RPC never
+        resolves. Keep the two builders identical on this point -- a client that
+        works in Agent mode and hangs in Team mode is a worse bug than one that
+        hangs in both.
+        """
+        payload: dict[str, Any] = {
+            "request_id": request.request_id,
+            "session_id": request.session_id,
+            "accepted": accepted,
+            "target": "team_leader",
+        }
+        if accepted:
+            payload["disposition"] = "steer_queued"
+        if reason is not None:
+            payload["reason"] = reason
+        return AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=True,
+            payload=payload,
+            metadata=request.metadata,
+        )
+
     async def _process_team_interrupt(
         self,
         *,
@@ -1657,6 +1754,12 @@ class JiuWenSwarm:
         if request.req_method == ReqMethod.CHAT_SWARMFLOW_REPLY:
             adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
             return await adapter.handle_swarmflow_reply(request)
+
+        if request.req_method == ReqMethod.CHAT_STEER:
+            if is_team_params(request.params if isinstance(request.params, dict) else None):
+                return await self._process_team_steer(request)
+            adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
+            return await adapter.handle_steer(request)
 
         # Non-stream goal command (GET, PAUSE, CLEAR)
         if request.req_method == ReqMethod.COMMAND_GOAL:

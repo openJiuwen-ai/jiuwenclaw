@@ -572,6 +572,7 @@ _FORWARD_REQ_METHODS = frozenset({
     "team.delete",
     "command.goal",
     "chat.send",
+    "chat.steer",
     "chat.interrupt",
     "chat.resume",
     "chat.user_answer",
@@ -672,6 +673,11 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "team.session.bind",
     "team.delete",
     "command.goal",
+    # Steering is answered entirely by the AgentServer -- the ACK travels back
+    # as the RPC reply. Without this the Web forwards nothing and answers
+    # METHOD_NOT_FOUND, because a method absent from both sets falls through to
+    # the local-handler branch.
+    "chat.steer",
     "team.snapshot",
     "team.history.get",
     "team.mq.publish",

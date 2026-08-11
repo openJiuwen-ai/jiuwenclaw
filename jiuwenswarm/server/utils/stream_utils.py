@@ -6,6 +6,36 @@ from __future__ import annotations
 
 from typing import Any
 
+# agent-core's name for the event, and the name clients listen for. They differ
+# because the core has no business knowing a channel's vocabulary, so the
+# translation has to happen exactly once, here.
+STEER_APPLIED_CORE_TYPE = "steer.applied"
+STEER_APPLIED_EVENT_TYPE = "chat.steer_applied"
+
+
+def steer_applied_payload(payload: Any) -> dict[str, Any]:
+    """Normalize a ``steer.applied`` event to the public Web/TUI payload shape.
+
+    ``applied`` carries one ``{"id", "text"}`` entry per steer that reached model
+    context and ``dropped`` the ids of those a rail removed. Both stay lists:
+    this is the only event that can tell a client its text was acknowledged but
+    never read, and collapsing them into a count or a boolean would destroy
+    exactly that.
+
+    Lives here rather than on an adapter because two different parsers need it --
+    the single-agent adapter and the generic parser the Team stream uses. When
+    only one of them knew the mapping, Team clients received the raw
+    ``steer.applied`` name and ignored it.
+    """
+    data = payload if isinstance(payload, dict) else {}
+    applied = data.get("applied")
+    dropped = data.get("dropped")
+    return {
+        "event_type": STEER_APPLIED_EVENT_TYPE,
+        "applied": applied if isinstance(applied, list) else [],
+        "dropped": dropped if isinstance(dropped, list) else [],
+    }
+
 
 def parse_stream_chunk(chunk: Any, *, _has_streamed_content: bool = False) -> dict[str, Any] | None:
     """Parse agent output chunk to frontend-consumable payload dict.
@@ -53,6 +83,8 @@ def _parse_dict_chunk(chunk: dict[str, Any], _has_streamed_content: bool) -> dic
 
     if "type" in chunk:
         event_type = chunk.get("type")
+        if event_type == STEER_APPLIED_CORE_TYPE:
+            return steer_applied_payload(chunk.get("payload"))
         if event_type == "tool_call":
             return {
                 "event_type": "tool.use",
@@ -108,6 +140,9 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
     """Parse OutputSchema-like chunk with type and payload attributes."""
     chunk_type = getattr(chunk, "type", "")
     payload = getattr(chunk, "payload", {})
+
+    if chunk_type == STEER_APPLIED_CORE_TYPE:
+        return steer_applied_payload(payload)
 
     if chunk_type == "chat.ask_user_question":
         return parse_ask_user_question_payload(payload)
