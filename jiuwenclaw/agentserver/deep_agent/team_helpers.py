@@ -42,6 +42,19 @@ from jiuwenclaw.schema.message import E2A_SUPPRESSED_EVENT_TYPES
 logger = logging.getLogger(__name__)
 DEBUG_PREFIX = '/debug'
 
+# Per-chunk idle break for the team stream consumer. When the openjiuwen
+# generator never finalizes (a teammate stuck in BUSY -> is_team_completed()
+# returns None forever -> close_stream never called -> leader stream() blocks
+# on stream_queue.get() forever), break the consumer and run completion
+# teardown (soft-fallback chat.file) INSTEAD of waiting for the relay 300s
+# watchdog cancel (which routes through pause-skip and suppresses chat.file).
+# Must stay < relay RELAYCLAW_TEAM_STUCK_WATCHDOG_MS (300s). Steady chunks
+# (incl. chat.reasoning, which relay counts as a business frame) reset the
+# timer, so legitimate long reasoning is not killed.
+_TEAM_STREAM_IDLE_BREAK_S = float(
+    os.environ.get('JIUWEN_TEAM_STREAM_IDLE_BREAK_S', '120')
+)
+
 
 def strip_slash_directive(query: str, prefix: str) -> tuple[str, bool]:
     if not isinstance(query, str):
@@ -2050,7 +2063,26 @@ async def _consume_stream_with_query_impl(
         # 上次 relay 业务帧时间（monotonic）。流开始前的 chat.processing_status
         # (is_processing=True) 即业务帧，计时起点即循环入口。
         last_relay_business_at = time.monotonic()
-        async for chunk in team_stream:
+        while True:
+            try:
+                chunk = await asyncio.wait_for(
+                    team_stream.__anext__(), timeout=_TEAM_STREAM_IDLE_BREAK_S
+                )
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError:
+                logger.warning(
+                    '[TeamHelpers] stream idle-stalled %ss with no chunk; finalizing '
+                    'teardown (not pause): channel_id=%s session_id=%s',
+                    _TEAM_STREAM_IDLE_BREAK_S, _resolve_channel_id(channel_id), session_id,
+                )
+                _broadcast_event(channel_id, session_id, {
+                    'event_type': 'team.stalled',
+                    'session_id': session_id,
+                    'reason': 'idle_break',
+                    'idle_seconds': _TEAM_STREAM_IDLE_BREAK_S,
+                })
+                break
             received_chunks += 1
             if received_chunks == 1 or received_chunks % 30 == 0:
                 _role = getattr(chunk, 'role', None)
@@ -2321,13 +2353,23 @@ async def _consume_stream_with_query_impl(
                     deliverable_paths.extend(_extract_file_paths_from_text(text, workspace_root))
                 if deliverable_paths:
                     _emit_team_chat_file_events(channel_id, session_id, deliverable_paths)
-                # team.completed includes team_name so the frontend can archive by team.
-                completed_payload = {
-                    'event_type': 'team.completed',
-                    'session_id': session_id,
-                    'team_name': str(getattr(team_spec, 'team_name', '') or ''),
-                }
-                _broadcast_event(channel_id, session_id, completed_payload)
+                # team.completed ONLY when truly settled — avoids archiving a half-done
+                # team when idle-break finalized an unsettled stream. Soft-fallback
+                # chat.file above still delivers leader-cited paths regardless.
+                if await _team_round_settled(channel_id, session_id):
+                    # team.completed includes team_name so the frontend can archive by team.
+                    completed_payload = {
+                        'event_type': 'team.completed',
+                        'session_id': session_id,
+                        'team_name': str(getattr(team_spec, 'team_name', '') or ''),
+                    }
+                    _broadcast_event(channel_id, session_id, completed_payload)
+                else:
+                    logger.info(
+                        '[TeamHelpers] stream finalized without team settled; '
+                        'skip team.completed: session_id=%s',
+                        session_id,
+                    )
         except Exception:
             logger.debug(
                 '[TeamHelpers] team stream-end completion signaling failed: session_id=%s',
