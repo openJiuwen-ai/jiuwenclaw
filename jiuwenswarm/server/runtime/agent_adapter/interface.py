@@ -30,6 +30,7 @@ from jiuwenswarm.agents.harness.common.memory.config import get_memory_mode, is_
 from jiuwenswarm.server.runtime.session.session_history import (
     append_compact_history_records,
     append_history_record,
+    collapse_file_content_blocks,
 )
 from jiuwenswarm.server.runtime.agent_adapter.user_turn import TEAM_USER_TURN_KEY, UserTurn
 from jiuwenswarm.server.runtime.session.session_manager import SessionManager
@@ -104,17 +105,26 @@ def _history_user_content(params: Any, query: Any) -> Any:
 
     进入 plan 的那一轮同理：``query`` 前面被拼了一段 <system-reminder>，历史里
     要还原成用户原文，否则重新加载会话会把提示词当成用户提问显示出来。
+
+    Gateway 可能已把 ``@path`` 展开成 ``<file-content>`` 正文；历史只保留 ``@path``，
+    避免 transcript 膨胀，也不影响当轮已发给模型的内联内容。
     """
+    content: Any
     if not isinstance(params, dict):
-        return query
-    if params.get("is_supplement"):
+        content = query
+    elif params.get("is_supplement"):
         supplement_input = params.get("supplement_input")
         if isinstance(supplement_input, str) and supplement_input.strip():
-            return supplement_input
-    original_query = params.get(PLAN_REMINDER_ORIGINAL_QUERY_KEY)
-    if isinstance(original_query, str):
-        return original_query
-    return query
+            content = supplement_input
+        else:
+            content = query
+    else:
+        original_query = params.get(PLAN_REMINDER_ORIGINAL_QUERY_KEY)
+        content = original_query if isinstance(original_query, str) else query
+
+    if isinstance(content, str):
+        return collapse_file_content_blocks(content)
+    return content
 
 
 def _should_record_user_history(params: Any) -> bool:

@@ -256,7 +256,11 @@ if (-not $Iscc) {
 & $Iscc "$ProjectRoot\scripts\installer.iss"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-$InstallerPath = (Get-ChildItem "$ProjectRoot\dist\JiuwenSwarm-setup-*.exe" | Select-Object -First 1).FullName
+$InstallerPath = (
+    Get-ChildItem "$ProjectRoot\dist\JiuwenSwarm-setup-*.exe" |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+).FullName
 
 Write-Host "`n=== Build complete ===" -ForegroundColor Green
 Write-Host "Installer: $InstallerPath" -ForegroundColor Green
