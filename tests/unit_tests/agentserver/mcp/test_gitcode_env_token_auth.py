@@ -66,10 +66,11 @@ def test_connect_cli_missing_token_returns_credentials_required(tmp_path: Path, 
     """gitcode (CLI + token-schema) with no stored token → connect_mcp returns
     credentials_required (NOT _connect_cli / OAuth). The user must provision
     GITCODE_TOKEN first."""
-    from jiuwenswarm.server.runtime.mcp import registry, state_store
+    from jiuwenswarm.server.runtime.mcp import credential, registry, state_store
 
     monkeypatch.setattr(registry, "get_workspace_dir", lambda: tmp_path)
     monkeypatch.setattr(state_store, "get_workspace_dir", lambda: tmp_path)
+    monkeypatch.setattr(credential, "get_workspace_dir", lambda: tmp_path)
     _write_gitcode_pkg(tmp_path)
 
     # CredentialStore empty (no token saved).
@@ -88,10 +89,11 @@ def test_connect_cli_token_provisioned_proceeds_to_connect_cli(tmp_path: Path, m
     """gitcode with the token already stored → connect_mcp does NOT surface
     credentials_required; it proceeds to _connect_cli. We mock _connect_cli
     to capture the call (no real pip/gitcode binary in the test env)."""
-    from jiuwenswarm.server.runtime.mcp import registry, state_store
+    from jiuwenswarm.server.runtime.mcp import credential, registry, state_store
 
     monkeypatch.setattr(registry, "get_workspace_dir", lambda: tmp_path)
     monkeypatch.setattr(state_store, "get_workspace_dir", lambda: tmp_path)
+    monkeypatch.setattr(credential, "get_workspace_dir", lambda: tmp_path)
     _write_gitcode_pkg(tmp_path)
 
     captured: dict = {}
