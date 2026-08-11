@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts import PromptSection
@@ -27,6 +28,7 @@ class TeamWorkspaceReportPathRail(DeepAgentRail):
         team_id: str | None = None,
         language: str = "cn",
         enable_send_file_guidance: bool = False,
+        send_file_rail: Any | None = None,
     ) -> None:
         super().__init__()
         self.system_prompt_builder = None
@@ -34,6 +36,7 @@ class TeamWorkspaceReportPathRail(DeepAgentRail):
         self._team_id = team_id or ""
         self._language = language
         self._enable_send_file_guidance = bool(enable_send_file_guidance)
+        self._send_file_rail = send_file_rail
 
     def init(self, agent) -> None:
         self.system_prompt_builder = getattr(agent, "system_prompt_builder", None)
@@ -71,7 +74,10 @@ class TeamWorkspaceReportPathRail(DeepAgentRail):
             "- Member intermediate files stay in the team workspace for the team to "
             "find; do not treat them as user-facing deliveries.\n"
         )
-        if self._enable_send_file_guidance:
+        if self._enable_send_file_guidance and bool(
+            self._send_file_rail is not None
+            and getattr(self._send_file_rail, "_registered", False)
+        ):
             content += (
                 "- For every **Leader final** deliverable file, call `send_file_to_user` with "
                 "its real absolute filesystem path under the shared root "

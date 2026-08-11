@@ -581,6 +581,7 @@ def build_member_rails(
                 team_id=team_id,
                 language=language,
                 enable_send_file_guidance=(role == "leader"),
+                send_file_rail=send_file_rail_ref,
             )
             rails_list.append(rail)
             logger.info(
