@@ -360,8 +360,9 @@ class TestRailConfiguration(unittest.TestCase):
 class TestEdgeCases(unittest.TestCase):
     """Edge-case tests for RuntimePromptRail."""
 
-    def test_before_model_call_with_no_builder_skips_injection(self):
-        """before_model_call with no builder returns early (logs warning)."""
+    def test_before_model_call_with_no_builder_skips_builder_sections(self):
+        """before_model_call with no builder: date is still injected (builder-independent),
+        but builder sections are skipped via early return (logs warning)."""
         rail = RuntimePromptRail(language="cn")
         rail.system_prompt_builder = None
         ctx = AgentCallbackContext(agent=MagicMock(system_prompt_builder=None))
@@ -369,8 +370,11 @@ class TestEdgeCases(unittest.TestCase):
 
         asyncio.run(rail.before_model_call(ctx))
 
-        # No reminder should be written when builder is None
-        assert "environment_context" not in ctx.extra
+        # Date injection does not depend on system_prompt_builder; only the
+        # builder-backed sections (runtime/workspace) are skipped.
+        entries = ctx.extra["environment_context"]
+        assert len(entries) == 1
+        assert entries[0]["source"] == "time_rail"
 
     def test_request_system_prompt_added_to_builder_when_set(self):
         """request_system_prompt is added to builder when self._request_system_prompt is set."""

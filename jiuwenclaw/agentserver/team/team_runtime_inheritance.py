@@ -520,42 +520,25 @@ def build_member_rails(
             role=role,
             team_id=team_id,
         )
-    registered_skills_dir = (
-        team_workspace.leader_skills_dir
-        if role == "leader" and team_workspace.leader_skills_dir
-        else team_workspace.skills_dir
-    )
 
     rails_list = []
-
-    # Inject team skill dirs into the adapter's RuntimePromptRail.
-    if registered_skills_dir or team_workspace.global_skills_dir:
-        try:
-            from jiuwenclaw.utils import get_agent_skills_dir
-
-            for r in rails_list:
-                if hasattr(r, "set_registered_skill_dirs"):
-                    skill_dirs: list[str] = []
-                    global_skills = str(
-                        team_workspace.global_skills_dir or get_agent_skills_dir()
-                    ).strip()
-                    if global_skills:
-                        skill_dirs.append(global_skills)
-                    team_skills = str(registered_skills_dir or "").strip()
-                    if team_skills and team_skills not in skill_dirs:
-                        skill_dirs.append(team_skills)
-                    if skill_dirs:
-                        r.set_registered_skill_dirs(skill_dirs)
-                    break
-            logger.info("[TeamRuntime] skill dirs injected to RuntimePromptRail")
-        except Exception as exc:
-            logger.warning("[TeamRuntime] skill dirs injection failed: %s", exc)
 
     # Skill loading: single JiuWenSkillUseRail per member (see _build_team_skill_rails).
     # Do not also mount openjiuwen SkillUseRail — same tools would register twice.
 
     # SysOperationRail is mounted declaratively via agent_configurator
     # (core.sys_operation). Imperative mount here would double-register tools.
+
+    # Every team member gets the current date via environment_context.
+    # Full RuntimePromptRail is not mounted for members (its workspace section
+    # carries main-agent paths/semantics); sections=("time",) injects date only.
+    try:
+        rails_list.append(RuntimePromptRail(language=language, sections=("time",)))
+        logger.info(
+            "[TeamRuntime] RuntimePromptRail(time-only) created: language=%s", language
+        )
+    except Exception as exc:
+        logger.warning("[TeamRuntime] RuntimePromptRail(time-only) failed: %s", exc)
 
     # Leader-only structured ask tool.
     if role == "leader":
