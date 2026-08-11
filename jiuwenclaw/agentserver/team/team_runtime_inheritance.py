@@ -605,7 +605,8 @@ def build_member_rails(
     )
 
     # Same react.disabled_tools gate as plan; only touch this member's ability_manager.
-    disabled_rail = _build_team_disabled_tools_rail(config)
+    # Per-team modes.team.<team>.disabled_tools merges on top (relay team payload).
+    disabled_rail = _build_team_disabled_tools_rail(config, team_id)
     if disabled_rail is not None:
         rails_list.append(disabled_rail)
 
@@ -659,11 +660,54 @@ def build_member_rails(
     return rails_list
 
 
-def _build_team_disabled_tools_rail(config: dict[str, Any] | None) -> Any | None:
+def _team_modes_entry_list(
+    config: dict[str, Any] | None,
+    team_id: str | None,
+    key: str,
+) -> list[str]:
+    """Read a per-team string-list knob from ``modes.team.<team>.<key>``.
+
+    Team-level keys are synced verbatim from the caller's team payload, so any
+    caller can scope a knob to one team without jiuwen-side changes (same
+    pattern as ``enable_swarmflow`` / roster lookups). Missing entry/key or a
+    malformed value → ``[]``; callers merge over the global knob.
+    """
+    from jiuwenclaw.agentserver.skill_manager import resolve_string_or_list_config
+
+    if not isinstance(config, dict):
+        return []
+    modes = config.get("modes")
+    teams = modes.get("team") if isinstance(modes, dict) else None
+    if not isinstance(teams, dict):
+        return []
+    entry = _select_modes_team_entry(teams, team_id)
+    if not isinstance(entry, dict):
+        return []
+    return resolve_string_or_list_config(entry.get(key))
+
+
+def _merge_name_lists(base: list[str], extra: list[str]) -> list[str]:
+    """Union two name lists, deduped case-insensitively, order preserved."""
+    merged: list[str] = []
+    seen: set[str] = set()
+    for name in [*base, *extra]:
+        folded = name.casefold()
+        if folded in seen:
+            continue
+        seen.add(folded)
+        merged.append(name)
+    return merged
+
+
+def _build_team_disabled_tools_rail(
+    config: dict[str, Any] | None,
+    team_id: str | None = None,
+) -> Any | None:
     """Mirror plan's DisabledToolsRail for team members.
 
-    Config: ``react.disabled_tools`` (yaml list or ``${DISABLED_TOOLS:-}``).
-    Empty list → skip (nothing to disable). Uses ``touch_shared_resource_mgr=False``
+    Config: global ``react.disabled_tools`` (yaml list or ``${DISABLED_TOOLS:-}``)
+    merged with per-team ``modes.team.<team>.disabled_tools``. Empty merged list
+    → skip (nothing to disable). Uses ``touch_shared_resource_mgr=False``
     so in-process multi-member teams do not evict shared Runner tools.
     """
     try:
@@ -675,7 +719,10 @@ def _build_team_disabled_tools_rail(config: dict[str, Any] | None) -> Any | None
         react = (config or {}).get("react") if isinstance(config, dict) else {}
         react = react if isinstance(react, dict) else {}
         # Same field plan uses: react.disabled_tools (list or DISABLED_TOOLS env).
-        disabled_list = resolve_string_or_list_config(react.get("disabled_tools"))
+        disabled_list = _merge_name_lists(
+            resolve_string_or_list_config(react.get("disabled_tools")),
+            _team_modes_entry_list(config, team_id, "disabled_tools"),
+        )
         if not disabled_list:
             return None
         rail = DisabledToolsRail(
@@ -683,8 +730,9 @@ def _build_team_disabled_tools_rail(config: dict[str, Any] | None) -> Any | None
             touch_shared_resource_mgr=False,
         )
         logger.info(
-            "[TeamRuntime] DisabledToolsRail created: disabled_tools=%s",
+            "[TeamRuntime] DisabledToolsRail created: disabled_tools=%s team_id=%s",
             disabled_list,
+            team_id,
         )
         return rail
     except Exception as exc:
@@ -694,6 +742,24 @@ def _build_team_disabled_tools_rail(config: dict[str, Any] | None) -> Any | None
             exc_info=True,
         )
         return None
+
+
+def _resolve_team_disabled_skills(
+    config: dict[str, Any],
+    team_id: str | None = None,
+) -> list[str]:
+    """Global ``disabled_skills`` merged with per-team ``modes.team.<team>.disabled_skills``.
+
+    Blacklist merge rather than allowlist filtering: when the enabled allowlist
+    is None the rail exposes every scanned skill, and only a blacklist expresses
+    "all but X" in both cases.
+    """
+    from jiuwenclaw.agentserver.skill_manager import resolve_string_or_list_config
+
+    return _merge_name_lists(
+        resolve_string_or_list_config(config.get("disabled_skills")),
+        _team_modes_entry_list(config, team_id, "disabled_skills"),
+    )
 
 
 def _build_team_skill_rails(
@@ -747,9 +813,6 @@ def _build_team_skill_rails(
         from jiuwenclaw.agentserver.deep_agent.rails.jiuwen_skill_use_rail import (
             JiuWenSkillUseRail,
         )
-        from jiuwenclaw.agentserver.skill_manager import (
-            resolve_string_or_list_config,
-        )
         from jiuwenclaw.config import get_config as _get_config
 
         config = team_workspace.config if isinstance(team_workspace.config, dict) else _get_config()
@@ -779,7 +842,7 @@ def _build_team_skill_rails(
             include_skill_body_tools=True,
             max_active_skill_bodies=max_bodies,
             enabled_skills=rail_enabled,
-            disabled_skills=resolve_string_or_list_config(config.get("disabled_skills")),
+            disabled_skills=_resolve_team_disabled_skills(config, team_workspace.team_id),
         )
         rails.append(skill_rail)
         if not rail_enabled:

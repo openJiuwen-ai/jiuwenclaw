@@ -123,3 +123,104 @@ def test_enabled_skills_from_member_or_tip_prefers_yaml():
         catalog_agent_id=None,
     )
     assert text == "a,b"
+
+
+_TEAM_DISABLED_CONFIG = {
+    "react": {"disabled_tools": ["bash"]},
+    "disabled_skills": ["global-skill"],
+    "modes": {
+        "team": {
+            "oc_team_research": {
+                "team_name": "oc_team_research",
+                # "bash" intentionally duplicates the global entry (dedupe check).
+                "disabled_tools": ["deepresearch_stream", "bash"],
+                "disabled_skills": ["deepresearch"],
+            }
+        }
+    },
+}
+
+
+def test_team_modes_entry_list_reads_per_team_key():
+    from jiuwenclaw.agentserver.team.team_runtime_inheritance import (
+        _team_modes_entry_list,
+    )
+
+    assert _team_modes_entry_list(
+        _TEAM_DISABLED_CONFIG, "oc_team_research", "disabled_tools"
+    ) == ["deepresearch_stream", "bash"]
+    # Session-scoped runtime name resolves to the same template entry.
+    assert _team_modes_entry_list(
+        _TEAM_DISABLED_CONFIG, "oc_team_research_sess1", "disabled_skills"
+    ) == ["deepresearch"]
+
+
+def test_team_modes_entry_list_missing_returns_empty():
+    from jiuwenclaw.agentserver.team.team_runtime_inheritance import (
+        _team_modes_entry_list,
+    )
+
+    assert _team_modes_entry_list(
+        _TEAM_DISABLED_CONFIG, "oc_team_other", "disabled_tools"
+    ) == []
+    assert _team_modes_entry_list(
+        _TEAM_DISABLED_CONFIG, "oc_team_research", "no_such_key"
+    ) == []
+    assert _team_modes_entry_list(None, "oc_team_research", "disabled_tools") == []
+    assert _team_modes_entry_list({}, None, "disabled_tools") == []
+
+
+def test_resolve_team_disabled_skills_merges_global_and_team():
+    from jiuwenclaw.agentserver.team.team_runtime_inheritance import (
+        _resolve_team_disabled_skills,
+    )
+
+    assert _resolve_team_disabled_skills(
+        _TEAM_DISABLED_CONFIG, "oc_team_research"
+    ) == ["global-skill", "deepresearch"]
+
+
+def test_resolve_team_disabled_skills_without_team_keeps_global():
+    from jiuwenclaw.agentserver.team.team_runtime_inheritance import (
+        _resolve_team_disabled_skills,
+    )
+
+    # No team_id: _select_modes_team_entry falls back to the single configured
+    # team (same semantics as roster resolution), so its knobs apply.
+    assert _resolve_team_disabled_skills(_TEAM_DISABLED_CONFIG) == [
+        "global-skill",
+        "deepresearch",
+    ]
+    # Explicit team_id that matches nothing: never guess — global only.
+    assert _resolve_team_disabled_skills(
+        _TEAM_DISABLED_CONFIG, "oc_team_other"
+    ) == ["global-skill"]
+
+
+def test_build_team_disabled_tools_rail_merges_per_team():
+    from jiuwenclaw.agentserver.team.team_runtime_inheritance import (
+        _build_team_disabled_tools_rail,
+    )
+
+    rail = _build_team_disabled_tools_rail(_TEAM_DISABLED_CONFIG, "oc_team_research")
+    assert rail is not None
+    assert rail._disabled_tools == {"bash", "deepresearch_stream"}
+
+
+def test_build_team_disabled_tools_rail_global_only_when_team_misses():
+    from jiuwenclaw.agentserver.team.team_runtime_inheritance import (
+        _build_team_disabled_tools_rail,
+    )
+
+    rail = _build_team_disabled_tools_rail(_TEAM_DISABLED_CONFIG, "oc_team_other")
+    assert rail is not None
+    assert rail._disabled_tools == {"bash"}
+
+
+def test_build_team_disabled_tools_rail_none_when_nothing_disabled():
+    from jiuwenclaw.agentserver.team.team_runtime_inheritance import (
+        _build_team_disabled_tools_rail,
+    )
+
+    assert _build_team_disabled_tools_rail({}, None) is None
+    assert _build_team_disabled_tools_rail(None, "oc_team_research") is None
