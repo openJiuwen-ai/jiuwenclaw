@@ -50,6 +50,9 @@ class SwarmBuildContext(BuildContext):
             "team_skills_dir": self.team_skills_dir,
             "leader_skills_dir": self.leader_skills_dir,
             "global_skills_dir": self.global_skills_dir,
+            # BuildContext.language — must survive spawn/deserialize so rails
+            # and tools keep cn|en (defaulting the seed would pin everyone to cn).
+            "language": self.language,
         }
 
     @classmethod
@@ -62,6 +65,9 @@ class SwarmBuildContext(BuildContext):
     ) -> SwarmBuildContext:
         skills_raw = seed.get("agent_skills_by_key")
         skills_map = skills_raw if isinstance(skills_raw, dict) else None
+        language = str(seed.get("language") or "").strip() or "cn"
+        if language not in {"cn", "en"}:
+            language = "cn"
         return cls(
             session_id=seed.get("session_id", ""),
             request_id=seed.get("request_id"),
@@ -79,6 +85,7 @@ class SwarmBuildContext(BuildContext):
             global_skills_dir=seed.get("global_skills_dir"),
             trajectory_registry=trajectory_registry,
             config=config,
+            language=language,
         )
 
 

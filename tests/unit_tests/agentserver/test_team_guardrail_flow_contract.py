@@ -13,7 +13,7 @@ from jiuwenclaw.agentserver.deep_agent.team_helpers import (
 )
 from jiuwenclaw.agentserver.swarm.config_specs import build_member_capability_specs
 from jiuwenclaw.agentserver.swarm.registry import (
-    CORE_WEB_SEARCH,
+    JIUWEN_WEB_SEARCH,
     PLATFORM_CATALOG_TOOLS,
     PLATFORM_MEMBER_RAILS,
 )
@@ -170,7 +170,7 @@ def test_catalog_tools_remain_declared_for_capability() -> None:
     assert any(r.type == PLATFORM_MEMBER_RAILS for r in rails)
     assert rails[0].params.get("enable_permissions") is True
     types = [t.type for t in tools]
-    assert CORE_WEB_SEARCH in types
+    assert JIUWEN_WEB_SEARCH in types
     assert PLATFORM_CATALOG_TOOLS in types
 
 

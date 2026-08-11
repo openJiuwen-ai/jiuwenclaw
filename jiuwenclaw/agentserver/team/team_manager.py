@@ -1414,6 +1414,10 @@ class TeamManager:
     def register_monitor(self, session_id: str, handler: TeamMonitorHandler) -> None:
         self._team_monitors[session_id] = handler
 
+    def pop_monitor(self, session_id: str) -> TeamMonitorHandler | None:
+        """Remove and return the monitor handler for the session (rebind path)."""
+        return self._team_monitors.pop(session_id, None)
+
     def register_workflow_handler(self, session_id: str, handler: Any) -> None:
         self._workflow_handlers[session_id] = handler
 

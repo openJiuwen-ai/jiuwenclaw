@@ -21,9 +21,8 @@ from jiuwenclaw.agentserver.swarm.providers import catalog_tools as _catalog_too
 from jiuwenclaw.agentserver.swarm.registry import (
     CORE_AUDIO,
     CORE_VISION,
-    CORE_WEB_FETCH,
-    CORE_WEB_PAID_SEARCH,
-    CORE_WEB_SEARCH,
+    JIUWEN_WEB_FETCH,
+    JIUWEN_WEB_SEARCH,
     PLATFORM_CATALOG_TOOLS,
     PLATFORM_MEMBER_RAILS,
     SWARM_BROWSER_AGENT,
@@ -87,13 +86,14 @@ def _browser_subagent_spec(react_cfg: dict[str, Any], language: str) -> SubAgent
 def _build_catalog_tool_specs(config: dict[str, Any]) -> list[BuiltinToolSpec]:
     """Declare plan-parity catalog tools so team members can invoke them.
 
-    Web trio always declared (paid search self-gates). Vision / audio only when
-    dedicated model config exists. ENT extras via ``swarm.platform_catalog_tools``.
+    Web search uses jiuwenclaw's ``web_search`` (paid chain includes petal),
+    replacing openjiuwen's ``core.web_search`` / ``core.web_paid_search`` which
+    lack petal support. Vision / audio only when dedicated model config exists.
+    ENT extras via ``swarm.platform_catalog_tools``.
     """
     tool_specs: list[BuiltinToolSpec] = [
-        BuiltinToolSpec(type=CORE_WEB_SEARCH),
-        BuiltinToolSpec(type=CORE_WEB_FETCH),
-        BuiltinToolSpec(type=CORE_WEB_PAID_SEARCH),
+        BuiltinToolSpec(type=JIUWEN_WEB_SEARCH),
+        BuiltinToolSpec(type=JIUWEN_WEB_FETCH),
     ]
 
     vision_params = _catalog_tools.vision_tool_params(config)

@@ -57,7 +57,7 @@ dependencies = [
     "pytest-cov==7.1.0",
     "sqlite-vec==0.1.6",
     "python-json-logger",
-    "openjiuwen_deepsearch @ git+https://gitcode.com/openJiuwen/deepsearch.git@enterprise-0.1.0.beta06_v2",
+    "openjiuwen_deepsearch @ git+https://gitcode.com/openJiuwen/deepsearch.git@enterprise_dev#subdirectory=deepsearch",
     "latex2mathml>=3.81.0",
     "markdown",
     "markdown-it-py>=4.0.0,<5.0.0",

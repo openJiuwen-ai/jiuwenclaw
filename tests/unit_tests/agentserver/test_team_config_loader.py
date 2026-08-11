@@ -463,3 +463,122 @@ def test_load_team_spec_dict_adds_teammate_when_leader_and_extra_keys():
     spec = load_team_spec_dict(config_base=config)
     assert "teammate" in spec["agents"]
     assert "leader" in spec["agents"]
+
+def test_display_name_rule_appended_to_leader_and_member_prompts():
+    """Display-name rule is appended to leader and member private prompts."""
+    from jiuwenclaw.agentserver.team.config_loader import (
+        _TEAM_MEMBER_DISPLAY_NAME_RULE_CN,
+        _TEAM_MEMBER_DISPLAY_NAME_RULE_EN,
+    )
+
+    config = {
+        "modes": {
+            "team": {
+                "oc_team_debate": {
+                    "team_name": "oc_team_debate",
+                    "lifecycle": "persistent",
+                    "leader": {
+                        "member_name": "team_leader",
+                        "name": "Leader",
+                        "persona": "天才项目管理专家",
+                    },
+                    "predefined_members": [
+                        {
+                            "member_name": "assistant",
+                            "name": "助理",
+                            "persona": "逻辑清晰的综合助理",
+                            "prompt_hint": "先认领再写",
+                        },
+                        {
+                            "member_name": "blank-prompt",
+                            "name": "空白",
+                            "display_name": "空白成员",
+                        },
+                    ],
+                }
+            }
+        },
+        "models": {"defaults": []},
+    }
+
+    spec = load_team_spec_dict(config, template_id="oc_team_debate")
+    assert spec["language"] == "cn"
+    # leader: persona + naming rule (default preferred_language -> CN)
+    leader_prompt = spec["leader"]["prompt"]
+    assert "天才项目管理专家" in leader_prompt
+    assert _TEAM_MEMBER_DISPLAY_NAME_RULE_CN in leader_prompt
+    assert _TEAM_MEMBER_DISPLAY_NAME_RULE_EN not in leader_prompt
+    assert "## 成员称呼规范" in leader_prompt
+    members = {m["member_name"]: m for m in spec["predefined_members"]}
+    # member: keep persona/prompt_hint and append naming rule
+    assert "先认领再写" in members["assistant"]["prompt"]
+    assert _TEAM_MEMBER_DISPLAY_NAME_RULE_CN in members["assistant"]["prompt"]
+    # members without persona still get the naming rule
+    assert _TEAM_MEMBER_DISPLAY_NAME_RULE_CN in members["blank-prompt"]["prompt"]
+
+
+def test_display_name_rule_uses_english_when_preferred_language_en():
+    """preferred_language=en selects the English naming-rule prompt."""
+    from jiuwenclaw.agentserver.team.config_loader import (
+        _TEAM_MEMBER_DISPLAY_NAME_RULE_CN,
+        _TEAM_MEMBER_DISPLAY_NAME_RULE_EN,
+    )
+
+    config = {
+        "preferred_language": "en",
+        "modes": {
+            "team": {
+                "oc_team_debate": {
+                    "team_name": "oc_team_debate",
+                    "lifecycle": "persistent",
+                    "leader": {
+                        "member_name": "team_leader",
+                        "name": "Leader",
+                        "persona": "Project lead",
+                    },
+                    "predefined_members": [
+                        {
+                            "member_name": "assistant",
+                            "name": "Assistant",
+                            "persona": "Helper",
+                        },
+                    ],
+                }
+            }
+        },
+        "models": {"defaults": []},
+    }
+
+    spec = load_team_spec_dict(config, template_id="oc_team_debate")
+    assert spec["language"] == "en"
+    leader_prompt = spec["leader"]["prompt"]
+    assert _TEAM_MEMBER_DISPLAY_NAME_RULE_EN in leader_prompt
+    assert _TEAM_MEMBER_DISPLAY_NAME_RULE_CN not in leader_prompt
+    assert "## Member naming convention" in leader_prompt
+    members = {m["member_name"]: m for m in spec["predefined_members"]}
+    assert _TEAM_MEMBER_DISPLAY_NAME_RULE_EN in members["assistant"]["prompt"]
+    assert _TEAM_MEMBER_DISPLAY_NAME_RULE_CN not in members["assistant"]["prompt"]
+
+
+def test_preferred_language_zh_normalizes_to_cn_on_spec():
+    """Config ``zh`` must become TeamSpec ``cn`` (agent-core supported set)."""
+    config = {
+        "preferred_language": "zh",
+        "modes": {
+            "team": {
+                "oc_team_debate": {
+                    "team_name": "oc_team_debate",
+                    "lifecycle": "persistent",
+                    "leader": {
+                        "member_name": "team_leader",
+                        "name": "Leader",
+                        "persona": "专家",
+                    },
+                }
+            }
+        },
+        "models": {"defaults": []},
+    }
+    spec = load_team_spec_dict(config, template_id="oc_team_debate")
+    assert spec["language"] == "cn"
+

@@ -315,18 +315,48 @@ def _mcp_add_result_error_text(result: Any) -> str:
 
 
 async def _add_mcp_server_and_ability(agent: Any, mcp_cfg: Any, *, tag: str) -> None:
-    """调用 ``add_mcp_server``，按返回值决定是否 ``ability_manager.add``；失败抛 ``RuntimeError``。"""
-    result = await Runner.resource_mgr.add_mcp_server(mcp_cfg, tag=tag)
+    """调用 ``add_mcp_server``，按返回值决定是否 ``ability_manager.add``；失败抛 ``RuntimeError``。
+
+    注意：不在此处捕获 ``asyncio.CancelledError``。MCP 不可达导致的 cancel 由
+    ``ResourceMgr.add_mcp_server`` 隔离并转为 Error 结果；外层真取消必须继续向上传播。
+    """
+    try:
+        result = await Runner.resource_mgr.add_mcp_server(mcp_cfg, tag=tag)
+    except Exception as e:
+        error_msg = (
+            f"add_mcp_server 失败: "
+            f"name={mcp_cfg.server_name} url={mcp_cfg.server_path}: {e}"
+        )
+        logger.error(error_msg)
+        raise RuntimeError(error_msg) from e
+
     if _mcp_add_result_is_ok(result):
         agent.ability_manager.add(mcp_cfg)
+        logger.debug(
+            "[ToolManager] add_mcp_server 成功: name=%s url=%s",
+            mcp_cfg.server_name,
+            mcp_cfg.server_path,
+        )
         return
+
     err = _mcp_add_result_error_text(result)
     if "already exist" in err.lower():
         agent.ability_manager.add(mcp_cfg)
-        logger.info("[ToolManager] add_mcp_server 已存在，仍加入 ability_manager: %s", err)
+        logger.info(
+            "[ToolManager] add_mcp_server 已存在，仍加入 ability_manager: name=%s, 错误信息: %s",
+            mcp_cfg.server_name,
+            err,
+        )
         return
-    raise RuntimeError(f"add_mcp_server 失败: {err}" if err else "add_mcp_server 失败")
 
+    error_msg = f"add_mcp_server 失败: {err}" if err else "add_mcp_server 失败"
+    logger.error(
+        "[ToolManager] %s: name=%s url=%s",
+        error_msg,
+        mcp_cfg.server_name,
+        mcp_cfg.server_path,
+    )
+    raise RuntimeError(error_msg)
 
 # ---------------------------------------------------------------------------
 # 落盘 JSON 模板：列表顺序即写入顺序；每项为 (disk_key, default, kind)。
@@ -621,6 +651,7 @@ class ToolManager:
             raise RuntimeError("JiuWenClaw 未初始化，请先调用 create_instance()")
 
         registered: list[dict[str, str]] = []
+        failed: list[dict[str, str]] = []
 
         for tool_name, cfg in servers.items():
             if not isinstance(tool_name, str) or not tool_name.strip():
@@ -700,7 +731,18 @@ class ToolManager:
                     cfg.get("url", ""),
                     bool(cfg.get("auth_headers") or cfg.get("auth_query_params")),
                 )
-                await _add_mcp_server_and_ability(agent, mcp_cfg, tag=server_name)
+                # 远程 MCP 连接失败（含 core 已转为 Error 的 cancel）时跳过该 server，
+                # 不中断同请求内其它 MCP；真 CancelledError 不在 Exception 内，会继续上抛。
+                try:
+                    await _add_mcp_server_and_ability(agent, mcp_cfg, tag=server_name)
+                except Exception as e:
+                    logger.error(
+                        "[ToolManager] MCP 服务器注册失败，跳过: name=%s error=%s",
+                        server_name,
+                        e,
+                    )
+                    failed.append({"name": server_name, "error": str(e)})
+                    continue
                 reg = {
                     "kind": "shared",
                     "server_name": server_name,
@@ -722,6 +764,7 @@ class ToolManager:
             "registered": True,
             "request_id": request_id,
             "tools": registered,
+            "failed": failed,
         }
 
     async def unregister_request_scoped_mcp(self, request_id: str) -> None:

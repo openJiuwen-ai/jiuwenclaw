@@ -968,6 +968,7 @@ permissions:
     approve_plan: allow
     approve_tool: allow
     create_task: allow
+    list_members: allow
     update_task: allow
     claim_task: allow
     submit_plan: allow
@@ -975,6 +976,7 @@ permissions:
     member_complete_task: allow
     view_task: allow
     send_message: allow
+    send_message_scheduled: allow
     workspace_meta: allow
     swarmflow: allow
     async_tasks_list: allow

@@ -8,7 +8,6 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from functools import cache
 from pathlib import Path
 from typing import Any, Optional
 from ruamel.yaml import YAML
@@ -491,86 +490,39 @@ def _resolve_ui_language() -> str:
     return "cn"
 
 
-@cache
-def _get_team_tool_translator(lang: str | None = None) -> Any:
-    """Lazily build the agent-team tool description translator (cached).
-
-    Config-only agent-team tools (``build_team``, ``spawn_teammate``, ...) are
-    registered to ``ability_manager`` only after ``build_team`` completes, so
-    they are absent from the runtime catalog until then. Their descriptions
-    are sourced from the upstream ``openjiuwen.agent_teams.tools.locales``
-    translator so they stay in sync with upstream changes without a
-    hand-maintained static mapping. Returns ``None`` when the upstream package
-    is unavailable (e.g. a jiuwenclaw runtime without agent-team support).
-
-    ``lang`` is the translator language (``cn``/``en``); when omitted it is
-    resolved from the global ``preferred_language`` config so the tool list
-    stays consistent with the runtime's language. A future request-level
-    language can be threaded through by passing ``lang`` explicitly.
-    """
-    try:
-        from openjiuwen.agent_teams.tools.locales import make_translator
-
-        return make_translator(lang or _resolve_ui_language())
-    except Exception:
-        return None
-
-
-def _resolve_config_only_tool_description(tool_name: str) -> str:
-    """Resolve description for a config-only tool absent from the runtime catalog.
-
-    Agent-team tools resolve via the upstream translator; tools whose
-    descriptions live elsewhere (e.g. ``office_claw_*`` MCP tools described by
-    the relay-claw MCP server) return an empty string so the UI can show a
-    placeholder.
-    """
-    translator = _get_team_tool_translator(_resolve_ui_language())
-    if translator is None:
-        return ""
-    try:
-        return str(translator(tool_name)) or ""
-    except (FileNotFoundError, KeyError):
-        return ""
-    except Exception:
-        return ""
-
-
 def build_permissions_tools_list_view(
     catalog_by_name: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, Any]:
-    """Build permissions UI list merging runtime catalog and config-only tools.
+    """List configured and initialized tools, enriched with stable metadata."""
+    from jiuwenclaw.agentserver.tool_catalog import (
+        get_stable_tools_catalog,
+        ui_list_short_description,
+    )
 
-    Tools are drawn from two sources, merged by name:
-
-    1. ``catalog_by_name`` — tools currently registered in the runtime
-       ``ability_manager`` (``registered=True``).
-    2. ``permissions.tools`` config keys absent from the runtime catalog
-       (``registered=False``). These are tools configured in advance but not
-       yet registered — e.g. agent-team tools only registered after
-       ``build_team`` completes. Surfacing them lets users pre-configure
-       approval levels before the tool is ever invoked; the level takes effect
-       once the tool registers and is called, because ``PermissionEngine``
-       reads ``config.tools[name]`` independent of registration state.
-
-    Descriptions for config-only agent-team tools are resolved via the
-    ``openjiuwen.agent_teams.tools.locales`` translator so they stay in sync
-    with upstream tool definitions without a hand-maintained mapping.
-    """
-    from jiuwenclaw.agentserver.tool_catalog import ui_list_short_description
-
-    catalog = dict(catalog_by_name or {})
+    runtime_catalog = dict(catalog_by_name or {})
+    stable_catalog = get_stable_tools_catalog(_resolve_ui_language())
     explicit = get_permissions_tools().get("tools")
     if not isinstance(explicit, dict):
         explicit = {}
     default_level = get_permissions_defaults_level()
 
-    seen: set[str] = set()
     tools_out: list[dict[str, Any]] = []
 
-    # 1. 已注册工具（runtime catalog）：registered=True
-    for name in sorted(catalog.keys()):
-        seen.add(name)
-        entry = catalog.get(name, {})
+    for name in sorted(set(runtime_catalog) | set(explicit)):
+        runtime_entry = runtime_catalog.get(name, {})
+        entry = {
+            **stable_catalog.get(name, {"name": name}),
+            **{
+                key: value
+                for key, value in runtime_entry.items()
+                if value is not None and str(value).strip()
+            },
+            "name": name,
+        }
+        runtime_description = str(runtime_entry.get("description", "") or "").strip()
+        runtime_short_description = str(runtime_entry.get("short_description", "") or "").strip()
+        if runtime_description and not runtime_short_description:
+            entry["short_description"] = ""
         raw_explicit = explicit.get(name)
         if raw_explicit is not None:
             level = normalize_permissions_tool_level(raw_explicit) or default_level
@@ -591,33 +543,7 @@ def build_permissions_tools_list_view(
                 "short_description": short,
                 "level": level,
                 "configured": configured,
-                "registered": True,
-            }
-        )
-
-    # 2. config 独有键（permissions.tools 里配过、但不在 runtime catalog）：
-    #    典型场景是 agent-team 工具——只在 build_team 成功后才注册到
-    #    ability_manager。提前暴露它们让用户可预配审批档位；档位在该工具
-    #    注册并被调用时即生效（PermissionEngine 读 config.tools[name]，
-    #    与注册状态无关）。
-    for name in sorted(explicit.keys()):
-        if name in seen:
-            continue
-        raw_explicit = explicit.get(name)
-        level = normalize_permissions_tool_level(raw_explicit) or default_level
-        description = _resolve_config_only_tool_description(name)
-        short = ui_list_short_description(
-            name,
-            description=description,
-            short_description="",
-        )
-        tools_out.append(
-            {
-                "name": name,
-                "short_description": short,
-                "level": level,
-                "configured": True,
-                "registered": False,
+                "registered": name in runtime_catalog,
             }
         )
 

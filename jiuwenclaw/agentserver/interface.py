@@ -107,7 +107,7 @@ from jiuwenclaw.extensions.registry import ExtensionRegistry
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenclaw.schema.hook_event import AgentServerHookEvents
 from jiuwenclaw.schema.hooks_context import MemoryHookContext
-from jiuwenclaw.schema.message import EventType, ReqMethod
+from jiuwenclaw.schema.message import E2A_SUPPRESSED_EVENT_TYPES, EventType, ReqMethod
 from jiuwenclaw.utils import (
     get_agent_home_dir,
     get_agent_sessions_relative_dir,
@@ -170,9 +170,8 @@ _SKILLDEV_METHODS: frozenset[ReqMethod] = frozenset(
 )
 
 # Recorded to history.json but not emitted on the E2A WebSocket wire.
-_E2A_SUPPRESSED_EVENT_TYPES: frozenset[str] = frozenset({
-    EventType.CHAT_TOOL_CALLS_DELTA.value,
-})
+# 定义已上移至 jiuwenclaw.schema.message.E2A_SUPPRESSED_EVENT_TYPES（单一事实源），此处保留别名。
+_E2A_SUPPRESSED_EVENT_TYPES = E2A_SUPPRESSED_EVENT_TYPES
 
 # Preserve cross-service context-size hints if they are present in request.params.
 _CONTEXT_SIZE_HINT_KEYS: tuple[str, ...] = (
