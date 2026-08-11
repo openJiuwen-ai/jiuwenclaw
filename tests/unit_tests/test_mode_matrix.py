@@ -14,6 +14,7 @@ from jiuwenswarm.common.mode_matrix import (
     is_team_mode,
     is_team_plan_mode,
     NEW_AGENT_WORK_NORMAL,
+    NEW_AGENT_WORK_PLAN,
     NEW_CANONICAL_MODES,
     resolve_request_mode,
 )
@@ -42,6 +43,47 @@ def test_web_composition_covers_all_single_agent_combinations(mode, work_mode, e
     assert (resolved.manager_mode, resolved.sub_mode, resolved.canonical_mode) == expected
     assert resolved.from_web_composition is True
     assert resolved.is_code_profile is (work_mode == "code")
+
+
+@pytest.mark.parametrize(
+    ("mode", "work_mode", "expected"),
+    [
+        # P6.4：新串直通 canonical——work 折叠进串，work_mode 不改变 canonical
+        (NEW_AGENT_WORK_NORMAL, "work", ("agent", None, NEW_AGENT_WORK_NORMAL)),
+        (NEW_AGENT_WORK_PLAN, "work", ("agent", "plan", NEW_AGENT_WORK_PLAN)),
+        ("agent.code.normal", "work", ("code", None, "agent.code.normal")),
+        ("agent.code.plan", "work", ("code", "plan", "agent.code.plan")),
+        # work_mode=code 不改变新 work 串的 canonical（串优先于 work_mode）
+        (NEW_AGENT_WORK_NORMAL, "code", ("agent", None, NEW_AGENT_WORK_NORMAL)),
+        (NEW_AGENT_WORK_PLAN, "code", ("agent", "plan", NEW_AGENT_WORK_PLAN)),
+    ],
+)
+def test_web_composition_new_canonical_passes_through(mode, work_mode, expected):
+    """P6.4：新三段 canonical 经 Web 组合分支直通，canonical = mode_text 自身。"""
+    resolved = _resolve({"mode": mode, "work_mode": work_mode})
+
+    assert (resolved.manager_mode, resolved.sub_mode, resolved.canonical_mode) == expected
+    assert resolved.from_web_composition is True
+
+
+@pytest.mark.parametrize(
+    ("mode", "work_mode", "is_code"),
+    [
+        # P6.4：新串 profile 从串本身解析，不看 work_mode
+        (NEW_AGENT_WORK_NORMAL, "work", False),
+        (NEW_AGENT_WORK_NORMAL, "code", False),
+        ("agent.code.normal", "work", True),
+        ("agent.code.normal", "code", True),
+        ("agent.code.plan", "work", True),
+        (NEW_AGENT_WORK_PLAN, "code", False),
+    ],
+)
+def test_web_composition_new_canonical_profile_from_string(mode, work_mode, is_code):
+    """新串的 is_code_profile 由串本身决定，不因 work_mode 错判。"""
+    resolved = _resolve({"mode": mode, "work_mode": work_mode})
+
+    assert resolved.is_code_profile is is_code
+    assert resolved.profile == ("code" if is_code else "normal")
 
 
 @pytest.mark.parametrize(

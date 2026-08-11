@@ -43,7 +43,7 @@ import {
   useWorkspaceStore,
   useCronStore,
 } from '../stores';
-import { isPlanWireMode, resolvePlanWireMode } from '../features/planMode/wireMode';
+import { isPlanWireMode, resolveNormalWireMode, resolvePlanWireMode } from '../features/planMode/wireMode';
 import { flushPendingGoalObjectiveBubble } from '../features/goalPendingObjectiveBubble';
 import { normalizeTaskEvent } from '../stores/teamTaskNormalize';
 import { webClient, requestGoalAction, sendGoalStreamCommand } from '../services/webClient';
@@ -411,14 +411,22 @@ function resolveInterruptResumeMode(sessionId: string): AgentMode {
 }
 
 /**
- * 组合出本次请求要发送的 mode。
+ * 组合出本次请求要发送的 mode（新三段 canonical）。
  *
  * UI 的 `AgentMode` 只有 agent / team / auto_harness；Plan 是独立开关。所有出站
  * 请求（普通消息、队列重发、interrupt resume）都必须走这里，否则 Plan 状态会被
- * `normalizeAgentMode` 抹平，后端就收不到 `agent.plan`。
+ * `normalizeAgentMode` 抹平。
+ *
+ * P6.1：产出新 canonical 串——agent + plan on → `agent.work.plan`，
+ * agent + plan off → `agent.work.normal`（后端 P6.4 组合分支对新串直通）。
+ * team / auto_harness 原样透传（不参与新串组合）。
  */
 function resolveOutgoingMode(sessionId: string, baseMode: AgentMode | string | undefined): string {
-  return resolvePlanWireMode(baseMode, usePlanStore.getState().isActive(sessionId));
+  const planActive = usePlanStore.getState().isActive(sessionId);
+  if (planActive && (baseMode === 'agent' || baseMode === undefined)) {
+    return resolvePlanWireMode(baseMode, true);
+  }
+  return resolveNormalWireMode(baseMode);
 }
 
 /**

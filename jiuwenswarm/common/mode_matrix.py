@@ -32,10 +32,6 @@ from jiuwenswarm.common.work_mode import SUPPORTED_WORK_MODES
 WEB_BASE_AGENT: str = "agent"
 WEB_PLAN_AGENT: str = "agent.plan"
 
-WEB_COMPOSABLE_MODES: frozenset[str] = frozenset(
-    {WEB_BASE_AGENT, WEB_PLAN_AGENT}
-)
-
 # Team plan 的规范模式与兼容别名。
 TEAM_PLAN_NORMAL_MODE: str = "team.plan.normal"
 TEAM_PLAN_CODE_MODE: str = "team.plan.code"
@@ -125,12 +121,42 @@ _PLAN_EXIT_MODES: dict[str, str] = {
     NEW_TEAM_CODE_PLAN: NEW_TEAM_CODE_NORMAL,
 }
 
+# P6.4：Web 组合分支接受的 mode 值集合。
+# 旧值 agent / agent.plan（work_mode 决定 profile）+ 新三段 canonical
+# （work/code 已折叠进 mode 串，组合分支直通 canonical）。
+WEB_COMPOSABLE_MODES: frozenset[str] = frozenset(
+    {
+        WEB_BASE_AGENT,
+        WEB_PLAN_AGENT,
+        NEW_AGENT_WORK_NORMAL,
+        NEW_AGENT_WORK_PLAN,
+        NEW_AGENT_CODE_NORMAL,
+        NEW_AGENT_CODE_PLAN,
+    }
+)
+
 # (mode, work_mode) -> (manager_mode, sub_mode, canonical_mode)
+# P6.4：新三段 canonical 串已折叠 work/code，canonical 取 mode_text 自身。
+# work_mode 仍作为键参与查表（决策 1 保留作分桶键），但新串的 profile
+# 由串本身决定——agent.code.* 配 work_mode=work 时仍走 code profile
+# （串优先于 work_mode）。为避免 work_mode 与串自带 profile 冲突时落 None，
+# 新串对两种 work_mode 都映射到同一 canonical。
 _WEB_MODE_TABLE: dict[tuple[str, str], tuple[str, str | None, str]] = {
+    # 旧 Web 组合
     (WEB_BASE_AGENT, "work"): ("agent", None, "agent"),
     (WEB_PLAN_AGENT, "work"): ("agent", "plan", "agent.plan"),
     (WEB_BASE_AGENT, "code"): ("code", "normal", "code.normal"),
     (WEB_PLAN_AGENT, "code"): ("code", "plan", "code.plan"),
+    # P6.4：新串直通 canonical（work profile）
+    (NEW_AGENT_WORK_NORMAL, "work"): ("agent", None, NEW_AGENT_WORK_NORMAL),
+    (NEW_AGENT_WORK_PLAN, "work"): ("agent", "plan", NEW_AGENT_WORK_PLAN),
+    (NEW_AGENT_WORK_NORMAL, "code"): ("agent", None, NEW_AGENT_WORK_NORMAL),
+    (NEW_AGENT_WORK_PLAN, "code"): ("agent", "plan", NEW_AGENT_WORK_PLAN),
+    # P6.4：新串直通 canonical（code profile）
+    (NEW_AGENT_CODE_NORMAL, "work"): ("code", None, NEW_AGENT_CODE_NORMAL),
+    (NEW_AGENT_CODE_PLAN, "work"): ("code", "plan", NEW_AGENT_CODE_PLAN),
+    (NEW_AGENT_CODE_NORMAL, "code"): ("code", None, NEW_AGENT_CODE_NORMAL),
+    (NEW_AGENT_CODE_PLAN, "code"): ("code", "plan", NEW_AGENT_CODE_PLAN),
 }
 
 
@@ -325,6 +351,14 @@ def resolve_request_mode(
         composed = compose_web_mode(mode_text, work_mode)
         if composed is not None:
             manager_mode, sub_mode, canonical_mode = composed
+            # P6.4：新串已折叠 work/code，profile 从串本身解析（agent.code.*
+            # 永远是 code profile，即便 work_mode=work）。旧串（agent / agent.plan）
+            # 仍按 work_mode 决定 profile。
+            is_code = (
+                is_code_profile_mode(canonical_mode)
+                if is_new_canonical_mode(canonical_mode)
+                else work_mode == "code"
+            )
             return ResolvedMode(
                 manager_mode=manager_mode,
                 sub_mode=sub_mode,
@@ -332,8 +366,8 @@ def resolve_request_mode(
                 work_mode=work_mode,
                 is_plan=canonical_mode in PLAN_CANONICAL_MODES,
                 is_team=canonical_mode in TEAM_CANONICAL_MODES,
-                is_code_profile=work_mode == "code",
-                profile="code" if work_mode == "code" else "normal",
+                is_code_profile=is_code,
+                profile="code" if is_code else "normal",
                 normal_mode=base_mode_without_plan(canonical_mode),
                 from_web_composition=True,
             )
