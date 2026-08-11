@@ -150,6 +150,7 @@ export function isSearchTool(name: string): boolean {
     normalized === "rg" ||
     normalized === "ripgrep" ||
     normalized === "memory_search" ||
+    normalized === "web_search" ||
     normalized === "mcp_free_search" ||
     normalized === "mcp_paid_search"
   );
@@ -210,7 +211,7 @@ export function toolDisplayName(tool: ToolCallDisplay): string {
   }
   if (name in { ls: true, list_files: true, list_dir: true }) return "List";
   if (name === "memory_search") return "Search memories";
-  if (name in { mcp_free_search: true, mcp_paid_search: true }) return "Search web";
+  if (name in { web_search: true, mcp_free_search: true, mcp_paid_search: true }) return "Search web";
   if (name in { write: true, write_file: true, write_memory: true, write_text_file: true }) {
     return "Write";
   }

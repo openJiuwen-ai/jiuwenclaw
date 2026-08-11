@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 import pytest
 
@@ -26,6 +26,12 @@ from jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail import RuntimeP
 from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import SkillRetrievalPromptRail
 from jiuwenswarm.agents.harness.common.rails.symphony import (
     SymphonyOrchestrationRail,
+)
+from jiuwenswarm.agents.harness.common.tools.harness_named_web_tools import (
+    JiuwenHarnessFetchWebpageTool,
+)
+from jiuwenswarm.agents.harness.common.tools.web_search.harness import (
+    JiuwenHarnessWebSearchTool,
 )
 
 
@@ -1181,7 +1187,12 @@ def test_deep_adapter_subagents_includes_optional_browser_and_configured_researc
         language="cn",
         max_iterations=9,
         rails=None,
+        tools=ANY,
     )
+    research_tools = mock_research.call_args.kwargs["tools"]
+    assert len(research_tools) == 2
+    assert isinstance(research_tools[0], JiuwenHarnessWebSearchTool)
+    assert isinstance(research_tools[1], JiuwenHarnessFetchWebpageTool)
     mock_browser.assert_called_once_with(
         model,
         workspace="/tmp/jiuwenswarm-workspace",

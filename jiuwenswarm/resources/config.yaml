@@ -929,8 +929,7 @@ permissions:
     viking_browse: allow
     viking_remember: allow
     viking_add_resource: allow
-    mcp_free_search: allow
-    mcp_paid_search: allow
+    web_search: allow
     mcp_fetch_webpage: allow
     cron_list_jobs: allow
     cron_get_job: allow
@@ -1168,6 +1167,17 @@ mcp:
   #     timeout_s: 30
 
 
+# Petal search: when true, set PETAL_SEARCH_URL and PETAL_SEARCH_HEADERS in env.
+enable_petal_web_search: true
+
+# Unified web_search: timeout and paid provider order (petal first when enabled).
+web_search:
+  timeout_seconds: 30
+  max_results: 8
+  paid_provider_order:
+    - petal
+    - bocha
+
 modes:
   # 一级模式 agent / code / team
   agent:
@@ -1197,9 +1207,8 @@ modes:
     # send_file_to_user 由运行时 _update_session_tools 注册，不在此配置
     # coding_memory_read/write/edit 由 CodingMemoryRail 在 subagent 内部注册，不在此配置
     tools:
-      - web_free_search
+      - web_search
       - web_fetch_webpage
-      - web_paid_search
       - user_todos
       - skill_toolkit
       - skill_retrieval

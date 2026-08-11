@@ -81,9 +81,6 @@ from openjiuwen.harness.rails.context_engineer.context_processor_rail import Con
 from openjiuwen.harness.subagents.browser_agent import build_browser_agent_config
 from openjiuwen.harness.subagents.research_agent import build_research_agent_config
 from openjiuwen.harness.tools import (
-    WebFetchWebpageTool,
-    WebFreeSearchTool,
-    WebPaidSearchTool,
     create_audio_tools,
     create_vision_tools,
 )
@@ -99,26 +96,6 @@ _ERROR_EVENT = getattr(InteractionEventType, "EXECUTION_ERROR", None)
 if _ERROR_EVENT is None:
     _ERROR_EVENT = getattr(InteractionEventType, "RUNTIME_ERROR")
 ERROR_EVENT_TYPE = _ERROR_EVENT.value
-
-try:
-    from openjiuwen.harness.tools import is_paid_search_enabled
-except ImportError:  # Compatibility with older agent-core versions.
-    try:
-        from openjiuwen.harness.tools.web_tools import is_paid_search_enabled
-    except ImportError:
-
-        def is_paid_search_enabled() -> bool:
-            api_key_envs = (
-                "BOCHA_API_KEY",
-                "PERPLEXITY_API_KEY",
-                "SERPER_API_KEY",
-                "JINA_API_KEY",
-            )
-            for key in api_key_envs:
-                if str(os.environ.get(key, "") or "").strip():
-                    return True
-            return False
-
 
 from openjiuwen.harness.schema.task import TodoStatus
 from openjiuwen.harness.workspace.workspace import Workspace, WorkspaceNode
@@ -282,6 +259,9 @@ from jiuwenswarm.agents.harness.common.rails.progressive_tool_rail import (
 )
 from jiuwenswarm.symphony.config import load_symphony_config
 from jiuwenswarm.agents.harness.common.tools.wiki_tools import wiki_ingest, wiki_query, wiki_lint
+from jiuwenswarm.agents.harness.common.tools.harness_named_web_tools import (
+    build_jiuwen_harness_named_web_tools,
+)
 from jiuwenswarm.agents.harness.common.tools.acp_output_tools import get_tools as get_acp_output_tools
 from jiuwenswarm.agents.harness.common.tools.acp_chat import acp_chat
 from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools import (
@@ -1885,7 +1865,7 @@ class JiuWenSwarmDeepAdapter:
         self._session_instance_sub_mode: str | None = None
         self._xiaoyi_phone_tools_registered: bool = False
         self._paid_search_registered: bool = False
-        self._paid_search_tool: WebPaidSearchTool | None = None
+        self._paid_search_tool: Any | None = None
         self._symphony_tools: list[Any] = []
         self._symphony_tools_registered: bool = False
         self._symphony_orchestration_rail = None
@@ -3224,6 +3204,10 @@ class JiuWenSwarmDeepAdapter:
                             react_cfg.get("max_iterations", 15),
                         ),
                         rails=subagent_rails,
+                        tools=build_jiuwen_harness_named_web_tools(
+                            agent_id="research_agent",
+                            language=resolved_language,
+                        ),
                     )
                 )
 
@@ -4093,21 +4077,9 @@ class JiuWenSwarmDeepAdapter:
                     )
 
     def _sync_paid_search_tool_for_runtime(self) -> None:
-        """Sync paid-search tool registration after config reload."""
-        # The owner id, not ``card.id``; see ``_sync_multimodal_tools_for_runtime``.
-        agent_id = self._tool_owner_id()
-        tools, self._paid_search_registered = self._sync_tool_group(
-            current_tools=[self._paid_search_tool] if self._paid_search_tool else [],
-            registered=self._paid_search_registered,
-            enabled=is_paid_search_enabled(),
-            create_fn=lambda: [
-                WebPaidSearchTool(language=self._resolve_runtime_language(), agent_id=agent_id)
-            ],
-            warn_label="paid search tool",
-        )
-        self._paid_search_tool = tools[0] if tools else None
-        if self._paid_search_tool is not None:
-            self._prioritize_paid_search_tool_card()
+        """Legacy hook: unified ``web_search`` replaces separate paid-search sync."""
+        self._paid_search_tool = None
+        self._paid_search_registered = False
 
     def _sync_symphony_tools_for_runtime(self, config_base: dict[str, Any]) -> None:
         """Sync Symphony tool registration after config reload."""
@@ -6428,17 +6400,10 @@ class JiuWenSwarmDeepAdapter:
             registered = self._register_shared_tool(wtool)
             tool_cards.append(registered.card)
 
-        # 付费搜索工具：有任意一个付费 key 就注册
-        if is_paid_search_enabled():
-            self._paid_search_tool = WebPaidSearchTool(
-                language=self._resolve_runtime_language(), agent_id=agent_id
-            )
-            self._paid_search_tool = self._register_agent_owned_tool(self._paid_search_tool, agent_id)
-            tool_cards.append(self._paid_search_tool.card)
-            self._paid_search_registered = True
-
-        for tool_cls in [WebFreeSearchTool, WebFetchWebpageTool]:
-            tool_instance = tool_cls(agent_id=agent_id)
+        for tool_instance in build_jiuwen_harness_named_web_tools(
+            agent_id=agent_id,
+            language=self._resolve_runtime_language(),
+        ):
             registered = self._register_agent_owned_tool(tool_instance, agent_id)
             tool_cards.append(registered.card)
 
