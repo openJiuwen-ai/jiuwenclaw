@@ -250,6 +250,7 @@ from jiuwenswarm.common.local_env_config import (
 )
 from jiuwenswarm.server.runtime.reload_result import (
     ReloadResult,
+    env_touches_shared_skills_dirs,
     env_touches_task_memory,
 )
 from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
@@ -1989,13 +1990,20 @@ class JiuWenSwarmDeepAdapter:
             adapter.set_skill_manager(skill_manager)
 
     def _resolve_skill_dirs(self, extra_skill_dir: str | None = None) -> list[str]:
-        """解析 SkillUseRail / evolution 使用的 skills 目录列表."""
+        """解析 SkillUseRail / evolution 使用的 skills 目录列表.
+
+        Align with OfficeClaw tip: when ``JIUWEN*_SHARED_SKILLS_DIRS`` is set
+        (e.g. office-claw-skills), those roots are used instead of only the
+        empty workspace skills folder.
+        """
         if is_skill_whitelist_tenant(self._agent_id, self._service_id):
             skills_dirs = [
                 str(p) for p in get_tenant_agent_skills_dirs(self._service_id, self._agent_id)
             ]
         else:
-            skills_dirs = [str(get_agent_skills_dir())]
+            from jiuwenswarm.common.utils import resolve_agent_registered_skill_dirs
+
+            skills_dirs = [str(p) for p in resolve_agent_registered_skill_dirs()]
         if extra_skill_dir:
             skills_dirs.append(extra_skill_dir)
         return skills_dirs
@@ -4715,6 +4723,10 @@ class JiuWenSwarmDeepAdapter:
 
     def _visible_skill_names_for_list_skill(self) -> set[str]:
         """Return the skill names exposed by the matching SkillUseRail setup."""
+        from jiuwenswarm.server.runtime.skill.skill_manager import (
+            enabled_skills_from_environ,
+        )
+
         skills_dirs = [Path(p) for p in self._resolve_skill_dirs()]
         disabled_skills = set(
             self._skill_manager.list_execution_disabled_skills()
@@ -4724,6 +4736,14 @@ class JiuWenSwarmDeepAdapter:
         enabled = self._enabled_skills
         if is_skill_whitelist_tenant(self._agent_id, self._service_id) and enabled is None:
             enabled = []
+        elif enabled is None:
+            raw = enabled_skills_from_environ()
+            if raw is not None:
+                enabled = [
+                    item.strip()
+                    for item in str(raw).replace(";", ",").split(",")
+                    if item.strip()
+                ]
         enabled_set = set(enabled) if enabled is not None else None
         visible: set[str] = set()
         for skills_dir in skills_dirs:
@@ -5323,12 +5343,19 @@ class JiuWenSwarmDeepAdapter:
     ) -> SkillUseRail | None:
         """Build SkillUseRail."""
         try:
+            from jiuwenswarm.server.runtime.skill.skill_manager import (
+                enabled_skills_from_environ,
+            )
+
             skill_mode = self._resolve_skill_mode(config)
             logger.info("[JiuWenSwarmDeepAdapter] current skill_mode: %s", skill_mode)
             skills_dirs = self._resolve_skill_dirs()
             enabled_skills = self._enabled_skills
             if is_skill_whitelist_tenant(self._agent_id, self._service_id) and enabled_skills is None:
                 enabled_skills = []
+            elif enabled_skills is None:
+                # OfficeClaw tip path: ENABLED_SKILLS from sync_agents_configs.
+                enabled_skills = enabled_skills_from_environ()
             skill_rail_kwargs: dict[str, Any] = dict(
                 skills_dir=skills_dirs,
                 skill_mode=skill_mode,
@@ -5344,7 +5371,11 @@ class JiuWenSwarmDeepAdapter:
             except TypeError:
                 skill_rail_kwargs.pop("enabled_skills", None)
                 skill_rail = SkillUseRail(**skill_rail_kwargs)
-            logger.info("[JiuWenSwarmDeepAdapter] SkillUseRail create success")
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] SkillUseRail create success skills_dirs=%s enabled=%s",
+                skills_dirs,
+                enabled_skills,
+            )
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] SkillUseRail create failed: %s", exc)
             skill_rail = None
@@ -7230,6 +7261,14 @@ class JiuWenSwarmDeepAdapter:
             # TaskMemory: clear when env keys that feed the fingerprint change.
             if env_touches_task_memory(env_overrides):
                 clear_task_memory_service()
+
+            # Shared skill dirs / ENABLED_SKILLS from tip: rebuild SkillUseRail so
+            # OfficeClaw office-claw-skills become visible after sync/reload.
+            if env_touches_shared_skills_dirs(env_overrides):
+                self._skill_rail = None
+                logger.info(
+                    "[JiuWenSwarmDeepAdapter] shared skills env changed; SkillUseRail will rebuild"
+                )
 
             config_base = await self._apply_reload_config_snapshot(config_base, env_overrides)
             config = self._config_cache.copy()

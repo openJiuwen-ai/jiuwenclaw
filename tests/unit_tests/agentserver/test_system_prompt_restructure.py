@@ -978,9 +978,27 @@ def test_deep_adapter_visible_skill_names_match_list_skill(monkeypatch, tmp_path
     adapter.set_skill_manager(
         SimpleNamespace(list_execution_disabled_skills=lambda: ["beta"])
     )
+    # `_visible_skill_names_for_list_skill` scans `_resolve_skill_dirs()`, which
+    # prefers shared tip dirs (`JIUWEN*_SHARED_SKILLS_DIRS`) over workspace.
+    # Isolate both the resolver and the env whitelist so CI shared roots
+    # (skill-creator / swarmskill-creator) cannot leak into this unit test.
+    monkeypatch.delenv("JIUWENSWARM_SHARED_SKILLS_DIRS", raising=False)
+    monkeypatch.delenv("JIUWENCLAW_SHARED_SKILLS_DIRS", raising=False)
+    monkeypatch.setattr(
+        "jiuwenswarm.common.utils.resolve_agent_registered_skill_dirs",
+        lambda: [tmp_path],
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.common.utils.get_agent_skills_dir",
+        lambda: tmp_path,
+    )
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.agent_adapter.interface_deep.get_agent_skills_dir",
         lambda: tmp_path,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.skill.skill_manager.enabled_skills_from_environ",
+        lambda: None,
     )
 
     assert adapter._visible_skill_names_for_list_skill() == {"alpha"}
