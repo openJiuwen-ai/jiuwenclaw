@@ -112,13 +112,18 @@ Public methods and events are:
 - `health_check.set_conf`
 - `health_check.relay`
 
-`health_check.get_path` is temporarily retained for old clients that query the
-legacy `HEARTBEAT.md` path. HealthCheck no longer executes that file.
+The old `heartbeat.get_conf`, `heartbeat.set_conf`, and `heartbeat.get_path`
+method names temporarily remain as aliases for staged client upgrades.
+HealthCheck no longer executes the legacy `HEARTBEAT.md` file.
 
 At startup, legacy `heartbeat.every/target/active_hours` values are migrated to
 `health_check`, while `heartbeat.jobs` is preserved. New writes use only the new
 name. Upgrade Gateway and AgentServer atomically when possible. For a staged
 rollout, upgrade AgentServer before Gateway.
+
+Session-bound Heartbeat jobs currently require a local WebSocket AgentServer
+topology with shared session storage. Other deployment types reject Heartbeat
+job operations instead of accepting jobs that cannot safely resume a session.
 
 ## Cron jobs
 

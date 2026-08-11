@@ -9,6 +9,10 @@ from typing import Any, Protocol, runtime_checkable
 
 @runtime_checkable
 class GatewayPushTransport(Protocol):
+    def is_available(self) -> bool:
+        """Return whether correlated Gateway requests can be delivered now."""
+        ...
+
     async def send_push(self, msg: dict[str, Any]) -> None:
         """向 Gateway 发送一条 server_push 语义的消息（与 AgentWebSocketServer.send_push 入参一致）。"""
         ...
@@ -22,6 +26,11 @@ class GatewayPushTransport(Protocol):
 
 class WebSocketGatewayPushTransport:
     """通过进程内 AgentWebSocketServer 单例推送（分离部署 + WebSocket 默认路径）。"""
+
+    def is_available(self) -> bool:
+        from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+
+        return AgentWebSocketServer.get_instance().has_gateway_connection
 
     async def send_push(self, msg: dict[str, Any]) -> None:
         from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer

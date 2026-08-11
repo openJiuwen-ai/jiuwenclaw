@@ -31,7 +31,9 @@ from jiuwenswarm.gateway.channel_manager.im_platforms.wecom.wecom_connect import
     WecomChannel,
 )
 from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
+from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
 from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+from jiuwenswarm.server.gateway_push import WebSocketGatewayPushTransport
 
 
 class _Push:
@@ -180,6 +182,47 @@ async def test_heartbeat_scheduler_start_failure_is_nonfatal_to_gateway() -> Non
     assert await app_gateway_module._start_heartbeat_scheduler(Scheduler()) is False
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "ws://127.0.0.1:18000",
+        "ws://localhost:18000",
+        "ws://0.0.0.0:18000",
+        "ws://[::1]:18000",
+    ],
+)
+def test_session_bound_heartbeat_accepts_local_websocket_topology(url: str) -> None:
+    assert app_gateway_module._supports_session_bound_heartbeat(
+        WebSocketAgentServerClient(), url
+    )
+
+
+def test_session_bound_heartbeat_rejects_remote_or_non_websocket_topology() -> None:
+    client = WebSocketAgentServerClient()
+    assert not app_gateway_module._supports_session_bound_heartbeat(
+        client, "ws://agent.example.com:18000"
+    )
+    assert not app_gateway_module._supports_session_bound_heartbeat(
+        object(), "ws://127.0.0.1:18000"
+    )
+
+
+def test_message_handler_registers_server_push_by_client_capability() -> None:
+    class PushCapableClient:
+        handler = None
+
+        def set_server_push_handler(self, handler) -> None:  # noqa: ANN001
+            self.handler = handler
+
+    client = PushCapableClient()
+    handler = object.__new__(MessageHandler)
+    handler.agent_client = client
+    handler.set_outbound_pipeline(object())
+
+    assert client.handler is not None
+    assert client.handler.__self__ is handler
+
+
 @pytest.mark.parametrize("payload_key", ["health_check", "heartbeat"])
 def test_telegram_and_dingtalk_read_health_check_relay_payload(
     payload_key: str,
@@ -312,6 +355,43 @@ async def test_agent_heartbeat_runtime_surfaces_gateway_error() -> None:
         await HeartbeatRuntimeBridge(gateway_push=FailedPush())._send(
             context, "get", {"job_id": "missing"}
         )
+
+
+async def test_agent_heartbeat_runtime_hides_tools_without_gateway_connection() -> None:
+    class UnavailablePush(_Push):
+        @staticmethod
+        def is_available() -> bool:
+            return False
+
+    context = SimpleNamespace(
+        channel_id="web",
+        session_id="session-1",
+        metadata={"request_id": "request-1"},
+    )
+    bridge = HeartbeatRuntimeBridge(gateway_push=UnavailablePush())
+
+    assert bridge.build_tools(context=context) == []
+    with pytest.raises(RuntimeError, match="active Gateway WebSocket"):
+        await bridge._send(context, "list", {"scope": "current"})
+
+
+def test_websocket_gateway_push_availability_tracks_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._current_ws = None
+    server._current_send_lock = None
+    monkeypatch.setattr(
+        AgentWebSocketServer,
+        "get_instance",
+        classmethod(lambda cls, **kwargs: server),
+    )
+    transport = WebSocketGatewayPushTransport()
+
+    assert transport.is_available() is False
+    server._current_ws = object()
+    server._current_send_lock = asyncio.Lock()
+    assert transport.is_available() is True
 
 
 async def test_agent_heartbeat_runtime_rejects_legacy_one_way_transport() -> None:

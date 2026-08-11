@@ -189,6 +189,19 @@ async def _start_heartbeat_scheduler(scheduler: Any) -> bool:
     return True
 
 
+def _supports_session_bound_heartbeat(client: Any, agent_server_url: str) -> bool:
+    """Return whether Gateway and AgentServer share the local session topology."""
+    from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
+
+    if not isinstance(client, WebSocketAgentServerClient):
+        return False
+    try:
+        host = (urlparse(agent_server_url).hostname or "").lower()
+    except ValueError:
+        return False
+    return host in {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+
+
 def _build_event_frame(msg) -> dict[str, Any]:
     event_name = "chat.final"
     if msg.event_type is not None:
@@ -1728,16 +1741,24 @@ async def _run(
     # 与旧探活(HealthCheck,下方 heartbeat_service)严格区分:
     # 新 Heartbeat 绑定原 session 投递 CHAT_SEND,不创建临时会话、不读 HEARTBEAT.md。
     # config 段 heartbeat.jobs.* 独立于旧探活的 heartbeat.every/target/active_hours。
-    hb_job_store = HeartbeatJobStore(path=get_heartbeat_jobs_path())
-    heartbeat_scheduler_service = HeartbeatSchedulerService(
-        store=hb_job_store,
-        message_handler=message_handler,
-    )
-    heartbeat_controller = HeartbeatController.get_instance(
-        store=hb_job_store, scheduler=heartbeat_scheduler_service
-    )
-    message_handler.set_heartbeat_controller(heartbeat_controller)
-    message_handler._heartbeat_scheduler_service = heartbeat_scheduler_service
+    heartbeat_scheduler_service = None
+    heartbeat_controller = None
+    if _supports_session_bound_heartbeat(client, agent_server_url):
+        hb_job_store = HeartbeatJobStore(path=get_heartbeat_jobs_path())
+        heartbeat_scheduler_service = HeartbeatSchedulerService(
+            store=hb_job_store,
+            message_handler=message_handler,
+        )
+        heartbeat_controller = HeartbeatController.get_instance(
+            store=hb_job_store, scheduler=heartbeat_scheduler_service
+        )
+        message_handler.set_heartbeat_controller(heartbeat_controller)
+        message_handler._heartbeat_scheduler_service = heartbeat_scheduler_service
+    else:
+        logger.warning(
+            "[App] Heartbeat jobs unavailable: this deployment does not "
+            "provide a local WebSocket session topology"
+        )
 
     full_cfg, health_check_cfg, channels_cfg = _load_gateway_runtime_config(
         message_handler
@@ -1820,9 +1841,12 @@ async def _run(
     for key, value in hb_env_limits.items():
         if value is not None and value != "":
             hb_limits[key] = value
-    if hb_limits:
+    if heartbeat_controller is not None and hb_limits:
         heartbeat_controller.set_limits(hb_limits)
-    if await _start_heartbeat_scheduler(heartbeat_scheduler_service):
+    if (
+        heartbeat_scheduler_service is not None
+        and await _start_heartbeat_scheduler(heartbeat_scheduler_service)
+    ):
         logger.info(
             "[App] HeartbeatSchedulerService started "
             "(thread-automation heartbeat jobs)"
@@ -3045,7 +3069,8 @@ async def _run(
         await cron_scheduler.stop()
         await channel_manager.stop_dispatch()
         await heartbeat_service.stop()
-        await heartbeat_scheduler_service.stop()
+        if heartbeat_scheduler_service is not None:
+            await heartbeat_scheduler_service.stop()
         await message_handler.stop_forwarding()
         await client.disconnect()
 

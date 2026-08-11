@@ -984,6 +984,11 @@ class AgentWebSocketServer:
     def port(self) -> int:
         return self._port
 
+    @property
+    def has_gateway_connection(self) -> bool:
+        """Return whether reverse requests can use the active Gateway socket."""
+        return self._current_ws is not None and self._current_send_lock is not None
+
     # ---------- 生命周期 ----------
 
     async def start(self) -> None:

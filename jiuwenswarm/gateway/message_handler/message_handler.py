@@ -308,10 +308,9 @@ class MessageHandler(ABC):
         self._get_config_raw = get_config_raw
         self._update_channel_in_config = update_channel_in_config
 
-        from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
-
-        if isinstance(self.agent_client, WebSocketAgentServerClient):
-            self.agent_client.set_server_push_handler(self._handle_agent_server_push)
+        set_push_handler = getattr(self.agent_client, "set_server_push_handler", None)
+        if callable(set_push_handler):
+            set_push_handler(self._handle_agent_server_push)
 
     def update_evolution_auto_save(self, config_payload: dict[str, Any] | None) -> None:
         """Refresh the in-memory evolution auto-save flag from a config snapshot.

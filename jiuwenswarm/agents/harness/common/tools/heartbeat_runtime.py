@@ -41,11 +41,19 @@ class HeartbeatRuntimeBridge:
     def __init__(self, gateway_push: GatewayPushTransport | None = None) -> None:
         self._gateway_push = gateway_push or WebSocketGatewayPushTransport()
 
+    def _gateway_available(self) -> bool:
+        checker = getattr(self._gateway_push, "is_available", None)
+        return bool(checker()) if callable(checker) else True
+
     async def _send(
         self, context: Any, action: str, data: dict[str, Any]
     ) -> dict[str, Any]:
         from jiuwenswarm.common.e2a.constants import E2A_RESPONSE_KIND_HEARTBEAT
 
+        if not self._gateway_available():
+            raise RuntimeError(
+                "heartbeat jobs are unavailable without an active Gateway WebSocket"
+            )
         metadata = context.metadata if isinstance(context.metadata, dict) else {}
         request_id = str(metadata.get("request_id") or "").strip()
         channel_id = str(context.channel_id or "web").strip() or "web"
@@ -80,6 +88,9 @@ class HeartbeatRuntimeBridge:
         return dict(data_out) if isinstance(data_out, dict) else {"result": data_out}
 
     def build_tools(self, *, context: Any) -> list[Tool]:
+        if not self._gateway_available():
+            return []
+
         def tool(name: str, description: str, schema: dict[str, Any], func: Any) -> Tool:
             return LocalFunction(
                 card=ToolCard(name=name, description=description, input_params=schema),

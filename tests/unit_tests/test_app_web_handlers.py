@@ -111,7 +111,7 @@ class FakeHeartbeatController:
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_web_methods_use_new_names_and_current_session() -> None:
+async def test_heartbeat_web_methods_keep_probe_aliases_and_use_current_session() -> None:
     channel = FakeWebChannel()
     controller = FakeHeartbeatController()
     _register_web_handlers(
@@ -119,8 +119,18 @@ async def test_heartbeat_web_methods_use_new_names_and_current_session() -> None
     )
     assert "health_check.get_conf" in channel.methods
     assert "health_check.set_conf" in channel.methods
-    assert "heartbeat.get_conf" not in channel.methods
-    assert "heartbeat.set_conf" not in channel.methods
+    assert (
+        channel.methods["heartbeat.get_conf"]
+        is channel.methods["health_check.get_conf"]
+    )
+    assert (
+        channel.methods["heartbeat.set_conf"]
+        is channel.methods["health_check.set_conf"]
+    )
+    assert (
+        channel.methods["heartbeat.get_path"]
+        is channel.methods["health_check.get_path"]
+    )
     expected = {
         "heartbeat.job.list", "heartbeat.job.meta", "heartbeat.job.get",
         "heartbeat.job.create", "heartbeat.job.update", "heartbeat.job.delete",
