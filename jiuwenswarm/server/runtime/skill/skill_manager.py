@@ -50,6 +50,27 @@ def _get_ssl_verify() -> bool:
 
 logger = logging.getLogger(__name__)
 
+# Cold-start / tip skills allowlist: pass raw comma-separated string to SkillUseRail.
+ENABLED_SKILLS_ENV = "ENABLED_SKILLS"
+
+
+def enabled_skills_from_environ() -> str | None:
+    """Read ENABLED_SKILLS from tip/env (skills allowlist).
+
+    Returns the raw comma-separated string for SkillUseRail normalization,
+    or None when unset so the rail does not apply an empty allowlist.
+    """
+    from jiuwenswarm.common.local_env_config import read_env_if_set
+
+    raw = read_env_if_set(ENABLED_SKILLS_ENV)
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    return text
+
+
 _SKILLNET_DOWNLOAD_TIMEOUT: int = int(os.environ.get("SKILLNET_DOWNLOAD_TIMEOUT", "60"))
 _SKILLNET_MAX_RETRIES: int = int(os.environ.get("SKILLNET_MAX_RETRIES", "3"))
 # SkillNet 异步安装 job 必须跨 SkillManager 实例共享：skills.* 无状态 RPC 在

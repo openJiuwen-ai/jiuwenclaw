@@ -120,8 +120,6 @@ def prepare_requests_kwargs(url: str, kwargs: dict[str, Any] | None = None) -> d
 
 def _requests_verify() -> bool:
     raw = read_env("JIUWENSWARM_SSL_VERIFY", "").strip().lower()
-    if not raw:
-        raw = read_env("JIUWENCLAW_SSL_VERIFY", "").strip().lower()
     if raw in ("0", "false", "no", "off"):
         return False
     if raw in ("1", "true", "yes", "on"):
