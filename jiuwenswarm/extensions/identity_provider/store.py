@@ -105,6 +105,11 @@ class IdentityStore:
             logger.warning("[IdentityStore] 身份获取失败: %s", e)
             _fetched_var.set(True)
             fallback = await _provider.on_fetch_failed(e)
+            fallback = None
+            try:
+                fallback = await _provider.on_fetch_failed(e)
+            except Exception as fe:
+                logger.warning("[IdentityStore] fallback 获取失败: %s", fe)
             if fallback is not None:
                 token = _identity_var.set(fallback)
                 logger.info(
