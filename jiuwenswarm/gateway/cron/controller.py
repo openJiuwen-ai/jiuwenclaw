@@ -37,13 +37,34 @@ class CronController:
 
     _instance: ClassVar[CronController | None] = None
 
-    def __init__(self, *, store: CronJobStoreBackend, scheduler: CronSchedulerService) -> None:
+    def __init__(
+        self,
+        *,
+        store: CronJobStoreBackend,
+        scheduler: CronSchedulerService,
+        service_id: str = "default",
+        agent_id: str = "default",
+    ) -> None:
         self._store = store
         self._scheduler = scheduler
+        self._service_id = str(service_id or "default").strip() or "default"
+        self._agent_id = str(agent_id or "default").strip() or "default"
         self._target_channel: CronTargetChannel | None = None
 
     def set_target_channel(self, channel: CronTargetChannel) -> None:
         self._target_channel = channel
+
+    async def stop_scheduler(self) -> None:
+        """Stop the backing CronSchedulerService for this controller."""
+        await self._scheduler.stop()
+
+    def set_scheduler_active(self, active: bool) -> None:
+        """Enable or pause the backing scheduler (e.g. enterprise active-standby)."""
+        self._scheduler.set_active(active)
+
+    async def reload_scheduler(self) -> None:
+        """Reload jobs into the backing scheduler from its store."""
+        await self._scheduler.reload()
 
     @classmethod
     def get_instance(
@@ -350,6 +371,8 @@ class CronController:
             "model_name": model_name,
             "app_id": app_id,
             "work_mode": work_mode,
+            "service_id": self._service_id,
+            "agent_id": self._agent_id,
         }
         if enterprise_cron_enabled():
             create_kwargs["group_id"] = group_id

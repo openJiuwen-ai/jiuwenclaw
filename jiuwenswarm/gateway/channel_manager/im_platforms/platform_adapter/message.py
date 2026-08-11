@@ -3,7 +3,8 @@ import threading
 import json
 from typing import Any
 from pathlib import Path
-from jiuwenswarm.common.utils import logger, get_agent_memory_dir
+from jiuwenswarm.common.utils import logger
+from jiuwenswarm.gateway.tenant_paths import resolve_channel_group_chat_memory_dir
 
 # lark_oapi (飞书 SDK) 体积巨大 (21175 文件 / 49MB), 启动期 import 耗时 ~5-8s/进程.
 # 历史在模块顶层 try-import, 导致只要 import MessageStore 就强制加载 lark_oapi
@@ -42,128 +43,111 @@ MSG_TYPE_MAP = {
 
 class MessageStore:
     def __init__(self, api_client: Any = None, platform_adapter: Any = None):
-        self._memory_dir = (
-            get_agent_memory_dir() / "group_chat"
-        )  # 群聊记忆目录
-        self._memory_file = self._memory_dir / "feishu_memory.json"  # 飞书记忆文件路径（兼容旧逻辑）
-        self._memory_lock = threading.Lock()  # 记忆文件读写锁
+        # Paths are resolved lazily per (service_id, agent_id); do not mkdir at init.
         self._api_client = api_client  # 飞书API客户端
         self._platform_adapter = platform_adapter  # 平台适配器，用于获取用户信息等
+        self._memory_lock = threading.Lock()  # 记忆文件读写锁
+
+    @staticmethod
+    def _memory_dir(
+        service_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> Path:
+        return resolve_channel_group_chat_memory_dir(service_id, agent_id)
+
+    def _get_memory_file_path(
+        self,
+        chat_id: str,
+        *,
+        service_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> Path:
+        """获取指定群聊的记忆文件路径。"""
+        return self._memory_dir(service_id, agent_id) / f"{chat_id}.json"
+
+    def _legacy_memory_file(
+        self,
+        *,
+        service_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> Path:
+        return self._memory_dir(service_id, agent_id) / "feishu_memory.json"
 
     def set_api_client(self, api_client: Any) -> None:
-        """
-        设置飞书API客户端。
-
-        Args:
-            api_client: 飞书API客户端实例
-        """
+        """设置飞书API客户端。"""
         self._api_client = api_client
         logger.info("飞书API客户端已设置")
-    
-    def set_platform_adapter(self, platform_adapter: Any) -> None:
-        """
-        设置平台适配器。
 
-        Args:
-            platform_adapter: 平台适配器实例
-        """
+    def set_platform_adapter(self, platform_adapter: Any) -> None:
+        """设置平台适配器。"""
         self._platform_adapter = platform_adapter
         logger.info("平台适配器已设置")
-    
+
     def get_user_name_by_open_id(self, open_id: str) -> str:
-        """
-        获取用户名称，优先使用平台适配器，如果不可用则使用本地API客户端。
-
-        Args:
-            open_id: 用户 open_id
-
-        Returns:
-            str: 用户名
-        """
-        # 优先使用平台适配器（如果可用）
-        if self._platform_adapter and hasattr(self._platform_adapter, 'get_user_name_by_open_id'):
+        """获取用户名称，优先使用平台适配器。"""
+        if self._platform_adapter and hasattr(self._platform_adapter, "get_user_name_by_open_id"):
             return self._platform_adapter.get_user_name_by_open_id(open_id)
-        
-        # 如果平台适配器不可用，返回空字符串（因为原方法已被移除）
         return ""
 
-    def _get_memory_file_path(self, chat_id: str) -> Path:
-        """
-        获取指定群聊的记忆文件路径。
-
-        Args:
-            chat_id: 群聊ID
-
-        Returns:
-            Path: 记忆文件路径
-        """
-        return self._memory_dir / f"{chat_id}.json"
-
-    def load_memory(self, chat_id: str | None = None) -> dict[str, list] | list:
-        """
-        加载飞书记忆文件。
-
-        Args:
-            chat_id: 群聊ID，如果为None则加载所有记忆（兼容旧逻辑）
-
-        Returns:
-            dict或list: 记忆数据
-        """
+    def load_memory(
+        self,
+        chat_id: str | None = None,
+        *,
+        service_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> dict[str, list] | list:
+        """加载飞书记忆文件（按租户路径隔离）。"""
         with self._memory_lock:
-            # 如果指定了chat_id，加载该群聊的独立记忆文件
             if chat_id:
-                memory_file = self._get_memory_file_path(chat_id)
-                logger.info(f"[调试] _load_memory: 群聊记忆文件路径={memory_file}, exists={memory_file.exists()}")
+                memory_file = self._get_memory_file_path(
+                    chat_id, service_id=service_id, agent_id=agent_id
+                )
                 if not memory_file.exists():
-                    logger.info(f"[调试] _load_memory: 群聊记忆文件不存在，返回空列表: chat_id={chat_id}")
                     return []
                 try:
                     with open(memory_file, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                        logger.info(f"[调试] _load_memory: 成功加载群聊记忆，消息数={len(data)}, chat_id={chat_id}")
-                        return data
+                        return json.load(f)
                 except Exception as e:
-                    logger.warning(f"[调试] 加载群聊记忆文件失败: {e}, chat_id={chat_id}")
+                    logger.warning("加载群聊记忆文件失败: %s, chat_id=%s", e, chat_id)
                     return []
-            
-            # 兼容旧逻辑：加载统一的feishu_memory.json
-            logger.info(f"[调试] _load_memory: 统一记忆文件路径={self._memory_file}, exists={self._memory_file.exists()}")
-            if not self._memory_file.exists():
-                logger.info(f"[调试] _load_memory: 统一记忆文件不存在，返回空字典")
+
+            memory_file = self._legacy_memory_file(service_id=service_id, agent_id=agent_id)
+            if not memory_file.exists():
                 return {}
             try:
-                with open(self._memory_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    logger.info(f"[调试] _load_memory: 成功加载统一记忆，会话数={len(data)}")
-                    return data
+                with open(memory_file, "r", encoding="utf-8") as f:
+                    return json.load(f)
             except Exception as e:
-                logger.warning(f"[调试] 加载飞书记忆文件失败: {e}")
+                logger.warning("加载飞书记忆文件失败: %s", e)
                 return {}
 
-    def _save_memory(self, memory: dict[str, list] | list, chat_id: str | None = None) -> None:
-        """
-        保存飞书记忆文件。
-
-        Args:
-            memory: 记忆数据
-            chat_id: 群聊ID，如果为None则保存到统一的feishu_memory.json（兼容旧逻辑）
-        """
+    def _save_memory(
+        self,
+        memory: dict[str, list] | list,
+        chat_id: str | None = None,
+        *,
+        service_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> None:
+        """保存飞书记忆文件（按租户路径隔离）。"""
         with self._memory_lock:
             try:
-                self._memory_dir.mkdir(parents=True, exist_ok=True)
-                
-                # 如果指定了chat_id，保存到该群聊的独立记忆文件
+                memory_dir = self._memory_dir(service_id, agent_id)
+                memory_dir.mkdir(parents=True, exist_ok=True)
                 if chat_id:
-                    memory_file = self._get_memory_file_path(chat_id)
+                    memory_file = self._get_memory_file_path(
+                        chat_id, service_id=service_id, agent_id=agent_id
+                    )
                     with open(memory_file, "w", encoding="utf-8") as f:
                         json.dump(memory, f, ensure_ascii=False, indent=2)
-                    logger.info(f"[调试] _save_memory: 群聊记忆已保存: {memory_file}, 消息数={len(memory)}")
                 else:
-                    # 兼容旧逻辑：保存到统一的feishu_memory.json
-                    with open(self._memory_file, "w", encoding="utf-8") as f:
+                    memory_file = self._legacy_memory_file(
+                        service_id=service_id, agent_id=agent_id
+                    )
+                    with open(memory_file, "w", encoding="utf-8") as f:
                         json.dump(memory, f, ensure_ascii=False, indent=2)
             except Exception as e:
-                logger.warning(f"保存飞书记忆文件失败: {e}")
+                logger.warning("保存飞书记忆文件失败: %s", e)
 
     @staticmethod
     def _parse_history_message_content(item: Any) -> str:
@@ -304,82 +288,70 @@ class MessageStore:
             logger.warning(f"拉取飞书历史消息时发生异常: {e}")
             return []
 
-    def _get_or_fetch_history(self, chat_id: str) -> list[dict]:
-        """
-        获取或拉取会话历史消息。
-
-        如果本地记忆中没有该会话，则从飞书API拉取过去7天的历史消息。
-        如果本地记忆中有该会话，则从最后一条消息的时间戳开始拉取新消息。
-
-        Args:
-            chat_id: 聊天ID
-
-        Returns:
-            list: 历史消息列表
-        """
+    def _get_or_fetch_history(
+        self,
+        chat_id: str,
+        *,
+        service_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> list[dict]:
+        """获取或拉取会话历史消息（按租户懒解析本地文件）。"""
         from datetime import datetime, timedelta, timezone
 
-        memory = self.load_memory(chat_id)
-        memory_file = self._get_memory_file_path(chat_id)
+        memory = self.load_memory(chat_id, service_id=service_id, agent_id=agent_id)
+        memory_file = self._get_memory_file_path(
+            chat_id, service_id=service_id, agent_id=agent_id
+        )
 
         if not memory_file.exists():
-            # 首次获取：拉取过去7天的消息
             logger.info(f"[调试] 本地记忆文件不存在，首次拉取过去7天历史: chat_id={chat_id}")
             now = datetime.now(timezone.utc)
             start_time = int((now - timedelta(days=7)).timestamp() * 1000)
             history = self._fetch_history_from_feishu(chat_id, start_time=start_time)
-            self._save_memory(history, chat_id)
+            self._save_memory(history, chat_id, service_id=service_id, agent_id=agent_id)
             logger.info(f"[调试] 首次拉取历史消息完成: chat_id={chat_id}, 消息数={len(history)}")
             return history
-        else:
-            # 增量获取：从最后一条消息的时间戳开始拉取到今天
-            logger.info(f"[调试] 本地记忆文件存在，进行增量更新: chat_id={chat_id}")
 
-            if memory and len(memory) > 0:
-                # 获取最后一条消息的时间戳
-                last_timestamp = memory[-1].get("timestamp", 0)
-                if last_timestamp:
-                    # 从最后一条消息的时间开始拉取
-                    logger.info(f"[调试] 从最后一条消息时间开始拉取: last_timestamp={last_timestamp}")
-                    new_messages = self._fetch_history_from_feishu(chat_id, start_time=last_timestamp)
+        logger.info(f"[调试] 本地记忆文件存在，进行增量更新: chat_id={chat_id}")
+        if memory and len(memory) > 0:
+            last_timestamp = memory[-1].get("timestamp", 0)
+            if last_timestamp:
+                logger.info(f"[调试] 从最后一条消息时间开始拉取: last_timestamp={last_timestamp}")
+                new_messages = self._fetch_history_from_feishu(
+                    chat_id, start_time=last_timestamp
+                )
+                existing_ids = {msg.get("message_id") for msg in memory}
+                added_count = 0
+                for msg in new_messages:
+                    if msg.get("message_id") not in existing_ids:
+                        memory.append(msg)
+                        added_count += 1
+                if added_count > 0:
+                    self._save_memory(
+                        memory, chat_id, service_id=service_id, agent_id=agent_id
+                    )
+                    logger.info(
+                        f"[调试] 增量更新完成: chat_id={chat_id}, 新增消息数={added_count}, 总消息数={len(memory)}"
+                    )
+                else:
+                    logger.info(f"[调试] 没有新消息需要添加: chat_id={chat_id}")
+                return memory
+        return memory if memory else []
 
-                    # 合并新消息（去重）
-                    existing_ids = {msg.get("message_id") for msg in memory}
-                    added_count = 0
-                    for msg in new_messages:
-                        if msg.get("message_id") not in existing_ids:
-                            memory.append(msg)
-                            added_count += 1
-
-                    if added_count > 0:
-                        self._save_memory(memory, chat_id)
-                        logger.info(f"[调试] 增量更新完成: chat_id={chat_id}, 新增消息数={added_count}, 总消息数={len(memory)}")
-                    else:
-                        logger.info(f"[调试] 没有新消息需要添加: chat_id={chat_id}")
-
-                    return memory
-
-            # 如果没有历史消息或无法获取时间戳，返回现有记忆
-            return memory if memory else []
-
-    def add_message_to_memory(self, chat_id: str, message: dict) -> None:
-        """
-        将消息添加到本地记忆。
-
-        Args:
-            chat_id: 聊天ID
-            message: 消息数据
-        """
-        # 加载该群聊的记忆
-        history = self.load_memory(chat_id)
-
+    def add_message_to_memory(
+        self,
+        chat_id: str,
+        message: dict,
+        *,
+        service_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> None:
+        """将消息添加到本地记忆（按租户懒解析路径）。"""
+        history = self.load_memory(chat_id, service_id=service_id, agent_id=agent_id)
         open_id = message.get("open_id", "")
-        user_name = self.get_user_name_by_open_id(open_id)
-        message["user_name"] = user_name
-        
-        # 添加新消息
+        message["user_name"] = self.get_user_name_by_open_id(open_id)
         history.append(message)
-        
-        # 保存到该群聊的独立记忆文件
-        self._save_memory(history, chat_id)
-        logger.info(f"[调试] 新消息已添加到群聊记忆: chat_id={chat_id}, 总消息数={len(history)}")
+        self._save_memory(history, chat_id, service_id=service_id, agent_id=agent_id)
+        logger.info(
+            f"[调试] 新消息已添加到群聊记忆: chat_id={chat_id}, 总消息数={len(history)}"
+        )

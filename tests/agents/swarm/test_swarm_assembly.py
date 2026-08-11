@@ -1038,20 +1038,32 @@ def test_xiaoyi_phone_tools_gated_by_config() -> None:
 
 def test_video_tool_gated_by_config(monkeypatch: pytest.MonkeyPatch) -> None:
     """The video tool is built only when models.video is configured."""
+    from jiuwenswarm.common.local_env_config import (
+        bind_task_env_overlay,
+        reset_task_env_overlay,
+    )
+
     ctx = SwarmBuildContext(config={})
     # Gate closed: empty config has no dedicated video model.
     assert tools._build_video_tools(ctx) == []
 
-    # Gate open: complete config reported + VIDEO_API_KEY present.
+    # Gate open: complete config reported + VIDEO_* tip overlay (Track-B, not bare os.environ).
     monkeypatch.setattr(tools, "apply_video_model_config_from_yaml", lambda cfg: None)
     monkeypatch.setattr(
         tools, "complete_multimodal_model_configured", lambda cfg, kind: True
     )
-    monkeypatch.setenv("VIDEO_API_KEY", "k")
-    monkeypatch.setenv("VIDEO_API_BASE", "https://video.example/v1")
-    monkeypatch.setenv("VIDEO_MODEL_NAME", "video-model")
-    built = tools._build_video_tools(ctx)
-    assert [tool.card.name for tool in built] == ["video_understanding"]
+    token = bind_task_env_overlay(
+        {
+            "VIDEO_API_KEY": "k",
+            "VIDEO_API_BASE": "https://video.example/v1",
+            "VIDEO_MODEL_NAME": "video-model",
+        }
+    )
+    try:
+        built = tools._build_video_tools(ctx)
+        assert [tool.card.name for tool in built] == ["video_understanding"]
+    finally:
+        reset_task_env_overlay(token)
 
 
 def test_image_gen_tool_gated_by_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1147,9 +1159,23 @@ def test_vision_model_config_params_gating(monkeypatch: pytest.MonkeyPatch) -> N
         tools, "dedicated_multimodal_model_configured", lambda cfg, kind: True
     )
     monkeypatch.setattr(tools, "apply_vision_model_config_from_yaml", lambda cfg: None)
-    monkeypatch.setenv("VISION_API_KEY", "key")
-    monkeypatch.setenv("VISION_BASE_URL", "https://vision.example")
-    monkeypatch.setenv("VISION_MODEL", "vlm-1")
+    from jiuwenswarm.common.local_env_config import (
+        ENV_CONFIG_DICT,
+        apply_env_overrides_to_active,
+        clear_staged_env,
+    )
+
+    ENV_CONFIG_DICT.clear()
+    clear_staged_env()
+    apply_env_overrides_to_active(
+        {
+            "VISION_API_KEY": "key",
+            "VISION_BASE_URL": "https://vision.example",
+            "VISION_MODEL": "vlm-1",
+        },
+        service_id="default",
+        agent_id="default",
+    )
 
     params = tools.vision_model_config_params({})
     assert params["api_key"] == "key"

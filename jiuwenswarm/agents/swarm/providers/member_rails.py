@@ -32,6 +32,7 @@ from openjiuwen.agent_teams.rails.team_context import (
 )
 
 from jiuwenswarm.agents.harness.common.plugins.rail_manager import get_rail_manager
+from jiuwenswarm.server.runtime.runtime_scope import RuntimeScopeKey
 from jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail import (
     RuntimePromptRail,
 )
@@ -72,6 +73,25 @@ def _workspace_root(ctx: SwarmBuildContext) -> str | None:
     """Resolve the member workspace root path."""
     workspace = getattr(ctx, "workspace", None)
     return getattr(workspace, "root_path", None) if workspace else None
+
+
+def _runtime_scope_from_context(ctx: SwarmBuildContext) -> RuntimeScopeKey:
+    """Prefer bound agent env ns; else request metadata; else default/default."""
+    from jiuwenswarm.common.local_env_config import get_bound_agent_env_ns
+
+    bound = get_bound_agent_env_ns()
+    if bound is not None:
+        return RuntimeScopeKey.from_ids(bound[0], bound[1], getattr(ctx, "session_id", None))
+    meta = getattr(ctx, "request_metadata", None)
+    if isinstance(meta, dict) and (
+        meta.get("service_id") is not None or meta.get("agent_id") is not None
+    ):
+        return RuntimeScopeKey.from_ids(
+            meta.get("service_id"),
+            meta.get("agent_id"),
+            getattr(ctx, "session_id", None),
+        )
+    return RuntimeScopeKey.from_ids(session_id=getattr(ctx, "session_id", None))
 
 
 class SkillRetrievalPromptInput(ConstructionInput):
@@ -405,7 +425,7 @@ def _build_plugin_rails(
     Returns:
         A list of extension rail instances (possibly empty).
     """
-    rail_manager = get_rail_manager()
+    rail_manager = get_rail_manager(_runtime_scope_from_context(context))
     rails: list[Any] = []
     for rail_name in rail_manager.get_registered_rail_names():
         try:

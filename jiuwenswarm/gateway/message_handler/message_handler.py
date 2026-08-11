@@ -248,6 +248,7 @@ class MessageHandler(ABC):
         # 组合：/join /exit 团队成员管理逻辑（独立文件维护，通过 self._h 访问宿主能力）
         self._join_exit = JoinExitHandlers(self)
         self._cron_controller = None
+        self._cron_registry = None
 
         # IM Pipeline（数字分身）— None 时不执行，不影响原有逻辑
         self._inbound_pipeline = None   # type: Any  # IMInboundPipeline | None
@@ -2836,6 +2837,7 @@ class MessageHandler(ABC):
         return await push_file_to_web_and_get_token(file_path, filename, session_id)
 
     def set_cron_controller(self, controller: Any) -> None:
+        """Deprecated: use :meth:`set_cron_registry`."""
         self._cron_controller = controller
 
     @staticmethod
@@ -2843,6 +2845,9 @@ class MessageHandler(ABC):
         from jiuwenswarm.gateway.cron.enterprise_gate import extract_routing_triple
 
         return extract_routing_triple(params)
+
+    def set_cron_registry(self, registry: Any) -> None:
+        self._cron_registry = registry
 
     async def _handle_cron_push_payload(
         self,
@@ -2853,62 +2858,87 @@ class MessageHandler(ABC):
         session_id: str | None,
         metadata: dict[str, Any] | None,
     ) -> None:
-        cc = self._cron_controller
-        if cc is None:
+        registry = self._cron_registry or self._cron_controller
+        if registry is None:
             return
         action = str(payload.get("action") or "").strip()
         params = payload.get("data") or {}
         if not isinstance(params, dict):
             params = {}
         try:
-            g, b, u = self._cron_routing_from_params(params)
-            if action == "list":
-                data = await cc.list_jobs(params)
-            elif action == "get":
-                data = await cc.get_job(str(params.get("job_id") or ""), group_id=g, bot_id=b, user_id=u)
-            elif action == "create":
-                # 从原始请求中获取 mode，覆盖 LLM 工具调用的默认值
-                request_mode = self._stream_modes.get(request_id)
-                if request_mode:
-                    params["mode"] = request_mode
-                data = await cc.create_job(params)
-            elif action == "update":
-                data = await cc.update_job(
-                    str(params.get("job_id") or ""),
-                    dict(params.get("patch") or {}),
-                    group_id=g,
-                    bot_id=b,
-                    user_id=u,
+            if hasattr(registry, "handle_push_action"):
+                service_id, agent_id = registry.resolve_scope(
+                    metadata=metadata,
+                    payload=payload,
+                    params=params,
                 )
-            elif action == "delete":
-                data = {
-                    "deleted": await cc.delete_job(
+                request_mode = self._stream_modes.get(request_id)
+                data = await registry.handle_push_action(
+                    action=action,
+                    params=params,
+                    service_id=service_id,
+                    agent_id=agent_id,
+                    request_mode=request_mode,
+                    mirror_to_agent=False,
+                )
+            else:
+                g, b, u = self._cron_routing_from_params(params)
+                if action == "list":
+                    data = await registry.list_jobs(params)
+                elif action == "get":
+                    data = await registry.get_job(
+                        str(params.get("job_id") or ""), group_id=g, bot_id=b, user_id=u
+                    )
+                elif action == "create":
+                    # 从原始请求中获取 mode，覆盖 LLM 工具调用的默认值
+                    request_mode = self._stream_modes.get(request_id)
+                    if request_mode:
+                        params["mode"] = request_mode
+                    data = await registry.create_job(params)
+                elif action == "update":
+                    data = await registry.update_job(
                         str(params.get("job_id") or ""),
+                        dict(params.get("patch") or {}),
                         group_id=g,
                         bot_id=b,
                         user_id=u,
                     )
-                }
-            elif action == "toggle":
-                data = await cc.toggle_job(
-                    str(params.get("job_id") or ""),
-                    bool(params.get("enabled")),
-                    group_id=g,
-                    bot_id=b,
-                    user_id=u,
-                )
-            elif action == "preview":
-                data = await cc.preview_job(
-                    str(params.get("job_id") or ""),
-                    int(params.get("count", 5)),
-                    group_id=g,
-                    bot_id=b,
-                    user_id=u,
-                )
-            elif action == "run_now":
-                data = {"run_id": await cc.run_now(str(params.get("job_id") or ""), group_id=g, bot_id=b, user_id=u)}
-            else:
-                data = {"error": f"unknown cron action: {action}"}
+                elif action == "delete":
+                    data = {
+                        "deleted": await registry.delete_job(
+                            str(params.get("job_id") or ""),
+                            group_id=g,
+                            bot_id=b,
+                            user_id=u,
+                        )
+                    }
+                elif action == "toggle":
+                    data = await registry.toggle_job(
+                        str(params.get("job_id") or ""),
+                        bool(params.get("enabled")),
+                        group_id=g,
+                        bot_id=b,
+                        user_id=u,
+                    )
+                elif action == "preview":
+                    data = await registry.preview_job(
+                        str(params.get("job_id") or ""),
+                        int(params.get("count", 5)),
+                        group_id=g,
+                        bot_id=b,
+                        user_id=u,
+                    )
+                elif action == "run_now":
+                    data = {
+                        "run_id": await registry.run_now(
+                            str(params.get("job_id") or ""),
+                            group_id=g,
+                            bot_id=b,
+                            user_id=u,
+                        )
+                    }
+                else:
+                    data = {"error": f"unknown cron action: {action}"}
         except Exception as exc:  # noqa: BLE001
             data = {"error": str(exc)}
 

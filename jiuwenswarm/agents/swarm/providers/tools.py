@@ -87,6 +87,7 @@ from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools import (
 from jiuwenswarm.agents.harness.team.team_runtime_inheritance import TOOL_WHITELIST
 from jiuwenswarm.agents.swarm.context import SwarmBuildContext
 from jiuwenswarm.common.config import get_config
+from jiuwenswarm.common.local_env_config import get_local_config
 from jiuwenswarm.common.tool_ownership import mark_stateless
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
 
@@ -243,6 +244,16 @@ def _parse_int(value: Any, default: int) -> int:
 # ---------------------------------------------------------------------------
 
 
+
+def _tip_getenv(name: str, default: str = "") -> str:
+    """Read Track-B tip (overlay/active); never bare os.environ for business keys."""
+    value = get_local_config(name, default if default else None)
+    if value is None:
+        return default
+    text = str(value).strip()
+    return text if text else default
+
+
 def vision_model_config_params(config: dict[str, Any]) -> dict[str, Any]:
     """Return ``VisionModelConfig`` constructor kwargs, or {} when unconfigured.
 
@@ -252,12 +263,12 @@ def vision_model_config_params(config: dict[str, Any]) -> dict[str, Any]:
     if not dedicated_multimodal_model_configured(config, "vision"):
         return {}
     apply_vision_model_config_from_yaml(config)
-    api_key = str(os.getenv("VISION_API_KEY", "")).strip()
+    api_key = str(_tip_getenv("VISION_API_KEY")).strip()
     base_url = str(
-        os.getenv("VISION_BASE_URL") or os.getenv("VISION_API_BASE") or ""
+        _tip_getenv("VISION_BASE_URL") or _tip_getenv("VISION_API_BASE") or ""
     ).strip()
     model_name = str(
-        os.getenv("VISION_MODEL") or os.getenv("VISION_MODEL_NAME") or ""
+        _tip_getenv("VISION_MODEL") or _tip_getenv("VISION_MODEL_NAME") or ""
     ).strip()
     if not api_key or not base_url or not model_name:
         return {}
@@ -265,7 +276,7 @@ def vision_model_config_params(config: dict[str, Any]) -> dict[str, Any]:
         "api_key": api_key,
         "base_url": base_url,
         "model": model_name,
-        "max_retries": _parse_int(os.getenv("VISION_MAX_RETRIES"), 3),
+        "max_retries": _parse_int(_tip_getenv("VISION_MAX_RETRIES"), 3),
     }
 
 
@@ -279,32 +290,32 @@ def audio_model_config_params(config: dict[str, Any]) -> dict[str, Any]:
     if not complete_multimodal_model_configured(config, "audio"):
         return {}
     apply_audio_model_config_from_yaml(config)
-    api_key = str(os.getenv("AUDIO_API_KEY", "")).strip()
+    api_key = str(_tip_getenv("AUDIO_API_KEY")).strip()
     base_url = str(
-        os.getenv("AUDIO_BASE_URL") or os.getenv("AUDIO_API_BASE") or ""
+        _tip_getenv("AUDIO_BASE_URL") or _tip_getenv("AUDIO_API_BASE") or ""
     ).strip()
     if not api_key or not base_url:
         return {}
     transcription_model = str(
-        os.getenv("AUDIO_TRANSCRIPTION_MODEL") or os.getenv("AUDIO_MODEL_NAME") or "",
+        _tip_getenv("AUDIO_TRANSCRIPTION_MODEL") or _tip_getenv("AUDIO_MODEL_NAME") or "",
     ).strip()
     question_answering_model = str(
-        os.getenv("AUDIO_QUESTION_ANSWERING_MODEL")
-        or os.getenv("AUDIO_MODEL_NAME")
+        _tip_getenv("AUDIO_QUESTION_ANSWERING_MODEL")
+        or _tip_getenv("AUDIO_MODEL_NAME")
         or "",
     ).strip()
     config_kwargs: dict[str, Any] = {
         "api_key": api_key,
         "base_url": base_url,
-        "max_retries": _parse_int(os.getenv("AUDIO_MAX_RETRIES"), 3),
-        "http_timeout": _parse_int(os.getenv("AUDIO_HTTP_TIMEOUT"), 20),
+        "max_retries": _parse_int(_tip_getenv("AUDIO_MAX_RETRIES"), 3),
+        "http_timeout": _parse_int(_tip_getenv("AUDIO_HTTP_TIMEOUT"), 20),
         "max_audio_bytes": _parse_int(
-            os.getenv("AUDIO_MAX_AUDIO_BYTES"), 25 * 1024 * 1024
+            _tip_getenv("AUDIO_MAX_AUDIO_BYTES"), 25 * 1024 * 1024
         ),
     }
-    acr_access_key = str(os.getenv("ACR_ACCESS_KEY", "")).strip()
-    acr_access_secret = str(os.getenv("ACR_ACCESS_SECRET", "")).strip()
-    acr_base_url = str(os.getenv("ACR_BASE_URL", "")).strip()
+    acr_access_key = str(_tip_getenv("ACR_ACCESS_KEY")).strip()
+    acr_access_secret = str(_tip_getenv("ACR_ACCESS_SECRET")).strip()
+    acr_base_url = str(_tip_getenv("ACR_BASE_URL")).strip()
     if acr_access_key:
         config_kwargs["acr_access_key"] = acr_access_key
     if acr_access_secret:
@@ -371,9 +382,9 @@ def _build_video_tools(ctx: SwarmBuildContext) -> list[Any]:
     apply_video_model_config_from_yaml(config)
     if not complete_multimodal_model_configured(config, "video"):
         return []
-    video_api_key = str(os.getenv("VIDEO_API_KEY", "")).strip()
-    video_api_base = str(os.getenv("VIDEO_API_BASE", "")).strip()
-    video_model_name = str(os.getenv("VIDEO_MODEL_NAME", "")).strip()
+    video_api_key = str(_tip_getenv("VIDEO_API_KEY")).strip()
+    video_api_base = str(_tip_getenv("VIDEO_API_BASE")).strip()
+    video_model_name = str(_tip_getenv("VIDEO_MODEL_NAME")).strip()
     if not video_api_key or not video_api_base or not video_model_name:
         return []
     return _mark_stateless([video_understanding])
@@ -382,7 +393,7 @@ def _build_video_tools(ctx: SwarmBuildContext) -> list[Any]:
 def _build_image_gen_tools(ctx: SwarmBuildContext) -> list[Any]:
     """Build the image-generation tool when ``models.image_gen`` is configured."""
     apply_image_gen_model_config_from_yaml(ctx.config or {})
-    if not os.getenv("IMAGE_GEN_API_KEY"):
+    if not _tip_getenv("IMAGE_GEN_API_KEY"):
         return []
     return _mark_stateless([generate_image])
 

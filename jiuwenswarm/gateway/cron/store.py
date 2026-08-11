@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from dataclasses import replace
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TypeVar
@@ -237,6 +238,8 @@ class FileCronJobStore:
         model_name: str | None = None,
         app_id: str = "",
         work_mode: str = DEFAULT_WEB_WORK_MODE,
+        service_id: str | None = None,
+        agent_id: str | None = None,
     ) -> CronJob:
         job = build_new_cron_job(
             job_id=job_id,
@@ -257,6 +260,9 @@ class FileCronJobStore:
             app_id=app_id,
             work_mode=work_mode,
         )
+        tenant_sid = str(service_id or "default").strip() or "default"
+        tenant_aid = str(agent_id or "default").strip() or "default"
+        job = replace(job, service_id=tenant_sid, agent_id=tenant_aid)
         await self._upsert_job(job)
         return job
 
@@ -348,6 +354,12 @@ class FileCronJobStore:
             self._write_json_unlocked(data)
 
         await self._run_locked(_body)
+
+    async def upsert_from_dict(self, data: dict[str, Any]) -> CronJob:
+        """Insert or replace a job from a serialized dict (mirror sync)."""
+        job = CronJob.from_dict(dict(data))
+        await self._upsert_job(job)
+        return job
 
     async def _read_json(self) -> dict[str, Any]:
         return await self._run_locked(self._read_json_unlocked)

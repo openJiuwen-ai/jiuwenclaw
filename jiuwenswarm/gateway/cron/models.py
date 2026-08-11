@@ -277,6 +277,9 @@ class CronJob:
     # from_dict 仅做 normalize + 兜底 "work"，不做跨层 Project 反查；
     # 精确值由创建/更新路径从 Project 记录注入，或由展示层二次查询覆盖。
     work_mode: str = DEFAULT_WEB_WORK_MODE
+    # Multi-tenant scope (Gateway CronTenantRegistry / Agent CronTools).
+    service_id: str = "default"
+    agent_id: str = "default"
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -291,6 +294,8 @@ class CronJob:
             "targets": self.targets,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "service_id": self.service_id,
+            "agent_id": self.agent_id,
         }
         if self.session_id:
             d["session_id"] = self.session_id
@@ -423,6 +428,8 @@ class CronJob:
         # （gateway.cron.models 是底层数据模型，不应反向依赖 server.runtime.session.project_store）
         # 精确值由创建/更新路径从 Project 记录注入，或由展示层二次查询覆盖。
         job_work_mode = normalize_work_mode(data.get("work_mode"), default=DEFAULT_WEB_WORK_MODE)
+        job_service_id = str(data.get("service_id") or "default").strip() or "default"
+        job_agent_id = str(data.get("agent_id") or "default").strip() or "default"
 
         def _opt_id(key: str) -> str | None:
             raw = data.get(key, None)
@@ -453,6 +460,8 @@ class CronJob:
             group_id=_opt_id("group_id"),
             bot_id=_opt_id("bot_id"),
             user_id=_opt_id("user_id"),
+            service_id=job_service_id,
+            agent_id=job_agent_id,
         )
 
 

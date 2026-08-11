@@ -126,9 +126,9 @@ class E2AEnvelope:
     agent_ref: dict | None = None
     chat_id: str | None = None
     source_agent_id: str | None = None
-    # 企业多租户路由（SessionMap / AGENT_RUNTIME）：可选，与 session_id 同源派生
-    service_id: str | None = None
+    # 企业多租户 / OfficeClaw：可选；wire 顶层或由 agent_ref 派生
     agent_id: str | None = None
+    service_id: str | None = None
 
     # --- 网关 RPC（原 req_method）；ACP 转入时同字段承载 JSON-RPC method ---
     method: str | None = None
@@ -310,6 +310,30 @@ def _migrate_legacy_binding(data: dict[str, Any], prov: E2AProvenance) -> E2APro
     )
 
 
+def _normalize_optional_wire_str(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text or None
+
+
+def _resolve_wire_agent_id(data: dict[str, Any]) -> str | None:
+    """Resolve tenant agent_id from legacy wire keys or V2 agent_ref."""
+    direct = _normalize_optional_wire_str(data.get("agent_id"))
+    if direct:
+        return direct
+    agent_ref = data.get("agent_ref")
+    if isinstance(agent_ref, dict):
+        ref_id = _normalize_optional_wire_str(agent_ref.get("id"))
+        if ref_id:
+            return ref_id
+    return _normalize_optional_wire_str(data.get("source_agent_id"))
+
+
+def _resolve_wire_service_id(data: dict[str, Any]) -> str | None:
+    return _normalize_optional_wire_str(data.get("service_id"))
+
+
 def _params_with_optional_legacy_payload(data: dict[str, Any]) -> dict[str, Any]:
     """
     以 ``params`` 为真源；若存在顶层 ``payload`` 对象，将其键合并进 params（不覆盖已有键）。
@@ -400,8 +424,8 @@ def _envelope_from_dict(data: dict[str, Any]) -> E2AEnvelope:
         agent_ref=data.get("agent_ref"),
         chat_id=data.get("chat_id"),
         source_agent_id=data.get("source_agent_id"),
-        service_id=data.get("service_id"),
-        agent_id=data.get("agent_id"),
+        agent_id=_resolve_wire_agent_id(data),
+        service_id=_resolve_wire_service_id(data),
         method=raw_method,
         params=params,
         ext_method=data.get("ext_method"),

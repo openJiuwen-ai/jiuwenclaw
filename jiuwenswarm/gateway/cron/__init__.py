@@ -12,6 +12,7 @@ from .redis_store import RedisCronJobStore
 from .factory import create_gateway_cron_store
 from .scheduler import CronSchedulerService
 from .controller import CronController
+from .tenant_registry import CronTenantRegistry
 
 __all__ = [
     "CronJob",
@@ -24,4 +25,5 @@ __all__ = [
     "create_gateway_cron_store",
     "CronSchedulerService",
     "CronController",
+    "CronTenantRegistry",
 ]

@@ -33,6 +33,7 @@ from openjiuwen.agent_evolving.checkpointing.evolution_store import (
     EvolutionLog as EvolutionFile,
     EvolutionRecord as EvolutionEntry,
 )
+from jiuwenswarm.common.local_env_config import get_local_config
 from jiuwenswarm.common.utils import (
     get_agent_root_dir,
     get_agent_skills_dir,
@@ -199,14 +200,14 @@ def _is_valid_http_mirror_url(url: str) -> bool:
 
 
 def _env_bool(name: str, default: bool = True) -> bool:
-    raw = str(os.environ.get(name, "") or "").strip().lower()
+    raw = str(get_local_config(name, "") or "").strip().lower()
     if not raw:
         return default
     return raw in {"1", "true", "yes", "on", "enabled"}
 
 
 def _get_free_search_proxy_url() -> str:
-    return str(os.environ.get(_FREE_SEARCH_PROXY_URL_ENV, "") or "").strip()
+    return str(get_local_config(_FREE_SEARCH_PROXY_URL_ENV, "") or "").strip()
 
 
 def _free_search_ssl_verify() -> bool:
@@ -3975,7 +3976,7 @@ class SkillManager:
 
     @staticmethod
     def _get_github_token() -> str:
-        return (os.getenv("GITHUB_TOKEN") or "").strip()
+        return str(get_local_config("GITHUB_TOKEN", "") or "").strip()
 
     @staticmethod
     def _skillnet_eval_llm_params() -> dict[str, str | None]:
@@ -3984,17 +3985,17 @@ class SkillManager:
             from jiuwenswarm.common.config import get_config
         except Exception:
             return {
-                "api_key": (os.getenv("API_KEY") or "").strip() or None,
-                "base_url": (os.getenv("API_BASE") or "").strip() or None,
-                "model": (os.getenv("MODEL_NAME") or "gpt-4o").strip(),
+                "api_key": str(get_local_config("API_KEY", "") or "").strip() or None,
+                "base_url": str(get_local_config("API_BASE", "") or "").strip() or None,
+                "model": str(get_local_config("MODEL_NAME", "gpt-4o") or "gpt-4o").strip(),
             }
 
         cfg = get_config() or {}
         react = cfg.get("react") or {}
         mcc = react.get("model_client_config") or {}
-        api_key = (mcc.get("api_key") or os.getenv("API_KEY") or "").strip()
-        base_url = (mcc.get("api_base") or os.getenv("API_BASE") or "").strip()
-        model = (react.get("model_name") or os.getenv("MODEL_NAME") or "gpt-4o").strip()
+        api_key = (mcc.get("api_key") or get_local_config("API_KEY", "") or "").strip()
+        base_url = (mcc.get("api_base") or get_local_config("API_BASE", "") or "").strip()
+        model = (react.get("model_name") or get_local_config("MODEL_NAME", "gpt-4o") or "gpt-4o").strip()
         if base_url.endswith("/chat/completions"):
             base_url = base_url.rsplit("/chat/completions", 1)[0]
         return {

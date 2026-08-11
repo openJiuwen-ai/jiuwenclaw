@@ -469,15 +469,18 @@ class TestAdditionalHardcodedPaths:
 
     @staticmethod
     def test_rail_manager_path_structure():
-        """Test rail_manager.py uses get_agent_workspace_dir() for extensions path."""
-        from jiuwenswarm.agents.harness.common.plugins.rail_manager import RailManager
-        from jiuwenswarm.common.utils import get_user_workspace_dir
+        """Test rail_manager uses multi-tenant workspace for extensions path."""
+        from jiuwenswarm.agents.harness.common.plugins.rail_manager import get_rail_manager
+        from jiuwenswarm.common.utils import get_multi_tenant_user_workspace_dir
+        from jiuwenswarm.server.runtime.runtime_scope import RuntimeScopeKey
 
-        workspace = get_user_workspace_dir()
+        scope = RuntimeScopeKey.from_ids()
+        workspace = get_multi_tenant_user_workspace_dir(scope.service_id, scope.agent_id)
+        assert workspace is not None
         expected_path = workspace / "agent" / "workspace" / "extensions"
-        rail_manager = RailManager()
+        rail_manager = get_rail_manager(scope)
 
-        extensions_dir = getattr(rail_manager, '_extensions_dir')
+        extensions_dir = rail_manager.extensions_dir
         assert str(extensions_dir.resolve()) == str(expected_path.resolve()), \
             f"Expected: {expected_path.resolve()}, Got: {extensions_dir.resolve()}"
 

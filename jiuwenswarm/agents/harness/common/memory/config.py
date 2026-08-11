@@ -16,7 +16,12 @@ from pathlib import Path
 
 import yaml
 
-from jiuwenswarm.common.utils import get_config_file, get_agent_workspace_dir
+from jiuwenswarm.common.local_env_config import (
+    SPAWN_ENV_KEYS,
+    get_local_config,
+    ingest_bare_business_into_tip,
+)
+from jiuwenswarm.common.utils import get_config_file, get_agent_workspace_dir, get_env_file
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +52,13 @@ def _resolve_env_vars(value: Any) -> Any:
         def replace_env(match):
             var_name = match.group(1)
             default = match.group(2) if match.group(2) is not None else ""
-            return os.getenv(var_name, default)
+            if var_name in SPAWN_ENV_KEYS:
+                current = os.environ.get(var_name)
+            else:
+                current = get_local_config(var_name)
+            if current is None or current == "":
+                return default
+            return str(current)
         return re.sub(pattern, replace_env, value)
     elif isinstance(value, dict):
         return {k: _resolve_env_vars(v) for k, v in value.items()}
@@ -220,13 +231,26 @@ def set_embed_config_db_cache(enterprise_embedding: Any = None) -> None:
     _embed_config_db_cache = None
 
 
+def _ensure_dotenv_loaded() -> None:
+    """Ensure .env is loaded into tip; pop Track B bare keys (H1)."""
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(dotenv_path=get_env_file(), override=False)
+        ingest_bare_business_into_tip()
+    except Exception as e:
+        logger.debug("Failed to load .env file: %s", e)
+
+
 def _load_config() -> Dict[str, Any]:
     """Load configuration from YAML file."""
     global _config_cache
 
     if _config_cache is not None:
         return _config_cache
-    
+
+    _ensure_dotenv_loaded()
+
     config_path = Path(DEFAULT_CONFIG_PATH)
     
     if not config_path.exists():

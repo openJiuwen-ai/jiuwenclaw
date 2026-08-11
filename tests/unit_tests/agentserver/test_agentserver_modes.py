@@ -1712,6 +1712,9 @@ def test_deep_adapter_handle_user_answer_ignores_team_plan_approval_compat(monke
     )
 
     adapter = JiuWenSwarmDeepAdapter()
+    # Exercise answer-routing on a session-scoped adapter; facade path would
+    # create_instance and require real model credentials.
+    adapter.mark_as_session_scoped("team-session")
     request = AgentRequest(
         request_id="req-answer",
         channel_id="tui",
@@ -1749,6 +1752,7 @@ def test_deep_adapter_routes_team_simplify_answer_by_evolution_meta(monkeypatch)
             pytest.fail("team simplify approval must not use regular SkillEvolutionRail")
 
     adapter = JiuWenSwarmDeepAdapter()
+    adapter.mark_as_session_scoped("team-session")
     adapter._skill_evolution_rail = FailingRegularRail()
     monkeypatch.setattr(
         JiuWenSwarmDeepAdapter,

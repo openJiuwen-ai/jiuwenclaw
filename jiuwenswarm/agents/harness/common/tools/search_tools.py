@@ -12,11 +12,12 @@ from html import unescape
 from typing import Any
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
-import requests
 import urllib3
 from openjiuwen.core.foundation.tool import tool
 
 from jiuwenswarm.agents.harness.common.tools.ssl_config import get_requests_verify
+from jiuwenswarm.common.http_proxy_config import requests_request
+from jiuwenswarm.common.local_env_config import get_local_config
 
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -73,11 +74,11 @@ _PROVIDER_TO_ENGINE: dict[str, str] = {
 
 
 def _get_free_search_proxy_url() -> str:
-    return str(os.environ.get(_FREE_SEARCH_PROXY_URL_ENV, "") or "").strip()
+    return str(get_local_config(_FREE_SEARCH_PROXY_URL_ENV, "") or "").strip()
 
 
 def _env_bool(name: str, default: bool = True) -> bool:
-    raw = str(os.environ.get(name, "") or "").strip().lower()
+    raw = str(get_local_config(name, "") or "").strip().lower()
     if not raw:
         return default
     return raw in {"1", "true", "yes", "on", "enabled"}
@@ -169,7 +170,7 @@ def _disable_insecure_request_warning() -> None:
 
 def _duckduckgo_search_url(query: str) -> str:
     base_url = (
-        os.environ.get(_FREE_SEARCH_DDG_URL_ENV, "https://html.duckduckgo.com/html/")
+        get_local_config(_FREE_SEARCH_DDG_URL_ENV, "https://html.duckduckgo.com/html/")
         or "https://html.duckduckgo.com/html/"
     ).strip()
     separator = "&" if "?" in base_url else "?"
@@ -206,27 +207,16 @@ def _apply_free_search_proxy(url: str, kwargs: dict[str, Any]) -> bool:
     return True
 
 
-def _http_request(method: str, url: str, **kwargs) -> requests.Response:
-    """Try normal request first; retry without env proxies on ProxyError."""
+def _http_request(method: str, url: str, **kwargs) -> Any:
+    """Issue HTTP via overlay-aware proxy helpers; free-search proxy still applied."""
     kwargs.setdefault("verify", get_requests_verify())
     method_up = method.upper()
-    explicit_proxy = _apply_free_search_proxy(url, kwargs)
+    _apply_free_search_proxy(url, kwargs)
     if "verify" not in kwargs:
         kwargs["verify"] = _free_search_ssl_verify()
         if kwargs["verify"] is False:
             _disable_insecure_request_warning()
-    try:
-        if method_up == "GET":
-            return requests.get(url, **kwargs)
-        if method_up == "POST":
-            return requests.post(url, **kwargs)
-        return requests.request(method_up, url, **kwargs)
-    except requests.exceptions.ProxyError:
-        if explicit_proxy:
-            raise
-        with requests.Session() as session:
-            session.trust_env = False
-            return session.request(method_up, url, **kwargs)
+    return requests_request(method_up, url, **kwargs)
 
 
 def _strip_tags(value: str) -> str:
@@ -447,12 +437,12 @@ def _parse_perplexity_citations(data: dict[str, Any]) -> list[str]:
 
 
 def _perplexity_search_sync(query: str, max_results: int, timeout_seconds: int) -> dict[str, Any]:
-    perplexity_key = os.environ.get("PERPLEXITY_API_KEY", "")
+    perplexity_key = str(get_local_config("PERPLEXITY_API_KEY", "") or "")
     if not perplexity_key:
         raise ValueError("PERPLEXITY_API_KEY is not set")
 
     payload = {
-        "model": os.environ.get("PPLX_MODEL", "sonar-pro"),
+        "model": str(get_local_config("PPLX_MODEL", "sonar-pro") or "sonar-pro"),
         "messages": [
             {"role": "system", "content": "Provide concise answer and include citations."},
             {"role": "user", "content": query},
@@ -461,9 +451,13 @@ def _perplexity_search_sync(query: str, max_results: int, timeout_seconds: int) 
         "temperature": 0.2,
         "stream": False,
     }
+    pplx_url = get_local_config(
+        "PPLX_API_URL",
+        "https://api.perplexity.ai/chat/completions",
+    ) or "https://api.perplexity.ai/chat/completions"
     response = _http_request(
         "POST",
-        os.environ.get("PPLX_API_URL", "https://api.perplexity.ai/chat/completions"),
+        str(pplx_url),
         headers={"Authorization": f"Bearer {perplexity_key}", "Content-Type": "application/json"},
         json=payload,
         timeout=timeout_seconds,
@@ -536,13 +530,17 @@ def _extract_bocha_answer(data: dict[str, Any]) -> str:
 
 
 def _bocha_search_sync(query: str, max_results: int, timeout_seconds: int) -> dict[str, Any]:
-    bocha_key = os.environ.get("BOCHA_API_KEY", "")
+    bocha_key = str(get_local_config("BOCHA_API_KEY", "") or "")
     if not bocha_key:
         raise ValueError("BOCHA_API_KEY is not set")
 
+    bocha_url = get_local_config(
+        "BOCHA_API_URL",
+        "https://api.bocha.cn/v1/web-search",
+    ) or "https://api.bocha.cn/v1/web-search"
     response = _http_request(
         "POST",
-        os.environ.get("BOCHA_API_URL", "https://api.bocha.cn/v1/web-search"),
+        str(bocha_url),
         headers={"Authorization": f"Bearer {bocha_key}", "Content-Type": "application/json"},
         json={"query": query, "summary": True, "count": max_results},
         timeout=timeout_seconds,
@@ -557,13 +555,17 @@ def _bocha_search_sync(query: str, max_results: int, timeout_seconds: int) -> di
 
 
 def _serper_search_sync(query: str, max_results: int, timeout_seconds: int) -> dict[str, Any]:
-    serper_key = os.environ.get("SERPER_API_KEY", "")
+    serper_key = str(get_local_config("SERPER_API_KEY", "") or "")
     if not serper_key:
         raise ValueError("SERPER_API_KEY is not set")
 
+    serper_url = get_local_config(
+        "SERPER_API_URL",
+        "https://google.serper.dev/search",
+    ) or "https://google.serper.dev/search"
     response = _http_request(
         "POST",
-        os.environ.get("SERPER_API_URL", "https://google.serper.dev/search"),
+        str(serper_url),
         headers={"X-API-KEY": serper_key, "Content-Type": "application/json"},
         json={"q": query, "num": max_results},
         timeout=timeout_seconds,
@@ -580,7 +582,7 @@ def _serper_search_sync(query: str, max_results: int, timeout_seconds: int) -> d
 
 
 def _jina_search_sync(query: str, timeout_seconds: int) -> dict[str, Any]:
-    jina_key = os.environ.get("JINA_API_KEY", "")
+    jina_key = str(get_local_config("JINA_API_KEY", "") or "")
     if not jina_key:
         raise ValueError("JINA_API_KEY is not set")
 
@@ -590,9 +592,13 @@ def _jina_search_sync(query: str, timeout_seconds: int) -> dict[str, Any]:
         "stream": False,
         "reasoning_effort": "low",
     }
+    jina_url = get_local_config(
+        "JINA_API_URL",
+        "https://deepsearch.jina.ai/v1/chat/completions",
+    ) or "https://deepsearch.jina.ai/v1/chat/completions"
     response = _http_request(
         "POST",
-        os.environ.get("JINA_API_URL", "https://deepsearch.jina.ai/v1/chat/completions"),
+        str(jina_url),
         headers={"Authorization": f"Bearer {jina_key}", "Content-Type": "application/json"},
         json=payload,
         timeout=timeout_seconds,
@@ -807,7 +813,6 @@ async def mcp_paid_search(
             query=query, max_results=max_results, timeout_seconds=timeout_seconds
         ),
     }
-
     if provider != "auto":
         if not _paid_provider_available(provider):
             reason = _paid_provider_skip_reason(provider)

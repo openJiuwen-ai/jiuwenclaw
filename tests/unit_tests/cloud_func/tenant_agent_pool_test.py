@@ -63,29 +63,55 @@ class TestTenantAgentPool(TestCase):
         TenantAgentPool.reset_instance()
 
     def test_community_singleton(self) -> None:
-        """未设置 AGENT_RUNTIME 时为单 AgentManager 模式."""
+        """未设置 AGENT_RUNTIME 时，同租户键复用同一 AgentManager."""
         with patch.dict("os.environ", {"AGENT_RUNTIME": ""}, clear=False):
             TenantAgentPool.reset_instance()
             pool = TenantAgentPool.get_instance()
-            self.assertFalse(pool._enterprise)
-            self.assertIsNotNone(pool._agent_manager)
+            mock_mgr = MagicMock()
+
+            async def _run():
+                with patch(
+                    "jiuwenswarm.server.runtime.agent_manager.AgentManager",
+                    return_value=mock_mgr,
+                ):
+                    mgr1 = await pool.get_agent_manager("default", "default")
+                    mgr2 = await pool.get_agent_manager("default", "default")
+                self.assertIs(mgr1, mock_mgr)
+                self.assertIs(mgr1, mgr2)
+
+            asyncio.run(_run())
 
     def test_enterprise_pool(self) -> None:
-        """AGENT_RUNTIME 下启用多租户 LRU."""
+        """AGENT_RUNTIME 下按 (agent_id, service_id) 隔离多租户 LRU."""
         with patch.dict("os.environ", {"AGENT_RUNTIME": "k8s"}, clear=False):
             TenantAgentPool.reset_instance()
             pool = TenantAgentPool.get_instance()
-            self.assertTrue(pool._enterprise)
+
+            def _factory(**kwargs):
+                mgr = MagicMock()
+                mgr.agent_id = kwargs.get("agent_id")
+                mgr.service_id = kwargs.get("service_id")
+                mgr.env_agent_id = kwargs.get("env_agent_id")
+                mgr.env_service_id = kwargs.get("env_service_id")
+                mgr._user_workspace_dir = kwargs.get("user_workspace_dir")
+                return mgr
 
             async def _run():
-                mgr1 = await pool.get_agent_manager("a1", "s1")
-                mgr2 = await pool.get_agent_manager("a1", "s1")
-                mgr3 = await pool.get_agent_manager("a2", "s2")
+                with patch(
+                    "jiuwenswarm.server.runtime.agent_manager.AgentManager",
+                    side_effect=_factory,
+                ):
+                    mgr1 = await pool.get_agent_manager("a1", "s1")
+                    mgr2 = await pool.get_agent_manager("a1", "s1")
+                    mgr3 = await pool.get_agent_manager("a2", "s2")
                 self.assertIs(mgr1, mgr2)
                 self.assertIsNot(mgr1, mgr3)
-                self.assertEqual(mgr1.agent_id, "a1")
+                # AGENT_RUNTIME 下 manager.agent_id 使用 legacy "aid_sid" 形态
+                self.assertEqual(mgr1.agent_id, "a1_s1")
                 self.assertEqual(mgr1.service_id, "s1")
-                self.assertIsNotNone(mgr1.user_workspace_dir)
+                self.assertEqual(mgr1.env_agent_id, "a1")
+                self.assertEqual(mgr1.env_service_id, "s1")
+                self.assertIsNotNone(mgr1._user_workspace_dir)
 
             asyncio.run(_run())
 
@@ -100,21 +126,28 @@ class TestTenantAgentPool(TestCase):
         )
 
     def test_process_message_dispatch(self) -> None:
-        """process_message 分发到内部 AgentManager."""
+        """process_message 分发到对应租户的 AgentManager."""
         with patch.dict("os.environ", {"AGENT_RUNTIME": ""}, clear=False):
             TenantAgentPool.reset_instance()
             pool = TenantAgentPool.get_instance()
             mock_resp = MagicMock()
-            pool._agent_manager.process_message = AsyncMock(return_value=mock_resp)
+            mock_mgr = MagicMock()
+            mock_mgr.process_message = AsyncMock(return_value=mock_resp)
 
             async def _run():
-                req = build_request(RequestParams(
-                    request_id="r1",
-                    session_id="s1",
-                    query="hi",
-                ))
-                resp = await pool.process_message(req)
+                with patch.object(
+                    pool,
+                    "_ensure_agent_manager",
+                    AsyncMock(return_value=mock_mgr),
+                ) as ensure:
+                    req = build_request(RequestParams(
+                        request_id="r1",
+                        session_id="s1",
+                        query="hi",
+                    ))
+                    resp = await pool.process_message(req)
                 self.assertIs(resp, mock_resp)
+                ensure.assert_awaited()
 
             asyncio.run(_run())
 
@@ -188,7 +221,7 @@ class TestTenantAgentPool(TestCase):
                 return True
 
             with patch(
-                "jiuwenswarm.server.runtime.tenant_agent_pool.AgentManager",
+                "jiuwenswarm.server.runtime.agent_manager.AgentManager",
                 return_value=MagicMock(),
             ):
                 self.assertTrue(asyncio.run(first_request()))
@@ -211,7 +244,7 @@ class TestTenantAgentPool(TestCase):
                     self.assertIsNotNone(result)
 
             with patch(
-                "jiuwenswarm.server.runtime.tenant_agent_pool.AgentManager",
+                "jiuwenswarm.server.runtime.agent_manager.AgentManager",
                 return_value=MagicMock(),
             ):
                 asyncio.run(simulate_multiple_requests())
@@ -286,7 +319,7 @@ class TestTenantAgentPool(TestCase):
                     self.assertIsNotNone(result)
 
             with patch(
-                "jiuwenswarm.server.runtime.tenant_agent_pool.AgentManager",
+                "jiuwenswarm.server.runtime.agent_manager.AgentManager",
                 return_value=MagicMock(),
             ):
                 asyncio.run(first_loop_with_concurrent_requests())

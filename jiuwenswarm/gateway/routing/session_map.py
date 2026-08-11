@@ -57,7 +57,7 @@ def invoke_ids_from_identity(
     """Derive ``(service_id, agent_id)`` from stable IM identity and SessionMap scope."""
     sid = invoke_service_id(chat_id, bot_id)
     if scope == SessionMapScope.PER_CHAT_BOT_USER:
-        return sid, user_id
+        return sid, user_id or None
     return sid, None
 
 
@@ -69,7 +69,7 @@ def invoke_ids_from_session_id_string(session_id: str) -> tuple[str, str | None]
     parts = session_id.split("::")
     if len(parts) == 6:
         _provider, chat_id, bot_id, user_id, _ts, _suffix = parts
-        return invoke_service_id(chat_id, bot_id), user_id
+        return invoke_service_id(chat_id, bot_id), user_id or None
     if len(parts) == 5:
         _provider, chat_id, bot_id, _ts, _suffix = parts
         return invoke_service_id(chat_id, bot_id), None
