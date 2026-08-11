@@ -2071,7 +2071,9 @@ class TestSetSessionPinnedQueuedWriteRace:
         old_write_started = threading.Event()
         release_old_write = threading.Event()
 
-        def _delayed_write(session_id, metadata, preserve_pin_fields=False):
+        def _delayed_write(
+            session_id, metadata, preserve_pin_fields=False, sessions_root=None
+        ):
             if session_id == "s_async_pin" and metadata.get("model") == "old-queued-write":
                 old_write_started.set()
                 assert release_old_write.wait(5), "old queued write was not released"
@@ -2079,6 +2081,7 @@ class TestSetSessionPinnedQueuedWriteRace:
                 session_id,
                 metadata,
                 preserve_pin_fields=preserve_pin_fields,
+                sessions_root=sessions_root,
             )
 
         monkeypatch.setattr(sm, "_write_metadata_sync", _delayed_write)

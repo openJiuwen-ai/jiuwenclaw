@@ -1,12 +1,40 @@
 from __future__ import annotations
 
+import math
 from datetime import datetime
+from typing import Any
 
 from zoneinfo import ZoneInfo
+
+# Harness / CronJob 常见默认提前量；相对 one-shot 时不可超过 delay。
+_DEFAULT_WAKE_OFFSET_SECONDS = 300
 
 
 def cron_field_count(expr: str) -> int:
     return len(str(expr or "").split())
+
+
+def clamp_wake_offset_for_delay_seconds(
+    wake_offset_seconds: Any,
+    delay_seconds: float,
+    *,
+    default_when_missing: int = _DEFAULT_WAKE_OFFSET_SECONDS,
+) -> int:
+    """相对 one-shot：将 wake_offset 收敛到不超过 delay。"""
+    delay = float(delay_seconds)
+    if delay <= 0:
+        return 0
+    if wake_offset_seconds is None:
+        requested = int(default_when_missing)
+    else:
+        try:
+            requested = int(wake_offset_seconds)
+        except (TypeError, ValueError):
+            requested = int(default_when_missing)
+    if requested < 0:
+        requested = 0
+    max_allowed = max(0, math.floor(delay))
+    return min(requested, max_allowed)
 
 
 def normalize_cron_expr(raw: str) -> str:

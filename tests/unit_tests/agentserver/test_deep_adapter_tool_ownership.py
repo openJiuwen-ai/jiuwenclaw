@@ -49,6 +49,9 @@ class _FakeResourceMgr:
             return
         self.tools[tool.card.id] = tool
 
+    def get_tool(self, tool_id: str) -> _FakeTool | None:
+        return self.tools.get(tool_id)
+
     def remove_tool(self, tool_id: str) -> None:
         self.removed.append(tool_id)
         self.tools.pop(tool_id, None)
@@ -80,21 +83,21 @@ def test_agent_owned_tool_is_qualified_by_owner(resource_mgr: _FakeResourceMgr) 
 
 
 def test_shared_tool_keeps_bare_id_and_first_instance(resource_mgr: _FakeResourceMgr) -> None:
-    """A stateless tool keeps its bare id and a repeat add is a no-op."""
+    """A stateless tool keeps its bare id and a repeat register is a no-op."""
     first = _FakeTool("video_understanding")
     second = _FakeTool("video_understanding")
     mark_stateless([first, second])
 
-    register_tool(first, "jiuwenswarm_sess_a")
-    register_tool(second, "jiuwenswarm_sess_b")
+    registered_first = register_tool(first, "jiuwenswarm_sess_a")
+    registered_second = register_tool(second, "jiuwenswarm_sess_b")
 
     assert first.card.id == "video_understanding"
     assert second.card.id == "video_understanding"
-    assert resource_mgr.adds == [
-        ("video_understanding", False, True),
-        ("video_understanding", False, True),
-    ]
+    # Second register hits get_tool and returns the existing instance without add_tool.
+    assert resource_mgr.adds == [("video_understanding", False, True)]
     assert resource_mgr.tools["video_understanding"] is first
+    assert registered_first is first
+    assert registered_second is first
 
 
 def test_missing_owner_degrades_to_shared(resource_mgr: _FakeResourceMgr) -> None:

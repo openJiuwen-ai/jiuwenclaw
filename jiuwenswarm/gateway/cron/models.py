@@ -268,6 +268,10 @@ class CronJob:
     model_name: str | None = None
     # 飞书多应用场景：创建该定时任务的 app_id，用于推送时定位到正确的 app 配置
     app_id: str = ""
+    # 企业路由身份（与 targets / SessionMap 语义独立；空值兼容非企业旧任务）
+    group_id: str | None = None
+    bot_id: str | None = None
+    user_id: str | None = None
     # 工作模式派生快照：由 project_id 归属推导（"code" / "work"）。
     # 不作为独立隔离维度，任务归属仍以 project_id 为准。
     # from_dict 仅做 normalize + 兜底 "work"，不做跨层 Project 反查；
@@ -309,6 +313,12 @@ class CronJob:
             d["model_name"] = self.model_name
         if self.app_id:
             d["app_id"] = self.app_id
+        if self.group_id:
+            d["group_id"] = self.group_id
+        if self.bot_id:
+            d["bot_id"] = self.bot_id
+        if self.user_id:
+            d["user_id"] = self.user_id
         return d
 
     @staticmethod
@@ -414,6 +424,10 @@ class CronJob:
         # 精确值由创建/更新路径从 Project 记录注入，或由展示层二次查询覆盖。
         job_work_mode = normalize_work_mode(data.get("work_mode"), default=DEFAULT_WEB_WORK_MODE)
 
+        def _opt_id(key: str) -> str | None:
+            raw = data.get(key, None)
+            return str(raw).strip() if isinstance(raw, str) and str(raw).strip() else None
+
         return CronJob(
             id=job_id,
             name=name,
@@ -436,6 +450,9 @@ class CronJob:
             model_name=job_model_name,
             app_id=job_app_id,
             work_mode=job_work_mode,
+            group_id=_opt_id("group_id"),
+            bot_id=_opt_id("bot_id"),
+            user_id=_opt_id("user_id"),
         )
 
 

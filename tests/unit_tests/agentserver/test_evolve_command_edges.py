@@ -182,7 +182,7 @@ async def test_evolve_slash_lazy_init_registers_active_review_rails(monkeypatch,
     assert isinstance(registered[1], _FakeSkillEvolutionRail)
     assert configure_calls == [
         {
-            "skills_dir": str(interface_deep_module.get_agent_skills_dir()),
+            "skills_dir": [str(interface_deep_module.get_agent_skills_dir())],
             "llm": adapter._model,  # pylint: disable=protected-access
             "model": "default-model",
             "signal_trigger": False,
