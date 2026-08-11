@@ -15,6 +15,10 @@
    ``authorization``。OfficeClaw / Huawei MaaS 经 tip ``default_headers`` 下发的是
    ``Authorization: Basic ...``（``api_key`` 仅为占位 ``huawei-maas-session``）；
    若不保留该头，网关会报 APIG.0303（Authorization header is missing）。
+
+4. 华为 MaaS x-span-id 注入：调用华为云 ModelArts MaaS 时，在 HTTP 请求头注入
+   ``x-span-id``（uuid4 hex），便于 MaaS 侧做链路追踪与本地日志对齐。仅当
+   ``api_base`` 识别为 MaaS 端点时触发，非 MaaS 调用零开销透传。
 """
 
 from __future__ import annotations
@@ -24,9 +28,31 @@ import json
 import logging
 import re
 import time
+import uuid
 from typing import Any, Optional
 
 logger = logging.getLogger("jiuwenswarm.llm_sse_patch")
+
+# ── 华为云 ModelArts MaaS 端点识别 ───────────────────────────────────────
+# 命中以下任一标记，或同时包含 modelarts + maas，即视为 MaaS 端点。
+_HUAWEI_MAAS_API_MARKERS: tuple[str, ...] = (
+    "modelarts-maas.com",
+    "modelarts-maas.cn",
+    "huaweiapaas.com",
+    "agentarts",
+)
+
+
+def _is_huawei_maas_api_base(api_base: str) -> bool:
+    """检测 ``api_base`` 是否指向华为云 ModelArts MaaS 服务。
+
+    与旧架构 ``jiuwen_core_patch._is_huawei_maas_api_base`` 保持一致，确保
+    MaaS 端点的识别规则向前兼容。
+    """
+    base = (api_base or "").lower()
+    if any(marker in base for marker in _HUAWEI_MAAS_API_MARKERS):
+        return True
+    return "modelarts" in base and "maas" in base
 
 _GLM_TOOL_XML_CLOSED_RE = re.compile(
     r"<(arg_value|arg_key|tool_call)[^>]*?>.*?</\1>",
@@ -377,6 +403,8 @@ def apply_openai_sse_invoke_patch() -> None:
     1. SSE-only 网关兼容：非流式调用下返回 str 时，先组装成标准 ChatCompletion。
     2. GLM XML 标签清洗：流式 chunk 中 tool_call.arguments 的 XML 标签剥离。
     3. 保留 tip ``default_headers`` 中的 ``Authorization``（Huawei MaaS Basic）。
+    4. 华为 MaaS x-span-id 注入：调用华为云 ModelArts MaaS 时，在请求头注入
+       ``x-span-id`` 便于 MaaS 侧链路追踪。
 
     幂等：重复调用只生效一次。在服务启动早期调用即可覆盖 subagent / 心跳等
     所有走 ``invoke()`` / ``stream()`` 的 LLM 调用。
@@ -431,9 +459,40 @@ def apply_openai_sse_invoke_patch() -> None:
 
     OpenAIModelClient._parse_stream_chunk = _parse_stream_chunk_with_sanitize  # pylint: disable=protected-access
 
+    # --- Patch 3: invoke / stream 注入华为 MaaS x-span-id ---
+    # 调用华为云 ModelArts MaaS 时，在请求头注入 x-span-id（uuid4 hex）便于
+    # MaaS 侧链路追踪。通过包装 invoke / stream 出口，复用原 custom_headers
+    # 合并链路（_build_request_headers），非 MaaS 端点零开销透传。
+    # 每次 invoke / stream 调用（含重试触发的重新调用）都会生成独立 span_id。
+    _orig_invoke = OpenAIModelClient.invoke
+    _orig_stream = OpenAIModelClient.stream
+
+    def _maybe_inject_maas_span_id(self: Any, kwargs: dict) -> None:
+        """当 self 指向华为 MaaS 端点时，向 kwargs 注入 x-span-id 到 custom_headers。"""
+        mcc = getattr(self, "model_client_config", None)
+        api_base = getattr(mcc, "api_base", "") if mcc is not None else ""
+        if not _is_huawei_maas_api_base(api_base):
+            return
+        existing = kwargs.get("custom_headers")
+        headers = dict(existing or {})
+        headers["x-span-id"] = uuid.uuid4().hex
+        kwargs["custom_headers"] = headers
+
+    async def _invoke_with_maas_span(self: Any, *args, **kwargs):
+        _maybe_inject_maas_span_id(self, kwargs)
+        return await _orig_invoke(self, *args, **kwargs)
+
+    async def _stream_with_maas_span(self: Any, *args, **kwargs):
+        _maybe_inject_maas_span_id(self, kwargs)
+        async for chunk in _orig_stream(self, *args, **kwargs):
+            yield chunk
+
+    OpenAIModelClient.invoke = _invoke_with_maas_span
+    OpenAIModelClient.stream = _stream_with_maas_span
+
     OpenAIModelClient._sse_invoke_patch_applied = True  # pylint: disable=protected-access
     _PATCH_APPLIED = True
     logger.info(
-        "[llm_sse_patch] OpenAIModelClient SSE 兼容补丁 + GLM XML 标签清洗补丁"
-        " + Authorization 保留补丁已应用"
+        "[llm_sse_patch] OpenAIModelClient SSE 兼容 + GLM XML 清洗 + Authorization 保留"
+        " + 华为 MaaS x-span-id 注入补丁已应用"
     )
