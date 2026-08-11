@@ -26,67 +26,10 @@ class XiaoyiDeviceCommandHandler:
 
     async def handle(self, data: dict[str, Any]) -> None:
         request = parse_device_command_request(data)
-        try:
-            channel = get_xiaoyi_channel()
-            if channel is None:
-                response = build_failure(
-                    request,
-                    "CHANNEL_NOT_FOUND",
-                    "XiaoyiChannel is not active",
-                )
-            elif request.intent_name == "GetLoginToken":
-                # huawei_id_tool 跨进程桥特判：不走普通 phone tool command（commands wire），
-                # 改走 send_login_token_artifact（artifact wire，1:1 复刻
-                # xy_channel login-token-tool.ts 第 53-90 行），端侧小艺 App 收到
-                # {kind:"getLoginToken"} part 后弹授权 UI。agentserver 侧工具
-                # login_token_tool.py 通过 execute_device_command("GetLoginToken", ...)
-                # 把请求投到本 handler，由 gateway 进程代为下发（channel 实例只在此进程）。
-                result = await _dispatch_login_token_artifact(channel, request)
-                response = DeviceCommandResponse(
-                    rpc_id=request.rpc_id,
-                    operation_id=request.operation_id,
-                    ok=True,
-                    result=result,
-                )
-            else:
-                if request.context.channel_id == "__cron__":
-                    logger.info(
-                        "[CRON_DEVICE] phase=GATEWAY_DISPATCH rpc_id=%s "
-                        "operation_id=%s intent_name=%s mode=scheduled",
-                        request.rpc_id,
-                        request.operation_id,
-                        request.intent_name,
-                    )
-                    result = await channel.execute_scheduled_phone_tool_command(
-                        request=request
-                    )
-                else:
-                    result = await channel.execute_phone_tool_command(request=request)
-                response = DeviceCommandResponse(
-                    rpc_id=request.rpc_id,
-                    operation_id=request.operation_id,
-                    ok=True,
-                    result=result,
-                )
-        except asyncio.TimeoutError:
-            response = build_failure(
-                request,
-                "DEVICE_EXECUTION_TIMEOUT",
-                "Timed out waiting for device data-event",
-            )
-        except Exception as exc:
-            logger.exception(
-                "[XiaoyiDeviceCommandHandler] execution failed: rpc_id=%s operation_id=%s intent_name=%s",
-                request.rpc_id,
-                request.operation_id,
-                request.intent_name,
-            )
-            response = build_failure(
-                request,
-                "DEVICE_EXECUTION_FAILED",
-                str(exc),
-            )
-
+        response = await execute_device_command_request(
+            request,
+            get_xiaoyi_channel(),
+        )
         await self._send_response(request=request, response=response)
 
     async def _send_response(
@@ -109,6 +52,62 @@ class XiaoyiDeviceCommandHandler:
             response.rpc_id,
             response.operation_id,
             response.ok,
+        )
+
+
+async def execute_device_command_request(
+    request: DeviceCommandRequest,
+    channel: Any | None,
+) -> DeviceCommandResponse:
+    """Execute Device business logic independently of the transport protocol."""
+
+    if channel is None:
+        return build_failure(
+            request,
+            "CHANNEL_NOT_FOUND",
+            "XiaoyiChannel is not active",
+        )
+
+    try:
+        if request.intent_name == "GetLoginToken":
+            result = await _dispatch_login_token_artifact(channel, request)
+        elif request.context.channel_id == "__cron__":
+            logger.info(
+                "[CRON_DEVICE] phase=GATEWAY_DISPATCH rpc_id=%s "
+                "operation_id=%s intent_name=%s mode=scheduled",
+                request.rpc_id,
+                request.operation_id,
+                request.intent_name,
+            )
+            result = await channel.execute_scheduled_phone_tool_command(
+                request=request
+            )
+        else:
+            result = await channel.execute_phone_tool_command(request=request)
+        return DeviceCommandResponse(
+            rpc_id=request.rpc_id,
+            operation_id=request.operation_id,
+            ok=True,
+            result=result,
+        )
+    except asyncio.TimeoutError:
+        return build_failure(
+            request,
+            "DEVICE_EXECUTION_TIMEOUT",
+            "Timed out waiting for device data-event",
+        )
+    except Exception as exc:
+        logger.exception(
+            "[XiaoyiDeviceCommandHandler] execution failed: rpc_id=%s "
+            "operation_id=%s intent_name=%s",
+            request.rpc_id,
+            request.operation_id,
+            request.intent_name,
+        )
+        return build_failure(
+            request,
+            "DEVICE_EXECUTION_FAILED",
+            str(exc),
         )
 
 

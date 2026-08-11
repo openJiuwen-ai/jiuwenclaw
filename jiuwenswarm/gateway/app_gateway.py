@@ -1479,6 +1479,9 @@ async def _run(
     )
     from jiuwenswarm.gateway.cron import CronController, CronJobStore, CronSchedulerService
     from jiuwenswarm.gateway.heartbeat.heartbeat import GatewayHeartbeatService, HeartbeatConfig
+    from jiuwenswarm.gateway.gateway_push.xiaoyi_device_reverse_rpc import (
+        register_xiaoyi_device_reverse_rpc,
+    )
     from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
     from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import (
         WebHandlersBindParams,
@@ -1621,6 +1624,10 @@ async def _run(
     channel_manager = ChannelManager(message_handler, config=initial_channels_conf)
     # 回填引用：MessageHandler 实例化早于 ChannelManager，广播全局事件时需经它取 web channel。
     message_handler.set_channel_manager(channel_manager)
+    register_xiaoyi_device_reverse_rpc(
+        message_handler.get_reverse_rpc_registry(),
+        channel_manager,
+    )
     channel_manager.set_config_persister(update_channel_in_config)
     updater_service = UpdaterService()
     prewarm_sync_debounce_task: asyncio.Task[None] | None = None
