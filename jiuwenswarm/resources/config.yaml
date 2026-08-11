@@ -480,6 +480,7 @@ react:
       - code
       - skill_tool
       - skill_complete
+      - skill_turbo_tool
       - todo_create
       - todo_list
       - todo_modify
@@ -492,6 +493,14 @@ react:
       #   - tools_search
       #   - invoke_tool
       #   - web_search
+  # SkillTurbo 在线执行：开启后 agent 模式请求会先尝试 SkillTurbo，未命中/失败自动回落 DeepAgent。
+  skill_turbo:
+    enabled: true
+    # [TEMP-EXTERNAL-SKILL] PPT skill 的外部目录名（与原版 pptx-craft 区分）。
+    skill_name: pptx-craft
+    # [TEMP-EXTERNAL-SKILL] 外部 skill 目录的 SHA256 校验值。
+    # 校验失败时打 WARNING 日志但不阻塞执行。
+    skill_checksum: 03fdacfcc92207294e226671066e5c6b8c7b64187ce6d47f1844d59f2a90a0dc
   # code_agent / research_agent 默认不启用；只有显式配置 enabled: true 才会显示并可被 task_tool 调用
   # browser_agent: code.team 路径通过此 key 门控（单 agent 路径仍由 browser runtime 开关决定）
   subagents:
@@ -914,6 +923,8 @@ permissions:
     todo_complete: allow
     todo_remove: allow
     todo_list: allow
+    # SkillTurbo 在线执行：审批通过后内部工具整体放行
+    skill_turbo_tool: allow
     # Coding Memory 工具权限
     coding_memory_write: allow
     coding_memory_edit: allow
