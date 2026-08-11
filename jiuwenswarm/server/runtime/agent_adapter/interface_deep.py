@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from jiuwenswarm.server.runtime.agent_config_service import AgentDefinition
 
 import yaml
-from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
+from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig, ContextEngineConfig
 from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
 from openjiuwen.core.foundation.llm.utils.provider_utils import is_openai_account_provider
@@ -798,6 +798,8 @@ def _deep_agent_context_engine_config(react_cfg: dict[str, Any] | None) -> Conte
     react_cfg = react_cfg or {}
     cec = react_cfg.get("context_engine_config")
     cec = cec if isinstance(cec, dict) else {}
+    recall = cec.get("compression_recall_config")
+    recall = recall if isinstance(recall, dict) else {}
     return ReActAgentConfig().context_engine_config.model_copy(
         update={
             "enable_reload": bool(cec.get("enable_reload", False)),
@@ -810,6 +812,12 @@ def _deep_agent_context_engine_config(react_cfg: dict[str, Any] | None) -> Conte
             # OPENJIUWEN_CONTEXT_DEBUG_DIR / workspace 默认路径解析
             "enable_context_debug": bool(cec.get("enable_context_debug", False)),
             "context_debug_dir": cec.get("context_debug_dir") or None,
+            # 压缩召回：压缩时归档原始消息，供模型按需召回
+            "compression_recall_config": CompressionRecallConfig(
+                enabled=bool(recall.get("enabled", False)),
+                chunk_size_tokens=parse_int(recall.get("chunk_size_tokens"), 3000),
+                chunk_overlap_tokens=parse_int(recall.get("chunk_overlap_tokens"), 300),
+            ),
         }
     )
 
@@ -887,6 +895,11 @@ def _build_context_processor_rail(config: dict[str, Any]) -> ContextProcessorRai
         offloader_cfg = context_engine_cfg.get("message_summary_offloader_config", {})
         if isinstance(offloader_cfg, dict) and offloader_cfg:
             user_processors.append(("MessageSummaryOffloader", offloader_cfg))
+
+        # 会话记忆：preset 链中默认为禁用，此处用配置覆盖启用
+        session_memory_compressor_cfg = context_engine_cfg.get("session_memory_compressor_config", {})
+        if isinstance(session_memory_compressor_cfg, dict) and session_memory_compressor_cfg:
+            user_processors.append(("SessionMemoryCompressor", session_memory_compressor_cfg))
 
         compressor_cfg = context_engine_cfg.get("dialogue_compressor_config", {})
         if isinstance(compressor_cfg, dict) and compressor_cfg:
