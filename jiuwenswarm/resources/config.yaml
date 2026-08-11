@@ -526,9 +526,9 @@ react:
     # 内层 memory 是异步更新器（SessionMemoryManager，由独立 agent/模型后台更新笔记）的行为参数。
     session_memory_compressor_config:
       enabled: false               # true 开启会话记忆
-      trigger_context_ratio: 0.8   # 上下文占用达到该比例时使用更新的笔记替换上下文
+      trigger_context_ratio: 0.8   # 上下文占用达到该比例时使用更新的笔记替换上下文、建议sessionmemory的阈值要小于等于下面的compressor，开启是下面的compressor作为兜底设计
       memory:
-        update_trigger_context_ratio: 0.7   # 上下文占用达到该比例时异步更新记忆
+        update_trigger_context_ratio: 0.1   # 上下文占用达到该比例时异步更新记忆
 
     # 对话压缩器：整体对话历史超长时，把旧对话压缩成摘要
     dialogue_compressor_config:
@@ -537,15 +537,15 @@ react:
 
     # 当前轮次压缩器：单轮对话（含工具调用链）过长时压缩当前轮
     current_round_compressor_config:
-      trigger_context_ratio: 0.8
-      min_target_context_ratio: 0.1
+      trigger_context_ratio: 0.8      # 上下文占用达到该比例时触发压缩
+      min_target_context_ratio: 0.1   # 压缩目标下限（占窗口比例）
       keep_recent_messages: 4         # 保留最近消息数
 
     # 轮次级别压缩器：多轮长对话的三轮渐进式压缩（最强力，最后触发）
     round_level_compressor_config:
-      trigger_context_ratio: 0.8
-      min_target_context_ratio: 0.1
-      keep_recent_messages: 4
+      trigger_context_ratio: 0.8      # 上下文占用达到该比例时触发压缩
+      min_target_context_ratio: 0.1   # 压缩目标下限（占窗口比例）
+      keep_recent_messages: 4         # 保留最近消息数
 
     # 连续相同 reasoning+工具集 / 相同工具入参时，折叠重复轮次；超阈值后兜底中止
     reasoning_tool_loop_compact_config:
