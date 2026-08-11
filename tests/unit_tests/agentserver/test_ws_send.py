@@ -149,6 +149,19 @@ async def test_stream_stops_after_oversized_chunk_is_replaced(monkeypatch):
     server._session_stream_tasks = {}
     server._is_stateless_method_request = lambda request: True
 
+    class ForegroundManager:
+        def __init__(self):
+            self.events = []
+
+        async def begin_foreground_chat(self):
+            self.events.append("begin")
+
+        async def end_foreground_chat(self):
+            self.events.append("end")
+
+    foreground_manager = ForegroundManager()
+    server._agent_manager = foreground_manager
+
     async def get_agent(channel_id):
         return FakeAgent()
 
@@ -181,6 +194,7 @@ async def test_stream_stops_after_oversized_chunk_is_replaced(monkeypatch):
     await server._handle_stream(FakeWebSocket(), request, asyncio.Lock())
 
     assert send_count == 1
+    assert foreground_manager.events == ["begin", "end"]
 
 
 def test_agent_ws_server_has_no_direct_websocket_send_calls():

@@ -174,6 +174,13 @@ class FakeAgentClient:
 
     async def send_request(self, envelope, *a, **kw):
         self.unary_requests.append(envelope)
+        if envelope.method == "session.create":
+            return AgentResponse(
+                request_id=envelope.request_id or "",
+                channel_id=envelope.channel or "",
+                ok=True,
+                payload={"session_id": "cron_agentserver_allocated"},
+            )
         return AgentResponse(
             request_id=envelope.request_id or "",
             channel_id=envelope.channel or "",
@@ -206,6 +213,8 @@ class FakeAgentClient:
 
 class FailingAgentClient(FakeAgentClient):
     async def send_request(self, envelope, *a, **kw):
+        if envelope.method == "session.create":
+            return await super().send_request(envelope, *a, **kw)
         self.unary_requests.append(envelope)
         raise RuntimeError("agent unavailable")
 
@@ -287,7 +296,7 @@ class TestCronLastSessionId:
         assert stored is not None
         assert stored.last_session_id
         assert stored.last_session_id.startswith("cron_")
-        assert stored.last_session_id.endswith(f"_{job.id}")
+        assert stored.last_session_id == "cron_agentserver_allocated"
 
     @pytest.mark.asyncio
     async def test_run_now_info_returns_current_execution_session_id(self, tmp_path):
@@ -994,12 +1003,14 @@ class TestTeamModeWake:
         assert task is not None
         await task
 
-        assert len(agent.unary_requests) == 1
+        assert len(agent.unary_requests) == 2
         assert len(agent.stream_requests) == 0
-        env = agent.unary_requests[0]
+        create_env, env = agent.unary_requests
+        assert create_env.method == "session.create"
+        assert "session_id" not in create_env.params
         assert env.is_stream is False
         assert env.channel == "__cron__"
-        assert env.session_id.startswith("cron_") and env.session_id.endswith(f"_{job.id}")
+        assert env.session_id == "cron_agentserver_allocated"
 
         state = svc.runs[run_id]
         assert state.status == "succeeded"
@@ -1020,7 +1031,7 @@ class TestTeamModeWake:
         assert task is not None
         await task
 
-        env = agent.unary_requests[0]
+        env = agent.unary_requests[1]
         assert env.params["model_name"] == "fast-model"
         assert "model" not in env.params
 

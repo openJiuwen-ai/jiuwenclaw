@@ -208,7 +208,13 @@ function cronJobToUI(job: CronJobDTO, projects: ProjectInfo[]): CronTaskUI {
 // 跟 CronTaskUI.mode 这个已经归一过的 UI 字段语义不同。
 function isTeamCronModeValue(raw: string | undefined | null): boolean {
   const value = String(raw ?? '').trim().toLowerCase();
-  return value === 'team' || value === 'team.plan' || value === 'code.team';
+  return (
+    value === 'team' ||
+    value === 'team.plan' ||
+    value === 'team.plan.normal' ||
+    value === 'team.plan.code' ||
+    value === 'code.team'
+  );
 }
 
 type StatusFilterKey = 'running' | 'paused' | 'expired';
@@ -641,7 +647,12 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
       const result = await webRequest<{ accepted: boolean; run_id: string; session_id?: string }>('cron.job.run_now', {
         id: confirmState.job.id,
       });
-      if (result.session_id) {
+      // proactive.tick 的"立即执行"不跳转：后端返回的 session_id 是 cron 执行会话
+      // （cron_<ts>_<jobid>，空的），而推荐消息实际投递到 most_recent_active_session
+      // （用户当前会话）。跳过去看到的是空欢迎页，推荐却在原会话——跳转无意义且打断用户。
+      // 推荐消息会自然出现在用户当前会话里，无需主动跳转。
+      const isProactiveJob = confirmState.job.id === PROACTIVE_AUTO_JOB_ID;
+      if (result.session_id && !isProactiveJob) {
         useCronStore.getState().setLastRunSessionId(confirmState.job.id, result.session_id);
         onSelectSession(result.session_id);
       }

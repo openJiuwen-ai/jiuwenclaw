@@ -32,27 +32,27 @@ import uuid
 import zipfile
 import yaml
 
-from openjiuwen.auto_harness import (
+from openjiuwen.rsi.auto_harness import (
     AutoHarnessConfig,
     AutoHarnessOrchestrator,
     create_auto_harness_orchestrator,
 )
-from openjiuwen.auto_harness.infra.git_auth import (
+from openjiuwen.rsi.auto_harness.infra.git_auth import (
     build_git_auth_env,
 )
-from openjiuwen.auto_harness.schema import (
+from openjiuwen.rsi.auto_harness.schema import (
     ExtensionDesign,
     OptimizationTask,
     RuntimeExtensionArtifact,
     StageResult,
     load_auto_harness_config,
 )
-from openjiuwen.auto_harness.contexts import TaskContext, TaskRuntime
-from openjiuwen.auto_harness.pipelines import EXTENDED_EVOLVE_PIPELINE
-from openjiuwen.auto_harness.pipelines.extended_evolve_pipeline import (
+from openjiuwen.rsi.auto_harness.contexts import TaskContext, TaskRuntime
+from openjiuwen.rsi.auto_harness.pipelines import EXTENDED_EVOLVE_PIPELINE
+from openjiuwen.rsi.auto_harness.pipelines.extended_evolve_pipeline import (
     ExtensionTaskPipeline,
 )
-from openjiuwen.auto_harness.stages.activate import ExtendActivateStage
+from openjiuwen.rsi.auto_harness.stages.activate import ExtendActivateStage
 from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.session.stream.base import OutputSchema
 
@@ -261,8 +261,17 @@ class AutoHarnessService:
         # Initialize scheduler components
         self._init_scheduler()
 
-    def update_agent_instance(self, agent: Any):
-        self._agent = agent.get_instance()
+    async def update_agent_instance(self, agent: Any):
+        """Bind the DeepAgent this service executes scheduled runs on.
+
+        Awaits ``ensure_instance`` rather than reading ``get_instance``: the
+        root adapter builds its DeepAgent lazily, so a plain accessor would hand
+        back None on any path that has not run a chat turn yet.
+
+        Args:
+            agent: The JiuWenSwarm agent wrapper owning the adapter.
+        """
+        self._agent = await agent.ensure_instance()
         try:
             stream_event_rail = JiuSwarmStreamEventRail()
             logger.info("[AutoHarnessService] JiuSwarmStreamEventRail create success")

@@ -30,7 +30,7 @@ export function formatMemoryPathForDisplay(filePath: string): string {
 // 统一的路径展示工具：从 memory.ts 的 getDisplayPath 与 app-screen.ts 的
 // mvDisplayPath 合并而来。二者原本各有侧重——
 //   getDisplayPath: 用 path.relative() 精确计算,处理 Windows 跨盘/Unicode/
-//                   大小写问题,且能产生 ../ 前缀路径(来自 gitRoot 候选)。
+//                   大小写问题,且能产生 ../ 前缀路径(来自 projectDir 候选)。
 //   mvDisplayPath:  纯前缀匹配,简单但无法产生 ../ 路径;空结果用 "." 表示
 //                   当前目录(Unix 惯例)。
 // 合并后取两者之长:保留 relative() 的稳健性 + 空路径→"." 的友好展示,
@@ -42,15 +42,15 @@ export function formatMemoryPathForDisplay(filePath: string): string {
  * and picks the shortest one:
  *
  *   Candidates:
- *   1. Relative from git root  (e.g. ".jiuwen/rules/foo.md", "../JIUWENSWARM.md")
- *   2. Relative from projectDir (e.g. "JIUWENSWARM.local.md", ".jiuwen/rules/foo.md")
+ *   1. Relative from git root  (e.g. ".jiuwen/rules/foo.md")
+ *   2. Relative from projectDir (e.g. "JIUWENSWARM.local.md", "../JIUWENSWARM.md")
  *   3. Tilde notation          (e.g. "~/.jiuwen/JIUWENSWARM.md")
  *
  *   Winner = shortest candidate.
  *   Empty candidate (file === base dir) is shown as "." (current directory).
  *
- * All output uses forward slashes. ../ prefix paths are allowed (from gitRoot
- * candidate only; projectDir candidate skips them as unfriendly).
+ * All output uses forward slashes. A direct parent keeps its ../ prefix; deeper
+ * ancestors use a stable ~/... or absolute form to avoid long traversal chains.
  *
  * On Windows, THREE critical issues must be handled:
  * - path.relative() returns absolute paths for cross-drive paths — must discard.
@@ -76,6 +76,7 @@ export function getDisplayPath(
 
   // Collect all valid candidate paths, then pick the shortest
   const candidates: string[] = [];
+  let projectRelativeParentDepth = 0;
 
   // Resolve gitRoot: use provided value or discover from projectDir
   const resolvedGitRoot = gitRoot !== undefined ? gitRoot : findGitRoot(projectDir);
@@ -102,20 +103,38 @@ export function getDisplayPath(
     }
   }
 
-  // Candidate 2: relative from projectDir (skip cross-drive & "../" paths)
-  // 允许空字符串(file === projectDir → 显示 ".");跳过 ../ 前缀(不友好)。
+  // Candidate 2: relative from projectDir. Preserve "../" paths so files in
+  // parent/ancestor directories are not reduced to an ambiguous basename.
+  // Cross-drive results are still discarded because path.relative() returns
+  // an absolute path for them on Windows.
   const projectDirSlashes = formatMemoryPathForDisplay(projectDir).replace(/\\/g, "/");
   const projectDirNorm = process.platform === "win32" ? projectDirSlashes.toLowerCase() : projectDirSlashes;
   const relFromProj = relative(projectDirNorm, fileNorm);
-  if (!relFromProj.startsWith("/") && !/^[A-Za-z]:/.test(relFromProj) && !relFromProj.startsWith("..")) {
+  if (!relFromProj.startsWith("/") && !/^[A-Za-z]:/.test(relFromProj)) {
     const display = relative(projectDirSlashes, fileSlashes).replace(/\\/g, "/");
+    const parentTraversal = display.match(/^(?:\.\.\/)+/);
+    projectRelativeParentDepth = parentTraversal ? parentTraversal[0].length / 3 : 0;
     candidates.push(display);
   }
 
   // Candidate 3: tilde notation (if file is in home directory)
+  let tildePath: string | undefined;
   if (fileNorm.startsWith(homeDirNorm + "/") || fileNorm === homeDirNorm) {
-    const tildePath = "~" + fileSlashes.slice(homeDirSlashes.length);
+    tildePath = "~" + fileSlashes.slice(homeDirSlashes.length);
     candidates.push(tildePath);
+  }
+
+  // Match the open tab's readable home-relative presentation. For ancestor
+  // files under home, prefer ~/... over a long ../../../../... chain. If the
+  // file is outside home, the explicit ../ form remains the fallback.
+  if (projectRelativeParentDepth > 0 && tildePath) {
+    return tildePath;
+  }
+
+  // When the file is outside home, a rooted absolute path is clearer than a
+  // multi-level traversal chain. Preserve ../ only for the direct-parent case.
+  if (projectRelativeParentDepth > 1) {
+    return fileSlashes;
   }
 
   // Pick the shortest candidate; empty string means "current dir" → "."

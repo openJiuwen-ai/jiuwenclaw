@@ -104,6 +104,7 @@ async def test_runtime_config_syncs_channel_and_task_workspace(monkeypatch):
     adapter._workspace_dir = "/tmp"
     adapter._runtime_prompt_rail = None
     adapter._circuit_breaker_rail = None
+    adapter._subagent_rail = None
 
     captured = {}
 

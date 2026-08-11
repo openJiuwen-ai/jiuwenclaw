@@ -6,6 +6,7 @@ import { containsIgnoredDirectory } from '../../features/fileTreeFilters';
 import { isHistoryPreviewFile } from '../../features/historyFilePreview';
 import { webRequest } from '../../services/webClient';
 import { useChatStore } from '../../stores/chatStore';
+import { toDisplaySessionTitle } from '../../utils/documentMessage';
 
 function SessionErrorIndicator({ sessionId }: { sessionId: string }) {
   const error = useChatStore((state) => state.runtimes[sessionId]?.error);
@@ -97,9 +98,10 @@ function parseSessionDisplayLabel(sessionId: string, t: (key: string, options?: 
   }
 
   // 处理以 sess_、cron_、feishu_、wechat_、xiaoyi_、dingtalk_、tui_ 开头的会话ID
-  const prefixes = ['sess_', 'cron_', 'feishu_', 'wechat_', 'xiaoyi_', 'dingtalk_', 'wecom_', 'tui_'];
+  const prefixes = ['sess_', 'web_', 'cron_', 'feishu_', 'wechat_', 'xiaoyi_', 'dingtalk_', 'wecom_', 'tui_'];
   const prefixMap: Record<string, string> = {
     'sess_': t('sessions.prefixes.session'),
+    'web_': t('sessions.prefixes.session'),
     'cron_': t('sessions.prefixes.cron'),
     'feishu_': t('sessions.prefixes.feishu'),
     'wechat_': t('sessions.prefixes.wechat'),
@@ -465,13 +467,15 @@ export function SessionsPanel({
     () => (selectedSessionId ? parseSessionDisplayLabel(selectedSessionId, t) : t('sessions.noneSelected')),
     [selectedSessionId, t]
   );
-  const canRestoreSelectedSession =
-    Boolean(selectedSessionId?.startsWith('sess_')) && isConnected && !isProcessing;
+  const isWebSession = Boolean(
+    selectedSessionId?.startsWith('sess_') || selectedSessionId?.startsWith('web_')
+  );
+  const canRestoreSelectedSession = isWebSession && isConnected && !isProcessing;
   const restoreButtonTitle = !isConnected
     ? t('sessions.restoreDisabledNotConnected')
     : isProcessing
       ? t('sessions.restoreDisabledProcessing')
-      : !selectedSessionId?.startsWith('sess_')
+      : !isWebSession
         ? t('sessions.restoreDisabledUnsupported')
         : t('sessions.restore');
 
@@ -542,10 +546,10 @@ export function SessionsPanel({
                         setSelectedSessionId(session.session_id);
                         void loadSessionFilesForSession(session.session_id);
                       }}
-                      title={session.title || parseSessionDisplayLabel(session.session_id, t)}
+                      title={toDisplaySessionTitle(session.title || '') || parseSessionDisplayLabel(session.session_id, t)}
                     >
                       <span className="flex items-center gap-2">
-                        <span className="truncate block flex-1">{session.title || parseSessionDisplayLabel(session.session_id, t)}</span>
+                        <span className="truncate block flex-1">{toDisplaySessionTitle(session.title || '') || parseSessionDisplayLabel(session.session_id, t)}</span>
                         <SessionErrorIndicator sessionId={session.session_id} />
                       </span>
                       {session.mode === 'team' && session.team_name ? (

@@ -301,7 +301,7 @@ async def _team_agent_for_session(
         )
         if host is None:
             return None
-        deep_agent = host.get_instance()
+        deep_agent = await host.ensure_instance()
         if deep_agent is None:
             return None
         token = set_session_id(sid)
@@ -2402,7 +2402,7 @@ async def _ensure_dynamic_member_execution_loop(
                 sid,
             )
             return False, False
-        deep_agent = agent.get_instance()
+        deep_agent = await agent.ensure_instance()
         if deep_agent is None:
             logger.warning(
                 "[RemoteMemberBootstrap] teammate loop start skipped: deep_agent unavailable session_id=%s",
@@ -2583,7 +2583,7 @@ async def _replace_teammate_card_after_direct_bootstrap(
         server = AgentWebSocketServer.get_instance()
         agent_manager = server.get_agent_manager()
         agent = agent_manager.get_agent_nowait(channel_id) or await agent_manager.get_agent(channel_id, "agent")
-        deep_agent = agent.get_instance() if agent is not None else None
+        deep_agent = await agent.ensure_instance() if agent is not None else None
         if deep_agent is None:
             logger.warning(
                 "[RemoteMemberBootstrap] teammate registry card replace skipped: deep_agent unavailable "

@@ -128,13 +128,11 @@ The session mechanism plays an important role in JiuwenSwarm:
 
 You can view complete chat history of all sessions to understand past conversation content.
 
-![Session List Example](../assets/images/session/jiuwenclaw_session_history_preview.png)
-
 **Steps:**
 
 1. **Via Web Interface**
-   - In JiuwenSwarm Web interface, click "Sessions" in the left navigation
-   - Enter session management page to see all session list (as displayed in frontend session management)
+   - In JiuwenSwarm Web interface, click **Work** in the left navigation
+   - In the session list on the left side of the Work page, you can see all sessions under the current project
    - Click any session to view its complete chat history
 
 2. **Via Local Files**
@@ -142,20 +140,14 @@ You can view complete chat history of all sessions to understand past conversati
    - Enter the corresponding session directory (e.g., `sess_19ddd41cbc0_fd1e4d/`)
    - View conversation content in `history.json` file
 
-> **Tip**: The frontend page has a "Conversation Preview" toggle to switch between JSON text format or conversation page format, convenient for viewing raw data or conversation content.
-
 ### Restore Session
 
 Restoring a session syncs historical session content to the frontend to continue previous work.
 
-![Restore Session Example](../assets/images/session/jiuwenclaw_session_recovery_history_1.png)
-
-![Restore Session Example 2](../assets/images/session/jiuwenclaw_session_recovery_history_2.png)
-
 **Steps:**
 
-1. Find the session to restore in the session management page (recommend selecting an actual chat history session, not a heartbeat session)
-2. Click the "Restore" button or double-click the session entry
+1. In the session list on the left side of the Work page, find the session to restore
+2. Click the session entry
 3. System will load all historical messages for that session
 4. After restoration, you can see complete conversation history in the chat page
 5. Continue entering new content, AI will respond based on historical context
@@ -176,15 +168,13 @@ Restoring a session syncs historical session content to the frontend to continue
 
 ### Delete Historical Session
 
-If a session is no longer needed, you can delete it directly in session management to free storage and keep the list tidy.
-
-![Delete Session Example](../assets/images/session/jiuwenclaw_session_history_delete.png)
+If a session is no longer needed, you can delete it directly in the Work page to free storage and keep the list tidy.
 
 **Steps:**
 
-1. In JiuwenSwarm Web interface, click "Sessions" in the left navigation
-2. Select the session to delete in the session management page
-3. Click the delete icon in the right-side session detail area
+1. In JiuwenSwarm Web interface, click **Work** in the left navigation
+2. In the session list on the left side of the Work page, select the session to delete
+3. Right-click or use the session operation menu to select "Delete"
 4. In the popup confirmation dialog, click "Confirm"
 5. After successful deletion, the session will be removed from the list
 

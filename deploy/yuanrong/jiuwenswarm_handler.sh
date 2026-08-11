@@ -137,11 +137,17 @@ jiuwenswarm_ensure_func_code() {
 
 jiuwenswarm_detect_session_dir() {
     local master_host="$1"
+    local fatal="${2:-true}"
 
     DEPLOY_VARS["YR_SESSION_DIR"]=$(exec_on_host "${master_host}" "readlink /tmp/yr_sessions/latest 2>/dev/null || echo ''" | tr -d '\r')
 
     if [ -z "${DEPLOY_VARS["YR_SESSION_DIR"]}" ]; then
-        error "Could not detect yuanrong session dir on ${master_host}. Please ensure yuanrong is deployed and started (run yuanrong_deploy.sh up first)."
+        if [ "${fatal}" = "true" ]; then
+            error "Could not detect yuanrong session dir on ${master_host}. Please ensure yuanrong is deployed and started (run yuanrong_deploy.sh up first)."
+        else
+            warning "Could not detect yuanrong session dir on ${master_host}. yuanrong may not be running."
+            return 1
+        fi
     fi
 
     info "Detected yuanrong session dir on ${master_host}: ${DEPLOY_VARS["YR_SESSION_DIR"]}"
@@ -274,24 +280,42 @@ uninstall_jiuwenswarm() {
     info "Unregistering jiuwenswarm function on yr master (${master_host})..."
 
     # 复用 up 流程的检测逻辑，获取 session dir 和 meta port
-    jiuwenswarm_detect_session_dir "${master_host}"
-    jiuwenswarm_get_meta_port "${master_host}"
-
-    local delete_url="http://${master_host}:${META_PORT}/serverless/v1/functions/${func_svc_name}"
-    info "curl -H \"Content-type: application/json\" -X DELETE ${delete_url}"
-
-    local res
-    res=$(curl -s -H "Content-type: application/json" -X DELETE "${delete_url}" || true)
-    info "Function unregistration result: ${res}"
-
-    # DELETE 成功返回 {}（无 code 字段）或 code=0；其他视为失败
-    local code
-    code=$(echo "${res}" | jq -r '.code // "none"' 2>/dev/null || echo "error")
-    if [[ "${code}" == "0" || "${code}" == "none" ]]; then
-        success "Serverless function unregistered successfully: ${func_svc_name}"
+    # down 流程中 yuanrong 可能未运行，使用非致命模式：检测失败则跳过注销
+    if ! jiuwenswarm_detect_session_dir "${master_host}" "false"; then
+        warning "yuanrong is not running on ${master_host}, skipping function unregistration."
     else
-        warning "Failed to unregister serverless function (may not exist): ${res}"
+        jiuwenswarm_get_meta_port "${master_host}"
+
+        local delete_url="http://${master_host}:${META_PORT}/serverless/v1/functions/${func_svc_name}"
+        info "curl -H \"Content-type: application/json\" -X DELETE ${delete_url}"
+
+        local res
+        res=$(curl -s -H "Content-type: application/json" -X DELETE "${delete_url}" || true)
+        info "Function unregistration result: ${res}"
+
+        # DELETE 成功返回 {}（无 code 字段）或 code=0；其他视为失败
+        local code
+        code=$(echo "${res}" | jq -r '.code // "none"' 2>/dev/null || echo "error")
+        if [[ "${code}" == "0" || "${code}" == "none" ]]; then
+            success "Serverless function unregistered successfully: ${func_svc_name}"
+        else
+            warning "Failed to unregister serverless function (may not exist): ${res}"
+        fi
     fi
+
+    # 卸载所有主机上的 jiuwenswarm 和 openjiuwen pip 包
+    local python_version="${DEPLOY_VARS["YR_PYTHON_VERSION"]}"
+    for host in "${JIUWENSWARM_HOST_LIST[@]}"; do
+        info "Uninstalling jiuwenswarm and openjiuwen pip packages on ${host}..."
+        local uninstall_output
+        if uninstall_output=$(exec_on_host "${host}" "python${python_version} -m pip uninstall -y jiuwenswarm openjiuwen 2>&1"); then
+            echo "${uninstall_output}" | sed "s/^/    /"
+            success "pip packages uninstalled on ${host}"
+        else
+            echo "${uninstall_output}" | sed "s/^/    /"
+            warning "Failed to uninstall pip packages on ${host} (may not be installed)"
+        fi
+    done
 
     echo ""
     echo "=========================================="

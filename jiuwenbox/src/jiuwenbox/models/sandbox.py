@@ -97,6 +97,10 @@ class SandboxRef(BaseModel):
     last_active_at: datetime | None = None
     error_message: str | None = None
     env: dict[str, str] = Field(default_factory=dict)
+    # Snapshot of the sandbox IPv4 confirmed after the last successful
+    # create/start. Isolated mode uses the veth address; host mode uses the
+    # shared network-namespace egress address. None when not yet known.
+    ip_address: str | None = None
 
 
 class ExecResult(BaseModel):

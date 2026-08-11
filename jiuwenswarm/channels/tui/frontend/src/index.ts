@@ -4,7 +4,7 @@ import { ProcessTerminal, TUI } from "@mariozechner/pi-tui";
 import { parseArgs } from "node:util";
 import { CliPiAppState } from "./app-state.js";
 import { CommandService } from "./core/commands/CommandService.js";
-import { createBuiltinCommands } from "./core/commands/registry.js";
+import { createBuiltinCommands, isHarmonyOSCommandsEnabled } from "./core/commands/registry.js";
 import { WsClient } from "./core/ws-client.js";
 import { AppScreen } from "./ui/app-screen.js";
 import { HandoffPortImpl } from "./core/supervision/handoff-port.js";
@@ -154,7 +154,12 @@ wsClient.onAuthExpired = () => {
 };
 
 const commandService = new CommandService();
-commandService.register(createBuiltinCommands({ switchEnabled: supervisionEnv.supervised }));
+commandService.register(
+  createBuiltinCommands({
+    harmonyosEnabled: isHarmonyOSCommandsEnabled(),
+    switchEnabled: supervisionEnv.supervised,
+  }),
+);
 
 /** 正常退出 CLI 前显式通知服务端；异常崩溃不走该路径。 */
 async function notifyDisconnectBeforeExit(): Promise<void> {

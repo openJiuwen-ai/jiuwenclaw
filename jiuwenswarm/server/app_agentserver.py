@@ -124,9 +124,33 @@ from jiuwenswarm.agents.harness.common.tools.bash_tool_safety import (
 install_shell_tool_safety_hooks()
 
 # 兼容 SSE-only 网关：让非流式 invoke()（subagent / 心跳等）能解析 text/event-stream 响应
+# 仅当 channels.xiaoyi.mode == xiaoyi_claw 时才打补丁（该网关以 SSE-only 方式返回非流式响应）。
 from jiuwenswarm.llm_sse_patch import apply_openai_sse_invoke_patch
 
-apply_openai_sse_invoke_patch()
+
+def _should_apply_sse_invoke_patch() -> bool:
+    """检测 channels.xiaoyi.mode 是否为 xiaoyi_claw。"""
+    try:
+        from jiuwenswarm.common.config import get_config
+
+        mode = (
+            get_config()
+            .get("channels", {})
+            .get("xiaoyi", {})
+            .get("mode")
+        )
+    except Exception as exc:  # noqa: BLE001 - 启动早期读配置失败时保守兜底
+        logger.warning(
+            "[app_agentserver] 读取 channels.xiaoyi.mode 失败，默认应用 SSE 兼容补丁: %s",
+            exc,
+        )
+        return True
+
+    return str(mode or "").strip() == "xiaoyi_claw"
+
+
+if _should_apply_sse_invoke_patch():
+    apply_openai_sse_invoke_patch()
 
 # /debug 模式下捕获 builtin TaskTool 分发的 subagent 流（reasoning/tool_call/usage），
 # 内联写入主 dump。非 debug 或 include_subagent_flow 关闭时走原始 invoke，零回归。
@@ -135,6 +159,15 @@ from jiuwenswarm.server.runtime.debug_trace.task_tool_patch import (
 )
 
 apply_task_tool_debug_patch()
+
+# 让所有分发路径创建的 subagent 都带上 OTel 观测 rail（内置 task_tool、自定义
+# agent 工具、后台 subagent），这样子 agent 的 llm/tool span 归属自己的
+# agent.<type>.invoke span，而不是挂到派发它的 agent 身上。
+from jiuwenswarm.agents.harness.agent_observability import (
+    install_subagent_observability_hook,
+)
+
+install_subagent_observability_hook()
 
 
 
@@ -163,6 +196,13 @@ async def _run(host: str, port: int) -> None:
 
     # 会话 metadata 的字段补全已改为惰性迁移:读取时按需推断并写回磁盘
     # (见 session_metadata._apply_metadata_defaults_with_inference),无需启动全量扫描。
+
+    # ---------- 图像模态探针预热 ----------
+    # 在开始接受连接之前把探针缓存坐实：晚于这里的话，第一批 agent（含每个
+    # subagent）会各自在后台补探，多发无谓的 LLM 请求。
+    from jiuwenswarm.server.runtime.image_modality_warmup import warm_image_modality_cache
+
+    await warm_image_modality_cache(get_config(), reason="startup")
 
     server = AgentWebSocketServer.get_instance(
         host=host,

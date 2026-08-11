@@ -5,6 +5,7 @@ import logging
 import json
 import os
 import queue
+import re
 import threading
 import time
 from pathlib import Path
@@ -22,6 +23,42 @@ _LEGACY_HISTORY_FILENAME = "history.json"
 _JSONL_HISTORY_FILENAME = "history.jsonl"
 _LEGACY_HISTORY_ENV = "JIUWENSWARM_USE_LEGACY_HISTORY_JSON"
 _HEARTBEAT_OK = "HEARTBEAT_OK"
+_VALID_SESSION_ID = re.compile(
+    r"^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,78}[A-Za-z0-9])?$"
+)
+# Gateway may inline @path as <file-content>...</file-content> before chat.send.
+# History should keep the short @path form so jsonl rows stay one physical line
+# and refresh UI does not load megabytes of file body.
+_FILE_CONTENT_BLOCK_RE = re.compile(
+    r"\n?<file-content\s+path=\"([^\"]*)\">.*?</file-content>\n?",
+    re.DOTALL,
+)
+
+
+def collapse_file_content_blocks(content: str) -> str:
+    """Replace inlined ``<file-content>`` bodies with ``@path`` references.
+
+    Used when persisting / serving user history so the agent-facing inline
+    expansion is not stored as the user-visible transcript.
+    """
+    if not content or "<file-content" not in content:
+        return content
+
+    def _replacer(match: re.Match[str]) -> str:
+        path = match.group(1) or ""
+        if not path:
+            return "\n"
+        ref = f'@"{path}"' if any(ch.isspace() for ch in path) else f"@{path}"
+        return f"\n{ref}\n"
+
+    collapsed = _FILE_CONTENT_BLOCK_RE.sub(_replacer, content)
+    return re.sub(r"\n{3,}", "\n\n", collapsed).strip()
+
+
+def is_valid_session_id(session_id: str) -> bool:
+    """Return whether a session id is safe to use as one path component."""
+
+    return _VALID_SESSION_ID.fullmatch(session_id) is not None
 
 
 def _is_ephemeral_heartbeat_session(session_id: str) -> bool:
@@ -113,9 +150,8 @@ def resolve_session_dir(
 ) -> tuple[Path | None, str | None]:
     """安全解析 session 目录路径（防路径遍历）。
 
-    采用白名单判据：``sanitize_session_id(session_id) == session_id`` 才认为合法，
-    原样使用；否则直接拒绝，根本不拼路径。这样删除类破坏性操作不会因 sanitize 后的
-    字符串（如 ``../config`` -> ``config``）误伤同名合法 session。
+    采用严格白名单判据：session id 只能包含 ASCII 字母、数字、点、横线和下划线，
+    长度不超过 80，且首尾必须是字母或数字。不合法输入直接拒绝，根本不拼路径。
 
     再用 ``resolve()`` + ``relative_to`` 做纵深防御，兜底白名单逻辑被绕过的极端情况。
 
@@ -128,9 +164,7 @@ def resolve_session_dir(
         ``(resolved_path, None)`` —— 合法，返回解析后的绝对路径（确认在 sessions 目录内）。
         ``(None, error_reason)`` —— 非法，根本未触碰磁盘路径。
     """
-    from jiuwenswarm.server.runtime.prompt_attachment_loader import sanitize_session_id
-
-    if not session_id or sanitize_session_id(session_id) != session_id:
+    if not session_id or not is_valid_session_id(session_id):
         return None, "invalid session_id"
 
     if sessions_root is None:
@@ -223,8 +257,13 @@ def _read_history_jsonl(path: Path) -> list[dict[str, Any]]:
 
     records: list[dict[str, Any]] = []
     try:
-        for lineno, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-            line = raw_line.strip()
+        # JSONL records are delimited by "\n" only. Do NOT use str.splitlines():
+        # inlined file bodies may contain Unicode line separators (U+2028 etc.)
+        # that splitlines() treats as breaks, corrupting a single JSON object
+        # into fragments and dropping the user turn on refresh.
+        text = path.read_text(encoding="utf-8")
+        for lineno, raw_line in enumerate(text.split("\n"), start=1):
+            line = raw_line.rstrip("\r").strip()
             if not line:
                 continue
             try:
@@ -233,6 +272,14 @@ def _read_history_jsonl(path: Path) -> list[dict[str, Any]]:
                 logger.warning("读取 history.jsonl 第 %d 行失败，已跳过: %s", lineno, exc)
                 continue
             if isinstance(item, dict):
+                content = item.get("content")
+                if (
+                    item.get("role") in {"user", "human"}
+                    and isinstance(content, str)
+                    and "<file-content" in content
+                ):
+                    item = dict(item)
+                    item["content"] = collapse_file_content_blocks(content)
                 records.append(item)
             else:
                 logger.warning(
@@ -337,10 +384,16 @@ def _is_team_relevant(item: dict[str, Any]) -> bool:
     if not isinstance(et, str):
         return False
     if et in _TEAM_RELEVANT_EVENT_TYPES:
+        if et == "chat.file":
+            role = item.get("role")
+            return isinstance(role, str) and role.strip().lower() in {
+                "assistant",
+                "teammate",
+            }
         if et in ("chat.tool_call", "chat.tracer_agent"):
             mode = item.get("mode")
             return isinstance(mode, str) and mode.strip().lower() == "team"
-        if et in ("chat.final", "chat.tool_result", "chat.file"):
+        if et in ("chat.final", "chat.tool_result"):
             role = item.get("role")
             return isinstance(role, str) and role.strip().lower() == "teammate"
         return True
