@@ -875,7 +875,6 @@
       "githubToken": "GitHub personal access token for repository or GitHub-related features.",
       "freeSearchDdg": "Enable free DuckDuckGo search (including DDG via Jina). Disable to turn off this source.",
       "freeSearchBing": "Enable free Bing search. Disable to stop using Bing.",
-      "evolutionAutoScan": "Automatically detect signals that a skill can be evolved and suggest creating/updating skills.",
       "skillCreate": "Install `skill-creator` and `teamskill-creator` before enabling automatic skill-creation suggestions.",
       "memoryForbiddenDescription": "Describe sensitive types or rules that must not be written to memory, e.g. passwords, ID numbers, secrets.",
       "symphonyDynamicGraphEnabled": "When disabled, planning uses only the static graph. Existing runtime data is retained.",
@@ -1039,7 +1038,6 @@
       "proactive": { "label": "Proactive Recommendation", "hint": "Automatically analyze user needs and proactively offer suggestions; adjust the schedule in the Cron panel" }
     },
     "booleanLabels": {
-      "evolutionAutoScan": "Auto-detect evolution signals",
       "skillCreate": "Auto-suggest new skill creation",
       "freeSearchDdg": "Enable DuckDuckGo (including DDG via Jina)",
       "freeSearchBing": "Enable Bing",

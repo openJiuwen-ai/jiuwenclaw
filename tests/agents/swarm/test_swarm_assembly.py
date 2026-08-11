@@ -1247,7 +1247,7 @@ def test_team_skill_evolution_provider_passes_review_runtime(
         language="cn",
     )
     rail = built[1]
-    assert rail.kwargs["signal_trigger"] is False
+    assert "signal_trigger" not in rail.kwargs
     assert rail.kwargs["auto_save"] is auto_save
     assert rail.kwargs["review_trigger"] is True
 
@@ -1336,7 +1336,7 @@ def test_member_skill_evolution_provider_passes_review_runtime(
     )
 
     built = evolution_rails.build_member_skill_evolution_rail(
-        {"evolution_model_config": {}, "signal_trigger": False},
+        {"evolution_model_config": {}},
         ctx,
     )
 
@@ -1347,7 +1347,7 @@ def test_member_skill_evolution_provider_passes_review_runtime(
         language="en",
     )
     assert rail.kwargs["language"] == "en"
-    assert rail.kwargs["signal_trigger"] is False
+    assert "signal_trigger" not in rail.kwargs
     assert rail.kwargs["auto_save"] is True
     assert rail.bound_sink == (registry_obj, "t", "teammate")
 

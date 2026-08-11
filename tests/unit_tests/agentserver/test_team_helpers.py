@@ -203,7 +203,6 @@ class _FakeRail:
         self._pending_first = pending_first
         self._drain_calls = 0
         self.drain_waits: list[bool] = []
-        self.signal_trigger = True
         self.review_trigger = False
 
     async def drain_pending_approval_events(self, wait: bool = False, timeout: float | None = None):
@@ -917,7 +916,6 @@ async def test_team_evolution_monitor_uses_approval_request_id_without_provision
     class _PendingThenApprovalRail:
         def __init__(self):
             self._drain_calls = 0
-            self.signal_trigger = True
             self.review_trigger = False
 
         async def drain_pending_approval_events(self, wait: bool = False, timeout: float | None = None):
@@ -1061,7 +1059,7 @@ async def test_ensure_team_evolution_watcher_starts_without_reasoning_gate(monke
 
         @staticmethod
         def get_team_skill_rail(session_id: str):
-            return SimpleNamespace(signal_trigger=True, review_trigger=False)
+            return SimpleNamespace(review_trigger=False)
 
         @staticmethod
         def register_team_evolution_watcher(
@@ -1114,22 +1112,14 @@ async def test_ensure_team_evolution_watcher_defers_when_rail_missing(monkeypatc
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(
-    ("review_trigger", "should_start"),
-    [(False, False), (True, True)],
-)
-async def test_ensure_team_evolution_watcher_respects_review_trigger(
+async def test_ensure_team_evolution_watcher_starts_when_rail_mounted(
         monkeypatch,
-        review_trigger: bool,
-        should_start: bool,
 ):
+    """Mounted evolution rail enables passive scan; watcher starts regardless of review_trigger."""
     registered: dict[str, asyncio.Task] = {}
 
     class _Rail:
-        pass
-
-    _Rail.signal_trigger = False
-    _Rail.review_trigger = review_trigger
+        review_trigger = False
 
     class _FakeManager(_InactiveTeamRuntimeManagerMixin):
         @staticmethod
@@ -1158,10 +1148,6 @@ async def test_ensure_team_evolution_watcher_respects_review_trigger(
     monkeypatch.setattr(team_helpers, "_watch_team_evolution_and_push", _fake_watch)
 
     _TeamHelpersTestApi.ensure_team_evolution_watcher("web", "sess-1")
-
-    if not should_start:
-        assert registered == {}
-        return
 
     watcher = registered["sess-1"]
     watcher.cancel()

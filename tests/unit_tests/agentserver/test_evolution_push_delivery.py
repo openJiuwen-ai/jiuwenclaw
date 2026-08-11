@@ -72,7 +72,6 @@ class _FakeEvolutionRail:
         )
         self.drain_waits: list[bool] = []
         self.cleanup_calls = 0
-        self.signal_trigger = True
         self.llm_updates: list[tuple[object, str | None]] = []
 
     def update_llm(self, model: object, model_name: str | None) -> None:
@@ -138,22 +137,26 @@ class _TestAdapter(JiuWenSwarmDeepAdapter):
 
 
 @pytest.mark.asyncio
-async def test_normal_evolution_watcher_skips_status_when_signal_trigger_disabled(monkeypatch):
+async def test_normal_evolution_watcher_runs_when_rail_mounted(monkeypatch):
+    """Mounted evolution rail enables passive scan; watcher does not gate on signal_trigger."""
     _FakeTransport.pushes = []
-    rail = _FakeEvolutionRail()
-    rail.signal_trigger = False
+    rail = _FakeEvolutionRail(batches=[[]])
     adapter = _TestAdapter.build_with_rail(rail)
 
     monkeypatch.setattr(
         "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
         _FakeTransport,
     )
+    monkeypatch.setattr(
+        interface_deep_module,
+        "resolve_evolution_event_timeout_sec",
+        lambda rail, fallback_sec=30.0: 0.01,
+    )
 
-    await adapter.watch_evolution_and_push("stream-rid", "web", "sess-disabled")
+    await adapter.watch_evolution_and_push("stream-rid", "web", "sess-mounted")
 
-    assert _FakeTransport.pushes == []
-    assert rail.drain_waits == []
-    assert rail.cleanup_calls == 0
+    assert rail.drain_waits
+    assert rail.cleanup_calls >= 1
 
 
 @pytest.mark.asyncio

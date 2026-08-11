@@ -265,9 +265,7 @@ def test_build_member_rails_wires_team_trajectory_registry_to_evolution_rails(
             self.bound_member_role = member_role
 
     registry = object()
-    monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
     monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
-    monkeypatch.delenv("EVOLUTION_SIGNAL_TRIGGER", raising=False)
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.team.team_runtime_inheritance.TeamSkillEvolutionRail",
         _FakeTeamSkillEvolutionRail,
@@ -288,7 +286,7 @@ def test_build_member_rails_wires_team_trajectory_registry_to_evolution_rails(
             skills_dir=str(tmp_path / "skills"),
             team_id="demo-team",
             trajectory_registry=registry,
-            config={"evolution": {"auto_scan": True}},
+            config={"evolution": {"review_trigger": True}},
         ),
     )
     member_rails = build_member_rails(
@@ -298,7 +296,7 @@ def test_build_member_rails_wires_team_trajectory_registry_to_evolution_rails(
             skills_dir=str(tmp_path / "skills"),
             team_id="demo-team",
             trajectory_registry=registry,
-            config={"evolution": {"auto_scan": True}},
+            config={"evolution": {"review_trigger": True}},
         ),
     )
 
@@ -312,12 +310,12 @@ def test_build_member_rails_wires_team_trajectory_registry_to_evolution_rails(
     assert leader_rail.kwargs["trajectory_source"] is registry
     assert leader_rail.kwargs["trajectory_sink"] is registry
     assert leader_rail.kwargs["member_role"] == "leader"
-    assert leader_rail.kwargs["signal_trigger"] is False
+    assert "signal_trigger" not in leader_rail.kwargs
     assert leader_rail.kwargs["review_trigger"] is True
     assert member_rail.bound_sink is registry
     assert member_rail.bound_team_id == "demo-team"
     assert member_rail.bound_member_role == "teammate"
-    assert member_rail.kwargs["signal_trigger"] is True
+    assert "signal_trigger" not in member_rail.kwargs
 
 
 @pytest.mark.parametrize(
@@ -326,8 +324,8 @@ def test_build_member_rails_wires_team_trajectory_registry_to_evolution_rails(
         (None, {"evolution": {"enabled": True, "review_trigger": False}}, False),
         (None, {"evolution": {"enabled": False, "review_trigger": False}}, False),
         (None, {"react": {"evolution": {"enabled": True, "review_trigger": True}}}, True),
-        (None, {"evolution": {"auto_scan": True}}, True),
-        (None, {"evolution": {"auto_scan": True, "review_trigger": False}}, False),
+        (None, {"evolution": {}}, False),
+        (None, {"evolution": {"review_trigger": False}}, False),
         ("false", {"evolution": {"enabled": True, "review_trigger": True}}, False),
     ],
 )
@@ -346,7 +344,6 @@ def test_build_member_rails_creates_leader_team_skill_evolution_rail_with_comple
             )
 
     if env_review_trigger is None:
-        monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
         monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
     else:
         monkeypatch.setenv("EVOLUTION_REVIEW_TRIGGER", env_review_trigger)
@@ -369,7 +366,7 @@ def test_build_member_rails_creates_leader_team_skill_evolution_rail_with_comple
 
     team_skill_rails = [rail for rail in rails if isinstance(rail, _FakeTeamSkillEvolutionRail)]
     assert len(team_skill_rails) == 1
-    assert team_skill_rails[0].kwargs["signal_trigger"] is False
+    assert "signal_trigger" not in team_skill_rails[0].kwargs
     assert team_skill_rails[0].kwargs["review_trigger"] is expected_review_trigger
 
 
@@ -390,7 +387,6 @@ def test_build_member_rails_wires_leader_team_skill_evolution_active_review_rail
                 experience_submission_service=object()
             )
 
-    monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
     monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.team.team_runtime_inheritance.EvolutionInterruptRail",
@@ -435,7 +431,7 @@ def test_build_member_rails_wires_leader_team_skill_evolution_active_review_rail
     assert team_rail.kwargs["auto_save"] is auto_save
 
 
-def test_build_member_rails_keeps_member_skill_evolution_when_signal_trigger_disabled(
+def test_build_member_rails_keeps_member_skill_evolution_when_mounted(
     tmp_path, monkeypatch
 ):
     class _FakeEvolutionInterruptRail:
@@ -444,15 +440,12 @@ def test_build_member_rails_keeps_member_skill_evolution_when_signal_trigger_dis
 
     class _FakeSkillEvolutionRail:
         def __init__(self, **kwargs):
-            self.signal_trigger = kwargs["signal_trigger"]
             self.auto_save = kwargs["auto_save"]
             self._review_runtime = kwargs.get("review_runtime")
             self.experience_manager = SimpleNamespace(
                 experience_submission_service=object()
             )
 
-    monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
-    monkeypatch.delenv("EVOLUTION_SIGNAL_TRIGGER", raising=False)
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.team.team_runtime_inheritance.EvolutionInterruptRail",
         _FakeEvolutionInterruptRail,
@@ -471,13 +464,12 @@ def test_build_member_rails_keeps_member_skill_evolution_when_signal_trigger_dis
         runtime=RuntimeInfo(channel="web"),
         team_workspace=TeamWorkspaceInfo(
             skills_dir=str(tmp_path / "skills"),
-            config={"react": {"evolution": {"auto_scan": False, "auto_save": False}}},
+            config={"react": {"evolution": {"auto_save": False}}},
         ),
     )
 
     evo_rails = [rail for rail in rails if isinstance(rail, _FakeSkillEvolutionRail)]
     assert len(evo_rails) == 1
-    assert evo_rails[0].signal_trigger is False
     assert evo_rails[0].auto_save is True
     interrupt_index = next(
         index for index, rail in enumerate(rails) if isinstance(rail, _FakeEvolutionInterruptRail)
@@ -487,7 +479,7 @@ def test_build_member_rails_keeps_member_skill_evolution_when_signal_trigger_dis
     assert rails[interrupt_index].kwargs["auto_save"] is True
 
 
-def test_build_member_rails_keeps_team_skill_create_when_signal_trigger_disabled(
+def test_build_member_rails_keeps_team_skill_create_when_skill_create_enabled(
     tmp_path, monkeypatch
 ):
     class _FakeTeamSkillCreateRail:
@@ -504,7 +496,7 @@ def test_build_member_rails_keeps_team_skill_create_when_signal_trigger_disabled
         member_info=MemberInfo(role="leader"),
         team_workspace=TeamWorkspaceInfo(
             skills_dir=str(tmp_path / "skills"),
-            config={"evolution": {"signal_trigger": False, "skill_create": True}},
+            config={"evolution": {"skill_create": True}},
         ),
     )
 
