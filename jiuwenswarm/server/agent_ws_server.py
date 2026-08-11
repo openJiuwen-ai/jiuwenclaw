@@ -128,6 +128,8 @@ from jiuwenswarm.common.mode_matrix import (
     resolve_request_mode,
 )
 from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenswarm.common.reverse_rpc.errors import ReverseRpcTransportDisconnected
+from jiuwenswarm.common.reverse_rpc.models import ReverseRpcResponse
 from jiuwenswarm.common.log_preview import preview_text
 from jiuwenswarm.server.request_context import (
     build_device_context_from_request,
@@ -135,6 +137,11 @@ from jiuwenswarm.server.request_context import (
     reset_device_context,
     set_current_agent_request,
     set_device_context,
+)
+from jiuwenswarm.server.reverse_rpc import (
+    SingleGatewayReverseRpcTransport,
+    configure_reverse_rpc_transport,
+    get_reverse_rpc_client,
 )
 
 logger = logging.getLogger(__name__)
@@ -928,6 +935,9 @@ class AgentWebSocketServer:
         )
         get_device_command_manager().set_send_push_callback(self.send_push)
         get_gui_rpc_client().set_send_push_callback(self.send_push)
+        configure_reverse_rpc_transport(
+            SingleGatewayReverseRpcTransport(self.send_push)
+        )
 
     def set_proactive_engine(self, engine: Any) -> None:
         """Store the proactive engine instance for debug trigger interface."""
@@ -1362,6 +1372,9 @@ class AgentWebSocketServer:
                     "Gateway disconnected",
                 )
             )
+            get_reverse_rpc_client().fail_all(
+                ReverseRpcTransportDisconnected("Gateway disconnected")
+            )
             self._clear_ws_acp_client_capabilities(ws)
             connection_tasks = list(tasks)
             for task in connection_tasks:
@@ -1478,6 +1491,9 @@ class AgentWebSocketServer:
                 return
             if request.req_method == ReqMethod.XIAOYI_GUI_RPC_RESPONSE:
                 await self._handle_xiaoyi_gui_rpc_response(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.REVERSE_RPC_RESPONSE:
+                await self._handle_reverse_rpc_response(ws, request, send_lock)
                 return
 
             await self._trigger_before_chat_request_hook(request)
@@ -8412,6 +8428,50 @@ class AgentWebSocketServer:
                 response.rpc_id,
                 response.success,
                 response.error_code,
+            )
+        resp = AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=True,
+            payload={
+                "accepted": accepted,
+                "rpc_id": response.rpc_id if response is not None else "",
+                "ignored": not accepted,
+            },
+        )
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await ws.send(json.dumps(wire, ensure_ascii=False))
+
+    async def _handle_reverse_rpc_response(
+            self,
+            ws: Any,
+            request: AgentRequest,
+            send_lock: asyncio.Lock,
+    ) -> None:
+        params = request.params if isinstance(request.params, dict) else {}
+        response: ReverseRpcResponse | None = None
+        accepted = False
+        try:
+            response = ReverseRpcResponse.from_dict(params)
+            accepted = get_reverse_rpc_client().complete(response)
+        except ValueError:
+            logger.warning(
+                "[REVERSE_RPC] phase=CLIENT_RESPONSE_INVALID source_request_id=%s",
+                request.request_id,
+                exc_info=True,
+            )
+        if response is not None and not accepted:
+            logger.info(
+                "[REVERSE_RPC] phase=CLIENT_RESPONSE_IGNORED rpc_id=%s "
+                "reason=unknown_or_completed",
+                response.rpc_id,
+            )
+        elif response is not None:
+            logger.info(
+                "[REVERSE_RPC] phase=CLIENT_RESPONSE_COMPLETED rpc_id=%s status=%s",
+                response.rpc_id,
+                "ok" if response.ok else "error",
             )
         resp = AgentResponse(
             request_id=request.request_id,

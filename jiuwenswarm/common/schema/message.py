@@ -12,6 +12,7 @@ class ReqMethod(Enum):
     ACP_TOOL_RESPONSE = "acp.tool_response"
     XIAOYI_DEVICE_COMMAND_RESPONSE = "xiaoyi.device_command.response"
     XIAOYI_GUI_RPC_RESPONSE = "xiaoyi.gui_rpc.response"
+    REVERSE_RPC_RESPONSE = "reverse_rpc.response"
 
     CHAT_SEND = "chat.send"
     CHAT_RESUME = "chat.resume"

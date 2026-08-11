@@ -23,12 +23,19 @@ from jiuwenswarm.common.e2a.constants import (
     E2A_RESPONSE_KIND_XIAOYI_DEVICE_COMMAND_REQUEST,
     E2A_RESPONSE_KIND_XIAOYI_GUI_RPC_CANCEL,
     E2A_RESPONSE_KIND_XIAOYI_GUI_RPC_REQUEST,
+    E2A_RESPONSE_KIND_REVERSE_RPC_CANCEL,
+    E2A_RESPONSE_KIND_REVERSE_RPC_REQUEST,
     E2A_WIRE_INTERNAL_METADATA_KEYS,
 )
 from jiuwenswarm.gateway.gateway_push.xiaoyi_device_command_handler import (
     XiaoyiDeviceCommandHandler,
 )
 from jiuwenswarm.gateway.gui_rpc import XiaoyiGuiRpcDispatcher
+from jiuwenswarm.gateway.reverse_rpc import (
+    CapabilityRegistry,
+    ReverseRpcDispatcher,
+    ReverseRpcResponseTransport,
+)
 from jiuwenswarm.common.config import get_evolution_auto_save_enabled
 
 from jiuwenswarm.gateway.routing.session_map import SessionMap
@@ -266,6 +273,11 @@ class MessageHandler(ABC):
         self._cron_controller = None
         self._xiaoyi_device_handler = XiaoyiDeviceCommandHandler(self.agent_client)
         self._xiaoyi_gui_rpc_dispatcher = XiaoyiGuiRpcDispatcher(self.agent_client)
+        self._reverse_rpc_registry = CapabilityRegistry()
+        self._reverse_rpc_dispatcher = ReverseRpcDispatcher(
+            self._reverse_rpc_registry,
+            ReverseRpcResponseTransport(self.agent_client),
+        )
 
         # IM Pipeline（数字分身）— None 时不执行，不影响原有逻辑
         self._inbound_pipeline = None   # type: Any  # IMInboundPipeline | None
@@ -309,6 +321,13 @@ class MessageHandler(ABC):
 
         if isinstance(self.agent_client, WebSocketAgentServerClient):
             self.agent_client.set_server_push_handler(self._handle_agent_server_push)
+            self.agent_client.set_disconnect_handler(
+                self._reverse_rpc_dispatcher.on_agent_disconnect
+            )
+
+    def get_reverse_rpc_registry(self) -> CapabilityRegistry:
+        """Return the registry used by explicitly assembled capabilities."""
+        return self._reverse_rpc_registry
 
     @classmethod
     def get_instance(cls, agent_client: "AgentServerClient | None" = None) -> "MessageHandler":
@@ -2774,6 +2793,12 @@ class MessageHandler(ABC):
         from jiuwenswarm.common.e2a.wire_codec import parse_agent_server_wire_chunk
 
         response_kind = str(wire.get("response_kind") or "")
+        if response_kind in (
+            E2A_RESPONSE_KIND_REVERSE_RPC_REQUEST,
+            E2A_RESPONSE_KIND_REVERSE_RPC_CANCEL,
+        ):
+            await self._reverse_rpc_dispatcher.handle(wire)
+            return
         if response_kind in (
             E2A_RESPONSE_KIND_XIAOYI_GUI_RPC_REQUEST,
             E2A_RESPONSE_KIND_XIAOYI_GUI_RPC_CANCEL,
