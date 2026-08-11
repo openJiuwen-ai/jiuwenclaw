@@ -185,6 +185,14 @@ def resolve_skill_relative_file(skill_root: Path, relative_path: str) -> tuple[P
         raise SkillFilesError(ERROR_UNSAFE_PATH, "不允许预览目录")
     if not candidate.is_file():
         raise SkillFilesError(ERROR_UNSAFE_PATH, "目标不是普通文件")
+    try:
+        # 拒绝硬链接
+        if int(candidate.stat().st_nlink) > 1:
+            raise SkillFilesError(ERROR_UNSAFE_PATH, "不允许通过硬链接访问文件")
+    except SkillFilesError:
+        raise
+    except OSError as exc:
+        raise SkillFilesError(ERROR_UNSAFE_PATH, f"无法校验文件属性: {posix.as_posix()}") from exc
 
     return candidate, posix.as_posix()
 

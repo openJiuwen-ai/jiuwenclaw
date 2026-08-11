@@ -844,6 +844,26 @@ class SkillManager:
         self._apply_enabled_config(meta, name)
         meta["version"] = response_version
         meta["skill_type"] = detect_skill_type(skill_dir if version_requested is None else read_root)
+
+        # 返回前改写本地相对图片为受控预览 URL（不改磁盘）
+        session_id = str(params.get("_session_id") or params.get("session_id") or "").strip()
+        try:
+            from jiuwenswarm.server.runtime.skill.skill_content_images import (
+                rewrite_skill_markdown_images,
+            )
+
+            meta["content"] = rewrite_skill_markdown_images(
+                str(meta.get("content") or ""),
+                skill_name=str(meta.get("name") or name),
+                version=response_version if version_requested is not None else None,
+                # workspace 查询时 version 字段可能是 current_version，但图片根仍是 workspace
+                content_root=read_root,
+                session_id=session_id,
+            )
+        except Exception:
+            logger.debug(
+                "[skills.get] 图片改写失败，返回原文: skill=%s", name, exc_info=True
+            )
         return meta
 
     async def handle_skills_versions_list(self, params: dict) -> dict:
@@ -1368,37 +1388,112 @@ class SkillManager:
 
         evo_path = self._get_skill_evolution_path(name)
         if evo_path is None or not evo_path.is_file():
-            return {
-                "name": name,
-                "exists": False,
-                "valid": True,
-                "skill_id": name,
-                "version": "1.0.0",
-                "updated_at": "",
-                "entries": [],
-            }
+            return self._normalize_evolution_get_payload(
+                name=name,
+                exists=False,
+                valid=True,
+                raw=None,
+            )
 
         try:
             raw = json.loads(evo_path.read_text(encoding="utf-8"))
             evo_file = EvolutionFile.from_dict(raw)
-            return {
-                "name": name,
-                "exists": True,
-                "valid": True,
-                **evo_file.to_dict(),
-            }
+            return self._normalize_evolution_get_payload(
+                name=name,
+                exists=True,
+                valid=True,
+                raw=evo_file.to_dict(),
+            )
         except Exception as exc:
             logger.warning("读取 evolutions.json 失败: skill=%s error=%s", name, exc)
-            return {
-                "name": name,
-                "exists": True,
-                "valid": False,
-                "detail": "evolutions.json 格式错误或读取失败",
-                "skill_id": name,
-                "version": "1.0.0",
-                "updated_at": "",
-                "entries": [],
-            }
+            return self._normalize_evolution_get_payload(
+                name=name,
+                exists=True,
+                valid=False,
+                raw=None,
+                detail="evolutions.json 格式错误或读取失败",
+            )
+
+    @staticmethod
+    def _normalize_evolution_get_payload(
+        *,
+        name: str,
+        exists: bool,
+        valid: bool,
+        raw: dict[str, Any] | None,
+        detail: str | None = None,
+    ) -> dict[str, Any]:
+        """按 design2.5 规范化 EvolutionLog 响应字段."""
+        data = dict(raw) if isinstance(raw, dict) else {}
+        skill_id = data.get("skill_id")
+        if not isinstance(skill_id, str) or not skill_id.strip():
+            skill_id = name
+        else:
+            skill_id = skill_id.strip()
+
+        version_raw = data.get("version")
+        # design2.5：version 必须为 string，缺省/非字符串统一回落为 "1.0.0"
+        if isinstance(version_raw, str) and version_raw.strip():
+            version = version_raw.strip()
+        else:
+            version = "1.0.0"
+
+        updated_at_raw = data.get("updated_at")
+        updated_at = (
+            str(updated_at_raw).strip()
+            if isinstance(updated_at_raw, str) and updated_at_raw.strip()
+            else ""
+        )
+
+        entries_out: list[dict[str, Any]] = []
+        entries = data.get("entries")
+        if isinstance(entries, list):
+            for item in entries:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    entry = EvolutionEntry.from_dict(item).to_dict()
+                except Exception:
+                    continue
+                # 可选字段仅非空时保留
+                for opt_key in ("skill_version", "summary"):
+                    val = entry.get(opt_key)
+                    if val is None or (isinstance(val, str) and not val.strip()):
+                        entry.pop(opt_key, None)
+                change = entry.get("change")
+                if isinstance(change, dict):
+                    for opt_key in (
+                        "skip_reason",
+                        "merge_target",
+                        "script_filename",
+                        "script_language",
+                        "script_purpose",
+                    ):
+                        val = change.get(opt_key)
+                        if val is None or (isinstance(val, str) and not str(val).strip()):
+                            change.pop(opt_key, None)
+                usage = entry.get("usage_stats")
+                if isinstance(usage, dict):
+                    for opt_key in ("last_presented_at", "last_evaluated_at"):
+                        val = usage.get(opt_key)
+                        if val is None or (isinstance(val, str) and not str(val).strip()):
+                            usage.pop(opt_key, None)
+                entries_out.append(entry)
+
+        out: dict[str, Any] = {
+            "name": name,
+            "exists": bool(exists),
+            "valid": bool(valid),
+            "skill_id": skill_id,
+            "version": version,
+            "updated_at": updated_at,
+            "entries": entries_out,
+        }
+        if detail:
+            out["detail"] = detail
+        elif not valid and "detail" not in out:
+            out["detail"] = "evolutions.json 格式错误或读取失败"
+        return out
 
     async def handle_skills_evolution_save(self, params: dict) -> dict:
         """保存某个 skill 的 evolutions.json 条目列表.
