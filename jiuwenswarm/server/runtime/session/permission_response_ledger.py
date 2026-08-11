@@ -20,17 +20,30 @@ class PermissionResponseReservation:
     _key: _PermissionResponseKey
     _started: bool = False
 
+    @property
+    def key(self) -> _PermissionResponseKey:
+        """Return the session-scoped response key."""
+        return self._key
+
+    @property
+    def started(self) -> bool:
+        """Return whether this reservation has entered the runtime."""
+        return self._started
+
     def start(self) -> bool:
         """Claim runtime entry if this reservation is still current."""
-        return self._ledger._start(self)
+        if self._started or not self._ledger.is_current_reservation(self):
+            return False
+        self._started = True
+        return True
 
     def complete(self) -> None:
         """Remember a response after it has entered the runtime."""
-        self._ledger._complete(self)
+        self._ledger.complete_reservation(self)
 
     def release_if_unstarted(self) -> None:
         """Release a queued reservation so a retry can replace it."""
-        self._ledger._release_if_unstarted(self)
+        self._ledger.release_if_unstarted(self)
 
 
 class PermissionResponseLedger:
@@ -58,31 +71,34 @@ class PermissionResponseLedger:
         self._active[key] = reservation
         return reservation
 
-    def _start(self, reservation: PermissionResponseReservation) -> bool:
-        if (
-            self._active.get(reservation._key) is not reservation
-            or reservation._started
-        ):
-            return False
-        reservation._started = True
-        return True
+    def is_current_reservation(
+        self,
+        reservation: PermissionResponseReservation,
+    ) -> bool:
+        """Return whether a reservation is still the current active entry."""
+        return self._active.get(reservation.key) is reservation
 
-    def _complete(self, reservation: PermissionResponseReservation) -> None:
-        if self._active.get(reservation._key) is not reservation:
-            return
-        self._active.pop(reservation._key, None)
-        if not reservation._started or self._max_recent_keys == 0:
-            return
-        self._recent[reservation._key] = None
-        while len(self._recent) > self._max_recent_keys:
-            self._recent.popitem(last=False)
-
-    def _release_if_unstarted(
+    def complete_reservation(
         self,
         reservation: PermissionResponseReservation,
     ) -> None:
+        """Complete a reservation and remember its key if it was started."""
+        if self._active.get(reservation.key) is not reservation:
+            return
+        self._active.pop(reservation.key, None)
+        if not reservation.started or self._max_recent_keys == 0:
+            return
+        self._recent[reservation.key] = None
+        while len(self._recent) > self._max_recent_keys:
+            self._recent.popitem(last=False)
+
+    def release_if_unstarted(
+        self,
+        reservation: PermissionResponseReservation,
+    ) -> None:
+        """Release a reservation only if it has not started."""
         if (
-            not reservation._started
-            and self._active.get(reservation._key) is reservation
+            not reservation.started
+            and self._active.get(reservation.key) is reservation
         ):
-            self._active.pop(reservation._key, None)
+            self._active.pop(reservation.key, None)

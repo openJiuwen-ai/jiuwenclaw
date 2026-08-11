@@ -105,6 +105,17 @@ def test_recent_permission_ledger_is_bounded() -> None:
     assert ledger.reserve("session-1", "permission-3") is None
 
 
+def test_permission_reservation_state_is_read_only() -> None:
+    ledger = PermissionResponseLedger()
+    reservation = ledger.reserve("session-1", "permission-1")
+    assert reservation is not None
+
+    with pytest.raises(AttributeError):
+        setattr(reservation, "key", ("session-1", "replacement"))
+    with pytest.raises(AttributeError):
+        setattr(reservation, "started", True)
+
+
 def _regular_request(*, request_id: str) -> AgentRequest:
     return AgentRequest(
         request_id=request_id,
