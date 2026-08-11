@@ -36,7 +36,6 @@ from openjiuwen.harness.rails import SkillUseRail
 
 from jiuwenswarm.agents.swarm.context import SwarmBuildContext
 from jiuwenswarm.common.mode_matrix import (
-    TEAM_PLAN_NORMAL_MODE,
     is_code_profile_mode,
     is_team_plan_mode,
 )
@@ -359,7 +358,18 @@ def build_code_coding_memory(params: dict[str, Any], ctx: SwarmBuildContext) -> 
 def build_code_agent_mode(params: dict[str, Any], ctx: SwarmBuildContext) -> Any:
     """Build one profile-aware plan rail for code or normal Team Plan contexts."""
     try:
-        if ctx.mode == TEAM_PLAN_NORMAL_MODE and ctx.role == "leader":
+        # P4: 谓词路由接通新 canonical（team.work.plan / team.code.plan）。
+        # 旧 ``== TEAM_PLAN_NORMAL_MODE`` 只认旧串 team.plan.normal；新模式落地后
+        # ctx.mode 是 team.work.plan，会被静默跳过 → WorkAgentModeRail 不挂。
+        # 用 ``is_team_plan_mode and not is_code_profile_mode`` 精确匹配 work-profile
+        # team plan leader：不能用 _is_team_plan_leader（它含 team.plan.code / team.code.plan
+        # 等 code 变体，会把 code-profile team plan leader 误路由到 WorkAgentModeRail，
+        # 抢占 :379 下方本应走的 CodeAgentModeRail 分支）。
+        if (
+            is_team_plan_mode(ctx.mode)
+            and not is_code_profile_mode(ctx.mode)
+            and ctx.role == "leader"
+        ):
             from jiuwenswarm.agents.harness.work.rails.work_agent_mode_rail import (
                 WorkAgentModeRail,
             )
