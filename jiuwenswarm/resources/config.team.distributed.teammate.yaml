@@ -294,11 +294,20 @@ gateway:
   session_map_scope: per_chat_bot
 
 heartbeat:
-  # 心跳间隔（秒），默认 3600
+  jobs:
+    min_interval_seconds: 60
+    max_active_jobs_per_session: 5
+    max_active_jobs_global: 100
+    default_max_runs: 12
+    default_concurrency_policy: skip
+    default_session_deleted_policy: disable
+
+health_check:
+  # 探活间隔（秒）
   every: 3600
-  # 心跳结果回传的 channel（如 "web"），
+  # 探活结果回传的 channel（如 "web"）
   target: web
-  # 心跳生效时间段（本地时间），start <= now < end 时心跳生效
+  # 探活生效时间段（本地时间）
   active_hours:
     start: 08:00
     end: 22:00

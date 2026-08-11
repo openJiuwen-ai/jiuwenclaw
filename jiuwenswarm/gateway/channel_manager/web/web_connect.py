@@ -710,8 +710,8 @@ class WebChannel(BaseWsChannel):
             getattr(msg, "id", ""), getattr(msg, "event_type", None), _et,
             _has_fanout, routing_target is not None, len(self.clients),
         )
-        # ── health_check relay：临时 session_id（health_check_{ts}_{suffix}，并兼容旧
-        # heartbeat_ 前缀）不匹配任何前端连接，
+        # ── health_check relay：临时 session_id（health_check_{ts}_{suffix}）
+        # 不匹配任何前端连接，
         # 按常规 session_id 路由会被当作"无连接"丢弃。探活状态是全局的（非会话级），
         # 前端 setHeartbeatStatus 也是全局 store，因此直接广播给所有 web 客户端。
         # 与 wechat 等 IM 渠道在 send() 中对 HEALTH_CHECK_RELAY 的专属分支对齐。

@@ -224,7 +224,7 @@ class TelegramChannel(BaseChannel):
         if msg.event_type == EventType.HEALTH_CHECK_RELAY and isinstance(
             payload, dict
         ):
-            health_check = payload.get("health_check", payload.get("heartbeat"))
+            health_check = payload.get("health_check")
             if health_check:
                 return str(health_check).strip()
         # Gateway/Agent 响应在 payload.content

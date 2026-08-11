@@ -208,21 +208,21 @@ class GatewayHealthCheckService(IHealthCheck):
             self._last_tick_at = time.time()
             self._last_tick_ok = True
             payload = resp.payload if isinstance(resp.payload, dict) else {}
-            # New producers write ``health_check``.  Reading the legacy field
-            # keeps rolling upgrades compatible with older AgentServer builds.
-            heartbeat_raw = payload.get("health_check", payload.get("heartbeat"))
-            heartbeat_content = heartbeat_raw if isinstance(heartbeat_raw, str) else ""
-            if not heartbeat_content:
+            health_check_raw = payload.get("health_check")
+            health_check_content = (
+                health_check_raw if isinstance(health_check_raw, str) else ""
+            )
+            if not health_check_content:
                 content = payload.get("content")
                 if isinstance(content, dict):
                     output = content.get("output")
                     if isinstance(output, str):
-                        heartbeat_content = output
+                        health_check_content = output
                 elif isinstance(content, str):
-                    heartbeat_content = content
-            logger.info("Gateway health check content: %s", heartbeat_content)
+                    health_check_content = content
+            logger.info("Gateway health check content: %s", health_check_content)
             if HEALTH_CHECK_OK in (
-                heartbeat_content if isinstance(heartbeat_content, str) else ""
+                health_check_content if isinstance(health_check_content, str) else ""
             ).upper():
                 logger.info(
                     "Gateway health check OK: request_id=%s (last_tick_at=%.0f)",
@@ -250,7 +250,7 @@ class GatewayHealthCheckService(IHealthCheck):
                     params={},
                     timestamp=time.time(),
                     ok=True,
-                    payload={"health_check": heartbeat_content},
+                    payload={"health_check": health_check_content},
                     event_type=EventType.HEALTH_CHECK_RELAY,
                 )
                 await self._message_handler.publish_robot_messages(relay_msg)

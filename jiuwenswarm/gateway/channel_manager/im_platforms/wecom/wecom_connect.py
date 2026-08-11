@@ -1159,7 +1159,7 @@ class WecomChannel(BaseChannel):
             if chatid:
                 payload = getattr(msg, "payload", None) or {}
                 health_check = (
-                    payload.get("health_check", payload.get("heartbeat"))
+                    payload.get("health_check")
                     if isinstance(payload, dict)
                     else None
                 )

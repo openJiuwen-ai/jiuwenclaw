@@ -1624,9 +1624,9 @@ class TestExtractTextFromAgentPayload:
         result = self._call({"error": original_error, "content": "stale output"})
         assert result == original_error
 
-    def test_heartbeat_fallback(self):
+    def test_legacy_heartbeat_payload_is_ignored(self):
         result = self._call({"heartbeat": "ping"})
-        assert result == "ping"
+        assert result == ""
 
     def test_text_fallback(self):
         result = self._call({"text": "raw text"})

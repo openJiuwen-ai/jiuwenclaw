@@ -486,9 +486,7 @@ class DingTalkChannel(BaseChannel):
         if msg.event_type == EventType.HEALTH_CHECK_RELAY and isinstance(
             msg.payload, dict
         ):
-            health_check = msg.payload.get(
-                "health_check", msg.payload.get("heartbeat")
-            )
+            health_check = msg.payload.get("health_check")
             if health_check:
                 return str(health_check)
         if msg.params and "content" in msg.params:

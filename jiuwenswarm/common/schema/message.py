@@ -149,7 +149,6 @@ class ReqMethod(Enum):
     # 旧探活使用 health_check 命名空间。
     HEALTH_CHECK_GET_CONF = "health_check.get_conf"
     HEALTH_CHECK_SET_CONF = "health_check.set_conf"
-    HEALTH_CHECK_GET_PATH = "health_check.get_path"
 
     # Gateway -> AgentServer internal response for an Agent heartbeat tool RPC.
     HEARTBEAT_TOOL_RESPONSE = "heartbeat.tool_response"

@@ -138,11 +138,8 @@ class CodingMemoryRail(_BaseCodingMemoryRail):
     @staticmethod
     def _is_read_only(inputs: Any) -> bool:
         """Support callback inputs and lightweight test doubles."""
-        values = []
-        for name in ("is_cron", "is_heartbeat"):
-            value = getattr(inputs, name, False)
-            values.append(value() if callable(value) else value)
-        return any(values)
+        value = getattr(inputs, "is_cron", False)
+        return bool(value() if callable(value) else value)
 
     def uninit(self, agent: Any) -> None:
         """Cancel pending initialization before the rail is torn down."""
@@ -268,7 +265,6 @@ _RAIL_BUILD_NAMES: dict[str, str] = {
     "SysOperationRail": "_build_filesystem_rail",
     "FileSystemRail": "_build_filesystem_rail",     # 别名映射
     "SkillUseRail": "_build_skill_rail_via_config",
-    "HeartbeatRail": "_build_heartbeat_rail",
     "AvatarPromptRail": "_build_avatar_rail",
     "TaskPlanningRail": "_build_task_planning_rail",
     "SubagentRail": "_build_subagent_rail",

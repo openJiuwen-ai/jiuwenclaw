@@ -57,9 +57,8 @@ the sections below may help.
 ```plain
 D:\Download\jiuwenswarm\
 ├── .env
-├── config/config.yaml                # App config (heartbeat, Feishu)
+├── config/config.yaml                # App config (Feishu, etc.)
 ├── workspace/
-│   ├── HEARTBEAT.md                  # Heartbeat tasks
 │   └── agent/skills/daily-report/    # Skill module
 │       ├── SKILL.md                  # Skill definition v2.0.0
 │       ├── collectors/
@@ -312,13 +311,10 @@ cd D:/Download/jiuwenswarm && python workspace/agent/skills/daily-report/run_rep
 
 ### Scheduled trigger
 
-Configure periodic runs in `HEARTBEAT.md`:
+Create the Heartbeat job in the conversation that should retain its history:
 
-```markdown
-## Active tasks
-- Generate today’s work report    # daily
-- Generate weekly report          # every Friday
-- Generate monthly report         # month end
+```text
+Create a heartbeat job that generates today's work report every day at 18:00.
 ```
 
 ## Daily report template
@@ -2291,69 +2287,16 @@ PERPLEXITY_API_KEY=
 + `EMAIL_TOKEN`：email authorization code (not login password); it needs to be obtained after enabling IMAP service in the mailbox settings
 + `EMAIL_PROVIDER`：email provider; currently supports three NetEase mailboxes: `163`、`126`、`yeah`
 
-### 6.2 Heartbeat Configuration (HEARTBEAT.md)
-```markdown
-# Heartbeat tasks
+### 6.2 Heartbeat Job
 
-In this file, configure tasks that JiuwenSwarm needs to execute periodically.
+In the target Feishu or Web conversation, say:
 
----
-
-## Active task items
-
-<!-- After this line, add tasks to be executed, one per line, starting with "- " -->
-
-- Generate today's work daily report
-
-<!-- Weekly report tasks (triggered every Friday) -->
-<!-- - Generate this week's work weekly report -->
-
-<!-- Monthly report tasks (triggered at the end of every month) -->
-<!-- - Generate this month's work monthly report -->
-
----
-
-## Completed task items
-
-<!-- Move completed tasks to this section or delete -->
-
----
-
-## Task description
-
-### Daily report task
-- **Trigger time**: Every day 18:00 - 18:30 (configured according to config.yaml)
-- **Push target**: Feishu
-- **Content**: Today's Git commits, task completion status, email statistics, work efficiency analysis
-
-### Weekly report task
-- **Trigger time**: Every Friday 18:00 - 18:30
-- **Push target**: Feishu
-- **Content**: This week's data aggregation, trend analysis, next week's plan
-
-### Monthly report task
-- **Trigger time**: The last day of every month 18:00 - 18:30
-- **Push target**: Feishu
-- **Content**: This month's data aggregation, achievements summary, next month's plan
-
----
-
-## Configuration method
-
-Modify the `heartbeat` configuration in `config/config.yaml`：
-
-```yaml
-heartbeat:
-  every: 3600              # Heartbeat interval (seconds)
-  target: feishu           # Push target
-  active_hours:
-    start: 18:00           # Effective start time
-    end: 18:30             # Effective end time
+```text
+Create a heartbeat job that generates today's work report every day at 18:00.
 ```
 
-**After modification, restart the service for it to take effect.**
-
-```
+The job is bound to the current conversation. Each run resumes that conversation,
+where its result and execution history remain visible.
 
 ### 6.3 Git Repository Configuration
 The Git repositories monitored by this project (the script will automatically read):
@@ -2563,6 +2506,5 @@ If you are also trying to build similar AI Agent applications, I hope this artic
 - [163 email IMAP ID command solution](https://github.com/HKUDS/nanobot/issues/1123)
 - [NetEase email help center](https://help.mail.163.com/)
 - [Python imaplib documentation](https://docs.python.org/3/library/imaplib.html)
-
 
 

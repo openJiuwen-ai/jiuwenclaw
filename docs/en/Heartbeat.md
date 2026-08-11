@@ -90,8 +90,8 @@ session.
 
 ## HealthCheck
 
-HealthCheck is the renamed liveness mechanism. It checks connectivity only; it
-does not execute user tasks or read `workspace/HEARTBEAT.md`.
+HealthCheck is the renamed liveness mechanism. It checks connectivity only and
+does not execute user tasks.
 
 ```yaml
 health_check:
@@ -111,10 +111,6 @@ Public methods and events are:
 - `health_check.get_conf`
 - `health_check.set_conf`
 - `health_check.relay`
-
-The old `heartbeat.get_conf`, `heartbeat.set_conf`, and `heartbeat.get_path`
-method names temporarily remain as aliases for staged client upgrades.
-HealthCheck no longer executes the legacy `HEARTBEAT.md` file.
 
 At startup, legacy `heartbeat.every/target/active_hours` values are migrated to
 `health_check`, while `heartbeat.jobs` is preserved. New writes use only the new

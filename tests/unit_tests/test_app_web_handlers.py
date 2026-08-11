@@ -74,7 +74,7 @@ class FakeHeartbeatService:
     def __init__(self):
         self.config = {"every": 60.0, "target": "web"}
 
-    async def set_heartbeat_conf(self, *, every=None, target=None, active_hours=None):
+    async def set_health_check_conf(self, *, every=None, target=None, active_hours=None):
         if every is not None:
             self.config["every"] = every
         if target is not None:
@@ -82,16 +82,8 @@ class FakeHeartbeatService:
         if active_hours is not None:
             self.config["active_hours"] = active_hours
 
-    def get_heartbeat_conf(self):
-        return dict(self.config)
-
-    async def set_health_check_conf(self, *, every=None, target=None, active_hours=None):
-        await self.set_heartbeat_conf(
-            every=every, target=target, active_hours=active_hours
-        )
-
     def get_health_check_conf(self):
-        return self.get_heartbeat_conf()
+        return dict(self.config)
 
 
 class FakeHeartbeatController:
@@ -111,7 +103,7 @@ class FakeHeartbeatController:
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_web_methods_keep_probe_aliases_and_use_current_session() -> None:
+async def test_heartbeat_web_methods_use_current_names_and_session() -> None:
     channel = FakeWebChannel()
     controller = FakeHeartbeatController()
     _register_web_handlers(
@@ -119,18 +111,10 @@ async def test_heartbeat_web_methods_keep_probe_aliases_and_use_current_session(
     )
     assert "health_check.get_conf" in channel.methods
     assert "health_check.set_conf" in channel.methods
-    assert (
-        channel.methods["heartbeat.get_conf"]
-        is channel.methods["health_check.get_conf"]
-    )
-    assert (
-        channel.methods["heartbeat.set_conf"]
-        is channel.methods["health_check.set_conf"]
-    )
-    assert (
-        channel.methods["heartbeat.get_path"]
-        is channel.methods["health_check.get_path"]
-    )
+    assert "health_check.get_path" not in channel.methods
+    assert "heartbeat.get_conf" not in channel.methods
+    assert "heartbeat.set_conf" not in channel.methods
+    assert "heartbeat.get_path" not in channel.methods
     expected = {
         "heartbeat.job.list", "heartbeat.job.meta", "heartbeat.job.get",
         "heartbeat.job.create", "heartbeat.job.update", "heartbeat.job.delete",

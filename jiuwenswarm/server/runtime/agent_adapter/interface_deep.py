@@ -69,7 +69,6 @@ from openjiuwen.harness.rails import (
     SecurityRail,
     SubagentRail,
     SysOperationRail,
-    HeartbeatRail,
     MemoryRail,
 )
 from openjiuwen.harness.rails import (
@@ -1157,7 +1156,6 @@ class JiuWenSwarmDeepAdapter:
         # 延时重索引任务（debounce）：连续改多次 embedding 只在最后一次后跑一次。
         self._memory_reindex_task: asyncio.Task | None = None
         self._llm_retry_rail: LLMRetryRail | None = None
-        self._heartbeat_rail: HeartbeatRail | None = None
         self._skill_evolution_rail: SkillEvolutionRail | None = None
         self._evolution_interrupt_rail: EvolutionInterruptRail | None = None
         self._skill_create_rail: SkillCreateRail | None = None
@@ -4509,17 +4507,6 @@ class JiuWenSwarmDeepAdapter:
         return memory_rail
 
     @staticmethod
-    def _build_heartbeat_rail() -> HeartbeatRail | None:
-        """Build HeartbeatRail."""
-        try:
-            heartbeat_rail = HeartbeatRail()
-            logger.info("[JiuWenSwarmDeepAdapter] HeartbeatRail create success")
-        except Exception as exc:
-            logger.warning("[JiuWenSwarmDeepAdapter] HeartbeatRail create failed: %s", exc)
-            heartbeat_rail = None
-        return heartbeat_rail
-
-    @staticmethod
     def _build_avatar_rail() -> Any | None:
         """Build AvatarPromptRail for digital avatar mode."""
         try:
@@ -4789,7 +4776,6 @@ class JiuWenSwarmDeepAdapter:
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
             _RailBuildInfo("_task_planning_rail", self._build_task_planning_rail),
             _RailBuildInfo("_security_rail", self._build_security_rail),
-            _RailBuildInfo("_heartbeat_rail", self._build_heartbeat_rail),
             _RailBuildInfo(
                 "_llm_retry_rail",
                 self._build_llm_retry_rail,
@@ -7694,7 +7680,7 @@ class JiuWenSwarmDeepAdapter:
     async def handle_heartbeat(self, request: AgentRequest) -> AgentResponse | None:
         """Answer a HealthCheck probe without executing workspace user tasks."""
         sid = str(request.session_id or "")
-        if not sid.startswith(("health_check_", "heartbeat_")):
+        if not sid.startswith("health_check_"):
             return None
 
         logger.info(
@@ -7703,16 +7689,11 @@ class JiuWenSwarmDeepAdapter:
             request.request_id,
             request.session_id,
         )
-        payload = {"health_check": "HEALTH_CHECK_OK"}
-        if sid.startswith("heartbeat_"):
-            # AgentServer-first rolling upgrades: an older Gateway still reads
-            # payload.heartbeat. New producers use only payload.health_check.
-            payload["heartbeat"] = "HEALTH_CHECK_OK"
         return AgentResponse(
             request_id=request.request_id,
             channel_id=request.channel_id,
             ok=True,
-            payload=payload,
+            payload={"health_check": "HEALTH_CHECK_OK"},
             metadata=request.metadata,
         )
 

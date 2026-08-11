@@ -379,11 +379,7 @@ _dump_yaml_round_trip = dump_yaml_round_trip
 
 
 def update_health_check_in_config(payload: dict[str, Any]) -> None:
-    """只更新 health_check 段(旧探活配置)并写回。
-
-    旧 ``update_heartbeat_in_config`` 的迁移目标：探活配置
-    every/target/active_hours 已从 heartbeat 段迁移到 health_check 段。
-    """
+    """只更新 health_check 段并写回。"""
     def _mutate(data: dict[str, Any]) -> dict[str, Any]:
         current = data.get("health_check")
         if not isinstance(current, dict):
@@ -424,10 +420,6 @@ def migrate_legacy_heartbeat_probe_config() -> bool:
 
     update_config(_mutate)
     return changed
-
-
-# 兼容别名:旧调用方仍可 import update_heartbeat_in_config(指向 health_check 段)。
-update_heartbeat_in_config = update_health_check_in_config
 
 
 def update_channel_in_config(channel_id: str, conf: dict[str, Any]) -> None:

@@ -219,8 +219,6 @@ C:\Users\<username>\.jiuwenswarm\
 │       ├── IDENTITY_EN.md           # Identity (English)
 │       ├── SOUL_ZH.md               # Values and persona (Chinese)
 │       ├── SOUL_EN.md               # Values and persona (English)
-│       ├── HEARTBEAT_ZH.md          # Heartbeat tasks (Chinese)
-│       ├── HEARTBEAT_EN.md          # Heartbeat tasks (English)
 │       ├── USER.md                  # User profile and preferences
 │       ├── memory/                  # Agent memory store
 │       ├── todo/                    # Agent todo items storage
@@ -244,7 +242,6 @@ C:\Users\<username>\.jiuwenswarm\
 | `agent/workspace/AGENT_ZH.md` | Bootstrap config (Chinese) | Yes, when needed | Affects startup behavior |
 | `agent/workspace/IDENTITY_ZH.md` | Identity (Chinese) | Customizable | Affects how the agent sees its role |
 | `agent/workspace/SOUL_ZH.md` | Values and persona (Chinese) | Customizable | Affects tone and style |
-| `agent/workspace/HEARTBEAT_ZH.md` | Heartbeat tasks (Chinese) | Adjustable | Affects scheduled / proactive behavior |
 | `agent/workspace/USER.md` | User profile and preferences | Auto-managed by system | Affects personalization; update via agent conversation |
 | `agent/workspace/skills/` | Skills | Add skills | Extends capabilities |
 | `agent/workspace/memory/` | Memory store (user profile, episodic, semantic) | Do not edit by hand | Risk of corrupting memory data |
@@ -267,8 +264,6 @@ C:\Users\Administrator\.jiuwenswarm\
 │       ├── IDENTITY_EN.md
 │       ├── SOUL_ZH.md
 │       ├── SOUL_EN.md
-│       ├── HEARTBEAT_ZH.md
-│       ├── HEARTBEAT_EN.md
 │       ├── USER.md
 │       ├── memory\
 │       ├── todo\                    # Agent todo items

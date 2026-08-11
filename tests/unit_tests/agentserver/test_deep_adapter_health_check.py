@@ -15,19 +15,14 @@ from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "session_id",
-    ["health_check_probe-1", "heartbeat_legacy-probe-1"],
-)
 async def test_health_check_is_acknowledged_without_mutating_or_executing_query(
-    session_id: str,
 ) -> None:
     adapter = object.__new__(JiuWenSwarmDeepAdapter)
     adapter._is_session_scoped_adapter = True  # pylint: disable=protected-access
     request = AgentRequest(
         request_id="probe-1",
         channel_id="__health_check__",
-        session_id=session_id,
+        session_id="health_check_probe-1",
         params={"query": "must remain untouched"},
         metadata={"trace": "health-check"},
     )
@@ -36,10 +31,7 @@ async def test_health_check_is_acknowledged_without_mutating_or_executing_query(
 
     assert response is not None
     assert response.ok is True
-    expected_payload = {"health_check": "HEALTH_CHECK_OK"}
-    if session_id.startswith("heartbeat_"):
-        expected_payload["heartbeat"] = "HEALTH_CHECK_OK"
-    assert response.payload == expected_payload
+    assert response.payload == {"health_check": "HEALTH_CHECK_OK"}
     assert response.metadata == {"trace": "health-check"}
     assert request.params == {"query": "must remain untouched"}
 
@@ -53,6 +45,19 @@ async def test_normal_session_does_not_use_health_check_short_circuit() -> None:
         channel_id="web",
         session_id="session-1",
         params={"query": "continue the task"},
+    )
+
+    assert await adapter.handle_heartbeat(request) is None
+
+
+@pytest.mark.asyncio
+async def test_legacy_heartbeat_session_does_not_use_health_check_short_circuit() -> None:
+    adapter = object.__new__(JiuWenSwarmDeepAdapter)
+    request = AgentRequest(
+        request_id="probe-old",
+        channel_id="__health_check__",
+        session_id="heartbeat_legacy-probe-1",
+        params={"query": "obsolete probe"},
     )
 
     assert await adapter.handle_heartbeat(request) is None

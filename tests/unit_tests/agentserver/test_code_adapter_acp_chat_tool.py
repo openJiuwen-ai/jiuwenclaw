@@ -147,9 +147,7 @@ async def test_coding_memory_initialization_does_not_block_and_is_deduplicated(m
         await release.wait()
 
     monkeypatch.setattr(rail, "_init_coding_memory_manager", initialize)
-    ctx = SimpleNamespace(
-        inputs=SimpleNamespace(is_cron=lambda: False, is_heartbeat=lambda: False)
-    )
+    ctx = SimpleNamespace(inputs=SimpleNamespace(is_cron=lambda: False))
 
     await asyncio.wait_for(rail.before_invoke(ctx), timeout=0.2)
     first_task = rail._manager_init_task
@@ -173,7 +171,7 @@ async def test_coding_memory_initialization_failure_degrades_without_retry(monke
     )
     ctx = SimpleNamespace(
         agent=SimpleNamespace(card=SimpleNamespace(id="test-agent")),
-        inputs=SimpleNamespace(is_cron=lambda: False, is_heartbeat=lambda: False),
+        inputs=SimpleNamespace(is_cron=lambda: False),
     )
     initializer = AsyncMock(side_effect=RuntimeError("embedding unavailable"))
     monkeypatch.setattr(
@@ -203,7 +201,7 @@ async def test_cancelled_initialization_cannot_reset_reinitialized_state(monkeyp
     )
     ctx = SimpleNamespace(
         agent=SimpleNamespace(card=SimpleNamespace(id="test-agent")),
-        inputs=SimpleNamespace(is_cron=lambda: False, is_heartbeat=lambda: False),
+        inputs=SimpleNamespace(is_cron=lambda: False),
     )
     started = asyncio.Event()
     release = asyncio.Event()

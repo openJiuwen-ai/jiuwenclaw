@@ -5125,26 +5125,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             logger.exception("[health_check.set_conf] %s", e)
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
-    async def _health_check_get_path(ws, req_id, params, session_id):
-        """兼容返回旧 HEARTBEAT.md 路径；HealthCheck 不再执行该文件。"""
-        from jiuwenswarm.common.utils import get_deepagent_heartbeat_path, get_agent_root_dir
-
-        try:
-            heartbeat_path = get_deepagent_heartbeat_path()
-            # 返回相对于 agent 根目录的路径，与 file-api 格式一致
-            agent_root = get_agent_root_dir()
-            relative_path = heartbeat_path.relative_to(agent_root.parent)
-            await channel.send_response(
-                ws, req_id, ok=True,
-                payload={"path": str(relative_path)}
-            )
-        except Exception as e:
-            logger.exception("[health_check.get_path] %s", e)
-            await channel.send_response(
-                ws, req_id, ok=False,
-                error=str(e), code="INTERNAL_ERROR"
-            )
-
     def _mask_sensitive(params: dict | list, sensitive_keys: frozenset[str]) -> dict | list:
         """递归脱敏，替换敏感字段值为 ``****``。"""
         if isinstance(params, dict):
@@ -6078,10 +6058,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("updater.set_conf", _updater_set_conf)
     channel.register_method("health_check.get_conf", _health_check_get_conf)
     channel.register_method("health_check.set_conf", _health_check_set_conf)
-    channel.register_method("health_check.get_path", _health_check_get_path)
-    channel.register_method("heartbeat.get_conf", _health_check_get_conf)
-    channel.register_method("heartbeat.set_conf", _health_check_set_conf)
-    channel.register_method("heartbeat.get_path", _health_check_get_path)
     channel.register_method("channel.feishu.get_conf", _channel_feishu_get_conf)
     channel.register_method("channel.feishu.set_conf", _channel_feishu_set_conf)
     channel.register_method("channel.xiaoyi.get_conf", _channel_xiaoyi_get_conf)

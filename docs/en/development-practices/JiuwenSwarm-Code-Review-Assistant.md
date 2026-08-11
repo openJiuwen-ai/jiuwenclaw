@@ -1439,11 +1439,10 @@ pip install lark-oapi
 
 ### 7.4 Heartbeat
 
-In `HEARTBEAT.md`, schedule periodic scans:
+Create a Heartbeat job in the conversation that should retain the scan history:
 
-```markdown
-## Active tasks
-- Run code quality scan  # daily
+```text
+Create a heartbeat job that runs a code quality scan every day.
 ```
 
 ## Chapter 8 — Testing

@@ -1705,9 +1705,9 @@ class FeishuChannel(BaseChannel):
             if (
                 msg.event_type == EventType.HEALTH_CHECK_RELAY
                 and isinstance(payload, dict)
-                and payload.get("health_check", payload.get("heartbeat"))
+                and payload.get("health_check")
             ):
-                content_str = str(payload.get("health_check", payload.get("heartbeat")))
+                content_str = str(payload.get("health_check"))
 
             if not content_str.strip():
                 logger.warning("飞书发送：消息内容为空，跳过发送")
@@ -2173,9 +2173,7 @@ class FeishuChannel(BaseChannel):
             return self._extract_preferred_text(payload.get("message")) or "[状态] 任务已中断"
 
         if event_name == "health_check.relay":
-            return self._extract_preferred_text(
-                payload.get("health_check", payload.get("heartbeat"))
-            )
+            return self._extract_preferred_text(payload.get("health_check"))
 
         # Gateway/Agent 响应在 payload.content，直接发送可能在 params.content
         content_str = (msg.params or {}).get("content") or payload.get("content") or ""

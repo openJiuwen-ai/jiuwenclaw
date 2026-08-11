@@ -85,7 +85,7 @@ async def test_health_check_writes_new_internal_protocol_and_relay() -> None:
     assert "不要执行用户任务" in HEALTH_CHECK_PROMPT
 
 
-async def test_health_check_reads_legacy_agent_response_during_upgrade() -> None:
+async def test_health_check_ignores_legacy_agent_response_field() -> None:
     client = _AgentClient()
     client.send_request = lambda envelope: asyncio.sleep(  # type: ignore[method-assign]
         0, result=SimpleNamespace(payload={"heartbeat": "HEARTBEAT_OK"})
@@ -97,7 +97,7 @@ async def test_health_check_reads_legacy_agent_response_during_upgrade() -> None
         message_handler=relay,
     )
     await service._tick()
-    assert relay.messages[0].payload == {"health_check": "HEARTBEAT_OK"}
+    assert relay.messages[0].payload == {"health_check": ""}
 
 
 def test_health_check_config_prefers_new_section_and_reads_legacy() -> None:
@@ -223,10 +223,7 @@ def test_message_handler_registers_server_push_by_client_capability() -> None:
     assert client.handler.__self__ is handler
 
 
-@pytest.mark.parametrize("payload_key", ["health_check", "heartbeat"])
-def test_telegram_and_dingtalk_read_health_check_relay_payload(
-    payload_key: str,
-) -> None:
+def test_telegram_and_dingtalk_read_health_check_relay_payload() -> None:
     msg = Message(
         id="health-check-relay",
         type="event",
@@ -235,11 +232,27 @@ def test_telegram_and_dingtalk_read_health_check_relay_payload(
         params={},
         timestamp=1.0,
         ok=True,
-        payload={payload_key: "probe result"},
+        payload={"health_check": "probe result"},
         event_type=EventType.HEALTH_CHECK_RELAY,
     )
     assert TelegramChannel._extract_content(None, msg) == "probe result"
     assert DingTalkChannel._extract_message_content(None, msg) == "probe result"
+
+
+def test_telegram_and_dingtalk_ignore_legacy_probe_payload() -> None:
+    msg = Message(
+        id="health-check-relay",
+        type="event",
+        channel_id="telegram",
+        session_id="health_check_1",
+        params={},
+        timestamp=1.0,
+        ok=True,
+        payload={"heartbeat": "probe result"},
+        event_type=EventType.HEALTH_CHECK_RELAY,
+    )
+    assert TelegramChannel._extract_content(None, msg) == ""
+    assert DingTalkChannel._extract_message_content(None, msg) is None
 
 
 @pytest.mark.parametrize("session_id", ["health_check_1", "healthcheck_legacy_1"])
