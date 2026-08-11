@@ -103,7 +103,7 @@ class HeartbeatSessionResolver:
         """
         sid = str(session_id or "").strip()
         cid = str(channel_id or "").strip()
-        if not sid:
+        if not sid or not cid:
             return None
         data = self._read_session_metadata(sid)
         if data is None:

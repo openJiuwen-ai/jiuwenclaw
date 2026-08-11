@@ -32,8 +32,13 @@ def test_resolve_returns_none_for_missing_session() -> None:
     assert r.resolve("web", "nonexistent-session-xyz") is None
 
 
-def test_resolve_returns_none_for_empty_session_id() -> None:
+def test_resolve_returns_none_for_empty_session_binding(monkeypatch) -> None:
     r = HeartbeatSessionResolver()
+    monkeypatch.setattr(
+        r,
+        "_read_session_metadata",
+        lambda _sid: pytest.fail("empty binding must not read session metadata"),
+    )
     assert r.resolve("web", "") is None
     assert r.resolve("", "s1") is None
 
