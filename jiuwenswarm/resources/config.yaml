@@ -90,6 +90,21 @@ logging:
   channel: INFO
   agent_server: INFO
   full: INFO
+  # 输出格式：text(默认)|json|dual(text+.json 双写)
+  format: text
+  # 输出开关
+  console_enabled: true
+  file_enabled: true
+  # JSON 子配置
+  json:
+    timestamp_format: text        # text|iso8601
+    include_component: true
+    sanitize_sensitive_data: true
+    exc_info_style: simple        # simple|full
+  # 用户可见 Tag 开关
+  tags:
+    user_visible: true
+    user_progress_visible: true
 
 memory:
   # ============================================================
