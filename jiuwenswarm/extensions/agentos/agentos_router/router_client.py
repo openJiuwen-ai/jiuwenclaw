@@ -717,6 +717,31 @@ class AgentOSRouterClient(AgentServerClient):
             }
         info = runtime.info
         status = info.status.value if hasattr(info.status, "value") else str(info.status)
+        instance_id = str(info.sandbox_id or "").strip()
+        ssh_relay = self._ssh_relay
+        if ssh_relay is not None:
+            if not instance_id:
+                return {
+                    "ok": False,
+                    "error": f"agent has no yuanrong instance_id: user={uid}",
+                    "code": "INTERNAL_ERROR",
+                }
+            try:
+                # create 返回不代表 sshd 已听端口；等南向 SSH 通了再让客户端连。
+                await ssh_relay.wait_until_ready(instance_id, user_id=uid)
+            except Exception as exc:
+                logger.warning(
+                    "[AgentOSRouter] 3rdagent.switch sshd not ready: "
+                    "user=%s instance=%s error=%s",
+                    uid,
+                    instance_id,
+                    exc,
+                )
+                return {
+                    "ok": False,
+                    "error": f"sandbox sshd not ready: {exc}",
+                    "code": "SSH_NOT_READY",
+                }
         # 记录用户当前 agent_type，后续 SSH 接入默认跟随
         self._current_agent_types[uid] = normalized
         payload = {
