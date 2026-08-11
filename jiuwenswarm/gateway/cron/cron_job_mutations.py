@@ -159,6 +159,16 @@ def apply_cron_job_patch(existing: CronJob, patch: dict[str, Any]) -> CronJob:
             updated,
             work_mode=normalize_work_mode(patch.get("work_mode"), default=DEFAULT_WEB_WORK_MODE),
         )
+    if "service_id" in patch:
+        updated = replace(
+            updated,
+            service_id=str(patch.get("service_id") or "default").strip() or "default",
+        )
+    if "agent_id" in patch:
+        updated = replace(
+            updated,
+            agent_id=str(patch.get("agent_id") or "default").strip() or "default",
+        )
     updated.updated_at = time.time()
     CronJob.from_dict(updated.to_dict())
     return updated

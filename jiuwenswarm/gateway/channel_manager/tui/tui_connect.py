@@ -38,6 +38,13 @@ from jiuwenswarm.common.config import (
     update_config,
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
+from jiuwenswarm.common.local_env_config import (
+    decrypt,
+    encrypt,
+    read_env,
+    set_os_environ,
+    update_process_baseline,
+)
 from jiuwenswarm.gateway.routing.route_binding import GatewayRouteBinding
 from jiuwenswarm.common.version import __version__
 from jiuwenswarm.common.utils import get_user_workspace_dir
@@ -657,8 +664,9 @@ def _persist_env_updates(updates: dict[str, str]) -> None:
             found = False
             for env_key, value in updates.items():
                 if stripped.startswith(env_key + "="):
+                    stored = encrypt(env_key, value)
                     new_lines.append(
-                        f'{env_key}="{value}"\n' if value else f"{env_key}=\n"
+                        f'{env_key}="{stored}"\n' if stored else f"{env_key}=\n"
                     )
                     found = True
                     break
@@ -666,7 +674,8 @@ def _persist_env_updates(updates: dict[str, str]) -> None:
                 new_lines.append(line)
         for env_key, value in updates.items():
             if not any(s.strip().startswith(env_key + "=") for s in new_lines):
-                new_lines.append(f'{env_key}="{value}"\n' if value else f"{env_key}=\n")
+                stored = encrypt(env_key, value)
+                new_lines.append(f'{env_key}="{stored}"\n' if stored else f"{env_key}=\n")
         env_path.parent.mkdir(parents=True, exist_ok=True)
         with open(env_path, "w", encoding="utf-8") as f:
             f.writelines(new_lines)
@@ -796,20 +805,15 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
 
     async def _config_get(ws, req_id, params, session_id):
         payload = {
-            param_key: (os.getenv(env_key) or "")
+            param_key: (read_env(env_key) or "")
             for param_key, env_key in _CLI_CONFIG_SET_ENV_MAP.items()
         }
         payload["app_version"] = __version__
         try:
             raw = get_config_raw()
             for key, val in payload.items():
-                from jiuwenswarm.extensions import ExtensionRegistry
-
-                crypto_provider = ExtensionRegistry.get_instance().get_crypto_provider()
-                if (
-                    "api_key" in key.lower() or "token" in key.lower()
-                ) and crypto_provider:
-                    payload[key] = crypto_provider.decrypt(val)
+                # Tip is plaintext; decrypt is a no-op for already-plain values.
+                payload[key] = decrypt(key, val) if val else val
             ctx_cfg = (raw.get("react") or {}).get("context_engine_config") or {}
             payload["context_engine_enabled"] = (
                 "true" if ctx_cfg.get("enabled", False) else "false"
@@ -919,12 +923,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST"
             )
             return
-        for key, val in params.items():
-            from jiuwenswarm.extensions import ExtensionRegistry
-
-            crypto_provider = ExtensionRegistry.get_instance().get_crypto_provider()
-            if ("api_key" in key.lower() or "token" in key.lower()) and crypto_provider:
-                params[key] = crypto_provider.encrypt(val)
+        # Tip stores plaintext; encrypt only when persisting to .env (see _persist_env_updates).
 
         env_updates: dict[str, str] = {}
         yaml_updated: list[str] = []
@@ -986,12 +985,14 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 )
 
         for env_key, value in env_updates.items():
-            os.environ[env_key] = value
-        # env 变量直接写 os.environ 立即生效；YAML 改动需要 agent 重启/热重载才生效
+            set_os_environ(env_key, value)
+        if env_updates:
+            update_process_baseline(env_updates)
+        # tip 立即生效；YAML 改动需要 agent 重启/热重载才生效
         applied_without_restart = not yaml_updated
 
         # ── 同步 env-only 模型/多模态/嵌入配置到 config.yaml ──
-        # config.set 对 source:"env" 的配置项只更新 os.environ 和 .env，
+        # config.set 对 source:"env" 的配置项只更新 tip 和 .env，
         # 不更新 config.yaml 本体。但 command.status / command.model 等读取配置时
         # 优先从 config.yaml 对应 section 的 model_client_config 获取值。
         # 若值是硬编码（非 ${MODEL_NAME} 语法），env 变量更新无法传播。
@@ -2621,7 +2622,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             logger.info(
                 "[cli command.model] 列出模型: names=%s, current=%s",
                 names,
-                os.getenv("MODEL_NAME", "unknown"),
+                read_env("MODEL_NAME") or "unknown",
             )
             # 列出模型全部数据均可从本地 config.yaml 获取，
             # 无需等待 AgentServer 响应（其返回的 current/available 会被本地值覆盖）。
@@ -2634,8 +2635,8 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             if isinstance(_defs, list) and _defs:
                 _first_name = resolve_env_vars(str((_defs[0].get("model_client_config") or {}).get("model_name", "")))
                 _first_alias = resolve_env_vars(str(_defs[0].get("alias", ""))) if _defs[0].get("alias") else ""
-                payload["current"] = _first_alias or _first_name or os.getenv("MODEL_NAME", "unknown")
-                payload["current_model_name"] = _first_name or os.getenv("MODEL_NAME", "unknown")
+                payload["current"] = _first_alias or _first_name or (read_env("MODEL_NAME") or "unknown")
+                payload["current_model_name"] = _first_name or (read_env("MODEL_NAME") or "unknown")
 
                 def _model_meta(i: int, e: dict) -> dict:
                     mcc = e.get("model_client_config") or {}
@@ -2662,7 +2663,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                     for i, e in enumerate(_defs) if isinstance(e, dict)
                 ]
             else:
-                payload["current"] = os.getenv("MODEL_NAME", "unknown")
+                payload["current"] = read_env("MODEL_NAME") or "unknown"
             await channel.send_response(ws, req_id, ok=True, payload=payload)
             return
 

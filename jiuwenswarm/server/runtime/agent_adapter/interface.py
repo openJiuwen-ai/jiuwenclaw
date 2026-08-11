@@ -996,6 +996,56 @@ class JiuWenSwarm:
             )
         return self._adapter
 
+    def ensure_adapter(self, *, mode: str = "agent") -> AgentAdapter:
+        """Public wrapper for ``_ensure_adapter`` (used by AgentManager reload)."""
+        return self._ensure_adapter(mode=mode)
+
+    def _resolve_workspace_dir(self) -> str:
+        user_ws = getattr(self, "_user_workspace_dir", None)
+        if user_ws is not None:
+            return str(Path(user_ws) / "agent" / "workspace")
+        return str(get_agent_workspace_dir())
+
+    def _bind_tenant_request_context(self) -> tuple[Any, Any]:
+        from jiuwenswarm.server.runtime.tenant_context import bind_tenant_workspace_dirs
+        from jiuwenswarm.agents.harness.common.tools.memory_tools import (
+            bind_memory_agent_id,
+            bind_memory_workspace_dir,
+        )
+
+        ws = Path(self._resolve_workspace_dir())
+        agent_root = ws.parent
+        tenant_root = agent_root.parent
+        tenant_tokens = bind_tenant_workspace_dirs(
+            jiuwenclaw_workspace=str(ws),
+            agent_root=str(agent_root),
+            tenant_root=str(tenant_root),
+        )
+        mem_ws_token = bind_memory_workspace_dir(str(ws))
+        mem_aid = (
+            getattr(self, "_env_agent_id", None)
+            or getattr(self, "_agent_id", None)
+            or "default"
+        )
+        mem_aid_token = bind_memory_agent_id(str(mem_aid))
+        return tenant_tokens, (mem_ws_token, mem_aid_token)
+
+    @staticmethod
+    def _reset_tenant_request_context(tenant_tokens: Any, mem_token: Any) -> None:
+        from jiuwenswarm.server.runtime.tenant_context import reset_tenant_workspace_dirs
+        from jiuwenswarm.agents.harness.common.tools.memory_tools import (
+            reset_memory_agent_id,
+            reset_memory_workspace_dir,
+        )
+
+        if isinstance(mem_token, tuple):
+            mem_ws_token, mem_aid_token = mem_token
+            reset_memory_agent_id(mem_aid_token)
+            reset_memory_workspace_dir(mem_ws_token)
+        else:
+            reset_memory_workspace_dir(mem_token)
+        reset_tenant_workspace_dirs(tenant_tokens)
+
     @staticmethod
     def _adapter_mode_for_request(request: AgentRequest) -> str:
         params = request.params if isinstance(request.params, dict) else {}
@@ -1018,6 +1068,8 @@ class JiuWenSwarm:
             sub_mode: 子模式
         """
         adapter = self._ensure_adapter(mode=mode)
+        setattr(adapter, "_env_service_id", getattr(self, "_env_service_id", "default"))
+        setattr(adapter, "_env_agent_id", getattr(self, "_env_agent_id", "default"))
         await adapter.create_instance(config, mode=mode, sub_mode=sub_mode)
         logger.info(
             "[JiuWenSwarm] Agent instance created: sdk=%s, mode=%s, sub_mode=%s",
@@ -2184,88 +2236,92 @@ class JiuWenSwarm:
             request.request_id, request.channel_id, session_id, self._sdk_name,
         )
 
+        tenant_tokens, mem_token = self._bind_tenant_request_context()
         try:
-            inputs, memory_mode, raw_query = self._build_inputs(request)
-        except _TeamPlanApprovalPayloadError as exc:
-            return AgentResponse(
-                request_id=request.request_id,
-                channel_id=request.channel_id,
-                ok=False,
-                payload={"error": str(exc)},
-                metadata=request.metadata,
-            )
+            try:
+                inputs, memory_mode, raw_query = self._build_inputs(request)
+            except _TeamPlanApprovalPayloadError as exc:
+                return AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=False,
+                    payload={"error": str(exc)},
+                    metadata=request.metadata,
+                )
 
-        # cloud memory: before chat hook
-        if memory_mode == "cloud":
-            mem_ctx = MemoryHookContext(
-                session_id=request.session_id or "default",
-                request_id=request.request_id or "",
-                channel_id=request.channel_id,
-                agent_name="main_agent",
-                workspace_dir=str(get_agent_home_dir()),
-                extra=request.params,
-            )
-            await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.MEMORY_BEFORE_CHAT, mem_ctx)
-            memory_block = "\n\n".join(b for b in mem_ctx.memory_blocks if b)
-            inputs["memory_block"] = memory_block
-
-        async def run_agent_task():
-            return await adapter.process_message_impl(request, inputs)
-
-        result = await self._session_manager.submit_and_wait(session_id, run_agent_task)
-
-        if result.ok and result.payload.get("content"):
-            content = result.payload["content"]
-            content_str = content if isinstance(content, str) else str(content)
-            repair_call = getattr(adapter, "repair_model_response", None)
-            retry_without_a2ui_call = self._make_retry_without_a2ui_call(
-                adapter=adapter,
-                request=request,
-            )
-            content_str = await finalize_assistant_response_if_a2ui(
-                content_str,
-                channel=request.channel_id,
-                user_query=raw_query,
-                request_id=request.request_id or "",
-                repair_call=repair_call,
-                retry_without_a2ui_call=retry_without_a2ui_call,
-            )
-            if isinstance(content, str):
-                result.payload["content"] = content_str
-            self._append_history_record(
-                session_id=session_id,
-                request_id=request.request_id,
-                channel_id=request.channel_id,
-                role="assistant",
-                event_type="chat.final",
-                content=content_str,
-                timestamp=time.time(),
-                mode=request.params.get("mode", "unknown"),
-            )
-
-            # cloud memory: after chat hook
+            # cloud memory: before chat hook
             if memory_mode == "cloud":
-                after_ctx = MemoryHookContext(
+                mem_ctx = MemoryHookContext(
                     session_id=request.session_id or "default",
                     request_id=request.request_id or "",
                     channel_id=request.channel_id,
                     agent_name="main_agent",
                     workspace_dir=str(get_agent_home_dir()),
-                    assistant_message=content_str,
                     extra=request.params,
                 )
-                await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.MEMORY_AFTER_CHAT, after_ctx)
+                await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.MEMORY_BEFORE_CHAT, mem_ctx)
+                memory_block = "\n\n".join(b for b in mem_ctx.memory_blocks if b)
+                inputs["memory_block"] = memory_block
 
-            # auto memory: extract memories after conversation ends
-            # 需要 auto_memory_enabled 和 memory.enabled 都为 true 才触发
-            mode = request.params.get("mode", "code") if isinstance(request.params, dict) else "code"
-            config = get_config()
-            if is_auto_memory_enabled(mode, config) and is_memory_enabled(mode, config):
-                _trigger_auto_memory_extraction(adapter, request, session_id, is_stream=False)
+            async def run_agent_task():
+                return await adapter.process_message_impl(request, inputs)
 
-        _schedule_symphony_session_feedback(session_id, request.request_id)
-        await self._try_apply_adapter_pending_reload()
-        return result
+            result = await self._session_manager.submit_and_wait(session_id, run_agent_task)
+
+            if result.ok and result.payload.get("content"):
+                content = result.payload["content"]
+                content_str = content if isinstance(content, str) else str(content)
+                repair_call = getattr(adapter, "repair_model_response", None)
+                retry_without_a2ui_call = self._make_retry_without_a2ui_call(
+                    adapter=adapter,
+                    request=request,
+                )
+                content_str = await finalize_assistant_response_if_a2ui(
+                    content_str,
+                    channel=request.channel_id,
+                    user_query=raw_query,
+                    request_id=request.request_id or "",
+                    repair_call=repair_call,
+                    retry_without_a2ui_call=retry_without_a2ui_call,
+                )
+                if isinstance(content, str):
+                    result.payload["content"] = content_str
+                append_history_record(
+                    session_id=session_id,
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    role="assistant",
+                    event_type="chat.final",
+                    content=content_str,
+                    timestamp=time.time(),
+                    mode=request.params.get("mode", "unknown"),
+                )
+
+                # cloud memory: after chat hook
+                if memory_mode == "cloud":
+                    after_ctx = MemoryHookContext(
+                        session_id=request.session_id or "default",
+                        request_id=request.request_id or "",
+                        channel_id=request.channel_id,
+                        agent_name="main_agent",
+                        workspace_dir=str(get_agent_home_dir()),
+                        assistant_message=content_str,
+                        extra=request.params,
+                    )
+                    await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.MEMORY_AFTER_CHAT, after_ctx)
+
+                # auto memory: extract memories after conversation ends
+                # 需要 auto_memory_enabled 和 memory.enabled 都为 true 才触发
+                mode = request.params.get("mode", "code") if isinstance(request.params, dict) else "code"
+                config = get_config()
+                if is_auto_memory_enabled(mode, config) and is_memory_enabled(mode, config):
+                    _trigger_auto_memory_extraction(adapter, request, session_id, is_stream=False)
+
+            _schedule_symphony_session_feedback(session_id, request.request_id)
+            await self._try_apply_adapter_pending_reload()
+            return result
+        finally:
+            self._reset_tenant_request_context(tenant_tokens, mem_token)
 
     async def process_message_stream(
             self, request: AgentRequest
@@ -2542,31 +2598,35 @@ class JiuWenSwarm:
             durable_final_content = pending_text
 
         async def run_stream_task():
+            tenant_tokens, mem_token = self._bind_tenant_request_context()
             logger.info("[JiuWenSwarm] run_stream_task started: request_id=%s session_id=%s", rid, session_id)
             _put_count = 0
             try:
-                async for chunk in adapter.process_message_stream_impl(request, inputs):
-                    _put_count += 1
-                    if _put_count <= 3:
-                        _pl = getattr(chunk, "payload", None) or {}
-                        _et = _pl.get("event_type", "") if isinstance(_pl, dict) else ""
-                        logger.info(
-                            "[JiuWenSwarm] run_stream_task chunk #%s: request_id=%s event_type=%s",
-                            _put_count, rid, _et,
-                        )
-                    await stream_queue.put(("chunk", chunk))
-            except asyncio.CancelledError:
-                logger.info("[JiuWenSwarm] 流式任务被取消: request_id=%s session_id=%s", rid, session_id)
-                await stream_queue.put(("error", asyncio.CancelledError()))
-            except Exception as exc:
-                logger.exception("[JiuWenSwarm] 流式任务异常: %s", exc)
-                await stream_queue.put(("error", exc))
+                try:
+                    async for chunk in adapter.process_message_stream_impl(request, inputs):
+                        _put_count += 1
+                        if _put_count <= 3:
+                            _pl = getattr(chunk, "payload", None) or {}
+                            _et = _pl.get("event_type", "") if isinstance(_pl, dict) else ""
+                            logger.info(
+                                "[JiuWenSwarm] run_stream_task chunk #%s: request_id=%s event_type=%s",
+                                _put_count, rid, _et,
+                            )
+                        await stream_queue.put(("chunk", chunk))
+                except asyncio.CancelledError:
+                    logger.info("[JiuWenSwarm] 流式任务被取消: request_id=%s session_id=%s", rid, session_id)
+                    await stream_queue.put(("error", asyncio.CancelledError()))
+                except Exception as exc:
+                    logger.exception("[JiuWenSwarm] 流式任务异常: %s", exc)
+                    await stream_queue.put(("error", exc))
+                finally:
+                    logger.info(
+                        "[JiuWenSwarm] run_stream_task finished: request_id=%s total_chunks=%s",
+                        rid, _put_count,
+                    )
+                    stream_done.set()
             finally:
-                logger.info(
-                    "[JiuWenSwarm] run_stream_task finished: request_id=%s total_chunks=%s",
-                    rid, _put_count,
-                )
-                stream_done.set()
+                self._reset_tenant_request_context(tenant_tokens, mem_token)
 
         # Team 模式: 后续请求直接执行，绕过 Session Manager 队列
         # 因为 Team 是长期运行的(persistent)，interact 调用不需要等待前一个任务完成

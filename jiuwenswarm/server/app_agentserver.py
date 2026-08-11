@@ -126,6 +126,9 @@ if not _loaded_logging_yaml:
 
 # Load env from user workspace config/.env
 load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
+from jiuwenswarm.common.local_env_config import ingest_bare_business_into_tip
+
+ingest_bare_business_into_tip()
 reset_free_search_runtime_flags()
 
 from jiuwenswarm.agents.harness.common.tools.bash_tool_safety import (

@@ -256,11 +256,15 @@ class CronSchedulerService:
         agent_client: AgentServerClient,
         message_handler: MessageHandler,
         now_fn: Callable[[], float] = _now_utc_ts,
+        service_id: str = "default",
+        agent_id: str = "default",
     ) -> None:
         self._store = store
         self._agent_client = agent_client
         self._message_handler = message_handler
         self._now_fn = now_fn
+        self._service_id = str(service_id or "default").strip() or "default"
+        self._agent_id = str(agent_id or "default").strip() or "default"
 
         self._running = False
         self._task: asyncio.Task | None = None
@@ -1027,6 +1031,8 @@ class CronSchedulerService:
                     "project_id": job.project_id or "",
                     "project_dir": exec_project_dir,
                     "work_mode": job.work_mode or DEFAULT_WEB_WORK_MODE,
+                    "service_id": self._service_id,
+                    "agent_id": self._agent_id,
                 }
                 if job.model_name:
                     params["model_name"] = job.model_name
@@ -1044,7 +1050,11 @@ class CronSchedulerService:
                     params=params,
                     is_stream=is_team_cron_mode(mode),
                     timestamp=self._now_fn(),
-                    metadata={"cron": {"job_id": job.id, "run_id": run_id}},
+                    metadata={
+                        "cron": {"job_id": job.id, "run_id": run_id},
+                        "service_id": self._service_id,
+                        "agent_id": self._agent_id,
+                    },
                 )
                 if is_team_cron_mode(mode):
                     timeout_seconds = resolve_cron_job_timeout_seconds(job)

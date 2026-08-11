@@ -15,7 +15,6 @@ import httpx
 from jiuwenswarm.gateway.channel_manager.base import RobotMessageRouter, BaseChannel
 from jiuwenswarm.gateway.channel_manager.im_platforms.dingtalk.dingtalk_file_service import DingTalkFileService
 from jiuwenswarm.common.schema.message import Message, ReqMethod
-from jiuwenswarm.common.utils import get_agent_workspace_dir
 from jiuwenswarm.gateway.routing.keys import DeliveryTarget
 from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
 
@@ -263,6 +262,18 @@ class DingTalkChannel(BaseChannel):
         """返回通道的唯一标识"""
         return self.name
 
+    def _im_tenant_ids(
+        self, conversation_id: str = "", sender_id: str = ""
+    ) -> tuple[str, str]:
+        """Resolve SessionMap-aligned tenant ids for DingTalk inbound traffic."""
+        from jiuwenswarm.gateway.tenant_paths import tenant_ids_from_im_identity
+
+        return tenant_ids_from_im_identity(
+            str(conversation_id or "").strip(),
+            str(self.config.client_id or ""),
+            str(sender_id or "").strip(),
+        )
+
     def on_message(self, callback: Callable[[Message], None]) -> None:
         """注册钉钉通道的回调函数"""
         self._gateway_callback = callback
@@ -358,15 +369,17 @@ class DingTalkChannel(BaseChannel):
             self._running = True
             self._http = httpx.AsyncClient()
 
-            # 初始化文件服务
-            workspace_dir = self.config.workspace_dir or str(get_agent_workspace_dir())
+            # 初始化文件服务（workspace 按消息租户懒解析；config.workspace_dir 可覆盖）
+            workspace_dir = (
+                str(self.config.workspace_dir).strip() if self.config.workspace_dir else None
+            )
             self._file_service = DingTalkFileService(
                 client_id=self.config.client_id,
                 get_token_func=self._get_access_token,
                 http_client=self._http,
                 max_download_size=self.config.max_download_size,
                 download_timeout=self.config.download_timeout,
-                workspace_dir=workspace_dir,
+                workspace_dir=workspace_dir or None,
                 api_base=self.config.api_base,
                 oapi_base=self.config.oapi_base,
             )
@@ -630,7 +643,9 @@ class DingTalkChannel(BaseChannel):
         if not download_code:
             return "[图片: 缺少下载码]", None
 
-        file_info = await self._file_service.download_image(download_code, message_id)
+        _svc, _aid = self._im_tenant_ids(conversation_id, sender_id)
+        with self._file_service.tenant_scope(_svc, _aid):
+            file_info = await self._file_service.download_image(download_code, message_id)
         if not file_info:
             return "[图片: 下载失败]", None
 
@@ -660,7 +675,9 @@ class DingTalkChannel(BaseChannel):
         if file_size > 0 and file_size > self.config.max_download_size:
             return f"[文件过大: {file_name}]", None
 
-        file_info = await self._file_service.download_file(download_code, message_id, file_name)
+        _svc, _aid = self._im_tenant_ids(conversation_id, sender_id)
+        with self._file_service.tenant_scope(_svc, _aid):
+            file_info = await self._file_service.download_file(download_code, message_id, file_name)
         if not file_info:
             return f"[文件: {file_name} 下载失败]", None
 
@@ -689,7 +706,9 @@ class DingTalkChannel(BaseChannel):
         if not download_code:
             return "[音频: 缺少下载码]", None
 
-        file_info = await self._file_service.download_audio(download_code, message_id)
+        _svc, _aid = self._im_tenant_ids(conversation_id, sender_id)
+        with self._file_service.tenant_scope(_svc, _aid):
+            file_info = await self._file_service.download_audio(download_code, message_id)
         if not file_info:
             return "[音频: 下载失败]", None
 
@@ -714,7 +733,9 @@ class DingTalkChannel(BaseChannel):
         if not download_code:
             return "[视频: 缺少下载码]", None
 
-        file_info = await self._file_service.download_video(download_code, message_id)
+        _svc, _aid = self._im_tenant_ids(conversation_id, sender_id)
+        with self._file_service.tenant_scope(_svc, _aid):
+            file_info = await self._file_service.download_video(download_code, message_id)
         if not file_info:
             return "[视频: 下载失败]", None
 
@@ -1070,49 +1091,73 @@ class DingTalkChannel(BaseChannel):
 
     # ==================== 兜底文件发送 ====================
 
-    def _detect_workspace_files(self, text: str, workspace_dir: str) -> list[str]:
-        """检测文本中提到的 workspace 文件路径。
+    def _detect_workspace_files(
+        self,
+        text: str,
+        session_id: str | None = None,
+        *,
+        service_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> list[str]:
+        """从文本中提取当前会话 project_dir（回退租户 workspace）下实际存在的文件路径。
 
+        用于兜底检测 LLM 提到但未通过 send_file_to_user 发送的文件。
         支持两种模式：
-        1. 完整绝对路径匹配
-        2. 从引号/书名号中提取文件名，在 workspace 下查找
-
-        Args:
-            text: 消息文本
-            workspace_dir: 工作空间目录
-
-        Returns:
-            存在的文件路径列表
+        1. 完整绝对路径：以当前会话 ``project_dir`` / 租户 workspace 为前缀
+        2. 仅文件名：'xxx.docx' 或 "xxx.docx"——在该目录下查找
         """
-        if not workspace_dir or not text:
+        from jiuwenswarm.common.utils import resolve_tenant_sessions_dir
+        from jiuwenswarm.gateway.tenant_paths import (
+            normalize_channel_tenant_ids,
+            resolve_channel_agent_workspace,
+        )
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            get_resolved_project_dir,
+        )
+
+        if not text:
             return []
 
-        found_files = []
+        sid, aid = normalize_channel_tenant_ids(service_id, agent_id)
+        sess = (session_id or "").strip() or "default"
+        workspace_dir = os.path.abspath(
+            get_resolved_project_dir(
+                sess,
+                resolve_tenant_sessions_dir(sid, aid),
+                default=resolve_channel_agent_workspace(sid, aid),
+            )
+        ).rstrip("/\\")
 
-        # 模式1：完整绝对路径匹配
-        # 匹配类似 /home/xxx/.jiuwenswarm/agent/workspace/xxx.ext 的路径
-        path_pattern = re.compile(
-            r'(?:^|["\'「「【《\s])(' + re.escape(workspace_dir) + r'[^\s"\'」」】》]+\.\w{1,10})(?:$|["\'」」】》\s])',
-            re.MULTILINE
-        )
-        for match in path_pattern.finditer(text):
-            path = match.group(1).strip()
-            if os.path.isfile(path):
-                found_files.append(path)
+        seen: set[str] = set()
+        result: list[str] = []
 
-        # 模式2：从引号/书名号中提取文件名
-        # 匹配 "filename.ext"、'filename.ext'、「filename.ext」、《filename.ext》
-        filename_pattern = re.compile(
-            r'["\'「「【《]([^"\'」」】》]+\.\w{1,10})["\'」」】》]'
-        )
-        for match in filename_pattern.finditer(text):
-            filename = match.group(1).strip()
-            # 在 workspace 下查找同名文件
-            potential_path = os.path.join(workspace_dir, filename)
-            if os.path.isfile(potential_path) and potential_path not in found_files:
-                found_files.append(potential_path)
+        # 模式1：完整路径 — 匹配原生分隔符与正斜杠（LLM 常输出 /）
+        ws_variants = [workspace_dir]
+        ws_fwd = workspace_dir.replace("\\", "/")
+        if ws_fwd != workspace_dir:
+            ws_variants.append(ws_fwd)
 
-        return found_files
+        for ws in ws_variants:
+            workspace_pattern = re.escape(ws) + r"[^\s\[\]\"']+\.\w+"
+            for m in re.findall(workspace_pattern, text):
+                m = os.path.normpath(m.rstrip(".,;:!?)"))
+                if m not in seen and os.path.isfile(m):
+                    seen.add(m)
+                    result.append(m)
+
+        # 模式2：从引号或书名号中提取文件名，在 workspace 下查找
+        name_pattern = (
+            r"""['"'《]([^'"'》\n]+\."""
+            r"""(?:docx?|xlsx?|pptx?|pdf|csv|txt|md|zip|tar|gz|"""
+            r"""png|jpg|jpeg|gif|mp3|mp4|wav|opus))['"'》]"""
+        )  # noqa: E501
+        for fname in re.findall(name_pattern, text, re.IGNORECASE):
+            fpath = os.path.normpath(os.path.join(workspace_dir, fname))
+            if fpath not in seen and os.path.isfile(fpath):
+                seen.add(fpath)
+                result.append(fpath)
+
+        return result
 
     async def _send_fallback_files(self, msg: Message, content: str) -> None:
         """chat.final 兜底文件发送。
@@ -1123,21 +1168,22 @@ class DingTalkChannel(BaseChannel):
         if not self._file_service or not self.config.send_file_allowed:
             return
 
-        workspace_dir = self.config.workspace_dir or str(get_agent_workspace_dir())
-        if not os.path.isdir(workspace_dir):
-            return
+        from jiuwenswarm.gateway.tenant_paths import tenant_ids_from_message
 
-        # 检测文件路径
-        file_paths = self._detect_workspace_files(content, workspace_dir)
-        if not file_paths:
-            return
-
-        # 获取当前 request_id 用于去重
+        service_id, agent_id = tenant_ids_from_message(msg)
+        session_id = str(getattr(msg, "session_id", None) or "").strip() or "default"
         request_id = getattr(msg, "id", "") or ""
         sent_paths = self._sent_file_paths_by_req.get(request_id, set())
-
-        # 过滤已发送的文件
-        new_files = [p for p in file_paths if p not in sent_paths]
+        detected = self._detect_workspace_files(
+            content,
+            session_id,
+            service_id=service_id,
+            agent_id=agent_id,
+        )
+        new_files = []
+        for fp in detected:
+            if os.path.abspath(fp) not in sent_paths and fp not in sent_paths:
+                new_files.append(fp)
         if not new_files:
             return
 

@@ -23,8 +23,13 @@ from jiuwenswarm.common.kv_cache_affinity_config import (
     set_default_model_provider_in_entries,
     validate_affinity_invariant,
 )
+from jiuwenswarm.common.local_env_config import (
+    SPAWN_ENV_KEYS,
+    get_bound_agent_env_ns,
+    get_local_config,
+    is_task_env_overlay_bound,
+)
 from jiuwenswarm.common.utils import get_config_dir, get_config_file
-from jiuwenswarm.common.local_env_config import get_local_config
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +65,24 @@ def resolve_env_vars(value: Any) -> Any:
         def replace_env(match):
             var_name = match.group(1)
             default = match.group(2)
-            current = get_local_config(var_name)
+            if var_name in SPAWN_ENV_KEYS:
+                current = os.environ.get(var_name)
+            else:
+                current = get_local_config(var_name)
+            is_need_decrypt = ("api_key" in var_name.lower() or "token" in var_name.lower()) and current
+            reg_mod = sys.modules.get("jiuwenswarm.extensions.registry")
+            if reg_mod is not None and hasattr(reg_mod, "ExtensionRegistry"):
+                try:
+                    reg = reg_mod.ExtensionRegistry.get_instance()
+                    crypto = reg.get_crypto_provider()
+                    if is_need_decrypt and crypto:
+                        current = crypto.decrypt(current)
+                except Exception:
+                    logger.debug(
+                        "Crypto provider unavailable while resolving env var %s; using raw value",
+                        var_name,
+                        exc_info=True,
+                    )
             # Bash: ${VAR:-default} uses default when VAR is unset OR empty.
             # ${VAR} (no :-) keeps getenv behavior; unset -> "".
             if default is not None:
@@ -188,14 +210,64 @@ def _read_with_retry(filepath: Path, max_attempts: int = 3) -> dict[str, Any]:
     return {}
 
 
+_ConfigNsKey = tuple[str, str] | None
+_resolved_config_by_ns: dict[_ConfigNsKey, tuple[float, dict[str, Any]]] = {}
+_CONFIG_CACHE_TTL_SECONDS: float = 20.0
+_config_lock = threading.Lock()
+_config_version: int = 0
+
+
 def get_config():
-    """读取并解析 config.yaml（锁保护 + 跨进程降级重试）。"""
-    config_base = _read_with_retry(get_config_file())
-    # resolve_env_vars 和 _normalize_config 只操作内存数据，在锁外执行以缩短锁持有时间
+    """Return merged, env-var-resolved config with per-ns TTL cache.
+
+    Results are cached per bound ``(service_id, agent_id)`` from
+    ``bind_agent_env_ns``. When a task env overlay is sealed, the cache is
+    bypassed so overlay values are always visible.
+    """
+    global _config_version
+    ns: _ConfigNsKey = get_bound_agent_env_ns()
+    skip_cache = is_task_env_overlay_bound()
+    now = time.monotonic()
+
+    if not skip_cache:
+        with _config_lock:
+            entry = _resolved_config_by_ns.get(ns)
+            if entry is not None and (now - entry[0]) < _CONFIG_CACHE_TTL_SECONDS:
+                return entry[1]
+            read_version = _config_version
+    else:
+        read_version = -1
+
+    config_base = deepcopy(_read_with_retry(get_config_file()))
     config_base = resolve_env_vars(config_base)
     _normalize_config(config_base)
 
+    if not skip_cache:
+        with _config_lock:
+            if _config_version == read_version:
+                _resolved_config_by_ns[ns] = (time.monotonic(), config_base)
+
     return config_base
+
+
+def clear_config_cache(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> None:
+    """Invalidate resolved-config cache (all slots or one ns)."""
+    global _config_version
+    with _config_lock:
+        _config_version += 1
+        if service_id is None and agent_id is None:
+            _resolved_config_by_ns.clear()
+            return
+        from jiuwenswarm.common.local_env_config import normalize_env_ns_id
+
+        sid = normalize_env_ns_id(service_id, default="default")
+        aid = normalize_env_ns_id(agent_id, default="default")
+        _resolved_config_by_ns.pop((sid, aid), None)
+        if sid == "default" and aid == "default":
+            _resolved_config_by_ns.pop(None, None)
 
 
 def get_config_raw():
@@ -216,6 +288,7 @@ def validate_persisted_kv_cache_affinity() -> tuple[bool, list[str]]:
 def set_config(config):
     with open(CONFIG_YAML_PATH, "w", encoding="utf-8") as f:
         yaml.safe_dump(config, f, allow_unicode=True, sort_keys=False)
+    clear_config_cache()
 
 
 def _get_bool_env(value: str | None) -> bool | None:
@@ -237,7 +310,8 @@ def _get_evolution_config(config: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def get_evolution_auto_scan_enabled(config: dict[str, Any] | None) -> bool:
-    env_auto_scan = _get_bool_env(os.getenv("EVOLUTION_AUTO_SCAN"))
+    raw = get_local_config("EVOLUTION_AUTO_SCAN")
+    env_auto_scan = _get_bool_env(None if raw is None else str(raw))
     if env_auto_scan is not None:
         return env_auto_scan
     return _get_evolution_config(config).get("auto_scan") is True
@@ -248,7 +322,8 @@ def get_evolution_signal_trigger_enabled(
     *,
     fallback: bool = False,
 ) -> bool:
-    env_signal_trigger = _get_bool_env(os.getenv("EVOLUTION_SIGNAL_TRIGGER"))
+    raw = get_local_config("EVOLUTION_SIGNAL_TRIGGER")
+    env_signal_trigger = _get_bool_env(None if raw is None else str(raw))
     if env_signal_trigger is not None:
         return env_signal_trigger
     signal_trigger = _get_evolution_config(config).get("signal_trigger")
@@ -262,7 +337,8 @@ def get_evolution_review_trigger_enabled(
     *,
     fallback: bool = False,
 ) -> bool:
-    env_review_trigger = _get_bool_env(os.getenv("EVOLUTION_REVIEW_TRIGGER"))
+    raw = get_local_config("EVOLUTION_REVIEW_TRIGGER")
+    env_review_trigger = _get_bool_env(None if raw is None else str(raw))
     if env_review_trigger is not None:
         return env_review_trigger
     review_trigger = _get_evolution_config(config).get("review_trigger")
@@ -272,7 +348,8 @@ def get_evolution_review_trigger_enabled(
 
 
 def get_skill_create_enabled(config: dict[str, Any] | None) -> bool:
-    env_skill_create = _get_bool_env(os.getenv("SKILL_CREATE"))
+    raw = get_local_config("SKILL_CREATE")
+    env_skill_create = _get_bool_env(None if raw is None else str(raw))
     if env_skill_create is not None:
         return env_skill_create
     return _get_evolution_config(config).get("skill_create", False)
@@ -281,7 +358,8 @@ def get_skill_create_enabled(config: dict[str, Any] | None) -> bool:
 def get_evolution_auto_save_enabled(config: dict[str, Any] | None = None) -> bool:
     """Return whether evolution approvals may auto-save without user action."""
     try:
-        env_auto_save = _get_bool_env(os.getenv("EVOLUTION_AUTO_SAVE"))
+        raw = get_local_config("EVOLUTION_AUTO_SAVE")
+        env_auto_save = _get_bool_env(None if raw is None else str(raw))
         if env_auto_save is not None:
             return env_auto_save
         if config is None:
@@ -330,6 +408,7 @@ def dump_yaml_round_trip(config_path: Path, data: Any) -> None:
         except FileNotFoundError:
             pass
         raise
+    clear_config_cache()
 
 
 def _atomic_replace(src: Path, dst: Path, max_attempts: int = 10) -> None:
@@ -1229,14 +1308,14 @@ def get_default_models(config: dict[str, Any] | None = None) -> list[dict[str, A
         return _decrypt_model_entries([models["default"]])
 
     # 回退：从环境变量构造（env var 已在 resolve_env_vars 中解密）
-    alias = os.getenv("MODEL_ALIAS", "")
+    alias = str(get_local_config("MODEL_ALIAS", "") or "")
     entry: dict[str, Any] = {
         "model_client_config": {
-            "api_base": os.getenv("API_BASE", ""),
-            "api_key": os.getenv("API_KEY", ""),
-            "model_name": os.getenv("MODEL_NAME", ""),
-            "client_provider": os.getenv("MODEL_PROVIDER", ""),
-            "custom_headers": _parse_custom_headers(os.getenv("CUSTOM_HEADERS", None)),
+            "api_base": str(get_local_config("API_BASE", "") or ""),
+            "api_key": str(get_local_config("API_KEY", "") or ""),
+            "model_name": str(get_local_config("MODEL_NAME", "") or ""),
+            "client_provider": str(get_local_config("MODEL_PROVIDER", "") or ""),
+            "custom_headers": _parse_custom_headers(get_local_config("CUSTOM_HEADERS", None)),
             "timeout": 1800,
             "verify_ssl": False,
         },

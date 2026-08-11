@@ -10,10 +10,16 @@
 2. GLM XML 标签清洗：流式场景下 GLM 调用原生工具的 XML 标签（如 ``<arg_value>``、
    ``<arg_key>``、``<tool_call>``）未剥离干净，会污染后续 todo_list、LLM 上下文及
    前端。补丁在解析流式 chunk 和非流式响应时，对 tool_call.arguments 做标签清洗。
+
+3. 保留 ``Authorization``：openjiuwen ``sanitize_headers`` 会剥离 protected
+   ``authorization``。OfficeClaw / Huawei MaaS 经 tip ``default_headers`` 下发的是
+   ``Authorization: Basic ...``（``api_key`` 仅为占位 ``huawei-maas-session``）；
+   若不保留该头，网关会报 APIG.0303（Authorization header is missing）。
 """
 
 from __future__ import annotations
 
+import importlib
 import json
 import logging
 import re
@@ -63,6 +69,155 @@ def _sanitize_glm_tool_xml_tags(raw: str) -> str:
     return result
 
 _PATCH_APPLIED = False
+_AUTH_HEADER_PATCH_APPLIED = False
+
+
+def _extract_authorization_header(
+    headers: dict[str, Any] | None,
+) -> tuple[str, str] | None:
+    """Return ``(original_key, value)`` for Authorization when present."""
+    if not headers:
+        return None
+    for key, value in headers.items():
+        if key is None or value is None:
+            continue
+        key_str = str(key).strip()
+        if key_str.lower() != "authorization":
+            continue
+        value_str = str(value).strip()
+        if not value_str:
+            return None
+        return key_str, value_str
+    return None
+
+
+def _restore_authorization_header(
+    headers: dict[str, str],
+    auth: tuple[str, str] | None,
+) -> dict[str, str]:
+    """Re-apply Authorization after sanitize (case-insensitive replace)."""
+    if not auth:
+        return headers
+    key, value = auth
+    drop = [existing for existing in headers if existing.lower() == "authorization"]
+    for existing in drop:
+        del headers[existing]
+    headers[key] = value
+    return headers
+
+
+def apply_openai_auth_header_patch() -> None:
+    """Keep intentional ``Authorization`` on LLM client headers (Huawei MaaS Basic).
+
+    openjiuwen clients do ``from headers_helper import build_base_headers``, so
+    patching only ``headers_helper.build_base_headers`` is a no-op for them —
+    we must also rebind the names already imported into each client module.
+
+    Idempotent. Safe to call before or after :func:`apply_openai_sse_invoke_patch`.
+    """
+    global _AUTH_HEADER_PATCH_APPLIED
+    if _AUTH_HEADER_PATCH_APPLIED:
+        return
+
+    try:
+        from openjiuwen.core.foundation.llm import headers_helper
+    except Exception as exc:  # pragma: no cover
+        logger.warning("[llm_sse_patch] 未能导入 headers_helper，跳过 Authorization 补丁: %s", exc)
+        return
+
+    if getattr(headers_helper, "_auth_header_patch_applied", False):
+        _AUTH_HEADER_PATCH_APPLIED = True
+        return
+
+    _orig_build_base_headers = headers_helper.build_base_headers
+    _orig_merge_request_headers = headers_helper.merge_request_headers
+
+    def _build_base_headers_keep_auth(
+        *,
+        custom_headers: dict[str, Any] | None = None,
+    ) -> dict[str, str]:
+        auth = _extract_authorization_header(custom_headers)
+        result = _orig_build_base_headers(custom_headers=custom_headers)
+        return _restore_authorization_header(result, auth)
+
+    def _merge_request_headers_keep_auth(
+        base_headers: dict[str, Any] | None,
+        request_custom_headers: dict[str, Any] | None,
+    ) -> dict[str, str]:
+        # Request-level Authorization wins over base when both are set.
+        auth = _extract_authorization_header(request_custom_headers) or _extract_authorization_header(
+            dict(base_headers) if base_headers else None
+        )
+        result = _orig_merge_request_headers(base_headers, request_custom_headers)
+        return _restore_authorization_header(result, auth)
+
+    headers_helper.build_base_headers = _build_base_headers_keep_auth
+    headers_helper.merge_request_headers = _merge_request_headers_keep_auth
+    headers_helper._auth_header_patch_applied = True  # pylint: disable=protected-access
+
+    # Rebind already-imported names on model clients (from-import binding).
+    client_modules = (
+        "openjiuwen.core.foundation.llm.model_clients.openai_model_client",
+        "openjiuwen.core.foundation.llm.model_clients.openai_account_model_client",
+        "openjiuwen.core.foundation.llm.model_clients.anthropic_model_client",
+    )
+    rebound = 0
+    for module_name in client_modules:
+        try:
+            module = importlib.import_module(module_name)
+        except Exception as exc:  # pragma: no cover
+            logger.debug("[llm_sse_patch] skip rebind %s: %s", module_name, exc)
+            continue
+        if hasattr(module, "build_base_headers"):
+            module.build_base_headers = _build_base_headers_keep_auth
+            rebound += 1
+        if hasattr(module, "merge_request_headers"):
+            module.merge_request_headers = _merge_request_headers_keep_auth
+
+    # Belt-and-suspenders: inject Authorization into AsyncOpenAI(default_headers=...)
+    # so auth does not depend solely on extra_headers surviving sanitize.
+    try:
+        from openjiuwen.core.foundation.llm.model_clients.openai_model_client import (
+            OpenAIModelClient,
+        )
+
+        create_attr = "_create_async_openai_client"
+        applied_attr = "_auth_default_headers_patch_applied"
+        if not getattr(OpenAIModelClient, applied_attr, False):
+            _orig_create = getattr(OpenAIModelClient, create_attr)
+
+            def _create_async_openai_client_with_auth(self: Any, timeout: Any = None):
+                client = _orig_create(self, timeout=timeout)
+                auth = _extract_authorization_header(
+                    getattr(self.model_client_config, "custom_headers", None)
+                )
+                if auth is None:
+                    return client
+                _key, value = auth
+                try:
+                    # OpenAI default_headers merges _custom_headers over api_key Bearer.
+                    existing = dict(getattr(client, "_custom_headers", {}) or {})
+                    existing["Authorization"] = value
+                    setattr(client, "_custom_headers", existing)
+                except Exception:
+                    logger.warning(
+                        "[llm_sse_patch] failed to inject Authorization into AsyncOpenAI",
+                        exc_info=True,
+                    )
+                return client
+
+            setattr(OpenAIModelClient, create_attr, _create_async_openai_client_with_auth)
+            setattr(OpenAIModelClient, applied_attr, True)
+    except Exception as exc:  # pragma: no cover
+        logger.warning(
+            "[llm_sse_patch] AsyncOpenAI Authorization 注入补丁跳过: %s", exc
+        )
+
+    _AUTH_HEADER_PATCH_APPLIED = True
+    logger.info(
+        "[llm_sse_patch] LLM Authorization header 保留补丁已应用 (rebound_client_modules=%s)",
+        rebound,
+    )
 
 
 def _parse_chunk(chunk_str: str) -> dict | None:
@@ -191,11 +346,13 @@ def apply_openai_sse_invoke_patch() -> None:
 
     1. SSE-only 网关兼容：非流式调用下返回 str 时，先组装成标准 ChatCompletion。
     2. GLM XML 标签清洗：流式 chunk 中 tool_call.arguments 的 XML 标签剥离。
+    3. 保留 tip ``default_headers`` 中的 ``Authorization``（Huawei MaaS Basic）。
 
     幂等：重复调用只生效一次。在服务启动早期调用即可覆盖 subagent / 心跳等
     所有走 ``invoke()`` / ``stream()`` 的 LLM 调用。
     """
     global _PATCH_APPLIED
+    apply_openai_auth_header_patch()
     if _PATCH_APPLIED:
         return
 
@@ -246,4 +403,7 @@ def apply_openai_sse_invoke_patch() -> None:
 
     OpenAIModelClient._sse_invoke_patch_applied = True  # pylint: disable=protected-access
     _PATCH_APPLIED = True
-    logger.info("[llm_sse_patch] OpenAIModelClient SSE 兼容补丁 + GLM XML 标签清洗补丁已应用")
+    logger.info(
+        "[llm_sse_patch] OpenAIModelClient SSE 兼容补丁 + GLM XML 标签清洗补丁"
+        " + Authorization 保留补丁已应用"
+    )

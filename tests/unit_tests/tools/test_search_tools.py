@@ -19,6 +19,8 @@ def _load_module():
 
     ssl_config_mod = types.ModuleType("jiuwenswarm.agents.harness.common.tools.ssl_config")
     ssl_config_mod.get_requests_verify = lambda: True
+    ssl_config_mod.get_ssl_verify = lambda: True
+    previous_ssl = sys.modules.get("jiuwenswarm.agents.harness.common.tools.ssl_config")
     sys.modules["jiuwenswarm.agents.harness.common.tools.ssl_config"] = ssl_config_mod
 
     tools_pkg = sys.modules.get("jiuwenswarm.agents.harness.common.tools")
@@ -31,7 +33,14 @@ def _load_module():
     spec = importlib.util.spec_from_file_location("search_tools_mod", str(_MODULE_PATH))
     mod = importlib.util.module_from_spec(spec)
     sys.modules["search_tools_mod"] = mod
-    spec.loader.exec_module(mod)
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        # Avoid permanently shadowing the real ssl_config for other test modules.
+        if previous_ssl is None:
+            sys.modules.pop("jiuwenswarm.agents.harness.common.tools.ssl_config", None)
+        else:
+            sys.modules["jiuwenswarm.agents.harness.common.tools.ssl_config"] = previous_ssl
     return mod
 
 

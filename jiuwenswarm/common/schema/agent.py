@@ -72,7 +72,7 @@ class AgentRequest:
     channel_id: str = ""
     session_id: str | None = None
     chat_id: str | None = None
-    # 企业多租户：service_id / agent_id（由 AGENT_RUNTIME 场景使用）
+    # 企业多租户 / OfficeClaw：service_id / agent_id（AGENT_RUNTIME 与 tip 隔离共用）
     service_id: str | None = None
     agent_id: str | None = None
     req_method: ReqMethod | None = None

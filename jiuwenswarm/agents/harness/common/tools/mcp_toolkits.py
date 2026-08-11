@@ -3,13 +3,13 @@
 """MCP toolkit aggregator for openjiuwen tools."""
 
 from __future__ import annotations
-import os
 
 from openjiuwen.core.foundation.tool import Tool
 
 from jiuwenswarm.agents.harness.common.tools.command_tools import mcp_exec_command
 from jiuwenswarm.agents.harness.common.tools.search_tools import mcp_free_search, mcp_paid_search
 from jiuwenswarm.agents.harness.common.tools.web_fetch_tools import mcp_fetch_webpage
+from jiuwenswarm.common.local_env_config import get_local_config
 from jiuwenswarm.common.mcp_config import (  # noqa: F401
     _check_dangerous_args,
     _is_blocked_host,
@@ -28,16 +28,18 @@ from jiuwenswarm.common.mcp_config import (  # noqa: F401
 
 def _has_paid_search_api_key() -> bool:
     """Check if any paid search API key is configured."""
-    return any([
-        os.environ.get("BOCHA_API_KEY"),
-        os.environ.get("PERPLEXITY_API_KEY"),
-        os.environ.get("SERPER_API_KEY"),
-        os.environ.get("JINA_API_KEY"),
-    ])
+    return any(
+        [
+            get_local_config("BOCHA_API_KEY"),
+            get_local_config("PERPLEXITY_API_KEY"),
+            get_local_config("SERPER_API_KEY"),
+            get_local_config("JINA_API_KEY"),
+        ]
+    )
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
-    raw = str(os.environ.get(name, "") or "").strip().lower()
+    raw = str(get_local_config(name, "") or "").strip().lower()
     if not raw:
         return default
     return raw in {"1", "true", "yes", "on", "enabled"}

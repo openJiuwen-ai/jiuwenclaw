@@ -27,6 +27,7 @@ Runtime layout:
 内置模板位于包内 ``jiuwenswarm/resources/``（含 ``agent/`` 下各技能模板以及 ``skills_state.json``）。
 """
 
+import asyncio
 import ctypes
 import hashlib
 import json
@@ -37,8 +38,8 @@ import datetime
 import shutil
 import socket
 import time
-import asyncio
 from collections import OrderedDict
+from collections.abc import Hashable
 from pathlib import Path
 from dataclasses import dataclass, replace
 from typing import Any, Literal, Optional
@@ -1653,8 +1654,81 @@ def get_interactions_dir() -> Path:
 
 
 def get_cron_jobs_path() -> Path:
-    """Canonical path for cron_jobs.json shared by gateway and agentserver."""
+    """Legacy global cron_jobs.json (pre-tenant Gateway). Prefer per-tenant helpers."""
     return get_user_workspace_dir() / "agent" / "home" / "cron_jobs.json"
+
+
+def resolve_gateway_cron_jobs_path(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> Path:
+    """Gateway per-tenant cron store: ``gateway/cron/service_{sid}/agent_{aid}/cron_jobs.json``."""
+    sid = str(service_id or "default").strip() or "default"
+    aid = str(agent_id or "default").strip() or "default"
+    return (
+        get_user_workspace_dir()
+        / "gateway"
+        / "cron"
+        / f"service_{sid}"
+        / f"agent_{aid}"
+        / "cron_jobs.json"
+    )
+
+
+def resolve_tenant_agent_root_dir(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> Path:
+    """``service_{sid}/agent_{aid}/agent`` under the user workspace."""
+    sid = normalize_tenant_scope_id(service_id)
+    aid = normalize_tenant_scope_id(agent_id)
+    base = get_multi_tenant_user_workspace_dir(sid, aid)
+    if base is None:
+        base = get_multi_tenant_user_workspace_dir("default", "default")
+    if base is None:
+        raise RuntimeError(
+            f"failed to resolve tenant agent root (service_id={sid!r}, agent_id={aid!r})"
+        )
+    return base / "agent"
+
+
+def resolve_tenant_sessions_dir(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> Path:
+    """``service_{sid}/agent_{aid}/agent/sessions`` for a tenant pair."""
+    return resolve_tenant_agent_root_dir(service_id, agent_id) / "sessions"
+
+
+def resolve_cron_tenant_scope(
+    *,
+    service_id: str | None = None,
+    agent_id: str | None = None,
+    metadata: dict | None = None,
+    params: dict | None = None,
+    log_prefix: str = "[Cron]",
+) -> tuple[str, str]:
+    """Resolve cron tenant ids; missing values fall back to default/default."""
+    sid = service_id
+    aid = agent_id
+    if sid is None and isinstance(metadata, dict):
+        sid = metadata.get("service_id")
+    if aid is None and isinstance(metadata, dict):
+        aid = metadata.get("agent_id")
+    if sid is None and isinstance(params, dict):
+        sid = params.get("service_id")
+    if aid is None and isinstance(params, dict):
+        aid = params.get("agent_id")
+    sid_s = str(sid).strip() if sid is not None else ""
+    aid_s = str(aid).strip() if aid is not None else ""
+    if not sid_s or not aid_s:
+        logger.warning(
+            "%s missing service_id/agent_id; fallback to default/default (sid=%r aid=%r)",
+            log_prefix,
+            sid,
+            aid,
+        )
+    return sid_s or "default", aid_s or "default"
 
 
 def get_deepagent_todo_dir() -> Path:
@@ -2628,3 +2702,135 @@ def fix_json_arguments(arguments: str | dict) -> str | dict:
         before_final,
     )
     return s
+
+
+class AsyncLRUCache:
+    """带可选过期时间与容量上限的 LRU 缓存（异步并发安全）.
+
+    ``max_size=None`` / ``ttl_seconds=None`` 表示不启用对应限制。
+    """
+
+    def __init__(
+        self,
+        max_size: int | None = None,
+        ttl_seconds: int | None = None,
+    ) -> None:
+        self._cache: OrderedDict[Hashable, tuple[Any, float]] = OrderedDict()
+        self._max_size = max_size
+        self._ttl = ttl_seconds
+        self._lock = asyncio.Lock()
+
+    def _is_expired(self, timestamp: float) -> bool:
+        if self._ttl is None:
+            return False
+        return time.time() - timestamp > self._ttl
+
+    async def get(self, key: Hashable) -> Any | None:
+        """获取缓存值，如果不存在或已过期则返回 None.
+
+        命中时会刷新访问时间（滑动过期：自最后一次 get/put 起算 ttl）。
+        """
+        async with self._lock:
+            if key not in self._cache:
+                return None
+
+            value, timestamp = self._cache[key]
+            if self._is_expired(timestamp):
+                self._cache.pop(key, None)
+                return None
+
+            # 刷新访问时间并移动到末尾（最近使用）
+            self._cache[key] = (value, time.time())
+            self._cache.move_to_end(key)
+            return value
+
+    async def put(self, key: Hashable, value: Any) -> None:
+        """存入缓存值，如果超过容量则淘汰最久未使用的."""
+        async with self._lock:
+            if key in self._cache:
+                self._cache.pop(key)
+            elif self._max_size is not None and len(self._cache) >= self._max_size:
+                # 淘汰最久未使用的（头部）
+                self._cache.popitem(last=False)
+
+            self._cache[key] = (value, time.time())
+
+    async def touch_if_same(self, key: Hashable, value: Any) -> bool:
+        """若 key 存在且缓存值与 value 为同一对象，则刷新访问时间.
+
+        用于请求结束时续约 TTL，避免无条件 put 用旧实例覆盖并发创建的新实例。
+        同一对象仍挂在 cache 上时，即使时间戳已过期也会续期（执行期间无 get 触达）。
+        """
+        async with self._lock:
+            if key not in self._cache:
+                return False
+
+            cached_value, _timestamp = self._cache[key]
+            if cached_value is not value:
+                return False
+
+            self._cache[key] = (value, time.time())
+            self._cache.move_to_end(key)
+            return True
+
+    async def remove(self, key: Hashable) -> None:
+        """删除缓存项."""
+        async with self._lock:
+            self._cache.pop(key, None)
+
+    async def clear(self) -> None:
+        """清空缓存."""
+        async with self._lock:
+            self._cache.clear()
+
+    def __len__(self) -> int:
+        return len(self._cache)
+
+    def snapshot_values_nowait(self) -> list[Any]:
+        """Return cached values for sync callers (best-effort, no async lock).
+
+        Entries are stored as ``(value, timestamp)``; malformed entries are skipped.
+        """
+        values: list[Any] = []
+        for entry in self._cache.values():
+            if not isinstance(entry, tuple) or len(entry) < 1:
+                continue
+            values.append(entry[0])
+        return values
+
+    async def keys(self) -> list[Hashable]:
+        async with self._lock:
+            if self._ttl is not None:
+                expired_keys = [
+                    key
+                    for key, (_, timestamp) in self._cache.items()
+                    if self._is_expired(timestamp)
+                ]
+                for key in expired_keys:
+                    del self._cache[key]
+            return list(self._cache.keys())
+
+
+def normalize_tenant_scope_id(value: str | None, *, default: str = "default") -> str:
+    """Normalize and validate a tenant scope ID (service_id / agent_id)."""
+    if value is None:
+        return default
+    text = str(value).strip()
+    if not text:
+        return default
+    if "__" in text:
+        raise ValueError(f"tenant scope ID must not contain '__': {text!r}")
+    return text
+
+
+def get_multi_tenant_user_workspace_dir(service_id: str | None, agent_id: str | None) -> Path | None:
+    """Get multi-tenant user workspace directory path.
+
+    Path format: ~/.jiuwenswarm/service_{service_id}/agent_{agent_id}
+    """
+    if not service_id and not agent_id:
+        return None
+    workspace_dir = get_user_workspace_dir()
+    workspace_dir = workspace_dir / f"service_{service_id}" if service_id else workspace_dir / "service"
+    workspace_dir = workspace_dir / f"agent_{agent_id}" if agent_id else workspace_dir / "agents"
+    return workspace_dir

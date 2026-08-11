@@ -697,7 +697,14 @@ async def test_config_set_syncs_auto_scan_to_review_trigger_only(
         "EVOLUTION_REVIEW_TRIGGER": value,
     }
     assert saved_updates == [expected]
-    assert {key: os.environ[key] for key in expected} == expected
+    from jiuwenswarm.common.local_env_config import get_process_baseline, read_env
+
+    assert {key: read_env(key) for key in expected} == expected
+    baseline = get_process_baseline()
+    assert {key: baseline.get(key) for key in expected} == expected
+    # Track B must not be written into bare os.environ.
+    assert os.environ.get("EVOLUTION_AUTO_SCAN") == ""
+    assert os.environ.get("EVOLUTION_REVIEW_TRIGGER") == ""
     assert os.environ["EVOLUTION_SIGNAL_TRIGGER"] == "manual"
     assert set((tmp_path / ".env").read_text(encoding="utf-8").splitlines()) == {
         f'{key}="{env_value}"' for key, env_value in expected.items()
