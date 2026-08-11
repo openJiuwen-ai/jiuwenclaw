@@ -297,10 +297,9 @@ from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools import (
 from jiuwenswarm.common.config import (
     get_config,
     get_default_models,
-    get_evolution_auto_scan_enabled,
+    get_evolution_enabled,
     get_evolution_review_trigger_enabled,
     get_evolution_auto_save_enabled,
-    get_evolution_signal_trigger_enabled,
     get_sandbox_endpoint,
     get_sandbox_runtime,
     get_sandbox_startup_mode,
@@ -1113,10 +1112,8 @@ def build_progressive_tool_rail_from_config(
 def _set_skill_evolution_triggers(
     rail: Any,
     *,
-    signal_trigger: bool,
     review_trigger: bool,
 ) -> None:
-    rail.signal_trigger = signal_trigger
     rail.review_trigger = review_trigger
 
 
@@ -5356,12 +5353,7 @@ class JiuWenSwarmDeepAdapter:
     def _build_skill_evolution_rail(self, config: dict[str, Any]) -> SkillEvolutionRail | None:
         """Build SkillEvolutionRail."""
         try:
-            evolution_auto_scan = get_evolution_auto_scan_enabled(config)
-            evolution_signal_trigger = get_evolution_signal_trigger_enabled(config)
-            evolution_review_trigger = get_evolution_review_trigger_enabled(
-                config,
-                fallback=evolution_auto_scan,
-            )
+            evolution_review_trigger = get_evolution_review_trigger_enabled(config)
             evolution_auto_save = get_evolution_auto_save_enabled(config)
             model_name = self._default_model_name or config.get("model_name", "gpt-4")
             skill_evolution_rail = SkillEvolutionRail(
@@ -5369,7 +5361,6 @@ class JiuWenSwarmDeepAdapter:
                 llm=self._model,
                 model=model_name,
                 review_runtime=EvolutionReviewRuntime(),
-                signal_trigger=evolution_signal_trigger,
                 review_trigger=evolution_review_trigger,
                 auto_save=evolution_auto_save,
                 disabled_skills=self._skill_manager.list_execution_disabled_skills(),
@@ -5387,12 +5378,7 @@ class JiuWenSwarmDeepAdapter:
             return
 
         resolved_language = self._resolve_runtime_language()
-        evolution_auto_scan = get_evolution_auto_scan_enabled(self._config_cache)
-        evolution_signal_trigger = get_evolution_signal_trigger_enabled(self._config_cache)
-        evolution_review_trigger = get_evolution_review_trigger_enabled(
-            self._config_cache,
-            fallback=evolution_auto_scan,
-        )
+        evolution_review_trigger = get_evolution_review_trigger_enabled(self._config_cache)
         evolution_auto_save = get_evolution_auto_save_enabled(self._config_cache)
         if (
             self._skill_evolution_rail is not None
@@ -5411,7 +5397,6 @@ class JiuWenSwarmDeepAdapter:
             llm=self._model,
             model=self._default_model_name
             or self._config_cache.get("model_name", "gpt-4"),
-            signal_trigger=evolution_signal_trigger,
             review_trigger=evolution_review_trigger,
             auto_save=evolution_auto_save,
             disabled_skills=disabled_skills,
@@ -5421,7 +5406,6 @@ class JiuWenSwarmDeepAdapter:
         if self._skill_evolution_rail is not None:
             _set_skill_evolution_triggers(
                 self._skill_evolution_rail,
-                signal_trigger=evolution_signal_trigger,
                 review_trigger=evolution_review_trigger,
             )
 
@@ -5474,7 +5458,7 @@ class JiuWenSwarmDeepAdapter:
         """Restore SkillEvolutionRail-owned review subagent after DeepAgent hot reload."""
         if self._instance is None or self._skill_evolution_rail is None:
             return
-        if not self._config_cache.get("evolution", {}).get("enabled", False):
+        if not get_evolution_enabled(self._config_cache):
             return
 
         register_review_agent = getattr(
@@ -6179,10 +6163,7 @@ class JiuWenSwarmDeepAdapter:
         """
         config_base = config_base or get_config()
         skill_create_enabled = get_skill_create_enabled(config_base)
-        evolution_review_trigger_enabled = get_evolution_review_trigger_enabled(
-            config_base,
-            fallback=get_evolution_auto_scan_enabled(config_base),
-        )
+        evolution_review_trigger_enabled = get_evolution_review_trigger_enabled(config_base)
         configured_value = config.get("enable_task_loop", True)
 
         if skill_create_enabled:
@@ -6281,6 +6262,14 @@ class JiuWenSwarmDeepAdapter:
         so their existing registered state is preserved without an uninit/init cycle.
         """
         rails_to_unregister: list[Any] = []
+
+        # Apply in-place updates to skill_evolution_rail (no re-init needed).
+        if self._skill_evolution_rail is not None:
+            self._skill_evolution_rail.update_llm(self._model, self._default_model_name)
+            _set_skill_evolution_triggers(
+                self._skill_evolution_rail,
+                review_trigger=get_evolution_review_trigger_enabled(config),
+            )
 
         # Reuse existing SkillUseRail to preserve dynamically loaded skills
         # from activate_package() / load_harness_config().  When agentic
@@ -7417,10 +7406,7 @@ class JiuWenSwarmDeepAdapter:
 
     async def _reconcile_evolution_rails(self) -> None:
         """Apply evolution rail configuration through its runtime owner."""
-        evolution_enabled = bool(
-            self._config_cache.get("evolution", {}).get("enabled", False)
-        )
-        if evolution_enabled:
+        if get_evolution_enabled(self._config_cache):
             await self._ensure_active_evolution_rails_registered()
         elif (
             self._skill_evolution_rail is not None
@@ -9712,7 +9698,7 @@ class JiuWenSwarmDeepAdapter:
         if mode not in ("agent", "agent.plan"):
             display_mode = str(mode or "当前").strip() or "当前"
             return f"{display_mode} 模式下演进功能不可用。"
-        if not self._config_cache.get("evolution", {}).get("enabled", False):
+        if not get_evolution_enabled(self._config_cache):
             return "演进功能未启用。"
         await self._ensure_active_evolution_rails_registered()
         if self._skill_evolution_rail is None:
@@ -9761,7 +9747,7 @@ class JiuWenSwarmDeepAdapter:
                 mode=mode,
                 session_id=session_id,
                 skills_dir=slash_dirs[0] if slash_dirs else str(get_agent_skills_dir()),
-                evolution_enabled=bool(self._config_cache.get("evolution", {}).get("enabled", False)),
+                evolution_enabled=get_evolution_enabled(self._config_cache),
                 language=self._resolve_runtime_language(),
             ),
         )
@@ -13215,8 +13201,6 @@ class JiuWenSwarmDeepAdapter:
         try:
             if self._skill_evolution_rail is None:
                 return
-            if not self._skill_evolution_rail.signal_trigger:
-                return
 
             active = False
             last_event_at = time.monotonic()
@@ -13227,11 +13211,6 @@ class JiuWenSwarmDeepAdapter:
 
             while True:
                 if self._skill_evolution_rail is None:
-                    return
-                if not self._skill_evolution_rail.signal_trigger:
-                    if active:
-                        await _push_status("end", "hidden", "")
-                    await _cleanup_evolution_rail()
                     return
 
                 events = await self._skill_evolution_rail.drain_pending_approval_events(wait=False) or []

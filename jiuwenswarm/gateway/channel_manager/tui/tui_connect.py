@@ -478,7 +478,6 @@ _CLI_CONFIG_SET_ENV_MAP = {
     "serper_api_key": "SERPER_API_KEY",
     "perplexity_api_key": "PERPLEXITY_API_KEY",
     "github_token": "GITHUB_TOKEN",
-    "evolution_auto_scan": "EVOLUTION_AUTO_SCAN",
     "teamskills_market_url": "TEAM_SKILLS_HUB_BASE_URL",
     "teamskills_user_token": "TEAM_SKILLS_HUB_USER_TOKEN",
     "teamskills_system_token": "TEAM_SKILLS_HUB_SYSTEM_TOKEN",
@@ -597,8 +596,6 @@ def _build_config_schema() -> list[dict]:
          "options": ["zh", "en"], "source": "yaml", "default": "zh"},
         {"key": "auto_recap_enabled", "label": "自动回顾", "group": "Features",
          "type": "toggle", "source": "yaml", "default": "true"},
-        {"key": "evolution_auto_scan", "label": "自动扫描技能", "group": "Features",
-         "type": "toggle", "source": "env", "default": "false"},
         # Auto-Harness (定时任务配置) - 合并为三项
         {"key": "auto_harness_git_user_name", "label": "用户名", "group": "Auto-Harness",
          "type": "string", "source": "yaml", "default": empty,

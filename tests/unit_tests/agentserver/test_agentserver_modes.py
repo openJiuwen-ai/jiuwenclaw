@@ -1503,8 +1503,6 @@ def test_deep_adapter_disables_and_restores_ask_user_for_request_capability(monk
 def test_deep_adapter_reconfigures_plan_evolution_rails_idempotently(monkeypatch, tmp_path):
     from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 
-    monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
-    monkeypatch.delenv("EVOLUTION_SIGNAL_TRIGGER", raising=False)
     monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
 
     class FakeAbilityManager:
@@ -1560,7 +1558,7 @@ def test_deep_adapter_reconfigures_plan_evolution_rails_idempotently(monkeypatch
     adapter = JiuWenSwarmDeepAdapter()
     adapter._instance = FakeInstance()
     adapter._config_cache = {
-        "evolution": {"enabled": True, "auto_scan": False},
+        "evolution": {"enabled": True, "review_trigger": False},
         "model_name": "configured-model",
     }
     adapter._skill_manager = FakeSkillManager()
@@ -1591,14 +1589,13 @@ def test_deep_adapter_reconfigures_plan_evolution_rails_idempotently(monkeypatch
         for rail in registered
         if _is_regular_skill_evolution_rail(rail)
     )
-    assert skill_evolution_rail.signal_trigger is False
     assert skill_evolution_rail.review_trigger is False
 
 
 def test_deep_adapter_rebuilds_plan_evolution_rails_when_language_changes(monkeypatch, tmp_path):
     from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 
-    monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
+    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
 
     class FakeAbilityManager:
         @staticmethod
@@ -1665,7 +1662,7 @@ def test_deep_adapter_rebuilds_plan_evolution_rails_when_language_changes(monkey
     adapter = JiuWenSwarmDeepAdapter()
     adapter._instance = FakeInstance()
     adapter._config_cache = {
-        "evolution": {"enabled": True, "auto_scan": False},
+        "evolution": {"enabled": True, "review_trigger": False},
         "model_name": "configured-model",
     }
     adapter._skill_manager = FakeSkillManager()

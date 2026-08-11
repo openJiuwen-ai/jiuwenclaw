@@ -43,7 +43,6 @@ channels:
 
 evolution:
   enabled: true
-  auto_scan: false
   skill_base_dir: "workspace/agent/skills"
 
 heartbeat:

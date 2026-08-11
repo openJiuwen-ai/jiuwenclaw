@@ -58,9 +58,7 @@ from jiuwenswarm.agents.harness.team.team_skill_links import sync_skill_dir_link
 from jiuwenswarm.common.config import (
     get_config,
     get_default_models,
-    get_evolution_auto_scan_enabled,
     get_evolution_review_trigger_enabled,
-    get_evolution_signal_trigger_enabled,
     get_skill_create_enabled,
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
@@ -1417,26 +1415,8 @@ class TeamManager:
 
     async def update_evolution_config(self, config: dict[str, Any] | None) -> None:
         """Hot-update team evolution rails for existing team runtimes."""
-        auto_scan_enabled = get_evolution_auto_scan_enabled(config)
-        signal_trigger_enabled = get_evolution_signal_trigger_enabled(
-            config,
-            fallback=auto_scan_enabled,
-        )
-        review_trigger_enabled = get_evolution_review_trigger_enabled(
-            config,
-            fallback=auto_scan_enabled,
-        )
+        review_trigger_enabled = get_evolution_review_trigger_enabled(config)
         skill_create_enabled = get_skill_create_enabled(config)
-
-        for rails in self._team_member_skill_evolution_rails.values():
-            for rail in rails:
-                try:
-                    rail.signal_trigger = signal_trigger_enabled
-                except Exception as exc:
-                    logger.warning(
-                        "[TeamManager] SkillEvolutionRail signal_trigger update failed: %s",
-                        exc,
-                    )
 
         for rail in self._team_skill_rails.values():
             try:

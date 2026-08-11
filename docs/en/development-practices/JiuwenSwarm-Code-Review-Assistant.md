@@ -1398,7 +1398,6 @@ react:
     enable_reload: true
   evolution:
     enabled: true
-    auto_scan: false
     skill_base_dir: "agent/skills"
 
 tools:

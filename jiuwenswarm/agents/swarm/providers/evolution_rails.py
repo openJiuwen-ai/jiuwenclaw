@@ -469,7 +469,6 @@ def build_team_skill_evolution_rail(
             trajectory_source=bound_registry,
             trajectory_sink=bound_registry,
             member_role=inp.role,
-            signal_trigger=False,
             auto_save=inp.auto_save,
             review_trigger=inp.review_trigger,
             team_id=inp.team_id,
@@ -486,10 +485,9 @@ def build_team_skill_evolution_rail(
         )
         logger.info(
             "[swarm.team_skill_evolution] built: skills_dir=%s, model=%s, "
-            "signal_trigger=%s, review_trigger=%s",
+            "review_trigger=%s",
             inp.team_skills_dir,
             actual_model_name,
-            False,
             inp.review_trigger,
         )
         return _build_evolution_approval_stack(
@@ -597,9 +595,6 @@ class MemberSkillEvolutionInput(ConstructionInput):
         default_factory=dict,
         description="Serializable evolution model config (LLM built at build time).",
     )
-    signal_trigger: bool = param_field(
-        default=False, description="Evolution signal trigger flag."
-    )
     team_skills_dir: str | None = context_field(
         attr="team_skills_dir", description="Team shared skills directory."
     )
@@ -621,8 +616,8 @@ class MemberSkillEvolutionInput(ConstructionInput):
 @harness_element(
     kind=ElementKind.RAIL,
     name=MEMBER_SKILL_EVOLUTION,
-    description="Teammate-only member skill evolution rail (auto-scan, auto-save, "
-    "disabled skills, conditional team trajectory sink).",
+    description="Teammate-only member skill evolution rail (passive scan after mount, "
+    "auto-save, disabled skills, conditional team trajectory sink).",
     input_model=MemberSkillEvolutionInput,
 )
 def build_member_skill_evolution_rail(
@@ -631,8 +626,8 @@ def build_member_skill_evolution_rail(
 ) -> list[Any]:
     """Build the teammate-only member skill evolution rail from the config source.
 
-    Replicates ``build_skill_evolution_rail`` (auto-scan, ``auto_save=True``,
-    disabled skills, conditional team trajectory sink with
+    Replicates ``build_skill_evolution_rail`` (passive evolution when mounted,
+    ``auto_save=True``, disabled skills, conditional team trajectory sink with
     ``member_role="teammate"``) but constructs the swarm subclass so the rail can
     self-register with the team manager from its ``init``.
 
@@ -661,7 +656,6 @@ def build_member_skill_evolution_rail(
             model=actual_model_name,
             review_runtime=review_runtime,
             language=inp.language,
-            signal_trigger=inp.signal_trigger,
             auto_save=True,
             disabled_skills=load_execution_disabled_skills(),
         )
@@ -674,10 +668,9 @@ def build_member_skill_evolution_rail(
             )
         rail.bind_swarm_context(channel=inp.channel, session_id=inp.session_id)
         logger.info(
-            "[swarm.member_skill_evolution] built: model=%s, signal_trigger=%s, "
+            "[swarm.member_skill_evolution] built: model=%s, "
             "team_trajectory_sink=%s",
             actual_model_name,
-            inp.signal_trigger,
             has_team_trajectory_sink,
         )
         return _build_evolution_approval_stack(

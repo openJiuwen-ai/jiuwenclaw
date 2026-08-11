@@ -27,11 +27,11 @@ def _write_skill(tmp_path, name: str, *, kind: str | None = None) -> str:
     return str(skills_dir)
 
 
-def _evolution_log_json(skill_name: str, marker: str) -> str:
+def _evolution_log_json(skill_name: str, marker: str, *, version: str = "v1.0.0") -> str:
     return json.dumps(
         {
             "skill_id": skill_name,
-            "version": "1.0.0",
+            "version": version,
             "updated_at": marker,
             "entries": [],
         },
@@ -72,18 +72,6 @@ def _archived_skill_versions_with_content(archive, excluded_name: str, content: 
         if path.read_text(encoding="utf-8") != content:
             continue
         versions.add(_skill_archive_version(path))
-    return versions
-
-
-def _archived_log_versions_with_updated_at(archive, excluded_name: str, updated_at: str) -> set[str]:
-    versions: set[str] = set()
-    for path in archive.glob("evolutions.v*.json"):
-        if path.name == excluded_name:
-            continue
-        log = json.loads(path.read_text(encoding="utf-8"))
-        if log["updated_at"] != updated_at:
-            continue
-        versions.add(_evolution_archive_version(path))
     return versions
 
 
@@ -285,8 +273,11 @@ async def test_agent_plan_evolve_rebuild_archives_before_clear_without_duplicate
         archive.joinpath(f"evolutions.{version}.json").read_text(encoding="utf-8")
     )
     current_log = json.loads(skill_dir.joinpath("evolutions.json").read_text(encoding="utf-8"))
-    assert archived_log["updated_at"] == "before-clear"
-    assert current_log["updated_at"] != "before-clear"
+    # Archive writes an empty paired evolutions marker; live log is left unchanged
+    # until rebuild completion.
+    assert archived_log["entries"] == []
+    assert archived_log["updated_at"] != "before-clear"
+    assert current_log["updated_at"] == "before-clear"
     assert current_log["entries"] == []
 
 
@@ -296,11 +287,12 @@ async def test_agent_plan_evolve_rollback_lists_paired_short_versions(tmp_path):
     _write_rollback_pair(
         tmp_path,
         "regular-skill",
-        "v20260623T101500",
+        "v1.0.1",
         skill_content="# archived\n",
         log_marker="target",
     )
     archive = tmp_path / "skills" / "regular-skill" / "archive"
+    # Timestamp-style archives are no longer treated as valid SemVer pairs.
     archive.joinpath("SKILL.v20260622T101500.md").write_text("# unpaired\n", encoding="utf-8")
 
     result = await handle_evolution_slash_command(
@@ -315,31 +307,34 @@ async def test_agent_plan_evolve_rollback_lists_paired_short_versions(tmp_path):
 
     assert result is not None
     assert result["result_type"] == "answer"
-    assert "`v20260623T101500`" in result["output"]
+    assert "`v1.0.1`" in result["output"]
     assert "v20260622T101500" not in result["output"]
-    assert "SKILL.v20260623T101500.md" not in result["output"]
-    assert "evolutions.v20260623T101500.json" not in result["output"]
+    assert "SKILL.v1.0.1.md" not in result["output"]
+    assert "evolutions.v1.0.1.json" not in result["output"]
 
 
 @pytest.mark.anyio
 async def test_agent_plan_evolve_rollback_restores_pair_and_archives_current(tmp_path):
     skills_dir = _write_skill(tmp_path, "regular-skill")
     skill_dir = tmp_path / "skills" / "regular-skill"
-    skill_dir.joinpath("SKILL.md").write_text("# current\n", encoding="utf-8")
+    skill_dir.joinpath("SKILL.md").write_text(
+        "---\nname: regular-skill\nversion: v1.2.0\n---\n# current\n",
+        encoding="utf-8",
+    )
     skill_dir.joinpath("evolutions.json").write_text(
-        _evolution_log_json("regular-skill", "current"),
+        _evolution_log_json("regular-skill", "current", version="v1.2.0"),
         encoding="utf-8",
     )
     _write_rollback_pair(
         tmp_path,
         "regular-skill",
-        "v20260623T101500",
+        "v1.0.0",
         skill_content="# archived\n",
         log_marker="target",
     )
 
     result = await handle_evolution_slash_command(
-        "/evolve_rollback regular-skill v20260623T101500",
+        "/evolve_rollback regular-skill v1.0.0",
         EvolutionSlashContext(
             mode="agent.plan",
             session_id="sess-agent-plan",
@@ -350,42 +345,52 @@ async def test_agent_plan_evolve_rollback_restores_pair_and_archives_current(tmp
 
     assert result is not None
     assert result["result_type"] == "answer"
-    assert "v20260623T101500" in result["output"]
+    assert "v1.0.0" in result["output"]
     assert skill_dir.joinpath("SKILL.md").read_text(encoding="utf-8") == "# archived\n"
-    assert json.loads(skill_dir.joinpath("evolutions.json").read_text(encoding="utf-8"))[
-        "updated_at"
-    ] == "target"
+    restored_log = json.loads(skill_dir.joinpath("evolutions.json").read_text(encoding="utf-8"))
+    # Live evolutions are cleared on rollback; archived evo contents are never restored.
+    assert restored_log["entries"] == []
+    assert restored_log["skill_id"] == "regular-skill"
 
     archive = skill_dir / "archive"
+    assert not archive.joinpath("SKILL.v1.0.0.md").exists()
+    assert not archive.joinpath("evolutions.v1.0.0.json").exists()
     current_skill_versions = _archived_skill_versions_with_content(
         archive,
-        "SKILL.v20260623T101500.md",
-        "# current\n",
+        "SKILL.v1.0.0.md",
+        "---\nname: regular-skill\nversion: v1.2.0\n---\n# current\n",
     )
-    current_log_versions = _archived_log_versions_with_updated_at(
+    current_log_versions = _archived_log_versions_for_initialized_log(
         archive,
-        "evolutions.v20260623T101500.json",
-        "current",
+        "evolutions.v1.0.0.json",
+        "regular-skill",
     )
-    assert current_skill_versions
+    assert current_skill_versions == {"v1.2.0"}
     assert current_skill_versions == current_log_versions
+    archived_current = json.loads(
+        archive.joinpath("evolutions.v1.2.0.json").read_text(encoding="utf-8")
+    )
+    assert archived_current["entries"] == []
 
 
 @pytest.mark.anyio
 async def test_agent_plan_evolve_rollback_initializes_missing_current_evolution_log(tmp_path):
     skills_dir = _write_skill(tmp_path, "regular-skill")
     skill_dir = tmp_path / "skills" / "regular-skill"
-    skill_dir.joinpath("SKILL.md").write_text("# current\n", encoding="utf-8")
+    skill_dir.joinpath("SKILL.md").write_text(
+        "---\nname: regular-skill\nversion: v1.2.0\n---\n# current\n",
+        encoding="utf-8",
+    )
     _write_rollback_pair(
         tmp_path,
         "regular-skill",
-        "v20260623T101500",
+        "v1.0.0",
         skill_content="# archived\n",
         log_marker="target",
     )
 
     result = await handle_evolution_slash_command(
-        "/evolve_rollback regular-skill v20260623T101500",
+        "/evolve_rollback regular-skill v1.0.0",
         EvolutionSlashContext(
             mode="agent.plan",
             session_id="sess-agent-plan",
@@ -397,20 +402,20 @@ async def test_agent_plan_evolve_rollback_initializes_missing_current_evolution_
     assert result is not None
     assert result["result_type"] == "answer"
     assert skill_dir.joinpath("SKILL.md").read_text(encoding="utf-8") == "# archived\n"
-    assert json.loads(skill_dir.joinpath("evolutions.json").read_text(encoding="utf-8"))[
-        "updated_at"
-    ] == "target"
+    restored_log = json.loads(skill_dir.joinpath("evolutions.json").read_text(encoding="utf-8"))
+    assert restored_log["entries"] == []
+    assert restored_log["skill_id"] == "regular-skill"
 
     archive = skill_dir / "archive"
     current_skill_versions = _archived_skill_versions_with_content(
         archive,
-        "SKILL.v20260623T101500.md",
-        "# current\n",
+        "SKILL.v1.0.0.md",
+        "---\nname: regular-skill\nversion: v1.2.0\n---\n# current\n",
     )
     current_log_versions = _archived_log_versions_for_initialized_log(
         archive,
-        "evolutions.v20260623T101500.json",
+        "evolutions.v1.0.0.json",
         "regular-skill",
     )
-    assert current_skill_versions
+    assert current_skill_versions == {"v1.2.0"}
     assert current_skill_versions == current_log_versions

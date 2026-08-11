@@ -246,16 +246,14 @@ def test_config_specs_bakes_attribute_params() -> None:
     )
 
 
-def test_config_specs_maps_auto_scan_by_swarm_role(
+def test_config_specs_maps_review_trigger_for_leader(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Leader reviews softly while teammates use deterministic signals."""
+    """Leader soft review uses review_trigger; member evolution has no signal_trigger param."""
     from jiuwenswarm.agents.swarm.config_specs import build_member_capability_specs
 
-    monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
-    monkeypatch.delenv("EVOLUTION_SIGNAL_TRIGGER", raising=False)
     monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
-    config = {"evolution": {"auto_scan": True}}
+    config = {"evolution": {"review_trigger": True}}
     leader_rails, _ = build_member_capability_specs(config, "team", "leader")
     member_rails, _ = build_member_capability_specs(config, "team", "teammate")
     leader_params = {spec.type: spec.params for spec in leader_rails}
@@ -263,23 +261,19 @@ def test_config_specs_maps_auto_scan_by_swarm_role(
 
     assert leader_params[registry.TEAM_SKILL_EVOLUTION]["review_trigger"] is True
     assert "signal_trigger" not in leader_params[registry.TEAM_SKILL_EVOLUTION]
-    assert member_params[registry.MEMBER_SKILL_EVOLUTION]["signal_trigger"] is True
+    assert "signal_trigger" not in member_params[registry.MEMBER_SKILL_EVOLUTION]
     assert "review_trigger" not in member_params[registry.MEMBER_SKILL_EVOLUTION]
 
 
-def test_config_specs_keeps_supported_explicit_swarm_trigger_overrides(
+def test_config_specs_keeps_explicit_review_trigger_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Only the trigger supported by each swarm role is configurable."""
+    """Leader review_trigger is configurable; member rail has no trigger params."""
     from jiuwenswarm.agents.swarm.config_specs import build_member_capability_specs
 
-    monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
-    monkeypatch.delenv("EVOLUTION_SIGNAL_TRIGGER", raising=False)
     monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
     config = {
         "evolution": {
-            "auto_scan": True,
-            "signal_trigger": False,
             "review_trigger": False,
         }
     }
@@ -290,7 +284,7 @@ def test_config_specs_keeps_supported_explicit_swarm_trigger_overrides(
 
     assert leader_params[registry.TEAM_SKILL_EVOLUTION]["review_trigger"] is False
     assert "signal_trigger" not in leader_params[registry.TEAM_SKILL_EVOLUTION]
-    assert member_params[registry.MEMBER_SKILL_EVOLUTION]["signal_trigger"] is False
+    assert "signal_trigger" not in member_params[registry.MEMBER_SKILL_EVOLUTION]
     assert "review_trigger" not in member_params[registry.MEMBER_SKILL_EVOLUTION]
 
 

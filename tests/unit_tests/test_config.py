@@ -11,9 +11,8 @@ import yaml
 from jiuwenswarm.common.config import (
     get_config_raw,
     get_evolution_auto_save_enabled,
-    get_evolution_auto_scan_enabled,
+    get_evolution_enabled,
     get_evolution_review_trigger_enabled,
-    get_evolution_signal_trigger_enabled,
     get_skill_create_enabled,
     migrate_config_from_template,
     replace_teams_in_config,
@@ -184,61 +183,12 @@ class TestConfigFunctions:
         assert get_evolution_auto_save_enabled(config) is expected
 
     @pytest.mark.parametrize(
-        ("env_value", "config", "expected"),
-        [
-            (None, {"react": {"evolution": {"auto_scan": True}}}, True),
-            (None, {"evolution": {"auto_scan": True}}, True),
-            ("false", {"react": {"evolution": {"auto_scan": True}}}, False),
-            ("true", {"react": {"evolution": {"auto_scan": False}}}, True),
-        ],
-    )
-    def test_evolution_auto_scan_config_and_env_values(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        env_value,
-        config,
-        expected,
-    ):
-        if env_value is None:
-            monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
-        else:
-            monkeypatch.setenv("EVOLUTION_AUTO_SCAN", env_value)
-
-        assert get_evolution_auto_scan_enabled(config) is expected
-
-    @pytest.mark.parametrize(
-        ("env_value", "config", "fallback", "expected"),
-        [
-            (None, {"react": {"evolution": {"signal_trigger": True}}}, False, True),
-            (None, {"evolution": {"signal_trigger": False}}, True, False),
-            (None, {"evolution": {"signal_trigger": None}}, True, True),
-            (None, {"evolution": {"auto_scan": True}}, False, False),
-            ("false", {"react": {"evolution": {"signal_trigger": True}}}, True, False),
-            ("true", {"react": {"evolution": {"signal_trigger": False}}}, False, True),
-        ],
-    )
-    def test_evolution_signal_trigger_config_and_env_values(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        env_value,
-        config,
-        fallback,
-        expected,
-    ):
-        if env_value is None:
-            monkeypatch.delenv("EVOLUTION_SIGNAL_TRIGGER", raising=False)
-        else:
-            monkeypatch.setenv("EVOLUTION_SIGNAL_TRIGGER", env_value)
-
-        assert get_evolution_signal_trigger_enabled(config, fallback=fallback) is expected
-
-    @pytest.mark.parametrize(
         ("env_value", "config", "fallback", "expected"),
         [
             (None, {"react": {"evolution": {"review_trigger": True}}}, False, True),
             (None, {"evolution": {"review_trigger": False}}, True, False),
             (None, {"evolution": {"review_trigger": None}}, True, True),
-            (None, {"evolution": {"auto_scan": True}}, False, False),
+            (None, {"evolution": {}}, False, False),
             ("false", {"react": {"evolution": {"review_trigger": True}}}, True, False),
             ("true", {"react": {"evolution": {"review_trigger": False}}}, False, True),
         ],
@@ -280,6 +230,29 @@ class TestConfigFunctions:
             monkeypatch.setenv("SKILL_CREATE", env_value)
 
         assert get_skill_create_enabled(config) is expected
+
+    @pytest.mark.parametrize(
+        ("config", "expected"),
+        [
+            ({}, False),
+            ({"react": {"evolution": {"enabled": True}}}, True),
+            ({"react": {"evolution": {"enabled": False}}}, False),
+            ({"evolution": {"enabled": True}}, True),
+            ({"evolution": {"enabled": False}}, False),
+            # react.evolution wins over top-level evolution
+            (
+                {
+                    "react": {"evolution": {"enabled": True}},
+                    "evolution": {"enabled": False},
+                },
+                True,
+            ),
+            ({"react": {"evolution": {"enabled": "true"}}}, True),
+            ({"react": {"evolution": {}}}, False),
+        ],
+    )
+    def test_evolution_enabled_config_values(self, config, expected):
+        assert get_evolution_enabled(config) is expected
 
     @staticmethod
     def test_get_config_raw(temp_config_file: Path):
@@ -344,7 +317,7 @@ symphony:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ):
-        monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
+        monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
         monkeypatch.delenv("EVOLUTION_AUTO_SAVE", raising=False)
         template_path = tmp_path / "template.yaml"
         user_config_path = tmp_path / "config.yaml"
@@ -352,10 +325,9 @@ symphony:
             """
 react:
   evolution:
-    auto_scan: false
-    signal_trigger:
     review_trigger:
     auto_save: false
+    enabled: true
 """,
             encoding="utf-8",
         )
@@ -363,7 +335,7 @@ react:
             """
 react:
   evolution:
-    auto_scan: true
+    review_trigger: true
     auto_save: true
 """,
             encoding="utf-8",
@@ -373,12 +345,11 @@ react:
 
         migrated = yaml.safe_load(user_config_path.read_text(encoding="utf-8"))
         assert migrated["react"]["evolution"] == {
-            "auto_scan": True,
-            "signal_trigger": None,
-            "review_trigger": None,
+            "review_trigger": True,
             "auto_save": True,
+            "enabled": True,
         }
-        assert get_evolution_auto_scan_enabled(migrated) is True
+        assert get_evolution_review_trigger_enabled(migrated) is True
         assert get_evolution_auto_save_enabled(migrated) is True
 
     @staticmethod

@@ -309,34 +309,16 @@ def _get_evolution_config(config: dict[str, Any] | None) -> dict[str, Any]:
     return {}
 
 
-def get_evolution_auto_scan_enabled(config: dict[str, Any] | None) -> bool:
-    raw = get_local_config("EVOLUTION_AUTO_SCAN")
-    env_auto_scan = _get_bool_env(None if raw is None else str(raw))
-    if env_auto_scan is not None:
-        return env_auto_scan
-    return _get_evolution_config(config).get("auto_scan") is True
-
-
-def get_evolution_signal_trigger_enabled(
-    config: dict[str, Any] | None,
-    *,
-    fallback: bool = False,
-) -> bool:
-    raw = get_local_config("EVOLUTION_SIGNAL_TRIGGER")
-    env_signal_trigger = _get_bool_env(None if raw is None else str(raw))
-    if env_signal_trigger is not None:
-        return env_signal_trigger
-    signal_trigger = _get_evolution_config(config).get("signal_trigger")
-    if isinstance(signal_trigger, bool):
-        return signal_trigger
-    return fallback
-
-
 def get_evolution_review_trigger_enabled(
     config: dict[str, Any] | None,
     *,
     fallback: bool = False,
 ) -> bool:
+    """Return whether review follow-ups are enabled.
+
+    Only honors ``review_trigger`` config / ``EVOLUTION_REVIEW_TRIGGER`` env.
+    Does not fall back to legacy ``auto_scan``.
+    """
     raw = get_local_config("EVOLUTION_REVIEW_TRIGGER")
     env_review_trigger = _get_bool_env(None if raw is None else str(raw))
     if env_review_trigger is not None:
@@ -345,6 +327,14 @@ def get_evolution_review_trigger_enabled(
     if isinstance(review_trigger, bool):
         return review_trigger
     return fallback
+
+
+def get_evolution_enabled(config: dict[str, Any] | None) -> bool:
+    """Return whether skill self-evolution is enabled.
+
+    Reads ``react.evolution.enabled`` first, then top-level ``evolution.enabled``.
+    """
+    return bool(_get_evolution_config(config).get("enabled"))
 
 
 def get_skill_create_enabled(config: dict[str, Any] | None) -> bool:

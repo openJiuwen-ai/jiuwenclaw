@@ -783,7 +783,6 @@ _CONFIG_SET_ENV_MAP = {
     "serper_api_key": "SERPER_API_KEY",
     "perplexity_api_key": "PERPLEXITY_API_KEY",
     "github_token": "GITHUB_TOKEN",
-    "evolution_auto_scan": "EVOLUTION_AUTO_SCAN",
     "skill_create": "SKILL_CREATE",
     "teamskills_market_url": "TEAM_SKILLS_HUB_BASE_URL",
     "teamskills_user_token": "TEAM_SKILLS_HUB_USER_TOKEN",
@@ -1671,18 +1670,13 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             perm_cfg = raw.get("permissions") or {}
             payload["permissions_enabled"] = "true" if perm_cfg.get("enabled", False) else "false"
-            # skill_create / evolution_auto_scan: tip 优先，fallback to config.yaml
+            # skill_create: tip 优先，fallback to config.yaml
             evolution_cfg = (raw.get("react") or {}).get("evolution") or {}
             skill_create_env = read_env_if_set("SKILL_CREATE")
             if skill_create_env is not None:
                 payload["skill_create"] = "true" if skill_create_env.lower() in ("true", "1", "yes") else "false"
             else:
                 payload["skill_create"] = "true" if evolution_cfg.get("skill_create", False) else "false"
-            auto_scan_env = read_env_if_set("EVOLUTION_AUTO_SCAN")
-            if auto_scan_env is not None:
-                payload["evolution_auto_scan"] = "true" if auto_scan_env.lower() in ("true", "1", "yes") else "false"
-            else:
-                payload["evolution_auto_scan"] = "true" if evolution_cfg.get("auto_scan", False) else "false"
             memory_cfg = (raw.get("memory") or {}).get("forbidden_memory_definition") or {}
             payload["memory_forbidden_enabled"] = "true" if memory_cfg.get("enabled", False) else "false"
             memory_desc = memory_cfg.get("description") or {}
@@ -1710,7 +1704,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload.setdefault("permissions_enabled", "false")
             payload.setdefault("setup_guide_enabled", "true")
             payload.setdefault("skill_create", "false")
-            payload.setdefault("evolution_auto_scan", "false")
             payload.setdefault("memory_forbidden_enabled", "false")
             payload.setdefault("memory_forbidden_description", "")
             payload.setdefault("swarmflow_enabled", "true" if DEFAULT_SWARMFLOW_ENABLED else "false")
@@ -1872,9 +1865,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 env_updates[env_key] = os.getenv(env_key) or ""
             else:
                 env_updates[env_key] = str(val).strip()
-
-        if "evolution_auto_scan" in params:
-            env_updates["EVOLUTION_REVIEW_TRIGGER"] = env_updates["EVOLUTION_AUTO_SCAN"]
 
         raw = get_config_raw()
         preferred_lang = raw.get("preferred_language", "zh")

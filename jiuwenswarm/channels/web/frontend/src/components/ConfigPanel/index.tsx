@@ -303,7 +303,7 @@ const THIRD_PARTY_API_KEYS = new Set([
 ]);
 const REQUIRED_MODEL_FIELDS = ["api_base", "api_key", "model", "model_provider"] as const;
 const REQUIRED_MODEL_FIELD_SET = new Set<string>(REQUIRED_MODEL_FIELDS);
-const EVOLUTION_KEYS = new Set(["evolution_auto_scan", "skill_create"]);
+const EVOLUTION_KEYS = new Set(["skill_create"]);
 
 // 模型字段长度校验常量
 const MAX_MODEL_NAME_LENGTH = 100;
@@ -648,7 +648,6 @@ function parseBoolValue(value: string): boolean {
 
 function getBooleanKeyLabel(key: string, t: (key: string) => string): string {
   const labels: Record<string, string> = {
-    evolution_auto_scan: t('config.booleanLabels.evolutionAutoScan'),
     skill_create: t('config.booleanLabels.skillCreate'),
     free_search_ddg_enabled: t('config.booleanLabels.freeSearchDdg'),
     free_search_bing_enabled: t('config.booleanLabels.freeSearchBing'),
@@ -780,7 +779,6 @@ const KEY_LABEL_HINT_I18N: Record<string, string> = {
   // 免费搜索 / 演进
   free_search_ddg_enabled: "config.keyHelp.freeSearchDdg",
   free_search_bing_enabled: "config.keyHelp.freeSearchBing",
-  evolution_auto_scan: "config.keyHelp.evolutionAutoScan",
   skill_create: "config.keyHelp.skillCreate",
   // 含义需补充（「启用」等不加）
   memory_forbidden_description: "config.keyHelp.memoryForbiddenDescription",
@@ -808,8 +806,7 @@ const KEY_LABEL_HINT_I18N: Record<string, string> = {
 
 /** 组内字段排序优先级，数字越小越靠前 */
 const KEY_SORT_PRIORITY: Record<string, number> = {
-  evolution_auto_scan: 0,
-  skill_create: 1,
+  skill_create: 0,
   free_search_ddg_enabled: 0,
   free_search_bing_enabled: 1,
   symphony_enabled: 0,
