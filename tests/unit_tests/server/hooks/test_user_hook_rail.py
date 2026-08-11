@@ -324,7 +324,21 @@ class TestAfterInvoke:
         )
         rail = UserHookRail(config)
         ctx = MockCallbackContext()
-        await rail.after_invoke(ctx)
+        # Mock 执行器：避免真实 bash 子进程（CI Linux/Py3.11 asyncio 子进程
+        # 不稳定，异常被 executor 吞为 NON_BLOCKING_ERROR → ctx.extra 空）。
+        # 此处验证的 rail 逻辑：收到 BLOCKING 结果即写入 _stop_hook_feedback。
+        with patch.object(
+            rail._executor,
+            "run_all",
+            new=AsyncMock(return_value=[
+                HookResult(
+                    outcome=HookOutcome.BLOCKING,
+                    error="final check failed",
+                    show_to_model=True,
+                ),
+            ]),
+        ):
+            await rail.after_invoke(ctx)
         assert "_stop_hook_feedback" in ctx.extra
 
     @pytest.mark.asyncio
@@ -351,7 +365,21 @@ class TestAfterInvoke:
         )
         rail = UserHookRail(config)
         ctx = MockCallbackContext()
-        await rail.after_invoke(ctx)
+        # Mock 执行器：避免真实 bash 子进程（CI 环境不稳定）。第二个 hook
+        # 返回 BLOCKING 以模拟 "exit 2"，rail 仍应记录 feedback。
+        with patch.object(
+            rail._executor,
+            "run_all",
+            new=AsyncMock(return_value=[
+                HookResult(outcome=HookOutcome.SUCCESS),
+                HookResult(
+                    outcome=HookOutcome.BLOCKING,
+                    error="hook blocked execution",
+                    show_to_model=True,
+                ),
+            ]),
+        ):
+            await rail.after_invoke(ctx)
         # 即使第二个 hook 是 blocking，也应记录 feedback
         assert "_stop_hook_feedback" in ctx.extra
 
