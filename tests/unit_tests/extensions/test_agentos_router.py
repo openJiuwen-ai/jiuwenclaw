@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -596,6 +597,110 @@ async def test_switch_to_jiuwenswarm_is_direct_without_create() -> None:
     assert response["payload"]["ssh_port"] == 2222
     assert client.get_current_agent_type("u1") == "jiuwenswarm"
     assert await agent_manager.list_user_agents("u1") == []
+    assert "ssh_private_key" not in response["payload"]
+
+
+@pytest.mark.asyncio
+async def test_agent_switch_includes_ephemeral_ssh_private_key_when_issuer_set() -> None:
+    yuanrong = FakeYuanRongClient()
+    agent_manager = AgentManager()
+    client = AgentOSRouterClient(
+        yuanrong, FakeRegistryClient(), agent_manager, ssh_channel_endpoint=_ssh_channel()
+    )
+
+    class _Issuer:
+        def issue_ephemeral_key(self, *, user_id, username, session_id, ttl_sec):
+            assert user_id == "u1"
+            assert username == "u1"
+            assert session_id == "sess-1"
+            assert ttl_sec == 120.0
+            return "-----BEGIN OPENSSH PRIVATE KEY-----\nTEST\n-----END OPENSSH PRIVATE KEY-----\n"
+
+    client.set_key_issuer(_Issuer(), ephemeral_key_ttl_sec=120.0)
+    response = await client.thirdagent_switch(
+        user_id="u1",
+        agent_type="opencode",
+        session_id="sess-1",
+    )
+    await client.shutdown()
+
+    assert response["ok"] is True
+    assert response["payload"]["ssh_private_key"].startswith("-----BEGIN OPENSSH PRIVATE KEY-----")
+
+
+@pytest.mark.asyncio
+async def test_agent_switch_fails_when_key_issuance_raises() -> None:
+    yuanrong = FakeYuanRongClient()
+    agent_manager = AgentManager()
+    client = AgentOSRouterClient(
+        yuanrong, FakeRegistryClient(), agent_manager, ssh_channel_endpoint=_ssh_channel()
+    )
+
+    class _BrokenIssuer:
+        def issue_ephemeral_key(self, *, user_id, username, session_id, ttl_sec):
+            raise RuntimeError("asyncssh missing")
+
+    client.set_key_issuer(_BrokenIssuer(), ephemeral_key_ttl_sec=120.0)
+    response = await client.thirdagent_switch(
+        user_id="u1",
+        agent_type="opencode",
+        session_id="sess-1",
+    )
+    await client.shutdown()
+
+    assert response["ok"] is False
+    assert response["code"] == "SSH_KEY_ISSUE_FAILED"
+    assert "asyncssh missing" in response["error"]
+    # Fail fast: no sandbox is created for an unusable switch.
+    assert yuanrong.create_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_agent_switch_fails_when_issuer_returns_empty_key() -> None:
+    yuanrong = FakeYuanRongClient()
+    agent_manager = AgentManager()
+    client = AgentOSRouterClient(
+        yuanrong, FakeRegistryClient(), agent_manager, ssh_channel_endpoint=_ssh_channel()
+    )
+    client.set_key_issuer(
+        SimpleNamespace(issue_ephemeral_key=lambda **kwargs: ""),
+        ephemeral_key_ttl_sec=120.0,
+    )
+
+    response = await client.thirdagent_switch(
+        user_id="u1",
+        agent_type="jiuwenswarm",
+        session_id="sess-1",
+    )
+    await client.shutdown()
+
+    assert response["ok"] is False
+    assert response["code"] == "SSH_KEY_ISSUE_FAILED"
+
+
+@pytest.mark.asyncio
+async def test_agent_switch_omits_ssh_private_key_when_issuer_cleared() -> None:
+    yuanrong = FakeYuanRongClient()
+    agent_manager = AgentManager()
+    client = AgentOSRouterClient(
+        yuanrong, FakeRegistryClient(), agent_manager, ssh_channel_endpoint=_ssh_channel()
+    )
+    client.set_key_issuer(
+        SimpleNamespace(
+            issue_ephemeral_key=lambda **kwargs: "KEY",
+        ),
+        ephemeral_key_ttl_sec=60.0,
+    )
+    client.set_key_issuer(None)
+    response = await client.thirdagent_switch(
+        user_id="u1",
+        agent_type="opencode",
+        session_id="sess-1",
+    )
+    await client.shutdown()
+
+    assert response["ok"] is True
+    assert "ssh_private_key" not in response["payload"]
 
 
 @pytest.mark.asyncio

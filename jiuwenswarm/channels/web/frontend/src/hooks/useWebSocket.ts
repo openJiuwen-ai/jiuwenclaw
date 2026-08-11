@@ -533,6 +533,8 @@ interface UseWebSocketOptions {
   onDisconnect?: () => void;
   onError?: (error: string) => void;
   onConfigChanged?: (updatedKeys?: string[]) => void;
+  /** cron 最终结果（非占位）广播到达后触发，用于自动跳转到执行会话并加载完整历史 */
+  onCronResultArrived?: (sessionId: string, jobId: string) => void;
 }
 
 interface UseWebSocketReturn {
@@ -823,6 +825,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     onDisconnect,
     onError,
     onConfigChanged,
+    onCronResultArrived,
   } = options;
 
   // 同步更新 ref，避免竞态条件
@@ -839,6 +842,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const onDisconnectRef = useRef(onDisconnect);
   const onErrorRef = useRef(onError);
   const onConfigChangedRef = useRef(onConfigChanged);
+  const onCronResultArrivedRef = useRef(onCronResultArrived);
   const sendMessageRef = useRef<typeof sendMessage>();
   // 标记本地 sendMessage 刚发起但后端尚未确认 processing_status=true 的 session。
   // 用于区分"旧任务被打断的 false"和"任务正常结束的 false"——前者应跳过自动排空，
@@ -1236,16 +1240,16 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         {
           session_id: sessionId,
           content,
-          parse: true,
           documents: mediaItems.map((item) => ({
             filename: item.filename,
             mime_type: getMediaMimeType(item),
-            base64_data: item.base64_data || item.base64Data,
+            path: item.path,
+            original_path: item.path,
+            size_bytes: item.size_bytes ?? item.sizeBytes,
           })),
         },
-        // Large documents (100+ page PDFs) take 10s+ to parse server-side; with
-        // transfer overhead this exceeds the 15s default timeout
-        { timeoutMs: 120_000 },
+        // Path validation only — no base64 transfer / parse
+        { timeoutMs: 30_000 },
       );
     },
     [request],
@@ -1372,7 +1376,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const sendMessage = useCallback(
     async (content: string, sessionId: string, mediaItems: MediaItem[] = []): Promise<boolean> => {
       const hasMedia = mediaItems.length > 0;
-      if (!content.trim() && !hasMedia) return false;
+      // User-visible text is required; attachment-only / 【上传文档】-only payloads
+      // must not send (matches InputArea canSubmit / handleSubmit).
+      if (!stripUploadDocumentBlocks(content).trim()) return false;
 
       const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
       const unsupportedEvolutionMode = unsupportedEvolutionModeMessage(content, currentMode ?? 'agent');
@@ -1925,7 +1931,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     onDisconnectRef.current = onDisconnect;
     onErrorRef.current = onError;
     onConfigChangedRef.current = onConfigChanged;
-  }, [onConfigChanged, onConnect, onDisconnect, onError]);
+    onCronResultArrivedRef.current = onCronResultArrived;
+  }, [onConfigChanged, onConnect, onCronResultArrived, onDisconnect, onError]);
 
   const shouldDropDuplicatedEvent = useCallback(
     (eventName: string, payload: Record<string, unknown>): boolean => {
@@ -1971,7 +1978,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
   const shouldRecoverProcessingFromReasoning = useCallback((sessionId: string, payload: Record<string, unknown>): boolean => {
     const runtime = useChatStore.getState().getRuntime(sessionId);
-    if (!runtime || runtime.isProcessing || runtime.isLoadingHistory) {
+    if (!runtime || runtime.isProcessing || runtime.isLoadingHistory || runtime.isPaused) {
       return false;
     }
     if (runtime.currentStreamId) {
@@ -2013,7 +2020,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         payload.rid,
         payload.request_id,
         Date.now()
-      );
+      );  
       teamMemberOutputEventRef.current.set(key, id);
       return id;
     },
@@ -2120,8 +2127,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           const sessionId = resolveEventSessionId(payload);
           if (!sessionId) return;
 
-        // 页面刷新后，如果收到活跃事件但 isProcessing=false，自动恢复执行状态
-        if (!useChatStore.getState().getRuntime(sessionId)?.isProcessing && !useChatStore.getState().getRuntime(sessionId)?.isLoadingHistory) {
+        // 页面刷新后收到活跃事件时恢复执行状态；已暂停会话的迟到事件不得重新拉起 processing
+        const activityRuntime = useChatStore.getState().getRuntime(sessionId);
+        if (!activityRuntime?.isProcessing && !activityRuntime?.isLoadingHistory && !activityRuntime?.isPaused) {
           useChatStore.getState().setProcessing(sessionId, true);
         }
 
@@ -2282,6 +2290,13 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           }
         }
         if (!sessionId) return;
+        // cron 最终结果（非占位）广播到达：自动跳转到执行会话，加载完整历史
+        // （含用户消息、agent 回复、session 标题），避免用户手动点击左侧 session。
+        // handleRestoreSession 通过队列异步执行，不会干扰当前消息处理。
+        if (cronMeta && typeof cronMeta === 'object' && cronMeta.is_placeholder !== true) {
+          const cronJobIdForNav = typeof cronMeta.job_id === 'string' ? cronMeta.job_id.trim() : '';
+          onCronResultArrivedRef.current?.(sessionId, cronJobIdForNav);
+        }
         flushPendingStreamDelta(sessionId);
 
         const memberAction = pickString(payload.member_action);
@@ -2834,8 +2849,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const sessionId = resolveEventSessionId(payload);
         if (!sessionId) return;
         if (shouldDropDuplicatedEvent('chat.tool_call', payload)) return;
-        // 页面刷新后，如果收到活跃事件但 isProcessing=false，自动恢复执行状态
-        if (!useChatStore.getState().getRuntime(sessionId)?.isProcessing && !useChatStore.getState().getRuntime(sessionId)?.isLoadingHistory) {
+        // 页面刷新后收到活跃事件时恢复执行状态；已暂停会话的迟到事件不得重新拉起 processing
+        const activityRuntime = useChatStore.getState().getRuntime(sessionId);
+        if (!activityRuntime?.isProcessing && !activityRuntime?.isLoadingHistory && !activityRuntime?.isPaused) {
           useChatStore.getState().setProcessing(sessionId, true);
         }
         const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
@@ -3340,15 +3356,25 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
         if (resultPayload.intent === 'pause') {
           if (resultPayload.success) {
-            useChatStore.getState().setPaused(sessionId, true, resultPayload.paused_task);
+            useChatStore.getState().setPaused(
+              sessionId,
+              hasActiveTask,
+              hasActiveTask ? resultPayload.paused_task : undefined,
+            );
+            useChatStore.getState().setProcessing(sessionId, false);
+            useChatStore.getState().setThinking(sessionId, false);
+            const sessionPatch: Partial<Session> = {
+              is_processing: false,
+              updated_at: new Date().toISOString(),
+            };
+            updateSession(sessionId, sessionPatch);
+            useWorkspaceStore.getState().patchSession(sessionId, sessionPatch);
+            // 集群模式下输入框的"停止"按钮走的是 pause（不是 cancel，见 App.tsx
+            // handleCancel：mode==='team' 时调用 pause）。team-leader 消息的
+            // isStreaming 不经过 currentStreamId 收尾，这里同 cancel 分支一样显式
+            // 关闭还在 streaming 的 team-leader 消息，避免光标永久闪烁（bug001）。
+            closeActiveTeamLeaderMessages(sessionId);
           }
-          useChatStore.getState().setProcessing(sessionId, false);
-          useChatStore.getState().setThinking(sessionId, false);
-          // 集群模式下输入框的"停止"按钮走的是 pause（不是 cancel，见 App.tsx
-          // handleCancel：mode==='team' 时调用 pause）。team-leader 消息的
-          // isStreaming 不经过 currentStreamId 收尾，这里同 cancel 分支一样显式
-          // 关闭还在 streaming 的 team-leader 消息，避免光标永久闪烁（bug001）。
-          closeActiveTeamLeaderMessages(sessionId);
         } else if (resultPayload.intent === 'resume') {
           if (resultPayload.success) {
             // 直接设置所有状态值

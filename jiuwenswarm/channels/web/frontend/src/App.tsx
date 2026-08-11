@@ -66,6 +66,7 @@ import {
   registerCreatedConversation,
   resetNewConversationRuntime,
 } from './multi-session/state/newConversationLifecycle';
+import { toDisplaySessionTitle } from './utils/documentMessage';
 import { createConversationSession } from './multi-session/state/createConversationSession';
 import { useTranslation } from 'react-i18next';
 import {
@@ -428,7 +429,8 @@ function AppContent() {
     const session = currentSession?.session_id === sessionId
       ? currentSession
       : sessions.find((s) => s.session_id === sessionId);
-    return session?.title?.trim() ?? '';
+    const raw = session?.title?.trim() ?? '';
+    return toDisplaySessionTitle(raw);
   }, [currentSession, sessions, sessionId]);
   const sessionProjectName = useMemo(() => {
     const session = currentSession?.session_id === sessionId
@@ -643,6 +645,20 @@ function AppContent() {
     },
     onConfigChanged: () => {
       handleConfigChanged();
+    },
+    onCronResultArrived: (cronSessionId: string, cronJobId: string) => {
+      // 仅当用户当前停留在该任务的"立即执行"页面时才自动跳转：
+      // - 多个任务同时返回结果时，不会互相跳转覆盖
+      // - 用户已手动切走时不打扰
+      // - 定时调度（非"立即执行"）不自动跳转
+      // lastRunSessionId[jobId] 是点击"立即执行"时存入的会话 ID，
+      // sessionIdRef.current 是当前会话，两者一致说明用户还在等这个任务的结果。
+      if (cronJobId) {
+        const lastSid = useCronStore.getState().lastRunSessionId[cronJobId] ?? '';
+        if (lastSid && sessionIdRef.current === lastSid) {
+          void handleRestoreSession(cronSessionId);
+        }
+      }
     },
   });
 
@@ -2055,7 +2071,10 @@ function AppContent() {
   const handleDeleteConversation = useCallback(async () => {
     if (!deleteTarget) return;
     const runtime = useChatStore.getState().getRuntime(deleteTarget.session_id);
-    if (runtime?.isProcessing || runtime?.pendingQuestion) return;
+    if (runtime?.isProcessing || runtime?.pendingQuestion) {
+      setDialogError(t('multiSession.deleteRunningDisabled'));
+      return;
+    }
     setDialogBusy(true); setDialogError(null);
     try {
       const deletedSession = deleteTarget;

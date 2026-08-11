@@ -825,6 +825,15 @@ channels:
     listen_port: 2222
     host_key_path: ~/.jiuwenswarm/config/ssh_host_key
     relay_timeout_sec: 3600
+    auth:
+      # 公钥认证开关。true 时校验客户端公钥并签发临时密钥；false 为宽松认证。
+      enabled: true
+      # TUI 场景: 临时密钥有效期（秒）
+      ephemeral_key_ttl_sec: 300
+      # 临时密钥类型
+      ephemeral_key_type: "ssh-ed25519"
+      # 过期清理间隔（秒）
+      cleanup_interval_sec: 60
 
 # ========== 细粒度权限管控（tiered_policy）==========
 #

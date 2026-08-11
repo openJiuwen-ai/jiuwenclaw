@@ -2242,8 +2242,20 @@ class AgentWebSocketServer:
                 "work",
             }:
                 runtime_work_mode = request_work_mode.strip().lower()
-        if runtime_work_mode is not None:
-            params["work_mode"] = runtime_work_mode
+            else:
+                from jiuwenswarm.server.runtime.session.work_mode import (
+                    default_work_mode_for_channel,
+                )
+                channel_id_for_default = request.channel_id or "web"
+                runtime_work_mode = default_work_mode_for_channel(channel_id_for_default)
+                logger.warning(
+                    "[_prepare_code_mode_chat_turn] work_mode missing in both session "
+                    "metadata and request params; defaulting to %r for channel=%s session=%s",
+                    runtime_work_mode,
+                    channel_id_for_default,
+                    request.session_id,
+                )
+        params["work_mode"] = runtime_work_mode
         mode, sub_mode = _apply_resolved_mode_to_request(
             request,
             work_mode=runtime_work_mode,
