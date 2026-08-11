@@ -544,7 +544,8 @@ def build_member_rails(
     except Exception as exc:
         logger.warning("[TeamRuntime] RuntimePromptRail(time-only) failed: %s", exc)
 
-    # Leader-only structured ask tool.
+    # Leader-only structured ask tool + leader-only send_file_to_user.
+    send_file_rail_ref = None
     if role == "leader":
         try:
             from jiuwenclaw.agentserver.team.rails.ask_user_question_tool_rail import (
@@ -555,6 +556,21 @@ def build_member_rails(
             logger.info("[TeamRuntime] AskUserQuestionToolRail created for leader")
         except Exception as exc:
             logger.warning("[TeamRuntime] AskUserQuestionToolRail failed: %s", exc)
+        try:
+            from jiuwenclaw.agentserver.team.rails.send_file_to_user_tool_rail import (
+                SendFileToUserToolRail,
+            )
+
+            send_file_rail_ref = SendFileToUserToolRail(
+                request_id=runtime.request_id,
+                session_id=runtime.session_id,
+                channel=channel,
+                config=config,
+            )
+            rails_list.append(send_file_rail_ref)
+            logger.info("[TeamRuntime] SendFileToUserToolRail created for leader")
+        except Exception as exc:
+            logger.warning("[TeamRuntime] SendFileToUserToolRail failed: %s", exc)
 
     # Team-specific rails (not provided by plan adapter).
 
