@@ -14,7 +14,7 @@ import httpx
 
 from jiuwenswarm.gateway.channel_manager.base import RobotMessageRouter, BaseChannel
 from jiuwenswarm.gateway.channel_manager.im_platforms.dingtalk.dingtalk_file_service import DingTalkFileService
-from jiuwenswarm.common.schema.message import Message, ReqMethod
+from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
 from jiuwenswarm.common.utils import get_agent_workspace_dir
 from jiuwenswarm.gateway.routing.keys import DeliveryTarget
 from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
@@ -483,6 +483,14 @@ class DingTalkChannel(BaseChannel):
 
     def _extract_message_content(self, msg: Message) -> str | None:
         """从消息对象中提取内容"""
+        if msg.event_type == EventType.HEALTH_CHECK_RELAY and isinstance(
+            msg.payload, dict
+        ):
+            health_check = msg.payload.get(
+                "health_check", msg.payload.get("heartbeat")
+            )
+            if health_check:
+                return str(health_check)
         if msg.params and "content" in msg.params:
             return str(msg.params["content"])
         elif msg.payload and "content" in msg.payload:

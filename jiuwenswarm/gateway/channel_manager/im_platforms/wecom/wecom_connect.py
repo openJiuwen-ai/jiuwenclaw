@@ -27,6 +27,8 @@ from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
 
 logger = logging.getLogger(__name__)
 
+_SYSTEM_SESSION_PREFIXES = ("__", "health_check_", "healthcheck_", "cron")
+
 try:
     from wecom_aibot_sdk import WSClient
     from wecom_aibot_sdk.utils import generate_req_id
@@ -1004,8 +1006,10 @@ class WecomChannel(BaseChannel):
         msg_id = str(msg.id or "").strip()
         is_system_msg = (
             msg_id.startswith("cron-push")
-            or msg_id.startswith("heartbeat-relay")
-            or str(getattr(msg, "session_id", "") or "").startswith(("__", "heartbeat_", "cron"))
+            or msg_id.startswith("healthcheck-relay")
+            or str(getattr(msg, "session_id", "") or "").startswith(
+                _SYSTEM_SESSION_PREFIXES
+            )
         )
         if is_system_msg:
             wecom_user_id = str(meta.get("wecom_user_id") or "").strip()
@@ -1020,9 +1024,8 @@ class WecomChannel(BaseChannel):
 
         sid = getattr(msg, "session_id", None) or msg.id
         sid_str = str(sid) if sid else ""
-        # 系统会话（心跳、cron 等）无有效 chatid，使用 config 中的 last_chat_id
-        system_session_prefixes = ("__", "heartbeat_", "cron")
-        if sid_str and not any(sid_str.startswith(p) for p in system_session_prefixes):
+        # 系统会话（探活、cron 等）无有效 chatid，使用 config 中的 last_chat_id
+        if sid_str and not sid_str.startswith(_SYSTEM_SESSION_PREFIXES):
             if not self._looks_like_msgid(sid_str):
                 logger.info("[WecomChannel] _extract_chatid: 返回session_id=%s", sid_str)
                 return sid_str
@@ -1150,14 +1153,19 @@ class WecomChannel(BaseChannel):
             return
 
         # 心跳/系统事件
-        if msg.event_type == EventType.HEARTBEAT_RELAY:
+        if msg.event_type == EventType.HEALTH_CHECK_RELAY:
             chatid = self._extract_chatid(msg)
             logger.info("[WecomChannel] 心跳/系统事件处理: chatid=%s, msg.id=%s", chatid, msg.id)
             if chatid:
                 payload = getattr(msg, "payload", None) or {}
-                if isinstance(payload, dict) and payload.get("heartbeat"):
+                health_check = (
+                    payload.get("health_check", payload.get("heartbeat"))
+                    if isinstance(payload, dict)
+                    else None
+                )
+                if health_check:
                     try:
-                        body = {"msgtype": "markdown", "markdown": {"content": str(payload.get("heartbeat"))}}
+                        body = {"msgtype": "markdown", "markdown": {"content": str(health_check)}}
                         await self._ws_client.send_message(chatid, body)
                         logger.info("[WecomChannel] 心跳已发送至 chatid=%s", chatid)
                     except Exception as e:

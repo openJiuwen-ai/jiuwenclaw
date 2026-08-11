@@ -94,6 +94,101 @@ _DINGTALK_DEFAULT_OAPI_BASE = "https://oapi.dingtalk.com"  # 旧版 media 接口
 _XIAOYI_DEFAULT_PUSH_URL = "https://hag.cloud.huawei.com/open-ability-agent/v1/agent-webhook"
 
 
+def _resolve_health_check_config(full_cfg: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Prefer health_check and read legacy heartbeat probe keys during migration."""
+    if not isinstance(full_cfg, dict):
+        return None
+    current = full_cfg.get("health_check")
+    if isinstance(current, dict):
+        return current
+    legacy = full_cfg.get("heartbeat")
+    if not isinstance(legacy, dict):
+        return None
+    migrated = {
+        key: legacy[key]
+        for key in ("every", "target", "active_hours")
+        if key in legacy
+    }
+    return migrated or None
+
+
+def _load_gateway_runtime_config(
+    message_handler: Any,
+) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any] | None]:
+    """Load Gateway config without coupling optional migrations to channels.
+
+    A failed legacy HealthCheck migration must not discard otherwise readable
+    channel configuration. Evolution config propagation is optional for the
+    same reason: it may fail independently without changing the loaded config.
+    """
+    import jiuwenswarm.common.config as config_module
+
+    try:
+        if config_module.migrate_legacy_heartbeat_probe_config():
+            logger.info(
+                "[App] migrated legacy heartbeat probe config to health_check"
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[App] failed to migrate legacy heartbeat probe config; "
+            "continuing with the existing config: %s",
+            exc,
+        )
+
+    try:
+        full_cfg = config_module.get_config()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[App] failed to read config.yaml, using defaults: %s",
+            exc,
+        )
+        return {}, None, None
+
+    if not isinstance(full_cfg, dict):
+        logger.warning(
+            "[App] config.yaml root must be an object, using defaults"
+        )
+        return {}, None, None
+
+    try:
+        message_handler.update_evolution_auto_save(full_cfg)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[App] failed to apply evolution auto-save config; "
+            "continuing with channel config: %s",
+            exc,
+        )
+
+    health_check_cfg = _resolve_health_check_config(full_cfg)
+    if (
+        isinstance(health_check_cfg, dict)
+        and not isinstance(full_cfg.get("health_check"), dict)
+    ):
+        logger.warning(
+            "[App] legacy heartbeat probe config detected; "
+            "migrate it to health_check"
+        )
+    channels_cfg = full_cfg.get("channels")
+    return (
+        full_cfg,
+        health_check_cfg,
+        channels_cfg if isinstance(channels_cfg, dict) else None,
+    )
+
+
+async def _start_heartbeat_scheduler(scheduler: Any) -> bool:
+    """Start optional Heartbeat scheduling without blocking Gateway startup."""
+    try:
+        await scheduler.start()
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "[App] HeartbeatSchedulerService disabled after startup failure: %s",
+            exc,
+        )
+        return False
+    return True
+
+
 def _build_event_frame(msg) -> dict[str, Any]:
     event_name = "chat.final"
     if msg.event_type is not None:
@@ -1533,7 +1628,14 @@ async def _run(
     from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
     from jiuwenswarm.gateway.channel_manager.channel_manager import ChannelManager
     from jiuwenswarm.gateway.cron import CronController, CronJobStore, CronSchedulerService
-    from jiuwenswarm.gateway.heartbeat.heartbeat import GatewayHeartbeatService, HeartbeatConfig
+    from jiuwenswarm.gateway.health_check import (
+        GatewayHealthCheckService,
+        HealthCheckConfig,
+    )
+    from jiuwenswarm.gateway.heartbeat.controller import HeartbeatController
+    from jiuwenswarm.gateway.heartbeat.scheduler import HeartbeatSchedulerService
+    from jiuwenswarm.gateway.heartbeat.store import HeartbeatJobStore
+    from jiuwenswarm.common.utils import get_heartbeat_jobs_path
     from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
     from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import (
         WebHandlersBindParams,
@@ -1622,54 +1724,109 @@ async def _run(
     cron_controller = CronController.get_instance(store=cron_store, scheduler=cron_scheduler)
     message_handler.set_cron_controller(cron_controller)
 
-    full_cfg: dict[str, Any] = {}
-    heartbeat_cfg: dict | None = None
-    channels_cfg: dict | None = None
-    try:
-        full_cfg = get_config()
-        message_handler.update_evolution_auto_save(full_cfg)
-        heartbeat_cfg = full_cfg.get("heartbeat") if isinstance(full_cfg, dict) else None
-        channels_cfg = full_cfg.get("channels") if isinstance(full_cfg, dict) else None
-    except Exception as e:  # noqa: BLE001
-        logger.warning("[App] failed to read heartbeat config from config.yaml, using defaults: %s", e)
-        heartbeat_cfg = None
-        channels_cfg = None
+    # ---- 新 Heartbeat 任务(线程续跑)构造 ----
+    # 与旧探活(HealthCheck,下方 heartbeat_service)严格区分:
+    # 新 Heartbeat 绑定原 session 投递 CHAT_SEND,不创建临时会话、不读 HEARTBEAT.md。
+    # config 段 heartbeat.jobs.* 独立于旧探活的 heartbeat.every/target/active_hours。
+    hb_job_store = HeartbeatJobStore(path=get_heartbeat_jobs_path())
+    heartbeat_scheduler_service = HeartbeatSchedulerService(
+        store=hb_job_store,
+        message_handler=message_handler,
+    )
+    heartbeat_controller = HeartbeatController.get_instance(
+        store=hb_job_store, scheduler=heartbeat_scheduler_service
+    )
+    message_handler.set_heartbeat_controller(heartbeat_controller)
+    message_handler._heartbeat_scheduler_service = heartbeat_scheduler_service
+
+    full_cfg, health_check_cfg, channels_cfg = _load_gateway_runtime_config(
+        message_handler
+    )
 
     client.set_or_update_server_config(
         config=dict(full_cfg or {}),
         env={env_key: (os.getenv(env_key) or "") for env_key in _CONFIG_SET_ENV_MAP.values()},
     )
 
-    if isinstance(heartbeat_cfg, dict):
-        cfg_every = heartbeat_cfg.get("every")
-        cfg_target = heartbeat_cfg.get("target")
-        cfg_active_hours = heartbeat_cfg.get("active_hours")
+    if isinstance(health_check_cfg, dict):
+        cfg_every = health_check_cfg.get("every")
+        cfg_target = health_check_cfg.get("target")
+        cfg_active_hours = health_check_cfg.get("active_hours")
     else:
         cfg_every = None
         cfg_target = None
         cfg_active_hours = None
 
     heartbeat_interval = float(
-        os.getenv("HEARTBEAT_INTERVAL")
+        os.getenv("HEALTH_CHECK_INTERVAL")
+        or os.getenv("HEARTBEAT_INTERVAL")
         or (str(cfg_every) if cfg_every is not None else "60")
     )
-    heartbeat_timeout = float(os.getenv("HEARTBEAT_TIMEOUT", "30")) if os.getenv("HEARTBEAT_TIMEOUT") else None
-    heartbeat_relay_channel = os.getenv("HEARTBEAT_RELAY_CHANNEL_ID") or (
-        str(cfg_target) if cfg_target is not None else "web"
+    health_check_timeout_raw = os.getenv("HEALTH_CHECK_TIMEOUT") or os.getenv(
+        "HEARTBEAT_TIMEOUT"
+    )
+    heartbeat_timeout = (
+        float(health_check_timeout_raw) if health_check_timeout_raw else None
+    )
+    heartbeat_relay_channel = (
+        os.getenv("HEALTH_CHECK_RELAY_CHANNEL_ID")
+        or os.getenv("HEARTBEAT_RELAY_CHANNEL_ID")
+        or (str(cfg_target) if cfg_target is not None else "web")
     )
 
-    heartbeat_config = HeartbeatConfig(
+    heartbeat_config = HealthCheckConfig(
         interval_seconds=heartbeat_interval,
         timeout_seconds=heartbeat_timeout,
         relay_channel_id=heartbeat_relay_channel,
         active_hours=cfg_active_hours if isinstance(cfg_active_hours, dict) else None,
     )
-    heartbeat_service = GatewayHeartbeatService(
+    heartbeat_service = GatewayHealthCheckService(
         client,
         heartbeat_config,
         message_handler=message_handler,
     )
     await heartbeat_service.start()
+
+    # 新 Heartbeat 任务:读取 heartbeat.jobs.* 资源限制,启动 scheduler。
+    # 该段独立于旧探活配置；后者仅由 health_check 段承载。
+    try:
+        hb_jobs_cfg = (
+            full_cfg.get("heartbeat", {}).get("jobs")
+            if isinstance(full_cfg, dict) and isinstance(full_cfg.get("heartbeat"), dict)
+            else None
+        )
+    except Exception:  # noqa: BLE001
+        hb_jobs_cfg = None
+    hb_limits: dict[str, Any] = {}
+    if isinstance(hb_jobs_cfg, dict):
+        for k in (
+            "min_interval_seconds",
+            "max_active_jobs_per_session",
+            "max_active_jobs_global",
+            "default_max_runs",
+            "default_concurrency_policy",
+            "default_session_deleted_policy",
+        ):
+            if k in hb_jobs_cfg:
+                hb_limits[k] = hb_jobs_cfg[k]
+    hb_env_limits = {
+        "min_interval_seconds": os.getenv("HEARTBEAT_JOBS_MIN_INTERVAL"),
+        "max_active_jobs_per_session": os.getenv("HEARTBEAT_JOBS_MAX_ACTIVE_PER_SESSION"),
+        "max_active_jobs_global": os.getenv("HEARTBEAT_JOBS_MAX_ACTIVE_GLOBAL"),
+        "default_max_runs": os.getenv("HEARTBEAT_JOBS_DEFAULT_MAX_RUNS"),
+        "default_concurrency_policy": os.getenv("HEARTBEAT_JOBS_DEFAULT_CONCURRENCY_POLICY"),
+        "default_session_deleted_policy": os.getenv("HEARTBEAT_JOBS_DEFAULT_SESSION_DELETED_POLICY"),
+    }
+    for key, value in hb_env_limits.items():
+        if value is not None and value != "":
+            hb_limits[key] = value
+    if hb_limits:
+        heartbeat_controller.set_limits(hb_limits)
+    if await _start_heartbeat_scheduler(heartbeat_scheduler_service):
+        logger.info(
+            "[App] HeartbeatSchedulerService started "
+            "(thread-automation heartbeat jobs)"
+        )
 
     _cleanup_task = start_background_cleanup()
 
@@ -1883,6 +2040,7 @@ async def _run(
             on_config_saved=_on_config_saved,
             heartbeat_service=heartbeat_service,
             cron_controller=cron_controller,
+            heartbeat_controller=heartbeat_controller,
             updater_service=updater_service,
         )
     )
@@ -1960,6 +2118,7 @@ async def _run(
                 path="/tui",
                 channel_id="tui",
                 cron_controller=cron_controller,
+                heartbeat_controller=heartbeat_controller,
                 ws_channel=tui_channel,
             )
         ),
@@ -2886,6 +3045,7 @@ async def _run(
         await cron_scheduler.stop()
         await channel_manager.stop_dispatch()
         await heartbeat_service.stop()
+        await heartbeat_scheduler_service.stop()
         await message_handler.stop_forwarding()
         await client.disconnect()
 

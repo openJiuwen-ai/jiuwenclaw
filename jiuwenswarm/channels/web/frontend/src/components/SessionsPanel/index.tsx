@@ -134,7 +134,7 @@ function parseSessionDisplayLabel(sessionId: string, t: (key: string, options?: 
     }
   }
 
-  if (sessionId.startsWith('heartbeat_')) {
+  if (sessionId.startsWith('health_check_') || sessionId.startsWith('heartbeat_')) {
     // heartbeat_{hex_ms}_{suffix}
     const parts = sessionId.split('_');
     const hexTs = parts[1] ?? '';

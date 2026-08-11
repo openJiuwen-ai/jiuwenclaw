@@ -162,6 +162,10 @@ from jiuwenswarm.agents.harness.common.browser_defaults import (
     DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
 )
 from jiuwenswarm.agents.harness.common.tools.cron.cron_runtime import CronRuntimeBridge
+from jiuwenswarm.agents.harness.common.tools.heartbeat_runtime import (
+    HEARTBEAT_TOOL_NAMES,
+    HeartbeatRuntimeBridge,
+)
 from jiuwenswarm.agents.harness.common.auto_harness import AutoHarnessService
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
     SKILL_EVOLUTION_APPROVAL_SCHEMA,
@@ -685,19 +689,6 @@ _CRON_TOOL_NAMES = frozenset(
         "cron_preview_job",
     }
 )
-
-
-def _clean_heartbeat_content(content: str) -> str:
-    """Remove HTML comments and blank lines from HEARTBEAT.md content."""
-    cleaned_lines: list[str] = []
-    for line in content.splitlines():
-        stripped_line = line.strip()
-        if stripped_line.startswith("<!--") and stripped_line.endswith("-->"):
-            continue
-        if stripped_line:
-            cleaned_lines.append(stripped_line)
-    return "\n".join(cleaned_lines)
-
 
 def _assemble_run_answer(deltas: list[str], final: str) -> str:
     """Join a streaming run's assistant text into its final answer.
@@ -1223,12 +1214,14 @@ class JiuWenSwarmDeepAdapter:
         self._a2x_blank_service_id: str = ""
         self._a2x_blank_dataset: str = ""
         self._cron_runtime = CronRuntimeBridge()
+        self._heartbeat_runtime = HeartbeatRuntimeBridge()
         self._runtime_cron_tool_context = _RuntimeCronToolContext(
             tool_scope=f"runtime_{id(self):x}",
         )
         # Language the currently registered cron tools were built for, or None
         # when they are not registered yet. Doubles as the rebuild condition.
         self._cron_tools_registered_language: str | None = None
+        self._heartbeat_tools_registered: bool = False
         # Git snapshot per (project dir, session), taken on a conversation's
         # first turn. Held on the adapter rather than module-globally so it is
         # reclaimed with the session instead of accumulating for the life of
@@ -5301,6 +5294,12 @@ class JiuWenSwarmDeepAdapter:
             language=self._resolve_runtime_language(),
         )
 
+    def _build_heartbeat_tools(self) -> list[Any]:
+        """Build session-bound heartbeat tools backed by Gateway RPC pushes."""
+        return self._heartbeat_runtime.build_tools(
+            context=self._runtime_cron_tool_context
+        )
+
     async def _proc_context_compaction(self) -> None:
         """Backward-compatible no-op hook for tests and legacy call sites."""
         return None
@@ -5994,7 +5993,9 @@ class JiuWenSwarmDeepAdapter:
             session_id: Session the current turn belongs to. Heartbeat and cron
                 sessions drive the scheduler themselves and get no cron tools.
         """
-        if session_id is not None and session_id.startswith(("heartbeat", "cron")):
+        if session_id is not None and session_id.startswith(
+            ("heartbeat", "health_check", "cron")
+        ):
             return
         language = self._resolve_runtime_language()
         registered_names = {
@@ -6026,19 +6027,55 @@ class JiuWenSwarmDeepAdapter:
         except Exception as exc:
             logger.error("[JiuWenSwarmDeepAdapter] 定时工具注册失败: %s", exc)
 
+    def _ensure_heartbeat_tools_registered(self, session_id: str | None) -> None:
+        """Register session-bound heartbeat tools once per agent instance."""
+        if session_id is not None and session_id.startswith(
+            ("heartbeat", "health_check", "cron")
+        ):
+            return
+        registered_names = {
+            getattr(existing, "name", "")
+            for existing in (self._instance.ability_manager.list() or [])
+        }
+        if self._heartbeat_tools_registered and (
+            registered_names & HEARTBEAT_TOOL_NAMES
+        ):
+            return
+        try:
+            heartbeat_tools = self._build_heartbeat_tools()
+            for existing in list(self._instance.ability_manager.list() or []):
+                if getattr(existing, "name", "") in HEARTBEAT_TOOL_NAMES:
+                    self._instance.ability_manager.remove(existing.name)
+            for heartbeat_tool in heartbeat_tools:
+                self._register_agent_owned_tool(
+                    heartbeat_tool, self._tool_owner_id()
+                )
+                self._instance.ability_manager.add(heartbeat_tool.card)
+            self._heartbeat_tools_registered = bool(heartbeat_tools)
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] Heartbeat tools registered: %s",
+                sorted(HEARTBEAT_TOOL_NAMES),
+            )
+        except Exception as exc:
+            logger.error(
+                "[JiuWenSwarmDeepAdapter] heartbeat tool registration failed: %s",
+                exc,
+            )
+
     async def _update_session_tools(
         self,
         session_id: str | None,
         request_id: str | None,
         channel_id: str | None = None,
     ) -> None:
-        """刷新每请求相关的 cron / send_file 工具运行时状态。
+        """刷新每请求相关的 cron / heartbeat / send_file 工具运行时状态。
 
-        两者的工具实例都只建一次：cron 见 ``_ensure_cron_tools_registered``，
-        send_file 首次注册后改走 ``update_runtime_context``。这里每次请求只做
-        幂等检查和运行时上下文更新。
+        工具实例都只建一次：cron/heartbeat 分别由对应的 ``_ensure_*``
+        方法注册，send_file 首次注册后改走 ``update_runtime_context``。
+        这里每次请求只做幂等检查和运行时上下文更新。
         """
         self._ensure_cron_tools_registered(session_id)
+        self._ensure_heartbeat_tools_registered(session_id)
 
         # send_file 工具：由 channels.<channel>.send_file_allowed 控制。工具实例只建一次，
         # 之后每次请求只用 update_runtime_context 刷新 request_id/session_id/channel 等
@@ -7654,51 +7691,29 @@ class JiuWenSwarmDeepAdapter:
         return approval_kind in (None, "", "evolve") and rail_kind in (None, "", "regular")
 
     async def handle_heartbeat(self, request: AgentRequest) -> AgentResponse | None:
-        """Handle heartbeat request. Returns None to continue normal flow.
-
-        Injects a heartbeat prompt into the query to ensure the LLM receives
-        a non-empty user message. Reading HEARTBEAT.md and injecting its content
-        into the system prompt is handled by HeartbeatRail in before_model_call.
-        """
+        """Answer a HealthCheck probe without executing workspace user tasks."""
         sid = str(request.session_id or "")
-        if not sid.startswith("heartbeat"):
+        if not sid.startswith(("health_check_", "heartbeat_")):
             return None
-        if not self._is_session_scoped_adapter:
-            session_adapter = await self._get_or_create_session_adapter(request.session_id)
-            try:
-                return await session_adapter.handle_heartbeat(request)
-            finally:
-                await self._evict_idle_session_adapters()
 
-        content = ""
-        try:
-            deep_config = getattr(self._instance, "deep_config", None) if self._instance else None
-            workspace = getattr(deep_config, "workspace", None)
-            sys_operation = getattr(deep_config, "sys_operation", None) or self._sys_operation
-            if workspace is not None and sys_operation is not None:
-                heartbeat_path = str(workspace.get_node_path(WorkspaceNode.HEARTBEAT_MD))
-                read_res = await sys_operation.fs().read_file(heartbeat_path, mode="text")
-                if read_res.code == 0:
-                    content = _clean_heartbeat_content(read_res.data.content)
-                else:
-                    logger.warning("[JiuWenSwarmDeepAdapter] heartbeat failed to read HEARTBEAT.md")
-            else:
-                logger.warning("[JiuWenSwarmDeepAdapter] heartbeat workspace/sys_operation not available")
-        except Exception as exc:
-            logger.warning("[JiuWenSwarmDeepAdapter] heartbeat failed to prepare HEARTBEAT.md content: %s", exc)
-
-        request.params["query"] = (
-            "这是一次心跳请求任务，请根据 <heartbeat_user_task> 标签中的内容进行回复。\n"
-            "<heartbeat_user_task>\n"
-            f"{content}\n"
-            "</heartbeat_user_task>"
-        )
         logger.info(
-            "[JiuWenSwarmDeepAdapter] heartbeat query injected:" " request_id=%s session_id=%s",
+            "[JiuWenSwarmDeepAdapter] health check acknowledged: "
+            "request_id=%s session_id=%s",
             request.request_id,
             request.session_id,
         )
-        return None
+        payload = {"health_check": "HEALTH_CHECK_OK"}
+        if sid.startswith("heartbeat_"):
+            # AgentServer-first rolling upgrades: an older Gateway still reads
+            # payload.heartbeat. New producers use only payload.health_check.
+            payload["heartbeat"] = "HEALTH_CHECK_OK"
+        return AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=True,
+            payload=payload,
+            metadata=request.metadata,
+        )
 
     async def _handle_evolution_approval(self, request_id: str, answers: list) -> bool:
         """Handle evolution approval via SkillEvolutionRail.on_approve/on_reject.

@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import os
+import secrets
 import shutil
 import sys
 from pathlib import Path
@@ -894,6 +895,7 @@ class AgentWebSocketServer:
         # 当前 Gateway 连接，用于 send_push 主动推送
         self._current_ws: Any = None
         self._current_send_lock: asyncio.Lock | None = None
+        self._gateway_push_waiters: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._acp_client_capabilities_by_ws: dict[int, dict[str, Any]] = {}
         # AgentManager 实例
         self._agent_manager = AgentManager()
@@ -904,6 +906,7 @@ class AgentWebSocketServer:
         # for interrupt/connection cleanup only; it never decides interaction
         # output ownership.
         self._session_stream_tasks: dict[str, dict[asyncio.Task, asyncio.Event]] = {}
+        self._stream_request_ids: dict[asyncio.Task, str] = {}
         # Scheduler service instance (for scheduled auto_harness tasks)
         self._scheduler_service: Optional[AutoHarnessService] = None
         self._scheduler_agent: Any = None
@@ -1359,8 +1362,19 @@ class AgentWebSocketServer:
         except Exception as e:
             logger.exception("[AgentWebSocketServer] 连接处理异常 (%s): %s", remote, e)
         finally:
-            self._current_ws = None
-            self._current_send_lock = None
+            # A newer Gateway may already have replaced this connection.  An
+            # old connection's teardown must not clear the replacement or fail
+            # operations issued through it.
+            if self._current_ws is ws:
+                self._current_ws = None
+                self._current_send_lock = None
+                for waiter in list(self._gateway_push_waiters.values()):
+                    if not waiter.done():
+                        waiter.set_exception(
+                            ConnectionError(
+                                "Gateway disconnected during heartbeat operation"
+                            )
+                        )
             self._clear_ws_acp_client_capabilities(ws)
             connection_tasks = list(tasks)
             for task in connection_tasks:
@@ -1390,6 +1404,7 @@ class AgentWebSocketServer:
             if connection_tasks:
                 await asyncio.gather(*connection_tasks, return_exceptions=True)
             self._session_stream_tasks.clear()
+            self._stream_request_ids.clear()
 
     async def _handle_message(self, ws: Any, raw: str | bytes, send_lock: asyncio.Lock) -> None:
         """解析一条 JSON 请求并分发到 IAgentServer 处理."""
@@ -1471,6 +1486,10 @@ class AgentWebSocketServer:
                     ws_caps or self._agent_manager.get_client_capabilities("acp"),
                 )
                 request.metadata = metadata
+
+            if request.req_method == ReqMethod.HEARTBEAT_TOOL_RESPONSE:
+                await self._handle_heartbeat_tool_response(ws, request, send_lock)
+                return
 
             await self._trigger_before_chat_request_hook(request)
 
@@ -1704,14 +1723,39 @@ class AgentWebSocketServer:
                 # pause/resume 不取消，因为任务仍在运行（pause 在 checkpoint 阻塞，resume 解除阻塞）
                 stream_tasks: list[asyncio.Task] = []
                 if intent in ("cancel", "supplement"):
-                    entries = self._session_stream_tasks.get(sid, {})
-                    for stream_task, stream_stop_event in list(entries.items()):
-                        if stream_task.done():
-                            continue
+                    target_request_id = ""
+                    if isinstance(request.params, dict):
+                        target_request_id = str(
+                            request.params.get("target_request_id") or ""
+                        ).strip()
+                    cancel_entries = self._cancel_stream_entries(
+                        sid, target_request_id=target_request_id or None
+                    )
+                    if target_request_id and not cancel_entries:
+                        not_found = AgentResponse(
+                            request_id=request.request_id,
+                            channel_id=request.channel_id,
+                            ok=True,
+                            payload={
+                                "event_type": "chat.interrupt_result",
+                                "success": True,
+                                "message": "target request is already inactive",
+                                "target_request_id": target_request_id,
+                            },
+                        )
+                        wire = encode_agent_response_for_wire(
+                            not_found, response_id=request.request_id
+                        )
+                        async with send_lock:
+                            await send_wire_payload(ws, wire)
+                        return
+                    for stream_task, stream_stop_event in cancel_entries:
                         logger.info(
-                            "[AgentWebSocketServer] cancel: 终止 session 流式任务: session_id=%s intent=%s",
+                            "[AgentWebSocketServer] cancel: 终止 session 流式任务: "
+                            "session_id=%s intent=%s target_request_id=%s",
                             sid,
                             intent,
+                            target_request_id or "*",
                         )
                         stream_stop_event.set()
                         stream_task.cancel()
@@ -1991,6 +2035,24 @@ class AgentWebSocketServer:
                 await send_wire_payload(ws, wire)
         return resp
 
+    def _cancel_stream_entries(
+        self,
+        session_id: str,
+        *,
+        target_request_id: str | None = None,
+    ) -> list[tuple[asyncio.Task, asyncio.Event]]:
+        """Return live stream entries covered by one cancel request."""
+        target = str(target_request_id or "").strip()
+        request_ids = getattr(self, "_stream_request_ids", {})
+        return [
+            (stream_task, stop_event)
+            for stream_task, stop_event in list(
+                self._session_stream_tasks.get(session_id, {}).items()
+            )
+            if not stream_task.done()
+            and (not target or request_ids.get(stream_task) == target)
+        ]
+
     @staticmethod
     def _resolve_code_language() -> str:
         """Determine the display language for code mode plan approval messages.
@@ -2204,6 +2266,7 @@ class AgentWebSocketServer:
         _raw_mode = params.get("mode")
         explicit_mode_provided = isinstance(_raw_mode, str) and bool(_raw_mode.strip())
         runtime_work_mode = None
+        stored_session_mode = None
         sid = str(request.session_id or "").strip()
         if sid:
             from jiuwenswarm.server.runtime.session.session_metadata import (
@@ -2229,7 +2292,13 @@ class AgentWebSocketServer:
                 else None
             )
             if isinstance(stored_session_mode, str) and stored_session_mode.strip():
-                params[_SESSION_PREVIOUS_MODE_KEY] = stored_session_mode.strip()
+                stored_session_mode = stored_session_mode.strip()
+                params[_SESSION_PREVIOUS_MODE_KEY] = stored_session_mode
+                # Heartbeat follow-ups intentionally omit mode. Restore the
+                # session's locked mode before agent selection so they resume
+                # the original execution context instead of defaulting to agent.
+                if not explicit_mode_provided:
+                    params["mode"] = stored_session_mode
             if isinstance(stored_work_mode, str) and stored_work_mode.strip().lower() in {
                 "code",
                 "work",
@@ -2242,19 +2311,36 @@ class AgentWebSocketServer:
                 "work",
             }:
                 runtime_work_mode = request_work_mode.strip().lower()
-            else:
-                from jiuwenswarm.server.runtime.session.work_mode import (
-                    default_work_mode_for_channel,
-                )
-                channel_id_for_default = request.channel_id or "web"
-                runtime_work_mode = default_work_mode_for_channel(channel_id_for_default)
-                logger.warning(
-                    "[_prepare_code_mode_chat_turn] work_mode missing in both session "
-                    "metadata and request params; defaulting to %r for channel=%s session=%s",
-                    runtime_work_mode,
-                    channel_id_for_default,
-                    request.session_id,
-                )
+        if (
+            runtime_work_mode is None
+            and not explicit_mode_provided
+            and isinstance(stored_session_mode, str)
+        ):
+            # Legacy sessions predate persisted work_mode. Their locked
+            # canonical mode is stronger evidence than the channel default:
+            # otherwise a web code session becomes work/agent, while a TUI
+            # work session becomes code on an automated continuation.
+            if stored_session_mode == "code" or stored_session_mode.startswith(
+                "code."
+            ):
+                runtime_work_mode = "code"
+            elif stored_session_mode == "agent" or stored_session_mode.startswith(
+                ("agent.", "team")
+            ):
+                runtime_work_mode = "work"
+        if runtime_work_mode is None:
+            from jiuwenswarm.server.runtime.session.work_mode import (
+                default_work_mode_for_channel,
+            )
+            channel_id_for_default = request.channel_id or "web"
+            runtime_work_mode = default_work_mode_for_channel(channel_id_for_default)
+            logger.warning(
+                "[_prepare_code_mode_chat_turn] work_mode missing in both session "
+                "metadata and request params; defaulting to %r for channel=%s session=%s",
+                runtime_work_mode,
+                channel_id_for_default,
+                request.session_id,
+            )
         params["work_mode"] = runtime_work_mode
         mode, sub_mode = _apply_resolved_mode_to_request(
             request,
@@ -2644,6 +2730,9 @@ class AgentWebSocketServer:
         stream_stop_event = asyncio.Event()
         if current_task is not None:
             self._session_stream_tasks.setdefault(session_id, {})[current_task] = stream_stop_event
+            if not hasattr(self, "_stream_request_ids"):
+                self._stream_request_ids = {}
+            self._stream_request_ids[current_task] = request.request_id
 
         # 无状态流式请求（skills / skilldev / plugins / symphony）不需要 mode 解析和
         # code mode 状态管理，直接走 process_message_stream 即可。用轻量 agent 获取，
@@ -2774,6 +2863,7 @@ class AgentWebSocketServer:
             entries = self._session_stream_tasks.get(session_id)
             if entries is not None and current_task is not None:
                 entries.pop(current_task, None)
+                getattr(self, "_stream_request_ids", {}).pop(current_task, None)
                 if not entries:
                     self._session_stream_tasks.pop(session_id, None)
             # Push plan.mode_exited if exit_plan_mode restored mode during processing
@@ -7611,6 +7701,52 @@ class AgentWebSocketServer:
             )
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    async def request_gateway_push(
+        self, msg: dict[str, Any], *, timeout_seconds: float = 15.0
+    ) -> dict[str, Any]:
+        """Send a correlated Gateway operation and await its authoritative result."""
+        if self._current_ws is None or self._current_send_lock is None:
+            raise RuntimeError("Gateway is not connected")
+        operation_id = f"hbop_{secrets.token_hex(12)}"
+        outbound = dict(msg or {})
+        body = dict(outbound.get("body") or {})
+        body["operation_id"] = operation_id
+        outbound["body"] = body
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[dict[str, Any]] = loop.create_future()
+        self._gateway_push_waiters[operation_id] = future
+        try:
+            await self.send_push(outbound)
+            return await asyncio.wait_for(future, timeout=float(timeout_seconds))
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError(
+                f"Gateway heartbeat operation timed out: {operation_id}"
+            ) from exc
+        finally:
+            self._gateway_push_waiters.pop(operation_id, None)
+
+    async def _handle_heartbeat_tool_response(
+        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
+    ) -> None:
+        """Resolve one pending Agent heartbeat tool call, then acknowledge Gateway."""
+        params = request.params if isinstance(request.params, dict) else {}
+        operation_id = str(params.get("operation_id") or "").strip()
+        result = params.get("result")
+        waiter = self._gateway_push_waiters.get(operation_id)
+        accepted = waiter is not None and not waiter.done()
+        if accepted:
+            waiter.set_result(dict(result) if isinstance(result, dict) else {})
+        response = AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=accepted,
+            payload={"accepted": accepted, "operation_id": operation_id},
+            metadata=request.metadata,
+        )
+        wire = encode_agent_response_for_wire(response, response_id=request.request_id)
         async with send_lock:
             await send_wire_payload(ws, wire)
 

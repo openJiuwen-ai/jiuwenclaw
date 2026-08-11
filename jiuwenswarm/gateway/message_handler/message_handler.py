@@ -222,6 +222,7 @@ class MessageHandler(ABC):
         # 但同样是“用户发起的对话任务在跑”，配置保存锁须覆盖，故单列此集合。
         # value 存 mode（与 _stream_modes 同款），供 has_active_streams() 判断 team 排除用。
         self._active_chat_tasks: dict[str, str] = {}
+        self._active_chat_sessions: dict[str, str | None] = {}
         self._disconnect_cancel_tasks: dict[tuple[str, str], asyncio.Task] = {}
         self._stream_app_ids: dict[str, str] = {}  # request_id -> app_id, 多应用流式精确路由
         self._fire_and_forget_tasks: set[asyncio.Task] = set()  # prevent GC of fire-and-forget tasks
@@ -265,6 +266,9 @@ class MessageHandler(ABC):
         # 组合：/join /exit 团队成员管理逻辑（独立文件维护，通过 self._h 访问宿主能力）
         self._join_exit = JoinExitHandlers(self)
         self._cron_controller = None
+        # 新 Heartbeat(线程续跑)controller + scheduler,由 app_gateway 注入。
+        self._heartbeat_controller = None
+        self._heartbeat_scheduler_service = None
 
         # IM Pipeline（数字分身）— None 时不执行，不影响原有逻辑
         self._inbound_pipeline = None   # type: Any  # IMInboundPipeline | None
@@ -606,11 +610,24 @@ class MessageHandler(ABC):
         # 主动推荐消息不取消现有流式任务，避免干扰用户当前对话
         if isinstance(msg.params, dict) and msg.params.get("source") == "proactive_recommendation":
             return False
+        # Heartbeat is a low-priority follow-up bound to the existing session.
+        # It must never preempt a user turn that is already in progress.
+        if cls._is_heartbeat_automation_message(msg):
+            return False
         return (
             cls._is_chat_send_message(msg)
             and not cls._is_team_chat_send(msg)
             and not cls._is_interrupt_resume_chat_send(msg)
             and not cls._is_interaction_managed_chat_send(msg)
+        )
+
+    @staticmethod
+    def _is_heartbeat_automation_message(msg: "Message") -> bool:
+        metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
+        automation = metadata.get("automation")
+        return bool(
+            isinstance(automation, dict)
+            and automation.get("kind") == "heartbeat"
         )
 
     @staticmethod
@@ -1033,6 +1050,8 @@ class MessageHandler(ABC):
         cancel_gateway_tasks: bool = True,
         agent_notify: Literal["await", "fire_and_forget"] = "await",
         cancel_source: str | None = None,
+        target_request_id: str | None = None,
+        cancel_local_on_agent_failure: bool = True,
     ) -> bool:
         """Cancel gateway and AgentServer work for a session.
 
@@ -1068,6 +1087,8 @@ class MessageHandler(ABC):
         rids_cancelled: list[str] = []
 
         for rid, task in list(self._stream_tasks.items()):
+            if target_request_id is not None and rid != target_request_id:
+                continue
             if self._stream_sessions.get(rid) != old_sid:
                 continue
             if channel_id is not None and self._stream_channels.get(rid) != channel_id:
@@ -1094,6 +1115,8 @@ class MessageHandler(ABC):
             "intent": "cancel",
             "session_id": sid_for_agent,
         }
+        if target_request_id:
+            cancel_params["target_request_id"] = target_request_id
         cancel_mode = None
         if isinstance(msg.params, dict) and msg.params.get("mode"):
             # _apply_channel_state 已将 mode 写入 msg.params
@@ -1176,7 +1199,7 @@ class MessageHandler(ABC):
             logger.warning("[MessageHandler] AgentServer 中断请求失败: %s", exc)
             if cancel_gateway_tasks:
                 pass  # gateway tasks already cancelled above
-            else:
+            elif cancel_local_on_agent_failure:
                 await _cancel_tasks(tasks_to_cancel)
                 await self._pop_stream_tracking_and_broadcast(rids_cancelled)
             if publish_interrupt_result:
@@ -1186,7 +1209,9 @@ class MessageHandler(ABC):
                 )
             return False
 
-        if not cancel_gateway_tasks:
+        if not cancel_gateway_tasks and (
+            bool(resp.ok) or cancel_local_on_agent_failure
+        ):
             await _cancel_tasks(tasks_to_cancel)
             await self._pop_stream_tracking_and_broadcast(rids_cancelled)
 
@@ -1340,6 +1365,100 @@ class MessageHandler(ABC):
             sid,
         )
         return True
+
+    async def cancel_request(self, request_id: str) -> bool:
+        """Cancel one exact Gateway and AgentServer request.
+
+        The request bookkeeping is captured before sending the interrupt so the
+        remote cancel can target the same run id without cancelling a sibling
+        user request in the bound session.
+        """
+        from jiuwenswarm.common.schema.message import Message
+
+        rid = str(request_id or "").strip()
+        if not rid:
+            return False
+        task = self._stream_tasks.get(rid)
+        if task is None or task.done():
+            return False
+        session_id = (self._stream_sessions.get(rid) or "").strip()
+        channel_id = (self._stream_channels.get(rid) or "").strip()
+        if not session_id or not channel_id:
+            return False
+        mode = self._stream_modes.get(rid)
+        params = {"mode": mode} if mode else {}
+        cancel_msg = Message(
+            id=f"cancel-{rid}",
+            type="req",
+            channel_id=channel_id,
+            session_id=session_id,
+            params=params,
+            timestamp=time.time(),
+            ok=True,
+            metadata=self._stream_metadata.get(rid),
+        )
+        return await self._cancel_agent_work_for_session(
+            cancel_msg,
+            session_id,
+            publish_interrupt_result=False,
+            channel_id=channel_id,
+            cancel_gateway_tasks=False,
+            agent_notify="await",
+            target_request_id=rid,
+            cancel_local_on_agent_failure=False,
+        )
+
+    async def _notify_heartbeat_run_finished(
+        self,
+        request_id: str,
+        metadata: dict[str, Any] | None,
+        *,
+        outcome: str,
+        error: str | None = None,
+    ) -> None:
+        automation = metadata.get("automation") if isinstance(metadata, dict) else None
+        if not isinstance(automation, dict) or automation.get("kind") != "heartbeat":
+            return
+        job_id = str(automation.get("job_id") or "").strip()
+        run_id = str(automation.get("run_id") or request_id or "").strip()
+        scheduler = self._heartbeat_scheduler_service
+        if scheduler is None or not job_id or not run_id:
+            return
+        try:
+            await scheduler.on_run_finished(
+                job_id, run_id, outcome=outcome, error=error
+            )
+        except Exception:
+            logger.exception(
+                "[MessageHandler] heartbeat completion callback failed: job=%s run=%s",
+                job_id,
+                run_id,
+            )
+
+    async def _defer_heartbeat_run_for_busy_session(
+        self,
+        request_id: str,
+        metadata: dict[str, Any] | None,
+    ) -> bool:
+        """Return a raced Heartbeat dispatch to the scheduler's idle wait path."""
+        automation = metadata.get("automation") if isinstance(metadata, dict) else None
+        if not isinstance(automation, dict) or automation.get("kind") != "heartbeat":
+            return False
+        job_id = str(automation.get("job_id") or "").strip()
+        run_id = str(automation.get("run_id") or request_id or "").strip()
+        scheduler = self._heartbeat_scheduler_service
+        callback = getattr(scheduler, "on_session_busy_after_dispatch", None)
+        if not callable(callback) or not job_id or not run_id:
+            return False
+        try:
+            return bool(await callback(job_id, run_id))
+        except Exception:
+            logger.exception(
+                "[MessageHandler] heartbeat busy deferral failed: job=%s run=%s",
+                job_id,
+                run_id,
+            )
+            return False
 
     def _merge_disconnect_session_keys(
         self,
@@ -2183,6 +2302,12 @@ class MessageHandler(ABC):
         if channel_type not in self._control_channel_types:
             return
 
+        metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
+        automation = metadata.get("automation")
+        is_heartbeat_run = (
+            isinstance(automation, dict) and automation.get("kind") == "heartbeat"
+        )
+
         # V2: 若 resolve_member_by_user 已识别为 team 成员（metadata 含 member_name），
         # 则 session_id 和 mode 已由 handle_message 正确设置，不覆盖。
         if isinstance(msg.metadata, dict) and msg.metadata.get("member_name"):
@@ -2195,25 +2320,49 @@ class MessageHandler(ABC):
 
         state = self.get_or_create_channel_state(msg)
 
-        # 仅 _session_map_channel_types 中的通道族使用 SessionMap；其它受控通道仍按 config/state 与入站 session_id。
-        cid = str(getattr(msg, "channel_id", "") or "")
-        identity_key = self._extract_identity_tuple(msg)
-        if identity_key and self._channel_id_matches_session_map_types(cid):
-            sid = self._session_map.find_session_id(*identity_key)
-            if sid:
-                state.session_id = sid
-                msg.session_id = sid
+        if not is_heartbeat_run:
+            # 仅 _session_map_channel_types 中的通道族使用 SessionMap；其它受控通道仍按 config/state 与入站 session_id。
+            cid = str(getattr(msg, "channel_id", "") or "")
+            identity_key = self._extract_identity_tuple(msg)
+            if identity_key and self._channel_id_matches_session_map_types(cid):
+                sid = self._session_map.find_session_id(*identity_key)
+                if sid:
+                    state.session_id = sid
+                    msg.session_id = sid
+                else:
+                    msg.session_id = None
+            elif state.session_id:
+                msg.session_id = state.session_id
             else:
                 msg.session_id = None
-        elif state.session_id:
-            msg.session_id = state.session_id
-        else:
-            msg.session_id = None
 
         # 将 mode 写入 params，后续 E2A / Agent 侧从 params["mode"] 读取
         if msg.params is None:
             msg.params = {}
         if isinstance(msg.params, dict):
+            if is_heartbeat_run and "mode" not in msg.params and msg.session_id:
+                try:
+                    from jiuwenswarm.server.runtime.session.session_metadata import (
+                        get_session_metadata,
+                    )
+
+                    session_metadata = get_session_metadata(
+                        str(msg.session_id),
+                        cache_bust=True,
+                        enable_writeback=False,
+                    )
+                    session_mode = str(
+                        (session_metadata or {}).get("mode") or ""
+                    ).strip()
+                    if session_mode and session_mode != "unknown":
+                        msg.params["mode"] = session_mode
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[HeartbeatScheduler] failed to restore session mode "
+                        "session=%s: %s",
+                        msg.session_id,
+                        exc,
+                    )
             msg.params.setdefault("mode", state.mode.value)
 
     # ---------- user_messages ----------
@@ -2280,6 +2429,28 @@ class MessageHandler(ABC):
         return any(
             not ChannelMode.is_team_mode(mode)
             for mode in self._iter_active_stream_modes()
+        )
+
+    def is_session_busy(
+        self,
+        session_id: str,
+        *,
+        exclude_request_id: str | None = None,
+    ) -> bool:
+        """Return whether a chat request is active in one exact session."""
+        sid = str(session_id or "").strip()
+        if not sid:
+            return False
+        excluded = str(exclude_request_id or "").strip()
+        for rid, task_sid in self._stream_sessions.items():
+            if rid == excluded or task_sid != sid:
+                continue
+            task = self._stream_tasks.get(rid)
+            if task is not None and not task.done() and self._is_chat_stream(rid):
+                return True
+        return any(
+            rid != excluded and task_sid == sid
+            for rid, task_sid in self._active_chat_sessions.items()
         )
 
     def active_non_team_modes(self) -> list[tuple[str, str]]:
@@ -2835,6 +3006,15 @@ class MessageHandler(ABC):
                 metadata=bus_metadata,
             )
             return
+        if isinstance(chunk.payload, dict) and chunk.payload.get("event_type") == "heartbeat.response":
+            await self._handle_heartbeat_push_payload(
+                payload=dict(chunk.payload),
+                request_id=rid,
+                channel_id=chunk.channel_id,
+                session_id=session_id,
+                metadata=bus_metadata,
+            )
+            return
         if self._is_terminal_stream_chunk(chunk):
             logger.debug(
                 "[MessageHandler] 忽略 server_push 终止 chunk: request_id=%s",
@@ -2872,6 +3052,17 @@ class MessageHandler(ABC):
 
     def set_cron_controller(self, controller: Any) -> None:
         self._cron_controller = controller
+
+    def set_heartbeat_controller(self, controller: Any) -> None:
+        """注入新 Heartbeat(线程续跑)controller,供 web handler / Agent Tool 使用。"""
+        self._heartbeat_controller = controller
+
+    def get_heartbeat_controller(self) -> Any:
+        return self._heartbeat_controller
+
+    def get_heartbeat_scheduler_service(self) -> Any:
+        return self._heartbeat_scheduler_service
+
 
     async def _handle_cron_push_payload(
         self,
@@ -2934,6 +3125,178 @@ class MessageHandler(ABC):
             enable_streaming=False,  # 工具结果不开启流式，避免被发送到群聊
         )
         await self.publish_robot_messages(out)
+
+    async def _handle_heartbeat_push_payload(
+        self,
+        *,
+        payload: dict[str, Any],
+        request_id: str,
+        channel_id: str,
+        session_id: str | None,
+        metadata: dict[str, Any] | None,
+    ) -> None:
+        sid = str(session_id or "").strip()
+        action = str(payload.get("action") or "").strip()
+        operation_id = str(payload.get("operation_id") or "").strip()
+        params = payload.get("data") or {}
+        if not isinstance(params, dict):
+            params = {}
+        # Session teardown is an internal lifecycle notification, not an Agent
+        # tool invocation.  It must work even before the controller is bound and
+        # must not emit a synthetic tool result into the deleted conversation.
+        if action == "session_deleted":
+            deleted_sid = str(params.get("session_id") or sid).strip()
+            scheduler = self._heartbeat_scheduler_service
+            if scheduler is not None and deleted_sid:
+                await scheduler.on_session_deleted(deleted_sid)
+            return
+
+        controller = self._heartbeat_controller
+        if controller is None:
+            if operation_id:
+                await self._reply_heartbeat_tool_operation(
+                    operation_id=operation_id,
+                    channel_id=channel_id,
+                    session_id=sid,
+                    data={
+                        "error": "heartbeat controller not available",
+                        "code": "SERVICE_UNAVAILABLE",
+                    },
+                    metadata=metadata,
+                )
+            return
+        try:
+            if action == "list":
+                data = await controller.list_jobs(params, access_session_id=sid)
+            elif action == "get":
+                data = await controller.get_job(
+                    str(params.get("job_id") or ""), access_session_id=sid
+                )
+                if data is None:
+                    raise KeyError("heartbeat job not found")
+            elif action == "create":
+                data = await controller.create_job_for_session(
+                    params, channel_id=channel_id, session_id=sid
+                )
+            elif action == "update":
+                data = await controller.update_job(
+                    str(params.get("job_id") or ""),
+                    dict(params.get("patch") or {}),
+                    access_session_id=sid,
+                )
+            elif action == "delete":
+                data = await controller.delete_job(
+                    str(params.get("job_id") or ""), access_session_id=sid
+                )
+            elif action == "toggle":
+                enabled = params.get("enabled")
+                if not isinstance(enabled, bool):
+                    raise ValueError("enabled must be boolean")
+                data = await controller.toggle_job(
+                    str(params.get("job_id") or ""),
+                    enabled,
+                    access_session_id=sid,
+                )
+            elif action == "preview":
+                data = await controller.preview_job(
+                    str(params.get("job_id") or ""),
+                    int(params.get("count", 5)),
+                    access_session_id=sid,
+                )
+            elif action == "run_now":
+                reschedule = params.get("reschedule", False)
+                if not isinstance(reschedule, bool):
+                    raise ValueError("reschedule must be boolean")
+                data = await controller.run_now(
+                    str(params.get("job_id") or ""),
+                    reschedule=reschedule,
+                    access_session_id=sid,
+                )
+            elif action == "cancel":
+                pause = params.get("pause_schedule", False)
+                if not isinstance(pause, bool):
+                    raise ValueError("pause_schedule must be boolean")
+                data = await controller.cancel_run(
+                    str(params.get("job_id") or ""),
+                    pause_schedule=pause,
+                    access_session_id=sid,
+                )
+            else:
+                raise ValueError(f"unknown heartbeat action: {action}")
+        except PermissionError as exc:
+            data = {"error": str(exc), "code": "FORBIDDEN"}
+        except KeyError as exc:
+            data = {"error": str(exc), "code": "NOT_FOUND"}
+        except ValueError as exc:
+            data = {"error": str(exc), "code": "BAD_REQUEST"}
+        except Exception as exc:  # noqa: BLE001
+            data = {"error": str(exc), "code": "INTERNAL_ERROR"}
+
+        if operation_id:
+            await self._reply_heartbeat_tool_operation(
+                operation_id=operation_id,
+                channel_id=channel_id,
+                session_id=sid,
+                data=data,
+                metadata=metadata,
+            )
+            return
+
+        from jiuwenswarm.common.schema.message import EventType, Message
+
+        await self.publish_robot_messages(
+            Message(
+                id=request_id,
+                type="event",
+                channel_id=channel_id,
+                session_id=session_id,
+                params={},
+                timestamp=time.time(),
+                ok="error" not in data,
+                payload={
+                    "event_type": "chat.tool_result",
+                    "tool_name": f"heartbeat_{action}",
+                    "result": data,
+                },
+                event_type=EventType.CHAT_TOOL_RESULT,
+                metadata=metadata,
+                enable_streaming=False,
+            )
+        )
+
+    async def _reply_heartbeat_tool_operation(
+        self,
+        *,
+        operation_id: str,
+        channel_id: str,
+        session_id: str,
+        data: dict[str, Any],
+        metadata: dict[str, Any] | None,
+    ) -> None:
+        """Return a Gateway heartbeat result to the waiting Agent tool call."""
+        from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+        from jiuwenswarm.common.schema.message import ReqMethod
+
+        failed = "error" in data
+        result = {
+            "ok": not failed,
+            "data": None if failed else data,
+            "error": data.get("error") if failed else None,
+            "code": data.get("code") if failed else None,
+        }
+        envelope = e2a_from_agent_fields(
+            request_id=f"heartbeat-tool-response-{operation_id}",
+            channel_id=channel_id,
+            session_id=session_id or None,
+            req_method=ReqMethod.HEARTBEAT_TOOL_RESPONSE,
+            params={"operation_id": operation_id, "result": result},
+            metadata=metadata,
+        )
+        response = await self.agent_client.send_request(envelope)
+        if not response.ok:
+            raise RuntimeError(
+                f"AgentServer rejected heartbeat tool response {operation_id}"
+            )
 
     @staticmethod
     def _chunk_to_message(
@@ -3942,6 +4305,30 @@ class MessageHandler(ABC):
                 stream_rid = env.request_id or msg.id
                 try:
                     if env.is_stream:
+                        if (
+                            self._is_heartbeat_automation_message(msg)
+                            and self.is_session_busy(
+                                msg.session_id or "",
+                                exclude_request_id=stream_rid,
+                            )
+                        ):
+                            logger.info(
+                                "[MessageHandler] heartbeat dispatch deferred because "
+                                "the bound session became busy: request_id=%s session_id=%s",
+                                stream_rid,
+                                msg.session_id,
+                            )
+                            deferred = await self._defer_heartbeat_run_for_busy_session(
+                                stream_rid, msg.metadata
+                            )
+                            if not deferred:
+                                await self._notify_heartbeat_run_finished(
+                                    stream_rid,
+                                    msg.metadata,
+                                    outcome="skipped",
+                                    error="session_busy_deferral_failed",
+                                )
+                            continue
                         # 取消同一 channel 上已有的流式任务，避免会话孤岛
                         # （例如 TUI 发送新消息时，旧 session 仍在后台空跑）
                         if self._should_cancel_existing_stream_before_chat_send(msg):
@@ -3969,14 +4356,22 @@ class MessageHandler(ABC):
                         self._active_chat_tasks[stream_rid] = (
                             msg.params.get("mode", "plan") if isinstance(msg.params, dict) else "plan"
                         )
+                        self._active_chat_sessions[stream_rid] = msg.session_id
                         await self._broadcast_task_global_running()
                         try:
                             await self._process_non_stream_request(msg, env)
                         finally:
                             self._active_chat_tasks.pop(stream_rid, None)
+                            self._active_chat_sessions.pop(stream_rid, None)
                             await self._broadcast_task_global_running()
                 except Exception as e:
                     logger.exception("AgentServer send_request failed for %s: %s", msg.id, e)
+                    await self._notify_heartbeat_run_finished(
+                        stream_rid,
+                        msg.metadata,
+                        outcome="failed",
+                        error=str(e),
+                    )
                     # 流式任务启动在 tracking 写入后、process_stream 成功登记前
                     # 抛异常（典型如 _send_processing_status / create_task 失败）时，
                     # process_stream 自身的 finally 不会执行，残留的
@@ -4014,6 +4409,8 @@ class MessageHandler(ABC):
         channel_id = env.channel or ""
         stream_app_id = self._stream_app_ids.get(rid, "")  # 提前捕获，_pop_stream_tracking 后会清除
         cancelled = False
+        stream_error: str | None = None
+        execution_error: str | None = None
         has_processing_status_false = False
         _proc_count = 0
         logger.info(
@@ -4032,6 +4429,21 @@ class MessageHandler(ABC):
                     )
                 if self._is_terminal_stream_chunk(chunk):
                     continue
+                payload = chunk.payload or {}
+                if (
+                    isinstance(payload, dict)
+                    and payload.get("event_type") == "execution.error"
+                    and execution_error is None
+                ):
+                    # execution.error 是协议内的语义失败，AgentServer 会继续
+                    # 正常收尾流，因此不会通过异常分支被感知。保留事件
+                    # 给前端，同时将心跳 run 正确结算为 failed。
+                    execution_error = str(
+                        payload.get("message")
+                        or payload.get("error")
+                        or payload.get("code")
+                        or "execution error"
+                    )
                 published = await self.publish_stream_chunk(
                     chunk,
                     session_id=session_id,
@@ -4039,7 +4451,6 @@ class MessageHandler(ABC):
                 )
                 if not published:
                     continue
-                payload = chunk.payload or {}
                 if isinstance(payload, dict):
                     event_type = payload.get("event_type")
                     if event_type == "chat.processing_status":
@@ -4075,6 +4486,7 @@ class MessageHandler(ABC):
                 rid, _proc_count,
             )
         except RuntimeError as exc:
+            stream_error = str(exc)
             if "AgentServer WebSocket connection closed" not in str(exc):
                 raise
             await self._publish_stream_connection_error(
@@ -4085,6 +4497,7 @@ class MessageHandler(ABC):
                 str(exc),
             )
         except Exception as exc:
+            stream_error = str(exc)
             logger.exception(
                 "[MessageHandler] Stream 异常: request_id=%s total_chunks=%s error=%s",
                 rid, _proc_count, exc,
@@ -4094,6 +4507,19 @@ class MessageHandler(ABC):
             )
             raise  # 重新抛出，让调用者知道任务被取消
         finally:
+            heartbeat_error = stream_error or execution_error
+            await self._notify_heartbeat_run_finished(
+                rid,
+                request_metadata,
+                outcome=(
+                    "cancelled"
+                    if cancelled
+                    else "failed"
+                    if heartbeat_error
+                    else "succeeded"
+                ),
+                error=heartbeat_error,
+            )
             if (
                 not cancelled
                 and self._is_interrupt_evolution_approval_answer_payload(env.params)
@@ -4165,6 +4591,7 @@ class MessageHandler(ABC):
                     await self._send_processing_status(
                         rid, session_id, channel_id,
                         is_processing=False, app_id=stream_app_id,
+                        request_metadata=request_metadata,
                     )
                     logger.info(
                         "[MessageHandler] 该 session 流式任务已结束（cancelled=%s），已发送 is_processing=false: session_id=%s",
@@ -4218,12 +4645,21 @@ class MessageHandler(ABC):
             msg.params.get("mode", "plan") if isinstance(msg.params, dict) else "plan"
         )
         if emit_processing_status:
+            heartbeat_prompt = None
+            metadata = msg.metadata if isinstance(msg.metadata, dict) else None
+            automation = metadata.get("automation") if metadata else None
+            if isinstance(automation, dict) and automation.get("kind") == "heartbeat":
+                raw_prompt = (msg.params or {}).get("query")
+                if isinstance(raw_prompt, str):
+                    heartbeat_prompt = raw_prompt
             await self._send_processing_status(
                 stream_rid,
                 msg.session_id,
                 msg.channel_id,
                 is_processing=True,
                 app_id=msg.app_id or "",
+                request_metadata=metadata,
+                content=heartbeat_prompt,
             )
         task = asyncio.create_task(
             self.process_stream(
@@ -4332,10 +4768,20 @@ class MessageHandler(ABC):
     async def _send_processing_status(
         self, request_id: str, session_id: str | None, channel_id: str, *,
         is_processing: bool, app_id: str = "",
+        request_metadata: dict[str, Any] | None = None,
+        content: str | None = None,
     ) -> None:
         """发送 chat.processing_status 事件到客户端。"""
         from jiuwenswarm.common.schema.message import Message, EventType
 
+        payload: dict[str, Any] = {
+            "event_type": "chat.processing_status",
+            "session_id": session_id,
+            "is_processing": is_processing,
+            "is_complete": not is_processing,
+        }
+        if content is not None:
+            payload["content"] = content
         status_msg = Message(
             id=request_id,
             type="event",
@@ -4345,14 +4791,9 @@ class MessageHandler(ABC):
             params={},
             timestamp=time.time(),
             ok=True,
-            payload={
-                "event_type": "chat.processing_status",
-                "session_id": session_id,
-                "is_processing": is_processing,
-                "is_complete": not is_processing
-            },
+            payload=payload,
             event_type=EventType.CHAT_PROCESSING_STATUS,
-            metadata=None,
+            metadata=request_metadata,
         )
         await self.publish_robot_messages(status_msg)
         # 广播全局运行态快照给所有 ws 客户端（不按 session 路由），用于多窗口配置保存锁。
@@ -4468,6 +4909,8 @@ class MessageHandler(ABC):
         self._stream_emits_processing_status.clear()
         self._stream_methods.clear()
         self._stream_modes.clear()
+        self._active_chat_tasks.clear()
+        self._active_chat_sessions.clear()
         pending_disconnect_cancels = list(self._disconnect_cancel_tasks.values())
         for task in pending_disconnect_cancels:
             if not task.done():

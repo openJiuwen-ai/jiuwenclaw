@@ -349,7 +349,7 @@ class ChannelManager(ABC):
                     and msg.channel_id == "feishu"
                     and (
                         (getattr(msg, "id", "") or "").startswith("cron-push-")
-                        or getattr(msg, "event_type", None) == _EventType.HEARTBEAT_RELAY
+                        or getattr(msg, "event_type", None) == _EventType.HEALTH_CHECK_RELAY
                     )
                 )
                 if _is_feishu_fanout:

@@ -109,6 +109,113 @@ async def test_prepare_chat_normalizes_agent_request_for_code_workspace() -> Non
 
 
 @pytest.mark.asyncio
+async def test_prepare_chat_without_mode_restores_locked_session_mode() -> None:
+    """Heartbeat CHAT_SEND without mode continues in the original session mode."""
+    agent = MagicMock()
+    manager = MagicMock()
+    manager.get_agent = AsyncMock(return_value=agent)
+    manager.wait_for_session_prewarm = AsyncMock()
+    server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._agent_manager = manager
+    request = AgentRequest(
+        request_id="heartbeat-run-1",
+        channel_id="web",
+        session_id="heartbeat-session",
+        req_method=ReqMethod.CHAT_SEND,
+        params={
+            "query": "continue",
+            "automation": {
+                "kind": "heartbeat",
+                "job_id": "hb-1",
+                "run_id": "run-1",
+            },
+        },
+        metadata={
+            "automation": {
+                "kind": "heartbeat",
+                "job_id": "hb-1",
+                "run_id": "run-1",
+            }
+        },
+    )
+
+    with (
+        patch(
+            "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
+            return_value={"mode": "code.normal"},
+        ),
+        patch.object(
+            agent_ws_server_module,
+            "_sync_chat_request_metadata",
+            return_value=None,
+        ),
+    ):
+        mode, sub_mode, resolved = await server._prepare_code_mode_chat_turn(
+            request, "web"
+        )
+
+    assert (mode, sub_mode, resolved) == ("code", "normal", agent)
+    assert request.params["mode"] == "code.normal"
+    assert request.params["work_mode"] == "code"
+    manager.get_agent.assert_awaited_once_with(
+        channel_id="web",
+        mode="code",
+        project_dir=None,
+        sub_mode="normal",
+    )
+
+
+@pytest.mark.asyncio
+async def test_prepare_chat_without_mode_restores_locked_work_session_on_tui() -> None:
+    """A legacy work session must not inherit TUI's code default on resume."""
+    agent = MagicMock()
+    manager = MagicMock()
+    manager.get_agent = AsyncMock(return_value=agent)
+    manager.wait_for_session_prewarm = AsyncMock()
+    server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._agent_manager = manager
+    request = AgentRequest(
+        request_id="heartbeat-work-run",
+        channel_id="tui",
+        session_id="heartbeat-work-session",
+        req_method=ReqMethod.CHAT_SEND,
+        params={"query": "continue work session"},
+        metadata={
+            "automation": {
+                "kind": "heartbeat",
+                "job_id": "hb-work",
+                "run_id": "heartbeat-work-run",
+            }
+        },
+    )
+
+    with (
+        patch(
+            "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
+            return_value={"mode": "agent"},
+        ),
+        patch.object(
+            agent_ws_server_module,
+            "_sync_chat_request_metadata",
+            return_value=None,
+        ),
+    ):
+        mode, sub_mode, resolved = await server._prepare_code_mode_chat_turn(
+            request, "tui"
+        )
+
+    assert (mode, sub_mode, resolved) == ("agent", None, agent)
+    assert request.params["mode"] == "agent"
+    assert request.params["work_mode"] == "work"
+    manager.get_agent.assert_awaited_once_with(
+        channel_id="tui",
+        mode="agent",
+        project_dir=None,
+        sub_mode=None,
+    )
+
+
+@pytest.mark.asyncio
 async def test_prepare_team_chat_turn_propagates_locked_project_dir() -> None:
     """The session-locked project dir reaches TeamSpec request metadata.
 

@@ -445,6 +445,7 @@ class CliHandlersBindParams:
     on_config_saved: Any = None
     path: str = "/tui"
     cron_controller: Any = None
+    heartbeat_controller: Any = None
 
 
 @dataclass
@@ -456,6 +457,8 @@ class CliRouteBindParams:
     path: str = "/tui"
     channel_id: str = "tui"
     cron_controller: Any = None
+    # 新 Heartbeat(线程续跑)controller,TUI 通道支持 heartbeat.job.* 调用。
+    heartbeat_controller: Any = None
     # V2: 委托 ws 注册的 TuiChannel 实例。GatewayServer 仍作 /tui ws 宿主 + 入站帧解析，
     # 但把 ws + RoutingKey 委托注册进 TuiChannel 的五维索引，出站由 ChannelManager
     # 派发到 TuiChannel.send（按 delivery.ws_id 物理寻址）。
@@ -818,9 +821,11 @@ def resolve_3rdagent_switch_session_id(params: dict | None) -> str:
 def register_cli_handlers(bind: CliHandlersBindParams) -> None:
     channel = bind.channel
     agent_client = bind.agent_client
+    message_handler = bind.message_handler
     on_config_saved = bind.on_config_saved
     path = bind.path
     cron_controller_ref = bind.cron_controller
+    heartbeat_controller_ref = bind.heartbeat_controller
     from jiuwenswarm.gateway.routing.third_agent import get_unsupported_third_agent
 
     third_agent = bind.third_agent if bind.third_agent is not None else get_unsupported_third_agent()
@@ -1590,6 +1595,25 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
         from jiuwenswarm.common.schema.message import ReqMethod
 
+        async def _notify_heartbeat_session_deleted(deleted_session_id: str) -> None:
+            if message_handler is None:
+                return
+            getter = getattr(
+                message_handler, "get_heartbeat_scheduler_service", None
+            )
+            scheduler = getter() if callable(getter) else None
+            if scheduler is None or not hasattr(scheduler, "on_session_deleted"):
+                return
+            try:
+                await scheduler.on_session_deleted(deleted_session_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[cli session.delete] heartbeat lifecycle hook failed: "
+                    "session_id=%s error=%s",
+                    deleted_session_id,
+                    exc,
+                )
+
         if not isinstance(params, dict):
             await channel.send_response(
                 ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST"
@@ -1623,6 +1647,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 )
                 if resp.ok:
                     pl = resp.payload if isinstance(resp.payload, dict) else {}
+                    await _notify_heartbeat_session_deleted(target)
                     await channel.send_response(ws, req_id, ok=True, payload=pl)
                     return
                 pl = resp.payload if isinstance(resp.payload, dict) else {}
@@ -1694,6 +1719,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 exc,
             )
         shutil.rmtree(session_dir)
+        await _notify_heartbeat_session_deleted(target)
         await channel.send_response(ws, req_id, ok=True, payload={"session_id": target})
 
     async def _forward_rewind_e2a(params: ForwardRewindE2AParams) -> bool:
@@ -3525,6 +3551,272 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
     channel.register_local_handler(path, "cron.job.preview", _cron_job_preview)
     channel.register_local_handler(path, "cron.job.run_now", _cron_job_run_now)
 
+    # ── Heartbeat RPC handlers(线程续跑,与 cron 独立) ────────────────
+    def _get_heartbeat():
+        """Resolve heartbeat_controller from ref dict or direct instance."""
+        if isinstance(heartbeat_controller_ref, dict):
+            return heartbeat_controller_ref.get("value")
+        return heartbeat_controller_ref
+
+    async def _hb_job_list(ws, req_id, params, session_id):
+        hc = _get_heartbeat()
+        if hc is None:
+            await channel.send_response(ws, req_id, ok=False, error="heartbeat not available", code="INTERNAL_ERROR")
+            return
+        try:
+            result = await hc.list_jobs(
+                params if isinstance(params, dict) else {},
+                access_session_id=session_id,
+            )
+            await channel.send_response(ws, req_id, ok=True, payload={"jobs": result.get("jobs", [])})
+        except ValueError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
+        except PermissionError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="FORBIDDEN")
+        except Exception as exc:
+            logger.warning("[heartbeat.job.list] %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+
+    async def _hb_job_meta(ws, req_id, params, session_id):
+        hc = _get_heartbeat()
+        if hc is None:
+            await channel.send_response(ws, req_id, ok=False, error="heartbeat not available", code="INTERNAL_ERROR")
+            return
+        await channel.send_response(ws, req_id, ok=True, payload=hc.get_meta())
+
+    async def _hb_job_get(ws, req_id, params, session_id):
+        hc = _get_heartbeat()
+        if hc is None:
+            await channel.send_response(ws, req_id, ok=False, error="heartbeat not available", code="INTERNAL_ERROR")
+            return
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        job_id = str(params.get("id") or "").strip()
+        if not job_id:
+            await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
+            return
+        try:
+            job = await hc.get_job(job_id, access_session_id=session_id)
+            if job is None:
+                await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+                return
+            await channel.send_response(ws, req_id, ok=True, payload={"job": job})
+        except PermissionError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="FORBIDDEN")
+        except Exception as exc:
+            logger.warning("[heartbeat.job.get] %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+
+    async def _hb_job_create(ws, req_id, params, session_id):
+        hc = _get_heartbeat()
+        if hc is None:
+            await channel.send_response(ws, req_id, ok=False, error="heartbeat not available", code="INTERNAL_ERROR")
+            return
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        # TUI 自动继承当前 channel_id=tui + session_id;source=tui_rpc。
+        create_params = {
+            **params,
+            "channel_id": "tui",
+            "session_id": session_id,
+            "source": "tui_rpc",
+        }
+        try:
+            job = await hc.create_job(create_params)
+            await channel.send_response(ws, req_id, ok=True, payload={"job": job})
+        except ValueError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
+        except Exception as exc:
+            logger.warning("[heartbeat.job.create] %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+
+    async def _hb_job_update(ws, req_id, params, session_id):
+        hc = _get_heartbeat()
+        if hc is None:
+            await channel.send_response(ws, req_id, ok=False, error="heartbeat not available", code="INTERNAL_ERROR")
+            return
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        job_id = str(params.get("id") or "").strip()
+        patch = params.get("patch")
+        if not job_id:
+            await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
+            return
+        if not isinstance(patch, dict):
+            await channel.send_response(ws, req_id, ok=False, error="patch must be object", code="BAD_REQUEST")
+            return
+        try:
+            job = await hc.update_job(job_id, patch, access_session_id=session_id)
+            await channel.send_response(ws, req_id, ok=True, payload={"job": job})
+        except KeyError:
+            await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+        except ValueError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
+        except PermissionError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="FORBIDDEN")
+        except Exception as exc:
+            logger.warning("[heartbeat.job.update] %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+
+    async def _hb_job_delete(ws, req_id, params, session_id):
+        hc = _get_heartbeat()
+        if hc is None:
+            await channel.send_response(ws, req_id, ok=False, error="heartbeat not available", code="INTERNAL_ERROR")
+            return
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        job_id = str(params.get("id") or "").strip()
+        if not job_id:
+            await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
+            return
+        try:
+            result = await hc.delete_job(job_id, access_session_id=session_id)
+            await channel.send_response(ws, req_id, ok=True, payload=result)
+        except KeyError:
+            await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+        except RuntimeError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="CONFLICT")
+        except PermissionError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="FORBIDDEN")
+        except Exception as exc:
+            logger.warning("[heartbeat.job.delete] %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+
+    async def _hb_job_toggle(ws, req_id, params, session_id):
+        hc = _get_heartbeat()
+        if hc is None:
+            await channel.send_response(ws, req_id, ok=False, error="heartbeat not available", code="INTERNAL_ERROR")
+            return
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        job_id = str(params.get("id") or "").strip()
+        if not job_id:
+            await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
+            return
+        enabled = params.get("enabled")
+        if not isinstance(enabled, bool):
+            await channel.send_response(ws, req_id, ok=False, error="enabled must be boolean", code="BAD_REQUEST")
+            return
+        try:
+            job = await hc.toggle_job(job_id, enabled, access_session_id=session_id)
+            await channel.send_response(ws, req_id, ok=True, payload={"job": job})
+        except KeyError:
+            await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+        except ValueError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
+        except PermissionError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="FORBIDDEN")
+        except Exception as exc:
+            logger.warning("[heartbeat.job.toggle] %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+
+    async def _hb_job_preview(ws, req_id, params, session_id):
+        hc = _get_heartbeat()
+        if hc is None:
+            await channel.send_response(ws, req_id, ok=False, error="heartbeat not available", code="INTERNAL_ERROR")
+            return
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        job_id = str(params.get("id") or "").strip()
+        if not job_id:
+            await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
+            return
+        count = 5
+        raw_count = params.get("count")
+        if isinstance(raw_count, int) and raw_count > 0:
+            count = raw_count
+        try:
+            result = await hc.preview_job(job_id, count=count, access_session_id=session_id)
+            await channel.send_response(ws, req_id, ok=True, payload=result)
+        except KeyError:
+            await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+        except ValueError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
+        except PermissionError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="FORBIDDEN")
+        except Exception as exc:
+            logger.warning("[heartbeat.job.preview] %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+
+    async def _hb_job_run_now(ws, req_id, params, session_id):
+        hc = _get_heartbeat()
+        if hc is None:
+            await channel.send_response(ws, req_id, ok=False, error="heartbeat not available", code="INTERNAL_ERROR")
+            return
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        job_id = str(params.get("id") or "").strip()
+        if not job_id:
+            await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
+            return
+        reschedule = params.get("reschedule", False)
+        if not isinstance(reschedule, bool):
+            await channel.send_response(ws, req_id, ok=False, error="reschedule must be boolean", code="BAD_REQUEST")
+            return
+        try:
+            result = await hc.run_now(
+                job_id, reschedule=reschedule, access_session_id=session_id
+            )
+            await channel.send_response(ws, req_id, ok=True, payload=result)
+        except KeyError:
+            await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+        except ValueError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
+        except PermissionError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="FORBIDDEN")
+        except Exception as exc:
+            logger.warning("[heartbeat.job.run_now] %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+
+    async def _hb_job_cancel(ws, req_id, params, session_id):
+        hc = _get_heartbeat()
+        if hc is None:
+            await channel.send_response(ws, req_id, ok=False, error="heartbeat not available", code="INTERNAL_ERROR")
+            return
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        job_id = str(params.get("id") or "").strip()
+        if not job_id:
+            await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
+            return
+        pause_schedule = params.get("pause_schedule", False)
+        if not isinstance(pause_schedule, bool):
+            await channel.send_response(ws, req_id, ok=False, error="pause_schedule must be boolean", code="BAD_REQUEST")
+            return
+        try:
+            result = await hc.cancel_run(
+                job_id,
+                pause_schedule=pause_schedule,
+                access_session_id=session_id,
+            )
+            await channel.send_response(ws, req_id, ok=True, payload=result)
+        except KeyError:
+            await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+        except PermissionError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="FORBIDDEN")
+        except Exception as exc:
+            logger.warning("[heartbeat.job.cancel] %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+
+    channel.register_local_handler(path, "heartbeat.job.list", _hb_job_list)
+    channel.register_local_handler(path, "heartbeat.job.meta", _hb_job_meta)
+    channel.register_local_handler(path, "heartbeat.job.get", _hb_job_get)
+    channel.register_local_handler(path, "heartbeat.job.create", _hb_job_create)
+    channel.register_local_handler(path, "heartbeat.job.update", _hb_job_update)
+    channel.register_local_handler(path, "heartbeat.job.delete", _hb_job_delete)
+    channel.register_local_handler(path, "heartbeat.job.toggle", _hb_job_toggle)
+    channel.register_local_handler(path, "heartbeat.job.preview", _hb_job_preview)
+    channel.register_local_handler(path, "heartbeat.job.run_now", _hb_job_run_now)
+    channel.register_local_handler(path, "heartbeat.job.cancel", _hb_job_cancel)
+
 
 def build_cli_route_binding(bind: CliRouteBindParams) -> GatewayRouteBinding:
     def _install(channel: Any) -> None:
@@ -3537,6 +3829,7 @@ def build_cli_route_binding(bind: CliRouteBindParams) -> GatewayRouteBinding:
                 on_config_saved=bind.on_config_saved,
                 path=bind.path,
                 cron_controller=bind.cron_controller,
+                heartbeat_controller=bind.heartbeat_controller,
             )
         )
 

@@ -62,7 +62,7 @@ _WEB_FULL_PAYLOAD_EVENT_TYPES = frozenset(
         "chat.interrupt_result",
         "chat.evolution_status",
         "chat.error",
-        "heartbeat.relay",
+        "health_check.relay",
         "context.usage",
         "context.compression_state",
         "chat.ask_user_question",
@@ -625,6 +625,24 @@ class WebChannel(BaseWsChannel):
             or event_name.startswith("harness.")
         )
 
+    @staticmethod
+    def _attach_automation_metadata(
+        payload: dict[str, Any], msg: Message
+    ) -> dict[str, Any]:
+        """Expose only the public automation marker, not routing metadata."""
+        message_metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
+        automation = message_metadata.get("automation")
+        if not isinstance(automation, dict) or automation.get("kind") != "heartbeat":
+            return payload
+        payload_metadata = (
+            dict(payload.get("metadata"))
+            if isinstance(payload.get("metadata"), dict)
+            else {}
+        )
+        payload_metadata["automation"] = dict(automation)
+        payload["metadata"] = payload_metadata
+        return payload
+
     @classmethod
     def _build_event_payload(cls, msg: Message, event_name: str) -> dict[str, Any]:
         """Build the Web event payload without dropping structured control fields."""
@@ -635,7 +653,7 @@ class WebChannel(BaseWsChannel):
                     payload["session_id"] = msg.session_id
                 if event_name.startswith("chat.") and "request_id" not in payload and msg.id:
                     payload["request_id"] = msg.id
-                return payload
+                return cls._attach_automation_metadata(payload, msg)
 
             content = str(msg.payload.get("content", "") or "")
             if not content and not getattr(msg, "ok", True) and msg.payload.get("error"):
@@ -664,13 +682,13 @@ class WebChannel(BaseWsChannel):
                         "content_len=%d payload_keys=%s",
                         source, ptype, len(str(payload.get("content", ""))), list(payload.keys()),
                     )
-            return payload
+            return cls._attach_automation_metadata(payload, msg)
 
         content = str((msg.params or {}).get("content", "") or "")
-        return {
+        return cls._attach_automation_metadata({
             "session_id": msg.session_id,
             "content": content,
-        }
+        }, msg)
 
     async def send(
         self,
@@ -692,17 +710,18 @@ class WebChannel(BaseWsChannel):
             getattr(msg, "id", ""), getattr(msg, "event_type", None), _et,
             _has_fanout, routing_target is not None, len(self.clients),
         )
-        # ── 心跳 relay：临时 session_id（heartbeat_{ts}_{suffix}）不匹配任何前端连接，
-        # 按常规 session_id 路由会被当作"无连接"丢弃。心跳状态是全局的（非会话级），
+        # ── health_check relay：临时 session_id（health_check_{ts}_{suffix}，并兼容旧
+        # heartbeat_ 前缀）不匹配任何前端连接，
+        # 按常规 session_id 路由会被当作"无连接"丢弃。探活状态是全局的（非会话级），
         # 前端 setHeartbeatStatus 也是全局 store，因此直接广播给所有 web 客户端。
-        # 与 wechat 等 IM 渠道在 send() 中对 HEARTBEAT_RELAY 的专属分支对齐。
-        if msg.event_type == EventType.HEARTBEAT_RELAY:
+        # 与 wechat 等 IM 渠道在 send() 中对 HEALTH_CHECK_RELAY 的专属分支对齐。
+        if msg.event_type == EventType.HEALTH_CHECK_RELAY:
             frame = self._serialize_frame(msg, None)  # 返回 dict，由 writer 统一序列化
             clients = self.clients
             for w in clients:
                 self._enqueue_send(w, frame)
             logger.debug(
-                "[WebChannel] heartbeat.relay broadcast to %d client(s) id=%s",
+                "[WebChannel] health_check.relay broadcast to %d client(s) id=%s",
                 len(clients), getattr(msg, "id", ""),
             )
             return
@@ -1327,6 +1346,8 @@ class WebChannel(BaseWsChannel):
             payload = {"session_id": getattr(msg, "session_id", None), "content": str(msg.payload)}
         else:
             payload = {"session_id": getattr(msg, "session_id", None), "content": ""}
+
+        payload = self._attach_automation_metadata(payload, msg)
 
         agent_ref = getattr(msg, "agent_ref", None)
         if agent_ref:
