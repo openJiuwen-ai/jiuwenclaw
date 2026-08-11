@@ -800,6 +800,44 @@ def _canonicalize_sandbox_files_path(path: str) -> str:
         return path
 
 
+async def _ensure_live_agent(agent_manager: Any, channel_id: str, mcp_name: str) -> None:
+    """Best-effort: create the channel's agent + build its root DeepAgent.
+
+    mcp.connect (a non-chat RPC) may arrive before any chat created an agent,
+    so apply_mcp_change fans out over zero adapters and fails with "add failed".
+    Even after get_agent, the root adapter's _instance stays None by design (it
+    is a router; live DeepAgents live on per-session children built on the chat
+    path) and register_mcp_by_name skips it → "register failed". Building both
+    here lets the targeted apply below register for real; session children
+    created later re-register from state.json (idempotent via stable server_id).
+
+    Failures are swallowed (warn + return) so the apply path still runs and
+    surfaces a real reason if registration genuinely fails. getattr so test
+    fakes without get_agent/ensure_instance keep working.
+    """
+    get_agent = getattr(agent_manager, "get_agent", None)
+    if not callable(get_agent):
+        return
+    try:
+        agent = await get_agent(channel_id, mode="agent")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[mcp][connect] get_agent for '%s' on channel=%s failed: %s",
+            mcp_name, channel_id, exc,
+        )
+        return
+    ensure = getattr(agent, "ensure_instance", None)
+    if not callable(ensure):
+        return
+    try:
+        await ensure()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[mcp][connect] ensure root DeepAgent for '%s' failed: %s",
+            mcp_name, exc,
+        )
+
+
 _SANDBOX_FILES_PARAMS = frozenset(
     {
         "sub",
@@ -6198,30 +6236,27 @@ class AgentWebSocketServer:
                     connect_failed = False
                     # connect_mcp wrote state=connecting. get_mcp_servers
                     # merges connecting (and connected), so apply_mcp_change
-                    # can read the entry WITHOUT a pre-flip here — that's the
-                    # point of connecting: apply can proceed, while the
-                    # frontend still shows "connecting" (not the phantom
-                    # "connected" a pre-flip would create). Promote to
-                    # connected only AFTER apply succeeds (below); on failure
-                    # roll back (marketplace → remove record; custom →
-                    # registered) so a bad MCP doesn't stay "connecting"
-                    # forever and re-trigger on every restart.
+                    # can read the entry WITHOUT a pre-flip here.
                     try:
+                        # Cold-start guard: mcp.connect may arrive before any
+                        # chat created an agent, so apply_mcp_change fans out
+                        # over zero adapters → "add failed". 
+                        await _ensure_live_agent(
+                            self._agent_manager, request.channel_id, name
+                        )
                         # Phase-2: targeted single-MCP register (no full reload).
                         # apply_mcp_change raises RuntimeError when NO adapter
-                        # applied the register (e.g. the MCP server returned an
-                        # error, or the SDK raised a cancel-scope error during
-                        # add) — surface that as a connect_failed to the frontend
-                        # instead of a silent "connected".
-                        await self._agent_manager.apply_mcp_change(name, "add")
+                        # applied the register.
+                        await self._agent_manager.apply_mcp_change(
+                            name, "add", target_channel_id=request.channel_id,
+                        )
                     except Exception as reload_exc:  # noqa: BLE001
                         # apply_mcp_change surfaces plain Exceptions only:
                         # openjiuwen add_tool_server coerces any
                         # CancelledError/BaseExceptionGroup from the MCP SDK's
                         # streamable-http teardown into a WorkflowError, and
                         # register_mcp_by_name wraps the first failure in a
-                        # RuntimeError. Treat it as connect_failed so the
-                        # frontend gets a real reason instead of hanging.
+                        # RuntimeError. 
                         reload_msg = str(reload_exc) or repr(reload_exc)
                         applied = False
                         error_message = reload_msg
