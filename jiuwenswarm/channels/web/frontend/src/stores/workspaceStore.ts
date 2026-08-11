@@ -209,7 +209,9 @@ function shouldKeepPendingLocalSession(session: Session): boolean {
   if (session.pinned) return false;
   if (!getSessionTitle(session)) return false;
   const runtime = useChatStore.getState().getRuntime(session.session_id);
-  return session.is_processing === true || runtime?.isProcessing === true;
+  return session.is_processing === true
+    || runtime?.isProcessing === true
+    || runtime?.isPaused === true;
 }
 
 function reconcileVisibleProjectSessions(serverSessions: Session[], visibleSessions: Session[]): Session[] {

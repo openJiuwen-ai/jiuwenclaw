@@ -121,6 +121,9 @@ export function InteractionPrompt({ pending, onSubmit }: InteractionPromptProps)
     [patch],
   );
 
+  /** 当前页是否选了 Other 却未填写自定义内容（禁止前进/提交，避免空答触发 thinking）。 */
+  const incompleteCustom = st.customActive && !st.custom.trim();
+
   /** 把某页状态转为一个 UserAnswer。 */
   const answerFor = useCallback(
     (idx: number, overrides?: Record<number, PageState>): UserAnswer => {
@@ -131,6 +134,10 @@ export function InteractionPrompt({ pending, onSubmit }: InteractionPromptProps)
       // 不再套用下面「默认选第一项」的兜底（否则会把跳过误传成某个具体选项）。
       if (s.skippedNoSelection && s.selected.length === 0 && !customText) {
         return { question: q?.question, selected_options: [], custom_input: SKIPPED_ANSWER_TEXT };
+      }
+      // Other 已激活但未输入：不得回落成第一个普通选项（#2330）。
+      if (s.customActive && !customText) {
+        return { question: q?.question, selected_options: [], custom_input: '' };
       }
       const answer: UserAnswer = { question: q?.question, selected_options: [...s.selected] };
       if (customText) answer.custom_input = customText;
@@ -209,9 +216,11 @@ export function InteractionPrompt({ pending, onSubmit }: InteractionPromptProps)
   }, [total]);
 
   const handleNextOrConfirm = useCallback(() => {
+    // Other 空输入：留在当前页提示用户填写，勿提交以免进入黄色 thinking（#2330）。
+    if (incompleteCustom) return;
     if (isLast) submit(true);
     else goNextPage();
-  }, [isLast, submit, goNextPage]);
+  }, [incompleteCustom, isLast, submit, goNextPage]);
 
   const handleSkip = useCallback(() => {
     // 跳过：无论当前页此前是否已经选中过某个选项/填过自定义输入，点击"跳过"
@@ -353,7 +362,7 @@ export function InteractionPrompt({ pending, onSubmit }: InteractionPromptProps)
           type="button"
           className="ix-btn ix-btn--primary"
           onClick={handleNextOrConfirm}
-          disabled={submitting}
+          disabled={submitting || incompleteCustom}
         >
           {isLast ? t('interactionPrompt.confirm') : t('interactionPrompt.nextStep')}
         </button>

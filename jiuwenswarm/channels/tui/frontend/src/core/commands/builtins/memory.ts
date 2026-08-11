@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { dirname, join, parse, relative } from "node:path";
 import { addError, addInfo, makeItem } from "../helpers.js";
 import { CommandKind, type SlashCommand } from "../types.js";
-import { getEditorInfo } from "../../utils/editor.js";
+import { getEditorEnvironmentHint } from "../../utils/editor.js";
 import {
   findGitRoot,
   formatMemoryPathForDisplay,
@@ -477,18 +477,18 @@ async function editMemoryByPath(
         return;
       }
       if (ctx.openInEditor) {
-        const { source, value } = getEditorInfo();
-        const editorHint = source !== "default"
-          ? `(${source}="${value}")`
-          : "(default: vi)";
+        const editorEnvironmentHint = getEditorEnvironmentHint();
         // openInEditor blocks until the editor window closes (TUI frozen in
-        // the meantime). Emit the "Opened…" line in onDone, i.e. AFTER the
-        // editor exits — matches CC's editFileInEditor → onDone("Opened…").
-        ctx.openInEditor(path, () => {
+        // the meantime). Report the result only after the editor exits.
+        await ctx.openInEditor(path, (success) => {
+          if (success === false) {
+            ctx.addItem(addError(ctx.sessionId, `Failed to open editor for memory file: ${displayPath}`));
+            return;
+          }
           ctx.addItem(
             addInfo(
               ctx.sessionId,
-              `Opened memory file at ${displayPath} ${editorHint}`,
+              `Memory file edited successfully: ${displayPath}\n\n> ${editorEnvironmentHint}`,
               "m",
             ),
           );
@@ -520,19 +520,18 @@ async function editMemoryByPath(
     if (ctx.openInEditor) {
       const projectDir = ctx.getCurrentProjectDir();
       const displayPath = getDisplayPath(payload.path, projectDir);
-      const { source, value } = getEditorInfo();
-      const editorHint = source !== "default"
-        ? `(${source}="${value}")`
-        : "(default: vi)";
-
+      const editorEnvironmentHint = getEditorEnvironmentHint();
       // openInEditor blocks until the editor window closes (TUI frozen in
-      // the meantime). Emit the "Opened…" line in onDone, AFTER the editor
-      // exits — matches CC's editFileInEditor → onDone("Opened…").
-      ctx.openInEditor(payload.path, () => {
+      // the meantime). Report the result only after the editor exits.
+      await ctx.openInEditor(payload.path, (success) => {
+        if (success === false) {
+          ctx.addItem(addError(ctx.sessionId, `Failed to open editor for memory file: ${displayPath}`));
+          return;
+        }
         ctx.addItem(
           addInfo(
             ctx.sessionId,
-            `Opened memory file at ${displayPath} ${editorHint}`,
+            `Memory file edited successfully: ${displayPath}\n\n> ${editorEnvironmentHint}`,
             "m",
           ),
         );
@@ -679,7 +678,7 @@ async function showMemoryStatus(
 
 // ---- MemoryActionRegistry: 单一数据源（按 mode 过滤）----
 // 消除 TOGGLE_KEYS(4) 与 toggle completion(3) 漂移；开关集合按 mode 自适应。
-// agent mode: memory_enabled / memory_proactive / memory_forbidden_enabled
+// agent mode: memory_enabled / memory_forbidden_enabled
 // code mode:  memory_enabled / auto_coding_memory / memory_forbidden_enabled
 
 type MemoryModeCategory = "agent" | "code";
@@ -701,13 +700,13 @@ const TOGGLE_DEFS: ToggleDef[] = [
       mode === "code" ? "modes.code.memory.enabled" : `modes.agent.${mode}.memory.enabled`,
     readValue: (p) => p.enabled,
   },
-  {
-    key: "memory_proactive",
-    label: "Proactive memory",
-    modes: ["agent"],
-    getConfigPath: (mode) => `modes.agent.${mode}.memory.is_proactive`,
-    readValue: (p) => p.proactive,
-  },
+      // {
+      //   key: "memory_proactive",
+      //   label: "Proactive memory",
+      //   modes: ["agent"],
+      //   getConfigPath: (mode) => `modes.agent.${mode}.memory.is_proactive`,
+      //   readValue: (p) => p.proactive,
+      // },
   {
     key: "auto_coding_memory",
     label: "Auto coding memory",
@@ -971,7 +970,7 @@ export function createMemoryCommand(): SlashCommand {
       },
       {
         name: "toggle",
-        description: "Toggle memory settings (memory_enabled, memory_proactive, memory_forbidden_enabled)",
+        description: "Toggle memory settings (memory_enabled, memory_forbidden_enabled)",
         usage: "/memory toggle [key]",
         example: "/memory toggle memory_enabled",
         kind: CommandKind.BUILT_IN,

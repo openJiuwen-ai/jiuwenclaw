@@ -137,6 +137,37 @@ async def test_browser_runtime_restart_supports_sdk_without_runtime_reset():
 
 
 @pytest.mark.asyncio
+async def test_browser_runtime_restart_uses_identity_scoped_sdk_reset():
+    calls = []
+
+    async def reset_managed_browser_runtime(**kwargs):
+        calls.append(kwargs)
+        return 1
+
+    reset_runtimes = await agent_ws_server_module._reset_requested_browser_runtime_if_available(
+        SimpleNamespace(
+            reset_managed_browser_runtime=reset_managed_browser_runtime,
+        ),
+        {
+            "browser_key": "",
+            "profile_name": "jiuwenclaw",
+            "display_mode": "headed",
+            "browser_binary": "C:\\Chrome\\chrome.exe",
+        },
+    )
+
+    assert reset_runtimes == 1
+    assert calls == [
+        {
+            "browser_key": "",
+            "profile_name": "jiuwenclaw",
+            "display_mode": "headed",
+            "browser_binary": "C:\\Chrome\\chrome.exe",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_handle_command_add_dir_returns_path_and_remember(
     server, fake_ws, monkeypatch
 ):

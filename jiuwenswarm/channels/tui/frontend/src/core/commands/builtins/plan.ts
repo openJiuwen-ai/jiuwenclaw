@@ -1,7 +1,19 @@
 import { addInfo } from "../helpers.js";
+import type { ClientMode } from "../../modes.js";
 import { CommandKind, type SlashCommand } from "../types.js";
 
 const CODE_MODES = new Set(["code.normal", "code.team", "code.plan"]);
+
+/** Resolve the plan variant while preserving the current agent/team profile. */
+export function resolvePlanTarget(mode: ClientMode): ClientMode {
+  if (mode === "team" || mode === "team.plan" || mode === "team.plan.normal") {
+    return "team.plan.normal";
+  }
+  if (mode === "code.team" || mode === "team.plan.code") {
+    return "team.plan.code";
+  }
+  return CODE_MODES.has(mode) ? "code.plan" : "agent.plan";
+}
 
 export function createPlanCommand(): SlashCommand {
   return {
@@ -12,20 +24,8 @@ export function createPlanCommand(): SlashCommand {
     kind: CommandKind.BUILT_IN,
     takesArgs: true,
     action: (ctx, args) => {
-      if (ctx.mode === "team" || ctx.mode === "team.plan") {
-        ctx.addItem(
-          addInfo(
-            ctx.sessionId,
-            "/plan does not apply in team mode; switch mode first (e.g. /mode agent).",
-            "p",
-          ),
-        );
-        return;
-      }
-
       const value = args.trim();
-      // Preserve the mode family: code.* → code.plan, agent.* → agent.plan
-      const target = CODE_MODES.has(ctx.mode) ? "code.plan" : "agent.plan";
+      const target = resolvePlanTarget(ctx.mode);
       if (ctx.mode !== target) {
         ctx.setMode(target);
       }

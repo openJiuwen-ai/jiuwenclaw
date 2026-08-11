@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import math
 import os
@@ -833,7 +834,7 @@ async def broadcast_evolution_progress(
     events: list[Any],
     *,
     parse_stream_chunk: Callable[[Any], dict[str, Any] | None],
-    broadcast_event: Callable[[str | None, str, dict[str, Any]], None],
+    broadcast_event: Callable[[str | None, str, dict[str, Any]], Any],
 ) -> None:
     for evt in events:
         if (
@@ -844,7 +845,9 @@ async def broadcast_evolution_progress(
             continue
         parsed = parse_stream_chunk(evt)
         if parsed is not None:
-            broadcast_event(channel_id, session_id, parsed)
+            result = broadcast_event(channel_id, session_id, parsed)
+            if inspect.isawaitable(result):
+                await result
 
 
 async def push_evolution_progress(

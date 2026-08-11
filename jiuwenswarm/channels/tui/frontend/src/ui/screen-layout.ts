@@ -1,5 +1,5 @@
 import type { AppSnapshot } from "../app-state.js";
-import { isTeamMode } from "../core/modes.js";
+import { formatModeForDisplay, isTeamMode } from "../core/modes.js";
 import { renderTeamPanel } from "./components/team-panel.js";
 import { isTeamWorking } from "./components/team-shared.js";
 import { renderTodoList } from "./components/todo-list.js";
@@ -132,7 +132,11 @@ function connectionStatusLabel(status: AppSnapshot["connectionStatus"]): string 
 }
 
 function isPlanMode(mode: AppSnapshot["mode"]): boolean {
-  return mode === "agent.plan" || mode === "code.plan" || mode === "team.plan";
+  return (
+    mode === "agent.plan" ||
+    mode === "code.plan" ||
+    mode.startsWith("team.plan")
+  );
 }
 
 function buildStatusLines(
@@ -152,7 +156,7 @@ function buildStatusLines(
     const displayTitle = raw.length > 30 ? raw.slice(0, 30) + "..." : raw;
     left.push(displayTitle);
   }
-  left.push(`mode:${snapshot.mode}`);
+  left.push(`mode:${formatModeForDisplay(snapshot.mode)}`);
   if (isPlanMode(snapshot.mode)) left.push("使用 /mode 退出plan模式");
   if (snapshot.transcriptFoldMode !== "none") left.push(`fold:${snapshot.transcriptFoldMode}`);
   const teamWorking =

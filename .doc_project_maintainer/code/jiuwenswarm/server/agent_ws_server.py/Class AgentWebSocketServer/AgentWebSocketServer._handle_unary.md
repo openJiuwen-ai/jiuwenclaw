@@ -24,14 +24,14 @@ health:
   observability: clear
   performance_risk: low
 audit:
-  status: agent_audited
+  status: audit_expired
   auditor: codex
   audited_at: 2026-07-14T11:37:47Z
   audited_commit: 39feee89e00dc6b0b6a6b16ca80a527beb631bd7
   audited_source_hash: sha256:5fbbae5104a1791ca98014aeed0b81fea243b57dcd2faac3f8f37886833c4fa5
   audited_symbol_hash: sha256:9b7fd3efb8a44f6abdb8414dd5d632e92b304e1d3deb58ea45884b31562030d8
   confidence: confirmed
-  expired_reason: null
+  expired_reason: "2026-08-01 source split into a foreground guard wrapper and _handle_unary_impl."
 issues:
   - id: ISSUE-001
     dimension: error_handling
@@ -55,7 +55,7 @@ details: {}
 
 ## Actual Role
 
-Routes non-stream initialize, session-create/fork, and ACP tool-response requests to dedicated handlers. Stateless methods use the lightweight agent directly; other requests prepare mode/agent state, reconcile plan mode, invoke `process_message`, run the plan-exit check, preserve or fill `agent_ref`, then encode and send one bounded response under the connection lock. `_handle_message` owns cancellation, closed-socket, and generic-error normalization.
+Wraps unary handling with the warm-pool foreground guard for chat-like methods. It increments the foreground count before delegating to `_handle_unary_impl` and releases it in `finally`; non-chat unary methods delegate without touching warm scheduling.
 
 ## Key Signals
 

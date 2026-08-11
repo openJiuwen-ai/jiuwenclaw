@@ -47,7 +47,8 @@ class TestResolveMode:
         assert resolve_mode("code.plan") == "code.plan"
         assert resolve_mode("code.team") == "code.team"
         assert resolve_mode("team") == "team"
-        assert resolve_mode("team.plan") == "team.plan"
+        assert resolve_mode("team.plan.normal") == "team.plan.normal"
+        assert resolve_mode("team.plan.code") == "team.plan.code"
 
     @staticmethod
     def test_alias_resolution():
@@ -56,6 +57,7 @@ class TestResolveMode:
         assert resolve_mode("agent.plan") == "agent"
         assert resolve_mode("agent.fast") == "agent"
         assert resolve_mode("code") == "code.normal"
+        assert resolve_mode("team.plan") == "team.plan.normal"
 
     @staticmethod
     def test_case_insensitive():

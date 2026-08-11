@@ -598,7 +598,7 @@ Field reference:
 | `sandbox.preserve_file_sharing_mode` | `mount` | `mount` | Intrinsic files (`AGENT.md` etc.) and `project_dir` are bind-mounted, with `project_dir/config/config.yaml` auto-added to `deny_write`. Writing any other value is rejected. |
 | `sandbox.enabled` | bool | `false` | When true, agent rebuilds route tools through the sandbox provider; toggled by `/sandbox enable`. |
 | `sandbox.excluded_commands` | list[str] | `[]` | Shell globs matched against the **full command string**; a match makes that single call run locally instead of in the sandbox. |
-| `sandbox.files.allow` / `sandbox.files.deny` | list | `[]` | User-configured write policy. The effective set shown by `/sandbox status` is `auto_managed ∪ user_configured`; see [the `/sandbox` design doc](../../agent-core/docs/en/2.Development%20Guide/Sandbox%20and%20sandbox%20command.md). |
+| `sandbox.files.allow` / `sandbox.files.deny` | list | `[]` | User-configured write policy. The effective set shown by `/sandbox status` is `auto_managed ∪ user_configured`; see [the `/sandbox` command reference](../docs/en/SlashCommands.md). |
 
 ### Two typical deployment shapes
 

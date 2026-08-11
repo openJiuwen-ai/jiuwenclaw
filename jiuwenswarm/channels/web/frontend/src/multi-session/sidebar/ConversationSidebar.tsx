@@ -32,6 +32,7 @@ import {
   isProjectDirectoryPickerSupported,
   selectProjectDirectory,
 } from '../../features/workspace/projectDirectoryPicker';
+import { toDisplaySessionTitle } from '../../utils/documentMessage';
 import './ConversationSidebar.css';
 import '../dialogs/dialogs.css';
 import AddProjectIcon from '../../assets/work-mode/add-project.svg?react';
@@ -122,7 +123,8 @@ export function formatRelativeTime(
 }
 
 function getSessionTitle(session: Session, fallback: string): string {
-  return session.display_title?.trim() || session.title?.trim() || fallback;
+  const raw = session.display_title?.trim() || session.title?.trim() || fallback;
+  return toDisplaySessionTitle(raw) || fallback;
 }
 
 const menuIconByAction: Record<SidebarMenuAction, React.ComponentType<React.SVGProps<SVGSVGElement>>> = {
@@ -196,7 +198,10 @@ function ConversationListItem({
   const title = getSessionTitle(session, t('multiSession.untitled'));
   const errorMessage = runtime?.error || runtime?.executionError || null;
   const indicator = getSessionIndicator(runtime, unread, session.is_processing === true, Boolean(errorMessage));
-  const deleteDisabled = indicator === 'processing' || indicator === 'waiting';
+  const deleteDisabled =
+    runtime?.isProcessing === true ||
+    session.is_processing === true ||
+    Boolean(runtime?.pendingQuestion);
 
   let status: React.ReactNode;
   if (indicator === 'waiting') {
@@ -640,7 +645,11 @@ function ProjectCreateDialog({
         >
           <CloseIcon aria-hidden />
         </button>
-        <div className="conversation-path-dialog__title">{t('multiSession.project.newProject')}</div>
+        <div className="conversation-path-dialog__title">
+          {mode === 'existing'
+            ? t('multiSession.project.selectExisting')
+            : t('multiSession.project.createBlank')}
+        </div>
         <input
           className="conversation-path-dialog__input"
           value={name}
@@ -653,7 +662,7 @@ function ProjectCreateDialog({
             className="conversation-path-dialog__input"
             value={projectDir}
             onChange={(event) => setProjectDir(event.target.value)}
-            placeholder="/Users/name/work/project"
+            placeholder={t('multiSession.project.pathPlaceholder')}
           />
         ) : null}
         {error ? <div className="conversation-path-dialog__error">{error}</div> : null}
