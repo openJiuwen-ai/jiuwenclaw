@@ -4,20 +4,7 @@ import type { AgentCatalogItem, RequestStatus } from '../../features/agentManage
 import { DefinitionCard } from './DefinitionCard';
 
 const PAGE_SIZE = 12;
-const CATEGORIES = [
-  'IndustryConsultant',
-  'ProductDevelopment',
-  'Marketing',
-  'Efficiency',
-  'DataAnalysis',
-  'Design',
-  'SafetyCompliance',
-  'Communication',
-  'Engineering',
-  'Life',
-  'Custom',
-  'Other',
-];
+const CATEGORIES = ['ProductDevelopment', 'Marketing', 'Efficiency', 'DataAnalysis', 'ContentCreation', 'SafetyCompliance', 'Communication', 'Other'];
 
 type CatalogPageProps = {
   scope: 'catalog' | 'mine';
@@ -84,7 +71,7 @@ export function CatalogPage({
               >
                 {t('agentManagement.categoryAll')}
               </button>
-              {CATEGORIES.map((item) => (
+              {CATEGORIES.map(item => (
                 <button
                   key={item}
                   type="button"
@@ -98,16 +85,29 @@ export function CatalogPage({
               ))}
             </>
           ) : (
-            <span className="agent-management-category agent-management-category--subtab is-active" role="tab" aria-selected="true">
-              {t('agentManagement.tabs.catalog')}
-            </span>
+            <>
+              <span className="agent-management-category agent-management-category--subtab is-active" role="tab" aria-selected="true">
+                {t('agentManagement.tabs.agent')}
+              </span>
+              <span
+                className="agent-management-category agent-management-category--subtab is-disabled"
+                role="tab"
+                aria-selected="false"
+                aria-disabled="true"
+                title={t('agentManagement.states.teamUnavailable')}
+              >
+                {t('agentManagement.tabs.teamMine')}
+              </span>
+            </>
           )}
         </div>
       </div>
 
       {status === 'loading' ? (
         <div className={`agent-management-card-grid ${isMine ? 'is-mine' : ''}`} aria-label={t('common.loading')}>
-          {Array.from({ length: isMine ? 6 : 12 }, (_, index) => <SkeletonCard key={index} />)}
+          {Array.from({ length: isMine ? 6 : 12 }, (_, index) => (
+            <SkeletonCard key={index} />
+          ))}
         </div>
       ) : status === 'error' ? (
         <div className="agent-management-state agent-management-state--error" role="alert">
@@ -118,7 +118,9 @@ export function CatalogPage({
         </div>
       ) : isEmpty ? (
         <div className="agent-management-state">
-          <div className="agent-management-state__icon" aria-hidden="true">⌁</div>
+          <div className="agent-management-state__icon" aria-hidden="true">
+            ⌁
+          </div>
           <p>{hasQuery ? t('agentManagement.states.noMatch') : t(isMine ? 'agentManagement.states.mineEmpty' : 'agentManagement.states.catalogEmpty')}</p>
           {isMine && !hasQuery ? (
             <button type="button" className="agent-management-button agent-management-button--primary" onClick={onCreate}>
@@ -129,7 +131,7 @@ export function CatalogPage({
       ) : (
         <>
           <div className={`agent-management-card-grid ${isMine ? 'is-mine' : ''}`}>
-            {items.map((item) => (
+            {items.map(item => (
               <DefinitionCard
                 key={item.id}
                 item={item}
@@ -144,7 +146,9 @@ export function CatalogPage({
           </div>
           {totalPages > 1 ? (
             <div className="agent-management-pagination" aria-label={t('agentManagement.pagination.label')}>
-              <span>{t('agentManagement.pagination.range', { start: (page - 1) * PAGE_SIZE + 1, end: Math.min(page * PAGE_SIZE, totalItems), total: totalItems })}</span>
+              <span>
+                {t('agentManagement.pagination.range', { start: (page - 1) * PAGE_SIZE + 1, end: Math.min(page * PAGE_SIZE, totalItems), total: totalItems })}
+              </span>
               <div className="agent-management-pagination__buttons">
                 <button type="button" disabled={page <= 1} onClick={() => onPageChange(page - 1)} aria-label={t('agentManagement.pagination.previous')}>
                   <ChevronLeft size={16} aria-hidden="true" />

@@ -2794,7 +2794,6 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                         value={agentPickerQuery}
                         onChange={(event) => setAgentPickerQuery(event.target.value)}
                         placeholder={t('chat.agentSearchPlaceholder')}
-                        autoFocus
                       />
                     </label>
                     {agentOptionsStatus === 'loading' ? (

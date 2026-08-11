@@ -11,6 +11,9 @@ export type RawAgentTemplateListItem = {
   source?: string;
   installed?: boolean;
   enabled?: boolean;
+  updateAvailable?: boolean;
+  tags?: RawAgentTag[];
+  avatar?: string;
 };
 
 export type RawAgentCapability = {
@@ -25,11 +28,9 @@ export type RawAgentTag = RawLocalizedText & {
 };
 
 export type RawAgentTemplateDetail = RawAgentTemplateListItem & {
-  avatar?: string;
   version?: string;
   details?: string;
   prompt?: string;
-  tags?: RawAgentTag[];
   skills?: RawAgentCapability[];
   tools?: RawAgentCapability[];
   rails?: RawAgentCapability[];
@@ -48,6 +49,7 @@ export type RawAgentDetailPayload = {
 export type RawAgentFileEntry = {
   path: string;
   type: 'file' | 'dir';
+  visible?: boolean;
   size?: number;
   children?: RawAgentFileEntry[];
 };

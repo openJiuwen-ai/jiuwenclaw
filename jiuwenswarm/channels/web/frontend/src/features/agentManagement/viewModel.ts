@@ -1,4 +1,4 @@
-import type { AgentCatalogItem, AgentDetail } from './types';
+import type { AgentCatalogItem, AgentDetail, DefinitionFileEntry } from './types';
 
 export type CatalogScope = 'catalog' | 'mine';
 
@@ -8,6 +8,21 @@ export type CatalogViewModel = {
   page: number;
   totalPages: number;
 };
+
+export function findFirstPreviewableFile(entries: DefinitionFileEntry[]): string | null {
+  const preferred = entries.find(
+    entry => entry.visible !== false && entry.kind === 'file' && entry.relativePath.toLowerCase().startsWith('persona/') && entry.previewable,
+  );
+  if (preferred) return preferred.relativePath;
+
+  for (const entry of entries) {
+    if (entry.visible === false) continue;
+    if (entry.kind === 'file' && entry.previewable) return entry.relativePath;
+    const nested = entry.children ? findFirstPreviewableFile(entry.children) : null;
+    if (nested) return nested;
+  }
+  return null;
+}
 
 export function mergeAgentDetailWithCatalog(detail: AgentDetail, catalogItem: AgentCatalogItem | undefined): AgentDetail {
   if (!catalogItem) return detail;
@@ -20,6 +35,9 @@ export function mergeAgentDetailWithCatalog(detail: AgentDetail, catalogItem: Ag
     source: catalogItem.source,
     installed: catalogItem.installed,
     ...(catalogItem.enabled !== undefined ? { enabled: catalogItem.enabled } : {}),
+    ...(catalogItem.updateAvailable !== undefined ? { updateAvailable: catalogItem.updateAvailable } : {}),
+    tags: detail.tags.length > 0 ? detail.tags : catalogItem.tags,
+    avatarUrl: detail.avatarUrl || catalogItem.avatarUrl,
   };
 }
 
@@ -34,7 +52,7 @@ export function buildCatalogViewModel(
   },
 ): CatalogViewModel {
   const query = options.query.trim().toLocaleLowerCase();
-  const filtered = catalog.filter((item) => {
+  const filtered = catalog.filter(item => {
     if (options.scope === 'mine' && item.source !== 'local' && !item.installed) {
       return false;
     }

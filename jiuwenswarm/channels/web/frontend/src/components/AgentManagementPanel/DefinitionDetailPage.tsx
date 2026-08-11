@@ -24,6 +24,7 @@ type DefinitionDetailPageProps = {
   onRetryFiles: () => void;
   onSelectFile: (path: string) => void;
   onUse: (id: string) => void;
+  onUsePrompt?: (id: string, prompt: string) => void;
   onInstall: (id: string) => void;
   onUninstall: (id: string) => void;
 };
@@ -72,6 +73,7 @@ export function DefinitionDetailPage({
   onRetryFiles,
   onSelectFile,
   onUse,
+  onUsePrompt,
   onInstall,
   onUninstall,
 }: DefinitionDetailPageProps) {
@@ -123,7 +125,9 @@ export function DefinitionDetailPage({
                 {t(`agentManagement.categories.${detail.category}`, { defaultValue: detail.category || t('agentManagement.categoryOther') })}
               </span>
               <span className="agent-management-source">
-                {detail.source === 'builtin' ? t('agentManagement.source.builtin') : t('agentManagement.source.local')}
+                {t('agentManagement.detail.sourcePrefix', {
+                  source: detail.source === 'builtin' ? t('agentManagement.source.builtin') : t('agentManagement.source.local'),
+                })}
               </span>
               {detail.installed ? <span className="agent-management-installed">{t('agentManagement.states.installed')}</span> : null}
             </div>
@@ -181,13 +185,21 @@ export function DefinitionDetailPage({
       </div>
 
       {detail.suggestedPrompts.length > 0 ? (
-        <section className="agent-management-detail-section">
+        <section className="agent-management-detail-section agent-management-detail-section--prompts">
           <h2>{t('agentManagement.detail.quickInputs')}</h2>
           <div className="agent-management-prompt-list">
             {detail.suggestedPrompts.map(prompt => (
               <div key={prompt} className="agent-management-prompt">
                 <span>{prompt}</span>
-                <Send size={15} aria-hidden="true" />
+                <button
+                  type="button"
+                  className="agent-management-prompt__send"
+                  aria-label={t('agentManagement.detail.usePrompt', { prompt })}
+                  disabled={!canUse || busy || !onUsePrompt}
+                  onClick={() => onUsePrompt?.(detail.id, prompt)}
+                >
+                  <Send size={16} aria-hidden="true" />
+                </button>
               </div>
             ))}
           </div>

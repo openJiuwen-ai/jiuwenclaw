@@ -15,9 +15,16 @@ type AgentEditorProps = {
   onSave: () => void;
 };
 
+const TAG_OPTIONS = [
+  { id: 'code-delivery', labelKey: 'agentManagement.form.tagOptions.codeDelivery' },
+  { id: 'code-review', labelKey: 'agentManagement.form.tagOptions.codeReview' },
+  { id: 'bug-fix', labelKey: 'agentManagement.form.tagOptions.bugFix' },
+] as const;
+
 export function AgentEditor({ draft, skillOptions, skillsStatus, saving, error, onChange, onReloadSkills, onCancel, onSave }: AgentEditorProps) {
   const { t } = useTranslation();
   const [touched, setTouched] = useState(false);
+  const [tagMenuOpen, setTagMenuOpen] = useState(false);
   const errors = useMemo(
     () => ({
       id: !draft.id.trim()
@@ -39,6 +46,20 @@ export function AgentEditor({ draft, skillOptions, skillsStatus, saving, error, 
     const skillRefs = draft.skillRefs.includes(skillId) ? draft.skillRefs.filter(item => item !== skillId) : [...draft.skillRefs, skillId];
     update({ skillRefs });
   };
+
+  const toggleTag = (tagId: string) => {
+    const tagIds = draft.tagIds.includes(tagId) ? draft.tagIds.filter(item => item !== tagId) : [...draft.tagIds, tagId];
+    update({ tagIds });
+  };
+
+  const updatePrompt = (index: number, value: string) => {
+    const suggestedPrompts = draft.suggestedPrompts.map((prompt, promptIndex) => (promptIndex === index ? value : prompt));
+    update({ suggestedPrompts });
+  };
+
+  const addPrompt = () => update({ suggestedPrompts: [...draft.suggestedPrompts, ''] });
+
+  const removePrompt = (index: number) => update({ suggestedPrompts: draft.suggestedPrompts.filter((_, promptIndex) => promptIndex !== index) });
 
   const handleSubmit = (event: FormEvent) => {
     event.preventDefault();
@@ -62,6 +83,9 @@ export function AgentEditor({ draft, skillOptions, skillsStatus, saving, error, 
           <span className="is-disabled" role="tab" aria-selected="false" aria-disabled="true">
             {t('agentManagement.form.createTeamTab')}
           </span>
+          <span className="is-disabled" role="tab" aria-selected="false" aria-disabled="true">
+            {t('agentManagement.tabs.mine')}
+          </span>
         </div>
       </header>
 
@@ -70,14 +94,14 @@ export function AgentEditor({ draft, skillOptions, skillsStatus, saving, error, 
         <div className="agent-management-form-profile">
           <span className="agent-management-avatar-placeholder" aria-hidden="true">
             <img src="/agent-management/avatar-yellow.svg" alt="" />
-            <span className="agent-management-avatar-placeholder__upload">
-              <Upload size={14} aria-hidden="true" />
-            </span>
+          </span>
+          <span className="agent-management-avatar-placeholder__upload" aria-hidden="true">
+            <Upload size={14} aria-hidden="true" />
           </span>
           <p>{t('agentManagement.form.avatarHint')}</p>
         </div>
         <div className="agent-management-form-grid">
-          <label className="agent-management-form-field--wide">
+          <label className="agent-management-form-field--wide agent-management-form-field--runtime-id">
             <span>{t('agentManagement.form.idLabel')}</span>
             <input
               value={draft.id}
@@ -100,16 +124,66 @@ export function AgentEditor({ draft, skillOptions, skillsStatus, saving, error, 
           <label className="agent-management-form-field--wide">
             <span>{t('agentManagement.form.descriptionLabel')}</span>
             <textarea
-              rows={4}
-              maxLength={300}
+              rows={2}
+              maxLength={226}
               value={draft.description}
               onChange={event => update({ description: event.target.value })}
               placeholder={t('agentManagement.form.descriptionPlaceholder')}
               aria-invalid={Boolean(touched && errors.description)}
             />
-            <small className="agent-management-field-count">{draft.description.length}/300</small>
+            <small className="agent-management-field-count">{draft.description.length}/226</small>
             {touched && errors.description ? <small className="agent-management-field-error">{errors.description}</small> : null}
           </label>
+          <div className="agent-management-form-field--wide agent-management-form-field--tag-picker">
+            <span>{t('agentManagement.form.tagLabel')}</span>
+            <div className="agent-management-tag-picker">
+              <button
+                type="button"
+                className="agent-management-tag-picker__trigger"
+                aria-expanded={tagMenuOpen}
+                aria-haspopup="listbox"
+                onClick={() => setTagMenuOpen(open => !open)}
+              >
+                <span className="agent-management-tag-picker__values">
+                  {draft.tagIds.length > 0 ? (
+                    draft.tagIds.map(tagId => {
+                      const option = TAG_OPTIONS.find(item => item.id === tagId);
+                      return option ? (
+                        <span key={tagId} className="agent-management-tag agent-management-tag--selected">
+                          {t(option.labelKey)}
+                          <span aria-hidden="true">×</span>
+                        </span>
+                      ) : null;
+                    })
+                  ) : (
+                    <span className="agent-management-form-placeholder">{t('agentManagement.form.tagPlaceholder')}</span>
+                  )}
+                </span>
+                <span className="agent-management-tag-picker__chevron" aria-hidden="true">
+                  ⌄
+                </span>
+              </button>
+              {tagMenuOpen ? (
+                <div className="agent-management-tag-picker__options" role="listbox" aria-label={t('agentManagement.form.tagLabel')}>
+                  {TAG_OPTIONS.map(option => {
+                    const selected = draft.tagIds.includes(option.id);
+                    return (
+                      <button
+                        key={option.id}
+                        type="button"
+                        role="option"
+                        aria-selected={selected}
+                        className={selected ? 'is-selected' : ''}
+                        onClick={() => toggleTag(option.id)}
+                      >
+                        {t(option.labelKey)}
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : null}
+            </div>
+          </div>
           <label className="agent-management-form-field--wide">
             <span>{t('agentManagement.form.personaLabel')}</span>
             <textarea
@@ -172,6 +246,28 @@ export function AgentEditor({ draft, skillOptions, skillsStatus, saving, error, 
             })}
           </div>
         ) : null}
+      </section>
+
+      <section className="agent-management-form-section agent-management-form-section--prompts">
+        <div className="agent-management-form-section__header">
+          <div>
+            <h2>{t('agentManagement.form.promptsLabel')}</h2>
+          </div>
+          <button type="button" className="agent-management-inline-action" onClick={addPrompt}>
+            <Plus size={14} aria-hidden="true" />
+            {t('agentManagement.form.addPrompt')}
+          </button>
+        </div>
+        <div className="agent-management-prompt-editor-list">
+          {draft.suggestedPrompts.map((prompt, index) => (
+            <div className="agent-management-prompt-editor" key={index}>
+              <input value={prompt} onChange={event => updatePrompt(index, event.target.value)} placeholder={t('agentManagement.form.promptPlaceholder')} />
+              <button type="button" onClick={() => removePrompt(index)} aria-label={t('agentManagement.form.removePrompt')}>
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
       </section>
 
       {error ? (

@@ -1,12 +1,4 @@
-import type {
-  AgentCapability,
-  AgentCatalogItem,
-  AgentDetail,
-  AgentFileContent,
-  AgentSource,
-  DefinitionFileEntry,
-  SkillOption,
-} from './types';
+import type { AgentCapability, AgentCatalogItem, AgentDetail, AgentFileContent, AgentSource, DefinitionFileEntry, SkillOption } from './types';
 import type {
   RawAgentCapability,
   RawAgentFileEntry,
@@ -49,20 +41,17 @@ function normalizeCapability(raw: RawAgentCapability, locale: SupportedLocale): 
 
 function normalizeTags(tags: RawAgentTag[] | undefined, locale: SupportedLocale): AgentCatalogItem['tags'] {
   return (tags || [])
-    .map((tag) => {
+    .map(tag => {
       const label = resolveLocalizedText(tag, locale);
       return {
         id: tag.id || label,
         label,
       };
     })
-    .filter((tag) => tag.label.length > 0);
+    .filter(tag => tag.label.length > 0);
 }
 
-export function normalizeAgentTemplateListItem(
-  raw: RawAgentTemplateListItem,
-  locale: SupportedLocale,
-): AgentCatalogItem {
+export function normalizeAgentTemplateListItem(raw: RawAgentTemplateListItem, locale: SupportedLocale): AgentCatalogItem {
   return {
     id: raw.id,
     displayName: resolveLocalizedText(raw.displayName, locale) || raw.id,
@@ -71,40 +60,33 @@ export function normalizeAgentTemplateListItem(
     source: normalizeAgentSource(raw.source),
     installed: raw.installed === true,
     ...(typeof raw.enabled === 'boolean' ? { enabled: raw.enabled } : {}),
-    tags: [],
-    avatarUrl: null,
+    ...(typeof raw.updateAvailable === 'boolean' ? { updateAvailable: raw.updateAvailable } : {}),
+    tags: normalizeTags(raw.tags, locale),
+    avatarUrl: raw.avatar ? raw.avatar : null,
   };
 }
 
-export function normalizeAgentTemplateDetail(
-  raw: RawAgentTemplateDetail,
-  locale: SupportedLocale,
-): AgentDetail {
+export function normalizeAgentTemplateDetail(raw: RawAgentTemplateDetail, locale: SupportedLocale): AgentDetail {
   const base = normalizeAgentTemplateListItem(raw, locale);
   return {
     ...base,
-    tags: normalizeTags(raw.tags, locale),
-    avatarUrl: raw.avatar ? raw.avatar : null,
     prompt: raw.prompt || '',
     details: raw.details || '',
-    skills: (raw.skills || []).map((item) => normalizeCapability(item, locale)),
-    tools: (raw.tools || []).map((item) => normalizeCapability(item, locale)),
-    rails: (raw.rails || []).map((item) => normalizeCapability(item, locale)),
-    mcps: (raw.mcps || []).map((item) => normalizeCapability(item, locale)),
-    suggestedPrompts: (raw.quickInputs || [])
-      .map((item) => resolveLocalizedText(item, locale))
-      .filter((item) => item.length > 0),
+    skills: (raw.skills || []).map(item => normalizeCapability(item, locale)),
+    tools: (raw.tools || []).map(item => normalizeCapability(item, locale)),
+    rails: (raw.rails || []).map(item => normalizeCapability(item, locale)),
+    mcps: (raw.mcps || []).map(item => normalizeCapability(item, locale)),
+    suggestedPrompts: (raw.quickInputs || []).map(item => resolveLocalizedText(item, locale)).filter(item => item.length > 0),
   };
 }
 
-export function normalizeAgentFileTree(
-  entries: RawAgentFileEntry[] | undefined,
-): DefinitionFileEntry[] {
-  return (entries || []).map((entry) => {
+export function normalizeAgentFileTree(entries: RawAgentFileEntry[] | undefined): DefinitionFileEntry[] {
+  return (entries || []).map(entry => {
     const isDirectory = entry.type === 'dir';
     return {
       relativePath: entry.path,
       kind: isDirectory ? 'directory' : 'file',
+      ...(entry.visible !== undefined ? { visible: entry.visible } : {}),
       size: entry.size,
       children: isDirectory ? normalizeAgentFileTree(entry.children) : undefined,
       previewable: !isDirectory && isPreviewableFile(entry.path),
@@ -112,9 +94,7 @@ export function normalizeAgentFileTree(
   });
 }
 
-export function normalizeAgentFileContent(
-  raw: RawAgentFileReadPayload,
-): AgentFileContent {
+export function normalizeAgentFileContent(raw: RawAgentFileReadPayload): AgentFileContent {
   return {
     relativePath: raw.path || '',
     content: raw.content || '',

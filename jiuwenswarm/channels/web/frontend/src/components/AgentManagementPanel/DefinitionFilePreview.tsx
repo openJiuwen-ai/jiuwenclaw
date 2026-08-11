@@ -17,26 +17,15 @@ type DefinitionFilePreviewProps = {
   onSelectFile: (relativePath: string) => void;
 };
 
-function sortEntries(entries: DefinitionFileEntry[]): DefinitionFileEntry[] {
-  return [...entries].sort((a, b) => {
-    if (a.kind !== b.kind) return a.kind === 'directory' ? -1 : 1;
-    return a.relativePath.localeCompare(b.relativePath, 'zh-Hans-CN');
-  });
-}
-
 function getLabel(path: string): string {
   return path.replace(/\/$/, '').split('/').filter(Boolean).pop() || path;
 }
 
-function findExpandedDirectories(entries: DefinitionFileEntry[], selectedPath: string): Set<string> {
+function findExpandedDirectories(entries: DefinitionFileEntry[]): Set<string> {
   const expanded = new Set<string>();
   const visit = (items: DefinitionFileEntry[]) => {
     for (const item of items) {
-      if (item.kind !== 'directory') continue;
-      if (!selectedPath.startsWith(item.relativePath)) {
-        visit(item.children || []);
-        continue;
-      }
+      if (item.visible === false || item.kind !== 'directory') continue;
       expanded.add(item.relativePath);
       visit(item.children || []);
     }
@@ -60,27 +49,41 @@ function TreeEntry({
   selectedFilePath: string | null;
   onSelectFile: (path: string) => void;
 }) {
+  if (entry.visible === false) return null;
   const isDirectory = entry.kind === 'directory';
   const isExpanded = expanded.has(entry.relativePath);
   const label = getLabel(entry.relativePath);
+  const isSkillDefinition = !isDirectory && label.toLowerCase() === 'skill.md';
   return (
     <div>
       <button
         type="button"
-        className={`agent-management-file-entry${selectedFilePath === entry.relativePath ? ' is-selected' : ''}${!isDirectory && !entry.previewable ? ' is-unsupported' : ''}`}
+        className={`agent-management-file-entry${selectedFilePath === entry.relativePath ? ' is-selected' : ''}${!isDirectory && !entry.previewable ? ' is-unsupported' : ''}${isSkillDefinition ? ' is-skill-definition' : ''}`}
         style={{ paddingLeft: `calc(${depth} * var(--agent-management-file-indent) + var(--agent-management-file-pad))` }}
         onClick={() => (isDirectory ? onToggle(entry.relativePath) : onSelectFile(entry.relativePath))}
         aria-label={label}
         title={entry.relativePath}
       >
         <span className="agent-management-file-entry__chevron" aria-hidden="true">
-          {isDirectory ? (isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />) : null}
+          {isDirectory ? isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} /> : null}
         </span>
         {isDirectory ? <Folder size={15} aria-hidden="true" /> : <FileText size={15} aria-hidden="true" />}
         <span className="agent-management-file-entry__label">{label}</span>
       </button>
       {isDirectory && isExpanded ? (
-        <div>{sortEntries(entry.children || []).map((child) => <TreeEntry key={child.relativePath} entry={child} depth={depth + 1} expanded={expanded} onToggle={onToggle} selectedFilePath={selectedFilePath} onSelectFile={onSelectFile} />)}</div>
+        <div>
+          {(entry.children || []).map(child => (
+            <TreeEntry
+              key={child.relativePath}
+              entry={child}
+              depth={depth + 1}
+              expanded={expanded}
+              onToggle={onToggle}
+              selectedFilePath={selectedFilePath}
+              onSelectFile={onSelectFile}
+            />
+          ))}
+        </div>
       ) : null}
     </div>
   );
@@ -112,12 +115,12 @@ export function DefinitionFilePreview({
 
   useEffect(() => {
     if (filesStatus === 'success' && selectedFilePath) {
-      setExpanded(findExpandedDirectories(files, selectedFilePath));
+      setExpanded(findExpandedDirectories(files));
     }
   }, [files, filesStatus, selectedFilePath]);
 
   const toggleFolder = (path: string) => {
-    setExpanded((current) => {
+    setExpanded(current => {
       const next = new Set(current);
       if (next.has(path)) next.delete(path);
       else next.add(path);
@@ -156,11 +159,25 @@ export function DefinitionFilePreview({
         {filesStatus === 'error' ? (
           <div className="agent-management-file-state agent-management-file-state--error">
             <p>{filesError || t('agentManagement.files.loadError')}</p>
-            <button type="button" className="agent-management-button agent-management-button--secondary" onClick={onRetryFiles}>{t('common.retry')}</button>
+            <button type="button" className="agent-management-button agent-management-button--secondary" onClick={onRetryFiles}>
+              {t('common.retry')}
+            </button>
           </div>
         ) : null}
         {filesStatus === 'success' && files.length === 0 ? <div className="agent-management-file-state">{t('agentManagement.files.empty')}</div> : null}
-        {filesStatus === 'success' ? sortEntries(files).map((entry) => <TreeEntry key={entry.relativePath} entry={entry} depth={0} expanded={expanded} onToggle={toggleFolder} selectedFilePath={selectedFilePath} onSelectFile={onSelectFile} />) : null}
+        {filesStatus === 'success'
+          ? files.map(entry => (
+              <TreeEntry
+                key={entry.relativePath}
+                entry={entry}
+                depth={0}
+                expanded={expanded}
+                onToggle={toggleFolder}
+                selectedFilePath={selectedFilePath}
+                onSelectFile={onSelectFile}
+              />
+            ))
+          : null}
       </aside>
       <section className="agent-management-file-content" aria-live="polite">
         {!selectedFilePath ? <div className="agent-management-file-state">{t('agentManagement.files.select')}</div> : null}
@@ -170,22 +187,42 @@ export function DefinitionFilePreview({
             <header className="agent-management-file-content__header">
               <span title={selectedFilePath}>{getLabel(selectedFilePath)}</span>
               <div className="agent-management-file-content__actions">
-                <button type="button" onClick={handleCopy} disabled={!fileContent || fileStatus !== 'success'} aria-label={t('agentManagement.files.copy')} title={t('agentManagement.files.copy')}>
+                <button
+                  type="button"
+                  onClick={handleCopy}
+                  disabled={!fileContent || fileStatus !== 'success'}
+                  aria-label={t('agentManagement.files.copy')}
+                  title={t('agentManagement.files.copy')}
+                >
                   <Clipboard size={16} aria-hidden="true" />
                   {copyState === 'copied' ? t('agentManagement.files.copied') : copyState === 'failed' ? t('agentManagement.files.copyFailed') : null}
                 </button>
-                <button type="button" onClick={handleDownload} disabled={!fileContent || fileStatus !== 'success'} aria-label={t('agentManagement.files.download')} title={t('agentManagement.files.download')}>
+                <button
+                  type="button"
+                  onClick={handleDownload}
+                  disabled={!fileContent || fileStatus !== 'success'}
+                  aria-label={t('agentManagement.files.download')}
+                  title={t('agentManagement.files.download')}
+                >
                   <Download size={16} aria-hidden="true" />
                 </button>
               </div>
             </header>
             <div className="agent-management-file-content__body">
               {fileStatus === 'loading' ? <div className="agent-management-file-state">{t('common.loading')}</div> : null}
-              {fileStatus === 'error' ? <div className="agent-management-file-state agent-management-file-state--error">{fileError || t('agentManagement.files.readError')}</div> : null}
-              {fileStatus === 'success' && fileContent && (selectedFilePath.toLowerCase().endsWith('.md') || selectedFilePath.toLowerCase().endsWith('.mdx')) ? (
-                <article className="prose prose-sm max-w-none agent-management-markdown"><ReactMarkdown>{fileContent.content || ' '}</ReactMarkdown></article>
+              {fileStatus === 'error' ? (
+                <div className="agent-management-file-state agent-management-file-state--error">{fileError || t('agentManagement.files.readError')}</div>
               ) : null}
-              {fileStatus === 'success' && fileContent && selectedFilePath.toLowerCase().endsWith('.json') ? <pre className="agent-management-code">{formattedContent || ' '}</pre> : null}
+              {fileStatus === 'success' &&
+              fileContent &&
+              (selectedFilePath.toLowerCase().endsWith('.md') || selectedFilePath.toLowerCase().endsWith('.mdx')) ? (
+                <article className="prose prose-sm max-w-none agent-management-markdown">
+                  <ReactMarkdown>{fileContent.content || ' '}</ReactMarkdown>
+                </article>
+              ) : null}
+              {fileStatus === 'success' && fileContent && selectedFilePath.toLowerCase().endsWith('.json') ? (
+                <pre className="agent-management-code">{formattedContent || ' '}</pre>
+              ) : null}
             </div>
           </>
         ) : null}

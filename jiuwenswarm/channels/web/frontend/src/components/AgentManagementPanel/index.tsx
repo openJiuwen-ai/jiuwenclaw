@@ -1,4 +1,4 @@
-import { ChevronDown, Plus, Search } from 'lucide-react';
+import { ChevronDown, Search } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { CatalogPage, PAGE_SIZE } from './CatalogPage';
@@ -12,6 +12,7 @@ import {
   type DefinitionFileEntry,
   agentManagementReducer,
   buildCatalogViewModel,
+  findFirstPreviewableFile,
   initialAgentManagementState,
   isPreviewableFile,
   mergeAgentDetailWithCatalog,
@@ -22,6 +23,7 @@ type PanelView = 'catalog' | 'mine' | 'detail' | 'create';
 
 type AgentManagementPanelProps = {
   onUseAgent?: (id: string) => void;
+  onUsePrompt?: (id: string, prompt: string) => void;
 };
 
 const EMPTY_DRAFT: AgentDraft = {
@@ -29,25 +31,16 @@ const EMPTY_DRAFT: AgentDraft = {
   name: '',
   description: '',
   persona: '',
+  tagIds: [],
   skillRefs: [],
+  suggestedPrompts: [],
 };
 
 function getErrorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
 }
 
-function findFirstPreviewableFile(entries: DefinitionFileEntry[]): string | null {
-  const preferred = entries.find(entry => entry.kind === 'file' && entry.relativePath.toLowerCase().startsWith('persona/') && entry.previewable);
-  if (preferred) return preferred.relativePath;
-  for (const entry of entries) {
-    if (entry.kind === 'file' && entry.previewable) return entry.relativePath;
-    const nested = entry.children ? findFirstPreviewableFile(entry.children) : null;
-    if (nested) return nested;
-  }
-  return null;
-}
-
-export function AgentManagementPanel({ onUseAgent }: AgentManagementPanelProps) {
+export function AgentManagementPanel({ onUseAgent, onUsePrompt }: AgentManagementPanelProps) {
   const { t } = useTranslation();
   const client = useMemo<AgentManagementClient>(() => createAgentManagementClient(), []);
   const [state, dispatch] = useReducer(agentManagementReducer, initialAgentManagementState);
@@ -217,7 +210,7 @@ export function AgentManagementPanel({ onUseAgent }: AgentManagementPanelProps) 
   };
 
   const handleUse = (id: string) => {
-    const item = catalogRef.current.find((candidate) => candidate.id === id);
+    const item = catalogRef.current.find(candidate => candidate.id === id);
     if (!item?.installed || item.enabled === false) return;
     onUseAgent?.(id);
   };
@@ -277,6 +270,7 @@ export function AgentManagementPanel({ onUseAgent }: AgentManagementPanelProps) 
           }
           onSelectFile={handleSelectFile}
           onUse={handleUse}
+          onUsePrompt={onUsePrompt}
           onInstall={handleInstall}
           onUninstall={handleUninstall}
         />
@@ -325,6 +319,15 @@ export function AgentManagementPanel({ onUseAgent }: AgentManagementPanelProps) 
           >
             {t('agentManagement.tabs.catalog')}
           </button>
+          <span
+            className="agent-management-primary-tab agent-management-primary-tab--disabled"
+            role="tab"
+            aria-selected="false"
+            aria-disabled="true"
+            title={t('agentManagement.states.teamUnavailable')}
+          >
+            {t('agentManagement.tabs.team')}
+          </span>
           <button
             type="button"
             role="tab"
@@ -358,7 +361,6 @@ export function AgentManagementPanel({ onUseAgent }: AgentManagementPanelProps) 
                 aria-expanded={createMenuOpen}
                 onClick={() => setCreateMenuOpen(open => !open)}
               >
-                <Plus size={16} aria-hidden="true" />
                 {t('agentManagement.actions.create')}
                 <ChevronDown size={15} aria-hidden="true" />
               </button>
@@ -367,6 +369,22 @@ export function AgentManagementPanel({ onUseAgent }: AgentManagementPanelProps) 
                   <button type="button" role="menuitem" onClick={openCreate}>
                     {t('agentManagement.actions.createFirst')}
                   </button>
+                  <span
+                    className="agent-management-create-menu__disabled"
+                    role="menuitem"
+                    aria-disabled="true"
+                    title={t('agentManagement.states.featureUnavailable')}
+                  >
+                    {t('agentManagement.actions.createByChat')}
+                  </span>
+                  <span
+                    className="agent-management-create-menu__disabled"
+                    role="menuitem"
+                    aria-disabled="true"
+                    title={t('agentManagement.states.featureUnavailable')}
+                  >
+                    {t('agentManagement.actions.createByUpload')}
+                  </span>
                 </div>
               ) : null}
             </div>

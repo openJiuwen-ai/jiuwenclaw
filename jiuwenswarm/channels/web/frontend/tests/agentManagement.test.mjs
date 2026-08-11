@@ -11,8 +11,7 @@ import {
 import { buildDefinitionSelectionPayload } from '../node_modules/.cache/agent-management/port.js';
 import { FixtureAgentManagementClient } from '../node_modules/.cache/agent-management/fixture.js';
 import { agentManagementReducer, initialAgentManagementState } from '../node_modules/.cache/agent-management/state.js';
-import { buildCatalogViewModel } from '../node_modules/.cache/agent-management/viewModel.js';
-import { mergeAgentDetailWithCatalog } from '../node_modules/.cache/agent-management/viewModel.js';
+import { buildCatalogViewModel, findFirstPreviewableFile, mergeAgentDetailWithCatalog } from '../node_modules/.cache/agent-management/viewModel.js';
 
 test('normalizes interface source variants and bilingual display fields', () => {
   assert.equal(normalizeAgentSource('built-in'), 'builtin');
@@ -111,13 +110,28 @@ test('normalizes package file tree and keeps preview policy extension-based', ()
   assert.equal(isPreviewableFile('runtime.bin'), false);
 
   const tree = normalizeAgentFileTree([
-    { path: 'persona/', type: 'dir', children: [{ path: 'persona/agent.md', type: 'file', size: 12 }] },
+    {
+      path: 'persona/',
+      type: 'dir',
+      children: [
+        { path: 'persona/hidden.md', type: 'file', visible: false, size: 12 },
+        { path: 'persona/agent.md', type: 'file', size: 12 },
+      ],
+    },
     { path: 'manifest.json', type: 'file', size: 42 },
   ]);
 
   assert.equal(tree[0].kind, 'directory');
-  assert.equal(tree[0].children[0].previewable, true);
+  assert.equal(tree[0].children[0].visible, false);
+  assert.equal(tree[0].children[1].previewable, true);
   assert.equal(tree[1].previewable, true);
+});
+
+test('initial file selection skips hidden previewable files', async () => {
+  const client = new FixtureAgentManagementClient();
+  const files = await client.getDefinitionFiles('content-creator');
+
+  assert.equal(findFirstPreviewableFile(files), '文件/SKILL.md');
 });
 
 test('selection payload preserves keep, clear and select semantics', () => {
@@ -131,16 +145,16 @@ test('selection payload preserves keep, clear and select semantics', () => {
 test('fixture writes refresh authoritative list state instead of optimistic UI state', async () => {
   const client = new FixtureAgentManagementClient();
   const before = await client.listCatalog();
-  assert.equal(before.find((item) => item.id === 'python-code-reviewer')?.installed, false);
+  assert.equal(before.find(item => item.id === 'python-code-reviewer')?.installed, false);
 
   const result = await client.installDefinition('python-code-reviewer');
   assert.deepEqual(result, { kind: 'ok' });
   const afterInstall = await client.listCatalog();
-  assert.equal(afterInstall.find((item) => item.id === 'python-code-reviewer')?.installed, true);
+  assert.equal(afterInstall.find(item => item.id === 'python-code-reviewer')?.installed, true);
 
   await client.uninstallDefinition('python-code-reviewer');
   const afterUninstall = await client.listCatalog();
-  assert.equal(afterUninstall.find((item) => item.id === 'python-code-reviewer')?.installed, false);
+  assert.equal(afterUninstall.find(item => item.id === 'python-code-reviewer')?.installed, false);
 });
 
 test('fixture fault controls expose deterministic request error states', async () => {
@@ -151,11 +165,20 @@ test('fixture fault controls expose deterministic request error states', async (
 test('fixture projects the active locale through list and detail adapters', async () => {
   const client = new FixtureAgentManagementClient({ locale: () => 'en' });
   const catalog = await client.listCatalog();
-  assert.equal(catalog.find((item) => item.id === 'content-creator')?.displayName, 'Content Creation Expert');
+  assert.equal(catalog.find(item => item.id === 'content-creator')?.displayName, 'Software Engineer');
+  assert.deepEqual(
+    catalog.find(item => item.id === 'content-creator')?.tags.map(tag => tag.label),
+    ['Efficiency', 'Content Creation'],
+  );
 
   const detail = await client.getDefinition('content-creator');
-  assert.equal(detail.displayName, 'Content Creation Expert');
-  assert.match(detail.details, /Content Creation Expert/);
+  assert.equal(detail.displayName, 'Software Engineer');
+  assert.match(detail.details, /Software Engineer/);
+  assert.deepEqual(detail.suggestedPrompts, [
+    '"A null pointer exception occurs during login. Analyze the traceback and fix it in the sandbox."',
+    '"Add a PDF invoice export feature, including the API, backend logic, and automated tests."',
+    '"Refactor the order processing module for efficiency and readability with a cross-file change plan."',
+  ]);
 });
 
 test('fixture create adds a local definition and its file source remains addressable', async () => {
@@ -165,18 +188,32 @@ test('fixture create adds a local definition and its file source remains address
     name: '自定义专家',
     description: '用于测试创建流程',
     persona: '你是一个测试专家。',
+    tagIds: ['code-delivery'],
     skillRefs: [],
+    suggestedPrompts: ['请帮我测试创建流程'],
   });
 
-  const created = (await client.listCatalog()).find((item) => item.id === 'custom-agent');
+  const created = (await client.listCatalog()).find(item => item.id === 'custom-agent');
   assert.equal(created?.source, 'local');
   assert.equal(created?.installed, false);
+  assert.deepEqual(created?.tags, [{ id: 'code-delivery', label: '代码交付' }]);
 
   const files = await client.getDefinitionFiles('custom-agent');
-  assert.equal(files.some((entry) => entry.relativePath === 'README.md'), true);
-  assert.equal(files.some((entry) => entry.relativePath === 'rails/' && entry.children?.some((child) => child.relativePath === 'rails/slim_reminder_rail.py')), true);
+  assert.equal(
+    files.some(entry => entry.relativePath === 'README.md'),
+    true,
+  );
+  assert.equal(
+    files.some(entry => entry.relativePath === 'rails/' && entry.children?.some(child => child.relativePath === 'rails/slim_reminder_rail.py')),
+    true,
+  );
   const content = await client.getDefinitionFile('custom-agent', 'README.md');
   assert.match(content.content, /自定义专家/);
+
+  const createdDetail = await client.getDefinition('custom-agent');
+  assert.deepEqual(createdDetail.suggestedPrompts, ['请帮我测试创建流程']);
+  assert.deepEqual(createdDetail.tags, [{ id: 'code-delivery', label: '代码交付' }]);
+  assert.match(createdDetail.details, /你是一个测试专家/);
 });
 
 test('catalog view model filters mine/search and clamps pages deterministically', () => {
@@ -194,12 +231,19 @@ test('catalog view model filters mine/search and clamps pages deterministically'
 
   assert.equal(view.totalItems, 1);
   assert.equal(view.page, 1);
-  assert.deepEqual(view.items.map((item) => item.id), ['a']);
+  assert.deepEqual(
+    view.items.map(item => item.id),
+    ['a'],
+  );
 
-  const installedBuiltin = buildCatalogViewModel([
-    { id: 'builtin', displayName: '官方', description: '', category: '', source: 'builtin', installed: true, tags: [], avatarUrl: null },
-  ], { scope: 'mine', category: '', query: '', page: 1, pageSize: 6 });
-  assert.deepEqual(installedBuiltin.items.map((item) => item.id), ['builtin']);
+  const installedBuiltin = buildCatalogViewModel(
+    [{ id: 'builtin', displayName: '官方', description: '', category: '', source: 'builtin', installed: true, tags: [], avatarUrl: null }],
+    { scope: 'mine', category: '', query: '', page: 1, pageSize: 6 },
+  );
+  assert.deepEqual(
+    installedBuiltin.items.map(item => item.id),
+    ['builtin'],
+  );
 });
 
 test('canonical reducer keeps file selection and content status separate from source DTOs', () => {

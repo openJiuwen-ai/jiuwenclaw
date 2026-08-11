@@ -2120,6 +2120,11 @@ function AppContent({
     requestComposerFocus();
   }, [requestComposerFocus]);
 
+  const handleUseAgentPrompt = useCallback((agentId: string, prompt: string) => {
+    enterNewConversation('agent', { initialInputValue: prompt });
+    useSessionStore.getState().setAgentSelectionIntent(NEW_CONVERSATION_ID, { kind: 'select', id: agentId });
+  }, [enterNewConversation]);
+
   const handleSendMessage = useCallback(async (content: string, mediaItems?: MediaItem[]) => {
     const currentSessionId = sessionIdRef.current;
     if (!currentSessionId) return;
@@ -2956,7 +2961,7 @@ function AppContent({
         )}
         {activeNav === 'agents' && (
           <div className="app-section">
-            <AgentManagementPanel onUseAgent={handleUseAgent} />
+            <AgentManagementPanel onUseAgent={handleUseAgent} onUsePrompt={handleUseAgentPrompt} />
           </div>
         )}
         {activeNav === 'teams' && (

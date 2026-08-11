@@ -12,6 +12,7 @@ export type AgentCatalogItem = {
   source: AgentSource;
   installed: boolean;
   enabled?: boolean;
+  updateAvailable?: boolean;
   tags: Array<{ id: string; label: string }>;
   avatarUrl: string | null;
 };
@@ -35,6 +36,7 @@ export type AgentDetail = AgentCatalogItem & {
 export type DefinitionFileEntry = {
   relativePath: string;
   kind: 'file' | 'directory';
+  visible?: boolean;
   size?: number;
   children?: DefinitionFileEntry[];
   previewable: boolean;
@@ -56,13 +58,12 @@ export type AgentDraft = {
   name: string;
   description: string;
   persona: string;
+  tagIds: string[];
   skillRefs: string[];
+  suggestedPrompts: string[];
 };
 
-export type AgentSelectionIntent =
-  | { kind: 'keep' }
-  | { kind: 'clear' }
-  | { kind: 'select'; id: string };
+export type AgentSelectionIntent = { kind: 'keep' } | { kind: 'clear' } | { kind: 'select'; id: string };
 
 export type AgentManagementErrorShape = {
   code: string;

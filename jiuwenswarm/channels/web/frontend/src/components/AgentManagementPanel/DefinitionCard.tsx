@@ -1,3 +1,4 @@
+import { Bell } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { getAgentAvatarUrl, type AgentCatalogItem } from '../../features/agentManagement';
 
@@ -34,12 +35,31 @@ export function DefinitionCard({ item, scope, busy, onOpen, onUse, onInstall, on
             {avatarUrl ? <img src={avatarUrl} alt="" /> : <span className="agent-management-avatar__letter">{getAvatarLetter(item.displayName)}</span>}
           </span>
           <span className="agent-management-card__content">
-            <span className="agent-management-card__title">{item.displayName}</span>
+            <span className="agent-management-card__title-row">
+              <span className="agent-management-card__title">{item.displayName}</span>
+              {scope === 'mine' && item.updateAvailable ? (
+                <span className="agent-management-card__update">
+                  <Bell size={16} aria-hidden="true" />
+                  <span className="agent-management-card__update-dot" aria-hidden="true" />
+                  <span className="agent-management-card__update-tooltip" role="status">
+                    {t('agentManagement.states.newVersion')}
+                  </span>
+                </span>
+              ) : null}
+            </span>
             {scope === 'mine' ? (
               <span className="agent-management-card__meta">
                 <span className="agent-management-tag">
                   {t(`agentManagement.categories.${item.category}`, { defaultValue: item.category || t('agentManagement.categoryOther') })}
                 </span>
+              </span>
+            ) : item.tags.length > 0 ? (
+              <span className="agent-management-card__meta">
+                {item.tags.map(tag => (
+                  <span key={tag.id} className="agent-management-tag">
+                    {tag.label}
+                  </span>
+                ))}
               </span>
             ) : null}
           </span>
