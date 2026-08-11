@@ -2,7 +2,7 @@
 
 """HeartbeatJob 模型 / schedule 校验 / 状态机不变量单元测试.
 
-对应方案 §12:
+覆盖范围:
   - schedule 计算: interval 基于 now 重算; cron 复用 helper; once 到点 completed。
   - 状态机: enabled=true 但 status!=scheduled 的手改不一致 job 被跳过(不变量)。
   - 状态机: 重新激活 completed/expired/disabled → scheduled + 重算 next_run_at。
@@ -288,7 +288,7 @@ def test_job_is_schedulable_requires_enabled_and_scheduled_and_next_run() -> Non
 
 
 # ---------------------------------------------------------------------------
-# 状态机不变量(方案 §2.5)
+# 状态机不变量
 # ---------------------------------------------------------------------------
 
 
@@ -330,7 +330,7 @@ def test_invariant_running_does_not_require_terminal_fields() -> None:
 
 
 # ---------------------------------------------------------------------------
-# source 审计(方案 §2.6)
+# source 审计
 # ---------------------------------------------------------------------------
 
 

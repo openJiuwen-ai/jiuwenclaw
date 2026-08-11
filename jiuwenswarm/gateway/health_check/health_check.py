@@ -2,7 +2,7 @@
 
 """HealthCheck(旧 Heartbeat 探活)— Gateway 内周期性向 AgentServer 发送探活请求.
 
-本模块是旧 ``gateway/heartbeat/heartbeat.py`` 的迁移目标(方案 §2.3 命名铁律):
+本模块承接旧 ``gateway/heartbeat/heartbeat.py`` 的探活能力：
 旧 ``heartbeat.*`` 探活协议改名到 ``health_check.*`` 命名空间,与新
 Heartbeat 任务(线程续跑,``gateway/heartbeat/``)严格区分。探活不再读取
 ``HEARTBEAT.md`` 或执行其中的用户任务。

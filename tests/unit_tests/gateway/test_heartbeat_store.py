@@ -2,7 +2,7 @@
 
 """HeartbeatJobStore 单元测试:CRUD + 状态机方法 + 状态机不变量 + reload.
 
-对应方案 §12:
+覆盖范围:
   - 状态机: update/toggle 重新激活 completed/expired/disabled → scheduled + 重算 next_run_at。
   - 停止条件: delete_after_run=true 执行后 completed 保留记录。
   - store reload: heartbeat_jobs.json 外部修改后 reload 生效。
@@ -209,7 +209,7 @@ async def test_delete_after_run_marks_completed(store: HeartbeatJobStore) -> Non
 
 
 # ---------------------------------------------------------------------------
-# update / toggle 状态机联动(方案 §2.5 重新激活)
+# update / toggle 状态机联动
 # ---------------------------------------------------------------------------
 
 

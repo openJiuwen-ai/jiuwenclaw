@@ -2,15 +2,13 @@
 
 """HeartbeatSessionResolver — 会话存在性检查与会话删除通知.
 
-第一版只做最小检查(方案 §7.5):
+这里只做最小检查:
   - ``resolve(channel_id, session_id)``：session 目录存在且 metadata 可读时返回会话摘要,否则 None。
   - ``on_session_deleted(session_id)``：会话删除/归档时通知 scheduler 清理关联任务。
 
 是否真正可投递、是否要取消当前流、是否做通道路由,应交给
 ``MessageHandler.publish_user_messages()`` 以及既有 MessageHandler 流程处理,
 避免 Heartbeat 新增一套与现有消息入口不一致的判定逻辑。
-
-参考:``jiuwenswarm心跳任务重构方案设计.md`` §7.5、§5.2。
 """
 
 from __future__ import annotations
@@ -129,7 +127,7 @@ class HeartbeatSessionResolver:
     async def on_session_deleted(self, session_id: str) -> None:
         """会话删除/归档入口调用;转交 scheduler 按 session_deleted_policy 处理。
 
-        两条必须接入的删除入口(方案 §5.2):
+        必须接入的删除入口:
           - Web/TUI session 删除:``app_web_handlers.py::_session_delete``
           - Team session runtime 删除:``team_manager.py::delete_session_runtime``
         """

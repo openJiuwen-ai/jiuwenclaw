@@ -2,7 +2,7 @@
 
 """HeartbeatSessionResolver 单元测试.
 
-对应方案 §12:
+覆盖范围:
   - 会话生命周期: session metadata 不可读/目录不存在时返回 None。
   - 会话生命周期: on_session_deleted 回调转交 scheduler。
 """

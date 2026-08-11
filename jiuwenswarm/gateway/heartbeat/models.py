@@ -10,8 +10,6 @@
 
 字段命名原则:与 Cron 已有字段语义一致的必须同名同义(``id/name/enabled/created_at/updated_at/
 timezone/delete_after_run``);Heartbeat 独有语义才新增字段。
-
-参考:``jiuwenswarm心跳任务重构方案设计.md`` §3、``接口设计方案.md`` §1。
 """
 
 from __future__ import annotations

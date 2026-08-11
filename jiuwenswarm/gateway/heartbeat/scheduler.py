@@ -2,7 +2,7 @@
 
 """HeartbeatSchedulerService — 心跳任务后台调度.
 
-职责(方案 §7.3):
+职责:
   - ``_loop`` 周期扫描 due jobs,调用 ``_tick_once``。
   - ``_handle_due_job``:session 校验 + 并发策略 + dispatch。
   - ``_dispatch_job``:构造 ``CHAT_SEND`` 投递回原 session,带 automation metadata。
@@ -13,13 +13,11 @@
   - ``reload``/``_check_store_changed``:外部编辑 heartbeat_jobs.json 后刷新。
   - ghost task 清理:job 被删除后取消当前 run。
 
-关键约束(方案 §6):
+关键约束:
   - 不创建 heartbeat_* 临时会话;不读 HEARTBEAT.md;不用 __heartbeat__ channel。
   - CHAT_SEND 投递回原 session_id;不传 params.mode(web/tui 由原 session 配置决定)。
   - 不补跑系统离线期间错过的历史触发(next_run_at 远早于 now 时基于 now 重算)。
   - 自动触发消息必须带 metadata.automation。
-
-参考:``jiuwenswarm心跳任务重构方案设计.md`` §6/§7、``接口设计方案.md`` §5。
 """
 
 from __future__ import annotations
@@ -211,7 +209,7 @@ class HeartbeatSchedulerService:
                 await asyncio.sleep(0.5)
 
     async def _tick_once(self) -> None:
-        """扫描 due jobs 并逐个执行调度判断(方案 §7.4)。"""
+        """扫描到期任务并逐个执行调度判断。"""
         jobs = await self._store.list_jobs()
         now = self._now_fn()
         admitted_job_ids = self._resource_admitted_job_ids(jobs, now=now)
@@ -312,7 +310,7 @@ class HeartbeatSchedulerService:
             return
         await self._handle_due_job(job, now)
 
-    # ---- due job 处理(方案 §7.5) ----
+    # ---- 到期任务处理 ----
 
     async def _handle_due_job(self, job: HeartbeatJob, now: float) -> None:
         session = self._session_resolver.resolve(job.channel_id, job.session_id)
@@ -356,7 +354,7 @@ class HeartbeatSchedulerService:
             return
 
     async def _handle_missing_session(self, job: HeartbeatJob, now: float) -> None:
-        """session 删除/归档/不可恢复(方案 §5.2)。"""
+        """处理 session 删除、归档或不可恢复的任务。"""
         await self._apply_session_deleted_job(job, now)
         logger.info(
             "[HeartbeatScheduler] session missing for job=%s, applied policy=%s",
@@ -382,13 +380,13 @@ class HeartbeatSchedulerService:
             # still-live stream remains authoritative until its callback.
             await self._store.disable(job.id, now)
 
-    # ---- 投递回原 session(方案 §7.6) ----
+    # ---- 投递回原 session ----
 
     def _new_run_id(self, job: HeartbeatJob, now: float) -> str:
         return f"{job.id}_run_{int(now)}_{secrets.token_hex(3)}"
 
     def _build_message(self, job: HeartbeatJob, run_id: str, now: float) -> Any:
-        """构造投递回原 session 的 CHAT_SEND Message(方案 §7.6)。"""
+        """构造投递回原 session 的 CHAT_SEND 消息。"""
         from jiuwenswarm.common.schema.message import Message, ReqMethod
 
         # metadata.source 审计:scheduler 只消费,缺失/非法记 warning 后兜底。
@@ -548,7 +546,7 @@ class HeartbeatSchedulerService:
             await self._dispatch_claimed_job(claimed, run_id, now)
         return decision
 
-    # ---- 下一次触发计算(方案 §7.7) ----
+    # ---- 下一次触发计算 ----
 
     def _compute_next_run(self, job: HeartbeatJob, base_ts: float) -> float | None:
         """interval/cron/once 下一次触发;基于 now 重算,不补跑历史。"""
@@ -582,7 +580,7 @@ class HeartbeatSchedulerService:
             return None
         return nxt.timestamp()
 
-    # ---- 完成与停止条件(方案 §7.10) ----
+    # ---- 完成与停止条件 ----
 
     async def on_run_finished(
         self,
@@ -670,7 +668,7 @@ class HeartbeatSchedulerService:
                     reschedule=queued_reschedule,
                 )
 
-    # ---- 取消执行(方案 §7.11) ----
+    # ---- 取消执行 ----
 
     async def cancel_run(self, job_id: str, *, pause_schedule: bool = False) -> dict[str, Any]:
         """中断当前心跳触发的运行;可选同时停用后续调度。"""
@@ -746,13 +744,13 @@ class HeartbeatSchedulerService:
     async def trigger_run_now(
         self, job_id: str, *, reschedule: bool = False
     ) -> dict[str, Any]:
-        """立即执行一次指定心跳任务(方案 §9.1 run_now)。"""
+        """立即执行一次指定心跳任务。"""
         job = await self._store.get_job(job_id)
         if job is None:
             raise KeyError("job not found")
         # completed 表示 once/delete_after_run/max_runs 已经达成。run_now
         # 不能绕过这些停止条件；需要再次执行时必须先由显式 update/toggle
-        # 重新激活任务（方案 §3 status 不变量、§7.10 停止条件）。
+        # 立即执行终态任务前先恢复其可运行状态。
         if job.status == STATUS_COMPLETED or (
             job.max_runs is not None and int(job.run_count) >= int(job.max_runs)
         ):
@@ -852,7 +850,7 @@ class HeartbeatSchedulerService:
     # ---- preview(controller 调用) ----
 
     def preview_next_runs(self, job: HeartbeatJob, count: int = 5) -> list[dict[str, Any]]:
-        """预览未来 N 次触发时间(方案 §9.1 preview)。"""
+        """预览未来 N 次触发时间。"""
         count = max(1, min(int(count), 50))
         out: list[dict[str, Any]] = []
         now = self._now_fn()

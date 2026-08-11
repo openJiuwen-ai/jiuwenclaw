@@ -2891,7 +2891,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 resp = await ac.send_request(env)
                 if resp.ok:
                     pl = resp.payload if isinstance(resp.payload, dict) else {}
-                    # 通知 Heartbeat scheduler 清理绑定该 session 的心跳任务(方案 §5.2)。
+                    # 通知 Heartbeat scheduler 清理绑定该 session 的任务。
                     try:
                         _hb_mh = _resolve(message_handler)
                         if _hb_mh is not None and hasattr(_hb_mh, "get_heartbeat_scheduler_service"):
@@ -2965,7 +2965,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 exc,
             )
         shutil.rmtree(session_dir)
-        # 通知 Heartbeat scheduler 清理绑定该 session 的心跳任务(方案 §5.2)。
+        # 通知 Heartbeat scheduler 清理绑定该 session 的任务。
         try:
             _hb_sched = _resolve(message_handler)
             if _hb_sched is not None and hasattr(_hb_sched, "get_heartbeat_scheduler_service"):

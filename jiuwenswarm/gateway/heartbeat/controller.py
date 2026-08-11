@@ -2,18 +2,16 @@
 
 """HeartbeatController — Web/RPC 与 Agent Tool 统一业务入口.
 
-职责(方案 §9 / 接口设计 §3):
+职责:
   - Web/RPC 业务 API: create/update/delete/toggle/list/get/preview/run_now/cancel。
   - Agent Tool (``heartbeat_*_job``): 语义化参数,自动继承当前 channel_id/session_id。
   - source 审计:controller 创建/更新时强制写入并校验 metadata.source 枚举。
   - 资源限制校验: min_interval / max_active_jobs_per_session / max_active_jobs_global。
   - 禁止字段拦截: mode/model/approval/sandbox/worktree 不可传入、不可修改。
 
-Agent Tool 与 Web/RPC 的分工(方案 §9.3):
+Agent Tool 与 Web/RPC 的分工:
   - Agent Tool 自动继承当前 channel_id/session_id,默认仅当前 session 可见。
   - Web/RPC 可显式传 channel_id/session_id,可迁移会话;两者都不可改运行配置。
-
-参考:``jiuwenswarm心跳任务重构方案设计.md`` §9、``接口设计方案.md`` §3。
 """
 
 from __future__ import annotations
@@ -47,7 +45,7 @@ from jiuwenswarm.gateway.heartbeat.store import HeartbeatJobStore
 
 logger = logging.getLogger(__name__)
 
-# 禁止传入/修改的运行配置字段(方案铁律)。
+# 禁止传入或修改的运行配置字段。
 _FORBIDDEN_FIELDS: frozenset[str] = frozenset(
     {"mode", "model", "model_name", "approval", "sandbox", "worktree", "work_mode"}
 )
@@ -67,7 +65,7 @@ _UPDATE_FIELDS: frozenset[str] = frozenset(
     }
 )
 
-# 资源限制默认值(可被 config 覆盖;接口设计 §4.2)。
+# 资源限制默认值，可被 config 覆盖。
 _DEFAULT_LIMITS: dict[str, Any] = {
     "min_interval_seconds": MIN_INTERVAL_SECONDS,
     "max_active_jobs_per_session": 5,
@@ -540,7 +538,7 @@ class HeartbeatController:
         if cur_global >= max_global:
             raise ValueError(f"max_active_jobs_global ({max_global}) exceeded")
 
-    # ---- meta(接口设计 §2.9) ----
+    # ---- 元数据 ----
 
     def get_meta(self) -> dict[str, Any]:
         return {
@@ -559,7 +557,7 @@ class HeartbeatController:
             },
         }
 
-    # ---- Agent Tool (方案 §9.2 / 接口设计 §3) ----
+    # ---- Agent Tool ----
 
     def get_tools(self) -> List[Tool]:
         """返回 heartbeat_*_job 工具组,供 openJiuwen Runner 注册。
@@ -827,7 +825,7 @@ class HeartbeatController:
 
 
 # ---------------------------------------------------------------------------
-# Tool schema 常量(对齐方案 §9.2 / 接口设计 §3.2)
+# Tool schema 常量
 # ---------------------------------------------------------------------------
 
 _SCHEDULE_SCHEMA: dict = {

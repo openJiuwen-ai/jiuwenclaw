@@ -2503,7 +2503,7 @@ class TeamManager:
                 session_id,
                 team_name,
             )
-            # 通知 Heartbeat scheduler 清理绑定该 session 的心跳任务(方案 §5.2)。
+            # 通知 Heartbeat scheduler 清理绑定该 session 的任务。
             # 延迟导入 + 单例获取,避免 agents 层 ↔ gateway 层循环依赖。
             try:
                 from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler

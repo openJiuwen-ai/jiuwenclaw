@@ -2,7 +2,7 @@
 
 """HeartbeatController 单元测试:Web/RPC + Agent Tool + source 审计 + 资源限制 + 禁止字段.
 
-对应方案 §12:
+覆盖范围:
   - source 审计: controller 创建/更新时强制写入并校验 metadata.source 枚举。
   - Agent Tool: heartbeat_create_job 自动继承当前 channel_id/session_id。
   - Agent Tool: 独立周期任务意图应拒绝或提示 cron_create_job(通过 schema/forbidden 字段拦截)。

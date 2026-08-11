@@ -1,10 +1,10 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-"""HealthCheck 模块 — 旧 Heartbeat 探活的迁移目标(方案 §2.3 命名铁律)。
+"""HealthCheck 模块，负责原 Heartbeat 的服务探活能力。
 
 旧 ``gateway/heartbeat/heartbeat.py`` 的探活逻辑迁移到本命名空间,与新 Heartbeat
 任务(线程续跑,``gateway/heartbeat/`` 下 models/store/scheduler/controller)严格区分。
-旧 ``heartbeat.py`` 保留为 thin shim 再导出本模块符号,保持既有 import 不崩。
+旧 ``heartbeat.py`` 已删除，调用方应直接从本模块导入。
 """
 
 from jiuwenswarm.gateway.health_check.health_check import (

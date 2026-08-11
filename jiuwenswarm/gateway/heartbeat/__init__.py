@@ -2,7 +2,7 @@
 
 """Heartbeat 模块 — 新心跳任务(线程续跑)。
 
-旧探活(HEARTBEAT.md 驱动的全局周期探活)已迁移到 ``gateway/health_check/``(方案 §2.3),
+旧探活(HEARTBEAT.md 驱动的全局周期探活)已迁移到 ``gateway/health_check/``,
 旧 ``heartbeat.py`` shim 已删除。本目录只服务新心跳任务:
   - models.py: HeartbeatJob / Schedule / 状态机
   - store.py: heartbeat_jobs.json 读写

@@ -16,7 +16,7 @@ __all__ = [
     "AgentServerClient",
     "WebSocketAgentServerClient",
     "ChannelManager",
-    # 旧探活(HealthCheck/Probe)已迁移到 gateway.health_check(方案 §2.3)
+    # 旧探活由 gateway.health_check 提供。
     "GatewayHealthCheckService",
     "HEALTH_CHECK_CHANNEL_ID",
     "HealthCheckConfig",

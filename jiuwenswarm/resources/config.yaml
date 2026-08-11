@@ -624,7 +624,7 @@ gateway:
     # Web/TUI token 鉴权总开关；默认关闭。true 时创建 AgentOSAuthenticator 校验连接。
     auth_enabled: false
 
-# 新心跳任务(线程续跑)资源限制(方案 §11)。只服务 heartbeat job;
+# 新心跳任务(线程续跑)资源限制。只服务 heartbeat job;
 # 旧探活配置见下方 health_check 段。
 heartbeat:
   jobs:

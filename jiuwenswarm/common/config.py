@@ -381,7 +381,7 @@ _dump_yaml_round_trip = dump_yaml_round_trip
 def update_health_check_in_config(payload: dict[str, Any]) -> None:
     """只更新 health_check 段(旧探活配置)并写回。
 
-    旧 ``update_heartbeat_in_config`` 的迁移目标(方案 §2.3):探活配置
+    旧 ``update_heartbeat_in_config`` 的迁移目标：探活配置
     every/target/active_hours 已从 heartbeat 段迁移到 health_check 段。
     """
     def _mutate(data: dict[str, Any]) -> dict[str, Any]:

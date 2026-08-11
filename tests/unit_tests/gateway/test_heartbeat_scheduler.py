@@ -2,7 +2,7 @@
 
 """HeartbeatSchedulerService 单元测试:due 扫描 / 并发 / 停止条件 / session / source / preview.
 
-对应方案 §12:
+覆盖范围:
   - schedule 计算: interval 基于 now 重算不补跑; cron 复用 helper; once completed 保留。
   - 并发策略: skip 上一轮运行中跳过并记录 skipped。
   - 停止条件: max_runs 达上限 completed; delete_after_run completed。

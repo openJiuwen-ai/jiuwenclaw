@@ -7,10 +7,8 @@
   - ``portalocker`` 伴生 ``heartbeat_jobs.json.lock``：跨进程互斥。
   整个 read-modify-write 在双层锁内完成,避免 lost update。
 
-store 层负责同步维护 ``status / enabled / next_run_at`` 三者状态机不变量
-(方案 §2.5 / 接口设计 §1.3),禁止只改其中一个字段。
-
-参考:``jiuwenswarm心跳任务重构方案设计.md`` §7.9、``接口设计方案.md`` §1.4。
+store 层负责同步维护 ``status / enabled / next_run_at`` 三者状态机不变量，
+禁止只改其中一个字段。
 """
 
 from __future__ import annotations
@@ -847,7 +845,7 @@ class HeartbeatJobStore:
     async def update_job(self, job_id: str, patch: dict[str, Any]) -> HeartbeatJob:
         """patch-only 更新;维护状态机不变量。
 
-        关键规则(方案 §9.1 update / 接口设计 §2.4):
+        关键规则:
           - 修改 schedule 后重算 next_run_at(由 controller 注入,store 接受 next_run_at 字段)。
           - patch.enabled=false → status=disabled, next_run_at=None。
           - patch.enabled=true 且原为终态 → 重新激活: status=scheduled, next_run_at 由调用方重算注入。
@@ -1008,7 +1006,7 @@ class HeartbeatJobStore:
             raise ValueError("enabled must be boolean")
         return await self.update_job(job_id, {"enabled": enabled})
 
-    # ---- 状态机写方法(方案 §7.9 / 接口设计 §1.4) ----
+    # ---- 状态机写方法 ----
 
     async def mark_running(self, job_id: str, run_id: str, now: float) -> HeartbeatJob:
         def _mark(job: HeartbeatJob) -> HeartbeatJob:
