@@ -404,6 +404,10 @@ class TeamManager:
     def get_monitor(self, session_id: str) -> TeamMonitorHandler | None:
         return self._team_monitors.get(session_id)
 
+    def pop_monitor(self, session_id: str) -> TeamMonitorHandler | None:
+        """Remove and return a stale monitor before rebinding it."""
+        return self._team_monitors.pop(session_id, None)
+
     def get_team_evolution_watcher(self, session_id: str) -> asyncio.Task | None:
         return self._team_evolution_watchers.get(session_id)
 

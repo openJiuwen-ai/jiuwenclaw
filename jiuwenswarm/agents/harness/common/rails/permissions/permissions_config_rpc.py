@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 _PERMISSIONS_CFG_METHODS: frozenset[ReqMethod] = frozenset(
     {
         ReqMethod.PERMISSIONS_TOOLS_GET,
+        ReqMethod.PERMISSIONS_TOOLS_LIST,
         ReqMethod.PERMISSIONS_TOOLS_SET,
         ReqMethod.PERMISSIONS_TOOLS_UPDATE,
         ReqMethod.PERMISSIONS_TOOLS_DELETE,
@@ -62,9 +63,14 @@ def _ok(request: AgentRequest, payload: dict[str, Any] | None) -> AgentResponse:
     )
 
 
-def dispatch_permissions_config_request(request: AgentRequest) -> AgentResponse:
+def dispatch_permissions_config_request(
+    request: AgentRequest,
+    *,
+    get_runtime_tools_catalog: Any | None = None,
+) -> AgentResponse:
     """执行一条 permissions 配置 RPC（与原先 WebSocket register_method 语义一致）。"""
     from jiuwenswarm.common.config import (
+        build_permissions_tools_list_view,
         create_permissions_rule_in_config,
         delete_permissions_approval_override_in_config,
         delete_permissions_rule_in_config,
@@ -84,6 +90,14 @@ def dispatch_permissions_config_request(request: AgentRequest) -> AgentResponse:
     try:
         if m == ReqMethod.PERMISSIONS_TOOLS_GET:
             return _ok(request, dict(get_permissions_tools()))
+
+        if m == ReqMethod.PERMISSIONS_TOOLS_LIST:
+            runtime_catalog = (
+                get_runtime_tools_catalog()
+                if callable(get_runtime_tools_catalog)
+                else {}
+            )
+            return _ok(request, build_permissions_tools_list_view(runtime_catalog))
 
         if m == ReqMethod.PERMISSIONS_TOOLS_SET:
             if not isinstance(params, dict):

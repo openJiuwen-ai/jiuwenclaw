@@ -14,9 +14,9 @@ elements, each self-gated by the config source and filtered against the swarm
 * ``swarm.xiaoyi_phone`` — the xiaoyi phone tools (channel-switch gated).
 * ``swarm.code_extra_tools`` — code-mode-exclusive ``acp_chat``.
 
-The generic web / vision / audio tools are provided by openjiuwen
-(``core.web_search`` / ``core.web_fetch`` / ``core.web_paid_search`` /
-``core.vision`` / ``core.audio``); ``vision_model_config_params`` /
+Vision and audio tools are provided by openjiuwen (``core.vision`` /
+``core.audio``). Team web tools use Jiuwen's unified search/fetch wrappers;
+``vision_model_config_params`` /
 ``audio_model_config_params`` here fill the openjiuwen ``VisionModelConfig`` /
 ``AudioModelConfig`` constructor kwargs from the swarm config + env so
 ``config_specs`` can bake them into those elements' params.
@@ -37,7 +37,12 @@ from openjiuwen.agent_teams.harness.manifest import (
     harness_element,
     param_field,
 )
+from openjiuwen.core.runner import Runner
 
+from jiuwenswarm.agents.harness.common.tools.harness_named_web_tools import (
+    JiuwenHarnessFetchWebpageTool,
+    JiuwenHarnessWebSearchTool,
+)
 from jiuwenswarm.agents.harness.common.tools.image_tools import generate_image
 from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
     apply_audio_model_config_from_yaml,
@@ -102,6 +107,8 @@ IMAGE_GEN = "swarm.image_gen"
 XIAOYI_PHONE = "swarm.xiaoyi_phone"
 SYMPHONY_TOOLKIT = "swarm.symphony_toolkit"
 CODE_EXTRA_TOOLS = "swarm.code_extra_tools"
+WEB_SEARCH = "swarm.web_search"
+WEB_FETCH = "swarm.web_fetch"
 _CODE_MODES = frozenset({"code.team", "team.plan"})
 
 # xiaoyi phone tool objects, gated by ``channels.xiaoyi.phone_tools_enabled``.
@@ -139,6 +146,30 @@ _XIAOYI_PHONE_TOOLS = (
 def _filter_whitelist(tools: list[Any]) -> list[Any]:
     """Keep only tools whose ``card.name`` is in the swarm ``TOOL_WHITELIST``."""
     return [tool for tool in tools if tool.card.name in TOOL_WHITELIST]
+
+
+def _reuse_registered_tool(candidate: Any) -> Any:
+    existing = Runner.resource_mgr.get_tool(candidate.card.id)
+    if existing is None:
+        return candidate
+    if type(existing) is not type(candidate) or existing.card.name != candidate.card.name:
+        raise ValueError(
+            "Registered tool is incompatible with Team web tool: "
+            f"tool_id='{candidate.card.id}', tool_name='{candidate.card.name}'"
+        )
+    return existing
+
+
+def _member_web_tool_identity(ctx: SwarmBuildContext) -> tuple[str | None, str]:
+    agent_id = str(
+        getattr(ctx, "member_card_id", None)
+        or getattr(ctx, "member_name", None)
+        or ""
+    ).strip() or None
+    language = "en" if str(getattr(ctx, "language", "cn")).lower() == "en" else "cn"
+    if agent_id is not None:
+        agent_id = f"{agent_id}:{language}"
+    return agent_id, language
 
 
 def _mark_stateless(tools: list[Any]) -> list[Any]:
@@ -441,6 +472,34 @@ class SkillRetrievalInput(ConstructionInput):
 
 @harness_element(
     kind=ElementKind.TOOL,
+    name=WEB_SEARCH,
+    description="Jiuwen unified web search with paid-provider chain and free fallback.",
+)
+def build_jiuwen_web_search(
+    params: dict[str, Any],
+    ctx: SwarmBuildContext,
+) -> list[Any]:
+    agent_id, language = _member_web_tool_identity(ctx)
+    tool = JiuwenHarnessWebSearchTool(language=language, agent_id=agent_id)
+    return [_reuse_registered_tool(tool)]
+
+
+@harness_element(
+    kind=ElementKind.TOOL,
+    name=WEB_FETCH,
+    description="Jiuwen webpage fetch tool.",
+)
+def build_jiuwen_web_fetch(
+    params: dict[str, Any],
+    ctx: SwarmBuildContext,
+) -> list[Any]:
+    agent_id, language = _member_web_tool_identity(ctx)
+    tool = JiuwenHarnessFetchWebpageTool(language=language, agent_id=agent_id)
+    return [_reuse_registered_tool(tool)]
+
+
+@harness_element(
+    kind=ElementKind.TOOL,
     name=SKILL_TOOLKIT,
     description="Skill discovery / install / uninstall tools bound to the member workspace.",
     input_model=SkillToolkitInput,
@@ -553,9 +612,13 @@ __all__ = [
     "XIAOYI_PHONE",
     "SYMPHONY_TOOLKIT",
     "CODE_EXTRA_TOOLS",
+    "WEB_SEARCH",
+    "WEB_FETCH",
     "vision_model_config_params",
     "audio_dedicated_configured",
     "audio_model_config_params",
     "build_symphony_toolkit",
     "build_code_extra_tools",
+    "build_jiuwen_web_search",
+    "build_jiuwen_web_fetch",
 ]

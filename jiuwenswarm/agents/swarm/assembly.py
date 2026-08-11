@@ -28,6 +28,7 @@ from openjiuwen.agent_teams.paths import team_home
 
 from jiuwenswarm.agents.swarm.config_specs import build_member_deep_agent_spec
 from jiuwenswarm.agents.swarm.context import SwarmBuildContext
+from jiuwenswarm.agents.harness.team.config_loader import _normalize_prompt_language
 from jiuwenswarm.agents.swarm.registry import register_swarm_providers
 from jiuwenswarm.common.config import get_config
 from jiuwenswarm.common.mcp_config import build_enabled_mcp_server_configs
@@ -105,6 +106,10 @@ def enrich_team_spec_for_swarm(
         global_skills_dir=global_skills_dir,
         trajectory_registry=InMemoryTrajectoryRegistry(),
         config=config,
+        language=_normalize_prompt_language(
+            getattr(spec, "language", None)
+            or (config.get("preferred_language") if isinstance(config, dict) else None)
+        ),
     )
     mcp_configs = build_enabled_mcp_server_configs(
         config,

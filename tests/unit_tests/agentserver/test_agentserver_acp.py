@@ -2152,7 +2152,7 @@ async def test_handle_team_delete_deletes_all_matching_team_sessions(monkeypatch
     monkeypatch.setattr(
         agent_ws_server_module,
         "remove_session_metadata_cache",
-        lambda session_id: cleared_metadata_cache.append(session_id),
+        lambda session_id, **_kwargs: cleared_metadata_cache.append(session_id),
     )
     monkeypatch.setattr(
         interface_deep_module,
@@ -2329,7 +2329,7 @@ async def test_handle_team_delete_keeps_catalog_when_session_directory_delete_fa
     monkeypatch.setattr(
         agent_ws_server_module,
         "remove_session_metadata_cache",
-        lambda session_id: cleared_metadata_cache.append(session_id),
+        lambda session_id, **_kwargs: cleared_metadata_cache.append(session_id),
     )
     monkeypatch.setattr(
         interface_deep_module,
@@ -2594,8 +2594,13 @@ async def test_handle_session_delete_initializes_persistent_checkpointer(monkeyp
         lambda: sessions_root,
     )
     monkeypatch.setattr(
+        agent_ws_server_module,
+        "_sessions_dir_for_request",
+        lambda _request: sessions_root,
+    )
+    monkeypatch.setattr(
         "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
-        lambda _session_id: {"mode": "agent.plan"},
+        lambda _session_id, **_kwargs: {"mode": "agent.plan"},
     )
     monkeypatch.setattr(
         interface_deep_module,
@@ -2609,7 +2614,7 @@ async def test_handle_session_delete_initializes_persistent_checkpointer(monkeyp
     monkeypatch.setattr(
         agent_ws_server_module,
         "remove_session_metadata_cache",
-        lambda session_id: cleared_metadata_cache.append(session_id),
+        lambda session_id, **_kwargs: cleared_metadata_cache.append(session_id),
     )
 
     request = AgentRequest(
@@ -2632,6 +2637,96 @@ async def test_handle_session_delete_initializes_persistent_checkpointer(monkeyp
             "ok": True,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_handle_session_delete_uses_request_tenant_sessions_root(
+    monkeypatch,
+    tmp_path,
+):
+    from jiuwenswarm.server.runtime.session.session_metadata import (
+        get_session_metadata,
+        init_session_metadata,
+        update_session_metadata,
+    )
+
+    server = AgentWebSocketServerHarness()
+    fake_ws = FakeWebSocket()
+    global_root = tmp_path / "global-sessions"
+    tenant_root = tmp_path / "tenant-sessions"
+    global_session = global_root / "same-session-id"
+    tenant_session = tenant_root / "same-session-id"
+    global_session.mkdir(parents=True)
+    tenant_session.mkdir(parents=True)
+    init_session_metadata(
+        session_id="same-session-id",
+        channel_id="officeclaw",
+        mode="agent",
+        sessions_root=tenant_root,
+    )
+    update_session_metadata(
+        session_id="same-session-id",
+        title="cached tenant session",
+        sync_write=True,
+        sessions_root=tenant_root,
+    )
+    assert get_session_metadata(
+        "same-session-id",
+        sessions_root=tenant_root,
+    )["title"] == "cached tenant session"
+
+    async def fake_release(_session_id: str):
+        return None
+
+    async def fake_evict_plan_session(**_kwargs):
+        return None
+
+    async def fake_ensure_persistent_checkpointer():
+        return None
+
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "get_agent_sessions_dir",
+        lambda: global_root,
+    )
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "_sessions_dir_for_request",
+        lambda _request: tenant_root,
+    )
+    monkeypatch.setattr("openjiuwen.core.runner.Runner.release", fake_release)
+    monkeypatch.setattr(
+        interface_deep_module,
+        "ensure_persistent_checkpointer",
+        fake_ensure_persistent_checkpointer,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.kv_cache_product_hooks.evict_plan_session",
+        fake_evict_plan_session,
+    )
+
+    request = AgentRequest(
+        request_id="req-tenant-session-delete",
+        channel_id="officeclaw",
+        agent_id="office",
+        service_id="tenant-a",
+        req_method=ReqMethod.SESSION_DELETE,
+        params={"session_id": "same-session-id"},
+    )
+
+    await server.handle_session_delete_for_test(fake_ws, request, asyncio.Lock())
+
+    assert not tenant_session.exists()
+    assert global_session.exists()
+    assert get_session_metadata(
+        "same-session-id",
+        sessions_root=tenant_root,
+    ) == {}
 
 
 @pytest.mark.asyncio
@@ -2669,8 +2764,13 @@ async def test_handle_session_delete_unbinds_team_session(monkeypatch, tmp_path)
         lambda: sessions_root,
     )
     monkeypatch.setattr(
+        agent_ws_server_module,
+        "_sessions_dir_for_request",
+        lambda _request: sessions_root,
+    )
+    monkeypatch.setattr(
         "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
-        lambda _session_id: {
+        lambda _session_id, **_kwargs: {
             "mode": "code.team",
             "team_name": "research_team",
             "channel_id": "web",
@@ -2692,7 +2792,7 @@ async def test_handle_session_delete_unbinds_team_session(monkeypatch, tmp_path)
     monkeypatch.setattr(
         agent_ws_server_module,
         "remove_session_metadata_cache",
-        lambda session_id: cleared_metadata_cache.append(session_id),
+        lambda session_id, **_kwargs: cleared_metadata_cache.append(session_id),
     )
 
     request = AgentRequest(
@@ -2744,6 +2844,11 @@ async def test_handle_session_delete_rejects_when_checkpointer_unavailable(monke
         agent_ws_server_module,
         "get_agent_sessions_dir",
         lambda: sessions_root,
+    )
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "_sessions_dir_for_request",
+        lambda _request: sessions_root,
     )
     monkeypatch.setattr(
         interface_deep_module,

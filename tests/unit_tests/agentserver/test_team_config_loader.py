@@ -21,6 +21,76 @@ def _wrap_modes_team(team_mapping: dict[str, dict]) -> dict:
     return {"modes": {"team": team_mapping}}
 
 
+@pytest.mark.parametrize(
+    ("preferred_language", "expected"),
+    [
+        ("zh", "cn"),
+        ("zh-cn", "cn"),
+        ("cn", "cn"),
+        ("en", "en"),
+        ("en-US", "en"),
+        ("unsupported", "cn"),
+    ],
+)
+def test_load_team_spec_dict_normalizes_language(preferred_language, expected):
+    config = {
+        "preferred_language": preferred_language,
+        "models": {"defaults": []},
+        **_wrap_modes_team(
+            {
+                "demo_team": {
+                    "team_name": "demo_team",
+                    "agents": {"leader": {}, "teammate": {}},
+                }
+            }
+        ),
+    }
+
+    spec = load_team_spec_dict(config_base=config)
+
+    assert spec["language"] == expected
+
+
+def test_load_team_spec_dict_maps_private_prompts_and_display_name_rule():
+    config = {
+        "preferred_language": "en",
+        "models": {"defaults": []},
+        **_wrap_modes_team(
+            {
+                "demo_team": {
+                    "team_name": "demo_team",
+                    "agents": {"leader": {}, "teammate": {}},
+                    "leader": {
+                        "member_name": "team_leader",
+                        "display_name": "Lead",
+                        "persona": "Coordinate the team",
+                    },
+                    "predefined_members": [
+                        {
+                            "member_name": "analyst",
+                            "display_name": "Analyst",
+                            "persona": "Analyze evidence",
+                            "prompt_hint": "Cite sources",
+                        }
+                    ],
+                }
+            }
+        ),
+    }
+
+    spec = load_team_spec_dict(config_base=config)
+
+    assert spec["leader"]["desc"] == "Coordinate the team"
+    assert "Coordinate the team" in spec["leader"]["prompt"]
+    assert "## Member naming convention" in spec["leader"]["prompt"]
+    member = spec["predefined_members"][0]
+    assert member["desc"] == "Analyze evidence"
+    assert "Cite sources" in member["prompt"]
+    assert "display name" in member["prompt"]
+    assert "persona" not in member
+    assert "prompt_hint" not in member
+
+
 def test_load_team_spec_dict_reads_models_defaults_from_repository_config(monkeypatch):
     """Repository config template should provide the default team model from models.defaults."""
     repo_config = Path(__file__).resolve().parents[3] / "jiuwenswarm" / "resources" / "config.yaml"
@@ -163,10 +233,12 @@ def test_load_team_spec_dict_supports_member_specific_agents(monkeypatch, tmp_pa
     assert spec["team_name"] == "demo_team"
     assert spec["leader"]["member_name"] == "team_leader"
     assert spec["leader"]["display_name"] == "TeamLeader"
-    assert spec["leader"]["persona"] == "Lead the team"
+    assert spec["leader"]["desc"] == "Lead the team"
+    assert "Lead the team" in spec["leader"]["prompt"]
     assert spec["predefined_members"][0]["member_name"] == "analyst"
     assert spec["predefined_members"][0]["display_name"] == "Data Analyst"
-    assert spec["predefined_members"][0]["prompt_hint"] == "Focus on trends"
+    assert spec["predefined_members"][0]["desc"] == "Analyze data"
+    assert "Focus on trends" in spec["predefined_members"][0]["prompt"]
     assert spec["predefined_members"][0]["toolkits"] == ["sql", "python"]
     assert spec["workspace"]["enabled"] is True
     assert spec["workspace"]["artifact_dirs"] == ["artifacts/reports"]

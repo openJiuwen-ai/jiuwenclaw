@@ -130,7 +130,6 @@ _COMMON_TOOL_NAMES: frozenset[str] = frozenset(
     {
         registry.WEB_SEARCH,
         registry.WEB_FETCH,
-        registry.WEB_PAID_SEARCH,
         registry.VISION,
         registry.AUDIO,
         # SKILL_TOOLKIT is no longer declared as a tool; the
@@ -452,7 +451,84 @@ def test_build_member_capability_specs_tool_names(role: str) -> None:
     tool_names = {spec.type for spec in tool_specs}
 
     assert tool_names == _COMMON_TOOL_NAMES
+    assert "core.web_paid_search" not in tool_names
     assert all(isinstance(spec, BuiltinToolSpec) for spec in tool_specs)
+
+
+def test_team_web_providers_build_jiuwen_named_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.agents.harness.common.tools.harness_named_web_tools import (
+        JiuwenHarnessFetchWebpageTool,
+        JiuwenHarnessWebSearchTool,
+    )
+
+    monkeypatch.setattr("openjiuwen.core.runner.Runner.resource_mgr.get_tool", lambda _id: None)
+    context = SwarmBuildContext(
+        member_name="researcher",
+        member_card_id="researcher-card",
+        language="en",
+    )
+
+    build_search = getattr(tools, "build_jiuwen_web_search", None)
+    build_fetch = getattr(tools, "build_jiuwen_web_fetch", None)
+    assert callable(build_search)
+    assert callable(build_fetch)
+
+    search_tool = build_search({}, context)[0]
+    fetch_tool = build_fetch({}, context)[0]
+
+    assert isinstance(search_tool, JiuwenHarnessWebSearchTool)
+    assert search_tool.card.name == "web_search"
+    assert search_tool.card.id == "JiuwenHarnessWebSearch_researcher-card:en"
+    assert isinstance(fetch_tool, JiuwenHarnessFetchWebpageTool)
+    assert fetch_tool.card.name == "fetch_webpage"
+    assert fetch_tool.card.id == "JiuwenHarnessFetch:researcher-card:en"
+
+
+def test_team_web_provider_reuses_compatible_registered_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.agents.harness.common.tools.harness_named_web_tools import (
+        JiuwenHarnessWebSearchTool,
+    )
+
+    existing = JiuwenHarnessWebSearchTool(language="cn", agent_id="member-card:cn")
+    monkeypatch.setattr(
+        "openjiuwen.core.runner.Runner.resource_mgr.get_tool",
+        lambda tool_id: existing if tool_id == existing.card.id else None,
+    )
+    context = SwarmBuildContext(member_card_id="member-card", language="cn")
+    build_search = getattr(tools, "build_jiuwen_web_search", None)
+    assert callable(build_search)
+
+    assert build_search({}, context) == [existing]
+
+
+def test_team_web_provider_does_not_reuse_tool_across_languages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registered: dict[str, object] = {}
+    monkeypatch.setattr(
+        "openjiuwen.core.runner.Runner.resource_mgr.get_tool",
+        registered.get,
+    )
+    build_search = getattr(tools, "build_jiuwen_web_search", None)
+    assert callable(build_search)
+
+    cn_tool = build_search(
+        {},
+        SwarmBuildContext(member_card_id="member-card", language="cn"),
+    )[0]
+    registered[cn_tool.card.id] = cn_tool
+    en_tool = build_search(
+        {},
+        SwarmBuildContext(member_card_id="member-card", language="en"),
+    )[0]
+
+    assert en_tool is not cn_tool
+    assert en_tool.card.id != cn_tool.card.id
+    assert en_tool.card.input_params != cn_tool.card.input_params
 
 
 def test_member_skill_toolkit_carries_selected_skills() -> None:
@@ -768,6 +844,32 @@ def test_enrich_team_spec_for_swarm_rewrites_spec_in_place() -> None:
     # The parent-free contract: openjiuwen removed the imperative customizer
     # hook entirely, so the field no longer exists on the spec.
     assert not hasattr(spec, "agent_customizer")
+
+
+def test_swarm_build_context_seed_round_trip_preserves_language() -> None:
+    context = SwarmBuildContext(language="en", session_id="s")
+
+    restored = SwarmBuildContext.from_seed(
+        context.to_seed(),
+        config={},
+        trajectory_registry=None,
+    )
+
+    assert restored.language == "en"
+
+
+def test_enrich_team_spec_uses_normalized_team_language(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.swarm.assembly.get_config",
+        lambda: {"preferred_language": "zh"},
+    )
+    spec = _make_team_spec()
+    spec.language = "en"
+
+    enrich_team_spec_for_swarm(spec, session_id="s", mode="team", channel_id="web")
+
+    assert spec.build_context.language == "en"
+    assert spec.build_context_seed["language"] == "en"
 
 
 def test_enrich_team_spec_points_member_cwd_at_project_dir() -> None:
@@ -1511,7 +1613,6 @@ def test_code_capability_specs_rail_and_tool_names(mode: str) -> None:
     assert tool_names == {
         registry.WEB_SEARCH,
         registry.WEB_FETCH,
-        registry.WEB_PAID_SEARCH,
         registry.VISION,
         registry.AUDIO,
         # SKILL_TOOLKIT moved to the MEMBER_SKILL_TOOLKIT rail (see common set).
@@ -2071,7 +2172,6 @@ def test_swarm_build_context_seed_round_trip() -> None:
     for excluded in (
         "member_name",
         "role",
-        "language",
         "workspace",
         "member_card_id",
         "config",
@@ -2092,6 +2192,7 @@ def test_swarm_build_context_seed_round_trip() -> None:
     assert restored.team_id == "t1"
     assert restored.team_ws_root == "/tmp/ws"
     assert restored.request_metadata == {"mode": "code.team"}
+    assert restored.language == "cn"
     # Non-serializable handles are sourced from the receiver, not the seed.
     assert restored.config == {"k": "v"}
     assert restored.trajectory_registry is registry_obj

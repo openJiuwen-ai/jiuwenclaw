@@ -577,6 +577,25 @@ async def query_team_human_members_for_join(
     return members or []
 
 
+async def _current_pool_team_agent(team_name: str) -> Any | None:
+    """Return the TeamAgent currently owned by Runner for ``team_name``."""
+    try:
+        from jiuwenswarm.agents.harness.team.team_manager import (
+            _runner_team_runtime_manager,
+        )
+
+        runtime_mgr = _runner_team_runtime_manager(_get_global_team_runner())
+        entry = await runtime_mgr.pool.get(team_name)
+        return getattr(entry, "agent", None) if entry is not None else None
+    except Exception:
+        logger.debug(
+            "[TeamHelpers] resolve pool team agent failed: team_name=%s",
+            team_name,
+            exc_info=True,
+        )
+        return None
+
+
 async def ensure_monitor_handlers_for_active_runtime(
     channel_id: str | None,
     session_id: str,
@@ -593,6 +612,35 @@ async def ensure_monitor_handlers_for_active_runtime(
 
     # --- TeamMonitorHandler ---
     existing_monitor = tm.get_monitor(session_id)
+    if existing_monitor is not None and existing_monitor.is_running:
+        bound_agent = getattr(
+            getattr(existing_monitor, "_monitor", None),
+            "_team_agent",
+            None,
+        )
+        current_agent = await _current_pool_team_agent(team_name)
+        if (
+            bound_agent is not None
+            and current_agent is not None
+            and bound_agent is not current_agent
+        ):
+            logger.info(
+                "[TeamHelpers] monitor bound to a replaced TeamAgent; rebinding: "
+                "channel_id=%s session_id=%s team_name=%s",
+                _resolve_channel_id(channel_id),
+                session_id,
+                team_name,
+            )
+            try:
+                await existing_monitor.stop()
+            except Exception:
+                logger.debug(
+                    "[TeamHelpers] stale monitor stop failed: session_id=%s",
+                    session_id,
+                    exc_info=True,
+                )
+            tm.pop_monitor(session_id)
+            existing_monitor = None
     if existing_monitor is None or not existing_monitor.is_running:
         # create_monitor inside Runner.get_agent_team_monitor freezes the
         # current contextvar session_id into the TeamMonitor (self._session_id).
@@ -1526,7 +1574,15 @@ async def process_team_message_stream(
     # 2. 已有同 session 的 waiter → False
     # 3. session 已初始化过 team runtime → False
     # 4. 否则 → True（首次请求，需要创建 team spec + stream）
+    params = request.params if isinstance(getattr(request, "params", None), dict) else {}
+    from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+
+    is_control_continuation = (
+        isinstance(query, InteractiveInput)
+        and params.get("source") in {"permission_interrupt", "ask_user_interrupt"}
+    )
     has_active_waiters = team_manager.has_waiters(session_id)
+    reuse_active_waiter = is_control_continuation and has_active_waiters
     is_first_request = (
         not team_manager.has_stream_task(session_id)
         and not has_active_waiters
@@ -1702,12 +1758,21 @@ async def process_team_message_stream(
                 _resolve_channel_id(channel_id),
                 session_id,
             )
-            # V2: follow-up 不创建 waiter —— 一个 session 只保留一个 waiter（原始 stream 的）。
-            # follow-up 的唯一目的是 interact() 把 query 发给 team，
-            # 后续的 team events 由原始 waiter 的 while 循环产出，
-            # 通过 Gateway 的 fan_out 路由机制分发到各 channel。
-            # 之前 follow-up 也创建 waiter 导致 _broadcast_event 广播到两个 queue，
-            # 同一事件被 yield 两次 → Gateway dispatch 两次 → 重复消息。
+            if not reuse_active_waiter and not _is_cron_request_id(rid):
+                team_manager.reset_seen_team_events(session_id)
+                team_manager.reset_workflow_completed(session_id)
+                request_queue = asyncio.Queue()
+                team_manager.add_waiter(session_id, rid, request_queue)
+                logger.info(
+                    "[TeamHelpers] follow-up team request registered own waiter before delivery: "
+                    "channel_id=%s session_id=%s request_id=%s",
+                    _resolve_channel_id(channel_id),
+                    session_id,
+                    rid,
+                )
+
+            # Control continuations reuse the waiter that was active before
+            # delivery. Other follow-ups already own the current request queue.
             if query:
                 success, reason = await team_manager.interact(session_id, query)
                 if not success:
@@ -1743,6 +1808,9 @@ async def process_team_message_stream(
                             return
                         is_first_request = not preparation.recovered_runtime
                         if is_first_request:
+                            if request_queue is not None:
+                                team_manager.remove_waiter(session_id, rid)
+                                request_queue = None
                             first_request_source = "follow-up fallback"
                             query = preparation.query
                             hide_dm = preparation.hide_dm
@@ -1789,6 +1857,32 @@ async def process_team_message_stream(
                         return
 
             if not is_first_request:
+                if reuse_active_waiter:
+                    logger.info(
+                        "[TeamHelpers] control continuation submitted to existing waiter: "
+                        "channel_id=%s session_id=%s request_id=%s source=%s",
+                        _resolve_channel_id(channel_id),
+                        session_id,
+                        rid,
+                        params.get("source"),
+                    )
+                    yield AgentResponseChunk(
+                        request_id=rid,
+                        channel_id=channel_id,
+                        payload={
+                            "event_type": "chat.processing_status_deferred",
+                            "session_id": session_id,
+                        },
+                        is_complete=False,
+                    )
+                    yield AgentResponseChunk(
+                        request_id=rid,
+                        channel_id=channel_id,
+                        payload=None,
+                        is_complete=True,
+                    )
+                    return
+
                 if _is_cron_request_id(rid):
                     request_queue = asyncio.Queue()
                     team_manager.add_waiter(session_id, rid, request_queue)
@@ -1828,32 +1922,35 @@ async def process_team_message_stream(
                     return
 
                 logger.info(
-                    "[TeamHelpers] follow-up request submitted without waiter: "
+                    "[TeamHelpers] follow-up team request waits for round with own waiter: "
                     "channel_id=%s session_id=%s request_id=%s",
                     _resolve_channel_id(channel_id),
                     session_id,
                     rid,
                 )
-                # NOTE: do NOT emit is_processing=False here.
-                # A follow-up request only enqueues the query into the running
-                # team stream; the actual LLM work still happens inside
-                # _consume_stream_with_query. The real "round complete" signal
-                # will be broadcast by that background stream once team.completed
-                # arrives, and forwarded to the frontend via the long-lived
-                # waiter that was registered by the first request.
-                # The deferred placeholder below tells the Gateway not to
-                # auto-emit is_processing=False when this short stream ends,
-                # which prevents the frontend from flashing
-                # "finished -> wait -> running again" before the LLM replies.
-                yield AgentResponseChunk(
-                    request_id=rid,
-                    channel_id=channel_id,
-                    payload={
-                        "event_type": "chat.processing_status_deferred",
-                        "session_id": session_id,
-                    },
-                    is_complete=False,
-                )
+                try:
+                    while True:
+                        try:
+                            event = await asyncio.wait_for(request_queue.get(), timeout=0.1)
+                        except asyncio.TimeoutError:
+                            if not team_manager.has_stream_task(session_id):
+                                break
+                            continue
+                        if not isinstance(event, dict):
+                            continue
+                        _agent_ref, _metadata = _build_team_event_chunk_meta(event)
+                        yield AgentResponseChunk(
+                            request_id=rid,
+                            channel_id=channel_id,
+                            payload=event,
+                            agent_ref=_agent_ref,
+                            metadata=_metadata,
+                            is_complete=False,
+                        )
+                        if event.get("event_type") in {"team.completed", "team.error"}:
+                            break
+                finally:
+                    team_manager.remove_waiter(session_id, rid)
                 yield AgentResponseChunk(
                     request_id=rid,
                     channel_id=channel_id,

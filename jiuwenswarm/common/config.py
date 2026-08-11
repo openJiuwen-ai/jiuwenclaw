@@ -919,6 +919,87 @@ def get_permissions_tools() -> dict[str, Any]:
     return {"tools": dict(tools)}
 
 
+def normalize_permissions_tool_level(raw: Any) -> str | None:
+    """Normalize a configured tool level for UI display."""
+    if isinstance(raw, str):
+        level = raw.strip().lower()
+        if level in {"guard", "ask"}:
+            return "ask"
+        if level in _VALID_PERM_LEVEL:
+            return level
+        return None
+    if isinstance(raw, dict) and "*" in raw:
+        return normalize_permissions_tool_level(raw.get("*"))
+    return None
+
+
+def get_permissions_defaults_level() -> str:
+    """Return the effective default tool level as ``allow|ask|deny``."""
+    raw = _effective_permissions().get("defaults", "guard")
+    return normalize_permissions_tool_level(raw) or "ask"
+
+
+def build_permissions_tools_list_view(
+    catalog_by_name: dict[str, dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    """Build the permissions list from runtime and explicitly configured tools."""
+    from jiuwenswarm.server.runtime.tool_catalog import (
+        get_stable_tools_catalog,
+        ui_list_short_description,
+    )
+
+    runtime_catalog = dict(catalog_by_name or {})
+    configured_tools = get_permissions_tools().get("tools")
+    if not isinstance(configured_tools, dict):
+        configured_tools = {}
+    default_level = get_permissions_defaults_level()
+    preferred_language = str(
+        (get_config() or {}).get("preferred_language", "")
+    ).lower()
+    stable_catalog = get_stable_tools_catalog(
+        "en" if preferred_language.startswith("en") else "cn"
+    )
+    visible_names = set(runtime_catalog) | {
+        str(name).strip() for name in configured_tools if str(name).strip()
+    }
+
+    tools_out: list[dict[str, Any]] = []
+    for name in sorted(visible_names):
+        runtime_entry = runtime_catalog.get(name, {})
+        stable_entry = stable_catalog.get(name, {})
+        short = ui_list_short_description(
+            name,
+            description=str(runtime_entry.get("description", "") or ""),
+            short_description=str(
+                runtime_entry.get("short_description", "") or ""
+            ),
+        )
+        if not short:
+            short = ui_list_short_description(
+                name,
+                description=str(stable_entry.get("description", "") or ""),
+                short_description=str(
+                    stable_entry.get("short_description", "") or ""
+                ),
+            )
+        configured = name in configured_tools
+        level = (
+            normalize_permissions_tool_level(configured_tools.get(name))
+            if configured
+            else None
+        ) or default_level
+        tools_out.append(
+            {
+                "name": name,
+                "short_description": short,
+                "level": level,
+                "configured": configured,
+                "registered": name in runtime_catalog,
+            }
+        )
+    return {"default_level": default_level, "tools": tools_out}
+
+
 def replace_permissions_tools_in_config(tools: Any) -> None:
     """整表替换 ``permissions.tools``；值仅允许 ``allow|ask|deny``（或 legacy ``{\"*\": level}``）。"""
     normalized = _validate_tools_map(tools)

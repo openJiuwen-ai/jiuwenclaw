@@ -405,6 +405,35 @@ class TestGetSessionMetadata:
         assert data == {}
 
     @staticmethod
+    def test_explicit_sessions_root_does_not_fallback_to_global_metadata(
+        sessions_dir,
+        tmp_path,
+    ):
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            get_session_metadata,
+        )
+
+        session_id = "same-session-id"
+        global_session = sessions_dir / session_id
+        global_session.mkdir(parents=True)
+        (global_session / "metadata.json").write_text(
+            json.dumps({"session_id": session_id, "title": "global"}),
+            encoding="utf-8",
+        )
+        tenant_root = tmp_path / "tenant-sessions"
+        tenant_root.mkdir()
+
+        metadata = get_session_metadata(
+            session_id,
+            cache_bust=True,
+            enable_writeback=False,
+            sessions_root=tenant_root,
+        )
+
+        assert metadata == {}
+        assert not (tenant_root / session_id).exists()
+
+    @staticmethod
     def test_backfill_new_fields_for_legacy_session(sessions_dir):
         """存量会话（无新字段）读取时 setdefault 兜底，前端拿到稳定 schema"""
         from jiuwenswarm.server.runtime.session.session_metadata import (

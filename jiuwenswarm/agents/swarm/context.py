@@ -91,6 +91,7 @@ class SwarmBuildContext(BuildContext):
             "team_ws_root": self.team_ws_root,
             "team_skills_dir": self.team_skills_dir,
             "global_skills_dir": self.global_skills_dir,
+            "language": self.language,
         }
 
     @classmethod
@@ -112,6 +113,9 @@ class SwarmBuildContext(BuildContext):
             A ``SwarmBuildContext`` with the seed fields restored and the
             non-serializable handles sourced from the receiving process.
         """
+        language = str(seed.get("language") or "").strip().lower()
+        if language not in {"cn", "en"}:
+            language = "cn"
         return cls(
             session_id=seed.get("session_id", ""),
             request_id=seed.get("request_id"),
@@ -127,6 +131,7 @@ class SwarmBuildContext(BuildContext):
             global_skills_dir=seed.get("global_skills_dir"),
             trajectory_registry=trajectory_registry,
             config=config,
+            language=language,
         )
 
 

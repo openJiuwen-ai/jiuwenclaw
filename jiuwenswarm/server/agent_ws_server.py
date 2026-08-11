@@ -3751,8 +3751,9 @@ class AgentWebSocketServer:
         else:
             from jiuwenswarm.server.runtime.session.session_history import resolve_session_dir
 
+            sessions_root = _sessions_dir_for_request(request)
             session_dir, invalid_reason = resolve_session_dir(
-                target, sessions_root=get_agent_sessions_dir()
+                target, sessions_root=sessions_root
             )
             if session_dir is None:
                 resp = AgentResponse(
@@ -3783,7 +3784,10 @@ class AgentWebSocketServer:
                 if checkpoint_resp is not None:
                     resp = checkpoint_resp
                 else:
-                    metadata = get_session_metadata(target)
+                    metadata = get_session_metadata(
+                        target,
+                        sessions_root=sessions_root,
+                    )
                     is_team_mode = self._is_team_metadata_mode(metadata)
                     team_name = str(metadata.get("team_name") or "").strip()
                     channel_id = str(metadata.get("channel_id") or request.channel_id or "").strip() or None
@@ -3826,7 +3830,10 @@ class AgentWebSocketServer:
                     else:
                         shutil.rmtree(session_dir)
                         _plan_exited_sessions.discard(target)
-                        remove_session_metadata_cache(target)
+                        remove_session_metadata_cache(
+                            target,
+                            sessions_root=sessions_root,
+                        )
                         if is_team_mode:
                             try:
                                 from jiuwenswarm.server.runtime.team_binding_store import get_team_binding_store
@@ -4230,7 +4237,31 @@ class AgentWebSocketServer:
         from jiuwenswarm.agents.harness.common.rails.permissions.permissions_config_rpc import \
             dispatch_permissions_config_request
 
-        resp = dispatch_permissions_config_request(request)
+        def runtime_catalog() -> dict[str, dict[str, str]]:
+            from jiuwenswarm.server.runtime.tool_catalog import (
+                collect_tools_catalog_from_swarms,
+            )
+
+            if self._uses_tenant_pool(request):
+                pool = TenantAgentPool.peek_instance()
+                if pool is None:
+                    return {}
+                agent_id, service_id = TenantAgentPool.extract_ids(request)
+                manager = pool.get_agent_manager_nowait(agent_id, service_id)
+                managers = [manager] if manager is not None else []
+            else:
+                managers = [self._agent_manager]
+            swarms: list[Any] = []
+            for manager in managers:
+                iterator = getattr(manager, "iter_jiuwenswarm_instances", None)
+                if callable(iterator):
+                    swarms.extend(iterator())
+            return collect_tools_catalog_from_swarms(swarms)
+
+        resp = dispatch_permissions_config_request(
+            request,
+            get_runtime_tools_catalog=runtime_catalog,
+        )
 
         # After any successful mutation (delete / update / set / create),
         # reload agent config so the PermissionInterruptRail picks up the
@@ -4238,6 +4269,7 @@ class AgentWebSocketServer:
         # get_permissions_snapshot refresh.
         read_only_methods = {
             ReqMethod.PERMISSIONS_TOOLS_GET,
+            ReqMethod.PERMISSIONS_TOOLS_LIST,
             ReqMethod.PERMISSIONS_RULES_GET,
             ReqMethod.PERMISSIONS_APPROVAL_OVERRIDES_GET,
         }

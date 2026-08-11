@@ -187,6 +187,14 @@ class _InactiveTeamRuntimeManagerMixin:
         return None
 
 
+class _CompletingFollowupRuntimeManagerMixin(_InactiveTeamRuntimeManagerMixin):
+    """Finish follow-up waiters immediately in input-routing tests."""
+
+    @staticmethod
+    def add_waiter(session_id: str, request_id: str, queue: asyncio.Queue) -> None:
+        queue.put_nowait({"event_type": "team.completed"})
+
+
 class _FakeTransport:
     pushes: list[dict] = []
 
@@ -1431,9 +1439,28 @@ async def test_process_team_message_stream_handles_team_evolve_list(monkeypatch,
 
 
 @pytest.mark.anyio
-async def test_process_team_message_stream_emits_deferred_marker_for_followup(monkeypatch):
+async def test_process_team_message_stream_followup_owns_waiter_until_team_completed(monkeypatch):
     class _FakeManager(_InactiveTeamRuntimeManagerMixin):
         interact_calls: list[tuple[str, str]] = []
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.waiters: dict[tuple[str, str], asyncio.Queue] = {}
+            self.emitter_tasks: list[asyncio.Task] = []
+
+        def has_waiters(self, session_id: str) -> bool:
+            return any(sid == session_id for sid, _rid in self.waiters)
+
+        def add_waiter(
+            self,
+            session_id: str,
+            request_id: str,
+            queue: asyncio.Queue,
+        ) -> None:
+            self.waiters[(session_id, request_id)] = queue
+
+        def remove_waiter(self, session_id: str, request_id: str) -> None:
+            self.waiters.pop((session_id, request_id), None)
 
         @staticmethod
         def has_stream_task(session_id: str) -> bool:
@@ -1444,12 +1471,25 @@ async def test_process_team_message_stream_emits_deferred_marker_for_followup(mo
         async def get_swarm_enriched_team_spec(**kwargs):
             return SimpleNamespace(team_name="unit-team")
 
-        @classmethod
-        async def interact(cls, session_id: str, query: str):
-            cls.interact_calls.append((session_id, query))
+        async def interact(self, session_id: str, query: str):
+            type(self).interact_calls.append((session_id, query))
+            queue = self.waiters.get((session_id, "req-team-followup"))
+            assert queue is not None
+            queue.put_nowait(
+                {
+                    "event_type": "chat.final",
+                    "role": "teammate",
+                    "member_name": "human-reporter",
+                    "content": "follow-up result",
+                }
+            )
+            queue.put_nowait({"event_type": "team.completed"})
             return True, None
 
-    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
+    manager = _FakeManager()
+    manager.mark_seen_team_events("sess-team-followup")
+    manager.mark_workflow_completed("sess-team-followup")
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: manager)
 
     request = SimpleNamespace(
         session_id="sess-team-followup",
@@ -1467,27 +1507,105 @@ async def test_process_team_message_stream_emits_deferred_marker_for_followup(mo
         object(),
     ):
         chunks.append(chunk)
+    await asyncio.gather(*manager.emitter_tasks)
 
     assert _FakeManager.interact_calls == [
         ("sess-team-followup", "$human-reporter claim task"),
     ]
-    # follow-up short stream emits chat.processing_status_deferred
-    # to tell the Gateway not to auto-emit is_processing=False, preventing
-    # "finished -> wait -> running again" flashing. See
-    # team_helpers.process_team_message_stream.
-    assert len(chunks) == 2
-    assert chunks[0].payload == {
-        "event_type": "chat.processing_status_deferred",
-        "session_id": "sess-team-followup",
+    assert [chunk.payload and chunk.payload.get("event_type") for chunk in chunks] == [
+        "chat.final",
+        "team.completed",
+        None,
+    ]
+    assert chunks[0].request_id == "req-team-followup"
+    assert chunks[0].agent_ref == {"mode": "team", "id": "human-reporter"}
+    assert chunks[0].metadata["fan_out_targets"]
+    assert chunks[-1].is_complete is True
+    assert manager.has_seen_team_events("sess-team-followup") is False
+    assert manager.is_workflow_completed("sess-team-followup") is False
+    assert manager.waiters == {}
+
+
+@pytest.mark.anyio
+async def test_process_team_message_stream_control_followup_reuses_existing_waiter(monkeypatch):
+    from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+
+    approval_input = InteractiveInput()
+    approval_input.update(
+        "permission-call-1",
+        {"approved": True},
+    )
+
+    class _FakeManager(_InactiveTeamRuntimeManagerMixin):
+        def __init__(self) -> None:
+            super().__init__()
+            self.stream_active = True
+            self.waiters = {
+                ("sess-team-control-followup", "original-request"): asyncio.Queue(),
+            }
+            self.added_waiters: list[tuple[str, str]] = []
+
+        def has_waiters(self, session_id: str) -> bool:
+            return any(sid == session_id for sid, _rid in self.waiters)
+
+        def add_waiter(
+            self,
+            session_id: str,
+            request_id: str,
+            queue: asyncio.Queue,
+        ) -> None:
+            self.added_waiters.append((session_id, request_id))
+            self.waiters[(session_id, request_id)] = queue
+
+        def remove_waiter(self, session_id: str, request_id: str) -> None:
+            self.waiters.pop((session_id, request_id), None)
+
+        def has_stream_task(self, session_id: str) -> bool:
+            assert session_id == "sess-team-control-followup"
+            return self.stream_active
+
+        @staticmethod
+        async def get_swarm_enriched_team_spec(**kwargs):
+            return SimpleNamespace(team_name="unit-team")
+
+        async def interact(self, session_id: str, query: Any):
+            assert query is approval_input
+            self.stream_active = False
+            return True, None
+
+    manager = _FakeManager()
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: manager)
+
+    request = SimpleNamespace(
+        session_id="sess-team-control-followup",
+        request_id="req-team-control-followup",
+        channel_id="web",
+        metadata=None,
+        params={"mode": "team", "source": "permission_interrupt"},
+    )
+
+    chunks = []
+    async for chunk in team_helpers.process_team_message_stream(
+        request,
+        {"query": approval_input},
+        object(),
+    ):
+        chunks.append(chunk)
+
+    assert manager.added_waiters == []
+    assert set(manager.waiters) == {
+        ("sess-team-control-followup", "original-request"),
     }
-    assert chunks[0].is_complete is False
-    assert chunks[1].payload is None
-    assert chunks[1].is_complete is True
+    assert [chunk.payload and chunk.payload.get("event_type") for chunk in chunks] == [
+        "chat.processing_status_deferred",
+        None,
+    ]
+    assert chunks[-1].is_complete is True
 
 
 @pytest.mark.anyio
 async def test_process_team_message_stream_retries_followup_while_native_starts(monkeypatch):
-    class _FakeManager(_InactiveTeamRuntimeManagerMixin):
+    class _FakeManager(_CompletingFollowupRuntimeManagerMixin):
         interact_calls: list[tuple[str, str]] = []
 
         @staticmethod
@@ -1550,10 +1668,7 @@ async def test_process_team_message_stream_retries_followup_while_native_starts(
         ("sess-team-followup-starting", "启动中追问"),
         ("sess-team-followup-starting", "retry:启动中追问"),
     ]
-    assert chunks[0].payload == {
-        "event_type": "chat.processing_status_deferred",
-        "session_id": "sess-team-followup-starting",
-    }
+    assert chunks[0].payload == {"event_type": "team.completed"}
     assert chunks[-1].is_complete is True
 
 
@@ -1838,7 +1953,7 @@ async def test_process_team_message_stream_passes_interactive_input_to_followup(
         {"approved": True, "auto_confirm": False, "feedback": ""},
     )
 
-    class _FakeManager(_InactiveTeamRuntimeManagerMixin):
+    class _FakeManager(_CompletingFollowupRuntimeManagerMixin):
         interact_calls: list[tuple[str, Any]] = []
 
         @staticmethod
@@ -1963,7 +2078,7 @@ async def test_process_team_message_stream_routes_evolution_interrupt_to_active_
         {"answers": {"approve": True}},
     )
 
-    class _FakeManager(_InactiveTeamRuntimeManagerMixin):
+    class _FakeManager(_CompletingFollowupRuntimeManagerMixin):
         interact_calls: list[tuple[str, Any]] = []
 
         @staticmethod
@@ -2209,7 +2324,7 @@ async def test_process_team_message_stream_recovers_paused_runtime_for_interacti
         {"approved": True, "auto_confirm": False, "feedback": ""},
     )
 
-    class _FakeManager(_InactiveTeamRuntimeManagerMixin):
+    class _FakeManager(_CompletingFollowupRuntimeManagerMixin):
         runtime_ready = False
         interact_calls: list[tuple[str, Any]] = []
 
@@ -2269,14 +2384,7 @@ async def test_process_team_message_stream_recovers_paused_runtime_for_interacti
     assert _FakeManager.interact_calls == [
         ("sess-team-plan-recover", approval_input),
     ]
-    # follow-up short stream emits chat.processing_status_deferred
-    # so the Gateway does not auto-emit is_processing=False, preventing
-    # "finished -> wait -> running again" flashing. See
-    # team_helpers.process_team_message_stream.
-    assert chunks[0].payload == {
-        "event_type": "chat.processing_status_deferred",
-        "session_id": "sess-team-plan-recover",
-    }
+    assert chunks[0].payload == {"event_type": "team.completed"}
     assert chunks[-1].is_complete is True
 
 
@@ -2369,7 +2477,7 @@ async def test_process_team_message_stream_treats_plain_query_as_first_request_a
 async def test_process_team_message_stream_converts_a2ui_followup_event(monkeypatch):
     monkeypatch.setenv("JIUWENSWARM_A2UI_ENABLED", "true")
 
-    class _FakeManager(_InactiveTeamRuntimeManagerMixin):
+    class _FakeManager(_CompletingFollowupRuntimeManagerMixin):
         interact_calls: list[tuple[str, str]] = []
 
         @staticmethod
@@ -2425,14 +2533,7 @@ async def test_process_team_message_stream_converts_a2ui_followup_event(monkeypa
     assert "A2UI" in prompt
     assert "submitDietForm" in prompt
     assert "dietType" in prompt
-    # follow-up short stream emits chat.processing_status_deferred
-    # so the Gateway does not auto-emit is_processing=False, preventing
-    # "finished -> wait -> running again" flashing. See
-    # team_helpers.process_team_message_stream.
-    assert chunks[0].payload == {
-        "event_type": "chat.processing_status_deferred",
-        "session_id": "sess-team-a2ui",
-    }
+    assert chunks[0].payload == {"event_type": "team.completed"}
     assert chunks[1].is_complete is True
 
 
@@ -3678,6 +3779,129 @@ async def test_handle_team_slash_command_lists_regular_skill_records(tmp_path):
 # ---------------------------------------------------------------------------
 # WorkflowMonitorHandler integration tests
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_ensure_monitor_handlers_rebinds_replaced_pool_agent(monkeypatch):
+    from jiuwenswarm.agents.harness.team.handlers.team_monitor_handler import (
+        TeamMonitorHandler,
+    )
+    from jiuwenswarm.agents.harness.team.team_manager import TeamManager
+
+    class _FakeMonitor:
+        def __init__(self, team_agent: object) -> None:
+            self._team_agent = team_agent
+            self.team_name = "demo-team"
+            self.stopped = False
+
+        async def start(self) -> None:
+            pass
+
+        async def stop(self) -> None:
+            self.stopped = True
+
+        async def events(self):
+            while not self.stopped:
+                await asyncio.sleep(0.01)
+            if False:
+                yield None
+
+    manager = TeamManager()
+    old_agent = object()
+    new_agent = object()
+    stale = TeamMonitorHandler(_FakeMonitor(old_agent), "sess-monitor-rebind")
+    await stale.start()
+    manager.register_monitor("sess-monitor-rebind", stale)
+    created: list[_FakeMonitor] = []
+
+    async def fake_get_monitor(**kwargs):
+        monitor = _FakeMonitor(new_agent)
+        created.append(monitor)
+        return monitor
+
+    async def fake_pool_agent(team_name: str):
+        assert team_name == "demo-team"
+        return new_agent
+
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: manager)
+    monkeypatch.setattr(team_helpers.Runner, "get_agent_team_monitor", fake_get_monitor)
+    monkeypatch.setattr(
+        team_helpers,
+        "_current_pool_team_agent",
+        fake_pool_agent,
+        raising=False,
+    )
+
+    await team_helpers.ensure_monitor_handlers_for_active_runtime(
+        "web",
+        "sess-monitor-rebind",
+        "demo-team",
+    )
+
+    current = manager.get_monitor("sess-monitor-rebind")
+    assert stale._monitor.stopped is True
+    assert current is not stale
+    assert len(created) == 1
+    assert current._monitor._team_agent is new_agent
+    await current.stop()
+
+
+@pytest.mark.anyio
+async def test_ensure_monitor_handlers_keeps_current_pool_agent(monkeypatch):
+    from jiuwenswarm.agents.harness.team.handlers.team_monitor_handler import (
+        TeamMonitorHandler,
+    )
+    from jiuwenswarm.agents.harness.team.team_manager import TeamManager
+
+    class _FakeMonitor:
+        def __init__(self, team_agent: object) -> None:
+            self._team_agent = team_agent
+            self.team_name = "demo-team"
+            self.stopped = False
+
+        async def start(self) -> None:
+            pass
+
+        async def stop(self) -> None:
+            self.stopped = True
+
+        async def events(self):
+            while not self.stopped:
+                await asyncio.sleep(0.01)
+            if False:
+                yield None
+
+    manager = TeamManager()
+    current_agent = object()
+    handler = TeamMonitorHandler(_FakeMonitor(current_agent), "sess-monitor-current")
+    await handler.start()
+    manager.register_monitor("sess-monitor-current", handler)
+
+    async def fail_get_monitor(**kwargs):
+        raise AssertionError("current monitor must not be rebuilt")
+
+    async def fake_pool_agent(team_name: str):
+        assert team_name == "demo-team"
+        return current_agent
+
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: manager)
+    monkeypatch.setattr(team_helpers.Runner, "get_agent_team_monitor", fail_get_monitor)
+    monkeypatch.setattr(
+        team_helpers,
+        "_current_pool_team_agent",
+        fake_pool_agent,
+        raising=False,
+    )
+
+    await team_helpers.ensure_monitor_handlers_for_active_runtime(
+        "web",
+        "sess-monitor-current",
+        "demo-team",
+    )
+
+    assert manager.get_monitor("sess-monitor-current") is handler
+    assert handler._monitor.stopped is False
+    await handler.stop()
 
 
 @pytest.mark.anyio

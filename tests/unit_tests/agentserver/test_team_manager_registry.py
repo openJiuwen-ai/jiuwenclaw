@@ -1176,6 +1176,37 @@ async def test_resolve_resumable_runner_entry_ignores_stale_active_session(
 
 
 @pytest.mark.asyncio
+async def test_resolve_resumable_runner_entry_accepts_running_pool_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _TeamManagerHarness()
+    running_entry = SimpleNamespace(
+        current_session_id="sess-running",
+        state=RuntimeState.RUNNING,
+    )
+
+    class _FakePool:
+        @staticmethod
+        async def get(team_name: str):
+            assert team_name == "demo-team"
+            return running_entry
+
+    fake_runner = SimpleNamespace(_team_runtime_manager=SimpleNamespace(pool=_FakePool()))
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.get_session_metadata",
+        lambda session_id: {"team_name": "demo-team"},
+    )
+    monkeypatch.setattr(
+        "openjiuwen.core.runner.runner.GLOBAL_RUNNER",
+        fake_runner,
+    )
+
+    resolved = await manager.resolve_resumable_runner_entry_for_test("sess-running")
+
+    assert resolved == ("demo-team", running_entry)
+
+
+@pytest.mark.asyncio
 async def test_interact_restores_resumable_runtime_even_with_stale_active_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

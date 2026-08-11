@@ -1085,8 +1085,13 @@ class TenantAgentPool:
         """Return cached ``AgentManager`` instances without creating new ones."""
         return filter_cached_agent_managers(self._agent_wrappers.snapshot_values_nowait())
 
-    @staticmethod
-    def collect_runtime_tools_catalog_nowait() -> dict[str, dict[str, str]]:
+    def collect_runtime_tools_catalog_nowait(self) -> dict[str, dict[str, str]]:
         """Union tool catalogs from all initialized JiuWenSwarm instances."""
-        # Placeholder until tool_catalog is migrated from jiuwenclaw.
-        return {}
+        from jiuwenswarm.server.runtime.tool_catalog import collect_tools_catalog_from_swarms
+
+        swarms: list[Any] = []
+        for manager in self.iter_agent_managers_nowait():
+            iterator = getattr(manager, "iter_jiuwenswarm_instances", None)
+            if callable(iterator):
+                swarms.extend(iterator())
+        return collect_tools_catalog_from_swarms(swarms)

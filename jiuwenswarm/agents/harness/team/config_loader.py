@@ -411,22 +411,88 @@ def _build_transport_spec(team_raw: dict[str, Any]) -> dict[str, Any]:
     return transport_spec
 
 
-def _build_leader_spec(team_raw: dict[str, Any]) -> dict[str, Any]:
+_TEAM_MEMBER_DISPLAY_NAME_RULE_CN = (
+    "## 成员称呼规范\n"
+    "面向用户可见的内容中提及团队成员时，一律使用其显示名（display_name）。"
+    "member_name 是系统内部标识，仅允许用于工具参数，不得出现在正文里。"
+)
+_TEAM_MEMBER_DISPLAY_NAME_RULE_EN = (
+    "## Member naming convention\n"
+    "When mentioning team members in user-visible text, always use their display name "
+    "(display_name). member_name is an internal identifier and may only appear in tool "
+    "arguments; it must not appear in prose."
+)
+
+
+def _normalize_prompt_language(language: str | None) -> str:
+    """Normalize configured locales to the ``cn|en`` set supported by Team."""
+    normalized = str(language or "").strip().lower().replace("_", "-")
+    if normalized == "en" or normalized.startswith("en-") or normalized == "english":
+        return "en"
+    if normalized in {"cn", "zh", "chinese"} or normalized.startswith("zh-"):
+        return "cn"
+    return "cn"
+
+
+def _team_member_display_name_rule(language: str | None) -> str:
+    if _normalize_prompt_language(language) == "en":
+        return _TEAM_MEMBER_DISPLAY_NAME_RULE_EN
+    return _TEAM_MEMBER_DISPLAY_NAME_RULE_CN
+
+
+def _map_member_public_private_fields(
+    raw: dict[str, Any],
+    *,
+    default_desc: str = "",
+    language: str | None = None,
+) -> dict[str, str]:
+    desc = str(raw.get("desc") or raw.get("persona") or default_desc or "").strip()
+    prompt = str(raw.get("prompt") or "").strip()
+    if not prompt:
+        prompt = "\n\n".join(
+            part
+            for part in (
+                str(raw.get("persona") or "").strip(),
+                str(raw.get("prompt_hint") or "").strip(),
+            )
+            if part
+        )
+    rule = _team_member_display_name_rule(language)
+    prompt = f"{prompt}\n\n{rule}" if prompt else rule
+    return {"desc": desc, "prompt": prompt}
+
+
+def _build_leader_spec(
+    team_raw: dict[str, Any],
+    *,
+    language: str | None = None,
+) -> dict[str, Any]:
     leader_raw = team_raw.get("leader", {})
     leader_name = (
         str(leader_raw.get("name", "")).strip()
         or str(leader_raw.get("display_name", "")).strip()
         or "TeamLeader"
     )
-    return {
+    leader_spec = {
         "member_name": leader_raw.get("member_name", "team_leader"),
         "display_name": leader_raw.get("display_name", "Team Leader"),
         "name": leader_name,
-        "persona": leader_raw.get("persona", "天才项目管理专家"),
     }
+    leader_spec.update(
+        _map_member_public_private_fields(
+            leader_raw,
+            default_desc="天才项目管理专家",
+            language=language,
+        )
+    )
+    return leader_spec
 
 
-def _build_predefined_members(team_raw: dict[str, Any]) -> list[dict[str, Any]]:
+def _build_predefined_members(
+    team_raw: dict[str, Any],
+    *,
+    language: str | None = None,
+) -> list[dict[str, Any]]:
     predefined_members_raw = team_raw.get("predefined_members", [])
     if not isinstance(predefined_members_raw, list):
         logger.warning("[TeamConfigLoader] predefined_members must be a list, ignored")
@@ -453,7 +519,11 @@ def _build_predefined_members(team_raw: dict[str, Any]) -> list[dict[str, Any]]:
         member_spec = deepcopy(item)
         member_spec["member_name"] = member_name
         member_spec["display_name"] = str(identity_name).strip()
-        member_spec["persona"] = member_spec.get("persona") or ""
+        member_spec.update(
+            _map_member_public_private_fields(member_spec, language=language)
+        )
+        member_spec.pop("persona", None)
+        member_spec.pop("prompt_hint", None)
         # openjiuwen TeamMemberSpec 现按 role_type 判别联合类型，缺省补 teammate
         role_type = str(member_spec.get("role_type") or "").strip()
         member_spec["role_type"] = role_type or "teammate"
@@ -525,9 +595,10 @@ def load_team_spec_dict(
     spec_dict["spawn_mode"] = team_raw.get("spawn_mode", "inprocess")
     spec_dict["enable_hitt"] = team_raw.get("enable_hitt", True)
     spec_dict["enable_permissions"] = _resolve_enable_permissions(config_base, team_raw)
-    spec_dict["leader"] = _build_leader_spec(team_raw)
+    language = _normalize_prompt_language(config_base.get("preferred_language"))
+    spec_dict["leader"] = _build_leader_spec(team_raw, language=language)
     spec_dict["agents"] = agents
-    spec_dict["language"] = str(config_base.get("preferred_language", "zh")).strip().lower()
+    spec_dict["language"] = language
 
     workspace_spec = _build_workspace_spec(team_raw)
     if workspace_spec is not None:
@@ -535,7 +606,7 @@ def load_team_spec_dict(
 
     spec_dict["transport"] = _build_transport_spec(team_raw)
 
-    predefined_members = _build_predefined_members(team_raw)
+    predefined_members = _build_predefined_members(team_raw, language=language)
     if predefined_members:
         spec_dict["predefined_members"] = predefined_members
     elif "predefined_members" in spec_dict:

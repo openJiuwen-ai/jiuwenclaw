@@ -461,13 +461,11 @@ def _read_metadata_prefer_root(
     *,
     sessions_root: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Prefer tenant ``sessions_root``; fall back to legacy global sessions tree."""
+    """Read an explicit tenant root, or the legacy global root when omitted."""
     if sessions_root is not None:
-        meta = _read_metadata(
+        return _read_metadata(
             session_id, cache_bust=cache_bust, sessions_root=sessions_root
         )
-        if meta:
-            return meta
     return _read_metadata(session_id, cache_bust=cache_bust, sessions_root=None)
 
 
@@ -1053,7 +1051,7 @@ def get_session_metadata(
             ``False``,避免读路径触发写盘副作用,同时仍享受推断能力(存量会话
             缺 ``project_id`` 时可从 ``project_dir`` 反查补全,避免误拒)。
         sessions_root: 租户 sessions 根；缺省为全局 ``get_agent_sessions_dir()``。
-            租户根下未命中时回退读全局树（过渡期兼容）。
+            显式传入时只读取该根，不回退全局树。
     """
     root_s = _normalize_sessions_root_s(sessions_root)
     metadata = _read_metadata_prefer_root(
@@ -1065,10 +1063,6 @@ def get_session_metadata(
             if root_s is not None
             else get_agent_sessions_dir() / session_id
         )
-        # If we fell back to global disk, writebacks should still target the
-        # requested tenant root when provided (migrate forward).
-        if root_s is not None and not (Path(root_s) / session_id / "metadata.json").is_file():
-            session_dir = Path(root_s) / session_id
         metadata = _apply_metadata_defaults_with_inference(
             session_id,
             metadata,
@@ -1175,9 +1169,16 @@ def increment_session_round_count(session_id: str) -> int:
     return new_round
 
 
-def remove_session_metadata_cache(session_id: str) -> None:
+def remove_session_metadata_cache(
+    session_id: str,
+    *,
+    sessions_root: str | Path | None = None,
+) -> None:
     """Remove cached session metadata after the session directory is deleted."""
+    root_s = _normalize_sessions_root_s(sessions_root)
+    cache_key = _metadata_cache_key(session_id, root_s)
     with _CACHE_LOCK:
+        _METADATA_CACHE.pop(cache_key, None)
         _METADATA_CACHE.pop(session_id, None)
 
 
