@@ -389,7 +389,10 @@ def _citation_index(
 
 
 def _citation_occurrence_index(
-    markdown: str, citations: list[dict]
+    markdown: str,
+    citations: list[dict],
+    *,
+    ambiguity_error_code: str = "DOCUMENT_NOT_FOUND",
 ) -> dict[tuple[int, int], dict]:
     _, by_key = _citation_index(citations)
     boundary_table = Utf8BoundaryTable(markdown)
@@ -411,7 +414,10 @@ def _citation_occurrence_index(
                 result[byte_range] = items[0]
             continue
         if len(ranges) != len(items):
-            raise RewriteError("DOCUMENT_NOT_FOUND", "report citation data is ambiguous")
+            raise RewriteError(
+                ambiguity_error_code,
+                "report citation data is ambiguous",
+            )
         result.update(zip(ranges, items))
     return result
 
@@ -757,7 +763,9 @@ def prepare_rewrite(
     citation_occurrences = None
     if external_edit_adopted:
         citation_occurrences = _citation_occurrence_index(
-            markdown, final_result_citations
+            markdown,
+            final_result_citations,
+            ambiguity_error_code="FORMAT_CONFLICT",
         )
         _require_all_citations_whitelisted(markdown, citation_occurrences)
 

@@ -385,6 +385,48 @@ def test_prepare_rejects_unknown_citation_in_corrected_parent_before_context(
     assert stored_contexts == []
 
 
+@pytest.mark.parametrize("current_occurrence_count", [1, 3])
+def test_prepare_classifies_adopted_duplicate_citation_occurrence_drift_as_format_conflict(
+    tmp_path, monkeypatch, current_occurrence_count
+):
+    citation = "[[1]](https://example.com/source)"
+    original = f"原始内容 {citation} 中段 {citation}\n"
+    report, provenance = _write_document(tmp_path, original)
+    snapshot_path = report.with_name(provenance["final_result_path"])
+    first = json.loads(snapshot_path.read_text(encoding="utf-8"))[
+        "citation_messages"
+    ]["data"][0]
+    _set_snapshot_citations(
+        report,
+        provenance,
+        [
+            dict(first, id=3, chunk="first occurrence evidence"),
+            dict(first, id=4, chunk="second occurrence evidence"),
+        ],
+    )
+    corrected = "用户订正内容 " + " 中段 ".join(
+        [citation] * current_occurrence_count
+    ) + "\n"
+    report.write_text(corrected, encoding="utf-8")
+    stored_contexts = []
+    monkeypatch.setattr(
+        rewrite_module,
+        "_store_context",
+        lambda *args: stored_contexts.append(args),
+    )
+
+    with pytest.raises(RewriteError) as caught:
+        _prepare(
+            tmp_path,
+            report,
+            "用户订正内容",
+            base_revision=_base_revision(provenance),
+        )
+
+    assert caught.value.code == "FORMAT_CONFLICT"
+    assert stored_contexts == []
+
+
 def test_unchanged_legacy_rewrite_reports_no_external_adoption(tmp_path):
     report, _ = _write_document(tmp_path, "原始内容。\n")
     prepared = _prepare(tmp_path, report, "原始内容。")
