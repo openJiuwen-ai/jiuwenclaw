@@ -189,6 +189,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     stopStreaming,
     updateMessage,
     setProcessing,
+    setHasActiveRequest,
     setThinking,
     setPaused,
     setInterruptResult,
@@ -455,6 +456,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       // 这样工具调用会先显示，然后才是助手的回复
 
       setProcessing(true);
+      setHasActiveRequest(true);
       setThinking(true);
 
       const requestId = makeClientRequestId('chat');
@@ -488,6 +490,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const webError = error as WebError;
         setConnectionStats({ lastError: webError.message });
         setProcessing(false);
+        setHasActiveRequest(false);
         setThinking(false);
         activeRequestIdRef.current = null;
         const errorMsg = webError.message || i18n.t('network.sendMessageFailed');
@@ -500,7 +503,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         });
       }
     },
-    [addMessage, clearPauseBuffer, request, setProcessing, setThinking]
+    [addMessage, clearPauseBuffer, request, setHasActiveRequest, setProcessing, setThinking]
   );
 
   // 存储sendMessage函数到ref
@@ -565,6 +568,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         enterPauseHold();
       } else if (intent === 'supplement') {
         exitPauseHoldForNewTurn({ interruptRequestId: interruptRequestId });
+        setProcessing(true);
+        setHasActiveRequest(true);
+        setThinking(true);
       }
       try {
         const params: Record<string, unknown> = {
@@ -590,6 +596,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           setPaused(false);
         } else if (intent === 'supplement') {
           pendingSupplementInterruptIdRef.current = null;
+          setProcessing(false);
+          setHasActiveRequest(false);
+          setThinking(false);
         }
         const webError = error as WebError;
         setConnectionStats({ lastError: webError.message });
@@ -606,6 +615,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       setPaused,
       setPendingQuestion,
       setProcessing,
+      setHasActiveRequest,
       setThinking,
       stopStreaming,
     ]
@@ -1258,6 +1268,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (!isProcessingNow) {
           setThinking(false);
           clearSubtasks();
+          setHasActiveRequest(false);
           activeRequestIdRef.current = null;
           
           // 检查是否有等待的任务队列
@@ -1284,6 +1295,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (shouldDropDuplicatedEvent('chat.error', payload)) return;
         setThinking(false);
         setProcessing(false);
+        setHasActiveRequest(false);
         activeRequestIdRef.current = null;
         const errorMsg =
           typeof payload.error === 'string' ? payload.error : i18n.t('network.unknownError');
@@ -1335,6 +1347,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           clearPauseBuffer();
           setPaused(false);
           setProcessing(false);
+          setHasActiveRequest(false);
           setThinking(false);
           activeRequestIdRef.current = null;
         } else if (resultPayload.intent === 'supplement') {

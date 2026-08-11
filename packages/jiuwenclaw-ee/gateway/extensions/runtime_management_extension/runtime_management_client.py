@@ -300,6 +300,10 @@ def _default_invoke_ids(group_id: str, bot_id: str, user_id: str) -> tuple[str, 
     routed_bot = _routing_bot_id(bot_id)
     default_svc = f"{group_id}{routed_bot}"
     default_ag = f"{group_id}{routed_bot}{user_id}"
+    logger.info(
+        "user_id=%s, group_id=%s, bot_id=%s, routed_bot=%s, default_svc=%s, default_ag=%s",
+        user_id, group_id, bot_id, routed_bot, default_svc, default_ag,
+    )
     return default_svc, default_ag
 
 

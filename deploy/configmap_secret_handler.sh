@@ -5,7 +5,7 @@ set -euo >/dev/null 2>&1
 render_secret_configmap() {
     local namespace="${DEPLOY_VARS["NAMESPACE"]}"
     local name="${DEPLOY_VARS["SECRET_CM_NAME"]}"
-    if check_k8s_resource_exists "secret" "${name}" "${namespace}"; then
+    if [[ "${DEPLOY_VARS["RENDER_ONLY"]}" == "false" ]] && check_k8s_resource_exists "secret" "${name}" "${namespace}"; then
         warning "Secret ${namespace}/${name} exists, skip rendering."
         return
     fi
@@ -25,13 +25,8 @@ render_secret_configmap() {
             continue
         fi
 
-        # 已编码，跳过
-        if echo -n "${DEPLOY_VARS[$key]}" | base64 -d >/dev/null 2>&1; then
-            continue
-        fi
-
-        # 明文才编码
-        DEPLOY_VARS[$key]=$(echo -n "${DEPLOY_VARS[$key]}" | base64 -w 0)
+        local ekey="${key}_ENCODED"
+        DEPLOY_VARS["$ekey"]=$(echo -n "${DEPLOY_VARS[$key]}" | base64 -w 0)
     done
     render_config_template "${template_file}" "${file}" "DEPLOY_VARS"
 }
