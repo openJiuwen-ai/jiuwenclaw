@@ -1,3 +1,9 @@
+// P7：plan_entry_source 契约常量（跨层单源精神，后端 schema 层同名定义）。
+// TUI /plan 命令发 PLAN_ENTRY_SOURCE_SLASH_COMMAND，Web 手动开关发
+// PLAN_ENTRY_SOURCE_PLAN_TOGGLE（见 web frontend useWebSocket.ts）。
+// 契约测试（tests/unit_tests/test_plan_entry_source_contract.py）保证字面量一致。
+const PLAN_ENTRY_SOURCE_SLASH_COMMAND = "slash_command";
+
 import { addError, addInfo } from "./core/commands/helpers.js";
 import type { CommandContext, PreferredLanguage } from "./core/commands/types.js";
 import type {
@@ -451,7 +457,7 @@ export class CliPiAppState {
   private activeCommandRequestId: string | null = null;
   /** 当前正在执行的命令名称，用于追踪不可中断命令。 */
   private runningCommand: string | null = null;
-  private pendingPlanEntrySource: "slash_command" | null = null;
+  private pendingPlanEntrySource: typeof PLAN_ENTRY_SOURCE_SLASH_COMMAND | null = null;
   private lastVisibleUserRequest: VisibleUserRequest | null = null;
   /** 保存 askQuestions 之前的 streamingState，用于在对话框关闭后恢复。 */
   private streamingStateBeforeQuestion: StreamingState | null = null;
@@ -1950,7 +1956,7 @@ export class CliPiAppState {
   };
 
   readonly markPlanEntryFromSlashCommand = (): void => {
-    this.pendingPlanEntrySource = "slash_command";
+    this.pendingPlanEntrySource = PLAN_ENTRY_SOURCE_SLASH_COMMAND;
   };
 
   readonly setModel = (name: string): void => {

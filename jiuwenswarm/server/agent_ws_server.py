@@ -43,6 +43,7 @@ from jiuwenswarm.common.e2a.wire_codec import (
 )
 from jiuwenswarm.common.model_config_validation import is_placeholder_api_base
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
+from jiuwenswarm.common.schema.chat_send import PLAN_ENTRY_SOURCES as _PLAN_ENTRY_SOURCES
 from jiuwenswarm.common.version import __version__
 from jiuwenswarm.common.ws_diagnostics import (
     describe_ws_exception,
@@ -229,9 +230,9 @@ _plan_active_sessions: set[str] = set()
 # metadata 之前捎带到 params 里，给 ``_ensure_code_mode_state`` 当跨重启判据。
 _SESSION_PREVIOUS_MODE_KEY = "_session_previous_mode"
 
-# ``plan_entry_source`` 的合法取值，表示"用户这一条消息明确要求进入 plan"。
-# 一次性字段：TUI 的 ``/plan`` 命令、Web 用户手动打开 Plan 开关后的第一条消息。
-_PLAN_ENTRY_SOURCES = frozenset({"slash_command", "plan_toggle"})
+# P7：``plan_entry_source`` 合法取值已提到 schema 层单源
+# （``jiuwenswarm.common.schema.chat_send.PLAN_ENTRY_SOURCES``），本模块 import
+# 为 ``_PLAN_ENTRY_SOURCES``。前端 TS 各自定义同名常量，契约测试保证一致。
 
 _CODE_MODE_SYNC_METHODS = frozenset({
     ReqMethod.CHAT_SEND,

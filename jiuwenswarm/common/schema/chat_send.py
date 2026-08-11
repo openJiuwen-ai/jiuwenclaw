@@ -7,6 +7,22 @@
 
 from typing import TypedDict, NotRequired
 
+# ── plan_entry_source 契约常量（P7：跨层共享单源） ──
+# ``plan_entry_source`` 的合法取值，表示"用户这一条消息明确要求进入 plan"。
+# 一次性字段：TUI 的 ``/plan`` 命令发 ``slash_command``，Web 用户手动打开 Plan
+# 开关后的第一条消息发 ``plan_toggle``。
+#
+# P4.2 坑点：原先后端 ``agent_ws_server._PLAN_ENTRY_SOURCES`` 硬编码、前端各自
+# 字面量，无共享 schema。P7 提到 schema 层做单源，前后端引用同一组字面量。
+# 跨语言（Python/TS）无法共享一个常量对象，故前端各自定义同名 TS 常量，
+# 跨层契约测试确保字面量一致（见 tests/unit_tests/test_plan_entry_source_contract.py）。
+PLAN_ENTRY_SOURCE_SLASH_COMMAND = "slash_command"
+PLAN_ENTRY_SOURCE_PLAN_TOGGLE = "plan_toggle"
+
+PLAN_ENTRY_SOURCES: frozenset[str] = frozenset(
+    {PLAN_ENTRY_SOURCE_SLASH_COMMAND, PLAN_ENTRY_SOURCE_PLAN_TOGGLE}
+)
+
 
 class ChatSendParams(TypedDict, total=False):
     """chat.send 参数契约（TypedDict，供类型标注与文档）。
@@ -64,7 +80,12 @@ class ChatSendParams(TypedDict, total=False):
     """客户端是否能处理 ask_user 等用户交互。缺省为 True，兼容现有客户端。"""
 
     plan_entry_source: NotRequired[str]
-    """plan 模式入口来源（internal use）。"""
+    """plan 模式入口来源（internal use）。
+
+    合法取值见 :data:`PLAN_ENTRY_SOURCES`：``slash_command``（TUI /plan）、
+    ``plan_toggle``（Web 手动打开 Plan 开关的首条消息）。一次性字段，防重入闸门
+    据此区分"用户明确要求进入 plan"和"开关没复位导致的残留请求"。
+    """
 
     answers: NotRequired[list]
     """用户交互问答（interrupt resume 场景）。"""

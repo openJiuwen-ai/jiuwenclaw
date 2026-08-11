@@ -44,6 +44,11 @@ import {
   useCronStore,
 } from '../stores';
 import { isPlanWireMode, resolveNormalWireMode, resolvePlanWireMode } from '../features/planMode/wireMode';
+
+// P7：plan_entry_source 契约常量（跨层单源精神，后端 schema 层同名定义）。
+// Web 用户手动打开 Plan 开关后的第一条消息发 PLAN_ENTRY_SOURCE_PLAN_TOGGLE。
+// 契约测试（tests/unit_tests/test_plan_entry_source_contract.py）保证字面量一致。
+const PLAN_ENTRY_SOURCE_PLAN_TOGGLE = 'plan_toggle';
 import { flushPendingGoalObjectiveBubble } from '../features/goalPendingObjectiveBubble';
 import { normalizeTaskEvent } from '../stores/teamTaskNormalize';
 import { webClient, requestGoalAction, sendGoalStreamCommand } from '../services/webClient';
@@ -441,7 +446,7 @@ function resolvePlanEntryPayload(
 ): Record<string, string> {
   if (!isPlanWireMode(outgoingMode)) return {};
   if (!usePlanStore.getState().hasPendingExplicitEntry(sessionId)) return {};
-  return { plan_entry_source: 'plan_toggle' };
+  return { plan_entry_source: PLAN_ENTRY_SOURCE_PLAN_TOGGLE };
 }
 
 /** 请求成功发出后才消费标记，失败时保留以便重试。 */

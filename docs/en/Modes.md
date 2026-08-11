@@ -53,6 +53,23 @@ Use the following commands during a channel conversation:
 
 > Compatibility: `/mode plan` and `/mode team.normal` are TUI-local command forms. Gateway controlled channels accept `agent`, `code`, `team`, `agent.plan`, `agent.fast`, `code.normal`, and `code.team`.
 
+### Internal Canonical Naming (Three-Segment)
+
+The backend mode resolution has migrated to a three-segment canonical naming `<role>.<environment>.<state>`, where work/code is folded into the mode string and no longer relies on `work_mode` composition:
+
+| User Command | Legacy Canonical | New Canonical |
+|--------------|-------------------|---------------|
+| `/mode agent` | `agent` / `agent.fast` | `agent.work.normal` |
+| `/mode agent.plan` | `agent.plan` | `agent.work.plan` |
+| `/mode code` | `code.normal` | `agent.code.normal` |
+| `/mode code.plan` | `code.plan` | `agent.code.plan` |
+| `/mode code.team` | `code.team` | `team.code.normal` |
+| `/mode team` | `team` | `team.work.normal` |
+| `/mode team.plan` | `team.plan.normal` | `team.work.plan` |
+| `/mode team.plan.code` | `team.plan.code` | `team.code.plan` |
+
+Legacy strings are silently mapped to new ones via `deprecate_mode` — **user commands are unchanged**. `/mode agent` still works; the backend translates it to `agent.work.normal`. New strings are internal canonical, used by the persistence layer, rail routing, and Web frontend outbound. Frontend localStorage legacy values are translated on read via a local mapping table.
+
 You can also use `/switch` to change sub-modes within the same category:
 
 ```
