@@ -77,6 +77,14 @@ def _rail(todos: list[TodoItem], **kwargs) -> CodeTaskPlanningRail:
     return rail
 
 
+def test_code_task_planning_rail_forces_progress_repeat_off() -> None:
+    """Code mode forces progress_repeat off; YAML/env kwargs cannot re-enable it."""
+    rail = CodeTaskPlanningRail()
+    assert rail.enable_progress_repeat is False
+    rail_forced = CodeTaskPlanningRail(enable_progress_repeat=True)
+    assert rail_forced.enable_progress_repeat is False
+
+
 async def _task_reminders(agent: FakeAgent):
     return await agent.prompt_attachment_manager.list_by_filter(
         session_id="sess1",

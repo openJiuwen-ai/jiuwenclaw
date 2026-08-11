@@ -5866,12 +5866,27 @@ class JiuWenSwarmDeepAdapter:
             multimodal_image_rail = None
         return multimodal_image_rail
 
-    @staticmethod
-    def _build_task_planning_rail() -> TaskPlanningRail | None:
-        """Build TaskPlanningRail."""
+    def _build_task_planning_rail(
+        self, config: dict[str, Any] | None = None
+    ) -> TaskPlanningRail | None:
+        """Build TaskPlanningRail from ``react.task_planning`` config.
+
+        ``config`` should be the react section (same shape as ``_config_cache``).
+        """
         try:
-            task_planning_rail = TaskPlanningRail()
-            logger.info("[JiuWenSwarmDeepAdapter] TaskPlanningRail create success")
+            from openjiuwen.harness.rails.task_planning_rail import (
+                resolve_task_planning_rail_kwargs,
+            )
+
+            react_cfg = config if config is not None else self._config_cache
+            rail_kwargs = resolve_task_planning_rail_kwargs(react_cfg)
+            task_planning_rail = TaskPlanningRail(**rail_kwargs)
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] TaskPlanningRail create success "
+                "enable_progress_repeat=%s list_tool_call_interval=%s",
+                task_planning_rail.enable_progress_repeat,
+                task_planning_rail.list_tool_call_interval,
+            )
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] TaskPlanningRail create failed: %s", exc)
             task_planning_rail = None
@@ -6302,7 +6317,11 @@ class JiuWenSwarmDeepAdapter:
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
             # an example to use extension rail (enterprise)
             # _RailBuildInfo("_extension_config_debug_rail", self._build_extension_config_debug_rail),
-            _RailBuildInfo("_task_planning_rail", self._build_task_planning_rail),
+            _RailBuildInfo(
+                "_task_planning_rail",
+                self._build_task_planning_rail,
+                {"config": config},
+            ),
             _RailBuildInfo("_security_rail", self._build_security_rail),
             _RailBuildInfo("_heartbeat_rail", self._build_heartbeat_rail),
             _RailBuildInfo("_context_overflow_recovery_rail", self._build_context_overflow_recovery_rail),

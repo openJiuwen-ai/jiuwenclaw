@@ -1272,7 +1272,7 @@ def test_deep_adapter_registers_evolution_interrupt_rail_before_skill_evolution(
     async def _noop(*_args, **_kwargs):
         return None
 
-    monkeypatch.setattr(adapter, "_build_task_planning_rail", lambda: None)
+    monkeypatch.setattr(adapter, "_build_task_planning_rail", lambda *a, **k: None)
     monkeypatch.setattr(adapter, "_handle_memory_rail_by_config", _noop)
     monkeypatch.setattr(adapter, "_handle_external_memory_rail_by_config", _noop)
     monkeypatch.setattr(interface_deep_module, "SkillEvolutionRail", FakeSkillEvolutionRail)
@@ -1315,7 +1315,7 @@ def test_deep_adapter_build_agent_rails_adds_ask_user_for_agent_modes(monkeypatc
     monkeypatch.setattr(adapter, "_build_runtime_prompt_rail", lambda: None)
     monkeypatch.setattr(adapter, "_build_response_prompt_rail", lambda: None)
     monkeypatch.setattr(adapter, "_build_stream_event_rail", lambda: None)
-    monkeypatch.setattr(adapter, "_build_task_planning_rail", lambda: None)
+    monkeypatch.setattr(adapter, "_build_task_planning_rail", lambda *a, **k: None)
     monkeypatch.setattr(adapter, "_build_security_rail", lambda: None)
     monkeypatch.setattr(adapter, "_build_heartbeat_rail", lambda: None)
     monkeypatch.setattr(adapter, "_build_circuit_breaker_rail", lambda: None)
@@ -1418,7 +1418,7 @@ def test_deep_adapter_registers_ask_user_rail_when_entering_plan_mode(monkeypatc
     adapter._context_assemble_mode = "agent.plan"
 
     ask_user_rail = object()
-    monkeypatch.setattr(adapter, "_build_task_planning_rail", lambda: None)
+    monkeypatch.setattr(adapter, "_build_task_planning_rail", lambda *a, **k: None)
     monkeypatch.setattr(adapter, "_build_structured_ask_user_rail", lambda: ask_user_rail)
     monkeypatch.setattr(adapter, "_handle_memory_rail_by_config", _noop)
     monkeypatch.setattr(adapter, "_handle_external_memory_rail_by_config", _noop)

@@ -499,6 +499,13 @@ react:
   max_iterations: 100
   model_name: ${MODEL_NAME}
   skill_mode: all
+  # Todo 周期 progress 提醒（deep/chat 主会话 + team 非 leader 成员）
+  # Code 模式不读此开关（强制 False，走 attachment task_reminder）
+  # enable_progress_repeat: 仅 true|false（可用环境变量 TODO_PROGRESS_REPEAT）
+  # list_tool_call_interval: 仅正整数 >=1
+  task_planning:
+    enable_progress_repeat: ${TODO_PROGRESS_REPEAT:-true}
+    list_tool_call_interval: 20
   # ProgressiveToolRail: 工具延迟加载，固定 eager_tools schema，deferred 工具通过
   # tools_search → invoke_tool 间接调用，最大化 prefix cache 命中率。
   tool_lazy_load:
