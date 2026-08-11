@@ -1085,8 +1085,26 @@ class TenantAgentPool:
         """Return cached ``AgentManager`` instances without creating new ones."""
         return filter_cached_agent_managers(self._agent_wrappers.snapshot_values_nowait())
 
-    @staticmethod
-    def collect_runtime_tools_catalog_nowait() -> dict[str, dict[str, str]]:
+    def collect_runtime_tools_catalog_nowait(self) -> dict[str, dict[str, str]]:
         """Union tool catalogs from all initialized JiuWenSwarm instances."""
-        # Placeholder until tool_catalog is migrated from jiuwenclaw.
-        return {}
+        import logging as _logging
+
+        from jiuwenswarm.server.runtime.tool_catalog import (
+            get_registered_tools_catalog,
+            merge_tools_catalog_entries,
+        )
+
+        _log = _logging.getLogger(__name__)
+        catalogs: list[list[dict[str, str]]] = []
+        for agent_manager in self.iter_agent_managers_nowait():
+            ability = getattr(agent_manager, "ability_manager", None)
+            if ability is None:
+                continue
+            try:
+                entries = get_registered_tools_catalog(ability)
+            except Exception as exc:
+                _log.warning("[TenantAgentPool] get_registered_tools_catalog failed: %s", exc)
+                continue
+            if entries:
+                catalogs.append(entries)
+        return merge_tools_catalog_entries(catalogs)

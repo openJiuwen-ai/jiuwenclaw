@@ -1423,7 +1423,26 @@ class AgentWebSocketServer:
                     env.method,
                     env.is_stream,
                 )
-                request = e2a_to_agent_request(env)
+                try:
+                    request = e2a_to_agent_request(env)
+                except ValueError:
+                    logger.warning(
+                        "[E2A][compat] unknown E2A method=%r request_id=%s — replying error",
+                        env.method,
+                        env.request_id,
+                    )
+                    from jiuwenswarm.common.schema.agent import AgentResponse as _AgentResponse
+                    from jiuwenswarm.common.e2a.wire_codec import encode_agent_response_for_wire as _encode_wire
+                    err_resp = _AgentResponse(
+                        request_id=env.request_id or "",
+                        channel_id=env.channel or "web",
+                        ok=False,
+                        payload={"error": f"unknown method: {env.method}", "code": "UNKNOWN_METHOD"},
+                    )
+                    wire = _encode_wire(err_resp, response_id=env.request_id or "")
+                    async with send_lock:
+                        await send_wire_payload(ws, wire)
+                    return
 
         logger.info(
             "[AgentWebSocketServer] 收到请求: request_id=%s channel_id=%s is_stream=%s",
@@ -4213,15 +4232,42 @@ class AgentWebSocketServer:
         """处理 permissions.* E2A 请求（与 Web ``register_method`` 同名 method）。"""
         from jiuwenswarm.agents.harness.common.rails.permissions.permissions_config_rpc import \
             dispatch_permissions_config_request
+        from jiuwenswarm.server.runtime.tool_catalog import (
+            get_registered_tools_catalog,
+            merge_tools_catalog_entries,
+        )
 
-        resp = dispatch_permissions_config_request(request)
+        mgr = self._agent_manager
+        catalogs: list[list[dict[str, str]]] = []
+        for channel_agents in mgr.agents.values():
+            if not isinstance(channel_agents, dict):
+                continue
+            for agent in channel_agents.values():
+                try:
+                    entries = agent.get_registered_tools_catalog()
+                except Exception as exc:
+                    logger.warning("[AgentWS] get_registered_tools_catalog failed: %s", exc)
+                    continue
+                if entries:
+                    catalogs.append(entries)
+
+        def _collect_catalog() -> dict[str, dict[str, str]]:
+            return merge_tools_catalog_entries(catalogs)
+
+        resp = dispatch_permissions_config_request(
+            request,
+            get_runtime_tools_catalog=_collect_catalog,
+        )
 
         # After any successful mutation (delete / update / set / create),
         # reload agent config so the PermissionInterruptRail picks up the
         # change immediately instead of waiting for the next tool call's
         # get_permissions_snapshot refresh.
         read_only_methods = {
+            ReqMethod.PERMISSIONS_ENABLED_GET,
+            ReqMethod.PERMISSIONS_WORKSPACE_ENABLE_GET,
             ReqMethod.PERMISSIONS_TOOLS_GET,
+            ReqMethod.PERMISSIONS_TOOLS_LIST,
             ReqMethod.PERMISSIONS_RULES_GET,
             ReqMethod.PERMISSIONS_APPROVAL_OVERRIDES_GET,
         }
