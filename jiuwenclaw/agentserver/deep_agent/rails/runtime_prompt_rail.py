@@ -174,6 +174,78 @@ class RuntimePromptRail(DeepAgentRail):
             "todo": str(workspace_root / "todo"),
         }
 
+    def _add_runtime_section(self) -> None:
+        """构建并注入 runtime 段（平台/Python/命令语法规范）。"""
+        plat = f"{platform.system()} {platform.machine()}"
+        python_ver = platform.python_version()
+        os_type = platform.system().lower()
+
+        if self._language == "cn":
+            runtime_content = (
+                "# 运行时\n\n"
+                f"- 平台：{plat}\n"
+                f"- Python：{python_ver}\n"
+                f"- 模型：{self._model_name}\n"
+                f"- Agent：{self._agent_name}\n"
+                f"- 频道：{self._channel}\n"
+                f"- 语言：{self._language}\n"
+                "\n## 命令语法规范\n"
+                f"当前运行平台：`{os_type}`\n\n"
+                "**重要提示**：必须严格使用与当前平台匹配的命令语法，切勿使用其他平台的命令格式。\n\n"
+                "常见命令差异对照：\n\n"
+                "| 操作 | Windows (`win32`/`win64`) | Linux/macOS (`linux`/`darwin`) |\n"
+                "|------|---------------------------|-------------------------------|\n"
+                "| 创建目录 | `mkdir folder` 或 PowerShell "
+                "`New-Item -ItemType Directory -Path folder` | `mkdir -p folder` |\n"
+                "| 查看文件 | `type file.txt` 或 PowerShell `Get-Content file.txt` | `cat file.txt` |\n"
+                "| 列出文件 | `dir` 或 PowerShell `Get-ChildItem` | `ls -la` |\n"
+                "| 删除文件 | `del file.txt` 或 PowerShell `Remove-Item file.txt` | `rm file.txt` |\n"
+                "| 删除目录 | `rmdir folder` 或 PowerShell `Remove-Item -Recurse folder` | `rm -rf folder` |\n"
+                "| 查找文件 | `dir /s pattern` 或 PowerShell "
+                "`Get-ChildItem -Recurse -Filter pattern` | `find . -name pattern` |\n\n"
+                "**特别注意**：Windows 的 `mkdir` 不支持 `-p` 参数！"
+                "在 Windows 上使用 `mkdir -p folder` 会错误创建名为 `-p` 的目录。"
+                "如需创建嵌套目录，请使用 PowerShell `New-Item -ItemType Directory -Path \"parent/child\" -Force`，"
+                "或使用 cmd 分步创建 `mkdir parent && mkdir parent\\child`。"
+            )
+        else:
+            runtime_content = (
+                "# Runtime\n\n"
+                f"- Platform: {plat}\n"
+                f"- Python: {python_ver}\n"
+                f"- Model: {self._model_name}\n"
+                f"- Agent: {self._agent_name}\n"
+                f"- Channel: {self._channel}\n"
+                f"- Language: {self._language}\n"
+                "\n## Command Syntax\n"
+                f"Current platform: `{os_type}`\n\n"
+                "**Important**: You MUST strictly use command syntax matching the current platform. "
+                "Never use command formats from other platforms.\n\n"
+                "Common command differences:\n\n"
+                "| Operation | Windows (`win32`/`win64`) | Linux/macOS (`linux`/`darwin`) |\n"
+                "|-----------|---------------------------|-------------------------------|\n"
+                "| Create directory | `mkdir folder` or PowerShell "
+                "`New-Item -ItemType Directory -Path folder` | `mkdir -p folder` |\n"
+                "| View file | `type file.txt` or PowerShell `Get-Content file.txt` | `cat file.txt` |\n"
+                "| List files | `dir` or PowerShell `Get-ChildItem` | `ls -la` |\n"
+                "| Delete file | `del file.txt` or PowerShell `Remove-Item file.txt` | `rm file.txt` |\n"
+                "| Delete directory | `rmdir folder` or PowerShell `Remove-Item -Recurse folder` | `rm -rf folder` |\n"
+                "| Find file | `dir /s pattern` or PowerShell "
+                "`Get-ChildItem -Recurse -Filter pattern` | `find . -name pattern` |\n\n"
+                "**WARNING**: Windows `mkdir` does NOT support the `-p` flag! "
+                "Using `mkdir -p folder` on Windows will incorrectly create a directory named `-p`. "
+                'To create nested directories on Windows, use either PowerShell '
+                '`New-Item -ItemType Directory -Path "parent/child" -Force` '
+                "or cmd with step-by-step creation `mkdir parent && mkdir parent\\child`."
+            )
+
+        self.system_prompt_builder.add_section(PromptSection(
+            name="runtime",
+            content={"cn": runtime_content, "en": runtime_content},
+            priority=95,
+        ))
+        logger.info("[RuntimePromptRail] runtime section 已注入")
+
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """每次 model call 注入最新的时间和运行时信息。"""
         logger.info(
@@ -223,75 +295,7 @@ class RuntimePromptRail(DeepAgentRail):
             return
 
         if "runtime" in self._sections:
-            plat = f"{platform.system()} {platform.machine()}"
-            python_ver = platform.python_version()
-            os_type = platform.system().lower()
-
-            if self._language == "cn":
-                runtime_content = (
-                    "# 运行时\n\n"
-                    f"- 平台：{plat}\n"
-                    f"- Python：{python_ver}\n"
-                    f"- 模型：{self._model_name}\n"
-                    f"- Agent：{self._agent_name}\n"
-                    f"- 频道：{self._channel}\n"
-                    f"- 语言：{self._language}\n"
-                    "\n## 命令语法规范\n"
-                    f"当前运行平台：`{os_type}`\n\n"
-                    "**重要提示**：必须严格使用与当前平台匹配的命令语法，切勿使用其他平台的命令格式。\n\n"
-                    "常见命令差异对照：\n\n"
-                    "| 操作 | Windows (`win32`/`win64`) | Linux/macOS (`linux`/`darwin`) |\n"
-                    "|------|---------------------------|-------------------------------|\n"
-                    "| 创建目录 | `mkdir folder` 或 PowerShell "
-                    "`New-Item -ItemType Directory -Path folder` | `mkdir -p folder` |\n"
-                    "| 查看文件 | `type file.txt` 或 PowerShell `Get-Content file.txt` | `cat file.txt` |\n"
-                    "| 列出文件 | `dir` 或 PowerShell `Get-ChildItem` | `ls -la` |\n"
-                    "| 删除文件 | `del file.txt` 或 PowerShell `Remove-Item file.txt` | `rm file.txt` |\n"
-                    "| 删除目录 | `rmdir folder` 或 PowerShell `Remove-Item -Recurse folder` | `rm -rf folder` |\n"
-                    "| 查找文件 | `dir /s pattern` 或 PowerShell "
-                    "`Get-ChildItem -Recurse -Filter pattern` | `find . -name pattern` |\n\n"
-                    "**特别注意**：Windows 的 `mkdir` 不支持 `-p` 参数！"
-                    "在 Windows 上使用 `mkdir -p folder` 会错误创建名为 `-p` 的目录。"
-                    "如需创建嵌套目录，请使用 PowerShell `New-Item -ItemType Directory -Path \"parent/child\" -Force`，"
-                    "或使用 cmd 分步创建 `mkdir parent && mkdir parent\\child`。"
-                )
-            else:
-                runtime_content = (
-                    "# Runtime\n\n"
-                    f"- Platform: {plat}\n"
-                    f"- Python: {python_ver}\n"
-                    f"- Model: {self._model_name}\n"
-                    f"- Agent: {self._agent_name}\n"
-                    f"- Channel: {self._channel}\n"
-                    f"- Language: {self._language}\n"
-                    "\n## Command Syntax\n"
-                    f"Current platform: `{os_type}`\n\n"
-                    "**Important**: You MUST strictly use command syntax matching the current platform. "
-                    "Never use command formats from other platforms.\n\n"
-                    "Common command differences:\n\n"
-                    "| Operation | Windows (`win32`/`win64`) | Linux/macOS (`linux`/`darwin`) |\n"
-                    "|-----------|---------------------------|-------------------------------|\n"
-                    "| Create directory | `mkdir folder` or PowerShell "
-                    "`New-Item -ItemType Directory -Path folder` | `mkdir -p folder` |\n"
-                    "| View file | `type file.txt` or PowerShell `Get-Content file.txt` | `cat file.txt` |\n"
-                    "| List files | `dir` or PowerShell `Get-ChildItem` | `ls -la` |\n"
-                    "| Delete file | `del file.txt` or PowerShell `Remove-Item file.txt` | `rm file.txt` |\n"
-                    "| Delete directory | `rmdir folder` or PowerShell `Remove-Item -Recurse folder` | `rm -rf folder` |\n"
-                    "| Find file | `dir /s pattern` or PowerShell "
-                    "`Get-ChildItem -Recurse -Filter pattern` | `find . -name pattern` |\n\n"
-                    "**WARNING**: Windows `mkdir` does NOT support the `-p` flag! "
-                    "Using `mkdir -p folder` on Windows will incorrectly create a directory named `-p`. "
-                    'To create nested directories on Windows, use either PowerShell '
-                    '`New-Item -ItemType Directory -Path "parent/child" -Force` '
-                    "or cmd with step-by-step creation `mkdir parent && mkdir parent\\child`."
-                )
-
-            self.system_prompt_builder.add_section(PromptSection(
-                name="runtime",
-                content={"cn": runtime_content, "en": runtime_content},
-                priority=95,
-            ))
-            logger.info("[RuntimePromptRail] runtime section 已注入")
+            self._add_runtime_section()
 
         # soul / identify 由 JiuClawContextEngineeringRail 写入 context 段（## SOUL / ## IDENTITY）
 
