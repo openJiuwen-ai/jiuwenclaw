@@ -624,6 +624,8 @@ _FORWARD_REQ_METHODS = frozenset({
     "skills.evolution.status",
     "skills.evolution.get",
     "skills.evolution.save",
+    "skills.enterprise.install",
+    "skills.enterprise.uninstall",
     "symphony.build_score",
     "symphony.pause_build",
     "symphony.score_status",
@@ -723,6 +725,8 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "skills.evolution.status",
     "skills.evolution.get",
     "skills.evolution.save",
+    "skills.enterprise.install",
+    "skills.enterprise.uninstall",
     "symphony.build_score",
     "symphony.pause_build",
     "symphony.score_status",
@@ -6069,6 +6073,46 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("cron.job.toggle", _cron_job_toggle)
     channel.register_method("cron.job.preview", _cron_job_preview)
     channel.register_method("cron.job.run_now", _cron_job_run_now)
+
+    async def _skills_enterprise_list(ws, req_id, params, session_id):
+        """Gateway 只读 DB：按最终 service_id+agent_id 列出已装成功行."""
+        from jiuwenswarm.agents.harness.common.installed_skill import (
+            list_installed_skills_for_gateway,
+            resolve_final_tenant_ids,
+        )
+        from jiuwenswarm.gateway.cron.enterprise_gate import extract_routing_triple
+
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        g, b, u = extract_routing_triple(params)
+        try:
+            service_id, agent_id = resolve_final_tenant_ids(
+                group_id=g,
+                bot_id=b,
+                user_id=u,
+                service_id=params.get("service_id"),
+                agent_id=params.get("agent_id"),
+            )
+            skills = await list_installed_skills_for_gateway(
+                service_id=service_id,
+                agent_id=agent_id,
+            )
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=True,
+                payload={
+                    "skills": skills,
+                    "service_id": service_id,
+                    "agent_id": agent_id,
+                },
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[skills.enterprise.list] %s", e)
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
+
+    channel.register_method("skills.enterprise.list", _skills_enterprise_list)
 
     # 数字分身 — permissions.owner_scopes：仅 Web 网关直连 config（不经 E2A / config_rpc）。
     # 其余 permissions.*（tools / rules / approval_overrides）走 _forward_permissions_to_agent。
