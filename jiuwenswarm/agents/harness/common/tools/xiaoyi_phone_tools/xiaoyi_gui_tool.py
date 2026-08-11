@@ -9,14 +9,17 @@ from typing import Any, Dict
 
 from openjiuwen.core.foundation.tool import tool
 
-from jiuwenswarm.common.utils import logger
-from jiuwenswarm.server.gui_rpc import get_gui_rpc_client
-from jiuwenswarm.server.gui_rpc.client import (
-    GUI_RPC_DEFAULT_TIMEOUT_SECONDS,
-    GuiRpcClientError,
-    GuiRpcContextError,
+from jiuwenswarm.common.gui_rpc.reverse_rpc import XIAOYI_GUI_MAX_TIMEOUT_SECONDS
+from jiuwenswarm.common.invocation_context import get_current_invocation_context
+from jiuwenswarm.common.reverse_rpc.errors import (
+    ReverseRpcError,
+    ReverseRpcTimeoutError,
+    ReverseRpcTransportDisconnected,
 )
-from jiuwenswarm.server.request_context import get_current_agent_request
+from jiuwenswarm.common.utils import logger
+from jiuwenswarm.server.gui_rpc.reverse_rpc import (
+    get_xiaoyi_gui_reverse_rpc_client,
+)
 
 from .utils import ToolInputError, format_success_response
 
@@ -44,6 +47,16 @@ def _payload_is_gui_final(payload: Dict[str, Any]) -> bool:
     return False
 
 
+def _first_text(*values: Any) -> str | None:
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
 @tool(
     name="xiaoyi_gui_agent",
     description=(
@@ -58,66 +71,110 @@ async def xiaoyi_gui_agent(query: str) -> Dict[str, Any]:
         raise ToolInputError("缺少有效参数 query（非空字符串）")
 
     query = query.strip()
-    request = get_current_agent_request()
-    if request is None:
+    invocation = get_current_invocation_context()
+    if invocation is None:
         logger.error(
-            "[GUI_RPC_TRACE] phase=TOOL_CONTEXT_MISSING query_len=%s",
+            "[INVOCATION_CTX] MISSING phase=TOOL_READ capability=gui query_len=%s",
             len(query),
         )
         raise RuntimeError(
-            "GUI Agent 调用失败 [INVALID_CONTEXT]: 当前请求上下文不可用"
+            "GUI Agent 调用失败 [INVALID_CONTEXT]: 当前 invocation context 不可用"
         )
+    logger.info(
+        "[INVOCATION_CTX] TOOL_READ capability=gui invocation_id=%s "
+        "request_id=%s session_id=%s channel_id=%s asyncio_task_id=%s",
+        invocation.invocation_id,
+        invocation.request_id,
+        invocation.session_id,
+        invocation.channel_id,
+        id(asyncio.current_task()) if asyncio.current_task() else None,
+    )
+    if str(invocation.channel_id or "").strip().lower() != "xiaoyi":
+        raise RuntimeError(
+            "GUI Agent 调用失败 [INVALID_CONTEXT]: 当前调用不是 Xiaoyi channel"
+        )
+    xiaoyi = invocation.xiaoyi
+    xiaoyi_session_id = _first_text(
+        xiaoyi.root_session_id if xiaoyi else None,
+        xiaoyi.params_session_id if xiaoyi else None,
+        invocation.chat_id,
+    )
+    xiaoyi_task_id = _first_text(xiaoyi.task_id if xiaoyi else None)
+    xiaoyi_message_id = _first_text(xiaoyi.message_id if xiaoyi else None)
+    missing = [
+        name
+        for name, value in (
+            ("xiaoyi_session_id", xiaoyi_session_id),
+            ("xiaoyi_task_id", xiaoyi_task_id),
+            ("xiaoyi_message_id", xiaoyi_message_id),
+        )
+        if not value
+    ]
+    if missing:
+        raise RuntimeError(
+            "GUI Agent 调用失败 [INVALID_CONTEXT]: 当前 Xiaoyi invocation 缺少 "
+            + ", ".join(missing)
+        )
+    metadata = invocation.metadata if isinstance(invocation.metadata, dict) else {}
     logger.info(
         "[GUI_RPC_TRACE] phase=TOOL_CALL_BEGIN source_request_id=%s "
         "jiuwen_session_id=%s channel_id=%s query_len=%s",
-        request.request_id,
-        request.session_id,
-        request.channel_id,
+        invocation.request_id,
+        invocation.session_id,
+        invocation.channel_id,
         len(query),
     )
     try:
-        response = await get_gui_rpc_client().call(
+        response = await get_xiaoyi_gui_reverse_rpc_client().call(
             query=query,
-            request=request,
-            timeout=GUI_RPC_DEFAULT_TIMEOUT_SECONDS,
+            source_request_id=invocation.request_id,
+            jiuwen_session_id=invocation.session_id,
+            xiaoyi_session_id=xiaoyi_session_id,
+            xiaoyi_task_id=xiaoyi_task_id,
+            xiaoyi_message_id=xiaoyi_message_id,
+            device_id=_first_text(xiaoyi.device_id if xiaoyi else None),
+            execution_id=invocation.invocation_id,
+            app_id=_first_text(metadata.get("app_id")),
+            binding_id=_first_text(metadata.get("binding_id")),
+            timeout=XIAOYI_GUI_MAX_TIMEOUT_SECONDS,
         )
-    except GuiRpcContextError as exc:
+    except ReverseRpcTransportDisconnected as exc:
         logger.error(
             "[GUI_RPC_TRACE] phase=TOOL_CALL_FAILED source_request_id=%s "
-            "error_code=%s error_type=%s",
-            request.request_id,
-            exc.error_code,
+            "error_code=TRANSPORT_DISCONNECTED error_type=%s",
+            invocation.request_id,
             type(exc).__name__,
         )
         raise RuntimeError(
-            f"GUI Agent 调用失败 [{exc.error_code}]: {exc}"
+            "GUI Agent 调用失败 [TRANSPORT_DISCONNECTED]: Gateway 连接已断开"
         ) from exc
-    except GuiRpcClientError as exc:
-        logger.error(
-            "[GUI_RPC_TRACE] phase=TOOL_CALL_FAILED source_request_id=%s "
-            "error_code=%s error_type=%s",
-            request.request_id,
-            exc.error_code,
-            type(exc).__name__,
-        )
-        raise RuntimeError(
-            f"GUI Agent 调用失败 [{exc.error_code}]: {exc}"
-        ) from exc
-    except asyncio.TimeoutError as exc:
+    except (ReverseRpcTimeoutError, asyncio.TimeoutError) as exc:
         logger.error(
             "[GUI_RPC_TRACE] phase=TOOL_CALL_FAILED source_request_id=%s "
             "error_code=GUI_TIMEOUT error_type=%s",
-            request.request_id,
+            invocation.request_id,
             type(exc).__name__,
         )
         raise RuntimeError(
             "GUI Agent 调用失败 [GUI_TIMEOUT]: 小艺 GUI Agent 操作超时（3 分钟）"
         ) from exc
+    except ReverseRpcError as exc:
+        error_code = str(getattr(exc, "code", None) or "REVERSE_RPC_ERROR")
+        logger.error(
+            "[GUI_RPC_TRACE] phase=TOOL_CALL_FAILED source_request_id=%s "
+            "error_code=%s error_type=%s",
+            invocation.request_id,
+            error_code,
+            type(exc).__name__,
+        )
+        raise RuntimeError(
+            f"GUI Agent 调用失败 [{error_code}]: {exc}"
+        ) from exc
     except Exception as exc:
         logger.exception(
             "[GUI_RPC_TRACE] phase=TOOL_CALL_FAILED source_request_id=%s "
             "error_code=INTERNAL_ERROR error_type=%s",
-            request.request_id,
+            invocation.request_id,
             type(exc).__name__,
         )
         raise RuntimeError(
@@ -130,7 +187,7 @@ async def xiaoyi_gui_agent(query: str) -> Dict[str, Any]:
         logger.error(
             "[GUI_RPC_TRACE] phase=TOOL_RESPONSE_FAILED source_request_id=%s "
             "rpc_id=%s error_code=%s",
-            request.request_id,
+            invocation.request_id,
             response.rpc_id,
             error_code,
         )
@@ -141,14 +198,14 @@ async def xiaoyi_gui_agent(query: str) -> Dict[str, Any]:
     logger.info(
         "[GUI_RPC_TRACE] phase=TOOL_CALL_COMPLETED source_request_id=%s "
         "rpc_id=%s result_len=%s",
-        request.request_id,
+        invocation.request_id,
         response.rpc_id,
         len(text),
     )
     logger.info(
         "[GUI_AGENT_DIAG] phase=TOOL_RESULT_RETURNED "
         "source_request_id=%s rpc_id=%s result=%r",
-        request.request_id,
+        invocation.request_id,
         response.rpc_id,
         text,
     )

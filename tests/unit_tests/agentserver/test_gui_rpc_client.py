@@ -12,6 +12,11 @@ from jiuwenswarm.common.gui_rpc.models import (
     GuiRpcRequest,
     GuiRpcResponse,
 )
+from jiuwenswarm.common.invocation_context.models import (
+    INVOCATION_CONTEXT_VERSION,
+    InvocationContext,
+    XiaoyiInvocationContext,
+)
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.server.gui_rpc.client import (
     GuiRpcClient,
@@ -37,10 +42,29 @@ def _agent_request(channel_id: str = "xiaoyi") -> AgentRequest:
     )
 
 
+def _invocation(channel_id: str = "xiaoyi") -> InvocationContext:
+    request = _agent_request(channel_id=channel_id)
+    return InvocationContext(
+        version=INVOCATION_CONTEXT_VERSION,
+        invocation_id="invocation-1",
+        request_id=request.request_id,
+        session_id=request.session_id,
+        channel_id=request.channel_id,
+        chat_id=request.chat_id,
+        xiaoyi=XiaoyiInvocationContext(
+            root_session_id="xiaoyi-session-1",
+            params_session_id=None,
+            task_id="xiaoyi-task-1",
+            message_id="xiaoyi-message-1",
+            device_id="device-1",
+        ),
+    )
+
+
 def test_gui_rpc_models_round_trip() -> None:
     request = build_gui_rpc_request(
         query="open settings",
-        request=_agent_request(),
+        invocation=_invocation(),
         timeout=30.0,
     )
     assert GuiRpcRequest.from_dict(request.to_dict()) == request
@@ -65,7 +89,7 @@ def test_gui_rpc_request_rejects_non_xiaoyi_context() -> None:
     with pytest.raises(GuiRpcContextError) as exc_info:
         build_gui_rpc_request(
             query="open settings",
-            request=_agent_request(channel_id="web"),
+            invocation=_invocation(channel_id="web"),
             timeout=30.0,
         )
     assert exc_info.value.error_code == "INVALID_CONTEXT"
@@ -93,7 +117,7 @@ async def test_gui_rpc_client_completes_matching_pending() -> None:
     client.set_send_push_callback(send_push)
     response = await client.call(
         query="open settings",
-        request=_agent_request(),
+        invocation=_invocation(),
         timeout=1.0,
     )
 
@@ -114,8 +138,10 @@ async def test_gui_rpc_client_timeout_sends_cancel_and_cleans_pending() -> None:
     with pytest.raises(asyncio.TimeoutError):
         await client.call(
             query="open settings",
-            request=_agent_request(),
-            timeout=0.01,
+            invocation=_invocation(),
+            # Keep enough headroom for request construction/logging before
+            # the timeout watcher is scheduled on slower CI workers.
+            timeout=0.1,
         )
 
     assert client._pending == {}
@@ -148,7 +174,7 @@ async def test_gui_rpc_client_disconnect_fails_and_cleans_pending() -> None:
     task = asyncio.create_task(
         client.call(
             query="open settings",
-            request=_agent_request(),
+            invocation=_invocation(),
             timeout=10.0,
         )
     )

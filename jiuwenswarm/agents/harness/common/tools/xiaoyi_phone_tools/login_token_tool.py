@@ -32,8 +32,11 @@ from typing import Any, Dict
 
 from openjiuwen.core.foundation.tool import tool
 
+from jiuwenswarm.common.invocation_context import get_current_invocation_context
+from jiuwenswarm.common.invocation_context.adapters import (
+    build_device_command_context_from_invocation,
+)
 from jiuwenswarm.common.utils import logger
-from jiuwenswarm.server.request_context import get_device_context
 
 from .utils import ToolInputError, execute_device_command
 
@@ -242,7 +245,7 @@ async def _poll_for_token(client_id: str, baseline_expire: float | None = None) 
 async def huawei_id_tool(clientId: str, skillName: str) -> Dict[str, Any]:
     """翻译自 login-token-tool.ts 的 huawei_id_tool（loginTokenTool）.
 
-    通过 DeviceCommandManager 跨进程桥下发 getLoginToken artifact（gateway 侧执行），
+    通过通用 Reverse RPC 下发 getLoginToken artifact（gateway 侧执行），
     再轮询 /home/sandbox/.openclaw/.xiaoyitoken.json 取授权结果。
 
     Args:
@@ -259,12 +262,13 @@ async def huawei_id_tool(clientId: str, skillName: str) -> Dict[str, Any]:
     if not skill_name:
         raise ToolInputError("缺少必填参数: skillName 必须为非空字符串")
 
-    context = get_device_context()
-    if context is None:
-        raise RuntimeError("No active Xiaoyi request context")
+    invocation = get_current_invocation_context()
+    if invocation is None:
+        raise RuntimeError("No active Jiuwen invocation context")
+    context = build_device_command_context_from_invocation(invocation)
 
     # 跨进程桥：把 getLoginToken 请求投到 gateway 进程，由 gateway 侧
-    # XiaoyiDeviceCommandHandler 特判 intent=GetLoginToken 调
+    # XiaoyiDeviceCapability 的共享 executor 特判 intent=GetLoginToken 调
     # channel.send_login_token_artifact 下发 artifact。command 带 client_id /
     # skill_name，gateway 侧从中取参。message_id（JSON-RPC id）由 gateway 侧从
     # context.xiaoyi_rpc_id 解析，与 TS 第 75 行 id=messageId 对齐。

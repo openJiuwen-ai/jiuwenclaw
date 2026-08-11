@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, Dict
 
-from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools.device_command_manager import (
-    get_device_command_manager,
+from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools.device_reverse_rpc import (
+    get_xiaoyi_device_reverse_rpc_client,
 )
+from jiuwenswarm.common.invocation_context import get_current_invocation_context
+from jiuwenswarm.common.invocation_context.adapters import (
+    build_device_command_context_from_invocation,
+)
+from jiuwenswarm.common.reverse_rpc.errors import ReverseRpcTimeoutError
 from jiuwenswarm.common.utils import logger
-from jiuwenswarm.server.request_context import get_device_context
 
 
 def _is_data_event_status_success(status: Any) -> bool:
@@ -43,12 +48,27 @@ async def execute_device_command(
     timeout: float = 60.0,
 ) -> Dict[str, Any]:
     logger.info("[%s_TOOL] Starting execution", intent_name)
-    context = get_device_context()
-    if context is None:
-        raise RuntimeError("No active Xiaoyi request context")
-    if context.channel_id == "xiaoyi":
+    invocation = get_current_invocation_context()
+    if invocation is None:
+        logger.warning(
+            "[INVOCATION_CTX] MISSING phase=TOOL_READ capability=device intent_name=%s",
+            intent_name,
+        )
+        raise RuntimeError("No active Jiuwen invocation context")
+    logger.info(
+        "[INVOCATION_CTX] TOOL_READ capability=device invocation_id=%s "
+        "request_id=%s session_id=%s channel_id=%s asyncio_task_id=%s",
+        invocation.invocation_id,
+        invocation.request_id,
+        invocation.session_id,
+        invocation.channel_id,
+        id(asyncio.current_task()) if asyncio.current_task() else None,
+    )
+    context = build_device_command_context_from_invocation(invocation)
+    channel_id = str(invocation.channel_id or "").strip().lower()
+    if channel_id == "xiaoyi":
         pass
-    elif context.channel_id == "__cron__":
+    elif channel_id == "__cron__":
         scheduled_device = context.metadata.get("scheduled_device")
         if not isinstance(scheduled_device, dict):
             logger.warning(
@@ -88,12 +108,17 @@ async def execute_device_command(
     else:
         raise RuntimeError("Xiaoyi device tools require Xiaoyi channel")
 
-    response = await get_device_command_manager().call(
-        intent_name=intent_name,
-        command=command,
-        context=context,
-        timeout=timeout,
-    )
+    try:
+        response = await get_xiaoyi_device_reverse_rpc_client().call(
+            intent_name=intent_name,
+            command=command,
+            context=context,
+            timeout=timeout,
+        )
+    except ReverseRpcTimeoutError as exc:
+        # Preserve the established Tool-facing timeout contract while the
+        # generic Core owns pending/cancel/cleanup internally.
+        raise asyncio.TimeoutError from exc
     if not response.ok:
         raise RuntimeError(f"{response.error_code}: {response.error_message}")
     return response.result or {}

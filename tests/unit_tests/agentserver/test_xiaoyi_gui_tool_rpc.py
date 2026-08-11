@@ -11,11 +11,18 @@ from jiuwenswarm.common.gui_rpc.models import (
     GUI_RPC_RESPONSE_MESSAGE_TYPE,
     GuiRpcResponse,
 )
-from jiuwenswarm.gateway.gui_rpc import executor as executor_module
-from jiuwenswarm.gateway.gui_rpc.dispatcher import XiaoyiGuiRpcDispatcher
-from jiuwenswarm.gateway.gui_rpc.executor import XiaoyiGuiExecutor
-from jiuwenswarm.server.gui_rpc.client import GuiRpcClient
+from jiuwenswarm.common.reverse_rpc.codec import request_from_wire
 from jiuwenswarm.common.schema.agent import AgentRequest
+from jiuwenswarm.gateway.gui_rpc.reverse_rpc import (
+    register_xiaoyi_gui_reverse_rpc,
+)
+from jiuwenswarm.gateway.reverse_rpc import (
+    CapabilityRegistry,
+    ReverseRpcDispatcher,
+)
+from jiuwenswarm.server.gui_rpc.reverse_rpc import XiaoyiGuiReverseRpcClient
+from jiuwenswarm.server.invocation_context_builder import build_invocation_context
+from jiuwenswarm.server.reverse_rpc.client import ReverseRpcClient
 
 
 def _request() -> AgentRequest:
@@ -27,6 +34,7 @@ def _request() -> AgentRequest:
             "xiaoyi_root_session_id": "xiaoyi-session-1",
             "xiaoyi_task_id": "xiaoyi-task-1",
             "xiaoyi_rpc_id": "xiaoyi-message-1",
+            "app_id": "app-1",
         },
     )
 
@@ -51,13 +59,24 @@ async def test_xiaoyi_gui_tool_calls_independent_rpc(monkeypatch) -> None:
             result="opened",
         )
     )
-    monkeypatch.setattr(tool_module, "get_current_agent_request", _request)
-    monkeypatch.setattr(tool_module, "get_gui_rpc_client", lambda: client)
+    monkeypatch.setattr(
+        tool_module,
+        "get_current_invocation_context",
+        lambda: build_invocation_context(_request()),
+    )
+    monkeypatch.setattr(
+        tool_module,
+        "get_xiaoyi_gui_reverse_rpc_client",
+        lambda: client,
+    )
 
     result = await tool_module.xiaoyi_gui_agent.invoke({"query": "open settings"})
 
     assert client.calls[0]["query"] == "open settings"
-    assert client.calls[0]["request"].request_id == "request-1"
+    assert client.calls[0]["source_request_id"] == "request-1"
+    assert client.calls[0]["execution_id"].startswith("inv_")
+    assert client.calls[0]["app_id"] == "app-1"
+    assert client.calls[0]["xiaoyi_task_id"] == "xiaoyi-task-1"
     assert result["content"][0]["type"] == "text"
     assert "opened" in result["content"][0]["text"]
 
@@ -73,8 +92,16 @@ async def test_xiaoyi_gui_tool_preserves_remote_error_code(monkeypatch) -> None:
             error_message="not connected",
         )
     )
-    monkeypatch.setattr(tool_module, "get_current_agent_request", _request)
-    monkeypatch.setattr(tool_module, "get_gui_rpc_client", lambda: client)
+    monkeypatch.setattr(
+        tool_module,
+        "get_current_invocation_context",
+        lambda: build_invocation_context(_request()),
+    )
+    monkeypatch.setattr(
+        tool_module,
+        "get_xiaoyi_gui_reverse_rpc_client",
+        lambda: client,
+    )
 
     with pytest.raises(RuntimeError, match="CHANNEL_NOT_READY"):
         await tool_module.xiaoyi_gui_agent.invoke({"query": "open settings"})
@@ -107,33 +134,59 @@ async def test_xiaoyi_gui_tool_full_in_memory_rpc_round_trip(monkeypatch) -> Non
                 handler(item)
             return True
 
-    gui_client = GuiRpcClient()
+    class FakeChannelManager:
+        def get_by_key(self, key):
+            if key.channel_id == "xiaoyi" and key.app_id == "app-1":
+                return channel
+            return None
+
+        def get_channels_by_id(self, channel_id):
+            return [channel] if channel_id == "xiaoyi" else []
+
+    generic_client = ReverseRpcClient()
 
     class ResponseTransport:
-        async def send_request(self, envelope) -> None:
-            assert gui_client.complete(
-                GuiRpcResponse.from_dict(envelope.params)
-            )
+        async def send(self, response, request) -> None:
+            del request
+            assert generic_client.complete(response)
 
-    dispatcher = XiaoyiGuiRpcDispatcher(
+    registry = CapabilityRegistry()
+    channel = FakeChannel()
+    register_xiaoyi_gui_reverse_rpc(registry, FakeChannelManager())
+    dispatcher = ReverseRpcDispatcher(
+        registry,
         ResponseTransport(),
-        XiaoyiGuiExecutor(),
     )
 
-    async def send_push(message: dict) -> None:
-        await dispatcher.handle(message)
+    class RequestTransport:
+        def __init__(self) -> None:
+            self.requests = []
 
-    gui_client.set_send_push_callback(send_push)
-    channel = FakeChannel()
-    monkeypatch.setattr(executor_module, "get_xiaoyi_channel", lambda: channel)
-    monkeypatch.setattr(tool_module, "get_current_agent_request", _request)
-    monkeypatch.setattr(tool_module, "get_gui_rpc_client", lambda: gui_client)
+        async def send(self, message: dict, route) -> None:
+            del route
+            self.requests.append(request_from_wire(message))
+            await dispatcher.handle(message)
+
+    request_transport = RequestTransport()
+    generic_client.set_transport(request_transport)
+    gui_client = XiaoyiGuiReverseRpcClient(generic_client)
+    monkeypatch.setattr(
+        tool_module,
+        "get_current_invocation_context",
+        lambda: build_invocation_context(_request()),
+    )
+    monkeypatch.setattr(
+        tool_module,
+        "get_xiaoyi_gui_reverse_rpc_client",
+        lambda: gui_client,
+    )
 
     result = await tool_module.xiaoyi_gui_agent.invoke(
         {"query": "open settings"}
     )
 
     assert "opened settings" in result["content"][0]["text"]
-    assert gui_client._pending == {}
-    assert dispatcher._executions == {}
+    assert generic_client.registry.pending_count() == 0
+    assert dispatcher.execution_count == 0
     assert channel.handlers == []
+    assert request_transport.requests[0].method == "xiaoyi.gui.execute"

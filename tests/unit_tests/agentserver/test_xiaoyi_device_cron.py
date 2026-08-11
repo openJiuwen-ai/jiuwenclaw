@@ -14,10 +14,47 @@ from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools import (
     utils as device_utils,
 )
 from jiuwenswarm.common.device_rpc.models import (
-    DeviceCommandContext,
     DeviceCommandResponse,
 )
+from jiuwenswarm.common.invocation_context.models import (
+    INVOCATION_CONTEXT_VERSION,
+    InvocationContext,
+    XiaoyiInvocationContext,
+)
 from jiuwenswarm.gateway.cron.models import CronJob
+
+
+def _scheduled_invocation(
+    *,
+    required_intents: list[str],
+    include_cron: bool = False,
+) -> InvocationContext:
+    scheduled_device = {
+        "push_id": "push-1",
+        "required_intents": required_intents,
+    }
+    return InvocationContext(
+        version=INVOCATION_CONTEXT_VERSION,
+        invocation_id="invocation-cron-1",
+        request_id="cron-run-1",
+        session_id="cron-session",
+        channel_id="__cron__",
+        chat_id=None,
+        xiaoyi=XiaoyiInvocationContext(
+            scheduled_device=scheduled_device,
+            cron={"job_id": "job-1", "run_id": "run-1"}
+            if include_cron
+            else None,
+        ),
+        metadata={
+            "scheduled_device": scheduled_device,
+            **(
+                {"cron": {"job_id": "job-1", "run_id": "run-1"}}
+                if include_cron
+                else {}
+            ),
+        },
+    )
 
 
 def test_permission_map_exactly_matches_openclaw() -> None:
@@ -184,25 +221,12 @@ def test_device_cron_model_round_trip() -> None:
 
 @pytest.mark.asyncio
 async def test_execute_device_command_accepts_scheduled_context(monkeypatch) -> None:
-    context = DeviceCommandContext(
-        source_request_id="cron-run-1",
-        channel_id="__cron__",
-        jiuwen_session_id="cron-session",
-        xiaoyi_root_session_id=None,
-        xiaoyi_params_session_id=None,
-        xiaoyi_task_id=None,
-        xiaoyi_rpc_id=None,
-        metadata={
-            "scheduled_device": {
-                "push_id": "push-1",
-                "required_intents": ["CreateNote"],
-            }
-        },
-    )
+    invocation = _scheduled_invocation(required_intents=["CreateNote"])
 
     class FakeManager:
         async def call(self, **kwargs):
-            assert kwargs["context"] is context
+            assert kwargs["context"].source_request_id == "cron-run-1"
+            assert kwargs["context"].channel_id == "__cron__"
             assert kwargs["intent_name"] == "CreateNote"
             return DeviceCommandResponse(
                 rpc_id="rpc-1",
@@ -211,10 +235,14 @@ async def test_execute_device_command_accepts_scheduled_context(monkeypatch) -> 
                 result={"code": 0},
             )
 
-    monkeypatch.setattr(device_utils, "get_device_context", lambda: context)
     monkeypatch.setattr(
         device_utils,
-        "get_device_command_manager",
+        "get_current_invocation_context",
+        lambda: invocation,
+    )
+    monkeypatch.setattr(
+        device_utils,
+        "get_xiaoyi_device_reverse_rpc_client",
         lambda: FakeManager(),
     )
 
@@ -228,22 +256,11 @@ async def test_execute_device_command_accepts_scheduled_context(monkeypatch) -> 
 
 @pytest.mark.asyncio
 async def test_execute_device_command_rejects_undeclared_intent(monkeypatch) -> None:
-    context = DeviceCommandContext(
-        source_request_id="cron-run-1",
-        channel_id="__cron__",
-        jiuwen_session_id="cron-session",
-        xiaoyi_root_session_id=None,
-        xiaoyi_params_session_id=None,
-        xiaoyi_task_id=None,
-        xiaoyi_rpc_id=None,
-        metadata={
-            "scheduled_device": {
-                "push_id": "push-1",
-                "required_intents": ["CreateNote"],
-            }
-        },
+    monkeypatch.setattr(
+        device_utils,
+        "get_current_invocation_context",
+        lambda: _scheduled_invocation(required_intents=["CreateNote"]),
     )
-    monkeypatch.setattr(device_utils, "get_device_context", lambda: context)
 
     with pytest.raises(RuntimeError, match="not allowed"):
         await device_utils.execute_device_command(
@@ -256,24 +273,11 @@ async def test_execute_device_command_rejects_undeclared_intent(monkeypatch) -> 
 async def test_execute_device_command_rejects_empty_scheduled_intents(
     monkeypatch,
 ) -> None:
-    context = DeviceCommandContext(
-        source_request_id="cron-run-1",
-        channel_id="__cron__",
-        jiuwen_session_id="cron-session",
-        xiaoyi_root_session_id=None,
-        xiaoyi_params_session_id=None,
-        xiaoyi_task_id=None,
-        xiaoyi_rpc_id=None,
-        metadata={
-            "cron": {"job_id": "job-1", "run_id": "run-1"},
-            "scheduled_device": {
-                "push_id": "push-1",
-                "required_intents": [],
-            },
-        },
+    monkeypatch.setattr(
+        device_utils,
+        "get_current_invocation_context",
+        lambda: _scheduled_invocation(required_intents=[], include_cron=True),
     )
-
-    monkeypatch.setattr(device_utils, "get_device_context", lambda: context)
 
     with pytest.raises(RuntimeError, match="recreate the cron job"):
         await device_utils.execute_device_command("CreateNote", {})

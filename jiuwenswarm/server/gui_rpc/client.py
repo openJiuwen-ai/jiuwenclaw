@@ -21,7 +21,7 @@ from jiuwenswarm.common.gui_rpc.models import (
     GuiRpcRequest,
     GuiRpcResponse,
 )
-from jiuwenswarm.common.schema.agent import AgentRequest
+from jiuwenswarm.common.invocation_context.models import InvocationContext
 
 logger = logging.getLogger(__name__)
 
@@ -50,38 +50,34 @@ class GuiRpcContextError(GuiRpcClientError):
 def build_gui_rpc_request(
     *,
     query: str,
-    request: AgentRequest,
+    invocation: InvocationContext,
     timeout: float,
 ) -> GuiRpcRequest:
-    source_request_id = str(request.request_id or "").strip()
+    if not isinstance(invocation, InvocationContext):
+        raise GuiRpcContextError(
+            "INVALID_CONTEXT",
+            "current invocation context is invalid",
+        )
+
+    source_request_id = str(invocation.request_id or "").strip()
     if not source_request_id:
         raise GuiRpcContextError(
             "INVALID_CONTEXT",
             "current request_id is missing",
         )
-    if str(request.channel_id or "").strip() != "xiaoyi":
+    if str(invocation.channel_id or "").strip().lower() != "xiaoyi":
         raise GuiRpcContextError(
             "INVALID_CONTEXT",
             "xiaoyi_gui_agent can only be used for a Xiaoyi request",
         )
-    metadata = dict(request.metadata or {})
-    params = request.params if isinstance(request.params, dict) else {}
+    xiaoyi = invocation.xiaoyi
     xiaoyi_session_id = _first_text(
-        metadata.get("xiaoyi_root_session_id"),
-        metadata.get("xiaoyi_session_id"),
-        metadata.get("xiaoyi_params_session_id"),
-        params.get("xiaoyi_session_id"),
-        params.get("session_id"),
-        request.chat_id,
+        xiaoyi.root_session_id if xiaoyi else None,
+        xiaoyi.params_session_id if xiaoyi else None,
+        invocation.chat_id,
     )
-    xiaoyi_task_id = _first_text(
-        metadata.get("xiaoyi_task_id"),
-        params.get("task_id"),
-    )
-    xiaoyi_message_id = _first_text(
-        metadata.get("xiaoyi_rpc_id"),
-        metadata.get("xiaoyi_message_id"),
-    )
+    xiaoyi_task_id = _first_text(xiaoyi.task_id if xiaoyi else None)
+    xiaoyi_message_id = _first_text(xiaoyi.message_id if xiaoyi else None)
     missing = [
         name
         for name, value in (
@@ -101,13 +97,12 @@ def build_gui_rpc_request(
         rpc_id=f"xiaoyi_gui_rpc_{uuid.uuid4().hex}",
         query=query,
         source_request_id=source_request_id,
-        jiuwen_session_id=_first_text(request.session_id),
+        jiuwen_session_id=_first_text(invocation.session_id),
         xiaoyi_session_id=xiaoyi_session_id,
         xiaoyi_task_id=xiaoyi_task_id,
         xiaoyi_message_id=xiaoyi_message_id,
         device_id=_first_text(
-            metadata.get("xiaoyi_device_id"),
-            metadata.get("device_id"),
+            xiaoyi.device_id if xiaoyi else None,
         ),
         deadline=time.time() + timeout,
     )
@@ -150,14 +145,14 @@ class GuiRpcClient:
         self,
         *,
         query: str,
-        request: AgentRequest,
+        invocation: InvocationContext,
         timeout: float = GUI_RPC_DEFAULT_TIMEOUT_SECONDS,
     ) -> GuiRpcResponse:
         if self._send_push_callback is None:
             raise RuntimeError("GUI RPC Gateway push callback is not configured")
         gui_request = build_gui_rpc_request(
             query=query,
-            request=request,
+            invocation=invocation,
             timeout=timeout,
         )
         logger.info(
