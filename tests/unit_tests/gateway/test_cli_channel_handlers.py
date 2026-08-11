@@ -50,6 +50,11 @@ class FakeMessageHandler:
         self.cancelled = []
         self.scheduled = []
         self.reconnected = []
+        self.disconnected_websockets = []
+
+    async def unregister_ws_subscriptions(self, channel_id, ws_id):
+        self.disconnected_websockets.append((channel_id, ws_id))
+        return 1
 
     async def cancel_agent_sessions_on_disconnect(
         self, session_keys, *, stale_request_keys=None, user_id=None
@@ -386,6 +391,17 @@ async def test_tui_route_disconnect_schedules_cancel_for_transport_close():
 
     assert handler.scheduled == [([("tui", "sess-drop")], [("tui", "req-drop")])]
     assert handler.cancelled == []
+
+
+@pytest.mark.asyncio
+async def test_tui_route_disconnect_unregisters_physical_subscriptions():
+    handler = FakeMessageHandler()
+    binding = build_cli_route_binding(CliRouteBindParams(path="/tui", message_handler=handler))
+    ws = type("FakeWs", (), {"_jiuwen_ws_id": "tui-ws-dead"})()
+
+    await binding.disconnect_handler(ws, [("tui", "sess-drop")], [])
+
+    assert handler.disconnected_websockets == [("tui", "tui-ws-dead")]
 
 
 @pytest.mark.asyncio

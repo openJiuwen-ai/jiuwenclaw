@@ -3542,13 +3542,17 @@ def build_cli_route_binding(bind: CliRouteBindParams) -> GatewayRouteBinding:
 
     async def _tui_disconnect(
         _ws: Any,
-        stale_session_keys: list[tuple[str, str]],
-        stale_request_keys: list[tuple[str, str]] | None = None,
+        stale_session_keys: list[tuple[str, ...]],
+        stale_request_keys: list[tuple[str, ...]] | None = None,
     ) -> None:
         await _cancel_harmonyos_dev_init_tasks(_ws)
+        mh = bind.message_handler
+        cleanup = getattr(mh, "unregister_ws_subscriptions", None)
+        ws_id = str(getattr(_ws, "_jiuwen_ws_id", "") or "").strip()
+        if callable(cleanup) and ws_id:
+            await cleanup(bind.channel_id, ws_id)
         if bool(getattr(_ws, "_jiuwenswarm_tui_user_exit", False)):
             return
-        mh = bind.message_handler
         if mh is None:
             return
         # NOTE: do not early-return on empty stale_session_keys; in-flight streams
