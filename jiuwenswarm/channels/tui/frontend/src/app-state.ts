@@ -923,6 +923,16 @@ export class CliPiAppState {
     if (!this.hasActiveResponseStream()) {
       return;
     }
+    // ws 仍 connected 即认为本地服务（Gateway/AgentServer）还活着、任务在跑只是暂未吐帧。
+    // air-gapped 内网里 ws 恒 connected，故永远续期不报错，消除公网探针必然失败导致的误报。
+    // 公网用户真断网时 ws 会先变 reconnecting（见 handleConnectionStatusChanged，走 60s
+    // 重连看门狗），不会走到本分支，故公网保护语义不变。
+    if (this.connectionStatus === "connected") {
+      this.lastStreamActivityAt = Date.now();
+      this.scheduleStreamStallWatchdog();
+      return;
+    }
+    // ws 已不 connected：保留原公网探针作为防御性兜底。
     if (await hasExternalNetwork()) {
       this.lastStreamActivityAt = Date.now();
       this.scheduleStreamStallWatchdog();
