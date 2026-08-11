@@ -780,6 +780,8 @@ function AppContent() {
       const currentItems = current.map((segment) => ({
         at: new Date(segment.startedAt + 1).toISOString(),
         text: segment.text,
+        // live 内存里的真实末帧时刻并入 replay，刷新重建后耗时终点不丢。
+        updatedAt: segment.updatedAt,
       }));
       store.restoreReasoningSegments(sid, [...result.reasoningReplay, ...currentItems]);
     }
