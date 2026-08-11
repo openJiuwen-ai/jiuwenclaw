@@ -434,6 +434,7 @@ check_gateway_up_dependency(){
 }
 
 check_web_up_dependency(){
+    check_if_db_up
     check_if_obs_up
 
     if ! check_k8s_resource_exists "deployment" "${DEPLOY_VARS["GATEWAY_NAME"]}" "${DEPLOY_VARS["NAMESPACE"]}"; then
