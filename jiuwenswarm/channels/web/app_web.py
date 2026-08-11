@@ -943,29 +943,79 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
 
         try:
             from jiuwenswarm.agents.harness.common.tools.web_file_download import (
+                PURPOSE_SKILL_CONTENT_IMAGE,
                 validate_file_download_token,
             )
+            from jiuwenswarm.server.runtime.skill.skill_content_images import (
+                extract_request_session_id,
+                resolve_skill_content_image_file,
+                validate_skill_content_image_payload,
+            )
+            from jiuwenswarm.server.runtime.skill.skill_files import SkillFilesError
         except ImportError:
             self._write_json(500, {"error": "download_module_unavailable"})
             return
 
-        payload = validate_file_download_token(token)
+        request_sid = extract_request_session_id(query=query, headers=self.headers)
+        payload = validate_file_download_token(
+            token,
+            session_id=request_sid or None,
+        )
         if payload is None:
             self._write_json(403, {"error": "invalid_or_expired_token"})
             return
 
-        file_path = payload.get("path", "")
-        if not file_path or not os.path.isfile(file_path):
-            self._write_json(404, {"error": "file_not_found"})
-            return
+        purpose = str(payload.get("purpose") or "").strip()
+        force_inline = False
+        mime_type = "application/octet-stream"
+        file_path = ""
+
+        if purpose == PURPOSE_SKILL_CONTENT_IMAGE:
+            err = validate_skill_content_image_payload(
+                payload, request_session_id=request_sid
+            )
+            if err:
+                self._write_json(403, {"error": err})
+                return
+            version_raw = payload.get("version")
+            if version_raw is None or (
+                isinstance(version_raw, str) and not version_raw.strip()
+            ):
+                version = None
+            else:
+                version = str(version_raw).strip()
+            try:
+                resolved, mime_type = resolve_skill_content_image_file(
+                    name=str(payload.get("name") or ""),
+                    version=version,
+                    relative_path=str(payload.get("relative_path") or ""),
+                )
+            except SkillFilesError as exc:
+                code = str(exc.code or "")
+                if code in {"SKILL_NOT_FOUND", "SKILL_VERSION_NOT_FOUND"}:
+                    self._write_json(404, {"error": "file_not_found", "code": code})
+                elif "图片" in str(exc.message) or code == "SKILL_INVALID_PACKAGE":
+                    self._write_json(415, {"error": "unsupported_media_type", "code": code})
+                else:
+                    self._write_json(403, {"error": "forbidden_path", "code": code})
+                return
+            except Exception as exc:
+                self.log_error("skill content image resolve error: %s", exc)
+                self._write_json(404, {"error": "file_not_found"})
+                return
+            file_path = str(resolved)
+            force_inline = True
+        else:
+            file_path = str(payload.get("path") or "")
+            if not file_path or not os.path.isfile(file_path):
+                self._write_json(404, {"error": "file_not_found"})
+                return
+            guessed, _ = mimetypes.guess_type(os.path.basename(file_path))
+            mime_type = guessed or "application/octet-stream"
 
         try:
             file_size = os.path.getsize(file_path)
             file_name = os.path.basename(file_path)
-
-            mime_type, _ = mimetypes.guess_type(file_name)
-            if not mime_type:
-                mime_type = "application/octet-stream"
 
             range_header = self.headers.get("Range")
             byte_range = None
@@ -986,7 +1036,7 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             encoded_name = quote(file_name, safe="")
             disposition = (
                 "inline"
-                if query.get("inline", "").lower() in {"1", "true"}
+                if force_inline or query.get("inline", "").lower() in {"1", "true"}
                 else "attachment"
             )
             self.send_header(
@@ -994,6 +1044,8 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 f"{disposition}; filename*=UTF-8''{encoded_name}",
             )
             self.send_header("Cache-Control", "no-store")
+            if force_inline:
+                self.send_header("X-Content-Type-Options", "nosniff")
             if byte_range is not None:
                 self.send_header(
                     "Content-Range",

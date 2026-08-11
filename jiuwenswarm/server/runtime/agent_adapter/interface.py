@@ -1566,9 +1566,15 @@ class JiuWenSwarm:
         handler = getattr(self._skill_manager, handler_name)
         try:
             params = dict(request.params) if isinstance(request.params, dict) else {}
-            if handler_name == "handle_skills_import_local":
-                # download_token 校验需要绑定当前会话 sid
+            if handler_name in (
+                "handle_skills_import_local",
+                "handle_skills_get",
+                "handle_skills_files_get",
+            ):
+                # download_token / 正文图片 token 校验需要绑定当前会话 sid
                 params["_session_id"] = str(request.session_id or "").strip()
+                if handler_name == "handle_skills_files_get" and not params.get("session_id"):
+                    params["session_id"] = params["_session_id"]
             payload = await handler(params)
             _reload_after_skills = handler_name in [
                 "handle_skills_install",
