@@ -184,7 +184,19 @@
   display: none;
 }
 
-/* Keep the full Mermaid diagram visible in share image */
+/* Export only the rendered diagram, without the interactive viewer chrome. */
+.share-image-document .diagram-container {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  overflow: visible;
+}
+
+.share-image-document .diagram-container__toolbar {
+  display: none;
+}
+
+/* Keep the full diagram visible without an inner scrollbar in share images. */
 .share-image-document .mermaid-canvas {
   overflow: visible !important;
 }
@@ -192,6 +204,19 @@
 /* Prevent Mermaid from squeezing wide diagrams in share images. */
 .share-image-document .mermaid-canvas svg {
   max-width: none !important;
+}
+
+.share-image-document .svg-diagram__canvas {
+  max-height: none;
+  overflow: visible;
+  padding: 0;
+  scrollbar-gutter: auto;
+  background: transparent;
+}
+
+.share-image-document .svg-diagram__code-view {
+  max-height: none;
+  overflow: visible;
 }
 
 .share-image-document .chat-bubble,
