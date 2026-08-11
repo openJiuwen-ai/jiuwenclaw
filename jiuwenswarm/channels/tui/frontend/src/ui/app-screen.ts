@@ -1714,15 +1714,11 @@ export class AppScreen implements Component, Focusable {
   /** Whether the eager skill-cache fetch on first WebSocket connection has already been fired. */
   private didEagerFetchSkills = false;
   private didEagerFetchSandboxMeta = false;
-  /**
-   * The workflow run the user most recently submitted a swarmflow human reply
-   * against, regardless of which swarm view they replied from. While the user
-   * is still on that run's session-detail view, this lets the refresh hook
-   * auto-jump back to the workflow detail page once the run reaches a terminal
-   * state — otherwise the user stays stranded on the session view and never
-   * sees that the workflow completed. Cleared after the jump fires.
-   */
-  private lastRepliedWorkflowId: string | null = null;
+  /** The exact human turn most recently submitted from a swarmflow reply editor. */
+  private lastRepliedHumanPrompt: {
+    workflowRunId: string;
+    correlationId: string;
+  } | null = null;
   private pendingSubmittedInput: string | null = null;
   private pendingSubmittedBaseline = 0;
   private pendingSubmittedSessionId: string | null = null;
@@ -5881,7 +5877,7 @@ export class AppScreen implements Component, Focusable {
   private closeSwarmWorkflowsView(): void {
     if (!this.swarmWorkflowsViewState) return;
     this.swarmWorkflowsViewState = null;
-    this.lastRepliedWorkflowId = null;
+    this.lastRepliedHumanPrompt = null;
     this.state.flushDeferredTranscript();
     this.tui.requestRender();
   }
@@ -5927,32 +5923,24 @@ export class AppScreen implements Component, Focusable {
       return;
     }
     if (current.phase === "session-detail") {
-      // After the user submits a reply from the session-detail view, the run
-      // usually keeps executing other agents. Auto-leave only once that run
-      // reaches a terminal state, so the user lands back on the workflow
-      // detail page (with its ✓/× status, phases and agents) and actually
-      // sees that the workflow finished — instead of staying stranded on the
-      // session view with no completion signal. Bound to lastRepliedWorkflowId
-      // so merely opening a finished run's session history never triggers it.
-      if (this.lastRepliedWorkflowId === current.workflowId) {
-        const workflow = this.state
-          .getSnapshot()
-          .workflowRuns.find((item) => item.id === current.workflowId);
-        const status = workflow?.status;
-        if (
-          status === "completed" ||
-          status === "failed" ||
-          status === "stopped"
-        ) {
-          this.lastRepliedWorkflowId = null;
-          // Land on the workflow detail page focused on the agents of the phase
-          // the session belongs to, so the user sees the completed run plus the
-          // surrounding agent context (mirrors restoreFromSessionDetail).
-          this.swarmWorkflowsViewState = this.buildSwarmWorkflowDetailState(
-            current.workflowId,
-            current.phaseId,
-            "agents",
-          );
+      // A submitted turn may complete while the workflow immediately opens its
+      // next human turn. Leave this history view as soon as the exact replied
+      // turn stops waiting, returning the user to chat where the new pending
+      // input indicator is visible. Merely browsing completed history does not
+      // trigger this path because no submitted-turn marker is present.
+      const replied = this.lastRepliedHumanPrompt;
+      if (replied?.workflowRunId === current.workflowId) {
+        const agentId = this.findAgentIdForHumanReply(
+          replied.workflowRunId,
+          replied.correlationId,
+        );
+        const lookup = findWorkflowAgent(
+          this.state.getSnapshot().workflowRuns,
+          replied.workflowRunId,
+          agentId,
+        );
+        if (lookup && lookup.agent.status !== "waiting_for_human") {
+          this.closeSwarmWorkflowsView();
           return;
         }
       }
@@ -6374,6 +6362,8 @@ export class AppScreen implements Component, Focusable {
           this.tui.requestRender();
           return;
         }
+        this.showHumanReplyUnavailableNotice(lookup?.agent.status, lookup?.agent.kind);
+        return;
       }
     }
     if (state.phase === "session-detail") {
@@ -6436,6 +6426,20 @@ export class AppScreen implements Component, Focusable {
             }
           }
         }
+        const sessionAgents = sessionMembersInPhase(
+          phase?.agents ?? [],
+          state.sessionLabel,
+          state.nodeType,
+        );
+        const sessionCompleted =
+          sessionAgents.length > 0 &&
+          sessionAgents.every((agent) => agent.status === "completed");
+        this.showTransientNotice(
+          sessionCompleted
+            ? "This session is completed and can no longer accept replies."
+            : "This session has no turn waiting for a reply.",
+        );
+        return;
       }
     }
     if (action === "swarm:refresh") {
@@ -6528,7 +6532,11 @@ export class AppScreen implements Component, Focusable {
             this.tui.requestRender();
             return;
           }
+          this.showHumanReplyUnavailableNotice(lookup?.agent.status, lookup?.agent.kind);
+          return;
         }
+        this.showTransientNotice("Select a human turn that is waiting for a reply.");
+        return;
       }
       const activeList = state.focus === "phases" ? state.phaseList : state.agentList;
       activeList.handleInput(data);
@@ -6983,6 +6991,12 @@ export class AppScreen implements Component, Focusable {
     const statusBanner = workflowStatusBannerText(workflow.status);
     const selectedPhase =
       workflow.phases.find((phase) => phase.id === state.selectedPhaseId) ?? workflow.phases[0];
+    const selectedAgentId = state.agentList.getSelectedItem()?.value;
+    const selectedAgent = selectedPhase?.agents.find((agent) => agent.id === selectedAgentId);
+    const replyHint =
+      selectedAgent?.kind === "human" && selectedAgent.status === "waiting_for_human"
+        ? " · Tab reply"
+        : "";
     const workflowSummary = workflow.summary.trim();
     const budgetKey = this.swarmActionKeyLabel("swarm:budget");
     const runTokens = formatTokenCount(workflow.token_count);
@@ -7081,7 +7095,7 @@ export class AppScreen implements Component, Focusable {
         palette.text.secondary(
           state.focus === "phases"
             ? `↑/↓ select phase · Enter/→ show agents · Esc/← back`
-            : `↑/↓ select · Enter/→ show detail or session · Tab reply (human) · Esc/← back to phases`,
+            : `↑/↓ select · Enter/→ show detail or session${replyHint} · Esc/← back to phases`,
         ),
         width,
       ),
@@ -7276,7 +7290,7 @@ export class AppScreen implements Component, Focusable {
   private restoreFromSessionDetail(returnTo: SessionDetailReturnTo): void {
     // Manual leave clears the pending auto-jump so re-entering the session
     // view later (e.g. to browse a finished run's history) never triggers it.
-    this.lastRepliedWorkflowId = null;
+    this.lastRepliedHumanPrompt = null;
     switch (returnTo.kind) {
       case "pending-list":
         this.swarmWorkflowsViewState = this.buildPendingListState(returnTo.previous_phase ?? "list");
@@ -7430,7 +7444,6 @@ export class AppScreen implements Component, Focusable {
     } else if (options.waiting) {
       parts.push("Tab to reply");
     }
-    parts.push("r refresh");
     parts.push(`${this.swarmActionKeyLabel("swarm:budget")} budget`);
     parts.push("Esc/← back to agents");
     return parts.join(" · ");
@@ -9868,10 +9881,9 @@ export class AppScreen implements Component, Focusable {
         correlation_id: correlationId,
         answer,
       });
-      // Remember the run we just replied to so the swarm-view refresh hook can
-      // auto-leave the session-detail view once this run reaches a terminal
-      // state (completed/failed/stopped) — see refreshSwarmWorkflowsView.
-      this.lastRepliedWorkflowId = workflowRunId;
+      // Track the exact turn so session-detail can close as soon as this reply
+      // is accepted, even if the workflow continues or opens another turn.
+      this.lastRepliedHumanPrompt = { workflowRunId, correlationId };
       this.replyingToHumanPrompt = null;
       this.editor.setText("");
       this.editor.focused = false;
@@ -9880,6 +9892,38 @@ export class AppScreen implements Component, Focusable {
 
     this.editor.handleInput(data);
     return true;
+  }
+
+  private showHumanReplyUnavailableNotice(
+    status?: WorkflowStatus,
+    kind?: WorkflowAgent["kind"],
+  ): void {
+    if (kind && kind !== "human") {
+      this.showTransientNotice("Only human nodes can accept replies.");
+      return;
+    }
+    if (status === "completed") {
+      this.showTransientNotice("This node is completed and can no longer accept replies.");
+      return;
+    }
+    if (status === "failed" || status === "stopped") {
+      this.showTransientNotice(`This node is ${status} and can no longer accept replies.`);
+      return;
+    }
+    this.showTransientNotice("This node is not waiting for a reply.");
+  }
+
+  private showTransientNotice(message: string, durationMs = 3000): void {
+    this.transientNotice = message;
+    if (this.transientNoticeTimer) {
+      clearTimeout(this.transientNoticeTimer);
+    }
+    this.transientNoticeTimer = setTimeout(() => {
+      this.transientNotice = null;
+      this.transientNoticeTimer = null;
+      this.tui.requestRender();
+    }, durationMs);
+    this.tui.requestRender();
   }
 
   private findAgentIdForHumanReply(workflowId: string, correlationId: string): string {

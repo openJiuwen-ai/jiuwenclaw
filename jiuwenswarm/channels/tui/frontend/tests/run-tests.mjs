@@ -480,6 +480,96 @@ for (const key of ["\x1b", "\x1b[D"]) {
   assert.equal(swarmNavigationRenderCount, 1);
 }
 
+// Once the exact turn replied from session history is completed, return to
+// chat even when the workflow itself is still running with another turn.
+const repliedTurnWorkflow = {
+  id: "workflow-human-session",
+  name: "human session workflow",
+  summary: "",
+  status: "running",
+  phases: [
+    {
+      id: "phase-interact",
+      name: "Interact",
+      status: "waiting_for_human",
+      agents: [
+        {
+          id: "turn-0",
+          name: "relationship-manager",
+          kind: "human",
+          node_type: "human_session",
+          correlation_id: "interact:relationship-manager:0",
+          status: "completed",
+          human_reply: "first answer",
+        },
+        {
+          id: "turn-1",
+          name: "relationship-manager",
+          kind: "human",
+          node_type: "human_session",
+          correlation_id: "interact:relationship-manager:1",
+          status: "waiting_for_human",
+        },
+      ],
+    },
+  ],
+};
+let deferredTranscriptFlushes = 0;
+const completedReplyScreen = Object.create(AppScreen.prototype);
+Object.assign(completedReplyScreen, {
+  swarmWorkflowsViewState: {
+    phase: "session-detail",
+    workflowId: repliedTurnWorkflow.id,
+    sessionLabel: "relationship-manager",
+    phaseId: "phase-interact",
+    nodeType: "human_session",
+    returnTo: { kind: "workflow", workflowId: repliedTurnWorkflow.id },
+    scrollOffset: 0,
+  },
+  lastRepliedHumanPrompt: {
+    workflowRunId: repliedTurnWorkflow.id,
+    correlationId: "interact:relationship-manager:0",
+  },
+  state: {
+    getSnapshot: () => ({ workflowRuns: [repliedTurnWorkflow] }),
+    flushDeferredTranscript: () => {
+      deferredTranscriptFlushes += 1;
+    },
+  },
+  tui: { requestRender: () => undefined },
+});
+completedReplyScreen.refreshSwarmWorkflowsView();
+assert.equal(completedReplyScreen.swarmWorkflowsViewState, null);
+assert.equal(completedReplyScreen.lastRepliedHumanPrompt, null);
+assert.equal(deferredTranscriptFlushes, 1);
+
+// Completed human nodes consume Tab with a clear notice instead of opening a
+// reply editor or silently doing nothing.
+let completedReplyNotice = "";
+const completedNodeReplyScreen = Object.create(AppScreen.prototype);
+Object.assign(completedNodeReplyScreen, {
+  swarmWorkflowsViewState: {
+    phase: "workflow",
+    workflowId: repliedTurnWorkflow.id,
+    selectedPhaseId: "phase-interact",
+    focus: "agents",
+    agentList: {
+      getSelectedItem: () => ({ value: "turn-0" }),
+      handleInput: () => assert.fail("completed Tab must not reach the list"),
+    },
+  },
+  state: { getSnapshot: () => ({ workflowRuns: [repliedTurnWorkflow] }) },
+  showTransientNotice: (message) => {
+    completedReplyNotice = message;
+  },
+  tui: { requestRender: () => undefined },
+});
+completedNodeReplyScreen.handleSwarmWorkflowsInput("\t");
+assert.equal(
+  completedReplyNotice,
+  "This node is completed and can no longer accept replies.",
+);
+
 const pendingQuestionScreen = Object.create(AppScreen.prototype);
 let pendingQuestionExitCount = 0;
 let pendingQuestionInterruptCount = 0;
