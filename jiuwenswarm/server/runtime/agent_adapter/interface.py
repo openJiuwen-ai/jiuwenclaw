@@ -1354,6 +1354,20 @@ class JiuWenSwarm:
                     source,
                     original_request=original_request,
                 )
+                # Frontend may also send all_request_ids for parallel permission
+                # interrupts; merge them into InteractiveInput with the same payload.
+                if (
+                    interactive_input is not None
+                    and source in {"permission_interrupt", "confirm_interrupt"}
+                ):
+                    raw_all_ids = params.get("all_request_ids")
+                    if isinstance(raw_all_ids, list) and request_id:
+                        primary = interactive_input.user_inputs.get(request_id)
+                        if primary is not None:
+                            for raw_id in raw_all_ids:
+                                sibling = str(raw_id or "").strip()
+                                if sibling and sibling not in interactive_input.user_inputs:
+                                    interactive_input.update(sibling, primary)
                 if interactive_input is not None:
                     final_query = interactive_input
                 else:
@@ -2739,6 +2753,7 @@ class JiuWenSwarm:
         final_answer_content = ""
         final_answer_chunks: list[str] = []
         durable_pending_final_chunks: list[str] = []
+        durable_pending_final_stream_source_id: str | None = None
         durable_pending_reasoning_chunks: list[str] = []
         durable_final_content = ""
 
@@ -2756,12 +2771,34 @@ class JiuWenSwarm:
             merged["reasoning_content"] = reasoning_text
             return merged
 
+        def _note_pending_final_stream_source(payload: dict[str, Any] | None) -> None:
+            """Remember stream_source_id from chat.delta for durable chat.final (skill-turbo).
+
+            No-op when payload has no non-empty stream_source_id — non-turbo streams unchanged.
+            """
+            nonlocal durable_pending_final_stream_source_id
+            if not isinstance(payload, dict):
+                return
+            src = payload.get("stream_source_id")
+            if isinstance(src, str) and src.strip():
+                durable_pending_final_stream_source_id = src.strip()
+
         def _persist_pending_final_text() -> None:
             nonlocal durable_pending_final_chunks, durable_final_content
+            nonlocal durable_pending_final_stream_source_id
             pending_text = "".join(durable_pending_final_chunks)
             durable_pending_final_chunks = []
+            pending_source = durable_pending_final_stream_source_id
+            durable_pending_final_stream_source_id = None
             if not pending_text or pending_text == durable_final_content:
                 return
+            extra_fields = {
+                k: v for k, v in request.params.items()
+                if k in ("source", "proactive_type", "proactive_target")
+            }
+            # 透传 skill-turbo 等子气泡路由 id，避免 delta→history final 丢 source 进主气泡。
+            if pending_source:
+                extra_fields["stream_source_id"] = pending_source
             self._append_history_record(
                 session_id=session_id,
                 request_id=rid,
@@ -2772,10 +2809,7 @@ class JiuWenSwarm:
                 timestamp=time.time(),
                 # 透传 proactive 标记到 history——刷新页面时前端靠 payload.source===
                 # 'proactive_recommendation' 渲染推荐卡片，不带则退化白色气泡。
-                extra=_attach_reasoning_content({
-                    k: v for k, v in request.params.items()
-                    if k in ("source", "proactive_type", "proactive_target")
-                }),
+                extra=_attach_reasoning_content(extra_fields),
                 mode=request.params.get("mode", "unknown"),
             )
             durable_final_content = pending_text
@@ -2973,6 +3007,9 @@ class JiuWenSwarm:
                                         a2ui_pending_render_sent = True
                                     continue
                                 durable_pending_final_chunks.append(payload_content)
+                                _note_pending_final_stream_source(
+                                    data.payload if isinstance(data.payload, dict) else None
+                                )
                                 should_record = False
                             elif et == "chat.reasoning":
                                 durable_pending_reasoning_chunks.append(payload_content)
@@ -2996,8 +3033,10 @@ class JiuWenSwarm:
                                         a2ui_pending_render_sent = True
                                     final_answer_content = payload_content
                                     durable_pending_final_chunks = []
+                                    durable_pending_final_stream_source_id = None
                                     continue
                                 durable_pending_final_chunks = []
+                                durable_pending_final_stream_source_id = None
 
                             if should_record:
                                 payload_dict = dict(data.payload)
@@ -3088,6 +3127,7 @@ class JiuWenSwarm:
                                     a2ui_pending_render_sent = True
                                 continue
                             durable_pending_final_chunks.append(payload_content)
+                            _note_pending_final_stream_source(data if isinstance(data, dict) else None)
                             should_record = False
                         elif et == "chat.reasoning":
                             durable_pending_reasoning_chunks.append(payload_content)
@@ -3109,8 +3149,10 @@ class JiuWenSwarm:
                                     a2ui_pending_render_sent = True
                                 final_answer_content = payload_content
                                 durable_pending_final_chunks = []
+                                durable_pending_final_stream_source_id = None
                                 continue
                             durable_pending_final_chunks = []
+                            durable_pending_final_stream_source_id = None
 
                         if should_record:
                             extra_fields = {k: v for k, v in data.items() if k not in ("event_type", "content")}

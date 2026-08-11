@@ -29,6 +29,7 @@ from openjiuwen.core.single_agent.rail.base import (
     InvokeInputs,
     ToolCallInputs,
 )
+from openjiuwen.core.single_agent.interrupt.state import RESUME_USER_INPUT_KEY
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.schema.task import TodoStatus
 from openjiuwen.harness.tools import TodoListTool
@@ -59,6 +60,138 @@ from jiuwenswarm.common.utils import fix_json_arguments, logger
 _TODO_TOOL_NAMES = frozenset(["todo_create", "todo_get", "todo_list", "todo_modify"])
 _EARLY_CHECKPOINT_EXTRA_KEY = "_jiuwenswarm_early_checkpoint_done"
 _EARLY_CHECKPOINT_ENV = "JIUWENCLAW_EARLY_CHECKPOINT"
+
+
+def _extract_skill_turbo_pending_tool_call_id(resume_input: Any) -> str:
+    """Extract internal pending_tool_call_id for skill_turbo node resume.
+
+    Returns empty string when id is unknown. Do **not** fall back to the outer
+    ``skill_turbo_tool`` call id — executor internal ids are ``skill_turbo-tc-*``
+    and a mismatched pending id makes ``set_pending_resume`` a no-op.
+    """
+    if isinstance(resume_input, dict):
+        pending = resume_input.get("pending_tool_call_id")
+        if pending:
+            return str(pending)
+    try:
+        from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+
+        if isinstance(resume_input, InteractiveInput) and resume_input.user_inputs:
+            # Prefer internal turbo tool-call ids; ignore outer skill_turbo_tool id.
+            for key in resume_input.user_inputs.keys():
+                kid = str(key)
+                if kid.startswith("skill_turbo-tc-"):
+                    return kid
+    except ImportError:
+        pass
+    return ""
+
+
+def _build_skill_turbo_resume_payload(resume_input: Any) -> dict[str, Any] | None:
+    """Build ContextVar payload, or None when pending_tool_call_id cannot be resolved."""
+    if isinstance(resume_input, dict) and resume_input.get("pending_tool_call_id"):
+        return resume_input
+    pending_id = _extract_skill_turbo_pending_tool_call_id(resume_input)
+    if not pending_id:
+        return None
+    actual_input = resume_input
+    if isinstance(resume_input, dict) and "user_input" in resume_input:
+        actual_input = resume_input.get("user_input", resume_input)
+    return {
+        "pending_tool_call_id": pending_id,
+        "user_input": actual_input,
+    }
+
+
+def _bind_skill_turbo_resume_input(ctx: AgentCallbackContext) -> None:
+    """Bridge harness RESUME_USER_INPUT_KEY → skill_turbo ContextVar for node resume."""
+    if not isinstance(ctx.inputs, ToolCallInputs):
+        return
+    if ctx.inputs.tool_name != "skill_turbo_tool":
+        return
+    extra = ctx.extra if isinstance(getattr(ctx, "extra", None), dict) else None
+    if not extra:
+        return
+    resume_input = extra.get(RESUME_USER_INPUT_KEY)
+    if resume_input is None:
+        return
+    try:
+        from jiuwenswarm.agents.skill_turbo.skill_turbo_tools import (
+            set_skill_turbo_resume_input,
+        )
+    except ImportError as exc:
+        logger.debug("[StreamEventRail] skill_turbo resume bridge unavailable: %s", exc)
+        return
+    payload = _build_skill_turbo_resume_payload(resume_input)
+    if payload is None:
+        # Fallback: skill_turbo_tool 透传 ToolInterruptException 时把 tic.tool_call
+        # 置 None，handler 用外层 skill_turbo_tool 的 tool_call 弹窗，用户回复绑定
+        # 到外层 tool_call_id（call_xxx），_extract 找不到 skill_turbo-tc- 前缀。
+        # 回退到 session 的 SKILL_TURBO_RESUME_CTX_KEY 读取 save_resume_ctx 保存的
+        # pending_tool_call_id（subagent 内部的 ask_user tool_call_id）。
+        payload = _build_skill_turbo_resume_payload_from_session(ctx, resume_input)
+    if payload is None:
+        logger.warning(
+            "[StreamEventRail] skill_turbo resume: no internal pending_tool_call_id; "
+            "skip set_pending_resume bridge (outer re-run still proceeds)"
+        )
+        return
+    extra["_jiuwenswarm_skill_turbo_resume_token"] = set_skill_turbo_resume_input(payload)
+
+
+def _build_skill_turbo_resume_payload_from_session(
+    ctx: AgentCallbackContext, resume_input: Any
+) -> dict[str, Any] | None:
+    """Fallback payload builder: read pending_tool_call_id from session resume ctx.
+
+    Used when the outer tool_call_id is bound to the user reply (tic.tool_call=None
+    in skill_turbo_tool) so _extract_skill_turbo_pending_tool_call_id cannot find
+    the internal skill_turbo-tc-* id from InteractiveInput.user_inputs keys.
+    """
+    session = getattr(ctx, "session", None)
+    if session is None:
+        return None
+    try:
+        from jiuwenswarm.agents.skill_turbo.permission_bridge import (
+            SKILL_TURBO_RESUME_CTX_KEY,
+        )
+    except ImportError:
+        return None
+    try:
+        state = session.get_state(SKILL_TURBO_RESUME_CTX_KEY)
+    except Exception:
+        return None
+    if not isinstance(state, dict):
+        return None
+    pending_id = str(state.get("pending_tool_call_id", "") or "")
+    if not pending_id:
+        return None
+    actual_input = resume_input
+    if isinstance(resume_input, dict) and "user_input" in resume_input:
+        actual_input = resume_input.get("user_input", resume_input)
+    return {
+        "pending_tool_call_id": pending_id,
+        "user_input": actual_input,
+    }
+
+
+def _reset_skill_turbo_resume_input(ctx: AgentCallbackContext) -> None:
+    extra = ctx.extra if isinstance(getattr(ctx, "extra", None), dict) else None
+    if not extra:
+        return
+    token = extra.pop("_jiuwenswarm_skill_turbo_resume_token", None)
+    if token is None:
+        return
+    try:
+        from jiuwenswarm.agents.skill_turbo.skill_turbo_tools import (
+            reset_skill_turbo_resume_input,
+        )
+        reset_skill_turbo_resume_input(token)
+    except Exception as exc:
+        logger.debug(
+            "[StreamEventRail] reset skill_turbo resume input failed: %s",
+            exc,
+        )
 
 
 def _early_checkpoint_disabled_by_env() -> bool:
@@ -305,6 +438,17 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         # cross-session leakage in concurrent collect→get→clear sequences).
         self._cancelled_tool_results: dict[str, list[dict[str, Any]]] = {}
         self._symphony_stream_handler = SymphonyToolStreamHandler()
+        # SkillTurbo: adapter + checkpointer bound by _init_skill_turbo_tool
+        self._skill_turbo_adapter: Optional[Any] = None
+        self._checkpointer: Optional[Any] = None
+
+    def set_skill_turbo_adapter(self, adapter: Optional[Any]) -> None:
+        """Bind the adapter instance for skill_turbo tool."""
+        self._skill_turbo_adapter = adapter
+
+    def set_checkpointer(self, checkpointer: Optional[Any]) -> None:
+        """Bind tenant-scoped checkpointer for early checkpoint saves."""
+        self._checkpointer = checkpointer
 
     def init(self, agent: Any) -> None:
         self._deep_agent = agent
@@ -811,6 +955,44 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         if self._abort_requested.get(sid, False):
             raise asyncio.CancelledError("Agent abort requested")
 
+        # SkillTurbo: propagate adapter + parent session via ContextVar so
+        # skill_turbo_tool can build/cached parent_executor (case_24).
+        try:
+            if self._skill_turbo_adapter is not None:
+                from jiuwenswarm.agents.skill_turbo.skill_turbo_tools import (
+                    set_current_skill_turbo_adapter,
+                )
+                ctx.extra["_jiuwenswarm_skill_turbo_adapter_token"] = (
+                    set_current_skill_turbo_adapter(self._skill_turbo_adapter)
+                )
+                # Use tip-sealed roots from rail build — never live re-resolve
+                # after tip reset (that hides turbo/ beside standard skills).
+                try:
+                    getter = getattr(
+                        self._skill_turbo_adapter, "get_skill_turbo_skill_roots", None
+                    )
+                    if callable(getter):
+                        from jiuwenswarm.agents.skill_turbo.online.context_vars import (
+                            set_skill_turbo_skill_roots,
+                        )
+
+                        set_skill_turbo_skill_roots(list(getter()))
+                except Exception as roots_exc:
+                    logger.debug(
+                        "[StreamEventRail] bind skill_turbo skill_roots failed: %s",
+                        roots_exc,
+                    )
+            session_for_ctx = ctx.session
+            if session_for_ctx is not None:
+                from jiuwenswarm.agents.skill_turbo.online.context_vars import (
+                    set_subagent_parent_session,
+                )
+                actual = getattr(session_for_ctx, "_parent", session_for_ctx)
+                set_subagent_parent_session(actual)
+            _bind_skill_turbo_resume_input(ctx)
+        except Exception as exc:
+            logger.debug("[StreamEventRail] set skill_turbo ctx failed: %s", exc)
+
         session = ctx.session
         if session is not None and isinstance(ctx.inputs, ToolCallInputs):
             tc = ctx.inputs.tool_call
@@ -855,6 +1037,21 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
     # ------------------------------------------------------------------
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
+        # SkillTurbo: reset adapter ContextVar token set in before_tool_call
+        _st_token = ctx.extra.pop("_jiuwenswarm_skill_turbo_adapter_token", None) if ctx.extra else None
+        if _st_token is not None:
+            try:
+                from jiuwenswarm.agents.skill_turbo.skill_turbo_tools import (
+                    reset_current_skill_turbo_adapter,
+                )
+                reset_current_skill_turbo_adapter(_st_token)
+            except Exception as exc:
+                logger.debug(
+                    "[StreamEventRail] reset skill_turbo adapter failed: %s",
+                    exc,
+                )
+        _reset_skill_turbo_resume_input(ctx)
+
         session = ctx.session
         if session is None or not isinstance(ctx.inputs, ToolCallInputs):
             return

@@ -10,6 +10,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.foundation.tool import Tool, ToolCard
+from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
 
 from jiuwenswarm.common.tool_ownership import qualify_tool_id
 
@@ -82,6 +83,10 @@ class InvokeToolTool(Tool):
             return await self._invoke_target_tool(
                 session, parsed, **kwargs_without_session
             )
+        except ToolInterruptException:
+            # HITL interrupt (e.g. ask_user confirmation): must propagate to the
+            # interrupt collector/frontend, not be swallowed as a generic error.
+            raise
         except Exception as exc:
             logger.warning("[InvokeTool] invoke failed: %s", exc)
             return {
