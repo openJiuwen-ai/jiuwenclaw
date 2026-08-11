@@ -463,20 +463,20 @@ def _validate_base_revision(base_revision: object) -> tuple[str, str, str] | Non
     if base_revision is None:
         return None
     valid = (
-        isinstance(base_revision, dict)
+        type(base_revision) is dict
         and set(base_revision)
         == {"document_id", "revision_id", "content_sha256"}
-        and isinstance(base_revision.get("document_id"), str)
+        and type(base_revision.get("document_id")) is str
         and re.fullmatch(
             r"doc_[A-Za-z0-9_-]{1,128}", base_revision["document_id"]
         )
         is not None
-        and isinstance(base_revision.get("revision_id"), str)
+        and type(base_revision.get("revision_id")) is str
         and re.fullmatch(
             r"rev_[A-Za-z0-9_-]{1,128}", base_revision["revision_id"]
         )
         is not None
-        and isinstance(base_revision.get("content_sha256"), str)
+        and type(base_revision.get("content_sha256")) is str
         and re.fullmatch(r"[0-9a-f]{64}", base_revision["content_sha256"])
         is not None
     )
