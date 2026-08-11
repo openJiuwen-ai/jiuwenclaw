@@ -23,6 +23,7 @@ from openjiuwen.agent_teams.runtime import RunActionKind
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.monitor import TeamStreamLogger
 from openjiuwen.core.runner import Runner
+from openjiuwen.core.runner.team_runner import _global_runner as _get_global_team_runner
 from openjiuwen.core.common.logging import server_logger
 from openjiuwen.harness import DeepAgent
 
@@ -1088,6 +1089,92 @@ def _truncate_team_tool_result_event(parsed: dict[str, Any]) -> dict[str, Any]:
     return next_event
 
 
+_TEAM_MEMBER_SETTLED_STATUSES = frozenset({"ready", "paused", "stopped", "shut_down"})
+_TEAM_TASK_TERMINAL_STATUSES = frozenset({"completed", "cancelled"})
+_TEAM_MEMBER_UNSTARTED_STATUS = "unstarted"
+
+
+def _run_agent_team_streaming(**kwargs: Any) -> AsyncIterator[Any]:
+    # The public Runner facade re-yields the core generator and does not
+    # propagate aclose(). Keep the core handle so early round termination runs
+    # TeamRuntimeManager.finalize before broadcasting team.completed.
+    return _get_global_team_runner().run_agent_team_streaming(**kwargs)
+
+
+async def _team_has_unread_messages(session_id: str, handler: Any) -> bool:
+    """Return whether the team database has unread direct or broadcast messages."""
+    monitor = getattr(handler, "_monitor", None)
+    team_agent = getattr(monitor, "_team_agent", None)
+    backend = getattr(team_agent, "team_backend", None) if team_agent is not None else None
+    if backend is None:
+        return False
+    message_manager = getattr(backend, "message_manager", None)
+    if message_manager is None:
+        return False
+
+    token = set_session_id(session_id)
+    try:
+        return bool(await message_manager.has_unread_messages(include_broadcast=True))
+    finally:
+        reset_session_id(token)
+
+
+async def _team_round_settled(channel_id: str | None, session_id: str) -> bool:
+    """Return whether the DB-backed team state is safe to finish this round."""
+    try:
+        team_manager = get_team_manager(channel_id)
+        handler = team_manager.get_monitor_handler(session_id)
+        if handler is None:
+            return False
+
+        snapshot = await handler.get_team_snapshot()
+        if not isinstance(snapshot, dict):
+            return False
+
+        for member in snapshot.get("members") or []:
+            status = (
+                str(member.get("status") or "").strip().lower()
+                if isinstance(member, dict)
+                else ""
+            )
+            if status in _TEAM_MEMBER_SETTLED_STATUSES:
+                continue
+            if status == _TEAM_MEMBER_UNSTARTED_STATUS:
+                continue
+            return False
+
+        for task in snapshot.get("tasks") or []:
+            status = (
+                str(task.get("status") or "").strip().lower()
+                if isinstance(task, dict)
+                else ""
+            )
+            if status not in _TEAM_TASK_TERMINAL_STATUSES:
+                return False
+
+        if await _team_has_unread_messages(session_id, handler):
+            return False
+
+        get_workflow_handler = getattr(team_manager, "get_workflow_handler", None)
+        workflow_handler = (
+            get_workflow_handler(session_id) if callable(get_workflow_handler) else None
+        )
+        if workflow_handler is not None:
+            get_run_states = getattr(workflow_handler, "get_run_states", None)
+            runs = get_run_states() if callable(get_run_states) else {}
+            if any(not run.is_terminal for run in runs.values()):
+                return False
+
+        return True
+    except Exception:
+        logger.debug(
+            "[TeamHelpers] team settled check failed: session_id=%s",
+            session_id,
+            exc_info=True,
+        )
+        return False
+
+
 def _is_duplicate_ask_user_question(
     parsed: dict[str, Any],
     emitted_request_ids: set[str],
@@ -1941,6 +2028,7 @@ async def _consume_stream_with_query(
     received_chunks = 0
     first_model_output_at: float | None = None
     emitted_ask_user_request_ids: set[str] = set()
+    team_stream: Any = None
     # Reset the team-events flag at the start of a new round so chat.final
     # can correctly determine whether the team is active.
     tm_ = get_team_manager(channel_id)
@@ -1985,13 +2073,14 @@ async def _consume_stream_with_query(
             _safe_query_preview(initial_query),
         )
         runner_entered_at = time.monotonic()
-        async for chunk in Runner.run_agent_team_streaming(
+        team_stream = _run_agent_team_streaming(
             agent_team=team_spec,
             inputs={"query": initial_query},
             session=session_id,
             envs=envs,
             stream_logger=lg,
-        ):
+        )
+        async for chunk in team_stream:
             received_chunks += 1
             # First event of any kind from the runner — usually a framework
             # control event (team.runtime_ready and friends), not model output.
@@ -2194,6 +2283,14 @@ async def _consume_stream_with_query(
                                 "is_complete": True,
                             },
                         )
+                    if is_leader and await _team_round_settled(channel_id, session_id):
+                        logger.info(
+                            "[TeamHelpers] leader final with settled team; finish round "
+                            "and close stream: channel_id=%s session_id=%s",
+                            _resolve_channel_id(channel_id),
+                            session_id,
+                        )
+                        break
                     continue
                 _broadcast_event(channel_id, session_id, parsed)
 
@@ -2245,6 +2342,17 @@ async def _consume_stream_with_query(
             },
         )
     finally:
+        if team_stream is not None:
+            stream_aclose = getattr(team_stream, "aclose", None)
+            if callable(stream_aclose):
+                try:
+                    await stream_aclose()
+                except Exception:
+                    logger.debug(
+                        "[TeamHelpers] team stream aclose failed: session_id=%s",
+                        session_id,
+                        exc_info=True,
+                    )
         # Flush & close the stream trace logger if one was opened.
         if lg is not None:
             try:
