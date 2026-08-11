@@ -1793,6 +1793,7 @@ class JiuWenSwarmDeepAdapter:
         self._enterprise_config: Any = None
         self._config_cache: dict[str, Any] = {}
         self._filesystem_rail: SysOperationRail | None = None
+        self._progressive_tool_rail: ProgressiveToolRail | None = None
         self._skill_rail: SkillUseRail | None = None
         self._enabled_skills: list[str] | None = None
         self._stream_event_rail: JiuSwarmStreamEventRail | None = None
@@ -6268,26 +6269,15 @@ class JiuWenSwarmDeepAdapter:
 
     def _get_current_agent_rails(
         self, config: dict[str, Any], config_base: dict[str, Any] | None = None
-    ) -> list[Any]:
-        """Return rail instances that need to be re-initialized on hot reload.
+    ) -> tuple[list[Any], list[Any]]:
+        """Return rail replacements and rails to retire after configure.
 
         SkillUseRail, ContextEngineeringRail, and MemoryRail are rebuilt on config reload.
         All other rails read language dynamically from system_prompt_builder.language
         and are updated in-place where needed — they are NOT passed to configure()
         so their existing registered state is preserved without an uninit/init cycle.
         """
-        # Apply in-place updates to skill_evolution_rail (no re-init needed).
-        if self._skill_evolution_rail is not None:
-            self._skill_evolution_rail.update_llm(self._model, self._default_model_name)
-            evolution_auto_scan = get_evolution_auto_scan_enabled(config)
-            _set_skill_evolution_triggers(
-                self._skill_evolution_rail,
-                signal_trigger=get_evolution_signal_trigger_enabled(config),
-                review_trigger=get_evolution_review_trigger_enabled(
-                    config,
-                    fallback=evolution_auto_scan,
-                ),
-            )
+        rails_to_unregister: list[Any] = []
 
         # Reuse existing SkillUseRail to preserve dynamically loaded skills
         # from activate_package() / load_harness_config().  When agentic
@@ -6309,10 +6299,20 @@ class JiuWenSwarmDeepAdapter:
             if self._skill_rail.disabled_skills != new_disabled:
                 self._skill_rail.disabled_skills = new_disabled
 
-        if not self._filesystem_rail_enabled_for_profile():
-            self._filesystem_rail = None
+        if (
+            not self._filesystem_rail_enabled_for_profile()
+            and self._filesystem_rail is not None
+        ):
+            rails_to_unregister.append(self._filesystem_rail)
 
         self._update_permission_rail(config_base)
+
+        old_progressive_tool_rail = self._progressive_tool_rail
+        progressive_tool_rail = self._build_progressive_tool_rail(config)
+        if progressive_tool_rail is not None:
+            self._progressive_tool_rail = progressive_tool_rail
+        elif old_progressive_tool_rail is not None:
+            rails_to_unregister.append(old_progressive_tool_rail)
 
         rails_list = []
         if self._skill_rail is not None:
@@ -6327,7 +6327,9 @@ class JiuWenSwarmDeepAdapter:
             rails_list.append(self._avatar_rail)
         if self._permission_rail is not None:
             rails_list.append(self._permission_rail)
-        return rails_list
+        if progressive_tool_rail is not None:
+            rails_list.append(progressive_tool_rail)
+        return rails_list, rails_to_unregister
 
     def _runtime_agent_scope_id(self) -> str:
         """Return AgentCard / tool-owner base id for this adapter.
@@ -7244,16 +7246,9 @@ class JiuWenSwarmDeepAdapter:
             self._sync_skill_retrieval_tools_for_runtime(config_base)
             await self._sync_skill_retrieval_prompt_rail_for_runtime(config_base)
 
-            if not self._filesystem_rail_enabled_for_profile() and self._filesystem_rail is not None:
-                try:
-                    await self._instance.unregister_rail(self._filesystem_rail)
-                except Exception as exc:
-                    logger.warning(
-                        "[JiuWenSwarmDeepAdapter] ACP filesystem rail unregister failed: %s", exc
-                    )
-                self._filesystem_rail = None
-
-            rails_list = self._get_current_agent_rails(config, config_base)
+            rails_list, rails_to_unregister = self._get_current_agent_rails(
+                config, config_base
+            )
 
             # 加载用户自定义的 Rail 扩展
             await self.load_user_rails()
@@ -7271,6 +7266,31 @@ class JiuWenSwarmDeepAdapter:
                 self._instance.configure(deep_cfg)
             finally:
                 self._restore_omitted_reload_fields(deep_cfg, omitted_fields)
+
+            first_unregister_error: Exception | None = None
+            rail_cache_attrs = ("_progressive_tool_rail", "_filesystem_rail")
+            for rail in rails_to_unregister:
+                try:
+                    await self._instance.unregister_rail(rail)
+                except Exception as exc:
+                    if first_unregister_error is None:
+                        first_unregister_error = exc
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] %s unregister on reload failed: %s",
+                        type(rail).__name__,
+                        exc,
+                    )
+                    continue
+                for attr_name in rail_cache_attrs:
+                    if getattr(self, attr_name, None) is rail:
+                        setattr(self, attr_name, None)
+                        break
+                logger.info(
+                    "[JiuWenSwarmDeepAdapter] %s unregistered on reload",
+                    type(rail).__name__,
+                )
+
+            await self._reconcile_evolution_rails()
             # configure() rebuilds ability_manager from tool_cards; multimodal tools
             # registered before configure are dropped — re-sync after configure.
             self._sync_multimodal_tools_for_runtime()
@@ -7292,6 +7312,9 @@ class JiuWenSwarmDeepAdapter:
                 logger.warning(
                     "[JiuWenSwarmDeepAdapter] memory rail refresh on reload failed: %s", e
                 )
+
+            if first_unregister_error is not None:
+                raise first_unregister_error
 
             logger.info("[JiuWenSwarmDeepAdapter] 配置已热更新（configure），未重启进程")
             return ReloadResult(applied=True)
@@ -7388,6 +7411,19 @@ class JiuWenSwarmDeepAdapter:
         self._last_mode = mode
         await self._update_agent_rails()
 
+    async def _reconcile_evolution_rails(self) -> None:
+        """Apply evolution rail configuration through its runtime owner."""
+        evolution_enabled = bool(
+            self._config_cache.get("evolution", {}).get("enabled", False)
+        )
+        if evolution_enabled:
+            await self._ensure_active_evolution_rails_registered()
+        elif (
+            self._skill_evolution_rail is not None
+            or self._evolution_interrupt_rail is not None
+        ):
+            await self._unconfigure_active_evolution_rails()
+
     @staticmethod
     def _user_interaction_rail_attribute() -> str:
         return "_ask_user_rail"
@@ -7469,16 +7505,8 @@ class JiuWenSwarmDeepAdapter:
                     "[JiuWenSwarmDeepAdapter] ContextProcessorRail unregistered for agent mode (disabled)"
                 )
 
-        # SkillEvolutionRail runtime configure creates/reuses and registers its rail set.
-        evolution_enabled = self._config_cache.get("evolution", {}).get("enabled", False)
-        if evolution_enabled:
-            await self._ensure_active_evolution_rails_registered()
-        else:
-            # evolution disabled: unregister if exists
-            if self._skill_evolution_rail is not None:
-                await self._instance.unregister_rail(self._skill_evolution_rail)
-                self._skill_evolution_rail = None
-                logger.info("[JiuWenSwarmDeepAdapter] SkillEvolutionRail unregistered (evolution.enabled=false)")
+        # Evolution runtime configure owns the complete regular + interrupt rail set.
+        await self._reconcile_evolution_rails()
 
         # SkillCreateRail
         skill_create_enabled = get_skill_create_enabled(self._config_cache)

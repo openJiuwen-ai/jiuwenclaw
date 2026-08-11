@@ -1065,6 +1065,14 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                     mode,
                 )
 
+    async def _reconcile_evolution_rails(self) -> None:
+        """Keep evolution rails disabled for every Code adapter reload."""
+        if (
+            self._skill_evolution_rail is not None
+            or self._evolution_interrupt_rail is not None
+        ):
+            await self._unconfigure_active_evolution_rails()
+
     def _build_code_agent_rail(self) -> CodeAgentRail | None:
         """构建 CodeAgentRail，管理 /agents 创建的自定义 agent。"""
         try:
@@ -1091,19 +1099,21 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
 
     def _get_current_agent_rails(
         self, config: dict[str, Any], config_base: dict[str, Any] | None = None
-    ) -> list[Any]:
+    ) -> tuple[list[Any], list[Any]]:
         """扩展父类方法，将 Code/Plan 专属 Rail 纳入热重载范围。
 
         父类 _get_current_agent_rails 只返回 skill/context/memory 等 rail，
         CodeAgentRail 和 PlanApprovalInterruptRail 不在其中。覆盖此方法确保 config reload
         时这些 rail 被正确重新初始化。
         """
-        rails_list = super()._get_current_agent_rails(config, config_base)
+        rails_list, rails_to_unregister = super()._get_current_agent_rails(
+            config, config_base
+        )
         if self._code_agent_rail is not None:
             rails_list.append(self._code_agent_rail)
         if self._code_plan_approval_rail is not None:
             rails_list.append(self._code_plan_approval_rail)
-        return rails_list
+        return rails_list, rails_to_unregister
 
     # ─── Runtime config ──────────────────────────
 
