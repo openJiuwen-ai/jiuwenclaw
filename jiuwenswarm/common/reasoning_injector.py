@@ -5,8 +5,9 @@ from collections.abc import Mapping
 from typing import Any
 
 from jiuwenswarm.common.reasoning_config import (
-    LEVEL_MAPPING,
-    ReasoningEffort,
+    ANTHROPIC_BUDGET_TOKENS,
+    ANTHROPIC_MAX_TOKENS_HEADROOM,
+    ReasoningLevel,
     normalize_reasoning_level,
     resolve_reasoning_target,
 )
@@ -48,32 +49,121 @@ def _runtime_config_copy(model_config_dict: dict[str, Any]) -> dict[str, Any]:
 
 def inject_deepseek_official_payload(
     model_config_obj: dict[str, Any],
-    mapped_level: ReasoningEffort,
+    level: ReasoningLevel,
 ) -> None:
+    """DeepSeek takes an on/off switch, plus an effort hint only at ``high``.
+
+    ``low`` and ``medium`` enable thinking and send no effort. They used to send
+    ``reasoning_effort="high"``, which discarded the level the user picked.
+    """
     model_config_obj.pop("reasoning_effort", None)
 
     extra_body = _copy_extra_body(model_config_obj.get("extra_body"))
     extra_body["thinking"] = {
-        "type": "disabled" if mapped_level == "off" else "enabled",
+        "type": "disabled" if level == "off" else "enabled",
     }
     model_config_obj["extra_body"] = extra_body
 
-    if mapped_level == "high":
-        model_config_obj["reasoning_effort"] = mapped_level
+    if level == "high":
+        model_config_obj["reasoning_effort"] = "high"
 
 
 def inject_dashscope_bailian_payload(
     model_config_obj: dict[str, Any],
-    mapped_level: ReasoningEffort,
+    level: ReasoningLevel,
 ) -> None:
+    """Bailian spells the same switch as ``enable_thinking``."""
     model_config_obj.pop("reasoning_effort", None)
 
     extra_body = _copy_extra_body(model_config_obj.get("extra_body"))
-    extra_body["enable_thinking"] = mapped_level != "off"
+    extra_body["enable_thinking"] = level != "off"
     model_config_obj["extra_body"] = extra_body
 
-    if mapped_level == "high":
-        model_config_obj["reasoning_effort"] = mapped_level
+    if level == "high":
+        model_config_obj["reasoning_effort"] = "high"
+
+
+def inject_openai_reasoning_payload(
+    model_config_obj: dict[str, Any],
+    level: ReasoningLevel,
+) -> None:
+    """OpenAI's enum is the product axis, so the level passes straight through.
+
+    ``off`` omits the field rather than sending ``"none"``: omission is what
+    every model accepts, and the caller has already established that this model
+    is reasoning-capable.
+    """
+    model_config_obj.pop("reasoning_effort", None)
+    if level == "off":
+        return
+    model_config_obj["reasoning_effort"] = level
+
+
+def _coerce_positive_int(value: Any) -> int | None:
+    """Parse a configured ceiling; reject bools and non-numeric junk."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            parsed = int(text)
+        except ValueError:
+            return None
+        return parsed
+    return None
+
+
+def inject_anthropic_thinking_payload(
+    model_config_obj: dict[str, Any],
+    level: ReasoningLevel,
+) -> None:
+    """Anthropic wants an integer budget, and it must fit inside ``max_tokens``.
+
+    The budget is thinking tokens taken *out of* ``max_tokens``, so a maximum
+    that cannot hold the budget *and* leave answer headroom is raised to
+    ``budget`` plus :data:`ANTHROPIC_MAX_TOKENS_HEADROOM`. This applies to an
+    unset maximum too, which is the case that looks safe and is not: the client
+    substitutes 8192, and against that default ``high`` (16000) is rejected
+    outright while ``medium`` (8000) is *accepted* and leaves 192 tokens for the
+    actual answer. A ceiling of ``budget + 1`` is the same trap. A 400 is
+    recoverable; a near-empty reply that reads like the model had nothing to
+    say is not.
+
+    Extended thinking also rejects non-default sampling: ``temperature`` may
+    only be ``1`` (or omitted), and ``top_p`` / ``top_k`` are incompatible.
+    Stale OpenAI ``reasoning_effort`` is cleared for the same reason the other
+    injectors clear it -- an OpenAI-only knob on a Messages request is a hard
+    error once agent-core forwards extras.
+
+    ``off`` omits the block instead of sending ``{"type": "disabled"}``, because
+    a model without extended thinking rejects the field either way.
+    """
+    model_config_obj.pop("thinking", None)
+    model_config_obj.pop("reasoning_effort", None)
+    if level == "off":
+        return
+
+    budget = ANTHROPIC_BUDGET_TOKENS[level]
+    configured = _coerce_positive_int(model_config_obj.get("max_tokens"))
+    if configured is None or configured - budget < ANTHROPIC_MAX_TOKENS_HEADROOM:
+        model_config_obj["max_tokens"] = budget + ANTHROPIC_MAX_TOKENS_HEADROOM
+    else:
+        # Normalise string/float ceilings so the request carries an int.
+        model_config_obj["max_tokens"] = configured
+
+    # Thinking is incompatible with custom sampling. Omit rather than force 1:
+    # omission is what every Messages model accepts.
+    model_config_obj.pop("temperature", None)
+    model_config_obj.pop("top_p", None)
+    model_config_obj.pop("top_k", None)
+
+    model_config_obj["thinking"] = {"type": "enabled", "budget_tokens": budget}
 
 
 def inject_reasoning_params(
@@ -99,12 +189,15 @@ def inject_reasoning_params(
         return runtime_model_config
 
     provider_kind, _model = target
-    mapped_level = LEVEL_MAPPING[level]
 
     if provider_kind == "deepseek_official":
-        inject_deepseek_official_payload(runtime_model_config, mapped_level)
+        inject_deepseek_official_payload(runtime_model_config, level)
     elif provider_kind == "dashscope_bailian":
-        inject_dashscope_bailian_payload(runtime_model_config, mapped_level)
+        inject_dashscope_bailian_payload(runtime_model_config, level)
+    elif provider_kind == "openai_reasoning":
+        inject_openai_reasoning_payload(runtime_model_config, level)
+    elif provider_kind == "anthropic":
+        inject_anthropic_thinking_payload(runtime_model_config, level)
 
     return runtime_model_config
 
@@ -144,7 +237,9 @@ def build_reasoning_model_request_kwargs(
 
 __all__ = [
     "build_reasoning_model_request_kwargs",
+    "inject_anthropic_thinking_payload",
     "inject_dashscope_bailian_payload",
     "inject_deepseek_official_payload",
+    "inject_openai_reasoning_payload",
     "inject_reasoning_params",
 ]
