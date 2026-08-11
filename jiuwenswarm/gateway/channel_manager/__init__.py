@@ -11,6 +11,7 @@ from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.xiaoyi_connect impo
 from jiuwenswarm.gateway.channel_manager.im_platforms.telegram.telegram_connect import TelegramChannel, \
     TelegramChannelConfig
 from jiuwenswarm.gateway.channel_manager.im_platforms.discord.discord_connect import DiscordChannel, DiscordChannelConfig
+from jiuwenswarm.gateway.channel_manager.im_platforms.slack.slack_connect import SlackChannel, SlackChannelConfig
 from jiuwenswarm.gateway.channel_manager.im_platforms.dingtalk.dingtalk_connect import DingTalkChannel, DingTalkConfig
 from jiuwenswarm.gateway.channel_manager.im_platforms.whatsapp.whatsapp_connect import WhatsAppChannel, \
     WhatsAppChannelConfig
@@ -29,6 +30,8 @@ __all__ = [
     "TelegramChannelConfig",
     "DiscordChannel",
     "DiscordChannelConfig",
+    "SlackChannel",
+    "SlackChannelConfig",
     "DingTalkChannel",
     "DingTalkConfig",
     "WhatsAppChannel",

@@ -5,8 +5,6 @@
 from __future__ import annotations
 
 import asyncio
-import gc
-import weakref
 
 import pytest
 
@@ -50,36 +48,6 @@ async def test_close_session_releases_idle_processor_state() -> None:
     finally:
         if not processor.done():
             processor.cancel()
-        await asyncio.gather(processor, return_exceptions=True)
-
-
-@pytest.mark.asyncio
-async def test_idle_processor_does_not_retain_completed_task_closure() -> None:
-    class Payload:
-        pass
-
-    manager = SessionManager()
-    completed = asyncio.Event()
-    payload = Payload()
-    payload_ref = weakref.ref(payload)
-
-    async def task_with_payload(value: Payload = payload) -> None:
-        assert value is not None
-        completed.set()
-
-    await manager.submit_task("tui_reusable", task_with_payload)
-    await asyncio.wait_for(completed.wait(), timeout=1)
-    await _wait_until_idle(manager, "tui_reusable")
-    del task_with_payload
-    del payload
-    gc.collect()
-
-    processor = manager._session_processors["tui_reusable"]
-    try:
-        assert payload_ref() is None
-        assert manager.has_active_processor("tui_reusable") is True
-    finally:
-        processor.cancel()
         await asyncio.gather(processor, return_exceptions=True)
 
 

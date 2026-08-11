@@ -13,11 +13,11 @@ from typing import Any
 import numpy as np
 import pytest
 
-from jiuwenswarm.symphony.experience.bank import ExperienceBank
-from jiuwenswarm.symphony.experience.cluster import ClusteredQuery, cluster_traces
-from jiuwenswarm.symphony.experience.collector import ExperienceBaseBuilder
-from jiuwenswarm.symphony.experience.retriever import ExperienceRetriever
-from jiuwenswarm.symphony.experience.models import (
+from openjiuwen.symphony.experience.bank import ExperienceBank
+from openjiuwen.symphony.experience.cluster import ClusteredQuery, cluster_traces
+from openjiuwen.symphony.experience.collector import ExperienceBaseBuilder
+from openjiuwen.symphony.experience.retriever import ExperienceRetriever
+from openjiuwen.symphony.experience.models import (
     DistilledPattern,
     ExperienceBankBuildConfig,
     ExperienceItem,
@@ -182,7 +182,7 @@ def test_build_drops_traces_with_success_false(monkeypatch) -> None:
         captured.append(list(traces))
         return [ClusteredQuery(0, "ok", [], [], [])]
 
-    import jiuwenswarm.symphony.experience.collector as collector_mod
+    import openjiuwen.symphony.experience.collector as collector_mod
     monkeypatch.setattr(collector_mod, "cluster_traces", fake_cluster_traces)
     monkeypatch.setattr(
         collector_mod, "TraceDistiller",
@@ -219,7 +219,7 @@ def test_build_drops_traces_with_empty_skills(monkeypatch) -> None:
         captured.append(list(traces))
         return [ClusteredQuery(0, "ok", [], [], [])]
 
-    import jiuwenswarm.symphony.experience.collector as collector_mod
+    import openjiuwen.symphony.experience.collector as collector_mod
     monkeypatch.setattr(collector_mod, "cluster_traces", fake_cluster_traces)
     monkeypatch.setattr(
         collector_mod, "TraceDistiller",
@@ -256,7 +256,7 @@ def test_build_returns_zero_when_all_traces_invalid(monkeypatch) -> None:
         called["cluster"] = True
         return []
 
-    import jiuwenswarm.symphony.experience.collector as collector_mod
+    import openjiuwen.symphony.experience.collector as collector_mod
     monkeypatch.setattr(collector_mod, "cluster_traces", fake_cluster_traces)
 
     builder = ExperienceBaseBuilder(
@@ -289,7 +289,7 @@ def test_build_logs_dropped_count(monkeypatch) -> None:
         captured.append(list(traces))
         return [ClusteredQuery(0, "ok", [], [], [])]
 
-    import jiuwenswarm.symphony.experience.collector as collector_mod
+    import openjiuwen.symphony.experience.collector as collector_mod
     monkeypatch.setattr(collector_mod, "cluster_traces", fake_cluster_traces)
     monkeypatch.setattr(
         collector_mod, "TraceDistiller",
@@ -313,7 +313,7 @@ def test_build_logs_dropped_count(monkeypatch) -> None:
     records: list[logging.LogRecord] = []
     handler = logging.Handler()
     handler.emit = records.append
-    logger = logging.getLogger("jiuwenswarm.symphony.experience.collector")
+    logger = logging.getLogger("openjiuwen.symphony.experience.collector")
     prev_level = logger.level
     logger.setLevel(logging.WARNING)
     logger.addHandler(handler)
@@ -352,6 +352,51 @@ def test_add_accepts_valid_trace() -> None:
     assert len(builder._pending) == 1
 
 
+def test_trace_record_query_defaults_to_empty_string() -> None:
+    """TraceRecord must be constructible with only trace_id — query defaults to "".
+
+    Regression: ``query`` used to be a required positional field, so callers
+    that built a record from a partially-known session (e.g. only the
+    request_id available) had to pass a placeholder. Making it default to
+    ``""`` aligns the dataclass with the already-tolerant ``from_dict``,
+    which reads ``data.get("query", "")``.
+    """
+    record = TraceRecord(trace_id="t1")
+    assert record.query == ""
+    assert record.skills == []
+    assert record.messages == []
+    assert record.result == ""
+    assert record.success is False
+
+
+def test_trace_record_to_dict_preserves_default_query() -> None:
+    """to_dict must emit the default ``query`` as ``""`` for round-trip parity."""
+    record = TraceRecord(trace_id="t1")
+    assert record.to_dict()["query"] == ""
+
+
+def test_trace_record_from_dict_tolerates_missing_query() -> None:
+    """from_dict must not raise when the persisted record lacks ``query``.
+
+    Regression: the persistence layer (records.jsonl) may carry legacy rows
+    written before ``query`` was added; ``from_dict`` already used
+    ``data.get("query", "")`` and must keep accepting such rows.
+    """
+    record = TraceRecord.from_dict({"trace_id": "t_legacy", "skills": ["s"]})
+    assert record.trace_id == "t_legacy"
+    assert record.query == ""
+    assert record.skills == ["s"]
+
+
+def test_trace_record_round_trip_preserves_empty_and_populated_query() -> None:
+    """to_dict -> from_dict round-trip must preserve ``query`` in both states."""
+    empty = TraceRecord(trace_id="t1")
+    assert TraceRecord.from_dict(empty.to_dict()).query == ""
+
+    populated = TraceRecord(trace_id="t2", query="how do I x", skills=["s"])
+    assert TraceRecord.from_dict(populated.to_dict()).query == "how do I x"
+
+
 def test_add_propagates_flush_exception_instead_of_dropping_pending(monkeypatch) -> None:
     """When the LLM is down, distiller.run() must surface the error from
     add()'s auto-flush rather than silently clearing the pending buffer.
@@ -374,7 +419,6 @@ def test_add_propagates_flush_exception_instead_of_dropping_pending(monkeypatch)
     builder._min_hits = 1
     builder._skill_cluster_num = None
     builder._min_cluster_size = 1
-    builder._cluster_max_examples = None
     builder._embedder = FakeEmbedder({"q": [1.0, 0.0]})
     builder._kb = FakeBank()
     builder._skills_info = None
@@ -383,7 +427,7 @@ def test_add_propagates_flush_exception_instead_of_dropping_pending(monkeypatch)
     builder._pattern_merge_threshold = 1.0
     builder._query_examples_count = 0
 
-    import jiuwenswarm.symphony.experience.collector as collector_mod
+    import openjiuwen.symphony.experience.collector as collector_mod
     monkeypatch.setattr(
         collector_mod, "TraceDistiller",
         lambda *a, **kw: _BoomDistiller(),

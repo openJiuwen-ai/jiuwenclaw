@@ -417,7 +417,7 @@ class A2AChannel(BaseChannel):
                 ok=True,
                 req_method=ReqMethod.CHAT_SEND,
                 is_stream=True,
-                metadata=metadata or None,
+                metadata=dict(metadata or {}),
             )
             result = self._on_message_cb(msg)
             if asyncio.iscoroutine(result):

@@ -240,7 +240,13 @@ class WebSocketAgentServerClient(AgentServerClient):
 
                     # 使用锁保护队列访问，避免竞态条件
                     async with self._queue_lock:
-                        # 检查是否是已取消的请求，静默丢弃消息
+                        # 检查是否是已取消的请求，静默丢弃消息。
+                        # 不放宽为"rid 已有新 queue 就放行"——_drain_and_remove_queue
+                        # 删 queue 后会保留 _cancelled_request_ids 标记 2s，若在此窗口内
+                        # 新请求复用同 rid 并建新 queue，放行旧请求的残余响应会串进新请求
+                        # 的 queue，导致新请求拿到错误响应（响应串线，比超时更危险）。
+                        # send_request 已有 "duplicate in-flight request_id" 防护（402行），
+                        # 正常路径下 queue 不被提前删；此处 2s 丢弃窗口仅针对已取消的残余。
                         if request_id in self._cancelled_request_ids:
                             logger.debug(
                                 "[WebSocketAgentServerClient] 收到已取消请求的残余消息，已丢弃: request_id=%s",
@@ -251,9 +257,11 @@ class WebSocketAgentServerClient(AgentServerClient):
                         if request_id and request_id in self._message_queues:
                             await self._message_queues[request_id].put(data)
                         else:
-                            # 没有对应的队列（非预期情况）
-                            logger.debug(
-                                "[WebSocketAgentServerClient] 收到无目标队列的消息: request_id=%s",
+                            # 没有对应的队列（非预期情况）——可能是 E2A 编解码导致
+                            # request_id 不匹配，此时 send_request 会等满 600s 超时。
+                            # 提升为 warning 让问题可见，便于排查"到点没推送"类故障。
+                            logger.warning(
+                                "[WebSocketAgentServerClient] 收到无目标队列的消息（等待方将超时）: request_id=%s",
                                 request_id
                             )
                 except asyncio.CancelledError:

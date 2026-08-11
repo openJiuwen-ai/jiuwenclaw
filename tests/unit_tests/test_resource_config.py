@@ -24,6 +24,6 @@ def test_default_round_level_compressor_config_uses_context_ratio():
         data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
         round_level_config = data["react"]["context_engine_config"]["round_level_compressor_config"]
 
-        assert round_level_config["trigger_context_ratio"] == 0.9
+        assert round_level_config["trigger_context_ratio"] == 0.8
         assert "trigger_total_tokens" not in round_level_config
         assert "tokens_threshold" not in round_level_config

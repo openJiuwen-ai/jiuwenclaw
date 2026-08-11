@@ -5,7 +5,6 @@ from jiuwenswarm.evolve.models import (
     Proposal, ProposalTargetType, DecisionResult, DecisionSuggestion, EvidenceRef,
 )
 from jiuwenswarm.evolve.ahe.decision_policy import AheDecisionPolicy
-from jiuwenswarm.evolve.ahe.experience_governor import ExperienceGovernor
 
 
 class TestRuleGate:
@@ -24,35 +23,35 @@ class TestRuleGate:
         return Proposal(**defaults)
 
     def test_empty_evidence_blocked(self):
-        policy = AheDecisionPolicy(governor=ExperienceGovernor(), model=None)
+        policy = AheDecisionPolicy(model=None)
         proposal = self._make_proposal(failure_evidence=[])
         result = policy._rule_gate(proposal)
         assert result.blocking is True
         assert "empty_failure_evidence" in result.failed_checks
 
     def test_empty_root_cause_blocked(self):
-        policy = AheDecisionPolicy(governor=ExperienceGovernor(), model=None)
+        policy = AheDecisionPolicy(model=None)
         proposal = self._make_proposal(root_cause="")
         result = policy._rule_gate(proposal)
         assert result.blocking is True
         assert "empty_root_cause" in result.failed_checks
 
     def test_unsupported_target_type_blocked(self):
-        policy = AheDecisionPolicy(governor=ExperienceGovernor(), model=None)
+        policy = AheDecisionPolicy(model=None)
         proposal = self._make_proposal(target_type=ProposalTargetType.MEMORY)
         result = policy._rule_gate(proposal)
         assert result.blocking is True
         assert "unsupported_target_type_memory" in result.failed_checks
 
     def test_empty_predicted_impact_blocked(self):
-        policy = AheDecisionPolicy(governor=ExperienceGovernor(), model=None)
+        policy = AheDecisionPolicy(model=None)
         proposal = self._make_proposal(predicted_impact="")
         result = policy._rule_gate(proposal)
         assert result.blocking is True
         assert "empty_predicted_impact" in result.failed_checks
 
     def test_valid_proposal_passes_rule_gate(self):
-        policy = AheDecisionPolicy(governor=ExperienceGovernor(), model=None)
+        policy = AheDecisionPolicy(model=None)
         proposal = self._make_proposal()
         result = policy._rule_gate(proposal)
         assert result.blocking is False
@@ -63,7 +62,7 @@ class TestRuleGate:
 class TestLlmDecisionFallback:
     def test_no_model_fallback_to_candidate(self):
         """When no model is available, LLMDecision should return CANDIDATE."""
-        policy = AheDecisionPolicy(governor=ExperienceGovernor(), model=None)
+        policy = AheDecisionPolicy(model=None)
         result = policy._llm_decision(Proposal(
             target_type=ProposalTargetType.SKILL,
             proposal_type="add_skill_experience",

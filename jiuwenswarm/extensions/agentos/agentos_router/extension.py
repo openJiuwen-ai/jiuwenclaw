@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from jiuwenswarm.common.config import get_config
 from jiuwenswarm.extensions.agentos.agentos_router.agent_manager import AgentManager
+from jiuwenswarm.extensions.agentos.agentos_router.agentos_authenticator import AgentOSAuthenticator
 from jiuwenswarm.extensions.agentos.agentos_router.config import (
     RouterConfig,
     agentos_router_selected,
@@ -11,17 +12,21 @@ from jiuwenswarm.extensions.agentos.agentos_router.config import (
 )
 from jiuwenswarm.extensions.agentos.agentos_router.registry_client import RegistryClient
 from jiuwenswarm.extensions.agentos.agentos_router.router_client import AgentOSRouterClient
+from jiuwenswarm.extensions.agentos.agentos_router.ssh_relay import YuanrongSshRelay
+from jiuwenswarm.extensions.agentos.agentos_router.third_agent import AgentOSThirdAgent
 from jiuwenswarm.extensions.sdk.agent_server_client import (
     AgentServerClientExtension,
 )
+from jiuwenswarm.extensions.sdk.third_agent import ThirdAgentExtension
 from jiuwenswarm.extensions.yuanrong_frontend_client import (
     YuanrongFrontendAgentClient,
 )
 from jiuwenswarm.gateway.routing.agent_client import AgentServerClient
+from jiuwenswarm.gateway.routing.third_agent import ThirdAgent
 
 
-class AgentOSRouter(AgentServerClientExtension):
-    """AgentOS southbound Router extension."""
+class AgentOSRouter(AgentServerClientExtension, ThirdAgentExtension):
+    """AgentOS southbound Router extension (AgentServerClient + ThirdAgent)."""
 
     def __init__(self, config: RouterConfig) -> None:
         self._config = config
@@ -38,11 +43,24 @@ class AgentOSRouter(AgentServerClientExtension):
             creating_timeout_seconds=config.creating_timeout_seconds,
             key_fields=config.agent_key_fields,
         )
+        self._ssh_relay = YuanrongSshRelay(
+            config.ssh,
+            frontend_endpoint=config.frontend_endpoint,
+        )
         self._router_client = AgentOSRouterClient(
             self._yuanrong_client,
             self._registry_client,
             self._agent_manager,
+            ssh_relay=self._ssh_relay,
+            ssh_channel_endpoint=config.ssh_channel,
+            workspace_root=config.workspace_root,
+            sandbox_idle_timeout_seconds=config.sandbox_idle_timeout_seconds,
+            sandbox_idle_check_interval_seconds=(
+                config.sandbox_idle_check_interval_seconds
+            ),
+            auth_client=AgentOSAuthenticator(config.auth_service_url, config.timeout) if config.auth_enabled else None
         )
+        self._third_agent = AgentOSThirdAgent(self._router_client)
         self._closed = False
 
     async def initialize(self, config) -> None:
@@ -50,6 +68,9 @@ class AgentOSRouter(AgentServerClientExtension):
 
     def get_client(self) -> AgentServerClient:
         return self._router_client
+
+    def get_third_agent(self) -> ThirdAgent:
+        return self._third_agent
 
     async def shutdown(self) -> None:
         if self._closed:
@@ -64,4 +85,5 @@ async def register_extensions(registry):
         return []
     extension = AgentOSRouter(load_router_config(config))
     registry.register_agent_server_client(extension)
+    registry.register_third_agent(extension)
     return [extension]

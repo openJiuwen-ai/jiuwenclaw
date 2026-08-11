@@ -61,6 +61,26 @@ def test_resolve_agent_request_mode_accepts_primary_and_dotted_modes(raw_mode, e
     assert agent_ws_server_module.resolve_agent_request_mode(raw_mode) == expected
 
 
+@pytest.mark.parametrize(
+    ("raw_mode", "work_mode", "expected"),
+    [
+        ("agent", "code", ("code", "normal", "code.normal")),
+        ("code.normal", "work", ("agent", None, "agent")),
+        ("code.plan", "code", ("code", "plan", "code.plan")),
+        ("team", "code", ("team", None, "team")),
+    ],
+)
+def test_resolve_agent_request_mode_aligns_single_agent_with_work_mode(
+    raw_mode,
+    work_mode,
+    expected,
+):
+    assert agent_ws_server_module.resolve_agent_request_mode(
+        raw_mode,
+        work_mode=work_mode,
+    ) == expected
+
+
 def test_team_plan_params_are_team_mode():
     from jiuwenswarm.server.utils.utils import is_team_params
 
@@ -271,6 +291,27 @@ def test_build_inputs_keeps_stable_project_dir_and_dynamic_cwd(monkeypatch):
     assert inputs["trusted_dirs"] == ["/tmp/project"]
 
 
+def test_build_inputs_propagates_user_interaction_capability(monkeypatch):
+    from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
+
+    monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
+    monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
+
+    request = AgentRequest(
+        request_id="req-non-interactive",
+        channel_id="tui",
+        session_id="tui_session",
+        params={
+            "query": "hello",
+            "supports_user_interaction": False,
+        },
+    )
+
+    inputs, _, _ = interface_module.JiuWenSwarm().build_inputs(request)
+
+    assert inputs["supports_user_interaction"] is False
+
+
 def test_build_inputs_does_not_map_team_plan_approval_answers_to_interactive_input(monkeypatch):
     from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
     from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
@@ -417,7 +458,7 @@ def test_build_inputs_maps_team_plan_confirm_interrupt_answers_to_interactive_in
             "feedback": "",
         }
     }
-    assert raw_query == ""
+    assert raw_query.text is inputs["query"]
 
 
 def test_build_inputs_maps_team_plan_reject_answers_to_interactive_input(monkeypatch):
@@ -453,7 +494,7 @@ def test_build_inputs_maps_team_plan_reject_answers_to_interactive_input(monkeyp
             "feedback": "把任务拆得再细一点",
         }
     }
-    assert raw_query == ""
+    assert raw_query.text is inputs["query"]
 
 
 def test_build_inputs_preserves_original_request_on_ask_user_answers(monkeypatch):
@@ -489,6 +530,92 @@ def test_build_inputs_preserves_original_request_on_ask_user_answers(monkeypatch
         "tool-ask-1": {
             "answers": {"你希望用什么技术实现？": "浏览器（HTML/CSS/JS）"},
             "original_request": "做一个斗地主游戏",
+        }
+    }
+
+
+def test_build_inputs_merges_multi_select_custom_input(monkeypatch):
+    from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+    from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
+
+    monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
+    monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
+
+    request = AgentRequest(
+        request_id="req-answer",
+        channel_id="tui",
+        session_id="team-session",
+        params={
+            "query": "",
+            "mode": "team.plan",
+            "request_id": "tool-ask-1",
+            "source": "ask_user_interrupt",
+            "answers": [
+                {
+                    "question": "启用哪些模块？",
+                    "selected_options": ["auth", "Other"],
+                    "custom_input": "metrics",
+                },
+                {
+                    "question": "还有其他需求吗？",
+                    "selected_options": ["Other"],
+                    "custom_input": "tracing",
+                },
+            ],
+        },
+    )
+
+    inputs, _, _ = interface_module.JiuWenSwarm().build_inputs(request)
+
+    assert isinstance(inputs["query"], InteractiveInput)
+    assert inputs["query"].user_inputs == {
+        "tool-ask-1": {
+            "answers": {
+                "启用哪些模块？": ["auth", "metrics"],
+                "还有其他需求吗？": "tracing",
+            }
+        }
+    }
+
+
+def test_build_inputs_drops_bare_other_without_custom_input(monkeypatch):
+    """Regression for #2330: empty Other must not become answer value \"Other\"."""
+    from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+    from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
+
+    monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
+    monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
+
+    request = AgentRequest(
+        request_id="req-answer",
+        channel_id="tui",
+        session_id="team-session",
+        params={
+            "query": "",
+            "mode": "team.plan",
+            "request_id": "tool-ask-1",
+            "source": "ask_user_interrupt",
+            "answers": [
+                {
+                    "question": "选择技术栈？",
+                    "selected_options": ["Other"],
+                    "custom_input": "",
+                },
+                {
+                    "question": "多选模块？",
+                    "selected_options": ["Other"],
+                    "custom_input": "   ",
+                },
+            ],
+        },
+    )
+
+    inputs, _, _ = interface_module.JiuWenSwarm().build_inputs(request)
+
+    assert isinstance(inputs["query"], InteractiveInput)
+    assert inputs["query"].user_inputs == {
+        "tool-ask-1": {
+            "answers": {},
         }
     }
 
@@ -1024,7 +1151,8 @@ def test_process_message_stream_treats_plain_team_query_as_first_request_after_r
     # task itself; DeepAgent interaction owns session concurrency, so
     # SessionManager.submit_task is no longer used on this path.
     assert FakeSessionManager.submit_task_calls == []
-    assert fake_adapter.seen_inputs["query"] == "你好"
+    delivered = fake_adapter.seen_inputs["query"]
+    assert json.loads(delivered[delivered.index("{"):])["content"] == "你好"
     assert chunks[0].payload == {"event_type": "chat.done"}
     assert chunks[-1].is_complete is True
 
@@ -1125,7 +1253,7 @@ def test_deep_adapter_registers_evolution_interrupt_rail_before_skill_evolution(
     adapter = JiuWenSwarmDeepAdapter()
     adapter._instance = FakeInstance()
     adapter._config_cache = {
-        "evolution": {"enabled": True},
+        "react": {"evolution": {"skill_evolution": True}},
         "context_engineering": {"enabled": False},
     }
     adapter._skill_manager = FakeSkillManager()
@@ -1184,7 +1312,7 @@ def test_deep_adapter_build_agent_rails_adds_ask_user_for_agent_modes(monkeypatc
     monkeypatch.setattr(adapter, "_build_subagent_rail", lambda: None)
     monkeypatch.setattr(adapter, "_build_skill_rail", lambda **_kwargs: None)
     monkeypatch.setattr(adapter, "_build_skill_retrieval_prompt_rail", lambda: None)
-    monkeypatch.setattr(adapter, "_build_symphony_orchestration_prompt_rail", lambda: orchestration_rail)
+    monkeypatch.setattr(adapter, "_build_symphony_orchestration_rail", lambda: orchestration_rail)
     monkeypatch.setattr(adapter, "_build_structured_ask_user_rail", lambda: ask_user_rail)
     monkeypatch.setattr(interface_deep_module, "build_permission_rail", lambda **_kwargs: None)
     monkeypatch.setattr(interface_deep_module, "_build_context_processor_rail", lambda **_kwargs: None)
@@ -1230,7 +1358,7 @@ def test_deep_adapter_unregisters_evolution_runtime_rails_when_leaving_plan(monk
     adapter._skill_evolution_rail = "skill-evolution-rail"
     adapter._context_assemble_rail = "agent-context-assemble-rail"
     adapter._context_assemble_mode = "agent"
-    adapter._config_cache = {"evolution": {"enabled": True}}
+    adapter._config_cache = {"react": {"evolution": {"skill_evolution": True}}}
 
     ask_user_rail = object()
     monkeypatch.setattr(adapter, "_handle_memory_rail_by_config", _noop)
@@ -1329,6 +1457,38 @@ def test_deep_adapter_registers_ask_user_rail_when_entering_fast_mode(monkeypatc
     assert adapter._ask_user_rail is ask_user_rail
 
 
+def test_deep_adapter_disables_and_restores_ask_user_for_request_capability(monkeypatch):
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
+
+    class FakeInstance:
+        def __init__(self):
+            self.registered = []
+            self.unregistered = []
+
+        async def register_rail(self, rail):
+            self.registered.append(rail)
+
+        async def unregister_rail(self, rail):
+            self.unregistered.append(rail)
+
+    adapter = JiuWenSwarmDeepAdapter()
+    adapter._instance = FakeInstance()
+    existing_rail = object()
+    restored_rail = object()
+    adapter._ask_user_rail = existing_rail
+    monkeypatch.setattr(adapter, "_build_structured_ask_user_rail", lambda: restored_rail)
+
+    asyncio.run(adapter._set_user_interaction_enabled(False))
+
+    assert adapter._instance.unregistered == [existing_rail]
+    assert adapter._ask_user_rail is None
+
+    asyncio.run(adapter._set_user_interaction_enabled(True))
+
+    assert adapter._instance.registered == [restored_rail]
+    assert adapter._ask_user_rail is restored_rail
+
+
 def test_deep_adapter_reconfigures_plan_evolution_rails_idempotently(monkeypatch, tmp_path):
     from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 
@@ -1389,7 +1549,7 @@ def test_deep_adapter_reconfigures_plan_evolution_rails_idempotently(monkeypatch
     adapter = JiuWenSwarmDeepAdapter()
     adapter._instance = FakeInstance()
     adapter._config_cache = {
-        "evolution": {"enabled": True, "auto_scan": False},
+        "react": {"evolution": {"skill_evolution": True}},
         "model_name": "configured-model",
     }
     adapter._skill_manager = FakeSkillManager()
@@ -1421,7 +1581,7 @@ def test_deep_adapter_reconfigures_plan_evolution_rails_idempotently(monkeypatch
         if _is_regular_skill_evolution_rail(rail)
     )
     assert skill_evolution_rail.signal_trigger is False
-    assert skill_evolution_rail.review_trigger is False
+    assert skill_evolution_rail.review_trigger is True
 
 
 def test_deep_adapter_rebuilds_plan_evolution_rails_when_language_changes(monkeypatch, tmp_path):
@@ -1494,7 +1654,7 @@ def test_deep_adapter_rebuilds_plan_evolution_rails_when_language_changes(monkey
     adapter = JiuWenSwarmDeepAdapter()
     adapter._instance = FakeInstance()
     adapter._config_cache = {
-        "evolution": {"enabled": True, "auto_scan": False},
+        "react": {"evolution": {"skill_evolution": True}},
         "model_name": "configured-model",
     }
     adapter._skill_manager = FakeSkillManager()
@@ -1541,6 +1701,7 @@ def test_deep_adapter_handle_user_answer_ignores_team_plan_approval_compat(monke
     )
 
     adapter = JiuWenSwarmDeepAdapter()
+    adapter._is_session_scoped_adapter = True
     request = AgentRequest(
         request_id="req-answer",
         channel_id="tui",
@@ -1578,6 +1739,7 @@ def test_deep_adapter_routes_team_simplify_answer_by_evolution_meta(monkeypatch)
             pytest.fail("team simplify approval must not use regular SkillEvolutionRail")
 
     adapter = JiuWenSwarmDeepAdapter()
+    adapter._is_session_scoped_adapter = True
     adapter._skill_evolution_rail = FailingRegularRail()
     monkeypatch.setattr(
         JiuWenSwarmDeepAdapter,

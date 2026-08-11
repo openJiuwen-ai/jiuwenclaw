@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ============================================================================
@@ -229,7 +229,7 @@ class Proposal(BaseModel):
     Determines which :class:`~apply_writers.ApplyWriter` handles it.
 
     ============  =========================================
-    ``skill``     Write to ``{skills_dir}/{name}/evolutions.json``
+    ``skill``     Append to ``{skills_dir}/{name}/SKILL.md``
     ``memory``    Write to ``{memory_dir}/policies/``
     ``training``  Insert into ``training_candidates`` table
     ============  =========================================
@@ -293,8 +293,8 @@ class Proposal(BaseModel):
     """Expected improvement if this fix is applied.
 
     MUST be non-empty.  Used by :class:`~decision_policies.EvalPolicy`
-    for quality scoring and as the ``EvolutionRecord.summary`` in the
-    ``evolutions.json`` output.
+    for quality scoring and as the experience content appended to the
+    target skill's ``SKILL.md``.
     """
 
     risk: str | None = None
@@ -416,7 +416,7 @@ class ApplyRecord(BaseModel):
     """Proof that a Proposal was (or was not) written to a target store.
 
     This is the last link in the audit chain.  Given an ``apply_id`` you
-    can find the ``stored_object_id`` (e.g. the ``evolutions.json`` path
+    can find the ``stored_object_id`` (e.g. the ``SKILL.md`` path
     or the training_candidates row), and from there trace back through
     ``proposal_id`` → ``trace_id``.
 
@@ -454,7 +454,7 @@ class ApplyRecord(BaseModel):
     stored_object_id: str | None = None
     """Persistent identifier of the written object.
 
-    For SkillExperienceWriter, this is the ``evolutions.json`` path.
+    For SkillExperienceWriter, this is the ``SKILL.md`` path.
     For TrainingCandidateWriter, this is a row-count summary string.
     For MemoryPolicyWriter, this is the policy file path.
     """
@@ -525,83 +525,3 @@ class TraceBatch:
 
     metadata: dict[str, JsonValue] = field(default_factory=dict)
     """Extension point (e.g. ``benchmark_run_id``)."""
-
-
-# ============================================================================
-# PDA Phase 1 — Experience governance & task evaluation models
-# ============================================================================
-
-
-class ExperienceOperationType(StrEnum):
-    """Operation types for experience governance.
-
-    Propose phase explicitly declares governance intent; Decision validates;
-    Apply faithfully executes. These are pluggable — PDA algorithm defines
-    them independently; other algorithms (LLMProposer) do not use them.
-    """
-
-    ADD = "add"
-    MERGE = "merge"
-    UPDATE = "update"
-    DEPRECATE = "deprecate"
-    REPLACE = "replace"
-    NOOP = "noop"
-
-
-class ExperienceOperation(BaseModel):
-    """A single experience operation within a Proposal.
-
-    Carried in ``Proposal.metadata["operations"]``. Only used by PDA-style
-    algorithms — existing algorithms (LLMProposer, RulePolicy) ignore this
-    field entirely.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    op: ExperienceOperationType
-    """Operation type — determines what Apply does."""
-
-    target_experience_id: str | None = None
-    """Target experience for MERGE/REPLACE/UPDATE/DEPRECATE.
-    Required when op != ADD/NOOP."""
-
-    new_content: str | None = None
-    """New experience content for ADD/REPLACE/UPDATE.
-    Required when op in {ADD, REPLACE, UPDATE}."""
-
-    reason: str
-    """Why this operation was chosen over alternatives."""
-
-    evidence_refs: list[EvidenceRef] = Field(default_factory=list)
-    """Evidence supporting this operation."""
-
-    expected_effect: str | None = None
-    """Predicted improvement if this operation is applied."""
-
-    risk: str | None = None
-    """Potential downsides."""
-
-    @model_validator(mode="after")
-    def _validate_op_requirements(self) -> "ExperienceOperation":
-        """Ensure required fields are present for each operation type."""
-        content_required = {
-            ExperienceOperationType.ADD,
-            ExperienceOperationType.REPLACE,
-            ExperienceOperationType.UPDATE,
-        }
-        target_required = {
-            ExperienceOperationType.MERGE,
-            ExperienceOperationType.REPLACE,
-            ExperienceOperationType.UPDATE,
-            ExperienceOperationType.DEPRECATE,
-        }
-
-        if self.op in content_required and not self.new_content:
-            raise ValueError(f"op={self.op.value} requires new_content")
-        if self.op in target_required and not self.target_experience_id:
-            raise ValueError(f"op={self.op.value} requires target_experience_id")
-        return self
-
-
-# NOTE: GovernanceContext and TraceOutcome have been moved to
-# jiuwenswarm/evolve/ahe/models.py — they are AHE algorithm internals.

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ChevronRight, Plus, Trash2 } from 'lucide-react';
+import { ChevronRight, Plus, Trash2, X } from 'lucide-react';
 import i18n from '../../i18n';
 import { webRequest } from '../../services/webClient';
 import { AvatarPermEditor } from './AvatarPermEditor';
@@ -38,6 +38,7 @@ type SupportedChannelId =
   | 'dingtalk'
   | 'telegram'
   | 'discord'
+  | 'slack'
   | 'whatsapp'
   | 'wechat';
 
@@ -159,6 +160,26 @@ type DiscordDraft = {
   allow_from: string;
 };
 
+type SlackConfig = {
+  enabled: boolean;
+  bot_token: string;
+  app_token: string;
+  allow_from: string[];
+  allowed_channel_ids: string[];
+  default_channel_id: string;
+  reply_in_thread: boolean;
+};
+
+type SlackDraft = {
+  enabled: boolean;
+  bot_token: string;
+  app_token: string;
+  allow_from: string;
+  allowed_channel_ids: string;
+  default_channel_id: string;
+  reply_in_thread: boolean;
+};
+
 type WhatsAppConfig = {
   enabled: boolean;
   bridge_ws_url: string;
@@ -261,6 +282,16 @@ const DEFAULT_DISCORD_CONF: DiscordConfig = {
   allow_from: [],
 };
 
+const DEFAULT_SLACK_CONF: SlackConfig = {
+  enabled: false,
+  bot_token: '',
+  app_token: '',
+  allow_from: [],
+  allowed_channel_ids: [],
+  default_channel_id: '',
+  reply_in_thread: true,
+};
+
 const DEFAULT_WHATSAPP_CONF: WhatsAppConfig = {
   enabled: false,
   bridge_ws_url: 'ws://127.0.0.1:19600/ws',
@@ -294,8 +325,8 @@ const SUPPORTED_CHANNELS: Array<{ channel_id: SupportedChannelId; logo_src: stri
   { channel_id: 'dingtalk', logo_src: '/dingtalk.png' },
   { channel_id: 'telegram', logo_src: '/telegram.webp' },
   { channel_id: 'discord', logo_src: '/discord.webp' },
+  { channel_id: 'slack', logo_src: '/slack.svg' },
   { channel_id: 'whatsapp', logo_src: '/whatsapp.png' },
-  { channel_id: 'wechat', logo_src: '/wechat.png' },
 ];
 
 
@@ -531,6 +562,11 @@ function normalizeXiaoyiAppsConfig(input: unknown): XiaoyiAppConfig[] {
   return sortXiaoyiApps([normalizeXiaoyiAppConfig(input, '默认小艺应用', true)]);
 }
 
+function normalizeSingleXiaoyiAppConfig(input: unknown): XiaoyiAppConfig {
+  const apps = normalizeXiaoyiAppsConfig(input);
+  return apps.find((app) => app.is_default) ?? apps[0] ?? normalizeXiaoyiAppConfig(DEFAULT_XIAOYI_CONF, '默认小艺应用', true);
+}
+
 function draftFromXiaoyiAppConfig(conf: XiaoyiAppConfig): XiaoyiAppDraft {
   return {
     ...draftFromXiaoyiConfig(conf),
@@ -675,6 +711,54 @@ function buildDiscordPayload(draft: DiscordDraft): Record<string, unknown> {
     channel_id: draft.channel_id.trim(),
     block_dm: draft.block_dm,
     allow_from: normalizeAllowFromText(draft.allow_from),
+  };
+}
+
+function isSensitiveSlackField(field: keyof SlackDraft): boolean {
+  return field === 'bot_token' || field === 'app_token';
+}
+
+function normalizeSlackConfig(input: unknown): SlackConfig {
+  if (!input || typeof input !== 'object') {
+    return DEFAULT_SLACK_CONF;
+  }
+  const data = input as Record<string, unknown>;
+  const normalizeList = (value: unknown): string[] =>
+    (Array.isArray(value) ? value : [])
+      .map((item) => String(item ?? '').trim())
+      .filter((item) => item.length > 0);
+  return {
+    enabled: Boolean(data.enabled),
+    bot_token: String(data.bot_token ?? '').trim(),
+    app_token: String(data.app_token ?? '').trim(),
+    allow_from: normalizeList(data.allow_from),
+    allowed_channel_ids: normalizeList(data.allowed_channel_ids),
+    default_channel_id: String(data.default_channel_id ?? '').trim(),
+    reply_in_thread: data.reply_in_thread === undefined ? true : Boolean(data.reply_in_thread),
+  };
+}
+
+function draftFromSlackConfig(conf: SlackConfig): SlackDraft {
+  return {
+    enabled: conf.enabled,
+    bot_token: conf.bot_token,
+    app_token: conf.app_token,
+    allow_from: conf.allow_from.join('\n'),
+    allowed_channel_ids: conf.allowed_channel_ids.join('\n'),
+    default_channel_id: conf.default_channel_id,
+    reply_in_thread: conf.reply_in_thread,
+  };
+}
+
+function buildSlackPayload(draft: SlackDraft): Record<string, unknown> {
+  return {
+    enabled: draft.enabled,
+    bot_token: draft.bot_token.trim(),
+    app_token: draft.app_token.trim(),
+    allow_from: normalizeAllowFromText(draft.allow_from),
+    allowed_channel_ids: normalizeAllowFromText(draft.allowed_channel_ids),
+    default_channel_id: draft.default_channel_id.trim(),
+    reply_in_thread: draft.reply_in_thread,
   };
 }
 
@@ -862,18 +946,18 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
-  const [xiaoyiApps, setXiaoyiApps] = useState<XiaoyiAppConfig[]>(() =>
-    normalizeXiaoyiAppsConfig(DEFAULT_XIAOYI_CONF),
+  const [xiaoyiApp, setXiaoyiApp] = useState<XiaoyiAppConfig>(() =>
+    normalizeSingleXiaoyiAppConfig(DEFAULT_XIAOYI_CONF),
   );
-  const [xiaoyiDraftApps, setXiaoyiDraftApps] = useState<XiaoyiAppDraft[]>(() =>
-    normalizeXiaoyiAppsConfig(DEFAULT_XIAOYI_CONF).map(draftFromXiaoyiAppConfig),
+  const [xiaoyiDraft, setXiaoyiDraft] = useState<XiaoyiAppDraft>(() =>
+    draftFromXiaoyiAppConfig(normalizeSingleXiaoyiAppConfig(DEFAULT_XIAOYI_CONF)),
   );
-  const [expandedXiaoyiAppIndex, setExpandedXiaoyiAppIndex] = useState(0);
   const [xiaoyiVisibleFields, setXiaoyiVisibleFields] = useState<Record<string, boolean>>({});
   const [xiaoyiLoading, setXiaoyiLoading] = useState(false);
   const [xiaoyiSaving, setXiaoyiSaving] = useState(false);
   const [xiaoyiSaveError, setXiaoyiSaveError] = useState<string | null>(null);
   const [xiaoyiSuccess, setXiaoyiSuccess] = useState<string | null>(null);
+  const [xiaoyiApiIdHintDismissed, setXiaoyiApiIdHintDismissed] = useState(false);
   const [dingtalkConfig, setDingtalkConfig] = useState<DingTalkConfig>(DEFAULT_DINGTALK_CONF);
   const [dingtalkDraft, setDingtalkDraft] = useState<DingTalkDraft>(draftFromDingtalkConfig(DEFAULT_DINGTALK_CONF));
   const [dingtalkVisibleFields, setDingtalkVisibleFields] = useState<Record<string, boolean>>({});
@@ -895,6 +979,13 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
   const [discordSaving, setDiscordSaving] = useState(false);
   const [discordSaveError, setDiscordSaveError] = useState<string | null>(null);
   const [discordSuccess, setDiscordSuccess] = useState<string | null>(null);
+  const [slackConfig, setSlackConfig] = useState<SlackConfig>(DEFAULT_SLACK_CONF);
+  const [slackDraft, setSlackDraft] = useState<SlackDraft>(draftFromSlackConfig(DEFAULT_SLACK_CONF));
+  const [slackVisibleFields, setSlackVisibleFields] = useState<Record<string, boolean>>({});
+  const [slackLoading, setSlackLoading] = useState(false);
+  const [slackSaving, setSlackSaving] = useState(false);
+  const [slackSaveError, setSlackSaveError] = useState<string | null>(null);
+  const [slackSuccess, setSlackSuccess] = useState<string | null>(null);
   const [whatsappConfig, setWhatsappConfig] = useState<WhatsAppConfig>(DEFAULT_WHATSAPP_CONF);
   const [whatsappDraft, setWhatsappDraft] = useState<WhatsAppDraft>(draftFromWhatsAppConfig(DEFAULT_WHATSAPP_CONF));
   const [whatsappLoading, setWhatsappLoading] = useState(false);
@@ -964,10 +1055,9 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
     setXiaoyiSuccess(null);
     try {
       const payload = await webRequest<{ config?: unknown }>('channel.xiaoyi.get_conf');
-      const normalized = normalizeXiaoyiAppsConfig(payload?.config);
-      setXiaoyiApps(normalized);
-      setXiaoyiDraftApps(normalized.map(draftFromXiaoyiAppConfig));
-      setExpandedXiaoyiAppIndex(0);
+      const normalized = normalizeSingleXiaoyiAppConfig(payload?.config);
+      setXiaoyiApp(normalized);
+      setXiaoyiDraft(draftFromXiaoyiAppConfig(normalized));
       setXiaoyiVisibleFields({});
     } catch (err) {
       setXiaoyiSaveError(err instanceof Error ? err.message : t('channels.errors.loadXiaoyi'));
@@ -1024,6 +1114,23 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
       setDiscordSaveError(err instanceof Error ? err.message : t('channels.errors.loadDiscord'));
     } finally {
       setDiscordLoading(false);
+    }
+  }, [t]);
+
+  const fetchSlackConfig = useCallback(async () => {
+    setSlackLoading(true);
+    setSlackSaveError(null);
+    setSlackSuccess(null);
+    try {
+      const payload = await webRequest<{ config?: unknown }>('channel.slack.get_conf');
+      const normalized = normalizeSlackConfig(payload?.config);
+      setSlackConfig(normalized);
+      setSlackDraft(draftFromSlackConfig(normalized));
+      setSlackVisibleFields({});
+    } catch (err) {
+      setSlackSaveError(err instanceof Error ? err.message : t('channels.errors.loadSlack'));
+    } finally {
+      setSlackLoading(false);
     }
   }, [t]);
 
@@ -1107,6 +1214,10 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
       void fetchDiscordConfig();
       return;
     }
+    if (activeChannelId === 'slack') {
+      void fetchSlackConfig();
+      return;
+    }
     if (activeChannelId === 'whatsapp') {
       void fetchWhatsAppConfig();
     }
@@ -1123,6 +1234,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
     fetchDingtalkConfig,
     fetchFeishuConfig,
     fetchTelegramConfig,
+    fetchSlackConfig,
     fetchWhatsAppConfig,
     fetchWechatConfig,
     fetchXiaoyiConfig,
@@ -1191,8 +1303,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
     return JSON.stringify(feishuApps) !== JSON.stringify(feishuDraftApps.map(buildFeishuAppConfig));
   }, [feishuApps, feishuDraftApps]);
   const hasXiaoyiConfigChanges = useMemo(() => {
-    return JSON.stringify(xiaoyiApps) !== JSON.stringify(xiaoyiDraftApps.map(buildXiaoyiAppConfig));
-  }, [xiaoyiApps, xiaoyiDraftApps]);
+    return JSON.stringify(xiaoyiApp) !== JSON.stringify(buildXiaoyiAppConfig(xiaoyiDraft));
+  }, [xiaoyiApp, xiaoyiDraft]);
   const hasDingtalkConfigChanges = useMemo(() => {
     const baseDraft = draftFromDingtalkConfig(dingtalkConfig);
     return (
@@ -1225,6 +1337,19 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
       normalizeAllowFromText(baseDraft.allow_from).join('\n') !== normalizeAllowFromText(discordDraft.allow_from).join('\n')
     );
   }, [discordConfig, discordDraft]);
+  const hasSlackConfigChanges = useMemo(() => {
+    const baseDraft = draftFromSlackConfig(slackConfig);
+    return (
+      baseDraft.enabled !== slackDraft.enabled ||
+      baseDraft.bot_token !== slackDraft.bot_token ||
+      baseDraft.app_token !== slackDraft.app_token ||
+      normalizeAllowFromText(baseDraft.allow_from).join('\n') !== normalizeAllowFromText(slackDraft.allow_from).join('\n') ||
+      normalizeAllowFromText(baseDraft.allowed_channel_ids).join('\n') !==
+        normalizeAllowFromText(slackDraft.allowed_channel_ids).join('\n') ||
+      baseDraft.default_channel_id !== slackDraft.default_channel_id ||
+      baseDraft.reply_in_thread !== slackDraft.reply_in_thread
+    );
+  }, [slackConfig, slackDraft]);
   const hasWhatsAppConfigChanges = useMemo(() => {
     const baseDraft = draftFromWhatsAppConfig(whatsappConfig);
     return (
@@ -1345,62 +1470,19 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
     setVisibleFields((prev) => ({ ...prev, [field]: !prev[field] }));
   };
 
-  const handleXiaoyiAppFieldChange = <K extends keyof XiaoyiAppDraft>(
-    index: number,
-    key: K,
-    value: XiaoyiAppDraft[K],
-  ) => {
-    setXiaoyiDraftApps((prev) => prev.map((app, i) => (i === index ? { ...app, [key]: value } : app)));
-    if (xiaoyiSaveError) {
-      setXiaoyiSaveError(null);
-    }
-    if (xiaoyiSuccess) {
-      setXiaoyiSuccess(null);
+  const handleXiaoyiFieldChange = <K extends keyof XiaoyiAppDraft>(key: K, value: XiaoyiAppDraft[K]) => {
+    setXiaoyiDraft((prev) => ({ ...prev, [key]: value }));
+    setXiaoyiSaveError(null);
+    setXiaoyiSuccess(null);
+    // 填入 api_id 后重置关闭状态，清空时警告横幅可再次出现
+    if (key === 'api_id' && String(value ?? '').trim()) {
+      setXiaoyiApiIdHintDismissed(false);
     }
   };
 
   const handleCancelXiaoyiConfig = () => {
     if (!hasXiaoyiConfigChanges) return;
-    setXiaoyiDraftApps(xiaoyiApps.map(draftFromXiaoyiAppConfig));
-    setXiaoyiSaveError(null);
-    setXiaoyiSuccess(null);
-  };
-
-  const handleAddXiaoyiApp = () => {
-    setXiaoyiDraftApps((prev) => {
-      const next = [
-        ...prev,
-        {
-          ...draftFromXiaoyiAppConfig({
-            ...DEFAULT_XIAOYI_CONF,
-            name: `小艺应用 ${prev.length + 1}`,
-            is_default: false,
-          }),
-        },
-      ];
-      setExpandedXiaoyiAppIndex(next.length - 1);
-      return next;
-    });
-    setXiaoyiSaveError(null);
-    setXiaoyiSuccess(null);
-  };
-
-  const handleDeleteXiaoyiApp = (index: number) => {
-    setXiaoyiDraftApps((prev) => {
-      if (prev.length <= 1) return prev;
-      const next = prev.filter((_, i) => i !== index);
-      if (!next.some((app) => app.is_default) && next.length > 0) {
-        next[0] = { ...next[0], is_default: true };
-      }
-      setExpandedXiaoyiAppIndex((current) => Math.max(0, Math.min(current >= index ? current - 1 : current, next.length - 1)));
-      return next;
-    });
-    setXiaoyiSaveError(null);
-    setXiaoyiSuccess(null);
-  };
-
-  const handleSetDefaultXiaoyiApp = (index: number) => {
-    setXiaoyiDraftApps((prev) => prev.map((app, i) => ({ ...app, is_default: i === index })));
+    setXiaoyiDraft(draftFromXiaoyiAppConfig(xiaoyiApp));
     setXiaoyiSaveError(null);
     setXiaoyiSuccess(null);
   };
@@ -1470,6 +1552,27 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
 
   const toggleDiscordFieldVisible = (field: keyof DiscordDraft) => {
     setDiscordVisibleFields((prev) => ({ ...prev, [field]: !prev[field] }));
+  };
+
+  const handleSlackFieldChange = <K extends keyof SlackDraft>(key: K, value: SlackDraft[K]) => {
+    setSlackDraft((prev) => ({ ...prev, [key]: value }));
+    if (slackSaveError) {
+      setSlackSaveError(null);
+    }
+    if (slackSuccess) {
+      setSlackSuccess(null);
+    }
+  };
+
+  const handleCancelSlackConfig = () => {
+    if (!hasSlackConfigChanges) return;
+    setSlackDraft(draftFromSlackConfig(slackConfig));
+    setSlackSaveError(null);
+    setSlackSuccess(null);
+  };
+
+  const toggleSlackFieldVisible = (field: keyof SlackDraft) => {
+    setSlackVisibleFields((prev) => ({ ...prev, [field]: !prev[field] }));
   };
 
   const handleWhatsAppFieldChange = <K extends keyof WhatsAppDraft>(key: K, value: WhatsAppDraft[K]) => {
@@ -1568,11 +1671,11 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
     setXiaoyiSaving(true);
     setXiaoyiSaveError(null);
     try {
-      const apps = xiaoyiDraftApps.map(buildXiaoyiAppConfig);
+      const apps = [{ ...buildXiaoyiAppConfig(xiaoyiDraft), is_default: true }];
       const result = await webRequest<{ config?: unknown }>('channel.xiaoyi.set_conf', { apps });
-      const normalized = normalizeXiaoyiAppsConfig(result?.config);
-      setXiaoyiApps(normalized);
-      setXiaoyiDraftApps(normalized.map(draftFromXiaoyiAppConfig));
+      const normalized = normalizeSingleXiaoyiAppConfig(result?.config);
+      setXiaoyiApp(normalized);
+      setXiaoyiDraft(draftFromXiaoyiAppConfig(normalized));
       setXiaoyiSuccess(t('channels.saved.xiaoyi'));
       void fetchChannels();
     } catch (saveErr) {
@@ -1640,6 +1743,26 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
       setDiscordSaveError(message);
     } finally {
       setDiscordSaving(false);
+    }
+  };
+
+  const handleSaveSlackConfig = async () => {
+    if (!hasSlackConfigChanges || slackSaving) return;
+    setSlackSaving(true);
+    setSlackSaveError(null);
+    try {
+      const payload = buildSlackPayload(slackDraft);
+      const result = await webRequest<{ config?: unknown }>('channel.slack.set_conf', payload);
+      const normalized = normalizeSlackConfig(result?.config);
+      setSlackConfig(normalized);
+      setSlackDraft(draftFromSlackConfig(normalized));
+      setSlackSuccess(t('channels.saved.slack'));
+      void fetchChannels();
+    } catch (saveErr) {
+      const message = saveErr instanceof Error ? saveErr.message : t('channels.errors.saveGeneric');
+      setSlackSaveError(message);
+    } finally {
+      setSlackSaving(false);
     }
   };
 
@@ -1732,6 +1855,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
     dingtalkLoading ||
     telegramLoading ||
     discordLoading ||
+    slackLoading ||
     whatsappLoading ||
     wecomLoading ||
     wechatLoading;
@@ -1798,15 +1922,15 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
     );
   };
 
-  const renderXiaoyiAppField = (app: XiaoyiAppDraft, appIndex: number, field: keyof XiaoyiAppDraft) => {
-    const visibilityKey = `${appIndex}.${String(field)}`;
+  const renderXiaoyiField = (app: XiaoyiAppDraft, field: keyof XiaoyiAppDraft) => {
+    const visibilityKey = String(field);
     const value = app[field];
     if (typeof value === 'boolean') {
       return (
         <tr key={String(field)} className="border-t border-border first:border-t-0 even:bg-secondary/10">
           <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">{String(field)}</td>
           <td className="px-4 py-2.5 align-middle">
-            {renderToggle(value, () => handleXiaoyiAppFieldChange(appIndex, field, !value as XiaoyiAppDraft[typeof field]))}
+            {renderToggle(value, () => handleXiaoyiFieldChange(field, !value as XiaoyiAppDraft[typeof field]))}
           </td>
         </tr>
       );
@@ -1819,7 +1943,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
             <input
               type={isSensitiveXiaoyiField(field) && !xiaoyiVisibleFields[visibilityKey] ? 'password' : 'text'}
               value={String(value ?? '')}
-              onChange={(e) => handleXiaoyiAppFieldChange(appIndex, field, e.target.value as XiaoyiAppDraft[typeof field])}
+              onChange={(e) => handleXiaoyiFieldChange(field, e.target.value as XiaoyiAppDraft[typeof field])}
               placeholder={t('channels.placeholders.configValue')}
               className={`w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent ${
                 isSensitiveXiaoyiField(field) ? 'pr-10' : ''
@@ -1947,92 +2071,36 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
     </div>
   );
 
-  const renderXiaoyiAppsEditor = () => (
-    <div className="space-y-3">
-      {xiaoyiDraftApps.map((app, index) => {
-        const expanded = expandedXiaoyiAppIndex === index;
-        const identifier = app.api_id.trim() || app.agent_id.trim() || '未配置 api_id';
-        return (
-          <div key={`xiaoyi-app-${index}`} className="rounded-xl border border-border bg-card overflow-hidden">
-            <div className="flex items-center gap-3 px-4 py-3">
-              <button
-                type="button"
-                onClick={() => setExpandedXiaoyiAppIndex(expanded ? -1 : index)}
-                className="inline-flex h-7 w-7 items-center justify-center rounded-md text-text-muted hover:bg-secondary hover:text-text"
-                aria-label={expanded ? '收起应用配置' : '展开应用配置'}
-                title={expanded ? '收起应用配置' : '展开应用配置'}
-              >
-                <ChevronRight className={`h-4 w-4 transition-transform ${expanded ? 'rotate-90' : ''}`} />
-              </button>
-              <input
-                type="text"
-                value={app.name}
-                onChange={(e) => handleXiaoyiAppFieldChange(index, 'name', e.target.value)}
-                className="min-w-[160px] flex-1 rounded-md border border-border bg-bg px-3 py-2 text-sm outline-none focus:border-accent"
-                placeholder="应用名称"
-              />
-              {app.is_default ? (
-                <span className="rounded-full border border-accent bg-accent-subtle px-2.5 py-1 text-xs text-accent">
-                  默认
-                </span>
-              ) : null}
-              {!app.is_default ? (
-                <button
-                  type="button"
-                  onClick={() => handleSetDefaultXiaoyiApp(index)}
-                  className="rounded-full border border-accent/50 bg-accent-subtle px-2.5 py-1 text-xs font-medium text-accent hover:border-accent hover:bg-accent/15"
-                  aria-label="设为默认应用"
-                  title="设为默认应用"
-                >
-                  设为默认
-                </button>
-              ) : null}
-              <span className="mono max-w-[220px] truncate rounded-md border border-border bg-secondary px-2.5 py-1 text-xs text-text-muted">
-                {identifier}
-              </span>
-              <span
-                className={`rounded-full border px-2.5 py-1 text-xs font-medium ${
-                  app.enabled ? 'border-ok bg-ok-subtle text-ok' : 'border-border bg-secondary text-text-muted'
-                }`}
-              >
-                {app.enabled ? t('channels.status.enabled') : t('channels.status.disabled')}
-              </span>
-              <button
-                type="button"
-                onClick={() => handleDeleteXiaoyiApp(index)}
-                disabled={xiaoyiDraftApps.length <= 1}
-                className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-border text-text-muted hover:bg-danger-subtle hover:text-danger disabled:cursor-not-allowed disabled:opacity-40"
-                aria-label="删除应用"
-                title="删除应用"
-              >
-                <Trash2 className="h-4 w-4" />
-              </button>
-            </div>
-            {expanded ? (
-              <div className="border-t border-border bg-bg/30">
-                <table className="w-full text-sm">
-                  <tbody>
-                    {(['enabled', 'enable_streaming', 'ak', 'sk', 'agent_id', 'api_id'] as const).map((field) =>
-                      renderXiaoyiAppField(app, index, field),
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            ) : null}
+  const renderXiaoyiConfigEditor = () => {
+    // 仅在启用且未填 api_id 时显示警告横幅；填入后直接消失，不切换成灰色说明条
+    const showApiIdHint =
+      xiaoyiDraft.enabled && !xiaoyiDraft.api_id.trim() && !xiaoyiApiIdHintDismissed;
+    return (
+      <>
+        {showApiIdHint ? (
+          <div className="mb-3 flex items-start gap-2 rounded-md border border-warn/30 bg-warn-subtle px-3 py-2 text-xs text-warn">
+            <p className="min-w-0 flex-1">{t('channels.placeholders.xiaoyiApiIdRequiredForCron')}</p>
+            <button
+              type="button"
+              onClick={() => setXiaoyiApiIdHintDismissed(true)}
+              className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-current/70 hover:bg-secondary hover:text-current"
+              aria-label={t('common.close')}
+              title={t('common.close')}
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
           </div>
-        );
-      })}
-      <button
-        type="button"
-        onClick={handleAddXiaoyiApp}
-        className="flex w-full items-center justify-center gap-2 rounded-xl border border-dashed border-border px-4 py-3 text-sm text-text-muted hover:border-accent hover:bg-accent-subtle hover:text-accent"
-      >
-        <Plus className="h-4 w-4" />
-        添加应用
-      </button>
-    </div>
-  );
-
+        ) : null}
+        <table className="w-full text-sm">
+          <tbody>
+            {(['enabled', 'enable_streaming', 'ak', 'sk', 'agent_id', 'api_id'] as const).map((field) =>
+              renderXiaoyiField(xiaoyiDraft, field),
+            )}
+          </tbody>
+        </table>
+      </>
+    );
+  };
   const configErrorNotice = useMemo(() => {
     return Array.from(
       new Set(
@@ -2042,6 +2110,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
           dingtalkSaveError,
           telegramSaveError,
           discordSaveError,
+          slackSaveError,
           whatsappSaveError,
           wecomSaveError,
           wechatSaveError,
@@ -2052,6 +2121,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
     discordSaveError,
     dingtalkSaveError,
     saveError,
+    slackSaveError,
     t,
     telegramSaveError,
     whatsappSaveError,
@@ -2069,6 +2139,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
       setDingtalkSaveError(null);
       setTelegramSaveError(null);
       setDiscordSaveError(null);
+      setSlackSaveError(null);
       setWhatsappSaveError(null);
       setWecomSaveError(null);
       setWechatSaveError(null);
@@ -2263,7 +2334,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                       {xiaoyiLoading ? (
                         <div className="text-sm text-text-muted">{t('channels.loading.xiaoyi')}</div>
                       ) : (
-                        renderXiaoyiAppsEditor()
+                        renderXiaoyiConfigEditor()
                       )}
                     </div>
                   </div>
@@ -2930,6 +3001,175 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                     value={discordDraft.allow_from}
                                     onChange={(e) => handleDiscordFieldChange('allow_from', e.target.value)}
                                     placeholder={t('channels.placeholders.ids')}
+                                    rows={4}
+                                    className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent resize-y"
+                                  />
+                                </td>
+                              </tr>
+                            </tbody>
+                          </table>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                ) : null}
+
+                {activeChannelId === 'slack' ? (
+                  <div className="w-full h-full rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col">
+                    <div className="px-4 py-3 bg-secondary/30 border-b border-border">
+                      <div className="flex items-center justify-between gap-4">
+                        <div className="flex items-center gap-3">
+                          <ChannelHeaderLogo channelId="slack" label={getChannelLabel(t, 'slack')} />
+                          <div>
+                            <h4 className="text-sm font-medium text-text">{t('channels.config.slackTitle')}</h4>
+                            <p className="text-xs text-text-muted mt-1">{t('channels.config.slackSubtitle')}</p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => void fetchSlackConfig()}
+                            disabled={slackSaving || isConfigRefreshing}
+                            className="btn !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {slackLoading ? t('common.refreshing') : t('common.refresh')}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleCancelSlackConfig}
+                            disabled={!hasSlackConfigChanges || slackSaving}
+                            className="btn !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {t('common.cancel')}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleSaveSlackConfig()}
+                            disabled={!hasSlackConfigChanges || slackSaving || !isConnected}
+                            className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {slackSaving ? t('common.saving') : t('common.save')}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    {slackSuccess ? (
+                      <div className="mx-4 mt-4 rounded-md border border-[var(--color-border-success)] bg-ok-subtle px-3 py-2 text-sm text-ok">
+                        {slackSuccess}
+                      </div>
+                    ) : null}
+
+                    <div className="p-4 pt-3 flex-1 overflow-auto">
+                      {slackLoading ? (
+                        <div className="text-sm text-text-muted">{t('channels.loading.slack')}</div>
+                      ) : (
+                        <>
+                          <div className="mb-3 rounded-md border border-border bg-secondary/20 px-3 py-2 text-xs text-text-muted">
+                            {t('channels.config.slackHint')}
+                          </div>
+                          <table className="w-full text-sm">
+                            <tbody>
+                              <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
+                                <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">enabled</td>
+                                <td className="px-4 py-2.5 align-middle">
+                                  <button
+                                    type="button"
+                                    role="switch"
+                                    aria-checked={slackDraft.enabled}
+                                    onClick={() => handleSlackFieldChange('enabled', !slackDraft.enabled)}
+                                    className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent focus:outline-none ${
+                                      slackDraft.enabled ? 'bg-ok' : 'bg-secondary'
+                                    }`}
+                                  >
+                                    <span
+                                      className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-[var(--color-control-thumb)] shadow ${
+                                        slackDraft.enabled ? 'translate-x-4' : 'translate-x-0'
+                                      }`}
+                                    />
+                                  </button>
+                                </td>
+                              </tr>
+                              <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
+                                <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">
+                                  reply_in_thread
+                                </td>
+                                <td className="px-4 py-2.5 align-middle">
+                                  <button
+                                    type="button"
+                                    role="switch"
+                                    aria-checked={slackDraft.reply_in_thread}
+                                    onClick={() =>
+                                      handleSlackFieldChange('reply_in_thread', !slackDraft.reply_in_thread)
+                                    }
+                                    className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent focus:outline-none ${
+                                      slackDraft.reply_in_thread ? 'bg-ok' : 'bg-secondary'
+                                    }`}
+                                  >
+                                    <span
+                                      className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-[var(--color-control-thumb)] shadow ${
+                                        slackDraft.reply_in_thread ? 'translate-x-4' : 'translate-x-0'
+                                      }`}
+                                    />
+                                  </button>
+                                </td>
+                              </tr>
+                              {(['bot_token', 'app_token', 'default_channel_id'] as const).map((field) => (
+                                <tr key={field} className="border-t border-border first:border-t-0 even:bg-secondary/10">
+                                  <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">{field}</td>
+                                  <td className="px-4 py-2.5 break-all text-[13px] align-middle">
+                                    <div className="relative">
+                                      <input
+                                        type={isSensitiveSlackField(field) && !slackVisibleFields[field] ? 'password' : 'text'}
+                                        value={slackDraft[field]}
+                                        onChange={(e) => handleSlackFieldChange(field, e.target.value)}
+                                        placeholder={
+                                          field === 'bot_token'
+                                            ? t('channels.placeholders.slackBotToken')
+                                            : field === 'app_token'
+                                              ? t('channels.placeholders.slackAppToken')
+                                              : t('channels.placeholders.slackChannelId')
+                                        }
+                                        className={`w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent ${
+                                          isSensitiveSlackField(field) ? 'pr-10' : ''
+                                        }`}
+                                      />
+                                      {isSensitiveSlackField(field) ? (
+                                        <button
+                                          type="button"
+                                          onClick={() => toggleSlackFieldVisible(field)}
+                                          className="channels-panel__visibility-toggle"
+                                          aria-label={slackVisibleFields[field] ? t('channels.hideValue') : t('channels.showValue')}
+                                          title={slackVisibleFields[field] ? t('channels.hideValue') : t('channels.showValue')}
+                                        >
+                                          <VisibilityIcon visible={Boolean(slackVisibleFields[field])} />
+                                        </button>
+                                      ) : null}
+                                    </div>
+                                  </td>
+                                </tr>
+                              ))}
+                              <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
+                                <td className="px-4 py-2.5 align-top mono text-xs text-text-muted w-[32%]">allow_from</td>
+                                <td className="px-4 py-2.5 break-all text-[13px] align-middle">
+                                  <textarea
+                                    value={slackDraft.allow_from}
+                                    onChange={(e) => handleSlackFieldChange('allow_from', e.target.value)}
+                                    placeholder={t('channels.placeholders.slackUserIds')}
+                                    rows={4}
+                                    className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent resize-y"
+                                  />
+                                </td>
+                              </tr>
+                              <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
+                                <td className="px-4 py-2.5 align-top mono text-xs text-text-muted w-[32%]">
+                                  allowed_channel_ids
+                                </td>
+                                <td className="px-4 py-2.5 break-all text-[13px] align-middle">
+                                  <textarea
+                                    value={slackDraft.allowed_channel_ids}
+                                    onChange={(e) => handleSlackFieldChange('allowed_channel_ids', e.target.value)}
+                                    placeholder={t('channels.placeholders.slackChannelIds')}
                                     rows={4}
                                     className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent resize-y"
                                   />

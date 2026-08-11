@@ -15,6 +15,8 @@ class ReqMethod(Enum):
     CHAT_RESUME = "chat.resume"
     CHAT_CANCEL = "chat.interrupt"
     CHAT_ANSWER = "chat.user_answer"
+    CHAT_SWARMFLOW_REPLY = "chat.swarmflow_reply"
+    SSH_RELAY = "ssh.relay"
     HISTORY_GET = "history.get"
     COMMAND_BTW = "command.btw"
     COMMAND_ADD_DIR = "command.add_dir"
@@ -49,16 +51,21 @@ class ReqMethod(Enum):
     SESSION_REWIND_COMPACT = "session.rewind_compact"
     SESSION_RESTORE_FILES = "session.restore_files"
     HISTORY_LIST_TURNS = "history.list_turns"
+    TEAM_TEMPLATES_LIST = "team.templates.list"
+    TEAM_BINDINGS_LIST = "team.bindings.list"
+    TEAM_BINDING_CREATE = "team.binding.create"
+    TEAM_BINDING_GENERATE = "team.binding.generate"
+    TEAM_SESSION_BIND = "team.session.bind"
     TEAM_DELETE = "team.delete"
 
     PATH_GET = "path.get"
     PATH_SET = "path.set"
 
-    BROWSER_START = "browser.start"
     BROWSER_RUNTIME_RESTART = "browser.runtime_restart"
 
     CONFIG_CACHE_CLEAR = "config.cache_clear"
     AGENT_RELOAD_CONFIG = "agent.reload_config"
+    AGENT_PREWARM_SYNC = "agent.prewarm.sync"
 
     MEMORY_COMPUTE = "memory.compute"
 
@@ -77,6 +84,8 @@ class ReqMethod(Enum):
     AGENTS_ENABLE = "agents.enable"
     AGENTS_DISABLE = "agents.disable"
     AGENTS_TOOLS_LIST = "agents.tools_list"
+    AGENT_SWITCH = "3rdagent.switch"
+    AGENT_LIST = "3rdagent.list"
 
     SKILLS_MARKETPLACE_LIST = "skills.marketplace.list"
     SKILLS_LIST = "skills.list"
@@ -89,6 +98,7 @@ class ReqMethod(Enum):
     SKILLS_MARKETPLACE_REMOVE = "skills.marketplace.remove"
     SKILLS_MARKETPLACE_TOGGLE = "skills.marketplace.toggle"
     SKILLS_UNINSTALL = "skills.uninstall"
+    SKILLS_ONLINE_SEARCH = "skills.online_search.search"
     SKILLS_SKILLNET_SEARCH = "skills.skillnet.search"
     SKILLS_SKILLNET_INSTALL = "skills.skillnet.install"
     SKILLS_SKILLNET_INSTALL_STATUS = "skills.skillnet.install_status"
@@ -114,11 +124,12 @@ class ReqMethod(Enum):
     SKILLS_EVOLUTION_GET = "skills.evolution.get"
     SKILLS_EVOLUTION_SAVE = "skills.evolution.save"
 
-    SYMPHONY_BUILD_SCORE = "symphony.build_score"
-    SYMPHONY_PAUSE_BUILD = "symphony.pause_build"
-    SYMPHONY_SCORE_STATUS = "symphony.score_status"
-    SYMPHONY_GRAPH = "symphony.graph"
-    SYMPHONY_PLAN = "symphony.plan"
+    # Skill Graph Web panel transport. The implementation is provided by
+    # agent-core Symphony, while the public transport remains skill-domain API.
+    SKILLS_GRAPH_BUILD = "skills.graph.build"
+    SKILLS_GRAPH_STATUS = "skills.graph.status"
+    SKILLS_GRAPH_GET = "skills.graph.get"
+    SKILLS_GRAPH_CANCEL = "skills.graph.cancel"
 
     # Plugin management (reuses skills marketplace infrastructure)
     PLUGINS_LIST = "plugins.list"
@@ -158,6 +169,8 @@ class ReqMethod(Enum):
 
     CHANNEL_TELEGRAM_GET_CONF = "channel.telegram.get_conf"
     CHANNEL_TELEGRAM_SET_CONF = "channel.telegram.set_conf"
+    CHANNEL_SLACK_GET_CONF = "channel.slack.get_conf"
+    CHANNEL_SLACK_SET_CONF = "channel.slack.set_conf"
     CHANNEL_DINGTALK_GET_CONF = "channel.dingtalk.get_conf"
     CHANNEL_DINGTALK_SET_CONF = "channel.dingtalk.set_conf"
 
@@ -177,6 +190,7 @@ class ReqMethod(Enum):
     TEAM_SNAPSHOT = "team.snapshot"
     TEAM_HISTORY_GET = "team.history.get"
     TEAM_MEMBERS_GET = "team.members.get"
+    TEAM_MQ_PUBLISH = "team.mq.publish"
 
     # Harness package management
     HARNESS_PACKAGES_GET = "harness.packages.get"

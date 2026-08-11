@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import base64
-import binascii
 import http.client
 import logging
 import os
@@ -12,8 +11,10 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from logging.handlers import RotatingFileHandler
@@ -21,19 +22,50 @@ from logging.handlers import RotatingFileHandler
 import webview
 
 from jiuwenswarm.common.utils import get_user_workspace_dir, get_logs_dir, wait_for_pid_exit, wait_for_tcp_port
+from jiuwenswarm.instance_manager.config import (
+    BASE_PORTS,
+    PORT_TYPES,
+    find_available_ports,
+)
 
 
 BACKEND_HOST = "127.0.0.1"
-BACKEND_PORT = 19000
+BACKEND_PORT = int(BASE_PORTS["web"])
 FRONTEND_HOST = "127.0.0.1"
-FRONTEND_PORT = 5173
+FRONTEND_PORT = int(BASE_PORTS["frontend"])
+DESKTOP_PORT_SCAN_RANGE = 10
 APP_CHILD_FLAG = "--desktop-run-app"
 WEB_CHILD_FLAG = "--desktop-run-web"
 UPDATE_HELPER_FLAG = "--desktop-install-update"
 DESKTOP_ENV_FLAG = "JIUWENSWARM_DESKTOP"
 STARTUP_TIMEOUT_SECONDS = 45.0
-PNG_DATA_URL_PREFIX = "data:image/png;base64,"
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+@dataclass(frozen=True)
+class _DataUrlExportSpec:
+    allowed_suffixes: frozenset[str]
+    allowed_parameters: frozenset[str]
+    file_types: tuple[str, ...]
+
+
+DATA_URL_EXPORT_SPECS = {
+    "image/png": _DataUrlExportSpec(
+        allowed_suffixes=frozenset({".png"}),
+        allowed_parameters=frozenset(),
+        file_types=("PNG Image (*.png)",),
+    ),
+    "image/svg+xml": _DataUrlExportSpec(
+        allowed_suffixes=frozenset({".svg"}),
+        allowed_parameters=frozenset({"charset=utf-8"}),
+        file_types=("SVG Image (*.svg)",),
+    ),
+    "text/plain": _DataUrlExportSpec(
+        allowed_suffixes=frozenset({".mmd"}),
+        allowed_parameters=frozenset({"charset=utf-8"}),
+        file_types=("Mermaid Diagram (*.mmd)",),
+    ),
+}
 DesktopSaveResult = dict[str, bool]
 UPDATE_CLEANUP_PATTERNS = (
     "JiuwenSwarm-setup-*.exe",
@@ -81,6 +113,54 @@ def _setup_logger() -> logging.Logger:
 
 
 logger = _setup_logger()
+
+
+def _format_ports_for_log(ports: dict[str, int]) -> str:
+    return ", ".join(f"{name}={ports.get(name, 0)}" for name in PORT_TYPES)
+
+
+def resolve_desktop_ports(
+    host: str = "127.0.0.1",
+    scan_range: int = DESKTOP_PORT_SCAN_RANGE,
+) -> dict[str, int]:
+    """Pick a free port group for this desktop session (no config persistence).
+
+    Reuses ``find_available_ports`` (base + index * 1000). Result lives only in
+    process memory / child env for this launch.
+    """
+    if scan_range < 1:
+        raise RuntimeError(
+            f"invalid desktop port scan_range={scan_range}; must be >= 1"
+        )
+
+    result = find_available_ports(
+        base_index=0,
+        host=host,
+        scan_range=scan_range,
+    )
+    if result is None:
+        logger.error(
+            "[desktop] no free port group within scan_range=%s "
+            "(tried indices 0..%s on %s). Free ports or raise "
+            "JIUWENSWARM_*_PORT base overrides, then retry.",
+            scan_range,
+            scan_range - 1,
+            host,
+        )
+        raise RuntimeError(
+            f"No available desktop port group within scan_range={scan_range}"
+        )
+
+    ports, index = result
+    if index == 0:
+        logger.info("[desktop] using ports: %s", _format_ports_for_log(ports))
+    else:
+        logger.warning(
+            "[desktop] default ports busy; using alternate group index=%s: %s",
+            index,
+            _format_ports_for_log(ports),
+        )
+    return ports
 
 
 def _cleanup_stale_update_artifacts() -> None:
@@ -134,19 +214,43 @@ def _build_child_command(name: str, extra_args: list[str] | None = None) -> list
     return base
 
 
-def _build_child_env(name: str) -> dict[str, str]:
+def _build_child_env(name: str, ports: dict[str, int]) -> dict[str, str]:
     env = os.environ.copy()
     env[DESKTOP_ENV_FLAG] = "1"
-    if name == "app":
-        env["WEB_HOST"] = BACKEND_HOST
-        env["WEB_PORT"] = str(BACKEND_PORT)
+    # Inject the full session port group so app → agent/gateway and web agree.
+    # load_dotenv_runtime preserves these under JIUWENSWARM_DESKTOP=1.
+    env["WEB_HOST"] = BACKEND_HOST
+    env["WEB_PORT"] = str(ports["web"])
+    env["GATEWAY_PORT"] = str(ports["gateway"])
+    env["AGENT_SERVER_PORT"] = str(ports["agent_server"])
+    env["AGENT_PORT"] = str(ports["agent_server"])
+    env["FRONTEND_PORT"] = str(ports["frontend"])
+    # Gateway prefers AGENT_SERVER_URL over AGENT_SERVER_PORT; drop any stale
+    # URL from the parent shell so the remapped port is used.
+    env.pop("AGENT_SERVER_URL", None)
+    if name == "web":
+        logger.info(
+            "[desktop] web child ports: frontend=%s proxy=http://%s:%s",
+            ports["frontend"],
+            BACKEND_HOST,
+            ports["web"],
+        )
+    elif name == "app":
+        logger.info(
+            "[desktop] app child ports: %s",
+            _format_ports_for_log(ports),
+        )
     return env
 
 
-def _start_process(name: str, command: list[str]) -> subprocess.Popen[bytes]:
+def _start_process(
+    name: str,
+    command: list[str],
+    ports: dict[str, int],
+) -> subprocess.Popen[bytes]:
     logger.info("[desktop] starting %s: %s", name, command)
     kwargs: dict[str, object] = {
-        "env": _build_child_env(name),
+        "env": _build_child_env(name, ports),
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.DEVNULL,
     }
@@ -157,6 +261,46 @@ def _start_process(name: str, command: list[str]) -> subprocess.Popen[bytes]:
     else:
         kwargs["creationflags"] = _creationflags()
     return subprocess.Popen(command, **kwargs)
+
+
+# frozen exe 冷启动时, C 扩展 (.pyd) 与大量 .py 首次从 _MEIPASS 读盘很慢.
+# 桌面主进程在拉起 agent/gateway/web 子进程前, 起后台线程预读关键包入 OS page
+# cache, 子进程 import 时命中内存而非闪存/磁盘, 显著降低冷启动 import 耗时.
+# 只读首页 (4096B) 触发预读, 零执行零副作用; 非冻结模式 (dev) 无 _MEIPASS 直接跳过.
+_WARMUP_PACKAGES = (
+    "openjiuwen", "faiss", "pymilvus", "google", "a2ui",
+    "sqlite_vec", "tree_sitter", "tiktoken", "tiktoken_ext",
+)
+
+
+def _warmup_page_cache_background() -> None:
+    """frozen exe 冷启动后台预读关键包入 OS page cache, 不阻塞 start_services."""
+    if not getattr(sys, "frozen", False):
+        return  # dev 模式无 _MEIPASS, 跳过 (uv run 已有 pyc + OS cache 暖)
+    meipass = getattr(sys, "_MEIPASS", None)
+    if not meipass or not os.path.isdir(meipass):
+        return
+
+    def _read_all(pkg_dir):
+        try:
+            for root, _dirs, files in os.walk(pkg_dir):
+                for f in files:
+                    p = os.path.join(root, f)
+                    try:
+                        with open(p, "rb") as fh:
+                            _ = fh.read(4096)
+                    except OSError:
+                        pass
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _worker():
+        for pkg in _WARMUP_PACKAGES:
+            d = os.path.join(meipass, pkg)
+            if os.path.isdir(d):
+                _read_all(d)
+
+    threading.Thread(target=_worker, name="exe-page-cache-warmup", daemon=True).start()
 
 
 def _wait_for_tcp(
@@ -223,7 +367,13 @@ def _wait_for_port_release(host: str, port: int, timeout: float = 15.0) -> bool:
     return wait_for_tcp_port(host, port, timeout=timeout, target_state="disconnected")
 
 
-def _launch_windows_installer_helper(installer_path: str, app_executable: str, parent_pid: int = 0) -> None:
+def _launch_windows_installer_helper(
+    installer_path: str,
+    app_executable: str,
+    parent_pid: int = 0,
+    backend_port: int = BACKEND_PORT,
+    frontend_port: int = FRONTEND_PORT,
+) -> None:
     target = Path(installer_path).expanduser().resolve()
 
     logger.info("[update-helper] starting, target=%s, parent_pid=%d", target, parent_pid)
@@ -231,10 +381,16 @@ def _launch_windows_installer_helper(installer_path: str, app_executable: str, p
     wait_pid = parent_pid if parent_pid else os.getppid()
     logger.info("[update-helper] waiting for process %d to exit", wait_pid)
     wait_for_pid_exit(wait_pid)
-    logger.info("[update-helper] parent process %d has exited, waiting for ports to release", wait_pid)
+    logger.info(
+        "[update-helper] parent process %d has exited, waiting for ports "
+        "backend=%s frontend=%s to release",
+        wait_pid,
+        backend_port,
+        frontend_port,
+    )
 
-    _wait_for_port_release(BACKEND_HOST, BACKEND_PORT, timeout=15.0)
-    _wait_for_port_release(FRONTEND_HOST, FRONTEND_PORT, timeout=15.0)
+    _wait_for_port_release(BACKEND_HOST, backend_port, timeout=15.0)
+    _wait_for_port_release(FRONTEND_HOST, frontend_port, timeout=15.0)
     logger.info("[update-helper] ports released, proceeding with install")
 
     try:
@@ -264,8 +420,8 @@ class _WindowApi:
     def install_update(self, installer_path: str) -> bool:
         return self._runtime.install_update(installer_path)
 
-    def download_file(self, url: str, filename: str) -> bool:
-        """通过 webview 下载文件，解决 exe 中无法使用 <a> 标签下载的问题。"""
+    def download_file(self, url: str, filename: str) -> DesktopSaveResult:
+        """通过 webview 下载文件，解决桌面端无法使用 <a> 标签下载的问题。"""
         # 如果是相对路径，拼接完整的 URL（使用前端 web server 端口）
         if url.startswith("/"):
             full_url = f"http://{self._runtime.frontend_host}:{self._runtime.frontend_port}{url}"
@@ -275,7 +431,7 @@ class _WindowApi:
         return self._runtime.download_file(full_url, filename)
 
     def save_data_url(self, data_url: str, filename: str) -> DesktopSaveResult:
-        """保存前端生成的 data URL 文件，供分享图片导出使用。"""
+        """保存前端生成的 data URL 文件，供分享图片和图表导出使用。"""
         return self._runtime.save_data_url(data_url, filename)
 
     def select_project_directory(self) -> str | None:
@@ -285,11 +441,12 @@ class _WindowApi:
 
 class DesktopRuntime:
     def __init__(
-        self, frontend_host: str, frontend_port: int, backend_port: int
+        self, frontend_host: str, ports: dict[str, int]
     ) -> None:
         self.frontend_host = frontend_host
-        self.frontend_port = frontend_port
-        self.backend_port = backend_port
+        self.ports = dict(ports)
+        self.frontend_port = int(ports["frontend"])
+        self.backend_port = int(ports["web"])
         self.processes: dict[str, subprocess.Popen[bytes]] = {}
         self.window = None
         self._lock = threading.Lock()
@@ -300,7 +457,11 @@ class DesktopRuntime:
         return f"http://{self.frontend_host}:{self.frontend_port}"
 
     def start_services(self) -> None:
-        self.processes["app"] = _start_process("app", _build_child_command("app"))
+        # 先起后台预读, 与后续子进程拉起/端口等待并行, 不阻塞 start_services.
+        _warmup_page_cache_background()
+        self.processes["app"] = _start_process(
+            "app", _build_child_command("app"), self.ports
+        )
         _ensure_process_running("app", self.processes["app"])
         _wait_for_tcp(
             BACKEND_HOST,
@@ -320,7 +481,7 @@ class DesktopRuntime:
                 f"http://{BACKEND_HOST}:{self.backend_port}",
             ],
         )
-        self.processes["web"] = _start_process("web", web_command)
+        self.processes["web"] = _start_process("web", web_command, self.ports)
         _ensure_process_running("web", self.processes["web"])
         _wait_for_http(
             self.frontend_host,
@@ -362,41 +523,48 @@ class DesktopRuntime:
         threading.Thread(target=_delayed_destroy, daemon=True).start()
         return True
 
-    def download_file(self, url: str, filename: str) -> bool:
-        """下载文件到用户下载目录（异步执行，避免阻塞 UI）。"""
-        def _download() -> None:
-            try:
-                import urllib.request
+    def download_file(self, url: str, filename: str) -> DesktopSaveResult:
+        """选择保存位置并在实际写入完成后返回结果。"""
+        try:
+            target_path = self._select_save_path(filename, ())
+        except (OSError, RuntimeError, ValueError) as exc:
+            logger.error("[desktop] failed to select download path: %s", exc)
+            return _desktop_save_result(False)
 
-                # 获取下载目录
-                download_dir = Path.home() / "Downloads"
-                if not download_dir.exists():
-                    download_dir.mkdir(parents=True, exist_ok=True)
+        if target_path is None:
+            logger.info("[desktop] file download cancelled by user")
+            return _desktop_save_result(False, cancelled=True)
 
-                safe_name = Path(filename).name
-                if not safe_name:
-                    raise ValueError("empty_filename")
+        temp_path: Path | None = None
+        try:
+            import urllib.request
 
-                # 处理文件名冲突
-                target_path = download_dir / safe_name
-                if target_path.exists():
-                    base, ext = Path(safe_name).stem, Path(safe_name).suffix
-                    counter = 1
-                    while target_path.exists():
-                        target_path = download_dir / f"{base} ({counter}){ext}"
-                        counter += 1
+            temp_fd, temp_name = tempfile.mkstemp(
+                dir=target_path.parent,
+                prefix=f".{target_path.name}.",
+                suffix=".part",
+            )
+            os.close(temp_fd)
+            temp_path = Path(temp_name)
+            urllib.request.urlretrieve(url, temp_path)
+            os.replace(temp_path, target_path)
+            temp_path = None
+            logger.info("[desktop] file downloaded to: %s", target_path)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[desktop] download failed: %s", exc)
+            if temp_path is not None:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError as cleanup_exc:
+                    logger.warning(
+                        "[desktop] failed to remove partial download %s: %s",
+                        temp_path,
+                        cleanup_exc,
+                    )
+            return _desktop_save_result(False)
 
-                # 下载文件
-                urllib.request.urlretrieve(url, target_path)
-                logger.info("[desktop] file downloaded to: %s", target_path)
-
-                # 下载完成后提醒用户并打开文件
-                self._show_download_complete(str(target_path))
-            except Exception as exc:  # noqa: BLE001
-                logger.error("[desktop] download failed: %s", exc)
-
-        threading.Thread(target=_download, daemon=True).start()
-        return True
+        self._show_download_complete(str(target_path))
+        return _desktop_save_result(True)
 
     @staticmethod
     def _sanitize_filename(filename: str) -> str:
@@ -447,33 +615,101 @@ class DesktopRuntime:
             return str(Path(selected_path).expanduser())
 
     def save_data_url(self, data_url: str, filename: str) -> DesktopSaveResult:
-        """选择保存位置并保存 PNG data URL。"""
-        if not isinstance(data_url, str) or not data_url.startswith(PNG_DATA_URL_PREFIX):
-            logger.error("[desktop] invalid data url for share export")
+        """选择保存位置并保存受支持的 base64 data URL。"""
+        try:
+            safe_name = self._sanitize_filename(filename)
+        except ValueError as exc:
+            logger.error("[desktop] invalid export filename: %s", exc)
+            return _desktop_save_result(False)
+
+        if not isinstance(data_url, str) or not data_url.startswith("data:"):
+            logger.error("[desktop] invalid data url for export")
+            return _desktop_save_result(False)
+
+        header, separator, encoded_data = data_url.partition(",")
+        metadata = header[5:].split(";")
+        if not separator or len(metadata) < 2 or metadata[-1].lower() != "base64":
+            logger.error("[desktop] export data url must use base64 encoding")
+            return _desktop_save_result(False)
+
+        mime_type = metadata[0].lower()
+        export_spec = DATA_URL_EXPORT_SPECS.get(mime_type)
+        if export_spec is None:
+            logger.error("[desktop] unsupported export data url type: %s", mime_type)
+            return _desktop_save_result(False)
+
+        parameters = [parameter.lower() for parameter in metadata[1:-1]]
+        if len(parameters) != len(set(parameters)) or any(
+            parameter not in export_spec.allowed_parameters for parameter in parameters
+        ):
+            logger.error(
+                "[desktop] unsupported export data url parameters for %s: %s",
+                mime_type,
+                parameters,
+            )
+            return _desktop_save_result(False)
+
+        if Path(safe_name).suffix.lower() not in export_spec.allowed_suffixes:
+            logger.error(
+                "[desktop] export filename extension does not match %s: %s",
+                mime_type,
+                safe_name,
+            )
             return _desktop_save_result(False)
 
         try:
-            image_bytes = base64.b64decode(data_url[len(PNG_DATA_URL_PREFIX):], validate=True)
-        except binascii.Error as exc:
-            logger.error("[desktop] failed to decode share export data url: %s", exc)
+            file_bytes = base64.b64decode(encoded_data, validate=True)
+        except ValueError as exc:
+            logger.error("[desktop] failed to decode export data url: %s", exc)
             return _desktop_save_result(False)
 
-        if not image_bytes.startswith(PNG_SIGNATURE):
-            logger.error("[desktop] share export data is not a PNG")
+        if mime_type == "image/png" and not file_bytes.startswith(PNG_SIGNATURE):
+            logger.error("[desktop] export data is not a PNG")
             return _desktop_save_result(False)
 
+        temp_fd: int | None = None
+        temp_path: Path | None = None
         try:
-            selected_path = self._select_save_path(filename, ("PNG Image (*.png)",))
+            selected_path = self._select_save_path(safe_name, export_spec.file_types)
             if selected_path is None:
-                logger.info("[desktop] share image save cancelled by user")
+                logger.info("[desktop] data url export cancelled by user")
                 return _desktop_save_result(False, cancelled=True)
 
-            selected_path.write_bytes(image_bytes)
-            logger.info("[desktop] share image saved to: %s", selected_path)
+            temp_fd, temp_name = tempfile.mkstemp(
+                dir=selected_path.parent,
+                prefix=f".{selected_path.name}.",
+                suffix=".part",
+            )
+            temp_path = Path(temp_name)
+            export_file = os.fdopen(temp_fd, "wb")
+            temp_fd = None
+            with export_file:
+                export_file.write(file_bytes)
+            os.replace(temp_path, selected_path)
+            temp_path = None
+            logger.info("[desktop] data url export saved to: %s", selected_path)
             return _desktop_save_result(True)
         except (OSError, RuntimeError, ValueError) as exc:
-            logger.error("[desktop] failed to save share image: %s", exc)
+            logger.error("[desktop] failed to save data url export: %s", exc)
             return _desktop_save_result(False)
+        finally:
+            if temp_fd is not None:
+                try:
+                    os.close(temp_fd)
+                except OSError as cleanup_exc:
+                    logger.warning(
+                        "[desktop] failed to close partial export: %s",
+                        cleanup_exc,
+                    )
+            if temp_path is not None:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError as cleanup_exc:
+                    logger.warning(
+                        "[desktop] failed to remove partial export %s: %s",
+                        temp_path,
+                        cleanup_exc,
+                    )
 
     @staticmethod
     def _show_download_complete(file_path: str) -> None:
@@ -539,8 +775,7 @@ class DesktopRuntime:
         self.close_window()
         return True
 
-    @staticmethod
-    def _launch_macos_install_helper(target: Path, app_executable: Path) -> bool:
+    def _launch_macos_install_helper(self, target: Path, app_executable: Path) -> bool:
         parent_pid = os.getpid()
         updates_dir = get_user_workspace_dir() / ".updates"
         updates_dir.mkdir(parents=True, exist_ok=True)
@@ -564,6 +799,8 @@ class DesktopRuntime:
             install_target = "/Applications/JiuwenSwarm.app"
 
         log_file = get_logs_dir() / "update_helper.log"
+        backend_port = self.backend_port
+        frontend_port = self.frontend_port
 
         # shlex.quote all external paths to prevent shell injection if the
         # release API serves a malicious asset name.
@@ -605,8 +842,8 @@ wait_port_release() {{
     done
     echo "[helper] warning: port $port ($name) still in use after 15s, proceeding anyway"
 }}
-wait_port_release {BACKEND_PORT} backend
-wait_port_release {FRONTEND_PORT} frontend
+wait_port_release {backend_port} backend
+wait_port_release {frontend_port} frontend
 
 # Mount the DMG at a controlled mount point
 MOUNT_POINT="/tmp/jiuwenswarm_dmg_{parent_pid}"
@@ -748,8 +985,7 @@ nohup {q_executable} >/dev/null 2>&1 &
         logger.info("[desktop] Linux install helper launched, target=%s", target)
         return True
 
-    @staticmethod
-    def _launch_windows_install_helper(target: Path, app_executable: Path) -> bool:
+    def _launch_windows_install_helper(self, target: Path, app_executable: Path) -> bool:
         detached_flags = (
             getattr(subprocess, "DETACHED_PROCESS", 0)
             | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
@@ -764,6 +1000,10 @@ nohup {q_executable} >/dev/null 2>&1 &
                 str(app_executable),
                 "--parent-pid",
                 str(os.getpid()),
+                "--backend-port",
+                str(self.backend_port),
+                "--frontend-port",
+                str(self.frontend_port),
             ],
         )
         logger.info("[desktop] launching update helper: %s", helper_cmd)
@@ -1042,6 +1282,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--installer-path", default="", help=argparse.SUPPRESS)
     parser.add_argument("--app-executable", default="", help=argparse.SUPPRESS)
     parser.add_argument("--parent-pid", type=int, default=0, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--backend-port", type=int, default=BACKEND_PORT, help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--frontend-port", type=int, default=FRONTEND_PORT, help=argparse.SUPPRESS
+    )
     return parser.parse_args()
 
 
@@ -1074,16 +1320,27 @@ def _setup_tui_path() -> None:
 def main() -> None:
     args = _parse_args()
     if getattr(args, "desktop_install_update", False):
-        _launch_windows_installer_helper(args.installer_path, args.app_executable, args.parent_pid)
+        _launch_windows_installer_helper(
+            args.installer_path,
+            args.app_executable,
+            args.parent_pid,
+            backend_port=args.backend_port,
+            frontend_port=args.frontend_port,
+        )
         return
 
     _cleanup_stale_update_artifacts()
     _setup_tui_path()
 
+    try:
+        ports = resolve_desktop_ports()
+    except RuntimeError as exc:
+        logger.error("[desktop] port resolution failed: %s", exc)
+        raise SystemExit(1) from exc
+
     runtime = DesktopRuntime(
         frontend_host=FRONTEND_HOST,
-        frontend_port=FRONTEND_PORT,
-        backend_port=BACKEND_PORT,
+        ports=ports,
     )
     try:
         runtime.run(

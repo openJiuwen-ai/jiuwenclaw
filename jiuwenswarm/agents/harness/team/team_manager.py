@@ -20,13 +20,16 @@ from openjiuwen.agent_teams.runtime.pool import RuntimeState
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 from openjiuwen.core.runner import Runner
+from openjiuwen.core.common.logging import server_logger
 from openjiuwen.harness import DeepAgent
 from openjiuwen.harness.rails import (
+    EvolutionInterruptRail,
     SkillEvolutionRail,
     TeamSkillCreateRail,
     TeamSkillEvolutionRail,
 )
 from jiuwenswarm.agents.harness.team.bootstrap import configure_agent_teams_home
+from jiuwenswarm.common.log_preview import preview_text
 from jiuwenswarm.common.utils import get_user_workspace_dir
 
 configure_agent_teams_home()
@@ -50,15 +53,14 @@ from jiuwenswarm.agents.harness.team.distributed_runtime import (
     try_start_pg_cluster,
 )
 from jiuwenswarm.agents.harness.team.handlers.team_monitor_handler import TeamMonitorHandler
+from jiuwenswarm.agents.harness.team import kv_cache_hooks
 from jiuwenswarm.agents.harness.team.remote_member_bootstrap import release_a2x_reservations_for_session
 from jiuwenswarm.agents.harness.team.team_skill_links import sync_skill_dir_links
 from jiuwenswarm.common.config import (
     get_config,
     get_default_models,
-    get_evolution_auto_scan_enabled,
-    get_evolution_review_trigger_enabled,
-    get_evolution_signal_trigger_enabled,
-    get_skill_create_enabled,
+    get_evolution_auto_save_enabled,
+    get_skill_evolution_enabled,
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
@@ -66,6 +68,7 @@ from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
     RuntimeInfo,
     TeamWorkspaceInfo,
     build_member_rails,
+    get_default_model_name,
 )
 from jiuwenswarm.common.utils import get_agent_skills_dir
 from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
@@ -81,6 +84,29 @@ _PG_POST_START_READY_MAX_SLEEP = 2.0
 _PG_POST_START_READY_BACKOFF = 1.45
 _PG_POST_START_LOG_EVERY_SEC = 5.0
 _TEAM_STREAM_EXIT_GRACE_TIMEOUT_SEC = 1.5
+# Bound each frontend waiter's event backlog.  Producers await a free slot, so
+# a slow or disconnected TUI consumer cannot make the process retain every
+# event emitted by a long-running team session.
+TEAM_EVENT_QUEUE_MAXSIZE = 64
+_WAITER_PUT_RECHECK_TIMEOUT_SEC = 0.1
+
+
+def _safe_payload_preview(payload: Any) -> str:
+    """Render an interact payload as a bounded single-line log fragment.
+
+    Args:
+        payload: Raw interact payload, either plain text or a team message
+            object (``GodViewMessage`` / ``HumanAgentMessage`` / ...).
+
+    Returns:
+        Clipped text of the payload body, prefixed with the payload type when
+        it is not a plain string.
+    """
+    if isinstance(payload, str):
+        return preview_text(payload)
+    body = getattr(payload, "body", None)
+    text = body if isinstance(body, str) else str(payload)
+    return f"<{type(payload).__name__}>{preview_text(text)}"
 
 # ── Team Observability ──────────────────────────────────────
 # Tracks whether observability is currently active so we can
@@ -171,6 +197,46 @@ class TeamRailMountContext:
     team_workspace: TeamWorkspaceInfo
 
 
+def _make_team_rail_mount_context(
+    *,
+    agent: Any,
+    role: str,
+    channel: str = "default",
+    language: str = "cn",
+    member_name: str | None = None,
+    model_name: str | None = None,
+    root_dir: str | None = None,
+    skills_dir: str | None = None,
+    team_id: str | None = "",
+    config: dict[str, Any] | None = None,
+    trajectory_registry: Any | None = None,
+) -> TeamRailMountContext:
+    """Build the shared rail context used by swarm and legacy rail mounts."""
+    card = getattr(agent, "card", None)
+    agent_name = (
+        str(member_name or "").strip()
+        or str(getattr(card, "name", "") or "").strip()
+        or "team_member"
+    )
+    resolved_model_name = model_name or get_default_model_name(config)
+    return TeamRailMountContext(
+        agent=agent,
+        member_info=MemberInfo(
+            agent_name=agent_name,
+            model_name=resolved_model_name,
+            role=role,
+        ),
+        runtime=RuntimeInfo(channel=channel, language=language),
+        team_workspace=TeamWorkspaceInfo(
+            root_dir=root_dir,
+            skills_dir=skills_dir,
+            team_id=team_id,
+            config=config,
+            trajectory_registry=trajectory_registry,
+        ),
+    )
+
+
 async def _stop_team_messager(team_agent: Any, *, session_id: str) -> None:
     """Stop a team's mailbox transport so per-team ZMQ sockets release their ports."""
     infra = getattr(team_agent, "infra", None)
@@ -237,6 +303,13 @@ class TeamManager:
         self._team_skill_create_rails: dict[str, Any] = {}
         # session_id → context used to rebuild team rails on config enable
         self._team_rail_contexts: dict[str, TeamRailMountContext] = {}
+        # session_id → latest in-memory canonical evolution switch.  Slash
+        # handling and other request hot paths must consult this snapshot
+        # instead of re-reading config.yaml.
+        self._team_evolution_enabled: dict[str, bool] = {}
+        # session_id → teammate contexts used to rebuild member rails after a
+        # disabled → enabled hot toggle without recreating the team runtime.
+        self._team_member_rail_contexts: dict[str, list[TeamRailMountContext]] = {}
         # session_id → live rails and owning DeepAgent, for hot-unregister
         self._team_live_rails: dict[str, list[tuple[Any, Any]]] = {}
         # session_id → evolution watcher task
@@ -289,19 +362,45 @@ class TeamManager:
         else:
             self._pending_waiters.pop(session_id, None)
 
-    def broadcast_event(self, session_id: str, event: dict[str, Any]) -> None:
-        """Broadcast an event to all request queues waiting on the same session."""
-        waiters = self._pending_waiters.get(session_id)
-        if waiters:
-            for request_id, queue in waiters:
+    async def broadcast_event(self, session_id: str, event: dict[str, Any]) -> None:
+        """Broadcast an event with backpressure to every active waiter.
+
+        The short timed wait is only used while a queue is full.  It lets a
+        producer notice that ``remove_waiter`` detached a disconnected client
+        instead of remaining blocked forever on that orphaned queue.
+        """
+        waiters = list(self._pending_waiters.get(session_id, ()))
+
+        async def _put_to_waiter(
+            request_id: str,
+            queue: asyncio.Queue,
+        ) -> None:
+            queued_event = dict(event)
+            while any(
+                rid == request_id and registered_queue is queue
+                for rid, registered_queue in self._pending_waiters.get(session_id, ())
+            ):
                 try:
-                    queue.put_nowait(dict(event))
+                    await asyncio.wait_for(
+                        queue.put(queued_event),
+                        timeout=_WAITER_PUT_RECHECK_TIMEOUT_SEC,
+                    )
+                    break
+                except asyncio.TimeoutError:
+                    continue
                 except Exception:
                     logger.debug(
                         "[TeamManager] broadcast failed: session_id=%s request_id=%s",
                         session_id,
                         request_id,
+                        exc_info=True,
                     )
+                    break
+
+        await asyncio.gather(*(
+            _put_to_waiter(request_id, queue)
+            for request_id, queue in waiters
+        ))
 
     # --- seen_team_events tracking ---
     # A session enters "team" mode once any team-building event (team.member,
@@ -361,6 +460,15 @@ class TeamManager:
     def get_active_team_name(self, session_id: str) -> str | None:
         """Return the active Runner-owned team name for the session."""
         return self._active_team_names.get(session_id)
+
+    def get_runtime_team_snapshot(self) -> dict[str, dict[str, str]]:
+        """Return session -> team runtime status for active/pending team runs."""
+        snapshot: dict[str, dict[str, str]] = {}
+        for sid, team_name in self._active_team_names.items():
+            snapshot[sid] = {"team_name": team_name, "state": "active"}
+        for sid, team_name in self._pending_team_names.items():
+            snapshot.setdefault(sid, {"team_name": team_name, "state": "pending"})
+        return snapshot
 
     def _get_lifecycle_lock(self, session_id: str) -> asyncio.Lock:
         """Return the lock that serializes lifecycle operations for a session."""
@@ -486,6 +594,9 @@ class TeamManager:
         session_id: str,
         *,
         requested_model_name: str | None = None,
+        template_id: str | None = None,
+        template_snapshot: dict[str, Any] | None = None,
+        strict_template: bool = False,
     ) -> TeamAgentSpec:
         config_base = get_config()
         # Keep dependency checks scoped to distributed mode to make the
@@ -512,6 +623,9 @@ class TeamManager:
         spec_dict = load_team_spec_dict(
             config_base=config_base,
             requested_model_name=requested_model_name,
+            template_id=template_id,
+            template_snapshot=template_snapshot,
+            strict_template=strict_template,
         )
         spec_dict = TeamManager._normalize_team_identity_fields(spec_dict)
         if TeamManager._is_distributed_mode(config_base):
@@ -561,6 +675,59 @@ class TeamManager:
 
         return TeamAgentSpec.model_validate(spec_dict)
 
+    @staticmethod
+    def _lookup_bound_team_identity(session_id: str) -> tuple[str | None, str | None, dict[str, Any] | None]:
+        metadata = get_session_metadata(session_id, cache_bust=True)
+        team_name = str(metadata.get("team_name") or "").strip()
+        template_id = str(metadata.get("team_template_id") or "").strip()
+        template_snapshot: dict[str, Any] | None = None
+        if team_name:
+            from jiuwenswarm.server.runtime.team_binding_store import get_team_binding_store
+            from jiuwenswarm.server.runtime.team_entity_store import ensure_team_entity, ensure_team_entity_for_binding
+
+            binding = get_team_binding_store().get(team_name)
+            if binding is not None:
+                if not template_id:
+                    template_id = binding.template_id
+                entity = ensure_team_entity_for_binding(binding, config_base=get_config())
+            else:
+                legacy_snapshot = (
+                    copy.deepcopy(metadata.get("team_template_snapshot"))
+                    if isinstance(metadata.get("team_template_snapshot"), dict)
+                    else None
+                )
+                entity = ensure_team_entity(
+                    team_name=team_name,
+                    template_id=template_id,
+                    template_snapshot=legacy_snapshot,
+                    config_base=get_config(),
+                )
+            if entity is not None:
+                template_id = entity.template_id
+                template_snapshot = copy.deepcopy(entity.template_snapshot)
+        return team_name or None, template_id or None, template_snapshot
+
+    def _load_session_team_spec(
+        self,
+        session_id: str,
+        *,
+        requested_model_name: str | None = None,
+    ) -> tuple[TeamAgentSpec, bool]:
+        team_name, template_id, template_snapshot = self._lookup_bound_team_identity(session_id)
+        load_kwargs: dict[str, Any] = {}
+        if requested_model_name is not None:
+            load_kwargs["requested_model_name"] = requested_model_name
+        if template_id is not None:
+            load_kwargs["template_id"] = template_id
+            load_kwargs["strict_template"] = template_snapshot is None
+        if template_snapshot is not None:
+            load_kwargs["template_snapshot"] = template_snapshot
+        spec = self._load_team_spec(session_id, **load_kwargs)
+        if team_name:
+            spec.team_name = team_name
+            return spec, True
+        return spec, False
+
 
     async def get_swarm_enriched_team_spec(
         self,
@@ -568,6 +735,7 @@ class TeamManager:
         *,
         mode: str,
         project_dir: str | None = None,
+        trusted_dirs: list[str] | None = None,
         request_id: str | None = None,
         channel_id: str | None = None,
         request_metadata: dict[str, Any] | None = None,
@@ -583,6 +751,7 @@ class TeamManager:
             session_id: Active session id.
             mode: Request mode (e.g. "team").
             project_dir: Resolved project directory, if any.
+            trusted_dirs: Directories the client declared as trusted for this request.
             request_id: Originating request id, if any.
             channel_id: Raw channel id from the request, if any.
             request_metadata: Request metadata mapping.
@@ -594,18 +763,21 @@ class TeamManager:
         from jiuwenswarm.agents.swarm import enrich_team_spec_for_swarm
 
         config_base = get_config()
+        self._team_evolution_enabled[session_id] = get_skill_evolution_enabled(config_base)
         await self._ensure_postgresql_for_leader(config_base)
-        spec = self._load_team_spec(
+        spec, has_binding = self._load_session_team_spec(
             session_id,
             requested_model_name=requested_model_name,
         )
-        self._apply_session_scoped_team_name(spec, session_id=session_id)
+        if not has_binding:
+            self._apply_session_scoped_team_name(spec, session_id=session_id)
         self.apply_team_plan_mode(spec, request_metadata=request_metadata)
         enrich_team_spec_for_swarm(
             spec,
             session_id=session_id,
             mode=mode,
             project_dir=project_dir,
+            trusted_dirs=trusted_dirs,
             request_id=request_id,
             channel_id=channel_id,
             request_metadata=request_metadata,
@@ -684,7 +856,12 @@ class TeamManager:
             timeout_sec,
         )
 
-    async def prepare_session_switch(self, target_session_id: str, reason: str = "") -> None:
+    async def prepare_session_switch(
+        self,
+        target_session_id: str,
+        reason: str = "",
+        previous_session_id: str | None = None,
+    ) -> None:
         """Enforce the distributed runtime's single-session switch policy.
 
         Local Runner-owned teams use session-scoped team names and may stay
@@ -692,6 +869,20 @@ class TeamManager:
         single-session behavior because their bootstrap resources are scoped to
         one active session per channel.
         """
+        normalized_previous = str(previous_session_id or "").strip()
+        pre_signaled_session_ids: set[str] = set()
+        if normalized_previous and normalized_previous != target_session_id:
+            await self.offload_session_kv_cache(
+                normalized_previous,
+                reason=f"{reason}session-switch",
+            )
+            await self.stop_paused_session_runtime(
+                normalized_previous,
+                reason=f"{reason}session-switch: ",
+                offload=False,
+            )
+            pre_signaled_session_ids.add(normalized_previous)
+
         if not self._is_distributed_mode(get_config()):
             logger.info(
                 "[TeamManager] %sprepare_session_switch skipped for local runtime target=%s",
@@ -704,13 +895,33 @@ class TeamManager:
             await self._stop_stale_distributed_sessions(
                 target_session_id,
                 reason=reason,
+                pre_signaled_session_ids=pre_signaled_session_ids,
             )
+
+    async def offload_session_kv_cache(self, session_id: str, reason: str = "") -> bool:
+        """Dispatch KVC offload for a Team session without changing runtime state."""
+        return await kv_cache_hooks.dispatch_for_session(
+            "offload",
+            session_id=session_id,
+            reason=reason,
+            resolve_team_name=self._lookup_session_team_name,
+        )
+
+    async def prefetch_session_kv_cache(self, session_id: str, reason: str = "") -> bool:
+        """Dispatch KVC prefetch for a historical Team session without resuming it."""
+        return await kv_cache_hooks.dispatch_for_session(
+            "prefetch",
+            session_id=session_id,
+            reason=f"{reason}history-resume",
+            resolve_team_name=self._lookup_session_team_name,
+        )
 
     async def _stop_stale_distributed_sessions(
         self,
         target_session_id: str,
         *,
         reason: str,
+        pre_signaled_session_ids: set[str] | None = None,
     ) -> None:
         """Stop active or pending distributed sessions except the target."""
         stale_sessions = [
@@ -732,7 +943,13 @@ class TeamManager:
             list(dict.fromkeys(stale_sessions)),
         )
 
+        already_signaled = pre_signaled_session_ids or set()
         for stale_session_id in dict.fromkeys(stale_sessions):
+            if stale_session_id not in already_signaled:
+                await self.offload_session_kv_cache(
+                    stale_session_id,
+                    reason=f"{reason}session-switch",
+                )
             await self.stop_session_runtime(
                 stale_session_id,
                 reason=reason,
@@ -985,11 +1202,12 @@ class TeamManager:
         config_base = get_config()
         await self._ensure_postgresql_for_leader(config_base)
         logger.info("[TeamManager] building TeamAgentSpec: session_id=%s", session_id)
-        spec = self._load_team_spec(session_id)
-        self._apply_session_scoped_team_name(
-            spec,
-            session_id=session_id,
-        )
+        spec, has_binding = self._load_session_team_spec(session_id)
+        if not has_binding:
+            self._apply_session_scoped_team_name(
+                spec,
+                session_id=session_id,
+            )
 
         resolved_mode = str((request_metadata or {}).get("mode") or "").strip()
         # Provider-based assembly: source every member capability from the shared
@@ -1118,6 +1336,13 @@ class TeamManager:
                 )
                 return False, "not_active"
 
+            # Last stop before the message enters the team runner interact path.
+            server_logger.info(
+                "[AgentServer] team message entering runner interact: session_id=%s team=%s payload=%s",
+                session_id,
+                team_name,
+                _safe_payload_preview(user_input),
+            )
             result = await Runner.interact_agent_team(
                 user_input,
                 team_name=team_name,
@@ -1180,9 +1405,23 @@ class TeamManager:
         if getattr(context.member_info, "role", None) == "leader":
             self._team_rail_contexts[session_id] = context
 
+    def register_team_member_rail_context(
+        self, session_id: str, context: TeamRailMountContext
+    ) -> None:
+        """Remember a teammate mount context for evolution hot re-enable."""
+        contexts = self._team_member_rail_contexts.setdefault(session_id, [])
+        for existing in contexts:
+            if existing.agent is context.agent:
+                return
+        contexts.append(context)
+
     def get_team_rail_context(self, session_id: str) -> TeamRailMountContext | None:
         """Return the stored leader rail mount context for a session."""
         return self._team_rail_contexts.get(session_id)
+
+    def get_team_evolution_enabled(self, session_id: str) -> bool | None:
+        """Return the cached canonical evolution switch for a session."""
+        return self._team_evolution_enabled.get(session_id)
 
     def register_team_live_rail(self, session_id: str, agent: Any, rail: Any) -> None:
         """Remember a live rail owner so hot reload can unregister mounted rails."""
@@ -1196,8 +1435,18 @@ class TeamManager:
         self._team_member_skill_evolution_rails.pop(session_id, None)
         self._team_skill_create_rails.pop(session_id, None)
         self._team_rail_contexts.pop(session_id, None)
+        self._team_evolution_enabled.pop(session_id, None)
+        self._team_member_rail_contexts.pop(session_id, None)
         self._team_live_rails.pop(session_id, None)
         self._team_shared_skill_link_targets.pop(session_id, None)
+
+    def _clear_terminal_session_markers(self, session_id: str) -> None:
+        """Release process-wide markers only for non-resumable teardown."""
+        self.clear_session_initialized(session_id)
+        self.reset_seen_team_events(session_id)
+        self.reset_workflow_completed(session_id)
+        self.pop_cron_completion(session_id)
+        self._pending_team_evolution_watcher_sessions.discard(session_id)
 
     async def _cancel_team_evolution_watcher(self, session_id: str) -> None:
         watcher_task = self._team_evolution_watchers.pop(session_id, None)
@@ -1239,6 +1488,24 @@ class TeamManager:
         else:
             self._team_live_rails.pop(session_id, None)
 
+    async def _unregister_live_rails(self, session_id: str) -> None:
+        """Unmount every evolution rail while preserving registration order."""
+        for _agent, rail in list(self._team_live_rails.get(session_id, [])):
+            await self._unregister_live_rail(session_id, rail)
+
+    def _clear_team_evolution_rails(self, session_id: str) -> None:
+        """Forget mounted evolution rails while retaining rebuild contexts."""
+        self._team_skill_rails.pop(session_id, None)
+        self._team_skill_create_rails.pop(session_id, None)
+        self._team_member_skill_evolution_rails.pop(session_id, None)
+
+    def _has_live_rail(self, session_id: str, agent: Any, rail_type: type) -> bool:
+        """Return whether *agent* already owns a rail of *rail_type*."""
+        return any(
+            owner is agent and isinstance(rail, rail_type)
+            for owner, rail in self._team_live_rails.get(session_id, [])
+        )
+
     def _build_and_mount_member_rails_for_context(
         self,
         session_id: str,
@@ -1263,8 +1530,14 @@ class TeamManager:
                 context.agent.add_rail(rail)
                 self.register_team_live_rail(session_id, context.agent, rail)
                 team_skill_rail = rail
+            elif isinstance(rail, EvolutionInterruptRail) and (
+                mount_team_skill_rail or mount_skill_evolution_rail
+            ):
+                context.agent.add_rail(rail)
+                self.register_team_live_rail(session_id, context.agent, rail)
             elif isinstance(rail, SkillEvolutionRail) and mount_skill_evolution_rail:
                 context.agent.add_rail(rail)
+                self.register_team_live_rail(session_id, context.agent, rail)
                 self.register_team_member_skill_evolution_rail(session_id, rail)
             elif isinstance(rail, TeamSkillCreateRail) and mount_team_skill_create_rail:
                 context.agent.add_rail(rail)
@@ -1279,52 +1552,74 @@ class TeamManager:
 
     async def update_evolution_config(self, config: dict[str, Any] | None) -> None:
         """Hot-update team evolution rails for existing team runtimes."""
-        auto_scan_enabled = get_evolution_auto_scan_enabled(config)
-        signal_trigger_enabled = get_evolution_signal_trigger_enabled(
-            config,
-            fallback=auto_scan_enabled,
-        )
-        review_trigger_enabled = get_evolution_review_trigger_enabled(
-            config,
-            fallback=auto_scan_enabled,
-        )
-        skill_create_enabled = get_skill_create_enabled(config)
+        enabled = get_skill_evolution_enabled(config)
+        auto_save = get_evolution_auto_save_enabled(config)
+        known_sessions = set(self._team_rail_contexts)
+        known_sessions.update(self._team_member_rail_contexts)
+        known_sessions.update(self._team_skill_rails)
+        known_sessions.update(self._team_skill_create_rails)
+        known_sessions.update(self._team_member_skill_evolution_rails)
+        for session_id in known_sessions:
+            self._team_evolution_enabled[session_id] = enabled
 
+        if not enabled:
+            # Disable is a full capability teardown.  Cancel the watcher before
+            # unregistering rails so no pending approval can be emitted after
+            # the switch has been persisted.
+            for session_id in known_sessions:
+                await self._cancel_team_evolution_watcher(session_id)
+                # Every rail mounted by the evolution providers is recorded
+                # with its owning agent.  Unregister the complete snapshot so
+                # approval interrupts are removed together with their parent
+                # evolution/create rails; relying on find_rails_by_type here
+                # is unsafe because host implementations need not accept a
+                # tuple of types.  Mount contexts remain for a later enable.
+                await self._unregister_live_rails(session_id)
+                self._clear_team_evolution_rails(session_id)
+            return
+
+        # Existing rails receive the fixed role trigger policy and canonical
+        # auto-save value; neither role policy is user-configurable.
+        for rail in self._team_skill_rails.values():
+            try:
+                rail.signal_trigger = False
+                rail.review_trigger = True
+                rail.auto_save = auto_save
+            except Exception as exc:
+                logger.debug("[TeamManager] team auto_save update failed: %s", exc)
         for rails in self._team_member_skill_evolution_rails.values():
             for rail in rails:
                 try:
-                    rail.signal_trigger = signal_trigger_enabled
+                    rail.signal_trigger = True
+                    rail.review_trigger = False
+                    rail.auto_save = True
                 except Exception as exc:
-                    logger.warning(
-                        "[TeamManager] SkillEvolutionRail signal_trigger update failed: %s",
-                        exc,
-                    )
+                    logger.debug("[TeamManager] member auto_save update failed: %s", exc)
 
-        for rail in self._team_skill_rails.values():
-            try:
-                rail.review_trigger = review_trigger_enabled
-            except Exception as exc:
-                logger.warning(
-                    "[TeamManager] TeamSkillEvolutionRail review_trigger update failed: %s",
-                    exc,
-                )
-
-        if not skill_create_enabled:
-            for session_id, rail in list(self._team_skill_create_rails.items()):
-                await self._unregister_live_rail(session_id, rail)
-                self._team_skill_create_rails.pop(session_id, None)
-            return
-
+        # Rebuild any missing role-specific rails from the preserved context.
         for session_id, context in list(self._team_rail_contexts.items()):
-            if session_id in self._team_skill_create_rails:
+            has_team_rail = session_id in self._team_skill_rails
+            has_create_rail = session_id in self._team_skill_create_rails
+            if has_team_rail and has_create_rail:
                 continue
             self._build_and_mount_member_rails_for_context(
                 session_id,
                 context,
-                mount_team_skill_rail=False,
-                mount_team_skill_create_rail=True,
-                mount_skill_evolution_rail=False,
+                mount_team_skill_rail=not has_team_rail,
+                mount_team_skill_create_rail=not has_create_rail,
+                mount_skill_evolution_rail=True,
             )
+        for session_id, contexts in list(self._team_member_rail_contexts.items()):
+            for context in contexts:
+                if self._has_live_rail(session_id, context.agent, SkillEvolutionRail):
+                    continue
+                self._build_and_mount_member_rails_for_context(
+                    session_id,
+                    context,
+                    mount_team_skill_rail=False,
+                    mount_team_skill_create_rail=False,
+                    mount_skill_evolution_rail=True,
+                )
 
     async def destroy_team(self, session_id: str) -> bool:
         async with self._bootstrap_lock:
@@ -1587,19 +1882,7 @@ class TeamManager:
     async def _cleanup_runtime_locals(
         self, session_id: str, *, finalize_workflows: bool = True
     ) -> None:
-        watcher_task = self._team_evolution_watchers.pop(session_id, None)
-        if watcher_task and not watcher_task.done():
-            watcher_task.cancel()
-            try:
-                await watcher_task
-            except asyncio.CancelledError:
-                pass
-            except Exception as exc:
-                logger.warning(
-                    "[TeamManager] evolution watcher stop failed: session_id=%s error=%s",
-                    session_id,
-                    exc,
-                )
+        await self._cancel_team_evolution_watcher(session_id)
 
         stream_task = self._stream_tasks.pop(session_id, None)
         if stream_task and not stream_task.done():
@@ -1714,6 +1997,11 @@ class TeamManager:
         )
         self.clear_active_runtime(session_id)
         self.clear_pending_runtime(session_id)
+        # These round/session markers live on the process-wide TeamManager.
+        # TUI disconnect cancels the async event generator before its normal
+        # tail can clear them, so terminal runtime cleanup must own the
+        # idempotent release as well.
+        self._clear_terminal_session_markers(session_id)
         logger.info(
             "[TeamManager] %s: clear done, session_id=%s",
             caller,
@@ -1786,6 +2074,7 @@ class TeamManager:
                 or self.is_runtime_pending(session_id)
             )
             if not has_stream_task and not has_team_runtime:
+                self._clear_terminal_session_markers(session_id)
                 return False
             logger.info(
                 "[TeamManager] %s terminate team session runtime: session_id=%s",
@@ -1795,6 +2084,13 @@ class TeamManager:
 
             # Resolve team_name early before cleanup, from active/pending/metadata
             team_name = self._resolve_session_team_name(session_id)
+
+            await kv_cache_hooks.dispatch_signal(
+                "offload",
+                session_id=session_id,
+                team_name=team_name,
+                reason=f"{reason}team-terminate",
+            )
 
             # Stop Runner-owned runtime first before cleaning locals
             # to avoid gate/teardown races
@@ -1864,6 +2160,7 @@ class TeamManager:
                 or self.is_runtime_pending(session_id)
             )
             if not has_stream_task and not has_team_runtime:
+                self._clear_terminal_session_markers(session_id)
                 return False
 
             logger.info(
@@ -1897,8 +2194,19 @@ class TeamManager:
         )
         return True
 
-    async def stop_session_runtime(self, session_id: str, reason: str = "") -> bool:
-        """Stop the current team runtime for this session without deleting persisted data."""
+    async def stop_session_runtime(
+        self,
+        session_id: str,
+        reason: str = "",
+        *,
+        stop_runner: bool = True,
+    ) -> bool:
+        """Stop local runtime resources and, by default, the Runner runtime.
+
+        Permanent delete callers leave the Runner runtime alive until
+        ``Runner.delete_agent_team(force=True)`` so agent-core can snapshot its
+        member bindings before performing the equivalent stop itself.
+        """
         async with self._get_lifecycle_lock(session_id):
             has_stream_task = session_id in self._stream_tasks
             has_local_team_runtime = self._has_local_team_runtime(session_id)
@@ -1910,6 +2218,7 @@ class TeamManager:
                 or self.is_runtime_pending(session_id)
             )
             if not has_stream_task and not has_team_runtime:
+                self._clear_terminal_session_markers(session_id)
                 return False
 
             logger.info(
@@ -1926,7 +2235,7 @@ class TeamManager:
 
             team_name = self._resolve_session_team_name(session_id)
 
-            if team_name:
+            if team_name and stop_runner:
                 try:
                     runner_stopped = await Runner.stop_agent_team(team_name=team_name, session_id=session_id)
                     stopped = runner_stopped or stopped
@@ -1947,10 +2256,16 @@ class TeamManager:
                         session_id,
                         exc,
                     )
-                await self._stop_runner_team_agent_transport(session_id)
+                if stop_runner:
+                    await self._stop_runner_team_agent_transport(session_id)
+                else:
+                    # Runner.delete_agent_team(force=True) still owns the
+                    # actual TeamAgent stop; drop only Jiuwenswarm's mirror.
+                    self._runner_team_agents.pop(session_id, None)
 
             self.clear_active_runtime(session_id)
             self.clear_pending_runtime(session_id)
+            self._clear_terminal_session_markers(session_id)
 
         logger.info(
             "[TeamManager] %steam session stopped: session_id=%s stopped=%s",
@@ -1959,6 +2274,104 @@ class TeamManager:
             stopped,
         )
         return True
+
+    @staticmethod
+    async def _find_paused_runner_team_name(session_id: str) -> str | None:
+        """Return the paused Runner team name for a session using the public facade."""
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id:
+            return None
+
+        try:
+            active_teams = await Runner.list_active_teams()
+        except Exception as exc:
+            logger.warning(
+                "[TeamManager] list active teams failed before paused lookup: session_id=%s error=%s",
+                session_id,
+                exc,
+            )
+            return None
+
+        for info in active_teams:
+            current_session_id = str(info.current_session_id or "").strip()
+            if current_session_id == normalized_session_id and info.state == RuntimeState.PAUSED:
+                team_name = str(info.team_name or "").strip()
+                return team_name or None
+        return None
+
+    async def stop_paused_session_runtime(
+        self,
+        session_id: str,
+        reason: str = "",
+        *,
+        offload: bool = True,
+    ) -> bool:
+        """Stop a parked Runner team runtime without touching active streams."""
+        async with self._get_lifecycle_lock(session_id):
+            if self.has_stream_task(session_id):
+                logger.debug(
+                    "[TeamManager] skip paused runtime stop because stream task is active: session_id=%s",
+                    session_id,
+                )
+                return False
+
+            team_name = await self._find_paused_runner_team_name(session_id)
+            if not team_name:
+                logger.debug(
+                    "[TeamManager] skip paused runtime stop because no paused Runner entry matched: session_id=%s",
+                    session_id,
+                )
+                return False
+
+            if offload:
+                await self.offload_session_kv_cache(
+                    session_id,
+                    reason=f"{reason}paused-runtime-stop",
+                )
+
+            logger.info(
+                "[TeamManager] %sstop paused team session runtime: session_id=%s team_name=%s",
+                reason,
+                session_id,
+                team_name,
+            )
+            stopped = await self._stop_runner_team_runtime(
+                session_id,
+                team_name,
+                "paused-runtime-stop",
+            )
+            await self._stop_runner_team_agent_transport(session_id)
+            await self._finalize_runtime_cleanup(session_id, "paused-runtime-stop")
+
+        logger.info(
+            "[TeamManager] %spaused team session stopped: session_id=%s stopped=%s",
+            reason,
+            session_id,
+            stopped,
+        )
+        return stopped
+
+    async def stop_all_paused_session_runtimes(self, reason: str = "") -> int:
+        """Stop every paused Runner team runtime known to the process."""
+        try:
+            active_teams = await Runner.list_active_teams()
+        except Exception as exc:
+            logger.warning("[TeamManager] list active teams failed before paused stop: %s", exc)
+            return 0
+
+        paused_session_ids: set[str] = set()
+        for info in active_teams:
+            if info.state != RuntimeState.PAUSED:
+                continue
+            current_session_id = str(info.current_session_id or "").strip()
+            if current_session_id:
+                paused_session_ids.add(current_session_id)
+        stopped_count = 0
+        for session_id in paused_session_ids:
+            stopped = await self.stop_paused_session_runtime(session_id, reason=reason)
+            if stopped:
+                stopped_count += 1
+        return stopped_count
 
     async def pause_session_runtime(self, session_id: str, reason: str = "") -> bool:
         """Pause the current team runtime for this session.
@@ -2062,8 +2475,11 @@ class TeamManager:
         releasing only the session checkpoint.
         """
         team_name = self._resolve_delete_session_team_name(session_id)
-
-        await self.stop_session_runtime(session_id, reason=reason)
+        await kv_cache_hooks.stop_runtime_before_terminal_delete(
+            self.stop_session_runtime,
+            session_id=session_id,
+            reason=reason,
+        )
 
         try:
             if team_name:
@@ -2168,9 +2584,23 @@ async def cancel_all_team_stream_tasks_across_managers(reason: str = "") -> None
     await get_team_manager().cancel_all_stream_tasks(reason=reason)
 
 
-async def stop_team_session_runtime_across_managers(session_id: str, reason: str = "") -> bool:
+async def stop_team_session_runtime_across_managers(
+    session_id: str,
+    reason: str = "",
+    *,
+    stop_runner: bool = True,
+) -> bool:
     """Stop a team session runtime on the singleton manager."""
-    return await get_team_manager().stop_session_runtime(session_id, reason=reason)
+    return await get_team_manager().stop_session_runtime(
+        session_id,
+        reason=reason,
+        stop_runner=stop_runner,
+    )
+
+
+async def stop_all_paused_team_session_runtimes_across_managers(reason: str = "") -> int:
+    """Stop all paused team runtimes on the singleton manager."""
+    return await get_team_manager().stop_all_paused_session_runtimes(reason=reason)
 
 
 def get_all_team_managers() -> list[TeamManager]:

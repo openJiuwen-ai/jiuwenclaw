@@ -1,0 +1,33 @@
+{
+  "categories": ["chat", "reasoning", "coding", "summarization", "format"],
+  "difficulties": ["easy", "medium", "hard"],
+  "score": {
+    "chat.easy": 5,
+    "chat.medium": 20,
+    "chat.hard": 40,
+    "reasoning.easy": 20,
+    "reasoning.medium": 40,
+    "reasoning.hard": 60,
+    "coding.easy": 25,
+    "coding.medium": 45,
+    "coding.hard": 65,
+    "summarization.easy": 15,
+    "summarization.medium": 25,
+    "summarization.hard": 45,
+    "format.easy": 5,
+    "format.medium": 10,
+    "format.hard": 30
+  },
+  "classifier": {
+    "imports": ["re", "json"],
+    "source": "# classify(prompt_text) 函数体 — 由 exec() 编译注入\n#\n# 自动注入到 namespace 的数据（不需要 import 或定义）：\n#   _EXTRAS     dict   — 即下方 extras 字段（api_base/api_key/model_name/system_prompt 等）\n#   _CATEGORIES tuple  — 即上方 categories 字段\n#   _DIFFICULTIES tuple — 即上方 difficulties 字段\n#   _SCORE_TABLE  dict  — 即上方 score 字段解析后 {(category,difficulty)->int}\n#   _DEFAULT_SCORE dict — 难度默认分 {easy:10, medium:30, hard:50}\n#   imports 列表指定的模块（如 re、json）也已注入 namespace\n#\n# 工具函数不自动注入，需要时自行 import：\n#   from jiuwenswarm.agents.harness.common.rails.model_routing.classifier import (\n#       _build_llm_model, _parse_classifier_response, _lookup_score\n#   )\n#\n# 函数签名: async def classify(prompt_text: str) -> (score, category, difficulty)\n# 返回值范围: score 0-100（路由算法按此选最接近 model_score 的模型）\n# 异常/返回异常 → 路由代码按 (50, \"unknown\", \"hard\") 兜底\n\nimport logging\nfrom jiuwenswarm.agents.harness.common.rails.model_routing.classifier import (\n    _build_llm_model, _parse_classifier_response, _lookup_score\n)\n\n_log = logging.getLogger(\"ModelRouting\")\n\nif not _EXTRAS.get(\"api_base\"):\n    _log.debug(\"no api_base → fallback\")\n    return 50, \"unknown\", \"hard\"\n\nmodel = _build_llm_model(_EXTRAS)\nif model is None:\n    _log.debug(\"build model failed → fallback\")\n    return 50, \"unknown\", \"hard\"\n\n_log.debug(\"LLM call start, prompt=%r\", prompt_text[:80])\nmessages = [\n    {\"role\": \"system\", \"content\": _EXTRAS.get(\"system_prompt\")},\n    {\"role\": \"user\", \"content\": prompt_text[:4000]},\n]\ntry:\n    resp = await model.invoke(messages)\n    content = getattr(resp, \"content\", \"\") or \"\"\n    category, difficulty = _parse_classifier_response(content, _CATEGORIES, _DIFFICULTIES)\n    score = _lookup_score(category, difficulty)\n    _log.debug(\"result: %s/%s score=%d\", category, difficulty, score)\n    return score, category, difficulty\nexcept Exception as exc:\n    _log.warning(\"LLM call failed: %s → fallback\", exc)\n    return 50, \"unknown\", \"hard\"",
+    "extras": {
+      "api_base": "",
+      "api_key": "",
+      "model_name": "",
+      "client_provider": "OpenAI",
+      "temperature": 0,
+      "system_prompt": "You are a task classifier. Classify the user input into a category and difficulty. Output ONLY a JSON object. No explanation, no markdown.\n\nCategories:\n- chat: greeting, small talk, casual conversation\n- reasoning: logic, analysis, planning, research, investigation, math\n- coding: write code, debug, programming\n- summarization: summarize, condense, compress, extract key points\n- format: convert between formats (JSON, CSV, table, list)\n\nDifficulty:\n- easy: simple, short task\n- medium: moderate complexity\n- hard: complex, long task\n\nExamples:\n\"hello\" -> {\"category\":\"chat\",\"difficulty\":\"easy\"}\n\"write a Python sort function\" -> {\"category\":\"coding\",\"difficulty\":\"medium\"}\n\"summarize this article\" -> {\"category\":\"summarization\",\"difficulty\":\"medium\"}\n\"convert this CSV to JSON\" -> {\"category\":\"format\",\"difficulty\":\"easy\"}\n\"prove that sqrt(2) is irrational\" -> {\"category\":\"reasoning\",\"difficulty\":\"hard\"}\n\nOutput ONLY: {\"category\":\"<category>\",\"difficulty\":\"<difficulty>\"}"
+    }
+  }
+}

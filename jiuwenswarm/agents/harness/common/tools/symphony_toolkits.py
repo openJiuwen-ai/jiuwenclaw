@@ -3,68 +3,62 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
-import json
 import logging
-from pathlib import Path
 from typing import Any, Callable
 
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 
-from jiuwenswarm.extensions.registry import ExtensionRegistry
+from jiuwenswarm.agents.harness.common.tool_progress_context import (
+    current_tool_progress,
+)
 from jiuwenswarm.symphony.config import load_symphony_config
-from jiuwenswarm.symphony.score_storage import (
-    CURRENT_POINTER_FILENAME,
-    resolve_score_artifact_dir,
+from jiuwenswarm.symphony.service import (
+    SwarmSymphonyService,
+    get_swarm_symphony_service,
 )
 
 logger = logging.getLogger(__name__)
 
-_SKILL_RETRIEVAL_CANDIDATE_RECORD_LIMIT = 10
-
 
 class SymphonyToolkit:
-    """Expose Symphony extension RPC methods as model-callable tools."""
+    """Expose the process-local Symphony service as model-callable tools."""
+
+    def __init__(self, service: SwarmSymphonyService | None = None) -> None:
+        self._service = service
 
     @staticmethod
     def _resolve_timeout_s(default_s: float = 1800.0) -> float:
         return default_s
 
-    async def _call_rpc(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+    async def _call_service(
+        self,
+        operation: str,
+        *args: Any,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         logger.info(
-            "[SymphonyToolkit] calling RPC: method=%s params_keys=%s",
-            method,
-            sorted(params),
+            "[SymphonyToolkit] calling service: operation=%s",
+            operation,
         )
-        try:
-            registry = ExtensionRegistry.get_instance()
-        except RuntimeError as exc:
-            return {
-                "success": False,
-                "detail": f"Symphony extension RPC unavailable: {method}: {exc}",
-            }
-
-        handler = registry.get_rpc_handler(method)
-        if handler is None:
-            return {
-                "success": False,
-                "detail": f"Symphony extension RPC unavailable: {method}: handler not registered",
-            }
-
         timeout_s = self._resolve_timeout_s()
         try:
-            result = handler(params, request=None)
-            payload = await asyncio.wait_for(
-                result if inspect.isawaitable(result) else _return_value(result),
-                timeout=timeout_s,
-            )
+            service = self._service or get_swarm_symphony_service()
+            handler = getattr(service, operation)
+            payload = await asyncio.wait_for(handler(*args, **kwargs), timeout=timeout_s)
         except asyncio.TimeoutError:
-            return {"success": False, "detail": f"{method}: timeout after {timeout_s}s"}
+            return {
+                "success": False,
+                "detail": f"symphony.{operation}: timeout after {timeout_s}s",
+            }
         except Exception as exc:  # noqa: BLE001
-            logger.exception("Symphony RPC failed: %s", method)
-            return {"success": False, "detail": f"{method}: {exc}"}
+            logger.exception("Symphony service failed: %s", operation)
+            return {"success": False, "detail": f"symphony.{operation}: {exc}"}
 
-        return payload if isinstance(payload, dict) else {"success": True, "result": payload}
+        return (
+            payload
+            if isinstance(payload, dict)
+            else {"success": True, "result": payload}
+        )
 
     @staticmethod
     def _disabled_payload(method: str) -> dict[str, Any]:
@@ -75,109 +69,18 @@ class SymphonyToolkit:
             "detail": "Symphony is disabled by config: symphony.enabled=false",
         }
 
-    async def score_status(self) -> dict[str, Any]:
+    async def graph_status(self) -> dict[str, Any]:
         if not self.is_enabled():
-            return self._disabled_payload("symphony.score_status")
-        return await self._call_rpc("symphony.score_status", {})
+            return self._disabled_payload("symphony_read_graph")
+        return await self._call_service("graph_status")
 
-    async def refresh_score(self) -> dict[str, Any]:
+    async def refresh_graph(self) -> dict[str, Any]:
         if not self.is_enabled():
-            return self._disabled_payload("symphony.build_score")
-        return await self._call_rpc("symphony.build_score", {})
-
-    @staticmethod
-    def _score_needs_build(status: dict[str, Any]) -> bool:
-        if not bool(status.get("exists", False)):
-            return True
-        if bool(status.get("stale", False)):
-            return True
-        for key in ("added_count", "changed_count", "removed_count"):
-            try:
-                if int(status.get(key) or 0) > 0:
-                    return True
-            except (TypeError, ValueError):
-                continue
-        return False
-
-    @staticmethod
-    def _score_summary_markdown(
-        status: dict[str, Any],
-        update: dict[str, Any] | None,
-    ) -> str:
-        lines = ["## Symphony score", ""]
-        if status.get("success"):
-            state = "stale" if status.get("stale") else "fresh"
-            if not status.get("exists"):
-                state = "missing"
-            reason = str(status.get("reason") or "").strip()
-            lines.append(f"- Status: `{state}`")
-            if reason:
-                lines.append(f"- Detail: {reason}")
-            for key, label in (
-                ("added_count", "Added"),
-                ("changed_count", "Changed"),
-                ("removed_count", "Removed"),
-            ):
-                value = status.get(key)
-                if value not in (None, ""):
-                    lines.append(f"- {label}: `{value}`")
-        else:
-            detail = str(status.get("detail") or "score status failed").strip()
-            lines.append("- Status: `failed`")
-            lines.append(f"- Detail: {detail}")
-        if update is not None:
-            if update.get("rebuilt") is False:
-                lines.append("- Update: `not required`")
-                created_at = str(update.get("score_created_at") or "").strip()
-                if created_at:
-                    lines.append(f"- Score created: `{created_at}`")
-                return "\n".join(lines)
-
-            update_state = "succeeded" if update.get("success") else "failed"
-            lines.append(f"- Update: `{update_state}`")
-            detail = str(update.get("detail") or update.get("reason") or "").strip()
-            if detail:
-                lines.append(f"- Update detail: {detail}")
-            created_at = str(update.get("score_created_at") or "").strip()
-            if created_at:
-                lines.append(f"- Score created: `{created_at}`")
-            total_tokens = update.get("llm_total_tokens")
-            if total_tokens not in (None, ""):
-                lines.append(f"- Build tokens: `{total_tokens}`")
-        else:
-            lines.append("- Update: `not required`")
-        return "\n".join(lines)
-
-    @staticmethod
-    def _attach_display_payload(
-        payload: dict[str, Any],
-        status: dict[str, Any],
-        update: dict[str, Any] | None,
-    ) -> None:
-        del status, update
-        presentation = payload.get("presentation")
-        presentation_markdown = (
-            presentation.get("markdown") if isinstance(presentation, dict) else None
+            return self._disabled_payload("symphony_refresh_graph")
+        return await self._call_service(
+            "refresh_graph",
+            progress=current_tool_progress(),
         )
-        presentation_mermaid = (
-            presentation.get("mermaid") if isinstance(presentation, dict) else None
-        )
-        rendered = (
-            payload.get("content")
-            or payload.get("markdown")
-            or presentation_markdown
-        )
-        mermaid = payload.get("mermaid") or presentation_mermaid
-        if isinstance(mermaid, str) and mermaid.strip():
-            payload.setdefault("mermaid", mermaid.strip())
-        if not isinstance(rendered, str):
-            rendered = ""
-        rendered = rendered.strip()
-        payload["content"] = rendered
-        payload["markdown"] = rendered
-        payload["summary"] = rendered
-        payload.setdefault("display_format", "markdown")
-        payload.setdefault("direct_display", True)
 
     @classmethod
     def _compact_plan_payload(cls, payload: dict[str, Any]) -> dict[str, Any]:
@@ -188,9 +91,7 @@ class SymphonyToolkit:
         for key in (
             "disabled",
             "content",
-            "mermaid",
             "direct_display",
-            "display_format",
             "continue_after_display",
             "followup_action",
         ):
@@ -206,33 +107,34 @@ class SymphonyToolkit:
             if reason not in (None, ""):
                 compact["reason"] = reason
 
-        score_status = payload.get("score_status")
-        if isinstance(score_status, dict):
-            compact["score_status"] = cls._compact_score_status(score_status)
+        graph_status = payload.get("graph_status")
+        graph_build = payload.get("graph_build")
+        if not bool(compact["success"]) and isinstance(graph_status, dict):
+            compact["graph_status"] = cls._compact_graph_status(graph_status)
+        if isinstance(graph_build, dict) and (
+            not bool(compact["success"]) or graph_build.get("rebuilt") is True
+        ):
+            compact["graph_build"] = cls._compact_graph_build(graph_build)
 
-        score_build = payload.get("score_build")
-        if isinstance(score_build, dict):
-            compact["score_build"] = cls._compact_score_build(score_build)
-        elif isinstance(score_status, dict):
-            compact["score_build"] = cls._score_build_summary(score_status, None)
+        beam_search = planning_payload.get("beam_search")
+        if isinstance(beam_search, dict):
+            compact["beam_search"] = cls._compact_beam_search(beam_search)
 
-        skill_retrieval = planning_payload.get("skill_retrieval")
-        if not isinstance(skill_retrieval, dict):
-            skill_retrieval = payload.get("skill_retrieval")
-        if isinstance(skill_retrieval, dict):
-            compact["skill_retrieval"] = cls._compact_skill_retrieval(skill_retrieval)
+        for key in ("plan_id", "dynamic_graph_enabled"):
+            value = planning_payload.get(key)
+            if value in (None, ""):
+                value = payload.get(key)
+            if value not in (None, ""):
+                compact[key] = value
 
         plan = cls._compact_plan(cls._primary_plan(planning_payload))
         if plan:
             compact["plan"] = plan
 
-        metrics = cls._compact_metrics(payload, planning_payload)
-        if metrics:
-            compact["metrics"] = metrics
         return compact
 
     @staticmethod
-    def _compact_score_status(status: dict[str, Any]) -> dict[str, Any]:
+    def _compact_graph_status(status: dict[str, Any]) -> dict[str, Any]:
         compact = _copy_compact_fields(
             status,
             (
@@ -251,7 +153,7 @@ class SymphonyToolkit:
         return compact
 
     @classmethod
-    def _compact_score_build(cls, update: dict[str, Any]) -> dict[str, Any]:
+    def _compact_graph_build(cls, update: dict[str, Any]) -> dict[str, Any]:
         compact = _copy_compact_fields(
             update,
             (
@@ -266,7 +168,7 @@ class SymphonyToolkit:
                 "relation_reused_count",
                 "relation_resolved_count",
                 "version",
-                "score_created_at",
+                "graph_created_at",
                 "llm_total_tokens",
                 "reason",
                 "detail",
@@ -281,69 +183,6 @@ class SymphonyToolkit:
             if total_tokens > 0 and update.get("success") is not False:
                 compact["llm_total_tokens"] = total_tokens
         return compact
-
-    @classmethod
-    def _score_build_summary(
-        cls,
-        status: dict[str, Any],
-        update: dict[str, Any] | None,
-    ) -> dict[str, Any]:
-        if isinstance(update, dict):
-            compact = cls._compact_score_build(update)
-            if update.get("success") is not False:
-                metadata = cls._score_metadata(status, update)
-                for key, value in metadata.items():
-                    compact.setdefault(key, value)
-            return compact
-
-        if not status.get("success"):
-            reason = "score_status_failed"
-        elif cls._score_needs_build(status):
-            reason = "not_run"
-        else:
-            reason = "not_required"
-        return {
-            "rebuilt": False,
-            "reason": reason,
-            **cls._score_metadata(status, None),
-        }
-
-    @staticmethod
-    def _score_metadata(
-        status: dict[str, Any],
-        update: dict[str, Any] | None,
-    ) -> dict[str, Any]:
-        score_dir = ""
-        if isinstance(update, dict):
-            score_dir = str(update.get("score_dir") or "").strip()
-        if not score_dir:
-            score_dir = str(status.get("score_dir") or "").strip()
-        if not score_dir:
-            return {}
-
-        root = Path(score_dir)
-        metadata: dict[str, Any] = {}
-        pointer_path = root / CURRENT_POINTER_FILENAME
-        if pointer_path.is_file():
-            try:
-                pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                pointer = {}
-            if isinstance(pointer, dict):
-                version = str(pointer.get("version") or "").strip()
-                if version:
-                    metadata["version"] = version
-
-        try:
-            manifest_path = resolve_score_artifact_dir(root) / "score_manifest.json"
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            manifest = {}
-        if isinstance(manifest, dict):
-            created_at = str(manifest.get("created_at") or "").strip()
-            if created_at:
-                metadata["score_created_at"] = created_at
-        return metadata
 
     @staticmethod
     def _llm_total_tokens(token_usage: Any) -> int:
@@ -367,33 +206,46 @@ class SymphonyToolkit:
         )
 
     @classmethod
-    def _compact_skill_retrieval(cls, payload: dict[str, Any]) -> dict[str, Any]:
+    def _compact_beam_search(cls, payload: dict[str, Any]) -> dict[str, Any]:
         compact = _copy_compact_fields(
             payload,
             (
-                "enabled",
-                "source",
-                "used",
-                "candidate_skill_ids",
-                "candidate_count",
-                "fallback_reason",
+                "language",
+                "round_index",
             ),
-            keep_empty=("fallback_reason",),
         )
-        records = payload.get("candidate_records")
-        if isinstance(records, list):
-            compact["candidate_records"] = [
-                cls._compact_candidate_record(record)
-                for record in records[:_SKILL_RETRIEVAL_CANDIDATE_RECORD_LIMIT]
-                if isinstance(record, dict)
+        graph = payload.get("graph")
+        if isinstance(graph, dict):
+            compact["graph"] = cls._compact_beam_graph(graph)
+        return compact
+
+    @classmethod
+    def _compact_beam_graph(cls, graph: dict[str, Any]) -> dict[str, Any]:
+        compact: dict[str, Any] = {}
+        nodes = graph.get("nodes")
+        if isinstance(nodes, list):
+            compact["nodes"] = [
+                cls._compact_beam_node(node) for node in nodes if isinstance(node, dict)
+            ]
+        edges = graph.get("edges")
+        if isinstance(edges, list):
+            compact["edges"] = [
+                cls._compact_beam_edge(edge) for edge in edges if isinstance(edge, dict)
             ]
         return compact
 
     @staticmethod
-    def _compact_candidate_record(record: dict[str, Any]) -> dict[str, Any]:
+    def _compact_beam_node(node: dict[str, Any]) -> dict[str, Any]:
         return _copy_compact_fields(
-            record,
-            ("rank", "skill_id", "skill_name", "score", "source"),
+            node,
+            ("id", "label", "status", "seed"),
+        )
+
+    @staticmethod
+    def _compact_beam_edge(edge: dict[str, Any]) -> dict[str, Any]:
+        return _copy_compact_fields(
+            edge,
+            ("source", "target", "status"),
         )
 
     @classmethod
@@ -438,8 +290,6 @@ class SymphonyToolkit:
             compact["source_id"] = source
         if target not in (None, ""):
             compact["target_id"] = target
-        if "confidence" in edge:
-            compact["confidence"] = edge.get("confidence")
         method = edge.get("method")
         if method not in (None, ""):
             compact["method"] = method
@@ -447,25 +297,6 @@ class SymphonyToolkit:
         if reason not in (None, ""):
             compact["reason"] = reason
         return compact
-
-    @staticmethod
-    def _compact_metrics(
-        payload: dict[str, Any],
-        planning_payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        metrics = _copy_compact_fields(
-            planning_payload,
-            (
-                "planning_mode",
-                "llm_call_count",
-                "candidate_skill_count",
-                "candidate_edge_count",
-            ),
-        )
-        mode = payload.get("mode") or planning_payload.get("mode")
-        if mode not in (None, ""):
-            metrics["mode"] = mode
-        return metrics
 
     @staticmethod
     def _primary_plan(payload: dict[str, Any]) -> dict[str, Any]:
@@ -487,16 +318,18 @@ class SymphonyToolkit:
     def _needs_external_skill_discovery(cls, payload: dict[str, Any]) -> bool:
         planning_payload = cls._planning_payload(payload)
         plan = cls._primary_plan(planning_payload)
-        status = str(
-            plan.get("status")
-            or planning_payload.get("status")
-            or payload.get("status")
-            or ""
-        ).strip().lower()
+        status = (
+            str(
+                plan.get("status")
+                or planning_payload.get("status")
+                or payload.get("status")
+                or ""
+            )
+            .strip()
+            .lower()
+        )
         missing_inputs = (
-            plan.get("missing_inputs")
-            or planning_payload.get("missing_inputs")
-            or []
+            plan.get("missing_inputs") or planning_payload.get("missing_inputs") or []
         )
         if status == "needs_input" or missing_inputs:
             return False
@@ -508,9 +341,7 @@ class SymphonyToolkit:
         if not isinstance(execution_graph, dict):
             execution_graph = payload.get("execution_graph")
         graph_nodes = (
-            execution_graph.get("nodes")
-            if isinstance(execution_graph, dict)
-            else []
+            execution_graph.get("nodes") if isinstance(execution_graph, dict) else []
         )
         return not steps and not graph_nodes
 
@@ -538,45 +369,23 @@ class SymphonyToolkit:
         candidate_skill_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         if not self.is_enabled():
-            return self._compact_plan_payload(self._disabled_payload("symphony.plan"))
-        status = await self.score_status()
-        if not status.get("success"):
-            detail = self._failure_detail(status, "symphony.score_status failed")
-            return self._compact_plan_payload({
-                "success": False,
-                "detail": f"symphony.score_status failed before planning: {detail}",
-                "score_status": status,
-            })
-        update: dict[str, Any] | None = None
-        if status.get("success") and self._score_needs_build(status):
-            update = await self.refresh_score()
-            if not update.get("success"):
-                detail = self._failure_detail(update, "symphony.build_score failed")
-                return self._compact_plan_payload({
-                    "success": False,
-                    "detail": f"symphony.build_score failed before planning: {detail}",
-                    "score_status": status,
-                    "score_build": self._score_build_summary(status, update),
-                })
-        score_build = self._score_build_summary(status, update)
-
-        params: dict[str, Any] = {
-            "query": str(query or "").strip(),
-        }
+            return self._compact_plan_payload(
+                self._disabled_payload("symphony_compose_graph")
+            )
+        query_text = str(query or "").strip()
         mode_text = str(mode or "").strip()
-        if mode_text:
-            params["mode"] = mode_text
         normalized_candidate_skill_ids = _normalize_candidate_skill_ids(
             candidate_skill_ids
         )
-        if normalized_candidate_skill_ids is not None:
-            params["candidate_skill_ids"] = normalized_candidate_skill_ids
-        payload = await self._call_rpc("symphony.plan", params)
+        payload = await self._call_service(
+            "plan",
+            query_text,
+            mode=mode_text or None,
+            candidate_skill_ids=normalized_candidate_skill_ids,
+            progress=current_tool_progress(),
+        )
         if isinstance(payload, dict):
-            payload.setdefault("score_status", status)
-            payload["score_build"] = score_build
             self._attach_followup_control(payload)
-            self._attach_display_payload(payload, status, score_build)
             return self._compact_plan_payload(payload)
         return payload
 
@@ -610,31 +419,32 @@ class SymphonyToolkit:
 
         return [
             make_tool(
-                "symphony_read_score",
-                "Read whether the Symphony score exists or is stale before composing skill execution.",
+                "symphony_read_graph",
+                "Read whether the Symphony graph exists or is stale before composing skill execution.",
                 {"type": "object", "properties": {}},
-                self.score_status,
+                self.graph_status,
             ),
             make_tool(
-                "symphony_refresh_score",
-                "Extract installed skill features and refresh the Symphony score.",
+                "symphony_refresh_graph",
+                "Extract installed skill features and refresh the Symphony graph.",
                 {"type": "object", "properties": {}},
-                self.refresh_score,
+                self.refresh_graph,
             ),
             make_tool(
-                "symphony_compose_score",
+                "symphony_compose_graph",
                 (
                     "MUST call before answering when the user says to use skill(s) "
                     "or 技能, or when skill capabilities, skill chaining, skill ordering, "
-                    "or a specialized toolchain could help complete the task. Use skill_branch_peek "
-                    "and skill_branch_explore first when installed-skill retrieval can narrow "
-                    "the candidate skills, then pass returned worker_id values as candidate_skill_ids. "
-                    "This is the Symphony composition entrypoint: it reads the score, refreshes stale "
-                    "or missing scores, then composes the skill execution graph from the provided "
-                    "candidates or a default score subgraph. If no suitable candidates or a missing "
+                    "or a specialized toolchain could help complete the task. When you identify, "
+                    "inspect, or recommend installed Skills that are relevant to the task, you MUST "
+                    "pass their exact identifiers or names as candidate_skill_ids. Do not omit "
+                    "candidate_skill_ids after selecting candidate Skills. "
+                    "This is the Symphony composition entrypoint: it reads the graph, refreshes a stale "
+                    "or missing graph, then composes the skill execution graph from the provided "
+                    "candidates or a default graph subgraph. If no suitable candidates or a missing "
                     "capability is reported, use search_skill to discover external skills; when "
                     "installing a discovered skill is appropriate, call install_skill, then call "
-                    "symphony_refresh_score and retry this tool with the original query. "
+                    "symphony_refresh_graph and retry this tool with the original query. "
                     "After it returns, present its content result directly to the user; "
                     "do not call individual skill tools just to manually recreate the plan. "
                     "Skip only clearly ordinary tasks that do not benefit from skill capabilities."
@@ -648,19 +458,24 @@ class SymphonyToolkit:
                         },
                         "mode": {
                             "type": "string",
-                            "enum": ["fast"],
+                            "enum": ["fast", "beam"],
                             "description": (
-                                "Optional planning mode. The current Symphony runtime "
-                                "supports fast planning only."
+                                "Optional planning mode. Use fast for simple tasks, "
+                                "short execution chains, or when candidate skills are "
+                                "already clear; fast is the default. Use beam for "
+                                "complex multi-step tasks, tasks with multiple possible "
+                                "skill paths, or when prerequisite skills need to be "
+                                "discovered through bidirectional search."
                             ),
                         },
                         "candidate_skill_ids": {
                             "type": "array",
                             "items": {"type": "string"},
                             "description": (
-                                "Optional installed skill worker_id values returned by "
-                                "skill_branch_explore. When provided, Symphony composes "
-                                "from these candidate skills and their eligible neighbors."
+                                "Optional identifiers or exact names of the installed Skills "
+                                "you consider most relevant to the user's task. When relevant "
+                                "Skills have already been identified, provide them here so "
+                                "Symphony uses them and their eligible neighbors as seeds."
                             ),
                         },
                     },
@@ -671,23 +486,16 @@ class SymphonyToolkit:
         ]
 
 
-async def _return_value(value: Any) -> Any:
-    return value
-
-
 def _copy_compact_fields(
     payload: dict[str, Any],
     keys: tuple[str, ...],
-    *,
-    keep_empty: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     compact: dict[str, Any] = {}
-    keep_empty_set = set(keep_empty)
     for key in keys:
         if key not in payload:
             continue
         value = payload[key]
-        if key not in keep_empty_set and value in (None, "", [], {}):
+        if value in (None, "", [], {}):
             continue
         compact[key] = value
     return compact

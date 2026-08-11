@@ -39,9 +39,12 @@ def test_git_diff_from_subdir_includes_untracked_files(tmp_path):
     assert untracked_info["status"] == "added"
     assert untracked_info["isNewFile"] is True
     assert untracked_info["isUntracked"] is True
-    assert untracked_info["hunks"] == []
+    assert len(untracked_info["hunks"]) == 1
+    assert untracked_info["hunks"][0]["lines"] == ["+line one", "+line two"]
+    assert untracked_info["linesAdded"] == 2
+    assert untracked_info["isTruncated"] is False
     assert diff["stats"]["filesChanged"] == 2
-    assert diff["stats"]["linesAdded"] == 1
+    assert diff["stats"]["linesAdded"] == 3
     assert diff["stats"]["linesRemoved"] == 1
 
 
@@ -160,6 +163,117 @@ def test_git_diff_staged_rename_brace_form_keeps_hunks(tmp_path):
     # brace 简写 numstat key "a/{b => c}/d.txt" 需展开为 "a/c/d.txt" 与 hunk key 对齐
     assert len(file_info["hunks"]) == 1
     assert file_info["hunks"][0]["lines"]  # 非空
+
+
+def test_git_diff_summary_does_not_run_full_patch(monkeypatch):
+    from jiuwenswarm.server.utils import diff_service as ds_mod
+
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run_git_command(project_dir, args):
+        calls.append(tuple(args))
+        if args == ["diff", "HEAD", "--shortstat"]:
+            return " 1 file changed, 2 insertions(+), 1 deletion(-)\n"
+        if args == ["-c", "core.quotepath=false", "ls-files", "--others", "--exclude-standard"]:
+            return ""
+        raise AssertionError(f"unexpected git command: {args}")
+
+    monkeypatch.setattr(ds_mod.DiffService, "_get_git_toplevel", staticmethod(lambda p: "/repo"))
+    monkeypatch.setattr(ds_mod.DiffService, "_is_in_transient_git_state", staticmethod(lambda p: False))
+    monkeypatch.setattr(ds_mod.DiffService, "_run_git_command", staticmethod(fake_run_git_command))
+
+    diff = ds_mod.DiffService().get_git_diff(
+        "/repo",
+        include_files=False,
+        include_hunks=False,
+    )
+
+    assert diff == {
+        "stats": {"filesChanged": 1, "linesAdded": 2, "linesRemoved": 1},
+        "files": {},
+    }
+    assert ("diff", "HEAD") not in calls
+    assert ("diff", "HEAD", "--numstat") not in calls
+
+
+def test_git_diff_files_layer_does_not_run_full_patch(monkeypatch):
+    from jiuwenswarm.server.utils import diff_service as ds_mod
+
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run_git_command(project_dir, args):
+        calls.append(tuple(args))
+        if args == ["diff", "HEAD", "--shortstat"]:
+            return " 1 file changed, 2 insertions(+), 1 deletion(-)\n"
+        if args == ["diff", "HEAD", "--numstat"]:
+            return "2\t1\ta.txt\n"
+        if args == ["diff", "HEAD", "--name-status"]:
+            return "M\ta.txt\n"
+        if args == ["-c", "core.quotepath=false", "status", "--porcelain=v1"]:
+            return " M a.txt\n"
+        if args == ["-c", "core.quotepath=false", "ls-files", "--others", "--exclude-standard"]:
+            return ""
+        raise AssertionError(f"unexpected git command: {args}")
+
+    monkeypatch.setattr(ds_mod.DiffService, "_get_git_toplevel", staticmethod(lambda p: "/repo"))
+    monkeypatch.setattr(ds_mod.DiffService, "_is_in_transient_git_state", staticmethod(lambda p: False))
+    monkeypatch.setattr(ds_mod.DiffService, "_run_git_command", staticmethod(fake_run_git_command))
+
+    diff = ds_mod.DiffService().get_git_diff(
+        "/repo",
+        include_files=True,
+        include_hunks=False,
+    )
+
+    assert diff is not None
+    assert diff["files"][str(Path("/repo") / "a.txt")]["hunks"] == []
+    assert ("diff", "HEAD") not in calls
+
+
+def test_git_diff_detail_layer_limits_patch_to_requested_paths(monkeypatch):
+    from jiuwenswarm.server.utils import diff_service as ds_mod
+
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run_git_command(project_dir, args):
+        calls.append(tuple(args))
+        if args == ["diff", "HEAD", "--shortstat"]:
+            return " 2 files changed, 2 insertions(+), 2 deletions(-)\n"
+        if args == ["diff", "HEAD", "--numstat"]:
+            return "1\t1\ta.txt\n1\t1\tb.txt\n"
+        if args == ["diff", "HEAD", "--name-status"]:
+            return "M\ta.txt\nM\tb.txt\n"
+        if args == ["-c", "core.quotepath=false", "status", "--porcelain=v1"]:
+            return " M a.txt\n M b.txt\n"
+        if args == ["--literal-pathspecs", "diff", "HEAD", "--", "a.txt"]:
+            return (
+                "diff --git a/a.txt b/a.txt\n"
+                "--- a/a.txt\n"
+                "+++ b/a.txt\n"
+                "@@ -1 +1 @@\n"
+                "-old\n"
+                "+new\n"
+            )
+        if args == ["-c", "core.quotepath=false", "ls-files", "--others", "--exclude-standard"]:
+            return ""
+        raise AssertionError(f"unexpected git command: {args}")
+
+    monkeypatch.setattr(ds_mod.DiffService, "_get_git_toplevel", staticmethod(lambda p: "/repo"))
+    monkeypatch.setattr(ds_mod.DiffService, "_is_in_transient_git_state", staticmethod(lambda p: False))
+    monkeypatch.setattr(ds_mod.DiffService, "_run_git_command", staticmethod(fake_run_git_command))
+
+    diff = ds_mod.DiffService().get_git_diff(
+        "/repo",
+        include_files=True,
+        include_hunks=True,
+        hunk_paths=["a.txt"],
+    )
+
+    assert diff is not None
+    assert diff["files"][str(Path("/repo") / "a.txt")]["hunks"]
+    assert diff["files"][str(Path("/repo") / "b.txt")]["hunks"] == []
+    assert ("diff", "HEAD") not in calls
+    assert ("--literal-pathspecs", "diff", "HEAD", "--", "a.txt") in calls
 
 
 @pytest.fixture

@@ -8,16 +8,15 @@ import { useState, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useChatStore, useTodoStore, useSessionStore } from '../../stores';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
+import { getMemberDisplayName } from '../teamArea/shared';
 
 interface MemberTaskDrawerProps {
   memberId: string;
   onClose: () => void;
 }
 
-// 获取成员显示名称
-const getMemberDisplayName = (memberId: string): string => {
-  return memberId.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
-};
+// 成员显示名称统一走 teamArea/shared 的名册解析，别在这里美化内部 slug——
+// 美化出来的仍然是 member_id，和面板里的展示名对不上。
 
 // 获取成员角色描述
 const getMemberRole = (memberId: string): string => {

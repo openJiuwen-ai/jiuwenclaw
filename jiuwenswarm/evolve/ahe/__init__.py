@@ -12,13 +12,11 @@ Only shared contracts:
 
 from jiuwenswarm.evolve.ahe.proposer import AheProposer
 from jiuwenswarm.evolve.ahe.decision_policy import AheDecisionPolicy
-from jiuwenswarm.evolve.ahe.experience_governor import ExperienceGovernor
 from jiuwenswarm.evolve.ahe.evaluator import TraceOutcomeEvaluator, TaskNameInferrer
 
 __all__ = [
     "AheProposer",
     "AheDecisionPolicy",
-    "ExperienceGovernor",
     "TraceOutcomeEvaluator",
     "TaskNameInferrer",
 ]

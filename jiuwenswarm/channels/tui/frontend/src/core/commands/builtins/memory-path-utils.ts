@@ -5,11 +5,32 @@ import { dirname, join, parse, relative } from "node:path";
 // ---------------------------------------------------------------------------
 // Path display utilities (aligned with Claude Code's getDisplayPath)
 // ---------------------------------------------------------------------------
+
+/**
+ * 格式化 /memory 中展示的路径，不修改实际用于文件操作的原始路径。
+ *
+ * Windows 路径可能分别来自 Node 前端和 Python 后端，盘符大小写不一致。
+ * 此处只将展示盘符转为大写，路径分隔符、目录名和文件名均保持不变。
+ */
+export function formatMemoryPathForDisplay(filePath: string): string {
+  // Windows 命名空间路径：\\?\d:\repo -> \\?\D:\repo
+  const namespacedPath = filePath.replace(
+    /^((?:\\\\\?\\|\/\/\?\/))([A-Za-z]):(?=[\\/]|$)/,
+    (_match, prefix: string, drive: string) => `${prefix}${drive.toUpperCase()}:`,
+  );
+
+  // 普通 Windows 路径：d:\repo -> D:\repo
+  return namespacedPath.replace(
+    /^([A-Za-z]):(?=[\\/]|$)/,
+    (_match, drive: string) => `${drive.toUpperCase()}:`,
+  );
+}
+
 //
 // 统一的路径展示工具：从 memory.ts 的 getDisplayPath 与 app-screen.ts 的
 // mvDisplayPath 合并而来。二者原本各有侧重——
 //   getDisplayPath: 用 path.relative() 精确计算,处理 Windows 跨盘/Unicode/
-//                   大小写问题,且能产生 ../ 前缀路径(来自 gitRoot 候选)。
+//                   大小写问题,且能产生 ../ 前缀路径(来自 projectDir 候选)。
 //   mvDisplayPath:  纯前缀匹配,简单但无法产生 ../ 路径;空结果用 "." 表示
 //                   当前目录(Unix 惯例)。
 // 合并后取两者之长:保留 relative() 的稳健性 + 空路径→"." 的友好展示,
@@ -21,15 +42,15 @@ import { dirname, join, parse, relative } from "node:path";
  * and picks the shortest one:
  *
  *   Candidates:
- *   1. Relative from git root  (e.g. ".jiuwen/rules/foo.md", "../JIUWENSWARM.md")
- *   2. Relative from projectDir (e.g. "JIUWENSWARM.local.md", ".jiuwen/rules/foo.md")
+ *   1. Relative from git root  (e.g. ".jiuwen/rules/foo.md")
+ *   2. Relative from projectDir (e.g. "JIUWENSWARM.local.md", "../JIUWENSWARM.md")
  *   3. Tilde notation          (e.g. "~/.jiuwen/JIUWENSWARM.md")
  *
  *   Winner = shortest candidate.
  *   Empty candidate (file === base dir) is shown as "." (current directory).
  *
- * All output uses forward slashes. ../ prefix paths are allowed (from gitRoot
- * candidate only; projectDir candidate skips them as unfriendly).
+ * All output uses forward slashes. A direct parent keeps its ../ prefix; deeper
+ * ancestors use a stable ~/... or absolute form to avoid long traversal chains.
  *
  * On Windows, THREE critical issues must be handled:
  * - path.relative() returns absolute paths for cross-drive paths — must discard.
@@ -47,14 +68,15 @@ export function getDisplayPath(
   projectDir: string,
   gitRoot?: string | null,
 ): string {
-  const fileSlashes = filePath.replace(/\\/g, "/");
+  const fileSlashes = formatMemoryPathForDisplay(filePath).replace(/\\/g, "/");
   const fileNorm = process.platform === "win32" ? fileSlashes.toLowerCase() : fileSlashes;
   const homeDir = homedir();
-  const homeDirSlashes = homeDir.replace(/\\/g, "/");
+  const homeDirSlashes = formatMemoryPathForDisplay(homeDir).replace(/\\/g, "/");
   const homeDirNorm = process.platform === "win32" ? homeDirSlashes.toLowerCase() : homeDirSlashes;
 
   // Collect all valid candidate paths, then pick the shortest
   const candidates: string[] = [];
+  let projectRelativeParentDepth = 0;
 
   // Resolve gitRoot: use provided value or discover from projectDir
   const resolvedGitRoot = gitRoot !== undefined ? gitRoot : findGitRoot(projectDir);
@@ -66,9 +88,9 @@ export function getDisplayPath(
   // 的 projectDir 相对路径(必带 ../ 前缀)。
   const fileInsideProject = isAncestorOrSelfDir(projectDir, filePath);
   if (resolvedGitRoot && fileInsideProject) {
-    const gitRootSlashes = resolvedGitRoot.replace(/\\/g, "/");
+    const gitRootSlashes = formatMemoryPathForDisplay(resolvedGitRoot).replace(/\\/g, "/");
     const gitRootNorm = process.platform === "win32" ? gitRootSlashes.toLowerCase() : gitRootSlashes;
-    const projectDirSlashes = projectDir.replace(/\\/g, "/");
+    const projectDirSlashes = formatMemoryPathForDisplay(projectDir).replace(/\\/g, "/");
     const projectDirNorm = process.platform === "win32" ? projectDirSlashes.toLowerCase() : projectDirSlashes;
     // Only use git root as base if projectDir is inside the git repo
     if (projectDirNorm.startsWith(gitRootNorm + "/") || projectDirNorm === gitRootNorm) {
@@ -81,20 +103,38 @@ export function getDisplayPath(
     }
   }
 
-  // Candidate 2: relative from projectDir (skip cross-drive & "../" paths)
-  // 允许空字符串(file === projectDir → 显示 ".");跳过 ../ 前缀(不友好)。
-  const projectDirSlashes = projectDir.replace(/\\/g, "/");
+  // Candidate 2: relative from projectDir. Preserve "../" paths so files in
+  // parent/ancestor directories are not reduced to an ambiguous basename.
+  // Cross-drive results are still discarded because path.relative() returns
+  // an absolute path for them on Windows.
+  const projectDirSlashes = formatMemoryPathForDisplay(projectDir).replace(/\\/g, "/");
   const projectDirNorm = process.platform === "win32" ? projectDirSlashes.toLowerCase() : projectDirSlashes;
   const relFromProj = relative(projectDirNorm, fileNorm);
-  if (!relFromProj.startsWith("/") && !/^[A-Za-z]:/.test(relFromProj) && !relFromProj.startsWith("..")) {
+  if (!relFromProj.startsWith("/") && !/^[A-Za-z]:/.test(relFromProj)) {
     const display = relative(projectDirSlashes, fileSlashes).replace(/\\/g, "/");
+    const parentTraversal = display.match(/^(?:\.\.\/)+/);
+    projectRelativeParentDepth = parentTraversal ? parentTraversal[0].length / 3 : 0;
     candidates.push(display);
   }
 
   // Candidate 3: tilde notation (if file is in home directory)
+  let tildePath: string | undefined;
   if (fileNorm.startsWith(homeDirNorm + "/") || fileNorm === homeDirNorm) {
-    const tildePath = "~" + fileSlashes.slice(homeDirSlashes.length);
+    tildePath = "~" + fileSlashes.slice(homeDirSlashes.length);
     candidates.push(tildePath);
+  }
+
+  // Match the open tab's readable home-relative presentation. For ancestor
+  // files under home, prefer ~/... over a long ../../../../... chain. If the
+  // file is outside home, the explicit ../ form remains the fallback.
+  if (projectRelativeParentDepth > 0 && tildePath) {
+    return tildePath;
+  }
+
+  // When the file is outside home, a rooted absolute path is clearer than a
+  // multi-level traversal chain. Preserve ../ only for the direct-parent case.
+  if (projectRelativeParentDepth > 1) {
+    return fileSlashes;
   }
 
   // Pick the shortest candidate; empty string means "current dir" → "."

@@ -7,6 +7,15 @@ import type {
   TeamTaskStatus,
 } from '../stores/sessionStore';
 import { normalizeFinalContent } from '../utils/finalContent';
+import {
+  findOverlappingFileExecutionEvent,
+  mergeFileDownloadItems,
+} from '../utils/fileDownloadDedup';
+import {
+  createTaskProgressBaseline,
+  registerConfirmedTaskCreation,
+  type TaskProgressBaseline,
+} from './teamTaskProgressBaseline';
 
 interface TeamMember {
   id: string;
@@ -16,6 +25,8 @@ interface TeamMember {
   name?: string;
   execution_status?: string | null;
   mode?: string;
+  role?: string;
+  cli_agent?: string | null;
 }
 
 interface TeamTaskEvent {
@@ -30,6 +41,12 @@ interface TeamTaskEvent {
   team_name?: string;
   title?: string;
   content?: string;
+  // Truncation observability flags — kept aligned with TeamTaskEvent in
+  // stores/sessionStore.ts and components/teamArea/shared.tsx.
+  title_truncated?: boolean;
+  title_original_size?: number;
+  content_truncated?: boolean;
+  content_original_size?: number;
   updated_at?: number | string | null;
 }
 
@@ -40,6 +57,7 @@ export interface TeamHistoryPanelState {
   executionEvents: TeamMemberExecutionEvent[];
   messages: Message[];
   humanShareCommands: HumanShareCommand[];
+  taskProgressBaseline: TaskProgressBaseline;
 }
 
 interface TeamHistoryGetResponse {
@@ -329,6 +347,7 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
   const humanShareCommands = new Map<string, HumanShareCommand>();
   const messages: Message[] = [];
   const shutdownMembers = new Set<string>();
+  let taskProgressBaseline = createTaskProgressBaseline();
   let hasSeenMember = false;
 
   const addMember = (memberId: string, timestamp: number) => {
@@ -403,7 +422,9 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
     fallbackStatus: TeamTaskStatus,
     allowCreate = true
   ) => {
-    const taskId = pickString(rawTask, ['task_id', 'id']);
+    // Card identity is the DB `task_id` only. Never fall back to LLM `id` —
+    // that mismatch is what produced duplicate cards historically.
+    const taskId = pickString(rawTask, ['task_id']);
     if (!taskId) {
       return;
     }
@@ -437,10 +458,29 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
       timestamp: Math.max(existing?.timestamp || 0, nextTimestamp),
       skills: skills || existing?.skills,
       files: files || existing?.files,
+      // Truncation flags: read raw with explicit guards so a status-only
+      // record (no flags) falls back to `existing?` — never resets to false.
+      // Mirrors the title/content `|| existing?` pattern above.
+      title_truncated:
+        rawTask.title_truncated === true ? true : existing?.title_truncated,
+      title_original_size:
+        typeof rawTask.title_original_size === 'number' &&
+        Number.isFinite(rawTask.title_original_size)
+          ? rawTask.title_original_size
+          : existing?.title_original_size,
+      content_truncated:
+        rawTask.content_truncated === true ? true : existing?.content_truncated,
+      content_original_size:
+        typeof rawTask.content_original_size === 'number' &&
+        Number.isFinite(rawTask.content_original_size)
+          ? rawTask.content_original_size
+          : existing?.content_original_size,
     });
     addMember(assignee, timestamp);
   };
 
+  // Member lifecycle from tool_call only. Task cards are NEVER built from
+  // tool_call arguments (LLM `id` like bubble-sort-task ≠ DB task_id).
   const applyToolInput = (
     name: string,
     args: Record<string, unknown>,
@@ -455,77 +495,33 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
       const spawnedMemberId = pickString(args, ['member_name', 'member_id', 'name']) || memberId;
       shutdownMembers.delete(spawnedMemberId);
       addMember(spawnedMemberId, timestamp);
-      return;
-    }
-    if (name === 'create_task') {
-      if (Array.isArray(args.tasks)) {
-        args.tasks.forEach((item) => {
-          if (isRecord(item)) {
-            upsertTask(item, timestamp, 'pending');
-          }
-        });
-        return;
-      }
-      upsertTask(args, timestamp, 'pending');
-      return;
-    }
-    if (name === 'update_task') {
-      upsertTask(args, timestamp, 'pending', false);
-      return;
-    }
-    if (name === 'claim_task') {
-      const task = { ...args };
-      if (!task.status) {
-        task.status = 'in_progress';
-      }
-      if (!pickString(task, ['assignee', 'member_id', 'claimed_by', 'claimedBy']) && memberId) {
-        task.member_id = memberId;
-      }
-      upsertTask(task, timestamp, 'in_progress', false);
     }
   };
 
+  // Tool *results* may carry the DB task_id + title (create_task brief()).
+  // Old history `team.task` events often have no title/content; without this
+  // path (and when team.snapshot is empty because the monitor is down) the
+  // board would only show UUID placeholder cards. Never read args.tasks —
+  // those carry the LLM `id`.
   const applyToolData = (
     name: string,
     data: Record<string, unknown>,
-    args: Record<string, unknown>,
+    _args: Record<string, unknown>,
     timestamp: number
   ) => {
-    if (name === 'view_task' && Array.isArray(data.tasks)) {
+    if (name !== 'create_task') {
+      return;
+    }
+    if (Array.isArray(data.tasks)) {
       data.tasks.forEach((item) => {
-        if (isRecord(item)) {
+        if (isRecord(item) && pickString(item, ['task_id'])) {
           upsertTask(item, timestamp, 'pending');
         }
       });
       return;
     }
-    if (name === 'view_task') {
-      upsertTask(data, timestamp, 'pending', false);
-      return;
-    }
-
-    if (name === 'create_task') {
-      if (Array.isArray(args.tasks)) {
-        args.tasks.forEach((item) => {
-          if (isRecord(item)) {
-            upsertTask(item, timestamp, 'pending');
-          }
-        });
-        return;
-      }
-      upsertTask({ ...args, ...data }, timestamp, 'pending');
-      return;
-    }
-
-    if (name === 'update_task' || name === 'claim_task') {
-      const merged = { ...args, ...data };
-      if (isRecord(data.status_change)) {
-        const nextStatus = pickString(data.status_change, ['to']);
-        if (nextStatus) {
-          merged.status = nextStatus;
-        }
-      }
-      upsertTask(merged, timestamp, name === 'claim_task' ? 'in_progress' : 'pending', false);
+    if (pickString(data, ['task_id'])) {
+      upsertTask(data, timestamp, 'pending');
     }
   };
 
@@ -615,18 +611,25 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
                 size: typeof file.size === 'number' ? file.size : undefined,
                 mime_type: pickString(file, ['mime_type']) || undefined,
                 download_url: pickString(file, ['download_url']) || undefined,
+                path: pickString(file, ['path']) || undefined,
               }))
             : [];
           if (files.length > 0) {
-            const id = eventId('hist-file', record.id, memberId, timestamp, files.map((file) => file.name).join(','));
+            const existing = findOverlappingFileExecutionEvent(
+              Array.from(executionEvents.values()),
+              files,
+              (event) => event.member_id === memberId && event.kind === 'file'
+            );
+            const mergedFiles = mergeFileDownloadItems(existing?.files, files);
+            const id = existing?.id || eventId('hist-file', record.id, memberId, timestamp, files.map((file) => file.name).join(','));
             executionEvents.set(id, {
               id,
               member_id: memberId,
               kind: 'file',
               timestamp,
               title: '发送文件',
-              content: files.map((file) => file.name).join('\n'),
-              files,
+              content: mergedFiles.map((file) => file.name).join('\n'),
+              files: mergedFiles,
             });
           }
         }
@@ -724,19 +727,25 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
       if (shouldKeepMember(memberId)) {
         hasSeenMember = true;
       }
+      // 回放是逐条覆盖同一个 member 记录的，而只有部分事件带 name / mode
+      // （registered 带，spawned / status_changed 不带）。后到的事件不能把先前
+      // 学到的展示名冲掉，否则恢复出来的面板会退回显示 member_id。
+      const knownMember = members.get(memberId);
       members.set(memberId, {
         id: `hist-member-${memberId}`,
         member_id: memberId,
         status: pickString(event, ['status', 'new_status']) || 'idle',
         timestamp: eventTimestamp,
-        name: pickString(event, ['name']) || undefined,
+        name: pickString(event, ['name']) || knownMember?.name || undefined,
         execution_status: pickString(event, ['execution_status', 'new_status']) || 'idle',
-        mode: pickString(event, ['mode']) || undefined,
+        mode: pickString(event, ['mode']) || knownMember?.mode || undefined,
+        role: pickString(event, ['role']) || knownMember?.role || undefined,
+        cli_agent: pickString(event, ['cli_agent']) || knownMember?.cli_agent || undefined,
       });
       continue;
     }
 
-    const taskId = pickString(event, ['task_id', 'id']);
+    const taskId = pickString(event, ['task_id']);
     if (!taskId) {
       continue;
     }
@@ -746,6 +755,14 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
     const title = pickString(event, ['title', 'name', 'description']);
     const content = pickString(event, ['content']);
     const teamId = pickString(event, ['team_id']);
+
+    if (type === 'team.task.created') {
+      taskProgressBaseline = registerConfirmedTaskCreation(
+        Array.from(tasks.values()),
+        taskProgressBaseline,
+        taskId
+      );
+    }
 
     taskEvents.set(taskId, {
       id: `hist-task-${taskId}-${timestamp}`,
@@ -772,6 +789,7 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
       executionEvents: [],
       messages: [],
       humanShareCommands: [],
+      taskProgressBaseline: createTaskProgressBaseline(),
     };
   }
 
@@ -782,11 +800,103 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
     executionEvents: Array.from(executionEvents.values()),
     messages,
     humanShareCommands: Array.from(humanShareCommands.values()),
+    taskProgressBaseline,
   };
 }
 
 export function parseTeamHistoryPanelRecords(records: unknown[], sessionId: string): TeamHistoryPanelState {
   return collectTeamState(records.filter(isRecord), sessionId);
+}
+
+interface TeamSnapshotResponse {
+  tasks?: unknown;
+}
+
+function readSnapshotSize(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function snapshotItemToTask(item: Record<string, unknown>, fallbackTimestamp: number): TeamTask | null {
+  const taskId = pickString(item, ['task_id']);
+  if (!taskId) {
+    return null;
+  }
+  const title = pickString(item, ['title', 'name', 'description']);
+  const content = pickString(item, ['content']);
+  const status = normalizeTaskStatus(item.status);
+  const assignee = pickString(item, ['assignee', 'member_id', 'claimed_by', 'claimedBy']);
+  const teamId = pickString(item, ['team_id']);
+  const timestamp = taskTimestamp(item, fallbackTimestamp);
+  return {
+    task_id: taskId,
+    title: title || `任务 ${taskId}`,
+    content: content || undefined,
+    status,
+    assignee: assignee || undefined,
+    team_id: teamId || undefined,
+    timestamp,
+    skills: stringList(item.skills),
+    files: stringList(item.files),
+    title_truncated: item.title_truncated === true ? true : undefined,
+    title_original_size: readSnapshotSize(item.title_original_size),
+    content_truncated: item.content_truncated === true ? true : undefined,
+    content_original_size: readSnapshotSize(item.content_original_size),
+  };
+}
+
+/**
+ * Reconcile the restored task board against the live DB snapshot.
+ *
+ * History events alone can leave:
+ * - placeholder-body cards (`任务 <task_id>`) in the waiting column, or
+ * - orphan cards keyed by LLM `id` that were merged in from a prior live store.
+ *
+ * When `team.snapshot` returns tasks, it is the authoritative board (DB
+ * `task_id` + title/content + status): replace the list so wrong-id / stale
+ * waiting cards are refreshed to the correct ones. When the monitor is
+ * inactive (empty snapshot) or the RPC fails, keep the history-derived state.
+ */
+async function reconcileTasksFromSnapshot(
+  state: TeamHistoryPanelState,
+  sessionId: string,
+  signal?: AbortSignal
+): Promise<TeamHistoryPanelState> {
+  try {
+    const response = await webClient.request<TeamSnapshotResponse>(
+      'team.snapshot',
+      { session_id: sessionId },
+      { signal, timeoutMs: 5000 }
+    );
+    const snapshotTasks = Array.isArray(response?.tasks) ? response.tasks : [];
+    if (snapshotTasks.length === 0) {
+      return state;
+    }
+
+    const existingById = new Map(state.tasks.map((task) => [task.task_id, task]));
+    const now = Date.now();
+    const tasks: TeamTask[] = [];
+    for (const item of snapshotTasks) {
+      if (!isRecord(item)) {
+        continue;
+      }
+      const fromSnap = snapshotItemToTask(item, now);
+      if (!fromSnap) {
+        continue;
+      }
+      const existing = existingById.get(fromSnap.task_id);
+      // Snapshot wins for identity/body/status; keep history-only extras
+      // (skills/files) when the snapshot omits them.
+      tasks.push({
+        ...fromSnap,
+        skills: fromSnap.skills || existing?.skills,
+        files: fromSnap.files || existing?.files,
+        timestamp: Math.max(existing?.timestamp || 0, fromSnap.timestamp || 0),
+      });
+    }
+    return { ...state, tasks };
+  } catch {
+    return state;
+  }
 }
 
 export async function loadTeamHistoryPanelState(
@@ -821,5 +931,11 @@ export async function loadTeamHistoryPanelState(
     cursor = nextCursor;
   }
 
-  return parseTeamHistoryPanelRecords(records, sessionId);
+  const state = parseTeamHistoryPanelRecords(records, sessionId);
+  // Prefer live DB snapshot as the authoritative board when the monitor is
+  // still up — refreshes placeholder / wrong-id waiting cards to real
+  // task_id + body. When the monitor is down (empty snapshot), keep the
+  // history-event-derived board. Runs only on this async path so the sync
+  // export path (shareImageExport) stays side-effect free.
+  return reconcileTasksFromSnapshot(state, sessionId, signal);
 }

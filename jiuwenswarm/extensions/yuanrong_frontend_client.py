@@ -16,10 +16,14 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, TypedDict
+from typing import Any, AsyncIterator, Mapping, TypedDict
 
 from jiuwenswarm.common.e2a.agent_compat import e2a_to_agent_request
 from jiuwenswarm.common.e2a.models import E2AEnvelope
+from jiuwenswarm.common.e2a.wire_codec import (
+    parse_agent_server_wire_chunk,
+    parse_agent_server_wire_unary,
+)
 from jiuwenswarm.gateway.routing.agent_client import AgentServerClient
 from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk, AgentRequest
 
@@ -33,6 +37,26 @@ class AgentMount(TypedDict, total=False):
     source: str
     target: str
     readonly: bool
+
+
+class AgentRootfsSpec(TypedDict, total=False):
+    """Inline ``runtime_spec.rootfs`` for POST /api/agent."""
+
+    imageurl: str
+    user: str
+    ports: list[str]
+
+
+class AgentRuntimeSpec(TypedDict, total=False):
+    """Inline ``runtime_spec`` for POST /api/agent (bypass meta_service)."""
+
+    runtime: str
+    sandbox_type: str
+    rootfs: AgentRootfsSpec
+    cpu: int
+    memory: int
+    code_path: str
+    cmds: list[list[str]]
 
 
 @dataclass
@@ -65,6 +89,7 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         invoke_timeout_s: float = 60.0,
         agent_timeout_s: float = 300.0,
         agent_namespace: str = "default",
+        session_ttl_s: int = 900,
     ) -> None:
         self._frontend_endpoint = (frontend_endpoint or "").rstrip("/")
         self._function_version_urn = (function_version_urn or "").strip()
@@ -72,6 +97,9 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         self._invoke_timeout_s = float(invoke_timeout_s)
         self._agent_timeout_s = float(agent_timeout_s)
         self._agent_namespace = str(agent_namespace or "default").strip() or "default"
+        # yuanrong X-Instance-Session.sessionTTL，单位：秒；0 = 立即解绑。
+        # 默认 900s（15 分钟），保证会话对实例的亲和性，避免每次调用重建实例。
+        self._session_ttl_s = max(int(session_ttl_s), 0)
         self._connected = False
         self._server_ready = False
 
@@ -115,44 +143,87 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         self._server_ready = False
         logger.info("[YuanrongFrontendAgentClient] disconnected")
 
+    @staticmethod
+    def _normalize_runtime_spec(
+        runtime_spec: AgentRuntimeSpec | Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Normalize inline ``runtime_spec`` for POST /api/agent."""
+        if not isinstance(runtime_spec, Mapping):
+            raise ValueError("runtime_spec is required to create sandbox")
+        runtime = str(runtime_spec.get("runtime") or "").strip()
+        rootfs_raw = runtime_spec.get("rootfs")
+        if not isinstance(rootfs_raw, Mapping):
+            raise ValueError("runtime_spec.rootfs is required to create sandbox")
+        imageurl = str(
+            rootfs_raw.get("imageurl") or rootfs_raw.get("image_url") or ""
+        ).strip()
+        if not runtime:
+            raise ValueError("runtime_spec.runtime is required to create sandbox")
+        if not imageurl:
+            raise ValueError(
+                "runtime_spec.rootfs.imageurl is required to create sandbox"
+            )
+
+        rootfs: dict[str, Any] = {"imageurl": imageurl}
+        user = str(rootfs_raw.get("user") or "").strip()
+        if user:
+            rootfs["user"] = user
+        ports = rootfs_raw.get("ports")
+        if isinstance(ports, list) and ports:
+            rootfs["ports"] = [str(port) for port in ports]
+
+        normalized: dict[str, Any] = {"runtime": runtime, "rootfs": rootfs}
+        sandbox_type = str(runtime_spec.get("sandbox_type") or "").strip()
+        if sandbox_type:
+            normalized["sandbox_type"] = sandbox_type
+        if runtime_spec.get("cpu") is not None:
+            normalized["cpu"] = int(runtime_spec["cpu"])
+        if runtime_spec.get("memory") is not None:
+            normalized["memory"] = int(runtime_spec["memory"])
+        cmds = runtime_spec.get("cmds")
+        if isinstance(cmds, list) and cmds:
+            normalized["cmds"] = cmds
+        return normalized
+
     async def create_sandbox(
         self,
         *,
         namespace: str,
         name: str,
-        urn: str,
-        workspace: str | None = None,
+        workspace: str,
+        runtime_spec: AgentRuntimeSpec | Mapping[str, Any],
         env_vars: dict[str, str] | None = None,
         mounts: list[AgentMount] | None = None,
     ) -> SandboxInfo:
-        """Create a detached agent instance via POST /api/agent.
+        """Create a detached agent instance via POST /api/agent (inline mode).
 
-        Mirrors Frontend ``CreateRequest``:
+        Mirrors Frontend ``CreateAgentRequest`` inline path:
 
-        - ``namespace`` / ``name`` / ``urn``: required
-        - ``workspace`` / ``env_vars`` / ``mounts``: optional
+        - ``namespace`` / ``name`` / ``workspace`` / ``runtime_spec``: required
+        - ``runtime_spec.runtime`` + ``runtime_spec.rootfs.imageurl``: required
+        - ``env_vars`` / ``mounts``: optional
+        - does not send ``urn`` (inline takes priority over registered)
         """
         self._ensure_connected()
         normalized_namespace = str(namespace or "").strip()
         normalized_name = str(name or "").strip()
-        normalized_urn = str(urn or "").strip()
+        normalized_workspace = str(workspace or "").strip()
         if not normalized_namespace:
             raise ValueError("namespace is required to create sandbox")
         if not normalized_name:
             raise ValueError("name is required to create sandbox")
-        if not normalized_urn:
-            raise ValueError("urn is required to create sandbox")
+        if not normalized_workspace:
+            raise ValueError("workspace is required to create sandbox")
+        if not normalized_workspace.startswith("/"):
+            raise ValueError("workspace must be an absolute path")
 
+        normalized_runtime_spec = self._normalize_runtime_spec(runtime_spec)
         payload: dict[str, Any] = {
             "namespace": normalized_namespace,
             "name": normalized_name,
-            "urn": normalized_urn,
+            "workspace": normalized_workspace,
+            "runtime_spec": normalized_runtime_spec,
         }
-
-        if workspace is not None:
-            normalized_workspace = str(workspace).strip()
-            if normalized_workspace:
-                payload["workspace"] = normalized_workspace
 
         if env_vars:
             payload["env_vars"] = {
@@ -177,20 +248,21 @@ class YuanrongFrontendAgentClient(AgentServerClient):
                 "instance_id": instance_id,
                 "namespace": normalized_namespace,
                 "name": normalized_name,
-                "urn": normalized_urn,
-                "workspace": payload.get("workspace"),
+                "workspace": normalized_workspace,
+                "runtime_spec": dict(normalized_runtime_spec),
                 "env_vars": dict(payload.get("env_vars") or {}),
                 "mounts": list(payload.get("mounts") or []),
-                "provisioning": "yuanrong_agent_api",
+                "provisioning": "yuanrong_agent_api_inline",
             },
         )
         logger.info(
             "[YuanrongFrontendAgentClient] create_sandbox: "
-            "instance_id=%s name=%s namespace=%s urn=%s",
+            "instance_id=%s name=%s namespace=%s runtime=%s imageurl=%s",
             instance_id,
             normalized_name,
             normalized_namespace,
-            normalized_urn,
+            normalized_runtime_spec.get("runtime"),
+            (normalized_runtime_spec.get("rootfs") or {}).get("imageurl"),
         )
         return info
 
@@ -210,6 +282,21 @@ class YuanrongFrontendAgentClient(AgentServerClient):
             "[YuanrongFrontendAgentClient] delete_sandbox: instance_id=%s",
             normalized_sandbox_id,
         )
+
+    async def get_agent_info(self, instance_id: str) -> dict[str, Any]:
+        """Query agent instance info via GET /api/agent/:instanceId.
+
+        Returns the ``instance`` dict (contains node_ip, sandbox_ip,
+        sandbox_type, rootfs, workspace, env_vars, etc.).
+        """
+        self._ensure_connected()
+        normalized_id = str(instance_id or "").strip()
+        if not normalized_id:
+            raise ValueError("instance_id is required to get agent info")
+        status, body = await asyncio.to_thread(self._do_agent_get, normalized_id)
+        parsed = self._parse_agent_api_response(body, status)
+        instance = parsed.get("instance")
+        return instance if isinstance(instance, dict) else {}
 
     def _ensure_connected(self) -> None:
         if not self._connected:
@@ -314,22 +401,31 @@ class YuanrongFrontendAgentClient(AgentServerClient):
             raise_on_timeout=True,
         )
 
+    def _do_agent_get(self, instance_id: str) -> tuple[int, str]:
+        req = urllib.request.Request(
+            self._agent_delete_url(instance_id),  # same URL: /api/agent/{instanceId}
+            headers={"Content-Type": "application/json"},
+            method="GET",
+        )
+        return self._urlopen_request(
+            req,
+            timeout=self._agent_timeout_s,
+        )
+
     def _invoke_url(self) -> str:
         urn = urllib.parse.quote(self._function_version_urn, safe="")
         return f"{self._frontend_endpoint}/serverless/v1/functions/{urn}/invocations"
 
-    def _build_invoke_payload(self, request: AgentRequest, *, stream: bool) -> dict[str, Any]:
-        """构造 faas invocation 请求体（非流式 / 流式共用，仅 is_stream 不同）."""
-        return {
-            "request_id": request.request_id,
-            "channel_id": request.channel_id,
-            "session_id": request.session_id,
-            "req_method": request.req_method.value if request.req_method else None,
-            "params": request.params,
-            "is_stream": stream,
-            "timestamp": request.timestamp,
-            "metadata": request.metadata,
-        }
+    def _build_invoke_payload(self, envelope: E2AEnvelope, *, stream: bool) -> dict[str, Any]:
+        """构造 faas invocation 请求体（E2AEnvelope 形状，与 ws 入站完全一致）.
+
+        直接用 envelope.to_dict() 发送，透传完整 channel_context（含
+        gateway 已注入的 permission_context/enable_memory），不丢字段。
+        仅覆盖 is_stream 以区分非流式/流式。
+        """
+        payload = envelope.to_dict()
+        payload["is_stream"] = stream
+        return payload
 
     @staticmethod
     def _is_faas_envelope(parsed: Any) -> bool:
@@ -408,8 +504,9 @@ class YuanrongFrontendAgentClient(AgentServerClient):
     ) -> AgentResponse:
         """faas 非流式 body → AgentResponse.
 
-        识别到标准 AgentResponse 形状时直接透传 payload/ok（不再二次包成 {"content": parsed}），
-        使网关 _session_list 等管理类调用方能直接读到 resp.payload["sessions"]。
+        复用 parse_agent_server_wire_unary（与 ws client 同款反解），补齐
+        agent_ref/metadata 透传。faas executor 外层 {body, innerCode} 由
+        _normalize_faas_body 剥离，内层 body 是 E2A wire 形状。
         """
         try:
             parsed = json.loads(body) if body else {}
@@ -418,6 +515,29 @@ class YuanrongFrontendAgentClient(AgentServerClient):
 
         parsed, faas_err = self._normalize_faas_body(parsed)
 
+        # 尝试用 wire_codec 反解（与 ws client 完全相同的反解函数）
+        try:
+            resp = parse_agent_server_wire_unary(parsed)
+            meta = dict(resp.metadata or {})
+            meta["http_status"] = status
+            if faas_err:
+                meta["_faas_error_code"] = faas_err
+            return AgentResponse(
+                request_id=resp.request_id or request.request_id,
+                channel_id=resp.channel_id or request.channel_id,
+                ok=(200 <= status < 300) and resp.ok,
+                payload=resp.payload,
+                metadata=meta,
+                agent_ref=resp.agent_ref,
+            )
+        except Exception as parse_err:
+            logger.debug(
+                "[YuanrongFrontendAgentClient] wire_codec unary parse failed, "
+                "falling back to legacy shape: %s",
+                parse_err,
+            )
+
+        # 兜底：标准 AgentResponse 形状（非 E2A wire）
         if self._is_agent_response_shape(parsed):
             meta = dict(parsed.get("metadata") or {})
             meta["http_status"] = status
@@ -429,6 +549,7 @@ class YuanrongFrontendAgentClient(AgentServerClient):
                 ok=(200 <= status < 300) and bool(parsed.get("ok", True)),
                 payload=parsed.get("payload", {}),
                 metadata=meta,
+                agent_ref=parsed.get("agent_ref"),
             )
 
         return AgentResponse(
@@ -441,17 +562,37 @@ class YuanrongFrontendAgentClient(AgentServerClient):
 
     @staticmethod
     def _normalize_invoke_chunk(text: str) -> dict[str, Any]:
-        """faas 流式 chunk data 内容 → 规范化 dict（复用非流式 unwrap 前半段）.
+        """faas 流式 chunk data 内容 → 规范化 dict.
 
-        返回 dict 形状以便调用方取 request_id / channel_id / is_complete / payload，
-        与原内联 json.loads + {content} 兜底行为一致；额外做 faas 外层剥离 + 二次解析，
-        使流式路径与 send_request 解析逻辑对齐。
+        复用 parse_agent_server_wire_chunk（与 ws client 同款反解），补齐
+        agent_ref/metadata 透传。faas executor 外层 {body, innerCode} 由
+        _normalize_faas_body 剥离，内层 body 是 E2A wire 形状。
         """
         try:
             parsed = json.loads(text)
         except Exception:
             parsed = {"content": text}
         parsed, _ = YuanrongFrontendAgentClient._normalize_faas_body(parsed)
+
+        # 尝试用 wire_codec 反解（与 ws client 完全相同的反解函数）
+        try:
+            chunk = parse_agent_server_wire_chunk(parsed)
+            result: dict[str, Any] = {
+                "request_id": chunk.request_id,
+                "channel_id": chunk.channel_id,
+                "payload": chunk.payload,
+                "is_complete": chunk.is_complete,
+                "agent_ref": chunk.agent_ref,
+                "metadata": chunk.metadata,
+            }
+            return result
+        except Exception as parse_err:
+            logger.debug(
+                "[YuanrongFrontendAgentClient] wire_codec chunk parse failed, "
+                "falling back to legacy shape: %s",
+                parse_err,
+            )
+
         return parsed if isinstance(parsed, dict) else {"content": parsed}
 
     def _invoke_headers(
@@ -472,7 +613,11 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         headers = {
             "Content-Type": "application/json",
             "X-Instance-Session": json.dumps(
-                {"sessionID": session_id, "concurrency": self._concurrency},
+                {
+                    "sessionID": session_id,
+                    "sessionTTL": self._session_ttl_s,
+                    "concurrency": self._concurrency,
+                },
                 ensure_ascii=False,
             ),
         }
@@ -510,11 +655,11 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         headers = self._invoke_headers(
             session_id,
             user_id=user_id,
-            req_method=payload.get("req_method"),
+            req_method=payload.get("method"),
         )
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         req = urllib.request.Request(self._invoke_url(), data=data, headers=headers, method="POST")
-        return self._urlopen_request(req)
+        return self._urlopen_request(req, raise_on_timeout=True)
 
     async def send_request(self, envelope: E2AEnvelope) -> AgentResponse:
         """发送非流式请求.
@@ -526,15 +671,25 @@ class YuanrongFrontendAgentClient(AgentServerClient):
             AgentResponse 响应
         """
         self._ensure_connected()
+        payload = self._build_invoke_payload(envelope, stream=False)
+        session_id = envelope.session_id or ""
+        try:
+            status, body = await asyncio.to_thread(
+                self._do_invoke,
+                payload,
+                session_id,
+                envelope.user_id,
+            )
+        except YuanrongAgentApiError as e:
+            logger.warning("[YuanrongFrontendAgentClient] invoke failed: %s", e)
+            return AgentResponse(
+                request_id=envelope.request_id,
+                channel_id=envelope.channel_id,
+                ok=False,
+                payload={"error": str(e)},
+            )
+        # 仍需 AgentRequest 形状供 _parse_invoke_response 填充 request_id/channel_id 兜底
         request = e2a_to_agent_request(envelope)
-        payload = self._build_invoke_payload(request, stream=False)
-        session_id = request.session_id or ""
-        status, body = await asyncio.to_thread(
-            self._do_invoke,
-            payload,
-            session_id,
-            envelope.user_id,
-        )
         return self._parse_invoke_response(body, status, request)
 
     async def send_request_stream(self, envelope: E2AEnvelope) -> AsyncIterator[AgentResponseChunk]:
@@ -547,12 +702,13 @@ class YuanrongFrontendAgentClient(AgentServerClient):
             AgentResponseChunk 响应块
         """
         self._ensure_connected()
+        payload = self._build_invoke_payload(envelope, stream=True)
+        # 仍需 AgentRequest 形状供 chunk 兜底填充 request_id/channel_id
         request = e2a_to_agent_request(envelope)
-        payload = self._build_invoke_payload(request, stream=True)
 
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[tuple[str, str | None]] = asyncio.Queue()
-        session_id = request.session_id or ""
+        session_id = envelope.session_id or ""
         reader_task = asyncio.create_task(
             asyncio.to_thread(
                 self._do_invoke_stream,
@@ -567,13 +723,15 @@ class YuanrongFrontendAgentClient(AgentServerClient):
             while True:
                 item_type, text = await queue.get()
                 if item_type == "chunk" and text:
-                    # SSE 解析已完成，复用非流式 unwrap 前半段规范化 chunk body
+                    # SSE 解析已完成，复用 wire_codec 反解 chunk body
                     parsed_obj = self._normalize_invoke_chunk(text)
                     yield AgentResponseChunk(
                         request_id=str(parsed_obj.get("request_id") or request.request_id),
                         channel_id=str(parsed_obj.get("channel_id") or request.channel_id),
                         payload=parsed_obj.get("payload", parsed_obj.get("content")),
                         is_complete=bool(parsed_obj.get("is_complete", False)),
+                        agent_ref=parsed_obj.get("agent_ref"),
+                        metadata=dict(parsed_obj.get("metadata") or {}),
                     )
                 elif item_type == "error":
                     yield AgentResponseChunk(
@@ -620,7 +778,7 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         headers = self._invoke_headers(
             session_id,
             user_id=user_id,
-            req_method=payload.get("req_method"),
+            req_method=payload.get("method"),
             stream=True,
         )
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")

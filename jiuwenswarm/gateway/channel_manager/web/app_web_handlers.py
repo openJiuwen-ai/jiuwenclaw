@@ -19,7 +19,6 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from dotenv import load_dotenv
 try:
     import psutil as _psutil
     _HAS_PSUTIL = True
@@ -54,16 +53,30 @@ from jiuwenswarm.common.config import (
     update_browser_in_config,
     update_preferred_language_in_config,
     update_context_engine_enabled_in_config,
+    update_default_model_provider_in_config,
     update_kv_cache_affinity_enabled_in_config,
+    validate_persisted_kv_cache_affinity,
+    update_kv_cache_release_enabled_in_config,
     update_skill_retrieval_in_config,
     update_symphony_in_config,
     update_permissions_enabled_in_config,
+    update_setup_guide_enabled_in_config,
     update_memory_forbidden_enabled_in_config,
     update_memory_forbidden_description_in_config,
     update_swarmflow_enabled_in_config,
     update_a2ui_in_config,
     update_updater_in_config,
     update_proactive_recommendation_in_config,
+    update_skill_evolution_enabled_in_config,
+)
+from jiuwenswarm.common.kv_cache_affinity_config import (
+    ASCEND_AFFINITY_PROVIDER,
+    KVC_CONFIG_KEYS,
+    default_model_provider_from_entries,
+    is_affinity_enabled,
+    normalize_affinity_request,
+    parse_bool as parse_kvc_bool,
+    set_default_model_provider_in_entries,
 )
 from jiuwenswarm.server.runtime.a2ui.integration import (
     get_a2ui_config_payload,
@@ -71,28 +84,32 @@ from jiuwenswarm.server.runtime.a2ui.integration import (
     validate_a2ui_config_update,
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
-from jiuwenswarm.common.updater import UpdaterService
+from jiuwenswarm.common.updater import DEFAULT_SOURCE_CONFIG, UpdaterService
 from jiuwenswarm.common.utils import (
     get_agent_sessions_dir,
     get_env_file,
     get_root_dir,
     get_user_workspace_dir
 )
+from jiuwenswarm.dotenv_early import load_dotenv_runtime
 from jiuwenswarm.common.work_mode import (
     DEFAULT_PROJECT_ID_CODE,
     DEFAULT_PROJECT_ID_WORK,
-    DEFAULT_PROJECT_IDS,
     DEFAULT_TUI_WORK_MODE,
     DEFAULT_WEB_WORK_MODE,
     SUPPORTED_WORK_MODES,
     is_default_project_id,
-    normalize_work_mode,
-    resolve_default_project_id,
 )
 from jiuwenswarm.agents.harness.common.auto_harness import AutoHarnessService
 from jiuwenswarm.agents.harness.common.tools.web_file_download import build_file_download_info
 from jiuwenswarm.common.version import __version__
 from jiuwenswarm.gateway.media_attachments import normalize_chat_media_attachments
+from jiuwenswarm.gateway.document_attachments import (
+    coerce_document_parse_flag,
+    parse_existing_document,
+    persist_and_parse_documents,
+)
+from jiuwenswarm.common.document_parser import DEFAULT_MAX_CHARS, supported_formats
 from jiuwenswarm.server.runtime.session import project_store
 from jiuwenswarm.symphony.skill_retrieval.taxonomy_config import (
     coerce_root_categories_value,
@@ -157,7 +174,7 @@ class _ConfigChangeSet:
                 scopes.add("proactive")
             elif key_text.startswith("symphony") or key_text.startswith("skill_retrieval"):
                 scopes.add("agent_runtime")
-            elif key_text.startswith("a2ui_"):
+            elif key_text.startswith("a2ui_") or key_text == "setup_guide_enabled":
                 scopes.add("web_ui")
             else:
                 scopes.add("agent_runtime")
@@ -175,7 +192,7 @@ class _ConfigChangeSet:
 
 _PROJECT_ROOT = get_root_dir()
 _ENV_FILE = get_env_file()
-load_dotenv(dotenv_path=_ENV_FILE, override=True)
+load_dotenv_runtime(dotenv_path=_ENV_FILE, override=True)
 
 
 _ENV_VAR_PLACEHOLDER_RE = re.compile(r"^\$\{([^:}]+)(?::-([^}]*))?\}$")
@@ -561,7 +578,6 @@ _FORWARD_REQ_METHODS = frozenset({
     "chat.resume",
     "chat.user_answer",
     "history.get",
-    "browser.start",
     # "tts.synthesize",
     "skills.marketplace.list",
     "skills.list",
@@ -574,6 +590,7 @@ _FORWARD_REQ_METHODS = frozenset({
     "skills.marketplace.remove",
     "skills.marketplace.toggle",
     "skills.uninstall",
+    "skills.online_search.search",
     "skills.skillnet.search",
     "skills.skillnet.install",
     "skills.skillnet.install_status",
@@ -598,11 +615,10 @@ _FORWARD_REQ_METHODS = frozenset({
     "skills.evolution.status",
     "skills.evolution.get",
     "skills.evolution.save",
-    "symphony.build_score",
-    "symphony.pause_build",
-    "symphony.score_status",
-    "symphony.graph",
-    "symphony.plan",
+    "skills.graph.build",
+    "skills.graph.status",
+    "skills.graph.get",
+    "skills.graph.cancel",
     "plugins.list",
     "plugins.install",
     "plugins.uninstall",
@@ -613,8 +629,14 @@ _FORWARD_REQ_METHODS = frozenset({
     "extensions.import",
     "extensions.delete",
     "extensions.toggle",
+    "team.templates.list",
+    "team.bindings.list",
+    "team.binding.create",
+    "team.binding.generate",
+    "team.session.bind",
     "team.snapshot",
     "team.history.get",
+    "team.mq.publish",
     # Agent configuration
     "agents.list",
     "agents.get",
@@ -645,11 +667,16 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "session.create",
     "session.switch",
     "acp.tool_response",
+    "team.templates.list",
+    "team.bindings.list",
+    "team.binding.create",
+    "team.binding.generate",
+    "team.session.bind",
     "team.delete",
     "command.goal",
-    "browser.start",
     "team.snapshot",
     "team.history.get",
+    "team.mq.publish",
     "skills.marketplace.list",
     "skills.list",
     "skills.installed",
@@ -661,6 +688,7 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "skills.marketplace.remove",
     "skills.marketplace.toggle",
     "skills.uninstall",
+    "skills.online_search.search",
     "skills.skillnet.search",
     "skills.skillnet.install",
     "skills.skillnet.install_status",
@@ -685,11 +713,10 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "skills.evolution.status",
     "skills.evolution.get",
     "skills.evolution.save",
-    "symphony.build_score",
-    "symphony.pause_build",
-    "symphony.score_status",
-    "symphony.graph",
-    "symphony.plan",
+    "skills.graph.build",
+    "skills.graph.status",
+    "skills.graph.get",
+    "skills.graph.cancel",
     "plugins.list",
     "plugins.install",
     "plugins.uninstall",
@@ -745,8 +772,6 @@ _CONFIG_SET_ENV_MAP = {
     "serper_api_key": "SERPER_API_KEY",
     "perplexity_api_key": "PERPLEXITY_API_KEY",
     "github_token": "GITHUB_TOKEN",
-    "evolution_auto_scan": "EVOLUTION_AUTO_SCAN",
-    "skill_create": "SKILL_CREATE",
     "teamskills_market_url": "TEAM_SKILLS_HUB_BASE_URL",
     "teamskills_user_token": "TEAM_SKILLS_HUB_USER_TOKEN",
     "teamskills_system_token": "TEAM_SKILLS_HUB_SYSTEM_TOKEN",
@@ -776,6 +801,7 @@ CONFIG_KEYS = tuple(_CONFIG_SET_ENV_MAP.keys())
 # 来自 config.yaml 的配置项（前端 param 名 -> config.yaml 路径）
 _CONFIG_YAML_KEYS = frozenset({
     "context_engine_enabled",
+    "kv_cache_release_enabled",
     "kv_cache_affinity_enabled",
     "permissions_enabled",
     "memory_forbidden_enabled",
@@ -785,6 +811,8 @@ _CONFIG_YAML_KEYS = frozenset({
     "proactive_recommendation_max_recommend_per_day",
     "proactive_recommendation_max_rounds_per_tick",
     "swarmflow_enabled",
+    "setup_guide_enabled",
+    "skill_evolution",
 })
 
 # 微信通道数值参数的取值范围：(下限, 上限, 是否必须为整数)。均为秒，必须为有限正数。
@@ -833,6 +861,7 @@ def _validate_wechat_numeric_params(params: dict) -> str | None:
 
 _SYMPHONY_CONFIG_SPECS: dict[str, tuple[tuple[str, ...], str, Any]] = {
     "symphony_enabled": (("enabled",), "bool", False),
+    "symphony_dynamic_graph_enabled": (("evolution", "enabled"), "bool", False),
 }
 _SYMPHONY_CONFIG_KEYS = tuple(_SYMPHONY_CONFIG_SPECS.keys())
 _SKILL_RETRIEVAL_CONFIG_SPECS: dict[str, tuple[tuple[str, ...], str, Any]] = {
@@ -1091,6 +1120,38 @@ async def _clear_agent_config_cache(agent_client=None) -> None:
         pass
 
 
+async def _restart_agent_browser_runtime(
+    agent_client=None,
+    *,
+    previous_chrome_path: str = "",
+    previous_headless: bool = True,
+) -> None:
+    """Stop active agent-side browser runtimes so the next task uses new config."""
+    if agent_client is None:
+        return
+
+    from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+    from jiuwenswarm.common.schema.message import ReqMethod
+
+    env = e2a_from_agent_fields(
+        request_id=f"browser-restart-{uuid.uuid4().hex[:8]}",
+        channel_id="",
+        req_method=ReqMethod.BROWSER_RUNTIME_RESTART,
+        params={
+            "browser_key": "",
+            "profile_name": (
+                os.getenv("BROWSER_PROFILE_NAME") or "jiuwenclaw"
+            ).strip(),
+            "display_mode": "headless" if previous_headless else "headed",
+            "browser_binary": str(previous_chrome_path or "").strip(),
+        },
+    )
+    response = await agent_client.send_request(env)
+    if not response.ok:
+        error = response.payload.get("error", "browser runtime restart failed")
+        raise RuntimeError(str(error))
+
+
 def _make_session_id() -> str:
     # 与前端 generateSessionId 保持一致：毫秒时间戳(16进制) + 6位随机16进制
     ts = format(int(time.time() * 1000), "x")
@@ -1343,7 +1404,7 @@ def _project_info_payload(
     """Serialize a project item consistently for project.list/info/create."""
     st = stats or {"session_count": 0, "last_message_at": None, "last_user_message_at": None}
     git = getattr(proj, "git", {}) if proj is not None else {}
-    git_payload = dict(git) if isinstance(git, dict) and git else {
+    git_defaults = {
         "enabled": False,
         "repo_root": "",
         "initialized_by_jiuwenswarm": False,
@@ -1351,8 +1412,11 @@ def _project_info_payload(
         "status": "disabled",
         "branch": "",
         "error": "",
+        "error_code": "",
+        "hint": "",
         "is_dirty": False,
     }
+    git_payload = {**git_defaults, **dict(git)} if isinstance(git, dict) and git else git_defaults
     if default_id is not None:
         work_mode = DEFAULT_TUI_WORK_MODE if default_id == DEFAULT_PROJECT_ID_CODE else DEFAULT_WEB_WORK_MODE
         return {
@@ -1390,6 +1454,68 @@ def _project_info_payload(
     }
 
 
+def _normalize_provider_value(value: str) -> str:
+    """把任意大小写的 provider 值归一化为 ``ProviderType`` 规范大小写。
+
+    与 TUI 侧 ``gateway/channel_manager/tui/tui_connect.py:_normalize_provider_value``
+    保持一致：TUI 在写入/校验 model_provider 时会做大小写归一化，Web 侧此前没有做，
+    导致同一份配置（例如历史数据里 model_provider 大小写不规范）在 TUI 能正常识别，
+    但 Web 的"测试"/"保存"因大小写敏感的精确匹配而被误判为非法值。
+    """
+    normalized = value.strip()
+    if not normalized:
+        return normalized
+
+    available_model_providers = [provider.value for provider in ProviderType]
+    lookup = {provider.lower(): provider for provider in available_model_providers}
+    return lookup.get(normalized.lower(), normalized)
+
+
+def _resolve_model_config_obj_for_validate(model_name: str, params: dict[str, Any]) -> dict[str, Any]:
+    """从热更新后的配置中查找对应模型的 ``model_config_obj``。
+
+    按 ``model_name`` 或 ``alias`` 匹配 ``models.defaults`` 中的条目，
+    返回该条目的 ``model_config_obj``；找不到或读取失败时 fallback 到
+    空字典（让模型使用自身默认参数，避免 ``temperature=0`` 对部分
+    模型不兼容）。前端传入的 ``reasoning_level`` 可覆盖配置值。
+    """
+    model_config_obj: dict[str, Any] = {}
+    try:
+        _cfg = get_config()
+        _models = get_default_models(_cfg)
+        for entry in _models:
+            if not isinstance(entry, dict):
+                continue
+            mcc = entry.get("model_client_config") or {}
+            entry_model_name = str(mcc.get("model_name", "")).strip()
+            entry_alias = str(entry.get("alias", "")).strip()
+            if entry_model_name == model_name or entry_alias == model_name:
+                obj = entry.get("model_config_obj")
+                if isinstance(obj, dict):
+                    model_config_obj = dict(obj)
+                logger.info(
+                    "[config.validate_model] loaded model_config_obj for '%s' "
+                    "(matched_by=%s): %s",
+                    model_name,
+                    "model_name" if entry_model_name == model_name else "alias",
+                    model_config_obj,
+                )
+                break
+        else:
+            logger.info(
+                "[config.validate_model] no model_config_obj found for '%s', using empty default",
+                model_name,
+            )
+    except Exception as exc:
+        logger.warning(
+            "[config.validate_model] failed to read model_config_obj from config, using default. %s",
+            exc,
+        )
+    if "reasoning_level" in params:
+        model_config_obj["reasoning_level"] = params.get("reasoning_level")
+    return model_config_obj
+
+
 def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     """注册 Web 前端需要的 method 与 on_connect。
     on_config_saved: 可选，config.set 写回后调用的回调；
@@ -1421,6 +1547,44 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             _clear_agent_config_cache(_resolve(agent_client)),
             name=f"{name}.clear_agent_config_cache",
         )
+
+    def _schedule_agent_prewarm_sync(name: str) -> None:
+        """Reconcile project-derived warm keys without delaying the Web RPC."""
+
+        async def _sync() -> None:
+            try:
+                from jiuwenswarm.common.e2a.gateway_normalize import (
+                    e2a_from_agent_fields,
+                )
+                from jiuwenswarm.common.schema.message import ReqMethod
+
+                real_client = _resolve(agent_client)
+                if real_client is None:
+                    return
+                cm = _resolve(channel_manager)
+                enabled_channels = [
+                    channel
+                    for channel in list(getattr(cm, "enabled_channels", []) or [])
+                    if str(channel).lower() not in {"acp", "a2a"}
+                ]
+                env = e2a_from_agent_fields(
+                    request_id=f"agent-prewarm-project-{uuid.uuid4().hex[:8]}",
+                    channel_id="web",
+                    req_method=ReqMethod.AGENT_PREWARM_SYNC,
+                    params={"enabled_channels": sorted(set(enabled_channels))},
+                    is_stream=False,
+                    timestamp=time.time(),
+                )
+                response = await real_client.send_request(env)
+                if not getattr(response, "ok", False):
+                    logger.warning(
+                        "[Project] agent.prewarm.sync rejected: %s",
+                        getattr(response, "payload", None),
+                    )
+            except Exception as exc:  # noqa: BLE001 - maintenance is non-blocking
+                logger.warning("[Project] agent.prewarm.sync failed: %s", exc)
+
+        asyncio.create_task(_sync(), name=f"{name}.agent_prewarm_sync")
 
     def _resolve_env_vars(value: Any) -> Any:
         """Recursively resolve environment variables in config values."""
@@ -1485,30 +1649,30 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         # 合并 config.yaml 中的配置项
         try:
             raw = get_config_raw()
+            setup_guide_cfg = raw.get("setup_guide") or {}
+            payload["setup_guide_enabled"] = (
+                "true" if setup_guide_cfg.get("enabled", True) else "false"
+            )
             for key, val in payload.items():
                 from jiuwenswarm.extensions.registry import ExtensionRegistry
                 if (("api_key" in key.lower() or "token" in key.lower())
                         and ExtensionRegistry.get_instance().get_crypto_provider()):
                     payload[key] = ExtensionRegistry.get_instance().get_crypto_provider().decrypt(val)
-            ctx_cfg = (raw.get("react") or {}).get("context_engine_config") or {}
+            react_cfg = raw.get("react") or {}
+            ctx_cfg = react_cfg.get("context_engine_config") or {}
+            kv_cfg = react_cfg.get("kv_cache_affinity_config") or {}
             payload["context_engine_enabled"] = "true" if ctx_cfg.get("enabled", False) else "false"
+            payload["kv_cache_release_enabled"] = (
+                "true" if kv_cfg.get("enable_kv_cache_release", False) else "false"
+            )
             payload["kv_cache_affinity_enabled"] = (
-                "true" if ctx_cfg.get("enable_kv_cache_release", False) else "false"
+                "true" if kv_cfg.get("enable_kv_cache_affinity", False) else "false"
             )
             perm_cfg = raw.get("permissions") or {}
             payload["permissions_enabled"] = "true" if perm_cfg.get("enabled", False) else "false"
-            # skill_create / evolution_auto_scan: env var takes precedence, fallback to config.yaml
+            # Skill evolution is controlled solely by the canonical nested YAML key.
             evolution_cfg = (raw.get("react") or {}).get("evolution") or {}
-            skill_create_env = os.getenv("SKILL_CREATE")
-            if skill_create_env is not None:
-                payload["skill_create"] = "true" if skill_create_env.lower() in ("true", "1", "yes") else "false"
-            else:
-                payload["skill_create"] = "true" if evolution_cfg.get("skill_create", False) else "false"
-            auto_scan_env = os.getenv("EVOLUTION_AUTO_SCAN")
-            if auto_scan_env is not None:
-                payload["evolution_auto_scan"] = "true" if auto_scan_env.lower() in ("true", "1", "yes") else "false"
-            else:
-                payload["evolution_auto_scan"] = "true" if evolution_cfg.get("auto_scan", False) else "false"
+            payload["skill_evolution"] = "true" if evolution_cfg.get("skill_evolution", False) else "false"
             memory_cfg = (raw.get("memory") or {}).get("forbidden_memory_definition") or {}
             payload["memory_forbidden_enabled"] = "true" if memory_cfg.get("enabled", False) else "false"
             memory_desc = memory_cfg.get("description") or {}
@@ -1531,10 +1695,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 proactive_cfg.get("max_rounds_per_tick", 20))
         except Exception:  # noqa: BLE001
             payload.setdefault("context_engine_enabled", "false")
+            payload.setdefault("kv_cache_release_enabled", "false")
             payload.setdefault("kv_cache_affinity_enabled", "false")
             payload.setdefault("permissions_enabled", "false")
-            payload.setdefault("skill_create", "false")
-            payload.setdefault("evolution_auto_scan", "false")
+            payload.setdefault("setup_guide_enabled", "true")
+            payload.setdefault("skill_evolution", "false")
             payload.setdefault("memory_forbidden_enabled", "false")
             payload.setdefault("memory_forbidden_description", "")
             payload.setdefault("swarmflow_enabled", "true" if DEFAULT_SWARMFLOW_ENABLED else "false")
@@ -1615,6 +1780,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             raise _ConfigBadRequest(f"{name} 需为 {lo}-{hi} 的正整数，当前：{n}")
         return n
 
+    def _parse_config_bool(value: Any) -> bool:
+        return parse_kvc_bool(value)
+
     def _encrypt_config_params(params: dict[str, Any]) -> dict[str, Any]:
         encrypted = dict(params)
         for key, val in list(encrypted.items()):
@@ -1624,12 +1792,64 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 encrypted[key] = ExtensionRegistry.get_instance().get_crypto_provider().encrypt(val)
         return encrypted
 
+    def _front_team_template_ids(params: dict[str, Any]) -> set[str] | None:
+        teams_raw = params.get("team")
+        if teams_raw is None:
+            return None
+        if not isinstance(teams_raw, list):
+            return set()
+        template_ids: set[str] = set()
+        for team_raw in teams_raw:
+            if not isinstance(team_raw, dict):
+                continue
+            template_id = str(team_raw.get("team_name") or "").strip()
+            if template_id:
+                template_ids.add(template_id)
+        return template_ids
+
+    def _preserve_deleted_team_entities(params: dict[str, Any]) -> None:
+        next_template_ids = _front_team_template_ids(params)
+        if next_template_ids is None:
+            return
+
+        from jiuwenswarm.agents.harness.team import list_team_template_summaries
+        from jiuwenswarm.server.runtime.team_binding_store import get_team_binding_store
+        from jiuwenswarm.server.runtime.team_entity_store import ensure_team_entity_for_binding
+
+        config_base = get_config()
+        current_template_ids = {
+            str(item.get("template_id") or "").strip()
+            for item in list_team_template_summaries(config_base)
+            if str(item.get("source") or "").startswith("modes.team.")
+        }
+        deleted_template_ids = current_template_ids - next_template_ids
+        if not deleted_template_ids:
+            return
+
+        failed_team_names: list[str] = []
+        for binding in get_team_binding_store().list():
+            if binding.template_id not in deleted_template_ids:
+                continue
+            if ensure_team_entity_for_binding(binding, config_base=config_base) is None:
+                failed_team_names.append(binding.team_name)
+        if failed_team_names:
+            raise _ConfigInternalError(
+                "failed to preserve team entity config: " + ", ".join(sorted(failed_team_names))
+            )
+
     def _apply_config_payload(params: dict[str, Any]) -> tuple[dict[str, str], list[str]]:
         """Apply config.set-style payload to .env/config.yaml without triggering reload."""
         params = _encrypt_config_params(params)
         env_updates: dict[str, str] = {}
         yaml_updated: list[str] = []
         available_model_providers = [provider.value for provider in ProviderType]
+        raw = get_config_raw()
+        preferred_lang = raw.get("preferred_language", "zh")
+
+        try:
+            normalize_affinity_request(params)
+        except ValueError as exc:
+            raise _ConfigBadRequest(str(exc)) from exc
 
         for param_key, env_key in _CONFIG_SET_ENV_MAP.items():
             if param_key not in params:
@@ -1642,14 +1862,13 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             else:
                 env_updates[env_key] = str(val).strip()
 
-        if "evolution_auto_scan" in params:
-            env_updates["EVOLUTION_REVIEW_TRIGGER"] = env_updates["EVOLUTION_AUTO_SCAN"]
-
         raw = get_config_raw()
         preferred_lang = raw.get("preferred_language", "zh")
 
         if "agents" in params or "team" in params:
             try:
+                if "team" in params:
+                    _preserve_deleted_team_entities(params)
                 replace_teams_in_config(params)
                 yaml_updated.append("modes.team")
             except ValueError as exc:
@@ -1662,14 +1881,18 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             if param_key not in params:
                 continue
             val = params[param_key]
-            parsed = str(val).strip().lower() in ("true", "1", "yes")
+            parsed = _parse_config_bool(val)
             try:
                 if param_key == "context_engine_enabled":
                     update_context_engine_enabled_in_config(parsed)
+                elif param_key == "kv_cache_release_enabled":
+                    update_kv_cache_release_enabled_in_config(parsed)
                 elif param_key == "kv_cache_affinity_enabled":
                     update_kv_cache_affinity_enabled_in_config(parsed)
                 elif param_key == "permissions_enabled":
                     update_permissions_enabled_in_config(parsed)
+                elif param_key == "setup_guide_enabled":
+                    update_setup_guide_enabled_in_config(parsed)
                 elif param_key == "memory_forbidden_enabled":
                     update_memory_forbidden_enabled_in_config(parsed)
                 elif param_key == "memory_forbidden_description":
@@ -1677,6 +1900,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     update_memory_forbidden_description_in_config({preferred_lang: desc_val})
                 elif param_key == "swarmflow_enabled":
                     update_swarmflow_enabled_in_config(parsed)
+                elif param_key == "skill_evolution":
+                    update_skill_evolution_enabled_in_config(parsed)
                 elif param_key.startswith("a2ui_"):
                     ok, update, error = validate_a2ui_config_update(param_key, val)
                     if not ok:
@@ -1698,6 +1923,15 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 logger.warning("[config.set] 写回 config.yaml 失败 %s: %s", param_key, e)
                 if param_key == "swarmflow_enabled":
                     raise _ConfigInternalError("failed to update enable_swarmflow") from e
+
+        if params.get("model_provider") == ASCEND_AFFINITY_PROVIDER:
+            try:
+                if update_default_model_provider_in_config(
+                    ASCEND_AFFINITY_PROVIDER
+                ):
+                    yaml_updated.append("models.default_provider")
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[config.set] 写回默认模型 provider 失败: %s", e)
 
         symphony_updates = _build_symphony_config_update(params)
         if symphony_updates:
@@ -1725,6 +1959,17 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             logger.info("[config.set] 已更新 .env: %s", list(env_updates.keys()))
         if yaml_updated:
             logger.info("[config.set] 已更新 config.yaml: %s", yaml_updated)
+
+        kvc_config_changed = any(key in params for key in KVC_CONFIG_KEYS)
+        if kvc_config_changed:
+            valid, failures = validate_persisted_kv_cache_affinity()
+            if not valid:
+                # Do not leave a persisted half-success state active. This is a
+                # narrow fail-closed correction, not a cross-file transaction.
+                update_kv_cache_affinity_enabled_in_config(False)
+                raise _ConfigInternalError(
+                    "KV cache affinity saved but not applied: " + "; ".join(failures)
+                )
 
         return env_updates, yaml_updated
 
@@ -1769,7 +2014,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     origin_index = None
             api_key = str(item.get("api_key") or "").strip()
             api_base = str(item.get("api_base") or "").strip()
-            model_provider = str(item.get("model_provider") or "").strip()
+            model_provider = _normalize_provider_value(str(item.get("model_provider") or ""))
             # OpenAIAccount uses the token store managed by core OAuth, so it does not
             # carry a user-entered api_key in config.
             if not api_key and origin_index is None and not is_openai_account_provider(model_provider):
@@ -1867,7 +2112,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         """
         if max_tokens_bounds is None:
             max_tokens_bounds = {
-                "infimum_max_tokens": 1,
+                "infimum_max_tokens": 3,
                 "supremum_max_tokens": 16,
             }
 
@@ -1875,8 +2120,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             infimum_max_tokens = max_tokens_bounds.get("infimum_max_tokens")
             supremum_max_tokens = max_tokens_bounds.get("supremum_max_tokens")
         else:
-            infimum_max_tokens = 1
+            infimum_max_tokens = 3
             supremum_max_tokens = 16
+        infimum_max_tokens = max(infimum_max_tokens, 3)
 
         if not isinstance(params, dict):
             await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
@@ -1884,7 +2130,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         api_base = str(params.get("api_base") or "").strip()
         api_key = str(params.get("api_key") or "").strip()
         model = str(params.get("model") or "").strip()
-        model_provider = str(params.get("model_provider") or "").strip()
+        model_provider = _normalize_provider_value(str(params.get("model_provider") or ""))
         needs_api_key = not is_openai_account_provider(model_provider)
         if not all([api_base, model, model_provider]) or (needs_api_key and not api_key):
             await channel.send_response(
@@ -1901,15 +2147,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 code="BAD_REQUEST",
             )
             return
-        if api_base.endswith("/chat/completions"):
-            api_base = api_base.rsplit("/chat/completions", 1)[0]
         api_base = api_base.rstrip("/")
 
         verify_ssl = bool(params.get("verify_ssl", False))
 
-        model_config_obj = {"temperature": 0}
-        if "reasoning_level" in params:
-            model_config_obj["reasoning_level"] = params.get("reasoning_level")
+        model_config_obj = _resolve_model_config_obj_for_validate(model, params)
+
         reasoning_mcc = {
             "client_provider": model_provider,
             "api_base": api_base,
@@ -1920,6 +2163,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 model_config_obj=model_config_obj,
                 model_name=model,
             )
+        )
+        logger.info(
+            "[config.validate_model] final model_request_config for '%s': %s",
+            model,
+            model_request_config.model_dump(),
         )
         model_client_config = ModelClientConfig(
             client_id="config-validate",
@@ -1936,7 +2184,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return await llm.invoke(
                 [{"role": "user", "content": "Hi"}],
                 max_tokens=max_tokens,
-                temperature=0,
             )
 
         try:
@@ -1978,8 +2225,16 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         # tokens into reasoning_content while leaving content empty.  Treat a
         # non-empty reasoning_content as a valid response as well.
         reasoning_content = getattr(resp, "reasoning_content", None) if hasattr(resp, "reasoning_content") else None
-        has_valid_response = (isinstance(content, str) and content) or (
-                isinstance(reasoning_content, str) and reasoning_content
+        # Some backends report thinking in a field the client does not map at
+        # all (e.g. Ollama's "reasoning"), leaving both content and
+        # reasoning_content empty.  Generated-token usage still proves the
+        # endpoint, credentials, and model name are all valid.
+        usage = getattr(resp, "usage_metadata", None)
+        output_tokens = usage.get("output_tokens") if isinstance(usage, dict) else getattr(usage, "output_tokens", None)
+        has_valid_response = (
+            (isinstance(content, str) and content)
+            or (isinstance(reasoning_content, str) and reasoning_content)
+            or (isinstance(output_tokens, (int, float)) and output_tokens > 0)
         )
         if not has_valid_response:
             await channel.send_response(
@@ -2007,6 +2262,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             models = get_default_models(config)
             result = []
             active_model = ""
+            # 显式配置的上下文窗口上限（react.context_engine_config.context_window_tokens）
+            # 优先级高于按模型名解析，与 AgentServer 侧 ContextEngine 行为保持一致
+            cec = (config.get("react", {}) or {}).get("context_engine_config", {}) or {}
+            cw_override = cec.get("context_window_tokens")
+            if not (isinstance(cw_override, int) and cw_override > 0):
+                cw_override = None
             for idx, entry in enumerate(models):
                 mcc = entry.get("model_client_config", {})
                 mco = entry.get("model_config_obj", {})
@@ -2015,7 +2276,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 context_window_tokens = 0
                 try:
                     from openjiuwen.core.context_engine.context.context_utils import ContextUtils
-                    context_window_tokens = ContextUtils.resolve_context_max(model_name=model_name)
+                    context_window_tokens = ContextUtils.resolve_context_max(
+                        model_name=model_name,
+                        fallback_context_window_tokens=cw_override,
+                    )
                 except Exception:
                     logger.debug(
                         "Failed to resolve context_window_tokens for model %s",
@@ -2059,6 +2323,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return
         try:
             new_models = _build_models_defaults_from_frontend(params.get("models"))
+            default_provider = default_model_provider_from_entries(new_models)
+            if (
+                is_affinity_enabled(get_config_raw())
+                and default_provider != ASCEND_AFFINITY_PROVIDER
+            ):
+                update_kv_cache_affinity_enabled_in_config(False)
             update_default_models_in_config(new_models)
 
             applied_without_restart = await _apply_config_change_set(
@@ -2108,17 +2378,47 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             if "team" in params:
                 config_params["team"] = params.get("team")
 
+            affinity_requested = _parse_config_bool(config_params.get("kv_cache_affinity_enabled"))
+            if affinity_requested and new_models is not None:
+                if set_default_model_provider_in_entries(
+                    new_models,
+                    ASCEND_AFFINITY_PROVIDER,
+                ):
+                    yaml_updated.append("models.default_provider")
+
             if config_params:
                 applied_env, applied_yaml = _apply_config_payload(config_params)
                 env_updates.update(applied_env)
                 yaml_updated.extend(applied_yaml)
 
             if new_models is not None:
+                default_provider = default_model_provider_from_entries(new_models)
+                if (
+                    is_affinity_enabled(get_config_raw())
+                    and default_provider != ASCEND_AFFINITY_PROVIDER
+                ):
+                    update_kv_cache_affinity_enabled_in_config(False)
+                    yaml_updated.append("kv_cache_affinity_enabled")
                 update_default_models_in_config(new_models)
                 yaml_updated.append("models.defaults")
                 models_count = len(new_models)
 
-            change_set = _ConfigChangeSet(env_updates, yaml_updated, force=bool(env_updates or yaml_updated))
+            kvc_config_changed = new_models is not None or any(
+                key in config_params for key in KVC_CONFIG_KEYS
+            )
+            if kvc_config_changed:
+                valid, failures = validate_persisted_kv_cache_affinity()
+                if not valid:
+                    update_kv_cache_affinity_enabled_in_config(False)
+                    raise _ConfigInternalError(
+                        "KV cache affinity saved but not applied: " + "; ".join(failures)
+                    )
+
+            change_set = _ConfigChangeSet(
+                env_updates,
+                yaml_updated,
+                force=bool(env_updates or yaml_updated),
+            )
             applied_without_restart = await _apply_config_change_set(change_set)
 
             await channel.send_response(
@@ -2320,6 +2620,18 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         service = updater_service or UpdaterService()
         await channel.send_response(ws, req_id, ok=True, payload=service.get_runtime_config())
 
+    async def _updater_reset_source(ws, req_id, params, session_id):
+        try:
+            update_updater_in_config(dict(DEFAULT_SOURCE_CONFIG))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[updater.reset_source] 写回 config.yaml 失败: %s", exc)
+            await channel.send_response(ws, req_id, ok=False,
+                                        error=str(exc), code="INTERNAL_ERROR")
+            return
+
+        service = updater_service or UpdaterService()
+        await channel.send_response(ws, req_id, ok=True, payload=service.get_runtime_config())
+
     async def _updater_set_conf(ws, req_id, params, session_id):
         if not isinstance(params, dict):
             await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
@@ -2443,95 +2755,52 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST",
             )
             return
-        session_id_to_create = params.get("session_id")
-        if not isinstance(session_id_to_create, str) or not session_id_to_create.strip():
+        resolved_agent_client = _resolve(agent_client)
+        if resolved_agent_client is None:
             await channel.send_response(
-                ws, req_id, ok=False, error="session_id is required", code="BAD_REQUEST",
+                ws,
+                req_id,
+                ok=False,
+                error="AgentServer is unavailable",
+                code="SERVICE_UNAVAILABLE",
             )
             return
-        session_id_to_create = session_id_to_create.strip()
+        from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+        from jiuwenswarm.common.schema.message import ReqMethod
 
-        # Step 1: 归一化 work_mode / project_id / project_dir 三元组
-        from jiuwenswarm.server.runtime.session.work_mode import resolve_session_work_mode_params
-        binding = resolve_session_work_mode_params(params, channel_id=channel.channel_id)
-        if binding.error:
-            await channel.send_response(
-                ws, req_id, ok=False, error=binding.error, code=binding.code,
-            )
-            return
-
-        # Step 2: 校验 project_id / project_dir 绑定关系(存在性、路径一致性)
-        project_id, project_dir, p_err, p_code = project_store.resolve_session_project_binding(
-            binding.project_id, binding.project_dir
-        )
-        if p_err:
-            await channel.send_response(
-                ws, req_id, ok=False, error=p_err, code=p_code,
-            )
-            return
-
-        # Step 3: 确定最终 work_mode
-        # 对真实 project_id: 最终 work_mode 以 Project 记录为准;若请求显式传了
-        # work_mode 且与 Project 不一致 → BAD_REQUEST(设计文档 §4.1.6)
-        # 对默认项目: 使用 binding 归一化的 work_mode
-        # has_explicit_work_mode 由 resolve_session_work_mode_params 统一计算,
-        # 不再从 params 直接判定(避免 gateway 注入通道默认值后被误判为显式)
-        if not is_default_project_id(project_id):
-            proj = project_store.get_project_by_id(project_id, cache_bust=True)
-            if proj is not None:
-                project_work_mode = proj.work_mode or DEFAULT_WEB_WORK_MODE
-                if binding.has_explicit_work_mode and project_work_mode != binding.work_mode:
-                    await channel.send_response(
-                        ws, req_id, ok=False,
-                        error=f"work_mode mismatch: project is '{project_work_mode}' \
-                            but request specified '{binding.work_mode}'",
-                        code="BAD_REQUEST",
-                    )
-                    return
-                final_work_mode = project_work_mode
-            else:
-                # 竞态: project 已被其他进程删除/隐藏。
-                # 不创建指向不存在项目的会话,返回 NOT_FOUND 由调用方决定回退策略。
-                await channel.send_response(
-                    ws, req_id, ok=False,
-                    error=f"project not found: {project_id}",
-                    code="NOT_FOUND",
-                )
-                return
+        create_params = dict(params)
+        create_params.pop("session_id", None)
+        authenticated_user_id = str(user_id or "").strip()
+        if authenticated_user_id:
+            create_params["user_id"] = authenticated_user_id
         else:
-            final_work_mode = binding.work_mode
-
-        workspace_session_dir = get_agent_sessions_dir()
-        if not workspace_session_dir.exists():
-            workspace_session_dir.mkdir(parents=True)
-        session_dir = workspace_session_dir / session_id_to_create
-        if session_dir.exists():
+            create_params.pop("user_id", None)
+        create_params.setdefault("create_token", secrets.token_hex(16))
+        env = e2a_from_agent_fields(
+            request_id=req_id,
+            channel_id=channel.channel_id,
+            req_method=ReqMethod.SESSION_CREATE,
+            params=create_params,
+            is_stream=False,
+            timestamp=time.time(),
+            user_id=authenticated_user_id or None,
+        )
+        try:
+            response = await resolved_agent_client.send_request(env)
+        except Exception as exc:  # noqa: BLE001
             await channel.send_response(
-                ws, req_id, ok=False, error="session already exists", code="ALREADY_EXISTS",
+                ws, req_id, ok=False, error=str(exc), code="SERVICE_UNAVAILABLE"
             )
             return
-        session_dir.mkdir()
-
-        # 初始化会话元数据
-        from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata
-        # User identity comes exclusively from the authenticated WebSocket handshake.
-        init_session_metadata(
-            session_id=session_id_to_create,
-            channel_id=params.get("channel_id", ""),
-            user_id=str(user_id or "").strip(),
-            title=params.get("title", ""),
-            mode=params.get("mode", "unknown"),
-            project_dir=project_dir,
-            project_id=project_id,
-            work_mode=final_work_mode,
+        payload = dict(response.payload or {}) if isinstance(response.payload, dict) else {}
+        await channel.send_response(
+            ws,
+            req_id,
+            ok=bool(response.ok),
+            payload=payload if response.ok else None,
+            error=None if response.ok else str(payload.get("error") or "session.create failed"),
+            code=None if response.ok else str(payload.get("code") or "SESSION_CREATE_FAILED"),
         )
-
-        await channel.send_response(ws, req_id, ok=True, payload={
-            "session_id": session_id_to_create,
-            "project_id": project_id,
-            "project_dir": project_dir,
-            "work_mode": final_work_mode,
-        })
 
     async def _session_rename(ws, req_id, params, session_id):
         """重命名会话标题(查询/设置/清除三种语义),复用 apply_session_rename。
@@ -2648,8 +2917,16 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
 
-        workspace_session_dir = get_agent_sessions_dir()
-        session_dir = workspace_session_dir / session_id_to_delete
+        from jiuwenswarm.server.runtime.session.session_history import resolve_session_dir
+
+        session_dir, invalid_reason = resolve_session_dir(
+            session_id_to_delete, sessions_root=get_agent_sessions_dir()
+        )
+        if session_dir is None:
+            await channel.send_response(
+                ws, req_id, ok=False, error=invalid_reason or "invalid session_id", code="BAD_REQUEST",
+            )
+            return
         if not session_dir.exists():
             await channel.send_response(
                 ws, req_id, ok=False, error="session not found", code="NOT_FOUND",
@@ -2660,6 +2937,22 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 ws, req_id, ok=False, error="session is not a directory", code="BAD_REQUEST",
             )
             return
+        from jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle import (
+            evict_session_kv_cache,
+        )
+
+        try:
+            await evict_session_kv_cache(
+                session_id=session_id_to_delete,
+                parent_session_id=session_id_to_delete,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[session.delete] KV cache evict hook failed during local fallback; "
+                "continuing: session_id=%s error=%s",
+                session_id_to_delete,
+                exc,
+            )
         shutil.rmtree(session_dir)
         await channel.send_response(ws, req_id, ok=True, payload={"session_id": session_id_to_delete})
 
@@ -2723,6 +3016,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return st
 
         for s in sessions:
+            # 仅统计 web 渠道会话
+            if s.get("channel_id") != "web":
+                continue
             # 置顶会话已从项目分组剥离,不计入任何项目统计
             if s.get("pinned"):
                 continue
@@ -2797,6 +3093,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             "last_message_at": meta.get("last_message_at", 0),
             "message_count": int(meta.get("message_count", 0)),
             "mode": str(meta.get("mode", "unknown")),
+            "team_name": str(meta.get("team_name", "")),
             "pinned": bool(meta.get("pinned", False)),
             "pin_order": int(meta.get("pin_order", 0)),
             "project_dir": str(meta.get("project_dir", "")),
@@ -2807,7 +3104,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             "work_mode": str(meta.get("work_mode") or DEFAULT_WEB_WORK_MODE),
         }
 
-    async def _project_get_sessions(ws, req_id, params, session_id):
+    async def _project_get_sessions(ws, req_id, params, session_id, user_id=None):
         """获取项目下的非置顶普通会话列表,按 last_user_message_at 倒序。
 
         会话仅按 ``project_id`` 匹配可见项目。``project_id`` 传 ``"default"`` 时,
@@ -2866,9 +3163,32 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         def _belongs(meta: dict[str, Any]) -> bool:
             return _attribute_session_project(meta, visible_by_id) == project_id
 
-        sessions = collect_all_sessions_metadata()
-        # 仅非置顶普通会话(cron_id 为空) + 归属匹配；cron 会话由 get_cron_sessions 返回
-        matched = [s for s in sessions if not s.get("pinned") and _belongs(s) and not s.get("cron_id")]
+        # 按 web 连接 user_id 读对应用户家目录的会话(隔离前提:user_id == OS 用户名)。
+        # user_id 为空时扫 gateway 默认目录(向后兼容)。
+        sessions = collect_all_sessions_metadata(user_id=user_id)
+        # 仅非置顶普通会话(cron_id 为空) + 归属匹配 + web 渠道
+        # cron 会话由 get_cron_sessions 返回
+        # user_id 非空时再按 metadata.user_id 收敛(隔离:只看自己的普通会话历史);
+        # 旧会话缺 user_id 字段不被过滤(避免历史会话凭空消失)。
+        uid_str = str(user_id or "").strip()
+
+        def _is_user_owned(s: dict[str, Any]) -> bool:
+            # user_id 非空时按 metadata.user_id 收敛;旧会话缺 user_id 不过滤
+            if not uid_str:
+                return True
+            s_uid = str(s.get("user_id") or "").strip()
+            return not s_uid or s_uid == uid_str
+
+        def _is_plain_web_session(s: dict[str, Any]) -> bool:
+            return (
+                not s.get("pinned")
+                and _belongs(s)
+                and not s.get("cron_id")
+                and s.get("channel_id") == "web"
+                and _is_user_owned(s)
+            )
+
+        matched = [s for s in sessions if _is_plain_web_session(s)]
 
         def _lum(s: dict[str, Any]) -> float:
             v = s.get("last_user_message_at")
@@ -2884,7 +3204,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             "total": total,
         })
 
-    async def _project_get_cron_sessions(ws, req_id, params, session_id):
+    async def _project_get_cron_sessions(ws, req_id, params, session_id, user_id=None):
         """获取项目下的定时任务会话列表(cron_id 非空的非置顶会话),按 last_user_message_at 倒序。
 
         与 ``project.get_sessions`` 互斥分工:本接口仅返回 cron 会话,
@@ -2939,8 +3259,14 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         def _belongs(meta: dict[str, Any]) -> bool:
             return _attribute_session_project(meta, visible_by_id) == project_id
 
-        sessions = collect_all_sessions_metadata()
+        # 按 web 连接 user_id 读对应用户家目录的会话(faas 沙箱按 OS 用户写入;
+        # 前提:业务 user_id == OS 用户名)。user_id 为空时扫 gateway 默认目录。
+        sessions = collect_all_sessions_metadata(user_id=user_id)
         # 仅非置顶 cron 会话(cron_id 非空) + 归属匹配 + 可选按 cron_id 过滤
+        # 注意: cron 会话的 channel_id 通常为 "__cron__"(默认模式)或 job.targets(team 模式),
+        # 不固定为 "web",因此不过滤 channel_id,否则 cron 面板会变空。
+        # user_id 非空时再按 metadata.user_id 收敛(隔离:只看自己的定时任务历史)。
+        uid_str = str(user_id or "").strip()
         matched = []
         for s in sessions:
             if s.get("pinned"):
@@ -2950,6 +3276,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             if not s.get("cron_id"):
                 continue
             if cron_id_filter and s.get("cron_id") != cron_id_filter:
+                continue
+            if uid_str and str(s.get("user_id") or "").strip() and str(s.get("user_id") or "").strip() != uid_str:
                 continue
             matched.append(s)
 
@@ -2995,6 +3323,14 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 ok=False,
                 error="project_dir must be an absolute path",
                 code="BAD_REQUEST",
+            )
+            return
+        if project_dir and not os.path.isdir(project_dir):
+            await channel.send_response(
+                ws, req_id,
+                ok=False,
+                error="project directory does not exist",
+                code="PROJECT_DIR_MISSING",
             )
             return
         # 解析 work_mode(严格校验:非法值返回 BAD_REQUEST,不静默回落)
@@ -3085,6 +3421,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     proj.project_id, proj.project_dir, exc,
                 )
         project_payload = _project_info_payload(proj)
+        _schedule_agent_prewarm_sync("project.create")
         await channel.send_response(ws, req_id, ok=True, payload={
             "project_id": proj.project_id,
             "project_dir": proj.project_dir,
@@ -3245,6 +3582,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         sessions = collect_all_sessions_metadata()
         affected = 0
         for s in sessions:
+            if s.get("channel_id") != "web":
+                continue
             if not s.get("pinned") and _attribute_session_project(s, visible_by_id) == project_id:
                 affected += 1
 
@@ -3268,6 +3607,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if registry is not None:
             registry.cleanup_project(project_id)
         project_store.reindex_project_pin_orders()
+        _schedule_agent_prewarm_sync("project.remove")
         await channel.send_response(
             ws, req_id, ok=True, payload={
                 "project_id": project_id,
@@ -3325,6 +3665,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         sessions = collect_all_sessions_metadata()
         affected = 0
         for s in sessions:
+            if s.get("channel_id") != "web":
+                continue
             if not s.get("pinned") and _attribute_session_project(s, visible_by_id) == project_id:
                 affected += 1
 
@@ -3342,6 +3684,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 ws, req_id, ok=False, error="project is not hidden", code="CONFLICT",
             )
             return
+        _schedule_agent_prewarm_sync("project.restore")
         await channel.send_response(
             ws, req_id, ok=True, payload={
                 "project_id": restored.project_id,
@@ -3380,6 +3723,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         last_message_at = None
         last_user_message_at = None
         for s in sessions:
+            if s.get("channel_id") != "web":
+                continue
             if s.get("pinned") or s.get("cron_id"):
                 continue
             if _attribute_session_project(s, visible_by_id) == project_id:
@@ -3427,7 +3772,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         from jiuwenswarm.server.runtime.session.session_metadata import collect_all_sessions_metadata
 
         sessions = collect_all_sessions_metadata()
-        pinned = [s for s in sessions if s.get("pinned")]
+        pinned = [s for s in sessions if s.get("pinned") and s.get("channel_id") == "web"]
         pinned.sort(key=lambda s: int(s.get("pin_order", 0) or 0))
 
         await channel.send_response(ws, req_id, ok=True, payload={
@@ -3793,6 +4138,290 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             "status": status_payload,
         })
 
+    def _strict_bool_param(
+        params: dict, key: str, *, default: bool,
+    ) -> tuple[bool, str | None]:
+        """严格解析布尔参数:只接受 JSON ``true``/``false``。
+
+        字符串 ``"false"``、``"true"``、整数 ``0``/``1`` 等均被拒绝,
+        避免前端误传字符串导致 ``bool("false") == True`` 的陷阱。
+        对 ``force``/``delete``/``no_verify`` 等高影响参数尤为重要。
+
+        Returns:
+            ``(value, error_or_none)``: 参数缺失时返回 ``(default, None)``;
+            类型非法时返回 ``(default, error_message)``。
+        """
+        if key not in params:
+            return default, None
+        val = params[key]
+        # 注意:bool 是 int 的子类,必须先检查 bool 再检查 int
+        if isinstance(val, bool):
+            return val, None
+        return default, (
+            f"{key} must be a JSON boolean (true/false), "
+            f"got {type(val).__name__}: {val!r}"
+        )
+
+    async def _project_git_commit(ws, req_id, params, session_id):
+        """提交当前工作区改动到当前分支(设计文档 §4.9 ``project.git.commit``)。
+
+        ``stage_all=true`` 先 ``git add -A`` 暂存全部;``paths`` 显式指定暂存路径
+        (与 ``stage_all`` 互斥)。``amend=true`` 覆盖最近一次提交。成功后调
+        ``mark_dirty`` 触发 /ws/git 立即重算(HEAD/is_dirty/stats 变化)。
+        """
+        if not isinstance(params, dict):
+            params = {}
+        project_id = str(params.get("project_id") or "").strip()
+        proj, err, code = _resolve_git_project(project_id, cache_bust=True)
+        if proj is None:
+            await channel.send_response(
+                ws, req_id, ok=False, error=err, code=code, payload={},
+            )
+            return
+        message = params.get("message")
+        if message is None:
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error="message is required", code="BAD_REQUEST",
+            )
+            return
+        if not isinstance(message, str):
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error=(
+                    f"message must be a string, "
+                    f"got {type(message).__name__}: {message!r}"
+                ),
+                code="BAD_REQUEST",
+            )
+            return
+        if not message.strip():
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error="message must not be empty", code="BAD_REQUEST",
+            )
+            return
+        paths_param = params.get("paths")
+        paths: list[str] | None = None
+        if paths_param is not None:
+            if not isinstance(paths_param, list):
+                await channel.send_response(
+                    ws, req_id, ok=False,
+                    error="paths must be an array of strings", code="BAD_REQUEST",
+                )
+                return
+            # 严格校验:任一元素非字符串或空白即拒绝,而非静默过滤。
+            # 否则 ["a.py", 123] 会只提交 a.py,调用方以为两个路径都处理了。
+            paths = []
+            for idx, p in enumerate(paths_param):
+                if not isinstance(p, str):
+                    await channel.send_response(
+                        ws, req_id, ok=False,
+                        error=(
+                            f"paths[{idx}] must be a string, "
+                            f"got {type(p).__name__}: {p!r}"
+                        ),
+                        code="BAD_REQUEST",
+                    )
+                    return
+                if not p.strip():
+                    await channel.send_response(
+                        ws, req_id, ok=False,
+                        error=f"paths[{idx}] must not be empty or whitespace",
+                        code="BAD_REQUEST",
+                    )
+                    return
+                paths.append(p)
+            # 显式传了空数组:调用方意图是只提交指定路径,但没有路径——拒绝。
+            if not paths:
+                await channel.send_response(
+                    ws, req_id, ok=False,
+                    error="paths is empty",
+                    code="BAD_REQUEST",
+                )
+                return
+        # amend 需在 stage_all 之前解析:amend=true 时 stage_all 默认 False,
+        # 避免"只改 commit message 的 amend"意外把所有未暂存改动塞进上一条提交。
+        amend, sb_err = _strict_bool_param(params, "amend", default=False)
+        if sb_err:
+            await channel.send_response(
+                ws, req_id, ok=False, error=sb_err, code="BAD_REQUEST",
+            )
+            return
+        # stage_all 默认值推导:
+        #   - 未传 paths 且非 amend → True(常规提交,暂存全部)
+        #   - 传了 paths → False(只暂存指定路径)
+        #   - amend=true → False(除非显式传 stage_all=true,否则不自动暂存)
+        stage_all_default = (paths_param is None) and not amend
+        stage_all, sb_err = _strict_bool_param(
+            params, "stage_all", default=stage_all_default,
+        )
+        if sb_err:
+            await channel.send_response(
+                ws, req_id, ok=False, error=sb_err, code="BAD_REQUEST",
+            )
+            return
+        if stage_all and paths:
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error="stage_all and paths are mutually exclusive",
+                code="BAD_REQUEST",
+            )
+            return
+        no_verify, sb_err = _strict_bool_param(params, "no_verify", default=False)
+        if sb_err:
+            await channel.send_response(
+                ws, req_id, ok=False, error=sb_err, code="BAD_REQUEST",
+            )
+            return
+        from jiuwenswarm.server.runtime.session.project_git import (
+            get_project_git_service,
+        )
+        service = get_project_git_service()
+        try:
+            op_result = await asyncio.to_thread(
+                service.commit,
+                proj, message,
+                stage_all=stage_all,
+                paths=paths,
+                amend=amend,
+                no_verify=no_verify,
+            )
+        except Exception as exc:  # noqa: BLE001
+            git_error = getattr(exc, "git_error", None)
+            if git_error is not None:
+                await _send_git_error_response(ws, req_id, git_error)
+                return
+            logger.warning(
+                "[ProjectGit] commit failed (project=%s): %s",
+                proj.project_id, exc,
+            )
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error=f"handler error: {exc}",
+                code="INTERNAL_ERROR",
+            )
+            return
+        if not op_result.success:
+            # 失败路径也唤醒 watcher:staging 可能已改变 index(如 git add 成功
+            # 但 commit 失败),watcher 重算后通过 /ws/git 推送最新 staged/dirty
+            # 状态,避免前端 UI 短时间失真。service 层返回的 repo_status 已反映
+            # 暂存后的真实状态(非 pre_status)。
+            _mark_git_watcher_dirty(proj.project_id)
+            await _send_git_error_response(ws, req_id, op_result.error)
+            return
+        # 写后即时刷新 /ws/git summary(HEAD/is_dirty/stats 变化)
+        _mark_git_watcher_dirty(proj.project_id)
+        status_payload = _build_git_status_payload(proj, op_result.repo_status)
+        await channel.send_response(ws, req_id, ok=True, payload={
+            "committed": True,
+            "commit_hash": op_result.commit_hash,
+            "amended": bool(amend),
+            "status": status_payload,
+        })
+
+    async def _project_git_push(ws, req_id, params, session_id):
+        """推送本地分支到远程(设计文档 §4.10 ``project.git.push``)。
+
+        ``remote`` 默认 ``origin``;``branch`` 不传时用当前分支(detached HEAD
+        须显式传 ``branch``)。``force=true`` 使用 ``--force-with-lease``(更安全)。
+        ``delete=true`` 删除远程分支(与 ``set_upstream``/``force`` 互斥)。push
+        涉及网络,超时独立配置(``GIT_PUSH_TIMEOUT_SEC``,默认 60s)。成功后调
+        ``mark_dirty`` 刷新 /ws/git(主要更新 upstream 字段)。
+        """
+        if not isinstance(params, dict):
+            params = {}
+        project_id = str(params.get("project_id") or "").strip()
+        proj, err, code = _resolve_git_project(project_id, cache_bust=True)
+        if proj is None:
+            await channel.send_response(
+                ws, req_id, ok=False, error=err, code=code, payload={},
+            )
+            return
+        remote = str(params.get("remote") or "origin").strip() or "origin"
+        branch_param = params.get("branch")
+        branch: str | None = None
+        if branch_param is not None:
+            if not isinstance(branch_param, str):
+                await channel.send_response(
+                    ws, req_id, ok=False,
+                    error=(
+                        f"branch must be a string, "
+                        f"got {type(branch_param).__name__}: {branch_param!r}"
+                    ),
+                    code="BAD_REQUEST",
+                )
+                return
+            branch = branch_param.strip() or None
+        set_upstream, sb_err = _strict_bool_param(params, "set_upstream", default=False)
+        if sb_err:
+            await channel.send_response(
+                ws, req_id, ok=False, error=sb_err, code="BAD_REQUEST",
+            )
+            return
+        force, sb_err = _strict_bool_param(params, "force", default=False)
+        if sb_err:
+            await channel.send_response(
+                ws, req_id, ok=False, error=sb_err, code="BAD_REQUEST",
+            )
+            return
+        delete, sb_err = _strict_bool_param(params, "delete", default=False)
+        if sb_err:
+            await channel.send_response(
+                ws, req_id, ok=False, error=sb_err, code="BAD_REQUEST",
+            )
+            return
+        if delete and (set_upstream or force):
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error="delete is mutually exclusive with set_upstream and force",
+                code="BAD_REQUEST",
+            )
+            return
+        from jiuwenswarm.server.runtime.session.project_git import (
+            get_project_git_service,
+        )
+        service = get_project_git_service()
+        try:
+            op_result = await asyncio.to_thread(
+                service.push,
+                proj,
+                remote=remote,
+                branch=branch,
+                set_upstream=set_upstream,
+                force=force,
+                delete=delete,
+            )
+        except Exception as exc:  # noqa: BLE001
+            git_error = getattr(exc, "git_error", None)
+            if git_error is not None:
+                await _send_git_error_response(ws, req_id, git_error)
+                return
+            logger.warning(
+                "[ProjectGit] push failed (project=%s): %s",
+                proj.project_id, exc,
+            )
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error=f"handler error: {exc}",
+                code="INTERNAL_ERROR",
+            )
+            return
+        if not op_result.success:
+            await _send_git_error_response(ws, req_id, op_result.error)
+            return
+        # push 主要影响 upstream 字段;调 mark_dirty 让 watcher 重算并推送
+        _mark_git_watcher_dirty(proj.project_id)
+        status_payload = _build_git_status_payload(proj, op_result.repo_status)
+        await channel.send_response(ws, req_id, ok=True, payload={
+            "pushed": True,
+            "remote": op_result.pushed_remote or remote,
+            "branch": branch or op_result.repo_status.branch,
+            "deleted": bool(delete),
+            "upstream_set": bool(set_upstream),
+            "status": status_payload,
+        })
+
     async def _project_git_diff_status(ws, req_id, params, session_id):
         """拉取当前分支 diff 和上一轮对话 diff 的快照(设计文档 §4.1.16)。
 
@@ -4102,30 +4731,80 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         raw_headless = params.get("headless", True)
         headless = bool(raw_headless) if isinstance(raw_headless, bool) else True
 
+        current_browser_cfg = get_config().get("browser", {})
+        if not isinstance(current_browser_cfg, dict):
+            current_browser_cfg = {}
+        previous_chrome_path = current_browser_cfg.get("chrome_path", "")
+        if not isinstance(previous_chrome_path, str):
+            previous_chrome_path = ""
+        raw_previous_headless = current_browser_cfg.get("headless", True)
+        previous_headless = (
+            bool(raw_previous_headless)
+            if isinstance(raw_previous_headless, bool)
+            else True
+        )
+
         try:
             update_browser_in_config({"chrome_path": chrome_path, "headless": headless})
-            await _clear_agent_config_cache(_resolve(agent_client))
+            resolved_agent_client = _resolve(agent_client)
+            await _clear_agent_config_cache(resolved_agent_client)
         except Exception as e:  # noqa: BLE001
             logger.warning("[path.set] 写回 config.yaml 失败: %s", e)
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
             return
 
-        # When switching to headless, purge any persisted headed-Chrome profile so the
-        # managed driver doesn't reuse an existing visible window on the next browser task.
-        if headless:
-            try:
-                from pathlib import Path as _Path
-                _profile_store = _Path(
-                    os.getenv("BROWSER_PROFILE_STORE_PATH", "").strip()
-                    or str(get_user_workspace_dir() / ".browser" / "profiles.json")
-                ).expanduser()
-                if _profile_store.exists():
-                    _profile_store.unlink()
-                    logger.info("[path.set] Cleared browser profile store for headless mode: %s", _profile_store)
-            except Exception as _e:
-                logger.debug("[path.set] Could not clear browser profile store: %s", _e)
+        try:
+            await _restart_agent_browser_runtime(
+                resolved_agent_client,
+                previous_chrome_path=previous_chrome_path,
+                previous_headless=previous_headless,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "[path.set] browser config saved but active runtime reset failed: %s",
+                e,
+            )
 
         await channel.send_response(ws, req_id, ok=True, payload={"chrome_path": chrome_path, "headless": headless})
+
+    async def _path_select_directory(ws, req_id, params, session_id):
+        """在服务端本机弹出系统文件夹对话框（浏览器 / whl 包回退方案）。
+
+        桌面端 pywebview 已提供 ``select_project_directory``；本方法覆盖无该桥接时的
+        纯浏览器访问场景。
+
+        - Windows：tkinter
+        - macOS：osascript；
+        - Linux：zenity/kdialog/yad/tkinter
+        - 不可用时返回 ``UNSUPPORTED``，前端回落到手填绝对路径
+        """
+        if not isinstance(params, dict):
+            params = {}
+        initial_dir = params.get("initial_dir")
+        if initial_dir is not None and not isinstance(initial_dir, str):
+            await channel.send_response(
+                ws, req_id, ok=False, error="initial_dir must be string", code="BAD_REQUEST",
+            )
+            return
+
+        from jiuwenswarm.channels.web.directory_picker import select_directory_native
+
+        try:
+            selected = await asyncio.to_thread(
+                select_directory_native,
+                initial_dir=initial_dir.strip() if isinstance(initial_dir, str) else None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[path.select_directory] picker unavailable: %s", exc)
+            await channel.send_response(
+                ws, req_id, ok=False, error=str(exc), code="UNSUPPORTED",
+            )
+            return
+
+        if not selected:
+            await channel.send_response(ws, req_id, ok=True, payload={"path": None, "cancelled": True})
+            return
+        await channel.send_response(ws, req_id, ok=True, payload={"path": selected, "cancelled": False})
 
     async def _memory_compute(ws, req_id, params, session_id):
         if _HAS_PSUTIL:
@@ -4161,12 +4840,97 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             logger.exception("[media.persist] failed: %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
             return
-        payload = {
-            key: normalized[key]
-            for key in ("content", "query", "media_items", "files")
-            if key in normalized
-        }
+        # G.EXP.04: 多 key + 条件过滤不用推导式，改为显式循环。
+        payload = {}
+        for key in ("content", "query", "media_items", "files"):
+            if key in normalized:
+                payload[key] = normalized[key]
         await channel.send_response(ws, req_id, ok=True, payload=payload)
+
+    async def _document_persist(ws, req_id, params, session_id):
+        """Upload documents (PDF/DOCX/XLSX/ipynb/...) and parse via AutoFileParser."""
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        normalized = dict(params)
+        parse = coerce_document_parse_flag(normalized.get("parse", True), default=True)
+        max_chars_raw = normalized.get("max_chars", DEFAULT_MAX_CHARS)
+        try:
+            max_chars = int(max_chars_raw)
+        except (TypeError, ValueError):
+            max_chars = DEFAULT_MAX_CHARS
+        max_chars = max(1, min(max_chars, 500_000))
+        try:
+            await persist_and_parse_documents(
+                normalized,
+                session_id,
+                parse=parse,
+                max_chars=max_chars,
+            )
+        except Exception as exc:
+            logger.exception("[document.persist] failed: %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+            return
+        # G.EXP.04: 多 key + 条件过滤不用推导式，改为显式循环。
+        payload = {}
+        for key in (
+            "content",
+            "query",
+            "media_items",
+            "files",
+            "documents",
+            "document_errors",
+            "supported_formats",
+        ):
+            if key in normalized:
+                payload[key] = normalized[key]
+        if "supported_formats" not in payload:
+            payload["supported_formats"] = supported_formats()
+        await channel.send_response(ws, req_id, ok=True, payload=payload)
+
+    async def _document_parse(ws, req_id, params, session_id):
+        """Parse an already-uploaded document path with AutoFileParser (+ ipynb)."""
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        path = str(params.get("path") or "").strip()
+        if not path:
+            await channel.send_response(ws, req_id, ok=False, error="path is required", code="BAD_REQUEST")
+            return
+        max_chars_raw = params.get("max_chars", DEFAULT_MAX_CHARS)
+        try:
+            max_chars = int(max_chars_raw)
+        except (TypeError, ValueError):
+            max_chars = DEFAULT_MAX_CHARS
+        max_chars = max(1, min(max_chars, 500_000))
+        try:
+            result = await parse_existing_document(
+                path,
+                session_id=session_id,
+                max_chars=max_chars,
+            )
+        except FileNotFoundError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="NOT_FOUND")
+            return
+        except PermissionError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="FORBIDDEN")
+            return
+        except ValueError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
+            return
+        except Exception as exc:
+            logger.exception("[document.parse] failed: %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+            return
+        await channel.send_response(ws, req_id, ok=True, payload=result)
+
+    async def _document_formats(ws, req_id, params, session_id):
+        await channel.send_response(
+            ws,
+            req_id,
+            ok=True,
+            payload={"supported_formats": supported_formats()},
+        )
 
     async def _chat_resume(ws, req_id, params, session_id):
         await channel.send_response(
@@ -4747,6 +5511,57 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             logger.exception("[channel.discord.set_conf] %s", e)
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
+    async def _channel_slack_get_conf(ws, req_id, params, session_id):
+        cm = _resolve(channel_manager)
+        if cm is None:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="channel manager not available",
+                code="SERVICE_UNAVAILABLE",
+            )
+            return
+        try:
+            conf = cm.get_conf("slack")
+            await channel.send_response(ws, req_id, ok=True, payload={"config": conf})
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[channel.slack.get_conf] %s", e)
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
+
+    async def _channel_slack_set_conf(ws, req_id, params, session_id):
+        cm = _resolve(channel_manager)
+        if cm is None:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="channel manager not available",
+                code="SERVICE_UNAVAILABLE",
+            )
+            return
+        if not isinstance(params, dict):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="params must be object",
+                code="BAD_REQUEST",
+            )
+            return
+        try:
+            await cm.set_conf("slack", params)
+            conf = cm.get_conf("slack")
+            try:
+                update_channel_in_config("slack", conf)
+                await _clear_agent_config_cache(_resolve(agent_client))
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[channel.slack.set_conf] failed to persist config.yaml: %s", e)
+            await channel.send_response(ws, req_id, ok=True, payload={"config": conf})
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[channel.slack.set_conf] %s", e)
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
+
     async def _channel_wecom_get_conf(ws, req_id, params, session_id):
         cm = _resolve(channel_manager)
         if cm is None:
@@ -4911,12 +5726,18 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     def _get_cron():
         return _resolve(cron_controller)
 
-    async def _cron_job_list(ws, req_id, params, session_id):
+    async def _cron_job_list(ws, req_id, params, session_id, user_id=None):
         cc = _get_cron()
         if cc is None:
             await channel.send_response(ws, req_id, ok=False, error="cron not available", code="INTERNAL_ERROR")
             return
         jobs = await cc.list_jobs()
+        # 按 web 连接 user_id 过滤:只返回该用户创建的定时任务(隔离)。
+        # user_id 为空(连接未带)时维持原行为(返回全部);agent 内部创建的 cron
+        # (user_id 空串)在带 user_id 的连接下被过滤掉(对人类用户不可见)。
+        uid_str = str(user_id or "").strip()
+        if uid_str:
+            jobs = [j for j in jobs if str(j.get("user_id") or "").strip() == uid_str]
         # 可选按 project_id 过滤(支持 default/default_code 虚拟项目)
         if isinstance(params, dict):
             raw_pid = params.get("project_id")
@@ -4980,7 +5801,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return
         await channel.send_response(ws, req_id, ok=True, payload={"job": job})
 
-    async def _cron_job_create(ws, req_id, params, session_id):
+    async def _cron_job_create(ws, req_id, params, session_id, user_id=None):
         cc = _get_cron()
         if cc is None:
             await channel.send_response(ws, req_id, ok=False, error="cron not available", code="INTERNAL_ERROR")
@@ -4991,6 +5812,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         try:
             if session_id:
                 params["session_id"] = session_id
+            # 注入创建者 user_id（web 连接携带），执行时透传给 faas 的 X-Session-Context，
+            # 否则 CreateSandbox 拉不起 → 60s 超时（见 plan-cron-user-id）。
+            if user_id:
+                params["user_id"] = str(user_id).strip()
             # project_dir 默认值：仅当前端「未传」时从当前 WebSocket 会话 metadata 读取
             # （cache_bust=True 强制读盘，跨进程拿最新值；见设计文档 §5.1）
             # 注意：显式传空串 "" 等价于归默认项目，不可覆盖——用 key presence 区分
@@ -5185,12 +6010,15 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("project.git.init", _project_git_init)
     channel.register_method("project.git.switch_branch", _project_git_switch_branch)
     channel.register_method("project.git.create_branch", _project_git_create_branch)
+    channel.register_method("project.git.commit", _project_git_commit)
+    channel.register_method("project.git.push", _project_git_push)
     channel.register_method("project.git.diff_status", _project_git_diff_status)
     channel.register_method("project.git.turn_diff_list", _project_git_turn_diff_list)
     channel.register_method("project.git.turn_diff", _project_git_turn_diff)
 
     channel.register_method("path.get", _path_get)
     channel.register_method("path.set", _path_set)
+    channel.register_method("path.select_directory", _path_select_directory)
 
     async def _hooks_list(ws, req_id, params, session_id):
         from jiuwenswarm.common.hooks_config import load_hooks_config
@@ -5212,6 +6040,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
     channel.register_method("chat.send", _chat_send)
     channel.register_method("media.persist", _media_persist)
+    channel.register_method("document.persist", _document_persist)
+    channel.register_method("document.parse", _document_parse)
+    channel.register_method("document.formats", _document_formats)
     channel.register_method("chat.resume", _chat_resume)
     channel.register_method("chat.interrupt", _chat_interrupt)
     channel.register_method("chat.user_answer", _chat_user_answer)
@@ -5223,6 +6054,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("updater.download", _updater_download)
     channel.register_method("updater.upgrade", _updater_upgrade)
     channel.register_method("updater.get_conf", _updater_get_conf)
+    channel.register_method("updater.reset_source", _updater_reset_source)
     channel.register_method("updater.set_conf", _updater_set_conf)
     channel.register_method("heartbeat.get_conf", _heartbeat_get_conf)
     channel.register_method("heartbeat.set_conf", _heartbeat_set_conf)
@@ -5239,6 +6071,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("channel.whatsapp.set_conf", _channel_whatsapp_set_conf)
     channel.register_method("channel.discord.get_conf", _channel_discord_get_conf)
     channel.register_method("channel.discord.set_conf", _channel_discord_set_conf)
+    channel.register_method("channel.slack.get_conf", _channel_slack_get_conf)
+    channel.register_method("channel.slack.set_conf", _channel_slack_set_conf)
     channel.register_method("channel.wecom.get_conf", _channel_wecom_get_conf)
     channel.register_method("channel.wecom.set_conf", _channel_wecom_set_conf)
     channel.register_method("channel.wechat.get_conf", _channel_wechat_get_conf)

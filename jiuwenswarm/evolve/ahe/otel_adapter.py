@@ -639,7 +639,7 @@ class OtelTraceAdapter:
 
                 # Extract tool result messages for this LLM span
                 tool_results = self._extract_tool_results_for_llm(
-                    llm_span, tool_spans
+                    output, tool_spans
                 )
                 if tool_results:
                     turns.extend(tool_results)
@@ -652,45 +652,44 @@ class OtelTraceAdapter:
         return turns
 
     def _extract_tool_results_for_llm(
-        self, llm_span: dict, all_tool_spans: list[dict]
+        self, llm_output: dict, all_tool_spans: list[dict]
     ) -> list[dict]:
-        """Extract tool result messages for a specific LLM span.
+        """Extract tool result messages for the tool_calls in *llm_output*.
 
         Returns list of tool messages in OpenAI format:
         {"role": "tool", "tool_call_id": "...", "name": "...", "content": "..."}
+
+        Matching is by ``tool_call_id`` (the assistant tool_call ``id`` equals
+        the tool span's ``gen_ai.tool.call.id``), NOT by span parentage. In
+        jiuwenswarm traces tool spans are children of the agent span, not of
+        the LLM span, so parent-based matching would drop every tool result.
         """
-        llm_span_id = llm_span.get("span_id")
+        issued_ids: list[str] = []
+        for tc in llm_output.get("tool_calls", []) or []:
+            tcid = tc.get("id", "")
+            if not tcid:
+                # Anthropic-ish fallback: id nested under function
+                tcid = (tc.get("function") or {}).get("id", "")
+            if tcid:
+                issued_ids.append(tcid)
+        if not issued_ids:
+            return []
+
+        issued_set = set(issued_ids)
         tool_results = []
-
-        # Find TOOL spans that are children of this LLM span
-        child_tool_spans = [
-            s for s in all_tool_spans
-            if s.get("parent_span_id") == llm_span_id
-        ]
-
-        # Sort by start_time
-        child_tool_spans.sort(key=lambda s: s.get("start_time_ns", 0))
-
-        for tool_span in child_tool_spans:
+        for tool_span in all_tool_spans:
             attrs = tool_span.get("attributes", {})
-
-            # Extract tool call id (from gen_ai.tool.call.id or generate)
             tool_call_id = attrs.get("gen_ai.tool.call.id", "")
-            if not tool_call_id:
-                # Generate a synthetic id from span_id
-                tool_call_id = f"call_tool_{tool_span.get('span_id', '')}"
+            if not tool_call_id or tool_call_id not in issued_set:
+                continue
 
-            # Extract tool name
             tool_name = attrs.get("gen_ai.tool.name", "")
-
-            # Extract tool result (output)
             tool_result_raw = attrs.get("gen_ai.tool.result", "")
             if isinstance(tool_result_raw, dict):
                 tool_result_str = json.dumps(tool_result_raw, ensure_ascii=False)
             else:
                 tool_result_str = str(tool_result_raw)
 
-            # Build tool result message
             tool_msg = {
                 "role": "tool",
                 "tool_call_id": tool_call_id,
@@ -699,6 +698,11 @@ class OtelTraceAdapter:
             }
 
             tool_results.append(tool_msg)
+
+        # Order results to match the order the tool_calls were issued.
+        order = {tid: i for i, tid in enumerate(issued_ids)}
+        tool_results.sort(key=lambda m: order.get(m["tool_call_id"], 0))
+        return tool_results
 
         return tool_results
 

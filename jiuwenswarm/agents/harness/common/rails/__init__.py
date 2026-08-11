@@ -7,11 +7,14 @@
 
 from openjiuwen.harness.rails.security.tool_security_rail import PermissionInterruptRail
 from jiuwenswarm.agents.harness.common.rails.avatar_rail import AvatarPromptRail
+from jiuwenswarm.agents.harness.common.rails.browser_task_prompt_rail import (
+    BrowserTaskPromptRail,
+)
 from jiuwenswarm.agents.harness.common.rails.project_memory_rail import ProjectMemoryRail
 from jiuwenswarm.agents.harness.common.rails.response_prompt_rail import ResponsePromptRail
 from jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail import RuntimePromptRail
-from jiuwenswarm.agents.harness.common.rails.symphony_orchestration_prompt_rail import (
-    SymphonyOrchestrationPromptRail,
+from jiuwenswarm.agents.harness.common.rails.symphony import (
+    SymphonyOrchestrationRail,
 )
 from jiuwenswarm.agents.harness.team.rails.team_member_skill_toolkit_rail import (
     MemberSkillToolkitRail,
@@ -26,10 +29,11 @@ __all__ = [
     "MultimodalImageRail",
     "PermissionInterruptRail",
     "AvatarPromptRail",
+    "BrowserTaskPromptRail",
     "ProjectMemoryRail",
     "ResponsePromptRail",
     "RuntimePromptRail",
-    "SymphonyOrchestrationPromptRail",
+    "SymphonyOrchestrationRail",
     "MemberSkillToolkitRail",
     "StructuredAskUserRail",
     "TokenJuiceRail",
