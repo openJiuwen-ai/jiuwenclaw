@@ -274,7 +274,8 @@ assert.equal(collapsedTeamLines.some((line) => line.includes("Member 1")), false
 const codeTeamDisplay = stripAnsi(
   buildAppScreenLines({ ...teamSnapshot, mode: "code.team" }, teamLayoutOptions).join("\n"),
 );
-assert.equal(codeTeamDisplay.includes("mode:team.code"), true);
+// P5.3：状态栏指示器改 `[${mode}]` 格式，原 `mode:` 前缀已退场。
+assert.equal(codeTeamDisplay.includes("[team.code]"), true);
 assert.equal(codeTeamDisplay.includes("code.team"), false);
 const codeTeamWelcome = stripAnsi(
   buildWelcomeLines(160, "connected", teamSnapshot.modelInfo, "code.team").join("\n"),

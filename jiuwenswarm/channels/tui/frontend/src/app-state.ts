@@ -233,11 +233,11 @@ const DEFERRED_TRANSCRIPT_EVENTS = new Set([
 ]);
 
 function isPlanClientMode(mode: ClientMode): boolean {
-  return (
-    mode === "agent.plan" ||
-    mode === "code.plan" ||
-    mode.startsWith("team.plan")
-  );
+  // P5：覆盖新旧所有 plan 变体。
+  // 新串（<role>.<env>.plan，第三段）ends_with(".plan")；
+  // 旧 team 串（team.plan.<profile>，plan 在第二段）starts_with("team.plan")。
+  // ⚠️ 不能只用 endsWith——会漏 team.plan.normal / team.plan.code。
+  return mode.endsWith(".plan") || mode.startsWith("team.plan");
 }
 
 // ── Auto-recap (自动回顾) 常量 ──

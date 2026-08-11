@@ -132,11 +132,9 @@ function connectionStatusLabel(status: AppSnapshot["connectionStatus"]): string 
 }
 
 function isPlanMode(mode: AppSnapshot["mode"]): boolean {
-  return (
-    mode === "agent.plan" ||
-    mode === "code.plan" ||
-    mode.startsWith("team.plan")
-  );
+  // P5：与 app-state.isPlanClientMode 同源。新串 endsWith(".plan")，
+  // 旧 team 串 startsWith("team.plan")（plan 在第二段）。
+  return mode.endsWith(".plan") || mode.startsWith("team.plan");
 }
 
 function buildStatusLines(
@@ -156,8 +154,13 @@ function buildStatusLines(
     const displayTitle = raw.length > 30 ? raw.slice(0, 30) + "..." : raw;
     left.push(displayTitle);
   }
-  left.push(`mode:${formatModeForDisplay(snapshot.mode)}`);
-  if (isPlanMode(snapshot.mode)) left.push("使用 /mode 退出plan模式");
+  // P5.3：plan 用 accent 色 + 📝，normal 用 dim 色，替代旧 `mode:` 前缀。
+  const displayMode = formatModeForDisplay(snapshot.mode);
+  const modeIndicator = isPlanMode(snapshot.mode)
+    ? palette.text.accent(`[${displayMode} 📝]`)
+    : palette.text.dim(`[${displayMode}]`);
+  left.push(modeIndicator);
+  if (isPlanMode(snapshot.mode)) left.push("使用 /plan 退出plan模式");
   if (snapshot.transcriptFoldMode !== "none") left.push(`fold:${snapshot.transcriptFoldMode}`);
   const teamWorking =
     isTeamMode(snapshot.mode) &&
