@@ -1,10 +1,10 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Unit tests for jiuwenswarm.cli.events."""
+"""Unit tests for jiuwenswarm.channels.cli.events."""
 
 from __future__ import annotations
 
-from jiuwenswarm.cli.events import (
+from jiuwenswarm.channels.cli.events import (
     event_kind,
     is_terminal_event,
     needs_user_input,

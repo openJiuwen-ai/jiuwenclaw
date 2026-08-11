@@ -20,8 +20,8 @@ def main() -> None:
         from jiuwenswarm.dotenv_early import parse_dotenv_early
         parse_dotenv_early("jiuwenswarm")
 
-        from jiuwenswarm.cli.chat import build_parser as build_chat_parser
-        from jiuwenswarm.cli.chat import run_chat
+        from jiuwenswarm.channels.cli.chat import build_parser as build_chat_parser
+        from jiuwenswarm.channels.cli.chat import run_chat
     except KeyboardInterrupt:
         logging.warning("Interrupted during startup. Exiting.")
         sys.exit(130)

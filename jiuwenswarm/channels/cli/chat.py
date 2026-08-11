@@ -39,15 +39,15 @@ except ImportError:
         except ImportError:
             pass
 
-from jiuwenswarm.cli._terminal import write_stderr, write_stdout
-from jiuwenswarm.cli.gateway_client import GatewayClient
-from jiuwenswarm.cli.events import (
+from jiuwenswarm.channels.cli._terminal import write_stderr, write_stdout
+from jiuwenswarm.channels.cli.gateway_client import GatewayClient
+from jiuwenswarm.channels.cli.events import (
     event_kind,
     is_content_final,
     is_terminal_event,
     needs_user_input,
 )
-from jiuwenswarm.cli.render import HumanRenderer, JsonRenderer, JsonlRenderer
+from jiuwenswarm.channels.cli.render import HumanRenderer, JsonRenderer, JsonlRenderer
 
 logger = logging.getLogger(__name__)
 

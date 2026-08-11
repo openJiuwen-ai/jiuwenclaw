@@ -11,7 +11,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from jiuwenswarm.cli._terminal import write_stderr, write_stdout
+from jiuwenswarm.channels.cli._terminal import write_stderr, write_stdout
 
 _logger = logging.getLogger(__name__)
 
