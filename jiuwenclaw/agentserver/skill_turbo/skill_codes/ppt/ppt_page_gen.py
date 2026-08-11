@@ -29,6 +29,7 @@ def _extract_designer_section(
     *,
     include_charts: bool = False,
     for_content_template_fill: bool = False,
+    for_custom_content_fill: bool = False,
 ) -> str:
     """从新版 references/designer.md 提取当前生成链路需要的关键章节。
 
@@ -51,28 +52,38 @@ def _extract_designer_section(
         end = min(candidates) if candidates else len(text)
         return text[start:end].rstrip()
 
-    sections = [
-        _extract_bounded_section(
-            "### 页面内容预算契约",
-            ("\n### 阶段 4：交付",),
-        ),
-        _extract_bounded_section(
-            "## 弹性布局模式",
-            ("\n## HTML 代码规范",),
-        ),
-        _extract_bounded_section(
-            "## 页面布局规范",
-            ("\n## 视觉设计规范",),
-        ),
-        _extract_bounded_section(
-            "## 视觉设计规范",
-            ("\n## 图表与数据可视化",),
-        ),
-        _extract_bounded_section(
-            "## 关键原则",
-            ("\n## 质量控制清单",),
-        ),
-    ]
+    # custom 内容页只注入官方要求的预算契约与按需图表章，
+    # 不注入「页面布局规范」里 section/chapter 的 PART 示例，避免内容页误用。
+    if for_custom_content_fill:
+        sections = [
+            _extract_bounded_section(
+                "### 页面内容预算契约",
+                ("\n### 阶段 4：交付",),
+            ),
+        ]
+    else:
+        sections = [
+            _extract_bounded_section(
+                "### 页面内容预算契约",
+                ("\n### 阶段 4：交付",),
+            ),
+            _extract_bounded_section(
+                "## 弹性布局模式",
+                ("\n## HTML 代码规范",),
+            ),
+            _extract_bounded_section(
+                "## 页面布局规范",
+                ("\n## 视觉设计规范",),
+            ),
+            _extract_bounded_section(
+                "## 视觉设计规范",
+                ("\n## 图表与数据可视化",),
+            ),
+            _extract_bounded_section(
+                "## 关键原则",
+                ("\n## 质量控制清单",),
+            ),
+        ]
     if include_charts:
         chart_section = _extract_bounded_section(
             "## 图表与数据可视化",
@@ -95,7 +106,7 @@ def _extract_designer_section(
         logger.warning("[P8.0] designer.md 未匹配到新版关键章节")
         return ""
 
-    if for_content_template_fill:
+    if for_content_template_fill or for_custom_content_fill:
         return "\n\n".join(selected)
 
     return (
@@ -158,6 +169,16 @@ _FOOTER_BLOCK_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _P_INNER_TEXT_RE = re.compile(r"(<p\b[^>]*>)(.*?)(</p>)", re.IGNORECASE | re.DOTALL)
+_CSS_FENCE_RE = re.compile(r"```css\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
+_THEME_CONTRACT_STYLE_RE = re.compile(
+    r'<style\b[^>]*id=["\']theme-contract["\'][^>]*>.*?</style>',
+    re.IGNORECASE | re.DOTALL,
+)
+_THEME_RULES_STYLE_RE = re.compile(
+    r'<style\b[^>]*id=["\']theme-rules["\'][^>]*>.*?</style>',
+    re.IGNORECASE | re.DOTALL,
+)
+_CSS_CUSTOM_PROP_RE = re.compile(r"(--[A-Za-z0-9-]+)\s*:\s*([^;]+);")
 
 
 def _normalize_template_whitespace(text: str) -> str:
@@ -173,8 +194,11 @@ def _outline_needs_research(outline_page: str) -> bool:
 
 
 def _uses_content_template_fill(style_id: str, page_type: str, outline_page: str) -> bool:
-    """预设四风格内容页：官方 content-template 预铺后仅填槽。"""
-    if style_id not in _PRESET_STYLE_IDS:
+    """普通分支内容页：官方 content-template 预铺后仅填槽。
+
+    预设四风格走 Stage 6 §3.5；custom 走 Stage 6 §3.6。结构页不走此路径。
+    """
+    if style_id not in _PRESET_STYLE_IDS and style_id != "custom":
         return False
     if page_type in _STRUCTURAL_TEMPLATE_PAGE_TYPES:
         return False
@@ -492,6 +516,77 @@ def _validate_content_template_fill_output(seed_html: str, filled_html: str) -> 
     return True, ""
 
 
+def _css_custom_properties(css_text: str) -> str:
+    props = [
+        f"{name.strip()}: {value.strip()};"
+        for name, value in _CSS_CUSTOM_PROP_RE.findall(css_text or "")
+    ]
+    return "\n      ".join(props)
+
+
+def _extract_theme_css_slots(style_text: str) -> tuple[str, str]:
+    """从 style-custom.md 提取 Stage 5 的变量块与可选全局规则块。"""
+    fences = [block.strip() for block in _CSS_FENCE_RE.findall(style_text or "") if block.strip()]
+    if not fences:
+        return "", ""
+    variables = _css_custom_properties(fences[0])
+    rules = ""
+    if len(fences) > 1:
+        rules = fences[1]
+    else:
+        leftover = _CSS_CUSTOM_PROP_RE.sub("", fences[0])
+        leftover = re.sub(r":root\s*\{|\}\s*$", "", leftover).strip()
+        leftover = re.sub(r"\n{3,}", "\n\n", leftover).strip()
+        if leftover and "{" in leftover:
+            rules = leftover
+    return variables, rules
+
+
+def _apply_custom_theme_slots(seed_html: str, style_text: str) -> str:
+    """按 Stage 6 §3.6 从风格文件逐字填入主题槽；仅用于 custom 内容页脚手架。"""
+    variables, rules = _extract_theme_css_slots(style_text)
+    html = seed_html or ""
+    html = html.replace("{{THEME_CSS_VARIABLES}}", variables)
+    html = html.replace("{{THEME_CSS_RULES}}", rules)
+    return html
+
+
+def _style_block_unchanged(seed_html: str, filled_html: str, pattern: re.Pattern[str]) -> bool:
+    seed_block = pattern.search(seed_html or "")
+    filled_block = pattern.search(filled_html or "")
+    if not seed_block or not filled_block:
+        return False
+    return _normalize_template_whitespace(seed_block.group(0)) == _normalize_template_whitespace(
+        filled_block.group(0)
+    )
+
+
+def _validate_custom_content_template_fill_output(
+    seed_html: str,
+    filled_html: str,
+) -> tuple[bool, str]:
+    """Stage 6 §3.6：只校验官方脚手架硬约束，不另加标题文案黑名单。"""
+    if not _is_valid_html(filled_html):
+        return False, "invalid_html"
+    if _has_unfilled_placeholders(filled_html):
+        return False, "unfilled_placeholders"
+    if _normalize_template_whitespace(seed_html) == _normalize_template_whitespace(filled_html):
+        return False, "seed_not_modified"
+    if "{{PAGE_CONTENT}}" in (filled_html or ""):
+        return False, "page_content_unfilled"
+    if not _style_block_unchanged(seed_html, filled_html, _THEME_CONTRACT_STYLE_RE):
+        return False, "theme_contract_changed"
+    if not _style_block_unchanged(seed_html, filled_html, _THEME_RULES_STYLE_RE):
+        return False, "theme_rules_changed"
+    if "@layer utilities" in (seed_html or "") and "@layer utilities" not in (filled_html or ""):
+        return False, "utilities_layer_missing"
+    if not _validate_slide_dom(filled_html):
+        return False, "invalid_dom"
+    if not _validate_chart_height_chain(filled_html):
+        return False, "invalid_chart_height_chain"
+    return True, ""
+
+
 def _build_content_layout_template(page_type: str) -> str:
     layout = _PAGE_LAYOUT_TEMPLATES.get(page_type, "")
     if not layout:
@@ -578,6 +673,84 @@ def _build_content_template_fill_prompt(
         "## 预铺模板 HTML（只填槽，勿重写）\n"
         f"{seed_html}\n"
     )
+
+
+def _build_custom_content_template_fill_prompt(
+    *,
+    page_number: int,
+    style_text: str,
+    outline_page: str,
+    research_page: str,
+    outline_full: str,
+    seed_html: str,
+    image_map_page: str = "",
+    designer_md_text: str = "",
+    user_query: str = "",
+) -> str:
+    """custom 内容页：对齐 Stage 6 §3.6 与 generate-slide-designer-tasks 通用规范。"""
+    user_query_section = ""
+    if user_query:
+        user_query_section = (
+            "## 用户原始 query（用于指导内容方向和视觉风格要求）\n"
+            f"{user_query}\n"
+            f"⚠️ 用户 query 中的页数/总量要求已由大纲规划完成，本步骤**仅填充第 {page_number} 页内容页**。\n\n"
+        )
+    outline_full_section = ""
+    if outline_full.strip() and outline_full.strip() != outline_page.strip():
+        outline_full_section = (
+            "### 大纲全文（仅用于核对本页章节与上下文，不得混入其他页内容）\n"
+            f"{outline_full}\n\n"
+        )
+    page_type = _detect_page_type(outline_page)
+    designer_section = ""
+    if designer_md_text:
+        designer_md = _extract_designer_section(
+            designer_md_text,
+            include_charts=page_type in _CHART_CANDIDATE_TYPES,
+            for_custom_content_fill=True,
+        )
+        if designer_md:
+            designer_section = (
+                "\n## skill designer 约束（写 HTML 前先完成页面内容预算；"
+                "图表候选页另读图表章节）\n"
+                f"{designer_md}\n"
+            )
+    return (
+        f"{user_query_section}"
+        f"## 任务：填充第 {page_number} 页 custom 内容页官方脚手架\n"
+        "style_id=`custom`，模板=`references/styles/custom/content-template.html`。\n"
+        "对齐 Stage 6 §3.6。\n\n"
+        "## 填充规则（Stage 6 §3.6）\n"
+        "1. 已预铺 `custom/content-template.html`：逐字保留 `.ppt-slide` 1280×720、"
+        "`overflow: hidden`、`@layer utilities` 安全块与 `theme-contract` 插槽\n"
+        "2. `{{THEME_CSS_VARIABLES}}` 与 `{{THEME_CSS_RULES}}` 已从风格文件逐字填入"
+        "（风格文件未提供规则块时该槽为空）；不得逐页重新选择全局颜色或字体，"
+        "不得改写这两个 style 块\n"
+        "3. `{{PAGE_TITLE}}` 填写本页大纲标题；页面全部内容（含标题、正文、页脚）"
+        "在 `{{PAGE_CONTENT}}` 内依据风格文件设计\n"
+        "4. 新增样式只引用风格文件已定义变量，不得另立视觉权威，不得覆盖 `@layer utilities`，"
+        "不得用 `*`、`body` 或根 `:root` 重定义颜色/字体\n"
+        "5. 图表候选页必须优先激活模板内 `CHART_SCAFFOLD`；禁止额外手写第二套 `echarts.init`；"
+        "非图表页保留注释\n"
+        "6. 完成后不得残留任何 `{{[A-Z][A-Z0-9_]*}}`\n"
+        "7. 直接输出完整 HTML，禁止 Markdown 代码块包裹与解释文字\n\n"
+        "## 可见文字来源契约（generate-slide-designer-tasks）\n"
+        "所有观众可见文字只能来自用户原始需求、outline.md、本页 research-P{N}.md "
+        "或已批准模板的固定文案。"
+        "禁止为营造氛围自行添加与叙事无关的英文、随机数字或制作编号。\n\n"
+        "## 风格文件（本次演示唯一视觉权威）\n"
+        f"{style_text}\n\n"
+        "## 大纲 — 本页规划\n"
+        f"{outline_page}\n\n"
+        f"{outline_full_section}"
+        "## 研究报告 — 本页素材\n"
+        f"{research_page}\n"
+        f"{_build_image_section(image_map_page)}\n"
+        f"{designer_section}"
+        "## 预铺模板 HTML（主题槽已按风格文件填入，只填 PAGE_TITLE / PAGE_CONTENT）\n"
+        f"{seed_html}\n"
+    )
+
 
 _VISIBLE_PAGE_NUMBER_RULE = (
     "- 禁止页脚出现页码（所有页型）：所有页面（content / cover / agenda / section / "
@@ -2962,14 +3135,15 @@ class PageWorkerNode(PlanNode):
                 "\n"
                 "### 执行流程（N 页 asyncio.gather 并发）\n"
                 "对每一页独立执行：\n"
-                "1. 若 style_id ∈ 预设四风格∪custom 且页型为 agenda：读取官方 "
-                "`references/styles/{style_id}/agenda-template.html` 预铺，LLM 仅替换 `{{}}` "
-                "占位符；残留占位符判失败；不走整页自由生成\n"
-                "2. 其余页：用该页 outline 片段 + research 片段 + 风格规范 + 视觉与布局硬约束构造 prompt，"
-                "调 LLM 生成 HTML；剥 ```html 包裹 → 校验（含 <!DOCTYPE> + ppt-slide 容器）→ write_file 落盘\n"
+                "1. 若 style_id ∈ 预设四风格∪custom 且页型为 agenda/cover/ending/section："
+                "读取官方结构页模板预铺，LLM 仅替换 `{{}}`；残留占位符判失败\n"
+                "2. 若为内容页且 style_id ∈ 预设四风格∪custom：读取官方 content-template 预铺填槽"
+                "（custom 先按风格文件逐字填入 THEME_CSS 槽，再只填 PAGE_TITLE/PAGE_CONTENT）\n"
+                "3. 其余页：用该页 outline 片段 + research 片段 + 风格规范构造 prompt 生成 HTML\n"
+                "   - 剥 ```html 包裹 → 校验 → write_file 落盘\n"
                 "   - 失败按 gen_retry_round 重试（仅本页）\n"
                 "   - 重试后仍失败 → 进 missing_pages\n"
-                "3. 成功页只保留一个 ppt-slide 容器并直接落盘；生成后不再调用 LLM 核查、搜索或整页重写\n"
+                "4. 成功页只保留一个 ppt-slide 容器并直接落盘；生成后不再调用 LLM 核查、搜索或整页重写\n"
                 "\n"
                 "### 失败兜底\n"
                 "- 生成 LLM 调用 raise / 返回空 / HTML 校验失败：进 missing_pages\n"
@@ -3251,7 +3425,7 @@ class PageWorkerNode(PlanNode):
         return await self._generate_structural_template_fill(ctx, "agenda")
 
     async def _generate_content_template_fill(self, ctx: PageGenContext) -> str:
-        """预设四风格内容页：官方 content-template 预铺 + 仅填三处占位符。"""
+        """普通分支内容页：官方 content-template 预铺后填槽。"""
         if not ctx.pptx_root:
             logger.error("[P8.1] 内容页填槽缺少 pptx_root page=%d", ctx.page_num)
             return ""
@@ -3271,25 +3445,47 @@ class PageWorkerNode(PlanNode):
             )
             return ""
 
+        is_custom = ctx.style_id == "custom"
+        if is_custom:
+            seed_html = _apply_custom_theme_slots(seed_html, ctx.style_text)
+            prompt = _build_custom_content_template_fill_prompt(
+                page_number=ctx.page_num,
+                style_text=ctx.style_text,
+                outline_page=ctx.outline_page,
+                research_page=ctx.research_page,
+                outline_full=ctx.outline_full,
+                seed_html=seed_html,
+                image_map_page=ctx.image_map_page,
+                designer_md_text=ctx.designer_md_text,
+                user_query=ctx.user_query,
+            )
+            system_prompt = (
+                "你是 PPT custom 内容页脚手架填充师。主题 CSS 已按风格文件填入；"
+                "只替换 PAGE_TITLE 与 PAGE_CONTENT，直接输出完整 HTML 原文，不输出任何解释。"
+            )
+        else:
+            prompt = _build_content_template_fill_prompt(
+                page_number=ctx.page_num,
+                style_id=ctx.style_id,
+                style_text=ctx.style_text,
+                outline_page=ctx.outline_page,
+                research_page=ctx.research_page,
+                outline_full=ctx.outline_full,
+                seed_html=seed_html,
+                image_map_page=ctx.image_map_page,
+                designer_md_text=ctx.designer_md_text,
+                user_query=ctx.user_query,
+                total_pages=ctx.total_pages,
+            )
+            system_prompt = (
+                "你是 PPT 内容页模板填充师。只替换模板中的 PAGE_TITLE、PAGE_CONTENT、PAGE_FOOTER，"
+                "直接输出完整 HTML 原文，不输出任何解释。"
+            )
+
         try:
             result = await self.stream_llm_collect(
-                prompt=_build_content_template_fill_prompt(
-                    page_number=ctx.page_num,
-                    style_id=ctx.style_id,
-                    style_text=ctx.style_text,
-                    outline_page=ctx.outline_page,
-                    research_page=ctx.research_page,
-                    outline_full=ctx.outline_full,
-                    seed_html=seed_html,
-                    image_map_page=ctx.image_map_page,
-                    designer_md_text=ctx.designer_md_text,
-                    user_query=ctx.user_query,
-                    total_pages=ctx.total_pages,
-                ),
-                system_prompt=(
-                    "你是 PPT 内容页模板填充师。只替换模板中的 PAGE_TITLE、PAGE_CONTENT、PAGE_FOOTER，"
-                    "直接输出完整 HTML 原文，不输出任何解释。"
-                ),
+                prompt=prompt,
+                system_prompt=system_prompt,
                 node_name=f"p8_1_content_fill_{ctx.page_num}",
                 concurrent=True,
             )
@@ -3305,7 +3501,10 @@ class PageWorkerNode(PlanNode):
         html = _fix_echarts_svg_renderer(html)
         html = _strip_unsupported_fullpage_overlays(html)
         html = _strip_chart_header_unit(html)
-        ok, reason = _validate_content_template_fill_output(seed_html, html)
+        if is_custom:
+            ok, reason = _validate_custom_content_template_fill_output(seed_html, html)
+        else:
+            ok, reason = _validate_content_template_fill_output(seed_html, html)
         if not ok:
             logger.warning(
                 "[P8.1] 内容页填槽校验失败 page=%d style=%s reason=%s",
