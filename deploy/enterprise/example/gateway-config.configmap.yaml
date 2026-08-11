@@ -154,6 +154,12 @@ data:
       max_iterations: 10
       model_name: ${MODEL_NAME:-deepseek-chat}
       skill_mode: all
+      # 同轮多个受控 tool 的批次内并发（AGENT_RUNTIME 下不走 update_config merge，需写在部署配置中）
+      concurrency:
+        enabled: true
+        tool_limits:
+          web_search: 10
+          task_tool: 10
       # 禁用的工具列表，添加 fork_agent 可避免并行调用触发 API 限流
       # 禁用后用户需使用 spawn_subagent 替代
       # disabled_tools: ["fork_agent"]
