@@ -557,6 +557,17 @@ def build_member_rails(
     # SysOperationRail is mounted declaratively via agent_configurator
     # (core.sys_operation). Imperative mount here would double-register tools.
 
+    # Every team member gets the current date via environment_context.
+    # Full RuntimePromptRail is not mounted for members (its workspace section
+    # carries main-agent paths/semantics); sections=("time",) injects date only.
+    try:
+        rails_list.append(RuntimePromptRail(language=language, sections=("time",)))
+        logger.info(
+            "[TeamRuntime] RuntimePromptRail(time-only) created: language=%s", language
+        )
+    except Exception as exc:
+        logger.warning("[TeamRuntime] RuntimePromptRail(time-only) failed: %s", exc)
+
     # Leader-only structured ask tool.
     if role == "leader":
         try:
