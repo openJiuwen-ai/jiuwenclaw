@@ -162,7 +162,8 @@ def test_extract_legacy_params_context_mode_takes_priority_over_payload() -> Non
 
     out = _extract_legacy_params(payload, context=context, require_schedule=True)
 
-    assert out["mode"] == "agent"
+    # 铁律 1：context.mode=agent.fast 经 coerce_cron_job_mode 归一到新 canonical
+    assert out["mode"] == "agent.work.normal"
 
 
 def test_extract_legacy_params_inherits_context_mode_when_missing() -> None:
@@ -174,7 +175,8 @@ def test_extract_legacy_params_inherits_context_mode_when_missing() -> None:
 
     out = _extract_legacy_params(payload, context=context, require_schedule=True)
 
-    assert out["mode"] == "team"
+    # 铁律 1：context.mode=team 经 coerce_cron_job_mode 归一到新 canonical
+    assert out["mode"] == "team.work.normal"
 
 
 def test_extract_legacy_params_defaults_to_agent_without_context_mode() -> None:
@@ -186,7 +188,8 @@ def test_extract_legacy_params_defaults_to_agent_without_context_mode() -> None:
 
     out = _extract_legacy_params(payload, context=context, require_schedule=True)
 
-    assert out["mode"] == "agent"
+    # 铁律 1：默认 agent 经 coerce_cron_job_mode 归一到新 canonical
+    assert out["mode"] == "agent.work.normal"
 
 
 def test_extract_legacy_params_passthrough_unknown_mode() -> None:
