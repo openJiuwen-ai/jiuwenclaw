@@ -38,6 +38,9 @@ from openjiuwen.harness.rails import (
 from openjiuwen.harness.rails.evolution import EvolutionReviewRuntime
 
 from jiuwenswarm.agents.swarm.context import SwarmBuildContext
+from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
+    merge_evolution_disabled_skills,
+)
 from jiuwenswarm.server.runtime.skill import load_execution_disabled_skills
 
 logger = logging.getLogger(__name__)
@@ -472,7 +475,9 @@ def build_team_skill_evolution_rail(
             auto_save=inp.auto_save,
             review_trigger=inp.review_trigger,
             team_id=inp.team_id,
-            disabled_skills=load_execution_disabled_skills(),
+            disabled_skills=merge_evolution_disabled_skills(
+                load_execution_disabled_skills()
+            ),
         )
         rail.bind_swarm_context(
             channel=inp.channel,
@@ -657,7 +662,9 @@ def build_member_skill_evolution_rail(
             review_runtime=review_runtime,
             language=inp.language,
             auto_save=True,
-            disabled_skills=load_execution_disabled_skills(),
+            disabled_skills=merge_evolution_disabled_skills(
+                load_execution_disabled_skills()
+            ),
         )
         has_team_trajectory_sink = inp.trajectory_registry is not None and bool(inp.team_id)
         if has_team_trajectory_sink:
