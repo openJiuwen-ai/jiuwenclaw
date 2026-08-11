@@ -530,16 +530,20 @@ async def test_create_instance_keeps_workspace_root_separate_from_project_dir(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
-    adapter = JiuWenSwarmDeepAdapter()
-    # Only a session-scoped adapter builds its own DeepAgent; the root adapter
-    # defers that to ``ensure_instance`` so the chat path does not pay for it.
-    adapter.mark_as_session_scoped("sess_a2x_workspace_test")
     workspace_dir = tmp_path / "workspace"
     project_dir = tmp_path / "project"
     workspace_dir.mkdir()
     project_dir.mkdir()
+    # Workspace root comes from get_agent_workspace_dir() (constructor), not
+    # react.workspace_dir; project_dir is supplied via create_instance overrides.
+    monkeypatch.setattr(interface_module, "get_agent_workspace_dir", lambda: str(workspace_dir))
+    monkeypatch.delenv("AGENT_RUNTIME", raising=False)
+
+    adapter = JiuWenSwarmDeepAdapter()
+    # Only a session-scoped adapter builds its own DeepAgent; the root adapter
+    # defers that to ``ensure_instance`` so the chat path does not pay for it.
+    adapter.mark_as_session_scoped("sess_a2x_workspace_test")
     config_base = _make_config("teamleader")
-    config_base["react"]["workspace_dir"] = str(workspace_dir)
 
     monkeypatch.setattr(interface_module, "get_config", lambda: config_base)
     created_instance = MagicMock(name="deep_agent", ensure_initialized=AsyncMock())

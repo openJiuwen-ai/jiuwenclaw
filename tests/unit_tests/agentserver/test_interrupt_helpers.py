@@ -126,7 +126,13 @@ def _scene_hook_input(normalized_tool_name: str, user_input):
     )
 
 
-def _permission_scene_hook():
+def _permission_scene_hook(monkeypatch: pytest.MonkeyPatch):
+    # build_permission_rail reads the process-effective permissions config, not
+    # the unused ``config`` argument — enable it explicitly for these unit tests.
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.rails.permissions.config_loader.get_effective_permissions_config",
+        lambda **_kwargs: {"enabled": True, "tools": {}, "rules": []},
+    )
     rail = build_permission_rail({"permissions": {"enabled": True}})
     assert rail is not None
     hook = rail._host.permission_scene_hook
@@ -134,7 +140,7 @@ def _permission_scene_hook():
     return hook
 
 
-def test_scene_hook_approves_ask_user_on_resume():
+def test_scene_hook_approves_ask_user_on_resume(monkeypatch: pytest.MonkeyPatch):
     """Regression for issue #1976.
 
     The permission rail intercepts every tool. On resume it would otherwise
@@ -142,7 +148,7 @@ def test_scene_hook_approves_ask_user_on_resume():
     interrupt, making the option card re-pop forever. The scene hook must
     approve ask_user so its answer reaches the model.
     """
-    hook = _permission_scene_hook()
+    hook = _permission_scene_hook(monkeypatch)
     resume_answer = {"answers": {"__free_text__": "数据处理"}, "original_request": "..."}
 
     outcome = asyncio.run(hook(_scene_hook_input("ask_user", resume_answer)))
@@ -150,18 +156,18 @@ def test_scene_hook_approves_ask_user_on_resume():
     assert outcome == ("approve",)
 
 
-def test_scene_hook_approves_ask_user_on_first_pass():
-    hook = _permission_scene_hook()
+def test_scene_hook_approves_ask_user_on_first_pass(monkeypatch: pytest.MonkeyPatch):
+    hook = _permission_scene_hook(monkeypatch)
 
     outcome = asyncio.run(hook(_scene_hook_input("ask_user", None)))
 
     assert outcome == ("approve",)
 
 
-def test_scene_hook_leaves_other_tools_to_engine():
+def test_scene_hook_leaves_other_tools_to_engine(monkeypatch: pytest.MonkeyPatch):
     """Non-interactive tools must still fall through to the tiered engine
     (returns ``None``) when no owner-scope context is set."""
-    hook = _permission_scene_hook()
+    hook = _permission_scene_hook(monkeypatch)
 
     outcome = asyncio.run(hook(_scene_hook_input("bash", None)))
 

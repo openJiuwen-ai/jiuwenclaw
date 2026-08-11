@@ -21,6 +21,20 @@ def sessions_dir(tmp_path, monkeypatch):
         "jiuwenswarm.server.runtime.session.session_metadata.get_agent_sessions_dir",
         lambda: d,
     )
+    # 进程合一：_sync_chat_request_metadata 经 _sessions_dir_for_request →
+    # resolve_tenant_sessions_dir 写盘；fixture 需与之对齐，避免读写分叉。
+    monkeypatch.setattr(
+        "jiuwenswarm.server.agent_ws_server._sessions_dir_for_request",
+        lambda request: d,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.agent_ws_server.resolve_tenant_sessions_dir",
+        lambda *args, **kwargs: d,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.common.utils.resolve_tenant_sessions_dir",
+        lambda *args, **kwargs: d,
+    )
     # 清空内存缓存，避免跨用例污染（不同用例可能复用同一 session_id）
     from jiuwenswarm.server.runtime.session.session_metadata import _METADATA_CACHE
     _METADATA_CACHE.clear()
@@ -2071,7 +2085,13 @@ class TestSetSessionPinnedQueuedWriteRace:
         old_write_started = threading.Event()
         release_old_write = threading.Event()
 
-        def _delayed_write(session_id, metadata, preserve_pin_fields=False):
+        def _delayed_write(
+            session_id,
+            metadata,
+            preserve_pin_fields=False,
+            *,
+            sessions_root=None,
+        ):
             if session_id == "s_async_pin" and metadata.get("model") == "old-queued-write":
                 old_write_started.set()
                 assert release_old_write.wait(5), "old queued write was not released"
@@ -2079,6 +2099,7 @@ class TestSetSessionPinnedQueuedWriteRace:
                 session_id,
                 metadata,
                 preserve_pin_fields=preserve_pin_fields,
+                sessions_root=sessions_root,
             )
 
         monkeypatch.setattr(sm, "_write_metadata_sync", _delayed_write)

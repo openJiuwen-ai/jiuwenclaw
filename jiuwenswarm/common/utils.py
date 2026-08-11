@@ -27,6 +27,7 @@ Runtime layout:
 内置模板位于包内 ``jiuwenswarm/resources/``（含 ``agent/`` 下各技能模板以及 ``skills_state.json``）。
 """
 
+import asyncio
 import ctypes
 import hashlib
 import json
@@ -37,8 +38,10 @@ import datetime
 import shutil
 import socket
 import time
+from collections import OrderedDict
+from collections.abc import Hashable
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal, Optional
 import logging
 from logging.handlers import BaseRotatingHandler
@@ -979,6 +982,33 @@ def cleanup_team_files(workspace_dir: Path) -> None:
                 logger.warning(f"[Cleanup] Failed to remove legacy team database file: {e}")
 
 
+def update_config() -> None:
+    """Merge new template fields into user config.yaml, preserving user values."""
+    package_root = _find_package_root()
+    if not package_root:
+        raise RuntimeError("package root not found")
+
+    workspace_dir = get_user_workspace_dir()
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    resources_dir = package_root / "resources"
+    config_yaml_src_candidates = [
+        resources_dir / "config.yaml",
+        package_root / "config" / "config.yaml",
+    ]
+    config_yaml_src = next((p for p in config_yaml_src_candidates if p.exists()), None)
+    if not config_yaml_src:
+        raise RuntimeError(
+            "config.yaml template not found; tried: "
+            + ", ".join(str(p) for p in config_yaml_src_candidates)
+        )
+
+    config_yaml_dest = workspace_dir / "config" / "config.yaml"
+    from jiuwenswarm.common.config import migrate_config_from_template
+
+    migrate_config_from_template(config_yaml_src, config_yaml_dest)
+
+
 def prepare_workspace(
     overwrite: bool = True,
     preferred_language: Optional[str] = None,
@@ -1489,6 +1519,105 @@ def get_agent_root_dir() -> Path:
     return get_user_workspace_dir() / "agent"
 
 
+def get_agent_root_relative_dir() -> Path:
+    """Get the agent root relative path under user workspace."""
+    return Path("agent")
+
+
+def get_agent_workspace_relative_dir() -> Path:
+    """Get the agent workspace relative path under user workspace."""
+    return get_agent_root_relative_dir() / "workspace"
+
+
+def get_agent_sessions_relative_dir() -> Path:
+    """Get the agent sessions relative path under user workspace."""
+    return get_agent_root_relative_dir() / "sessions"
+
+
+def get_multi_tenant_user_workspace_dir(
+    service_id: str | None, agent_id: str | None
+) -> Path | None:
+    """Get multi-tenant user workspace directory path.
+
+    Path format: <user_workspace>/service_{service_id}/agent_{agent_id}
+
+    二者皆空时返回 ``None``（供单租户分支判断）。仅一侧有值时返回 ``service/.../agents`` 等
+    不完整路径，**不要**用于 Skill 白名单；租户工作区请用 ``get_tenant_agent_*`` 系列（要求双 ID）。
+    Only meaningful for enterprise (AGENT_RUNTIME) multi-tenant isolation.
+    """
+    sid = _normalize_tenant_id(service_id)
+    aid = _normalize_tenant_id(agent_id)
+    if not sid and not aid:
+        return None
+    workspace_dir = get_user_workspace_dir()
+    workspace_dir = workspace_dir / f"service_{sid}" if sid else workspace_dir / "service"
+    workspace_dir = workspace_dir / f"agent_{aid}" if aid else workspace_dir / "agents"
+    return workspace_dir
+
+
+def _normalize_tenant_id(value: str | None) -> str:
+    return str(value or "").strip()
+
+
+def _require_tenant_ids(service_id: str | None, agent_id: str | None) -> tuple[str, str]:
+    """白名单 / 租户工作区要求 ``service_id`` 与 ``agent_id`` 均非空."""
+    sid = _normalize_tenant_id(service_id)
+    aid = _normalize_tenant_id(agent_id)
+    if not sid or not aid:
+        raise ValueError(
+            f"tenant id required: agent_id={agent_id!r}, service_id={service_id!r}"
+        )
+    return sid, aid
+
+
+def get_tenant_agent_workspace_dir(
+    service_id: str | None, agent_id: str | None,
+) -> Path:
+    """多租户 DeepAgent 工作区：``<tenant>/agent/workspace``.
+
+    ``service_id`` / ``agent_id`` 任一缺失时抛 ``ValueError``（不返回 ``None``）。
+    """
+    sid, aid = _require_tenant_ids(service_id, agent_id)
+    base = get_multi_tenant_user_workspace_dir(sid, aid)
+    if base is None:
+        raise ValueError(
+            f"get_multi_tenant_user_workspace_dir returned None for service_id={sid!r}, agent_id={aid!r}"
+        )
+    return base / get_agent_workspace_relative_dir()
+
+
+# 兼容旧命名（上游 jiuwenclaw_workspace）
+get_tenant_agent_jiuwenclaw_workspace_dir = get_tenant_agent_workspace_dir
+
+
+def get_tenant_agent_skills_dirs(
+    service_id: str | None, agent_id: str | None,
+) -> list[Path]:
+    """多租户 skills 目录（与 ``JiuWenSwarm`` / ``SkillManager`` 落盘路径一致）.
+
+    要求 ``service_id`` 与 ``agent_id`` 均非空。单租户请用 ``get_multi_tenant_skill_dirs``
+    或 ``get_agent_skills_dir()``。
+    """
+    workspace = get_tenant_agent_workspace_dir(service_id, agent_id)
+    return [workspace / "skills"]
+
+
+def get_multi_tenant_skill_dirs(
+    service_id: str | None, agent_id: str | None,
+) -> list[Path]:
+    """Resolve the skills directory list for multi-tenant / single-tenant mode.
+
+    - Multi-tenant (both ``service_id`` / ``agent_id`` provided): returns
+      ``[<tenant>/agent/workspace/skills]``.
+    - Single-tenant (both empty): returns ``[get_agent_skills_dir()]``.
+    """
+    sid = _normalize_tenant_id(service_id)
+    aid = _normalize_tenant_id(agent_id)
+    if sid or aid:
+        return get_tenant_agent_skills_dirs(service_id, agent_id)
+    return [get_agent_skills_dir()]
+
+
 def get_agent_home_dir() -> Path:
     return get_agent_root_dir() / "home"
 
@@ -1525,8 +1654,81 @@ def get_interactions_dir() -> Path:
 
 
 def get_cron_jobs_path() -> Path:
-    """Canonical path for cron_jobs.json shared by gateway and agentserver."""
+    """Legacy global cron_jobs.json (pre-tenant Gateway). Prefer per-tenant helpers."""
     return get_user_workspace_dir() / "agent" / "home" / "cron_jobs.json"
+
+
+def resolve_gateway_cron_jobs_path(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> Path:
+    """Gateway per-tenant cron store: ``gateway/cron/service_{sid}/agent_{aid}/cron_jobs.json``."""
+    sid = str(service_id or "default").strip() or "default"
+    aid = str(agent_id or "default").strip() or "default"
+    return (
+        get_user_workspace_dir()
+        / "gateway"
+        / "cron"
+        / f"service_{sid}"
+        / f"agent_{aid}"
+        / "cron_jobs.json"
+    )
+
+
+def resolve_tenant_agent_root_dir(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> Path:
+    """``service_{sid}/agent_{aid}/agent`` under the user workspace."""
+    sid = normalize_tenant_scope_id(service_id)
+    aid = normalize_tenant_scope_id(agent_id)
+    base = get_multi_tenant_user_workspace_dir(sid, aid)
+    if base is None:
+        base = get_multi_tenant_user_workspace_dir("default", "default")
+    if base is None:
+        raise RuntimeError(
+            f"failed to resolve tenant agent root (service_id={sid!r}, agent_id={aid!r})"
+        )
+    return base / "agent"
+
+
+def resolve_tenant_sessions_dir(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> Path:
+    """``service_{sid}/agent_{aid}/agent/sessions`` for a tenant pair."""
+    return resolve_tenant_agent_root_dir(service_id, agent_id) / "sessions"
+
+
+def resolve_cron_tenant_scope(
+    *,
+    service_id: str | None = None,
+    agent_id: str | None = None,
+    metadata: dict | None = None,
+    params: dict | None = None,
+    log_prefix: str = "[Cron]",
+) -> tuple[str, str]:
+    """Resolve cron tenant ids; missing values fall back to default/default."""
+    sid = service_id
+    aid = agent_id
+    if sid is None and isinstance(metadata, dict):
+        sid = metadata.get("service_id")
+    if aid is None and isinstance(metadata, dict):
+        aid = metadata.get("agent_id")
+    if sid is None and isinstance(params, dict):
+        sid = params.get("service_id")
+    if aid is None and isinstance(params, dict):
+        aid = params.get("agent_id")
+    sid_s = str(sid).strip() if sid is not None else ""
+    aid_s = str(aid).strip() if aid is not None else ""
+    if not sid_s or not aid_s:
+        logger.warning(
+            "%s missing service_id/agent_id; fallback to default/default (sid=%r aid=%r)",
+            log_prefix,
+            sid,
+            aid,
+        )
+    return sid_s or "default", aid_s or "default"
 
 
 def get_deepagent_todo_dir() -> Path:
@@ -1683,6 +1885,14 @@ def get_checkpoint_dir() -> Path:
 
 
 def get_logs_dir() -> Path:
+    """Get the logs directory path.
+
+    Prefer ``LOG_ROOT_PATH`` when set (e.g. container-local disk instead of NFS
+    workspace). Otherwise use ``~/.jiuwenswarm/agent/.logs`` after legacy migration.
+    """
+    log_root_path = os.getenv("LOG_ROOT_PATH", "").strip()
+    if log_root_path:
+        return Path(log_root_path).expanduser().resolve()
     _migrate_legacy_checkpoint_and_logs()
     return get_agent_root_dir() / ".logs"
 
@@ -1788,6 +1998,9 @@ def _fingerprint(value: str) -> str:
 # 导致跨日志关联失效（如 stream_logger._mask_secrets 先脱敏，_write_raw 再脱敏）。
 _ALREADY_MASKED_PATTERN = re.compile(rf"^{re.escape(_SENSITIVE_MASK)}(\(fp:[0-9a-f]{{8}}\))?$")
 
+# LogMaskingEngine 回退失败计数（避免在日志 Filter 热路径上静默吞异常）。
+_sanitize_engine_fallback_failures = 0
+
 
 def _is_already_masked(value: Any) -> bool:
     """判断 value 是否已是脱敏产物（纯掩码或带指纹），避免重复脱敏。"""
@@ -1819,6 +2032,26 @@ def _masked_with_fp(value: Any) -> str:
 def _sanitize_log_text(text: str) -> str:
     if not text:
         return text
+
+    # 企业版：若已从 Gateway DB 下发脱敏规则，优先走 LogMaskingEngine。
+    if os.getenv("AGENT_RUNTIME", "").strip():
+        try:
+            from jiuwenswarm.infrastructure.log_masking.engine import LogMaskingEngine
+
+            engine = LogMaskingEngine.get_instance()
+            if engine.uses_external_rules:
+                return engine.sanitize(text)
+        except Exception as exc:
+            # 回退到本地正则脱敏。不能走 logging：本函数会被 SensitiveDataFilter 调用，
+            # 写日志会递归进脱敏路径。仅首次 stderr 提示，避免静默吞掉异常。
+            global _sanitize_engine_fallback_failures
+            _sanitize_engine_fallback_failures += 1
+            if _sanitize_engine_fallback_failures == 1:
+                print(
+                    "[jiuwenswarm] LogMaskingEngine sanitize failed, "
+                    f"falling back to local masking: {exc!r}",
+                    file=sys.stderr,
+                )
 
     masked = text
     masked = _DATA_IMAGE_PATTERN.sub("data:image/*;base64,******", masked)
@@ -1977,13 +2210,22 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     - ``jiuwenswarm.agents.*`` 或 ``jiuwenswarm.server.*`` → agent_server.log
     - 其余 ``jiuwenswarm.*``（含 ``jiuwenswarm.app``、gateway、evolution、utils 等）→ gateway.log
 
-    所有分类日志同时写入 ``full.log``。输出目录：``~/.jiuwenswarm/agent/.logs/``。
+    所有分类日志同时写入 ``full.log``。输出目录默认 ``~/.jiuwenswarm/agent/.logs/``；
+    也可通过环境变量 ``LOG_ROOT_PATH`` 覆盖。
 
     级别由 ``config.yaml`` 的 ``logging`` 段控制；环境变量 ``LOG_LEVEL`` 仅覆盖**控制台**级别
     （``log_level`` 参数为 ``None`` 时）。若传入 ``log_level``（如单测），则控制台与各文件级别均为该值。
+
+    环境变量 ``LOG_TO_FILE_ENABLED`` 设为 ``false`` 时，跳过所有文件 handler 的创建与
+    日志目录写入，仅保留控制台输出。
     """
+    from jiuwenswarm.infrastructure.config import Settings
+
+    settings = Settings()
     logs_root = get_logs_dir()
-    logs_root.mkdir(parents=True, exist_ok=True)
+    file_logging_enabled = settings.log_to_file_enabled
+    if file_logging_enabled:
+        logs_root.mkdir(parents=True, exist_ok=True)
 
     levels = _resolve_logging_levels(log_level)
 
@@ -1998,7 +2240,9 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
         fmt="%(asctime)s.%(msecs)03d %(levelname)s %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    privacy_filter = SensitiveDataFilter()
+    privacy_filter: Optional[SensitiveDataFilter] = None
+    if settings.log_masking_enabled:
+        privacy_filter = SensitiveDataFilter()
 
     def _add_rotating(
         filename: str,
@@ -2014,28 +2258,32 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
         )
         h.setLevel(level)
         h.setFormatter(custom_formatter if custom_formatter is not None else formatter)
-        h.addFilter(privacy_filter)
+        if privacy_filter is not None:
+            h.addFilter(privacy_filter)
         if name_filter is not None:
             h.addFilter(name_filter)
         root.addHandler(h)
 
-    _add_rotating("gateway.log", levels.gateway, _ComponentNameFilter("gateway"))
-    _add_rotating("channel.log", levels.channel, _ComponentNameFilter("channel"))
-    _add_rotating("agent_server.log", levels.agent_server,
-        _CompositeFilter([_ComponentNameFilter("agent_server"), _ComponentNameFilter("permissions")]))
-    _add_rotating("full.log", levels.full, None)
-    json_formatter = JsonOnlyFormatter()
-    _add_rotating("permissions.log", levels.agent_server, _ComponentNameFilter("permissions"), json_formatter)
+    if file_logging_enabled:
+        _add_rotating("gateway.log", levels.gateway, _ComponentNameFilter("gateway"))
+        _add_rotating("channel.log", levels.channel, _ComponentNameFilter("channel"))
+        _add_rotating("agent_server.log", levels.agent_server,
+            _CompositeFilter([_ComponentNameFilter("agent_server"), _ComponentNameFilter("permissions")]))
+        _add_rotating("full.log", levels.full, None)
+        json_formatter = JsonOnlyFormatter()
+        _add_rotating("permissions.log", levels.agent_server, _ComponentNameFilter("permissions"), json_formatter)
 
     stream_handler = logging.StreamHandler()
     stream_handler.setLevel(levels.console)
     stream_handler.setFormatter(formatter)
-    stream_handler.addFilter(privacy_filter)
+    if privacy_filter is not None:
+        stream_handler.addFilter(privacy_filter)
     root.addHandler(stream_handler)
 
     # 源头脱敏：覆盖 jiuwenswarm 命名空间之外的第三方 logger（openjiuwen/openai/
     # httpx 等），在 LogRecord 创建时统一脱敏，保证任何来源的 api_key 都不明文落盘。
-    install_source_record_masking()
+    if privacy_filter is not None:
+        install_source_record_masking()
     return root
 
 
@@ -2124,6 +2372,188 @@ def wait_for_pid_exit(pid: int, timeout: float = 60.0) -> None:
                 return
             time.sleep(0.5)
     logger.warning("process %d did not exit within %.1f seconds", pid, timeout)
+
+
+
+_FILE_HANDLER_LEVEL_MAP: dict[str, str] = {
+    "gateway.log": "gateway",
+    "channel.log": "channel",
+    "agent_server.log": "agent_server",
+    "full.log": "full",
+    "permissions.log": "agent_server",
+}
+
+
+def update_log_levels(
+    log_level: Optional[str] = None,
+    *,
+    console_level: Optional[str] = None,
+    gateway: Optional[str] = None,
+    channel: Optional[str] = None,
+    agent_server: Optional[str] = None,
+    full: Optional[str] = None,
+) -> logging.Logger:
+    """运行时动态更新 ``jiuwenswarm`` 根日志及各 handler 的级别，无需重建 handler。"""
+    levels = _resolve_logging_levels(log_level)
+
+    if console_level is not None:
+        levels = replace(levels, console=_parse_log_level(console_level, levels.console))
+    if gateway is not None:
+        levels = replace(levels, gateway=_parse_log_level(gateway, levels.gateway))
+    if channel is not None:
+        levels = replace(levels, channel=_parse_log_level(channel, levels.channel))
+    if agent_server is not None:
+        levels = replace(levels, agent_server=_parse_log_level(agent_server, levels.agent_server))
+    if full is not None:
+        levels = replace(levels, full=_parse_log_level(full, levels.full))
+
+    logger_level = min(levels.gateway, levels.channel, levels.agent_server, levels.full)
+    levels = replace(levels, logger=logger_level)
+
+    root = logging.getLogger("jiuwenswarm")
+    root.setLevel(levels.logger)
+
+    for h in root.handlers:
+        if isinstance(h, SafeRotatingFileHandler):
+            fname = Path(h.baseFilename).name
+            attr = _FILE_HANDLER_LEVEL_MAP.get(fname)
+            if attr is not None:
+                h.setLevel(getattr(levels, attr))
+        elif isinstance(h, logging.StreamHandler):
+            h.setLevel(levels.console)
+
+    return root
+
+
+_LOGGING_CONFIG_TABLE = "logging_config"
+
+
+def _logging_config_row_to_dict(obj: dict[str, Any] | Any) -> dict[str, Any]:
+    if isinstance(obj, dict):
+        return {
+            "level": obj.get("level", "INFO"),
+            "console_level": obj.get("console_level"),
+            "gateway": obj.get("gateway"),
+            "channel": obj.get("channel"),
+            "agent_server": obj.get("agent_server"),
+            "full": obj.get("full"),
+        }
+    return {
+        "level": getattr(obj, "level", "INFO"),
+        "console_level": getattr(obj, "console_level", None),
+        "gateway": getattr(obj, "gateway", None),
+        "channel": getattr(obj, "channel", None),
+        "agent_server": getattr(obj, "agent_server", None),
+        "full": getattr(obj, "full", None),
+    }
+
+
+def apply_logging_config_payload(payload: dict[str, Any] | None) -> None:
+    """将 DB 行 / WS payload 转为 :func:`update_log_levels` 调用。"""
+    if not payload or payload.get("op") == "delete":
+        update_log_levels()
+        return
+
+    kwargs: dict[str, Any] = {}
+    if payload.get("level") is not None:
+        kwargs["log_level"] = str(payload["level"])
+    for key in ("console_level", "gateway", "channel", "agent_server", "full"):
+        if payload.get(key) is not None:
+            kwargs[key] = str(payload[key])
+    update_log_levels(**kwargs)
+
+
+async def reload_logging_levels_from_gateway_db() -> None:
+    """从 Gateway 库加载 ``logging_config`` 并刷新**本进程**日志级别。"""
+    if not os.getenv("AGENT_RUNTIME", "").strip():
+        update_log_levels()
+        return
+    try:
+        from jiuwenswarm.server.runtime.enterprise_config import gateway_db
+
+        jid = gateway_db.resolve_jiuwenclaw_id()
+        if not jid:
+            update_log_levels()
+            return
+
+        rows = await gateway_db.list_records(
+            _LOGGING_CONFIG_TABLE,
+            filters={"jiuwenclaw_id": jid},
+        )
+        row = rows[0] if rows else None
+        apply_logging_config_payload(
+            _logging_config_row_to_dict(row) if row is not None else None,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[logging_config_db] logging_config read failed: %s",
+            exc,
+            exc_info=True,
+        )
+        update_log_levels()
+
+
+
+class AsyncLRUCache:
+    """带过期时间的 LRU 缓存（异步并发安全）."""
+
+    def __init__(self, max_size: int = 100, ttl_seconds: int = 600) -> None:
+        self._cache: OrderedDict[str, tuple[Any, float]] = OrderedDict()
+        self._max_size = max_size
+        self._ttl = ttl_seconds
+        self._lock = asyncio.Lock()
+
+    async def get(self, key: str) -> Any | None:
+        """获取缓存值，如果不存在或已过期则返回 None."""
+        async with self._lock:
+            if key not in self._cache:
+                return None
+
+            value, timestamp = self._cache[key]
+            if time.time() - timestamp > self._ttl:
+                self._cache.pop(key, None)
+                return None
+
+            self._cache.move_to_end(key)
+            return value
+
+    async def put(self, key: str, value: Any) -> None:
+        """存入缓存值，如果超过容量则淘汰最久未使用的."""
+        async with self._lock:
+            if key in self._cache:
+                self._cache.pop(key)
+            elif len(self._cache) >= self._max_size:
+                self._cache.popitem(last=False)
+
+            self._cache[key] = (value, time.time())
+
+    async def remove(self, key: str) -> None:
+        """删除缓存项."""
+        async with self._lock:
+            self._cache.pop(key, None)
+
+    async def clear(self) -> None:
+        """清空缓存."""
+        async with self._lock:
+            self._cache.clear()
+
+    def __len__(self) -> int:
+        return len(self._cache)
+
+    def values(self) -> list[Any]:
+        """返回当前缓存值快照（同步，不做 TTL 清理）."""
+        return [value for value, _ts in self._cache.values()]
+
+    async def keys(self) -> list[str]:
+        async with self._lock:
+            now = time.time()
+            expired_keys = [
+                key for key, (_, timestamp) in self._cache.items()
+                if now - timestamp > self._ttl
+            ]
+            for key in expired_keys:
+                del self._cache[key]
+            return list(self._cache.keys())
 
 
 logger = logging.getLogger(__name__)
@@ -2272,3 +2702,135 @@ def fix_json_arguments(arguments: str | dict) -> str | dict:
         before_final,
     )
     return s
+
+
+class AsyncLRUCache:
+    """带可选过期时间与容量上限的 LRU 缓存（异步并发安全）.
+
+    ``max_size=None`` / ``ttl_seconds=None`` 表示不启用对应限制。
+    """
+
+    def __init__(
+        self,
+        max_size: int | None = None,
+        ttl_seconds: int | None = None,
+    ) -> None:
+        self._cache: OrderedDict[Hashable, tuple[Any, float]] = OrderedDict()
+        self._max_size = max_size
+        self._ttl = ttl_seconds
+        self._lock = asyncio.Lock()
+
+    def _is_expired(self, timestamp: float) -> bool:
+        if self._ttl is None:
+            return False
+        return time.time() - timestamp > self._ttl
+
+    async def get(self, key: Hashable) -> Any | None:
+        """获取缓存值，如果不存在或已过期则返回 None.
+
+        命中时会刷新访问时间（滑动过期：自最后一次 get/put 起算 ttl）。
+        """
+        async with self._lock:
+            if key not in self._cache:
+                return None
+
+            value, timestamp = self._cache[key]
+            if self._is_expired(timestamp):
+                self._cache.pop(key, None)
+                return None
+
+            # 刷新访问时间并移动到末尾（最近使用）
+            self._cache[key] = (value, time.time())
+            self._cache.move_to_end(key)
+            return value
+
+    async def put(self, key: Hashable, value: Any) -> None:
+        """存入缓存值，如果超过容量则淘汰最久未使用的."""
+        async with self._lock:
+            if key in self._cache:
+                self._cache.pop(key)
+            elif self._max_size is not None and len(self._cache) >= self._max_size:
+                # 淘汰最久未使用的（头部）
+                self._cache.popitem(last=False)
+
+            self._cache[key] = (value, time.time())
+
+    async def touch_if_same(self, key: Hashable, value: Any) -> bool:
+        """若 key 存在且缓存值与 value 为同一对象，则刷新访问时间.
+
+        用于请求结束时续约 TTL，避免无条件 put 用旧实例覆盖并发创建的新实例。
+        同一对象仍挂在 cache 上时，即使时间戳已过期也会续期（执行期间无 get 触达）。
+        """
+        async with self._lock:
+            if key not in self._cache:
+                return False
+
+            cached_value, _timestamp = self._cache[key]
+            if cached_value is not value:
+                return False
+
+            self._cache[key] = (value, time.time())
+            self._cache.move_to_end(key)
+            return True
+
+    async def remove(self, key: Hashable) -> None:
+        """删除缓存项."""
+        async with self._lock:
+            self._cache.pop(key, None)
+
+    async def clear(self) -> None:
+        """清空缓存."""
+        async with self._lock:
+            self._cache.clear()
+
+    def __len__(self) -> int:
+        return len(self._cache)
+
+    def snapshot_values_nowait(self) -> list[Any]:
+        """Return cached values for sync callers (best-effort, no async lock).
+
+        Entries are stored as ``(value, timestamp)``; malformed entries are skipped.
+        """
+        values: list[Any] = []
+        for entry in self._cache.values():
+            if not isinstance(entry, tuple) or len(entry) < 1:
+                continue
+            values.append(entry[0])
+        return values
+
+    async def keys(self) -> list[Hashable]:
+        async with self._lock:
+            if self._ttl is not None:
+                expired_keys = [
+                    key
+                    for key, (_, timestamp) in self._cache.items()
+                    if self._is_expired(timestamp)
+                ]
+                for key in expired_keys:
+                    del self._cache[key]
+            return list(self._cache.keys())
+
+
+def normalize_tenant_scope_id(value: str | None, *, default: str = "default") -> str:
+    """Normalize and validate a tenant scope ID (service_id / agent_id)."""
+    if value is None:
+        return default
+    text = str(value).strip()
+    if not text:
+        return default
+    if "__" in text:
+        raise ValueError(f"tenant scope ID must not contain '__': {text!r}")
+    return text
+
+
+def get_multi_tenant_user_workspace_dir(service_id: str | None, agent_id: str | None) -> Path | None:
+    """Get multi-tenant user workspace directory path.
+
+    Path format: ~/.jiuwenswarm/service_{service_id}/agent_{agent_id}
+    """
+    if not service_id and not agent_id:
+        return None
+    workspace_dir = get_user_workspace_dir()
+    workspace_dir = workspace_dir / f"service_{service_id}" if service_id else workspace_dir / "service"
+    workspace_dir = workspace_dir / f"agent_{agent_id}" if agent_id else workspace_dir / "agents"
+    return workspace_dir

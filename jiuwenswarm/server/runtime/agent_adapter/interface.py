@@ -15,6 +15,7 @@ from dataclasses import replace
 import inspect
 import json
 import logging
+import os
 import re
 import time
 from pathlib import Path
@@ -50,7 +51,9 @@ from jiuwenswarm.extensions.hooks_context import MemoryHookContext
 from jiuwenswarm.common.schema.message import EventType, ReqMethod
 from jiuwenswarm.common.utils import (
     get_agent_home_dir,
+    get_agent_sessions_relative_dir,
     get_agent_workspace_dir,
+    get_agent_workspace_relative_dir,
     get_env_file,
     reset_free_search_runtime_flags,
 )
@@ -776,6 +779,39 @@ def _handle_statusline_prompt_command(query: str) -> Tuple[str, str]:
     return "", query
 
 
+def _enterprise_file_download_hint(language: str) -> str:
+    if language == "zh":
+        return (
+            "附件中的 http/https url 是远程文件地址，不在本机 path 上。"
+            "请先用 bash/curl 等工具将 url 下载到当前工作区，再对下载后的本地文件使用 read_file；"
+            "不要根据 path 字段或文件名猜测并直接 read_file 本地路径。"
+        )
+    return (
+        "Attachments with http/https url point to remote files, not local path values. "
+        "Download the url to the workspace with bash/curl first, then use read_file on the "
+        "downloaded local file. Do not guess local paths from path or filename."
+    )
+
+
+def _normalize_files_for_agent_prompt(files: dict | list | Any) -> dict | list | Any:
+    """企业态：有 url 时去掉 Gateway 本地 path，避免 Agent 优先 read_file 失败。"""
+    if not os.getenv("AGENT_RUNTIME", "").strip():
+        return files
+    if isinstance(files, list):
+        normalized: list[Any] = []
+        for file_info in files:
+            if not isinstance(file_info, dict):
+                normalized.append(file_info)
+                continue
+            updated = dict(file_info)
+            file_url = str(updated.get("url") or updated.get("uri") or "").strip()
+            if file_url:
+                updated.pop("path", None)
+            normalized.append(updated)
+        return normalized
+    return files
+
+
 def build_user_prompt(content: str | dict, files: dict, channel: str, language: str, *,
     trusted_dirs: list[str] | None = None, metadata: dict[str, Any] | None = None,
     skills: list[str] | None = None,
@@ -821,6 +857,8 @@ def build_user_prompt(content: str | dict, files: dict, channel: str, language: 
     else:
         statusline_prompt = ""
 
+    files = _normalize_files_for_agent_prompt(files)
+
     if language == "zh":
         prompt = "你收到一条消息：\n"
         if channel == "cron":
@@ -848,6 +886,8 @@ def build_user_prompt(content: str | dict, files: dict, channel: str, language: 
             msg_data["sender"] = sender_name
     if channel not in ["cron", "heartbeat"]:
         msg_data["files_updated_by_user"] = json.dumps(files, ensure_ascii=False)
+        if os.getenv("AGENT_RUNTIME", "").strip() and files:
+            msg_data["file_handling_hint"] = _enterprise_file_download_hint(language)
     if supplementary_info:
         msg_data["supplementary_info"] = supplementary_info
     final_prompt = interaction_prefix + prompt + json.dumps(msg_data, ensure_ascii=False)
@@ -869,6 +909,8 @@ def build_user_prompt(content: str | dict, files: dict, channel: str, language: 
         "files_updated_by_user": json.dumps(files, ensure_ascii=False),
         "type": "user input",
     }
+    if os.getenv("AGENT_RUNTIME", "").strip() and files and channel not in ["cron", "heartbeat"]:
+        user_message_context["file_handling_hint"] = _enterprise_file_download_hint(language)
     if skills_to_use:
         user_message_context["skills_to_use"] = skills_to_use
     if trusted_dirs:
@@ -901,14 +943,42 @@ class JiuWenSwarm:
     - 公共编排（session 队列、Skills 路由、heartbeat、流式包装）
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        workspace_dir: str | None = None,
+        user_workspace_dir: str | None = None,
+        agent_id: str | None = None,
+        service_id: str | None = None,
+    ) -> None:
         self._adapter: AgentAdapter | None = None
         self._sdk_name: str | None = None
-        self._skill_manager = SkillManager(workspace_dir=str(get_agent_workspace_dir()))
+        # 企业多租户：AGENT_RUNTIME 下 user_workspace_dir 为租户根，再拼相对 workspace/sessions
+        enterprise = bool(os.getenv("AGENT_RUNTIME", "").strip())
+        self._agent_id = agent_id if enterprise else None
+        self._service_id = service_id if enterprise else None
+        tenant_root = user_workspace_dir or (workspace_dir if enterprise else None)
+        if enterprise and tenant_root:
+            user_ws = Path(tenant_root)
+            self._workspace_dir = str(user_ws / get_agent_workspace_relative_dir())
+            self._sessions_dir: Path | None = user_ws / get_agent_sessions_relative_dir()
+        else:
+            self._workspace_dir = str(get_agent_workspace_dir())
+            self._sessions_dir = None
+        self._skill_manager = SkillManager(workspace_dir=self._workspace_dir)
         self._session_manager = SessionManager()
         self._permission_response_ledger = PermissionResponseLedger()
         # SkillDev 模式：懒初始化，首次 skilldev.* 请求时构造
         self._skilldev_service = None
+
+    def _history_kwargs(self) -> dict[str, Any]:
+        """企业版 history/metadata 写入时附带 sessions_root."""
+        if self._sessions_dir is not None and os.getenv("AGENT_RUNTIME", "").strip():
+            return {"sessions_root": self._sessions_dir}
+        return {}
+
+    def _append_history_record(self, **kwargs: Any) -> None:
+        kwargs.update(self._history_kwargs())
+        append_history_record(**kwargs)
 
     def _get_skilldev_service(self):
         """懒初始化并返回 SkillDevService 实例.
@@ -948,14 +1018,75 @@ class JiuWenSwarm:
         """确保 adapter 已初始化，如果未初始化则根据环境变量和 mode 创建."""
         if self._adapter is None:
             self._sdk_name = resolve_sdk_choice()
-            self._adapter = create_adapter(self._sdk_name, mode=mode)
+            self._adapter = create_adapter(
+                self._sdk_name,
+                mode=mode,
+                workspace_dir=self._workspace_dir,
+                agent_id=self._agent_id,
+                service_id=self._service_id,
+            )
             if hasattr(self._adapter, "set_skill_manager"):
                 self._adapter.set_skill_manager(self._skill_manager)
             self._skill_manager.set_skillnet_install_complete_hook(
                 self._on_skillnet_install_complete
             )
-            logger.info("[JiuWenSwarm] Initialized adapter: sdk=%s, mode=%s", self._sdk_name, mode)
+            logger.info(
+                "[JiuWenSwarm] Initialized adapter: sdk=%s, mode=%s, workspace_dir=%s",
+                self._sdk_name,
+                mode,
+                self._workspace_dir,
+            )
         return self._adapter
+
+    def ensure_adapter(self, *, mode: str = "agent") -> AgentAdapter:
+        """Public wrapper for ``_ensure_adapter`` (used by AgentManager reload)."""
+        return self._ensure_adapter(mode=mode)
+
+    def _resolve_workspace_dir(self) -> str:
+        user_ws = getattr(self, "_user_workspace_dir", None)
+        if user_ws is not None:
+            return str(Path(user_ws) / "agent" / "workspace")
+        return str(get_agent_workspace_dir())
+
+    def _bind_tenant_request_context(self) -> tuple[Any, Any]:
+        from jiuwenswarm.server.runtime.tenant_context import bind_tenant_workspace_dirs
+        from jiuwenswarm.agents.harness.common.tools.memory_tools import (
+            bind_memory_agent_id,
+            bind_memory_workspace_dir,
+        )
+
+        ws = Path(self._resolve_workspace_dir())
+        agent_root = ws.parent
+        tenant_root = agent_root.parent
+        tenant_tokens = bind_tenant_workspace_dirs(
+            jiuwenclaw_workspace=str(ws),
+            agent_root=str(agent_root),
+            tenant_root=str(tenant_root),
+        )
+        mem_ws_token = bind_memory_workspace_dir(str(ws))
+        mem_aid = (
+            getattr(self, "_env_agent_id", None)
+            or getattr(self, "_agent_id", None)
+            or "default"
+        )
+        mem_aid_token = bind_memory_agent_id(str(mem_aid))
+        return tenant_tokens, (mem_ws_token, mem_aid_token)
+
+    @staticmethod
+    def _reset_tenant_request_context(tenant_tokens: Any, mem_token: Any) -> None:
+        from jiuwenswarm.server.runtime.tenant_context import reset_tenant_workspace_dirs
+        from jiuwenswarm.agents.harness.common.tools.memory_tools import (
+            reset_memory_agent_id,
+            reset_memory_workspace_dir,
+        )
+
+        if isinstance(mem_token, tuple):
+            mem_ws_token, mem_aid_token = mem_token
+            reset_memory_agent_id(mem_aid_token)
+            reset_memory_workspace_dir(mem_ws_token)
+        else:
+            reset_memory_workspace_dir(mem_token)
+        reset_tenant_workspace_dirs(tenant_tokens)
 
     @staticmethod
     def _adapter_mode_for_request(request: AgentRequest) -> str:
@@ -979,6 +1110,8 @@ class JiuWenSwarm:
             sub_mode: 子模式
         """
         adapter = self._ensure_adapter(mode=mode)
+        setattr(adapter, "_env_service_id", getattr(self, "_env_service_id", "default"))
+        setattr(adapter, "_env_agent_id", getattr(self, "_env_agent_id", "default"))
         await adapter.create_instance(config, mode=mode, sub_mode=sub_mode)
         logger.info(
             "[JiuWenSwarm] Agent instance created: sdk=%s, mode=%s, sub_mode=%s",
@@ -1242,6 +1375,21 @@ class JiuWenSwarm:
         enable_memory = request.metadata.get("enable_memory", True) if request.metadata else True
         inputs["enable_memory"] = enable_memory
 
+        # 传递 extension_config（供 Rails 消费；仅企业版）
+        # 优先从 metadata 读取，fallback 到 params（Gateway WebSocket 请求中放在 params）
+        ext_config = None
+        if os.getenv("AGENT_RUNTIME", "").strip():
+            if request.metadata and "extension_config" in request.metadata:
+                ext_config = request.metadata["extension_config"]
+            elif isinstance(params, dict) and "extension_config" in params:
+                ext_config = params["extension_config"]
+            if ext_config is not None:
+                inputs["extension_config"] = ext_config
+                logger.info(
+                    "[JiuWenSwarm] extension_config added to inputs: %s",
+                    ext_config,
+                )
+
         # 传递 trusted_dirs 参数（用于 RuntimePromptRail 添加路径限制策略）
         if trusted_dirs:
             inputs["trusted_dirs"] = trusted_dirs
@@ -1269,6 +1417,29 @@ class JiuWenSwarm:
                 "context": {"extra": {"cron": cron}},
             }
 
+        # 将 extension_config 放入 run_context.extra 中，供 Rails 消费
+        # 注意：openjiuwen 框架从 inputs["run"]["context"] 解析 RunContext
+        # _normalize_inputs 会用 RunContext(**context_data) 构造，因此传 dict
+        # 放在 run / cron 处理之后，避免被覆盖；与 cron 合并到同一 extra
+        if ext_config is not None:
+            run_payload = inputs.get("run")
+            if not isinstance(run_payload, dict):
+                run_payload = {}
+                inputs["run"] = run_payload
+            context = run_payload.get("context")
+            if not isinstance(context, dict):
+                context = {}
+                run_payload["context"] = context
+            extra = context.get("extra")
+            if not isinstance(extra, dict):
+                extra = {}
+                context["extra"] = extra
+            extra["extension_config"] = ext_config
+            logger.info(
+                "[JiuWenSwarm] run_context added to inputs[run][context]: %s",
+                context,
+            )
+
         # Per-request workspace_dir scopes one prompt's cwd to the given
         # directory; threaded into inputs["cwd"] which downstream init_cwd
         # installs onto openjiuwen's CwdState ContextVar. See E2A-protocol.md
@@ -1294,6 +1465,11 @@ class JiuWenSwarm:
 
         # 返回原始 query（未经 build_user_prompt 包装）
         # Team 模式需要使用原始 query，而不是 JSON 包装后的 prompt
+        if os.getenv("AGENT_RUNTIME", "").strip():
+            logger.info(
+                "[JiuWenSwarm] _build_inputs returning inputs keys=%s",
+                list(inputs.keys()),
+            )
         return inputs, memory_mode, query
 
     def _make_retry_without_a2ui_call(
@@ -1995,7 +2171,7 @@ class JiuWenSwarm:
                                 if isinstance(goal_obj, dict)
                                 else None
                             )
-                            append_history_record(
+                            self._append_history_record(
                                 session_id=session_id,
                                 request_id=request.request_id,
                                 channel_id=request.channel_id,
@@ -2085,7 +2261,7 @@ class JiuWenSwarm:
         # proactive_recommendation 是系统触发的推荐指令（不是用户说的话），不写 user
         # history——否则刷新页面会显示"[主动推荐指令] xxx"这种用户没说过的消息。
         if _should_record_user_history(request.params):
-            append_history_record(
+            self._append_history_record(
                 session_id=session_id,
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -2102,121 +2278,125 @@ class JiuWenSwarm:
             request.request_id, request.channel_id, session_id, self._sdk_name,
         )
 
+        tenant_tokens, mem_token = self._bind_tenant_request_context()
         try:
-            inputs, memory_mode, raw_query = self._build_inputs(request)
-        except _TeamPlanApprovalPayloadError as exc:
-            return AgentResponse(
-                request_id=request.request_id,
-                channel_id=request.channel_id,
-                ok=False,
-                payload={"error": str(exc)},
-                metadata=request.metadata,
-            )
-
-        # cloud memory: before chat hook
-        if memory_mode == "cloud":
-            mem_ctx = MemoryHookContext(
-                session_id=request.session_id or "default",
-                request_id=request.request_id or "",
-                channel_id=request.channel_id,
-                agent_name="main_agent",
-                workspace_dir=str(get_agent_home_dir()),
-                extra=request.params,
-            )
-            await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.MEMORY_BEFORE_CHAT, mem_ctx)
-            memory_block = "\n\n".join(b for b in mem_ctx.memory_blocks if b)
-            inputs["memory_block"] = memory_block
-
-        permission_key = _permission_response_key(request)
-        permission_reservation = None
-        if permission_key is not None:
-            permission_reservation = self._permission_response_ledger.reserve(
-                session_id,
-                permission_key,
-            )
-            if permission_reservation is None:
-                logger.info(
-                    "[JiuWenSwarm] permission response deduplicated: "
-                    "session_id=%s response_id=%s request_id=%s",
-                    session_id,
-                    permission_key,
-                    request.request_id,
-                )
-                return _duplicate_permission_response(request)
-
-        async def run_agent_task():
-            if (
-                permission_reservation is not None
-                and not permission_reservation.start()
-            ):
-                return _duplicate_permission_response(request)
             try:
-                return await adapter.process_message_impl(request, inputs)
-            finally:
-                if permission_reservation is not None:
-                    permission_reservation.complete()
+                inputs, memory_mode, raw_query = self._build_inputs(request)
+            except _TeamPlanApprovalPayloadError as exc:
+                return AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=False,
+                    payload={"error": str(exc)},
+                    metadata=request.metadata,
+                )
 
-        try:
-            result = await self._session_manager.submit_and_wait(
-                session_id,
-                run_agent_task,
-            )
-        finally:
-            if permission_reservation is not None:
-                permission_reservation.release_if_unstarted()
-
-        if result.ok and result.payload.get("content"):
-            content = result.payload["content"]
-            content_str = content if isinstance(content, str) else str(content)
-            repair_call = getattr(adapter, "repair_model_response", None)
-            retry_without_a2ui_call = self._make_retry_without_a2ui_call(
-                adapter=adapter,
-                request=request,
-            )
-            content_str = await finalize_assistant_response_if_a2ui(
-                content_str,
-                channel=request.channel_id,
-                user_query=raw_query,
-                request_id=request.request_id or "",
-                repair_call=repair_call,
-                retry_without_a2ui_call=retry_without_a2ui_call,
-            )
-            if isinstance(content, str):
-                result.payload["content"] = content_str
-            append_history_record(
-                session_id=session_id,
-                request_id=request.request_id,
-                channel_id=request.channel_id,
-                role="assistant",
-                event_type="chat.final",
-                content=content_str,
-                timestamp=time.time(),
-                mode=request.params.get("mode", "unknown"),
-            )
-
-            # cloud memory: after chat hook
+            # cloud memory: before chat hook
             if memory_mode == "cloud":
-                after_ctx = MemoryHookContext(
+                mem_ctx = MemoryHookContext(
                     session_id=request.session_id or "default",
                     request_id=request.request_id or "",
                     channel_id=request.channel_id,
                     agent_name="main_agent",
                     workspace_dir=str(get_agent_home_dir()),
-                    assistant_message=content_str,
                     extra=request.params,
                 )
-                await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.MEMORY_AFTER_CHAT, after_ctx)
+                await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.MEMORY_BEFORE_CHAT, mem_ctx)
+                memory_block = "\n\n".join(b for b in mem_ctx.memory_blocks if b)
+                inputs["memory_block"] = memory_block
 
-            # auto memory: extract memories after conversation ends
-            # 需要 auto_memory_enabled 和 memory.enabled 都为 true 才触发
-            mode = request.params.get("mode", "code") if isinstance(request.params, dict) else "code"
-            config = get_config()
-            if is_auto_memory_enabled(mode, config) and is_memory_enabled(mode, config):
-                _trigger_auto_memory_extraction(adapter, request, session_id, is_stream=False)
+            permission_key = _permission_response_key(request)
+            permission_reservation = None
+            if permission_key is not None:
+                permission_reservation = self._permission_response_ledger.reserve(
+                    session_id,
+                    permission_key,
+                )
+                if permission_reservation is None:
+                    logger.info(
+                        "[JiuWenSwarm] permission response deduplicated: "
+                        "session_id=%s response_id=%s request_id=%s",
+                        session_id,
+                        permission_key,
+                        request.request_id,
+                    )
+                    return _duplicate_permission_response(request)
 
-        _schedule_symphony_session_feedback(session_id, request.request_id)
-        await self._try_apply_adapter_pending_reload()
-        return result
+            async def run_agent_task():
+                if (
+                    permission_reservation is not None
+                    and not permission_reservation.start()
+                ):
+                    return _duplicate_permission_response(request)
+                try:
+                    return await adapter.process_message_impl(request, inputs)
+                finally:
+                    if permission_reservation is not None:
+                        permission_reservation.complete()
+
+            try:
+                result = await self._session_manager.submit_and_wait(
+                    session_id,
+                    run_agent_task,
+                )
+            finally:
+                if permission_reservation is not None:
+                    permission_reservation.release_if_unstarted()
+
+            if result.ok and result.payload.get("content"):
+                content = result.payload["content"]
+                content_str = content if isinstance(content, str) else str(content)
+                repair_call = getattr(adapter, "repair_model_response", None)
+                retry_without_a2ui_call = self._make_retry_without_a2ui_call(
+                    adapter=adapter,
+                    request=request,
+                )
+                content_str = await finalize_assistant_response_if_a2ui(
+                    content_str,
+                    channel=request.channel_id,
+                    user_query=raw_query,
+                    request_id=request.request_id or "",
+                    repair_call=repair_call,
+                    retry_without_a2ui_call=retry_without_a2ui_call,
+                )
+                if isinstance(content, str):
+                    result.payload["content"] = content_str
+                append_history_record(
+                    session_id=session_id,
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    role="assistant",
+                    event_type="chat.final",
+                    content=content_str,
+                    timestamp=time.time(),
+                    mode=request.params.get("mode", "unknown"),
+                )
+
+                # cloud memory: after chat hook
+                if memory_mode == "cloud":
+                    after_ctx = MemoryHookContext(
+                        session_id=request.session_id or "default",
+                        request_id=request.request_id or "",
+                        channel_id=request.channel_id,
+                        agent_name="main_agent",
+                        workspace_dir=str(get_agent_home_dir()),
+                        assistant_message=content_str,
+                        extra=request.params,
+                    )
+                    await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.MEMORY_AFTER_CHAT, after_ctx)
+
+                # auto memory: extract memories after conversation ends
+                # 需要 auto_memory_enabled 和 memory.enabled 都为 true 才触发
+                mode = request.params.get("mode", "code") if isinstance(request.params, dict) else "code"
+                config = get_config()
+                if is_auto_memory_enabled(mode, config) and is_memory_enabled(mode, config):
+                    _trigger_auto_memory_extraction(adapter, request, session_id, is_stream=False)
+
+            _schedule_symphony_session_feedback(session_id, request.request_id)
+            await self._try_apply_adapter_pending_reload()
+            return result
+        finally:
+            self._reset_tenant_request_context(tenant_tokens, mem_token)
 
     async def process_message_stream(
             self, request: AgentRequest
@@ -2360,7 +2540,7 @@ class JiuWenSwarm:
             request.req_method != ReqMethod.COMMAND_GOAL
             and _should_record_user_history(params_for_history)
         ):
-            append_history_record(
+            self._append_history_record(
                 session_id=session_id,
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -2492,7 +2672,7 @@ class JiuWenSwarm:
             durable_pending_final_chunks = []
             if not pending_text or pending_text == durable_final_content:
                 return
-            append_history_record(
+            self._append_history_record(
                 session_id=session_id,
                 request_id=rid,
                 channel_id=cid,
@@ -2511,41 +2691,45 @@ class JiuWenSwarm:
             durable_final_content = pending_text
 
         async def run_stream_task():
+            tenant_tokens, mem_token = self._bind_tenant_request_context()
             logger.info("[JiuWenSwarm] run_stream_task started: request_id=%s session_id=%s", rid, session_id)
             _put_count = 0
             try:
-                if (
-                    permission_reservation is not None
-                    and not permission_reservation.start()
-                ):
-                    await stream_queue.put(
-                        ("chunk", _duplicate_permission_chunk(request))
-                    )
-                    return
-                async for chunk in adapter.process_message_stream_impl(request, inputs):
-                    _put_count += 1
-                    if _put_count <= 3:
-                        _pl = getattr(chunk, "payload", None) or {}
-                        _et = _pl.get("event_type", "") if isinstance(_pl, dict) else ""
-                        logger.info(
-                            "[JiuWenSwarm] run_stream_task chunk #%s: request_id=%s event_type=%s",
-                            _put_count, rid, _et,
+                try:
+                    if (
+                        permission_reservation is not None
+                        and not permission_reservation.start()
+                    ):
+                        await stream_queue.put(
+                            ("chunk", _duplicate_permission_chunk(request))
                         )
-                    await stream_queue.put(("chunk", chunk))
-            except asyncio.CancelledError:
-                logger.info("[JiuWenSwarm] 流式任务被取消: request_id=%s session_id=%s", rid, session_id)
-                await stream_queue.put(("error", asyncio.CancelledError()))
-            except Exception as exc:
-                logger.exception("[JiuWenSwarm] 流式任务异常: %s", exc)
-                await stream_queue.put(("error", exc))
+                        return
+                    async for chunk in adapter.process_message_stream_impl(request, inputs):
+                        _put_count += 1
+                        if _put_count <= 3:
+                            _pl = getattr(chunk, "payload", None) or {}
+                            _et = _pl.get("event_type", "") if isinstance(_pl, dict) else ""
+                            logger.info(
+                                "[JiuWenSwarm] run_stream_task chunk #%s: request_id=%s event_type=%s",
+                                _put_count, rid, _et,
+                            )
+                        await stream_queue.put(("chunk", chunk))
+                except asyncio.CancelledError:
+                    logger.info("[JiuWenSwarm] 流式任务被取消: request_id=%s session_id=%s", rid, session_id)
+                    await stream_queue.put(("error", asyncio.CancelledError()))
+                except Exception as exc:
+                    logger.exception("[JiuWenSwarm] 流式任务异常: %s", exc)
+                    await stream_queue.put(("error", exc))
+                finally:
+                    if permission_reservation is not None:
+                        permission_reservation.complete()
+                    logger.info(
+                        "[JiuWenSwarm] run_stream_task finished: request_id=%s total_chunks=%s",
+                        rid, _put_count,
+                    )
+                    stream_done.set()
             finally:
-                if permission_reservation is not None:
-                    permission_reservation.complete()
-                logger.info(
-                    "[JiuWenSwarm] run_stream_task finished: request_id=%s total_chunks=%s",
-                    rid, _put_count,
-                )
-                stream_done.set()
+                self._reset_tenant_request_context(tenant_tokens, mem_token)
 
         # Team 模式: 后续请求直接执行，绕过 Session Manager 队列
         # 因为 Team 是长期运行的(persistent)，interact 调用不需要等待前一个任务完成
@@ -2615,7 +2799,7 @@ class JiuWenSwarm:
                     }
                     if error_type:
                         error_payload["error_type"] = error_type
-                    append_history_record(
+                    self._append_history_record(
                         session_id=session_id,
                         request_id=rid,
                         channel_id=cid,
@@ -2735,7 +2919,7 @@ class JiuWenSwarm:
                                 for pk in ("source", "proactive_type", "proactive_target"):
                                     if pk not in extra_fields and pk in request.params:
                                         extra_fields[pk] = request.params[pk]
-                                append_history_record(
+                                self._append_history_record(
                                     session_id=session_id,
                                     request_id=rid,
                                     channel_id=cid,
@@ -2846,7 +3030,7 @@ class JiuWenSwarm:
                             for pk in ("source", "proactive_type", "proactive_target"):
                                 if pk not in extra_fields and pk in request.params:
                                     extra_fields[pk] = request.params[pk]
-                            append_history_record(
+                            self._append_history_record(
                                 session_id=session_id,
                                 request_id=rid,
                                 channel_id=cid,
@@ -2909,7 +3093,7 @@ class JiuWenSwarm:
         if finalized_assistant_message and (
                 finalized_assistant_message != assistant_message or suppress_a2ui_stream
         ):
-            append_history_record(
+            self._append_history_record(
                 session_id=session_id,
                 request_id=rid,
                 channel_id=cid,

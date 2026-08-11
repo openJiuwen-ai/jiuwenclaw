@@ -65,7 +65,9 @@ class ReqMethod(Enum):
 
     CONFIG_CACHE_CLEAR = "config.cache_clear"
     AGENT_RELOAD_CONFIG = "agent.reload_config"
+    SYNC_AGENTS_CONFIGS = "sync_agents_configs"
     AGENT_PREWARM_SYNC = "agent.prewarm.sync"
+    LOGGING_SET = "logging.set"
 
     MEMORY_COMPUTE = "memory.compute"
 
@@ -252,6 +254,7 @@ class EventType(Enum):
     HEARTBEAT_RELAY = "heartbeat.relay"
     HISTORY_GET = "history.message"
     PROACTIVE_RECOMMENDATION = "proactive_recommendation"
+    SYNC_AGENTS_CONFIGS_RESULT = "sync_agents_configs.result"
 
 
 class Mode(Enum):

@@ -23,8 +23,13 @@ from jiuwenswarm.common.kv_cache_affinity_config import (
     set_default_model_provider_in_entries,
     validate_affinity_invariant,
 )
+from jiuwenswarm.common.local_env_config import (
+    SPAWN_ENV_KEYS,
+    get_bound_agent_env_ns,
+    get_local_config,
+    is_task_env_overlay_bound,
+)
 from jiuwenswarm.common.utils import get_config_dir, get_config_file
-from jiuwenswarm.common.local_env_config import get_local_config
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +65,24 @@ def resolve_env_vars(value: Any) -> Any:
         def replace_env(match):
             var_name = match.group(1)
             default = match.group(2)
-            current = get_local_config(var_name)
+            if var_name in SPAWN_ENV_KEYS:
+                current = os.environ.get(var_name)
+            else:
+                current = get_local_config(var_name)
+            is_need_decrypt = ("api_key" in var_name.lower() or "token" in var_name.lower()) and current
+            reg_mod = sys.modules.get("jiuwenswarm.extensions.registry")
+            if reg_mod is not None and hasattr(reg_mod, "ExtensionRegistry"):
+                try:
+                    reg = reg_mod.ExtensionRegistry.get_instance()
+                    crypto = reg.get_crypto_provider()
+                    if is_need_decrypt and crypto:
+                        current = crypto.decrypt(current)
+                except Exception:
+                    logger.debug(
+                        "Crypto provider unavailable while resolving env var %s; using raw value",
+                        var_name,
+                        exc_info=True,
+                    )
             # Bash: ${VAR:-default} uses default when VAR is unset OR empty.
             # ${VAR} (no :-) keeps getenv behavior; unset -> "".
             if default is not None:
@@ -188,14 +210,64 @@ def _read_with_retry(filepath: Path, max_attempts: int = 3) -> dict[str, Any]:
     return {}
 
 
+_ConfigNsKey = tuple[str, str] | None
+_resolved_config_by_ns: dict[_ConfigNsKey, tuple[float, dict[str, Any]]] = {}
+_CONFIG_CACHE_TTL_SECONDS: float = 20.0
+_config_lock = threading.Lock()
+_config_version: int = 0
+
+
 def get_config():
-    """读取并解析 config.yaml（锁保护 + 跨进程降级重试）。"""
-    config_base = _read_with_retry(get_config_file())
-    # resolve_env_vars 和 _normalize_config 只操作内存数据，在锁外执行以缩短锁持有时间
+    """Return merged, env-var-resolved config with per-ns TTL cache.
+
+    Results are cached per bound ``(service_id, agent_id)`` from
+    ``bind_agent_env_ns``. When a task env overlay is sealed, the cache is
+    bypassed so overlay values are always visible.
+    """
+    global _config_version
+    ns: _ConfigNsKey = get_bound_agent_env_ns()
+    skip_cache = is_task_env_overlay_bound()
+    now = time.monotonic()
+
+    if not skip_cache:
+        with _config_lock:
+            entry = _resolved_config_by_ns.get(ns)
+            if entry is not None and (now - entry[0]) < _CONFIG_CACHE_TTL_SECONDS:
+                return entry[1]
+            read_version = _config_version
+    else:
+        read_version = -1
+
+    config_base = deepcopy(_read_with_retry(get_config_file()))
     config_base = resolve_env_vars(config_base)
     _normalize_config(config_base)
 
+    if not skip_cache:
+        with _config_lock:
+            if _config_version == read_version:
+                _resolved_config_by_ns[ns] = (time.monotonic(), config_base)
+
     return config_base
+
+
+def clear_config_cache(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> None:
+    """Invalidate resolved-config cache (all slots or one ns)."""
+    global _config_version
+    with _config_lock:
+        _config_version += 1
+        if service_id is None and agent_id is None:
+            _resolved_config_by_ns.clear()
+            return
+        from jiuwenswarm.common.local_env_config import normalize_env_ns_id
+
+        sid = normalize_env_ns_id(service_id, default="default")
+        aid = normalize_env_ns_id(agent_id, default="default")
+        _resolved_config_by_ns.pop((sid, aid), None)
+        if sid == "default" and aid == "default":
+            _resolved_config_by_ns.pop(None, None)
 
 
 def get_config_raw():
@@ -216,6 +288,7 @@ def validate_persisted_kv_cache_affinity() -> tuple[bool, list[str]]:
 def set_config(config):
     with open(CONFIG_YAML_PATH, "w", encoding="utf-8") as f:
         yaml.safe_dump(config, f, allow_unicode=True, sort_keys=False)
+    clear_config_cache()
 
 
 def _get_bool_env(value: str | None) -> bool | None:
@@ -237,7 +310,8 @@ def _get_evolution_config(config: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def get_evolution_auto_scan_enabled(config: dict[str, Any] | None) -> bool:
-    env_auto_scan = _get_bool_env(os.getenv("EVOLUTION_AUTO_SCAN"))
+    raw = get_local_config("EVOLUTION_AUTO_SCAN")
+    env_auto_scan = _get_bool_env(None if raw is None else str(raw))
     if env_auto_scan is not None:
         return env_auto_scan
     return _get_evolution_config(config).get("auto_scan") is True
@@ -248,7 +322,8 @@ def get_evolution_signal_trigger_enabled(
     *,
     fallback: bool = False,
 ) -> bool:
-    env_signal_trigger = _get_bool_env(os.getenv("EVOLUTION_SIGNAL_TRIGGER"))
+    raw = get_local_config("EVOLUTION_SIGNAL_TRIGGER")
+    env_signal_trigger = _get_bool_env(None if raw is None else str(raw))
     if env_signal_trigger is not None:
         return env_signal_trigger
     signal_trigger = _get_evolution_config(config).get("signal_trigger")
@@ -262,7 +337,8 @@ def get_evolution_review_trigger_enabled(
     *,
     fallback: bool = False,
 ) -> bool:
-    env_review_trigger = _get_bool_env(os.getenv("EVOLUTION_REVIEW_TRIGGER"))
+    raw = get_local_config("EVOLUTION_REVIEW_TRIGGER")
+    env_review_trigger = _get_bool_env(None if raw is None else str(raw))
     if env_review_trigger is not None:
         return env_review_trigger
     review_trigger = _get_evolution_config(config).get("review_trigger")
@@ -272,7 +348,8 @@ def get_evolution_review_trigger_enabled(
 
 
 def get_skill_create_enabled(config: dict[str, Any] | None) -> bool:
-    env_skill_create = _get_bool_env(os.getenv("SKILL_CREATE"))
+    raw = get_local_config("SKILL_CREATE")
+    env_skill_create = _get_bool_env(None if raw is None else str(raw))
     if env_skill_create is not None:
         return env_skill_create
     return _get_evolution_config(config).get("skill_create", False)
@@ -281,7 +358,8 @@ def get_skill_create_enabled(config: dict[str, Any] | None) -> bool:
 def get_evolution_auto_save_enabled(config: dict[str, Any] | None = None) -> bool:
     """Return whether evolution approvals may auto-save without user action."""
     try:
-        env_auto_save = _get_bool_env(os.getenv("EVOLUTION_AUTO_SAVE"))
+        raw = get_local_config("EVOLUTION_AUTO_SAVE")
+        env_auto_save = _get_bool_env(None if raw is None else str(raw))
         if env_auto_save is not None:
             return env_auto_save
         if config is None:
@@ -330,6 +408,7 @@ def dump_yaml_round_trip(config_path: Path, data: Any) -> None:
         except FileNotFoundError:
             pass
         raise
+    clear_config_cache()
 
 
 def _atomic_replace(src: Path, dst: Path, max_attempts: int = 10) -> None:
@@ -682,11 +761,53 @@ def update_skill_retrieval_in_config(updates: dict[str, Any]) -> None:
 
 def update_permissions_enabled_in_config(value: bool) -> None:
     """更新 permissions.enabled（工具安全护栏开关）并写回。"""
-    data = load_yaml_round_trip(CONFIG_YAML_PATH)
-    if "permissions" not in data:
-        data["permissions"] = {}
-    data["permissions"]["enabled"] = value
-    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+    def mutate(perms: dict[str, Any]) -> None:
+        perms["enabled"] = value
+
+    _persist_permissions(mutate)
+
+
+def _effective_permissions() -> dict[str, Any]:
+    from jiuwenswarm.agents.harness.common.rails.permissions.config_loader import (
+        get_effective_permissions_config,
+    )
+
+    return get_effective_permissions_config()
+
+
+def _persist_permissions(mutate_fn) -> dict[str, Any]:
+    from jiuwenswarm.agents.harness.common.rails.permissions.config_loader import (
+        persist_permissions_mutate,
+    )
+
+    return persist_permissions_mutate(mutate_fn, persist_scope="base")
+
+
+def get_permissions_file_guard_workspace_rw_enabled() -> bool:
+    """读取 ``permissions.file_guard.workspace.rw_enabled``（缺省为 True）。"""
+    fg = _effective_permissions().get("file_guard")
+    if not isinstance(fg, dict):
+        return True
+    ws = fg.get("workspace")
+    if not isinstance(ws, dict):
+        return True
+    return bool(ws.get("rw_enabled", True))
+
+
+def update_permissions_file_guard_workspace_rw_enabled_in_config(value: bool) -> None:
+    """更新 ``permissions.file_guard.workspace.rw_enabled`` 并写回。"""
+    def mutate(perms: dict[str, Any]) -> None:
+        fg = perms.get("file_guard")
+        if not isinstance(fg, dict):
+            fg = {}
+            perms["file_guard"] = fg
+        ws = fg.get("workspace")
+        if not isinstance(ws, dict):
+            ws = {}
+            fg["workspace"] = ws
+        ws["rw_enabled"] = bool(value)
+
+    _persist_permissions(mutate)
 
 
 def update_auto_recap_enabled_in_config(value: bool) -> None:
@@ -760,8 +881,7 @@ def _update_memory_in_modes_config(mode: str, item: str, value: bool) -> None:
 
 def get_permissions_owner_scopes() -> dict[str, Any]:
     """读取 permissions.owner_scopes 及 deny_guidance_message."""
-    cfg = get_config() or {}
-    perm = cfg.get("permissions", {})
+    perm = _effective_permissions()
     return {
         "owner_scopes": perm.get("owner_scopes", {}),
         "deny_guidance_message": perm.get("deny_guidance_message", ""),
@@ -773,28 +893,25 @@ def update_permissions_owner_scopes_in_config(
     deny_guidance_message: str | None = None,
 ) -> None:
     """更新 permissions.owner_scopes（及可选 deny_guidance_message）并写回。"""
-    data = load_yaml_round_trip(CONFIG_YAML_PATH)
-    if "permissions" not in data:
-        data["permissions"] = {}
-    data["permissions"]["owner_scopes"] = owner_scopes
-    if deny_guidance_message is not None:
-        data["permissions"]["deny_guidance_message"] = deny_guidance_message
-    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+    def mutate(perms: dict[str, Any]) -> None:
+        perms["owner_scopes"] = owner_scopes
+        if deny_guidance_message is not None:
+            perms["deny_guidance_message"] = deny_guidance_message
+
+    _persist_permissions(mutate)
 
 
 def get_permissions_deny_guidance() -> str:
     """读取 permissions.deny_guidance_message."""
-    cfg = get_config() or {}
-    return cfg.get("permissions", {}).get("deny_guidance_message", "")
+    return str(_effective_permissions().get("deny_guidance_message", ""))
 
 
 def update_permissions_deny_guidance_in_config(msg: str) -> None:
     """更新 permissions.deny_guidance_message 并写回。"""
-    data = load_yaml_round_trip(CONFIG_YAML_PATH)
-    if "permissions" not in data:
-        data["permissions"] = {}
-    data["permissions"]["deny_guidance_message"] = msg
-    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+    def mutate(perms: dict[str, Any]) -> None:
+        perms["deny_guidance_message"] = msg
+
+    _persist_permissions(mutate)
 
 
 # ---------- Web UI：permissions.tools / rules / approval_overrides ----------
@@ -806,8 +923,7 @@ _RULE_MUTABLE_KEYS = frozenset({"tools", "pattern", "severity", "action", "descr
 
 def get_permissions_tools() -> dict[str, Any]:
     """返回 ``permissions.tools``（原始结构，可能含 legacy dict）。"""
-    cfg = get_config() or {}
-    tools = (cfg.get("permissions") or {}).get("tools")
+    tools = _effective_permissions().get("tools")
     if not isinstance(tools, dict):
         return {"tools": {}}
     return {"tools": dict(tools)}
@@ -816,15 +932,15 @@ def get_permissions_tools() -> dict[str, Any]:
 def replace_permissions_tools_in_config(tools: Any) -> None:
     """整表替换 ``permissions.tools``；值仅允许 ``allow|ask|deny``（或 legacy ``{\"*\": level}``）。"""
     normalized = _validate_tools_map(tools)
-    data = load_yaml_round_trip(CONFIG_YAML_PATH)
-    if "permissions" not in data:
-        data["permissions"] = {}
-    data["permissions"]["tools"] = normalized
-    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+
+    def mutate(perms: dict[str, Any]) -> None:
+        perms["tools"] = normalized
+
+    _persist_permissions(mutate)
 
 
 def update_permissions_tool_in_config(tool_name: str, level: Any) -> dict[str, Any]:
-    """合并单条工具级别到 ``permissions.tools`` 并写回 YAML。
+    """合并单条工具级别到 ``permissions.tools`` 并写回。
 
     Args:
         tool_name: 工具名（如 ``mcp_exec_command``），与 ``permissions.tools`` 键一致。
@@ -837,17 +953,19 @@ def update_permissions_tool_in_config(tool_name: str, level: Any) -> dict[str, A
     if not name:
         raise ValueError("tool name must be non-empty")
     piece = _validate_tools_map({name: level})
-    data = load_yaml_round_trip(CONFIG_YAML_PATH)
-    if "permissions" not in data:
-        data["permissions"] = {}
-    existing = data["permissions"].get("tools")
-    if not isinstance(existing, dict):
-        existing = {}
-    merged = {str(k): v for k, v in existing.items()}
-    merged[name] = piece[name]
-    data["permissions"]["tools"] = merged
-    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
-    return {"tools": dict(merged)}
+    result: dict[str, str] = {}
+
+    def mutate(perms: dict[str, Any]) -> None:
+        existing = perms.get("tools")
+        if not isinstance(existing, dict):
+            existing = {}
+        merged = {str(k): v for k, v in existing.items()}
+        merged[name] = piece[name]
+        perms["tools"] = merged
+        result.update(merged)
+
+    _persist_permissions(mutate)
+    return {"tools": dict(result)}
 
 
 def delete_permissions_tool_in_config(tool_name: str) -> bool:
@@ -855,23 +973,24 @@ def delete_permissions_tool_in_config(tool_name: str) -> bool:
     name = str(tool_name).strip()
     if not name:
         raise ValueError("tool name must be non-empty")
-    data = load_yaml_round_trip(CONFIG_YAML_PATH)
-    if "permissions" not in data:
-        return False
-    tools = data["permissions"].get("tools")
-    if not isinstance(tools, dict):
-        return False
-    key_to_drop = None
-    for k in tools:
-        if str(k).strip() == name:
-            key_to_drop = k
-            break
-    if key_to_drop is None:
-        return False
-    new_tools = {k: v for k, v in tools.items() if k != key_to_drop}
-    data["permissions"]["tools"] = new_tools
-    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
-    return True
+    found = {"value": False}
+
+    def mutate(perms: dict[str, Any]) -> None:
+        tools = perms.get("tools")
+        if not isinstance(tools, dict):
+            return
+        key_to_drop = None
+        for k in tools:
+            if str(k).strip() == name:
+                key_to_drop = k
+                break
+        if key_to_drop is None:
+            return
+        perms["tools"] = {k: v for k, v in tools.items() if k != key_to_drop}
+        found["value"] = True
+
+    _persist_permissions(mutate)
+    return bool(found["value"])
 
 
 def _validate_tools_map(tools: Any) -> dict[str, str]:
@@ -896,8 +1015,7 @@ def _validate_tools_map(tools: Any) -> dict[str, str]:
 
 def get_permissions_rules() -> dict[str, Any]:
     """返回 ``permissions.rules`` 列表（仅 dict 项）。"""
-    cfg = get_config() or {}
-    rules = (cfg.get("permissions") or {}).get("rules")
+    rules = _effective_permissions().get("rules")
     if not isinstance(rules, list):
         return {"rules": []}
     return {"rules": [r for r in rules if isinstance(r, dict)]}
@@ -905,8 +1023,7 @@ def get_permissions_rules() -> dict[str, Any]:
 
 def get_permissions_approval_overrides() -> dict[str, Any]:
     """返回 ``permissions.approval_overrides`` 列表（仅 dict 项）。"""
-    cfg = get_config() or {}
-    raw = (cfg.get("permissions") or {}).get("approval_overrides")
+    raw = _effective_permissions().get("approval_overrides")
     if not isinstance(raw, list):
         return {"approval_overrides": []}
     return {"approval_overrides": [x for x in raw if isinstance(x, dict)]}
@@ -931,17 +1048,16 @@ def create_permissions_rule_in_config(rule: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("pattern must be non-empty")
     _normalize_rule_severity_action(stored)
 
-    data = load_yaml_round_trip(CONFIG_YAML_PATH)
-    if "permissions" not in data:
-        data["permissions"] = {}
-    rules = data["permissions"].get("rules")
-    if not isinstance(rules, list):
-        rules = []
-    if any(isinstance(r, dict) and str(r.get("id") or "").strip() == rid for r in rules):
-        raise ValueError(f"rule id already exists: {rid}")
-    rules.append(stored)
-    data["permissions"]["rules"] = rules
-    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+    def mutate(perms: dict[str, Any]) -> None:
+        rules = perms.get("rules")
+        if not isinstance(rules, list):
+            rules = []
+        if any(isinstance(r, dict) and str(r.get("id") or "").strip() == rid for r in rules):
+            raise ValueError(f"rule id already exists: {rid}")
+        rules.append(stored)
+        perms["rules"] = rules
+
+    _persist_permissions(mutate)
     return stored
 
 
@@ -953,44 +1069,46 @@ def update_permissions_rule_in_config(rule_id: str, patch: dict[str, Any]) -> di
     if not isinstance(patch, dict):
         raise ValueError("patch must be an object")
 
-    data = load_yaml_round_trip(CONFIG_YAML_PATH)
-    if "permissions" not in data:
-        data["permissions"] = {}
-    rules = data["permissions"].get("rules")
-    if not isinstance(rules, list):
-        rules = []
-    idx: int | None = None
-    for i, r in enumerate(rules):
-        if isinstance(r, dict) and str(r.get("id") or "").strip() == rid:
-            idx = i
-            break
-    if idx is None:
-        raise ValueError(f"rule not found: {rid}")
+    merged_result: dict[str, Any] = {}
 
-    merged: dict[str, Any] = dict(rules[idx])
-    for k, v in patch.items():
-        if k == "id":
-            continue
-        if k not in _RULE_MUTABLE_KEYS:
-            continue
-        if v is None:
-            merged.pop(k, None)
-        else:
-            merged[k] = v
-    merged["id"] = rid
-    if "tools" in merged:
-        merged["tools"] = _normalize_rule_tools(merged["tools"])
-    if "pattern" in merged:
-        merged["pattern"] = str(merged["pattern"]).strip()
-    if not merged.get("tools"):
-        raise ValueError("tools must be a non-empty list")
-    if not merged.get("pattern"):
-        raise ValueError("pattern must be non-empty")
-    _normalize_rule_severity_action(merged)
-    rules[idx] = merged
-    data["permissions"]["rules"] = rules
-    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
-    return merged
+    def mutate(perms: dict[str, Any]) -> None:
+        rules = perms.get("rules")
+        if not isinstance(rules, list):
+            rules = []
+        idx: int | None = None
+        for i, r in enumerate(rules):
+            if isinstance(r, dict) and str(r.get("id") or "").strip() == rid:
+                idx = i
+                break
+        if idx is None:
+            raise ValueError(f"rule not found: {rid}")
+
+        merged: dict[str, Any] = dict(rules[idx])
+        for k, v in patch.items():
+            if k == "id":
+                continue
+            if k not in _RULE_MUTABLE_KEYS:
+                continue
+            if v is None:
+                merged.pop(k, None)
+            else:
+                merged[k] = v
+        merged["id"] = rid
+        if "tools" in merged:
+            merged["tools"] = _normalize_rule_tools(merged["tools"])
+        if "pattern" in merged:
+            merged["pattern"] = str(merged["pattern"]).strip()
+        if not merged.get("tools"):
+            raise ValueError("tools must be a non-empty list")
+        if not merged.get("pattern"):
+            raise ValueError("pattern must be non-empty")
+        _normalize_rule_severity_action(merged)
+        rules[idx] = merged
+        perms["rules"] = rules
+        merged_result.update(merged)
+
+    _persist_permissions(mutate)
+    return merged_result
 
 
 def delete_permissions_rule_in_config(rule_id: str) -> bool:
@@ -998,18 +1116,23 @@ def delete_permissions_rule_in_config(rule_id: str) -> bool:
     rid = str(rule_id or "").strip()
     if not rid:
         raise ValueError("id is required")
-    data = load_yaml_round_trip(CONFIG_YAML_PATH)
-    if "permissions" not in data:
-        return False
-    rules = data["permissions"].get("rules")
-    if not isinstance(rules, list):
-        return False
-    new_rules = [r for r in rules if not (isinstance(r, dict) and str(r.get("id") or "").strip() == rid)]
-    if len(new_rules) == len(rules):
-        return False
-    data["permissions"]["rules"] = new_rules
-    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
-    return True
+    found = {"value": False}
+
+    def mutate(perms: dict[str, Any]) -> None:
+        rules = perms.get("rules")
+        if not isinstance(rules, list):
+            return
+        new_rules = [
+            r for r in rules
+            if not (isinstance(r, dict) and str(r.get("id") or "").strip() == rid)
+        ]
+        if len(new_rules) == len(rules):
+            return
+        perms["rules"] = new_rules
+        found["value"] = True
+
+    _persist_permissions(mutate)
+    return bool(found["value"])
 
 
 def delete_permissions_approval_override_in_config(override_id: str) -> bool:
@@ -1017,18 +1140,23 @@ def delete_permissions_approval_override_in_config(override_id: str) -> bool:
     oid = str(override_id or "").strip()
     if not oid:
         raise ValueError("id is required")
-    data = load_yaml_round_trip(CONFIG_YAML_PATH)
-    if "permissions" not in data:
-        return False
-    ov = data["permissions"].get("approval_overrides")
-    if not isinstance(ov, list):
-        return False
-    new_ov = [x for x in ov if not (isinstance(x, dict) and str(x.get("id") or "").strip() == oid)]
-    if len(new_ov) == len(ov):
-        return False
-    data["permissions"]["approval_overrides"] = new_ov
-    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
-    return True
+    found = {"value": False}
+
+    def mutate(perms: dict[str, Any]) -> None:
+        ov = perms.get("approval_overrides")
+        if not isinstance(ov, list):
+            return
+        new_ov = [
+            x for x in ov
+            if not (isinstance(x, dict) and str(x.get("id") or "").strip() == oid)
+        ]
+        if len(new_ov) == len(ov):
+            return
+        perms["approval_overrides"] = new_ov
+        found["value"] = True
+
+    _persist_permissions(mutate)
+    return bool(found["value"])
 
 
 def _normalize_rule_tools(raw: Any) -> list[str]:
@@ -1180,14 +1308,14 @@ def get_default_models(config: dict[str, Any] | None = None) -> list[dict[str, A
         return _decrypt_model_entries([models["default"]])
 
     # 回退：从环境变量构造（env var 已在 resolve_env_vars 中解密）
-    alias = os.getenv("MODEL_ALIAS", "")
+    alias = str(get_local_config("MODEL_ALIAS", "") or "")
     entry: dict[str, Any] = {
         "model_client_config": {
-            "api_base": os.getenv("API_BASE", ""),
-            "api_key": os.getenv("API_KEY", ""),
-            "model_name": os.getenv("MODEL_NAME", ""),
-            "client_provider": os.getenv("MODEL_PROVIDER", ""),
-            "custom_headers": _parse_custom_headers(os.getenv("CUSTOM_HEADERS", None)),
+            "api_base": str(get_local_config("API_BASE", "") or ""),
+            "api_key": str(get_local_config("API_KEY", "") or ""),
+            "model_name": str(get_local_config("MODEL_NAME", "") or ""),
+            "client_provider": str(get_local_config("MODEL_PROVIDER", "") or ""),
+            "custom_headers": _parse_custom_headers(get_local_config("CUSTOM_HEADERS", None)),
             "timeout": 1800,
             "verify_ssl": False,
         },

@@ -270,7 +270,11 @@ def test_build_inputs_keeps_stable_project_dir_and_dynamic_cwd(monkeypatch):
     monkeypatch.setattr(interface_module, "SessionManager", FakeSessionManager)
     monkeypatch.setattr(interface_module, "append_history_record", lambda **_kwargs: None)
     monkeypatch.setattr(interface_module, "resolve_sdk_choice", lambda: "harness")
-    monkeypatch.setattr(interface_module, "create_adapter", lambda _sdk, mode="agent": fake_adapter)
+    monkeypatch.setattr(
+        interface_module,
+        "create_adapter",
+        lambda _sdk, mode="agent", **_kwargs: fake_adapter,
+    )
     request = AgentRequest(
         request_id="req-chat",
         channel_id="tui",
@@ -638,7 +642,11 @@ def test_chat_answer_routes_team_plan_confirm_interrupt_to_adapter(monkeypatch):
     monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
     monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
     fake_adapter = FakeAdapter()
-    monkeypatch.setattr(interface_module, "create_adapter", lambda _sdk, mode="agent": fake_adapter)
+    monkeypatch.setattr(
+        interface_module,
+        "create_adapter",
+        lambda _sdk, mode="agent", **_kwargs: fake_adapter,
+    )
 
     request = AgentRequest(
         request_id="req-answer",
@@ -1197,7 +1205,11 @@ def test_team_plan_answer_routing(monkeypatch, params):
         "jiuwenswarm.agents.harness.team.get_team_manager",
         lambda _channel_id: FakeTeamManager(),
     )
-    monkeypatch.setattr(interface_module, "create_adapter", lambda _sdk, mode="agent": FakeAdapter())
+    monkeypatch.setattr(
+        interface_module,
+        "create_adapter",
+        lambda _sdk, mode="agent", **_kwargs: FakeAdapter(),
+    )
 
     request = AgentRequest(
         request_id="req-answer",
@@ -1700,6 +1712,9 @@ def test_deep_adapter_handle_user_answer_ignores_team_plan_approval_compat(monke
     )
 
     adapter = JiuWenSwarmDeepAdapter()
+    # Exercise answer-routing on a session-scoped adapter; facade path would
+    # create_instance and require real model credentials.
+    adapter.mark_as_session_scoped("team-session")
     request = AgentRequest(
         request_id="req-answer",
         channel_id="tui",
@@ -1737,6 +1752,7 @@ def test_deep_adapter_routes_team_simplify_answer_by_evolution_meta(monkeypatch)
             pytest.fail("team simplify approval must not use regular SkillEvolutionRail")
 
     adapter = JiuWenSwarmDeepAdapter()
+    adapter.mark_as_session_scoped("team-session")
     adapter._skill_evolution_rail = FailingRegularRail()
     monkeypatch.setattr(
         JiuWenSwarmDeepAdapter,
@@ -1820,7 +1836,11 @@ def test_build_inputs_threads_workspace_dir_into_cwd(monkeypatch, tmp_path):
     monkeypatch.setattr(interface_module, "SessionManager", FakeSessionManager)
     monkeypatch.setattr(interface_module, "append_history_record", lambda **_kwargs: None)
     monkeypatch.setattr(interface_module, "resolve_sdk_choice", lambda: "harness")
-    monkeypatch.setattr(interface_module, "create_adapter", lambda _sdk, mode="agent": fake_adapter)
+    monkeypatch.setattr(
+        interface_module,
+        "create_adapter",
+        lambda _sdk, mode="agent", **_kwargs: fake_adapter,
+    )
 
     scratch = tmp_path / "scoped-run-001"  # does NOT exist yet
     assert not scratch.exists()
@@ -1895,7 +1915,11 @@ def test_build_inputs_omits_cwd_when_workspace_dir_unset(monkeypatch):
     monkeypatch.setattr(interface_module, "SessionManager", FakeSessionManager)
     monkeypatch.setattr(interface_module, "append_history_record", lambda **_kwargs: None)
     monkeypatch.setattr(interface_module, "resolve_sdk_choice", lambda: "harness")
-    monkeypatch.setattr(interface_module, "create_adapter", lambda _sdk, mode="agent": fake_adapter)
+    monkeypatch.setattr(
+        interface_module,
+        "create_adapter",
+        lambda _sdk, mode="agent", **_kwargs: fake_adapter,
+    )
 
     request = AgentRequest(
         request_id="req-nows",
@@ -2090,7 +2114,7 @@ def test_agent_manager_creates_code_adapter_for_code_team(monkeypatch):
                 }
             )
 
-    def fake_create_adapter(sdk=None, *, mode="agent"):
+    def fake_create_adapter(sdk=None, *, mode="agent", **_kwargs):
         calls.append({"adapter_mode": mode})
         return FakeAdapter()
 
@@ -2141,7 +2165,7 @@ def test_agent_manager_creates_code_adapter_for_team_plan(monkeypatch):
                 }
             )
 
-    def fake_create_adapter(sdk=None, *, mode="agent"):
+    def fake_create_adapter(sdk=None, *, mode="agent", **_kwargs):
         calls.append({"adapter_mode": mode})
         return FakeAdapter()
 
@@ -2197,7 +2221,7 @@ def test_agent_manager_uses_project_dir_in_cache_identity(monkeypatch, tmp_path)
             self.sub_mode = sub_mode
             created.append(self)
 
-    def fake_create_adapter(sdk=None, *, mode="agent"):
+    def fake_create_adapter(sdk=None, *, mode="agent", **_kwargs):
         return FakeAdapter()
 
     monkeypatch.setattr(interface_module, "SkillManager", FakeSkillManager)

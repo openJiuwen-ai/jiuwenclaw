@@ -17,6 +17,7 @@ from jiuwenswarm.common.e2a.gateway_normalize import (
 )
 from jiuwenswarm.common.e2a.models import E2AEnvelope, E2AResponse
 from jiuwenswarm.common.schema.message import Message, ReqMethod
+from jiuwenswarm.server.runtime.tenant_agent_pool import TenantAgentPool
 
 
 def test_message_to_e2a_or_fallback_basic():
@@ -57,6 +58,61 @@ def test_envelope_from_dict_merges_metadata_when_channel_context_nonempty():
     req = e2a_to_agent_request(env)
     assert req.metadata["traceparent"] == "00-abc-def-01"
     assert req.metadata["wecom_chat_id"] == "user1"
+
+
+def test_envelope_from_dict_preserves_officeclaw_tenant_ids():
+    """relay-claw sends top-level agent_id; E2A ingress must not drop it to default/default."""
+    env = E2AEnvelope.from_dict(
+        {
+            "request_id": "relay-req-1",
+            "channel_id": "officeclaw",
+            "session_id": "officeclaw_sess",
+            "agent_id": "office",
+            "service_id": "default",
+            "params": {"query": "hello"},
+            "is_stream": True,
+            "req_method": "chat.send",
+        }
+    )
+    assert env.agent_id == "office"
+    assert env.service_id == "default"
+
+    req = e2a_to_agent_request(env)
+    assert req.agent_id == "office"
+    assert req.service_id == "default"
+
+
+def test_envelope_from_dict_derives_agent_id_from_agent_ref():
+    env = E2AEnvelope.from_dict(
+        {
+            "request_id": "r-agent-ref",
+            "channel_id": "officeclaw",
+            "agent_ref": {"mode": "code", "id": "office"},
+            "params": {"query": "hi"},
+            "is_stream": True,
+            "method": "chat.send",
+        }
+    )
+    assert env.agent_id == "office"
+    req = e2a_to_agent_request(env)
+    assert req.agent_id == "office"
+
+
+def test_officeclaw_e2a_tenant_ids_reach_extract_ids():
+    env = E2AEnvelope.from_dict(
+        {
+            "request_id": "relay-req-2",
+            "channel_id": "officeclaw",
+            "agent_id": "office",
+            "params": {"query": "hello"},
+            "is_stream": True,
+            "method": "chat.send",
+        }
+    )
+    req = e2a_to_agent_request(env)
+    agent_id, service_id = TenantAgentPool.extract_ids(req)
+    assert agent_id == "office"
+    assert service_id == "default"
 
 
 def test_e2a_to_agent_request_roundtrip():

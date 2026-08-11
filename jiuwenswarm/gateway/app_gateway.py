@@ -35,7 +35,6 @@ from jiuwenswarm.dotenv_early import parse_dotenv_early, load_dotenv_runtime
 parse_dotenv_early("jiuwenswarm-gateway")
 
 from jiuwenswarm.common.utils import (
-    get_cron_jobs_path,
     get_env_file,
     get_user_workspace_dir,
     prepare_workspace,
@@ -1444,9 +1443,10 @@ async def _run(
     from jiuwenswarm.gateway.channel_manager.protocol.ssh.ssh_connect import SshChannel, SshChannelConfig
     from jiuwenswarm.common.config import get_config
     from jiuwenswarm.common.cleanup import start_background_cleanup
+    from jiuwenswarm.extensions.redis import init_gateway_redis_from_config
     from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
     from jiuwenswarm.gateway.channel_manager.channel_manager import ChannelManager
-    from jiuwenswarm.gateway.cron import CronController, CronJobStore, CronSchedulerService
+    from jiuwenswarm.gateway.cron import CronTenantRegistry
     from jiuwenswarm.gateway.heartbeat.heartbeat import GatewayHeartbeatService, HeartbeatConfig
     from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
     from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import (
@@ -1533,14 +1533,13 @@ async def _run(
     message_handler.set_inbound_pipeline(im_inbound)
     message_handler.set_outbound_pipeline(im_outbound)
 
-    cron_store = CronJobStore(path=get_cron_jobs_path())
-    cron_scheduler = CronSchedulerService(
-        store=cron_store,
+    cron_registry = CronTenantRegistry.get_instance(
         agent_client=client,
         message_handler=message_handler,
     )
-    cron_controller = CronController.get_instance(store=cron_store, scheduler=cron_scheduler)
-    message_handler.set_cron_controller(cron_controller)
+    message_handler.set_cron_registry(cron_registry)
+    # Default-tenant controller for proactive sync / TUI compatibility.
+    cron_controller = await cron_registry.get_controller("default", "default")
 
     full_cfg: dict[str, Any] = {}
     heartbeat_cfg: dict | None = None
@@ -1554,12 +1553,19 @@ async def _run(
         heartbeat_cfg = None
         channels_cfg = None
 
+    # Retain enterprise Redis initialization while tenant config remains tip-scoped.
+    await init_gateway_redis_from_config(dict(full_cfg or {}))
+
+    from jiuwenswarm.common.local_env_config import get_local_config
+
+    # 配置从 tip 读取（明文），再推给 agentserver
     env_dict = {}
     for env_key in _CONFIG_SET_ENV_MAP.values():
-        env_dict[env_key] = decrypt(env_key, os.getenv(env_key) or "")
+        tip_val = get_local_config(env_key)
+        env_dict[env_key] = tip_val if tip_val is not None else ""
     client.set_or_update_server_config(
         config=dict(full_cfg or {}),
-        env=env_dict
+        env=env_dict,
     )
 
     if isinstance(heartbeat_cfg, dict):
@@ -1771,6 +1777,7 @@ async def _run(
             on_config_saved=_on_config_saved,
             heartbeat_service=heartbeat_service,
             cron_controller=cron_controller,
+            cron_registry=cron_registry,
             updater_service=updater_service,
         )
     )
@@ -2569,7 +2576,30 @@ async def _run(
     await channel_manager.start_dispatch()
     # cron jobs 的 work_mode 补全已改为惰性迁移:scheduler.start() → reload() →
     # list_jobs() 读取时按需推断并写回磁盘(见 CronJobStore.list_jobs),无需启动全量扫描。
-    await cron_scheduler.start()
+    # default/default scheduler already started via get_controller above.
+    # Enterprise active-standby gates the default scheduler; tenant controllers
+    # remain owned by CronTenantRegistry and inherit the same process role.
+    leader_election = None
+    if os.getenv("AGENT_RUNTIME", "").strip():
+        deployment_mode = str(
+            (get_config().get("gateway") or {}).get("deployment_mode", "standalone")
+        ).strip().lower()
+        if deployment_mode == "active-standby":
+            from jiuwenswarm.gateway.leader_election import LeaderElection, Role
+
+            leader_election = LeaderElection.get_instance()
+            cron_controller.set_scheduler_active(False)
+
+            async def _on_leader_role_change(role: Role) -> None:
+                if role == Role.PRIMARY:
+                    message_handler.reload_session_map()
+                    await cron_controller.reload_scheduler()
+                    cron_controller.set_scheduler_active(True)
+                else:
+                    cron_controller.set_scheduler_active(False)
+
+            leader_election.register_callback(_on_leader_role_change)
+            await leader_election.start()
     # 主动推荐：按 config 自动注册/删除 proactive.tick 定时 job
     try:
         from jiuwenswarm.gateway.cron.proactive_cron_sync import sync_proactive_tick_job
@@ -2739,7 +2769,7 @@ async def _run(
                 pass
             await ssh_channel.stop()
 
-        await cron_scheduler.stop()
+        await cron_registry.stop_all()
         await channel_manager.stop_dispatch()
         await heartbeat_service.stop()
         await message_handler.stop_forwarding()

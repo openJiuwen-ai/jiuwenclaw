@@ -8,11 +8,15 @@ import asyncio
 import os
 import re
 from html import unescape
+from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
 import urllib3
 from openjiuwen.core.foundation.tool import tool
+
+from jiuwenswarm.common.http_proxy_config import requests_get
+from jiuwenswarm.common.local_env_config import get_local_config
 
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -22,6 +26,7 @@ _USER_AGENT = (
 _REQUEST_HEADERS = {"User-Agent": _USER_AGENT}
 _FREE_SEARCH_PROXY_URL_ENV = "FREE_SEARCH_PROXY_URL"
 _FREE_SEARCH_SSL_VERIFY_ENV = "FREE_SEARCH_SSL_VERIFY"
+_JINA_FETCH_ENABLED_ENV = "JIUWENSWARM_ENABLE_JINA_FETCH"
 _FREE_SEARCH_DEFAULT_NO_PROXY = (
     "127.0.0.1,.huawei.com,localhost,local,.local,10.155.97.247,.myhuaweicloud.com"
 )
@@ -49,11 +54,11 @@ def _extract_declared_charset(response: requests.Response) -> str:
 
 
 def _get_free_search_proxy_url() -> str:
-    return str(os.environ.get(_FREE_SEARCH_PROXY_URL_ENV, "") or "").strip()
+    return str(get_local_config(_FREE_SEARCH_PROXY_URL_ENV, "") or "").strip()
 
 
 def _env_bool(name: str, default: bool = True) -> bool:
-    raw = str(os.environ.get(name, "") or "").strip().lower()
+    raw = str(get_local_config(name, "") or "").strip().lower()
     if not raw:
         return default
     return raw in {"1", "true", "yes", "on", "enabled"}
@@ -139,21 +144,14 @@ def _decode_response_text(response: requests.Response) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
-def _http_get(url: str, **kwargs) -> requests.Response:
-    """Try normal requests first; retry without env proxies on ProxyError."""
-    explicit_proxy = _apply_free_search_proxy(url, kwargs)
+def _http_get(url: str, **kwargs) -> Any:
+    """HTTP GET via overlay-aware proxy helpers; free-search proxy still applied."""
+    _apply_free_search_proxy(url, kwargs)
     verify = _free_search_ssl_verify()
     kwargs.setdefault("verify", verify)
     if verify is False:
         _disable_insecure_request_warning()
-    try:
-        return requests.get(url, **kwargs)
-    except requests.exceptions.ProxyError:
-        if explicit_proxy:
-            raise
-        with requests.Session() as session:
-            session.trust_env = False
-            return session.get(url, **kwargs)
+    return requests_get(url, **kwargs)
 
 
 def _clip_text(value: str, max_chars: int) -> str:
@@ -202,7 +200,10 @@ def _fetch_via_jina_reader_sync(url: str, timeout_seconds: int) -> dict[str, str
 
 def _fetch_webpage_sync(url: str, timeout_seconds: int) -> dict[str, str | int]:
     response = _http_get(url, headers=_REQUEST_HEADERS, timeout=timeout_seconds)
-    if response.status_code in {401, 403, 429}:
+    if response.status_code in {401, 403, 429} and _env_bool(
+        _JINA_FETCH_ENABLED_ENV,
+        default=False,
+    ):
         return _fetch_via_jina_reader_sync(url, timeout_seconds)
     response.raise_for_status()
 

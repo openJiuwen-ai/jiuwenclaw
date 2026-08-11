@@ -14,7 +14,6 @@ from jiuwenswarm.agents.harness.common.tools import web_file_download
 from jiuwenswarm.agents.harness.common.tools.web_file_download import (
     WebFileDownloadManager,
 )
-from jiuwenswarm.channels.web.app_web import _SpaStaticHandler
 
 
 class _DownloadHandlerStub:
@@ -47,6 +46,13 @@ class _DownloadHandlerStub:
         raise AssertionError(message % args)
 
 
+def _spa_static_handler():
+    """Lazy import: app_web pulls cgi (removed in Py3.13) which handler tests need."""
+    from jiuwenswarm.channels.web.app_web import _SpaStaticHandler
+
+    return _SpaStaticHandler
+
+
 def _serve_file(
     monkeypatch: pytest.MonkeyPatch,
     file_path: Path,
@@ -61,7 +67,7 @@ def _serve_file(
         lambda _token: {"path": str(file_path)},
     )
     handler = _DownloadHandlerStub(command=command, headers=headers)
-    _SpaStaticHandler._handle_file_download(handler, query)
+    _spa_static_handler()._handle_file_download(handler, query)
     return handler
 
 
@@ -86,7 +92,8 @@ def test_valid_token_is_accepted() -> None:
     assert payload["sid"] == "session-1"
 
 
-def test_expiration_is_not_required_for_download() -> None:
+def test_missing_expiration_is_rejected() -> None:
+    """payload 无 exp 时按 get('exp', 0) 视为已过期，validate_token 返回 None。"""
     secret = "s" * 32
     manager = WebFileDownloadManager(secret=secret)
     token = _signed_token(
@@ -94,10 +101,7 @@ def test_expiration_is_not_required_for_download() -> None:
         {"path": "/tmp/report.xlsx", "sid": "session-1"},
     )
 
-    assert manager.validate_token(token) == {
-        "path": "/tmp/report.xlsx",
-        "sid": "session-1",
-    }
+    assert manager.validate_token(token) is None
 
 
 def test_tampered_token_is_rejected() -> None:

@@ -17,7 +17,6 @@ from google.genai import types
 from openai import OpenAI
 from openjiuwen.core.foundation.tool import McpServerConfig, tool
 from openjiuwen.core.runner import Runner
-import requests
 
 from jiuwenswarm.common.utils import get_agent_workspace_dir
 from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
@@ -26,6 +25,8 @@ from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
     _get_model_config,
 )
 from jiuwenswarm.agents.harness.common.tools.ssl_config import get_requests_verify
+from jiuwenswarm.common.http_proxy_config import requests_get
+from jiuwenswarm.common.local_env_config import get_local_config
 
 
 logger = logging.getLogger(__name__)
@@ -90,9 +91,9 @@ class _RetryExecutor:
 
 
 def _get_vision_api_credentials():
-    k = os.environ.get("VISION_API_KEY") or os.environ.get("API_KEY", "")
-    b = os.environ.get("VISION_API_BASE") or os.environ.get("API_BASE", "")
-    m = os.environ.get("VISION_MODEL_NAME") or "gpt-4o"
+    k = str(get_local_config("VISION_API_KEY", "") or get_local_config("API_KEY", "") or "")
+    b = str(get_local_config("VISION_API_BASE", "") or get_local_config("API_BASE", "") or "")
+    m = str(get_local_config("VISION_MODEL_NAME", "gpt-4o") or "gpt-4o")
     return k, b, m
 
 
@@ -103,14 +104,14 @@ def _get_image_gen_api_credentials():
     Default api_base: https://dashscope.aliyuncs.com/api/v1
     Default model: wanx-v1
     """
-    k = os.environ.get("IMAGE_GEN_API_KEY") or os.environ.get("API_KEY", "")
+    k = str(get_local_config("IMAGE_GEN_API_KEY", "") or get_local_config("API_KEY", "") or "")
     b = (
-        os.environ.get("IMAGE_GEN_API_BASE")
-        or os.environ.get("API_BASE", "")
+        str(get_local_config("IMAGE_GEN_API_BASE", "") or "")
+        or str(get_local_config("API_BASE", "") or "")
         or "https://dashscope.aliyuncs.com/api/v1"
     )
-    m = os.environ.get("IMAGE_GEN_MODEL_NAME") or "wanx-v1"
-    p = os.environ.get("IMAGE_GEN_PROVIDER") or "DashScope"
+    m = str(get_local_config("IMAGE_GEN_MODEL_NAME", "wanx-v1") or "wanx-v1")
+    p = str(get_local_config("IMAGE_GEN_PROVIDER", "DashScope") or "DashScope")
     return k, b, m, p
 
 
@@ -168,7 +169,7 @@ async def _invoke_openai_vision(src: str, q: str) -> str:
 
 
 async def _invoke_gemini_vision(src: str, q: str) -> str:
-    gemini_key = os.environ.get("GEMINI_API_KEY", "")
+    gemini_key = str(get_local_config("GEMINI_API_KEY", "") or "")
     if not gemini_key:
         return "[ERROR]: GEMINI_API_KEY is not configured for Gemini vision."
 
@@ -188,7 +189,7 @@ async def _invoke_gemini_vision(src: str, q: str) -> str:
             data = None
             for attempt in range(4):
                 try:
-                    r = requests.get(src, headers={"User-Agent": ua}, verify=get_requests_verify())
+                    r = requests_get(src, headers={"User-Agent": ua}, verify=get_requests_verify())
                     r.raise_for_status()
                     data = r.content
                     break
@@ -636,19 +637,33 @@ async def _invoke_model_image_generation(inputs: dict[str, Any]) -> dict:
     # 的 models.image_gen.model_client_config，避免与主链路配置脱节。
     from jiuwenswarm.common.config import get_config
     mc = _get_model_config(get_config() or {}, "image_gen")
-    api_key = str(mc.get("api_key") or os.getenv("IMAGE_GEN_API_KEY") or os.getenv("API_KEY") or "").strip()
+    api_key = str(
+        mc.get("api_key")
+        or get_local_config("IMAGE_GEN_API_KEY", "")
+        or get_local_config("API_KEY", "")
+        or ""
+    ).strip()
     api_base = str(
         mc.get("api_base")
-        or os.getenv("IMAGE_GEN_API_BASE")
-        or os.getenv("API_BASE")
+        or get_local_config("IMAGE_GEN_API_BASE", "")
+        or get_local_config("API_BASE", "")
         or "https://dashscope.aliyuncs.com/api/v1"
     ).strip()
     if not api_key:
         return {"error": "[ERROR]: IMAGE_GEN_API_KEY or API_KEY is not configured for image generation."}
 
-    model = str(mc.get("model_name") or mc.get("model") or os.getenv("IMAGE_GEN_MODEL_NAME") or "wanx-v1").strip()
-    provider = str(mc.get("client_provider") or mc.get("model_provider")
-                   or os.getenv("IMAGE_GEN_PROVIDER") or "DashScope").strip()
+    model = str(
+        mc.get("model_name")
+        or mc.get("model")
+        or get_local_config("IMAGE_GEN_MODEL_NAME", "")
+        or "wanx-v1"
+    ).strip()
+    provider = str(
+        mc.get("client_provider")
+        or mc.get("model_provider")
+        or get_local_config("IMAGE_GEN_PROVIDER", "")
+        or "DashScope"
+    ).strip()
 
     prompt = str(inputs.get("prompt", "") or "").strip()
     if not prompt:

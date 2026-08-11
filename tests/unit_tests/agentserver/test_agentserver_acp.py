@@ -198,6 +198,21 @@ def patch_session_roots(monkeypatch, sessions_root):
         "jiuwenswarm.server.runtime.session.session_metadata.get_agent_sessions_dir",
         lambda: sessions_root,
     )
+    # 进程合一：session.create / team.bind 等经 _sessions_dir_for_request 写租户 sessions。
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "_sessions_dir_for_request",
+        lambda request: sessions_root,
+    )
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "resolve_tenant_sessions_dir",
+        lambda *args, **kwargs: sessions_root,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.common.utils.resolve_tenant_sessions_dir",
+        lambda *args, **kwargs: sessions_root,
+    )
 
 
 @pytest.fixture(autouse=True)

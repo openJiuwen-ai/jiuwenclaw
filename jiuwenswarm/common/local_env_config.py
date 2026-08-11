@@ -38,6 +38,13 @@ _DEFAULT_HEADERS_ALIASES = (
     "DEFAULT_HEADERS",
     "OPENAI_DEFAULT_HEADERS",
 )
+# Huawei MaaS / OfficeClaw: same Authorization JSON is also synced for Petal.
+# Use as fallback when ``default_headers`` is missing from tip seal.
+_DEFAULT_HEADERS_FALLBACK_ALIASES = (
+    "OFFICE_CLAW_HUAWEI_MAAS_HEADERS_JSON",
+    "PETAL_SEARCH_HEADERS",
+    "PETAL_API_KEY",
+)
 
 logger = logging.getLogger(__name__)
 
@@ -381,6 +388,54 @@ def _plaintext_tip_value(name: str, value: Any) -> str:
     if not text:
         return text
     return str(decrypt(name, text))
+
+
+def _ensure_ciphertext(name: str, value: Any) -> str:
+    """Store sensitive tip/baseline values as ciphertext; others unchanged.
+
+    Heuristic: if ``decrypt`` changes the value, treat it as already ciphertext
+    and keep as-is (avoids double-encrypt for .env ingest / legacy). Otherwise
+    encrypt plaintext. Without a crypto provider this is a no-op.
+    """
+    text = str(value)
+    if not text:
+        return text
+    if not is_sensitive_env_name(name):
+        return text
+    plain = decrypt(name, text)
+    if plain != text:
+        return text
+    return encrypt(name, text)
+
+
+def seal_env_mapping(mapping: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Copy a mapping with sensitive values sealed as ciphertext for long-lived stores."""
+    if not isinstance(mapping, Mapping):
+        return {}
+    out: dict[str, Any] = {}
+    for key, value in mapping.items():
+        name = str(key)
+        if value is None:
+            out[name] = None
+        else:
+            out[name] = _ensure_ciphertext(name, value)
+    return out
+
+
+def materialize_env_mapping(mapping: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Copy a mapping with sensitive values decrypted for short-lived use."""
+    if not isinstance(mapping, Mapping):
+        return {}
+    out: dict[str, Any] = {}
+    for key, value in mapping.items():
+        name = str(key)
+        if value is None:
+            out[name] = None
+        elif isinstance(value, str):
+            out[name] = decrypt(name, value) if value else value
+        else:
+            out[name] = value
+    return out
 
 
 def _pop_bare_if_default_default(service_id: str, agent_id: str, name: str) -> None:
@@ -947,6 +1002,12 @@ def read_default_headers_raw() -> str:
         raw = read_env(env_key, "")
         if raw.strip():
             return raw.strip()
+    for env_key in _DEFAULT_HEADERS_FALLBACK_ALIASES:
+        raw = read_env(env_key, "")
+        text = raw.strip()
+        # PETAL_API_KEY may be a real API key; only accept JSON object payloads.
+        if text.startswith("{") and text.endswith("}"):
+            return text
     return ""
 
 
