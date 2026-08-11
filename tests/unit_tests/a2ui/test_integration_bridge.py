@@ -8,6 +8,7 @@ core AgentServer and Gateway modules.
 
 from __future__ import annotations
 
+import asyncio
 import builtins
 
 import pytest
@@ -184,6 +185,259 @@ def test_a2ui_stream_probe_ignores_begin_sentence_at_line_start():
     probe = _extend_a2ui_stream_probe("", "begin by summarizing the mailbox.")
 
     assert _stream_probe_has_a2ui_marker(probe) is False
+
+
+def test_persistent_team_stream_does_not_buffer_member_a2ui():
+    """Persistent Team streams must not use request-wide A2UI buffering."""
+    from jiuwenswarm.server.runtime.agent_adapter.interface import (
+        _should_probe_a2ui_stream,
+    )
+
+    assert _should_probe_a2ui_stream(is_team_mode=True) is False
+    assert _should_probe_a2ui_stream(is_team_mode=False) is True
+
+
+def test_team_a2ui_block_closes_across_chunks_without_blocking_other_member():
+    """Only the emitting member is buffered until its closing tag arrives."""
+    from jiuwenswarm.server.runtime.a2ui.runtime.team_stream import TeamA2UIBlockBuffer
+
+    blocks = TeamA2UIBlockBuffer()
+    analyst = {"rid": 7, "role": "teammate", "member_name": "analyst"}
+    reviewer = {"rid": 7, "role": "teammate", "member_name": "reviewer"}
+
+    first = blocks.consume(analyst, "chat.delta", "结果如下：\n<a2")
+    other = blocks.consume(reviewer, "chat.delta", "审查任务已经完成。")
+    middle = blocks.consume(analyst, "chat.delta", "ui-json>[{")
+    closed = blocks.consume(analyst, "chat.delta", "}]</a2ui-json>")
+
+    assert first is not None
+    assert first.passthrough == "结果如下：\n"
+    assert first.suppress is True
+    assert other is None
+    assert middle is not None
+    assert middle.suppress is True
+    assert closed is not None
+    assert closed.raw_block == "<a2ui-json>[{}]</a2ui-json>"
+
+
+def test_team_a2ui_closed_block_preserves_prefix_and_trailing_text():
+    """Text surrounding a complete local block remains streamable."""
+    from jiuwenswarm.server.runtime.a2ui.runtime.team_stream import TeamA2UIBlockBuffer
+
+    blocks = TeamA2UIBlockBuffer()
+    payload = {"rid": 8, "role": "leader"}
+
+    decision = blocks.consume(
+        payload,
+        "chat.delta",
+        "开始展示。<a2ui-json>[]</a2ui-json>展示完成。",
+    )
+
+    assert decision is not None
+    assert decision.passthrough == "开始展示。"
+    assert decision.raw_block == "<a2ui-json>[]</a2ui-json>"
+    assert decision.trailing == "展示完成。"
+
+
+def test_team_a2ui_final_reuses_repaired_closed_block():
+    """The later answer frame reuses repair output instead of repairing twice."""
+    from jiuwenswarm.server.runtime.a2ui.runtime.team_stream import TeamA2UIBlockBuffer
+
+    blocks = TeamA2UIBlockBuffer()
+    payload = {"rid": 9, "role": "teammate", "member_name": "writer"}
+    raw_block = "<a2ui-json>[invalid]</a2ui-json>"
+    repaired_block = "<a2ui-json>[]</a2ui-json>"
+    closed = blocks.consume(payload, "chat.delta", raw_block)
+    assert closed is not None
+    blocks.remember_finalized(closed.key, raw_block, repaired_block)
+
+    final = blocks.consume(payload, "chat.final", f"说明。{raw_block}")
+
+    assert final is not None
+    assert final.replacement == f"说明。{repaired_block}"
+    assert final.finalize_whole_event is False
+
+
+def test_team_a2ui_final_detects_block_not_seen_in_deltas():
+    """A new block in chat.final is finalized after known blocks are replaced."""
+    from jiuwenswarm.server.runtime.a2ui.runtime.team_stream import TeamA2UIBlockBuffer
+
+    blocks = TeamA2UIBlockBuffer()
+    payload = {"rid": 9, "role": "teammate", "member_name": "writer"}
+    raw_block = "<a2ui-json>[invalid-a]</a2ui-json>"
+    repaired_block = "<a2ui-json>[]</a2ui-json>"
+    new_block = "<a2ui-json>[invalid-b]</a2ui-json>"
+    closed = blocks.consume(payload, "chat.delta", raw_block)
+    assert closed is not None
+    blocks.remember_finalized(closed.key, raw_block, repaired_block)
+
+    final = blocks.consume(
+        payload,
+        "chat.final",
+        f"说明。{raw_block}{new_block}",
+    )
+
+    assert final is not None
+    assert final.raw_block == f"说明。{repaired_block}{new_block}"
+    assert final.finalize_whole_event is True
+
+
+def test_team_a2ui_final_recognizes_already_repaired_block():
+    """A known finalized block must not be mistaken for a new block."""
+    from jiuwenswarm.server.runtime.a2ui.runtime.team_stream import TeamA2UIBlockBuffer
+
+    blocks = TeamA2UIBlockBuffer()
+    payload = {"rid": 9, "role": "teammate", "member_name": "writer"}
+    raw_block = "<a2ui-json>[invalid]</a2ui-json>"
+    repaired_block = "<a2ui-json>[]</a2ui-json>"
+    closed = blocks.consume(payload, "chat.delta", raw_block)
+    assert closed is not None
+    blocks.remember_finalized(closed.key, raw_block, repaired_block)
+
+    final = blocks.consume(payload, "chat.final", repaired_block)
+
+    assert final is None
+
+
+def test_team_a2ui_member_final_is_fallback_for_missing_close_tag():
+    """An unclosed block is finalized at the member boundary, not Team end."""
+    from jiuwenswarm.server.runtime.a2ui.runtime.team_stream import TeamA2UIBlockBuffer
+
+    blocks = TeamA2UIBlockBuffer()
+    payload = {"rid": 10, "role": "teammate", "member_name": "writer"}
+    held = blocks.consume(payload, "chat.delta", "<a2ui-json>[{}]")
+
+    final = blocks.consume(payload, "chat.final", "说明。<a2ui-json>[{}]")
+
+    assert held is not None
+    assert held.suppress is True
+    assert final is not None
+    assert final.raw_block == "说明。<a2ui-json>[{}]"
+    assert final.finalize_whole_event is True
+
+
+def test_team_a2ui_partial_tag_false_alarm_is_released_locally():
+    """A split prefix that is not A2UI must be returned without data loss."""
+    from jiuwenswarm.server.runtime.a2ui.runtime.team_stream import TeamA2UIBlockBuffer
+
+    blocks = TeamA2UIBlockBuffer()
+    payload = {"rid": 11, "role": "leader"}
+    held = blocks.consume(payload, "chat.delta", "链接：<a")
+    released = blocks.consume(payload, "chat.delta", " href='https://example.com'>")
+
+    assert held is not None
+    assert held.passthrough == "链接："
+    assert released is not None
+    assert released.passthrough == "<a href='https://example.com'>"
+
+
+@pytest.mark.asyncio
+async def test_team_a2ui_repair_does_not_block_other_member(monkeypatch):
+    """A slow local repair must not delay an unrelated teammate event."""
+    from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponseChunk
+    from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
+    from jiuwenswarm.server.runtime.agent_adapter import team_helpers
+
+    raw_block = "<a2ui-json>[invalid]</a2ui-json>"
+    repaired_block = "<a2ui-json>[]</a2ui-json>"
+    new_block = "<a2ui-json>[new-invalid]</a2ui-json>"
+    final_repaired = f"{repaired_block}<a2ui-json>[new-valid]</a2ui-json>"
+
+    class FakeSessionManager:
+        @staticmethod
+        def get_session_id(session_id=None):
+            return session_id or "default"
+
+    class FakeAdapter:
+        _instance = None
+
+        @staticmethod
+        async def process_message_stream_impl(*_args, **_kwargs):
+            yield AgentResponseChunk(
+                request_id="req-team-a2ui",
+                channel_id="web",
+                payload={
+                    "event_type": "chat.delta",
+                    "content": raw_block,
+                    "rid": 12,
+                    "role": "teammate",
+                    "member_name": "writer",
+                },
+                is_complete=False,
+            )
+            yield AgentResponseChunk(
+                request_id="req-team-a2ui",
+                channel_id="web",
+                payload={
+                    "event_type": "chat.delta",
+                    "content": "reviewer finished",
+                    "rid": 12,
+                    "role": "teammate",
+                    "member_name": "reviewer",
+                },
+                is_complete=False,
+            )
+            yield AgentResponseChunk(
+                request_id="req-team-a2ui",
+                channel_id="web",
+                payload={
+                    "event_type": "chat.final",
+                    "content": f"{raw_block}{new_block}",
+                    "rid": 12,
+                    "role": "teammate",
+                    "member_name": "writer",
+                },
+                is_complete=False,
+            )
+
+    async def fake_finalize(content, **_kwargs):
+        if content == raw_block:
+            await asyncio.sleep(0.02)
+            return repaired_block
+        if content == f"{repaired_block}{new_block}":
+            return final_repaired
+        return content
+
+    async def has_team_runtime(*_args, **_kwargs):
+        return True
+
+    monkeypatch.setattr(interface_module, "SessionManager", FakeSessionManager)
+    monkeypatch.setattr(interface_module, "get_config", lambda: {})
+    monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
+    monkeypatch.setattr(interface_module, "append_history_record", lambda **_kwargs: None)
+    monkeypatch.setattr(interface_module, "_schedule_symphony_session_feedback", lambda *_args: None)
+    monkeypatch.setattr(interface_module, "finalize_assistant_response_if_a2ui", fake_finalize)
+    monkeypatch.setattr(
+        interface_module.JiuWenSwarm,
+        "_ensure_adapter",
+        lambda self, mode="agent": FakeAdapter(),
+    )
+    monkeypatch.setattr(team_helpers, "_team_session_has_runtime", has_team_runtime)
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.get_team_manager",
+        lambda _channel_id: object(),
+    )
+
+    request = AgentRequest(
+        request_id="req-team-a2ui",
+        channel_id="web",
+        session_id="sess-team-a2ui",
+        params={"query": "render", "mode": "team"},
+        is_stream=True,
+    )
+    chunks = [
+        chunk
+        async for chunk in interface_module.JiuWenSwarm().process_message_stream(request)
+    ]
+    contents = [
+        str(chunk.payload.get("content"))
+        for chunk in chunks
+        if isinstance(chunk.payload, dict) and chunk.payload.get("content")
+    ]
+
+    assert contents.index("reviewer finished") < contents.index(final_repaired)
+    assert raw_block not in contents
+    assert new_block not in contents
 
 
 def test_split_a2ui_stream_content_keeps_prefix_streamable():

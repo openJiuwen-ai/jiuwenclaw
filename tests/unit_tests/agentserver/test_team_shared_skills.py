@@ -9,6 +9,8 @@ import shutil
 from pathlib import Path
 
 import pytest
+from openjiuwen.agent_evolving.checkpointing import EvolutionStore
+from openjiuwen.agent_evolving.checkpointing.types import EvolutionPatch, EvolutionRecord, EvolutionTarget
 from openjiuwen.core.single_agent.rail.base import ToolCallInputs
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 
@@ -17,12 +19,62 @@ from jiuwenswarm.agents.harness.team.rails.team_shared_skill_link_refresh_rail i
 )
 from jiuwenswarm.agents.harness.team.team_manager import TeamManager
 from jiuwenswarm.agents.harness.team.team_skill_links import remove_skill_dir_link
+from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
 
 
 def _assert_link_points_to(path: Path, target: Path) -> None:
     """Assert that a link or junction resolves to the expected target."""
     assert path.exists()
     assert path.resolve() == target.resolve()
+
+
+@pytest.mark.asyncio
+async def test_team_evolution_is_visible_and_editable_from_global_skill_manager(tmp_path):
+    global_workspace = tmp_path / "agent" / "workspace"
+    global_skills_dir = global_workspace / "skills"
+    global_skill = global_skills_dir / "shared-skill"
+    global_skill.mkdir(parents=True)
+    (global_skill / "SKILL.md").write_text(
+        "---\nname: shared-skill\nkind: swarm-skill\n---\n\n# Shared Skill\n",
+        encoding="utf-8",
+    )
+    team_skills_dir = tmp_path / "team-workspace" / "skills"
+    team_skills_dir.mkdir(parents=True)
+    try:
+        (team_skills_dir / "shared-skill").symlink_to(global_skill, target_is_directory=True)
+    except (NotImplementedError, OSError):
+        pytest.skip("directory symlinks are unavailable")
+
+    store = EvolutionStore([str(team_skills_dir), str(global_skills_dir)])
+    record = EvolutionRecord(
+        id="ev_shared",
+        source="execution_success",
+        timestamp="2026-08-04T00:00:00+00:00",
+        context="team run",
+        change=EvolutionPatch(
+            section="Instructions",
+            action="append",
+            content="original experience",
+            target=EvolutionTarget.BODY,
+        ),
+    )
+    await store.append_record("shared-skill", record, subject_kind="swarm-skill")
+
+    manager = SkillManager(workspace_dir=str(global_workspace))
+    listed = await manager.handle_skills_list({})
+    skill = next(item for item in listed["skills"] if item["name"] == "shared-skill")
+    assert skill["has_evolutions"] is True
+
+    evolution = await manager.handle_skills_evolution_get({"name": "shared-skill"})
+    assert [entry["id"] for entry in evolution["entries"]] == ["ev_shared"]
+    evolution["entries"][0]["change"]["content"] = "edited experience"
+
+    saved = await manager.handle_skills_evolution_save(
+        {"name": "shared-skill", "entries": evolution["entries"]}
+    )
+    assert saved["success"] is True
+    reloaded = await manager.handle_skills_evolution_get({"name": "shared-skill"})
+    assert reloaded["entries"][0]["change"]["content"] == "edited experience"
 
 
 def test_ensure_team_shared_skills_initialized_links_global_skills(tmp_path, monkeypatch):

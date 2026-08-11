@@ -44,6 +44,9 @@ parse_channel_control_text = _MOD.parse_channel_control_text
         ("/mode code.plan", ParsedControlAction.MODE_OK, ("code.plan", None), None, None),
         ("/mode code.normal", ParsedControlAction.MODE_OK, ("code.normal", None), None, None),
         ("/mode code.team", ParsedControlAction.MODE_OK, ("code.team", None), None, None),
+        ("/mode team.plan", ParsedControlAction.MODE_OK, ("team.plan", None), None, None),
+        ("/mode team.plan.normal", ParsedControlAction.MODE_OK, ("team.plan.normal", None), None, None),
+        ("/mode team.plan.code", ParsedControlAction.MODE_OK, ("team.plan.code", None), None, None),
         ("/mode plan", ParsedControlAction.MODE_BAD, (None, None), None, None),
         ("/mode", ParsedControlAction.MODE_BAD, (None, None), None, None),
         ("/switch plan", ParsedControlAction.SWITCH_OK, (None, "plan"), None, None),
@@ -155,6 +158,9 @@ def test_control_message_texts_contains_mode_variants_and_skills() -> None:
     assert "/mode agent.plan" in CONTROL_MESSAGE_TEXTS
     assert "/mode code.normal" in CONTROL_MESSAGE_TEXTS
     assert "/mode code.team" in CONTROL_MESSAGE_TEXTS
+    assert "/mode team.plan" in CONTROL_MESSAGE_TEXTS
+    assert "/mode team.plan.normal" in CONTROL_MESSAGE_TEXTS
+    assert "/mode team.plan.code" in CONTROL_MESSAGE_TEXTS
     assert "/switch normal" in CONTROL_MESSAGE_TEXTS
     assert "/switch team" in CONTROL_MESSAGE_TEXTS
     assert "/branch" in CONTROL_MESSAGE_TEXTS

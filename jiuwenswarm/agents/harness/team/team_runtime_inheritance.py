@@ -17,11 +17,13 @@ from openjiuwen.harness.rails import (
     SysOperationRail,
     HeartbeatRail,
     SecurityRail,
+    TaskPlanningRail,
+)
+from openjiuwen.harness.rails import (
     EvolutionInterruptRail,
     SkillEvolutionRail,
-    TaskPlanningRail,
-    TeamSkillEvolutionRail,
     TeamSkillCreateRail,
+    TeamSkillEvolutionRail,
 )
 from openjiuwen.harness.rails.evolution import EvolutionReviewRuntime
 from openjiuwen.harness.rails.context_engineer import ContextProcessorRail
@@ -35,12 +37,10 @@ from jiuwenswarm.agents.harness.team.rails.team_workspace_report_path_rail impor
 from jiuwenswarm.common.config import (
     get_config,
     get_evolution_auto_save_enabled,
-    get_evolution_auto_scan_enabled,
-    get_evolution_review_trigger_enabled,
-    get_evolution_signal_trigger_enabled,
-    get_skill_create_enabled,
+    get_skill_evolution_enabled,
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
+from jiuwenswarm.common.utils import get_agent_skills_dir
 from jiuwenswarm.server.runtime.skill import load_execution_disabled_skills
 
 logger = logging.getLogger(__name__)
@@ -52,6 +52,14 @@ class MemberInfo:
     agent_name: str = "team_member"
     model_name: str = "gpt-4"
     role: str | None = None
+
+
+def get_team_evolution_skills_dirs(
+    team_skills_dir: str,
+    global_skills_dir: str | None = None,
+) -> list[str]:
+    """Return the team view and its trusted global symlink target root."""
+    return [team_skills_dir, global_skills_dir or str(get_agent_skills_dir())]
 
 
 @dataclass
@@ -166,6 +174,7 @@ def build_member_rails(
     team_id = team_workspace.team_id
     config = team_workspace.config
     team_trajectory_registry = team_workspace.trajectory_registry
+    skill_evolution_enabled = get_skill_evolution_enabled(config)
 
     rails_list = []
 
@@ -257,29 +266,25 @@ def build_member_rails(
             logger.warning("[TeamRuntime] TeamWorkspaceReportPathRail failed: %s", exc)
 
     # Leader-only: TeamSkillEvolutionRail for team skill evolution.
-    if role == "leader" and team_ws_skills_dir:
+    if role == "leader" and team_ws_skills_dir and skill_evolution_enabled:
         try:
             Path(team_ws_skills_dir).mkdir(parents=True, exist_ok=True)
-            llm_model, actual_model_name = build_evolution_llm()
-            evolution_review_trigger = get_evolution_review_trigger_enabled(
-                config,
-                fallback=get_evolution_auto_scan_enabled(config),
-            )
+            llm_model, actual_model_name = build_evolution_llm(config)
             evolution_auto_save = get_evolution_auto_save_enabled(config)
             bound_team_trajectory_registry = team_trajectory_registry if team_id else None
             review_runtime = EvolutionReviewRuntime()
             team_skill_rail = TeamSkillEvolutionRail(
-                skills_dir=team_ws_skills_dir,
+                skills_dir=get_team_evolution_skills_dirs(team_ws_skills_dir),
                 llm=llm_model,
                 model=actual_model_name,
                 review_runtime=review_runtime,
                 language=language,
+                signal_trigger=False,
+                review_trigger=True,
                 trajectory_source=bound_team_trajectory_registry,
                 trajectory_sink=bound_team_trajectory_registry,
                 member_role=role,
-                signal_trigger=False,
                 auto_save=evolution_auto_save,
-                review_trigger=evolution_review_trigger,
                 team_id=team_id,
                 disabled_skills=load_execution_disabled_skills(),
             )
@@ -294,20 +299,18 @@ def build_member_rails(
             rails_list.append(team_skill_rail)
             logger.info(
                 "[TeamRuntime] TeamSkillEvolutionRail created: skills_dir=%s, "
-                "model=%s, signal_trigger=%s, review_trigger=%s, team_trajectory_registry=%s",
+                "model=%s, auto_save=%s, team_trajectory_registry=%s",
                 team_ws_skills_dir,
                 actual_model_name,
-                False,
-                evolution_review_trigger,
+                evolution_auto_save,
                 bool(bound_team_trajectory_registry),
             )
         except Exception as exc:
             logger.warning("[TeamRuntime] TeamSkillEvolutionRail failed: %s", exc, exc_info=True)
 
     # Leader-only: TeamSkillCreateRail for team skill creation proposals.
-    # Requires skill_create config enabled (same as SkillCreateRail for single agent).
-    # Env: SKILL_CREATE takes precedence over config.yaml.
-    if role == "leader" and team_ws_skills_dir and get_skill_create_enabled(config):
+    # Skill creation follows the same canonical capability switch as evolution.
+    if role == "leader" and team_ws_skills_dir and skill_evolution_enabled:
         try:
             team_skill_create_rail = TeamSkillCreateRail(
                 skills_dir=team_ws_skills_dir,
@@ -323,28 +326,16 @@ def build_member_rails(
             logger.warning("[TeamRuntime] TeamSkillCreateRail failed: %s", exc, exc_info=True)
 
     # Non-leader: SkillEvolutionRail for member skill self-evolution.
-    if role != "leader" and team_ws_skills_dir:
+    if role != "leader" and team_ws_skills_dir and skill_evolution_enabled:
         review_runtime = EvolutionReviewRuntime()
         evo_rail = build_skill_evolution_rail(
-            skills_dir=team_ws_skills_dir,
+            skills_dir=get_team_evolution_skills_dirs(team_ws_skills_dir),
             config=config,
             team_trajectory_sink=team_trajectory_registry,
             team_id=team_id,
             review_runtime=review_runtime,
         )
         if evo_rail is not None:
-            try:
-                rails_list.append(
-                    EvolutionInterruptRail(
-                        review_runtime=review_runtime,
-                        submission_service=evo_rail.experience_manager.experience_submission_service,
-                        auto_save=True,
-                        language=language,
-                    )
-                )
-                logger.info("[TeamRuntime] EvolutionInterruptRail created for member skill evolution")
-            except Exception as exc:
-                logger.warning("[TeamRuntime] EvolutionInterruptRail failed: %s", exc, exc_info=True)
             rails_list.append(evo_rail)
 
     # Context compression rail for all members (leader + teammates).
@@ -512,7 +503,7 @@ def build_evolution_llm(
 
 
 def build_skill_evolution_rail(
-    skills_dir: str,
+    skills_dir: str | list[str],
     config: dict[str, Any] | None = None,
     team_trajectory_sink: Any | None = None,
     team_id: str | None = None,
@@ -529,10 +520,6 @@ def build_skill_evolution_rail(
     """
     try:
         llm, model_name = build_evolution_llm(config)
-        evolution_signal_trigger = get_evolution_signal_trigger_enabled(
-            config,
-            fallback=get_evolution_auto_scan_enabled(config),
-        )
         review_runtime = review_runtime or EvolutionReviewRuntime()
 
         rail = SkillEvolutionRail(
@@ -540,8 +527,9 @@ def build_skill_evolution_rail(
             llm=llm,
             model=model_name,
             review_runtime=review_runtime,
-            signal_trigger=evolution_signal_trigger,
+            signal_trigger=True,
             auto_save=True,
+            review_trigger=False,
             disabled_skills=load_execution_disabled_skills(),
         )
         has_team_trajectory_sink = team_trajectory_sink is not None and bool(team_id)
@@ -552,10 +540,10 @@ def build_skill_evolution_rail(
                 member_role="teammate",
             )
         logger.info(
-            "[TeamRuntime] SkillEvolutionRail created: model=%s, signal_trigger=%s, "
+            "[TeamRuntime] SkillEvolutionRail created: model=%s, auto_save=%s, "
             "team_trajectory_sink=%s",
             model_name,
-            evolution_signal_trigger,
+            True,
             has_team_trajectory_sink,
         )
         return rail

@@ -69,6 +69,7 @@ def get_external_memory_config(
         "mem0": ext.get("mem0") or {},
         "openviking": ext.get("openviking") or {},
         "lakebase": ext.get("lakebase") or {},
+        "jiuwen": ext.get("jiuwen") or {},
     }
 
 

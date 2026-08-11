@@ -5,6 +5,8 @@ import teamAvatar3 from '../assets/Team-3.svg';
 import teamAvatar4 from '../assets/Team-4.svg';
 import teamAvatar5 from '../assets/Team-5.svg';
 import teamAvatar6 from '../assets/Team-6.svg';
+import claudeCodeAvatar from '../assets/providers/anthropic.png';
+import codexAvatar from '../assets/providers/openai.png';
 
 const TEAM_MEMBER_AVATARS = [
   teamAvatar2,
@@ -13,6 +15,20 @@ const TEAM_MEMBER_AVATARS = [
   teamAvatar5,
   teamAvatar6,
 ];
+
+// 人类成员（role=human_agent）专用。目前只有"团队中的用户"这一张，多个人类成员
+// 靠 member_id 哈希出的底色区分；设计补齐插画后往这个数组里加即可，无需改逻辑。
+const HUMAN_MEMBER_AVATARS = [userInTeamAvatar];
+
+// 外部 CLI 成员按后端认脸，直接复用仓库里已有的官方品牌图标（ModelProviderIcon
+// 同源），和模型选择器里的视觉认知保持一致。
+const CLI_AGENT_AVATARS: Record<string, string> = {
+  claude: claudeCodeAvatar,
+  codex: codexAvatar,
+};
+
+// 品牌图标自带底色，套成员那套彩色底会脏，统一给中性底。
+const CLI_AGENT_AVATAR_BACKGROUND = '#F2F3F5';
 
 const TEAM_MEMBER_BACKGROUND_COLORS = [
   '#D7F4EE',
@@ -44,7 +60,7 @@ const TEAM_MEMBER_BACKGROUND_COLORS = [
 const FNV_OFFSET_BASIS = 2166136261;
 const FNV_PRIME = 16777619;
 
-export type TeamMemberAvatarKind = 'leader' | 'user' | 'member';
+export type TeamMemberAvatarKind = 'leader' | 'user' | 'human' | 'cli' | 'member';
 
 export interface ResolvedTeamMemberAvatar {
   src: string;
@@ -88,7 +104,34 @@ function getMemberAvatarBackgroundColor(value: string): string {
   return TEAM_MEMBER_BACKGROUND_COLORS[hash % TEAM_MEMBER_BACKGROUND_COLORS.length];
 }
 
-export function resolveTeamMemberAvatar(member?: string): ResolvedTeamMemberAvatar {
+/** 成员身份，决定用哪一套头像；由调用方从成员名册取。 */
+export interface TeamMemberIdentity {
+  /** TeamRole 值：human_agent 认人类脸 */
+  role?: string;
+  /** 老事件用 mode='human' 表达人类成员，等价于 role='human_agent' */
+  mode?: string;
+  /** 外部 CLI 后端名：claude / codex / ... */
+  cliAgent?: string | null;
+}
+
+function isHumanIdentity(identity?: TeamMemberIdentity): boolean {
+  if (!identity) return false;
+  return identity.role === 'human_agent' || identity.mode === 'human';
+}
+
+/** CLI 后端名归一到头像 key：值可能写成 claude / claude-code / codex 等。 */
+function resolveCliAvatarKey(cliAgent?: string | null): string | null {
+  const value = cliAgent?.trim().toLowerCase();
+  if (!value) return null;
+  if (value.includes('claude')) return 'claude';
+  if (value.includes('codex') || value.includes('openai')) return 'codex';
+  return null;
+}
+
+export function resolveTeamMemberAvatar(
+  member?: string,
+  identity?: TeamMemberIdentity
+): ResolvedTeamMemberAvatar {
   const normalizedId = normalizeTeamMemberId(member);
 
   if (normalizedId === 'team_leader' || normalizedId === 'teamleader') {
@@ -107,8 +150,31 @@ export function resolveTeamMemberAvatar(member?: string): ResolvedTeamMemberAvat
     };
   }
 
+  // 外部 CLI 成员认后端的脸：同一队里可能同时有 Claude Code 和 Codex，用哈希插画
+  // 就完全看不出谁是谁。品牌图标底色自带，套彩色底会脏，故给中性底。
+  const cliKey = resolveCliAvatarKey(identity?.cliAgent);
+  if (cliKey) {
+    return {
+      src: CLI_AGENT_AVATARS[cliKey],
+      kind: 'cli',
+      normalizedId,
+      backgroundColor: CLI_AGENT_AVATAR_BACKGROUND,
+    };
+  }
+
   const hashKey = normalizedId || 'unknown_member';
   const hash = hashMemberKey(hashKey);
+
+  // 人类成员单独一套：这一格背后是真人，和 AI 队友混用同一套插画会误导。
+  if (isHumanIdentity(identity)) {
+    return {
+      src: HUMAN_MEMBER_AVATARS[hash % HUMAN_MEMBER_AVATARS.length],
+      kind: 'human',
+      normalizedId,
+      backgroundColor: getMemberAvatarBackgroundColor(hashKey),
+    };
+  }
+
   return {
     src: TEAM_MEMBER_AVATARS[hash % TEAM_MEMBER_AVATARS.length],
     kind: 'member',
@@ -117,6 +183,9 @@ export function resolveTeamMemberAvatar(member?: string): ResolvedTeamMemberAvat
   };
 }
 
-export function getTeamMemberAvatarSrc(member?: string): string {
-  return resolveTeamMemberAvatar(member).src;
+export function getTeamMemberAvatarSrc(
+  member?: string,
+  identity?: TeamMemberIdentity
+): string {
+  return resolveTeamMemberAvatar(member, identity).src;
 }

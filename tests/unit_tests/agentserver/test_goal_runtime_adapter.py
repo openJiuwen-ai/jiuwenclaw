@@ -90,8 +90,19 @@ def _adapter(goal_manager: _FakeGoals) -> JiuWenSwarmDeepAdapter:
     adapter = JiuWenSwarmDeepAdapter.__new__(JiuWenSwarmDeepAdapter)
     adapter._instance = SimpleNamespace(goal_manager=goal_manager)
     adapter._is_session_scoped_adapter = True
-    adapter._stream_content_run_kind = None
     return adapter
+
+
+def _chunk(chunk_type: str, payload: object) -> OutputSchema:
+    return OutputSchema(type=chunk_type, index=0, payload=payload)
+
+
+def _delta_chunk(text: str) -> OutputSchema:
+    return _chunk("llm_output", {"content": text})
+
+
+def _answer_chunk(text: str) -> OutputSchema:
+    return _chunk("answer", {"output": text, "result_type": "success"})
 
 
 class _FakeGoalAdapter:
@@ -337,6 +348,87 @@ def test_active_goal_demotes_goal_round_chat_final_to_delta() -> None:
     }
 
 
+def test_demoted_goal_final_is_dropped_when_text_was_already_streamed() -> None:
+    """降级后的 final 会被前端追加：已流式过的正文必须丢掉，否则气泡/历史各留两份。
+
+    普通轮的真 ``chat.final`` 是覆盖气泡正文，所以逐 token 流式 + final 全文不会
+    重复；Goal 轮被降级成 ``chat.delta`` 后是追加，正文就会出现两遍。
+    """
+    goals = _FakeGoals()
+    goals.record = GoalRecord.create(session_id="session-1", objective="ship the feature")
+    adapter = _adapter(goals)
+    adapter._instance.active_round = SimpleNamespace(run_kind="goal")
+    adapter._instance.interaction_started = True
+    adapter._stream_content_run_kind = "goal"
+
+    adapter._note_round_visible_text("测试全部")
+    adapter._note_round_visible_text("通过了。")
+
+    assert (
+        adapter._adapt_goal_intermediate_final(
+            {"event_type": "chat.final", "content": "测试全部通过了。"}
+        )
+        is None
+    )
+    # answer 会重新排版流式过的 token：换行/空白差异不算新内容。
+    assert (
+        adapter._adapt_goal_intermediate_final(
+            {"event_type": "chat.final", "content": " 测试全部\n通过了。 "}
+        )
+        is None
+    )
+
+
+def test_demoted_goal_final_keeps_text_that_was_never_streamed() -> None:
+    """attempt 只有 answer、没有流式正文时，降级的 final 仍要下发，别丢正文。"""
+    goals = _FakeGoals()
+    goals.record = GoalRecord.create(session_id="session-1", objective="ship the feature")
+    adapter = _adapter(goals)
+    adapter._instance.active_round = SimpleNamespace(run_kind="goal")
+    adapter._instance.interaction_started = True
+    adapter._stream_content_run_kind = "goal"
+
+    adapter._note_round_visible_text("正在跑测试……")
+
+    assert adapter._adapt_goal_intermediate_final(
+        {"event_type": "chat.final", "content": "本轮小结：测试通过。"}
+    ) == {
+        "event_type": "chat.delta",
+        "content": "本轮小结：测试通过。",
+        "goal_intermediate": True,
+    }
+
+
+def test_round_boundary_clears_streamed_text_memo() -> None:
+    """上一轮流过的正文不能影响下一轮 attempt 的去重判断。"""
+    goals = _FakeGoals()
+    goals.record = GoalRecord.create(session_id="session-1", objective="ship the feature")
+    adapter = _adapter(goals)
+    adapter._instance.interaction_started = True
+    adapter._instance.active_round = SimpleNamespace(run_kind="goal")
+
+    adapter._track_round_output_boundary(_delta_chunk("attempt 1 输出"))
+    adapter._note_round_visible_text("attempt 1 输出")
+    adapter._track_round_output_boundary(_answer_chunk("attempt 1 输出"))
+
+    adapter._track_round_output_boundary(_delta_chunk("attempt 2 输出"))
+    assert adapter._stream_round_visible_text == ""
+    adapter._note_round_visible_text("attempt 2 输出")
+    assert (
+        adapter._adapt_goal_intermediate_final(
+            {"event_type": "chat.final", "content": "attempt 2 输出"}
+        )
+        is None
+    )
+    assert adapter._adapt_goal_intermediate_final(
+        {"event_type": "chat.final", "content": "attempt 1 输出"}
+    ) == {
+        "event_type": "chat.delta",
+        "content": "attempt 1 输出",
+        "goal_intermediate": True,
+    }
+
+
 def test_active_goal_keeps_user_round_chat_final_terminal() -> None:
     """User answer finishes while Goal is still ACTIVE: keep real chat.final."""
     goals = _FakeGoals()
@@ -387,6 +479,79 @@ def test_user_to_goal_content_injects_bubble_split_final() -> None:
 
     assert boundary == {"event_type": "chat.final", "content": ""}
     assert adapter._stream_content_run_kind == "goal"
+
+
+def test_round_kind_latch_keeps_user_tail_when_goal_round_already_started() -> None:
+    """Queued user tail must stay user output, so its own final closes bubble A.
+
+    Output is drained from a queue: the scheduler can start the goal round while
+    the user round's last deltas and its ``answer`` are still queued. Sampling
+    ``active_round`` per chunk used to stamp that tail as goal output, which
+    demoted the user round's terminal ``chat.final`` and merged the ordinary
+    answer and the goal answer into one bubble.
+    """
+    goals = _FakeGoals()
+    goals.record = GoalRecord.create(session_id="session-1", objective="ship the feature")
+    adapter = _adapter(goals)
+    adapter._instance.interaction_started = True
+    adapter._instance.active_round = SimpleNamespace(run_kind="user")
+
+    adapter._track_round_output_boundary(_delta_chunk("hello"))
+    assert adapter._begin_visible_chat_content(True) is None
+    assert adapter._stream_content_run_kind == "user"
+
+    # Goal round starts at the producer; the user tail is still queued here.
+    adapter._instance.active_round = SimpleNamespace(run_kind="goal")
+    adapter._track_round_output_boundary(_delta_chunk(" world"))
+    assert adapter._begin_visible_chat_content(True) is None
+
+    adapter._track_round_output_boundary(_answer_chunk("hello world"))
+    assert adapter._adapt_goal_intermediate_final(
+        {"event_type": "chat.final", "content": "hello world"}
+    ) == {"event_type": "chat.final", "content": "hello world"}
+    # The forwarded terminal final closes the segment (stream loop behavior).
+    adapter._stream_content_run_kind = None
+
+    # Next round re-samples: goal output opens its own bubble and its
+    # attempt-boundary final stays intermediate.
+    adapter._track_round_output_boundary(_delta_chunk("goal step"))
+    assert adapter._begin_visible_chat_content(True) == {
+        "event_type": "chat.final",
+        "content": "",
+    }
+    assert adapter._stream_content_run_kind == "goal"
+    assert adapter._adapt_goal_intermediate_final(
+        {"event_type": "chat.final", "content": "goal step"}
+    ) == {
+        "event_type": "chat.delta",
+        "content": "goal step",
+        "goal_intermediate": True,
+    }
+
+
+def test_round_kind_latch_keeps_goal_attempts_in_one_bubble() -> None:
+    """Attempt boundaries must not inject a split final between goal attempts."""
+    goals = _FakeGoals()
+    goals.record = GoalRecord.create(session_id="session-1", objective="ship the feature")
+    adapter = _adapter(goals)
+    adapter._instance.interaction_started = True
+    adapter._instance.active_round = SimpleNamespace(run_kind="goal")
+
+    adapter._track_round_output_boundary(_delta_chunk("attempt 1"))
+    adapter._begin_visible_chat_content(True)
+    adapter._track_round_output_boundary(_answer_chunk("attempt 1"))
+
+    adapter._track_round_output_boundary(_delta_chunk("attempt 2"))
+    assert adapter._begin_visible_chat_content(True) is None
+    assert adapter._stream_content_run_kind == "goal"
+
+
+def test_only_round_result_chunks_end_the_round_kind_latch() -> None:
+    assert JiuWenSwarmDeepAdapter._is_round_terminal_chunk(_answer_chunk("done")) is True
+    assert JiuWenSwarmDeepAdapter._is_round_terminal_chunk(_delta_chunk("x")) is False
+    assert JiuWenSwarmDeepAdapter._is_round_terminal_chunk(_chunk("tool_call", {})) is False
+    assert JiuWenSwarmDeepAdapter._is_round_terminal_chunk({"type": "answer"}) is True
+    assert JiuWenSwarmDeepAdapter._is_round_terminal_chunk({"output": "x"}) is False
 
 
 def test_active_goal_keeps_chat_final_when_no_goal_round_in_flight() -> None:
@@ -604,11 +769,24 @@ def test_stream_end_skips_final_when_already_emitted() -> None:
 
 
 def test_record_goal_set_history_writes_objective_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    from collections import Counter
+
+    from jiuwenswarm.server.runtime.agent_adapter import interface_deep
+
     captured: list[dict] = []
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.agent_adapter.interface_deep.append_history_record",
         lambda **kwargs: captured.append(kwargs),
     )
+    interface_deep._pending_goal_objective_history.clear()
+    adapter = _adapter(_FakeGoals())
+    adapter._active_session_ids = Counter()
+    adapter._session_agent_tasks = {}
+    adapter._stream_content_run_kind = None
+    adapter._stream_round_kind_latch = None
+    adapter._resolve_interrupt_session_id = lambda sid: sid or "default"
+    adapter._current_interaction_run_kind = lambda: None
+
     req = AgentRequest(
         request_id="r1",
         channel_id="web",
@@ -616,11 +794,13 @@ def test_record_goal_set_history_writes_objective_flags(monkeypatch: pytest.Monk
         req_method=ReqMethod.COMMAND_GOAL,
         params={"mode": "agent"},
     )
-    JiuWenSwarmDeepAdapter._record_goal_set_history_if_needed(
+    # 本用例只钉 flags；defer=False 表示空闲立刻落盘（忙碌推迟另有 defer 单测）
+    adapter._record_goal_set_history_if_needed(
         req,
         action="set",
         result_type="goal_stream",
         goal_payload={"goal_id": "g1", "objective": "ship it"},
+        defer=False,
     )
     assert len(captured) == 1
     assert captured[0]["role"] == "user"
@@ -629,11 +809,12 @@ def test_record_goal_set_history_writes_objective_flags(monkeypatch: pytest.Monk
     assert captured[0]["extra"]["goal_id"] == "g1"
 
     captured.clear()
-    JiuWenSwarmDeepAdapter._record_goal_set_history_if_needed(
+    adapter._record_goal_set_history_if_needed(
         req,
         action="pause",
         result_type="ok",
         goal_payload={"goal_id": "g1", "objective": "ship it"},
+        defer=False,
     )
     assert captured == []
 

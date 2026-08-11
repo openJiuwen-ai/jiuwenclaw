@@ -67,6 +67,7 @@ from jiuwenswarm.common.config import (
     update_a2ui_in_config,
     update_updater_in_config,
     update_proactive_recommendation_in_config,
+    update_skill_evolution_enabled_in_config,
 )
 from jiuwenswarm.common.kv_cache_affinity_config import (
     ASCEND_AFFINITY_PROVIDER,
@@ -104,11 +105,9 @@ from jiuwenswarm.agents.harness.common.tools.web_file_download import build_file
 from jiuwenswarm.common.version import __version__
 from jiuwenswarm.gateway.media_attachments import normalize_chat_media_attachments
 from jiuwenswarm.gateway.document_attachments import (
-    coerce_document_parse_flag,
-    parse_existing_document,
+    forbidden_formats,
     persist_and_parse_documents,
 )
-from jiuwenswarm.common.document_parser import DEFAULT_MAX_CHARS, supported_formats
 from jiuwenswarm.server.runtime.session import project_store
 from jiuwenswarm.symphony.skill_retrieval.taxonomy_config import (
     coerce_root_categories_value,
@@ -614,11 +613,10 @@ _FORWARD_REQ_METHODS = frozenset({
     "skills.evolution.status",
     "skills.evolution.get",
     "skills.evolution.save",
-    "symphony.build_score",
-    "symphony.pause_build",
-    "symphony.score_status",
-    "symphony.graph",
-    "symphony.plan",
+    "skills.graph.build",
+    "skills.graph.status",
+    "skills.graph.get",
+    "skills.graph.cancel",
     "plugins.list",
     "plugins.install",
     "plugins.uninstall",
@@ -713,11 +711,10 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "skills.evolution.status",
     "skills.evolution.get",
     "skills.evolution.save",
-    "symphony.build_score",
-    "symphony.pause_build",
-    "symphony.score_status",
-    "symphony.graph",
-    "symphony.plan",
+    "skills.graph.build",
+    "skills.graph.status",
+    "skills.graph.get",
+    "skills.graph.cancel",
     "plugins.list",
     "plugins.install",
     "plugins.uninstall",
@@ -773,8 +770,6 @@ _CONFIG_SET_ENV_MAP = {
     "serper_api_key": "SERPER_API_KEY",
     "perplexity_api_key": "PERPLEXITY_API_KEY",
     "github_token": "GITHUB_TOKEN",
-    "evolution_auto_scan": "EVOLUTION_AUTO_SCAN",
-    "skill_create": "SKILL_CREATE",
     "teamskills_market_url": "TEAM_SKILLS_HUB_BASE_URL",
     "teamskills_user_token": "TEAM_SKILLS_HUB_USER_TOKEN",
     "teamskills_system_token": "TEAM_SKILLS_HUB_SYSTEM_TOKEN",
@@ -815,6 +810,7 @@ _CONFIG_YAML_KEYS = frozenset({
     "proactive_recommendation_max_rounds_per_tick",
     "swarmflow_enabled",
     "setup_guide_enabled",
+    "skill_evolution",
 })
 
 # 微信通道数值参数的取值范围：(下限, 上限, 是否必须为整数)。均为秒，必须为有限正数。
@@ -863,7 +859,6 @@ def _validate_wechat_numeric_params(params: dict) -> str | None:
 
 _SYMPHONY_CONFIG_SPECS: dict[str, tuple[tuple[str, ...], str, Any]] = {
     "symphony_enabled": (("enabled",), "bool", False),
-    "symphony_dynamic_graph_enabled": (("evolution", "enabled"), "bool", False),
 }
 _SYMPHONY_CONFIG_KEYS = tuple(_SYMPHONY_CONFIG_SPECS.keys())
 _SKILL_RETRIEVAL_CONFIG_SPECS: dict[str, tuple[tuple[str, ...], str, Any]] = {
@@ -1122,7 +1117,12 @@ async def _clear_agent_config_cache(agent_client=None) -> None:
         pass
 
 
-async def _restart_agent_browser_runtime(agent_client=None) -> None:
+async def _restart_agent_browser_runtime(
+    agent_client=None,
+    *,
+    previous_chrome_path: str = "",
+    previous_headless: bool = True,
+) -> None:
     """Stop active agent-side browser runtimes so the next task uses new config."""
     if agent_client is None:
         return
@@ -1134,6 +1134,14 @@ async def _restart_agent_browser_runtime(agent_client=None) -> None:
         request_id=f"browser-restart-{uuid.uuid4().hex[:8]}",
         channel_id="",
         req_method=ReqMethod.BROWSER_RUNTIME_RESTART,
+        params={
+            "browser_key": "",
+            "profile_name": (
+                os.getenv("BROWSER_PROFILE_NAME") or "jiuwenclaw"
+            ).strip(),
+            "display_mode": "headless" if previous_headless else "headed",
+            "browser_binary": str(previous_chrome_path or "").strip(),
+        },
     )
     response = await agent_client.send_request(env)
     if not response.ok:
@@ -1537,6 +1545,44 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             name=f"{name}.clear_agent_config_cache",
         )
 
+    def _schedule_agent_prewarm_sync(name: str) -> None:
+        """Reconcile project-derived warm keys without delaying the Web RPC."""
+
+        async def _sync() -> None:
+            try:
+                from jiuwenswarm.common.e2a.gateway_normalize import (
+                    e2a_from_agent_fields,
+                )
+                from jiuwenswarm.common.schema.message import ReqMethod
+
+                real_client = _resolve(agent_client)
+                if real_client is None:
+                    return
+                cm = _resolve(channel_manager)
+                enabled_channels = [
+                    channel
+                    for channel in list(getattr(cm, "enabled_channels", []) or [])
+                    if str(channel).lower() not in {"acp", "a2a"}
+                ]
+                env = e2a_from_agent_fields(
+                    request_id=f"agent-prewarm-project-{uuid.uuid4().hex[:8]}",
+                    channel_id="web",
+                    req_method=ReqMethod.AGENT_PREWARM_SYNC,
+                    params={"enabled_channels": sorted(set(enabled_channels))},
+                    is_stream=False,
+                    timestamp=time.time(),
+                )
+                response = await real_client.send_request(env)
+                if not getattr(response, "ok", False):
+                    logger.warning(
+                        "[Project] agent.prewarm.sync rejected: %s",
+                        getattr(response, "payload", None),
+                    )
+            except Exception as exc:  # noqa: BLE001 - maintenance is non-blocking
+                logger.warning("[Project] agent.prewarm.sync failed: %s", exc)
+
+        asyncio.create_task(_sync(), name=f"{name}.agent_prewarm_sync")
+
     def _resolve_env_vars(value: Any) -> Any:
         """Recursively resolve environment variables in config values."""
         if isinstance(value, str):
@@ -1621,18 +1667,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             perm_cfg = raw.get("permissions") or {}
             payload["permissions_enabled"] = "true" if perm_cfg.get("enabled", False) else "false"
-            # skill_create / evolution_auto_scan: env var takes precedence, fallback to config.yaml
+            # Skill evolution is controlled solely by the canonical nested YAML key.
             evolution_cfg = (raw.get("react") or {}).get("evolution") or {}
-            skill_create_env = os.getenv("SKILL_CREATE")
-            if skill_create_env is not None:
-                payload["skill_create"] = "true" if skill_create_env.lower() in ("true", "1", "yes") else "false"
-            else:
-                payload["skill_create"] = "true" if evolution_cfg.get("skill_create", False) else "false"
-            auto_scan_env = os.getenv("EVOLUTION_AUTO_SCAN")
-            if auto_scan_env is not None:
-                payload["evolution_auto_scan"] = "true" if auto_scan_env.lower() in ("true", "1", "yes") else "false"
-            else:
-                payload["evolution_auto_scan"] = "true" if evolution_cfg.get("auto_scan", False) else "false"
+            payload["skill_evolution"] = "true" if evolution_cfg.get("skill_evolution", False) else "false"
             memory_cfg = (raw.get("memory") or {}).get("forbidden_memory_definition") or {}
             payload["memory_forbidden_enabled"] = "true" if memory_cfg.get("enabled", False) else "false"
             memory_desc = memory_cfg.get("description") or {}
@@ -1659,8 +1696,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload.setdefault("kv_cache_affinity_enabled", "false")
             payload.setdefault("permissions_enabled", "false")
             payload.setdefault("setup_guide_enabled", "true")
-            payload.setdefault("skill_create", "false")
-            payload.setdefault("evolution_auto_scan", "false")
+            payload.setdefault("skill_evolution", "false")
             payload.setdefault("memory_forbidden_enabled", "false")
             payload.setdefault("memory_forbidden_description", "")
             payload.setdefault("swarmflow_enabled", "true" if DEFAULT_SWARMFLOW_ENABLED else "false")
@@ -1823,9 +1859,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             else:
                 env_updates[env_key] = str(val).strip()
 
-        if "evolution_auto_scan" in params:
-            env_updates["EVOLUTION_REVIEW_TRIGGER"] = env_updates["EVOLUTION_AUTO_SCAN"]
-
         raw = get_config_raw()
         preferred_lang = raw.get("preferred_language", "zh")
 
@@ -1864,6 +1897,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     update_memory_forbidden_description_in_config({preferred_lang: desc_val})
                 elif param_key == "swarmflow_enabled":
                     update_swarmflow_enabled_in_config(parsed)
+                elif param_key == "skill_evolution":
+                    update_skill_evolution_enabled_in_config(parsed)
                 elif param_key.startswith("a2ui_"):
                     ok, update, error = validate_a2ui_config_update(param_key, val)
                     if not ok:
@@ -2187,8 +2222,16 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         # tokens into reasoning_content while leaving content empty.  Treat a
         # non-empty reasoning_content as a valid response as well.
         reasoning_content = getattr(resp, "reasoning_content", None) if hasattr(resp, "reasoning_content") else None
-        has_valid_response = (isinstance(content, str) and content) or (
-                isinstance(reasoning_content, str) and reasoning_content
+        # Some backends report thinking in a field the client does not map at
+        # all (e.g. Ollama's "reasoning"), leaving both content and
+        # reasoning_content empty.  Generated-token usage still proves the
+        # endpoint, credentials, and model name are all valid.
+        usage = getattr(resp, "usage_metadata", None)
+        output_tokens = usage.get("output_tokens") if isinstance(usage, dict) else getattr(usage, "output_tokens", None)
+        has_valid_response = (
+            (isinstance(content, str) and content)
+            or (isinstance(reasoning_content, str) and reasoning_content)
+            or (isinstance(output_tokens, (int, float)) and output_tokens > 0)
         )
         if not has_valid_response:
             await channel.send_response(
@@ -2216,6 +2259,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             models = get_default_models(config)
             result = []
             active_model = ""
+            # 显式配置的上下文窗口上限（react.context_engine_config.context_window_tokens）
+            # 优先级高于按模型名解析，与 AgentServer 侧 ContextEngine 行为保持一致
+            cec = (config.get("react", {}) or {}).get("context_engine_config", {}) or {}
+            cw_override = cec.get("context_window_tokens")
+            if not (isinstance(cw_override, int) and cw_override > 0):
+                cw_override = None
             for idx, entry in enumerate(models):
                 mcc = entry.get("model_client_config", {})
                 mco = entry.get("model_config_obj", {})
@@ -2224,7 +2273,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 context_window_tokens = 0
                 try:
                     from openjiuwen.core.context_engine.context.context_utils import ContextUtils
-                    context_window_tokens = ContextUtils.resolve_context_max(model_name=model_name)
+                    context_window_tokens = ContextUtils.resolve_context_max(
+                        model_name=model_name,
+                        fallback_context_window_tokens=cw_override,
+                    )
                 except Exception:
                     logger.debug(
                         "Failed to resolve context_window_tokens for model %s",
@@ -2700,95 +2752,52 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST",
             )
             return
-        session_id_to_create = params.get("session_id")
-        if not isinstance(session_id_to_create, str) or not session_id_to_create.strip():
+        resolved_agent_client = _resolve(agent_client)
+        if resolved_agent_client is None:
             await channel.send_response(
-                ws, req_id, ok=False, error="session_id is required", code="BAD_REQUEST",
+                ws,
+                req_id,
+                ok=False,
+                error="AgentServer is unavailable",
+                code="SERVICE_UNAVAILABLE",
             )
             return
-        session_id_to_create = session_id_to_create.strip()
+        from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+        from jiuwenswarm.common.schema.message import ReqMethod
 
-        # Step 1: 归一化 work_mode / project_id / project_dir 三元组
-        from jiuwenswarm.server.runtime.session.work_mode import resolve_session_work_mode_params
-        binding = resolve_session_work_mode_params(params, channel_id=channel.channel_id)
-        if binding.error:
-            await channel.send_response(
-                ws, req_id, ok=False, error=binding.error, code=binding.code,
-            )
-            return
-
-        # Step 2: 校验 project_id / project_dir 绑定关系(存在性、路径一致性)
-        project_id, project_dir, p_err, p_code = project_store.resolve_session_project_binding(
-            binding.project_id, binding.project_dir
-        )
-        if p_err:
-            await channel.send_response(
-                ws, req_id, ok=False, error=p_err, code=p_code,
-            )
-            return
-
-        # Step 3: 确定最终 work_mode
-        # 对真实 project_id: 最终 work_mode 以 Project 记录为准;若请求显式传了
-        # work_mode 且与 Project 不一致 → BAD_REQUEST(设计文档 §4.1.6)
-        # 对默认项目: 使用 binding 归一化的 work_mode
-        # has_explicit_work_mode 由 resolve_session_work_mode_params 统一计算,
-        # 不再从 params 直接判定(避免 gateway 注入通道默认值后被误判为显式)
-        if not is_default_project_id(project_id):
-            proj = project_store.get_project_by_id(project_id, cache_bust=True)
-            if proj is not None:
-                project_work_mode = proj.work_mode or DEFAULT_WEB_WORK_MODE
-                if binding.has_explicit_work_mode and project_work_mode != binding.work_mode:
-                    await channel.send_response(
-                        ws, req_id, ok=False,
-                        error=f"work_mode mismatch: project is '{project_work_mode}' \
-                            but request specified '{binding.work_mode}'",
-                        code="BAD_REQUEST",
-                    )
-                    return
-                final_work_mode = project_work_mode
-            else:
-                # 竞态: project 已被其他进程删除/隐藏。
-                # 不创建指向不存在项目的会话,返回 NOT_FOUND 由调用方决定回退策略。
-                await channel.send_response(
-                    ws, req_id, ok=False,
-                    error=f"project not found: {project_id}",
-                    code="NOT_FOUND",
-                )
-                return
+        create_params = dict(params)
+        create_params.pop("session_id", None)
+        authenticated_user_id = str(user_id or "").strip()
+        if authenticated_user_id:
+            create_params["user_id"] = authenticated_user_id
         else:
-            final_work_mode = binding.work_mode
-
-        workspace_session_dir = get_agent_sessions_dir()
-        if not workspace_session_dir.exists():
-            workspace_session_dir.mkdir(parents=True)
-        session_dir = workspace_session_dir / session_id_to_create
-        if session_dir.exists():
+            create_params.pop("user_id", None)
+        create_params.setdefault("create_token", secrets.token_hex(16))
+        env = e2a_from_agent_fields(
+            request_id=req_id,
+            channel_id=channel.channel_id,
+            req_method=ReqMethod.SESSION_CREATE,
+            params=create_params,
+            is_stream=False,
+            timestamp=time.time(),
+            user_id=authenticated_user_id or None,
+        )
+        try:
+            response = await resolved_agent_client.send_request(env)
+        except Exception as exc:  # noqa: BLE001
             await channel.send_response(
-                ws, req_id, ok=False, error="session already exists", code="ALREADY_EXISTS",
+                ws, req_id, ok=False, error=str(exc), code="SERVICE_UNAVAILABLE"
             )
             return
-        session_dir.mkdir()
-
-        # 初始化会话元数据
-        from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata
-        # User identity comes exclusively from the authenticated WebSocket handshake.
-        init_session_metadata(
-            session_id=session_id_to_create,
-            channel_id=params.get("channel_id", ""),
-            user_id=str(user_id or "").strip(),
-            title=params.get("title", ""),
-            mode=params.get("mode", "unknown"),
-            project_dir=project_dir,
-            project_id=project_id,
-            work_mode=final_work_mode,
+        payload = dict(response.payload or {}) if isinstance(response.payload, dict) else {}
+        await channel.send_response(
+            ws,
+            req_id,
+            ok=bool(response.ok),
+            payload=payload if response.ok else None,
+            error=None if response.ok else str(payload.get("error") or "session.create failed"),
+            code=None if response.ok else str(payload.get("code") or "SESSION_CREATE_FAILED"),
         )
-
-        await channel.send_response(ws, req_id, ok=True, payload={
-            "session_id": session_id_to_create,
-            "project_id": project_id,
-            "project_dir": project_dir,
-            "work_mode": final_work_mode,
-        })
 
     async def _session_rename(ws, req_id, params, session_id):
         """重命名会话标题(查询/设置/清除三种语义),复用 apply_session_rename。
@@ -3092,7 +3101,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             "work_mode": str(meta.get("work_mode") or DEFAULT_WEB_WORK_MODE),
         }
 
-    async def _project_get_sessions(ws, req_id, params, session_id):
+    async def _project_get_sessions(ws, req_id, params, session_id, user_id=None):
         """获取项目下的非置顶普通会话列表,按 last_user_message_at 倒序。
 
         会话仅按 ``project_id`` 匹配可见项目。``project_id`` 传 ``"default"`` 时,
@@ -3151,13 +3160,32 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         def _belongs(meta: dict[str, Any]) -> bool:
             return _attribute_session_project(meta, visible_by_id) == project_id
 
-        sessions = collect_all_sessions_metadata()
+        # 按 web 连接 user_id 读对应用户家目录的会话(隔离前提:user_id == OS 用户名)。
+        # user_id 为空时扫 gateway 默认目录(向后兼容)。
+        sessions = collect_all_sessions_metadata(user_id=user_id)
         # 仅非置顶普通会话(cron_id 为空) + 归属匹配 + web 渠道
         # cron 会话由 get_cron_sessions 返回
-        matched = [
-            s for s in sessions
-            if not s.get("pinned") and _belongs(s) and not s.get("cron_id") and s.get("channel_id") == "web"
-        ]
+        # user_id 非空时再按 metadata.user_id 收敛(隔离:只看自己的普通会话历史);
+        # 旧会话缺 user_id 字段不被过滤(避免历史会话凭空消失)。
+        uid_str = str(user_id or "").strip()
+
+        def _is_user_owned(s: dict[str, Any]) -> bool:
+            # user_id 非空时按 metadata.user_id 收敛;旧会话缺 user_id 不过滤
+            if not uid_str:
+                return True
+            s_uid = str(s.get("user_id") or "").strip()
+            return not s_uid or s_uid == uid_str
+
+        def _is_plain_web_session(s: dict[str, Any]) -> bool:
+            return (
+                not s.get("pinned")
+                and _belongs(s)
+                and not s.get("cron_id")
+                and s.get("channel_id") == "web"
+                and _is_user_owned(s)
+            )
+
+        matched = [s for s in sessions if _is_plain_web_session(s)]
 
         def _lum(s: dict[str, Any]) -> float:
             v = s.get("last_user_message_at")
@@ -3173,7 +3201,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             "total": total,
         })
 
-    async def _project_get_cron_sessions(ws, req_id, params, session_id):
+    async def _project_get_cron_sessions(ws, req_id, params, session_id, user_id=None):
         """获取项目下的定时任务会话列表(cron_id 非空的非置顶会话),按 last_user_message_at 倒序。
 
         与 ``project.get_sessions`` 互斥分工:本接口仅返回 cron 会话,
@@ -3228,10 +3256,14 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         def _belongs(meta: dict[str, Any]) -> bool:
             return _attribute_session_project(meta, visible_by_id) == project_id
 
-        sessions = collect_all_sessions_metadata()
+        # 按 web 连接 user_id 读对应用户家目录的会话(faas 沙箱按 OS 用户写入;
+        # 前提:业务 user_id == OS 用户名)。user_id 为空时扫 gateway 默认目录。
+        sessions = collect_all_sessions_metadata(user_id=user_id)
         # 仅非置顶 cron 会话(cron_id 非空) + 归属匹配 + 可选按 cron_id 过滤
         # 注意: cron 会话的 channel_id 通常为 "__cron__"(默认模式)或 job.targets(team 模式),
         # 不固定为 "web",因此不过滤 channel_id,否则 cron 面板会变空。
+        # user_id 非空时再按 metadata.user_id 收敛(隔离:只看自己的定时任务历史)。
+        uid_str = str(user_id or "").strip()
         matched = []
         for s in sessions:
             if s.get("pinned"):
@@ -3241,6 +3273,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             if not s.get("cron_id"):
                 continue
             if cron_id_filter and s.get("cron_id") != cron_id_filter:
+                continue
+            if uid_str and str(s.get("user_id") or "").strip() and str(s.get("user_id") or "").strip() != uid_str:
                 continue
             matched.append(s)
 
@@ -3384,6 +3418,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     proj.project_id, proj.project_dir, exc,
                 )
         project_payload = _project_info_payload(proj)
+        _schedule_agent_prewarm_sync("project.create")
         await channel.send_response(ws, req_id, ok=True, payload={
             "project_id": proj.project_id,
             "project_dir": proj.project_dir,
@@ -3569,6 +3604,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if registry is not None:
             registry.cleanup_project(project_id)
         project_store.reindex_project_pin_orders()
+        _schedule_agent_prewarm_sync("project.remove")
         await channel.send_response(
             ws, req_id, ok=True, payload={
                 "project_id": project_id,
@@ -3645,6 +3681,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 ws, req_id, ok=False, error="project is not hidden", code="CONFLICT",
             )
             return
+        _schedule_agent_prewarm_sync("project.restore")
         await channel.send_response(
             ws, req_id, ok=True, payload={
                 "project_id": restored.project_id,
@@ -4691,6 +4728,19 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         raw_headless = params.get("headless", True)
         headless = bool(raw_headless) if isinstance(raw_headless, bool) else True
 
+        current_browser_cfg = get_config().get("browser", {})
+        if not isinstance(current_browser_cfg, dict):
+            current_browser_cfg = {}
+        previous_chrome_path = current_browser_cfg.get("chrome_path", "")
+        if not isinstance(previous_chrome_path, str):
+            previous_chrome_path = ""
+        raw_previous_headless = current_browser_cfg.get("headless", True)
+        previous_headless = (
+            bool(raw_previous_headless)
+            if isinstance(raw_previous_headless, bool)
+            else True
+        )
+
         try:
             update_browser_in_config({"chrome_path": chrome_path, "headless": headless})
             resolved_agent_client = _resolve(agent_client)
@@ -4701,7 +4751,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return
 
         try:
-            await _restart_agent_browser_runtime(resolved_agent_client)
+            await _restart_agent_browser_runtime(
+                resolved_agent_client,
+                previous_chrome_path=previous_chrome_path,
+                previous_headless=previous_headless,
+            )
         except Exception as e:  # noqa: BLE001
             logger.warning(
                 "[path.set] browser config saved but active runtime reset failed: %s",
@@ -4709,6 +4763,90 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
 
         await channel.send_response(ws, req_id, ok=True, payload={"chrome_path": chrome_path, "headless": headless})
+
+    async def _path_select_directory(ws, req_id, params, session_id):
+        """在服务端本机弹出系统文件夹对话框（浏览器 / whl 包回退方案）。
+
+        桌面端 pywebview 已提供 ``select_project_directory``；本方法覆盖无该桥接时的
+        纯浏览器访问场景。
+
+        - Windows：tkinter
+        - macOS：osascript；
+        - Linux：zenity/kdialog/yad/tkinter
+        - 不可用时返回 ``UNSUPPORTED``，前端回落到手填绝对路径
+        """
+        if not isinstance(params, dict):
+            params = {}
+        initial_dir = params.get("initial_dir")
+        if initial_dir is not None and not isinstance(initial_dir, str):
+            await channel.send_response(
+                ws, req_id, ok=False, error="initial_dir must be string", code="BAD_REQUEST",
+            )
+            return
+
+        from jiuwenswarm.channels.web.directory_picker import select_directory_native
+
+        try:
+            selected = await asyncio.to_thread(
+                select_directory_native,
+                initial_dir=initial_dir.strip() if isinstance(initial_dir, str) else None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[path.select_directory] picker unavailable: %s", exc)
+            await channel.send_response(
+                ws, req_id, ok=False, error=str(exc), code="UNSUPPORTED",
+            )
+            return
+
+        if not selected:
+            await channel.send_response(ws, req_id, ok=True, payload={"path": None, "cancelled": True})
+            return
+        await channel.send_response(ws, req_id, ok=True, payload={"path": selected, "cancelled": False})
+
+    async def _path_select_files(ws, req_id, params, session_id):
+        """在服务端本机弹出系统文件对话框（浏览器 / whl 包回退方案）。
+
+        桌面端 pywebview 已提供 ``select_local_files``；本方法覆盖无该桥接时的
+        纯浏览器访问场景，返回带绝对路径的文件元数据（与桌面端同形）。
+        """
+        if not isinstance(params, dict):
+            params = {}
+        initial_dir = params.get("initial_dir")
+        if initial_dir is not None and not isinstance(initial_dir, str):
+            await channel.send_response(
+                ws, req_id, ok=False, error="initial_dir must be string", code="BAD_REQUEST",
+            )
+            return
+        allow_multiple = params.get("allow_multiple", True)
+        if not isinstance(allow_multiple, bool):
+            await channel.send_response(
+                ws, req_id, ok=False, error="allow_multiple must be boolean", code="BAD_REQUEST",
+            )
+            return
+
+        from jiuwenswarm.channels.web.file_picker import select_and_describe_files
+
+        try:
+            selected = await asyncio.to_thread(
+                select_and_describe_files,
+                allow_multiple=allow_multiple,
+                initial_dir=initial_dir.strip() if isinstance(initial_dir, str) else None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[path.select_files] picker unavailable: %s", exc)
+            await channel.send_response(
+                ws, req_id, ok=False, error=str(exc), code="UNSUPPORTED",
+            )
+            return
+
+        if selected is None:
+            await channel.send_response(
+                ws, req_id, ok=True, payload={"files": [], "cancelled": True},
+            )
+            return
+        await channel.send_response(
+            ws, req_id, ok=True, payload={"files": selected, "cancelled": False},
+        )
 
     async def _memory_compute(ws, req_id, params, session_id):
         if _HAS_PSUTIL:
@@ -4752,25 +4890,13 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
     async def _document_persist(ws, req_id, params, session_id):
-        """Upload documents (PDF/DOCX/XLSX/ipynb/...) and parse via AutoFileParser."""
+        """Validate local document paths (blacklist); do not persist or parse content."""
         if not isinstance(params, dict):
             await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
             return
         normalized = dict(params)
-        parse = coerce_document_parse_flag(normalized.get("parse", True), default=True)
-        max_chars_raw = normalized.get("max_chars", DEFAULT_MAX_CHARS)
         try:
-            max_chars = int(max_chars_raw)
-        except (TypeError, ValueError):
-            max_chars = DEFAULT_MAX_CHARS
-        max_chars = max(1, min(max_chars, 500_000))
-        try:
-            await persist_and_parse_documents(
-                normalized,
-                session_id,
-                parse=parse,
-                max_chars=max_chars,
-            )
+            await persist_and_parse_documents(normalized)
         except Exception as exc:
             logger.exception("[document.persist] failed: %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
@@ -4784,56 +4910,20 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             "files",
             "documents",
             "document_errors",
-            "supported_formats",
+            "forbidden_formats",
         ):
             if key in normalized:
                 payload[key] = normalized[key]
-        if "supported_formats" not in payload:
-            payload["supported_formats"] = supported_formats()
+        if "forbidden_formats" not in payload:
+            payload["forbidden_formats"] = forbidden_formats()
         await channel.send_response(ws, req_id, ok=True, payload=payload)
-
-    async def _document_parse(ws, req_id, params, session_id):
-        """Parse an already-uploaded document path with AutoFileParser (+ ipynb)."""
-        if not isinstance(params, dict):
-            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
-            return
-        path = str(params.get("path") or "").strip()
-        if not path:
-            await channel.send_response(ws, req_id, ok=False, error="path is required", code="BAD_REQUEST")
-            return
-        max_chars_raw = params.get("max_chars", DEFAULT_MAX_CHARS)
-        try:
-            max_chars = int(max_chars_raw)
-        except (TypeError, ValueError):
-            max_chars = DEFAULT_MAX_CHARS
-        max_chars = max(1, min(max_chars, 500_000))
-        try:
-            result = await parse_existing_document(
-                path,
-                session_id=session_id,
-                max_chars=max_chars,
-            )
-        except FileNotFoundError as exc:
-            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="NOT_FOUND")
-            return
-        except PermissionError as exc:
-            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="FORBIDDEN")
-            return
-        except ValueError as exc:
-            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
-            return
-        except Exception as exc:
-            logger.exception("[document.parse] failed: %s", exc)
-            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
-            return
-        await channel.send_response(ws, req_id, ok=True, payload=result)
 
     async def _document_formats(ws, req_id, params, session_id):
         await channel.send_response(
             ws,
             req_id,
             ok=True,
-            payload={"supported_formats": supported_formats()},
+            payload={"forbidden_formats": forbidden_formats()},
         )
 
     async def _chat_resume(ws, req_id, params, session_id):
@@ -5630,12 +5720,18 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     def _get_cron():
         return _resolve(cron_controller)
 
-    async def _cron_job_list(ws, req_id, params, session_id):
+    async def _cron_job_list(ws, req_id, params, session_id, user_id=None):
         cc = _get_cron()
         if cc is None:
             await channel.send_response(ws, req_id, ok=False, error="cron not available", code="INTERNAL_ERROR")
             return
         jobs = await cc.list_jobs()
+        # 按 web 连接 user_id 过滤:只返回该用户创建的定时任务(隔离)。
+        # user_id 为空(连接未带)时维持原行为(返回全部);agent 内部创建的 cron
+        # (user_id 空串)在带 user_id 的连接下被过滤掉(对人类用户不可见)。
+        uid_str = str(user_id or "").strip()
+        if uid_str:
+            jobs = [j for j in jobs if str(j.get("user_id") or "").strip() == uid_str]
         # 可选按 project_id 过滤(支持 default/default_code 虚拟项目)
         if isinstance(params, dict):
             raw_pid = params.get("project_id")
@@ -5699,7 +5795,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return
         await channel.send_response(ws, req_id, ok=True, payload={"job": job})
 
-    async def _cron_job_create(ws, req_id, params, session_id):
+    async def _cron_job_create(ws, req_id, params, session_id, user_id=None):
         cc = _get_cron()
         if cc is None:
             await channel.send_response(ws, req_id, ok=False, error="cron not available", code="INTERNAL_ERROR")
@@ -5710,6 +5806,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         try:
             if session_id:
                 params["session_id"] = session_id
+            # 注入创建者 user_id（web 连接携带），执行时透传给 faas 的 X-Session-Context，
+            # 否则 CreateSandbox 拉不起 → 60s 超时（见 plan-cron-user-id）。
+            if user_id:
+                params["user_id"] = str(user_id).strip()
             # project_dir 默认值：仅当前端「未传」时从当前 WebSocket 会话 metadata 读取
             # （cache_bust=True 强制读盘，跨进程拿最新值；见设计文档 §5.1）
             # 注意：显式传空串 "" 等价于归默认项目，不可覆盖——用 key presence 区分
@@ -5912,6 +6012,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
     channel.register_method("path.get", _path_get)
     channel.register_method("path.set", _path_set)
+    channel.register_method("path.select_directory", _path_select_directory)
+    channel.register_method("path.select_files", _path_select_files)
 
     async def _hooks_list(ws, req_id, params, session_id):
         from jiuwenswarm.common.hooks_config import load_hooks_config
@@ -5934,7 +6036,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("chat.send", _chat_send)
     channel.register_method("media.persist", _media_persist)
     channel.register_method("document.persist", _document_persist)
-    channel.register_method("document.parse", _document_parse)
     channel.register_method("document.formats", _document_formats)
     channel.register_method("chat.resume", _chat_resume)
     channel.register_method("chat.interrupt", _chat_interrupt)
