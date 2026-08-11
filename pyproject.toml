@@ -51,6 +51,7 @@ dependencies = [
     "json-repair>=0.30.0",
     "gitcode-api>=1.2.20",
     "faiss-cpu>=1.7.0",
+    "fastembed>=0.8.0",
     "numpy>=1.24.0",
     "tree-sitter>=0.25.0,<0.26.0",
     "tree-sitter-bash>=0.25.0,<0.26.0",

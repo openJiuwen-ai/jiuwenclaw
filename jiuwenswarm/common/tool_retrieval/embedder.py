@@ -19,10 +19,23 @@ def ensure_embedding_model(model_name: str = "BAAI/bge-small-zh-v1.5"):
         )
     try:
         from fastembed import TextEmbedding
-
+    except ImportError:
+        logger.error(
+            "[tool_retrieval] dense DISABLED: fastembed is not installed. "
+            "Tool dense search needs it — run `pip install fastembed`. "
+            "Falling back to BM25 + name-lookup (Chinese recall will be poor)."
+        )
+        return None
+    try:
         return TextEmbedding(model_name)
     except Exception as exc:
-        logger.warning("[tool_retrieval] embedding load failed: %s", exc)
+        logger.error(
+            "[tool_retrieval] dense DISABLED: embedding model %r failed to load "
+            "(likely first-run download blocked / network issue). Error: %s. "
+            "Falling back to BM25 + name-lookup; retry on next agent restart "
+            "once the model is cached locally.",
+            model_name, exc,
+        )
         return None
 
 
