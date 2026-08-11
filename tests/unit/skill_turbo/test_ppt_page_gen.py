@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -1471,6 +1472,8 @@ def test_custom_content_fill_prompt_follows_official_scaffold_not_freeform() -> 
     assert "{{THEME_CSS_RULES}}" in prompt
     assert "PAGE_CONTENT" in prompt
     assert "可见文字来源契约" in prompt
+    assert "不得改写已注入的变量名与取值" in prompt
+    assert "全部可见内容必须写在 `.ppt-slide` 内" in prompt
     assert "布局多样性约束" not in prompt
     assert "推荐布局（" not in prompt
     assert "页面布局规范" not in prompt
@@ -1526,6 +1529,135 @@ def test_validate_custom_content_template_fill_rejects_theme_rewrite() -> None:
     )
     assert not ok
     assert reason == "theme_rules_changed"
+
+
+@pytest.mark.unit
+def test_validate_custom_content_template_fill_accepts_theme_whitespace_and_local_rules() -> None:
+    filled = _custom_filled_html()
+    filled = filled.replace(
+        "  :root {\n    --font-family:",
+        "  :root {\n    /* local comment */\n    --font-family:",
+        1,
+    )
+    filled = filled.replace(
+        "  background: var(--color-primary);\n}",
+        "  background: var(--color-primary);\n}\n.ppt-slide .local-note { color: var(--color-text); }",
+        1,
+    )
+    ok, reason = ppg._validate_custom_content_template_fill_output(
+        _custom_themed_seed(),
+        filled,
+    )
+    assert ok
+    assert reason == ""
+
+
+@pytest.mark.unit
+def test_validate_custom_content_template_fill_allows_missing_empty_theme_rules_slot() -> None:
+    seed = re.sub(
+        r'<style id="theme-rules">.*?</style>',
+        '<style id="theme-rules"></style>',
+        _custom_themed_seed(),
+        count=1,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    filled = re.sub(
+        r'<style id="theme-rules">.*?</style>',
+        "",
+        _custom_filled_html(),
+        count=1,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    ok, reason = ppg._validate_custom_content_template_fill_output(seed, filled)
+    assert ok
+    assert reason == ""
+
+
+@pytest.mark.unit
+def test_validate_custom_content_template_fill_accepts_non_h1_page_content() -> None:
+    themed = _custom_themed_seed()
+    filled = (
+        themed.replace("{{PAGE_TITLE}}", "全球新能源车渗透率")
+        .replace(
+            "{{PAGE_CONTENT}}",
+            '<section><p>全球新能源车渗透率持续提升，2025 年主要市场销量保持增长。</p></section>',
+        )
+    )
+    ok, reason = ppg._validate_custom_content_template_fill_output(themed, filled)
+    assert ok
+    assert reason == ""
+
+
+@pytest.mark.unit
+def test_validate_custom_content_template_fill_rejects_deleted_theme_var() -> None:
+    filled = _custom_filled_html().replace("    --color-primary: #1A7A4C;\n", "", 1)
+    ok, reason = ppg._validate_custom_content_template_fill_output(
+        _custom_themed_seed(),
+        filled,
+    )
+    assert not ok
+    assert reason == "theme_contract_changed"
+
+
+@pytest.mark.unit
+def test_validate_custom_content_template_fill_allows_main_outside_when_slide_has_title() -> None:
+    filled = _custom_filled_html()
+    filled = filled.replace(
+        '<main class="flex-1 min-h-0">',
+        "",
+        1,
+    ).replace(
+        "</main>",
+        "",
+        1,
+    ).replace(
+        "</div>\n<!-- CHART_SCAFFOLD_BEGIN",
+        '</div>\n<main><p>页外说明</p></main>\n<!-- CHART_SCAFFOLD_BEGIN',
+        1,
+    )
+    ok, reason = ppg._validate_custom_content_template_fill_output(
+        _custom_themed_seed(),
+        filled,
+    )
+    assert ok
+    assert reason == ""
+
+
+@pytest.mark.unit
+def test_validate_custom_content_template_fill_rejects_empty_slide_with_outer_main() -> None:
+    themed = _custom_themed_seed()
+    filled = (
+        themed.replace("{{PAGE_TITLE}}", "全球新能源车渗透率")
+        .replace("{{PAGE_CONTENT}}", "")
+        .replace(
+            "</div>\n<!-- CHART_SCAFFOLD_BEGIN",
+            "</div>\n<main><h1>全球新能源车渗透率</h1><p>正文在 slide 外。</p></main>\n<!-- CHART_SCAFFOLD_BEGIN",
+            1,
+        )
+    )
+    ok, reason = ppg._validate_custom_content_template_fill_output(themed, filled)
+    assert not ok
+    assert reason == "empty_slide_content"
+
+
+@pytest.mark.unit
+def test_relocate_orphan_main_into_custom_slide_moves_only_empty_slide() -> None:
+    themed = _custom_themed_seed()
+    orphan = (
+        themed.replace("{{PAGE_TITLE}}", "全球新能源车渗透率")
+        .replace("{{PAGE_CONTENT}}", "")
+        .replace(
+            "</div>\n<!-- CHART_SCAFFOLD_BEGIN",
+            "</div>\n<main><h1>全球新能源车渗透率</h1><p>正文应搬进 slide。</p></main>\n<!-- CHART_SCAFFOLD_BEGIN",
+            1,
+        )
+    )
+    relocated = ppg._relocate_orphan_main_into_custom_slide(orphan)
+    ok, reason = ppg._validate_custom_content_template_fill_output(themed, relocated)
+    assert ok
+    assert reason == ""
+    assert "<h1>全球新能源车渗透率</h1>" in relocated
+    assert orphan != relocated
 
 
 @pytest.mark.unit

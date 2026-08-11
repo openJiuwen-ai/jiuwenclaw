@@ -551,21 +551,115 @@ def _apply_custom_theme_slots(seed_html: str, style_text: str) -> str:
     return html
 
 
-def _style_block_unchanged(seed_html: str, filled_html: str, pattern: re.Pattern[str]) -> bool:
-    seed_block = pattern.search(seed_html or "")
-    filled_block = pattern.search(filled_html or "")
+def _style_block_text(html: str, pattern: re.Pattern[str]) -> str:
+    match = pattern.search(html or "")
+    return match.group(0) if match else ""
+
+
+def _css_props_map(css_text: str) -> dict[str, str]:
+    return {
+        name.strip(): re.sub(r"\s+", " ", value.strip())
+        for name, value in _CSS_CUSTOM_PROP_RE.findall(css_text or "")
+    }
+
+
+def _theme_contract_vars_preserved(seed_html: str, filled_html: str) -> bool:
+    """官方硬约束：theme-contract 插槽仍在，且预填变量名+值未被改写。"""
+    seed_block = _style_block_text(seed_html, _THEME_CONTRACT_STYLE_RE)
+    filled_block = _style_block_text(filled_html, _THEME_CONTRACT_STYLE_RE)
     if not seed_block or not filled_block:
         return False
-    return _normalize_template_whitespace(seed_block.group(0)) == _normalize_template_whitespace(
-        filled_block.group(0)
-    )
+    seed_props = _css_props_map(seed_block)
+    if not seed_props:
+        return True
+    filled_props = _css_props_map(filled_block)
+    return all(filled_props.get(name) == value for name, value in seed_props.items())
+
+
+def _theme_rules_core_preserved(seed_html: str, filled_html: str) -> bool:
+    """§3.6：已逐字填入的 THEME_CSS_RULES 必须仍在；未提供规则时空槽不是硬门禁。"""
+    seed_block = _style_block_text(seed_html, _THEME_RULES_STYLE_RE)
+    seed_inner = ""
+    if seed_block:
+        seed_inner = re.sub(
+            r"^<style\b[^>]*>|</style>$",
+            "",
+            seed_block,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        seed_inner = _CSS_COMMENT_RE.sub("", seed_inner).strip()
+    if not seed_inner:
+        return True
+    filled_block = _style_block_text(filled_html, _THEME_RULES_STYLE_RE)
+    if not filled_block:
+        return False
+    filled_norm = _normalize_template_whitespace(_CSS_COMMENT_RE.sub("", filled_block))
+    return _normalize_template_whitespace(seed_inner) in filled_norm
+
+
+def _custom_slide_inner_markup(inner_html: str) -> str:
+    text = re.sub(r"<!--.*?-->", "", inner_html or "", flags=re.DOTALL)
+    text = re.sub(r"<script\b[^>]*>.*?</script>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<style\b[^>]*>.*?</style>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    return text.strip()
+
+
+def _custom_slide_has_page_content(html: str) -> bool:
+    """§3.6：页面全部内容在 .ppt-slide 的 PAGE_CONTENT 内；不要求预设 h1/字数。"""
+    bounds = _ppt_slide_bounds(html)
+    if bounds is None:
+        return False
+    return bool(_custom_slide_inner_markup(html[bounds[0]:bounds[1]]))
+
+
+_CUSTOM_ORPHAN_MAIN_RE = re.compile(r"<main\b[^>]*>.*?</main\s*>", re.IGNORECASE | re.DOTALL)
+
+
+def _relocate_orphan_main_into_custom_slide(html: str) -> str:
+    """custom 内容页专用：slide 内无内容且唯一 main 在 slide 外时，把 main 子节点搬进 slide。"""
+    if not html or _custom_slide_has_page_content(html):
+        return html
+    mains = list(_CUSTOM_ORPHAN_MAIN_RE.finditer(html))
+    if len(mains) != 1:
+        return html
+    main = mains[0]
+    bounds = _ppt_slide_bounds(html)
+    if bounds is None:
+        return html
+    start, end = bounds
+    if start <= main.start() < end:
+        return html
+    main_inner = re.sub(
+        r"^<main\b[^>]*>|</main\s*>$",
+        "",
+        main.group(0),
+        flags=re.IGNORECASE | re.DOTALL,
+    ).strip()
+    if not main_inner:
+        return html
+    html_wo_main = html[: main.start()] + html[main.end():]
+    relocated = _ppt_slide_bounds(html_wo_main)
+    if relocated is None:
+        return html
+    return html_wo_main[: relocated[0]] + main_inner + html_wo_main[relocated[1]:]
+
+
+def _validate_custom_content_slide_dom(html: str) -> str:
+    """custom 内容页 DOM：不复用结构页/预设的 main 位置硬门禁。"""
+    if _MALFORMED_HTML_RE.search(html or ""):
+        return "invalid_dom"
+    if _ppt_slide_bounds(html or "") is None:
+        return "invalid_dom"
+    if not _custom_slide_has_page_content(html):
+        return "empty_slide_content"
+    return ""
 
 
 def _validate_custom_content_template_fill_output(
     seed_html: str,
     filled_html: str,
 ) -> tuple[bool, str]:
-    """Stage 6 §3.6：只校验官方脚手架硬约束，不另加标题文案黑名单。"""
+    """Stage 6 §3.6：官方脚手架语义硬约束，不另加标题文案黑名单。"""
     if not _is_valid_html(filled_html):
         return False, "invalid_html"
     if _has_unfilled_placeholders(filled_html):
@@ -574,14 +668,15 @@ def _validate_custom_content_template_fill_output(
         return False, "seed_not_modified"
     if "{{PAGE_CONTENT}}" in (filled_html or ""):
         return False, "page_content_unfilled"
-    if not _style_block_unchanged(seed_html, filled_html, _THEME_CONTRACT_STYLE_RE):
+    if not _theme_contract_vars_preserved(seed_html, filled_html):
         return False, "theme_contract_changed"
-    if not _style_block_unchanged(seed_html, filled_html, _THEME_RULES_STYLE_RE):
+    if not _theme_rules_core_preserved(seed_html, filled_html):
         return False, "theme_rules_changed"
     if "@layer utilities" in (seed_html or "") and "@layer utilities" not in (filled_html or ""):
         return False, "utilities_layer_missing"
-    if not _validate_slide_dom(filled_html):
-        return False, "invalid_dom"
+    dom_reason = _validate_custom_content_slide_dom(filled_html)
+    if dom_reason:
+        return False, dom_reason
     if not _validate_chart_height_chain(filled_html):
         return False, "invalid_chart_height_chain"
     return True, ""
@@ -725,9 +820,10 @@ def _build_custom_content_template_fill_prompt(
         "`overflow: hidden`、`@layer utilities` 安全块与 `theme-contract` 插槽\n"
         "2. `{{THEME_CSS_VARIABLES}}` 与 `{{THEME_CSS_RULES}}` 已从风格文件逐字填入"
         "（风格文件未提供规则块时该槽为空）；不得逐页重新选择全局颜色或字体，"
-        "不得改写这两个 style 块\n"
+        "不得改写已注入的变量名与取值\n"
         "3. `{{PAGE_TITLE}}` 填写本页大纲标题；页面全部内容（含标题、正文、页脚）"
-        "在 `{{PAGE_CONTENT}}` 内依据风格文件设计\n"
+        "在 `{{PAGE_CONTENT}}` 内依据风格文件设计；全部可见内容必须写在 `.ppt-slide` 内，"
+        "若使用 `<main>` 必须放在该容器内部\n"
         "4. 新增样式只引用风格文件已定义变量，不得另立视觉权威，不得覆盖 `@layer utilities`，"
         "不得用 `*`、`body` 或根 `:root` 重定义颜色/字体\n"
         "5. 图表候选页必须优先激活模板内 `CHART_SCAFFOLD`；禁止额外手写第二套 `echarts.init`；"
@@ -3502,6 +3598,7 @@ class PageWorkerNode(PlanNode):
         html = _strip_unsupported_fullpage_overlays(html)
         html = _strip_chart_header_unit(html)
         if is_custom:
+            html = _relocate_orphan_main_into_custom_slide(html)
             ok, reason = _validate_custom_content_template_fill_output(seed_html, html)
         else:
             ok, reason = _validate_content_template_fill_output(seed_html, html)
