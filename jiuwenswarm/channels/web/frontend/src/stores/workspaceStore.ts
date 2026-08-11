@@ -1,6 +1,11 @@
 import { create } from 'zustand';
 import i18n from '../i18n';
 import { projectRegistryClient } from '../features/workspace/projectRegistryClient';
+import {
+  getWorkModeStorage,
+  readWorkMode,
+  writeWorkMode,
+} from '../features/workspace/workModeStorage';
 import type { ProjectInfo, Session, WorkMode } from '../types';
 import { useChatStore } from './chatStore';
 import { useSessionStore } from './sessionStore';
@@ -8,11 +13,9 @@ import { useSessionStore } from './sessionStore';
 export const PROJECT_SESSION_PAGE_SIZE = 10;
 const DEFAULT_PROJECT_ID = 'default';
 const DEFAULT_CODE_PROJECT_ID = 'default_code';
-const WORK_MODE_STORAGE_KEY = 'jiuwenswarm_work_mode';
 
 function readInitialWorkMode(): WorkMode {
-  if (typeof window === 'undefined') return 'work';
-  return window.localStorage.getItem(WORK_MODE_STORAGE_KEY) === 'code' ? 'code' : 'work';
+  return readWorkMode(getWorkModeStorage());
 }
 
 function normalizeProject(project: ProjectInfo, fallbackWorkMode: WorkMode): ProjectInfo {
@@ -259,7 +262,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
   setWorkMode: async (workMode) => {
     if (get().workMode === workMode) return;
-    window.localStorage.setItem(WORK_MODE_STORAGE_KEY, workMode);
+    writeWorkMode(getWorkModeStorage(), workMode);
     set({
       workMode,
       projects: [],
