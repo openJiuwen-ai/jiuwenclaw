@@ -490,6 +490,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const webError = error as WebError;
         setConnectionStats({ lastError: webError.message });
         setProcessing(false);
+        setHasActiveRequest(false);
         setThinking(false);
         activeRequestIdRef.current = null;
         const errorMsg = webError.message || i18n.t('network.sendMessageFailed');
