@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -55,6 +55,59 @@ async def test_team_evolution_approval_dispatches_core_continuation(monkeypatch)
         None,
     )
     manager.interact.assert_awaited_once_with("sess-1", "create the approved skill")
+
+
+@pytest.mark.anyio
+async def test_approved_evolution_stays_successful_when_continuation_delivery_fails(
+    monkeypatch,
+):
+    adapter = JiuWenSwarmDeepAdapter()
+    rail = SimpleNamespace(
+        _pending_approval_snapshots={"team_skill_evolve_create_1": None},
+        pop_approval_continuation=lambda _request_id: "create the approved skill",
+    )
+    manager = SimpleNamespace(interact=AsyncMock(return_value=(False, "session ended")))
+    refresh = Mock()
+    push_resolution = AsyncMock()
+    monkeypatch.setattr(adapter, "find_team_skill_rail", lambda *_args: rail)
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.get_team_manager",
+        lambda _channel_id: manager,
+    )
+    monkeypatch.setattr(
+        interface_deep_module,
+        "approved_record_ids_from_answers",
+        lambda _answers, _labels, _record_ids: (True, None),
+    )
+    approve = AsyncMock()
+    monkeypatch.setattr(interface_deep_module, "approve_evolution_records", approve)
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.refresh_team_shared_skill_links_across_managers",
+        refresh,
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_push_team_skill_evolve_resolution_status",
+        push_resolution,
+    )
+
+    handled = await adapter.handle_team_skill_evolve_approval(
+        "team_skill_evolve_create_1",
+        [{"selected_options": ["接收"]}],
+        "sess-1",
+        "web",
+    )
+
+    assert handled is True
+    approve.assert_awaited_once_with(rail, "team_skill_evolve_create_1", None)
+    manager.interact.assert_awaited_once_with("sess-1", "create the approved skill")
+    refresh.assert_called_once_with("sess-1")
+    push_resolution.assert_awaited_once_with(
+        "team_skill_evolve_create_1",
+        session_id="sess-1",
+        channel_id="web",
+        accepted=True,
+    )
 
 
 @pytest.mark.anyio
