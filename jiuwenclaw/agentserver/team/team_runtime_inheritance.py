@@ -137,6 +137,10 @@ class RuntimeInfo:
     """运行时环境信息."""
     channel: str = "default"
     language: str = "cn"
+    # Team leader rail gating needs the current run's request_id/session_id
+    # (SwarmBuildContext carries them; plumbed in swarm.providers.member_rails).
+    session_id: str = ""
+    request_id: str | None = None
 
 
 @dataclass
