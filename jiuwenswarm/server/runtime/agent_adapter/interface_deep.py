@@ -4959,6 +4959,16 @@ class JiuWenSwarmDeepAdapter:
             ),
         ]
 
+        # ── ProgressiveToolRail（搜索方案，按需检索）──
+        # 由 config 的 progressive_tool_enabled 控制（默认 true = opt-out）。关闭时不注册，
+        # ContextAssembleRail 的"可用工具"全量列表正常保留（回退 show-all）。
+        if config.get("progressive_tool_enabled", True):
+            rail_infos.append(
+                _RailBuildInfo("_progressive_tool_rail", self._build_progressive_tool_rail),
+            )
+        else:
+            self._progressive_tool_rail = None
+
         # SkillEvolutionRail 不在冷启动时挂载，由 _update_rails_for_mode 按 mode 按需注册/注销
         # 智能模式下关闭自演进，plan 模式下按配置启用
 
