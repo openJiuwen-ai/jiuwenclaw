@@ -84,6 +84,10 @@ _INTERRUPT_RESUME_SOURCES = frozenset({
     "permission_interrupt",
     "evolution_interrupt",
 })
+_INTERNAL_STREAM_EVENT_TYPES = frozenset({
+    "keepalive",
+    "chat.processing_status_deferred",
+})
 _A2UI_OPEN_TAG_MARKER = "<a2ui-json>"
 # Shown when a channel with streaming disabled asks for a team round. The team
 # runtime streams member events as they happen and has no non-streaming entry
@@ -251,6 +255,7 @@ class MessageHandler(ABC):
         }
         # 使用 SessionMap 的 channel 族（由 config 中 gateway.session_map_scope 决定是否在 key 中含 user）
         self._session_map_channel_types = frozenset({
+            ChannelType.FEISHU.value,
             "feishu_enterprise",
         })
         self._channel_states: Dict[str, ChannelControlState] = {}
@@ -3019,9 +3024,13 @@ class MessageHandler(ABC):
         """
         if self._is_terminal_stream_chunk(chunk):
             return False
-        # 跳过 keepalive chunk — 仅用于 WebSocket 保活，不投递到 IM 通道
+        # Skip transport-only chunks. ``chat.processing_status_deferred`` is
+        # an internal Team follow-up marker, never a user-visible event.
         payload = getattr(chunk, "payload", None)
-        if isinstance(payload, dict) and payload.get("event_type") == "keepalive":
+        if (
+            isinstance(payload, dict)
+            and payload.get("event_type") in _INTERNAL_STREAM_EVENT_TYPES
+        ):
             return False
         if not await self._handle_evolution_chunk(chunk, session_id, request_metadata):
             return False
@@ -3141,6 +3150,17 @@ class MessageHandler(ABC):
         from jiuwenswarm.common.schema.message import ReqMethod
 
         return msg.req_method == ReqMethod.CHAT_SEND
+
+    def _has_active_team_stream_for_session(self, session_id: str | None) -> bool:
+        """Return whether a running Team stream already owns this session."""
+        if not session_id:
+            return False
+        for request_id, task in self._stream_tasks.items():
+            if task.done() or self._stream_sessions.get(request_id) != session_id:
+                continue
+            if ChannelMode.is_team_mode(self._stream_modes.get(request_id, "")):
+                return True
+        return False
 
     def _session_has_streams_blocking_processing_false(
         self, session_id: str | None
@@ -4026,6 +4046,15 @@ class MessageHandler(ABC):
                     )
                 if self._is_terminal_stream_chunk(chunk):
                     continue
+                payload = chunk.payload or {}
+                event_type = (
+                    payload.get("event_type") if isinstance(payload, dict) else None
+                )
+                if event_type == "chat.processing_status_deferred":
+                    # The active Team stream owns the real completion signal.
+                    # This short follow-up must neither close it nor reach IM.
+                    has_processing_status_false = True
+                    continue
                 published = await self.publish_stream_chunk(
                     chunk,
                     session_id=session_id,
@@ -4033,22 +4062,10 @@ class MessageHandler(ABC):
                 )
                 if not published:
                     continue
-                payload = chunk.payload or {}
                 if isinstance(payload, dict):
-                    event_type = payload.get("event_type")
                     if event_type == "chat.processing_status":
                         if payload.get("is_processing") is False:
                             has_processing_status_false = True
-                    elif event_type == "chat.processing_status_deferred":
-                        # Internal placeholder from the cluster-mode
-                        # follow-up short stream: the real round-complete
-                        # signal will be broadcast by the background team
-                        # stream on team.completed. This marker only
-                        # prevents the Gateway from auto-emitting
-                        # is_processing=False when this short stream
-                        # ends, and is NOT forwarded to the frontend.
-                        has_processing_status_false = True
-                        continue
 
                 _has_fanout = bool((getattr(chunk, "metadata", None) or {}).get("fan_out_targets"))
                 logger.debug(
@@ -4206,6 +4223,14 @@ class MessageHandler(ABC):
     ) -> None:
         """Start a Gateway stream consumer and register stream bookkeeping."""
         emit_processing_status = self._should_emit_processing_status_for_stream(msg)
+        if (
+            emit_processing_status
+            and self._is_team_chat_send(msg)
+            and self._has_active_team_stream_for_session(msg.session_id)
+        ):
+            # A Team follow-up is delivered to the existing runtime. That
+            # long-lived stream already owns the spinner and CardKit card.
+            emit_processing_status = False
         self._stream_emits_processing_status[stream_rid] = emit_processing_status
         self._stream_methods[stream_rid] = self._stream_method_value(msg)
         self._stream_modes[stream_rid] = (

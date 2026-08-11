@@ -27,12 +27,25 @@ from jiuwenswarm.gateway.channel_manager.im_platforms.feishu.feishu_streaming_ca
     CardKitError,
     FeishuCardKitClient,
     FeishuStreamingSession,
+    estimate_streaming_card_size_bytes,
 )
 from jiuwenswarm.gateway.channel_manager.im_platforms.platform_adapter.message import MessageStore
 from jiuwenswarm.gateway.routing.keys import DeliveryTarget
 from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
 
 logger = logging.getLogger(__name__)
+
+CARDKIT_PERMISSION_DENIED_CODE = 99991672
+MAX_CARDKIT_START_FAILURES = 512
+MAX_CARDKIT_COMPLETED_KEYS = 512
+CARDKIT_FINALIZE_GRACE_SECONDS = 3.0
+MAX_CARDKIT_PROGRESS_ENTRIES = 12
+MAX_CARDKIT_PROGRESS_ENTRY_CHARS = 160
+CARDKIT_TEAMMATE_PROGRESS_INTERVAL = 50
+CARDKIT_SAFE_CONTENT_BYTES = 24 * 1024
+CARDKIT_CONTINUATION_NOTICE = "\n\n> 内容较长，后续内容见下一张卡片。"
+CARDKIT_MAX_STREAMING_SECONDS = 9 * 60
+CARDKIT_TIME_CONTINUATION_NOTICE = "\n\n> 任务仍在执行，后续进度见下一张卡片。"
 
 
 class FeishuConfig(BaseModel):
@@ -202,8 +215,16 @@ class FeishuChannel(BaseChannel):
         self._stream_text_buffers: dict[str, str] = {}
         self._cardkit_sessions: dict[str, FeishuStreamingSession] = {}
         self._cardkit_buffers: dict[str, str] = {}
+        self._cardkit_progress_entries: dict[str, OrderedDict[str, str]] = {}
+        self._cardkit_teammate_delta_counts: dict[str, dict[str, int]] = {}
+        self._cardkit_segment_offsets: dict[str, int] = {}
+        self._cardkit_segment_numbers: dict[str, int] = {}
+        self._cardkit_finalize_tasks: dict[str, asyncio.Task[None]] = {}
         self._cardkit_lock = asyncio.Lock()
         self._cardkit_client: FeishuCardKitClient | None = None
+        self._cardkit_start_failures: OrderedDict[str, None] = OrderedDict()
+        self._cardkit_completed_keys: OrderedDict[str, None] = OrderedDict()
+        self._cardkit_disabled_error = ""
         # 文件服务（延迟初始化）
         self._file_service: FeishuFileService | None = None
         # 按 request_id 记录已通过 chat.file 发送的文件路径，用于兜底去重
@@ -562,6 +583,12 @@ class FeishuChannel(BaseChannel):
         self._running = False
         self._stopping = True
         self._stream_text_buffers.clear()
+        finalize_tasks = list(self._cardkit_finalize_tasks.values())
+        for task in finalize_tasks:
+            task.cancel()
+        if finalize_tasks:
+            await asyncio.gather(*finalize_tasks, return_exceptions=True)
+        self._cardkit_finalize_tasks.clear()
         for session in list(self._cardkit_sessions.values()):
             try:
                 await session.finalize()
@@ -569,6 +596,13 @@ class FeishuChannel(BaseChannel):
                 logger.warning("停止时关闭飞书流式卡片失败", exc_info=True)
         self._cardkit_sessions.clear()
         self._cardkit_buffers.clear()
+        self._cardkit_progress_entries.clear()
+        self._cardkit_teammate_delta_counts.clear()
+        self._cardkit_segment_offsets.clear()
+        self._cardkit_segment_numbers.clear()
+        self._cardkit_start_failures.clear()
+        self._cardkit_completed_keys.clear()
+        self._cardkit_disabled_error = ""
 
         if self._websocket_client and self._ws_thread_loop and self._ws_thread_loop.is_running():
             try:
@@ -1838,10 +1872,13 @@ class FeishuChannel(BaseChannel):
             "chat.tool_call",
             "chat.tool_result",
             "todo.updated",
+            "team.member",
+            "team.task",
+            "team.runtime_ready",
+            "team.completed",
+            "team.idle",
         }:
             return False
-        if event_name in {"chat.tool_call", "chat.tool_result", "todo.updated"}:
-            return True
         if (
             event_name == "chat.interrupt_result"
             and payload.get("intent") in {"pause", "resume"}
@@ -1856,32 +1893,93 @@ class FeishuChannel(BaseChannel):
             receive_id, id_type = self._extract_receive_info(msg)
         if not receive_id:
             return False
-        key = f"{msg.id}\0{receive_id}\0{id_type}"
+        key = self._cardkit_session_key(msg, receive_id, id_type, metadata)
+        if key in self._cardkit_completed_keys:
+            # Team completion can overtake a queued final event.  The card for
+            # this request was already sent and closed, so never create a new
+            # one or fall back to a duplicate normal message.
+            return True
         session = self._cardkit_sessions.get(key)
 
         if event_name == "chat.processing_status":
             if payload.get("is_processing") is False:
-                return await self._finalize_cardkit_session(key, session, "")
-            return await self._start_cardkit_session(key, receive_id, id_type)
+                return self._schedule_cardkit_finalization(key)
+            if not await self._start_cardkit_session(key, receive_id, id_type):
+                return False
+            session = self._cardkit_sessions[key]
+            progress = self._cardkit_progress_for_event(event_name, payload)
+            if progress is not None and self._record_cardkit_progress(key, *progress):
+                await self._replace_cardkit_content(
+                    key, session, metadata, receive_id, id_type
+                )
+            return True
+
+        self._cancel_cardkit_finalization(key)
+
+        if event_name in {
+            "chat.tool_call",
+            "chat.tool_result",
+            "todo.updated",
+            "team.member",
+            "team.task",
+            "team.runtime_ready",
+            "team.completed",
+            "team.idle",
+        }:
+            if not await self._start_cardkit_session(key, receive_id, id_type):
+                return False
+            session = self._cardkit_sessions[key]
+            progress = self._cardkit_progress_for_event(event_name, payload)
+            if progress is not None and self._record_cardkit_progress(key, *progress):
+                await self._replace_cardkit_content(
+                    key, session, metadata, receive_id, id_type
+                )
+            return True
 
         if event_name == "chat.delta":
             if not await self._start_cardkit_session(key, receive_id, id_type):
                 return False
             session = self._cardkit_sessions[key]
+            if self._is_cardkit_teammate_output(payload):
+                teammate_progress = self._cardkit_teammate_progress(
+                    key, payload, event_name
+                )
+                if teammate_progress is not None and self._record_cardkit_progress(
+                    key, *teammate_progress
+                ):
+                    await self._replace_cardkit_content(
+                        key, session, metadata, receive_id, id_type
+                    )
+                return True
             text = self._cardkit_buffers.get(key, "") + self._extract_message_content(msg)
             self._cardkit_buffers[key] = text
-            session.replace(self._filter_user_info_for_group(text, metadata))
+            await self._replace_cardkit_content(
+                key, session, metadata, receive_id, id_type
+            )
             return True
 
         if event_name == "chat.final" and payload.get("is_complete") is False:
             if not await self._start_cardkit_session(key, receive_id, id_type):
                 return False
             session = self._cardkit_sessions[key]
+            if self._is_cardkit_teammate_output(payload):
+                teammate_progress = self._cardkit_teammate_progress(
+                    key, payload, event_name
+                )
+                if teammate_progress is not None and self._record_cardkit_progress(
+                    key, *teammate_progress
+                ):
+                    await self._replace_cardkit_content(
+                        key, session, metadata, receive_id, id_type
+                    )
+                return True
             text = self._merge_stream_and_final_content(
                 self._cardkit_buffers.get(key, ""), self._extract_message_content(msg)
             )
             self._cardkit_buffers[key] = text
-            session.replace(self._filter_user_info_for_group(text, metadata))
+            await self._replace_cardkit_content(
+                key, session, metadata, receive_id, id_type
+            )
             return True
 
         if event_name == "chat.final" and session is None:
@@ -1895,11 +1993,374 @@ class FeishuChannel(BaseChannel):
         text = self._merge_stream_and_final_content(
             self._cardkit_buffers.get(key, ""), terminal_text
         )
+        self._cardkit_buffers[key] = text
+        active_session = await self._replace_cardkit_content(
+            key, session, metadata, receive_id, id_type
+        )
+        if active_session is None:
+            # The first card may already contain a safe prefix.  Close it, but
+            # let ``send`` deliver the terminal message through its ordinary
+            # final-message fallback so the remainder is never lost.
+            await self._finalize_cardkit_session(key, session, "")
+            return False
         return await self._finalize_cardkit_session(
             key,
-            session,
-            self._filter_user_info_for_group(text, metadata),
+            active_session,
+            self._cardkit_rendered_current_answer(key, metadata),
         )
+
+    def _cardkit_progress_for_event(
+        self,
+        event_name: str,
+        payload: dict[str, Any],
+    ) -> tuple[str, str] | None:
+        """Convert framework activity events into concise, user-visible progress."""
+        if event_name == "chat.processing_status" and payload.get("is_processing") is True:
+            return ("request", "请求已收到，正在处理中")
+
+        if event_name == "chat.tool_call":
+            tool = payload.get("tool_call")
+            tool_info = tool if isinstance(tool, dict) else payload
+            tool_name = str(
+                tool_info.get("tool_name") or tool_info.get("name") or "工具"
+            ).strip()
+            tool_id = str(
+                tool_info.get("tool_call_id") or tool_info.get("id") or tool_name
+            ).strip()
+            return (f"tool:{tool_id}", f"正在执行工具：{tool_name}")
+
+        if event_name == "chat.tool_result":
+            tool_name = str(payload.get("tool_name") or "工具").strip()
+            tool_id = str(payload.get("tool_call_id") or tool_name).strip()
+            failed = bool(payload.get("is_error") or payload.get("success") is False)
+            prefix = "工具失败" if failed else "工具完成"
+            return (f"tool:{tool_id}", f"{prefix}：{tool_name}")
+
+        if event_name == "todo.updated":
+            todos = payload.get("todos")
+            if not isinstance(todos, list):
+                return ("todos", "任务清单已更新")
+            statuses = [
+                str(todo.get("status") or "").strip().lower()
+                for todo in todos
+                if isinstance(todo, dict)
+            ]
+            completed = sum(status == "completed" for status in statuses)
+            running = sum(status in {"running", "in_progress"} for status in statuses)
+            return (
+                "todos",
+                f"任务进度：已完成 {completed}/{len(statuses)}，进行中 {running}",
+            )
+
+        if event_name == "team.member":
+            event = payload.get("event")
+            event_data = event if isinstance(event, dict) else {}
+            member = str(
+                event_data.get("name")
+                or event_data.get("member_name")
+                or event_data.get("member_id")
+                or "子智能体"
+            ).strip()
+            status = event_data.get("new_status") or event_data.get("status")
+            if not status:
+                status = str(event_data.get("type") or "").rsplit(".", 1)[-1]
+            return (
+                f"member:{member}",
+                f"成员 {member}：{self._cardkit_status_label(status)}",
+            )
+
+        if event_name == "team.task":
+            event = payload.get("event")
+            event_data = event if isinstance(event, dict) else {}
+            task_id = str(event_data.get("task_id") or event_data.get("id") or "任务").strip()
+            title = self._truncate_text(
+                self._extract_preferred_text(event_data.get("title")) or task_id,
+                max_len=80,
+            )
+            status = event_data.get("status")
+            if not status:
+                status = str(event_data.get("type") or "").rsplit(".", 1)[-1]
+            assignee = str(
+                event_data.get("assignee") or event_data.get("member_name") or ""
+            ).strip()
+            assignee_suffix = f"（{assignee}）" if assignee else ""
+            return (
+                f"task:{task_id}",
+                f"任务「{title}」：{self._cardkit_status_label(status)}{assignee_suffix}",
+            )
+
+        if event_name == "team.runtime_ready":
+            return ("team", "团队已启动，正在分配任务")
+        if event_name == "team.completed":
+            return ("team", "团队任务已完成，正在整理最终结果")
+        if event_name == "team.idle":
+            return ("team", "团队暂时空闲，等待后续任务")
+        return None
+
+    @staticmethod
+    def _is_cardkit_teammate_output(payload: dict[str, Any]) -> bool:
+        return str(payload.get("role") or "").strip().lower() == "teammate"
+
+    @staticmethod
+    def _cardkit_status_label(value: Any) -> str:
+        normalized = str(value or "").strip().lower()
+        labels = {
+            "created": "待处理",
+            "claimed": "执行中",
+            "in_progress": "执行中",
+            "running": "执行中",
+            "pending": "待处理",
+            "planned": "待处理",
+            "completed": "已完成",
+            "ready": "已就绪",
+            "registered": "已加入",
+            "spawned": "已启动",
+            "restarted": "已重启",
+            "failed": "失败",
+            "cancelled": "已取消",
+            "canceled": "已取消",
+            "shutdown": "已停止",
+        }
+        return labels.get(normalized, normalized.replace("_", " ") or "处理中")
+
+    def _cardkit_teammate_progress(
+        self,
+        key: str,
+        payload: dict[str, Any],
+        event_name: str,
+    ) -> tuple[str, str] | None:
+        member = str(payload.get("member_name") or "子智能体").strip()
+        if event_name == "chat.final":
+            return (f"member:{member}", f"成员 {member} 已完成阶段工作，正在汇总")
+        counts_by_card = getattr(self, "_cardkit_teammate_delta_counts", None)
+        if counts_by_card is None:
+            counts_by_card = {}
+            self._cardkit_teammate_delta_counts = counts_by_card
+        counts = counts_by_card.setdefault(key, {})
+        count = counts.get(member, 0) + 1
+        counts[member] = count
+        if count == 1:
+            return (f"member:{member}", f"成员 {member} 正在执行任务")
+        if count % CARDKIT_TEAMMATE_PROGRESS_INTERVAL == 0:
+            return (
+                f"member:{member}",
+                f"成员 {member} 持续执行中（已接收 {count} 条内部更新）",
+            )
+        return None
+
+    def _record_cardkit_progress(self, key: str, entry_key: str, text: str) -> bool:
+        """Store a bounded current-status list and report whether it changed."""
+        entry_key = self._truncate_text(
+            entry_key, max_len=MAX_CARDKIT_PROGRESS_ENTRY_CHARS
+        )
+        text = self._truncate_text(text, max_len=MAX_CARDKIT_PROGRESS_ENTRY_CHARS)
+        entries_by_card = getattr(self, "_cardkit_progress_entries", None)
+        if entries_by_card is None:
+            entries_by_card = {}
+            self._cardkit_progress_entries = entries_by_card
+        entries = entries_by_card.setdefault(key, OrderedDict())
+        if entries.get(entry_key) == text:
+            return False
+        entries[entry_key] = text
+        entries.move_to_end(entry_key)
+        while len(entries) > MAX_CARDKIT_PROGRESS_ENTRIES:
+            entries.popitem(last=False)
+        return True
+
+    def _render_cardkit_answer(self, key: str, answer: str) -> str:
+        segment_number = getattr(self, "_cardkit_segment_numbers", {}).get(key, 1)
+        sections: list[str] = []
+        if segment_number > 1:
+            sections.append(f"### 回复（续 {segment_number}）")
+        if answer.strip():
+            sections.append(answer)
+        return "\n\n".join(sections)
+
+    def _render_cardkit_progress(self, key: str) -> str:
+        entries = getattr(self, "_cardkit_progress_entries", {}).get(key)
+        if not entries:
+            return ""
+        return "### 执行进度\n" + "\n".join(f"- {text}" for text in entries.values())
+
+    def _cardkit_current_segment_answer(self, key: str) -> str:
+        answer = self._cardkit_buffers.get(key, "")
+        start = getattr(self, "_cardkit_segment_offsets", {}).get(key, 0)
+        return answer[start:]
+
+    def _cardkit_rendered_current_answer(
+        self, key: str, metadata: dict[str, Any]
+    ) -> str:
+        content = self._render_cardkit_answer(
+            key, self._cardkit_current_segment_answer(key)
+        )
+        return self._filter_user_info_for_group(content, metadata)
+
+    def _cardkit_rendered_progress(
+        self, key: str, metadata: dict[str, Any]
+    ) -> str:
+        return self._filter_user_info_for_group(
+            self._render_cardkit_progress(key), metadata
+        )
+
+    @staticmethod
+    def _cardkit_content_fits(answer: str, progress: str = "") -> bool:
+        return (
+            estimate_streaming_card_size_bytes(answer, progress)
+            <= CARDKIT_SAFE_CONTENT_BYTES
+        )
+
+    def _cardkit_continuation_cut(
+        self,
+        key: str,
+        answer: str,
+        start: int,
+        metadata: dict[str, Any],
+        notice: str = CARDKIT_CONTINUATION_NOTICE,
+    ) -> int:
+        """Find the largest safe segment end, preferring a nearby text boundary."""
+        progress = self._cardkit_rendered_progress(key, metadata)
+        low, high = start, len(answer)
+        while low < high:
+            middle = (low + high + 1) // 2
+            content = self._filter_user_info_for_group(
+                self._render_cardkit_answer(
+                    key, answer[start:middle] + notice
+                ),
+                metadata,
+            )
+            if self._cardkit_content_fits(content, progress):
+                low = middle
+            else:
+                high = middle - 1
+
+        if low <= start:
+            return start
+
+        boundary_start = max(start, low - 512)
+        for boundary in ("\n\n", "\n", "。", "！", "？", ".", " "):
+            boundary_index = answer.rfind(boundary, boundary_start, low)
+            if boundary_index > start:
+                return boundary_index + len(boundary)
+        return low
+
+    async def _replace_cardkit_content(
+        self,
+        key: str,
+        session: FeishuStreamingSession,
+        metadata: dict[str, Any],
+        receive_id: str,
+        id_type: str,
+    ) -> FeishuStreamingSession | None:
+        """Replace the active card, opening a continuation card only when needed."""
+        if key in getattr(self, "_cardkit_start_failures", {}):
+            return None
+        async with self._cardkit_lock:
+            active_session = self._cardkit_sessions.get(key)
+            if active_session is not None:
+                session = active_session
+
+            while True:
+                current_answer = self._cardkit_rendered_current_answer(key, metadata)
+                progress = self._cardkit_rendered_progress(key, metadata)
+                content_overflow = not self._cardkit_content_fits(
+                    current_answer, progress
+                )
+                lifetime_exceeded = (
+                    getattr(session, "streaming_age_seconds", 0.0)
+                    >= CARDKIT_MAX_STREAMING_SECONDS
+                )
+                if not content_overflow and not lifetime_exceeded:
+                    break
+
+                start = getattr(self, "_cardkit_segment_offsets", {}).get(key, 0)
+                answer = self._cardkit_buffers.get(key, "")
+                if content_overflow:
+                    cut = self._cardkit_continuation_cut(key, answer, start, metadata)
+                    notice = CARDKIT_CONTINUATION_NOTICE
+                else:
+                    cut = len(answer)
+                    notice = CARDKIT_TIME_CONTINUATION_NOTICE
+                if cut <= start and content_overflow:
+                    logger.warning(
+                        "飞书 CardKit 续卡失败：无法在安全大小内切分 request_id=%s",
+                        key.split("\0", 1)[0],
+                    )
+                    return None
+                closing_content = self._filter_user_info_for_group(
+                    self._render_cardkit_answer(
+                        key, answer[start:cut] + notice
+                    ),
+                    metadata,
+                )
+                if (
+                    not content_overflow
+                    and not self._cardkit_content_fits(closing_content, progress)
+                ):
+                    cut = self._cardkit_continuation_cut(
+                        key, answer, start, metadata, notice=notice
+                    )
+                    if cut > start:
+                        closing_content = self._filter_user_info_for_group(
+                            self._render_cardkit_answer(
+                                key, answer[start:cut] + notice
+                            ),
+                            metadata,
+                        )
+                if not self._cardkit_content_fits(closing_content, progress):
+                    logger.warning(
+                        "飞书 CardKit 续卡失败：前一张卡仍超出安全大小 request_id=%s",
+                        key.split("\0", 1)[0],
+                    )
+                    return None
+                try:
+                    continuation = await self._create_cardkit_session(receive_id, id_type)
+                except CardKitError as exc:
+                    self._mark_cardkit_start_failure(key)
+                    logger.warning(
+                        "创建飞书 CardKit 续卡失败：request_id=%s code=%s 原因：%s",
+                        key.split("\0", 1)[0],
+                        exc.code,
+                        exc,
+                    )
+                    return None
+                except Exception as exc:
+                    self._mark_cardkit_start_failure(key)
+                    logger.warning(
+                        "创建飞书 CardKit 续卡失败：request_id=%s 原因：%s",
+                        key.split("\0", 1)[0],
+                        exc,
+                    )
+                    return None
+
+                try:
+                    await session.finalize(closing_content, replace_final=True)
+                except CardKitError as exc:
+                    logger.warning(
+                        "关闭飞书 CardKit 前一张续卡失败：request_id=%s code=%s 原因：%s",
+                        key.split("\0", 1)[0],
+                        exc.code,
+                        exc,
+                    )
+                offsets = getattr(self, "_cardkit_segment_offsets", None)
+                if offsets is None:
+                    offsets = {}
+                    self._cardkit_segment_offsets = offsets
+                offsets[key] = cut
+                numbers = getattr(self, "_cardkit_segment_numbers", None)
+                if numbers is None:
+                    numbers = {}
+                    self._cardkit_segment_numbers = numbers
+                numbers[key] = numbers.get(key, 1) + 1
+                self._cardkit_sessions[key] = continuation
+                session = continuation
+
+            progress = self._cardkit_rendered_progress(key, metadata)
+            content = self._cardkit_rendered_current_answer(key, metadata)
+            if progress:
+                session.replace_progress(progress)
+            if content:
+                session.replace(content)
+            return session
 
     async def _start_cardkit_session(
         self,
@@ -1910,36 +2371,110 @@ class FeishuChannel(BaseChannel):
         async with self._cardkit_lock:
             if key in self._cardkit_sessions:
                 return True
-            if self._cardkit_client is None:
-                self._cardkit_client = FeishuCardKitClient(
-                    self.config.app_id, self.config.app_secret
-                )
-
-            async def send_card(content: str) -> None:
-                await self._create_and_send_message(
-                    FeishuMessageSendRequest(
-                        receive_id=receive_id,
-                        id_type=id_type,
-                        msg_type="interactive",
-                        content=content,
-                        log_label="cardkit_stream",
-                    )
-                )
-
-            session = FeishuStreamingSession(self._cardkit_client, send_card)
+            if self._cardkit_disabled_error or key in self._cardkit_start_failures:
+                return False
             try:
-                await session.start()
-            except Exception:
-                request_id, _, target_type = key.partition("\0")
+                session = await self._create_cardkit_session(receive_id, id_type)
+            except CardKitError as exc:
+                self._mark_cardkit_start_failure(key)
+                if exc.code == CARDKIT_PERMISSION_DENIED_CODE:
+                    self._cardkit_disabled_error = str(exc)
+                    logger.warning(
+                        "飞书 CardKit 流式卡片已停用：应用缺少 API 权限，"
+                        "app_id=%s；请在飞书开放平台为该应用开通日志中的 scope，"
+                        "发布后重启服务。原因：%s",
+                        self.config.app_id,
+                        exc,
+                    )
+                else:
+                    logger.warning(
+                        "创建飞书流式卡片失败：request_id=%s target_type=%s，原因：%s",
+                        key.split("\0", 1)[0],
+                        id_type,
+                        exc,
+                    )
+                return False
+            except Exception as exc:
+                self._mark_cardkit_start_failure(key)
                 logger.warning(
-                    "创建飞书流式卡片失败: request_id=%s target_type=%s",
-                    request_id,
-                    target_type.rsplit("\0", 1)[-1],
-                    exc_info=True,
+                    "创建飞书流式卡片失败：request_id=%s target_type=%s，原因：%s",
+                    key.split("\0", 1)[0],
+                    id_type,
+                    exc,
                 )
                 return False
             self._cardkit_sessions[key] = session
+            self._cardkit_segment_offsets.setdefault(key, 0)
+            self._cardkit_segment_numbers.setdefault(key, 1)
             return True
+
+    async def _create_cardkit_session(
+        self,
+        receive_id: str,
+        id_type: str,
+    ) -> FeishuStreamingSession:
+        if self._cardkit_client is None:
+            self._cardkit_client = FeishuCardKitClient(
+                self.config.app_id, self.config.app_secret
+            )
+
+        async def send_card(content: str) -> None:
+            await self._create_and_send_message(
+                FeishuMessageSendRequest(
+                    receive_id=receive_id,
+                    id_type=id_type,
+                    msg_type="interactive",
+                    content=content,
+                    log_label="cardkit_stream",
+                )
+            )
+
+        session = FeishuStreamingSession(self._cardkit_client, send_card)
+        await session.start()
+        return session
+
+    def _mark_cardkit_start_failure(self, key: str) -> None:
+        """Avoid retrying CardKit creation for every event in the same request."""
+        self._cardkit_start_failures[key] = None
+        self._cardkit_start_failures.move_to_end(key)
+        while len(self._cardkit_start_failures) > MAX_CARDKIT_START_FAILURES:
+            self._cardkit_start_failures.popitem(last=False)
+
+    def _mark_cardkit_completed(self, key: str) -> None:
+        """Remember a completed request so a late event cannot create another card."""
+        self._cardkit_completed_keys[key] = None
+        self._cardkit_completed_keys.move_to_end(key)
+        while len(self._cardkit_completed_keys) > MAX_CARDKIT_COMPLETED_KEYS:
+            self._cardkit_completed_keys.popitem(last=False)
+
+    def _schedule_cardkit_finalization(self, key: str) -> bool:
+        """Use status=false as a fallback without racing a later team final."""
+        if key not in self._cardkit_sessions:
+            return False
+        existing = self._cardkit_finalize_tasks.get(key)
+        if existing is not None and not existing.done():
+            return True
+
+        async def finalize_later() -> None:
+            try:
+                await asyncio.sleep(CARDKIT_FINALIZE_GRACE_SECONDS)
+                await self._finalize_cardkit_session(
+                    key, self._cardkit_sessions.get(key), ""
+                )
+            except Exception:
+                logger.warning("延迟关闭飞书流式卡片失败", exc_info=True)
+            finally:
+                if self._cardkit_finalize_tasks.get(key) is task:
+                    self._cardkit_finalize_tasks.pop(key, None)
+
+        task = asyncio.create_task(finalize_later())
+        self._cardkit_finalize_tasks[key] = task
+        return True
+
+    def _cancel_cardkit_finalization(self, key: str) -> None:
+        task = self._cardkit_finalize_tasks.pop(key, None)
+        if task is not None and not task.done():
+            task.cancel()
 
     async def _finalize_cardkit_session(
         self,
@@ -1952,18 +2487,44 @@ class FeishuChannel(BaseChannel):
         try:
             await session.finalize(final_text)
             return True
-        except CardKitError:
+        except CardKitError as exc:
             request_id, _, target_type = key.partition("\0")
             logger.warning(
-                "完成飞书流式卡片失败: request_id=%s target_type=%s",
+                "完成飞书流式卡片失败: request_id=%s target_type=%s code=%s 原因：%s",
                 request_id,
                 target_type.rsplit("\0", 1)[-1],
-                exc_info=True,
+                exc.code,
+                exc,
             )
-            return False
+            # The streaming card was already sent. Falling back here would post
+            # the same completed answer as a second Feishu message.
+            return True
         finally:
             self._cardkit_sessions.pop(key, None)
             self._cardkit_buffers.pop(key, None)
+            getattr(self, "_cardkit_progress_entries", {}).pop(key, None)
+            getattr(self, "_cardkit_teammate_delta_counts", {}).pop(key, None)
+            getattr(self, "_cardkit_segment_offsets", {}).pop(key, None)
+            getattr(self, "_cardkit_segment_numbers", {}).pop(key, None)
+            self._mark_cardkit_completed(key)
+
+    def _cardkit_session_key(
+        self,
+        msg: Message,
+        receive_id: str,
+        id_type: str,
+        metadata: dict[str, Any],
+    ) -> str:
+        """Return a stable CardKit key for one physical Feishu conversation."""
+        chat_type = str(
+            metadata.get("chat_type") or metadata.get("im_chat_type") or ""
+        ).lower()
+        chat_id = str(metadata.get("feishu_chat_id") or "").strip()
+        if id_type == "chat_id":
+            return f"{msg.id}\0chat_id\0{receive_id}"
+        if chat_type in {"p2p", "direct"} and chat_id:
+            return f"{msg.id}\0chat_id\0{chat_id}"
+        return f"{msg.id}\0{receive_id}\0{id_type}"
 
     def _detect_workspace_files(self, text: str) -> list[str]:
         """从文本中提取 workspace 下实际存在的文件路径。

@@ -50,6 +50,10 @@ from jiuwenswarm.server.runtime.session.session_history import append_history_re
 from jiuwenswarm.agents.harness.team.handlers.team_monitor_handler import TeamMonitorHandler
 from jiuwenswarm.server.utils.stream_utils import parse_stream_chunk
 from jiuwenswarm.server.runtime.agent_adapter.user_turn import TEAM_USER_TURN_KEY, UserTurn
+from jiuwenswarm.server.runtime.debug_trace.directives import (
+    DEBUG_PREFIX as _DEBUG_PREFIX,
+    strip_slash_directive as _strip_directive,
+)
 from jiuwenswarm.common.schema.agent import AgentResponseChunk
 from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
     EvolutionProgressStatus,
@@ -106,12 +110,6 @@ _STREAM_TRACE_ENV_KEY = "JIUWENSWARM_TEAM_STREAM_TRACE"
 # When set to "true", non-leader teammate frames are filtered out in team
 # streaming so the frontend only receives leader output.
 _HIDE_TEAMMATE_ENV_KEY = "JIUWENSWARM_TEAM_HIDE_TEAMMATE"
-# /debug 剥离原语与 Agent/Code 共享（debug_trace.directives），消除两份实现。
-# 别名保持 _DEBUG_PREFIX / _strip_directive 不变，_extract_query_directives 零改动。
-from jiuwenswarm.server.runtime.debug_trace.directives import (
-    DEBUG_PREFIX as _DEBUG_PREFIX,
-    strip_slash_directive as _strip_directive,
-)
 _FOLLOWUP_INTERACT_BOUNDARY_TIMEOUT_SEC = 10.0
 _FOLLOWUP_INTERACT_POLL_INTERVAL_SEC = 0.05
 
@@ -907,7 +905,6 @@ async def _finish_cron_team_stream_after_delegation_grace(
 ) -> None:
     """Wait briefly after a solo harness final before ending the cron team stream."""
     await asyncio.sleep(_CRON_DELEGATION_GRACE_SECONDS)
-    resolved_channel_id = _resolve_channel_id(channel_id)
     completion = get_team_manager(channel_id).get_cron_completion(session_id)
     if completion is None:
         return
@@ -1107,6 +1104,49 @@ async def _broadcast_team_state_snapshot(
             "[TeamHelpers] failed to broadcast team state snapshot: session_id=%s",
             session_id,
         )
+
+
+async def _feishu_team_has_unfinished_tasks(
+    channel_id: str | None,
+    session_id: str,
+) -> bool:
+    """Return whether the live Team task snapshot still has non-terminal work."""
+    try:
+        monitor_handler = get_team_manager(channel_id).get_monitor_handler(session_id)
+        if monitor_handler is None:
+            return False
+        snapshot = await monitor_handler.get_team_snapshot()
+        if not isinstance(snapshot, dict):
+            return False
+        tasks = snapshot.get("tasks")
+        if not isinstance(tasks, list):
+            return False
+        terminal_statuses = {"completed", "failed", "cancelled", "canceled", "stopped"}
+        task_statuses = [
+            str(task.get("status") or "").strip().lower()
+            if isinstance(task, dict)
+            else ""
+            for task in tasks
+        ]
+        outstanding_statuses = [
+            status for status in task_statuses if status not in terminal_statuses
+        ]
+        if outstanding_statuses:
+            logger.info(
+                "[TeamHelpers] keeping Feishu stream open for unfinished tasks: "
+                "session_id=%s statuses=%s",
+                session_id,
+                outstanding_statuses,
+            )
+        return bool(outstanding_statuses)
+    except Exception:
+        logger.debug(
+            "[TeamHelpers] failed to inspect Team task snapshot at Feishu idle: "
+            "session_id=%s",
+            session_id,
+            exc_info=True,
+        )
+        return False
 
 
 # Leader tools that add rows to the team roster. They only persist the member
@@ -2463,6 +2503,19 @@ async def _consume_stream_with_query(
                         session_id,
                         parsed.get("member_count"),
                     )
+                    is_feishu_channel = _resolve_channel_id(channel_id).split(":", 1)[0] in {
+                        "feishu",
+                        "feishu_enterprise",
+                    }
+                    if is_feishu_channel and await _feishu_team_has_unfinished_tasks(
+                        channel_id,
+                        session_id,
+                    ):
+                        # A Team can be idle between autonomous tasks.  CardKit
+                        # must remain attached to the original stream until the
+                        # task graph reaches a terminal state and the leader can
+                        # deliver the final result.
+                        continue
                     await _broadcast_event(
                         channel_id,
                         session_id,
@@ -2475,6 +2528,13 @@ async def _consume_stream_with_query(
                             "member_count": parsed.get("member_count"),
                         },
                     )
+                    # The web Team UI keeps this stream open because a later
+                    # interaction can wake the same runtime.  Feishu has no
+                    # persistent stream consumer for that turn: after idle it
+                    # needs the generator to finish so CardKit can close the
+                    # reply card instead of waiting for an unrelated wake-up.
+                    if is_feishu_channel:
+                        return
                     continue
                 elif (
                     is_leader
