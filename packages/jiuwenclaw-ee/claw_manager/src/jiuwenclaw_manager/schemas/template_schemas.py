@@ -74,9 +74,9 @@ class ModelTemplateCreateBody(SafeTextMixin):
     model_type: list[ModelTypeLiteral] = Field(default_factory=list)
     model_tags: list[str] | None = None
     api_base: ApiBaseUrl
-    api_key: str
-    model_id: str = Field(..., max_length=128)
-    model_provider: str = Field(..., max_length=64)
+    api_key: str = Field(..., min_length=1)
+    model_id: str = Field(..., min_length=1, max_length=128)
+    model_provider: str = Field(..., min_length=1, max_length=64)
     parameters: dict[str, Any] | None = None
     timeout: int = Field(default=60, ge=1)
     retry_count: int = Field(default=3, ge=0)
@@ -95,9 +95,9 @@ class ModelTemplateUpdateBody(SafeTextMixin):
     model_type: list[ModelTypeLiteral] | None = None
     model_tags: list[str] | None = None
     api_base: ApiBaseUrl | None = None
-    api_key: str | None = None
-    model_id: str | None = Field(default=None, max_length=128)
-    model_provider: str | None = Field(default=None, max_length=64)
+    api_key: str | None = Field(default=None, min_length=1)
+    model_id: str | None = Field(default=None, min_length=1, max_length=128)
+    model_provider: str | None = Field(default=None, min_length=1, max_length=64)
     parameters: dict[str, Any] | None = None
     timeout: int | None = Field(default=None, ge=1)
     retry_count: int | None = Field(default=None, ge=0)
@@ -491,10 +491,10 @@ class ServiceConfigTemplateCreateBody(SafeTextMixin):
 
     template_name: str = Field(..., min_length=1, max_length=128)
     description: str | None = Field(default=None, max_length=512)
-    agent_image: str = Field(..., max_length=512)
+    agent_image: str = Field(..., min_length=1, max_length=512)
     namespace: str = Field(default="default", max_length=128)
     pod_name: str | None = Field(default=None, max_length=128)
-    container_name: str = Field(..., max_length=128)
+    container_name: str = Field(..., min_length=1, max_length=128)
     container_port: int = Field(..., ge=1, le=65535)
     port_name: str = Field(default="http", max_length=64)
     image_pull_policy: ImagePullPolicyLiteral = Field(default="IfNotPresent")
@@ -539,10 +539,10 @@ class ServiceConfigTemplateUpdateBody(SafeTextMixin):
 
     template_name: str | None = Field(default=None, min_length=1, max_length=128)
     description: str | None = Field(default=None, max_length=512)
-    agent_image: str | None = Field(default=None, max_length=512)
+    agent_image: str | None = Field(default=None, min_length=1, max_length=512)
     namespace: str | None = Field(default=None, max_length=128)
     pod_name: str | None = Field(default=None, max_length=128)
-    container_name: str | None = Field(default=None, max_length=128)
+    container_name: str | None = Field(default=None, min_length=1, max_length=128)
     container_port: int | None = Field(default=None, ge=1, le=65535)
     port_name: str | None = Field(default=None, max_length=64)
     image_pull_policy: ImagePullPolicyLiteral | None = None
