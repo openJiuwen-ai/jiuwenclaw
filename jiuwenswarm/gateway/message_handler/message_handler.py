@@ -50,8 +50,40 @@ from jiuwenswarm.common.hooks_config import load_hooks_config
 from jiuwenswarm.gateway.hooks.handler import GatewayHookHandler
 from jiuwenswarm.gateway.routing.keys import RoutingKey, AgentRef, make_delivery_target
 from jiuwenswarm.gateway.routing.session_sharing import SessionSharingRegistry, SubRole
+from jiuwenswarm.common.mode_matrix import (
+    DEPRECATION_MAP,
+    MODE_ALIASES,
+    NEW_CANONICAL_MODES,
+    deprecate_mode,
+)
 
 logger = logging.getLogger(__name__)
+
+# /mode 输入合法集：新 canonical ∪ 旧 canonical（DEPRECATION_MAP.keys）
+# ∪ 正式别名（MODE_ALIASES.keys，如 team.plan）。
+# resolve_channel_mode 经 deprecate_mode → canonicalize_mode_text 能消化全部三类，
+# 三处（前置校验 / 分发 / default_mode_map）共用此单一事实源。
+_VALID_MODE_INPUTS: frozenset[str] = frozenset(
+    NEW_CANONICAL_MODES | DEPRECATION_MAP.keys() | MODE_ALIASES.keys()
+)
+
+
+def is_valid_mode_input(mode_str: str) -> bool:
+    """``/mode`` 子命令是否合法（新 canonical 或可静默转译的旧串）。"""
+    return mode_str in _VALID_MODE_INPUTS
+
+
+def resolve_channel_mode(mode_str: str) -> ChannelMode:
+    """把 /mode 输入解析成 ChannelMode：旧串经 deprecate_mode 转新，新串直通。
+
+    失配时回落到 ChannelMode.AGENT（兜底，调用方应先用 is_valid_mode_input 拦截）。
+    """
+    new_mode_str = deprecate_mode(mode_str)
+    try:
+        return ChannelMode(new_mode_str)
+    except ValueError:
+        return ChannelMode.AGENT
+
 
 _ACP_CHANNEL_ID = "acp"
 _ACP_ORIGINAL_SESSION_ID_KEY = "acp_original_session_id"
@@ -131,6 +163,15 @@ class ChannelMode(str, Enum):
     TEAM_PLAN = "team.plan.normal"
     TEAM_PLAN_NORMAL = "team.plan.normal"
     TEAM_PLAN_CODE = "team.plan.code"
+    # ── 新三段命名 canonical（持久化用新串；旧串经 deprecate_mode 归一）──
+    AGENT_WORK_NORMAL = "agent.work.normal"
+    AGENT_WORK_PLAN = "agent.work.plan"
+    AGENT_CODE_NORMAL = "agent.code.normal"
+    AGENT_CODE_PLAN = "agent.code.plan"
+    TEAM_WORK_NORMAL = "team.work.normal"
+    TEAM_WORK_PLAN = "team.work.plan"
+    TEAM_CODE_NORMAL = "team.code.normal"
+    TEAM_CODE_PLAN = "team.code.plan"
 
     @classmethod
     def is_team_mode(cls, mode: str) -> bool:
@@ -641,20 +682,9 @@ class MessageHandler(ABC):
         sid_raw = ch_cfg.get("default_session_id") or ""
         sid = str(sid_raw).strip() or None
         mode_raw = str(ch_cfg.get("default_mode") or "agent").strip().lower()
-        mode_map = {
-            "agent": ChannelMode.AGENT,
-            # plan / fast 已合并：历史 default_mode 归一到 agent。
-            "agent.plan": ChannelMode.AGENT,
-            "agent.fast": ChannelMode.AGENT,
-            "code.plan": ChannelMode.CODE_PLAN,
-            "code.normal": ChannelMode.CODE_NORMAL,
-            "code.team": ChannelMode.CODE_TEAM,
-            "team": ChannelMode.TEAM,
-            "team.plan": ChannelMode.TEAM_PLAN,
-            "team.plan.normal": ChannelMode.TEAM_PLAN_NORMAL,
-            "team.plan.code": ChannelMode.TEAM_PLAN_CODE,
-        }
-        mode = mode_map.get(mode_raw, ChannelMode.AGENT)
+        # 旧 config.yaml 的 default_mode（agent / agent.plan / code.team …）与新 canonical
+        # （agent.work.normal / team.code.normal …）都走 deprecate_mode + 查表归一。
+        mode = resolve_channel_mode(mode_raw)
         return ChannelControlState(session_id=sid, mode=mode)
 
     def _get_channel_state_key(self, channel_id: str, conversation_id: str | None) -> str:
@@ -1587,19 +1617,9 @@ class MessageHandler(ABC):
 
         if parsed.action is ParsedControlAction.MODE_OK:
             mode_str = parsed.mode_subcommand or ""
-            if mode_str not in (
-                "agent",
-                "code",
-                "team",
-                "agent.plan",
-                "agent.fast",
-                "code.plan",
-                "code.normal",
-                "code.team",
-                "team.plan",
-                "team.plan.normal",
-                "team.plan.code",
-            ):
+            # 单一事实源：新 canonical ∪ 旧 canonical（DEPRECATION_MAP.keys()）。
+            # 新串直通、旧串经 deprecate_mode 静默转译，三处（校验/分发）同源。
+            if not is_valid_mode_input(mode_str):
                 asyncio.create_task(
                     self.send_channel_notice(
                         user_infos,
@@ -1611,28 +1631,7 @@ class MessageHandler(ABC):
                 return True
             old_mode = state.mode
             old_sid = state.session_id
-            if mode_str == "agent":
-                state.mode = ChannelMode.AGENT
-            elif mode_str == "code":
-                state.mode = ChannelMode.CODE_NORMAL
-            elif mode_str == "team":
-                state.mode = ChannelMode.TEAM
-            elif mode_str == "agent.plan":
-                state.mode = ChannelMode.AGENT
-            elif mode_str == "agent.fast":
-                state.mode = ChannelMode.AGENT
-            elif mode_str == "code.plan":
-                state.mode = ChannelMode.CODE_PLAN
-            elif mode_str == "code.normal":
-                state.mode = ChannelMode.CODE_NORMAL
-            elif mode_str == "code.team":
-                state.mode = ChannelMode.CODE_TEAM
-            elif mode_str == "team.plan":
-                state.mode = ChannelMode.TEAM_PLAN
-            elif mode_str == "team.plan.normal":
-                state.mode = ChannelMode.TEAM_PLAN_NORMAL
-            elif mode_str == "team.plan.code":
-                state.mode = ChannelMode.TEAM_PLAN_CODE
+            state.mode = resolve_channel_mode(mode_str)
             new_label = state.mode.value
             if old_mode != state.mode:
                 asyncio.create_task(

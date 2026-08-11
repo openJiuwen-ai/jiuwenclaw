@@ -20,20 +20,25 @@ from jiuwenswarm.gateway.cron.models import (
 
 @pytest.mark.parametrize("mode", sorted(CRON_JOB_MODES))
 def test_normalize_cron_job_mode_accepts_supported_values(mode: str) -> None:
-    expected = (
-        "agent"
-        if mode in {"plan", "agent.plan", "agent.fast"}
-        else "team.plan.normal"
-        if mode == "team.plan"
-        else mode
-    )
+    # P3.3 两步法：legacy 别名先归一旧 canonical，再 deprecate_mode 转新 canonical；
+    # proactive.tick 非 chat.send mode，原样返回。这里复刻两步法的期望终态。
+    from jiuwenswarm.common.mode_matrix import deprecate_mode
+    from jiuwenswarm.gateway.cron.models import _CRON_JOB_MODE_ALIASES
+
+    if mode == "proactive.tick":
+        expected = "proactive.tick"
+    else:
+        step1 = _CRON_JOB_MODE_ALIASES.get(mode, mode)
+        expected = deprecate_mode(step1)
     assert normalize_cron_job_mode(mode) == expected
     assert normalize_cron_job_mode(mode.upper()) == expected
 
 
 def test_normalize_cron_job_mode_defaults_to_agent() -> None:
-    assert normalize_cron_job_mode(None) == CRON_JOB_DEFAULT_MODE
-    assert normalize_cron_job_mode("") == CRON_JOB_DEFAULT_MODE
+    # CRON_JOB_DEFAULT_MODE 仍是 legacy "agent"（input-level 默认），但 normalize
+    # 会经 deprecate_mode 升级成新 canonical agent.work.normal（P3.3 两步法）。
+    assert normalize_cron_job_mode(None) == "agent.work.normal"
+    assert normalize_cron_job_mode("") == "agent.work.normal"
     assert CRON_JOB_DEFAULT_MODE == "agent"
 
 
@@ -64,12 +69,15 @@ def test_coerce_cron_job_mode_passthrough_unknown() -> None:
 
 
 def test_coerce_cron_job_mode_known_values() -> None:
-    assert coerce_cron_job_mode("team") == "team"
-    assert coerce_cron_job_mode(None, default=CRON_JOB_DEFAULT_MODE) == CRON_JOB_DEFAULT_MODE
+    # P3.3：coerce 也走两步法，旧串升级成新 canonical。
+    assert coerce_cron_job_mode("team") == "team.work.normal"
+    assert coerce_cron_job_mode(None, default=CRON_JOB_DEFAULT_MODE) == "agent.work.normal"
 
 
 def test_cron_job_default_mode_matches_normalize_default() -> None:
-    assert normalize_cron_job_mode(None) == CRON_JOB_DEFAULT_MODE
+    # CRON_JOB_DEFAULT_MODE 是 legacy "agent"（input-level 默认常量不变，P3.3）；
+    # normalize/coerce 会经 deprecate_mode 把它升级成新 canonical agent.work.normal。
+    assert normalize_cron_job_mode(None) == "agent.work.normal"
 
 
 def test_cron_job_metadata_matches_modes_and_default() -> None:
@@ -80,6 +88,58 @@ def test_cron_job_metadata_matches_modes_and_default() -> None:
     assert meta["default_team_timeout_seconds"] == CRON_TEAM_DEFAULT_TIMEOUT_SECONDS
     assert meta["max_timeout_seconds"] == CRON_MAX_TIMEOUT_SECONDS
     assert meta["modes"] == sorted(meta["modes"])
+
+
+# ===========================================================================
+# P3.3：新三段命名 canonical 直通 + 旧串两步法归一 + team.plan 单一路径
+# ===========================================================================
+
+from jiuwenswarm.common.mode_matrix import NEW_CANONICAL_MODES
+
+
+@pytest.mark.parametrize("new_mode", sorted(NEW_CANONICAL_MODES))
+def test_cron_accepts_new_canonical(new_mode: str) -> None:
+    """新 canonical 必须能通过 CRON_JOB_MODES 严格校验，不再 raise。"""
+    assert normalize_cron_job_mode(new_mode) == new_mode
+
+
+@pytest.mark.parametrize(
+    ("legacy", "new_canonical"),
+    [
+        ("agent", "agent.work.normal"),
+        ("agent.plan", "agent.work.normal"),  # legacy 别名 → agent → 新串
+        ("agent.fast", "agent.work.normal"),
+        ("plan", "agent.work.normal"),
+        ("code.normal", "agent.code.normal"),
+        ("code.plan", "agent.code.plan"),
+        ("code.team", "team.code.normal"),
+        ("team", "team.work.normal"),
+        ("team.plan.normal", "team.work.plan"),
+        ("team.plan.code", "team.code.plan"),
+    ],
+)
+def test_cron_legacy_resolves_to_new_canonical(legacy: str, new_canonical: str) -> None:
+    """旧串/legacy 别名经两步法归一到新 canonical。"""
+    assert normalize_cron_job_mode(legacy) == new_canonical
+
+
+def test_cron_legacy_team_plan_resolves_unambiguously() -> None:
+    """team.plan 两步归一：先 team.plan.normal，再 deprecate 到 team.work.plan（单一路径）。"""
+    assert normalize_cron_job_mode("team.plan") == "team.work.plan"
+
+
+def test_cron_proactive_tick_not_translated() -> None:
+    """proactive.tick 非 chat.send mode，不参与 deprecate_mode 转译。"""
+    assert normalize_cron_job_mode("proactive.tick") == "proactive.tick"
+    assert coerce_cron_job_mode("proactive.tick") == "proactive.tick"
+
+
+def test_cron_coerce_upgrades_legacy_runtime() -> None:
+    """coerce（宽松运行时路径）也把旧串升级到新 canonical。"""
+    assert coerce_cron_job_mode("agent.plan") == "agent.work.normal"
+    assert coerce_cron_job_mode("team.plan.code") == "team.code.plan"
+    # 未识别串仍原样返回（宽松语义不变）
+    assert coerce_cron_job_mode("future.mode") == "future.mode"
 
 
 def test_resolve_cron_job_timeout_seconds_defaults_by_mode() -> None:

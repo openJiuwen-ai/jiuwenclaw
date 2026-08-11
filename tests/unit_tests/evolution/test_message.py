@@ -75,23 +75,44 @@ class TestMode:
         assert Mode.TEAM.value == "team"
         assert Mode.TEAM_PLAN_NORMAL.value == "team.plan.normal"
         assert Mode.TEAM_PLAN_CODE.value == "team.plan.code"
+        # P2.1：新三段命名 canonical 成员。
+        assert Mode.AGENT_WORK_NORMAL.value == "agent.work.normal"
+        assert Mode.AGENT_WORK_PLAN.value == "agent.work.plan"
+        assert Mode.AGENT_CODE_NORMAL.value == "agent.code.normal"
+        assert Mode.AGENT_CODE_PLAN.value == "agent.code.plan"
+        assert Mode.TEAM_WORK_NORMAL.value == "team.work.normal"
+        assert Mode.TEAM_WORK_PLAN.value == "team.work.plan"
+        assert Mode.TEAM_CODE_NORMAL.value == "team.code.normal"
+        assert Mode.TEAM_CODE_PLAN.value == "team.code.plan"
 
     @staticmethod
     def test_mode_from_raw_legacy_compatibility():
-        """Test legacy agent mode strings normalize to merged agent mode."""
-        assert Mode.from_raw("agent") == Mode.AGENT
-        assert Mode.from_raw("agent.plan") == Mode.AGENT
-        assert Mode.from_raw("agent.fast") == Mode.AGENT
-        assert Mode.from_raw("plan") == Mode.AGENT
-        assert Mode.from_raw("fast") == Mode.AGENT
-        assert Mode.from_raw("code.plan") == Mode.CODE_PLAN
-        assert Mode.from_raw("code.normal") == Mode.CODE_NORMAL
-        assert Mode.from_raw("code.team") == Mode.CODE_TEAM
-        assert Mode.from_raw("team") == Mode.TEAM
-        assert Mode.from_raw("team.plan") == Mode.TEAM_PLAN_NORMAL
-        assert Mode.from_raw("team.plan.normal") == Mode.TEAM_PLAN_NORMAL
-        assert Mode.from_raw("team.plan.code") == Mode.TEAM_PLAN_CODE
+        """旧 canonical / legacy shorthand 经 from_raw 静默归一到新三段命名枚举。
+
+        P2.1：from_raw 的归一目标从旧 AGENT 改成新 AGENT_WORK_*（详见
+        PLAN_mode_refactor_phased.md P2.1 联动说明）。旧枚举成员保留以兼容
+        旧序列化数据的反解析，但 from_raw 不再以它们为终点。
+        """
+        # agent 族 → agent.work.*（agent.plan 不再降级到 AGENT，而是 work.plan）
+        assert Mode.from_raw("agent") == Mode.AGENT_WORK_NORMAL
+        assert Mode.from_raw("agent.plan") == Mode.AGENT_WORK_PLAN
+        assert Mode.from_raw("agent.fast") == Mode.AGENT_WORK_NORMAL
+        assert Mode.from_raw("plan") == Mode.AGENT_WORK_NORMAL
+        assert Mode.from_raw("fast") == Mode.AGENT_WORK_NORMAL
+        # code 族 → agent.code.* / team.code.*
+        assert Mode.from_raw("code.plan") == Mode.AGENT_CODE_PLAN
+        assert Mode.from_raw("code.normal") == Mode.AGENT_CODE_NORMAL
+        assert Mode.from_raw("code.team") == Mode.TEAM_CODE_NORMAL
+        # team 族 → team.work.* / team.code.*
+        assert Mode.from_raw("team") == Mode.TEAM_WORK_NORMAL
+        assert Mode.from_raw("team.plan") == Mode.TEAM_WORK_PLAN
+        assert Mode.from_raw("team.plan.normal") == Mode.TEAM_WORK_PLAN
+        assert Mode.from_raw("team.plan.code") == Mode.TEAM_CODE_PLAN
+        # 未知值回落 default（AGENT）
         assert Mode.from_raw("invalid") == Mode.AGENT
+        # 新串直通
+        assert Mode.from_raw("agent.work.plan") == Mode.AGENT_WORK_PLAN
+        assert Mode.from_raw("team.code.normal") == Mode.TEAM_CODE_NORMAL
 
     @staticmethod
     def test_mode_to_runtime_mode():

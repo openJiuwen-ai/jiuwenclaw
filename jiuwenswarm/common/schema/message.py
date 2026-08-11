@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Literal
 
+from jiuwenswarm.common.mode_matrix import deprecate_mode
+
 
 class ReqMethod(Enum):
     INITIALIZE = "initialize"
@@ -266,32 +268,60 @@ class Mode(Enum):
     TEAM = "team"
     TEAM_PLAN_NORMAL = "team.plan.normal"
     TEAM_PLAN_CODE = "team.plan.code"
+    # ── 新三段命名 canonical（<角色>.<环境>.<状态>）──
+    # 旧串经 from_raw → DEPRECATION_MAP 静默归一到这些新成员。
+    AGENT_WORK_NORMAL = "agent.work.normal"
+    AGENT_WORK_PLAN = "agent.work.plan"
+    AGENT_CODE_NORMAL = "agent.code.normal"
+    AGENT_CODE_PLAN = "agent.code.plan"
+    TEAM_WORK_NORMAL = "team.work.normal"
+    TEAM_WORK_PLAN = "team.work.plan"
+    TEAM_CODE_NORMAL = "team.code.normal"
+    TEAM_CODE_PLAN = "team.code.plan"
 
     @classmethod
     def from_raw(cls, raw_mode: Any, default: "Mode | None" = None) -> "Mode":
-        """解析 mode。plan / fast 已合并：agent.plan / agent.fast 归一为 agent。"""
+        """解析 mode。
+
+        新三段命名落地后，旧 canonical 串（agent / agent.plan / agent.fast /
+        code.* / team / team.plan.*）经 ``DEPRECATION_MAP`` 静默归一到对应新枚举
+        （agent.plan → AGENT_WORK_PLAN 等）。新串直通。未知值回落到 *default*。
+        """
         fallback = default or cls.AGENT
         if isinstance(raw_mode, Mode):
-            # 历史枚举成员归一到合并后的 AGENT。
+            # 历史枚举成员归一到新 canonical：AGENT_PLAN/AGENT_FAST 不再是终点。
             if raw_mode in (cls.AGENT_PLAN, cls.AGENT_FAST):
-                return cls.AGENT
+                return cls.AGENT_WORK_NORMAL
+            if raw_mode is cls.AGENT:
+                return cls.AGENT_WORK_NORMAL
+            if raw_mode is cls.CODE_NORMAL:
+                return cls.AGENT_CODE_NORMAL
+            if raw_mode is cls.CODE_PLAN:
+                return cls.AGENT_CODE_PLAN
+            if raw_mode is cls.CODE_TEAM:
+                return cls.TEAM_CODE_NORMAL
+            if raw_mode is cls.TEAM:
+                return cls.TEAM_WORK_NORMAL
+            if raw_mode is cls.TEAM_PLAN_NORMAL:
+                return cls.TEAM_WORK_PLAN
+            if raw_mode is cls.TEAM_PLAN_CODE:
+                return cls.TEAM_CODE_PLAN
             return raw_mode
         if not isinstance(raw_mode, str):
             return fallback
         normalized = raw_mode.strip().lower()
         if not normalized:
             return fallback
-        # 任何 agent* 请求（agent / agent.plan / agent.fast）归一到 AGENT。
-        if normalized.split(".", 1)[0] == "agent":
-            return cls.AGENT
-        # 历史裸 plan / fast（同 CLI MODE_ALIASES）显式归一到 AGENT，
-        # 不依赖 fallback 默认值恰好等于 AGENT。
+        # 裸 plan / fast（CLI legacy shorthand）显式归一，不依赖 fallback 恰好等值。
         if normalized in ("plan", "fast"):
-            return cls.AGENT
+            return cls.AGENT_WORK_NORMAL
+        # team.plan 正式别名归一。
         if normalized == "team.plan":
-            return cls.TEAM_PLAN_NORMAL
+            return cls.TEAM_WORK_PLAN
+        # 旧 canonical → 新 canonical 静默转译。
+        new_text = deprecate_mode(normalized)
         try:
-            return cls(normalized)
+            return cls(new_text)
         except ValueError:
             return fallback
 

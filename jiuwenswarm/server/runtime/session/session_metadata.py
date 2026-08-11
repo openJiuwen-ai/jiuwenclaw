@@ -14,7 +14,11 @@ from typing import Any
 from datetime import datetime, timezone
 
 from jiuwenswarm.common.utils import get_agent_sessions_dir
-from jiuwenswarm.common.mode_matrix import is_team_mode
+from jiuwenswarm.common.mode_matrix import (
+    deprecate_mode,
+    is_new_canonical_mode,
+    is_team_mode,
+)
 from jiuwenswarm.server.runtime.session.work_mode import (
     DEFAULT_WEB_WORK_MODE,
     SUPPORTED_WORK_MODES,
@@ -224,6 +228,17 @@ def _apply_metadata_defaults_with_inference(
                         metadata["project_id"] = pid
                         changed = True
                         break
+
+    # mode: 旧 canonical 惰性迁移到新三段命名 canonical。
+    # 复用现有异步写盘逻辑：deprecate_mode 把旧串(agent.plan / code.team / …)
+    # 静默转新串；空值/None 经 normalize_mode_text 回落 agent 再映射成新串
+    # (期望行为，非 bug，详见 ERRORS.md ERR-20260810-001)。已是新串则不动。
+    existing_mode = metadata.get("mode")
+    if existing_mode is not None and not is_new_canonical_mode(existing_mode):
+        new_mode = deprecate_mode(existing_mode)
+        if new_mode != existing_mode:
+            metadata["mode"] = new_mode
+            changed = True
 
     # 确定性推断成功时异步写盘(不阻塞读路径)
     if changed and enable_writeback:

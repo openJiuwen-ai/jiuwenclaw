@@ -9,8 +9,10 @@ from jiuwenswarm.common.work_mode import (
     normalize_work_mode,
 )
 from jiuwenswarm.common.mode_matrix import (
+    NEW_CANONICAL_MODES,
     TEAM_PLAN_CODE_MODE,
     TEAM_PLAN_NORMAL_MODE,
+    deprecate_mode,
     is_team_mode,
 )
 from jiuwenswarm.gateway.cron.cron_expr import validate_cron_expression
@@ -72,17 +74,25 @@ def _normalize_targets_str(raw: str) -> str:
 
 
 # Cron job execution modes (passed to AgentServer as chat.send params["mode"]).
+# 包含 8 个新三段命名 canonical、旧 canonical、legacy 别名与非 chat.send 的
+# proactive.tick。新串经 normalize_cron_job_mode 直通；旧串/别名经两步法归一新串。
 CRON_JOB_MODES: frozenset[str] = frozenset(
     {
-        "agent",       # 合并后的单一 agent 模式
-        "plan",        # legacy shorthand（归一到 agent）
-        "team",        # multi-agent team mode
-        "agent.plan",  # legacy（归一到 agent）
-        "agent.fast",  # legacy（归一到 agent）
-        "team.plan",
+        # ── 新三段命名 canonical（normalize 后落库的目标值）──
+        *NEW_CANONICAL_MODES,
+        # ── 旧 canonical（兼容存量输入，经 deprecate_mode 转新串）──
+        "agent",
+        "agent.plan",
+        "agent.fast",
+        "code.normal",
+        "code.plan",
+        "code.team",
+        "team",
         TEAM_PLAN_NORMAL_MODE,
         TEAM_PLAN_CODE_MODE,
-        "code.team",
+        # ── legacy shorthand（先归一旧 canonical，再 deprecate 转新）──
+        "plan",
+        "team.plan",
         # 不走 chat.send，scheduler 消费时直接发 PROACTIVE_TICK WS 请求
         # 触发 AgentServer ProactiveEngine.tick_now()。由 proactive_cron_sync 自动注册。
         "proactive.tick",
@@ -91,6 +101,8 @@ CRON_JOB_MODES: frozenset[str] = frozenset(
 
 
 # Canonical default when create/update/runtime do not specify mode.
+# 旧值 "agent" 是 legacy；normalize_cron_job_mode 末尾会经 deprecate_mode 升级成
+# 新 canonical agent.work.normal，保证"不指定 mode"与"显式 agent"落库一致。
 CRON_JOB_DEFAULT_MODE: str = "agent"
 
 # 名称/描述最大长度（前后端保持一致，见 CronTaskDrawer.tsx 同名常量）。
@@ -98,6 +110,8 @@ CRON_JOB_DEFAULT_MODE: str = "agent"
 CRON_JOB_NAME_MAX_LENGTH: int = 64
 CRON_JOB_DESCRIPTION_MAX_LENGTH: int = 500
 
+# legacy / 旧 canonical → 旧 canonical 的归一（第一步）。
+# 第二步由 deprecate_mode 把旧 canonical 转成新三段命名 canonical。
 _CRON_JOB_MODE_ALIASES: dict[str, str] = {
     "plan": "agent",
     "agent.plan": "agent",
@@ -109,30 +123,53 @@ _CRON_JOB_MODE_ALIASES: dict[str, str] = {
 def normalize_cron_job_mode(raw: Any, *, default: str = CRON_JOB_DEFAULT_MODE) -> str:
     """Normalize and validate a cron job execution mode (strict, for create/update APIs).
 
-    legacy 别名（plan / agent.plan / agent.fast）在此处即归一为 "agent" 后落库，
-    而非仅依赖运行时（AgentServer 侧）兜底归一。
+    两步法：
+      1. legacy 别名（plan / agent.plan / agent.fast / team.plan）先归一到旧 canonical
+         （agent / team.plan.normal）；
+      2. 旧 canonical 经 ``deprecate_mode`` 转新三段命名 canonical
+         （agent → agent.work.normal，team.plan.normal → team.work.plan 等）。
+
+    新串直通。proactive.tick 非 chat.send mode，原样返回。
     """
     if raw is None:
-        return default
+        return deprecate_mode(default)
     value = str(raw).strip().lower()
     if not value:
-        return default
+        return deprecate_mode(default)
     if value not in CRON_JOB_MODES:
         raise ValueError(
             f"Invalid cron job mode {raw!r}. "
             f"Valid: {', '.join(sorted(CRON_JOB_MODES))}"
         )
-    return _CRON_JOB_MODE_ALIASES.get(value, value)
+    # proactive.tick 非 chat.send mode，不参与 mode 归一。
+    if value == "proactive.tick":
+        return value
+    # 步骤1：legacy 别名归一到旧 canonical。
+    legacy = _CRON_JOB_MODE_ALIASES.get(value)
+    if legacy is not None:
+        value = legacy
+    # 步骤2：旧 canonical 经 deprecate_mode 转新 canonical；新串直通。
+    return deprecate_mode(value)
 
 
 def coerce_cron_job_mode(raw: Any, *, default: str = CRON_JOB_DEFAULT_MODE) -> str:
-    """Normalize mode for runtime/persistence; unknown values pass through lowercased."""
+    """Normalize mode for runtime/persistence; unknown values pass through lowercased.
+
+    走与 :func:`normalize_cron_job_mode` 相同的两步法归一（legacy 别名 → 旧 canonical
+    → deprecate_mode → 新 canonical），但**不严格校验**：未识别串原样返回，
+    供存量 cron 数据与宽松运行时路径消费。
+    """
     if raw is None:
-        return default
+        return deprecate_mode(default)
     value = str(raw).strip().lower()
     if not value:
-        return default
-    return _CRON_JOB_MODE_ALIASES.get(value, value)
+        return deprecate_mode(default)
+    if value == "proactive.tick":
+        return value
+    legacy = _CRON_JOB_MODE_ALIASES.get(value)
+    if legacy is not None:
+        value = legacy
+    return deprecate_mode(value)
 
 
 def cron_job_modes_for_tools() -> list[str]:
