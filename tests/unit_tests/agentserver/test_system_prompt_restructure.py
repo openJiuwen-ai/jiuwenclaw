@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 import pytest
 
@@ -26,6 +26,12 @@ from jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail import RuntimeP
 from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import SkillRetrievalPromptRail
 from jiuwenswarm.agents.harness.common.rails.symphony import (
     SymphonyOrchestrationRail,
+)
+from jiuwenswarm.agents.harness.common.tools.harness_named_web_tools import (
+    JiuwenHarnessFetchWebpageTool,
+)
+from jiuwenswarm.agents.harness.common.tools.web_search.harness import (
+    JiuwenHarnessWebSearchTool,
 )
 
 
@@ -978,9 +984,27 @@ def test_deep_adapter_visible_skill_names_match_list_skill(monkeypatch, tmp_path
     adapter.set_skill_manager(
         SimpleNamespace(list_execution_disabled_skills=lambda: ["beta"])
     )
+    # `_visible_skill_names_for_list_skill` scans `_resolve_skill_dirs()`, which
+    # prefers shared tip dirs (`JIUWEN*_SHARED_SKILLS_DIRS`) over workspace.
+    # Isolate both the resolver and the env whitelist so CI shared roots
+    # (skill-creator / swarmskill-creator) cannot leak into this unit test.
+    monkeypatch.delenv("JIUWENSWARM_SHARED_SKILLS_DIRS", raising=False)
+    monkeypatch.delenv("JIUWENCLAW_SHARED_SKILLS_DIRS", raising=False)
+    monkeypatch.setattr(
+        "jiuwenswarm.common.utils.resolve_agent_registered_skill_dirs",
+        lambda: [tmp_path],
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.common.utils.get_agent_skills_dir",
+        lambda: tmp_path,
+    )
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.agent_adapter.interface_deep.get_agent_skills_dir",
         lambda: tmp_path,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.skill.skill_manager.enabled_skills_from_environ",
+        lambda: None,
     )
 
     assert adapter._visible_skill_names_for_list_skill() == {"alpha"}
@@ -1100,21 +1124,8 @@ def test_resolve_enable_task_loop_forces_true_when_review_trigger_enabled(monkey
     )
 
 
-def test_resolve_enable_task_loop_forces_true_when_legacy_auto_scan_enabled(monkeypatch):
-    monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
-    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
-    assert (
-        JiuWenSwarmDeepAdapter._resolve_enable_task_loop(
-            {"enable_task_loop": False},
-            {"evolution": {"auto_scan": True}},
-        )
-        is True
-    )
-
-
 def test_resolve_enable_task_loop_preserves_false_when_only_evolution_enabled(monkeypatch):
     monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
-    monkeypatch.delenv("EVOLUTION_SIGNAL_TRIGGER", raising=False)
     monkeypatch.delenv("SKILL_CREATE", raising=False)
     assert (
         JiuWenSwarmDeepAdapter._resolve_enable_task_loop(
@@ -1122,7 +1133,6 @@ def test_resolve_enable_task_loop_preserves_false_when_only_evolution_enabled(mo
             {
                 "evolution": {
                     "enabled": True,
-                    "signal_trigger": True,
                     "review_trigger": False,
                     "skill_create": False,
                 }
@@ -1133,7 +1143,6 @@ def test_resolve_enable_task_loop_preserves_false_when_only_evolution_enabled(mo
 
 
 def test_resolve_enable_task_loop_preserves_false_without_enforcers(monkeypatch):
-    monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
     monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
     monkeypatch.delenv("SKILL_CREATE", raising=False)
     assert (
@@ -1181,7 +1190,12 @@ def test_deep_adapter_subagents_includes_optional_browser_and_configured_researc
         language="cn",
         max_iterations=9,
         rails=None,
+        tools=ANY,
     )
+    research_tools = mock_research.call_args.kwargs["tools"]
+    assert len(research_tools) == 2
+    assert isinstance(research_tools[0], JiuwenHarnessWebSearchTool)
+    assert isinstance(research_tools[1], JiuwenHarnessFetchWebpageTool)
     mock_browser.assert_called_once_with(
         model,
         workspace="/tmp/jiuwenswarm-workspace",

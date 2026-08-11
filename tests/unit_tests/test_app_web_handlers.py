@@ -652,7 +652,7 @@ async def test_config_set_routes_team_payload_to_modes_team_helper(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("value", ["true", "false"])
-async def test_config_set_syncs_auto_scan_to_review_trigger_only(
+async def test_config_set_updates_skill_create_env(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
     value: str,
@@ -672,9 +672,7 @@ async def test_config_set_syncs_auto_scan_to_review_trigger_only(
         "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config",
         lambda: {"evolution": {}},
     )
-    monkeypatch.setenv("EVOLUTION_AUTO_SCAN", "")
-    monkeypatch.setenv("EVOLUTION_REVIEW_TRIGGER", "")
-    monkeypatch.setenv("EVOLUTION_SIGNAL_TRIGGER", "manual")
+    monkeypatch.setenv("SKILL_CREATE", "")
 
     _register_web_handlers(
         WebHandlersBindParams(
@@ -688,29 +686,22 @@ async def test_config_set_syncs_auto_scan_to_review_trigger_only(
     await channel.methods["config.set"](
         object(),
         "req-evolution",
-        {"evolution_auto_scan": value},
+        {"skill_create": value},
         "sess-evolution",
     )
 
-    expected = {
-        "EVOLUTION_AUTO_SCAN": value,
-        "EVOLUTION_REVIEW_TRIGGER": value,
-    }
+    expected = {"SKILL_CREATE": value}
     assert saved_updates == [expected]
     from jiuwenswarm.common.local_env_config import get_process_baseline, read_env
 
     assert {key: read_env(key) for key in expected} == expected
     baseline = get_process_baseline()
     assert {key: baseline.get(key) for key in expected} == expected
-    # Track B must not be written into bare os.environ.
-    assert os.environ.get("EVOLUTION_AUTO_SCAN") == ""
-    assert os.environ.get("EVOLUTION_REVIEW_TRIGGER") == ""
-    assert os.environ["EVOLUTION_SIGNAL_TRIGGER"] == "manual"
     assert set((tmp_path / ".env").read_text(encoding="utf-8").splitlines()) == {
         f'{key}="{env_value}"' for key, env_value in expected.items()
     }
     assert channel.responses[-1]["payload"] == {
-        "updated": ["evolution_auto_scan"],
+        "updated": ["skill_create"],
         "applied_without_restart": False,
     }
 

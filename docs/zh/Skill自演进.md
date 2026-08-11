@@ -21,7 +21,7 @@ Skill 自演进机制的核心价值在于：
 
 ### 2.1 自演进配置开关
 
-Skill 自动演进功能通过在配置信息中开启自演进配置项 `evolution_auto_scan` 开关启用。
+Skill 自动演进功能通过在配置信息中开启自演进总开关 `react.evolution.enabled` 启用。挂载演进 Rail 后，系统会在对话和工具执行后自动进行被动信号扫描；可选开启 `review_trigger`（软触发 Review）与 `auto_save`（自动保存审批）。
 
 ![打开自演进自动检测](../assets/images/skill演进_自动检测开关.png)
 

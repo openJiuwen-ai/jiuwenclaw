@@ -169,7 +169,7 @@ class ConstructionInput(BaseModel):
 | **环境值** | 随请求 / 会话 / 成员动态变化吗？ | `context`（`context_field`） | 运行时由 `SwarmBuildContext` 注入 |
 | **基础设施/句柄** | 既非设定也非构造参数（extras / 全局 / env） | 不建模 | 工厂直读 ctx / 全局 / env |
 
-**关键洞察**：`ctx.config` 是「伪装成环境的属性源」。所有 config 派生的构造参数（`skill_mode` / `model_name` / `auto_scan` / `permissions` / `embed` 等）**本质是属性**，统一由 `config_specs` 读 config → 投射进 `RailSpec.params`（与既有 `skills` / `tool_names` / `max_iterations` 同一套机制），provider 工厂只从 `params` 读，**不再在构造期读 `ctx.config` 派生**。
+**关键洞察**：`ctx.config` 是「伪装成环境的属性源」。所有 config 派生的构造参数（`skill_mode` / `model_name` / `review_trigger` / `permissions` / `embed` 等）**本质是属性**，统一由 `config_specs` 读 config → 投射进 `RailSpec.params`（与既有 `skills` / `tool_names` / `max_iterations` 同一套机制），provider 工厂只从 `params` 读，**不再在构造期读 `ctx.config` 派生**。
 
 收益：`RailSpec.params` 自洽且可序列化地描述元素的**全部设定**；`SwarmBuildContext` 保持纯环境；为「配置文件 → harness」loader 打好基础（文件即 params）。
 
@@ -213,14 +213,14 @@ _TOOL_PARAM_BUILDERS: dict[name, (config) -> params]   # send_file / code_extra_
 | `context_engine_enabled` + `context_engine_config`（context_processor） | `get_context_engine_enabled(config)` + `config.context_engine_config` |
 | `acp_enabled`（code_extra_tools） | `config.acp_agents` 非空 |
 | `channels_config`（send_file） | `config.channels` |
-| `evolution_model_config` + `auto_scan`（evolution×2） | `resolve_model_config(config)`（序列化 dict）+ `get_evolution_auto_scan_enabled(config)` |
+| `evolution_model_config` + `review_trigger` / `auto_save`（team evolution） | `resolve_model_config(config)`（序列化 dict）+ `get_evolution_review_trigger_enabled` / `get_evolution_auto_save_enabled` |
 | `skill_create`（team_skill_create） | `get_skill_create_enabled(config)` |
 
 > **evolution_llm**：`config_specs` 只烘焙*可序列化的模型配置*（`model_client_config` / `model_config_obj` / `model_name`）进 params；活的 LLM 句柄由工厂 `_build_evolution_llm_from(inp.evolution_model_config)` 在 **build 期**构造，**不进 schema**。
 
 > **blob builder**（permission / coding_memory / context_processor）签名不动：`config_specs` 抽 config 子树进 params，工厂传子 dict（如 `build_permission_rail(config={"permissions": inp.permissions_config}, ...)`）。**零 legacy 回归面**。
 
-> **env 烘焙**：env 派生位（`EVOLUTION_AUTO_SCAN` / `JIUWENSWARM_ADDITIONAL_DIRECTORIES` 等）在 enrich 期一并解析烘焙，随 spec 序列化——与既有 params 一致（团队级配置）。
+> **env 烘焙**：env 派生位（`EVOLUTION_REVIEW_TRIGGER` / `EVOLUTION_AUTO_SAVE` / `JIUWENSWARM_ADDITIONAL_DIRECTORIES` 等）在 enrich 期一并解析烘焙，随 spec 序列化——与既有 params 一致（团队级配置）。被动扫描在挂载演进 Rail 后始终开启，不再烘焙 `auto_scan` / `signal_trigger`。
 
 ---
 
@@ -306,9 +306,9 @@ harness_element(kind=RAIL, name=..., builder=SomeRailClass)              # 直�
 | `swarm.team_workspace_report_path` | T+K | — | team_ws_root, team_id, language |
 | `swarm.context_processor` | T+K | context_engine_enabled, context_engine_config | — |
 | `swarm.plugin_rails` | T+K | — | —（全局 rail manager） |
-| `swarm.team_skill_evolution` | T+K / leader | evolution_model_config, auto_scan | team_skills_dir, language, role, team_id, trajectory_registry, channel, session_id, team_ws_root, global_skills_dir |
+| `swarm.team_skill_evolution` | T+K / leader | evolution_model_config, review_trigger, auto_save | team_skills_dir, language, role, team_id, trajectory_registry, channel, session_id, team_ws_root, global_skills_dir |
 | `swarm.team_skill_create` | T+K / leader | skill_create | team_skills_dir, language, channel, session_id, team_ws_root, team_id, trajectory_registry |
-| `swarm.member_skill_evolution` | T+K / teammate | evolution_model_config, auto_scan | team_skills_dir, trajectory_registry, team_id, channel, session_id |
+| `swarm.member_skill_evolution` | T+K / teammate | evolution_model_config | team_skills_dir, trajectory_registry, team_id, channel, session_id |
 | `swarm.code_runtime_prompt` | K | — | language, channel |
 | `swarm.code_project_memory` | K | additional_directories | project_dir, language |
 | `swarm.permission_interrupt` | K | permissions_config, model_name | — |

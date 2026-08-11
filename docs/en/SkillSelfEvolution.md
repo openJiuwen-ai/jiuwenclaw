@@ -21,7 +21,7 @@ The core value of the skill self-evolution mechanism lies in:
 
 ### 2.1 Self-Evolution Configuration Switch
 
-The skill auto-evolution feature is enabled by turning on the self-evolution configuration item `evolution_auto_scan` in the configuration information.
+The skill auto-evolution feature is enabled by turning on the master switch `react.evolution.enabled` in the configuration. After the evolution rail is mounted, passive signal scanning runs automatically after chat and tool execution; optionally enable `review_trigger` (soft review follow-ups) and `auto_save` (auto-approve).
 
 ![Enable auto-evolution detection](../assets/images/skill演进_自动检测开关.png)
 

@@ -1490,7 +1490,6 @@ react:
   # Skills 在线自演进配置
   evolution:
     enabled: true
-    auto_scan: false
     skill_base_dir: "agent/skills"
 
 tools:

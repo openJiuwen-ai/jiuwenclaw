@@ -212,7 +212,7 @@ class TestEvolutionLog:
         """Test creating an EvolutionLog."""
         log = EvolutionLog(skill_id="test-skill")
         assert log.skill_id == "test-skill"
-        assert log.version == "1.0.0"
+        assert log.version == "v1.0.0"
         assert len(log.entries) == 0
 
     @staticmethod

@@ -26,20 +26,22 @@ def _reset_env_state():
     os.environ.update(saved)
 
 
-def test_search_tools_read_tip_not_bare_os_environ():
-    from jiuwenswarm.agents.harness.common.tools import mcp_toolkits
+def test_web_search_paid_availability_reads_tip_not_bare_os_environ():
+    from jiuwenswarm.agents.harness.common.tools.web_search.providers import (
+        paid_provider_available,
+    )
 
     os.environ["BOCHA_API_KEY"] = "bare-os-pollution"
 
     token = bind_task_env_overlay({"BOCHA_API_KEY": "tip-bocha"})
     try:
-        assert mcp_toolkits._has_paid_search_api_key() is True
+        assert paid_provider_available("bocha") is True
     finally:
         reset_task_env_overlay(token)
 
     empty = bind_task_env_overlay({})
     try:
-        assert mcp_toolkits._has_paid_search_api_key() is False
+        assert paid_provider_available("bocha") is False
     finally:
         reset_task_env_overlay(empty)
 

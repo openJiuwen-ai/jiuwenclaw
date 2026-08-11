@@ -101,6 +101,7 @@ BUSINESS_MIRROR_KEYS: frozenset[str] = frozenset(
         "TOOL_CALLING_GUARD_STRIP_REASON",
         "ENABLED_SKILLS",
         "DISABLED_SKILLS",
+        # Canonical product keys only; relay ``JIUWENCLAW_*`` is remapped on ingest.
         "JIUWENSWARM_DISABLED_SKILLS",
         "JIUWENSWARM_SHARED_SKILLS_DIRS",
         "BOCHA_API_KEY",
@@ -173,6 +174,79 @@ BUSINESS_MIRROR_KEYS: frozenset[str] = frozenset(
 )
 
 PROCESS_UNIQUE_ENV_KEYS: frozenset[str] = frozenset()
+
+# ---------------------------------------------------------------------------
+# Product env alias: relay-claw still ships ``JIUWENCLAW_*``; tip/code use
+# ``JIUWENSWARM_*``. Remap at the boundary — do not dual-list both everywhere.
+# ---------------------------------------------------------------------------
+
+_LEGACY_PRODUCT_ENV_PREFIX = "JIUWENCLAW_"
+_CANONICAL_PRODUCT_ENV_PREFIX = "JIUWENSWARM_"
+
+
+def canonical_product_env_key(name: str) -> str:
+    """Map ``JIUWENCLAW_*`` → ``JIUWENSWARM_*``; leave other keys unchanged."""
+    key = str(name)
+    if key.startswith(_LEGACY_PRODUCT_ENV_PREFIX):
+        return _CANONICAL_PRODUCT_ENV_PREFIX + key[len(_LEGACY_PRODUCT_ENV_PREFIX):]
+    return key
+
+
+def legacy_product_env_key(name: str) -> str | None:
+    """Return the relay ``JIUWENCLAW_*`` alias for a ``JIUWENSWARM_*`` key."""
+    key = str(name)
+    if key.startswith(_CANONICAL_PRODUCT_ENV_PREFIX):
+        return _LEGACY_PRODUCT_ENV_PREFIX + key[len(_CANONICAL_PRODUCT_ENV_PREFIX):]
+    return None
+
+
+def normalize_product_env_aliases(
+    env: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Rewrite product legacy keys to canonical; canonical wins on clash."""
+    if not isinstance(env, Mapping):
+        return {}
+    out: dict[str, Any] = {}
+    for raw_key, value in env.items():
+        key = str(raw_key)
+        canon = canonical_product_env_key(key)
+        if canon in out and key.startswith(_LEGACY_PRODUCT_ENV_PREFIX):
+            continue
+        out[canon] = value
+    return out
+
+
+def env_keys_with_product_aliases(keys: Iterable[str]) -> frozenset[str]:
+    """Expand a key set with both canonical and legacy product forms."""
+    expanded: set[str] = set()
+    for raw in keys:
+        key = str(raw)
+        expanded.add(key)
+        expanded.add(canonical_product_env_key(key))
+        legacy = legacy_product_env_key(key)
+        if legacy is not None:
+            expanded.add(legacy)
+        # If caller passed a legacy key, also keep its canonical form (above)
+        # and the original legacy form.
+        if key.startswith(_LEGACY_PRODUCT_ENV_PREFIX):
+            expanded.add(key)
+    return frozenset(expanded)
+
+
+def product_env_lookup_names(name: str) -> tuple[str, ...]:
+    """Ordered names to probe for a product env key (canonical + relay alias)."""
+    key = str(name)
+    canon = canonical_product_env_key(key)
+    if key.startswith(_LEGACY_PRODUCT_ENV_PREFIX) and canon != key:
+        return (canon, key)
+    names: list[str] = [key]
+    if canon not in names:
+        names.append(canon)
+    legacy = legacy_product_env_key(key)
+    if legacy is not None and legacy not in names:
+        names.append(legacy)
+    return tuple(names)
+
 
 # ---------------------------------------------------------------------------
 # Id / bag helpers
@@ -342,7 +416,7 @@ def stage_env_overrides(
     if not isinstance(env_overrides, dict):
         return
     bag = _bag(_staged_bags, resolve_env_ns(service_id, agent_id))
-    for env_key, env_value in env_overrides.items():
+    for env_key, env_value in normalize_product_env_aliases(env_overrides).items():
         key = str(env_key)
         if key in SPAWN_ENV_KEYS:
             logger.warning("拒绝 stage 轨道 A 键: %s", key)
@@ -453,10 +527,12 @@ def pop_track_b_bare_from_environ() -> list[str]:
     for key in BUSINESS_MIRROR_KEYS:
         if key in SPAWN_ENV_KEYS:
             continue
-        if key not in os.environ:
-            continue
-        os.environ.pop(key, None)
-        removed.append(key)
+        for name in env_keys_with_product_aliases((key,)):
+            if name not in os.environ:
+                continue
+            os.environ.pop(name, None)
+            if name not in removed:
+                removed.append(name)
     return removed
 
 
@@ -472,7 +548,7 @@ def apply_env_overrides_to_active(
     key = resolve_env_ns(service_id, agent_id)
     active = _bag(_active_bags, key)
     sid, aid = key
-    for env_key, env_value in env_overrides.items():
+    for env_key, env_value in normalize_product_env_aliases(env_overrides).items():
         name = str(env_key)
         if name in SPAWN_ENV_KEYS:
             logger.warning(
@@ -503,7 +579,7 @@ def replace_active_env(
     previous = dict(_bag(_active_bags, key))
     new_map: dict[str, Any] = {}
     if isinstance(env_overrides, dict):
-        for env_key, env_value in env_overrides.items():
+        for env_key, env_value in normalize_product_env_aliases(env_overrides).items():
             name = str(env_key)
             if name in SPAWN_ENV_KEYS:
                 continue
@@ -551,11 +627,16 @@ def apply_env_removals(
     sid, aid = key
     active = _bag(_active_bags, key)
     staged = _bag(_staged_bags, key)
-    for env_key in removals:
+    for env_key in normalize_product_env_aliases(removals):
         name = str(env_key)
         active.pop(name, None)
         staged.pop(name, None)
         _pop_bare_if_default_default(sid, aid, name)
+        legacy = legacy_product_env_key(name)
+        if legacy is not None:
+            active.pop(legacy, None)
+            staged.pop(legacy, None)
+            _pop_bare_if_default_default(sid, aid, legacy)
     _invalidate_resolved_config_cache(service_id=sid, agent_id=aid)
 
 
@@ -568,7 +649,7 @@ def build_effective_env_overlay(
     merged = effective_tip(service_id, agent_id)
     for part in extra:
         if isinstance(part, dict):
-            for key, value in part.items():
+            for key, value in normalize_product_env_aliases(part).items():
                 k = str(key)
                 if value is None:
                     merged.pop(k, None)
@@ -599,7 +680,10 @@ def bind_task_env_overlay(overlay: dict[str, Any] | None) -> Token:
     Callers must not use truthiness of the return/overlay to skip bind.
     Use :func:`reset_task_env_overlay` to unbind.
     """
-    bound: dict[str, Any] = {} if overlay is None else dict(overlay)
+    if overlay is None:
+        bound: dict[str, Any] = {}
+    else:
+        bound = normalize_product_env_aliases(overlay)
     return _task_env_overlay.set(bound)
 
 
@@ -631,10 +715,14 @@ class _ActiveEnvDict(MutableMapping[str, Any]):
         return _bag(_active_bags, resolve_env_ns())
 
     def __getitem__(self, key: str) -> Any:
-        return self._target()[str(key)]
+        target = self._target()
+        for lookup in product_env_lookup_names(key):
+            if lookup in target:
+                return target[lookup]
+        raise KeyError(key)
 
     def __setitem__(self, key: str, value: Any) -> None:
-        name = str(key)
+        name = canonical_product_env_key(key)
         bag = self._target()
         if value is None:
             bag.pop(name, None)
@@ -642,7 +730,8 @@ class _ActiveEnvDict(MutableMapping[str, Any]):
             bag[name] = value
 
     def __delitem__(self, key: str) -> None:
-        del self._target()[str(key)]
+        name = canonical_product_env_key(key)
+        del self._target()[name]
 
     def __iter__(self) -> Iterator[str]:
         return iter(self._target())
@@ -666,9 +755,9 @@ class _ActiveEnvDict(MutableMapping[str, Any]):
             items: Iterable[tuple[Any, Any]] = other.items()
         else:
             items = other
-        for k, v in items:
+        for k, v in normalize_product_env_aliases(dict(items)).items():
             bag[str(k)] = v
-        for k, v in kwargs.items():
+        for k, v in normalize_product_env_aliases(kwargs).items():
             bag[str(k)] = v
 
 
@@ -893,15 +982,30 @@ def ingest_bare_business_into_tip(*, force: bool = False) -> None:
     for key in BUSINESS_MIRROR_KEYS:
         if key in SPAWN_ENV_KEYS:
             continue
-        if key not in os.environ:
+        raw = None
+        source_key = key
+        for lookup in product_env_lookup_names(key):
+            if lookup not in os.environ:
+                continue
+            raw = os.environ[lookup]
+            source_key = lookup
+            break
+        if raw is None:
             continue
-        raw = os.environ[key]
         if key in _EMPTY_OMIT_ENV_KEYS and not str(raw).strip():
-            os.environ.pop(key, None)
+            for lookup in product_env_lookup_names(key):
+                os.environ.pop(lookup, None)
             continue
         plain = _plaintext_tip_value(key, raw)
         _process_baseline.setdefault(key, plain)
-        os.environ.pop(key, None)
+        for lookup in product_env_lookup_names(key):
+            os.environ.pop(lookup, None)
+        if source_key != key:
+            logger.debug(
+                "ingest: remapped bare %s → %s into process baseline",
+                source_key,
+                key,
+            )
     _mirrored_once = True
     if should_hydrate_default_tip():
         hydrate_default_tip_from_baseline()
@@ -922,13 +1026,19 @@ def mirror_bare_business_env_to_default_ns(*, force: bool = False) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _mapping_has_product_key(mapping: Mapping[str, Any], name: str) -> bool:
+    return any(n in mapping for n in product_env_lookup_names(name))
+
+
 def _read_from_mapping(name: str, mapping: dict[str, Any], default: Any = None) -> Any:
-    if name not in mapping:
-        return default
-    value = mapping[name]
-    if value is None or value == "":
-        return default
-    return decrypt(name, value) if isinstance(value, str) else value
+    for lookup in product_env_lookup_names(name):
+        if lookup not in mapping:
+            continue
+        value = mapping[lookup]
+        if value is None or value == "":
+            return default
+        return decrypt(lookup, value) if isinstance(value, str) else value
+    return default
 
 
 def get_local_config(name: str, default=None):
@@ -937,6 +1047,8 @@ def get_local_config(name: str, default=None):
     Falls back to ``os.environ`` for names not present in the tip (e.g. cold
     start or non-Track-B keys) so ``${VAR}`` config substitution keeps working
     for arbitrary process env vars; Track A keys are still refused.
+
+    ``JIUWENCLAW_*`` / ``JIUWENSWARM_*`` product aliases resolve interchangeably.
     """
     if name in SPAWN_ENV_KEYS:
         logger.warning(
@@ -947,16 +1059,20 @@ def get_local_config(name: str, default=None):
     overlay = _task_env_overlay.get()
     if overlay is not _UNBOUND:
         # Seal: miss => unset (no fallthrough to live tip)
+        if not _mapping_has_product_key(overlay, name):
+            return default
         return _read_from_mapping(name, overlay, default)
 
     tip = effective_tip()
-    if name in tip:
+    if _mapping_has_product_key(tip, name):
         return _read_from_mapping(name, tip, default)
 
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    return default if value == "" else value
+    for lookup in product_env_lookup_names(name):
+        value = os.environ.get(lookup)
+        if value is None:
+            continue
+        return default if value == "" else value
+    return default
 
 
 def read_env(name: str, default: str = "") -> str:
@@ -973,25 +1089,30 @@ def read_env_if_set(name: str) -> str | None:
 
     Bound overlay (incl. ``{}``): only overlay; miss → ``None`` (seal).
     Unbound: formula B tip only.
+    ``JIUWENCLAW_*`` / ``JIUWENSWARM_*`` aliases resolve interchangeably.
     """
     overlay = _task_env_overlay.get()
     if overlay is not _UNBOUND:
-        if name not in overlay:
-            return None
-        value = overlay[name]
-        if value is None:
-            return ""
-        if isinstance(value, str):
-            return decrypt(name, value)
-        return str(value)
+        for lookup in product_env_lookup_names(name):
+            if lookup not in overlay:
+                continue
+            value = overlay[lookup]
+            if value is None:
+                return ""
+            if isinstance(value, str):
+                return decrypt(lookup, value)
+            return str(value)
+        return None
 
     tip = effective_tip()
-    if name in tip:
-        value = tip[name]
+    for lookup in product_env_lookup_names(name):
+        if lookup not in tip:
+            continue
+        value = tip[lookup]
         if value is None:
             return ""
         if isinstance(value, str):
-            return decrypt(name, value)
+            return decrypt(lookup, value)
         return str(value)
     return None
 

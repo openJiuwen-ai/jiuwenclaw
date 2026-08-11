@@ -59,7 +59,12 @@ TASK_MEMORY_ENV_KEYS = frozenset({
     "EMBED_BASE_URL",
 })
 
-SHARED_SKILLS_ENV_KEYS = frozenset({"JIUWENSWARM_SHARED_SKILLS_DIRS"})
+SHARED_SKILLS_ENV_KEYS = frozenset(
+    {
+        "JIUWENSWARM_SHARED_SKILLS_DIRS",
+        "ENABLED_SKILLS",
+    }
+)
 
 
 def env_touches_external_memory(env_overrides: Any) -> bool:
@@ -88,7 +93,10 @@ def env_touches_shared_skills_dirs(env_overrides: Any) -> bool:
     """Return True when reload env payload may change shared skill directories."""
     if not isinstance(env_overrides, dict):
         return False
-    return bool({str(k) for k in env_overrides} & SHARED_SKILLS_ENV_KEYS)
+    from jiuwenswarm.common.local_env_config import canonical_product_env_key
+
+    keys = {canonical_product_env_key(k) for k in env_overrides}
+    return bool(keys & SHARED_SKILLS_ENV_KEYS)
 
 
 def embed_config_fingerprint(config: Any) -> tuple[Any, ...]:

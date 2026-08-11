@@ -249,6 +249,7 @@ data:
           compactable_tool_names:
             - fetch_webpage
             - mcp_fetch_webpage
+            - web_search
             - free_search
             - mcp_free_search
             - bash
@@ -537,9 +538,7 @@ data:
         viking_browse: allow
         viking_remember: allow
         viking_add_resource: allow
-        mcp_free_search: allow
-        mcp_paid_search: allow
-        mcp_petal_search: allow
+        web_search: allow
         mcp_fetch_webpage: allow
         cron_list_jobs: allow
         cron_get_job: allow
@@ -732,8 +731,14 @@ data:
         memory:
         rails:
         tools:
-    # Petal 搜索：默认关闭；为 true 时需同时配置环境变量 API_BASE（或 OPENAI_BASE_URL）与 default_headers（JSON）
+    # Petal 搜索：为 true 时需配置 PETAL_SEARCH_URL 与 PETAL_SEARCH_HEADERS
     enable_petal_web_search: true
+    web_search:
+      timeout_seconds: 30
+      max_results: 8
+      paid_provider_order:
+        - petal
+        - bocha
     # DeepResearch 工具：默认开启
     enable_deepresearch: true
     # ========== Sandbox（jiuwenbox 沙箱集成）==========

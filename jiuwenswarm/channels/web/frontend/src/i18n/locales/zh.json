@@ -875,7 +875,6 @@
       "githubToken": "GitHub Personal Access Token，用于访问仓库或 GitHub 相关能力。",
       "freeSearchDdg": "启用 DuckDuckGo 免费搜索（含经 Jina 转发的 DDG）。关闭后相关搜索源不可用。",
       "freeSearchBing": "启用 Bing 免费搜索源。关闭后不再走 Bing。",
-      "evolutionAutoScan": "自动检测对话中可演进为技能的信号，并提示创建/更新技能。",
       "skillCreate": "建议先安装 `skill-creator` 和 `teamskill-creator`，再开启自动建议创建新技能。",
       "memoryForbiddenDescription": "描述禁止写入记忆的敏感信息类型或规则，例如密码、证件号、密钥等。",
       "symphonyDynamicGraphEnabled": "关闭后仅使用静态图谱，已有运行时数据会保留。",
@@ -1039,7 +1038,6 @@
       "proactive": { "label": "主动推荐", "hint": "自动分析用户需求，主动提供建议；调度频率请在定时任务面板调整" }
     },
     "booleanLabels": {
-      "evolutionAutoScan": "自动检测可演进信号",
       "skillCreate": "自动建议创建新技能",
       "freeSearchDdg": "启用 DuckDuckGo（含 DDG via Jina）",
       "freeSearchBing": "启用 Bing",

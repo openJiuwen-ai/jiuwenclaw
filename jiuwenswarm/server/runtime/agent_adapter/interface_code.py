@@ -40,7 +40,6 @@ from openjiuwen.harness.subagents.browser_agent import build_browser_agent_confi
 from openjiuwen.harness.subagents.code_agent import build_code_agent_config
 from openjiuwen.harness.subagents.explore_agent import build_explore_agent_config
 from openjiuwen.harness.subagents.plan_agent import build_plan_agent_config
-from openjiuwen.harness.tools import WebFetchWebpageTool, WebFreeSearchTool, WebPaidSearchTool
 from openjiuwen.harness.tools.worktree import WorktreeConfig, WorktreeRail
 from openjiuwen.harness.workspace.workspace import Workspace
 
@@ -70,6 +69,10 @@ from jiuwenswarm.agents.harness.common.tools import (
     SkillToolkit,
 )
 from jiuwenswarm.agents.harness.common.tools.acp_chat import acp_chat
+from jiuwenswarm.agents.harness.common.tools.harness_named_web_tools import (
+    JiuwenHarnessFetchWebpageTool,
+    JiuwenHarnessWebSearchTool,
+)
 from jiuwenswarm.common.config import get_config
 from jiuwenswarm.common.tool_ownership import mark_stateless, register_tool
 from jiuwenswarm.common.coding_memory_paths import (
@@ -210,9 +213,8 @@ _RAIL_BUILD_NAMES: dict[str, str] = {
 }
 
 _TOOL_BUILD_NAMES: dict[str, str] = {
-    "web_free_search": "_build_web_free_search_tool",
+    "web_search": "_build_web_search_tool",
     "web_fetch_webpage": "_build_web_fetch_webpage_tool",
-    "web_paid_search": "_build_paid_search_tool",
     "user_todos": "_build_user_todos_tool",
     "skill_toolkit": "_build_skill_toolkit",
     "skill_retrieval": "_build_skill_retrieval_toolkit",
@@ -1279,32 +1281,17 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             return None
         return method(agent_id)
 
-    def _build_web_free_search_tool(self, agent_id: str) -> Any:
-        """构建 web_free_search 工具."""
-        return WebFreeSearchTool(
+    def _build_web_search_tool(self, agent_id: str) -> Any:
+        """Build unified ``web_search`` tool."""
+        return JiuwenHarnessWebSearchTool(
             language=self._resolve_runtime_language(), agent_id=agent_id
         )
 
     def _build_web_fetch_webpage_tool(self, agent_id: str) -> Any:
         """构建 web_fetch_webpage 工具."""
-        return WebFetchWebpageTool(
+        return JiuwenHarnessFetchWebpageTool(
             language=self._resolve_runtime_language(), agent_id=agent_id
         )
-
-    def _build_paid_search_tool(self, agent_id: str) -> WebPaidSearchTool | None:
-        """条件注册付费搜索工具：有任意一个付费 API Key 才注册."""
-        if not any(
-            os.environ.get(key)
-            for key in ("BOCHA_API_KEY", "PERPLEXITY_API_KEY", "SERPER_API_KEY", "JINA_API_KEY")
-        ):
-            logger.info("[JiuwenSwarmCodeAdapter] web_paid_search skipped: no paid search API key")
-            return None
-        tool = WebPaidSearchTool(
-            language=self._resolve_runtime_language(), agent_id=agent_id
-        )
-        self._paid_search_tool = tool
-        self._paid_search_registered = True
-        return tool
 
     def _build_user_todos_tool(self, agent_id: str) -> list[Any] | None:
         """注册 user_todos 工具."""
