@@ -139,6 +139,9 @@ class AgentWebSocketServerHarness(agent_ws_server_module.AgentWebSocketServer):
     async def handle_team_bindings_list_for_test(self, ws, request, send_lock):
         await self._handle_team_bindings_list(ws, request, send_lock)
 
+    async def handle_team_templates_list_for_test(self, ws, request, send_lock):
+        await self._handle_team_templates_list(ws, request, send_lock)
+
     async def handle_team_binding_create_for_test(self, ws, request, send_lock):
         await self._handle_team_binding_create(ws, request, send_lock)
 
@@ -1133,6 +1136,264 @@ async def test_handle_team_binding_create_persists_team_entity(monkeypatch, tmp_
 
 
 @pytest.mark.asyncio
+async def test_handle_team_binding_create_uses_officeclaw_tenant_catalog(monkeypatch, tmp_path):
+    from jiuwenswarm.server.runtime.team_binding_store import TeamBindingStore
+    from jiuwenswarm.server.runtime.team_entity_store import TeamEntityStore
+    from jiuwenswarm.server.runtime.tenant_catalog_registry import (
+        TenantAgentSpec,
+        TenantCatalogRegistry,
+    )
+
+    server = AgentWebSocketServerHarness()
+    fake_ws = FakeWebSocket()
+    binding_store = TeamBindingStore(tmp_path / "teams" / "bindings.json")
+    entity_store = TeamEntityStore(tmp_path / ".agent_teams")
+    tenant_config = {
+        "modes": {
+            "team": {
+                "relay_team": {
+                    "team_name": "relay_team",
+                    "leader": {"member_name": "relay_lead"},
+                }
+            }
+        }
+    }
+    registry = TenantCatalogRegistry.get_instance()
+    registry.upsert(
+        TenantAgentSpec(
+            service_id="officeclaw_service_owner",
+            agent_id="agentteam",
+            config=tenant_config,
+        )
+    )
+
+    monkeypatch.setattr(agent_ws_server_module, "get_config", lambda: {"modes": {"team": {}}})
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.team_binding_store.get_team_binding_store",
+        lambda: binding_store,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.team_entity_store.get_team_entity_store",
+        lambda: entity_store,
+    )
+
+    request = AgentRequest(
+        request_id="req-officeclaw-team-binding-create",
+        channel_id="officeclaw",
+        service_id="officeclaw_service_owner",
+        agent_id="agentteam",
+        req_method=ReqMethod.TEAM_BINDING_CREATE,
+        params={"team_name": "relay_team", "template_id": "relay_team"},
+    )
+
+    try:
+        await server.handle_team_binding_create_for_test(fake_ws, request, asyncio.Lock())
+    finally:
+        TenantCatalogRegistry.reset_for_tests()
+
+    assert fake_ws.sent[0]["ok"] is True
+    assert entity_store.get("relay_team").template_snapshot["leader"]["member_name"] == "relay_lead"
+
+
+@pytest.mark.asyncio
+async def test_handle_team_binding_create_does_not_fallback_to_disk_config_for_missing_officeclaw_tenant(
+    monkeypatch,
+    tmp_path,
+):
+    from jiuwenswarm.server.runtime.team_binding_store import TeamBindingStore
+    from jiuwenswarm.server.runtime.team_entity_store import TeamEntityStore
+    from jiuwenswarm.server.runtime.tenant_catalog_registry import TenantCatalogRegistry
+
+    server = AgentWebSocketServerHarness()
+    fake_ws = FakeWebSocket()
+    binding_store = TeamBindingStore(tmp_path / "teams" / "bindings.json")
+    entity_store = TeamEntityStore(tmp_path / ".agent_teams")
+    disk_config = {
+        "modes": {
+            "team": {
+                "relay_team": {
+                    "team_name": "relay_team",
+                    "leader": {"member_name": "disk_lead"},
+                }
+            }
+        }
+    }
+
+    TenantCatalogRegistry.reset_for_tests()
+    monkeypatch.setattr(agent_ws_server_module, "get_config", lambda: disk_config)
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.team_binding_store.get_team_binding_store",
+        lambda: binding_store,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.team_entity_store.get_team_entity_store",
+        lambda: entity_store,
+    )
+    request = AgentRequest(
+        request_id="req-officeclaw-team-binding-without-catalog",
+        channel_id="officeclaw",
+        service_id="officeclaw_service_owner",
+        agent_id="agentteam",
+        req_method=ReqMethod.TEAM_BINDING_CREATE,
+        params={"team_name": "relay_team", "template_id": "relay_team"},
+    )
+
+    try:
+        await server.handle_team_binding_create_for_test(fake_ws, request, asyncio.Lock())
+    finally:
+        TenantCatalogRegistry.reset_for_tests()
+
+    assert fake_ws.sent[0]["ok"] is False
+    assert fake_ws.sent[0]["payload"]["code"] == "NOT_FOUND"
+    assert binding_store.get("relay_team") is None
+    assert entity_store.get("relay_team") is None
+
+
+@pytest.mark.asyncio
+async def test_handle_team_templates_list_uses_officeclaw_tenant_catalog(monkeypatch):
+    from jiuwenswarm.server.runtime.tenant_catalog_registry import (
+        TenantAgentSpec,
+        TenantCatalogRegistry,
+    )
+
+    server = AgentWebSocketServerHarness()
+    fake_ws = FakeWebSocket()
+    tenant_config = {
+        "modes": {
+            "team": {
+                "tenant_template": {
+                    "team_name": "tenant_template",
+                    "leader": {"member_name": "tenant_lead"},
+                }
+            }
+        }
+    }
+    registry = TenantCatalogRegistry.get_instance()
+    registry.upsert(
+        TenantAgentSpec(
+            service_id="officeclaw_service_owner",
+            agent_id="agentteam",
+            config=tenant_config,
+        )
+    )
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "get_config",
+        lambda: {"modes": {"team": {"disk_template": {"team_name": "disk_template"}}}},
+    )
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    request = AgentRequest(
+        request_id="req-officeclaw-team-templates-list",
+        channel_id="officeclaw",
+        service_id="officeclaw_service_owner",
+        agent_id="agentteam",
+        req_method=ReqMethod.TEAM_TEMPLATES_LIST,
+        params={},
+    )
+
+    try:
+        await server.handle_team_templates_list_for_test(fake_ws, request, asyncio.Lock())
+    finally:
+        TenantCatalogRegistry.reset_for_tests()
+
+    assert fake_ws.sent[0]["ok"] is True
+    assert [item["template_id"] for item in fake_ws.sent[0]["payload"]["templates"]] == [
+        "tenant_template"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_handle_team_binding_generate_uses_officeclaw_tenant_catalog(monkeypatch, tmp_path):
+    from jiuwenswarm.agents.harness import team as team_module
+    from jiuwenswarm.server.runtime.team_binding_store import TeamBindingStore
+    from jiuwenswarm.server.runtime.team_entity_store import TeamEntityStore
+    from jiuwenswarm.server.runtime.tenant_catalog_registry import (
+        TenantAgentSpec,
+        TenantCatalogRegistry,
+    )
+
+    server = AgentWebSocketServerHarness()
+    fake_ws = FakeWebSocket()
+    binding_store = TeamBindingStore(tmp_path / "teams" / "bindings.json")
+    entity_store = TeamEntityStore(tmp_path / ".agent_teams")
+    tenant_config = {
+        "modes": {
+            "team": {
+                "tenant_template": {
+                    "team_name": "tenant_template",
+                    "leader": {"member_name": "tenant_lead"},
+                }
+            }
+        }
+    }
+    registry = TenantCatalogRegistry.get_instance()
+    registry.upsert(
+        TenantAgentSpec(
+            service_id="officeclaw_service_owner",
+            agent_id="agentteam",
+            config=tenant_config,
+        )
+    )
+
+    async def fake_generate_team_name(description, *, config_base, template_id):
+        assert description == "build a tenant team"
+        assert config_base is tenant_config
+        assert template_id == "tenant_template"
+        return "tenant_generated_team"
+
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "get_config",
+        lambda: {"modes": {"team": {"disk_template": {"team_name": "disk_template"}}}},
+    )
+    monkeypatch.setattr(team_module, "generate_team_name", fake_generate_team_name)
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.team_binding_store.get_team_binding_store",
+        lambda: binding_store,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.team_entity_store.get_team_entity_store",
+        lambda: entity_store,
+    )
+    request = AgentRequest(
+        request_id="req-officeclaw-team-binding-generate",
+        channel_id="officeclaw",
+        service_id="officeclaw_service_owner",
+        agent_id="agentteam",
+        req_method=ReqMethod.TEAM_BINDING_GENERATE,
+        params={"description": "build a tenant team"},
+    )
+
+    try:
+        await server.handle_team_binding_generate_for_test(fake_ws, request, asyncio.Lock())
+    finally:
+        TenantCatalogRegistry.reset_for_tests()
+
+    assert fake_ws.sent[0]["ok"] is True
+    assert fake_ws.sent[0]["payload"]["team"]["template_id"] == "tenant_template"
+    assert entity_store.get("tenant_generated_team").template_snapshot["leader"]["member_name"] == "tenant_lead"
+
+
+@pytest.mark.asyncio
 async def test_handle_team_binding_generate_uses_default_template_and_resolves_conflict(monkeypatch, tmp_path):
     from jiuwenswarm.agents.harness import team as team_module
     from jiuwenswarm.server.runtime.team_binding_store import TeamBindingStore
@@ -1376,6 +1637,56 @@ async def test_first_team_chat_reuses_legacy_session_team_without_tiny_agent(mon
     assert request.params["query"] == "继续执行之前的任务"
     assert request.params["team_name"] == "legacy_team"
     assert request.params["team_template_id"] == "legacy_template"
+
+
+@pytest.mark.asyncio
+async def test_officeclaw_team_chat_reads_binding_from_tenant_session_root(monkeypatch, tmp_path):
+    from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata
+
+    global_sessions_root = tmp_path / "global-sessions"
+    tenant_sessions_root = tmp_path / "tenant-sessions"
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "get_agent_sessions_dir",
+        lambda: global_sessions_root,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.session_metadata.get_agent_sessions_dir",
+        lambda: global_sessions_root,
+    )
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "_sessions_dir_for_request",
+        lambda request: tenant_sessions_root,
+    )
+    init_session_metadata(
+        session_id="sess-officeclaw-team",
+        channel_id="officeclaw",
+        mode="team",
+        team_name="relay_team",
+        team_template_id="relay_template",
+        sessions_root=tenant_sessions_root,
+    )
+
+    server = AgentWebSocketServerHarness()
+
+    async def fail_auto_generate(**kwargs):
+        pytest.fail("an explicitly bound tenant session must not auto-generate a team")
+
+    monkeypatch.setattr(server, "_create_generated_team_binding", fail_auto_generate)
+    request = AgentRequest(
+        request_id="req-officeclaw-bound-team-chat",
+        channel_id="officeclaw",
+        session_id="sess-officeclaw-team",
+        req_method=ReqMethod.CHAT_SEND,
+        params={"mode": "team", "query": "continue the existing team session"},
+    )
+
+    result = await server.ensure_auto_team_binding_for_chat_for_test(request)
+
+    assert result == "relay_team"
+    assert request.params["team_name"] == "relay_team"
+    assert request.params["team_template_id"] == "relay_template"
 
 
 @pytest.mark.asyncio

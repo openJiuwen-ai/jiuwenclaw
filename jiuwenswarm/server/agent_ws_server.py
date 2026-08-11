@@ -65,6 +65,7 @@ from jiuwenswarm.agents.harness.common.rails.permissions.permissions_persist imp
 from jiuwenswarm.extensions.hooks_context import AgentServerChatHookContext, AgentWsServerStartHookContext
 from jiuwenswarm.server.runtime.agent_manager import AgentManager, ACP_DEFAULT_CAPABILITIES
 from jiuwenswarm.server.runtime.tenant_agent_pool import TenantAgentPool
+from jiuwenswarm.server.runtime.tenant_catalog_registry import TenantCatalogRegistry
 from jiuwenswarm.server.runtime.session.session_metadata import get_all_sessions_metadata, remove_session_metadata_cache
 from jiuwenswarm.server.runtime.session.session_history import (
     append_compact_history_records,
@@ -3137,7 +3138,12 @@ class AgentWebSocketServer:
             update_session_metadata,
         )
 
-        metadata = get_session_metadata(session_id, cache_bust=True)
+        sessions_root = _sessions_dir_for_request(request)
+        metadata = get_session_metadata(
+            session_id,
+            cache_bust=True,
+            sessions_root=sessions_root,
+        )
         raw_mode = params.get("mode")
         effective_mode = (
             raw_mode
@@ -3161,7 +3167,11 @@ class AgentWebSocketServer:
             return None
 
         async with self._session_team_binding_lock(session_id):
-            metadata = get_session_metadata(session_id, cache_bust=True)
+            metadata = get_session_metadata(
+                session_id,
+                cache_bust=True,
+                sessions_root=sessions_root,
+            )
             existing_team_name = str(metadata.get("team_name") or "").strip()
             if existing_team_name:
                 params.setdefault("team_name", existing_team_name)
@@ -3175,7 +3185,7 @@ class AgentWebSocketServer:
 
             binding, _template = await self._create_generated_team_binding(
                 description=query,
-                config_base=get_config(),
+                config_base=self._effective_config_for_request(request),
             )
             binding_store = get_team_binding_store()
             entity_store = get_team_entity_store()
@@ -3193,6 +3203,7 @@ class AgentWebSocketServer:
                     team_template_id=binding.template_id,
                     touch_last_message_at=False,
                     sync_write=True,
+                    sessions_root=sessions_root,
                 )
             except Exception:
                 cleanup_errors: list[str] = []
@@ -3294,7 +3305,9 @@ class AgentWebSocketServer:
     async def _handle_team_templates_list(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         from jiuwenswarm.agents.harness.team import list_team_template_summaries
 
-        templates = list_team_template_summaries(get_config())
+        templates = list_team_template_summaries(
+            self._effective_config_for_request(request)
+        )
         resp = AgentResponse(
             request_id=request.request_id,
             channel_id=request.channel_id,
@@ -3312,7 +3325,7 @@ class AgentWebSocketServer:
         from jiuwenswarm.server.runtime.team_binding_store import get_team_binding_store
 
         active_by_team = self._active_team_session_map()
-        config_base = get_config()
+        config_base = self._effective_config_for_request(request)
         templates = {
             str(item.get("template_id") or ""): item
             for item in list_team_template_summaries(config_base)
@@ -3387,7 +3400,7 @@ class AgentWebSocketServer:
         params = request.params if isinstance(request.params, dict) else {}
         team_name = str(params.get("team_name") or "")
         template_id = str(params.get("template_id") or "").strip()
-        config_base = get_config()
+        config_base = self._effective_config_for_request(request)
         try:
             binding = self._create_team_binding_from_template(
                 team_name=team_name,
@@ -3423,7 +3436,7 @@ class AgentWebSocketServer:
 
         params = request.params if isinstance(request.params, dict) else {}
         description = str(params.get("description") or params.get("prompt") or "").strip()
-        config_base = get_config()
+        config_base = self._effective_config_for_request(request)
         try:
             binding, default_template = await self._create_generated_team_binding(
                 description=description,
@@ -3486,7 +3499,10 @@ class AgentWebSocketServer:
             existing_binding = binding_store.get(team_name)
             if existing_binding is None:
                 raise TeamBindingStoreError("team binding not found", code="NOT_FOUND")
-            entity = ensure_team_entity_for_binding(existing_binding, config_base=get_config())
+            entity = ensure_team_entity_for_binding(
+                existing_binding,
+                config_base=self._effective_config_for_request(request),
+            )
             if entity is None:
                 raise TeamBindingStoreError("team entity config missing", code="NOT_FOUND")
             binding = binding_store.bind_session(
@@ -7314,6 +7330,17 @@ class AgentWebSocketServer:
         if raw_service is not None and str(raw_service).strip() not in ("", "default"):
             return True
         return False
+
+    @staticmethod
+    def _effective_config_for_request(request: AgentRequest) -> Any:
+        """Return the OfficeClaw tenant snapshot; native gateway keeps disk config."""
+        if request.channel_id == "officeclaw":
+            agent_id, service_id = TenantAgentPool.extract_ids(request)
+            spec = TenantCatalogRegistry.get_instance().get(service_id, agent_id)
+            if spec is not None and isinstance(spec.config, dict):
+                return spec.config
+            return {}
+        return get_config()
 
     @staticmethod
     def _tenant_pool() -> TenantAgentPool:
