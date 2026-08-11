@@ -629,4 +629,3 @@ Check the connection state in logs:
 **Bluestacks or emulator linking issues**
 
 Scanning from a physical phone is usually more reliable than emulator camera passthrough.
->>>>>>> origin/develop
