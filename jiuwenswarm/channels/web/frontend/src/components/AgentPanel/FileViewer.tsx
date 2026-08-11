@@ -423,7 +423,7 @@ export function FileViewer({ filePath, fileName, reloadNonce = 0 }: FileViewerPr
                 {t('fileViewer.historyPreviewEmpty')}
               </div>
             ) : (
-              <div className="w-full min-h-[280px] rounded-lg border border-border bg-card p-3 chat-content">
+              <div className="w-full min-h-[280px] rounded-lg border border-border bg-card p-3" style={{ maxWidth: '920px', marginInline: 'auto' }}>
                 <ChatTimelineList
                   messages={historyMessages}
                   executions={historyExecutions}
