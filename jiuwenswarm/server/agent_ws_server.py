@@ -2716,8 +2716,9 @@ class AgentWebSocketServer:
         # 启动心跳任务
         heartbeat_task = asyncio.create_task(_heartbeat_loop())
 
+        response_stream = agent.process_message_stream(request)
         try:
-            async for chunk in agent.process_message_stream(request):
+            async for chunk in response_stream:
                 chunk_count += 1
                 # 通知心跳任务有真实 chunk 发送，重置心跳计时
                 heartbeat_event.set()
@@ -2761,6 +2762,9 @@ class AgentWebSocketServer:
                 # 清除 event，让心跳任务重新开始计时
                 heartbeat_event.clear()
         finally:
+            close_stream = getattr(response_stream, "aclose", None)
+            if callable(close_stream):
+                await close_stream()
             # 停止心跳任务
             if heartbeat_task is not None:
                 heartbeat_task.cancel()
