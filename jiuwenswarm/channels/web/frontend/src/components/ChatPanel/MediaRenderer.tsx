@@ -37,13 +37,16 @@ function mediaSrc(item: MediaItem): string | undefined {
     return `data:${mimeType};base64,${base64Data}`;
   }
   if (item.url) return item.url;
-  if (item.path) return `/file-api/raw-file?path=${encodeURIComponent(item.path)}`;
+  // Documents keep local absolute paths for agent @path refs; raw-file is project-scoped.
+  if (item.path && isImageItem(item)) {
+    return `/file-api/raw-file?path=${encodeURIComponent(item.path)}`;
+  }
   return undefined;
 }
 
 function FileCard({ item }: { item: MediaItem }) {
   const filename = item.filename || 'file';
-  const { stem, extLabel } = splitFilenameParts(filename);
+  const { extLabel } = splitFilenameParts(filename);
   const typeKey = getFileTypeIconKeyFromFilename(filename, item.type);
   const src = mediaSrc(item);
   const showThumb = isImageItem(item) && Boolean(src);
@@ -59,7 +62,7 @@ function FileCard({ item }: { item: MediaItem }) {
       </span>
       <span className="chat-msg-file-card__meta">
         <span className="chat-msg-file-card__name" title={filename}>
-          {stem}
+          {filename}
         </span>
         {extLabel ? <span className="chat-msg-file-card__ext">{extLabel}</span> : null}
       </span>

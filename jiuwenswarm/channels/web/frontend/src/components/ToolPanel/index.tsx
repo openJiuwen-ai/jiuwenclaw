@@ -51,11 +51,13 @@ interface ToolPanelProps {
   teamAreaActiveDetailTab: TeamDetailTab;
   teamAreaSelectedMemberId?: string;
   codeReviewTarget?: CodeReviewTarget | null;
+  teamAreaSelectedArtifactId?: string;
   setTeamAreaExpanded: (expanded: boolean) => void;
   setTeamAreaActiveTab: (tab: TabType) => void;
   setTeamAreaActiveDetailTab: (detailTab: TeamDetailTab) => void;
   setTeamAreaSelectedMemberId: (memberId: string) => void;
   setCodeReviewTarget?: (target: CodeReviewTarget | null) => void;
+  setTeamAreaSelectedArtifactId: (artifactId: string) => void;
 }
 
 function isEmptyValue(value: unknown): boolean {
@@ -96,6 +98,8 @@ function ExpandedSingleAgentArea({
   onTabChange,
   onCollapse,
   reviewPanel,
+  selectedArtifactId,
+  onArtifactSelect,
 }: {
   activeTab: TabType;
   tasks: TeamTask[];
@@ -105,6 +109,8 @@ function ExpandedSingleAgentArea({
   onTabChange: (tab: TabType) => void;
   onCollapse: () => void;
   reviewPanel?: ReactNode;
+  selectedArtifactId?: string;
+  onArtifactSelect: (artifactId: string) => void;
 }) {
   const { t } = useTranslation();
   const artifactsCount = useSessionArtifactsCount();
@@ -164,7 +170,7 @@ function ExpandedSingleAgentArea({
       <div className="flex min-h-0 flex-1 overflow-hidden">
         {resolvedTab === 'artifacts' ? (
           <div className="flex min-w-0 flex-1 overflow-hidden">
-            <ArtifactsPanel />
+            <ArtifactsPanel selectedArtifactId={selectedArtifactId} onSelectArtifact={onArtifactSelect} />
           </div>
         ) : resolvedTab === 'review' && reviewPanel ? (
           <div className="flex min-w-0 flex-1 overflow-hidden">{reviewPanel}</div>
@@ -192,11 +198,13 @@ export function ToolPanel({
   teamAreaActiveDetailTab,
   teamAreaSelectedMemberId,
   codeReviewTarget = null,
+  teamAreaSelectedArtifactId,
   setTeamAreaExpanded,
   setTeamAreaActiveTab,
   setTeamAreaActiveDetailTab,
   setTeamAreaSelectedMemberId,
   setCodeReviewTarget,
+  setTeamAreaSelectedArtifactId,
 }: ToolPanelProps) {
   const { t } = useTranslation();
   const { isConnected, memoryUsage, setMemoryUsage } = useSessionStore();
@@ -226,7 +234,7 @@ export function ToolPanel({
     enabled: canReviewCode,
   });
   const codeReviewPanel = canReviewCode && codeProject && sessionId
-    ? <CodeReviewPanel project={codeProject} sessionId={sessionId} target={codeReviewTarget} diffWatch={codeGitDiffWatch} />
+    ? <CodeReviewPanel project={codeProject} sessionId={sessionId} target={codeReviewTarget} diffWatch={codeGitDiffWatch} isProcessing={isProcessing} />
     : undefined;
   const todoTeamTasks = useMemo(() => todos.map(todoItemToTeamTask), [todos]);
   const todoCompletedTasks = useMemo(
@@ -281,7 +289,12 @@ export function ToolPanel({
   }, [isConnected, setMemoryUsage]);
 
   useEffect(() => {
-    if (mode !== 'team' || !isConnected || !sessionId?.startsWith('sess_')) {
+    if (
+      mode !== 'team'
+      || !isConnected
+      || !sessionId
+      || !(sessionId.startsWith('sess_') || sessionId.startsWith('web_'))
+    ) {
       if (sessionId) setTeamHistoryMessages(sessionId, []);
       hydratedTeamHistorySessionRef.current = null;
       loadingTeamHistorySessionRef.current = null;
@@ -435,6 +448,8 @@ export function ToolPanel({
               onTabChange={setTeamAreaActiveTab}
               onCollapse={() => setTeamAreaExpanded(false)}
               reviewPanel={codeReviewPanel}
+              selectedArtifactId={teamAreaSelectedArtifactId}
+              onArtifactSelect={setTeamAreaSelectedArtifactId}
             />
           </div>
         </div>
@@ -455,9 +470,11 @@ export function ToolPanel({
             activeTab={teamAreaActiveTab}
             activeDetailTab={teamAreaActiveDetailTab}
             selectedMemberId={teamAreaSelectedMemberId}
+            selectedArtifactId={teamAreaSelectedArtifactId}
             onTabChange={setTeamAreaActiveTab}
             onDetailTabChange={setTeamAreaActiveDetailTab}
             onMemberSelect={setTeamAreaSelectedMemberId}
+            onArtifactSelect={setTeamAreaSelectedArtifactId}
             onCollapse={() => {
               setTeamAreaExpanded(false);
               setTeamAreaSelectedMemberId('');

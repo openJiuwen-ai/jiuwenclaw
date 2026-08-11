@@ -24,7 +24,6 @@ class ExtensionRegistry:
         self._agent_server_client: AgentServerClientExtension | None = None
         self._crypto_tool: CryptoUtility | None = None
         self._third_agent: ThirdAgentExtension | None = None
-        self._rpc_handlers: dict[str, Callable] = {}
         self.callback_framework = callback_framework
         self._config = ExtensionConfig(config=config, logger=logger)
 
@@ -62,20 +61,6 @@ class ExtensionRegistry:
 
     def register_third_agent(self, extension: ThirdAgentExtension) -> None:
         self._third_agent = extension
-
-    def register_rpc_handler(self, method: str, handler: Callable) -> None:
-        method_name = str(method or "").strip()
-        if not method_name:
-            raise ValueError("rpc method is required")
-        if not callable(handler):
-            raise ValueError(f"rpc handler for {method_name} must be callable")
-        self._rpc_handlers[method_name] = handler
-
-    def get_rpc_handler(self, method: str) -> Callable | None:
-        return self._rpc_handlers.get(str(method or "").strip())
-
-    def list_rpc_methods(self) -> list[str]:
-        return sorted(self._rpc_handlers)
 
     def get_agent_server_client_extension(self) -> AgentServerClientExtension | None:
         return self._agent_server_client

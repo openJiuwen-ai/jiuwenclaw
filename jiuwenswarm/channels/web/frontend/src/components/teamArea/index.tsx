@@ -103,9 +103,11 @@ function ExpandedTeamArea({
   activeTab,
   activeDetailTab,
   selectedMemberId: externalSelectedMemberId,
+  selectedArtifactId,
   onTabChange,
   onDetailTabChange,
   onMemberSelect,
+  onArtifactSelect,
   onCollapse,
   reviewPanel,
 }: {
@@ -114,9 +116,11 @@ function ExpandedTeamArea({
   activeTab: TabType;
   activeDetailTab: TeamDetailTab;
   selectedMemberId?: string;
+  selectedArtifactId?: string;
   onTabChange: (tab: TabType) => void;
   onDetailTabChange: (tab: TeamDetailTab) => void;
   onMemberSelect?: (memberId: string) => void;
+  onArtifactSelect?: (artifactId: string) => void;
   onCollapse?: () => void;
   reviewPanel?: ReactNode;
 }) {
@@ -202,7 +206,7 @@ function ExpandedTeamArea({
           />
         ) : resolvedTab === 'artifacts' ? (
           <div className="flex min-w-0 flex-1 overflow-hidden">
-            <ArtifactsPanel />
+            <ArtifactsPanel selectedArtifactId={selectedArtifactId} onSelectArtifact={onArtifactSelect} />
           </div>
         ) : resolvedTab === 'review' && reviewPanel ? (
           <div className="flex min-w-0 flex-1 overflow-hidden">{reviewPanel}</div>
@@ -234,9 +238,11 @@ export function TeamArea(props: TeamAreaProps) {
         activeTab={props.activeTab}
         activeDetailTab={props.activeDetailTab}
         selectedMemberId={props.selectedMemberId}
+        selectedArtifactId={props.selectedArtifactId}
         onTabChange={props.onTabChange}
         onDetailTabChange={props.onDetailTabChange}
         onMemberSelect={props.onMemberSelect}
+        onArtifactSelect={props.onArtifactSelect}
         onCollapse={props.onCollapse}
         reviewPanel={reviewPanel}
       />

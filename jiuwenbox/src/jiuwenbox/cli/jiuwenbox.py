@@ -483,6 +483,29 @@ class _CliClient:
     def policy_get(self, sandbox_id: str) -> dict[str, Any]:
         return dict(self._get(f"{_API_PREFIX}/policies/{sandbox_id}").json())
 
+    def policy_update(
+        self,
+        sandbox_id: str,
+        *,
+        policy: Any,
+        policy_mode: str | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"policy": policy}
+        if policy_mode is not None:
+            body["policy_mode"] = policy_mode
+        return dict(self._put(f"{_API_PREFIX}/policies/{sandbox_id}", json=body).json())
+
+    def policy_update_all(
+        self,
+        *,
+        policy: Any,
+        policy_mode: str | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"policy": policy}
+        if policy_mode is not None:
+            body["policy_mode"] = policy_mode
+        return dict(self._put(f"{_API_PREFIX}/policies", json=body).json())
+
     # ── /api/v1/proxies/* ──
 
     def proxy_create(
@@ -829,6 +852,34 @@ def cmd_policy_get(args: argparse.Namespace, client: _CliClient) -> Any:
     return client.policy_get(args.sandbox_id)
 
 
+def _resolve_policy_arg(args: argparse.Namespace) -> Any:
+    if args.policy_file and args.policy:
+        raise _CliError("pass only one of --policy / --policy-file")
+    if args.policy_file:
+        return _load_policy_file(args.policy_file)
+    if args.policy:
+        try:
+            return json.loads(args.policy)
+        except json.JSONDecodeError as exc:
+            raise _CliError(f"--policy is not valid JSON: {exc}") from exc
+    raise _CliError("--policy or --policy-file is required")
+
+
+def cmd_policy_update(args: argparse.Namespace, client: _CliClient) -> Any:
+    return client.policy_update(
+        args.sandbox_id,
+        policy=_resolve_policy_arg(args),
+        policy_mode=args.policy_mode,
+    )
+
+
+def cmd_policy_update_all(args: argparse.Namespace, client: _CliClient) -> Any:
+    return client.policy_update_all(
+        policy=_resolve_policy_arg(args),
+        policy_mode=args.policy_mode,
+    )
+
+
 # ── proxy ──
 
 def cmd_proxy_create(args: argparse.Namespace, client: _CliClient) -> Any:
@@ -1114,13 +1165,44 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(_handler=cmd_sandbox_find)
 
     # ── policy group ──
-    p_policy = groups.add_parser("policy", help="inspect sandbox policy")
+    p_policy = groups.add_parser("policy", help="inspect and update sandbox policy")
     policy_subs = p_policy.add_subparsers(dest="action", metavar="ACTION")
     policy_subs.required = True
 
     p = policy_subs.add_parser("get", help="get effective policy of sandbox")
     _add_sandbox_id(p)
     p.set_defaults(_handler=cmd_policy_get)
+
+    def _add_policy_update_args(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument(
+            "--policy",
+            help="policy JSON fragment (e.g. '{\"network\":{\"egress\":{\"default\":\"allow\"}}}')",
+        )
+        parser.add_argument(
+            "--policy-file",
+            help="local JSON or YAML policy fragment file",
+        )
+        parser.add_argument(
+            "--policy-mode",
+            choices=["override", "append"],
+            default=None,
+            help="policy merge mode (default server-side 'override')",
+        )
+
+    p = policy_subs.add_parser(
+        "update",
+        help="update network ingress/egress for one sandbox",
+    )
+    _add_sandbox_id(p)
+    _add_policy_update_args(p)
+    p.set_defaults(_handler=cmd_policy_update)
+
+    p = policy_subs.add_parser(
+        "update-all",
+        help="update network ingress/egress for all sandboxes",
+    )
+    _add_policy_update_args(p)
+    p.set_defaults(_handler=cmd_policy_update_all)
 
     # ── proxy group ──
     p_proxy = groups.add_parser("proxy", help="manage inference proxies")

@@ -56,6 +56,8 @@ export class CommandService {
   private aliases = new Map<string, string>();
   private topLevelCommands: SlashCommand[] = [];
   private installedSkills: InstalledSkillEntry[] = [];
+  /** 配置未成功读取前保持关闭，避免演进命令意外暴露。 */
+  private skillEvolutionEnabled = false;
 
   /**
    * Optional callback invoked whenever the installed-skills cache is successfully
@@ -69,6 +71,34 @@ export class CommandService {
     for (const command of commands) {
       this.registerCommand(command);
     }
+    this.applySkillEvolutionVisibility();
+  }
+
+  /**
+   * 更新技能自演进命令的展示状态。
+   * 返回值用于让 UI 仅在状态变化时重建补全 provider。
+   */
+  setSkillEvolutionEnabled(enabled: boolean): boolean {
+    if (this.skillEvolutionEnabled === enabled) {
+      return false;
+    }
+    this.skillEvolutionEnabled = enabled;
+    this.applySkillEvolutionVisibility();
+    return true;
+  }
+
+  private applySkillEvolutionVisibility(): void {
+    const visit = (commands: readonly SlashCommand[]): void => {
+      for (const command of commands) {
+        if (command.requiresSkillEvolution) {
+          command.hidden = !this.skillEvolutionEnabled;
+        }
+        if (command.subCommands) {
+          visit(command.subCommands);
+        }
+      }
+    };
+    visit(this.topLevelCommands);
   }
 
   private registerCommand(command: SlashCommand): void {

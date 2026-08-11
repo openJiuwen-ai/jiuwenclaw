@@ -73,6 +73,8 @@ class TestMode:
         assert Mode.CODE_NORMAL.value == "code.normal"
         assert Mode.CODE_TEAM.value == "code.team"
         assert Mode.TEAM.value == "team"
+        assert Mode.TEAM_PLAN_NORMAL.value == "team.plan.normal"
+        assert Mode.TEAM_PLAN_CODE.value == "team.plan.code"
 
     @staticmethod
     def test_mode_from_raw_legacy_compatibility():
@@ -86,6 +88,9 @@ class TestMode:
         assert Mode.from_raw("code.normal") == Mode.CODE_NORMAL
         assert Mode.from_raw("code.team") == Mode.CODE_TEAM
         assert Mode.from_raw("team") == Mode.TEAM
+        assert Mode.from_raw("team.plan") == Mode.TEAM_PLAN_NORMAL
+        assert Mode.from_raw("team.plan.normal") == Mode.TEAM_PLAN_NORMAL
+        assert Mode.from_raw("team.plan.code") == Mode.TEAM_PLAN_CODE
         assert Mode.from_raw("invalid") == Mode.AGENT
 
     @staticmethod
@@ -98,6 +103,8 @@ class TestMode:
         assert Mode.CODE_NORMAL.to_runtime_mode() == "code.normal"
         assert Mode.CODE_TEAM.to_runtime_mode() == "code.team"
         assert Mode.TEAM.to_runtime_mode() == "team"
+        assert Mode.TEAM_PLAN_NORMAL.to_runtime_mode() == "team.plan.normal"
+        assert Mode.TEAM_PLAN_CODE.to_runtime_mode() == "team.plan.code"
 
 
 class TestAgentRequest:

@@ -68,6 +68,21 @@ def test_append_history_skips_empty_chat_final_and_heartbeat(tmp_path, monkeypat
     assert session_history.load_history_records("heartbeat_abc") == []
 
 
+def test_assistant_file_event_is_restored_for_team_history() -> None:
+    assert session_history._is_team_relevant(
+        {
+            "event_type": "chat.file",
+            "role": "assistant",
+            "files": [
+                {
+                    "name": "report.xlsx",
+                    "download_url": "/file-api/download?token=signed",
+                }
+            ],
+        }
+    )
+
+
 def test_has_persistable_assistant_payload_tool_result_with_tool_call_id():
     assert session_history._has_persistable_assistant_payload(
         content_text="",

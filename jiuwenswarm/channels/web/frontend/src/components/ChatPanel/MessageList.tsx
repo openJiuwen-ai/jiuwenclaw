@@ -13,6 +13,7 @@ import {
   buildTimelineItems,
   buildRenderItems,
   buildTurnWorkMeta,
+  buildTurnFoldAnchorKeys,
   buildLiveCompletedStreaks,
   buildStreakInputSignature,
   isSettlingForStreak,
@@ -20,7 +21,7 @@ import {
   formatStreakSummaryLabel,
   messageHasDeliverable,
   filterDeliverableExecutions,
-  completedWorkDurationMs,
+  turnElapsedRangeMs,
   REASONING_COLLAPSE_DELAY_MS,
   STREAK_FOLD_TRANSITION_DELAY_MS,
   type LiveWorkStreak,
@@ -57,6 +58,9 @@ function formatElapsedCoarse(ms: number): string {
   return `${minutes}m${seconds.toString().padStart(2, '0')}s`;
 }
 
+/** 与 buildTurnTimeline 中异常回退阈值一致：超过则视为 startMs 脏数据。 */
+const MAX_PLAUSIBLE_TURN_MS = 24 * 60 * 60 * 1000;
+
 function TurnElapsed({
   startMs,
   endMs,
@@ -73,20 +77,28 @@ function TurnElapsed({
   const active = isLastTurn && isProcessing;
   const now = useNow(active);
   const end = active ? now : endMs;
-  const elapsed = Math.max(0, end - startMs);
-  if (!active && elapsed <= 0) {
+  const rawElapsed = Math.max(0, end - startMs);
+  // 进行中若 startMs 异常偏旧，停用实时计时，避免一直飙到数小时。
+  const elapsed =
+    active && rawElapsed > MAX_PLAUSIBLE_TURN_MS
+      ? Math.max(0, endMs - startMs) > MAX_PLAUSIBLE_TURN_MS
+        ? 0
+        : Math.max(0, endMs - startMs)
+      : rawElapsed;
+  const showActive = active && rawElapsed <= MAX_PLAUSIBLE_TURN_MS;
+  if (!showActive && elapsed <= 0) {
     return null;
   }
   return (
-    <div className={clsx('turn-elapsed', teamLayout && 'turn-elapsed--team', active && 'is-active')}>
-      {active && (
+    <div className={clsx('turn-elapsed', teamLayout && 'turn-elapsed--team', showActive && 'is-active')}>
+      {showActive && (
         <LoaderCircle className="turn-elapsed__spinner" size={12} strokeWidth={2.2} aria-hidden="true" />
       )}
       <span className="turn-elapsed__label">
-        {active ? t('chatUi.turnRunning') : t('chatUi.turnElapsed')}
+        {showActive ? t('chatUi.turnRunning') : t('chatUi.turnElapsed')}
       </span>
       <span className="turn-elapsed__value">
-        {active ? formatElapsedCoarse(elapsed) : formatDurationPrecise(elapsed)}
+        {showActive ? formatElapsedCoarse(elapsed) : formatDurationPrecise(elapsed)}
       </span>
     </div>
   );
@@ -96,7 +108,7 @@ function CompletedWorkChip({
   variant,
   thinkingCount = 0,
   toolCount = 0,
-  durationMs = 0,
+  outcomeTone = 'neutral',
   expanded,
   onToggle,
   showAvatar,
@@ -105,19 +117,29 @@ function CompletedWorkChip({
   variant: 'turn' | 'streak';
   thinkingCount?: number;
   toolCount?: number;
-  durationMs?: number;
+  outcomeTone?: 'success' | 'partial' | 'error' | 'neutral';
   expanded: boolean;
   onToggle: () => void;
   showAvatar: boolean;
   teamLayout: boolean;
 }) {
   const { t } = useTranslation();
+  // 耗时统一由底部 TurnElapsed 展示，避免「已完成」在上、「任务用时」在下两套位置互相打架。
   const label =
     variant === 'turn'
-      ? t('chatUi.workCompleted', {
-          duration: formatDurationPrecise(Math.max(0, durationMs)),
-        })
-      : formatStreakSummaryLabel(t, thinkingCount, toolCount);
+      ? t('chatUi.workCompletedFallback')
+      : formatStreakSummaryLabel(t, thinkingCount, toolCount, outcomeTone);
+  // 最外层「已完成」始终绿勾；展开后的 streak：全成功绿勾 / 部分失败黄勾+标签 / 全失败红叉。
+  const applyOutcome = variant === 'streak';
+  const showErrorIcon = applyOutcome && outcomeTone === 'error';
+  const showPartialBadge = applyOutcome && outcomeTone === 'partial';
+  const toneClass = !applyOutcome
+    ? 'is-success'
+    : outcomeTone === 'error'
+      ? 'is-error'
+      : outcomeTone === 'partial'
+        ? 'is-partial'
+        : 'is-success';
 
   const chip = (
     <button
@@ -125,18 +147,31 @@ function CompletedWorkChip({
       className={clsx(
         'completed-work-chip',
         variant === 'streak' && 'completed-work-chip--streak',
-        expanded && 'is-expanded'
+        expanded && 'is-expanded',
+        toneClass
       )}
       onClick={onToggle}
       aria-expanded={expanded}
     >
-      <span className="completed-work-chip__icon" aria-hidden="true">
-        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-          <circle cx="10" cy="10" r="6.5" />
-          <path d="m7.2 10.1 1.8 1.8 3.8-3.8" />
-        </svg>
+      <span className={clsx('completed-work-chip__icon', toneClass)} aria-hidden="true">
+        {showErrorIcon ? (
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="10" cy="10" r="6.5" />
+            <path d="m7.6 7.6 4.8 4.8M12.4 7.6l-4.8 4.8" />
+          </svg>
+        ) : (
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="10" cy="10" r="6.5" />
+            <path d="m7.2 10.1 1.8 1.8 3.8-3.8" />
+          </svg>
+        )}
       </span>
       <span className="completed-work-chip__label">{label}</span>
+      {showPartialBadge ? (
+        <span className="completed-work-chip__badge is-partial">
+          {t('chatUi.workOutcomePartial')}
+        </span>
+      ) : null}
       <span className={clsx('tool-tree-item__disclosure', expanded && 'is-open')} aria-hidden="true">
         <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8">
           <path strokeLinecap="round" strokeLinejoin="round" d="m8 6 4 4-4 4" />
@@ -308,6 +343,10 @@ export function ChatTimelineList({
     () => buildTurnWorkMeta(renderItems, isProcessing),
     [renderItems, isProcessing]
   );
+  const turnFoldAnchorKeys = useMemo(
+    () => buildTurnFoldAnchorKeys(renderItems, turnWorkMeta),
+    [renderItems, turnWorkMeta]
+  );
   const streakInputSig = useMemo(
     () => buildStreakInputSignature(renderItems, streakNowMs),
     [renderItems, streakNowMs]
@@ -414,11 +453,24 @@ export function ChatTimelineList({
           const meta = item.turnId >= 0 ? turnWorkMeta.get(item.turnId) : undefined;
           const turnFoldable = Boolean(meta?.completed && meta.hasWork && item.hideMeta);
           const turnOpen = !turnFoldable || Boolean(expandedTurns[item.turnId]);
+          const isFoldAnchor = turnFoldAnchorKeys.get(item.turnId) === item.key;
 
           if (turnFoldable) {
             const hasDeliverable = messageHasDeliverable(item.message);
             return (
               <Fragment key={item.key}>
+                {/* 工具前的开场白若可折叠，折叠条锚在这里，展开后不会跑到「已完成」上面 */}
+                {isFoldAnchor && meta ? (
+                  <CompletedWorkChip
+                    key={`completed-work-${item.turnId}`}
+                    variant="turn"
+                    outcomeTone={meta.outcomeTone}
+                    expanded={turnOpen}
+                    onToggle={() => toggleTurn(item.turnId)}
+                    showAvatar
+                    teamLayout={isTeamMode}
+                  />
+                ) : null}
                 {/* 折叠态：交付物与代码变更卡需留在文档流内，不能放进被 absolute 隐藏的 collapse */}
                 {!turnOpen && hasDeliverable ? (
                   <>
@@ -469,10 +521,13 @@ export function ChatTimelineList({
           const streak = liveStreakByItemKey.get(item.key);
           const streakOpen = !streak || Boolean(expandedStreaks[streak.id]);
           const contentOpen = turnOpen && streakOpen;
+          const isFoldAnchor = turnFoldAnchorKeys.get(item.turnId) === item.key;
           const isTurnAnchor =
             Boolean(meta) &&
-            (meta!.firstWorkKey === item.key ||
-              (!meta!.firstWorkKey && !chipAnchoredTurns.current.has(item.turnId)));
+            (isFoldAnchor ||
+              (!turnFoldAnchorKeys.has(item.turnId) &&
+                (meta!.firstWorkKey === item.key ||
+                  (!meta!.firstWorkKey && !chipAnchoredTurns.current.has(item.turnId)))));
           if (isTurnAnchor && meta) {
             chipAnchoredTurns.current.add(item.turnId);
           }
@@ -484,16 +539,19 @@ export function ChatTimelineList({
               <CompletedWorkChip
                 key={`completed-work-${item.turnId}`}
                 variant="turn"
-                durationMs={completedWorkDurationMs(meta)}
+                outcomeTone={meta.outcomeTone}
                 expanded={turnOpen}
                 onToggle={() => toggleTurn(item.turnId)}
-                showAvatar={meta.showAvatar}
+                // 折叠条就是该轮视觉顶部：头像必须挂在这里，不能跟 meta/内容区抢来抢去。
+                showAvatar
                 teamLayout={isTeamMode}
               />
             );
           }
 
           // 轮次展开后才露出 streak chip；内容仍可按 streak 再折一层
+          // 整轮只有最顶部一颗头像：turn 折叠条 > 该轮第一条 streak > 首条内容
+          const isTopStreakInTurn = Boolean(streak && streak.ordinal === 0);
           if (turnOpen && streak && streak.firstKey === item.key) {
             nodes.push(
               <CompletedWorkChip
@@ -501,9 +559,11 @@ export function ChatTimelineList({
                 variant="streak"
                 thinkingCount={streak.thinkingCount}
                 toolCount={streak.toolCount}
+                outcomeTone={streak.outcomeTone}
                 expanded={streakOpen}
                 onToggle={() => toggleStreak(streak.id)}
-                showAvatar={turnFoldable ? false : streak.showAvatar}
+                // 仅当这条 streak 本身吃到了本轮顶部头像时才画；后续 streak 一律不画
+                showAvatar={!turnFoldable && isTopStreakInTurn && streak.showAvatar}
                 teamLayout={isTeamMode}
               />
             );
@@ -527,8 +587,13 @@ export function ChatTimelineList({
             }
           }
 
+          // 头像已挂在 turn/顶部 streak 上时，展开内容不再重复画。
+          const turnChipOwnsAvatar = turnFoldable;
+          const streakChipOwnsAvatar = Boolean(
+            !turnFoldable && isTopStreakInTurn && streak?.showAvatar
+          );
           const hideAvatar = Boolean(
-            (turnFoldable && turnOpen) || (streak && streakOpen)
+            (turnChipOwnsAvatar && turnOpen) || (streakChipOwnsAvatar && streakOpen)
           );
 
           const body =
@@ -572,14 +637,15 @@ export function ChatTimelineList({
 
         if (item.type === 'turnSummary') {
           const meta = turnWorkMeta.get(item.turnId);
-          if (meta?.completed && meta.hasWork) {
-            return null;
-          }
+          // 有折叠工作的回合也始终在底部展示耗时，与无工具回合位置一致。
+          const range = meta
+            ? turnElapsedRangeMs(meta)
+            : { startMs: item.startMs, endMs: item.hasWork ? item.workEndMs : item.endMs };
           return (
             <TurnElapsed
               key={item.key}
-              startMs={item.startMs}
-              endMs={item.endMs}
+              startMs={range.startMs}
+              endMs={range.endMs}
               isLastTurn={item.isLastTurn}
               teamLayout={isTeamMode}
             />
