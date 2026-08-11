@@ -625,6 +625,17 @@ class WebChannel(BaseWsChannel):
             or event_name.startswith("harness.")
         )
 
+    @staticmethod
+    def _should_backfill_request_id(event_name: str) -> bool:
+        # goal.snapshot/goal.updated/execution.error 原来没有回填 request_id，导致 Web
+        # 前端的事件去重逻辑只能靠内容比对，分不清"同一次操作的重复投递"和"不同操作但
+        # 内容碰巧相同"（bug001：同一 session 短时间内被 resume 两次，第二次自己的
+        # goal.snapshot 因为跟第一次内容相同被误判为重复丢弃，导致编辑/暂停按钮卡死）。
+        # runtime.accepted 的 payload 本身已经带了 request_id（见
+        # interface_deep.py `_yield_runtime_accepted`），调用处的 "request_id" not in
+        # payload 判断会自动跳过它，不会重复赋值。
+        return event_name.startswith("chat.") or event_name.startswith("goal.") or event_name == "execution.error"
+
     @classmethod
     def _build_event_payload(cls, msg: Message, event_name: str) -> dict[str, Any]:
         """Build the Web event payload without dropping structured control fields."""
@@ -633,18 +644,8 @@ class WebChannel(BaseWsChannel):
                 payload = {**msg.payload}
                 if "session_id" not in payload and msg.session_id:
                     payload["session_id"] = msg.session_id
-                # goal.snapshot/goal.updated/execution.error 原来没有回填 request_id，导致 Web
-                # 前端的事件去重逻辑只能靠内容比对，分不清"同一次操作的重复投递"和"不同操作但
-                # 内容碰巧相同"（bug001：同一 session 短时间内被 resume 两次，第二次自己的
-                # goal.snapshot 因为跟第一次内容相同被误判为重复丢弃，导致编辑/暂停按钮卡死）。
-                # runtime.accepted 的 payload 本身已经带了 request_id（见
-                # interface_deep.py `_yield_runtime_accepted`），这里的 "request_id" not in
-                # payload 判断会自动跳过它，不会重复赋值。
-                if (
-                    (event_name.startswith("chat.") or event_name.startswith("goal.") or event_name == "execution.error")
-                    and "request_id" not in payload
-                    and msg.id
-                ):
+                needs_request_id = "request_id" not in payload and msg.id
+                if cls._should_backfill_request_id(event_name) and needs_request_id:
                     payload["request_id"] = msg.id
                 return payload
 
