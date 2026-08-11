@@ -489,8 +489,7 @@ permissions:
     viking_browse: allow
     viking_remember: allow
     viking_add_resource: allow
-    mcp_free_search: allow
-    mcp_paid_search: allow
+    web_search: allow
     mcp_fetch_webpage: allow
     cron_list_jobs: allow
     cron_get_job: allow
@@ -723,9 +722,8 @@ modes:
     # send_file_to_user 由运行时 _update_session_tools 注册，不在此配置
     # coding_memory_read/write/edit 由 CodingMemoryRail 在 subagent 内部注册，不在此配置
     tools:
-      - web_free_search
+      - web_search
       - web_fetch_webpage
-      - web_paid_search
       - user_todos
       - skill_toolkit
 

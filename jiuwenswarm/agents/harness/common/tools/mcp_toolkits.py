@@ -7,9 +7,8 @@ from __future__ import annotations
 from openjiuwen.core.foundation.tool import Tool
 
 from jiuwenswarm.agents.harness.common.tools.command_tools import mcp_exec_command
-from jiuwenswarm.agents.harness.common.tools.search_tools import mcp_free_search, mcp_paid_search
 from jiuwenswarm.agents.harness.common.tools.web_fetch_tools import mcp_fetch_webpage
-from jiuwenswarm.common.local_env_config import get_local_config
+from jiuwenswarm.agents.harness.common.tools.web_search import web_search
 from jiuwenswarm.common.mcp_config import (  # noqa: F401
     _check_dangerous_args,
     _is_blocked_host,
@@ -26,46 +25,13 @@ from jiuwenswarm.common.mcp_config import (  # noqa: F401
 )
 
 
-def _has_paid_search_api_key() -> bool:
-    """Check if any paid search API key is configured."""
-    return any(
-        [
-            get_local_config("BOCHA_API_KEY"),
-            get_local_config("PERPLEXITY_API_KEY"),
-            get_local_config("SERPER_API_KEY"),
-            get_local_config("JINA_API_KEY"),
-        ]
-    )
-
-
-def _env_flag(name: str, default: bool = False) -> bool:
-    raw = str(get_local_config(name, "") or "").strip().lower()
-    if not raw:
-        return default
-    return raw in {"1", "true", "yes", "on", "enabled"}
-
-
-def _is_free_search_enabled() -> bool:
-    return (
-        _env_flag("FREE_SEARCH_DDG_ENABLED", default=False)
-        or _env_flag("FREE_SEARCH_BING_ENABLED", default=False)
-    )
-
-
 def get_mcp_tools() -> list[Tool]:
     """Return all MCP toolkit tools for registration in Runner."""
-    tools = []
-    if _has_paid_search_api_key():
-        tools.append(mcp_paid_search)
-    if _is_free_search_enabled():
-        tools.append(mcp_free_search)
-    tools.extend([mcp_fetch_webpage, mcp_exec_command])
-    return tools
+    return [web_search, mcp_fetch_webpage, mcp_exec_command]
 
 
 __all__ = [
-    "mcp_free_search",
-    "mcp_paid_search",
+    "web_search",
     "mcp_fetch_webpage",
     "mcp_exec_command",
     "get_mcp_tools",
