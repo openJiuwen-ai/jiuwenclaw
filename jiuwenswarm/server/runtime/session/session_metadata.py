@@ -9,6 +9,7 @@ import queue
 import re
 import shutil
 import threading
+import time
 from pathlib import Path
 from typing import Any
 from datetime import datetime, timezone
@@ -48,6 +49,11 @@ _HEARTBEAT_SESSION_PREFIX = "heartbeat_"
 _DELIVERY_KIND_SERVER_PUSH = "server_push"
 # user_id 白名单: 仅允许字母数字及 _-, 拒绝路径遍历字符
 _SAFE_USER_ID_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+# Windows 原子替换重试参数：并发 reader 持有句柄时 os.replace 报 WinError 5，
+# reader 的 read_text 在毫秒级释放，有限重试即可落地。详见 ERRORS.md ERR-20260811-006。
+_ATOMIC_REPLACE_RETRIES = 40
+_ATOMIC_REPLACE_BACKOFF_SEC = 0.002
 
 # 匹配所有小写 XML 块:
 # 如 <system-reminder>、<file-content>、<command-name> 等系统/工具注入内容
@@ -420,11 +426,39 @@ def _write_metadata_sync(
         tmp = fpath.with_name(f"{fpath.name}.{os.getpid()}.tmp")
         try:
             tmp.write_text(payload, encoding="utf-8")
-            os.replace(tmp, fpath)
+            _atomic_replace(tmp, fpath)
         except Exception:
             tmp.unlink(missing_ok=True)
             raise
     return to_write
+
+
+def _atomic_replace(tmp: Path, fpath: Path) -> None:
+    """``os.replace`` with a bounded retry on Windows file-lock contention.
+
+    Windows refuses to replace a file while another process (or thread) holds
+    it open for reading (``WinError 5`` / ``PermissionError``). POSIX rename
+    is inode-level and unaffected, so the issue only surfaces on Windows. The
+    reader's ``read_text()`` call releases its handle within milliseconds, so a
+    short retry loop lets the replace land without sacrificing atomicity.
+    See ``.learnings/ERRORS.md`` ERR-20260811-006.
+    """
+    if os.name != "nt":
+        os.replace(tmp, fpath)
+        return
+    last_exc: Exception | None = None
+    for _ in range(_ATOMIC_REPLACE_RETRIES):
+        try:
+            os.replace(tmp, fpath)
+            return
+        except PermissionError as exc:
+            last_exc = exc
+            # Reader holds the handle; yield and retry.
+            time.sleep(_ATOMIC_REPLACE_BACKOFF_SEC)
+    # Final attempt: let the original PermissionError propagate.
+    if last_exc is not None:
+        raise last_exc
+    os.replace(tmp, fpath)
 
 
 def _merge_pin_fields(current: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:

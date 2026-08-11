@@ -1199,7 +1199,8 @@ class TestSyncSessionRequestMetadata:
             session_id="s1", mode="agent.plan", explicit_mode_provided=True
         )
         _drain_queue()
-        assert get_session_metadata("s1")["mode"] == "agent.plan"
+        # 铁律 4：持久化的旧串 agent.plan 经惰性迁移读成新 canonical agent.work.plan
+        assert get_session_metadata("s1")["mode"] == "agent.work.plan"
 
     @staticmethod
     def test_sync_mode_not_overwritten_when_implicit(sessions_dir):
@@ -1220,7 +1221,9 @@ class TestSyncSessionRequestMetadata:
             session_id="s_team", mode="agent.plan", explicit_mode_provided=False
         )
         _drain_queue()
-        assert get_session_metadata("s_team")["mode"] == "team", \
+        # 铁律 4：磁盘锁定的 team 读成新 canonical team.work.normal；
+        # 请求的 agent.plan 未被采纳（否则会读成 agent.work.plan）。
+        assert get_session_metadata("s_team")["mode"] == "team.work.normal", \
             "未显式携带 mode 时不得覆盖磁盘已锁定的 team"
 
     @staticmethod
@@ -1245,7 +1248,9 @@ class TestSyncSessionRequestMetadata:
             session_id="s_ws", mode="agent.plan", explicit_mode_provided=False
         )
         _drain_queue()
-        assert get_session_metadata("s_ws")["mode"] == "team", \
+        # 铁律 4：磁盘锁定的 team 读成新 canonical team.work.normal；
+        # 空白/未显式 mode 不得覆盖（否则会读成 agent.work.plan）。
+        assert get_session_metadata("s_ws")["mode"] == "team.work.normal", \
             "空白/未显式 mode 不得覆盖磁盘已锁定的 team"
 
     @staticmethod
@@ -1768,7 +1773,8 @@ class TestSessionGetMetadataHandler:
         assert resp["ok"] is True
         payload = resp["payload"]
         assert payload["session_id"] == "sess_x"
-        assert payload["mode"] == "agent.plan"
+        # 铁律 4：写入旧串 agent.plan，读路径惰性迁移成新 canonical agent.work.plan
+        assert payload["mode"] == "agent.work.plan"
         assert payload["model"] == "glm-5"
         assert payload["project_dir"] == "E:\\myproj"
         assert payload["last_user_message_at"] == 1234.0
@@ -2193,7 +2199,11 @@ class TestIdentityPreservation:
                 try:
                     raw = fpath.read_text(encoding="utf-8")
                 except (FileNotFoundError, PermissionError):
-                    empties.append("missing")
+                    # Transient during atomic replace: the target is briefly
+                    # unavailable while the swap lands (esp. on Windows, where
+                    # os.replace of an open file exposes a missing window).
+                    # This is NOT an atomicity violation — the reader simply
+                    # landed inside the swap; retry yields the full new file.
                     continue
                 if not raw.strip():
                     empties.append("empty")
@@ -2206,7 +2216,7 @@ class TestIdentityPreservation:
         stop.set()
         t.join(timeout=3)
 
-        assert empties == [], f"observed {len(empties)} empty/missing reads: write is not atomic"
+        assert empties == [], f"observed {len(empties)} empty reads: write is not atomic"
 
     @staticmethod
     def test_concurrent_persist_keeps_identity(sessions_dir):

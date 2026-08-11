@@ -1228,7 +1228,8 @@ async def test_handle_session_create_injected_default_work_mode_does_not_mismatc
     from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
 
     metadata = get_session_metadata("sess_code_project", cache_bust=True)
-    assert metadata["mode"] == "code.normal"
+    # 铁律 4：注入的旧串 code.normal 经读路径惰性迁移成新 canonical agent.code.normal
+    assert metadata["mode"] == "agent.code.normal"
     assert metadata["work_mode"] == "code"
 
 
