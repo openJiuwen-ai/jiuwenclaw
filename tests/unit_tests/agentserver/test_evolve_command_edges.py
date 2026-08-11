@@ -10,6 +10,105 @@ from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmD
 
 
 @pytest.mark.anyio
+async def test_skill_evolution_approval_falls_back_to_review_feedback_sidecar(monkeypatch):
+    adapter = JiuWenSwarmDeepAdapter()
+    adapter._skill_evolution_rail = SimpleNamespace(  # pylint: disable=protected-access
+        _pending_approval_snapshots={}
+    )
+    sidecar = SimpleNamespace(
+        _pending_approval_snapshots={"skill_evolve_review_1": object()}
+    )
+    monkeypatch.setattr(adapter, "find_team_skill_rail", lambda _request_id: sidecar)
+    monkeypatch.setattr(
+        interface_deep_module,
+        "record_ids_from_pending_approval",
+        lambda _rail, _request_id: ["record-1"],
+    )
+    monkeypatch.setattr(
+        interface_deep_module,
+        "approved_record_ids_from_answers",
+        lambda _answers, _labels, _record_ids: (True, ["record-1"]),
+    )
+    approve = AsyncMock()
+    monkeypatch.setattr(interface_deep_module, "approve_evolution_records", approve)
+
+    handled = await adapter._handle_evolution_approval(  # pylint: disable=protected-access
+        "skill_evolve_review_1",
+        [{"value": "accept"}],
+    )
+
+    assert handled is True
+    approve.assert_awaited_once_with(
+        sidecar,
+        "skill_evolve_review_1",
+        ["record-1"],
+        legacy_fallback=True,
+    )
+
+
+@pytest.mark.anyio
+async def test_skill_creation_approval_dispatches_approved_creation_prompt(monkeypatch):
+    adapter = JiuWenSwarmDeepAdapter()
+    rail = SimpleNamespace(
+        owns_external_proposal=lambda request_id: request_id == "skill_create_1",
+        resolve_external_proposal=lambda request_id, *, accepted: (
+            "create the approved skill"
+            if request_id == "skill_create_1" and accepted
+            else None
+        ),
+    )
+    manager = SimpleNamespace(
+        get_team_skill_create_rail=lambda _session_id: rail,
+        interact=AsyncMock(return_value=(True, None)),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.get_team_manager",
+        lambda _channel_id: manager,
+    )
+
+    handled = await adapter.handle_skill_create_approval(
+        "skill_create_1",
+        [{"selected_options": ["接收"]}],
+        "sess-1",
+        "web",
+    )
+
+    assert handled is True
+    manager.interact.assert_awaited_once_with("sess-1", "create the approved skill")
+
+
+@pytest.mark.anyio
+async def test_skill_creation_approval_reject_discards_without_interact(monkeypatch):
+    adapter = JiuWenSwarmDeepAdapter()
+    resolved: list[tuple[str, bool]] = []
+    rail = SimpleNamespace(
+        owns_external_proposal=lambda _request_id: True,
+        resolve_external_proposal=lambda request_id, *, accepted: resolved.append(
+            (request_id, accepted)
+        ),
+    )
+    manager = SimpleNamespace(
+        get_team_skill_create_rail=lambda _session_id: rail,
+        interact=AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.get_team_manager",
+        lambda _channel_id: manager,
+    )
+
+    handled = await adapter.handle_skill_create_approval(
+        "skill_create_2",
+        [{"selected_options": ["拒绝"]}],
+        "sess-1",
+        "web",
+    )
+
+    assert handled is True
+    assert resolved == [("skill_create_2", False)]
+    manager.interact.assert_not_awaited()
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("query", "mode", "slash_command", "expected_output"),
     [
@@ -278,12 +377,18 @@ async def test_handle_user_answer_routes_regular_evolution_approval_without_requ
     adapter = JiuWenSwarmDeepAdapter()
     adapter._is_session_scoped_adapter = True  # pylint: disable=protected-access
     seen: list[tuple[str, list[dict[str, list[str]]]]] = []
+    push_resolution = AsyncMock()
 
     async def _fake_handle_evolution_approval(request_id: str, answers: list):
         seen.append((request_id, answers))
         return True
 
     monkeypatch.setattr(adapter, "_handle_evolution_approval", _fake_handle_evolution_approval)
+    monkeypatch.setattr(
+        adapter,
+        "_push_regular_evolution_approval_resolution",
+        push_resolution,
+    )
 
     response = await adapter.handle_user_answer(
         AgentRequest(
@@ -307,6 +412,71 @@ async def test_handle_user_answer_routes_regular_evolution_approval_without_requ
 
     assert seen == [("regular_123", [{"selected_options": ["接收"]}])]
     assert response.payload == {"accepted": True, "resolved": True}
+    push_resolution.assert_awaited_once_with(
+        request_id="regular_123",
+        session_id="sess-agent-evolve",
+        channel_id="web",
+        accepted=True,
+        params={
+            "request_id": "regular_123",
+            "answers": [{"selected_options": ["接收"]}],
+            "source": "skill_evolution_approval",
+            "approval_schema": "openjiuwen.skill_evolution_approval.v1",
+            "evolution_meta": {
+                "event_kind": "approval",
+                "rail_kind": "regular",
+                "approval_kind": "evolve",
+            },
+        },
+    )
+
+
+@pytest.mark.anyio
+async def test_regular_evolution_approval_resolution_pushes_status_and_notice(monkeypatch):
+    adapter = JiuWenSwarmDeepAdapter()
+    sent: list[dict] = []
+
+    class _Transport:
+        async def send_push(self, message):
+            sent.append(message)
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        _Transport,
+    )
+    monkeypatch.setattr(
+        interface_deep_module,
+        "build_server_push_message",
+        lambda **kwargs: kwargs,
+    )
+
+    await adapter._push_regular_evolution_approval_resolution(  # pylint: disable=protected-access
+        request_id="skill_evolve_review_1",
+        session_id="sess-team",
+        channel_id="web",
+        accepted=True,
+        params={
+            "evolution_meta": {
+                "skill_name": "release-fixture",
+                "source": "scheduler_review_feedback",
+            }
+        },
+    )
+
+    assert len(sent) == 2
+    status_payload = sent[0]["payload"]
+    assert status_payload == {
+        "event_type": "chat.evolution_status",
+        "status": "end",
+        "stage": "completed",
+        "message": "已接收全局 Skill 'release-fixture'的演进审批，经验已写入并更新 Skill 演进索引。",
+        "request_id": "skill_evolve_review_1",
+    }
+    notice_payload = sent[1]["payload"]
+    assert notice_payload["event_type"] == "chat.notice"
+    assert notice_payload["decision"] == "accepted"
+    assert notice_payload["resolved"] is True
+    assert notice_payload["skill_name"] == "release-fixture"
 
 
 @pytest.mark.anyio

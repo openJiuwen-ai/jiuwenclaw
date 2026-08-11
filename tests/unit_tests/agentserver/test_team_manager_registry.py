@@ -445,6 +445,16 @@ def test_find_team_skill_rail_for_request_uses_pending_governance() -> None:
     assert manager.find_team_skill_rail_for_request("missing") is None
 
 
+def test_find_team_skill_rail_for_request_includes_review_feedback_sidecar() -> None:
+    manager = TeamManager()
+    rail = _FakeTeamSkillEvolutionRail()
+    rail.add_pending_approval_snapshot("skill_evolve_review_req1")
+    manager.register_review_feedback_skill_rail("sess-1", rail)
+
+    assert manager.get_review_feedback_skill_rail("sess-1") is rail
+    assert manager.find_team_skill_rail_for_request("skill_evolve_review_req1") is rail
+
+
 def test_refresh_team_shared_skill_links_across_managers_uses_registered_session(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,

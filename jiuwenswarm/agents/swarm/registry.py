@@ -157,11 +157,14 @@ def _build_swarm_context_from_seed(seed: dict[str, Any]) -> SwarmBuildContext:
     Registered with openjiuwen so ``from_spawn_payload`` / ``recover_from_session``
     restore the provider build context after deserialization.
     """
-    return SwarmBuildContext.from_seed(
+    context = SwarmBuildContext.from_seed(
         seed,
         config=get_config(),
         trajectory_registry=_trajectory_registry_for(seed),
     )
+    from jiuwenswarm.agents.swarm.review_feedback_evolution import attach_review_feedback_handler
+
+    return attach_review_feedback_handler(context)
 
 
 def register_swarm_providers() -> None:
