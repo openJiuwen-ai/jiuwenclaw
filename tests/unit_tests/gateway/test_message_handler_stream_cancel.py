@@ -683,6 +683,25 @@ def test_disconnect_accepts_agent_ref_scoped_route_keys() -> None:
 
 
 @pytest.mark.asyncio
+async def test_disconnect_recovers_session_from_agent_ref_request_key() -> None:
+    handler = _TestMessageHandler.create()
+    _seed_stream_task(
+        handler,
+        rid="rid-agent-ref",
+        channel_id="tui",
+        session_id="sess_agent_ref",
+    )
+
+    await handler.cancel_agent_sessions_on_disconnect(
+        [],
+        stale_request_keys=[("tui", "rid-agent-ref", "code.normal:default")],
+    )
+
+    await asyncio.sleep(0)
+    assert len(_FakeAgentClient.sent_requests) == 1
+
+
+@pytest.mark.asyncio
 async def test_disconnect_cancel_marks_request_as_client_disconnect() -> None:
     handler = _TestMessageHandler.create()
     _seed_stream_task(
