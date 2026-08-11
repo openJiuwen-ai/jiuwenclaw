@@ -57,11 +57,12 @@ export function heartbeatErrorMessageId(runId: string): string {
   return `heartbeat-error-${runId}`;
 }
 
-/** 判断一条已存在消息是否属于某 Heartbeat run（按消息 ID 前缀匹配，供归并/去重使用）。 */
+/** 判断一条已存在消息是否属于某 Heartbeat run（精确匹配三种已知消息 ID，供归并/去重使用）。 */
 export function isHeartbeatRunMessage(messageId: string | undefined, runId: string): boolean {
   if (!messageId || !runId) return false;
-  const prefix = `heartbeat-`;
-  if (!messageId.startsWith(prefix)) return false;
-  // 形如 heartbeat-user-<runId> / heartbeat-assistant-<runId> / heartbeat-error-<runId>
-  return messageId.endsWith(`-${runId}`);
+  return (
+    messageId === heartbeatUserMessageId(runId) ||
+    messageId === heartbeatAssistantMessageId(runId) ||
+    messageId === heartbeatErrorMessageId(runId)
+  );
 }
