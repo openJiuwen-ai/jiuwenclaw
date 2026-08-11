@@ -36,8 +36,12 @@ SYNC_ENV_SCHEMA: frozenset[str] = frozenset(
         "TOOL_CALLING_GUARD_STRIP_REASON",
         "ENABLED_SKILLS",
         "DISABLED_SKILLS",
+        # Relay wire keys (unchanged). Tip storage remaps to JIUWENSWARM_* via
+        # normalize_product_env_aliases — either form satisfies the pair.
         "JIUWENCLAW_DISABLED_SKILLS",
         "JIUWENCLAW_SHARED_SKILLS_DIRS",
+        "JIUWENSWARM_DISABLED_SKILLS",
+        "JIUWENSWARM_SHARED_SKILLS_DIRS",
         "BOCHA_API_KEY",
         "JINA_API_KEY",
         "PERPLEXITY_API_KEY",
@@ -78,10 +82,16 @@ SYNC_ENV_SCHEMA: frozenset[str] = frozenset(
 
 
 def materialize_sync_env(env_dict: dict[str, Any]) -> dict[str, str]:
-    """Build active-tip map: keep empty strings, omit nulls (deletes)."""
+    """Build active-tip map: keep empty strings, omit nulls (deletes).
+
+    Remaps relay ``JIUWENCLAW_*`` product keys to ``JIUWENSWARM_*``.
+    """
     if not isinstance(env_dict, dict):
         raise ValueError("agent env must be an object")
-    return {str(k): str(v) for k, v in env_dict.items() if v is not None}
+    from jiuwenswarm.common.local_env_config import normalize_product_env_aliases
+
+    normalized = normalize_product_env_aliases(env_dict)
+    return {str(k): str(v) for k, v in normalized.items() if v is not None}
 
 
 def _env_bool(value: Any) -> bool | None:
@@ -219,12 +229,25 @@ def compute_content_hash(
 def _validate_env_schema(env: Any, *, agent_id: str) -> None:
     if not isinstance(env, dict):
         raise ValueError(f"agent {agent_id!r}: env must be an object")
-    missing = sorted(SYNC_ENV_SCHEMA - {str(k) for k in env})
+    from jiuwenswarm.common.local_env_config import (
+        env_keys_with_product_aliases,
+        normalize_product_env_aliases,
+    )
+
+    # Relay may send only ``JIUWENCLAW_*``; project may send ``JIUWENSWARM_*``.
+    # Either form covers the whole alias pair in SYNC_ENV_SCHEMA (no dual-require).
+    present: set[str] = set()
+    for key in env:
+        present |= set(env_keys_with_product_aliases((str(key),)))
+    missing = sorted(SYNC_ENV_SCHEMA - present)
     if missing:
         raise ValueError(
             f"agent {agent_id!r}: env missing required keys: {', '.join(missing)}"
         )
-    extra = sorted(str(k) for k in env if str(k) not in SYNC_ENV_SCHEMA)
+    normalized = normalize_product_env_aliases(env)
+    # Extras judged on canonical tip keys (JIUWENCLAW_* already remapped away).
+    schema_for_extra = set(env_keys_with_product_aliases(SYNC_ENV_SCHEMA))
+    extra = sorted(str(k) for k in normalized if str(k) not in schema_for_extra)
     if extra:
         logger.debug(
             "sync_agents_configs: agent %r env has extra keys (accepted): %s",
@@ -237,9 +260,20 @@ def _validate_shared_env(shared_env: Any) -> None:
     if not isinstance(shared_env, dict):
         raise ValueError("shared_env must be an object when provided")
     # Track A contract: MVP log/validate presence only — never mutate spawn env in sync.
-    from jiuwenswarm.common.local_env_config import SPAWN_ENV_KEYS
+    from jiuwenswarm.common.local_env_config import (
+        SPAWN_ENV_KEYS,
+        canonical_product_env_key,
+    )
 
-    unknown = sorted(str(k) for k in shared_env if str(k) not in SPAWN_ENV_KEYS)
+    unknown: list[str] = []
+    for k in shared_env:
+        key = str(k)
+        if key in SPAWN_ENV_KEYS:
+            continue
+        if canonical_product_env_key(k) in SPAWN_ENV_KEYS:
+            continue
+        unknown.append(key)
+    unknown = sorted(unknown)
     if unknown:
         logger.info(
             "sync_agents_configs: shared_env keys outside SPAWN table (ignored): %s",
@@ -310,11 +344,16 @@ def validate_sync_payload(params: Any) -> dict[str, Any]:
             raise ValueError(f"agent {agent_id!r}: runtime must be an object")
 
         _validate_env_schema(env, agent_id=agent_id)
+        from jiuwenswarm.common.local_env_config import normalize_product_env_aliases
+
+        normalized_env = (
+            normalize_product_env_aliases(env) if isinstance(env, dict) else env
+        )
         normalized_agents.append(
             {
                 "agent_id": agent_id,
                 "config": config,
-                "env": env,
+                "env": normalized_env,
                 "runtime": runtime,
             }
         )

@@ -405,7 +405,7 @@ def get_user_workspace_dir() -> Path:
 
     Priority:
     1. Cached value (if already set via set_user_workspace_dir or previous call)
-    2. JIUWENSWARM_DATA_DIR environment variable (for multi-instance isolation)
+    2. ``JIUWENSWARM_DATA_DIR`` (or relay ``JIUWENCLAW_DATA_DIR``) for isolation
     3. get_user_home() / ".jiuwenswarm" (default instance)
 
     Also performs one-time migration from ~/.jiuwenclaw/ to ~/.jiuwenswarm/ if needed.
@@ -413,7 +413,9 @@ def get_user_workspace_dir() -> Path:
     global _workspace_base_dir
     if _workspace_base_dir is not None:
         return _workspace_base_dir
-    env_workspace = os.getenv("JIUWENSWARM_DATA_DIR")
+    env_workspace = (
+        os.getenv("JIUWENSWARM_DATA_DIR") or os.getenv("JIUWENCLAW_DATA_DIR") or ""
+    ).strip()
     if env_workspace:
         _workspace_base_dir = Path(env_workspace)
         return _workspace_base_dir
@@ -1642,6 +1644,51 @@ def get_agent_skills_dir() -> Path:
         Path to skills directory: ~/.jiuwenswarm/agent/workspace/skills
     """
     return get_agent_workspace_dir() / "skills"
+
+
+JIUWENSWARM_SHARED_SKILLS_DIRS_ENV = "JIUWENSWARM_SHARED_SKILLS_DIRS"
+# Relay still emits the legacy name; tip ingest remaps it to the canonical key.
+JIUWENCLAW_SHARED_SKILLS_DIRS_ENV = "JIUWENCLAW_SHARED_SKILLS_DIRS"
+
+
+def parse_shared_skills_dirs_raw(raw: str) -> list[Path]:
+    """Parse SHARED_SKILLS_DIRS value into deduplicated absolute paths."""
+    text = (raw or "").strip()
+    if not text:
+        return []
+
+    dirs: list[Path] = []
+    seen: set[str] = set()
+    for part in [part.strip() for part in text.split(os.pathsep) if part.strip()]:
+        path = Path(part).expanduser().resolve()
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        dirs.append(path)
+    return dirs
+
+
+def get_shared_agent_skills_dirs() -> list[Path]:
+    """Read shared skill roots from tip/env (OfficeClaw ``office-claw-skills`` etc.).
+
+    Reads canonical ``JIUWENSWARM_SHARED_SKILLS_DIRS``; ``read_env`` also
+    resolves relay ``JIUWENCLAW_SHARED_SKILLS_DIRS`` via product-key aliasing.
+    """
+    from jiuwenswarm.common.local_env_config import read_env
+
+    raw = read_env(JIUWENSWARM_SHARED_SKILLS_DIRS_ENV, "")
+    if not raw or not raw.strip():
+        return []
+    return parse_shared_skills_dirs_raw(raw.strip())
+
+
+def resolve_agent_registered_skill_dirs() -> list[Path]:
+    """Resolve skill dirs: shared tip dirs when set, else workspace skills."""
+    shared = get_shared_agent_skills_dirs()
+    if shared:
+        return shared
+    return [get_agent_skills_dir()]
 
 
 def get_interactions_dir() -> Path:
