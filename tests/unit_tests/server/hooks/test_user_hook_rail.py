@@ -33,6 +33,18 @@ class MockCallbackContext:
     extra: dict = field(default_factory=dict)
 
 
+def _rail_with_mocked_executor(config, results):
+    """构造 UserHookRail，其 executor.run_all 被 mock 为返回 results。
+
+    CI(Linux/Py3.11) 下 asyncio.create_subprocess_exec 不稳定，异常被
+    executor 吞为 NON_BLOCKING_ERROR，断言 hook 输出的用例会失败。这些是
+    rail 逻辑单测，HookResult 由 mock 直接提供，不依赖真实 bash 子进程。
+    """
+    rail = UserHookRail(config)
+    rail._executor.run_all = AsyncMock(return_value=results)
+    return rail
+
+
 # ============================================================
 # UserHookRail: before_tool_call (PreToolUse)
 # ============================================================
@@ -61,7 +73,9 @@ class TestBeforeToolCall:
         config = self._make_config(
             PreToolUse=[("*", [{"command": "echo block >&2; exit 2", "timeout": 5}])]
         )
-        rail = UserHookRail(config)
+        rail = _rail_with_mocked_executor(config, [
+            HookResult(outcome=HookOutcome.BLOCKING, error="block", show_to_model=True),
+        ])
         ctx = MockCallbackContext(inputs=MockToolInputs(tool_name="Bash"))
         await rail.before_tool_call(ctx)
         assert ctx.extra["_skip_tool"] is True
@@ -78,7 +92,12 @@ class TestBeforeToolCall:
                 }]
             )]
         )
-        rail = UserHookRail(config)
+        rail = _rail_with_mocked_executor(config, [
+            HookResult(
+                outcome=HookOutcome.SUCCESS,
+                modified_input={"file_path": "/safe/path.txt"},
+            ),
+        ])
         ctx = MockCallbackContext(
             inputs=MockToolInputs(
                 tool_name="Write",
@@ -100,7 +119,12 @@ class TestBeforeToolCall:
                 }]
             )]
         )
-        rail = UserHookRail(config)
+        rail = _rail_with_mocked_executor(config, [
+            HookResult(
+                outcome=HookOutcome.SUCCESS,
+                modified_input={"_tool_name": "Read", "file_path": "/tmp/x.txt"},
+            ),
+        ])
         ctx = MockCallbackContext(inputs=MockToolInputs(tool_name="Write"))
         await rail.before_tool_call(ctx)
         assert ctx.inputs.tool_name == "Read"
@@ -125,7 +149,12 @@ class TestBeforeToolCall:
                 [{"command": 'echo \'{"additionalContext":"pre-write check passed"}\'', "timeout": 5}]
             )]
         )
-        rail = UserHookRail(config)
+        rail = _rail_with_mocked_executor(config, [
+            HookResult(
+                outcome=HookOutcome.SUCCESS,
+                additional_context="pre-write check passed",
+            ),
+        ])
         ctx = MockCallbackContext(inputs=MockToolInputs(tool_name="Write"))
         await rail.before_tool_call(ctx)
         assert "pre-write check passed" in ctx.extra.get("_hook_additional_context", "")
@@ -222,7 +251,9 @@ class TestAfterToolCall:
                 [{"command": 'echo \'{"additionalContext":"review note"}\'', "timeout": 5}]
             )]
         )
-        rail = UserHookRail(config)
+        rail = _rail_with_mocked_executor(config, [
+            HookResult(outcome=HookOutcome.SUCCESS, additional_context="review note"),
+        ])
         ctx = MockCallbackContext(
             inputs=MockToolInputs(tool_name="Bash", tool_result="command output")
         )
@@ -239,7 +270,9 @@ class TestAfterToolCall:
                 [{"command": 'echo \'{"additionalContext":"note"}\'', "timeout": 5}]
             )]
         )
-        rail = UserHookRail(config)
+        rail = _rail_with_mocked_executor(config, [
+            HookResult(outcome=HookOutcome.SUCCESS, additional_context="note"),
+        ])
         ctx = MockCallbackContext(inputs=MockToolInputs(tool_name="Read", tool_result=None))
         await rail.after_tool_call(ctx)
         assert "note" in (ctx.inputs.tool_result or "")
@@ -252,7 +285,13 @@ class TestAfterToolCall:
                 [{"command": "echo 'blocked after review' >&2; exit 2", "timeout": 5}]
             )]
         )
-        rail = UserHookRail(config)
+        rail = _rail_with_mocked_executor(config, [
+            HookResult(
+                outcome=HookOutcome.BLOCKING,
+                error="blocked after review",
+                show_to_model=True,
+            ),
+        ])
         ctx = MockCallbackContext(inputs=MockToolInputs(tool_name="Bash"))
         await rail.after_tool_call(ctx)
         assert "_post_tool_hook_feedback" in ctx.extra
@@ -324,7 +363,18 @@ class TestAfterInvoke:
         )
         rail = UserHookRail(config)
         ctx = MockCallbackContext()
-        await rail.after_invoke(ctx)
+        with patch.object(
+            rail._executor,
+            "run_all",
+            new=AsyncMock(return_value=[
+                HookResult(
+                    outcome=HookOutcome.BLOCKING,
+                    error="final check failed",
+                    show_to_model=True,
+                ),
+            ]),
+        ):
+            await rail.after_invoke(ctx)
         assert "_stop_hook_feedback" in ctx.extra
 
     @pytest.mark.asyncio
@@ -351,7 +401,20 @@ class TestAfterInvoke:
         )
         rail = UserHookRail(config)
         ctx = MockCallbackContext()
-        await rail.after_invoke(ctx)
+
+        with patch.object(
+            rail._executor,
+            "run_all",
+            new=AsyncMock(return_value=[
+                HookResult(outcome=HookOutcome.SUCCESS),
+                HookResult(
+                    outcome=HookOutcome.BLOCKING,
+                    error="hook blocked execution",
+                    show_to_model=True,
+                ),
+            ]),
+        ):
+            await rail.after_invoke(ctx)
         # 即使第二个 hook 是 blocking，也应记录 feedback
         assert "_stop_hook_feedback" in ctx.extra
 

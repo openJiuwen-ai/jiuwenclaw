@@ -1270,6 +1270,25 @@ class AgentWebSocketServer:
         self._current_ws = ws
         self._current_send_lock = send_lock
 
+        # 触发身份获取（写入当前连接 context；无 provider 时身份为 null，连接继续）。
+        # 其后 asyncio.create_task(_handle_message) 自动 copy_context，身份传播到各请求任务。
+        identity_token = None
+        try:
+            from jiuwenswarm.extensions.identity_provider import IdentityStore
+            identity_token = await IdentityStore.fetch_and_store()
+            identity = IdentityStore.get_identity()
+            if identity is not None:
+                logger.info(
+                    "[AgentWebSocketServer] 身份信息已获取: user_id=%s domain_id=%s app_id=%s",
+                    identity.user_id, identity.domain_id, identity.app_id,
+                    extra={"user_visible": "progress"},
+                )
+            else:
+                logger.debug("[AgentWebSocketServer] 未获取到身份信息（无 provider 或获取失败）",
+                             extra={"user_visible": "progress"})
+        except Exception as e:
+            logger.warning("[AgentWebSocketServer] 身份获取异常: %s", e, extra={"user_visible": "progress"})
+
         # 发送 connection.ack 事件，通知 Gateway 服务端已就绪
         try:
             ack_frame = {
@@ -1315,6 +1334,12 @@ class AgentWebSocketServer:
         except Exception as e:
             logger.exception("[AgentWebSocketServer] 连接处理异常 (%s): %s", remote, e)
         finally:
+            if identity_token is not None:
+                try:
+                    from jiuwenswarm.extensions.identity_provider import IdentityStore
+                    IdentityStore.clear(identity_token)
+                except Exception:
+                    logger.exception("[AgentWebSocketServer] identity clear failed")
             self._current_ws = None
             self._current_send_lock = None
             self._clear_ws_acp_client_capabilities(ws)

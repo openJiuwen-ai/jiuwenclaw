@@ -45,7 +45,14 @@ from dataclasses import dataclass, replace
 from typing import Any, Literal, Optional
 import logging
 from logging.handlers import BaseRotatingHandler
+from collections import OrderedDict
 from ruamel.yaml import YAML
+
+# 尝试导入 pythonjsonlogger（用于 JSON 格式化输出，缺失时优雅降级为文本 Formatter）
+try:
+    from pythonjsonlogger import jsonlogger
+except ImportError:
+    jsonlogger = None
 
 # read_file 工具：False 时不把图片字节注入主模型对话，改走 image_reading / VQA 等视觉工具。
 # 用于 create_deep_agent(enable_read_image_multimodal=...) 与 MultimodalImageRail(enable_image_multimodal=...)。
@@ -2249,32 +2256,320 @@ def install_source_record_masking() -> None:
     _source_record_masking_installed = True
 
 
+def _resolve_logging_format() -> str:
+    """解析日志格式（text/json/dual）。优先级 env > config.yaml > default(text)。"""
+    env_format = os.getenv("JIUWENSWARM_LOG_FORMAT")
+    if env_format:
+        v = env_format.strip().lower()
+        if v in ("text", "json", "dual"):
+            return v
+        logger.warning("无效的 JIUWENSWARM_LOG_FORMAT: '%s'，使用默认 'text'", env_format)
+    try:
+        cfg = _load_logging_config_from_yaml()
+        if cfg:
+            v = cfg.get("format")
+            if v and v in ("text", "json", "dual"):
+                return v
+            # 向后兼容：dual_output.enabled=true -> dual
+            dual = cfg.get("dual_output")
+            if isinstance(dual, dict) and dual.get("enabled") is True:
+                logger.warning("检测到旧配置 dual_output.enabled=true，已映射为 format=dual")
+                return "dual"
+    except Exception as e:
+        logger.warning("加载 config.yaml 的 logging.format 失败: %s", e)
+    return "text"
+
+
+def _resolve_output_switches() -> dict[str, bool]:
+    """解析 console_enabled/file_enabled。优先级 env > config.yaml > default(True)。"""
+    result = {"console_enabled": True, "file_enabled": True}
+
+    def _env_bool(env_name: str) -> bool | None:
+        raw = os.getenv(env_name)
+        if raw is None:
+            return None
+        v = raw.strip().lower()
+        if v in ("true", "1", "yes", "on"):
+            return True
+        if v in ("false", "0", "no", "off"):
+            return False
+        logger.warning("无效的 %s: '%s'，使用默认 true", env_name, raw)
+        return None
+
+    ce = _env_bool("JIUWENSWARM_LOG_CONSOLE_ENABLED")
+    fe = _env_bool("JIUWENSWARM_LOG_FILE_ENABLED")
+    try:
+        cfg = _load_logging_config_from_yaml()
+    except Exception:
+        cfg = {}
+    if ce is None and cfg:
+        ce = cfg.get("console_enabled")
+    if fe is None and cfg:
+        fe = cfg.get("file_enabled")
+    if isinstance(ce, bool):
+        result["console_enabled"] = ce
+    elif ce is not None:
+        logger.warning("config.yaml logging.console_enabled 非布尔: %s，使用默认 true", ce)
+    if isinstance(fe, bool):
+        result["file_enabled"] = fe
+    elif fe is not None:
+        logger.warning("config.yaml logging.file_enabled 非布尔: %s，使用默认 true", fe)
+    return result
+
+
+def _validate_json_config(config: dict) -> dict:
+    """验证 logging.json.* 字段。"""
+    if config.get("timestamp_format") not in ("text", "iso8601"):
+        logger.warning("无效 logging.json.timestamp_format，使用默认 'text'")
+        config["timestamp_format"] = "text"
+    if "include_component" in config and not isinstance(config["include_component"], bool):
+        logger.warning("无效 logging.json.include_component，使用默认 True")
+        config["include_component"] = True
+    if "sanitize_sensitive_data" in config and not isinstance(config["sanitize_sensitive_data"], bool):
+        logger.warning("无效 logging.json.sanitize_sensitive_data，使用默认 True")
+        config["sanitize_sensitive_data"] = True
+    if config.get("exc_info_style", "simple") not in ("simple", "full"):
+        config["exc_info_style"] = "simple"
+    return config
+
+
+def _resolve_json_config() -> dict[str, Any]:
+    """解析 logging.json 子段（带默认值 + 验证）。"""
+    default = {
+        "timestamp_format": "text",
+        "include_component": True,
+        "sanitize_sensitive_data": True,
+        "exc_info_style": "simple",
+    }
+    cfg = _load_logging_config_from_yaml()
+    if not cfg:
+        return default
+    json_cfg = cfg.get("json", {})
+    if not isinstance(json_cfg, dict):
+        return default
+    result = default.copy()
+    result.update(json_cfg)
+    return _validate_json_config(result)
+
+
+class JsonUserVisibleFormatter(jsonlogger.JsonFormatter if jsonlogger else logging.Formatter):
+    """JSON 格式化日志输出。
+
+    继承 pythonjsonlogger.JsonFormatter（缺失时降级为 logging.Formatter）。
+    字段顺序：timestamp → process → level → user_tag → user_id/domain_id/app_id →
+    logger → lineno → message → component → user_visible。
+    身份字段始终输出（null 便于聚合）。复用 dev-stable 的 _log_component_from_logger_name 与 _sanitize_log_text。
+    """
+
+    _FIELD_RENAME_MAP = {"asctime": "timestamp", "levelname": "level", "name": "logger"}
+
+    def __init__(self, timestamp_format: str = "text", include_component: bool = True,
+                 sanitize_sensitive_data: bool = True, exc_info_style: str = "simple", *args, **kwargs):
+        if jsonlogger is None:
+            fmt = kwargs.pop("fmt", "%(asctime)s %(levelname)s %(name)s %(message)s")
+            datefmt = kwargs.pop("datefmt", "%Y-%m-%d %H:%M:%S")
+            super().__init__(fmt, datefmt)
+        else:
+            fmt = "%(asctime)s %(levelname)s %(name)s %(message)s"
+            datefmt = "%Y-%m-%d %H:%M:%S"
+            kwargs["json_ensure_ascii"] = False
+            super().__init__(fmt, datefmt, *args, **kwargs)
+        self.timestamp_format = timestamp_format
+        self.include_component = include_component
+        self.sanitize_sensitive_data = sanitize_sensitive_data
+        self.exc_info_style = exc_info_style
+
+    def add_fields(self, log_record: dict, record: logging.LogRecord, message_dict: dict) -> None:
+        if jsonlogger is None:
+            return
+        super().add_fields(log_record, record, message_dict)
+        if "user_visible" in log_record:
+            del log_record["user_visible"]
+        for old, new in self._FIELD_RENAME_MAP.items():
+            if old in log_record:
+                log_record[new] = log_record.pop(old)
+        if "timestamp" in log_record and self.timestamp_format == "text":
+            ts = log_record["timestamp"]
+            if isinstance(ts, str):
+                try:
+                    dt = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                    log_record["timestamp"] = dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                except (ValueError, TypeError):
+                    log_record["timestamp"] = ts  # 解析失败保留原 ISO 字符串
+        ordered: OrderedDict = OrderedDict()
+        if "timestamp" in log_record:
+            ordered["timestamp"] = log_record["timestamp"]
+        ordered["process"] = record.process
+        if "level" in log_record:
+            ordered["level"] = log_record["level"]
+        user_tag = getattr(record, "user_tag", None)
+        if user_tag:
+            ordered["user_tag"] = user_tag
+        ordered["user_id"] = getattr(record, "user_id", None)
+        ordered["domain_id"] = getattr(record, "domain_id", None)
+        ordered["app_id"] = getattr(record, "app_id", None)
+        if "logger" in log_record:
+            ordered["logger"] = log_record["logger"]
+        ordered["lineno"] = record.lineno
+        if "message" in log_record:
+            ordered["message"] = log_record["message"]
+        for k, v in log_record.items():
+            if k not in ordered:
+                ordered[k] = v
+        log_record.clear()
+        log_record.update(ordered)
+        if self.include_component:
+            log_record["component"] = _log_component_from_logger_name(record.name)
+        uv = getattr(record, "user_visible", None)
+        if uv in ("critical", "progress"):
+            log_record["user_visible"] = uv
+        elif uv is not None:
+            logger.warning("无效 user_visible 值: '%s'，期望 'critical'/'progress'", uv)
+        if self.sanitize_sensitive_data and "message" in log_record:
+            log_record["message"] = _sanitize_log_text(log_record["message"])
+        if "exc_info" in log_record and log_record["exc_info"] and self.exc_info_style == "simple":
+            ei = log_record["exc_info"]
+            if isinstance(ei, tuple) and len(ei) >= 2:
+                log_record["exc_info"] = f"{ei[0].__name__}: {ei[1]}"
+
+
+class LoggingTagConfig:
+    """用户可见性 Tag 配置。env > config.yaml > default(True)。"""
+
+    user_visible: bool = True
+    user_progress_visible: bool = True
+    _env_prefix: str = "JIUWENSWARM_LOG_"
+    _skip_env_load: bool = False
+
+    def __init__(self, skip_env_load: bool = False):
+        self._skip_env_load = skip_env_load
+        self._load_config()
+
+    def _load_config(self) -> None:
+        if self._skip_env_load:
+            self.user_visible = True
+            self.user_progress_visible = True
+            return
+        base_uv = True
+        base_upv = True
+        self.user_visible = self._load_from_env("USER_VISIBLE", base_uv)
+        self.user_progress_visible = self._load_from_env("USER_PROGRESS_VISIBLE", base_upv)
+        if os.getenv(f"{self._env_prefix}USER_VISIBLE") is None:
+            self.user_visible = self._load_from_yaml("user_visible", self.user_visible)
+        if os.getenv(f"{self._env_prefix}USER_PROGRESS_VISIBLE") is None:
+            self.user_progress_visible = self._load_from_yaml("user_progress_visible", self.user_progress_visible)
+
+    def _load_from_env(self, key: str, default: bool) -> bool:
+        raw = os.getenv(f"{self._env_prefix}{key}")
+        if raw is None:
+            return default
+        v = raw.strip().lower()
+        if v in ("true", "1", "yes", "on"):
+            return True
+        if v in ("false", "0", "no", "off"):
+            return False
+        logger.warning("无效的 env %s: '%s'，使用默认 %s", f"{self._env_prefix}{key}", raw, default)
+        return default
+
+    @staticmethod
+    def _load_from_yaml(key: str, default: bool) -> bool:
+        try:
+            cfg = _load_logging_config_from_yaml()
+            if not cfg:
+                return default
+            tags = cfg.get("tags")
+            v = tags.get(key) if isinstance(tags, dict) else None
+            if v is None:
+                return default
+            if isinstance(v, bool):
+                return v
+            logger.warning("config.yaml logging.tags.%s 非布尔: %s，使用默认 %s", key, v, default)
+            return default
+        except Exception as e:
+            logger.warning("加载 logging.tags.%s 失败: %s，使用默认 %s", key, e, default)
+            return default
+
+    def is_user_visible_enabled(self) -> bool:
+        return self.user_visible
+
+    def is_user_progress_visible_enabled(self) -> bool:
+        return self.user_progress_visible
+
+
+class UserVisibleTagFilter(logging.Filter):
+    """按 record.user_visible 设 record.user_tag（[USER]/[USER_PROGRESS]/""）。从不丢日志，幂等。"""
+
+    def __init__(self, tag_config: Optional[LoggingTagConfig] = None):
+        super().__init__()
+        self.tag_config = tag_config if tag_config is not None else LoggingTagConfig()
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        uv = getattr(record, "user_visible", None)
+        if uv == "critical" and self.tag_config.is_user_visible_enabled():
+            record.user_tag = "[USER] "
+        elif uv == "progress" and self.tag_config.is_user_progress_visible_enabled():
+            record.user_tag = "[USER_PROGRESS] "
+        else:
+            record.user_tag = ""
+        return True
+
+
+class IdentityFieldFilter(logging.Filter):
+    """从 IdentityStore（contextvar）读身份，塞 record.user_id/domain_id/app_id。始终放行。
+
+    import 链失败时身份降级为 null——日志 filter 绝不因自身 import 失败而中断日志
+    （Python logging 不兜 filter 异常，filter 抛会透传到 logger.* 调用方）。
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            from jiuwenswarm.extensions.identity_provider import IdentityStore
+            identity = IdentityStore.get_identity()
+        except Exception:
+            identity = None
+        if identity is not None:
+            record.user_id = identity.user_id
+            record.domain_id = identity.domain_id
+            record.app_id = identity.app_id
+        else:
+            record.user_id = None
+            record.domain_id = None
+            record.app_id = None
+        return True
+
+
+class IdentityTextFormatter(logging.Formatter):
+    """文本 Formatter：构建 record.identity = " user_id=.. domain_id=.. app_id=.. "（null 输出 "null"）。"""
+
+    def format(self, record: logging.LogRecord) -> str:
+        parts = []
+        for field in ("user_id", "domain_id", "app_id"):
+            v = getattr(record, field, None)
+            parts.append(f"{field}={v if v is not None else 'null'}")
+        record.identity = " " + " ".join(parts) + " "
+        return super().format(record)
+
+
 def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     """配置 ``jiuwenswarm`` 根日志：控制台 + 分组件文件 + 汇总 full.log。
 
-    各模块应使用 ``logging.getLogger(__name__)``，分文件规则：
-    - ``jiuwenswarm.channel.*`` → channel.log
-    - ``jiuwenswarm.agents.*`` 或 ``jiuwenswarm.server.*`` → agent_server.log
-    - 其余 ``jiuwenswarm.*``（含 ``jiuwenswarm.app``、gateway、evolution、utils 等）→ gateway.log
-
-    所有分类日志同时写入 ``full.log``。输出目录默认 ``~/.jiuwenswarm/agent/.logs/``；
-    也可通过环境变量 ``LOG_ROOT_PATH`` 覆盖。
-
-    级别由 ``config.yaml`` 的 ``logging`` 段控制；环境变量 ``LOG_LEVEL`` 仅覆盖**控制台**级别
-    （``log_level`` 参数为 ``None`` 时）。若传入 ``log_level``（如单测），则控制台与各文件级别均为该值。
-
-    环境变量 ``LOG_TO_FILE_ENABLED`` 设为 ``false`` 时，跳过所有文件 handler 的创建与
-    日志目录写入，仅保留控制台输出。
+    扩展功能（迁移自 enterprise_dev）：
+    - format（text/json/dual）：env JIUWENSWARM_LOG_FORMAT 或 config.yaml logging.format
+    - console_enabled/file_enabled：输出开关
+    - JSON：JsonUserVisibleFormatter（.json 文件）
+    - 身份字段：IdentityFieldFilter（每 handler）
+    - user_visible Tag：UserVisibleTagFilter（text/dual）
+    保留 dev-stable 既有的 SensitiveDataFilter + install_source_record_masking 双层脱敏。
     """
-    from jiuwenswarm.infrastructure.config import Settings
-
-    settings = Settings()
-    logs_root = get_logs_dir()
-    file_logging_enabled = settings.log_to_file_enabled
-    if file_logging_enabled:
-        logs_root.mkdir(parents=True, exist_ok=True)
+    log_root_path = os.getenv("LOG_ROOT_PATH", "").strip()
+    logs_root = Path(log_root_path).expanduser().resolve() if log_root_path else get_logs_dir()
+    logs_root.mkdir(parents=True, exist_ok=True)
 
     levels = _resolve_logging_levels(log_level)
+    log_format = _resolve_logging_format()
+    output_switches = _resolve_output_switches()
+    console_enabled = output_switches["console_enabled"]
+    file_enabled = output_switches["file_enabled"]
 
     root = logging.getLogger("jiuwenswarm")
     root.setLevel(levels.logger)
@@ -2283,20 +2578,38 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
         handler.close()
         root.removeHandler(handler)
 
-    formatter = logging.Formatter(
-        fmt="%(asctime)s.%(msecs)03d %(levelname)s %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
+    json_config = _resolve_json_config() if log_format in ("json", "dual") else {}
+    # 文本格式串（含 process/identity/user_tag/lineno）
+    text_fmt = (
+        "%(asctime)s.%(msecs)03d [%(process)d] %(levelname)s "
+        "%(identity)s%(user_tag)s%(name)s:%(lineno)d: %(message)s"
     )
-    privacy_filter: Optional[SensitiveDataFilter] = None
-    if settings.log_masking_enabled:
-        privacy_filter = SensitiveDataFilter()
+
+    if log_format in ("json", "dual"):
+        json_formatter = JsonUserVisibleFormatter(
+            timestamp_format=json_config.get("timestamp_format", "text"),
+            include_component=json_config.get("include_component", True),
+            sanitize_sensitive_data=json_config.get("sanitize_sensitive_data", True),
+            exc_info_style=json_config.get("exc_info_style", "simple"),
+        )
+        text_formatter = IdentityTextFormatter(fmt=text_fmt, datefmt="%Y-%m-%d %H:%M:%S")
+    else:
+        text_formatter = IdentityTextFormatter(fmt=text_fmt, datefmt="%Y-%m-%d %H:%M:%S")
+        json_formatter = None
+
+    privacy_filter = SensitiveDataFilter()
+    tag_config = LoggingTagConfig() if log_format in ("text", "dual", "json") else None
+    identity_filter = IdentityFieldFilter()
 
     def _add_rotating(
         filename: str,
         level: int,
-        name_filter: Optional[_ComponentNameFilter] = None,
+        name_filter: Optional[logging.Filter] = None,
         custom_formatter: Optional[logging.Formatter] = None,
+        use_json: bool = False,
     ) -> None:
+        if not file_enabled:
+            return
         h = SafeRotatingFileHandler(
             filename=logs_root / filename,
             maxBytes=_LOG_FILE_MAX_BYTES,
@@ -2304,33 +2617,56 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
             encoding="utf-8",
         )
         h.setLevel(level)
-        h.setFormatter(custom_formatter if custom_formatter is not None else formatter)
-        if privacy_filter is not None:
-            h.addFilter(privacy_filter)
+        if custom_formatter is not None:
+            h.setFormatter(custom_formatter)
+        elif use_json and json_formatter is not None:
+            h.setFormatter(json_formatter)
+        else:
+            h.setFormatter(text_formatter)
+        h.addFilter(privacy_filter)
+        h.addFilter(identity_filter)
+        if tag_config:
+            h.addFilter(UserVisibleTagFilter(tag_config))
         if name_filter is not None:
             h.addFilter(name_filter)
         root.addHandler(h)
 
-    if file_logging_enabled:
-        _add_rotating("gateway.log", levels.gateway, _ComponentNameFilter("gateway"))
-        _add_rotating("channel.log", levels.channel, _ComponentNameFilter("channel"))
-        _add_rotating("agent_server.log", levels.agent_server,
-            _CompositeFilter([_ComponentNameFilter("agent_server"), _ComponentNameFilter("permissions")]))
-        _add_rotating("full.log", levels.full, None)
-        json_formatter = JsonOnlyFormatter()
-        _add_rotating("permissions.log", levels.agent_server, _ComponentNameFilter("permissions"), json_formatter)
+    def _component_files(ext: str, use_json: bool) -> None:
+        _add_rotating(f"gateway.{ext}", levels.gateway, _ComponentNameFilter("gateway"), use_json=use_json)
+        _add_rotating(f"channel.{ext}", levels.channel, _ComponentNameFilter("channel"), use_json=use_json)
+        _add_rotating(f"agent_server.{ext}", levels.agent_server,
+                      _CompositeFilter([_ComponentNameFilter("agent_server"), _ComponentNameFilter("permissions")]),
+                      use_json=use_json)
+        _add_rotating(f"full.{ext}", levels.full, None, use_json=use_json)
 
-    stream_handler = logging.StreamHandler()
-    stream_handler.setLevel(levels.console)
-    stream_handler.setFormatter(formatter)
-    if privacy_filter is not None:
+    if log_format == "text":
+        _component_files("log", use_json=False)
+    elif log_format == "json":
+        _component_files("json", use_json=True)
+    elif log_format == "dual":
+        _component_files("log", use_json=False)
+        _component_files("json", use_json=True)
+
+    # permissions.log 始终用 JsonOnlyFormatter
+    _add_rotating("permissions.log", levels.agent_server,
+                  _ComponentNameFilter("permissions"), JsonOnlyFormatter())
+
+    # 控制台
+    if console_enabled:
+        stream_handler = logging.StreamHandler()
+        stream_handler.setLevel(levels.console)
+        if log_format == "json":
+            stream_handler.setFormatter(json_formatter)
+        else:
+            stream_handler.setFormatter(text_formatter)
+        if tag_config:
+            stream_handler.addFilter(UserVisibleTagFilter(tag_config))
+        stream_handler.addFilter(identity_filter)
         stream_handler.addFilter(privacy_filter)
-    root.addHandler(stream_handler)
+        root.addHandler(stream_handler)
 
-    # 源头脱敏：覆盖 jiuwenswarm 命名空间之外的第三方 logger（openjiuwen/openai/
-    # httpx 等），在 LogRecord 创建时统一脱敏，保证任何来源的 api_key 都不明文落盘。
-    if privacy_filter is not None:
-        install_source_record_masking()
+    # 保留 dev-stable 既有的源头脱敏（与 handler 层 SensitiveDataFilter 双保险）
+    install_source_record_masking()
     return root
 
 
