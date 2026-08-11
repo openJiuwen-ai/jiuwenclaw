@@ -368,6 +368,7 @@ from jiuwenswarm.common.utils import (
     get_prompt_attachment_dir,
     get_runtime_state_path,
     get_tenant_agent_skills_dirs,
+    resolve_tenant_sessions_dir,
     reset_free_search_runtime_flags,
 )
 from jiuwenswarm.dotenv_early import load_dotenv_runtime
@@ -10711,7 +10712,19 @@ class JiuWenSwarmDeepAdapter:
                     or self._workspace_dir,
                 )
 
-                async for chunk in process_team_message_stream(request, inputs, self._instance):
+                from jiuwenswarm.server.runtime.tenant_agent_pool import TenantAgentPool
+
+                tenant_agent_id, tenant_service_id = TenantAgentPool.extract_ids(request)
+                async for chunk in process_team_message_stream(
+                    request,
+                    inputs,
+                    self._instance,
+                    config_base=self._config_base_cache,
+                    sessions_root=resolve_tenant_sessions_dir(
+                        tenant_service_id,
+                        tenant_agent_id,
+                    ),
+                ):
                     maybe_mark_answer_first_byte(getattr(chunk, "payload", None))
                     yield chunk
             except asyncio.CancelledError:

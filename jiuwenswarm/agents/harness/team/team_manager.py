@@ -519,12 +519,13 @@ class TeamManager:
         template_id: str | None = None,
         template_snapshot: dict[str, Any] | None = None,
         strict_template: bool = False,
+        config_base: dict[str, Any] | None = None,
     ) -> TeamAgentSpec:
-        config_base = get_config()
+        runtime_config = config_base if config_base is not None else get_config()
         # Keep dependency checks scoped to distributed mode to make the
         # control flow explicit at the call site (local mode bypasses checks).
-        if TeamManager._is_distributed_mode(config_base):
-            missing = missing_distributed_dependencies(config_base)
+        if TeamManager._is_distributed_mode(runtime_config):
+            missing = missing_distributed_dependencies(runtime_config)
             if missing:
                 missing_list = ", ".join(missing)
                 logger.warning(
@@ -540,23 +541,23 @@ class TeamManager:
                     "[TeamManager][ACTION] install via: "
                     "pip install -e \".[distribute]\" or uv sync --extra distribute"
                 )
-                config_base = fallback_distributed_to_local(config_base)
+                runtime_config = fallback_distributed_to_local(runtime_config)
 
         spec_dict = load_team_spec_dict(
-            config_base=config_base,
+            config_base=runtime_config,
             requested_model_name=requested_model_name,
             template_id=template_id,
             template_snapshot=template_snapshot,
             strict_template=strict_template,
         )
         spec_dict = TeamManager._normalize_team_identity_fields(spec_dict)
-        if TeamManager._is_distributed_mode(config_base):
-            spec_dict = TeamManager._normalize_distributed_transport_fields(config_base, spec_dict)
+        if TeamManager._is_distributed_mode(runtime_config):
+            spec_dict = TeamManager._normalize_distributed_transport_fields(runtime_config, spec_dict)
 
         # When models.defaults has more than one entry, populate model_pool
         # and set model_pool_strategy to by_model_name so team members
         # can be assigned different model endpoints from the pool.
-        default_models = get_default_models(config_base)
+        default_models = get_default_models(runtime_config)
         if len(default_models) > 1:
             from openjiuwen.agent_teams.schema.team import ModelPoolEntry
 
@@ -598,8 +599,16 @@ class TeamManager:
         return TeamAgentSpec.model_validate(spec_dict)
 
     @staticmethod
-    def _lookup_bound_team_identity(session_id: str) -> tuple[str | None, str | None, dict[str, Any] | None]:
-        metadata = get_session_metadata(session_id, cache_bust=True)
+    def _lookup_bound_team_identity(
+        session_id: str,
+        *,
+        config_base: dict[str, Any] | None = None,
+        sessions_root: str | Path | None = None,
+    ) -> tuple[str | None, str | None, dict[str, Any] | None]:
+        metadata_kwargs: dict[str, Any] = {"cache_bust": True}
+        if sessions_root is not None:
+            metadata_kwargs["sessions_root"] = sessions_root
+        metadata = get_session_metadata(session_id, **metadata_kwargs)
         team_name = str(metadata.get("team_name") or "").strip()
         template_id = str(metadata.get("team_template_id") or "").strip()
         template_snapshot: dict[str, Any] | None = None
@@ -607,11 +616,12 @@ class TeamManager:
             from jiuwenswarm.server.runtime.team_binding_store import get_team_binding_store
             from jiuwenswarm.server.runtime.team_entity_store import ensure_team_entity, ensure_team_entity_for_binding
 
+            runtime_config = config_base if config_base is not None else get_config()
             binding = get_team_binding_store().get(team_name)
             if binding is not None:
                 if not template_id:
                     template_id = binding.template_id
-                entity = ensure_team_entity_for_binding(binding, config_base=get_config())
+                entity = ensure_team_entity_for_binding(binding, config_base=runtime_config)
             else:
                 legacy_snapshot = (
                     copy.deepcopy(metadata.get("team_template_snapshot"))
@@ -622,7 +632,7 @@ class TeamManager:
                     team_name=team_name,
                     template_id=template_id,
                     template_snapshot=legacy_snapshot,
-                    config_base=get_config(),
+                    config_base=runtime_config,
                 )
             if entity is not None:
                 template_id = entity.template_id
@@ -634,8 +644,18 @@ class TeamManager:
         session_id: str,
         *,
         requested_model_name: str | None = None,
+        config_base: dict[str, Any] | None = None,
+        sessions_root: str | Path | None = None,
     ) -> tuple[TeamAgentSpec, bool]:
-        team_name, template_id, template_snapshot = self._lookup_bound_team_identity(session_id)
+        lookup_kwargs: dict[str, Any] = {}
+        if config_base is not None:
+            lookup_kwargs["config_base"] = config_base
+        if sessions_root is not None:
+            lookup_kwargs["sessions_root"] = sessions_root
+        team_name, template_id, template_snapshot = self._lookup_bound_team_identity(
+            session_id,
+            **lookup_kwargs,
+        )
         load_kwargs: dict[str, Any] = {}
         if requested_model_name is not None:
             load_kwargs["requested_model_name"] = requested_model_name
@@ -644,6 +664,8 @@ class TeamManager:
             load_kwargs["strict_template"] = template_snapshot is None
         if template_snapshot is not None:
             load_kwargs["template_snapshot"] = template_snapshot
+        if config_base is not None:
+            load_kwargs["config_base"] = config_base
         spec = self._load_team_spec(session_id, **load_kwargs)
         if team_name:
             spec.team_name = team_name
@@ -661,6 +683,8 @@ class TeamManager:
         channel_id: str | None = None,
         request_metadata: dict[str, Any] | None = None,
         requested_model_name: str | None = None,
+        config_base: dict[str, Any] | None = None,
+        sessions_root: str | Path | None = None,
     ) -> TeamAgentSpec:
         """Build a team spec via provider-based assembly (no parent DeepAgent).
 
@@ -682,11 +706,17 @@ class TeamManager:
         """
         from jiuwenswarm.agents.swarm import enrich_team_spec_for_swarm
 
-        config_base = get_config()
-        await self._ensure_postgresql_for_leader(config_base)
+        runtime_config = config_base if config_base is not None else get_config()
+        await self._ensure_postgresql_for_leader(runtime_config)
+        session_context: dict[str, Any] = {}
+        if config_base is not None:
+            session_context["config_base"] = runtime_config
+        if sessions_root is not None:
+            session_context["sessions_root"] = sessions_root
         spec, has_binding = self._load_session_team_spec(
             session_id,
             requested_model_name=requested_model_name,
+            **session_context,
         )
         if not has_binding:
             self._apply_session_scoped_team_name(spec, session_id=session_id)

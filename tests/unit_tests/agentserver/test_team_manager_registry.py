@@ -1571,6 +1571,85 @@ async def test_get_swarm_enriched_team_spec_uses_bound_team_entity_snapshot(
 
 
 @pytest.mark.asyncio
+async def test_get_swarm_enriched_team_spec_uses_explicit_tenant_runtime_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    manager = _TeamManagerHarness()
+    tenant_config = {"models": {"defaults": [{"model_name": "tenant-model"}]}}
+    tenant_sessions_root = tmp_path / "tenant-sessions"
+    metadata_calls: list[dict] = []
+    entity_calls: list[dict] = []
+    load_calls: list[dict] = []
+
+    class _Spec:
+        team_name = "template_team"
+
+    async def fake_ensure_postgresql(self, config_base: dict) -> None:
+        assert config_base is tenant_config
+
+    def fake_get_session_metadata(session_id: str, **kwargs):
+        metadata_calls.append({"session_id": session_id, **kwargs})
+        return {
+            "team_name": "tenant_team",
+            "team_template_id": "tenant_template",
+        }
+
+    def fake_ensure_team_entity(**kwargs):
+        entity_calls.append(kwargs)
+        return SimpleNamespace(
+            template_id="tenant_template",
+            template_snapshot={"team_name": "template_team"},
+        )
+
+    def fake_load_team_spec(session_id: str, **kwargs):
+        load_calls.append({"session_id": session_id, **kwargs})
+        return _Spec()
+
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.get_config",
+        lambda: (_ for _ in ()).throw(AssertionError("global config must not be read")),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.get_session_metadata",
+        fake_get_session_metadata,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.team_binding_store.get_team_binding_store",
+        lambda: SimpleNamespace(get=lambda _team_name: None),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.team_entity_store.ensure_team_entity",
+        fake_ensure_team_entity,
+    )
+    monkeypatch.setattr(TeamManager, "_ensure_postgresql_for_leader", fake_ensure_postgresql)
+    monkeypatch.setattr(TeamManager, "_load_team_spec", staticmethod(fake_load_team_spec))
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.swarm.enrich_team_spec_for_swarm",
+        lambda spec, **kwargs: None,
+    )
+
+    spec = await manager.get_swarm_enriched_team_spec(
+        "sess-tenant",
+        mode="team",
+        request_metadata={"mode": "team"},
+        config_base=tenant_config,
+        sessions_root=tenant_sessions_root,
+    )
+
+    assert spec.team_name == "tenant_team"
+    assert metadata_calls == [
+        {
+            "session_id": "sess-tenant",
+            "cache_bust": True,
+            "sessions_root": tenant_sessions_root,
+        }
+    ]
+    assert entity_calls[0]["config_base"] is tenant_config
+    assert load_calls[0]["config_base"] is tenant_config
+
+
+@pytest.mark.asyncio
 async def test_get_swarm_enriched_team_spec_keeps_legacy_session_scoped_team_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

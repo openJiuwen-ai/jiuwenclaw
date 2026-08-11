@@ -1414,6 +1414,9 @@ async def process_team_message_stream(
     request: Any,
     inputs: dict[str, Any],
     deep_agent: DeepAgent,
+    *,
+    config_base: dict[str, Any] | None = None,
+    sessions_root: str | Path | None = None,
 ) -> AsyncIterator[AgentResponseChunk]:
     """Process a team-mode streaming request."""
     session_id = request.session_id or "default"
@@ -1512,6 +1515,11 @@ async def process_team_message_stream(
         ) or None
         # Provider-based assembly: build members from the shared config source,
         # no pre-built parent DeepAgent required.
+        runtime_context: dict[str, Any] = {}
+        if config_base is not None:
+            runtime_context["config_base"] = config_base
+        if sessions_root is not None:
+            runtime_context["sessions_root"] = sessions_root
         team_spec = await team_manager.get_swarm_enriched_team_spec(
             session_id=session_id,
             mode=resolved_mode,
@@ -1520,6 +1528,7 @@ async def process_team_message_stream(
             channel_id=channel_id,
             request_metadata=request_metadata,
             requested_model_name=requested_model_name,
+            **runtime_context,
         )
         _persist_team_file_monitor_roots(session_id, team_spec)
     except Exception as exc:

@@ -1389,6 +1389,7 @@ async def test_process_team_message_stream_handles_team_evolve_list(monkeypatch,
         records=[_evolution_record("First summary line")],
     )
     captured_spec: list[object] = []
+    captured_context: list[dict] = []
 
     class _FakeManager(_InactiveTeamRuntimeManagerMixin):
         @staticmethod
@@ -1397,6 +1398,7 @@ async def test_process_team_message_stream_handles_team_evolve_list(monkeypatch,
 
         @staticmethod
         async def get_swarm_enriched_team_spec(**kwargs):
+            captured_context.append(kwargs)
             spec = SimpleNamespace(
                 team_name="unit-team",
                 workspace=SimpleNamespace(root_path=str(tmp_path / "team-workspace")),
@@ -1419,6 +1421,8 @@ async def test_process_team_message_stream_handles_team_evolve_list(monkeypatch,
             request,
             inputs,
             object(),
+            config_base={"models": {"defaults": []}},
+            sessions_root=tmp_path / "tenant-sessions",
     ):
         chunks.append(chunk)
 
@@ -1435,6 +1439,8 @@ async def test_process_team_message_stream_handles_team_evolve_list(monkeypatch,
     assert chunks[1].is_complete is False
     assert chunks[2].is_complete is True
     assert captured_spec
+    assert captured_context[0]["config_base"] == {"models": {"defaults": []}}
+    assert captured_context[0]["sessions_root"] == tmp_path / "tenant-sessions"
 
 
 @pytest.mark.anyio

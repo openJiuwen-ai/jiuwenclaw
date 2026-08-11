@@ -553,11 +553,28 @@ async def test_agent_stream_slash_followup_continues_into_runner(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_team_stream_injects_image_tool_context_for_non_vision_model(monkeypatch):
+@pytest.mark.parametrize(
+    ("channel_id", "service_id", "agent_id", "expected_service_id", "expected_agent_id"),
+    [
+        ("web", None, None, "default", "default"),
+        ("officeclaw", "service-officeclaw", "agent-team", "service-officeclaw", "agent-team"),
+        ("acp", None, None, "global_acp", "acp"),
+    ],
+)
+async def test_team_stream_injects_image_tool_context_for_non_vision_model(
+    monkeypatch,
+    channel_id,
+    service_id,
+    agent_id,
+    expected_service_id,
+    expected_agent_id,
+):
     """Team mode must preserve the same local-image tool context as agent mode."""
     adapter = JiuWenSwarmDeepAdapter()
     adapter._instance = SimpleNamespace()  # pylint: disable=protected-access
     adapter._is_session_scoped_adapter = True  # pylint: disable=protected-access
+    tenant_config = {"models": {"defaults": []}}
+    adapter._config_base_cache = tenant_config  # pylint: disable=protected-access
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(adapter, "_has_valid_model_config", lambda _model_name="": True)
@@ -567,19 +584,21 @@ async def test_team_stream_injects_image_tool_context_for_non_vision_model(monke
     monkeypatch.setattr(adapter, "_native_image_input_enabled", lambda *_args: False)
     monkeypatch.setattr(adapter, "_write_runtime_state", lambda **_kwargs: None)
 
-    async def _capture_team_inputs(_request, inputs, _instance):
+    async def _capture_team_inputs(_request, inputs, _instance, **runtime_context):
         captured.update(inputs)
+        captured["runtime_context"] = runtime_context
         if False:
             yield None
 
     from jiuwenswarm.server.runtime.agent_adapter import team_helpers
 
     monkeypatch.setattr(team_helpers, "process_team_message_stream", _capture_team_inputs)
-
     request = AgentRequest(
         request_id="req-team-image",
-        channel_id="web",
+        channel_id=channel_id,
         session_id="sess-team-image",
+        service_id=service_id,
+        agent_id=agent_id,
         params={
             "mode": "team",
             "query": "解析图片内容",
@@ -600,3 +619,12 @@ async def test_team_stream_injects_image_tool_context_for_non_vision_model(monke
 
     assert "jiuwenswarm_image_tool_context" in captured["query"]
     assert "agent/sessions/sess-team-image/uploads/persisted.png" in captured["query"]
+    from jiuwenswarm.common.utils import resolve_tenant_sessions_dir
+
+    assert captured["runtime_context"] == {
+        "config_base": tenant_config,
+        "sessions_root": resolve_tenant_sessions_dir(
+            expected_service_id,
+            expected_agent_id,
+        ),
+    }
