@@ -10285,6 +10285,15 @@ class JiuWenSwarmDeepAdapter:
                     message = str(error.get("message") or "")
             else:
                 legacy_status = "completed"
+        elif status == "idle":
+            turn_outcome = projection.get("turn_outcome")
+            if turn_outcome == "failed":
+                legacy_status = "error"
+                error = projection.get("error")
+                if isinstance(error, dict):
+                    message = str(error.get("message") or "")
+            else:
+                legacy_status = "completed"
         else:
             legacy_status = "starting"
 

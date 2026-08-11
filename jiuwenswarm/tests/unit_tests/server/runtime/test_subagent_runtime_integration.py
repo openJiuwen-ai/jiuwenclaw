@@ -82,6 +82,23 @@ class TestSubagentStreamMapping:
         assert first_parsed["is_parallel"] is True
         assert second_parsed["is_parallel"] is True
 
+    def test_maps_idle_completed_to_legacy_completed(self) -> None:
+        parsed = _map_subagent_updated_chunk(
+            SUBAGENT_UPDATED_EVENT_TYPE,
+            {
+                "subagent_updated": {
+                    "subagent_id": "sid-1",
+                    "parent_session_id": "parent-sess-idle",
+                    "status": "idle",
+                    "turn_outcome": "completed",
+                    "display_name": "Explorer",
+                }
+            },
+        )
+        assert parsed is not None
+        assert parsed["status"] == "completed"
+        assert parsed["status"] != "starting"
+
     def test_maps_closed_completed_to_legacy_completed(self) -> None:
         parsed = _map_subagent_updated_chunk(
             SUBAGENT_UPDATED_EVENT_TYPE,
