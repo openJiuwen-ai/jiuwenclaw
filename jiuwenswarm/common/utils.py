@@ -1873,6 +1873,15 @@ def get_agent_sessions_dir() -> Path:
     return get_agent_root_dir() / "sessions"
 
 
+def get_agent_evolution_trajectories_dir() -> Path:
+    """Get the default evolution execution trajectories directory.
+
+    Default path under the agent root, e.g.
+    ``~/.jiuwenswarm/agent/evolution_trajectories``.
+    """
+    return get_agent_root_dir() / "evolution_trajectories"
+
+
 # 当前 git 分支解析（带短 TTL 缓存），用于 /resume 按分支过滤会话。
 # 对齐 Claude Code：非 git 目录 / detached HEAD / 任何失败一律返回 "HEAD" 哨兵值。
 _GIT_BRANCH_CACHE: dict[str, tuple[float, str]] = {}

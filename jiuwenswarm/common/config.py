@@ -348,10 +348,6 @@ def get_skill_create_enabled(config: dict[str, Any] | None) -> bool:
 def get_evolution_auto_save_enabled(config: dict[str, Any] | None = None) -> bool:
     """Return whether evolution approvals may auto-save without user action."""
     try:
-        raw = get_local_config("EVOLUTION_AUTO_SAVE")
-        env_auto_save = _get_bool_env(None if raw is None else str(raw))
-        if env_auto_save is not None:
-            return env_auto_save
         if config is None:
             config = get_config()
         if not isinstance(config, dict):

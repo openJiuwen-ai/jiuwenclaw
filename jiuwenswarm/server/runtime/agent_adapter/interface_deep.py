@@ -78,6 +78,7 @@ from openjiuwen.harness.rails import (
 from openjiuwen.harness.rails.evolution import EvolutionReviewRuntime
 from openjiuwen.harness.rails.context_engineer.context_assemble_rail import ContextAssembleRail
 from openjiuwen.harness.rails.context_engineer.context_processor_rail import ContextProcessorRail
+from openjiuwen.agent_evolving.trajectory import FileTrajectoryStore
 from openjiuwen.harness.subagents.browser_agent import build_browser_agent_config
 from openjiuwen.harness.subagents.research_agent import build_research_agent_config
 from openjiuwen.harness.tools import (
@@ -295,6 +296,7 @@ from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools import (
     image_reading,
 )
 from jiuwenswarm.common.config import (
+    _get_evolution_config,
     get_config,
     get_default_models,
     get_evolution_enabled,
@@ -339,6 +341,8 @@ from jiuwenswarm.server.runtime.skill.skill_whitelist import (
 )
 from jiuwenswarm.common.utils import (
     DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL,
+    get_agent_evolution_trajectories_dir,
+    get_agent_root_dir,
     get_agent_skills_dir,
     get_agent_workspace_dir,
     get_checkpoint_dir,
@@ -5350,12 +5354,32 @@ class JiuWenSwarmDeepAdapter:
             skill_rail = None
         return skill_rail
 
+    @staticmethod
+    def _resolve_evolution_trajectory_dir(config: dict[str, Any]) -> Path:
+        """Resolve directory for FileTrajectoryStore (env > config > default)."""
+        env_dir = (os.getenv("EVOLUTION_TRAJECTORY_DIR") or "").strip()
+        if env_dir:
+            return Path(env_dir).expanduser().resolve()
+
+        configured = _get_evolution_config(config).get("trajectory_dir")
+        if configured:
+            path = Path(str(configured).strip())
+            if path.is_absolute():
+                return path
+            workspace = get_multi_tenant_user_workspace_dir("default", "default")
+            if workspace is not None:
+                return (workspace / path).resolve()
+            return (get_agent_root_dir().parent / path).resolve()
+
+        return get_agent_evolution_trajectories_dir()
+
     def _build_skill_evolution_rail(self, config: dict[str, Any]) -> SkillEvolutionRail | None:
         """Build SkillEvolutionRail."""
         try:
             evolution_review_trigger = get_evolution_review_trigger_enabled(config)
             evolution_auto_save = get_evolution_auto_save_enabled(config)
             model_name = self._default_model_name or config.get("model_name", "gpt-4")
+            trajectory_dir = self._resolve_evolution_trajectory_dir(config)
             skill_evolution_rail = SkillEvolutionRail(
                 skills_dir=self._resolve_skill_dirs(),
                 llm=self._model,
@@ -5364,9 +5388,13 @@ class JiuWenSwarmDeepAdapter:
                 review_trigger=evolution_review_trigger,
                 auto_save=evolution_auto_save,
                 disabled_skills=self._skill_manager.list_execution_disabled_skills(),
+                trajectory_store=FileTrajectoryStore(trajectory_dir),
             )
             self._skill_evolution_rail = skill_evolution_rail
-            logger.info("[JiuWenSwarmDeepAdapter] SkillEvolutionRail create success")
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] SkillEvolutionRail create success, trajectory_dir=%s",
+                trajectory_dir,
+            )
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] SkillEvolutionRail create failed: %s", exc)
             skill_evolution_rail = None
@@ -5391,6 +5419,7 @@ class JiuWenSwarmDeepAdapter:
             if self._skill_manager is not None
             else []
         )
+        trajectory_dir = self._resolve_evolution_trajectory_dir(self._config_cache or {})
         await configure_skill_evolution_runtime(
             self._instance,
             skills_dir=self._resolve_skill_dirs(),
@@ -5401,12 +5430,17 @@ class JiuWenSwarmDeepAdapter:
             auto_save=evolution_auto_save,
             disabled_skills=disabled_skills,
             language=resolved_language,
+            trajectory_store=FileTrajectoryStore(trajectory_dir),
         )
         self._refresh_active_evolution_rail_refs()
         if self._skill_evolution_rail is not None:
             _set_skill_evolution_triggers(
                 self._skill_evolution_rail,
                 review_trigger=evolution_review_trigger,
+            )
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] SkillEvolutionRail configured, trajectory_dir=%s",
+                trajectory_dir,
             )
 
     async def _unconfigure_active_evolution_rails(self) -> None:
