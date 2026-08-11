@@ -32,6 +32,10 @@ from jiuwenclaw.agentserver.session_metadata import get_session_metadata, update
 from jiuwenclaw.agentserver.session_history import append_history_record
 from jiuwenclaw.agentserver.team.handlers.team_monitor_handler import TeamMonitorHandler
 from jiuwenclaw.agentserver.stream_utils import parse_stream_chunk
+from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
+    reset_send_file_request_context,
+    set_send_file_request_context,
+)
 from jiuwenclaw.schema.agent import AgentResponseChunk
 from jiuwenclaw.schema.message import E2A_SUPPRESSED_EVENT_TYPES
 
@@ -1603,7 +1607,18 @@ async def process_team_message_stream(request: Any,
     if is_first_request and callable(ensure_ready):
         ensure_ready(session_id, team_spec)
         shared_skills_ready_prepared = True
+    # Bind send_file request context for this team run so SendFileToolkit._resolve_route
+    # (send_file_to_user.py) reads per-request ids from the ContextVar (authoritative,
+    # per-async-task isolated) instead of the global-singleton instance fields (which
+    # concurrent team runs overwrite). Mirrors skill_turbo/executor.py:810-814.
+    _sf_ctx_token = None
     try:
+        _sf_ctx_token = set_send_file_request_context(
+            request_id=rid,
+            session_id=session_id,
+            channel_id=channel_id,
+            metadata=getattr(request, 'metadata', None),
+        )
         first_request_source = 'resume_from_pause' if resume_from_pause else 'first'
         if not is_first_request:
             logger.info('[TeamHelpers] follow-up team request: channel_id=%s session_id=%s',
@@ -1897,6 +1912,8 @@ async def process_team_message_stream(request: Any,
             session_id,
         )
     finally:
+        if _sf_ctx_token is not None:
+            reset_send_file_request_context(_sf_ctx_token)
         if request_queue is not None:
             team_manager.remove_waiter(session_id, rid)
             if not team_manager.has_waiters(session_id):
