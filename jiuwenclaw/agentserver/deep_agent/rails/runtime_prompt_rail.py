@@ -4,11 +4,14 @@
 
 Dynamic content (time, channel, agent, model, language) is decoupled from the
 static identity prompt and refreshed on every model call via before_model_call().
+Supports `sections` gating: team mode passes ("time",) to inject only the date
+(without touching system_prompt_builder or workspace paths).
 """
 from __future__ import annotations
 
 import platform
 import subprocess
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from logging import getLogger
 from pathlib import Path
@@ -31,7 +34,11 @@ logger = getLogger(__name__)
 
 
 class RuntimePromptRail(DeepAgentRail):
-    """在 before_model_call 中注入运行时动态 section（时间、运行时信息）。"""
+    """在 before_model_call 中注入运行时动态 section（时间、运行时信息）。
+
+    支持 `sections` 门控：team 模式传 ("time",)，只注入日期（不依赖
+    system_prompt_builder，也不带 workspace 路径段）。
+    """
 
     priority = 5  # 高优先级，确保早于其他 rail 执行
 
@@ -47,6 +54,7 @@ class RuntimePromptRail(DeepAgentRail):
         service_id: Optional[str] = None,
         request_identify: str = "",
         request_soul: str = "",
+        sections: Sequence[str] | None = None,
     ) -> None:
         super().__init__()
         self.system_prompt_builder = None
@@ -64,6 +72,9 @@ class RuntimePromptRail(DeepAgentRail):
         self._request_identify: str = request_identify.strip() if request_identify else ""
         self._request_soul: str = request_soul.strip() if request_soul else ""
         self._registered_skill_dirs: list[str] | None = None
+        # None → 全部段落（普通模式默认，行为与历史一致）；
+        # team 模式传 ("time",)，只注入日期，不碰 builder、不带路径。
+        self._sections = ("time", "runtime", "workspace") if sections is None else tuple(sections)
 
     def set_registered_skill_dirs(self, dirs: list[str] | None) -> None:
         """Use adapter snapshot (reload session isolation); None falls back to resolve."""
@@ -170,6 +181,35 @@ class RuntimePromptRail(DeepAgentRail):
             self._language, self._channel, self._agent_name, self._model_name
         )
 
+        # 日期注入不依赖 system_prompt_builder：团队模式成员可能没有 builder，
+        # 日期也必须注入（environment_context 由 ReActAgent 消费）。
+        if "time" in self._sections:
+            now = datetime.now(tz=self._tz)
+            now_str = now.strftime("%Y-%m-%d")
+            current_year = now.strftime("%Y")
+
+            if self._language == "cn":
+                time_content = (
+                    f"# 当前日期\n\n"
+                    f"- 当前日期：{now_str}\n"
+                    f"- 当前年份：{current_year}\n"
+                    '- 当用户询问"最新、当前、今年、本年、实时、近期"等信息并需要搜索时，'
+                    '搜索 query 必须优先使用当前年份或日期'
+                )
+            else:
+                time_content = (
+                    f"# Current Date\n\n"
+                    f"- Current date: {now_str}\n"
+                    f"- Current year: {current_year}\n"
+                    "- When the user asks for latest/current/this-year/recent information and search is needed, "
+                    "search queries must prefer the current year or date."
+                )
+
+            ctx.extra.setdefault("environment_context", []).append({
+                "content": time_content,
+                "source": "time_rail",
+            })
+
         # 热重载（DeepAgent._hot_reload_system_prompt）会新建 SystemPromptBuilder 并替换
         # agent.system_prompt_builder，但保留型 rail 不会重新 init()，缓存的
         # self.system_prompt_builder 可能指向旧 builder。这里每次从 ctx.agent 现取最新
@@ -178,152 +218,129 @@ class RuntimePromptRail(DeepAgentRail):
         if _builder is not None:
             self.system_prompt_builder = _builder
         if not self.system_prompt_builder:
-            logger.warning("[RuntimePromptRail] system_prompt_builder 未初始化，无法注入 section")
+            if "runtime" in self._sections or "workspace" in self._sections:
+                logger.warning("[RuntimePromptRail] system_prompt_builder 未初始化，无法注入 section")
             return
 
-        now = datetime.now(tz=self._tz)
-        now_str = now.strftime("%Y-%m-%d")
-        current_year = now.strftime("%Y")
+        if "runtime" in self._sections:
+            plat = f"{platform.system()} {platform.machine()}"
+            python_ver = platform.python_version()
+            os_type = platform.system().lower()
 
-        if self._language == "cn":
-            time_content = (
-                f"# 当前日期\n\n"
-                f"- 当前日期：{now_str}\n"
-                f"- 当前年份：{current_year}\n"
-                '- 当用户询问"最新、当前、今年、本年、实时、近期"等信息并需要搜索时，'
-                '搜索 query 必须优先使用当前年份或日期'
-            )
-        else:
-            time_content = (
-                f"# Current Date\n\n"
-                f"- Current date: {now_str}\n"
-                f"- Current year: {current_year}\n"
-                "- When the user asks for latest/current/this-year/recent information and search is needed, "
-                "search queries must prefer the current year or date."
-            )
+            if self._language == "cn":
+                runtime_content = (
+                    "# 运行时\n\n"
+                    f"- 平台：{plat}\n"
+                    f"- Python：{python_ver}\n"
+                    f"- 模型：{self._model_name}\n"
+                    f"- Agent：{self._agent_name}\n"
+                    f"- 频道：{self._channel}\n"
+                    f"- 语言：{self._language}\n"
+                    "\n## 命令语法规范\n"
+                    f"当前运行平台：`{os_type}`\n\n"
+                    "**重要提示**：必须严格使用与当前平台匹配的命令语法，切勿使用其他平台的命令格式。\n\n"
+                    "常见命令差异对照：\n\n"
+                    "| 操作 | Windows (`win32`/`win64`) | Linux/macOS (`linux`/`darwin`) |\n"
+                    "|------|---------------------------|-------------------------------|\n"
+                    "| 创建目录 | `mkdir folder` 或 PowerShell "
+                    "`New-Item -ItemType Directory -Path folder` | `mkdir -p folder` |\n"
+                    "| 查看文件 | `type file.txt` 或 PowerShell `Get-Content file.txt` | `cat file.txt` |\n"
+                    "| 列出文件 | `dir` 或 PowerShell `Get-ChildItem` | `ls -la` |\n"
+                    "| 删除文件 | `del file.txt` 或 PowerShell `Remove-Item file.txt` | `rm file.txt` |\n"
+                    "| 删除目录 | `rmdir folder` 或 PowerShell `Remove-Item -Recurse folder` | `rm -rf folder` |\n"
+                    "| 查找文件 | `dir /s pattern` 或 PowerShell "
+                    "`Get-ChildItem -Recurse -Filter pattern` | `find . -name pattern` |\n\n"
+                    "**特别注意**：Windows 的 `mkdir` 不支持 `-p` 参数！"
+                    "在 Windows 上使用 `mkdir -p folder` 会错误创建名为 `-p` 的目录。"
+                    "如需创建嵌套目录，请使用 PowerShell `New-Item -ItemType Directory -Path \"parent/child\" -Force`，"
+                    "或使用 cmd 分步创建 `mkdir parent && mkdir parent\\child`。"
+                )
+            else:
+                runtime_content = (
+                    "# Runtime\n\n"
+                    f"- Platform: {plat}\n"
+                    f"- Python: {python_ver}\n"
+                    f"- Model: {self._model_name}\n"
+                    f"- Agent: {self._agent_name}\n"
+                    f"- Channel: {self._channel}\n"
+                    f"- Language: {self._language}\n"
+                    "\n## Command Syntax\n"
+                    f"Current platform: `{os_type}`\n\n"
+                    "**Important**: You MUST strictly use command syntax matching the current platform. "
+                    "Never use command formats from other platforms.\n\n"
+                    "Common command differences:\n\n"
+                    "| Operation | Windows (`win32`/`win64`) | Linux/macOS (`linux`/`darwin`) |\n"
+                    "|-----------|---------------------------|-------------------------------|\n"
+                    "| Create directory | `mkdir folder` or PowerShell "
+                    "`New-Item -ItemType Directory -Path folder` | `mkdir -p folder` |\n"
+                    "| View file | `type file.txt` or PowerShell `Get-Content file.txt` | `cat file.txt` |\n"
+                    "| List files | `dir` or PowerShell `Get-ChildItem` | `ls -la` |\n"
+                    "| Delete file | `del file.txt` or PowerShell `Remove-Item file.txt` | `rm file.txt` |\n"
+                    "| Delete directory | `rmdir folder` or PowerShell `Remove-Item -Recurse folder` | `rm -rf folder` |\n"
+                    "| Find file | `dir /s pattern` or PowerShell "
+                    "`Get-ChildItem -Recurse -Filter pattern` | `find . -name pattern` |\n\n"
+                    "**WARNING**: Windows `mkdir` does NOT support the `-p` flag! "
+                    "Using `mkdir -p folder` on Windows will incorrectly create a directory named `-p`. "
+                    'To create nested directories on Windows, use either PowerShell '
+                    '`New-Item -ItemType Directory -Path "parent/child" -Force` '
+                    "or cmd with step-by-step creation `mkdir parent && mkdir parent\\child`."
+                )
 
-        ctx.extra.setdefault("environment_context", []).append({
-            "content": time_content,
-            "source": "time_rail",
-        })
-
-        plat = f"{platform.system()} {platform.machine()}"
-        python_ver = platform.python_version()
-        os_type = platform.system().lower()
-
-        if self._language == "cn":
-            runtime_content = (
-                "# 运行时\n\n"
-                f"- 平台：{plat}\n"
-                f"- Python：{python_ver}\n"
-                f"- 模型：{self._model_name}\n"
-                f"- Agent：{self._agent_name}\n"
-                f"- 频道：{self._channel}\n"
-                f"- 语言：{self._language}\n"
-                "\n## 命令语法规范\n"
-                f"当前运行平台：`{os_type}`\n\n"
-                "**重要提示**：必须严格使用与当前平台匹配的命令语法，切勿使用其他平台的命令格式。\n\n"
-                "常见命令差异对照：\n\n"
-                "| 操作 | Windows (`win32`/`win64`) | Linux/macOS (`linux`/`darwin`) |\n"
-                "|------|---------------------------|-------------------------------|\n"
-                "| 创建目录 | `mkdir folder` 或 PowerShell "
-                "`New-Item -ItemType Directory -Path folder` | `mkdir -p folder` |\n"
-                "| 查看文件 | `type file.txt` 或 PowerShell `Get-Content file.txt` | `cat file.txt` |\n"
-                "| 列出文件 | `dir` 或 PowerShell `Get-ChildItem` | `ls -la` |\n"
-                "| 删除文件 | `del file.txt` 或 PowerShell `Remove-Item file.txt` | `rm file.txt` |\n"
-                "| 删除目录 | `rmdir folder` 或 PowerShell `Remove-Item -Recurse folder` | `rm -rf folder` |\n"
-                "| 查找文件 | `dir /s pattern` 或 PowerShell "
-                "`Get-ChildItem -Recurse -Filter pattern` | `find . -name pattern` |\n\n"
-                "**特别注意**：Windows 的 `mkdir` 不支持 `-p` 参数！"
-                "在 Windows 上使用 `mkdir -p folder` 会错误创建名为 `-p` 的目录。"
-                "如需创建嵌套目录，请使用 PowerShell `New-Item -ItemType Directory -Path \"parent/child\" -Force`，"
-                "或使用 cmd 分步创建 `mkdir parent && mkdir parent\\child`。"
-            )
-        else:
-            runtime_content = (
-                "# Runtime\n\n"
-                f"- Platform: {plat}\n"
-                f"- Python: {python_ver}\n"
-                f"- Model: {self._model_name}\n"
-                f"- Agent: {self._agent_name}\n"
-                f"- Channel: {self._channel}\n"
-                f"- Language: {self._language}\n"
-                "\n## Command Syntax\n"
-                f"Current platform: `{os_type}`\n\n"
-                "**Important**: You MUST strictly use command syntax matching the current platform. "
-                "Never use command formats from other platforms.\n\n"
-                "Common command differences:\n\n"
-                "| Operation | Windows (`win32`/`win64`) | Linux/macOS (`linux`/`darwin`) |\n"
-                "|-----------|---------------------------|-------------------------------|\n"
-                "| Create directory | `mkdir folder` or PowerShell "
-                "`New-Item -ItemType Directory -Path folder` | `mkdir -p folder` |\n"
-                "| View file | `type file.txt` or PowerShell `Get-Content file.txt` | `cat file.txt` |\n"
-                "| List files | `dir` or PowerShell `Get-ChildItem` | `ls -la` |\n"
-                "| Delete file | `del file.txt` or PowerShell `Remove-Item file.txt` | `rm file.txt` |\n"
-                "| Delete directory | `rmdir folder` or PowerShell `Remove-Item -Recurse folder` | `rm -rf folder` |\n"
-                "| Find file | `dir /s pattern` or PowerShell "
-                "`Get-ChildItem -Recurse -Filter pattern` | `find . -name pattern` |\n\n"
-                "**WARNING**: Windows `mkdir` does NOT support the `-p` flag! "
-                "Using `mkdir -p folder` on Windows will incorrectly create a directory named `-p`. "
-                'To create nested directories on Windows, use either PowerShell '
-                '`New-Item -ItemType Directory -Path "parent/child" -Force` '
-                "or cmd with step-by-step creation `mkdir parent && mkdir parent\\child`."
-            )
-
-        self.system_prompt_builder.add_section(PromptSection(
-            name="runtime",
-            content={"cn": runtime_content, "en": runtime_content},
-            priority=95,
-        ))
-        logger.info("[RuntimePromptRail] runtime section 已注入")
+            self.system_prompt_builder.add_section(PromptSection(
+                name="runtime",
+                content={"cn": runtime_content, "en": runtime_content},
+                priority=95,
+            ))
+            logger.info("[RuntimePromptRail] runtime section 已注入")
 
         # soul / identify 由 JiuClawContextEngineeringRail 写入 context 段（## SOUL / ## IDENTITY）
 
         # 使用多租户感知的方法获取路径
-        dirs = self._get_workspace_dirs()
-        config_dir = dirs["config"]
-        resolved_workspace = dirs["workspace"]
-        memory_dir = dirs["memory"]
-        daily_memory_dir = dirs["daily_memory"]
-        skills_dir = dirs["skills"]
-        todo_dir = dirs["todo"]
+        if "workspace" in self._sections:
+            dirs = self._get_workspace_dirs()
+            config_dir = dirs["config"]
+            resolved_workspace = dirs["workspace"]
+            memory_dir = dirs["memory"]
+            daily_memory_dir = dirs["daily_memory"]
+            skills_dir = dirs["skills"]
+            todo_dir = dirs["todo"]
 
-        #  关键诊断：检查 output_dir ContextVar 的实际值
-        from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import get_effective_request_output_dir
-        actual_output_dir = get_effective_request_output_dir()
-        logger.info(
-            "[RuntimePromptRail]  workspace paths 已获取: "
-            "resolved_workspace=%s | output_dir_from_ContextVar=%s | workspace_dir_from_request=%s",
-            resolved_workspace,
-            actual_output_dir,
-            self._workspace_dir
-        )
-
-        # ⭐ 方案B：根据 actual_output_dir 是否有值，生成不同的指导内容
-        # 直接给出路径值，不指导 Agent 调用 API（与方案A形成双重保障）
-        if actual_output_dir:
-            # 有值：直接给出 output_dir 路径
-            output_dir_guidance_cn = f"当前会话的 output_dir 路径：`{actual_output_dir}`"
-            output_dir_example_cn = f"{actual_output_dir}/filename.ext"
-            output_dir_guidance_en = f"Current session output_dir path: `{actual_output_dir}`"
-            output_dir_example_en = f"{actual_output_dir}/filename.ext"
+            #  关键诊断：检查 output_dir ContextVar 的实际值
+            from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import get_effective_request_output_dir
+            actual_output_dir = get_effective_request_output_dir()
             logger.info(
-                "[RuntimePromptRail] ⭐ output_dir 有值，直接注入路径: %s",
-                actual_output_dir
-            )
-        else:
-            # 无值：明确告知未设置，使用 resolved_workspace
-            output_dir_guidance_cn = f"output_dir 未设置，使用 resolved_workspace：`{resolved_workspace}`"
-            output_dir_example_cn = f"{resolved_workspace}/filename.ext"
-            output_dir_guidance_en = f"output_dir not set, use resolved_workspace: `{resolved_workspace}`"
-            output_dir_example_en = f"{resolved_workspace}/filename.ext"
-            logger.info(
-                "[RuntimePromptRail] ⭐ output_dir 为 None，使用 resolved_workspace 备选: %s",
-                resolved_workspace
+                "[RuntimePromptRail]  workspace paths 已获取: "
+                "resolved_workspace=%s | output_dir_from_ContextVar=%s | workspace_dir_from_request=%s",
+                resolved_workspace,
+                actual_output_dir,
+                self._workspace_dir
             )
 
-        if self._language == "cn":
-            workspace_content = f"""# 你的家
+            # ⭐ 方案B：根据 actual_output_dir 是否有值，生成不同的指导内容
+            # 直接给出路径值，不指导 Agent 调用 API（与方案A形成双重保障）
+            if actual_output_dir:
+                # 有值：直接给出 output_dir 路径
+                output_dir_guidance_cn = f"当前会话的 output_dir 路径：`{actual_output_dir}`"
+                output_dir_example_cn = f"{actual_output_dir}/filename.ext"
+                output_dir_guidance_en = f"Current session output_dir path: `{actual_output_dir}`"
+                output_dir_example_en = f"{actual_output_dir}/filename.ext"
+                logger.info(
+                    "[RuntimePromptRail] ⭐ output_dir 有值，直接注入路径: %s",
+                    actual_output_dir
+                )
+            else:
+                # 无值：明确告知未设置，使用 resolved_workspace
+                output_dir_guidance_cn = f"output_dir 未设置，使用 resolved_workspace：`{resolved_workspace}`"
+                output_dir_example_cn = f"{resolved_workspace}/filename.ext"
+                output_dir_guidance_en = f"output_dir not set, use resolved_workspace: `{resolved_workspace}`"
+                output_dir_example_en = f"{resolved_workspace}/filename.ext"
+                logger.info(
+                    "[RuntimePromptRail] ⭐ output_dir 为 None，使用 resolved_workspace 备选: %s",
+                    resolved_workspace
+                )
+
+            if self._language == "cn":
+                workspace_content = f"""# 你的家
                 以下目录信息仅供你执行任务时内部参考。
                 你的默认工作空间和相关配置位于 `.jiuwenclaw` 目录下；除非完成任务确有必要，不要主动向用户展示其中的内部目录名或实现细节。
 
@@ -372,8 +389,8 @@ class RuntimePromptRail(DeepAgentRail):
                 - 用户主动调用`write_file`、`write_text_file`这类文件生成/修改工具后
 
                 **调用方式**：使用文件的绝对路径作为参数调用 `send_file_to_user` 工具。"""
-        else:
-            workspace_content = f"""# Your Home
+            else:
+                workspace_content = f"""# Your Home
                 The following paths are for your internal task execution only.
 Your default workspace and related configuration live under the `.jiuwenclaw` directory. Do not proactively expose
                 internal directory names or implementation details to the user unless necessary for task completion.
@@ -432,22 +449,22 @@ Your default workspace and related configuration live under the `.jiuwenclaw` di
                 **How to call**: Use the absolute file path(s) as the parameter to invoke the `send_file_to_user`
                 tool."""
 
-        self.system_prompt_builder.add_section(PromptSection(
-            name="workspace",
-            content={"cn": workspace_content, "en": workspace_content},
-            priority=15,
-        ))
-        logger.info(
-            "[RuntimePromptRail]  workspace section 已注入（包含 output_dir 指导）"
-            " | resolved_workspace=%s | output_dir_API返回值=%s",
-            resolved_workspace,
-            actual_output_dir
-        )
-
-        self.system_prompt_builder.remove_section("request_system_prompt")
-        if self._request_system_prompt:
             self.system_prompt_builder.add_section(PromptSection(
-                name="request_system_prompt",
-                content={"cn": self._request_system_prompt, "en": self._request_system_prompt},
-                priority=95,
+                name="workspace",
+                content={"cn": workspace_content, "en": workspace_content},
+                priority=15,
             ))
+            logger.info(
+                "[RuntimePromptRail]  workspace section 已注入（包含 output_dir 指导）"
+                " | resolved_workspace=%s | output_dir_API返回值=%s",
+                resolved_workspace,
+                actual_output_dir
+            )
+
+            self.system_prompt_builder.remove_section("request_system_prompt")
+            if self._request_system_prompt:
+                self.system_prompt_builder.add_section(PromptSection(
+                    name="request_system_prompt",
+                    content={"cn": self._request_system_prompt, "en": self._request_system_prompt},
+                    priority=95,
+                ))
