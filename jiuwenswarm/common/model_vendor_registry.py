@@ -303,7 +303,7 @@ _PRESETS: list[VendorPreset] = [
         icon_key="zhipu",
         models_endpoint="https://open.bigmodel.cn/api/paas/v4/models",
         models_needs_key=True,
-        anthropic_base="https://open.bigmodel.cn/api/paas/v4/anthropic",
+        anthropic_base="https://open.bigmodel.cn/api/anthropic",
     ),
     VendorPreset(
         vendor_key="minimax", display_name="MiniMax", plan=PlanKind.CUSTOM_API,
@@ -336,7 +336,7 @@ _PRESETS: list[VendorPreset] = [
         icon_key="doubao",
         models_endpoint="https://ark.cn-beijing.volces.com/api/v3/models",
         models_needs_key=True,
-        anthropic_base="https://ark.cn-beijing.volces.com/api/v3/anthropic",
+        anthropic_base="https://ark.cn-beijing.volces.com/api/compatible",
     ),
     VendorPreset(
         vendor_key="baidu", display_name="百度智能云", plan=PlanKind.CUSTOM_API,
