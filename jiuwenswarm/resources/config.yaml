@@ -721,6 +721,8 @@ minio:
 channels:
   web:
     send_file_allowed: true
+  officeclaw:
+    send_file_allowed: true
   feishu:
     send_file_allowed: true
     apps:
