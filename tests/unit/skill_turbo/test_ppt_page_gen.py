@@ -141,67 +141,9 @@ def test_page_prompt_forbids_visible_page_numbers_for_all_page_types() -> None:
             user_query="生成 8 页商务经典风格 PPT",
         )
 
-        assert "可见运行页码禁令（所有页型）" in prompt
+        assert "禁止页脚出现页码" in prompt
         assert "用户要求“生成 N 页”只表示页数，不等于要求显示页码" in prompt
         assert "agenda 正文中的章节目标页码" in prompt
-
-
-@pytest.mark.unit
-def test_page_number_policy_requires_explicit_user_intent() -> None:
-    assert not ppg._resolve_page_number_policy("生成 10 页 PPT").enabled
-    assert not ppg._resolve_page_number_policy("不要显示页码，生成 10 页 PPT").enabled
-
-    policy = ppg._resolve_page_number_policy("请在右下角添加页码")
-
-    assert policy.enabled
-    assert policy.position == "bottom-right"
-    assert ppg._format_visible_page_number(policy, 2, 10) == "2 / 10"
-
-
-@pytest.mark.unit
-def test_page_prompt_defers_explicit_page_number_to_deterministic_patch() -> None:
-    prompt = ppg._build_page_prompt(
-        2,
-        style_id="business-classic",
-        style_text="---\nfont-family: Arial\n---\n",
-        outline_page="### P2: 内容页\n- **类型**: data\n- **研究需求**: ✅",
-        research_page="### P2: 内容页\n#### PPT 内容建议\n正文素材",
-        user_query="页码生成在右下角",
-        total_pages=10,
-    )
-
-    assert "用户显式页码要求（优先于默认禁令）" in prompt
-    assert "文字逐字为 `2 / 10`" in prompt
-    assert "当前页面生成阶段不得自行创建页码" in prompt
-    assert "插入统一的可编辑文本页码" in prompt
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    ("query", "position", "marker"),
-    [
-        ("在左下角添加页码，仅显示当前页数字", "bottom-left", "7"),
-        ("在右上角显示页码，格式为 Page N", "top-right", "Page 7"),
-        ("在左上角生成页码，格式为第 N 页", "top-left", "第 7 页"),
-        ("右下角显示两位补零页码，格式为 P N", "bottom-right", "P07"),
-    ],
-)
-def test_explicit_page_number_position_and_format(
-    query: str,
-    position: str,
-    marker: str,
-) -> None:
-    html = ppg._apply_visible_page_number_policy(
-        _VALID_HTML,
-        user_query=query,
-        page_number=7,
-        total_pages=12,
-        style_id="business-classic",
-    )
-
-    assert html.count('data-skill-turbo-page-number="true"') == 1
-    assert f'data-position="{position}"' in html
-    assert f">{marker}</span>" in html
 
 
 @pytest.mark.unit
@@ -403,7 +345,7 @@ def test_page_worker_removes_page_marker_without_extra_llm_call() -> None:
 
 
 @pytest.mark.unit
-def test_page_worker_inserts_consistent_page_numbers_without_extra_llm_calls() -> None:
+def test_page_worker_does_not_insert_page_numbers_even_when_user_requests() -> None:
     llm_calls: list[str] = []
     written_contents: list[str] = []
     node = _configure_worker(
@@ -426,13 +368,8 @@ def test_page_worker_inserts_consistent_page_numbers_without_extra_llm_calls() -
     assert sorted(llm_calls) == ["p8_1_page_1", "p8_1_page_2", "p8_1_page_3"]
     assert result["missing_pages"] == []
     assert len(written_contents) == 3
-    combined_html = "\n".join(written_contents)
     assert all(
-        combined_html.count(f">{marker}</span>") == 1
-        for marker in ("1 / 3", "2 / 3", "3 / 3")
-    )
-    assert all(
-        content.count('data-skill-turbo-page-number="true"') == 1
+        "data-skill-turbo-page-number" not in content
         for content in written_contents
     )
 
