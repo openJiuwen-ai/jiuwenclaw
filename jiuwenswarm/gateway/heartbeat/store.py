@@ -754,9 +754,12 @@ class HeartbeatJobStore:
                 ).timestamp()
 
         # 过去的 once 已无可执行时间，直接进入 expired；其余 enabled job 必须有 next。
-        if enabled and schedule.type == SCHEDULE_ONCE and (
-            resolved_next_run_at is None or float(resolved_next_run_at) <= ts
-        ):
+        once_expired = False
+        if schedule.type == SCHEDULE_ONCE:
+            once_expired = (
+                resolved_next_run_at is None or float(resolved_next_run_at) <= ts
+            )
+        if enabled and once_expired:
             enabled = False
             status = STATUS_EXPIRED
             resolved_next_run_at = None
@@ -855,6 +858,7 @@ class HeartbeatJobStore:
         if not job_id:
             raise ValueError("id is required")
         patch = dict(patch or {})
+
         def _apply(existing: HeartbeatJob) -> HeartbeatJob:
             updated = existing
             if "name" in patch:
@@ -1251,13 +1255,13 @@ class HeartbeatJobStore:
         session_id = str(session_id or "").strip()
         if not session_id:
             return 0
-        return sum(
-            1
-            for j in await self.list_jobs()
-            if j.session_id == session_id
-            and j.status in {STATUS_SCHEDULED, STATUS_RUNNING}
-            and j.enabled
-        )
+        active_count = 0
+        for job in await self.list_jobs():
+            if job.session_id != session_id or not job.enabled:
+                continue
+            if job.status in {STATUS_SCHEDULED, STATUS_RUNNING}:
+                active_count += 1
+        return active_count
 
     async def count_active_jobs_global(self) -> int:
         return sum(

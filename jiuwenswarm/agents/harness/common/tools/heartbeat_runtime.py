@@ -174,7 +174,16 @@ class HeartbeatRuntimeBridge:
             tool(
                 "heartbeat_list_jobs",
                 "List heartbeat follow-up jobs for the current session.",
-                {"type": "object", "properties": {"scope": {"type": "string", "enum": ["current", "all_visible"], "default": "current"}}},
+                {
+                    "type": "object",
+                    "properties": {
+                        "scope": {
+                            "type": "string",
+                            "enum": ["current", "all_visible"],
+                            "default": "current",
+                        }
+                    },
+                },
                 list_jobs,
             ),
             tool("heartbeat_get_job", "Get a heartbeat job in the current session.", job_id_schema, get_job),
@@ -215,32 +224,67 @@ class HeartbeatRuntimeBridge:
             tool(
                 "heartbeat_update_job",
                 "Update a heartbeat job in the current session.",
-                {"type": "object", "properties": {"job_id": {"type": "string"}, "patch": {"type": "object"}}, "required": ["job_id", "patch"]},
+                {
+                    "type": "object",
+                    "properties": {
+                        "job_id": {"type": "string"},
+                        "patch": {"type": "object"},
+                    },
+                    "required": ["job_id", "patch"],
+                },
                 update_job,
             ),
             tool("heartbeat_delete_job", "Delete a heartbeat job in the current session.", job_id_schema, delete_job),
             tool(
                 "heartbeat_toggle_job",
                 "Enable or disable a heartbeat job.",
-                {"type": "object", "properties": {"job_id": {"type": "string"}, "enabled": {"type": "boolean"}}, "required": ["job_id", "enabled"]},
+                {
+                    "type": "object",
+                    "properties": {
+                        "job_id": {"type": "string"},
+                        "enabled": {"type": "boolean"},
+                    },
+                    "required": ["job_id", "enabled"],
+                },
                 toggle_job,
             ),
             tool(
                 "heartbeat_preview_job",
                 "Preview future heartbeat trigger times.",
-                {"type": "object", "properties": {"job_id": {"type": "string"}, "count": {"type": "integer", "default": 5}}, "required": ["job_id"]},
+                {
+                    "type": "object",
+                    "properties": {
+                        "job_id": {"type": "string"},
+                        "count": {"type": "integer", "default": 5},
+                    },
+                    "required": ["job_id"],
+                },
                 preview_job,
             ),
             tool(
                 "heartbeat_run_now",
                 "Run a heartbeat job now; reschedule=false preserves its schedule.",
-                {"type": "object", "properties": {"job_id": {"type": "string"}, "reschedule": {"type": "boolean", "default": False}}, "required": ["job_id"]},
+                {
+                    "type": "object",
+                    "properties": {
+                        "job_id": {"type": "string"},
+                        "reschedule": {"type": "boolean", "default": False},
+                    },
+                    "required": ["job_id"],
+                },
                 run_now,
             ),
             tool(
                 "heartbeat_cancel_run",
                 "Cancel only the current heartbeat run; optionally pause future scheduling.",
-                {"type": "object", "properties": {"job_id": {"type": "string"}, "pause_schedule": {"type": "boolean", "default": False}}, "required": ["job_id"]},
+                {
+                    "type": "object",
+                    "properties": {
+                        "job_id": {"type": "string"},
+                        "pause_schedule": {"type": "boolean", "default": False},
+                    },
+                    "required": ["job_id"],
+                },
                 cancel_run,
             ),
         ]

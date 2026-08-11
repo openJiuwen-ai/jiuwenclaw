@@ -7,7 +7,7 @@
   - ``_handle_due_job``:session 校验 + 并发策略 + dispatch。
   - ``_dispatch_job``:构造 ``CHAT_SEND`` 投递回原 session,带 automation metadata。
   - ``_finish_run``:更新 last_run_at/run_count/next_run_at;达成停止条件则 completed。
-  - ``_compute_next_run``:interval/cron/once 下一次触发。
+  - ``compute_next_run``:interval/cron/once 下一次触发。
   - ``_apply_concurrency_policy``:skip/queue/replace。
   - ``_handle_missing_session``:session 删除/不可恢复按 session_deleted_policy 处理。
   - ``reload``/``_check_store_changed``:外部编辑 heartbeat_jobs.json 后刷新。
@@ -236,19 +236,18 @@ class HeartbeatSchedulerService:
         max_session = int(self._limits.get("max_active_jobs_per_session", 5))
         max_global = int(self._limits.get("max_active_jobs_global", 100))
         current_time = self._now_fn() if now is None else float(now)
-        candidates = sorted(
-            (
-                job
-                for job in jobs
-                if job.enabled and job.status in {STATUS_SCHEDULED, STATUS_RUNNING}
-                and (
-                    job.status == STATUS_RUNNING
-                    or (
-                        job.next_run_at is not None
-                        and float(job.next_run_at) <= current_time
-                    )
-                )
-            ),
+        candidates: list[HeartbeatJob] = []
+        for job in jobs:
+            if not job.enabled:
+                continue
+            if job.status not in {STATUS_SCHEDULED, STATUS_RUNNING}:
+                continue
+            if job.status == STATUS_RUNNING:
+                candidates.append(job)
+                continue
+            if job.next_run_at is not None and float(job.next_run_at) <= current_time:
+                candidates.append(job)
+        candidates.sort(
             key=lambda job: (
                 0 if job.status == STATUS_RUNNING else 1,
                 -int(job.run_state.skipped_count),
@@ -305,7 +304,7 @@ class HeartbeatSchedulerService:
                 job.id,
                 now=now,
                 reason="resource_admission_limit_exceeded",
-                next_run_at=self._compute_next_run(job, now),
+                next_run_at=self.compute_next_run(job, now),
             )
             return
         await self._handle_due_job(job, now)
@@ -335,7 +334,7 @@ class HeartbeatSchedulerService:
                 job.id,
                 now=now,
                 reason="session_busy_timeout",
-                next_run_at=self._compute_next_run(job, now),
+                next_run_at=self.compute_next_run(job, now),
             )
             return
         run_id = self._new_run_id(job, now)
@@ -344,13 +343,13 @@ class HeartbeatSchedulerService:
         )
         if decision == "skip":
             # 跳过本轮,基于 now 重算下次触发(不补跑历史积压)
-            await self._store.reschedule(job.id, self._compute_next_run(job, now))
+            await self._store.reschedule(job.id, self.compute_next_run(job, now))
             return
         if decision in {"queued", "coalesced", "replace_pending"}:
-            await self._store.reschedule(job.id, self._compute_next_run(job, now))
+            await self._store.reschedule(job.id, self.compute_next_run(job, now))
             return
         if decision == "cancel_failed":
-            await self._store.reschedule(job.id, self._compute_next_run(job, now))
+            await self._store.reschedule(job.id, self.compute_next_run(job, now))
             return
 
     async def _handle_missing_session(self, job: HeartbeatJob, now: float) -> None:
@@ -382,7 +381,8 @@ class HeartbeatSchedulerService:
 
     # ---- 投递回原 session ----
 
-    def _new_run_id(self, job: HeartbeatJob, now: float) -> str:
+    @staticmethod
+    def _new_run_id(job: HeartbeatJob, now: float) -> str:
         return f"{job.id}_run_{int(now)}_{secrets.token_hex(3)}"
 
     def _build_message(self, job: HeartbeatJob, run_id: str, now: float) -> Any:
@@ -480,7 +480,7 @@ class HeartbeatSchedulerService:
             trigger=trigger,
             reschedule=reschedule,
             next_run_at_after_claim=(
-                self._compute_next_run(job, now) if trigger == "scheduler" else None
+                self.compute_next_run(job, now) if trigger == "scheduler" else None
             ),
         )
         if decision == "replace" and replaced_run_id:
@@ -530,7 +530,7 @@ class HeartbeatSchedulerService:
                 trigger=trigger,
                 reschedule=reschedule,
                 next_run_at_after_claim=(
-                    self._compute_next_run(job, now)
+                    self.compute_next_run(job, now)
                     if trigger == "scheduler"
                     else None
                 ),
@@ -548,7 +548,7 @@ class HeartbeatSchedulerService:
 
     # ---- 下一次触发计算 ----
 
-    def _compute_next_run(self, job: HeartbeatJob, base_ts: float) -> float | None:
+    def compute_next_run(self, job: HeartbeatJob, base_ts: float) -> float | None:
         """interval/cron/once 下一次触发;基于 now 重算,不补跑历史。"""
         stype = job.schedule.type
         if stype == SCHEDULE_ONCE:
@@ -561,7 +561,8 @@ class HeartbeatSchedulerService:
             return self._next_cron_ts(job, base_ts)
         raise ValueError(f"unsupported schedule type: {stype}")
 
-    def _next_cron_ts(self, job: HeartbeatJob, base_ts: float) -> float | None:
+    @staticmethod
+    def _next_cron_ts(job: HeartbeatJob, base_ts: float) -> float | None:
         """复用 Cron 的 _cron_next_push_dt 计算 cron 下一次触发。"""
         from jiuwenswarm.gateway.cron.scheduler import _cron_next_push_dt
 
@@ -619,7 +620,7 @@ class HeartbeatSchedulerService:
         if job.run_state.current_trigger == "scheduler":
             next_run_at = job.next_run_at
         elif job.run_state.current_reschedule:
-            next_run_at = self._compute_next_run(job, now)
+            next_run_at = self.compute_next_run(job, now)
         else:
             next_run_at = job.next_run_at
         matched, finished = await self._store.finish_run(

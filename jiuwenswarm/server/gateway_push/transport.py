@@ -27,7 +27,8 @@ class GatewayPushTransport(Protocol):
 class WebSocketGatewayPushTransport:
     """通过进程内 AgentWebSocketServer 单例推送（分离部署 + WebSocket 默认路径）。"""
 
-    def is_available(self) -> bool:
+    @staticmethod
+    def is_available() -> bool:
         from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
 
         return AgentWebSocketServer.get_instance().has_gateway_connection

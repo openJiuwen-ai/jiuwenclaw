@@ -36,7 +36,8 @@ class SessionSummary:
 class _SchedulerCallback(Protocol):
     """scheduler 需要实现的回调接口(避免循环导入,用 Protocol)。"""
 
-    async def on_session_deleted(self, session_id: str) -> None: ...
+    async def on_session_deleted(self, session_id: str) -> None:
+        ...
 
 
 class HeartbeatSessionResolver:
@@ -61,13 +62,11 @@ class HeartbeatSessionResolver:
         直接读磁盘以区分目录缺失、写入中和损坏，不经过会吞掉异常的元数据缓存。
         """
         sid = str(session_id or "").strip()
-        if (
-            not sid
-            or sid in {".", ".."}
-            or "/" in sid
-            or "\\" in sid
-            or Path(sid).name != sid
-        ):
+        if not sid or sid in {".", ".."}:
+            raise ValueError(f"invalid session_id: {session_id!r}")
+        if "/" in sid or "\\" in sid:
+            raise ValueError(f"invalid session_id: {session_id!r}")
+        if Path(sid).name != sid:
             raise ValueError(f"invalid session_id: {session_id!r}")
         try:
             from jiuwenswarm.common.utils import get_agent_sessions_dir

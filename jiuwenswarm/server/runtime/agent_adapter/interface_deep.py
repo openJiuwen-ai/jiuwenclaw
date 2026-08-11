@@ -690,6 +690,7 @@ _CRON_TOOL_NAMES = frozenset(
     }
 )
 
+
 def _assemble_run_answer(deltas: list[str], final: str) -> str:
     """Join a streaming run's assistant text into its final answer.
 

@@ -1753,7 +1753,9 @@ async def _run(
             store=hb_job_store, scheduler=heartbeat_scheduler_service
         )
         message_handler.set_heartbeat_controller(heartbeat_controller)
-        message_handler._heartbeat_scheduler_service = heartbeat_scheduler_service
+        message_handler.set_heartbeat_scheduler_service(
+            heartbeat_scheduler_service
+        )
     else:
         logger.warning(
             "[App] Heartbeat jobs unavailable: this deployment does not "

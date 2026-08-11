@@ -440,7 +440,8 @@ class HeartbeatJob:
         )
 
         enabled = _persisted_bool(data, "enabled", default=True)
-        assert isinstance(enabled, bool)
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled must be boolean")
         status = str(data.get("status") or STATUS_SCHEDULED).strip()
         if status not in HEARTBEAT_STATUSES:
             raise ValueError(f"invalid status {status!r}")
@@ -476,7 +477,8 @@ class HeartbeatJob:
         delete_after_run = _persisted_bool(
             data, "delete_after_run", default=False
         )
-        assert isinstance(delete_after_run, bool)
+        if not isinstance(delete_after_run, bool):
+            raise ValueError("delete_after_run must be boolean")
 
         created_at = data.get("created_at", None)
         updated_at = data.get("updated_at", None)

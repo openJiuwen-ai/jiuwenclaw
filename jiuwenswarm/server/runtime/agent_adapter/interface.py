@@ -2991,6 +2991,15 @@ class JiuWenSwarm:
         if finalized_assistant_message and (
                 finalized_assistant_message != assistant_message or suppress_a2ui_stream
         ):
+            history_metadata: dict[str, Any] = {}
+            for key in (
+                "source",
+                "proactive_type",
+                "proactive_target",
+                "automation",
+            ):
+                if key in request.params:
+                    history_metadata[key] = request.params[key]
             append_history_record(
                 session_id=session_id,
                 request_id=rid,
@@ -3000,15 +3009,7 @@ class JiuWenSwarm:
                 content=finalized_assistant_message,
                 timestamp=time.time(),
                 extra=_with_heartbeat_history_metadata(
-                    _attach_reasoning_content({
-                        k: v for k, v in request.params.items()
-                        if k in (
-                            "source",
-                            "proactive_type",
-                            "proactive_target",
-                            "automation",
-                        )
-                    }),
+                    _attach_reasoning_content(history_metadata),
                     request.params,
                 ),
                 mode=request.params.get("mode", "unknown"),

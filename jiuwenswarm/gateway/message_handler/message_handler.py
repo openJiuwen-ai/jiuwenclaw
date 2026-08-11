@@ -3059,6 +3059,10 @@ class MessageHandler(ABC):
     def get_heartbeat_controller(self) -> Any:
         return self._heartbeat_controller
 
+    def set_heartbeat_scheduler_service(self, scheduler: Any) -> None:
+        """Inject the session-bound Heartbeat scheduler."""
+        self._heartbeat_scheduler_service = scheduler
+
     def get_heartbeat_scheduler_service(self) -> Any:
         return self._heartbeat_scheduler_service
 

@@ -2049,14 +2049,17 @@ class AgentWebSocketServer:
         """Return live stream entries covered by one cancel request."""
         target = str(target_request_id or "").strip()
         request_ids = getattr(self, "_stream_request_ids", {})
-        return [
-            (stream_task, stop_event)
-            for stream_task, stop_event in list(
-                self._session_stream_tasks.get(session_id, {}).items()
-            )
-            if not stream_task.done()
-            and (not target or request_ids.get(stream_task) == target)
-        ]
+        entries: list[tuple[asyncio.Task, asyncio.Event]] = []
+        stream_entries = list(
+            self._session_stream_tasks.get(session_id, {}).items()
+        )
+        for stream_task, stop_event in stream_entries:
+            if stream_task.done():
+                continue
+            if target and request_ids.get(stream_task) != target:
+                continue
+            entries.append((stream_task, stop_event))
+        return entries
 
     @staticmethod
     def _resolve_code_language() -> str:

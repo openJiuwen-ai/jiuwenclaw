@@ -3789,7 +3789,13 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             return
         pause_schedule = params.get("pause_schedule", False)
         if not isinstance(pause_schedule, bool):
-            await channel.send_response(ws, req_id, ok=False, error="pause_schedule must be boolean", code="BAD_REQUEST")
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="pause_schedule must be boolean",
+                code="BAD_REQUEST",
+            )
             return
         try:
             result = await hc.cancel_run(

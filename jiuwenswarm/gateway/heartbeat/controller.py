@@ -17,6 +17,8 @@ Agent Tool 与 Web/RPC 的分工:
 from __future__ import annotations
 
 import logging
+import time
+from dataclasses import replace
 from typing import Any, ClassVar, List
 
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
@@ -337,10 +339,8 @@ class HeartbeatController:
             ),
         )
         # 算 next_run_at 并回填
-        import time as _time
-
-        now = _time.time()
-        next_run_at = self._scheduler._compute_next_run(job, now)
+        now = time.time()
+        next_run_at = self._scheduler.compute_next_run(job, now)
         if next_run_at is not None and job.enabled:
             job = await self._store.update_job(job.id, {"next_run_at": next_run_at})
         await self._scheduler.reload()
@@ -395,7 +395,7 @@ class HeartbeatController:
             )
 
         # 任何影响调度的更新都必须基于当前时间重算，禁止沿用旧 schedule 的 due time。
-        now = __import__("time").time()
+        now = time.time()
         target_enabled = patch.get("enabled", existing.enabled)
         if target_enabled and not existing.enabled:
             activation_schedule = HeartbeatSchedule.from_dict(
@@ -407,17 +407,19 @@ class HeartbeatController:
                 schedule=activation_schedule,
                 exclude_job_id=existing.id,
             )
-        if target_enabled and (
-            "schedule" in patch
-            or "timezone" in patch
-            or existing.status in {"completed", "expired", "disabled"}
-        ):
+        schedule_changed = "schedule" in patch or "timezone" in patch
+        terminal_job_reactivated = existing.status in {
+            "completed",
+            "expired",
+            "disabled",
+        }
+        if target_enabled and (schedule_changed or terminal_job_reactivated):
             merged_sched = HeartbeatSchedule.from_dict(
                 patch.get("schedule", existing.schedule.to_dict()),
                 default_timezone=str(patch.get("timezone") or existing.timezone),
             )
-            next_run_at = self._scheduler._compute_next_run(
-                __import__("dataclasses").replace(existing, schedule=merged_sched), now
+            next_run_at = self._scheduler.compute_next_run(
+                replace(existing, schedule=merged_sched), now
             )
             if next_run_at is None:
                 raise ValueError("schedule has no future run; update run_at before enabling")
@@ -859,7 +861,10 @@ _CREATE_JOB_SCHEMA: dict = {
         "or heartbeat_cancel_run(pause_schedule=true), not merely state that it has stopped."
     ),
     "properties": {
-        "name": {"type": "string", "description": "Heartbeat job name describing what to follow up in current session."},
+        "name": {
+            "type": "string",
+            "description": "Heartbeat job name describing what to follow up in current session.",
+        },
         "prompt": {
             "type": "string",
             "description": (

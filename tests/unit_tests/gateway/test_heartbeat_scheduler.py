@@ -105,7 +105,7 @@ async def test_start_rejects_corrupt_store_without_false_running_state(
 
 
 # ---------------------------------------------------------------------------
-# _compute_next_run
+# compute_next_run
 # ---------------------------------------------------------------------------
 
 
@@ -118,7 +118,7 @@ def test_compute_next_run_interval_based_on_base_ts(setup) -> None:
             id="x", name="n", enabled=True, channel_id="web", session_id="s1", prompt="p",
             schedule=HeartbeatSchedule.from_dict({"type": "interval", "interval_seconds": 300}),
         )
-        n = sched._compute_next_run(job, 1000.0)
+        n = sched.compute_next_run(job, 1000.0)
         assert n == 1000.0 + 300
 
     asyncio.run(run())
@@ -130,7 +130,7 @@ def test_compute_next_run_once_returns_future_run_at(setup) -> None:
         id="x", name="n", enabled=True, channel_id="web", session_id="s1", prompt="p",
         schedule=HeartbeatSchedule.from_dict({"type": "once", "run_at": 9999.0}),
     )
-    assert sched._compute_next_run(job, 1000.0) == 9999.0
+    assert sched.compute_next_run(job, 1000.0) == 9999.0
 
 
 def test_compute_next_run_cron_uses_cron_helper(setup) -> None:
@@ -142,7 +142,7 @@ def test_compute_next_run_cron_uses_cron_helper(setup) -> None:
     import time
 
     base = time.time()
-    nxt = sched._compute_next_run(job, base)
+    nxt = sched.compute_next_run(job, base)
     assert nxt is not None
     assert nxt > base  # 下一次触发在 now 之后
 
@@ -156,7 +156,7 @@ def test_compute_next_run_unsupported_type_raises(setup) -> None:
     # 篡改 type 触发 ValueError
     job.schedule.type = "bogus"
     with pytest.raises(ValueError, match="unsupported schedule type"):
-        sched._compute_next_run(job, 1000.0)
+        sched.compute_next_run(job, 1000.0)
 
 
 # ---------------------------------------------------------------------------
