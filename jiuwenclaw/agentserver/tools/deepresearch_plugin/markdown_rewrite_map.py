@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import re
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Literal
 from urllib.parse import unquote
 
 from markdown_it import MarkdownIt
+from markdown_it.rules_inline.state_inline import Delimiter, StateInline
 from markdown_it.token import Token
 
 
@@ -315,6 +317,58 @@ def _matched_unmatched_construct(raw: str, index: int) -> str | None:
 
 def _looks_like_unmatched_construct(raw: str, index: int) -> bool:
     return _matched_unmatched_construct(raw, index) is not None
+
+
+def _is_unicode_punctuation_or_symbol(character: str) -> bool:
+    return bool(character) and unicodedata.category(character)[0] in {"P", "S"}
+
+
+def _is_cjk_character(character: str) -> bool:
+    return (
+        bool(character)
+        and unicodedata.east_asian_width(character) in {"F", "H", "W"}
+        and not _is_unicode_punctuation_or_symbol(character)
+    )
+
+
+def _tokenize_cjk_friendly_emphasis(state: StateInline, silent: bool) -> bool:
+    """Tokenize emphasis with the CJK boundaries used by the web preview."""
+    start = state.pos
+    marker = state.src[start]
+    if silent or marker not in {"_", "*"}:
+        return False
+
+    scanned = state.scanDelims(start, marker == "*")
+    before = state.src[start - 1] if start > 0 else ""
+    after_index = start + scanned.length
+    after = state.src[after_index] if after_index < state.posMax else ""
+    can_open = scanned.can_open
+    can_close = scanned.can_close
+    if marker == "*":
+        can_open = can_open or (
+            _is_cjk_character(before)
+            and _is_unicode_punctuation_or_symbol(after)
+        )
+        can_close = can_close or (
+            _is_unicode_punctuation_or_symbol(before)
+            and _is_cjk_character(after)
+        )
+
+    for _ in range(scanned.length):
+        token = state.push("text", "", 0)
+        token.content = marker
+        state.delimiters.append(
+            Delimiter(
+                marker=ord(marker),
+                length=scanned.length,
+                token=len(state.tokens) - 1,
+                end=-1,
+                open=can_open,
+                close=can_close,
+            )
+        )
+    state.pos += scanned.length
+    return True
 
 
 def _token_identity(token: Token) -> tuple[object, ...]:
@@ -726,6 +780,7 @@ def build_rewrite_map(markdown: str) -> MarkdownRewriteMap:
     parser = MarkdownIt("commonmark", {"html": True}).enable(
         ["table", "strikethrough"]
     )
+    parser.inline.ruler.at("emphasis", _tokenize_cjk_friendly_emphasis)
     tokens = parser.parse(markdown)
     source_lines = _SourceLines(markdown)
     units: list[RewriteUnit] = []
