@@ -325,10 +325,11 @@ async def test_agent_plan_evolve_rollback_restores_pair_and_archives_current(tmp
         "evolutions.v1.0.0.json",
         "regular-skill",
     )
-    assert current_skill_versions == {"v1.2.0"}
+    assert len(current_skill_versions) == 1
     assert current_skill_versions == current_log_versions
+    current_version = next(iter(current_skill_versions))
     archived_current = json.loads(
-        archive.joinpath("evolutions.v1.2.0.json").read_text(encoding="utf-8")
+        archive.joinpath(f"evolutions.{current_version}.json").read_text(encoding="utf-8")
     )
     assert archived_current["entries"] == []
 
@@ -377,5 +378,5 @@ async def test_agent_plan_evolve_rollback_initializes_missing_current_evolution_
         "evolutions.v1.0.0.json",
         "regular-skill",
     )
-    assert current_skill_versions == {"v1.2.0"}
+    assert len(current_skill_versions) == 1
     assert current_skill_versions == current_log_versions

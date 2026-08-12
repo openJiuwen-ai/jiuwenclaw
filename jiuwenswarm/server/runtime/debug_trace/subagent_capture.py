@@ -65,8 +65,8 @@ def _ensure_observability_rail(subagent: Any) -> None:
         _logger.debug("[subagent-capture] attach observability rail failed: %s", exc)
 
     # Newer openjiuwen guards ObservabilityRail.before_invoke with
-    # `if not team_name: return` BEFORE the get_team_span() our _CURRENT_ROOT_SPAN
-    # fallback patches, so a team_name-less harness subagent gets no invoke span.
+    # `if not team_name: return` BEFORE the session-registry get_team_span()
+    # fallback runs, so a team_name-less harness subagent gets no invoke span.
     # Mirror the synthetic "single-agent" team from open_agent_run_span so the
     # guard passes. team_name is a plain attr on DeepAgent (not a property);
     # skipped when the subagent already has one (real team member).

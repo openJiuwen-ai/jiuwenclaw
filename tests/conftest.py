@@ -5,10 +5,23 @@
 import os
 import sys
 import tempfile
+import warnings
+from importlib import import_module
 from pathlib import Path
 from typing import Generator
 
 import pytest
+
+
+def pytest_configure() -> None:
+    """Preload pysbd while suppressing only its known Python 3.12 escapes."""
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r"invalid escape sequence '\\[.s]'",
+            category=SyntaxWarning,
+        )
+        import_module("pysbd")
 
 
 @pytest.fixture

@@ -298,10 +298,13 @@ class MessageHandler(ABC):
         self._get_config_raw = get_config_raw
         self._update_channel_in_config = update_channel_in_config
 
-        from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
-
-        if isinstance(self.agent_client, WebSocketAgentServerClient):
-            self.agent_client.set_server_push_handler(self._handle_agent_server_push)
+        set_server_push_handler = getattr(
+            self.agent_client,
+            "set_server_push_handler",
+            None,
+        )
+        if callable(set_server_push_handler):
+            set_server_push_handler(self._handle_agent_server_push)
 
     def reload_session_map(self) -> None:
         """Reload Redis-backed SessionMap cache after leader switchover (active-standby)."""
@@ -3708,6 +3711,14 @@ class MessageHandler(ABC):
 
     async def _process_non_stream_request(self, msg: "Message", env: "E2AEnvelope") -> Any:
         """执行单次非流式 Agent 请求并将结果写入 robot_messages（供串行或后台任务复用）。"""
+        from jiuwenswarm.telemetry.gateway import (
+            close_gateway_request,
+            open_gateway_request,
+        )
+
+        request_handle = open_gateway_request(env)
+        request_error: BaseException | None = None
+        cancelled = False
         try:
             resp = await self._send_non_stream_agent_request(env)
             out = self._response_to_message(
@@ -3733,7 +3744,11 @@ class MessageHandler(ABC):
                     str(answer_request_id or ""),
                 )
             return resp
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
         except Exception as e:
+            request_error = e
             logger.exception("AgentServer send_request failed for %s: %s", msg.id, e)
             err_msg = self._build_error_out_message(msg, e)
             await self.publish_robot_messages(err_msg)
@@ -3743,6 +3758,15 @@ class MessageHandler(ABC):
                 msg.channel_id,
             )
             return None
+        except BaseException as error:
+            request_error = error
+            raise
+        finally:
+            close_gateway_request(
+                request_handle,
+                error=request_error,
+                cancelled=cancelled,
+            )
 
     # ---------- 入队 -> AgentServer -> 出队 转发循环 ----------
 
@@ -4289,11 +4313,54 @@ class MessageHandler(ABC):
         *,
         emit_processing_status: bool = True,
     ) -> None:
-        """处理流式请求，逐个 chunk 写入 robot_messages.
+        """处理流式请求，并保证 Gateway 遥测覆盖完整清理阶段。"""
+        from jiuwenswarm.telemetry.gateway import (
+            close_gateway_request,
+            open_gateway_request,
+        )
 
-        这个方法被包装为 Task，在后台运行，可以被随时取消。
-        遥测可通过替换类上的 ``process_stream`` 进行打点。
-        """
+        request_handle = open_gateway_request(env)
+        telemetry_outcome: dict[str, Any] = {
+            "error": None,
+            "cancelled": False,
+        }
+        try:
+            await self._process_stream_impl(
+                env,
+                session_id,
+                request_metadata,
+                emit_processing_status=emit_processing_status,
+                telemetry_outcome=telemetry_outcome,
+            )
+        except asyncio.CancelledError:
+            telemetry_outcome["cancelled"] = True
+            raise
+        except BaseException as error:
+            telemetry_outcome["error"] = error
+            raise
+        finally:
+            request_error = telemetry_outcome["error"]
+            close_gateway_request(
+                request_handle,
+                error=(
+                    request_error
+                    if isinstance(request_error, BaseException)
+                    else None
+                ),
+                cancelled=bool(telemetry_outcome["cancelled"]),
+            )
+
+    async def _process_stream_impl(
+        self,
+        env: "E2AEnvelope",
+        session_id: str | None,
+        request_metadata: dict[str, Any] | None,
+        *,
+        emit_processing_status: bool,
+        telemetry_outcome: dict[str, Any],
+    ) -> None:
+        """逐个发布流式 chunk，并共享被内部消费的终止状态。"""
+        request_error: BaseException | None = None
         rid = env.request_id or ""
         channel_id = env.channel or ""
         stream_app_id = self._stream_app_ids.get(rid, "")  # 提前捕获，_pop_stream_tracking 后会清除
@@ -4354,11 +4421,14 @@ class MessageHandler(ABC):
             )
         except asyncio.CancelledError:
             cancelled = True
+            telemetry_outcome["cancelled"] = True
             logger.info(
                 "[MessageHandler] Stream 被取消: request_id=%s total_chunks=%s",
                 rid, _proc_count,
             )
         except RuntimeError as exc:
+            request_error = exc
+            telemetry_outcome["error"] = exc
             if "AgentServer WebSocket connection closed" not in str(exc):
                 raise
             await self._publish_stream_connection_error(
@@ -4369,6 +4439,8 @@ class MessageHandler(ABC):
                 str(exc),
             )
         except Exception as exc:
+            request_error = exc
+            telemetry_outcome["error"] = exc
             logger.exception(
                 "[MessageHandler] Stream 异常: request_id=%s total_chunks=%s error=%s",
                 rid, _proc_count, exc,
@@ -4378,6 +4450,8 @@ class MessageHandler(ABC):
             )
             raise  # 重新抛出，让调用者知道任务被取消
         finally:
+            telemetry_outcome["error"] = request_error
+            telemetry_outcome["cancelled"] = cancelled
             if (
                 not cancelled
                 and self._is_interrupt_evolution_approval_answer_payload(env.params)

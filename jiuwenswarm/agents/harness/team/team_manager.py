@@ -106,6 +106,13 @@ def _safe_payload_preview(payload: Any) -> str:
 # detect config toggles (enabled → disabled or vice-versa)
 # and init / shutdown accordingly on each team request.
 _observability_active: bool = False
+_runtime_managed_observability: bool = False
+
+
+def _get_unified_runtime() -> Any:
+    from jiuwenswarm.telemetry import get_telemetry_runtime
+
+    return get_telemetry_runtime()
 
 
 def sync_team_observability() -> None:
@@ -119,7 +126,20 @@ def sync_team_observability() -> None:
     * enabled → disabled : ``shutdown_observability()``
     * unchanged          : no-op
     """
-    global _observability_active
+    global _observability_active, _runtime_managed_observability
+    try:
+        unified_active = bool(_get_unified_runtime().is_unified_active())
+    except Exception as exc:
+        logger.debug("[TeamObservability] unified runtime lookup failed: %s", exc)
+        unified_active = False
+    if unified_active:
+        _observability_active = True
+        _runtime_managed_observability = True
+        return
+    if _runtime_managed_observability:
+        _observability_active = False
+        _runtime_managed_observability = False
+
     cfg = get_config().get("team_observability", {}) or {}
     want_enabled = bool(cfg.get("enabled", False))
 
@@ -168,8 +188,12 @@ def sync_team_observability() -> None:
 
 def shutdown_team_observability() -> None:
     """Shutdown team observability (called on disable or process exit)."""
-    global _observability_active
+    global _observability_active, _runtime_managed_observability
     if not _observability_active:
+        return
+    if _runtime_managed_observability:
+        _observability_active = False
+        _runtime_managed_observability = False
         return
     try:
         from openjiuwen.agent_teams.observability import shutdown_observability

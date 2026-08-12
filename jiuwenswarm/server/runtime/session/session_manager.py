@@ -15,6 +15,8 @@ import contextvars
 import logging
 from typing import Any, Awaitable, Callable
 
+from jiuwenswarm.telemetry.session import SessionTelemetry, get_session_telemetry
+
 logger = logging.getLogger(__name__)
 
 
@@ -24,13 +26,17 @@ class SessionManager:
     管理多 session 并发执行，同 session 内任务按先进后出顺序执行.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, telemetry: SessionTelemetry | None = None) -> None:
         self._session_tasks: dict[str, asyncio.Task] = {}
         self._session_priorities: dict[str, int] = {}
         self._session_queues: dict[str, asyncio.PriorityQueue] = {}
         self._session_processors: dict[str, asyncio.Task] = {}
         self._task_result_futures: dict[asyncio.Task, asyncio.Future[Any]] = {}
         self._closing_tasks: dict[str, set[asyncio.Task]] = {}
+        self._telemetry_sessions: set[str] = set()
+        self._session_telemetry = (
+            telemetry if telemetry is not None else get_session_telemetry()
+        )
 
     @staticmethod
     def get_session_id(session_id: str | None) -> str:
@@ -69,6 +75,7 @@ class SessionManager:
                 log_msg_prefix,
                 session_id,
             )
+            self._mark_task_cancelled(session_id, task, reason="user_cancel")
             task.cancel()
             terminated = False
             if wait_timeout is None:
@@ -146,6 +153,7 @@ class SessionManager:
         wait_timeout: float | None = 5.0,
     ) -> bool:
         """停止并释放指定 session 当前这一代任务处理器."""
+        self._telemetry_sessions.discard(session_id)
         closing_tasks = set(self._closing_tasks.get(session_id, ()))
         had_runtime = bool(closing_tasks) or (
             session_id in self._session_tasks
@@ -157,6 +165,9 @@ class SessionManager:
         queue = self._session_queues.pop(session_id, None)
         self._session_priorities.pop(session_id, None)
         task = self._session_tasks.pop(session_id, None)
+
+        if task is not None and not task.done():
+            self._mark_task_cancelled(session_id, task, reason="session_closed")
 
         if task is not None:
             self._cancel_result_future(self._task_result_futures.pop(task, None))
@@ -213,6 +224,7 @@ class SessionManager:
         session_ids.update(self._session_queues)
         session_ids.update(self._session_processors)
         session_ids.update(self._closing_tasks)
+        session_ids.update(self._telemetry_sessions)
         if session_ids:
             await asyncio.gather(
                 *(self.close_session(session_id) for session_id in session_ids)
@@ -255,9 +267,31 @@ class SessionManager:
                             if result_future is not None:
                                 self._task_result_futures[task] = result_future
                             self._session_tasks[session_id] = task
+                            generation = self._task_started(session_id, task)
+                            task_state = "idle"
                             try:
                                 await task
+                                if result_future is not None and result_future.done():
+                                    if not result_future.cancelled():
+                                        if result_future.exception() is not None:
+                                            task_state = "error"
+                            except asyncio.CancelledError:
+                                task_state = "cancelled"
+                                raise
+                            except Exception:
+                                task_state = "error"
+                                raise
+                            except BaseException:
+                                task_state = "error"
+                                raise
                             finally:
+                                if generation is not None:
+                                    self._task_finished(
+                                        session_id,
+                                        task,
+                                        generation,
+                                        task_state,
+                                    )
                                 self._task_result_futures.pop(task, None)
                                 if (
                                     self._session_queues.get(session_id) is queue
@@ -268,6 +302,7 @@ class SessionManager:
                                 # queue.get() 的下一次 await 会保留当前协程帧；主动清空
                                 # 上一轮闭包、Context 和 Task，避免空闲 session 持有对象图。
                                 item = task_func = task_ctx = result_future = task = None
+                                generation = None
 
                         except asyncio.CancelledError:
                             logger.info(
@@ -297,6 +332,7 @@ class SessionManager:
             self._session_processors[session_id] = asyncio.create_task(
                 process_session_queue()
             )
+            self._session_created(session_id)
 
     async def submit_task(
         self,
@@ -401,3 +437,62 @@ class SessionManager:
     def has_active_tasks(self) -> bool:
         """是否有活跃的 session 任务（供 dreaming busy_checker 使用）。"""
         return any(t is not None and not t.done() for t in self._session_tasks.values())
+
+    def _session_created(self, session_id: str) -> None:
+        if session_id in self._telemetry_sessions:
+            return
+        try:
+            self._session_telemetry.session_created(session_id)
+            self._telemetry_sessions.add(session_id)
+        except Exception as error:
+            logger.debug("[SessionManager] session telemetry create failed: %s", error)
+
+    def observe_external_task(self, session_id: str, task: asyncio.Task) -> None:
+        """Observe a scheduler-owned task without changing task ownership."""
+        self._session_created(session_id)
+        generation = self._task_started(session_id, task)
+        if generation is None:
+            return
+
+        def finish_external_task(completed: asyncio.Task) -> None:
+            if completed.cancelled():
+                state = "cancelled"
+            else:
+                try:
+                    state = "error" if completed.exception() is not None else "idle"
+                except asyncio.CancelledError:
+                    state = "cancelled"
+            self._task_finished(session_id, completed, generation, state)
+
+        task.add_done_callback(finish_external_task)
+
+    def _task_started(self, session_id: str, task: asyncio.Task) -> int | None:
+        try:
+            return self._session_telemetry.task_started(session_id, task)
+        except Exception as error:
+            logger.debug("[SessionManager] session telemetry start failed: %s", error)
+            return None
+
+    def _task_finished(
+        self,
+        session_id: str,
+        task: asyncio.Task,
+        generation: int,
+        state: str,
+    ) -> None:
+        try:
+            self._session_telemetry.task_finished(session_id, task, generation, state)
+        except Exception as error:
+            logger.debug("[SessionManager] session telemetry finish failed: %s", error)
+
+    def _mark_task_cancelled(
+        self,
+        session_id: str,
+        task: asyncio.Task,
+        *,
+        reason: str,
+    ) -> None:
+        try:
+            self._session_telemetry.task_cancelled(session_id, task, reason=reason)
+        except Exception as error:
+            logger.debug("[SessionManager] session telemetry cancel failed: %s", error)

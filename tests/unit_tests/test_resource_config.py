@@ -27,3 +27,20 @@ def test_default_round_level_compressor_config_uses_context_ratio():
         assert round_level_config["trigger_context_ratio"] == 0.8
         assert "trigger_total_tokens" not in round_level_config
         assert "tokens_threshold" not in round_level_config
+
+
+def test_default_telemetry_config_is_disabled_and_documents_unified_fields():
+    repo_root = Path(__file__).resolve().parents[2]
+    config_file = repo_root / "jiuwenswarm" / "resources" / "config.yaml"
+
+    telemetry = yaml.safe_load(config_file.read_text(encoding="utf-8"))["telemetry"]
+
+    assert telemetry["enabled"] is False
+    assert telemetry["claw_id"] is None
+    assert telemetry["redact_prompts"] is False
+    assert telemetry["redact_completions"] is False
+    assert telemetry["log_messages"] is True
+    assert telemetry["session"] == {
+        "stuck_threshold_ms": 300000,
+        "stuck_check_interval_s": 30,
+    }
