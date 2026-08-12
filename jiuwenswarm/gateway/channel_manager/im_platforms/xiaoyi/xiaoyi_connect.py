@@ -1463,7 +1463,7 @@ class XiaoyiChannel(BaseChannel):
             )
 
             async def _send_trigger_wrapper(wrapper: dict[str, Any]) -> None:
-                logger.info("url_key %s wrapper %s", url_key, json.dumps(wrapper))
+                logger.debug("url_key %s wrapper %s", url_key, json.dumps(wrapper))
                 if url_key:
                     await self._safe_ws_send(url_key, wrapper)
 
