@@ -55,10 +55,10 @@ def _json_result(payload: dict) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
-def _query() -> str:
+def _query(action: str = "polish") -> str:
     payload = {
         "report_path": "/workspace/report.md",
-        "action": "polish",
+        "action": action,
         "selection": {
             "protocol_version": 2,
             "start_byte": 0,
@@ -124,6 +124,7 @@ def _result(
 async def test_adapter_fast_path_ignores_plain_query_without_dependencies():
     adapter = object.__new__(JiuWenClawDeepAdapter)
     adapter._model = SimpleNamespace(invoke=AsyncMock())
+    adapter._build_deepresearch_rewrite_model = Mock()
 
     with patch(
         "jiuwenclaw.agentserver.tools.deepresearch.rewrite_tools."
@@ -138,29 +139,88 @@ async def test_adapter_fast_path_ignores_plain_query_without_dependencies():
 
     assert result is None
     prepare.assert_not_awaited()
+    adapter._build_deepresearch_rewrite_model.assert_not_called()
     adapter._model.invoke.assert_not_awaited()
     commit.assert_not_awaited()
 
 
+def test_rewrite_model_uses_each_request_overlay_over_reloaded_config():
+    adapter = object.__new__(JiuWenClawDeepAdapter)
+    reloaded_config = {
+        "models": {
+            "default": {
+                "model_client_config": {
+                    "api_base": "https://example.com/compatible-mode/v1",
+                    "api_key": "bad-key",
+                    "model_name": "your-model-name",
+                    "client_provider": "OpenAI",
+                    "timeout": 1800,
+                    "verify_ssl": False,
+                },
+                "model_config_obj": {"temperature": 0.6},
+            }
+        }
+    }
+
+    first_token = interface_module.bind_task_env_overlay({
+        "MODEL_NAME": "glm-5.2",
+        "MODEL_PROVIDER": "OpenAI",
+        "API_BASE": "https://maas.internal/v2",
+        "API_KEY": "first-tenant-key",
+    })
+    try:
+        with patch.object(interface_module, "get_config", return_value=reloaded_config):
+            first_model = adapter._build_deepresearch_rewrite_model()
+    finally:
+        interface_module.reset_task_env_overlay(first_token)
+
+    second_token = interface_module.bind_task_env_overlay({
+        "MODEL_NAME": "glm-6",
+        "MODEL_PROVIDER": "OpenAI",
+        "API_BASE": "https://maas-next.internal/v2",
+        "API_KEY": "second-tenant-key",
+    })
+    try:
+        with patch.object(interface_module, "get_config", return_value=reloaded_config):
+            second_model = adapter._build_deepresearch_rewrite_model()
+    finally:
+        interface_module.reset_task_env_overlay(second_token)
+
+    assert first_model.model_config.model_name == "glm-5.2"
+    assert first_model.model_client_config.api_base == "https://maas.internal/v2"
+    assert first_model.model_client_config.api_key == "first-tenant-key"
+    assert second_model.model_config.model_name == "glm-6"
+    assert second_model.model_client_config.api_base == "https://maas-next.internal/v2"
+    assert second_model.model_client_config.api_key == "second-tenant-key"
+    assert first_model.model_config.model_name == "glm-5.2"
+
+
 @pytest.mark.asyncio
-async def test_adapter_fast_path_uses_request_model_and_existing_rewrite_tools():
+@pytest.mark.parametrize("action", ["polish", "expand", "shorten"])
+async def test_adapter_fast_path_uses_private_request_model(action):
     model_response = SimpleNamespace(
         content=_json_result(_STRUCTURED_RESULT),
         usage_metadata={"input_tokens": 100, "output_tokens": 20, "total_tokens": 120},
     )
+    shared_model = SimpleNamespace(
+        invoke=AsyncMock(side_effect=AssertionError("shared model must not be used"))
+    )
+    request_model = SimpleNamespace(invoke=AsyncMock(return_value=model_response))
     adapter = object.__new__(JiuWenClawDeepAdapter)
-    adapter._model = SimpleNamespace(invoke=AsyncMock(return_value=model_response))
+    adapter._model = shared_model
+    adapter._model_cache = {"your-model-name": shared_model}
+    adapter._build_deepresearch_rewrite_model = Mock(return_value=request_model)
 
     with patch(
         "jiuwenclaw.agentserver.tools.deepresearch.rewrite_tools."
         "deepresearch_prepare_rewrite._func",
-        new=AsyncMock(return_value=_json_result(_PREPARED)),
+        new=AsyncMock(return_value=_json_result({**_PREPARED, "action": action})),
     ) as prepare, patch(
         "jiuwenclaw.agentserver.tools.deepresearch.rewrite_tools."
         "deepresearch_commit_rewrite._func",
         new=AsyncMock(return_value=_json_result(_COMPLETED)),
     ) as commit:
-        result = await adapter._try_deepresearch_rewrite_fast_path(_query())
+        result = await adapter._try_deepresearch_rewrite_fast_path(_query(action))
 
     assert result is not None
     assert result.status == "completed"
@@ -171,8 +231,47 @@ async def test_adapter_fast_path_uses_request_model_and_existing_rewrite_tools()
         "total_tokens": 120,
     }
     prepare.assert_awaited_once()
-    adapter._model.invoke.assert_awaited_once()
+    adapter._build_deepresearch_rewrite_model.assert_called_once_with()
+    request_model.invoke.assert_awaited_once()
+    shared_model.invoke.assert_not_awaited()
     commit.assert_awaited_once()
+    assert adapter._model is shared_model
+    assert adapter._model_cache == {"your-model-name": shared_model}
+
+
+@pytest.mark.asyncio
+async def test_adapter_fast_path_reuses_private_request_model_for_retry():
+    model_responses = [
+        SimpleNamespace(content="not json", usage_metadata=None),
+        SimpleNamespace(
+            content=_json_result(_STRUCTURED_RESULT),
+            usage_metadata={"input_tokens": 100, "output_tokens": 20, "total_tokens": 120},
+        ),
+    ]
+    shared_model = SimpleNamespace(
+        invoke=AsyncMock(side_effect=AssertionError("shared model must not be used"))
+    )
+    request_model = SimpleNamespace(invoke=AsyncMock(side_effect=model_responses))
+    adapter = object.__new__(JiuWenClawDeepAdapter)
+    adapter._model = shared_model
+    adapter._build_deepresearch_rewrite_model = Mock(return_value=request_model)
+
+    with patch(
+        "jiuwenclaw.agentserver.tools.deepresearch.rewrite_tools."
+        "deepresearch_prepare_rewrite._func",
+        new=AsyncMock(return_value=_json_result(_PREPARED)),
+    ), patch(
+        "jiuwenclaw.agentserver.tools.deepresearch.rewrite_tools."
+        "deepresearch_commit_rewrite._func",
+        new=AsyncMock(return_value=_json_result(_COMPLETED)),
+    ):
+        result = await adapter._try_deepresearch_rewrite_fast_path(_query())
+
+    assert result is not None and result.status == "completed"
+    assert result.model_calls == 2
+    adapter._build_deepresearch_rewrite_model.assert_called_once_with()
+    assert request_model.invoke.await_count == 2
+    shared_model.invoke.assert_not_awaited()
 
 
 def test_adapter_fast_path_success_chunk_uses_fixed_invitation():
