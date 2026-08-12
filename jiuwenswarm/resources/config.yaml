@@ -583,6 +583,13 @@ react:
     dataset: "team_pool"
     endpoint: ""
 
+  # 同轮多个受控 tool 的批次内并发
+  concurrency:
+    enabled: true
+    tool_limits:
+      web_search: 10
+      task_tool: 10
+
 tools:
   - todo
   - skill
