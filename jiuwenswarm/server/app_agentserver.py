@@ -198,6 +198,19 @@ atexit.register(_atexit_log_exit_reason)
 
 
 async def _run(host: str, port: int) -> None:
+    from jiuwenswarm.telemetry.runtime import ProcessTelemetryLifecycle
+
+    telemetry_lifecycle = ProcessTelemetryLifecycle(
+        logger=logger,
+        process_name="AgentServer",
+    )
+    try:
+        await _run_with_telemetry(host, port, telemetry_lifecycle)
+    finally:
+        await telemetry_lifecycle.stop()
+
+
+async def _run_with_telemetry(host: str, port: int, telemetry_lifecycle) -> None:
     from openjiuwen.core.runner import Runner
     from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
     from jiuwenswarm.agents.harness.team.remote_member_bootstrap import run_teammate_bootstrap_daemon
@@ -221,8 +234,14 @@ async def _run(host: str, port: int) -> None:
     extension_manager = ExtensionManager(
         registry=extension_registry,
     )
+    telemetry_lifecycle.bind_extension_manager(extension_manager)
     await extension_manager.load_all_extensions()
     logger.info("[AgentServer] 扩展加载完成，共 %d 个", len(extension_manager.list_extensions()))
+    await telemetry_lifecycle.start(
+        process_role="agentserver",
+        registry=extension_registry,
+        extension_manager=extension_manager,
+    )
 
     try:
         from jiuwenswarm.infrastructure.log_masking.engine import LogMaskingEngine
@@ -427,5 +446,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-

@@ -368,13 +368,19 @@ perf:
     include_by_agent: false
 
 telemetry:
+  # enabled=true 时统一 Runtime 独占 Provider 选择；下方旧
+  # agent_observability/team_observability 的 exporter/endpoint 不参与选择。
+  # enabled=false 或缺失时保持 dev-stable 的旧行为。Provider 配置变化需重启进程。
   enabled: false                    # 总开关（环境变量 OTEL_ENABLED 优先）
   exporter: otlp                    # otlp / console / none
   endpoint: http://localhost:4317   # OTLP endpoint
   protocol: grpc                    # grpc / http
   headers: {}                       # 公共 OTLP headers，可被 traces/metrics 覆盖
   log_messages: true                # 是否在 span event 中记录完整消息内容
-  service_name: jiuwenswarm
+  redact_prompts: false             # 脱敏 prompt（密钥字段始终打码）
+  redact_completions: false         # 脱敏 completion
+  claw_id:                          # 可选：统一写入 jiuwenclaw.claw.id
+  service_name: jiuwenclaw
   provider_factory:                 # 自定义 provider factory，格式：module:function
   traces:
     exporter:                       # trace exporter，默认回退到 telemetry.exporter
@@ -386,6 +392,9 @@ telemetry:
     endpoint:                       # metrics endpoint，默认回退到 telemetry.endpoint
     protocol:                       # metrics protocol，默认回退到 telemetry.protocol
     headers: {}                     # metrics headers，默认回退到 telemetry.headers
+  session:
+    stuck_threshold_ms: 300000      # 运行超过此时长后记录 stuck 指标
+    stuck_check_interval_s: 30      # stuck 扫描周期
 
 # ============================================================
 # Team 可观测性配置（OTel + Langfuse）

@@ -2417,6 +2417,11 @@ class AgentWebSocketServer:
     async def _handle_unary(
         self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
     ) -> None:
+        from jiuwenswarm.telemetry.context_propagation import (
+            bind_incoming_request,
+            reset_incoming_request,
+        )
+
         manager = getattr(self, "_agent_manager", None)
         foreground = (
             request.req_method in _CODE_MODE_SYNC_METHODS
@@ -2424,13 +2429,17 @@ class AgentWebSocketServer:
             and hasattr(manager, "begin_foreground_chat")
             and hasattr(manager, "end_foreground_chat")
         )
-        if foreground:
-            await manager.begin_foreground_chat()
+        binding = bind_incoming_request(request)
         try:
-            await self._handle_unary_impl(ws, request, send_lock)
-        finally:
             if foreground:
-                await manager.end_foreground_chat()
+                await manager.begin_foreground_chat()
+            try:
+                await self._handle_unary_impl(ws, request, send_lock)
+            finally:
+                if foreground:
+                    await manager.end_foreground_chat()
+        finally:
+            reset_incoming_request(binding)
 
     async def _handle_unary_impl(
         self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
@@ -2550,6 +2559,11 @@ class AgentWebSocketServer:
     async def _handle_stream(
         self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
     ) -> None:
+        from jiuwenswarm.telemetry.context_propagation import (
+            bind_incoming_request,
+            reset_incoming_request,
+        )
+
         manager = getattr(self, "_agent_manager", None)
         foreground = (
             request.req_method in _CODE_MODE_SYNC_METHODS
@@ -2557,13 +2571,17 @@ class AgentWebSocketServer:
             and hasattr(manager, "begin_foreground_chat")
             and hasattr(manager, "end_foreground_chat")
         )
-        if foreground:
-            await manager.begin_foreground_chat()
+        binding = bind_incoming_request(request)
         try:
-            await self._handle_stream_impl(ws, request, send_lock)
-        finally:
             if foreground:
-                await manager.end_foreground_chat()
+                await manager.begin_foreground_chat()
+            try:
+                await self._handle_stream_impl(ws, request, send_lock)
+            finally:
+                if foreground:
+                    await manager.end_foreground_chat()
+        finally:
+            reset_incoming_request(binding)
 
     async def _handle_stream_impl(
         self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock

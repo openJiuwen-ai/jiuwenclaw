@@ -6176,7 +6176,11 @@ class JiuWenSwarmDeepAdapter:
         # enable/disable of agent_observability without rebuilding the agent.
         try:
             from openjiuwen.agent_teams.observability.rail import ObservabilityRail
+            from jiuwenswarm.agents.harness.agent_observability import (
+                AgentTraceBindingRail,
+            )
 
+            rails_list.append(AgentTraceBindingRail())
             rails_list.append(ObservabilityRail())
         except Exception as exc:
             logger.warning("%s Failed to attach ObservabilityRail: %s", log_prefix, exc)
@@ -10841,7 +10845,12 @@ class JiuWenSwarmDeepAdapter:
                 sync_agent_observability,
             )
             sync_agent_observability()
-            _run_span = open_agent_run_span(session_id=session_id, mode=mode)
+            _run_span = open_agent_run_span(
+                session_id=session_id,
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                mode=mode,
+            )
             attach_goal = self._wants_attach_goal(request.params)
             dispatch_mode = self._resolve_input_dispatch_mode(request.params)
             if attach_goal:
@@ -11513,12 +11522,17 @@ class JiuWenSwarmDeepAdapter:
                 sync_agent_observability,
             )
             sync_agent_observability(force=_dbg_settings.otel_enabled)
-            _run_span = open_agent_run_span(session_id=session_id, mode=mode)
+            _run_span = open_agent_run_span(
+                session_id=session_id,
+                request_id=rid,
+                channel_id=cid,
+                mode=mode,
+            )
             _otel_trace_id = ""
             _otel_span_id = ""
             if _run_span is not None:
                 try:
-                    _span_ctx = _run_span.get_span_context()
+                    _span_ctx = _run_span.root_span.get_span_context()
                     _otel_trace_id = format(_span_ctx.trace_id, "032x")
                     _otel_span_id = format(_span_ctx.span_id, "016x")
                 except Exception:

@@ -314,11 +314,9 @@ class TestSessionRegistry:
             lg.flush()  # close the dump file opened on construction
 
 
-# ── OTel get_team_span global fallback ─────────────────────────────────────
+# ── OTel get_team_span session-registry fallback ───────────────────────────
 class TestOtelTeamSpanFallback:
-    """The get_team_span monkeypatch returns _CURRENT_ROOT_SPAN when the
-    per-request ContextVar is invisible (agent runs in a session-setup supervisor
-    task), so OtelCallbackHandler finds a parent and emits child spans."""
+    """The get_team_span monkeypatch resolves a root by current session."""
 
     def test_patch_is_installed(self):
         # ALL consumers must be patched: callback_handler (llm/tool spans) AND
@@ -333,24 +331,43 @@ class TestOtelTeamSpanFallback:
         assert ch.get_team_span in obs._team_span_patched
         assert rail.get_team_span in obs._team_span_patched
 
-    def test_fallback_returns_current_root_span(self):
-        # _team_span_ctx ContextVar is unset in the test process -> orig returns
-        # None -> the patched get_team_span falls back to _CURRENT_ROOT_SPAN.
+    def test_fallback_returns_current_session_root_span(self, monkeypatch):
         import openjiuwen.agent_teams.observability.callback_handler as ch
+        from openjiuwen.agent_teams.context import reset_session_id, set_session_id
+        from openjiuwen.agent_teams.observability.span_context import clear_team_span
         import jiuwenswarm.agents.harness.agent_observability as obs
+        from jiuwenswarm.telemetry.request_context import TraceBindingRegistry
 
-        obs._CURRENT_ROOT_SPAN = "ROOT_SENTINEL"
+        registry = TraceBindingRegistry(max_bindings=4, ttl_seconds=60)
+        registry.bind("s1", "r1", "ROOT_SENTINEL")
+        runtime = SimpleNamespace(trace_bindings=registry)
+        monkeypatch.setattr(obs, "_get_unified_runtime", lambda: runtime)
+        clear_team_span()
+        token = set_session_id("s1")
         try:
             assert ch.get_team_span() == "ROOT_SENTINEL"
         finally:
-            obs._CURRENT_ROOT_SPAN = None
+            reset_session_id(token)
+            clear_team_span()
 
-    def test_fallback_none_when_no_global_and_contextvar_empty(self):
+    def test_fallback_none_when_session_has_no_binding(self, monkeypatch):
         import openjiuwen.agent_teams.observability.callback_handler as ch
+        from openjiuwen.agent_teams.context import reset_session_id, set_session_id
+        from openjiuwen.agent_teams.observability.span_context import clear_team_span
         import jiuwenswarm.agents.harness.agent_observability as obs
+        from jiuwenswarm.telemetry.request_context import TraceBindingRegistry
 
-        obs._CURRENT_ROOT_SPAN = None
-        assert ch.get_team_span() is None
+        runtime = SimpleNamespace(
+            trace_bindings=TraceBindingRegistry(max_bindings=4, ttl_seconds=60)
+        )
+        monkeypatch.setattr(obs, "_get_unified_runtime", lambda: runtime)
+        clear_team_span()
+        token = set_session_id("missing")
+        try:
+            assert ch.get_team_span() is None
+        finally:
+            reset_session_id(token)
+            clear_team_span()
 
 
 # ── truncation / redaction ─────────────────────────────────────────────────
@@ -594,6 +611,7 @@ class TestAgentObservabilityForce:
         import jiuwenswarm.agents.harness.agent_observability as ao
         ao._agent_observability_active = False
         ao._agent_owns_provider = False
+        ao._runtime_managed_agent_observability = False
         ao._force_ever_enabled = False
 
     def test_force_inits_and_sticky_blocks_teardown(self, monkeypatch):
@@ -991,4 +1009,3 @@ class TestSubagentCapture:
 
         subagent_capture._ensure_observability_rail(FakeSub())
         assert added == []  # no-op when observability is off
-

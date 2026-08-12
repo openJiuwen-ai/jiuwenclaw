@@ -2820,6 +2820,12 @@ class JiuWenSwarm:
                 permission_reservation.release_if_unstarted()
             raise
 
+        observe_external_task = getattr(
+            self._session_manager, "observe_external_task", None
+        )
+        if callable(observe_external_task):
+            observe_external_task(session_id, stream_task)
+
         suppress_a2ui_stream = False
         a2ui_pending_render_sent = False
         a2ui_stream_probe = ""
