@@ -15,6 +15,7 @@ import { UserAnswer } from '../../types';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { isValidSkillApprovalCard, SkillApprovalCard } from './SkillApprovalCard';
+import { parseToolApprovalQuestion } from './approvalPresentation';
 
 interface InlineQuestionCardProps {
   onSubmit: (requestId: string, answers: UserAnswer[], source?: string) => void;
@@ -96,6 +97,9 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
   // 工具审批卡（主 Agent 与子 Agent）统一使用同一种视觉风格；子 Agent 额外带来源标识。
   const isToolPermission = isAskTool || pendingQuestion?.source === 'subagent_tool_permission';
   const isSubagentTool = pendingQuestion?.source === 'subagent_tool_permission';
+  const compactToolApproval = isToolPermission && !isBatch
+    ? parseToolApprovalQuestion(pendingQuestion?.questions[0]?.question ?? '')
+    : null;
   const skillApprovalCard = isValidSkillApprovalCard(pendingQuestion?.skill_approval_card)
     ? pendingQuestion.skill_approval_card
     : null;
@@ -118,10 +122,11 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
   return (
     <div className="animate-rise mx-2 my-3">
       <div
-        className="w-full rounded-xl overflow-hidden"
+        className={`w-full rounded-xl overflow-hidden ${compactToolApproval ? 'flex flex-col' : ''}`}
         style={{
           border: `1px solid ${borderColor}`,
           backgroundColor: 'var(--card)',
+          maxHeight: compactToolApproval ? 'min(55vh, 560px)' : undefined,
         }}
       >
         {/* 标题行 */}
@@ -228,8 +233,8 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
 
         {/* 问题列表 */}
         <div
-          className="overflow-y-auto"
-          style={{ maxHeight: '60vh' }}
+          className={compactToolApproval ? 'flex-1 min-h-0' : 'overflow-y-auto'}
+          style={{ maxHeight: compactToolApproval ? undefined : '60vh' }}
         >
           {pendingQuestion.questions.map((question, qIndex) => {
             const selectedLabel = selections.get(qIndex);
@@ -237,6 +242,7 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
             return (
               <div
                 key={qIndex}
+                className={compactToolApproval ? 'h-full min-h-0 flex flex-col' : undefined}
                 style={
                   qIndex > 0
                     ? { borderTop: '1px solid var(--border)' }
@@ -244,17 +250,62 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
                 }
               >
                 {/* 问题正文 */}
-                <div
-                  className="px-4 pt-3 pb-2 text-sm prose prose-sm max-w-none prose-headings:font-semibold prose-headings:text-sm prose-ul:my-1 prose-li:my-0 prose-li:pl-1"
-                  style={{ color: 'var(--text)' }}
-                >
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                    {question.question}
-                  </ReactMarkdown>
-                </div>
+                {compactToolApproval ? (
+                  <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3 text-sm">
+                    <div className="flex flex-wrap items-center gap-2 mb-3">
+                      <span className="font-semibold" style={{ color: 'var(--text-strong)' }}>
+                        工具 <code>{compactToolApproval.toolName}</code> 需要授权
+                      </span>
+                      {compactToolApproval.agentScopeId && (
+                        <span className="text-[11px] px-2 py-0.5 rounded-full" style={{ background: 'var(--accent-subtle)', color: 'var(--accent)' }}>
+                          子 Agent · {compactToolApproval.agentScopeId}
+                        </span>
+                      )}
+                      {compactToolApproval.skillName && (
+                        <span className="text-[11px] px-2 py-0.5 rounded-full" style={{ background: 'var(--bg-elevated)', color: 'var(--muted)' }}>
+                          Skill · {compactToolApproval.skillName}
+                        </span>
+                      )}
+                      {compactToolApproval.riskLevel && (
+                        <span className="text-[11px] px-2 py-0.5 rounded-full" style={{ background: 'var(--warning-subtle, rgba(245,158,11,0.12))', color: 'var(--warning, #f59e0b)' }}>
+                          {compactToolApproval.riskLevel}
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xs font-semibold mb-1.5" style={{ color: 'var(--text-strong)' }}>关键参数或命令</div>
+                    <pre
+                      className="max-h-32 overflow-auto whitespace-pre-wrap break-words rounded-lg px-3 py-2.5 text-xs leading-relaxed"
+                      style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border)', color: 'var(--text)' }}
+                    >
+                      {compactToolApproval.command}
+                    </pre>
+                    {compactToolApproval.reason && (
+                      <details className="mt-2 rounded-lg" style={{ border: '1px solid var(--border)' }}>
+                        <summary className="cursor-pointer select-none px-3 py-2 text-xs font-medium" style={{ color: 'var(--muted)' }}>
+                          审批原因（展开查看）
+                        </summary>
+                        <div className="max-h-28 overflow-auto break-all px-3 pb-3 text-xs leading-relaxed" style={{ color: 'var(--muted)' }}>
+                          {compactToolApproval.reason}
+                        </div>
+                      </details>
+                    )}
+                  </div>
+                ) : (
+                  <div
+                    className="px-4 pt-3 pb-2 text-sm prose prose-sm max-w-none prose-headings:font-semibold prose-headings:text-sm prose-ul:my-1 prose-li:my-0 prose-li:pl-1"
+                    style={{ color: 'var(--text)' }}
+                  >
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                      {question.question}
+                    </ReactMarkdown>
+                  </div>
+                )}
 
                 {/* 选项按钮 */}
-                <div className="px-4 pb-3 flex flex-col gap-2">
+                <div
+                  className={`px-4 pb-3 flex flex-col gap-2 ${compactToolApproval ? 'flex-none pt-3' : ''}`}
+                  style={compactToolApproval ? { borderTop: '1px solid var(--border)', background: 'var(--card)' } : undefined}
+                >
                   {question.options.map((option) => {
                     const isAccept = option.label === t('chatUi.inlineQuestion.accept')
                       || option.label === t('chatUi.inlineQuestion.allowOnce')
