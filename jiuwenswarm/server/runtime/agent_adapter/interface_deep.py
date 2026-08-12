@@ -89,7 +89,6 @@ from openjiuwen.harness.tools import (
     WebFreeSearchTool,
     WebPaidSearchTool,
     create_audio_tools,
-    create_vision_tools,
 )
 from openjiuwen.harness.goal.schema import GoalOperationError, GoalStatus
 from openjiuwen.harness.schema.interaction import (
@@ -270,7 +269,8 @@ from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import 
     SkillRetrievalPromptRail,
 )
 from jiuwenswarm.symphony.config import load_symphony_config
-from jiuwenswarm.agents.harness.common.tools.pdf_tools import read_pdf
+from jiuwenswarm.agents.harness.common.tools.pdf_tools import read_pdf, render_pdf_page
+from jiuwenswarm.agents.harness.common.tools.vision_tools import create_vision_tools
 from jiuwenswarm.agents.harness.common.tools.acp_output_tools import get_tools as get_acp_output_tools
 from jiuwenswarm.agents.harness.common.tools.acp_chat import acp_chat
 from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools import (
@@ -5110,7 +5110,7 @@ class JiuWenSwarmDeepAdapter:
         """Get tool cards."""
         tool_cards = []
 
-        for wtool in [read_pdf]:
+        for wtool in [read_pdf, render_pdf_page]:
             self._register_shared_tool(wtool)
             tool_cards.append(wtool.card)
 

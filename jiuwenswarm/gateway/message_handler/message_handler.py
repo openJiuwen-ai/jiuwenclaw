@@ -62,6 +62,20 @@ _SINGLE_USER_CHANNEL_IDS = frozenset({
 })
 _TUI_DISCONNECT_CANCEL_GRACE_SECONDS = 60.0
 _DEFAULT_INLINE_FILE_SIZE_LIMIT = 128 * 1024
+# Binary documents must never be inlined: reading them as text yields mojibake.
+# Hand over the path instead. Only PDF has a reader wired — read_file rejects
+# .docx/.xlsx with a UTF-8 decode error — so say that plainly rather than name
+# a tool that will fail.
+_BINARY_DOCUMENT_SUFFIXES = frozenset({".pdf", ".docx", ".xlsx"})
+_UNREADABLE_DOCUMENT_HINT = (
+    "no text-extraction tool is wired for this format; open it from the shell "
+    "(e.g. python with openpyxl/python-docx) if you need its contents"
+)
+_BINARY_DOCUMENT_HINTS = {
+    ".pdf": "use the read_pdf tool to read it (render_pdf_page + visual_question_answering if it is scanned)",
+    ".docx": _UNREADABLE_DOCUMENT_HINT,
+    ".xlsx": _UNREADABLE_DOCUMENT_HINT,
+}
 _KNOWN_JIUWENSWARM_SESSION_PREFIXES = (
     "sess_",
     "web_",
@@ -2570,6 +2584,16 @@ class MessageHandler(ABC):
                 path = Path(resolved)
                 if not path.is_file():
                     return m.group(0)
+
+                suffix = path.suffix.lower()
+                if suffix in _BINARY_DOCUMENT_SUFFIXES:
+                    hint = _BINARY_DOCUMENT_HINTS.get(suffix, _UNREADABLE_DOCUMENT_HINT)
+                    return (
+                        f'\n<file-reference path="{path}" type="{suffix.lstrip(".")}">\n'
+                        f"Binary document — contents not inlined; {hint}.\n"
+                        "</file-reference>\n"
+                    )
+
                 size = path.stat().st_size
                 truncated = False
                 if max_file_size is None:

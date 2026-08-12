@@ -57,6 +57,8 @@ def test_filter_inheritable_ability_cards_includes_extended_swarm_tools():
         ability_manager=_FakeAbilityManager(
             [
                 _make_tool_card("visual_question_answering"),
+                _make_tool_card("read_pdf"),
+                _make_tool_card("render_pdf_page"),
                 _make_tool_card("audio_question_answering"),
                 _make_tool_card("audio_metadata"),
                 _make_tool_card("user_todos"),
@@ -74,6 +76,10 @@ def test_filter_inheritable_ability_cards_includes_extended_swarm_tools():
 
     assert "acp_chat" in inherited_names
     assert "visual_question_answering" in inherited_names
+    # A team member asked about a PDF must be able to open one; without these
+    # it falls back to hunting for pdftoppm/ImageMagick on $PATH.
+    assert "read_pdf" in inherited_names
+    assert "render_pdf_page" in inherited_names
     assert "audio_question_answering" in inherited_names
     assert "audio_metadata" in inherited_names
     assert "user_todos" in inherited_names
