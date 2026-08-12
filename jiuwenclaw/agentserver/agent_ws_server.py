@@ -275,6 +275,11 @@ _RELAY_TEAM_SCALAR_WHITELIST: tuple[str, ...] = (
     "spawn_mode",
     "enable_swarmflow",
     "max_debate_rounds",
+    # Per-team tool/skill deny-lists (generic knobs; what to disable is the
+    # caller's policy). Merged over the global react.disabled_tools /
+    # disabled_skills at team member assembly.
+    "disabled_tools",
+    "disabled_skills",
     # enable_permissions is intentionally omitted: team rails follow the
     # global permissions.enabled switch (same as plan), not a team-local flag.
 )
