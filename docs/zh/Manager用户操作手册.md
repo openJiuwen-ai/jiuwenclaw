@@ -450,7 +450,11 @@ Claw Manager 是 JiuwenClaw 的**企业级管理面**，用于：
 
 位置：实例配置 → **Channel** Tab
 
+![Channel 配置](assets/manager/channel配置.png)
+
 用于向 Gateway 注册消息通道。列表支持按类型 / 状态筛选，并可对已有 Channel **激活 / 停用 / 删除**（删除会同步通知 Gateway）。
+
+> 生效前提：Gateway 需在 `.env.custom` 中配置 `DEPLOYMENT_MODE=active-standby`（主备模式），Manager 下发的 Channel 配置才会生效。
 
 注册字段：
 
@@ -462,6 +466,26 @@ Claw Manager 是 JiuwenClaw 的**企业级管理面**，用于：
 | bot_id | 否 | 关联的机器人 ID |
 | 初始状态 | 否 | `active`（启用）或 `inactive`（停用） |
 | 配置 (JSON) | 否 | 通道连接与业务参数 |
+
+**配置 (JSON) 示例（飞书 `feishu`）**
+
+```json
+{
+  "app_id": "cli_xxxxxxxx",
+  "app_secret": "xxxxxxxxxxxxxxxx",
+  "enabled": true,
+  "enable_streaming": true
+}
+```
+
+JSON 内容会下发到 Gateway。以飞书通道为例，常用字段如下：
+
+| 字段 | 必填 | 说明 |
+|------|------|------|
+| `app_id` | 是 | 飞书开放平台应用的 App ID，用于鉴权与建立 WebSocket 长连接 |
+| `app_secret` | 是 | 飞书开放平台应用的 App Secret，与 `app_id` 配对使用 |
+| `enabled` | 否 | 是否启用该飞书 Bot；`false` 时 Gateway 不会启动此通道（默认 `false`） |
+| `enable_streaming` | 否 | 是否开启流式/过程消息下发；`true` 时 Agent 回复逐段推送到飞书，`false` 时等完整回复后一次性发送（默认 `true`） |
 
 ### 7.2 日志脱敏
 
