@@ -172,6 +172,8 @@ Best for:
 
    > **Path note**: `~` represents the user home directory. On Windows, the actual path is `C:\Users\<username>\.jiuwenswarm\agent\workspace\skills\`; on Linux/macOS, it's `/home/<username>/.jiuwenswarm/agent/workspace/skills/`. In container deployment mode, the path may vary depending on mount configuration.
 
+   > **Agent Team mode shares this same library**: teams and team members keep no `skills/` directory and no copies of their own, only a visibility declaration stating which skills of this library they may see (by default, all of them). Installing a skill once therefore makes it available to single agents and team members alike. See the "Team Skills" section of [Agent Team](AgentTeam.md) for how to narrow a member's visibility.
+
 4. **Verify**
 
    After installation, confirm the new skill appears in **Skills** → **My Skills**.

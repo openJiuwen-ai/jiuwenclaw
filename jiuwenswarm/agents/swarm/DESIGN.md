@@ -96,7 +96,7 @@ _SUBAGENT_PROVIDER_REGISTRY: dict[str, Callable]  # register_subagent_provider(n
 | `session_id` / `request_id` / `channel_id` / `channel` / `request_metadata` | str / dict | 请求 | ✅（除非句柄） |
 | `mode` | str | 请求（team / code.team / team.plan） | ✅ |
 | `project_dir` | str\|None | 请求 | ✅ |
-| `team_id` / `team_ws_root` / `team_skills_dir` / `global_skills_dir` | str | team 工作区 | ✅ |
+| `team_id` / `team_ws_root` / `team_skill_visibility_path` / `global_skills_dir` | str | team 工作区 | ✅ |
 | `config` | dict | `get_config()`（config.yaml） | ❌（接收侧本地 `get_config()`） |
 | `trajectory_span_processor` | Any | 进程级 trajectory span processor | ❌（接收侧本地注入） |
 | `language` / `member_name` / `role` / `workspace` / `member_card_id` | — | openjiuwen `setup_agent` 经 `derive()` 注入 | per-member 派生 |
@@ -195,7 +195,7 @@ _role_evolution_rails(config, role)            # leader: 进化+创建；teammat
 ```python
 _RAIL_PARAM_BUILDERS: dict[name, (config) -> params]   # context_processor / code_project_memory /
                                                        # permission_interrupt / code_coding_memory /
-                                                       # user_hooks / code_skill_use
+                                                       # user_hooks
 _TOOL_PARAM_BUILDERS: dict[name, (config) -> params]   # send_file / code_extra_tools
 
 [RailSpec(type=name, params=_rail_params(name, config)) for name in _CODE_RAIL_NAMES]
@@ -205,7 +205,7 @@ _TOOL_PARAM_BUILDERS: dict[name, (config) -> params]   # send_file / code_extra_
 
 | param 字段（元素） | 抽取来源 |
 |---|---|
-| `skill_mode`（code_skill_use） | `react.skill_mode` 校验（`SkillUseRail.SKILL_MODE_*`） |
+| `skill_mode`（core.team.skill_use） | `react.skill_mode` 校验（`SkillUseRail.SKILL_MODE_*`）；开启 agentic retrieval 时强制 `auto_list` |
 | `additional_directories`（code_project_memory） | `react.project_memory` + env `JIUWENSWARM_ADDITIONAL_DIRECTORIES` |
 | `permissions_config` + `model_name`（permission_interrupt） | `config.permissions` + `config.models.default…model_name` |
 | `embed_config`（code_coding_memory） | `config.embed` |
@@ -301,14 +301,14 @@ harness_element(kind=RAIL, name=..., builder=SomeRailClass)              # 直�
 
 | name | 模式/角色 | P（属性） | C（环境） |
 |---|---|---|---|
-| `swarm.member_skill_toolkit` | T+K | skills | workspace_root, global_skills_dir, team_skills_dir |
+| `swarm.member_skill_toolkit` | T+K | —（不再收 skills：视图文档由 `core.team.skill_use` 单点播种） | workspace_root, visibility_path（`resolve_member_skill_visibility_path()` 派生，仅用于日志）, global_skills_dir |
 | `swarm.runtime_prompt` | T | — | language, channel |
 | `swarm.team_workspace_report_path` | T+K | — | team_ws_root, team_id, language |
 | `swarm.context_processor` | T+K | context_engine_enabled, context_engine_config | — |
 | `swarm.plugin_rails` | T+K | — | —（全局 rail manager） |
-| `swarm.team_skill_evolution` | T+K / leader | evolution_model_config, auto_save, skill_evolution | team_skills_dir, language, role, team_id, trajectory_registry, channel, session_id, team_ws_root, global_skills_dir |
-| `swarm.team_skill_create` | T+K / leader | skill_evolution | team_skills_dir, language, channel, session_id, team_ws_root, team_id, trajectory_registry |
-| `swarm.member_skill_evolution` | T+K / teammate | evolution_model_config, skill_evolution | team_skills_dir, trajectory_registry, team_id, channel, session_id |
+| `swarm.team_skill_evolution` | T+K / leader | evolution_model_config, auto_save（整条链路受 `skill_evolution` 开关门控） | global_skills_dir, language, role, team_id, trajectory_registry, channel, session_id, team_ws_root |
+| `swarm.team_skill_create` | T+K / leader | —（params 恒为 `{}`，受 `skill_evolution` 开关门控） | global_skills_dir, team_skill_visibility_path, language, channel, session_id, team_ws_root, team_id, trajectory_registry |
+| `swarm.member_skill_evolution` | T+K / teammate | evolution_model_config（受 `skill_evolution` 开关门控） | global_skills_dir, language, trajectory_registry, team_id, channel, session_id |
 | `swarm.code_runtime_prompt` | K | — | language, channel |
 | `swarm.code_project_memory` | K | additional_directories | project_dir, language |
 | `swarm.permission_interrupt` | K | permissions_config, model_name | — |
@@ -318,7 +318,6 @@ harness_element(kind=RAIL, name=..., builder=SomeRailClass)              # 直�
 | `swarm.code_task_planning` | K | — | — |
 | `swarm.code_agent_rail` | K | — | workspace_dir |
 | `swarm.user_hooks` | K | hooks_section | — |
-| `swarm.code_skill_use` | K | skill_mode | —（skills_dir/disabled 全局） |
 
 ### 10.3 Rail — 类（3，无输入，`EmptyInput`）
 
@@ -342,23 +341,35 @@ harness_element(kind=RAIL, name=..., builder=SomeRailClass)              # 直�
 
 ---
 
-## 11. 端到端数据流（以 `code_skill_use` 为例）
+## 11. 端到端数据流（以 `core.team.skill_use` 为例）
+
+skill 实体只存放在唯一的全局库，成员看得见哪些 skill 由 member / team 两份
+`skills-visibility.json` 决定。成员名是 spawn 时才铸出来的，所以 claw 侧只声明
+「怎么暴露」，身份类 params（库根、两份声明文件路径、seed allow）由 openjiuwen
+的 `agent_teams.skill.rail_spec.complete_declared_team_skill_rails` 在成员装配时补齐。
 
 ```
 config.yaml: react.skill_mode = "auto_list"
    │ enrich → config_specs._skill_mode(config) = "auto_list"
    ▼
-RailSpec(type="swarm.code_skill_use", params={"skill_mode": "auto_list"})   # 属性烘焙
+RailSpec(type="core.team.skill_use",
+         params={"skill_mode": "auto_list", "bootstrap_allow": [...]})   # 属性烘焙
    │ (随 DeepAgentSpec 序列化 / 跨进程重建保留)
    ▼
+AgentConfigurator.setup_agent → complete_declared_team_skill_rails(...)
+   │ 补 team_name / skills_dir / member_visibility_path / team_visibility_path
+   ▼
 RailSpec.build(language=..., context=SwarmBuildContext)
-   │ openjiuwen: _RAIL_PROVIDER_REGISTRY["swarm.code_skill_use"](params, context)
+   │ openjiuwen: _RAIL_PROVIDER_REGISTRY["core.team.skill_use"](params, context)
    ▼
-build_code_skill_use(params={"skill_mode": "auto_list"}, ctx)
-   │ inp = CodeSkillUseInput.resolve(params, ctx)   # skill_mode 来自 params
-   ▼
-SkillUseRail(skills_dir=get_agent_skills_dir(), skill_mode="auto_list", ...)
+TeamSkillUseRail(skills_dir=<全局唯一库>, visibility_provider=...)
+   │ 构造时用 bootstrap_allow 播种成员声明（唯一写者）
+   │ 每轮按两份声明重算 allow/deny；空 allow = 继承全库，deny 优先
 ```
+
+> 成员 `skills-visibility.json` 的**播种只有这一个写者**：
+> `create_team_skill_use_rail`。`swarm.member_skill_toolkit` 不再写这份文档，
+> 否则同一次装配里两个写者抢同一把文件锁，跳过规则还会各自漂移。
 
 ---
 
