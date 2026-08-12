@@ -21,6 +21,7 @@ import {
   FileDownloadItem,
   ContextCompressionRuntime,
   ContextCompressionSummary,
+  WebError,
 } from '../../types';
 import { StreamingContent } from './StreamingContent';
 import { ToolCallDisplay } from './ToolCallDisplay';
@@ -44,6 +45,8 @@ import { executeDesktopSave, type DesktopSaveApiResult } from '../../utils/deskt
 import { FileIcon } from '../FileIcon';
 import { webRequest } from '../../services/webClient';
 import { useChatStore } from '../../stores/chatStore';
+import { executeDesktopSave, type DesktopSaveApiResult } from '../../utils/desktopSave';
+import { extractTokenFromDownloadUrl } from '../../utils/fileDownloadDedup';
 
 export const MarkdownMessageBody = memo(function MarkdownMessageBody({
   content,
@@ -775,14 +778,52 @@ function formatFileSize(bytes: number | undefined): string {
   return `${size.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
+/** 与后端 `_is_skill_package_file` 对齐：`.skill` / `.zip` / `.skill.zip` */
+function isSkillPackageFile(file: FileDownloadItem): boolean {
+  const candidates = [file.name, file.path].filter(Boolean) as string[];
+  for (const candidate of candidates) {
+    const base = candidate.replace(/\\/g, '/').split('/').pop()?.toLowerCase() || '';
+    if (
+      base.endsWith('.skill.zip') ||
+      base.endsWith('.skill') ||
+      base.endsWith('.zip')
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function skillPackageDisplayName(file: FileDownloadItem): string {
+  const raw = (file.name || file.path || '').replace(/\\/g, '/').split('/').pop() || '';
+  return raw.replace(/(\.skill)?\.zip$/i, '').replace(/\.skill$/i, '') || raw || 'skill';
+}
+
+function resolveFileDownloadToken(file: FileDownloadItem): string | undefined {
+  const direct = file.download_token?.trim();
+  if (direct) return direct;
+  return extractTokenFromDownloadUrl(file.download_url)?.trim() || undefined;
+}
+
+function isImportOverwriteRequired(error: unknown): boolean {
+  const code = (error as WebError | undefined)?.code;
+  if (code === 'SKILL_IMPORT_OVERWRITE_REQUIRED' || code === 'SKILL_ALREADY_EXISTS') {
+    return true;
+  }
+  const msg = error instanceof Error ? error.message : String(error);
+  return msg.includes('已存在') || msg.includes('force=true') || msg.includes('IMPORT_OVERWRITE');
+}
+
 function getFileExtension(name: string): string {
   const parts = name.split('.');
   if (parts.length < 2) return '';
   return parts[parts.length - 1].toUpperCase();
 }
 
-function isSkillMdFile(file: FileDownloadItem): boolean {
-  return Boolean(file.path && /skill\.md$/i.test(file.path));
+function getFileExtension(name: string): string {
+  const parts = name.split('.');
+  if (parts.length < 2) return '';
+  return parts[parts.length - 1].toUpperCase();
 }
 
 function FileDownloadList({
@@ -804,6 +845,7 @@ function FileDownloadList({
   useEffect(() => {
     let cancelled = false;
     files.forEach((file, index) => {
+      if (!file.download_url) return;
       fetch(file.download_url, { method: 'HEAD' })
         .then((res) => {
           if (!cancelled && !res.ok) {
@@ -820,7 +862,7 @@ function FileDownloadList({
   }, [files]);
 
   const handleDownload = async (file: FileDownloadItem, index: number) => {
-    if (expiredSet.has(index)) return;
+    if (expiredSet.has(index) || !file.download_url) return;
 
     const pywebviewApi = (window as Window & { pywebview?: { api?: { download_file?: (url: string, filename: string) => DesktopSaveApiResult } } }).pywebview?.api;
     if (pywebviewApi?.download_file) {
@@ -842,21 +884,28 @@ function FileDownloadList({
 
   const handleSaveSkill = async (file: FileDownloadItem, index: number) => {
     if (expiredSet.has(index) || savingIndex !== null || savedIndex.has(index)) return;
-    if (!file.path) return;
+    const downloadToken = resolveFileDownloadToken(file);
+    if (!downloadToken) return;
+
+    const importParams = (force: boolean) => ({
+      download_token: downloadToken,
+      force,
+      session_id: sessionId,
+    });
 
     setSavingIndex(index);
     try {
-      await webRequest('skills.import_local', { path: file.path, force: false, session_id: sessionId });
+      await webRequest('skills.import_local', importParams(false));
       setSavedIndex((prev) => new Set(prev).add(index));
       setSaveSuccessIndex(index);
       setTimeout(() => setSaveSuccessIndex(null), 2000);
     } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
-      if (errorMsg.includes('已存在') || errorMsg.includes('force=true')) {
+      if (isImportOverwriteRequired(error)) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
         const overwrite = window.confirm(`${errorMsg}\n是否覆盖保存？`);
         if (!overwrite) return;
         try {
-          await webRequest('skills.import_local', { path: file.path, force: true, session_id: sessionId });
+          await webRequest('skills.import_local', importParams(true));
           setSavedIndex((prev) => new Set(prev).add(index));
           setSaveSuccessIndex(index);
           setTimeout(() => setSaveSuccessIndex(null), 2000);
@@ -877,10 +926,9 @@ function FileDownloadList({
       {files.map((file, index) => {
         const ext = getFileExtension(file.name);
         const expired = expiredSet.has(index);
-        const isSkill = isSkillMdFile(file);
-        const displayName = isSkill
-          ? (file.path!.replace(/[\\/][^\\/]+$/, '').split(/[\\/]/).pop() || file.name)
-          : file.name;
+        const isSkill = isSkillPackageFile(file);
+        const displayName = isSkill ? skillPackageDisplayName(file) : file.name;
+        const downloadToken = resolveFileDownloadToken(file);
         const isSaving = savingIndex === index;
         const isSaved = savedIndex.has(index);
         return (
@@ -954,7 +1002,7 @@ function FileDownloadList({
                         ? 'text-text-muted cursor-wait'
                         : 'text-accent hover:bg-accent-subtle'
                   )}
-                  disabled={expired || isSaving || isSaved || !file.path}
+                  disabled={expired || isSaving || isSaved || !downloadToken}
                   onClick={(event) => {
                     event.stopPropagation();
                     void handleSaveSkill(file, index);
