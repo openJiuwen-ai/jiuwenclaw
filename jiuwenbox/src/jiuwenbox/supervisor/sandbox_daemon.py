@@ -238,7 +238,7 @@ def _handle_exec(conn: socket.socket, header: dict[str, Any], state: DaemonState
 
         stdin_bytes = _recv_exact(conn, stdin_size) if stdin_size else b""
 
-        # Experimental Python ForkServer fast path. Only activated when BOTH
+        # Python ForkServer fast path (default OFF). Only activated when BOTH
         # the server marked the request (``python_fastpath``) and the daemon
         # environment enables the feature (``JIUWENBOX_PYTHON_FASTPATH=1``).
         # Falls back to the normal ``subprocess.Popen`` path below otherwise.
@@ -347,7 +347,7 @@ def _handle_exec(conn: socket.socket, header: dict[str, Any], state: DaemonState
 
 
 # ---------------------------------------------------------------------------
-# Experimental Python ForkServer fast path (feature-flagged, default OFF).
+# Python ForkServer fast path (feature-flagged, default OFF; release candidate).
 #
 # When ``JIUWENBOX_PYTHON_FASTPATH=1`` is set in the server environment (and
 # therefore inherited into the sandbox daemon), ``python3 -c <code>`` exec
@@ -357,10 +357,10 @@ def _handle_exec(conn: socket.socket, header: dict[str, Any], state: DaemonState
 # ``python3 -c <source>`` so nothing needs to be read from disk after
 # Landlock applies (mirroring how the launcher loads the daemon itself).
 # The forked children inherit the exact same bwrap namespace / userns /
-# cgroup / seccomp / Landlock / mount envelope as the daemon. This is an
-# experiment for perf/memory modelling only -- it is not a formal API and
-# does not change the default ``/exec`` path. When the fast path is
-# unavailable it falls back to the normal ``subprocess.Popen`` path.
+# cgroup / seccomp / Landlock / mount envelope as the daemon. This is a
+# feature-flagged internal path -- it is not a formal external API and does
+# not change the default ``/exec`` path. When the fast path is unavailable it
+# falls back to the normal ``subprocess.Popen`` path.
 FASTPATH_ENV = "JIUWENBOX_PYTHON_FASTPATH"
 FASTPATH_WORKERS_ENV = "JIUWENBOX_PYTHON_FASTPATH_WORKERS"
 FASTPATH_IDLE_TIMEOUT_ENV = "JIUWENBOX_PYTHON_FASTPATH_IDLE_TIMEOUT"
@@ -750,7 +750,7 @@ class ForkServerPool:
     sandbox holds zero workers) and are direct children of the daemon, i.e.
     they live inside the same bwrap namespace / userns / pidns and inherit
     the same cgroup, seccomp, Landlock and mount envelope. Simple round-robin
-    dispatch; no dynamic scaling in this experiment.
+    dispatch; no dynamic scaling.
 
     Concurrency: each worker has its own lock so two workers can service two
     requests concurrently. The pool lock only guards pool state (spawn/prune/

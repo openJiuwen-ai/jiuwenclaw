@@ -142,7 +142,7 @@ _LANDLOCK_LAUNCHER_BYTES = LANDLOCK_LAUNCHER_SOURCE.read_bytes()
 _SANDBOX_DAEMON_BYTES = SANDBOX_DAEMON_SOURCE.read_bytes()
 PYTHON_EXECUTABLE = "python3"
 
-# Experimental Python ForkServer fast path (feature-flagged, default OFF).
+# Python ForkServer fast path (feature-flagged, default OFF; release candidate).
 # When ``JIUWENBOX_PYTHON_FASTPATH=1`` is set in the server process
 # environment, exec requests whose command is the simple ``python3 -c CODE``
 # shape are marked ``python_fastpath: true`` in the daemon IPC payload. The
@@ -180,7 +180,7 @@ def _python_fastpath_enabled() -> bool:
 def _python_fastpath_candidate(command: list[str]) -> bool:
     """Whether ``command`` is the simple ``python3 -c CODE`` fast-path shape.
 
-    Narrow, explicit experimental trigger only (applied solely when the
+    Narrow, explicit trigger only (applied solely when the
     feature flag is on); it is not a general auto-detector of arbitrary
     Python invocations.
     """
