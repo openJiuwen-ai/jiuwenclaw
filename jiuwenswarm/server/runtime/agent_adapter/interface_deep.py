@@ -5355,22 +5355,8 @@ class JiuWenSwarmDeepAdapter:
         return skill_rail
 
     @staticmethod
-    def _resolve_evolution_trajectory_dir(config: dict[str, Any]) -> Path:
-        """Resolve directory for FileTrajectoryStore (env > config > default)."""
-        env_dir = (os.getenv("EVOLUTION_TRAJECTORY_DIR") or "").strip()
-        if env_dir:
-            return Path(env_dir).expanduser().resolve()
-
-        configured = _get_evolution_config(config).get("trajectory_dir")
-        if configured:
-            path = Path(str(configured).strip())
-            if path.is_absolute():
-                return path
-            workspace = get_multi_tenant_user_workspace_dir("default", "default")
-            if workspace is not None:
-                return (workspace / path).resolve()
-            return (get_agent_root_dir().parent / path).resolve()
-
+    def _resolve_evolution_trajectory_dir() -> Path:
+        """Resolve directory for FileTrajectoryStore (always use default)."""
         return get_agent_evolution_trajectories_dir()
 
     def _build_skill_evolution_rail(self, config: dict[str, Any]) -> SkillEvolutionRail | None:
@@ -5379,7 +5365,7 @@ class JiuWenSwarmDeepAdapter:
             evolution_review_trigger = get_evolution_review_trigger_enabled(config)
             evolution_auto_save = get_evolution_auto_save_enabled(config)
             model_name = self._default_model_name or config.get("model_name", "gpt-4")
-            trajectory_dir = self._resolve_evolution_trajectory_dir(config)
+            trajectory_dir = self._resolve_evolution_trajectory_dir()
             skill_evolution_rail = SkillEvolutionRail(
                 skills_dir=self._resolve_skill_dirs(),
                 llm=self._model,
@@ -5419,7 +5405,7 @@ class JiuWenSwarmDeepAdapter:
             if self._skill_manager is not None
             else []
         )
-        trajectory_dir = self._resolve_evolution_trajectory_dir(self._config_cache or {})
+        trajectory_dir = self._resolve_evolution_trajectory_dir()
         await configure_skill_evolution_runtime(
             self._instance,
             skills_dir=self._resolve_skill_dirs(),
