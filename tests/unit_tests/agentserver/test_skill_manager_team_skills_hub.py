@@ -153,6 +153,7 @@ async def test_handle_skills_swarm_skills_hub_recommend_maps_response(tmp_path, 
                     "short_desc": "desc",
                     "latest_version": "1.2.3",
                     "update_time": 123,
+                    "plugin_type": "skill",
                 }
             ]
         }
@@ -165,9 +166,74 @@ async def test_handle_skills_swarm_skills_hub_recommend_maps_response(tmp_path, 
     assert payload["success"] is True
     assert payload["source"] == "user_history"
     assert payload["count"] == 1
+    assert payload["plugin_type"] == ""
     assert payload["skills"][0]["asset_id"] == "demo-skill"
     assert payload["skills"][0]["display_name"] == "Demo Skill"
     assert payload["skills"][0]["score"] == 0.9
+    assert payload["skills"][0]["plugin_type"] == "skill"
+
+
+@pytest.mark.asyncio
+async def test_handle_skills_swarm_skills_hub_recommend_filters_plugin_type(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEAM_SKILLS_HUB_SYSTEM_TOKEN", "sys-token-demo")
+    manager = TeamSkillsHubHarnessSkillManager(workspace_dir=str(tmp_path))
+
+    async def _fake_post_data(path, **kwargs):  # noqa: ANN001
+        assert path == "/api/v1/recommend"
+        # top_k=2 with plugin_type filter over-fetches (2 * 5)
+        assert kwargs["json_body"]["top_k"] == 10
+        return {
+            "request_id": "r1",
+            "user_id": "",
+            "source": "topk_install",
+            "category_id": "",
+            "items": [
+                {"asset_id": "a-skill", "score": 0.9},
+                {"asset_id": "b-swarm", "score": 0.8},
+                {"asset_id": "c-skill", "score": 0.7},
+            ],
+        }
+
+    async def _fake_get_data(path, **kwargs):  # noqa: ANN001
+        assert path == "/api/v1/plugins"
+        asset_id = kwargs["params"]["asset_id"]
+        plugin_type = {
+            "a-skill": "skill",
+            "b-swarm": "swarmskill",
+            "c-skill": "skill",
+        }[asset_id]
+        return {
+            "items": [
+                {
+                    "asset_id": asset_id,
+                    "name": asset_id,
+                    "display_name": asset_id,
+                    "short_desc": "d",
+                    "latest_version": "1.0.0",
+                    "update_time": 1,
+                    "plugin_type": plugin_type,
+                }
+            ]
+        }
+
+    manager.set_mock_post_data(_fake_post_data)
+    manager.set_mock_get_data(_fake_get_data)
+    payload = await manager.handle_skills_swarm_skills_hub_recommend(
+        {"top_k": 2, "plugin_type": "swarmskill"}
+    )
+    assert payload["success"] is True
+    assert payload["plugin_type"] == "swarmskill"
+    assert payload["count"] == 1
+    assert payload["skills"][0]["asset_id"] == "b-swarm"
+    assert payload["skills"][0]["plugin_type"] == "swarmskill"
+
+    payload_alias = await manager.handle_skills_swarm_skills_hub_recommend(
+        {"top_k": 2, "skill_type": "teamskills"}
+    )
+    assert payload_alias["success"] is True
+    assert payload_alias["plugin_type"] == "swarmskill"
+    assert payload_alias["count"] == 1
+    assert payload_alias["skills"][0]["asset_id"] == "b-swarm"
 
 
 @pytest.mark.asyncio

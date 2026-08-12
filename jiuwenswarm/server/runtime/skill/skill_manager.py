@@ -1913,7 +1913,11 @@ class SkillManager:
             }
 
     async def handle_skills_swarm_skills_hub_recommend(self, params: dict) -> dict:
-        """转发 Swarm Skills Hub 个性化推荐（POST /api/v1/recommend）。"""
+        """转发 Swarm Skills Hub 个性化推荐（POST /api/v1/recommend）。
+
+        Hub 推荐本身不带 plugin_type；若传入 plugin_type/skill_type，则在 enrich
+        后按 plugins 元数据过滤（对齐 SkillHub 市场 list + order_by=recommend）。
+        """
         auth = self._resolve_teamskills_hub_auth_with_env(params)
         if auth.get("error"):
             return {
@@ -1936,17 +1940,27 @@ class SkillManager:
         request_id = str(params.get("request_id") or "").strip()
         category_id = str(params.get("category_id") or "").strip()
         timestamp = params.get("timestamp")
+        plugin_type_raw = str(params.get("plugin_type") or params.get("skill_type") or "").strip()
+        plugin_types = self._parse_hub_plugin_types(plugin_type_raw)
         enrich_raw = params.get("enrich", True)
         if isinstance(enrich_raw, bool):
             enrich = enrich_raw
         else:
             enrich = str(enrich_raw).strip().lower() not in {"0", "false", "no", "off"}
+        # 按类型过滤依赖 plugins 元数据，必须 enrich。
+        if plugin_types:
+            enrich = True
         base_url = self._get_team_skills_hub_base_url(str(params.get("market_url") or "").strip() or None)
+
+        # 有类型过滤时多拉一些再筛，避免 top_k 滤完不够。
+        fetch_k = top_k
+        if plugin_types:
+            fetch_k = min(500, max(top_k * 5, top_k))
 
         body: dict[str, Any] = {
             "user_id": user_id,
             "request_id": request_id,
-            "top_k": top_k,
+            "top_k": fetch_k,
             "category_id": category_id,
         }
         if timestamp is not None:
@@ -1987,11 +2001,24 @@ class SkillManager:
                         "summary": "",
                         "version": "",
                         "updated_at": 0,
+                        "plugin_type": "",
                     }
                 )
 
+            # Hub cold-start may ignore top_k and return the full snapshot; cap before enrich
+            # so we do not N+1 storm /plugins for hundreds of ids.
+            skills = skills[:fetch_k]
+
             if enrich and skills:
                 skills = await self._enrich_swarmskills_recommend_skills(skills, base_url=base_url)
+                if plugin_types:
+                    allowed = set(plugin_types)
+                    skills = [
+                        s
+                        for s in skills
+                        if self._normalize_hub_plugin_type(str(s.get("plugin_type") or "")) in allowed
+                    ]
+            skills = skills[:top_k]
 
             return {
                 "success": True,
@@ -1999,6 +2026,7 @@ class SkillManager:
                 "user_id": str((data or {}).get("user_id") or user_id),
                 "source": str((data or {}).get("source") or ""),
                 "category_id": str((data or {}).get("category_id") or category_id),
+                "plugin_type": ",".join(plugin_types) if plugin_types else "",
                 "count": len(skills),
                 "skills": skills,
                 "items": skills,
@@ -3622,6 +3650,22 @@ class SkillManager:
             raise RuntimeError("Team Skills Hub API 响应 data 格式错误")
         return data
 
+    @staticmethod
+    def _normalize_hub_plugin_type(raw: str) -> str:
+        """Align with SkillHub: teamskills is an alias of swarmskill."""
+        normalized = (raw or "").strip().lower()
+        return "swarmskill" if normalized == "teamskills" else normalized
+
+    @classmethod
+    def _parse_hub_plugin_types(cls, raw: str) -> list[str]:
+        """Parse plugin_type / skill_type (comma-separated) into normalized list."""
+        out: list[str] = []
+        for part in str(raw or "").split(","):
+            normalized = cls._normalize_hub_plugin_type(part)
+            if normalized and normalized not in out:
+                out.append(normalized)
+        return out
+
     async def _enrich_swarmskills_recommend_skills(
         self,
         skills: list[dict[str, Any]],
@@ -3646,6 +3690,7 @@ class SkillManager:
                 if not row:
                     return item
                 name = str(row.get("name", "")).strip() or asset_id
+                plugin_type = self._normalize_hub_plugin_type(str(row.get("plugin_type") or ""))
                 return {
                     **item,
                     "name": name,
@@ -3653,6 +3698,7 @@ class SkillManager:
                     "summary": str(row.get("short_desc", "")).strip(),
                     "version": str(row.get("latest_version", "")).strip(),
                     "updated_at": int(row.get("update_time") or 0),
+                    "plugin_type": plugin_type,
                 }
             except Exception as exc:
                 logger.warning("推荐结果补齐失败 asset_id=%s: %s", asset_id, exc)
