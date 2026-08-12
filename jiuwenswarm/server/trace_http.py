@@ -93,11 +93,19 @@ class TraceHttpServer:
 
         mode = body.get("mode") or "agent.plan"
         channel_id = body.get("channel_id") or "trace_http"
-        session_id = body.get("session_id") or f"trace-http-{int(time.time())}"
         project_dir = body.get("project_dir") or body.get("cwd") or ""
         timeout = int(body.get("timeout") or _DEFAULT_TIMEOUT)
 
-        request_id = f"trace-http-{uuid.uuid4().hex[:12]}"
+        # /run 代表一次完整 rollout：每个请求分配唯一 request_id（完整 uuid hex），
+        # 并以其作为默认 session_id，避免同秒并发请求共享 session 互相阻塞/串状态。
+        # 调用方传入的 session_id 仅作外部关联 key，runtime 仍按一次性处理——
+        # 多轮持久化对话走 gateway/AgentServer WebSocket，不走本端点。
+        request_id = f"trace-http-{uuid.uuid4().hex}"
+        explicit_session_id = str(body.get("session_id") or "").strip()
+        session_id = explicit_session_id or request_id
+        # 每次 /run 都是一次性 session：跑完即回收该 session 的内存运行时，
+        # 不依赖 deep adapter 2h TTL 的机会式 idle eviction（批量 rollout 期间会堆积）。
+        is_oneshot_session = True
 
         # 构造 params：query/mode 必填；project_dir/cwd/workspace_dir 给齐，
         # 兼容 resolve_request_project_dir 与 AgentManager.process_message（后者读 workspace_dir）。
@@ -139,7 +147,17 @@ class TraceHttpServer:
             metadata={},
         )
 
-        trace_id, trace, ok, error = await self._run_and_collect(agent_request, timeout)
+        # 先在根 span 内跑 agent + 收 trace（_run_and_collect 内部已 force_flush
+        # 并 get_trace_tree 取完整棵树），再在 finally 回收 session runtime——
+        # 这样 cleanup 里 adapter.cleanup() 可能的 flush/end span 与 unlink
+        # runtime_state 不会扰动已返回的 trace。
+        try:
+            trace_id, trace, ok, error = await self._run_and_collect(
+                agent_request, timeout
+            )
+        finally:
+            if is_oneshot_session:
+                await self._cleanup_session_runtime(channel_id, session_id)
 
         return web.json_response({
             "request_id": request_id,
@@ -149,6 +167,30 @@ class TraceHttpServer:
             "trace": trace,
             "error": error,
         })
+
+    async def _cleanup_session_runtime(
+        self, channel_id: str, session_id: str
+    ) -> None:
+        """一次性 session 跑完后回收其内存运行时（adapter + runtime_state）。
+
+        委托 AgentManager.cleanup_session_runtime 走既有清理链（close_session
+        硬拆除 + adapter.cleanup_session_adapter）。best-effort：upstream 版
+        cleanup_session_runtime 在清理失败/残留时会 raise RuntimeError，绝
+        不能让它把 /run 响应打挂，故兜底吞掉并记日志。
+        """
+        cleanup = getattr(self._agent_manager, "cleanup_session_runtime", None)
+        if not callable(cleanup):
+            return
+        try:
+            await cleanup(channel_id=channel_id, session_id=session_id)
+        except Exception as exc:
+            logger.warning(
+                "[TraceHttpServer] one-shot session cleanup failed "
+                "(channel=%s, session_id=%s): %s",
+                channel_id,
+                session_id,
+                exc,
+            )
 
     # ------------------------------------------------------------------
     # core: run agent under a root span, then collect its OTel trace tree
