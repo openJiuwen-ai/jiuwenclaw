@@ -7,6 +7,7 @@ from typing import Any
 from jiuwenswarm.common.reasoning_config import (
     LEVEL_MAPPING,
     ReasoningEffort,
+    is_new_generation_openai_model,
     normalize_reasoning_level,
     resolve_reasoning_target,
 )
@@ -119,6 +120,10 @@ def _build_model_request_kwargs(
     request_kwargs.pop("model_name", None)
     request_kwargs.pop("reasoning_level", None)
     request_kwargs["model"] = _resolve_model_name(model_name, model_config_obj)
+    if is_new_generation_openai_model(request_kwargs["model"]):
+        # gpt-5/o 系列在 /v1/chat/completions 中使用 function tools 时必须
+        # 显式 reasoning_effort="none"，否则 OpenAI API 返回 400
+        request_kwargs["reasoning_effort"] = "none"
     return request_kwargs
 
 
