@@ -821,11 +821,11 @@ async def test_handle_permissions_config_does_not_block_on_slow_reload(server, f
         ok = True
         payload = {"ok": True}
 
-    monkeypatch.setattr(_rpc_mod, "dispatch_permissions_config_request", lambda _req: _Resp())
+    monkeypatch.setattr(_rpc_mod, "dispatch_permissions_config_request", lambda _req, **_kw: _Resp())
     # dispatch 在 _handle_permissions_config 内部是延迟 import 取的符号, 需同时 patch 该符号
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.common.rails.permissions.permissions_config_rpc.dispatch_permissions_config_request",
-        lambda _req: _Resp(),
+        lambda _req, **_kw: _Resp(),
         raising=True,
     )
     monkeypatch.setattr(agent_ws_server_module, "get_config", lambda: {})
