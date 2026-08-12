@@ -808,6 +808,34 @@ def _install_bundled_skills_safe(name: str) -> list[str]:
         return []
 
 
+def rollback_failed_connect(name: str) -> None:
+    """Roll back a state.json entry after a failed connect/CLI auth.
+
+    Marketplace MCP (has package dir): remove record + uninstall skills.
+    Custom MCP: flip state back to ``registered`` so the user can retry/edit.
+    """
+    n = str(name or "").strip()
+    if not n:
+        return
+    try:
+        if (_packages_dir() / n).is_dir():
+            from jiuwenswarm.server.runtime.mcp.skill_installer import (
+                uninstall_mcp_skills,
+            )
+            from jiuwenswarm.server.runtime.mcp.state_store import (
+                remove_mcp_record,
+            )
+            uninstall_mcp_skills(n)
+            remove_mcp_record(n)
+        else:
+            from jiuwenswarm.server.runtime.mcp.state_store import (
+                set_mcp_state,
+            )
+            set_mcp_state(n, state="registered")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[mcp.registry] rollback '%s' failed: %s", n, exc)
+
+
 def _entry_missing_tokens(entry: dict[str, Any], store: Any) -> set[str]:
     """Collect ${VAR} placeholders not yet in the CredentialStore."""
     from jiuwenswarm.server.runtime.mcp.credential import extract_placeholders
@@ -994,7 +1022,6 @@ def complete_cli_auth(name: str, step_index: int, *, install_only: bool = False)
             "matched": status.matched,
             "output": status.output,
         }
-    inst = drv.install()
     return _connect_cli(n, idx + 1, install_only=install_only)
 
 
@@ -1101,28 +1128,17 @@ def register_custom_mcp(name: str, config: dict[str, Any]) -> dict[str, Any]:
             entry["env"] = {str(k): str(v) for k, v in config["env"].items()}
     if isinstance(config.get("timeout_s"), (int, float)) and int(config["timeout_s"]) > 0:
         entry["timeout_s"] = int(config["timeout_s"])
-    # Edit-vs-new: if a record already exists for this name, preserve its
-    # state and enabled flag. Editing a connected custom MCP keeps it
-    # connected so the handler can remove+re-add the live instance with the
-    # new config; editing a disabled one keeps it disabled (the edit dialog
-    # changing fields is not an implicit enable). A brand-new MCP is written
-    # as state=registered, enabled=True — the handler then flips state to
-    # connected and applies the MCP server.
     from jiuwenswarm.server.runtime.mcp.state_store import (
         get_mcp_record,
         upsert_mcp_record,
     )
     prior = get_mcp_record(n)
     was_connected = bool(prior and prior.get("state") == "connected")
-    new_state = "connected" if was_connected else "registered"
     new_enabled = bool(prior.get("enabled", True)) if prior else True
     upsert_mcp_record(
-        n, entry, state=new_state, enabled=new_enabled,
+        n, entry, state="registered", enabled=new_enabled,
         integration_type="remote-mcp" if transport != "stdio" else "stdio-mcp",
     )
-    # Signal to the handler whether the live MCP server needs a remove+re-add
-    # (edit of a connected instance) or a plain add (new registration). This
-    # key is not persisted to state.json — upsert only stored the entry fields.
     entry["was_connected"] = was_connected
     return entry
 
@@ -1257,4 +1273,7 @@ __all__ = [
     "disable_mcp",
     "complete_cli_auth",
     "register_custom_mcp",
+    "delete_custom_mcp",
+    "save_mcp_credentials",
+    "rollback_failed_connect",
 ]

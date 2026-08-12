@@ -2565,6 +2565,17 @@ class JiuWenSwarmDeepAdapter:
     async def _register_mcp_server(self, cfg: McpServerConfig, *, tag: str) -> bool:
         if self._instance is None:
             return False
+        # stdio: command 必须可执行（npx/uvx/node 等），否则 SDK 启动子进程会
+        # 抛 OSError 但被 connect() 的 except 吞掉，前端只看到笼统失败。
+        # 提前 shutil.which 检查，缺失则直接报"命令不存在"，不发到 SDK。
+        if str(cfg.client_type).strip().lower() == "stdio":
+            import shutil
+            cmd = str((cfg.params or {}).get("command", "")).strip()
+            if cmd and not shutil.which(cmd):
+                raise RuntimeError(
+                    f"MCP '{cfg.server_name}' command '{cmd}' not found on PATH "
+                    f"(install it or add to PATH)"
+                )
         # Pre-flight reachability check for HTTP-based MCP servers. If the host
         # is down we skip registration here instead of entering the mcp
         # streamable-http context — otherwise openjiuwen leaks orphaned anyio
@@ -2627,14 +2638,11 @@ class JiuWenSwarmDeepAdapter:
                 runner_reason
                 or f"MCP server '{cfg.server_name}' register rejected (no runner reason)"
             )
-        except Exception:
-            # openjiuwen's add_tool_server coerces any CancelledError /
-            # BaseExceptionGroup from the MCP SDK's streamable-http teardown
-            # into a catchable WorkflowError (Exception), and the ok=False path
-            # above raises a RuntimeError — both are plain Exceptions, so
-            # ``except Exception`` suffices. Re-raise so register_mcp_by_name
-            # collects the failure as first_error.
-            logger.warning("MCP server register mcp server failed.")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] MCP server '%s' register failed: %s",
+                cfg.server_name, exc,
+            )
             raise
 
     async def _unregister_mcp_server(self, server_id: str) -> None:
