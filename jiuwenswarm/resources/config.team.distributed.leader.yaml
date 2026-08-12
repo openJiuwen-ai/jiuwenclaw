@@ -228,14 +228,6 @@ react:
       trigger_context_ratio: 0.8
       min_target_context_ratio: 0.1
       keep_recent_messages: 4
-    reasoning_tool_loop_compact_config:
-      enabled: true
-      consecutive_threshold: 3
-      tool_args_consecutive_threshold: 5
-      reasoning_min_chars: 4
-      reasoning_preview_max_chars: 512
-      bailout_threshold: 3
-      tool_args_bailout_threshold: 2
   # Skills 在线自演进配置
   evolution:
     skill_evolution: false     # true = 启用技能演进与创建（自动及手动）
