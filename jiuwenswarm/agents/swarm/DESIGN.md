@@ -371,6 +371,17 @@ TeamSkillUseRail(skills_dir=<全局唯一库>, visibility_provider=...)
 > `create_team_skill_use_rail`。`swarm.member_skill_toolkit` 不再写这份文档，
 > 否则同一次装配里两个写者抢同一把文件锁，跳过规则还会各自漂移。
 
+> 团队 `skills-visibility.json` 的**播种者不在 claw**：唯一写者是 openjiuwen 的
+> `team_workspace/manager.py::initialize`（`_seed_team_skill_visibility()`），
+> 团队 workspace 起来时必跑一次。`assembly.py` 只按 `team_ws_root` 算出
+> `team_skill_visibility_path` 注入 `SwarmBuildContext` 供 rail 读取，**不写文件**；
+> `TeamManager` 也不再播种。理由是"缺文件 = 不施加约束"——`read_skill_visibility`
+> 对不存在的文件降级为空文档，`compose_skill_visibility` 里团队传空文档即无约束，
+> 所以没有 workspace 的团队根本不需要这份文件。曾经三处各播一次，语义碰巧一致
+> （空 allow + `AUTHORITY_SEED` + 不覆盖已存文件）才没出事；任一处改播非空 allow，
+> 胜负就变成由调用顺序决定。回归护栏见
+> `tests/unit_tests/agentserver/test_team_shared_skills.py::test_platform_declares_no_team_scope_skill_visibility_seeder`。
+
 ---
 
 ## 12. 序列化与跨进程重建
