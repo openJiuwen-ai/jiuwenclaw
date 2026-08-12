@@ -1691,7 +1691,17 @@ def get_shared_agent_skills_dirs() -> list[Path]:
 
 
 def resolve_agent_registered_skill_dirs() -> list[Path]:
-    """Resolve skill dirs: shared tip dirs when set, else workspace skills."""
+    """Resolve skill dirs: request-bound override, shared tip dirs, else workspace."""
+    try:
+        from jiuwenswarm.server.runtime.agent_adapter.session_skill_dirs import (
+            get_session_registered_skill_dirs,
+        )
+
+        bound = get_session_registered_skill_dirs()
+    except Exception:
+        bound = None
+    if bound:
+        return [Path(p) for p in bound]
     shared = get_shared_agent_skills_dirs()
     if shared:
         return shared

@@ -855,6 +855,12 @@ class TenantAgentPool:
             "skills.evolution.save",
         }
     )
+    _DISK_ONLY_EVOLUTION_METHODS: frozenset[str] = frozenset(
+        {
+            "skills.evolution.archives",
+            "skills.evolution.rollback",
+        }
+    )
     _PREFERRED_CONTROL_AGENT_IDS: tuple[str, ...] = ("office", "jiuwenclaw", "assistant")
 
     @staticmethod

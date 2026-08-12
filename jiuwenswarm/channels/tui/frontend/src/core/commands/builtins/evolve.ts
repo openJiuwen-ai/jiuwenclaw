@@ -134,37 +134,35 @@ export function createEvolveSimplifyCommand(): SlashCommand {
 }
 
 /**
- * /evolve_rebuild - Rebuild SKILL.md via followup execution
- * Usage: /evolve_rebuild <skill_name> [<user_query>...]
+ * /evolve_rollback - Rollback a skill to an archived SemVer pair
+ * Usage: /evolve_rollback <skill_name> [version|latest]
  */
-export function createEvolveRebuildCommand(): SlashCommand {
+export function createEvolveRollbackCommand(): SlashCommand {
   return {
-    name: "evolve_rebuild",
-    description: "Rebuild SKILL.md from archived history and evolution records",
-    usage: "/evolve_rebuild <skill_name> [<user_query>...]",
-    example: "/evolve_rebuild pptx improve error handling",
+    name: "evolve_rollback",
+    description: "Rollback a skill to an archived version (omit version to list)",
+    usage: "/evolve_rollback <skill_name> [version|latest]",
+    example: "/evolve_rollback pptx latest",
     kind: CommandKind.BUILT_IN,
     hidden: true,
     takesArgs: true,
     action: (ctx, args) => {
-      const parsedArgs = parseArgs(args);
-      const skillName = parsedArgs[0];
+      const unsupportedMode = unsupportedEvolutionModeMessage(ctx.mode);
+      if (unsupportedMode) {
+        ctx.addItem(makeItem(ctx.sessionId, "error", unsupportedMode));
+        return;
+      }
 
-      if (!skillName || skillName.startsWith("--")) {
+      const skillArg = args.trim();
+      const text = skillArg ? `/evolve_rollback ${skillArg}` : `/evolve_rollback`;
+      const requestId = ctx.sendMessage(text);
+      if (!requestId) {
         ctx.addItem(
           makeItem(
             ctx.sessionId,
             "error",
-            "usage: /evolve_rebuild <skill_name> [<user_query>...] - Provide the name of the skill",
+            "offline: waiting for reconnect before sending evolve_rollback request",
           ),
-        );
-        return;
-      }
-
-      const requestId = ctx.sendMessage(`/evolve_rebuild ${args.trim()}`);
-      if (!requestId) {
-        ctx.addItem(
-          makeItem(ctx.sessionId, "error", "offline: waiting for reconnect before sending evolve_rebuild request"),
         );
       }
     },

@@ -125,6 +125,9 @@ class ReqMethod(Enum):
     SKILLS_EVOLUTION_STATUS = "skills.evolution.status"
     SKILLS_EVOLUTION_GET = "skills.evolution.get"
     SKILLS_EVOLUTION_SAVE = "skills.evolution.save"
+    SKILLS_EVOLUTION_ARCHIVES = "skills.evolution.archives"
+    SKILLS_EVOLUTION_ROLLBACK = "skills.evolution.rollback"
+    SKILLS_EVOLUTION_REBUILD = "skills.evolution.rebuild"
 
     SYMPHONY_BUILD_SCORE = "symphony.build_score"
     SYMPHONY_PAUSE_BUILD = "symphony.pause_build"

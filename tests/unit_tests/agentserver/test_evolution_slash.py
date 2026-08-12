@@ -193,32 +193,8 @@ async def test_agent_plan_evolve_simplify_no_records_returns_answer(tmp_path, mo
 
 
 @pytest.mark.anyio
-async def test_agent_plan_evolve_rebuild_returns_followup(tmp_path, monkeypatch):
+async def test_agent_plan_evolve_rebuild_returns_removed_message(tmp_path):
     skills_dir = _write_skill(tmp_path, "research-team", kind="swarm-skill")
-    monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.agent_adapter.evolution_slash.ExperienceRebuildService.prepare_rebuild_context",
-        AsyncMock(
-            return_value={
-                "records": [
-                    {
-                        "record_id": "r1",
-                        "summary": "normalize prompt",
-                        "target": "body",
-                        "section": "Troubleshooting",
-                        "score": 0.99,
-                        "updated_at": "2026-06-15T00:00:00+00:00",
-                        "content": "old content",
-                    }
-                ],
-                "overflow_index": {},
-                "archive_pair": {
-                    "version": "v20260623T101500",
-                    "skill_archive": "SKILL.v20260623T101500.md",
-                    "evolution_archive": "evolutions.v20260623T101500.json",
-                },
-            }
-        ),
-    )
 
     result = await handle_evolution_slash_command(
         "/evolve_rebuild research-team optimize",
@@ -231,13 +207,13 @@ async def test_agent_plan_evolve_rebuild_returns_followup(tmp_path, monkeypatch)
     )
 
     assert result is not None
-    assert result["result_type"] == "followup"
-    assert result["action"] == "run_rebuild_followup"
-    assert result["skill_name"] == "research-team"
+    assert result["result_type"] == "error"
+    assert "skills.evolution.rebuild" in result["output"]
+    assert "/evolve_rebuild" in result["output"]
 
 
 @pytest.mark.anyio
-async def test_agent_plan_evolve_rebuild_archives_before_clear_without_duplicate(tmp_path):
+async def test_agent_plan_evolve_rebuild_no_longer_archives(tmp_path):
     skills_dir = _write_skill(tmp_path, "regular-skill")
     skill_dir = tmp_path / "skills" / "regular-skill"
     skill_dir.joinpath("evolutions.json").write_text(
@@ -258,27 +234,11 @@ async def test_agent_plan_evolve_rebuild_archives_before_clear_without_duplicate
     )
 
     assert result is not None
-    assert result["result_type"] == "followup"
-
+    assert result["result_type"] == "error"
     archive = skill_dir / "archive"
-    skill_versions = {_skill_archive_version(path) for path in archive.glob("SKILL.v*.md")}
-    evolution_versions = {
-        _evolution_archive_version(path) for path in archive.glob("evolutions.v*.json")
-    }
-    assert skill_versions == evolution_versions
-    assert len(skill_versions) == 1
-
-    version = next(iter(skill_versions))
-    archived_log = json.loads(
-        archive.joinpath(f"evolutions.{version}.json").read_text(encoding="utf-8")
-    )
+    assert not archive.exists() or not list(archive.glob("SKILL.v*.md"))
     current_log = json.loads(skill_dir.joinpath("evolutions.json").read_text(encoding="utf-8"))
-    # Archive writes an empty paired evolutions marker; live log is left unchanged
-    # until rebuild completion.
-    assert archived_log["entries"] == []
-    assert archived_log["updated_at"] != "before-clear"
     assert current_log["updated_at"] == "before-clear"
-    assert current_log["entries"] == []
 
 
 @pytest.mark.anyio
