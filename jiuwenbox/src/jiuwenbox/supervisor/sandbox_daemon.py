@@ -547,6 +547,16 @@ def _run_child(code, stdin_bytes, workdir, env_overrides, timeout, control_fd):
     timed_out = False
     stdout_fd = r_out
     stderr_fd = r_err
+    # Reap the child exactly once. ``os.waitpid(pid, WNOHANG)`` may be called
+    # many times across loop iterations (the child is often reaped before its
+    # stdout/stderr pipes reach EOF), but a *second* successful ``waitpid`` on
+    # the same pid raises ``ChildProcessError`` (ECHILD, errno 10). Before this
+    # guard, that exception escaped ``_run_child`` and surfaced to the client
+    # as ``worker error: [Errno 10] No child processes`` on ~0.1% of requests.
+    # Once the child is reaped we save its wait status and never call
+    # ``waitpid(pid)`` again -- subsequent iterations only drain the pipes.
+    child_status = None   # saved wait status after the first successful reap
+    child_done = False
     while True:
         fds = [fd for fd in (stdout_fd, stderr_fd) if fd != -1]
         if fds:
@@ -575,15 +585,29 @@ def _run_child(code, stdin_bytes, workdir, env_overrides, timeout, control_fd):
                 os.kill(pid, signal.SIGKILL)
             except OSError:
                 pass
-        wpid, status = os.waitpid(pid, os.WNOHANG)
-        child_done = wpid == pid
+        if not child_done:
+            # First (and only) reap attempt. ``wpid == 0`` means the child is
+            # still running; ``wpid == pid`` means it was just reaped. Either
+            # way we never reach this branch again once ``child_done`` is set.
+            try:
+                wpid, status = os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                # Defensive: a direct fork child we have not reaped should not
+                # disappear, but if it does, treat it as gone with an unknown
+                # (zero) status rather than propagating ECHILD.
+                wpid, status = pid, 0
+            if wpid == pid:
+                child_done = True
+                child_status = status
         pipes_done = stdout_fd == -1 and stderr_fd == -1
         if child_done and pipes_done:
             if timed_out:
                 return 124, out, err
-            if os.WIFEXITED(status):
-                return os.WEXITSTATUS(status), out, err
-            return -os.WTERMSIG(status), out, err
+            if child_status is None:
+                return 0, out, err
+            if os.WIFEXITED(child_status):
+                return os.WEXITSTATUS(child_status), out, err
+            return -os.WTERMSIG(child_status), out, err
         if not fds and not child_done:
             # No pipe activity and child still running; let the loop re-check
             # the deadline without busy-spinning.
