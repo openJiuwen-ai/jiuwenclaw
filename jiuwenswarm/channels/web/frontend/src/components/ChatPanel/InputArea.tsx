@@ -14,7 +14,6 @@
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { AtSign, CircleX, ClipboardList, FileText, Loader2, Plus, Square, Target, X } from 'lucide-react';
-import { FileTypeIcon, getFileTypeIconKeyFromFilename, type FileTypeIconKey } from './FileTypeIcon';
 import { useSpeechRecognition } from '../../hooks';
 
 // import { stopAllTts } from '../../utils';
@@ -36,6 +35,7 @@ import { AGENT_MODE_OPTIONS, PERMISSION_OPTIONS } from '../../config/chatConfig'
 import clsx from 'clsx';
 import { PermissionWarningDialog } from './PermissionWarningDialog';
 import { ModelProviderIcon } from '../ModelProviderIcon';
+import { FileIcon } from '../FileIcon';
 import { getEvolutionPillLabel } from './evolution-status';
 import { webRequest } from '../../services/webClient';
 import { getSkillAvatar } from '../../utils/skillAvatar';
@@ -317,14 +317,6 @@ function getFileExtension(filename: string): string {
   const idx = filename.lastIndexOf('.');
   if (idx < 0) return '';
   return filename.slice(idx).toLowerCase();
-}
-
-function getAttachmentTypeKey(attachment: AttachmentDraft): FileTypeIconKey {
-  return getFileTypeIconKeyFromFilename(attachment.filename, attachment.kind);
-}
-
-function AttachmentTypeIcon({ attachment }: { attachment: AttachmentDraft }) {
-  return <FileTypeIcon typeKey={getAttachmentTypeKey(attachment)} size={32} />;
 }
 
 function attachmentToMediaItem(attachment: AttachmentDraft): MediaItem {
@@ -2033,14 +2025,14 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                 <div
                   className={cx(
                     'chat-input-attachment-preview',
-                    `chat-input-attachment-preview--${getAttachmentTypeKey(attachment)}`,
+                    attachment.previewUrl && 'chat-input-attachment-preview--image',
                   )}
                   aria-hidden="true"
                 >
                   {attachment.previewUrl ? (
                     <img src={attachment.previewUrl} alt="" />
                   ) : (
-                    <AttachmentTypeIcon attachment={attachment} />
+                    <FileIcon fileName={attachment.filename} size={32} />
                   )}
                 </div>
                 <div className="chat-input-attachment-main">
