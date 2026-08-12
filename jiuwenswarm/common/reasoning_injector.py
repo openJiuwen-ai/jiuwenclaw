@@ -123,6 +123,11 @@ def _build_model_request_kwargs(
     if is_new_generation_openai_model(request_kwargs["model"]):
         # gpt-5/o 系列在 /v1/chat/completions 中使用 function tools 时必须
         # 显式 reasoning_effort="none"，否则 OpenAI API 返回 400
+    if is_new_generation_openai_model(request_kwargs["model"]):
+        # gpt-5/o 系列在 /v1/chat/completions 中使用 function tools 时必须
+        # 显式 reasoning_effort="none"，否则 OpenAI API 返回 400；
+        # 同时移除已弃用的 max_tokens 参数。
+        request_kwargs.pop("max_tokens", None)
         request_kwargs["reasoning_effort"] = "none"
     return request_kwargs
 
