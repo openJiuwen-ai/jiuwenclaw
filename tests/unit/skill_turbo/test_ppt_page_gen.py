@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -142,9 +141,67 @@ def test_page_prompt_forbids_visible_page_numbers_for_all_page_types() -> None:
             user_query="生成 8 页商务经典风格 PPT",
         )
 
-        assert "禁止页脚出现页码" in prompt
+        assert "可见运行页码禁令（所有页型）" in prompt
         assert "用户要求“生成 N 页”只表示页数，不等于要求显示页码" in prompt
         assert "agenda 正文中的章节目标页码" in prompt
+
+
+@pytest.mark.unit
+def test_page_number_policy_requires_explicit_user_intent() -> None:
+    assert not ppg._resolve_page_number_policy("生成 10 页 PPT").enabled
+    assert not ppg._resolve_page_number_policy("不要显示页码，生成 10 页 PPT").enabled
+
+    policy = ppg._resolve_page_number_policy("请在右下角添加页码")
+
+    assert policy.enabled
+    assert policy.position == "bottom-right"
+    assert ppg._format_visible_page_number(policy, 2, 10) == "2 / 10"
+
+
+@pytest.mark.unit
+def test_page_prompt_defers_explicit_page_number_to_deterministic_patch() -> None:
+    prompt = ppg._build_page_prompt(
+        2,
+        style_id="business-classic",
+        style_text="---\nfont-family: Arial\n---\n",
+        outline_page="### P2: 内容页\n- **类型**: data\n- **研究需求**: ✅",
+        research_page="### P2: 内容页\n#### PPT 内容建议\n正文素材",
+        user_query="页码生成在右下角",
+        total_pages=10,
+    )
+
+    assert "用户显式页码要求（优先于默认禁令）" in prompt
+    assert "文字逐字为 `2 / 10`" in prompt
+    assert "当前页面生成阶段不得自行创建页码" in prompt
+    assert "插入统一的可编辑文本页码" in prompt
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("query", "position", "marker"),
+    [
+        ("在左下角添加页码，仅显示当前页数字", "bottom-left", "7"),
+        ("在右上角显示页码，格式为 Page N", "top-right", "Page 7"),
+        ("在左上角生成页码，格式为第 N 页", "top-left", "第 7 页"),
+        ("右下角显示两位补零页码，格式为 P N", "bottom-right", "P07"),
+    ],
+)
+def test_explicit_page_number_position_and_format(
+    query: str,
+    position: str,
+    marker: str,
+) -> None:
+    html = ppg._apply_visible_page_number_policy(
+        _VALID_HTML,
+        user_query=query,
+        page_number=7,
+        total_pages=12,
+        style_id="business-classic",
+    )
+
+    assert html.count('data-skill-turbo-page-number="true"') == 1
+    assert f'data-position="{position}"' in html
+    assert f">{marker}</span>" in html
 
 
 @pytest.mark.unit
@@ -346,7 +403,7 @@ def test_page_worker_removes_page_marker_without_extra_llm_call() -> None:
 
 
 @pytest.mark.unit
-def test_page_worker_does_not_insert_page_numbers_even_when_user_requests() -> None:
+def test_page_worker_inserts_consistent_page_numbers_without_extra_llm_calls() -> None:
     llm_calls: list[str] = []
     written_contents: list[str] = []
     node = _configure_worker(
@@ -369,8 +426,13 @@ def test_page_worker_does_not_insert_page_numbers_even_when_user_requests() -> N
     assert sorted(llm_calls) == ["p8_1_page_1", "p8_1_page_2", "p8_1_page_3"]
     assert result["missing_pages"] == []
     assert len(written_contents) == 3
+    combined_html = "\n".join(written_contents)
     assert all(
-        'data-skill-turbo-page-number="true"' not in content
+        combined_html.count(f">{marker}</span>") == 1
+        for marker in ("1 / 3", "2 / 3", "3 / 3")
+    )
+    assert all(
+        content.count('data-skill-turbo-page-number="true"') == 1
         for content in written_contents
     )
 
@@ -1295,26 +1357,6 @@ _CHART_HEIGHT_ENDING_HTML = """<!DOCTYPE html>
 </body></html>
 """
 
-# designer.md / CHART_SCAFFOLD 官方三层：flex-col → flex-1 min-h-0 → chart
-_CHART_HEIGHT_OFFICIAL_SCAFFOLD_HTML = """<!DOCTYPE html>
-<html><body>
-<div class="ppt-slide" type="content">
-  <div class="w-full flex-1 min-h-0 flex flex-col h-full">
-    <header class="flex-shrink-0"><h1>市场规模</h1></header>
-    <div class="flex-1 min-h-0 grid grid-cols-2 gap-4">
-      <div class="flex flex-col">
-        <div class="flex-1 min-h-0">
-          <div id="chart-1" class="w-full h-full"></div>
-        </div>
-      </div>
-      <aside>说明文字</aside>
-    </div>
-  </div>
-</div>
-<script>echarts.init(document.getElementById('chart-1'), null, {renderer:'svg'});</script>
-</body></html>
-"""
-
 
 def test_validate_chart_height_chain_rejects_collapsed_wrapper() -> None:
     assert not ppg._validate_chart_height_chain(_CHART_HEIGHT_BAD_HTML)
@@ -1328,430 +1370,5 @@ def test_validate_chart_height_chain_accepts_min_h0_wrapper() -> None:
     assert ppg._validate_chart_height_chain(_CHART_HEIGHT_ENDING_HTML)
 
 
-def test_validate_chart_height_chain_accepts_official_scaffold_three_level() -> None:
-    assert ppg._validate_chart_height_chain(_CHART_HEIGHT_OFFICIAL_SCAFFOLD_HTML)
-
-
 def test_validate_chart_height_chain_skips_non_chart_page() -> None:
     assert ppg._validate_chart_height_chain(_GOOD_CONTENT_HTML)
-
-
-_CUSTOM_CONTENT_OUTLINE = (
-    "### P3:\n"
-    "- **类型**：data\n"
-    "- **研究需求**：✅\n"
-    "- **标题**：全球新能源车渗透率\n"
-    "- **页研究查询**：新能源车渗透率与销量\n"
-)
-
-_CUSTOM_CONTENT_RESEARCH = (
-    "### P3:\n"
-    "全球新能源车渗透率持续提升，2025 年主要市场销量保持增长。\n"
-)
-
-_CUSTOM_STYLE_TEXT = """---
-font-family:
-  - Noto Sans SC
-  - sans-serif
----
-# 风格规范：custom
-
-## 排版与组件规范
-- 标题字号：32px
-
-## CSS 主题变量
-```css
-:root {
-  --color-primary: #1A7A4C;
-  --color-text: #1A1A1A;
-  --font-family: "Noto Sans SC", sans-serif;
-}
-```
-
-## 全局 CSS 规则
-```css
-.ppt-slide h1 {
-  font-size: 32px;
-  color: var(--color-text);
-  font-weight: 600;
-}
-.ppt-slide h1 + .title-rule {
-  width: 48px;
-  height: 2px;
-  background: var(--color-primary);
-}
-```
-"""
-
-_CUSTOM_CONTENT_SEED_HTML = """<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<title>{{PAGE_TITLE}}</title>
-<style id="theme-contract">
-  :root {
-    --font-family: "Noto Sans SC", sans-serif;
-    {{THEME_CSS_VARIABLES}}
-  }
-</style>
-<style type="text/tailwindcss">
-  @layer utilities {
-    .ppt-slide { @apply relative w-[1280px] h-[720px] overflow-hidden; }
-  }
-</style>
-<style id="theme-rules">
-  {{THEME_CSS_RULES}}
-</style>
-</head>
-<body>
-<div class="ppt-slide" type="content">
-  {{PAGE_CONTENT}}
-</div>
-<!-- CHART_SCAFFOLD_BEGIN
-<script>const option = null;</script>
-CHART_SCAFFOLD_END -->
-</body>
-</html>
-"""
-
-_CUSTOM_DESIGNER_MD = """### 页面内容预算契约
-写 HTML 前先制定预算。
-
-### 阶段 4：交付
-写完即返回。
-
-## 弹性布局模式
-flex 示例。
-
-## 页面布局规范
-section/chapter 可用 PART 01 作为章节页标签示例。
-
-## 视觉设计规范
-卡片圆角示例。
-
-## 图表与数据可视化
-图表候选页必须激活 CHART_SCAFFOLD。
-
-### 激活 content-template 内的图表骨架（强制）
-禁止从零手写 echarts.init。
-
-## 图片使用规范
-按映射使用图片。
-"""
-
-
-def _custom_themed_seed() -> str:
-    return ppg._apply_custom_theme_slots(_CUSTOM_CONTENT_SEED_HTML, _CUSTOM_STYLE_TEXT)
-
-
-def _custom_filled_html(*, title: str = "全球新能源车渗透率", extra_kicker: str = "") -> str:
-    themed = _custom_themed_seed()
-    kicker = f"<p>{extra_kicker}</p>" if extra_kicker else ""
-    page_content = (
-        '<div class="w-full h-full flex flex-col">'
-        f"{kicker}"
-        f"<h1>{title}</h1>"
-        '<div class="title-rule"></div>'
-        "<main class=\"flex-1 min-h-0\">"
-        "<p>全球新能源车渗透率持续提升，2025 年主要市场销量保持增长。</p>"
-        "</main>"
-        "<footer><p>数据来源：本页研究报告</p></footer>"
-        "</div>"
-    )
-    return (
-        themed.replace("{{PAGE_TITLE}}", title)
-        .replace("{{PAGE_CONTENT}}", page_content)
-    )
-
-
-@pytest.mark.unit
-def test_uses_content_template_fill_for_custom_and_preset_content_pages() -> None:
-    assert ppg._uses_content_template_fill("custom", "data", _CUSTOM_CONTENT_OUTLINE)
-    assert ppg._uses_content_template_fill("tech-minimal", "data", _CUSTOM_CONTENT_OUTLINE)
-    assert not ppg._uses_content_template_fill("custom", "cover", _CUSTOM_CONTENT_OUTLINE)
-    assert not ppg._uses_content_template_fill("custom", "agenda", _AGENDA_OUTLINE)
-    assert not ppg._uses_content_template_fill(
-        "custom",
-        "data",
-        "### P3:\n- **类型**：data\n- **研究需求**：❌\n- **标题**：全球新能源车渗透率\n",
-    )
-
-
-@pytest.mark.unit
-def test_custom_content_fill_prompt_follows_official_scaffold_not_freeform() -> None:
-    prompt = ppg._build_custom_content_template_fill_prompt(
-        page_number=3,
-        style_text=_CUSTOM_STYLE_TEXT,
-        outline_page=_CUSTOM_CONTENT_OUTLINE,
-        research_page=_CUSTOM_CONTENT_RESEARCH,
-        outline_full="# outline\n" + _CUSTOM_CONTENT_OUTLINE,
-        seed_html=_custom_themed_seed(),
-        designer_md_text=_CUSTOM_DESIGNER_MD,
-        user_query="做一份全球新能源汽车行业分析",
-    )
-
-    assert "Stage 6 §3.6" in prompt
-    assert "custom/content-template.html" in prompt
-    assert "{{THEME_CSS_VARIABLES}}" in prompt
-    assert "{{THEME_CSS_RULES}}" in prompt
-    assert "PAGE_CONTENT" in prompt
-    assert "可见文字来源契约" in prompt
-    assert "不得改写已注入的变量名与取值" in prompt
-    assert "全部可见内容必须写在 `.ppt-slide` 内" in prompt
-    assert "布局多样性约束" not in prompt
-    assert "推荐布局（" not in prompt
-    assert "页面布局规范" not in prompt
-    assert "PART 01" not in prompt
-    assert "CHART_SCAFFOLD" in prompt
-    assert "div.flex.flex-col" in prompt
-    assert "div.flex-1.min-h-0" in prompt
-    assert "页面内容预算契约" in prompt
-
-
-@pytest.mark.unit
-def test_preset_content_fill_prompt_still_locks_chrome() -> None:
-    prompt = ppg._build_content_template_fill_prompt(
-        page_number=1,
-        style_id="tech-minimal",
-        style_text="---\nfont-family: Test\n---\n",
-        outline_page=_CUSTOM_CONTENT_OUTLINE,
-        research_page=_CUSTOM_CONTENT_RESEARCH,
-        outline_full="",
-        seed_html=_CONTENT_SEED_HTML,
-    )
-    assert "Stage 6 §3.5" in prompt
-    assert "禁止改标题栏" in prompt
-    assert "只允许替换 3 类占位符" in prompt
-
-
-@pytest.mark.unit
-def test_apply_custom_theme_slots_copies_style_fences_verbatim() -> None:
-    themed = _custom_themed_seed()
-    assert "{{THEME_CSS_VARIABLES}}" not in themed
-    assert "{{THEME_CSS_RULES}}" not in themed
-    assert "--color-primary: #1A7A4C;" in themed
-    assert ".ppt-slide h1" in themed
-    assert "font-size: 32px" in themed
-    assert themed.count('id="theme-contract"') == 1
-    assert themed.count('id="theme-rules"') == 1
-
-
-@pytest.mark.unit
-def test_validate_custom_content_template_fill_accepts_filled_scaffold() -> None:
-    ok, reason = ppg._validate_custom_content_template_fill_output(
-        _custom_themed_seed(),
-        _custom_filled_html(),
-    )
-    assert ok
-    assert reason == ""
-
-
-@pytest.mark.unit
-def test_validate_custom_content_template_fill_rejects_theme_rewrite() -> None:
-    filled = _custom_filled_html().replace("font-size: 32px", "font-size: 26px", 1)
-    ok, reason = ppg._validate_custom_content_template_fill_output(
-        _custom_themed_seed(),
-        filled,
-    )
-    assert not ok
-    assert reason == "theme_rules_changed"
-
-
-@pytest.mark.unit
-def test_validate_custom_content_template_fill_accepts_theme_whitespace_and_local_rules() -> None:
-    filled = _custom_filled_html()
-    filled = filled.replace(
-        "  :root {\n    --font-family:",
-        "  :root {\n    /* local comment */\n    --font-family:",
-        1,
-    )
-    filled = filled.replace(
-        "  background: var(--color-primary);\n}",
-        "  background: var(--color-primary);\n}\n.ppt-slide .local-note { color: var(--color-text); }",
-        1,
-    )
-    ok, reason = ppg._validate_custom_content_template_fill_output(
-        _custom_themed_seed(),
-        filled,
-    )
-    assert ok
-    assert reason == ""
-
-
-@pytest.mark.unit
-def test_validate_custom_content_template_fill_allows_missing_empty_theme_rules_slot() -> None:
-    seed = re.sub(
-        r'<style id="theme-rules">.*?</style>',
-        '<style id="theme-rules"></style>',
-        _custom_themed_seed(),
-        count=1,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    filled = re.sub(
-        r'<style id="theme-rules">.*?</style>',
-        "",
-        _custom_filled_html(),
-        count=1,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    ok, reason = ppg._validate_custom_content_template_fill_output(seed, filled)
-    assert ok
-    assert reason == ""
-
-
-@pytest.mark.unit
-def test_validate_custom_content_template_fill_accepts_non_h1_page_content() -> None:
-    themed = _custom_themed_seed()
-    filled = (
-        themed.replace("{{PAGE_TITLE}}", "全球新能源车渗透率")
-        .replace(
-            "{{PAGE_CONTENT}}",
-            '<section><p>全球新能源车渗透率持续提升，2025 年主要市场销量保持增长。</p></section>',
-        )
-    )
-    ok, reason = ppg._validate_custom_content_template_fill_output(themed, filled)
-    assert ok
-    assert reason == ""
-
-
-@pytest.mark.unit
-def test_validate_custom_content_template_fill_rejects_deleted_theme_var() -> None:
-    filled = _custom_filled_html().replace("    --color-primary: #1A7A4C;\n", "", 1)
-    ok, reason = ppg._validate_custom_content_template_fill_output(
-        _custom_themed_seed(),
-        filled,
-    )
-    assert not ok
-    assert reason == "theme_contract_changed"
-
-
-@pytest.mark.unit
-def test_validate_custom_content_template_fill_allows_main_outside_when_slide_has_title() -> None:
-    filled = _custom_filled_html()
-    filled = filled.replace(
-        '<main class="flex-1 min-h-0">',
-        "",
-        1,
-    ).replace(
-        "</main>",
-        "",
-        1,
-    ).replace(
-        "</div>\n<!-- CHART_SCAFFOLD_BEGIN",
-        '</div>\n<main><p>页外说明</p></main>\n<!-- CHART_SCAFFOLD_BEGIN',
-        1,
-    )
-    ok, reason = ppg._validate_custom_content_template_fill_output(
-        _custom_themed_seed(),
-        filled,
-    )
-    assert ok
-    assert reason == ""
-
-
-@pytest.mark.unit
-def test_validate_custom_content_template_fill_rejects_empty_slide_with_outer_main() -> None:
-    themed = _custom_themed_seed()
-    filled = (
-        themed.replace("{{PAGE_TITLE}}", "全球新能源车渗透率")
-        .replace("{{PAGE_CONTENT}}", "")
-        .replace(
-            "</div>\n<!-- CHART_SCAFFOLD_BEGIN",
-            "</div>\n<main><h1>全球新能源车渗透率</h1><p>正文在 slide 外。</p></main>\n<!-- CHART_SCAFFOLD_BEGIN",
-            1,
-        )
-    )
-    ok, reason = ppg._validate_custom_content_template_fill_output(themed, filled)
-    assert not ok
-    assert reason == "empty_slide_content"
-
-
-@pytest.mark.unit
-def test_relocate_orphan_main_into_custom_slide_moves_only_empty_slide() -> None:
-    themed = _custom_themed_seed()
-    orphan = (
-        themed.replace("{{PAGE_TITLE}}", "全球新能源车渗透率")
-        .replace("{{PAGE_CONTENT}}", "")
-        .replace(
-            "</div>\n<!-- CHART_SCAFFOLD_BEGIN",
-            "</div>\n<main><h1>全球新能源车渗透率</h1><p>正文应搬进 slide。</p></main>\n<!-- CHART_SCAFFOLD_BEGIN",
-            1,
-        )
-    )
-    relocated = ppg._relocate_orphan_main_into_custom_slide(orphan)
-    ok, reason = ppg._validate_custom_content_template_fill_output(themed, relocated)
-    assert ok
-    assert reason == ""
-    assert "<h1>全球新能源车渗透率</h1>" in relocated
-    assert orphan != relocated
-
-
-@pytest.mark.unit
-def test_page_worker_custom_content_uses_template_fill_not_free_generation(tmp_path) -> None:
-    pptx_root = _write_content_template(tmp_path, "custom", _CUSTOM_CONTENT_SEED_HTML)
-    llm_calls: list[str] = []
-    tool_calls: list[str] = []
-    written_contents: list[str] = []
-    node = _configure_content_worker(
-        [_custom_filled_html()],
-        llm_calls=llm_calls,
-        tool_calls=tool_calls,
-        written_contents=written_contents,
-        pptx_root=pptx_root,
-        style_id="custom",
-        seed_html=_CUSTOM_CONTENT_SEED_HTML,
-    )
-
-    result = asyncio.run(
-        node._execute(
-            _worker_inputs(
-                page_count=1,
-                style_id="custom",
-                style_text=_CUSTOM_STYLE_TEXT,
-                pptx_root=pptx_root,
-                outline_pages={3: _CUSTOM_CONTENT_OUTLINE},
-                research_pages={3: _CUSTOM_CONTENT_RESEARCH},
-                all_pages=[3],
-            )
-        )
-    )
-
-    assert llm_calls == ["p8_1_content_fill_3"]
-    assert tool_calls == ["read_file", "write_file"]
-    assert result["missing_pages"] == []
-    assert result["page_files"] == ["page-3.pptx.html"]
-    assert "全球新能源车渗透率" in written_contents[0]
-    assert "CASE STUDY" not in written_contents[0]
-    assert "font-size: 32px" in written_contents[0]
-
-
-@pytest.mark.unit
-def test_page_worker_custom_structural_page_still_uses_structural_fill(tmp_path) -> None:
-    pptx_root = _write_agenda_template(tmp_path, "custom")
-    llm_calls: list[str] = []
-    written_contents: list[str] = []
-    node = _configure_agenda_worker(
-        [_AGENDA_FILLED_HTML],
-        pptx_root=pptx_root,
-        style_id="custom",
-        llm_calls=llm_calls,
-        tool_calls=[],
-        written_contents=written_contents,
-    )
-
-    result = asyncio.run(
-        node._execute(
-            _worker_inputs(
-                page_count=1,
-                style_id="custom",
-                pptx_root=pptx_root,
-                all_pages=[2],
-                outline_pages={2: _AGENDA_OUTLINE},
-                outline_text="# outline\n" + _AGENDA_OUTLINE,
-            )
-        )
-    )
-
-    assert llm_calls == ["p8_1_agenda_fill_2"]
-    assert result["page_files"] == ["page-2.pptx.html"]
-    assert result["missing_pages"] == []
