@@ -88,3 +88,21 @@ class ImageArtifactHookContext:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass
+class ArtifactPostProcessHookContext:
+    """产物落盘检测后、向前端发送 ``artifact.generated`` 之前的扩展回调上下文。
+
+    扩展可在 handler 中按 ``artifact_paths`` 对文件做原地后处理（如水印、源码可读性转换）。
+    """
+
+    session_id: str
+    tool_name: str
+    task_id: str | None = None
+    subagent_id: str | None = None
+    artifact_paths: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)

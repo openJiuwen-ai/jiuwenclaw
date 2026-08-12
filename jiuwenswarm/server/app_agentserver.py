@@ -244,6 +244,13 @@ async def _run_with_telemetry(host: str, port: int, telemetry_lifecycle) -> None
     )
 
     try:
+        from jiuwenswarm.server.runtime.code_source_unicode import register_code_source_unicode_hook
+
+        register_code_source_unicode_hook()
+    except Exception:  # noqa: BLE001
+        logger.warning("[AgentServer] code_source_unicode hook registration skipped", exc_info=True)
+
+    try:
         from jiuwenswarm.infrastructure.log_masking.engine import LogMaskingEngine
 
         await LogMaskingEngine.reload_log_masking_rule()
