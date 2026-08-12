@@ -475,14 +475,18 @@ class TestAdditionalHardcodedPaths:
         from jiuwenswarm.server.runtime.runtime_scope import RuntimeScopeKey
 
         scope = RuntimeScopeKey.from_ids()
-        workspace = get_multi_tenant_user_workspace_dir(scope.service_id, scope.agent_id)
-        assert workspace is not None
+        workspace = get_multi_tenant_user_workspace_dir(scope.workspace_key)
         expected_path = workspace / "agent" / "workspace" / "extensions"
-        rail_manager = get_rail_manager(scope)
+        import os
+        os.environ["AGENT_RUNTIME"] = "1"
+        try:
+            rail_manager = get_rail_manager(scope)
 
-        extensions_dir = rail_manager.extensions_dir
-        assert str(extensions_dir.resolve()) == str(expected_path.resolve()), \
-            f"Expected: {expected_path.resolve()}, Got: {extensions_dir.resolve()}"
+            extensions_dir = rail_manager.extensions_dir
+            assert str(extensions_dir.resolve()) == str(expected_path.resolve()), \
+                f"Expected: {expected_path.resolve()}, Got: {extensions_dir.resolve()}"
+        finally:
+            os.environ.pop("AGENT_RUNTIME", None)
 
     @staticmethod
     def test_config_module_dir_structure(tmp_path):

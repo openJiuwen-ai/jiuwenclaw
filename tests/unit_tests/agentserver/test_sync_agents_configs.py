@@ -790,7 +790,7 @@ class TestOfficeclawGuard:
             params={},
         )
         assert TenantAgentPool.require_officeclaw_agent(req) is None
-        assert TenantAgentPool.extract_ids(req) == ("default", "default")
+        assert TenantAgentPool.extract_ids(req) == ("default", "default", "default")
 
     @staticmethod
     def test_require_officeclaw_tenant_not_registered():

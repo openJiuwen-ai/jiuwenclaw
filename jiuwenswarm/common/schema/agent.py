@@ -75,6 +75,8 @@ class AgentRequest:
     # 企业多租户 / OfficeClaw：service_id / agent_id（AGENT_RUNTIME 与 tip 隔离共用）
     service_id: str | None = None
     agent_id: str | None = None
+    # 数据目录逻辑键（Runtime 解析后可为明文；发往 AgentServer 前一般为 MD5 hex）
+    workspace_dir: str | None = None
     req_method: ReqMethod | None = None
     params: dict = field(default_factory=dict)
     is_stream: bool = False

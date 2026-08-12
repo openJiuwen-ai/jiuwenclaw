@@ -354,7 +354,6 @@ from jiuwenswarm.common.utils import (
     get_multi_tenant_user_workspace_dir,
     get_prompt_attachment_dir,
     get_runtime_state_path,
-    get_tenant_agent_skills_dirs,
     reset_free_search_runtime_flags,
     resolve_agent_registered_skill_dirs,
 )
@@ -1985,9 +1984,7 @@ class JiuWenSwarmDeepAdapter:
         empty workspace skills folder.
         """
         if is_skill_whitelist_tenant(self._agent_id, self._service_id):
-            skills_dirs = [
-                str(p) for p in get_tenant_agent_skills_dirs(self._service_id, self._agent_id)
-            ]
+            skills_dirs = [str(Path(self._workspace_dir) / "skills")]
         else:
             skills_dirs = [str(p) for p in resolve_agent_registered_skill_dirs()]
         if extra_skill_dir:
@@ -4886,11 +4883,9 @@ class JiuWenSwarmDeepAdapter:
         """
         runtime = runtime or {}
         shared_dir: str | None = None
-        if os.getenv("AGENT_RUNTIME", "").strip():
-            # 企业多租户：挂载当前 agent 工作区根，修复下载路径权限
-            mt_root = get_multi_tenant_user_workspace_dir(self._service_id, self._agent_id)
-            if mt_root is not None:
-                shared_dir = str(mt_root)
+        if os.getenv("AGENT_RUNTIME", "").strip() and self._workspace_dir:
+            # 企业多租户：挂载当前 workspace 根，修复下载路径权限
+            shared_dir = str(Path(self._workspace_dir).resolve().parent.parent)
         return create_sandbox_sysop_card(
             sandbox_url,
             sandbox_type,
@@ -5216,10 +5211,8 @@ class JiuWenSwarmDeepAdapter:
         extra["excluded_commands"] = list(runtime.get("excluded_commands") or [])
         extra["fallback_on_failure"] = bool(runtime.get("fallback_on_failure", False))
         shared_dir: str | None = None
-        if os.getenv("AGENT_RUNTIME", "").strip():
-            mt_root = get_multi_tenant_user_workspace_dir(self._service_id, self._agent_id)
-            if mt_root is not None:
-                shared_dir = str(mt_root)
+        if os.getenv("AGENT_RUNTIME", "").strip() and self._workspace_dir:
+            shared_dir = str(Path(self._workspace_dir).resolve().parent.parent)
         new_policy, upload_list = build_filesystem_policy(
             runtime.get("files") or {},
             project_dir=self._resolve_project_dir_for_sandbox(),
@@ -6854,7 +6847,7 @@ class JiuWenSwarmDeepAdapter:
                     self._agent_id, self._service_id, enterprise_skills
                 )
                 sync_result = await SkillWhitelistSynchronizer(
-                    self._service_id, self._agent_id
+                    self._workspace_dir
                 ).sync(skill_config)
                 if sync_result.errors:
                     logger.warning(

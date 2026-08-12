@@ -1539,7 +1539,7 @@ def main() -> None:
     global _history_runner
     history_db = ""
     if os.getenv("AGENT_RUNTIME", "").strip():
-        tenant_root = get_multi_tenant_user_workspace_dir("default", "default") or project_root
+        tenant_root = get_multi_tenant_user_workspace_dir("default")
         history_db = str(tenant_root / "web_history.db")
         store = ChatHistoryStore(history_db)
         _history_runner = HistoryFrameRunner(store)

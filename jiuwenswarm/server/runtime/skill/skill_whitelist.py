@@ -14,10 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager, _safe_rmtree
-from jiuwenswarm.common.utils import (
-    _require_tenant_ids,
-    get_tenant_agent_jiuwenclaw_workspace_dir,
-)
+from jiuwenswarm.common.utils import _require_tenant_ids
 
 logger = logging.getLogger(__name__)
 
@@ -143,8 +140,8 @@ def parse_agent_skill_whitelist(
 class SkillWhitelistSynchronizer:
     """将白名单 SkillHub URL 同步到租户 agent/workspace/skills."""
 
-    def __init__(self, service_id: str, agent_id: str) -> None:
-        workspace = get_tenant_agent_jiuwenclaw_workspace_dir(service_id, agent_id)
+    def __init__(self, workspace_dir: str | Path) -> None:
+        workspace = Path(workspace_dir)
         self._skills_dir = workspace / "skills"
         self._skills_dir.mkdir(parents=True, exist_ok=True)
         self._manifest_path = self._skills_dir / MANIFEST_FILENAME

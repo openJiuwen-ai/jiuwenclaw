@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
 import yaml
@@ -24,8 +25,6 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 from jiuwenswarm.agents.harness.common.prompt.shell_environment import build_shell_environment_prompt
 from jiuwenswarm.common.utils import (
     get_agent_workspace_dir,
-    get_agent_workspace_relative_dir,
-    get_multi_tenant_user_workspace_dir,
     get_runtime_state_path,
     get_user_workspace_dir,
     logger,
@@ -156,18 +155,16 @@ class RuntimePromptRail(DeepAgentRail):
         self._request_system_prompt = value
 
     def _resolve_agent_workspace_and_config(self) -> tuple[str, str]:
-        """Resolve agent workspace / config dirs; enterprise uses multi-tenant paths."""
-        if (
-            os.getenv("AGENT_RUNTIME", "").strip()
-            and self._agent_id
-            and self._service_id
-        ):
-            base = get_multi_tenant_user_workspace_dir(self._service_id, self._agent_id)
-            if base is not None:
-                return (
-                    str(base / get_agent_workspace_relative_dir()),
-                    str(base / "config"),
-                )
+        """Resolve agent workspace / config dirs; enterprise uses workspace_key paths."""
+        if self._workspace_dir and os.getenv("AGENT_RUNTIME", "").strip():
+            workspace_root = Path(self._workspace_dir)
+            base_workspace = workspace_root.parent.parent
+            return str(workspace_root), str(base_workspace / "config")
+        if self._workspace_dir:
+            return (
+                str(Path(self._workspace_dir)),
+                str(get_user_workspace_dir() / "config"),
+            )
         return (
             str(get_agent_workspace_dir()),
             str(get_user_workspace_dir() / "config"),

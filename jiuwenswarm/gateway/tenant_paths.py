@@ -63,17 +63,16 @@ def tenant_ids_from_message(msg: Any) -> tuple[str, str]:
 def resolve_channel_agent_workspace(
     service_id: str | None = None,
     agent_id: str | None = None,
+    *,
+    workspace_key: str | None = None,
 ) -> Path:
-    """``service_{sid}/agent_{aid}/agent/workspace`` (jiuwenswarm layout)."""
-    sid, aid = normalize_channel_tenant_ids(service_id, agent_id)
-    base = get_multi_tenant_user_workspace_dir(sid, aid)
-    if base is None:
-        base = get_multi_tenant_user_workspace_dir("default", "default")
-    if base is None:
-        raise RuntimeError(
-            "failed to resolve multi-tenant workspace for channel "
-            f"(service_id={sid!r}, agent_id={aid!r})"
-        )
+    """``workspace_{key}/agent/workspace`` (jiuwenswarm layout)."""
+    wk = (workspace_key or "").strip()
+    if not wk:
+        # Transition: channels not yet passing policy workspace_dir keep routing-derived key.
+        sid, aid = normalize_channel_tenant_ids(service_id, agent_id)
+        wk = "default" if sid == "default" and aid == "default" else f"{sid}_{aid}"
+    base = get_multi_tenant_user_workspace_dir(wk)
     return base / "agent" / "workspace"
 
 

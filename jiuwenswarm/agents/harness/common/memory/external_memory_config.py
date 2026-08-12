@@ -102,18 +102,16 @@ def _nonempty_str(value: Any) -> str | None:
 def _resolve_tenant_agent_workspace_dir(
     service_id: str | None = None,
     agent_id: str | None = None,
+    *,
+    workspace_key: str | None = None,
 ) -> Path:
-    """``service_{sid}/agent_{aid}/agent/workspace`` (jiuwenswarm layout)."""
+    """``workspace_{key}/agent/workspace`` (jiuwenswarm layout)."""
     sid = normalize_tenant_scope_id(service_id)
     aid = normalize_tenant_scope_id(agent_id)
-    base = get_multi_tenant_user_workspace_dir(sid, aid)
-    if base is None:
-        base = get_multi_tenant_user_workspace_dir("default", "default")
-    if base is None:
-        raise RuntimeError(
-            "failed to resolve multi-tenant workspace for LTM "
-            f"(service_id={sid!r}, agent_id={aid!r})"
-        )
+    wk = (workspace_key or "").strip()
+    if not wk:
+        wk = "default" if sid == "default" and aid == "default" else f"{sid}_{aid}"
+    base = get_multi_tenant_user_workspace_dir(wk)
     return base / "agent" / "workspace"
 
 

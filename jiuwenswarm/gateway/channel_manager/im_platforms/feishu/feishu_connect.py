@@ -2038,7 +2038,7 @@ class FeishuChannel(BaseChannel):
         workspace_dir = os.path.abspath(
             get_resolved_project_dir(
                 sess,
-                resolve_tenant_sessions_dir(sid, aid),
+                resolve_tenant_sessions_dir("default" if sid == "default" and aid == "default" else f"{sid}_{aid}"),
                 default=resolve_channel_agent_workspace(sid, aid),
             )
         ).rstrip("/\\")
