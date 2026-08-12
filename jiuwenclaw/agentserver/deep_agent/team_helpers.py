@@ -51,9 +51,26 @@ DEBUG_PREFIX = '/debug'
 # Must stay < relay RELAYCLAW_TEAM_STUCK_WATCHDOG_MS (300s). Steady chunks
 # (incl. chat.reasoning, which relay counts as a business frame) reset the
 # timer, so legitimate long reasoning is not killed.
-_TEAM_STREAM_IDLE_BREAK_S = float(
-    os.environ.get('JIUWEN_TEAM_STREAM_IDLE_BREAK_S', '120')
-)
+# Enforced at import: non-numeric / <= 0 / >= 300 → clamped to 120 with a
+# warning. >= 300 lets the relay watchdog fire first (pause-skip path, which
+# suppresses chat.file) and silently defeats this clean-teardown fix; <= 0
+# makes asyncio.wait_for time out before the first chunk is consumed.
+try:
+    _TEAM_STREAM_IDLE_BREAK_S = float(
+        os.environ.get('JIUWEN_TEAM_STREAM_IDLE_BREAK_S', '120')
+    )
+except (TypeError, ValueError):
+    _TEAM_STREAM_IDLE_BREAK_S = 120.0
+    logger.warning(
+        '[TeamHelpers] JIUWEN_TEAM_STREAM_IDLE_BREAK_S=%r not numeric; clamped to 120',
+        os.environ.get('JIUWEN_TEAM_STREAM_IDLE_BREAK_S'),
+    )
+if _TEAM_STREAM_IDLE_BREAK_S <= 0 or _TEAM_STREAM_IDLE_BREAK_S >= 300:
+    logger.warning(
+        '[TeamHelpers] JIUWEN_TEAM_STREAM_IDLE_BREAK_S=%s out of safe range (0, 300); clamped to 120',
+        _TEAM_STREAM_IDLE_BREAK_S,
+    )
+    _TEAM_STREAM_IDLE_BREAK_S = 120.0
 
 
 def strip_slash_directive(query: str, prefix: str) -> tuple[str, bool]:
