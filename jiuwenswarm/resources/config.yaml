@@ -223,6 +223,17 @@ proactive_recommendation:
   max_rounds_per_tick: 20                # 每次 Tick 读取最近几轮对话
 
 models:
+  # defaults 列表项可选 tier: lite | pro（每个 tier 只能绑定一个模型，first-wins；
+  # 供 task_tool / sessions_spawn 按 model_tier 选择子代理模型）
+  # 示例：
+  # defaults:
+  #   - tier: pro
+  #     is_default: true
+  #     model_client_config: { model_name: ..., api_base: ..., api_key: ..., client_provider: ... }
+  #     model_config_obj: { temperature: 0.6 }
+  #   - tier: lite
+  #     model_client_config: { model_name: ..., api_base: ..., api_key: ..., client_provider: ... }
+  #     model_config_obj: { temperature: 0.6 }
   defaults:
     - model_client_config:
         api_base: ${API_BASE}

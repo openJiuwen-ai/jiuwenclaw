@@ -1892,6 +1892,8 @@ class JiuWenSwarmDeepAdapter:
         self._is_proactive_memory: bool | None = None
         self._model_cache: dict[str, Model] = {}
         self._model_name_to_keys: dict[str, list[str]] = {}
+        # Optional lite/pro mapping from models.defaults[].tier for task_tool.
+        self._tier_model_cache: dict[str, Model] = {}
         # Cache system prompt to avoid re-building on every btw/recap call.
         # The system prompt is derived from project context (CLAUDE.md, skills, etc.)
         # which doesn't change within a session, so caching is safe.
@@ -4342,6 +4344,14 @@ class JiuWenSwarmDeepAdapter:
         if alias and alias != model_name and alias not in self._model_cache:
             self._model_cache[alias] = self._model_cache[cache_key]
 
+        tier_raw = entry.get("tier")
+        if not tier_raw:
+            return
+        tier = str(tier_raw).strip().lower()
+        if tier not in ("lite", "pro") or tier in self._tier_model_cache:
+            return
+        self._tier_model_cache[tier] = self._model_cache[cache_key]
+
     def _build_model_cache_from_defaults(self, config: dict) -> None:
         """从 models.defaults 列表构建模型缓存。
 
@@ -4349,6 +4359,7 @@ class JiuWenSwarmDeepAdapter:
         同时记录 _model_name_to_keys 映射以便按 model_name 查找。
         """
         self._model_name_to_keys.clear()
+        self._tier_model_cache.clear()
         name_counter: dict[str, int] = {}
 
         for entry in get_default_models(config):
@@ -4402,6 +4413,7 @@ class JiuWenSwarmDeepAdapter:
 
         self._model_cache.clear()
         self._model_name_to_keys.clear()
+        self._tier_model_cache.clear()
         self._inject_attribution_to_config(config)
         self._build_model_cache_from_defaults(config)
         if not self._model_cache:
@@ -4498,6 +4510,84 @@ class JiuWenSwarmDeepAdapter:
             if resolved is not None:
                 return resolved
         return self._model
+
+    def _lookup_model_by_name(self, requested_model_name: str = "") -> Model | None:
+        """Look up a model by exact name/alias without falling back to default.
+
+        Empty name returns None (caller decides fallback). Unknown name returns None.
+        """
+        requested = (requested_model_name or "").strip()
+        if not requested:
+            return None
+        if requested in self._model_cache:
+            return self._model_cache[requested]
+        keys = self._model_name_to_keys.get(requested)
+        if keys:
+            return self._model_cache.get(keys[0])
+        return None
+
+    def _resolve_model(
+        self,
+        *,
+        model_name: str = "",
+        model_tier: str = "",
+    ) -> tuple[Model, str | None]:
+        """Resolve Model by model_name or model_tier; fall back to adapter default.
+
+        Priority: valid model_name hit > valid model_tier (lite/pro) > self._model.
+        Never hard-fails; second tuple element is reserved (always None today).
+        """
+        if self._model is None:
+            raise RuntimeError("No model configured on adapter")
+
+        name = (model_name or "").strip()
+        if name:
+            hit = self._lookup_model_by_name(name)
+            if hit is not None:
+                return hit, None
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] 模型名无效 model_name=%r，尝试选用等级模型",
+                model_name,
+            )
+
+        tier = (model_tier or "").strip().lower()
+        if tier:
+            if tier not in ("lite", "pro"):
+                logger.info(
+                    "[JiuWenSwarmDeepAdapter] 模型等级无效 model_tier=%r，回退主 Agent 默认模型",
+                    model_tier,
+                )
+                return self._model, None
+            model = self._tier_model_cache.get(tier)
+            if model is None:
+                logger.info(
+                    "[JiuWenSwarmDeepAdapter] 模型等级未配置 model_tier=%r，回退主 Agent 默认模型",
+                    tier,
+                )
+                return self._model, None
+            return model, None
+
+        if name:
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] 模型名无效且无可用 model_tier=%r，回退主 Agent 默认模型",
+                model_tier or None,
+            )
+        return self._model, None
+
+    def _resolve_model_for_subagent(
+        self,
+        *,
+        model_name: str = "",
+        model_tier: str = "",
+    ) -> tuple[Model, str | None]:
+        """TaskTool / sessions_spawn model selection entrypoint."""
+        return self._resolve_model(model_name=model_name, model_tier=model_tier)
+
+    def _bind_subagent_model_resolver(self) -> None:
+        """Expose adapter resolve on the DeepAgent instance for TaskTool."""
+        if self._instance is None:
+            return
+        self._instance.resolve_subagent_model = self._resolve_model_for_subagent
 
     def _resolve_model_for_request(self, request: AgentRequest) -> Model:
         """根据请求中的 model_name 参数查找对应模型（支持别名），未匹配则回退默认模型。
@@ -4669,6 +4759,20 @@ class JiuWenSwarmDeepAdapter:
             config.model_client_config = model.model_client_config
             config.model_config_obj = model.model_config
         self._model_request_config = model.model_config
+        # Keep adapter default + DeepAgent parent model in sync so omitted
+        # task_tool model_* selectors inherit the currently switched model.
+        self._model = model
+        deep_config = getattr(self._instance, "_deep_config", None) or getattr(
+            self._instance, "deep_config", None
+        )
+        if deep_config is not None:
+            try:
+                deep_config.model = model
+            except Exception:
+                logger.debug(
+                    "[JiuWenSwarmDeepAdapter] failed to sync deep_config.model",
+                    exc_info=True,
+                )
 
     @staticmethod
     def _resolve_skill_mode(config: dict[str, Any]) -> str:
@@ -6820,6 +6924,7 @@ class JiuWenSwarmDeepAdapter:
                 ),
                 completion_timeout=config.get("completion_timeout", 21600.0),
             )
+            self._bind_subagent_model_resolver()
 
             _apply_llm_io_trace_patch()
 
