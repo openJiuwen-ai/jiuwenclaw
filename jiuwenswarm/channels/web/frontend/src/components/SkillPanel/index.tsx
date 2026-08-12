@@ -763,14 +763,18 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
     }, delay);
   }, []);
 
-  const showMessage = useCallback((type: "success" | "error", text: string) => {
+  const showMessage = useCallback((type: "success" | "error" | "loading", text: string) => {
     if (messageTimerRef.current !== null) {
       window.clearTimeout(messageTimerRef.current);
+      messageTimerRef.current = null;
     }
     const displayText = type === "success" ? `√ ${text}` : text;
     setMessage(displayText);
     setMessageType(type);
-    // 错误信息显示时间更长（8秒），方便用户阅读详细错误描述
+    // loading 持续到下一次消息；错误信息显示时间更长（8秒）
+    if (type === "loading") {
+      return;
+    }
     const duration = type === "error" ? 8000 : 3000;
     messageTimerRef.current = window.setTimeout(() => {
       setMessage(null);
@@ -1166,14 +1170,16 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   const handleRebuild = useCallback(
     async (skillName: string, version: string | null) => {
       setRebuildLoading(true);
+      showMessage("loading", "正在重建技能，请耐心等待");
       try {
         const data = await webRequest<SkillRebuildResponse>(
           "skills.rebuild",
-          withSession({ name: skillName, version })
+          withSession({ name: skillName, version }),
+          { timeoutMs: 5 * 60_000 }
         );
         if (data.success) {
-          showMessage("success", "技能重建已启动，Agent 正在改写 SKILL.md…");
-          setTimeout(() => fetchSkillDetail(skillName), 3000);
+          showMessage("success", "技能重建完成");
+          fetchSkillDetail(skillName);
         }
       } catch (error) {
         console.error(error);
@@ -1883,6 +1889,12 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
             </svg>
           </button>
+        </div>
+      )}
+      {message && messageType === "loading" && (
+        <div className="fixed top-4 right-4 z-[9999] rounded-[4px] text-sm text-text shadow-lg flex items-center gap-3 px-4 bg-card border border-border" style={{ width: "564px", height: "40px" }}>
+          <span className="w-4 h-4 border-2 border-accent border-t-transparent rounded-full animate-spin flex-shrink-0" />
+          {cleanMessage}
         </div>
       )}
       <div className="flex-1 flex flex-col min-w-0 min-h-0">
