@@ -933,6 +933,32 @@ def test_enrich_team_spec_preserves_explicit_external_transport() -> None:
     assert spec.external_transport is configured_transport
 
 
+def test_enrich_team_spec_resolves_team_visibility_path_without_writing_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Assembly injects the team document path but is not its seeder.
+
+    The team-scope ``skills-visibility.json`` has exactly one writer,
+    ``TeamWorkspaceManager.initialize``. Assembly only resolves where that
+    document lives so the rails can read it; a missing file reads back as "no
+    restriction", so there is nothing to create here.
+    """
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.swarm.assembly.get_agent_skills_dir",
+        lambda: tmp_path / "global-skills",
+    )
+    team_ws_root = tmp_path / "team-workspace"
+    spec = _make_team_spec()
+    spec.workspace = WorkspaceSpec(root_path=str(team_ws_root))
+
+    enrich_team_spec_for_swarm(spec, session_id="s", mode="team", channel_id="web")
+
+    visibility_path = team_ws_root / "skills-visibility.json"
+    assert spec.build_context.team_skill_visibility_path == str(visibility_path)
+    assert not visibility_path.exists()
+
+
 def test_enrich_team_spec_points_member_cwd_at_project_dir() -> None:
     """Core receives project-rooted member cwd, not a rewritten workspace.
 

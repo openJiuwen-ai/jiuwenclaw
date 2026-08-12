@@ -91,13 +91,14 @@ def _team_view_dir():
     return get_agent_teams_home() / TEAM_NAME / "team-workspace" / "skills"
 
 
-def _seed_like_assembly(library_names: list[str]) -> None:
-    """Write the seeds team assembly writes, as if it had run before migration.
+def _seed_like_bootstrap(library_names: list[str]) -> None:
+    """Write the startup seeds, as if they had landed before migration.
 
-    The member seed comes from ``config.agents.<role>.skills`` and the team seed
-    is the unrestricted default written at assembly. Both are the widest values
-    the config layer can produce, so if either one wins the workspace ends up
-    with *more* Skills than it had before the refactor.
+    The member seed comes from ``config.agents.<role>.skills`` at member
+    assembly; the team seed is the unrestricted default that team workspace
+    initialization writes. Both are the widest values the startup path can
+    produce, so if either one wins the workspace ends up with *more* Skills than
+    it had before the refactor.
     """
     bootstrap_skill_visibility(
         member_skill_visibility_path(TEAM_NAME, MEMBER_NAME),
@@ -111,7 +112,7 @@ def _seed_like_assembly(library_names: list[str]) -> None:
         scope=SCOPE_TEAM,
         entity_id=TEAM_NAME,
         allow=None,
-        bootstrapped_from="assembly:team",
+        bootstrapped_from="team_workspace:initialize",
     )
 
 
@@ -121,7 +122,7 @@ def test_migration_wins_over_a_config_seed_written_first(tmp_path, openjiuwen_ho
     _make_legacy_view(_member_view_dir(), library, ["skill-a"])
     _make_legacy_view(_team_view_dir(), library, ["skill-a"])
 
-    _seed_like_assembly(["skill-a", "skill-b", "skill-c"])
+    _seed_like_bootstrap(["skill-a", "skill-b", "skill-c"])
     migrated = migrate_team_skill_views(library_dir=library)
 
     member = read_skill_visibility(
@@ -154,7 +155,7 @@ def test_migration_result_is_independent_of_the_seed_order(tmp_path, openjiuwen_
     _make_legacy_view(_team_view_dir(), library, ["skill-a"])
 
     migrate_team_skill_views(library_dir=library)
-    _seed_like_assembly(["skill-a", "skill-b", "skill-c"])
+    _seed_like_bootstrap(["skill-a", "skill-b", "skill-c"])
 
     member = read_skill_visibility(
         member_skill_visibility_path(TEAM_NAME, MEMBER_NAME),

@@ -638,12 +638,6 @@ async def test_team_manager_keeps_single_session_per_channel(monkeypatch: pytest
         return _Spec()
 
     monkeypatch.setattr(TeamManager, "_load_team_spec", staticmethod(fake_load_team_spec))
-    # Stub the Skill visibility seeding to avoid file operations
-    monkeypatch.setattr(
-        TeamManager,
-        "ensure_team_skill_visibility_initialized",
-        staticmethod(lambda spec: None),
-    )
     # Provider assembly is covered by the swarm suite; stub it so this
     # session-management test runs on the minimal fake spec.
     monkeypatch.setattr(
@@ -683,12 +677,6 @@ async def test_create_team_does_not_run_global_runtime_cleanup(monkeypatch: pyte
         return _Spec()
 
     monkeypatch.setattr(TeamManager, "_load_team_spec", staticmethod(fake_load_team_spec))
-    # Stub the Skill visibility seeding to avoid file operations
-    monkeypatch.setattr(
-        TeamManager,
-        "ensure_team_skill_visibility_initialized",
-        staticmethod(lambda spec: None),
-    )
     # Provider assembly is covered by the swarm suite; stub it so this
     # session-management test runs on the minimal fake spec.
     monkeypatch.setattr(
@@ -720,11 +708,6 @@ async def test_create_team_appends_session_id_to_team_name(monkeypatch: pytest.M
             return SimpleNamespace()
 
     monkeypatch.setattr(TeamManager, "_load_team_spec", staticmethod(lambda _session_id: _Spec()))
-    monkeypatch.setattr(
-        TeamManager,
-        "ensure_team_skill_visibility_initialized",
-        staticmethod(lambda spec: None),
-    )
     # Provider assembly is covered by the swarm suite; stub it so this
     # session-management test runs on the minimal fake spec.
     monkeypatch.setattr(
@@ -756,11 +739,6 @@ async def test_create_team_appends_session_id_to_web_team_name(monkeypatch: pyte
             return SimpleNamespace()
 
     monkeypatch.setattr(TeamManager, "_load_team_spec", staticmethod(lambda _session_id: _Spec()))
-    monkeypatch.setattr(
-        TeamManager,
-        "ensure_team_skill_visibility_initialized",
-        staticmethod(lambda spec: None),
-    )
     # Provider assembly is covered by the swarm suite; stub it so this
     # session-management test runs on the minimal fake spec.
     monkeypatch.setattr(

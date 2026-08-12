@@ -1747,7 +1747,6 @@ async def test_process_team_message_stream_restarts_round_after_shutdown_race(mo
 
     class _FakeManager(_InactiveTeamRuntimeManagerMixin):
         interact_calls: list[tuple[str, str]] = []
-        skills_ready_calls: list[tuple[str, str]] = []
         stream_active = True
 
         @classmethod
@@ -1767,10 +1766,6 @@ async def test_process_team_message_stream_restarts_round_after_shutdown_race(mo
                 "deliver_to_leader_failed:[123023] deepagent runtime error, "
                 "reason: NativeHarness already stopped.",
             )
-
-        @classmethod
-        def ensure_team_skill_visibility_ready_for_session(cls, session_id: str, team_spec: object):
-            cls.skills_ready_calls.append((session_id, team_spec.team_name))
 
         @staticmethod
         async def prepare_runtime_activation(session_id: str, team_name: str):
@@ -1837,9 +1832,6 @@ async def test_process_team_message_stream_restarts_round_after_shutdown_race(mo
 
     assert _delivered(_FakeManager.interact_calls) == [
         ("sess-team-followup-stopped", "查询杭州天气"),
-    ]
-    assert _FakeManager.skills_ready_calls == [
-        ("sess-team-followup-stopped", "unit-team"),
     ]
     assert captured["prepared"] == ("sess-team-followup-stopped", "unit-team")
     assert captured["registered"] == "sess-team-followup-stopped"
@@ -2115,10 +2107,6 @@ async def test_process_team_message_stream_resumes_active_session_without_stream
             return True, None
 
         @staticmethod
-        def ensure_team_skill_visibility_ready_for_session(*_args, **_kwargs):
-            pytest.fail("active team sessions should not be treated as first requests")
-
-        @staticmethod
         async def prepare_runtime_activation(*_args, **_kwargs):
             pytest.fail("active team sessions should not be recreated")
 
@@ -2178,10 +2166,6 @@ async def test_process_team_message_stream_routes_evolution_interrupt_to_active_
         @staticmethod
         async def get_swarm_enriched_team_spec(**kwargs):
             return SimpleNamespace(team_name="unit-team", enable_swarmflow=False)
-
-        @staticmethod
-        def ensure_team_skill_visibility_ready_for_session(session_id: str, spec: Any):
-            pytest.fail("active evolution interrupt resume should not prepare shared skills")
 
         @staticmethod
         async def prepare_runtime_activation(session_id: str, team_name: str):
@@ -2277,10 +2261,6 @@ async def test_process_team_message_stream_resumes_structured_team_plan_confirm_
             return True, None
 
         @staticmethod
-        def ensure_team_skill_visibility_ready_for_session(session_id: str, spec: Any):
-            captured["skills_ready"] = (session_id, spec.team_name)
-
-        @staticmethod
         async def prepare_runtime_activation(session_id: str, team_name: str):
             raise AssertionError("prepare_runtime_activation should not run for resumed approval")
 
@@ -2319,7 +2299,6 @@ async def test_process_team_message_stream_resumes_structured_team_plan_confirm_
     assert _delivered(_FakeManager.interact_calls) == [
         ("sess-team-plan-resume", approval_input),
     ]
-    assert "skills_ready" not in captured
     assert chunks[-1].is_complete is True
 
 
@@ -2355,10 +2334,6 @@ async def test_process_team_message_stream_rejects_orphaned_interactive_input(mo
         @staticmethod
         async def get_swarm_enriched_team_spec(**_kwargs):
             pytest.fail("orphaned interactive inputs should not recreate team runtime")
-
-        @staticmethod
-        def ensure_team_skill_visibility_ready_for_session(*_args, **_kwargs):
-            pytest.fail("orphaned interactive inputs should not activate team runtime")
 
         @staticmethod
         async def prepare_runtime_activation(*_args, **_kwargs):
@@ -2504,10 +2479,6 @@ async def test_process_team_message_stream_treats_plain_query_as_first_request_a
             return SimpleNamespace(team_name="unit-team", enable_swarmflow=False)
 
         @staticmethod
-        def ensure_team_skill_visibility_ready_for_session(session_id: str, spec: Any):
-            captured["skills_ready"] = (session_id, spec.team_name)
-
-        @staticmethod
         async def prepare_runtime_activation(session_id: str, team_name: str):
             captured["prepared"] = (session_id, team_name)
 
@@ -2560,7 +2531,6 @@ async def test_process_team_message_stream_treats_plain_query_as_first_request_a
         "你好",
         1,
     )
-    assert captured["skills_ready"] == ("sess-team-new-round", "unit-team")
     assert chunks[-1].is_complete is True
 
 
@@ -2654,10 +2624,6 @@ async def test_process_team_message_stream_defers_first_evolve_until_team_runtim
             )
 
         @staticmethod
-        def ensure_team_skill_visibility_ready_for_session(session_id: str, team_spec: object) -> None:
-            return None
-
-        @staticmethod
         async def prepare_runtime_activation(session_id: str, team_name: str) -> None:
             return None
 
@@ -2706,75 +2672,6 @@ async def test_process_team_message_stream_defers_first_evolve_until_team_runtim
 
 
 @pytest.mark.anyio
-async def test_process_team_message_stream_syncs_team_skills_before_evolve_slash(monkeypatch, tmp_path):
-    captured_queries: list[str] = []
-    user_intent = "没有特殊要求时格式尽量简洁，如果使用颜色也需要保持美观"
-
-    class _FakeManager(_InactiveTeamRuntimeManagerMixin):
-        @staticmethod
-        def has_stream_task(session_id: str) -> bool:
-            return False
-
-        @staticmethod
-        async def get_swarm_enriched_team_spec(**kwargs):
-            return SimpleNamespace(
-                team_name="unit-team",
-                workspace=SimpleNamespace(root_path=str(tmp_path / "team-workspace")),
-            )
-
-        @staticmethod
-        def ensure_team_skill_visibility_ready_for_session(session_id: str, team_spec: object) -> None:
-            _write_team_skill(tmp_path, "xlsx")
-
-        @staticmethod
-        async def prepare_runtime_activation(session_id: str, team_name: str) -> None:
-            return None
-
-        @staticmethod
-        def register_stream_task(session_id: str, task: object) -> None:
-            return None
-
-    async def _fake_consume_stream_with_query(
-        channel_id: str | None,
-        session_id: str,
-        spec: object,
-        query: str,
-        *,
-        round_id: int,
-        envs: dict | None = None,
-    ) -> None:
-        captured_queries.append(query)
-
-    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
-    monkeypatch.setattr(team_helpers, "increment_session_round_count", lambda session_id: 1)
-    monkeypatch.setattr(team_helpers, "_consume_stream_with_query", _fake_consume_stream_with_query)
-
-    request = SimpleNamespace(
-        session_id="sess-sync-evolve",
-        request_id="req-sync-evolve",
-        channel_id="web",
-        metadata=None,
-        params={"mode": "team"},
-    )
-    inputs = {"query": f"/evolve xlsx {user_intent}"}
-
-    chunks = []
-    async for chunk in team_helpers.process_team_message_stream(request, inputs, object()):
-        chunks.append(chunk)
-    await asyncio.sleep(0)
-
-    assert captured_queries
-    assert "prepare_skill_evolution" in captured_queries[0]
-    assert user_intent in captured_queries[0]
-    assert not any(
-        chunk.payload
-        and chunk.payload.get("event_type") == "chat.error"
-        and "未找到 Skill 'xlsx'" in str(chunk.payload.get("error", ""))
-        for chunk in chunks
-    )
-
-
-@pytest.mark.anyio
 async def test_process_team_message_stream_runs_evolve_followup_without_rail(monkeypatch, tmp_path):
     captured_queries: list[str] = []
     _write_team_skill(tmp_path, "demo-skill")
@@ -2790,10 +2687,6 @@ async def test_process_team_message_stream_runs_evolve_followup_without_rail(mon
                 team_name="unit-team",
                 workspace=SimpleNamespace(root_path=str(tmp_path / "team-workspace")),
             )
-
-        @staticmethod
-        def ensure_team_skill_visibility_ready_for_session(session_id: str, team_spec: object) -> None:
-            return None
 
         @staticmethod
         async def prepare_runtime_activation(session_id: str, team_name: str) -> None:
@@ -2856,10 +2749,6 @@ async def test_process_team_message_stream_does_not_emit_evolution_status_for_no
                 team_name="unit-team",
                 workspace=SimpleNamespace(root_path=str(tmp_path / "team-workspace")),
             )
-
-        @staticmethod
-        def ensure_team_skill_visibility_ready_for_session(session_id: str, team_spec: object) -> None:
-            return None
 
         @staticmethod
         async def prepare_runtime_activation(session_id: str, team_name: str) -> None:

@@ -10,14 +10,13 @@ root, so these tests assert on metadata content rather than on symlinks.
 
 # pylint: disable=protected-access
 
-import json
+import inspect
 import logging
 
 import pytest
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 from openjiuwen.agent_evolving.checkpointing.types import EvolutionPatch, EvolutionRecord, EvolutionTarget
 from openjiuwen.agent_teams.paths import SKILL_VISIBILITY_FILENAME
-from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.core.single_agent.rail.base import ToolCallInputs
 from openjiuwen.agent_teams.skill import (
     SCOPE_MEMBER,
@@ -27,13 +26,14 @@ from openjiuwen.agent_teams.skill import (
     compose_skill_visibility,
     read_skill_visibility,
     set_skill_visibility,
-    update_skill_visibility,
 )
 
 from jiuwenswarm.agents.harness.team.rails.team_skill_library_reload_rail import (
     TeamSkillLibraryReloadRail,
 )
+from jiuwenswarm.agents.harness.team import team_manager as team_manager_module
 from jiuwenswarm.agents.harness.team.team_manager import TeamManager
+from jiuwenswarm.agents.swarm import assembly
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
 
 test_logger = logging.getLogger("tests.team_shared_skills")
@@ -44,17 +44,6 @@ def _make_skill(library_dir, name: str) -> None:
     skill_dir = library_dir / name
     skill_dir.mkdir(parents=True, exist_ok=True)
     (skill_dir / "SKILL.md").write_text(f"---\nname: {name}\n---\n", encoding="utf-8")
-
-
-def _make_team_spec(team_name: str, team_workspace) -> TeamAgentSpec:
-    """Build a team blueprint whose workspace root is under the test tmp dir."""
-    return TeamAgentSpec.model_validate(
-        {
-            "team_name": team_name,
-            "agents": {"leader": {}, "teammate": {}},
-            "workspace": {"root_path": str(team_workspace), "enabled": True},
-        }
-    )
 
 
 @pytest.mark.asyncio
@@ -100,77 +89,50 @@ async def test_team_evolution_is_visible_and_editable_from_global_skill_manager(
     assert reloaded["entries"][0]["change"]["content"] == "edited experience"
 
 
-def test_ensure_team_skill_visibility_initialized_seeds_permissive_document(tmp_path):
-    """Team seeding writes metadata at the workspace root, not a mirrored skills dir."""
-    team_workspace = tmp_path / "team_workspace"
-    team_workspace.mkdir(parents=True)
-    spec = _make_team_spec("demo_team", team_workspace)
+def test_platform_declares_no_team_scope_skill_visibility_seeder():
+    """The team document has exactly one seeder, and it does not live here.
 
-    TeamManager.ensure_team_skill_visibility_initialized(spec)
+    ``TeamWorkspaceManager.initialize`` seeds the team-scope
+    ``skills-visibility.json``; the platform side only resolves the path and
+    hands it to the rails. A second writer would be harmless only while every
+    writer agrees on an empty allow-list — the moment one of them seeds a real
+    grant, the outcome would depend on call order. This guard fails as soon as
+    a seeder is added back to team assembly or to the team lifecycle manager.
+    """
+    for module in (assembly, team_manager_module):
+        source = inspect.getsource(module)
+        test_logger.info("checking %s for a team-scope seeder", module.__name__)
+        assert "bootstrap_skill_visibility" not in source
 
-    metadata_path = team_workspace / SKILL_VISIBILITY_FILENAME
-    assert metadata_path.is_file()
-    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
-    test_logger.info("seeded team visibility: %s", payload)
-    assert payload["scope"] == SCOPE_TEAM
-    assert payload["id"] == "demo_team"
-    # An empty allow-list means "inherit the whole library" rather than "deny all",
-    # which is what reproduces the previous unfiltered mirror.
-    assert payload["allow"] == []
-    assert payload["deny"] == []
-    assert not (team_workspace / "skills").exists()
+    assert not hasattr(TeamManager, "ensure_team_skill_visibility_initialized")
+    assert not hasattr(TeamManager, "ensure_team_skill_visibility_ready_for_session")
 
 
-def test_ensure_team_skill_visibility_initialized_does_not_overwrite_existing(tmp_path):
-    """The metadata file is the authority: re-seeding never rolls back a grant."""
-    team_workspace = tmp_path / "team_workspace"
-    team_workspace.mkdir(parents=True)
-    spec = _make_team_spec("demo_team", team_workspace)
-    metadata_path = team_workspace / SKILL_VISIBILITY_FILENAME
+def test_missing_team_visibility_document_imposes_no_restriction(tmp_path):
+    """A team without a seeded document constrains nothing, so no seeding is required."""
+    metadata_path = tmp_path / "team_workspace" / SKILL_VISIBILITY_FILENAME
 
-    set_skill_visibility(
-        metadata_path,
-        scope=SCOPE_TEAM,
-        entity_id="demo_team",
-        allow=["skill-a"],
-        deny=["skill-b"],
-    )
+    team = read_skill_visibility(metadata_path, scope=SCOPE_TEAM, entity_id="demo_team")
+    test_logger.info("missing team document reads back as: allow=%s deny=%s", team.allow, team.deny)
+    assert team.allow == []
+    assert team.deny == []
 
-    TeamManager.ensure_team_skill_visibility_initialized(spec)
-
-    visibility = read_skill_visibility(metadata_path, scope=SCOPE_TEAM, entity_id="demo_team")
-    test_logger.info("visibility after re-seed: allow=%s deny=%s", visibility.allow, visibility.deny)
-    assert visibility.allow == ["skill-a"]
-    assert visibility.deny == ["skill-b"]
-
-
-def test_ensure_team_skill_visibility_ready_for_session_is_idempotent(tmp_path):
-    """Session readiness seeds once and stays a no-op on every team rebuild."""
-    team_workspace = tmp_path / "team_workspace"
-    spec = _make_team_spec("demo_team", team_workspace)
-    manager = TeamManager()
-
-    manager.ensure_team_skill_visibility_ready_for_session("sess-1", spec)
-    metadata_path = team_workspace / SKILL_VISIBILITY_FILENAME
-    assert metadata_path.is_file()
-
-    update_skill_visibility(
-        metadata_path,
-        scope=SCOPE_TEAM,
-        entity_id="demo_team",
-        add_deny=["skill-b"],
-    )
-    manager.ensure_team_skill_visibility_ready_for_session("sess-1", spec)
-
-    visibility = read_skill_visibility(metadata_path, scope=SCOPE_TEAM, entity_id="demo_team")
-    assert visibility.deny == ["skill-b"]
+    member = SkillVisibility(scope=SCOPE_MEMBER, id="teammate")
+    enabled, disabled = compose_skill_visibility(member, team, [])
+    assert enabled == set()
+    assert disabled == set()
 
 
 def test_newly_installed_skill_is_visible_without_touching_metadata(tmp_path):
     """A new library entry needs no metadata edit: an empty allow-list inherits it."""
     team_workspace = tmp_path / "team_workspace"
-    spec = _make_team_spec("demo_team", team_workspace)
-    TeamManager.ensure_team_skill_visibility_initialized(spec)
+    bootstrap_skill_visibility(
+        team_workspace / SKILL_VISIBILITY_FILENAME,
+        scope=SCOPE_TEAM,
+        entity_id="demo_team",
+        allow=None,
+        bootstrapped_from="team_workspace:initialize",
+    )
 
     team = read_skill_visibility(
         team_workspace / SKILL_VISIBILITY_FILENAME,
