@@ -15,6 +15,10 @@ from jiuwenswarm.gateway.tenant_paths import (
     resolve_channel_group_chat_memory_dir,
     tenant_ids_from_message,
 )
+from tests.unit_tests.tenant_workspace_test_helpers import (
+    patch_multi_tenant_workspace_dirs,
+    tenant_workspace_key,
+)
 
 
 def test_normalize_channel_tenant_ids_defaults():
@@ -24,12 +28,9 @@ def test_normalize_channel_tenant_ids_defaults():
 
 
 def test_message_store_lazy_paths_isolate_tenants(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        "jiuwenswarm.gateway.tenant_paths.get_multi_tenant_user_workspace_dir",
-        lambda sid, aid: tmp_path / f"service_{sid}" / f"agent_{aid}",
-    )
+    patch_multi_tenant_workspace_dirs(monkeypatch, tmp_path)
     store = MessageStore()
-    assert not (tmp_path / "service_default").exists()
+    assert not (tmp_path / "workspace_default_office").exists()
 
     store.add_message_to_memory(
         "chat_a",
@@ -53,6 +54,8 @@ def test_message_store_lazy_paths_isolate_tenants(tmp_path, monkeypatch):
     assert office_file.exists()
     assert default_file.exists()
     assert office_file != default_file
+    assert tenant_workspace_key("default", "office") in str(office_file)
+    assert tenant_workspace_key("default", "default") in str(default_file)
 
     office_hist = store.load_memory(
         "chat_a", service_id="default", agent_id="office"
@@ -67,10 +70,7 @@ def test_message_store_lazy_paths_isolate_tenants(tmp_path, monkeypatch):
 
 
 def test_message_store_omitted_tenant_uses_default_tree(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        "jiuwenswarm.gateway.tenant_paths.get_multi_tenant_user_workspace_dir",
-        lambda sid, aid: tmp_path / f"service_{sid}" / f"agent_{aid}",
-    )
+    patch_multi_tenant_workspace_dirs(monkeypatch, tmp_path)
     store = MessageStore()
     store.add_message_to_memory(
         "chat_b",
