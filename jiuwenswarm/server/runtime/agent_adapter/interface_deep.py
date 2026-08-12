@@ -5432,16 +5432,17 @@ class JiuWenSwarmDeepAdapter:
             )
             return
 
+        old_unregistered = False
         if old_rail is not None:
             try:
                 await self._instance.unregister_rail(old_rail)
+                old_unregistered = True
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "[JiuWenSwarmDeepAdapter] unregister old SkillUseRail failed: %s",
                     exc,
                 )
 
-        self._skill_rail = new_rail
         try:
             await self._instance.register_rail(new_rail)
         except Exception as exc:  # noqa: BLE001
@@ -5449,8 +5450,17 @@ class JiuWenSwarmDeepAdapter:
                 "[JiuWenSwarmDeepAdapter] register new SkillUseRail failed: %s",
                 exc,
             )
+            if old_rail is not None and old_unregistered:
+                try:
+                    await self._instance.register_rail(old_rail)
+                except Exception as restore_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] restore old SkillUseRail after refresh failure failed: %s",
+                        restore_exc,
+                    )
             return
 
+        self._skill_rail = new_rail
         logger.info(
             "[JiuWenSwarmDeepAdapter] enabled_skills refreshed from DB: count=%s",
             len(self._enabled_skills),
