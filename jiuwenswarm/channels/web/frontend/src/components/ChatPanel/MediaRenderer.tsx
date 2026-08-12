@@ -20,9 +20,9 @@ interface MediaRendererProps {
 const VISIBLE_FILE_COUNT = 2;
 
 function isImageItem(item: MediaItem): boolean {
-  if (item.type === 'image') return true;
-  const mime = (item.mimeType || item.mime_type || '').toLowerCase();
-  return mime.startsWith('image/');
+  // Attachment routing owns the media/document distinction. MIME metadata alone
+  // must not turn ordinary files such as SVG documents back into image previews.
+  return item.type === 'image';
 }
 
 function isCardItem(item: MediaItem): boolean {
