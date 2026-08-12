@@ -66,6 +66,7 @@ import {
   registerCreatedConversation,
   resetNewConversationRuntime,
 } from './multi-session/state/newConversationLifecycle';
+import { resolveNewConversationProjectDir } from './multi-session/state/newConversationProject';
 import { toDisplaySessionTitle } from './utils/documentMessage';
 import { createConversationSession } from './multi-session/state/createConversationSession';
 import { useTranslation } from 'react-i18next';
@@ -1636,7 +1637,11 @@ function AppContent() {
     // 默认模型列表尚未加载完成时兜底沿用当前会话的模型，避免新会话没有模型可用。
     const selectedModelName = useSessionStore.getState().defaultModelName ?? currentRuntime?.selectedModelName ?? null;
     const selectedProject = options.project ?? useWorkspaceStore.getState().selectedProject;
-    const projectDir = options.project?.project_dir ?? selectedProject?.project_dir ?? null;
+    const projectDir = resolveNewConversationProjectDir(
+      options.preserveProject,
+      options.project?.project_dir,
+      selectedProject?.project_dir,
+    );
     disposeInFlightHistoryHandles(
       currentSessionId !== NEW_CONVERSATION_ID ? currentSessionId : undefined,
     );
