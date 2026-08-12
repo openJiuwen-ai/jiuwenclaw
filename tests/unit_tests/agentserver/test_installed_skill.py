@@ -143,7 +143,7 @@ def test_install_from_channel_exists_never_force() -> None:
     import asyncio
     from unittest.mock import AsyncMock, patch
 
-    from jiuwenclaw.agentserver.installed_skill_ops import install_from_channel
+    from jiuwenswarm.agents.harness.common.installed_skill_ops import install_from_channel
 
     async def _run() -> None:
         channel_install = AsyncMock(
@@ -151,7 +151,7 @@ def test_install_from_channel_exists_never_force() -> None:
         )
 
         with patch(
-            "jiuwenclaw.agentserver.installed_skill_ops.get_installed_skill",
+            "jiuwenswarm.agents.harness.common.installed_skill_ops.get_installed_skill",
             new=AsyncMock(
                 return_value={"source_type": SOURCE_USER, "skill_version": "1.0"}
             ),
@@ -172,7 +172,7 @@ def test_install_from_channel_exists_never_force() -> None:
 
         channel_install.reset_mock()
         with patch(
-            "jiuwenclaw.agentserver.installed_skill_ops.get_installed_skill",
+            "jiuwenswarm.agents.harness.common.installed_skill_ops.get_installed_skill",
             new=AsyncMock(
                 return_value={"source_type": SOURCE_PREBUILT, "skill_version": "1.0"}
             ),
