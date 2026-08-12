@@ -395,7 +395,14 @@ def resolve_final_tenant_ids(
                 )
 
                 svc, ag = _default_invoke_ids(g, b, u)
-            except Exception:
+            except Exception as exc:  # noqa: BLE001 — extension optional; fallback below
+                logger.debug(
+                    "[InstalledSkill] _default_invoke_ids failed for g=%r b=%r u=%r: %s",
+                    g,
+                    b,
+                    u,
+                    exc,
+                )
                 routed = b
                 svc = svc or f"{g}{routed}"
                 ag = ag or f"{g}{routed}{u}"
