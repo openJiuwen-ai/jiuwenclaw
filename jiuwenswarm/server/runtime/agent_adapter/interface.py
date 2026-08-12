@@ -550,7 +550,17 @@ _SKILL_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.SKILLS_EVOLUTION_STATUS: "handle_skills_evolution_status",
     ReqMethod.SKILLS_EVOLUTION_GET: "handle_skills_evolution_get",
     ReqMethod.SKILLS_EVOLUTION_SAVE: "handle_skills_evolution_save",
+    ReqMethod.SKILLS_ENTERPRISE_INSTALL: "handle_skills_web_install",
+    ReqMethod.SKILLS_ENTERPRISE_UNINSTALL: "handle_skills_web_uninstall",
 }
+
+# Web 企业装卸（对外 RPC 仍为 skills.enterprise.*）
+_SKILLS_WEB_HANDLERS: frozenset[str] = frozenset(
+    {
+        "handle_skills_web_install",
+        "handle_skills_web_uninstall",
+    }
+)
 
 # Preserve cross-service context-size hints if they are present in request.params.
 _CONTEXT_SIZE_HINT_KEYS: tuple[str, ...] = (
@@ -1137,6 +1147,18 @@ class JiuWenSwarm:
             refresh_team_shared_skill_links_across_managers(session_id)
         except Exception as exc:
             logger.warning("[JiuWenSwarm] team shared skill link refresh failed: %s", exc)
+
+    async def refresh_enabled_skills_from_db(self) -> None:
+        """企业账本变更后轻量刷新启用集（直读 DB + 重建 SkillUseRail）。
+
+        适配器不支持时回退 ``create_instance``。
+        """
+        adapter = self._ensure_adapter()
+        refresh = getattr(adapter, "refresh_enabled_skills_from_db", None)
+        if callable(refresh):
+            await refresh()
+            return
+        await self.create_instance()
 
     async def _refresh_skill_rails_after_change(self) -> None:
         """轻量刷新 skill rail，避免 uninstall 后全量重建 agent 实例.
@@ -1770,7 +1792,13 @@ class JiuWenSwarm:
         handler_name = _SKILL_ROUTES[request.req_method]
         handler = getattr(self._skill_manager, handler_name)
         try:
-            payload = await handler(request.params)
+            params = dict(request.params) if isinstance(request.params, dict) else {}
+            if handler_name in _SKILLS_WEB_HANDLERS and os.getenv("AGENT_RUNTIME", "").strip():
+                if self._service_id and not str(params.get("service_id") or "").strip():
+                    params["service_id"] = self._service_id
+                if self._agent_id and not str(params.get("agent_id") or "").strip():
+                    params["agent_id"] = self._agent_id
+            payload = await handler(params)
             _reload_after_skills = handler_name in [
                 "handle_skills_install",
                 "handle_skills_import_local",
@@ -1779,15 +1807,16 @@ class JiuWenSwarm:
                 "handle_skills_clawhub_download",
                 "handle_skills_team_skills_hub_install",
             ]
+            _enterprise_web_handler = handler_name in _SKILLS_WEB_HANDLERS
             if handler_name == "handle_skills_skillnet_install" and payload.get("pending"):
                 _reload_after_skills = False
-            if _reload_after_skills:
+            if _enterprise_web_handler and payload.get("success") is not False:
+                if os.getenv("AGENT_RUNTIME", "").strip():
+                    await self.refresh_enabled_skills_from_db()
+            elif _reload_after_skills and payload.get("success") is not False:
                 await self.create_instance()
                 self._refresh_team_shared_skill_links(request.session_id)
             elif handler_name == "handle_skills_uninstall" and payload.get("success"):
-                # 卸载只需轻量刷新 skill rail，不需要全量重建 agent 实例。
-                # SkillUseRail 会通过文件系统签名检测到目录删除并自动刷新，
-                # 这里主动调用 reload_skills() 确保立即生效，避免延迟到下一次模型调用。
                 await self._refresh_skill_rails_after_change()
                 self._refresh_team_shared_skill_links(request.session_id)
         except Exception as exc:
