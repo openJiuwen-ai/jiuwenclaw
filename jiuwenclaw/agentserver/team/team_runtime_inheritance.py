@@ -666,14 +666,19 @@ def _team_modes_entry_list(
 
 
 def _merge_name_lists(base: list[str], extra: list[str]) -> list[str]:
-    """Union two name lists, deduped case-insensitively, order preserved."""
+    """Union two name lists, deduped by exact name, order preserved.
+
+    Dedup is case-sensitive on purpose: downstream consumers
+    (``DisabledToolsRail._disabled_tools`` set, ``ability_manager.get(name)``)
+    match tool/skill names case-sensitively, so case-insensitive dedup could
+    drop the only spelling that matches a registered name.
+    """
     merged: list[str] = []
     seen: set[str] = set()
     for name in [*base, *extra]:
-        folded = name.casefold()
-        if folded in seen:
+        if name in seen:
             continue
-        seen.add(folded)
+        seen.add(name)
         merged.append(name)
     return merged
 
