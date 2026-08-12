@@ -7822,13 +7822,9 @@ class JiuWenSwarmDeepAdapter:
 
         if accepted:
             await approve_evolution_records(rail, request_id, approved_record_ids)
-            # Sync updated team skill from workspace to global team_skills dir.
-            try:
-                from jiuwenswarm.agents.harness.team import refresh_team_shared_skill_links_across_managers
-
-                refresh_team_shared_skill_links_across_managers(session_id)
-            except Exception as exc:
-                logger.warning("[JiuWenSwarmDeepAdapter] team shared skill link refresh after approval failed: %s", exc)
+            # Skills live in a single physical library, so an approved evolution is visible to
+            # every agent as soon as it lands: SkillUseRail re-stats the library on each model
+            # call and picks the change up on its own. No view has to be re-linked.
             logger.info("[JiuWenSwarmDeepAdapter] team skill evolve accepted: request_id=%s", request_id)
         else:
             await reject_evolution_records(rail, request_id)
@@ -7857,13 +7853,8 @@ class JiuWenSwarmDeepAdapter:
         accepted = answers_select_option(answers, EVOLUTION_EXECUTE_LABELS)
         if accepted:
             await rail.on_approve_simplify(request_id)
-            try:
-                from jiuwenswarm.agents.harness.team import refresh_team_shared_skill_links_across_managers
-
-                if session_id:
-                    refresh_team_shared_skill_links_across_managers(session_id)
-            except Exception as exc:
-                logger.warning("[JiuWenSwarmDeepAdapter] team shared skill link refresh after simplify failed: %s", exc)
+            # No library-side fan-out is needed: the single Skill library is re-read by
+            # SkillUseRail on every model call.
             logger.info("[JiuWenSwarmDeepAdapter] team simplify accepted: request_id=%s", request_id)
         else:
             await rail.on_reject_simplify(request_id)

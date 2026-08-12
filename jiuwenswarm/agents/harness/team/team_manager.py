@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from openjiuwen.agent_teams.agent.team_agent import TeamAgent
-from openjiuwen.agent_teams.paths import team_home
+from openjiuwen.agent_teams.paths import SKILL_VISIBILITY_FILENAME, team_skill_visibility_path
 from openjiuwen.agent_teams.runtime.pool import RuntimeState
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
@@ -28,6 +28,7 @@ from openjiuwen.harness.rails import (
     TeamSkillCreateRail,
     TeamSkillEvolutionRail,
 )
+from openjiuwen.agent_teams.skill import SCOPE_TEAM, bootstrap_skill_visibility
 from jiuwenswarm.agents.harness.team.bootstrap import configure_agent_teams_home
 from jiuwenswarm.common.log_preview import preview_text
 from jiuwenswarm.common.utils import get_user_workspace_dir
@@ -55,7 +56,6 @@ from jiuwenswarm.agents.harness.team.distributed_runtime import (
 from jiuwenswarm.agents.harness.team.handlers.team_monitor_handler import TeamMonitorHandler
 from jiuwenswarm.agents.harness.team import kv_cache_hooks
 from jiuwenswarm.agents.harness.team.remote_member_bootstrap import release_a2x_reservations_for_session
-from jiuwenswarm.agents.harness.team.team_skill_links import sync_skill_dir_links
 from jiuwenswarm.common.config import (
     get_config,
     get_default_models,
@@ -70,7 +70,6 @@ from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
     build_member_rails,
     get_default_model_name,
 )
-from jiuwenswarm.common.utils import get_agent_skills_dir
 from jiuwenswarm.agents.harness.observability_runtime import (
     acquire_observability_demand,
     build_observability_config,
@@ -323,8 +322,6 @@ class TeamManager:
         self._team_evolution_watchers: dict[str, asyncio.Task] = {}
         # session_id → runtime_ready requested a watcher before the rail registered
         self._pending_team_evolution_watcher_sessions: set[str] = set()
-        # session_id -> team workspace skills directory used as the shared link view.
-        self._team_shared_skill_link_targets: dict[str, Path] = {}
         # session_id → workflow handler instance
         self._workflow_handlers: dict[str, Any] = {}
         # session_id → True once a team-building event (team.member,
@@ -1128,72 +1125,72 @@ class TeamManager:
         )
 
     @staticmethod
-    def _initialize_team_shared_skill_links(spec: TeamAgentSpec) -> None:
-        """Initialize team shared skill links from the global skill root."""
-        global_skills_dir = get_agent_skills_dir()
-        if not global_skills_dir.exists():
-            logger.warning("[TeamManager] global_skills_dir does not exist: %s", global_skills_dir)
+    def _resolve_team_skill_visibility_path(spec: TeamAgentSpec) -> Path:
+        """Return the team-level Skill visibility metadata file.
+
+        Args:
+            spec: Team blueprint, whose workspace override wins when present.
+
+        Returns:
+            Path of ``skills-visibility.json`` at the team workspace root.
+        """
+        ws_config = spec.workspace
+        ws_path = ws_config.root_path if ws_config and ws_config.root_path else None
+        if not ws_path:
+            return team_skill_visibility_path(spec.team_name)
+        return Path(ws_path) / SKILL_VISIBILITY_FILENAME
+
+    @staticmethod
+    def ensure_team_skill_visibility_initialized(spec: TeamAgentSpec) -> None:
+        """Seed the team-level Skill visibility document once per team.
+
+        Skills live in exactly one physical library; a team owns no mirrored
+        ``skills/`` directory, only this document. The team is seeded with an
+        empty allow-list, which means "inherit the whole library": that
+        reproduces the previous unfiltered mirror without freezing the view
+        against Skills installed later. The file is the authority afterwards,
+        so re-seeding an existing document is a no-op and the call is safe to
+        repeat on every team rebuild.
+
+        Args:
+            spec: Team blueprint identifying the team and its workspace.
+        """
+        path = TeamManager._resolve_team_skill_visibility_path(spec)
+        try:
+            visibility = bootstrap_skill_visibility(
+                path,
+                scope=SCOPE_TEAM,
+                entity_id=spec.team_name,
+                allow=(),
+                bootstrapped_from="team:create",
+            )
+        except (OSError, TimeoutError) as exc:
+            logger.warning(
+                "[TeamManager] team skill visibility bootstrap failed: path=%s error=%s",
+                path,
+                exc,
+            )
             return
-
-        # Resolve team workspace path
-        ws_config = spec.workspace
-        ws_path = ws_config.root_path if ws_config and ws_config.root_path else None
-        if not ws_path:
-            ws_path = str(team_home(spec.team_name) / "team-workspace")
-
-        team_shared_skills_dir = Path(ws_path) / "skills"
-
-        team_shared_skills_dir.mkdir(parents=True, exist_ok=True)
-        sync_skill_dir_links(global_skills_dir, team_shared_skills_dir)
-
-        logger.info("[TeamManager] Initialized team shared skill links: %s", team_shared_skills_dir)
-
-    @staticmethod
-    def _resolve_team_shared_skills_dir(spec: TeamAgentSpec) -> Path:
-        ws_config = spec.workspace
-        ws_path = ws_config.root_path if ws_config and ws_config.root_path else None
-        if not ws_path:
-            ws_path = str(team_home(spec.team_name) / "team-workspace")
-        return Path(ws_path) / "skills"
-
-    @staticmethod
-    def ensure_team_shared_skills_initialized(spec: TeamAgentSpec) -> None:
-        """Ensure team shared skills are available in the team workspace."""
-        TeamManager._initialize_team_shared_skill_links(spec)
-
-    def ensure_team_shared_skills_ready_for_session(self, session_id: str, spec: TeamAgentSpec) -> None:
-        """Ensure team shared skills are initialized and registered for refresh."""
-        self.ensure_team_shared_skills_initialized(spec)
-        self.register_team_shared_skill_link_target(
-            session_id,
-            self._resolve_team_shared_skills_dir(spec),
+        logger.info(
+            "[TeamManager] team skill visibility ready: path=%s allow=%s deny=%s",
+            path,
+            visibility.allow,
+            visibility.deny,
         )
 
-    def register_team_shared_skill_link_target(self, session_id: str, target: Path) -> None:
-        """Register the team shared skills directory for link refresh."""
-        self._team_shared_skill_link_targets[session_id] = target
+    def ensure_team_skill_visibility_ready_for_session(self, session_id: str, spec: TeamAgentSpec) -> None:
+        """Ensure a session's team owns a Skill visibility document.
 
-    def refresh_team_shared_skill_links(self, session_id: str) -> bool:
-        """Refresh team shared skill links from global skills."""
-        target = self._team_shared_skill_link_targets.get(session_id)
-        if target is None:
-            logger.debug("[TeamManager] no team shared skill link target for session_id=%s", session_id)
-            return False
-        global_skills_dir = get_agent_skills_dir()
-        if not global_skills_dir.exists():
-            logger.warning("[TeamManager] global_skills_dir does not exist: %s", global_skills_dir)
-            return False
-        sync_skill_dir_links(global_skills_dir, target)
-        logger.info("[TeamManager] Refreshed team shared skill links: session_id=%s target=%s", session_id, target)
-        return True
-
-    def refresh_all_team_shared_skill_links(self) -> int:
-        """Refresh every registered team shared skill link view."""
-        refreshed = 0
-        for session_id in list(self._team_shared_skill_link_targets):
-            if self.refresh_team_shared_skill_links(session_id):
-                refreshed += 1
-        return refreshed
+        Args:
+            session_id: Session that is about to run the team.
+            spec: Team blueprint identifying the team and its workspace.
+        """
+        self.ensure_team_skill_visibility_initialized(spec)
+        logger.debug(
+            "[TeamManager] team skill visibility ensured: session_id=%s team_name=%s",
+            session_id,
+            spec.team_name,
+        )
 
     async def create_team(
         self,
@@ -1245,8 +1242,8 @@ class TeamManager:
             team_agent = spec.build()
             team_agent.channel_id = channel_id  # 记录 channel，供 _destroy_other_sessions 按 channel 隔离
             self._team_agents[session_id] = team_agent
-            # After build, initialize team shared skill links.
-            self.ensure_team_shared_skills_ready_for_session(session_id, spec)
+            # After build, seed the team-level Skill visibility document.
+            self.ensure_team_skill_visibility_ready_for_session(session_id, spec)
 
             if self._is_distributed_mode(config_base):
                 try:
@@ -1439,6 +1436,52 @@ class TeamManager:
         if entry not in rails:
             rails.append(entry)
 
+    async def reload_team_skill_views(self, session_id: str | None = None) -> int:
+        """Re-scan the shared Skill library for live team members.
+
+        Skills live in exactly one physical library and each member is narrowed
+        by its ``skills-visibility.json`` document, so a library or metadata
+        change needs no fan-out: the only stale thing is each running member's
+        in-memory Skill rail. ``SkillUseRail`` would notice on its own at the
+        next model call through its snapshot signature; reloading here makes the
+        change land immediately instead.
+
+        Only members tracked as live rail owners are reachable, which today
+        means members that mounted an evolution rail. Members without one still
+        pick the change up through the snapshot signature.
+
+        Args:
+            session_id: Restrict the reload to one session; ``None`` reloads
+                every tracked session.
+
+        Returns:
+            Number of Skill rails reloaded across the visited agents.
+        """
+        from jiuwenswarm.agents.harness.team.rails.team_skill_library_reload_rail import (
+            reload_agent_skill_views,
+        )
+
+        if session_id is None:
+            sessions = list(self._team_live_rails)
+        else:
+            sessions = [session_id]
+
+        visited: set[int] = set()
+        reloaded = 0
+        for current_session in sessions:
+            for agent, _rail in list(self._team_live_rails.get(current_session, [])):
+                if agent is None or id(agent) in visited:
+                    continue
+                visited.add(id(agent))
+                reloaded += await reload_agent_skill_views(agent)
+        logger.info(
+            "[TeamManager] reloaded team skill views: session_id=%s agents=%d rails=%d",
+            session_id,
+            len(visited),
+            reloaded,
+        )
+        return reloaded
+
     def _clear_team_rail_registries(self, session_id: str) -> None:
         self._team_skill_rails.pop(session_id, None)
         self._team_member_skill_evolution_rails.pop(session_id, None)
@@ -1447,7 +1490,6 @@ class TeamManager:
         self._team_evolution_enabled.pop(session_id, None)
         self._team_member_rail_contexts.pop(session_id, None)
         self._team_live_rails.pop(session_id, None)
-        self._team_shared_skill_link_targets.pop(session_id, None)
 
     def _clear_terminal_session_markers(self, session_id: str) -> None:
         """Release process-wide markers only for non-resumable teardown."""
@@ -2580,12 +2622,16 @@ def find_team_skill_rail_across_managers(request_id: str) -> Any | None:
     return get_team_manager().find_team_skill_rail_for_request(request_id)
 
 
-def refresh_team_shared_skill_links_across_managers(session_id: str | None = None) -> bool:
-    """Refresh team shared skill links on the singleton manager."""
-    tm = get_team_manager()
-    if session_id is None:
-        return tm.refresh_all_team_shared_skill_links() > 0
-    return tm.refresh_team_shared_skill_links(session_id)
+async def reload_team_skill_views_across_managers(session_id: str | None = None) -> int:
+    """Reload live team Skill views on the singleton manager.
+
+    Args:
+        session_id: Restrict the reload to one session; ``None`` reloads all.
+
+    Returns:
+        Number of Skill rails reloaded.
+    """
+    return await get_team_manager().reload_team_skill_views(session_id)
 
 
 async def cancel_all_team_stream_tasks_across_managers(reason: str = "") -> None:

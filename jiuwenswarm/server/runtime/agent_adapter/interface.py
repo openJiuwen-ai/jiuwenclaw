@@ -58,9 +58,11 @@ from jiuwenswarm.extensions.hook_event import AgentServerHookEvents
 from jiuwenswarm.extensions.hooks_context import MemoryHookContext
 from jiuwenswarm.common.schema.message import EventType, ReqMethod
 from jiuwenswarm.common.utils import (
+    configure_skill_library,
     get_agent_home_dir,
     get_agent_workspace_dir,
     get_env_file,
+    migrate_team_skill_views,
     reset_free_search_runtime_flags,
 )
 from jiuwenswarm.server.runtime.a2ui.integration import (
@@ -583,7 +585,20 @@ _SKILL_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.SKILLS_EVOLUTION_STATUS: "handle_skills_evolution_status",
     ReqMethod.SKILLS_EVOLUTION_GET: "handle_skills_evolution_get",
     ReqMethod.SKILLS_EVOLUTION_SAVE: "handle_skills_evolution_save",
+    ReqMethod.SKILLS_VISIBILITY_GET: "handle_skills_visibility_get",
+    ReqMethod.SKILLS_VISIBILITY_SET: "handle_skills_visibility_set",
+    ReqMethod.SKILLS_VISIBILITY_UPDATE: "handle_skills_visibility_update",
 }
+
+# Handlers that persist a Skill visibility document; every one of them must
+# trigger a rail refresh so a grant or a revocation takes effect on the next
+# turn. The read-only ``get`` deliberately stays out.
+_SKILL_VISIBILITY_WRITE_HANDLERS: frozenset[str] = frozenset(
+    {
+        "handle_skills_visibility_set",
+        "handle_skills_visibility_update",
+    }
+)
 
 _PLUGIN_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.PLUGINS_LIST: "handle_plugins_list",
@@ -841,12 +856,37 @@ class JiuWenSwarm:
     STREAM_QUEUE_MAXSIZE = 64
 
     def __init__(self) -> None:
+        self._prepare_skill_library()
         self._adapter: AgentAdapter | None = None
         self._sdk_name: str | None = None
         self._skill_manager = SkillManager(workspace_dir=str(get_agent_workspace_dir()))
         self._session_manager = SessionManager()
         # SkillDev 模式：懒初始化，首次 skilldev.* 请求时构造
         self._skilldev_service = None
+
+    @staticmethod
+    def _prepare_skill_library() -> None:
+        """Pin the single Skill library and retire legacy per-workspace views.
+
+        Runs before any adapter, team or rail is built so legacy view directories
+        are gone by the time anything reads a team workspace. Correctness no
+        longer depends on that ordering: the migration seeds its allow lists at
+        ``AUTHORITY_MIGRATION``, which outranks the config seeds written during
+        assembly whichever one lands first. The agent-teams home still has to be
+        pinned before the scan, otherwise it would look under openJiuWen's own
+        default root instead of this instance's workspace.
+
+        Single-agent mode is untouched by all of this: it reads the same library
+        directory it always did and owns no visibility document.
+        """
+        try:
+            from jiuwenswarm.agents.harness.team.bootstrap import configure_agent_teams_home
+
+            configure_agent_teams_home()
+            configure_skill_library()
+            migrate_team_skill_views()
+        except Exception as exc:
+            logger.warning("[JiuWenSwarm] skill library preparation failed: %s", exc)
 
     def _get_skilldev_service(self):
         """懒初始化并返回 SkillDevService 实例.
@@ -935,19 +975,28 @@ class JiuWenSwarm:
                 busy_checker=lambda: sm.has_active_tasks(),))
 
     async def _on_skillnet_install_complete(self) -> None:
-        """Reload the agent and refresh active team shared skill links after async install."""
+        """Reload the agent and refresh live team skill rails after async install."""
         await self.create_instance()
-        self._refresh_team_shared_skill_links()
+        await self._reload_team_skill_rails()
 
     @staticmethod
-    def _refresh_team_shared_skill_links(session_id: str | None = None) -> None:
-        """Refresh team shared skill links after the global skill root changes."""
-        try:
-            from jiuwenswarm.agents.harness.team import refresh_team_shared_skill_links_across_managers
+    async def _reload_team_skill_rails(session_id: str | None = None) -> None:
+        """Re-scan the shared Skill library for live team members.
 
-            refresh_team_shared_skill_links_across_managers(session_id)
+        Replaces the old shared-link refresh: teams no longer own a mirrored
+        ``skills/`` directory, so nothing has to be re-linked. What still needs
+        a nudge is each running member's in-memory Skill rail, which otherwise
+        keeps serving the library listing from before the change.
+
+        Args:
+            session_id: Restrict the reload to one session; None reloads all.
+        """
+        try:
+            from jiuwenswarm.agents.harness.team import reload_team_skill_views_across_managers
+
+            await reload_team_skill_views_across_managers(session_id)
         except Exception as exc:
-            logger.warning("[JiuWenSwarm] team shared skill link refresh failed: %s", exc)
+            logger.warning("[JiuWenSwarm] team skill view reload failed: %s", exc)
 
     async def _refresh_skill_rails_after_change(self) -> None:
         """轻量刷新 skill rail，避免 uninstall 后全量重建 agent 实例.
@@ -1525,13 +1574,18 @@ class JiuWenSwarm:
                 _reload_after_skills = False
             if _reload_after_skills:
                 await self.create_instance()
-                self._refresh_team_shared_skill_links(request.session_id)
+                await self._reload_team_skill_rails(request.session_id)
             elif handler_name == "handle_skills_uninstall" and payload.get("success"):
                 # 卸载只需轻量刷新 skill rail，不需要全量重建 agent 实例。
                 # SkillUseRail 会通过文件系统签名检测到目录删除并自动刷新，
                 # 这里主动调用 reload_skills() 确保立即生效，避免延迟到下一次模型调用。
                 await self._refresh_skill_rails_after_change()
-                self._refresh_team_shared_skill_links(request.session_id)
+                await self._reload_team_skill_rails(request.session_id)
+            elif handler_name in _SKILL_VISIBILITY_WRITE_HANDLERS and payload.get("success"):
+                # 可见性只改 metadata，库内容没变：agent 无需重建，只要让各
+                # skill rail 重新读一次 metadata，授权/撤权即刻生效。
+                await self._refresh_skill_rails_after_change()
+                await self._reload_team_skill_rails(request.session_id)
         except Exception as exc:
             logger.error("[JiuWenSwarm] skills 请求处理失败: %s", exc)
             return AgentResponse(

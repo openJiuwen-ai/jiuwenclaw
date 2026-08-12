@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """统一消息模型."""
 
@@ -93,6 +93,12 @@ class ReqMethod(Enum):
     SKILLS_INSTALLED = "skills.installed"
     SKILLS_GET = "skills.get"
     SKILLS_TOGGLE = "skills.toggle"
+    # Per-workspace Skill visibility (team mode): the Skill entities themselves
+    # live in exactly one global library, so who may see which Skill is metadata
+    # stored next to a member / team workspace rather than a directory layout.
+    SKILLS_VISIBILITY_GET = "skills.visibility.get"
+    SKILLS_VISIBILITY_SET = "skills.visibility.set"
+    SKILLS_VISIBILITY_UPDATE = "skills.visibility.update"
     SKILLS_INSTALL = "skills.install"
     SKILLS_IMPORT_LOCAL = "skills.import_local"
     SKILLS_MARKETPLACE_ADD = "skills.marketplace.add"

@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """Team 成员运行时继承模块.
 
@@ -57,14 +57,6 @@ class MemberInfo:
     role: str | None = None
 
 
-def get_team_evolution_skills_dirs(
-    team_skills_dir: str,
-    global_skills_dir: str | None = None,
-) -> list[str]:
-    """Return the team view and its trusted global symlink target root."""
-    return [team_skills_dir, global_skills_dir or str(get_agent_skills_dir())]
-
-
 @dataclass
 class RuntimeInfo:
     """运行时环境信息."""
@@ -74,7 +66,17 @@ class RuntimeInfo:
 
 @dataclass
 class TeamWorkspaceInfo:
-    """Team 共享 workspace 信息."""
+    """Team 共享 workspace 信息.
+
+    Attributes:
+        root_dir: Team shared workspace root.
+        skills_dir: Legacy team skills view path. Skills now live in exactly
+            one physical library, so this no longer locates any Skill and is
+            kept only for callers that still thread it through.
+        team_id: Team name.
+        config: Resolved ``config.yaml`` mapping.
+        trajectory_registry: Per-team in-memory trajectory registry.
+    """
     root_dir: str | None = None
     skills_dir: str | None = None
     team_id: str | None = None
@@ -158,10 +160,13 @@ def build_member_rails(
 ) -> list[Any]:
     """为 Team 成员创建 rails 列表.
 
+    Skill 相关 rail 一律指向唯一的全局 skill 实体库；team 不再拥有 skills 视图目录，
+    因此这些 rail 的挂载不再依赖 ``team_workspace.skills_dir``.
+
     Args:
         member_info: 成员身份信息（agent_name, role）
         runtime: 运行时环境信息（channel, language）
-        team_workspace: 团队共享 workspace 信息，其中 skills_dir 为 team shared skills root
+        team_workspace: 团队共享 workspace 信息
 
     Returns:
         rail 实例列表
@@ -174,11 +179,13 @@ def build_member_rails(
     channel = runtime.channel
     language = runtime.language
     team_ws_root = team_workspace.root_dir
-    team_ws_skills_dir = team_workspace.skills_dir
     team_id = team_workspace.team_id
     config = team_workspace.config
     team_trajectory_span_processor = team_workspace.trajectory_span_processor
     skill_evolution_enabled = get_skill_evolution_enabled(config)
+    # Single physical Skill library shared by every agent; per-team and
+    # per-member skill directories no longer exist.
+    global_skills_root = str(get_agent_skills_dir())
 
     rails_list = []
 
@@ -271,14 +278,14 @@ def build_member_rails(
             logger.warning("[TeamRuntime] TeamWorkspaceReportPathRail failed: %s", exc)
 
     # Leader-only: TeamSkillEvolutionRail for team skill evolution.
-    if role == "leader" and team_ws_skills_dir and skill_evolution_enabled:
+    if role == "leader" and skill_evolution_enabled:
         try:
-            Path(team_ws_skills_dir).mkdir(parents=True, exist_ok=True)
+            Path(global_skills_root).mkdir(parents=True, exist_ok=True)
             llm_model, actual_model_name = build_evolution_llm(config)
             evolution_auto_save = get_evolution_auto_save_enabled(config)
             review_runtime = EvolutionReviewRuntime()
             team_skill_rail = TeamSkillEvolutionRail(
-                skills_dir=get_team_evolution_skills_dirs(team_ws_skills_dir),
+                skills_dir=global_skills_root,
                 llm=llm_model,
                 model=actual_model_name,
                 review_runtime=review_runtime,
@@ -305,7 +312,7 @@ def build_member_rails(
             logger.info(
                 "[TeamRuntime] TeamSkillEvolutionRail created: skills_dir=%s, "
                 "model=%s, auto_save=%s, trajectory_span_processor=%s",
-                team_ws_skills_dir,
+                global_skills_root,
                 actual_model_name,
                 evolution_auto_save,
                 bool(team_trajectory_span_processor),
@@ -315,10 +322,12 @@ def build_member_rails(
 
     # Leader-only: TeamSkillCreateRail for team skill creation proposals.
     # Skill creation follows the same canonical capability switch as evolution.
-    if role == "leader" and team_ws_skills_dir and skill_evolution_enabled:
+    # New skills are authored straight into the single library: there is no
+    # team-scoped skill directory to stage them in.
+    if role == "leader" and skill_evolution_enabled:
         try:
             team_skill_create_rail = TeamSkillCreateRail(
-                skills_dir=team_ws_skills_dir,
+                skills_dir=global_skills_root,
                 language=language,
                 auto_trigger=True,
                 trajectory_span_processor=(
@@ -327,17 +336,19 @@ def build_member_rails(
             )
             rails_list.append(team_skill_create_rail)
             logger.info(
-                "[TeamRuntime] TeamSkillCreateRail created: skills_dir=%s",
-                team_ws_skills_dir,
+                "[TeamRuntime] TeamSkillCreateRail created: skills_dir=%s, team_id=%s, member=%s",
+                global_skills_root,
+                team_id,
+                member_info.agent_name,
             )
         except Exception as exc:
             logger.warning("[TeamRuntime] TeamSkillCreateRail failed: %s", exc, exc_info=True)
 
     # Non-leader: SkillEvolutionRail for member skill self-evolution.
-    if role != "leader" and team_ws_skills_dir and skill_evolution_enabled:
+    if role != "leader" and skill_evolution_enabled:
         review_runtime = EvolutionReviewRuntime()
         evo_rail = build_skill_evolution_rail(
-            skills_dir=get_team_evolution_skills_dirs(team_ws_skills_dir),
+            skills_dir=global_skills_root,
             config=config,
             trajectory_span_processor=team_trajectory_span_processor,
             team_id=team_id,
@@ -511,7 +522,7 @@ def build_evolution_llm(
 
 
 def build_skill_evolution_rail(
-    skills_dir: str | list[str],
+    skills_dir: str,
     config: dict[str, Any] | None = None,
     trajectory_span_processor: Any | None = None,
     team_id: str | None = None,
@@ -520,8 +531,11 @@ def build_skill_evolution_rail(
     """为 Team member 构造 SkillEvolutionRail.
 
     Args:
-        skills_dir: 技能目录路径.
+        skills_dir: 全局 skill 实体库根目录（唯一实体库，不再传 team 视图目录）.
         config: 可选配置字典.
+        team_trajectory_sink: 团队轨迹注册表.
+        team_id: 团队名，为空时不绑定团队轨迹.
+        review_runtime: 复用的 review runtime.
 
     Returns:
         SkillEvolutionRail 实例，失败返回 None.
