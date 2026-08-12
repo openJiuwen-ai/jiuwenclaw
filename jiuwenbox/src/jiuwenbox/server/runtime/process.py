@@ -24,6 +24,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -141,6 +142,55 @@ _LANDLOCK_LAUNCHER_BYTES = LANDLOCK_LAUNCHER_SOURCE.read_bytes()
 _SANDBOX_DAEMON_BYTES = SANDBOX_DAEMON_SOURCE.read_bytes()
 PYTHON_EXECUTABLE = "python3"
 
+# Experimental Python ForkServer fast path (feature-flagged, default OFF).
+# When ``JIUWENBOX_PYTHON_FASTPATH=1`` is set in the server process
+# environment, exec requests whose command is the simple ``python3 -c CODE``
+# shape are marked ``python_fastpath: true`` in the daemon IPC payload. The
+# in-sandbox daemon routes those to a persistent ForkServer (see
+# ``sandbox_daemon.py``) instead of spawning a fresh interpreter per call.
+# The flag is inherited into the sandbox daemon via the bwrap process env, so
+# both sides agree. This does not change the HTTP API or the default path.
+FASTPATH_ENV = "JIUWENBOX_PYTHON_FASTPATH"
+
+# Global fast-path admission cap: at most this many sandboxes in a single
+# server process may activate their worker pools. Once the cap is reached,
+# further ``python3 -c`` requests are served by the normal ``/exec`` path.
+# This bounds the machine-wide worst-case worker count (cap × per-sandbox
+# cap) and the cold-start blast radius when many sandboxes start together.
+FASTPATH_MAX_SANDBOXES_ENV = "JIUWENBOX_PYTHON_FASTPATH_MAX_SANDBOXES"
+FASTPATH_DEFAULT_MAX_SANDBOXES = 50
+
+
+def _fastpath_max_sandboxes() -> int:
+    raw = os.environ.get(FASTPATH_MAX_SANDBOXES_ENV)
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = 0
+        if value >= 1:
+            return min(value, 1000)
+    return FASTPATH_DEFAULT_MAX_SANDBOXES
+
+
+def _python_fastpath_enabled() -> bool:
+    return os.environ.get(FASTPATH_ENV) == "1"
+
+
+def _python_fastpath_candidate(command: list[str]) -> bool:
+    """Whether ``command`` is the simple ``python3 -c CODE`` fast-path shape.
+
+    Narrow, explicit experimental trigger only (applied solely when the
+    feature flag is on); it is not a general auto-detector of arbitrary
+    Python invocations.
+    """
+    if not command or command[0] != PYTHON_EXECUTABLE:
+        return False
+    for i, tok in enumerate(command[:-1]):
+        if tok == "-c":
+            return i + 1 < len(command)
+    return False
+
 # Per-sandbox control socket: box-server ``bind()``s a Unix socket on its
 # own host filesystem inside a per-sandbox control directory, then passes
 # the listener fd into bubblewrap via ``subprocess.Popen(pass_fds=...)``.
@@ -227,6 +277,7 @@ class _DaemonExecCall:
     """
 
     socket_path: Path
+    sandbox_id: str
     command: list[str]
     env: dict[str, str] | None
     workdir: str | None
@@ -582,6 +633,12 @@ class ProcessRuntime(RuntimeAdapter):
         # outside the asyncio loop in some startup paths (CLI, tests).
         self._exec_concurrency_limit: int = _resolve_exec_concurrency()
         self._exec_semaphore: asyncio.Semaphore | None = None
+        # Global fast-path admission: bounds how many sandboxes in this
+        # process may activate their worker pools (see ``_fastpath_admit``).
+        # Released on sandbox delete via ``cleanup``.
+        self._fastpath_activated: set[str] = set()
+        self._fastpath_admit_lock = threading.Lock()
+        self._fastpath_max_sandboxes = _fastpath_max_sandboxes()
         # Zombie reaper plumbing. Plumbed in via ``register_zombie_reaper``
         # once an event loop is available (lifespan startup); we cannot
         # install a signal handler / create a Task before the loop exists.
@@ -2328,6 +2385,26 @@ class ProcessRuntime(RuntimeAdapter):
         blob = recv_frame(sock, DAEMON_MAX_RESPONSE_BYTES)
         return json.loads(blob.decode("utf-8"))
 
+    def _fastpath_admit(self, sandbox_id: str) -> bool:
+        """Whether ``sandbox_id`` may use the Python fast path (global cap).
+
+        The first fast-path request from a sandbox activates that sandbox's
+        worker pool inside its daemon. Once ``_fastpath_max_sandboxes``
+        sandboxes have activated in this process, further sandboxes are not
+        marked and their ``python3 -c`` requests take the normal ``/exec``
+        path. ``cleanup`` (sandbox delete) releases the slot. This yields a
+        hard worst-case worker bound of ``cap × per-sandbox cap`` and bounds
+        the startup-storm blast radius when many sandboxes cold-start
+        together.
+        """
+        if sandbox_id in self._fastpath_activated:
+            return True
+        with self._fastpath_admit_lock:
+            if len(self._fastpath_activated) >= self._fastpath_max_sandboxes:
+                return False
+            self._fastpath_activated.add(sandbox_id)
+            return True
+
     def _exec_via_daemon_blocking(self, call: _DaemonExecCall) -> ExecResult:
         """Run one ``exec`` over the IPC channel and return an ``ExecResult``.
 
@@ -2340,6 +2417,12 @@ class ProcessRuntime(RuntimeAdapter):
             "command": list(call.command),
             "stdin_size": len(call.stdin_bytes or b""),
         }
+        if (
+            _python_fastpath_enabled()
+            and self._fastpath_admit(call.sandbox_id)
+            and _python_fastpath_candidate(list(call.command))
+        ):
+            request_payload["python_fastpath"] = True
         if call.env:
             request_payload["env"] = dict(call.env)
         if call.workdir:
@@ -2507,6 +2590,7 @@ class ProcessRuntime(RuntimeAdapter):
                 self._exec_via_daemon_blocking,
                 _DaemonExecCall(
                     socket_path=socket_path,
+                    sandbox_id=sandbox_id,
                     command=list(request.command),
                     env=dict(request.env) if request.env else None,
                     workdir=request.workdir,
@@ -3187,6 +3271,7 @@ class ProcessRuntime(RuntimeAdapter):
             shutil.rmtree(control_dir, ignore_errors=True)
         self._background_processes.pop(sandbox_id, None)
         self._daemon_socket_ready.pop(sandbox_id, None)
+        self._fastpath_activated.discard(sandbox_id)
         # Runtime log files used to live here too; they were removed in
         # favour of the single ``audit.log`` written by ``AuditLogger``.
         # Nothing extra to clean up on this side any more.
