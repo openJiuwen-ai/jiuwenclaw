@@ -190,7 +190,8 @@ async def test_evolve_slash_lazy_init_registers_active_review_rails(monkeypatch,
         "llm": adapter._model,  # pylint: disable=protected-access
         "model": "default-model",
         "review_trigger": False,
-        "auto_save": auto_save,
+        # Rail always persists experiences; config auto_save only gates version merge.
+        "auto_save": True,
         "disabled_skills": ["disabled-demo"],
         "language": "en",
     }
@@ -346,17 +347,15 @@ async def test_handle_user_answer_does_not_route_call_interrupt_approval_to_regu
 
 
 @pytest.mark.anyio
-async def test_agent_evolve_rebuild_routes_to_slash_adapter(monkeypatch):
+async def test_agent_evolve_rebuild_routes_to_removed_message(monkeypatch):
     adapter = JiuWenSwarmDeepAdapter()
     adapter._config_cache = {"evolution": {"enabled": True}}  # pylint: disable=protected-access
 
     async def _fake_handler(query, _context):
         assert query == "/evolve_rebuild demo-skill"
         return {
-            "result_type": "followup",
-            "action": "run_rebuild_followup",
-            "followup_prompt": "review and rebuild demo-skill",
-            "skill_name": "demo-skill",
+            "result_type": "error",
+            "output": "`/evolve_rebuild` 已移除。请使用控制面接口 `skills.evolution.rebuild`",
         }
 
     monkeypatch.setattr(interface_deep_module, "handle_evolution_slash_command", _fake_handler)
@@ -369,9 +368,8 @@ async def test_agent_evolve_rebuild_routes_to_slash_adapter(monkeypatch):
 
     assert result is not None
     assert result["slash_command"] == "evolve_rebuild"
-    assert result["result_type"] == "followup"
-    assert result["action"] == "run_rebuild_followup"
-    assert result["skill_name"] == "demo-skill"
+    assert result["result_type"] == "error"
+    assert "skills.evolution.rebuild" in result["output"]
 
 
 @pytest.mark.anyio

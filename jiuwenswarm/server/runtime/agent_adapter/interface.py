@@ -552,6 +552,15 @@ _SKILL_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.SKILLS_EVOLUTION_SAVE: "handle_skills_evolution_save",
 }
 
+# Evolution version RPCs (archives/rollback/rebuild) are handled by DeepAdapter.
+_SKILL_EVOLUTION_RAIL_ROUTES: frozenset[ReqMethod] = frozenset(
+    {
+        ReqMethod.SKILLS_EVOLUTION_ARCHIVES,
+        ReqMethod.SKILLS_EVOLUTION_ROLLBACK,
+        ReqMethod.SKILLS_EVOLUTION_REBUILD,
+    }
+)
+
 # Preserve cross-service context-size hints if they are present in request.params.
 _CONTEXT_SIZE_HINT_KEYS: tuple[str, ...] = (
     "context_size",
@@ -1762,8 +1771,60 @@ class JiuWenSwarm:
             metadata=request.metadata,
         )
 
+    async def _handle_skills_evolution_rail_request(
+        self, request: AgentRequest
+    ) -> AgentResponse | None:
+        """Forward skills.evolution.archives/rollback/rebuild to DeepAdapter."""
+        if request.req_method not in _SKILL_EVOLUTION_RAIL_ROUTES:
+            return None
+
+        if request.req_method == ReqMethod.SKILLS_EVOLUTION_ROLLBACK:
+            handler_name = "handle_skills_evolution_rollback"
+        elif request.req_method == ReqMethod.SKILLS_EVOLUTION_REBUILD:
+            handler_name = "handle_skills_evolution_rebuild"
+        else:
+            handler_name = "handle_skills_evolution_archives"
+
+        adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
+        if request.req_method == ReqMethod.SKILLS_EVOLUTION_REBUILD:
+            ensure = getattr(adapter, "ensure_instance", None)
+            if callable(ensure):
+                await ensure()
+
+        handler = getattr(adapter, handler_name, None)
+        if handler is None:
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": f"missing handler {handler_name}"},
+                metadata=request.metadata,
+            )
+        try:
+            payload = await handler(request.params if isinstance(request.params, dict) else {})
+        except Exception as exc:
+            logger.error("[JiuWenSwarm] skills.evolution rail 请求处理失败: %s", exc)
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(exc)},
+                metadata=request.metadata,
+            )
+        return AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=True,
+            payload=payload,
+            metadata=request.metadata,
+        )
+
     async def _handle_skills_request(self, request: AgentRequest) -> AgentResponse | None:
         """处理 Skills 相关请求，返回 None 表示不是 Skills 请求."""
+        evolution_response = await self._handle_skills_evolution_rail_request(request)
+        if evolution_response is not None:
+            return evolution_response
+
         if request.req_method not in _SKILL_ROUTES:
             return None
 

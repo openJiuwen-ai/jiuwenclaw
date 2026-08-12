@@ -15,7 +15,7 @@ import { createExportCommand } from "./builtins/export.js";
 import {
   createEvolveCommand,
   createEvolveListCommand,
-  createEvolveRebuildCommand,
+  createEvolveRollbackCommand,
   createEvolveSimplifyCommand,
 } from "./builtins/evolve.js";
 import { createExitCommand } from "./builtins/exit.js";
@@ -83,7 +83,7 @@ export function createBuiltinCommands(options: BuiltinCommandsOptions = {}): Sla
     createExportCommand(),
     createEvolveCommand(),
     createEvolveListCommand(),
-    createEvolveRebuildCommand(),
+    createEvolveRollbackCommand(),
     createEvolveSimplifyCommand(),
     createExitCommand(),
     createModelCommand(),

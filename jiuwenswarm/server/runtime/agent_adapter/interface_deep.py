@@ -195,6 +195,8 @@ from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
     answers_select_option,
     approved_record_ids_from_answers,
     build_evolution_status_update,
+    event_payload_dict,
+    evolution_meta_from_payload,
     evolution_outcome_from_event,
     evolution_meta_from_params,
     evolution_slash_command_name,
@@ -216,6 +218,7 @@ from jiuwenswarm.server.runtime.agent_adapter.evolution_slash import (
     EvolutionSlashContext,
     handle_evolution_slash_command,
 )
+from jiuwenswarm.server.runtime.agent_adapter import evolution_version as evolution_version_ctl
 from jiuwenswarm.server.utils.stream_utils import parse_ask_user_question_payload
 from jiuwenswarm.common.local_env_config import (
     bind_agent_env_ns,
@@ -353,6 +356,7 @@ from jiuwenswarm.common.utils import (
     get_runtime_state_path,
     get_tenant_agent_skills_dirs,
     reset_free_search_runtime_flags,
+    resolve_agent_registered_skill_dirs,
 )
 from jiuwenswarm.dotenv_early import load_dotenv_runtime
 
@@ -1816,6 +1820,7 @@ class JiuWenSwarmDeepAdapter:
         self._heartbeat_rail: HeartbeatRail | None = None
         self._skill_evolution_rail: SkillEvolutionRail | None = None
         self._evolution_interrupt_rail: EvolutionInterruptRail | None = None
+        self._pending_auto_rebuild_skills: list[str] = []
         self._skill_create_rail: SkillCreateRail | None = None
         self._subagent_rail: SubagentRail | None = None
         self._ask_user_rail: StructuredAskUserRail | None = None
@@ -1982,8 +1987,6 @@ class JiuWenSwarmDeepAdapter:
                 str(p) for p in get_tenant_agent_skills_dirs(self._service_id, self._agent_id)
             ]
         else:
-            from jiuwenswarm.common.utils import resolve_agent_registered_skill_dirs
-
             skills_dirs = [str(p) for p in resolve_agent_registered_skill_dirs()]
         if extra_skill_dir:
             skills_dirs.append(extra_skill_dir)
@@ -5360,10 +5363,14 @@ class JiuWenSwarmDeepAdapter:
         return get_agent_evolution_trajectories_dir()
 
     def _build_skill_evolution_rail(self, config: dict[str, Any]) -> SkillEvolutionRail | None:
-        """Build SkillEvolutionRail."""
+        """Build SkillEvolutionRail.
+
+        Product contract: while the rail is mounted, generated experiences always
+        persist (``rail.auto_save=True``). Config ``react.evolution.auto_save``
+        only gates automatic version merge after persistence.
+        """
         try:
             evolution_review_trigger = get_evolution_review_trigger_enabled(config)
-            evolution_auto_save = get_evolution_auto_save_enabled(config)
             model_name = self._default_model_name or config.get("model_name", "gpt-4")
             trajectory_dir = self._resolve_evolution_trajectory_dir()
             skill_evolution_rail = SkillEvolutionRail(
@@ -5372,7 +5379,7 @@ class JiuWenSwarmDeepAdapter:
                 model=model_name,
                 review_runtime=EvolutionReviewRuntime(),
                 review_trigger=evolution_review_trigger,
-                auto_save=evolution_auto_save,
+                auto_save=True,
                 disabled_skills=self._skill_manager.list_execution_disabled_skills(),
                 trajectory_store=FileTrajectoryStore(trajectory_dir),
             )
@@ -5393,7 +5400,6 @@ class JiuWenSwarmDeepAdapter:
 
         resolved_language = self._resolve_runtime_language()
         evolution_review_trigger = get_evolution_review_trigger_enabled(self._config_cache)
-        evolution_auto_save = get_evolution_auto_save_enabled(self._config_cache)
         if (
             self._skill_evolution_rail is not None
             and getattr(self._skill_evolution_rail, "_language", None) != resolved_language
@@ -5413,7 +5419,7 @@ class JiuWenSwarmDeepAdapter:
             model=self._default_model_name
             or self._config_cache.get("model_name", "gpt-4"),
             review_trigger=evolution_review_trigger,
-            auto_save=evolution_auto_save,
+            auto_save=True,
             disabled_skills=disabled_skills,
             language=resolved_language,
             trajectory_store=FileTrajectoryStore(trajectory_dir),
@@ -9398,6 +9404,13 @@ class JiuWenSwarmDeepAdapter:
         )
 
         if accepted:
+            pending_snapshots = getattr(rail, "_pending_approval_snapshots", None)
+            pending = (
+                pending_snapshots.get(request_id)
+                if isinstance(pending_snapshots, dict)
+                else None
+            )
+            skill_for_rebuild = str(getattr(pending, "skill_name", "") or "").strip()
             await approve_evolution_records(
                 rail,
                 request_id,
@@ -9405,6 +9418,9 @@ class JiuWenSwarmDeepAdapter:
                 legacy_fallback=True,
             )
             logger.info("[JiuWenSwarmDeepAdapter] evolution approval accepted: request_id=%s", request_id)
+            if skill_for_rebuild:
+                self._queue_auto_rebuild_skill(skill_for_rebuild)
+                self._schedule_pending_auto_rebuild(request_id)
         else:
             await reject_evolution_records(
                 rail,
@@ -9686,6 +9702,256 @@ class JiuWenSwarmDeepAdapter:
             kind, "accepted" if accepted else "rejected", request_id,
         )
         return True
+
+    # ------------------------------------------------------------------
+    # Evolution version management (archives / rollback / rebuild)
+    # ------------------------------------------------------------------
+
+    def _get_disk_evolution_store(self):
+        return evolution_version_ctl.get_disk_evolution_store(self._resolve_skill_dirs())
+
+    def _queue_auto_rebuild_skill(self, skill_name: str) -> None:
+        name = str(skill_name or "").strip()
+        if not name:
+            return
+        if not get_evolution_auto_save_enabled(self._config_cache):
+            return
+        if name not in self._pending_auto_rebuild_skills:
+            self._pending_auto_rebuild_skills.append(name)
+
+    def _take_pending_auto_rebuild_skills(self) -> list[str]:
+        pending = list(self._pending_auto_rebuild_skills)
+        self._pending_auto_rebuild_skills.clear()
+        return pending
+
+    async def handle_skills_evolution_archives(self, params: dict) -> dict[str, Any]:
+        """RPC: skills.evolution.archives — list rollback archive versions."""
+        skill_name = evolution_version_ctl.safe_path_name(
+            params.get("name") or params.get("skill_name"), "skill"
+        )
+        store = self._get_disk_evolution_store()
+        if not store.skill_exists(skill_name):
+            raise ValueError(f"未找到 Skill '{skill_name}'")
+        subject = evolution_version_ctl.resolve_subject(store, skill_name)
+        return {
+            "name": skill_name,
+            "versions": evolution_version_ctl.list_body_archive_versions(
+                store,
+                skill_name,
+                subject_kind=str(subject.get("kind") or "skill"),
+            ),
+        }
+
+    async def handle_skills_evolution_rollback(self, params: dict) -> dict[str, Any]:
+        """RPC: skills.evolution.rollback — rollback skill via disk EvolutionStore."""
+        skill_name = evolution_version_ctl.safe_path_name(
+            params.get("name") or params.get("skill_name"), "skill"
+        )
+        raw_version = params.get("version")
+        version = (
+            str(raw_version).strip()
+            if raw_version is not None and str(raw_version).strip()
+            else None
+        )
+        skill_path = params.get("skill_path") or params.get("path")
+        if skill_path:
+            allowed = list(self._resolve_skill_dirs()) + [
+                str(p) for p in resolve_agent_registered_skill_dirs()
+            ]
+            evolution_version_ctl.validate_rebuild_skill_path(
+                str(skill_path),
+                skill_name=skill_name,
+                allowed_roots=allowed,
+            )
+            skills_base = evolution_version_ctl.skills_root_from_skill_md_path(str(skill_path))
+            store = evolution_version_ctl.get_disk_evolution_store(
+                [skills_base] if skills_base else self._resolve_skill_dirs()
+            )
+        else:
+            store = self._get_disk_evolution_store()
+
+        result = await evolution_version_ctl.do_evolve_rollback(store, skill_name, version)
+        if not result.get("ok"):
+            raise ValueError(str(result.get("error") or "回滚失败"))
+        if result.get("rolled_back"):
+            payload = {
+                "success": True,
+                "name": result["name"],
+                "version": result["version"],
+                "rolled_back": True,
+            }
+            if result.get("warning"):
+                payload["warning"] = result["warning"]
+            return payload
+        return {
+            "success": True,
+            "name": result["name"],
+            "rolled_back": False,
+            "versions": result.get("versions") or [],
+        }
+
+    async def handle_skills_evolution_rebuild(self, params: dict) -> dict[str, Any]:
+        """RPC: skills.evolution.rebuild — merge evolution records into a new version."""
+        return await self.generate_evolution_merge_version(params)
+
+    async def generate_evolution_merge_version(
+        self,
+        params: dict | None = None,
+        *,
+        skill_name: str | None = None,
+        stream_ctx: Any = None,
+    ) -> dict[str, Any]:
+        """Prepare → LLM rewrite → complete_rebuild (shared by RPC and auto merge)."""
+        params = params if isinstance(params, dict) else {}
+        name = skill_name or params.get("name") or params.get("skill_name")
+        name = evolution_version_ctl.safe_path_name(name, "skill")
+        record_ids = evolution_version_ctl.normalize_record_ids(params.get("record_ids"))
+        user_intent = params.get("user_intent") or params.get("intent")
+        if user_intent is not None:
+            user_intent = str(user_intent).strip() or None
+        min_score_raw = params.get("min_score", 0.5)
+        try:
+            min_score = float(min_score_raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid min_score: {min_score_raw}") from exc
+
+        skill_path = params.get("skill_path") or params.get("path")
+        resolved_skill_md: str | None = None
+        if skill_path:
+            allowed = list(self._resolve_skill_dirs()) + [
+                str(p) for p in resolve_agent_registered_skill_dirs()
+            ]
+            resolved_skill_md = evolution_version_ctl.validate_rebuild_skill_path(
+                str(skill_path),
+                skill_name=name,
+                allowed_roots=allowed,
+            )
+
+        logger.info(
+            "[JiuWenSwarmDeepAdapter] skills.evolution.rebuild start: skill=%s "
+            "record_ids=%s skill_path=%s",
+            name,
+            record_ids,
+            resolved_skill_md,
+        )
+
+        ns_token, overlay_token = self._bind_request_env_overlay()
+        try:
+            if self._instance is None:
+                await self.ensure_instance()
+            store = self._get_disk_evolution_store()
+            prepared = await evolution_version_ctl.prepare_rebuild_followup(
+                store,
+                name,
+                user_intent=user_intent,
+                record_ids=record_ids,
+                min_score=min_score,
+                language=self._resolve_runtime_language(),
+                llm=self._model,
+                model=self._resolve_model_name(),
+                skill_md_path=resolved_skill_md,
+            )
+            if not prepared.get("ok"):
+                raise ValueError(str(prepared.get("error") or "rebuild prepare failed"))
+
+            rebuild_context = prepared.get("rebuild_context") or {}
+            skill_md_path = rebuild_context.get("skill_md_path") or resolved_skill_md
+            before_fp = evolution_version_ctl.skill_md_fingerprint(skill_md_path)
+            prompt = str(prepared.get("followup_prompt") or "")
+            rebuild_ok = await self._execute_merge_version_rewrite(
+                prompt,
+                stream_ctx=stream_ctx,
+            )
+            after_fp = evolution_version_ctl.skill_md_fingerprint(skill_md_path)
+            if rebuild_ok and before_fp is not None and after_fp == before_fp:
+                rebuild_ok = False
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] skills.evolution.rebuild rewrite left "
+                    "SKILL.md unchanged: skill=%s path=%s",
+                    name,
+                    skill_md_path,
+                )
+            if not rebuild_ok:
+                raise ValueError(f"Skill '{name}' 重建改写失败（SKILL.md 未更新）。")
+
+            finalized = await evolution_version_ctl.finalize_rebuild_followup(
+                store,
+                rebuild_context,
+                llm=self._model,
+                model=self._resolve_model_name(),
+                language=self._resolve_runtime_language(),
+            )
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] skills.evolution.rebuild done: skill=%s "
+                "new_version=%s cleared=%s",
+                name,
+                finalized.get("new_version"),
+                finalized.get("cleared"),
+            )
+            if not finalized.get("ok"):
+                raise ValueError(
+                    str(finalized.get("error") or f"Skill '{name}' 版本收尾失败")
+                )
+            return {
+                "success": True,
+                "name": name,
+                "skill_path": skill_md_path,
+                "archive_path": rebuild_context.get("archive_path"),
+                "new_version": finalized.get("new_version"),
+                "cleared": finalized.get("cleared"),
+            }
+        finally:
+            self._reset_request_env_bindings(ns_token, overlay_token)
+
+    async def _execute_merge_version_rewrite(
+        self,
+        prompt: str,
+        *,
+        stream_ctx: Any = None,
+    ) -> bool:
+        """Run LLM rewrite for merge-version; return True when agent call succeeds."""
+        _ = stream_ctx
+        if self._instance is None:
+            return False
+        try:
+            await Runner.run_agent(agent=self._instance, inputs={"query": prompt})
+            return True
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] merge-version rewrite failed: %s", exc
+            )
+            return False
+
+    def _schedule_pending_auto_rebuild(self, request_id: str | None = None) -> None:
+        """Fire-and-forget version merge for skills queued after experience persist."""
+        if not self._pending_auto_rebuild_skills:
+            return
+        if not get_evolution_auto_save_enabled(self._config_cache):
+            self._pending_auto_rebuild_skills.clear()
+            return
+        rid = str(request_id or "auto-rebuild").strip() or "auto-rebuild"
+        asyncio.create_task(
+            self._run_auto_rebuild_skills_detached(request_id=rid),
+            name=f"auto-rebuild-{rid}",
+        )
+
+    async def _run_auto_rebuild_skills_detached(self, *, request_id: str | None = None) -> None:
+        """Background auto version merge gated by config auto_save."""
+        if not get_evolution_auto_save_enabled(self._config_cache):
+            self._pending_auto_rebuild_skills.clear()
+            return
+        skills = self._take_pending_auto_rebuild_skills()
+        for skill_name in skills:
+            try:
+                await self.generate_evolution_merge_version(skill_name=skill_name)
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] auto rebuild failed: request_id=%s "
+                    "skill=%s error=%s",
+                    request_id,
+                    skill_name,
+                    exc,
+                )
 
     @staticmethod
     def _followup_response(action: str, followup_prompt: str, skill_name: str) -> dict[str, Any]:
@@ -13256,6 +13522,25 @@ class JiuWenSwarmDeepAdapter:
                     continue
                 last_event_at = time.monotonic()
 
+                # Queue skills for auto version merge when experiences were persisted.
+                if get_evolution_auto_save_enabled(self._config_cache):
+                    for evt in events:
+                        payload = event_payload_dict(evt)
+                        meta = evolution_meta_from_payload(payload) or {}
+                        skill_name = str(
+                            payload.get("skill_name")
+                            or meta.get("skill_name")
+                            or ""
+                        ).strip()
+                        raw_stage = str(
+                            payload.get("stage") or meta.get("stage") or ""
+                        ).strip().lower()
+                        if skill_name and raw_stage in {
+                            "auto_approved",
+                            "completed",
+                        }:
+                            self._queue_auto_rebuild_skill(skill_name)
+
                 visible_progress_statuses = visible_evolution_progress_from_events(events)
                 just_started_with_progress = None
                 if not active:
@@ -13333,6 +13618,7 @@ class JiuWenSwarmDeepAdapter:
                         message or "Evolution analysis completed",
                     )
                     await _cleanup_evolution_rail()
+                    self._schedule_pending_auto_rebuild(rid)
                     return
 
                 terminal_progress = [
@@ -13353,6 +13639,7 @@ class JiuWenSwarmDeepAdapter:
                         )
                     ):
                         await _cleanup_evolution_rail()
+                        self._schedule_pending_auto_rebuild(rid)
                         return
                     if not active:
                         await _push_status(
@@ -13367,6 +13654,9 @@ class JiuWenSwarmDeepAdapter:
                         str(terminal.get("message") or ""),
                     )
                     await _cleanup_evolution_rail()
+                    # auto_approved maps to terminal "completed"; must schedule here
+                    # (outcome events are not emitted on the rail auto-save path).
+                    self._schedule_pending_auto_rebuild(rid)
                     return
         except asyncio.CancelledError:
             try:

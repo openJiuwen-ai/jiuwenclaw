@@ -11,10 +11,8 @@ from typing import Any
 from openjiuwen.agent_evolving.checkpointing.evolution_store import EvolutionStore
 from openjiuwen.agent_evolving.experience.archive import EvolutionArchivePair, EvolutionArchiveService
 from openjiuwen.agent_evolving.experience.query import ExperienceQueryService
-from openjiuwen.agent_evolving.experience.rebuild import ExperienceRebuildService
 from openjiuwen.harness.rails.evolution.commands import (
     build_evolve_review_command_prompt,
-    build_rebuild_command_prompt,
     build_simplify_command_prompt,
 )
 
@@ -23,6 +21,7 @@ from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
     validate_evolution_skill,
     validate_team_evolution_skill,
 )
+from jiuwenswarm.server.runtime.agent_adapter import evolution_version as evolution_version_ctl
 from jiuwenswarm.server.runtime.skill import filter_visible_skill_names
 
 logger = logging.getLogger(__name__)
@@ -34,6 +33,10 @@ _COMMANDS = (
     "evolve_list",
 )
 _DEFAULT_REVIEW_AGENT_NAME = "evolution_reviewer"
+_EVOLVE_REBUILD_REMOVED_MESSAGE = (
+    "`/evolve_rebuild` 已移除。请使用控制面接口 `skills.evolution.rebuild` 采纳经验并生成新版本；"
+    "若已开启 `react.evolution.auto_save`，经验落盘后会自动生成版本。"
+)
 
 
 @dataclass(frozen=True)
@@ -336,50 +339,8 @@ async def _handle_evolve_rebuild(
     store: EvolutionStore,
     context: EvolutionSlashContext,
 ) -> dict[str, Any]:
-    parts = query.split(maxsplit=2)
-    skill_name = parts[1] if len(parts) > 1 else ""
-    user_intent = parts[2] if len(parts) > 2 else None
-
-    if not skill_name:
-        return _error("请指定 Skill 名称：`/evolve_rebuild <skill_name> [user_intent]`")
-
-    subject = _subject(store, skill_name)
-    validation_error = _validate_skill(
-        store,
-        skill_name,
-        require_skill_md=False,
-        context=context,
-        subject=subject,
-    )
-    if validation_error is not None:
-        return _error(validation_error)
-
-    rebuild_service = ExperienceRebuildService(store=store)
-    try:
-        rebuild_context = await rebuild_service.prepare_rebuild_context(
-            subject,
-            user_intent=user_intent,
-        )
-    except Exception as exc:
-        logger.warning("[EvolutionSlash] evolve_rebuild failed: %s", exc)
-        return _error(f"重建失败：{exc}")
-
-    if rebuild_context is None:
-        return _error(f"Skill '{skill_name}' 未生成可执行的重建指令。")
-
-    archive_error = rebuild_context.get("archive_error")
-    if archive_error is not None:
-        return _error(f"重建失败：无法归档 Skill '{skill_name}' 的旧版本：{archive_error}")
-    if not rebuild_context.get("archive_pair"):
-        return _error(f"重建失败：无法归档 Skill '{skill_name}' 的旧版本。")
-
-    prompt = build_rebuild_command_prompt(
-        subject=subject,
-        user_intent=user_intent,
-        rebuild_context=rebuild_context,
-        language=context.language,
-    )
-    return _followup_response("run_rebuild_followup", prompt, skill_name)
+    _ = query, store, context
+    return _error(_EVOLVE_REBUILD_REMOVED_MESSAGE)
 
 
 async def _handle_evolve_rollback(
@@ -406,39 +367,24 @@ async def _handle_evolve_rollback(
     if validation_error is not None:
         return _error(validation_error)
 
-    subject_kind = str(subject.get("kind") or "skill")
-    pairs = archive_service.list_pairs(skill_name, subject_kind=subject_kind)
-    if not pairs:
-        return _error(f"Skill '{skill_name}' 没有成对归档版本可回滚。")
+    result = await evolution_version_ctl.do_evolve_rollback(
+        store,
+        skill_name,
+        version_raw or None,
+    )
+    if not result.get("ok"):
+        return _error(str(result.get("error") or "回滚失败"))
 
-    if not version_raw:
+    if not result.get("rolled_back"):
+        pairs = result.get("pairs")
+        if not pairs:
+            subject_kind = str(subject.get("kind") or "skill")
+            pairs = archive_service.list_pairs(skill_name, subject_kind=subject_kind)
         return _answer(_format_rollback_versions(skill_name, pairs))
 
-    requested_version = archive_service.normalize_version(version_raw)
-    if requested_version is None:
-        return _error(f"版本 `{version_raw}` 格式无效，请使用短版本号，例如 `{pairs[0].version}`。")
-
-    if requested_version == "latest":
-        pair = pairs[0]
-    else:
-        pair = next((item for item in pairs if item.version == requested_version), None)
-    if pair is None:
-        return _error(f"版本 `{requested_version}` 不存在或归档不成对。")
-
-    try:
-        restored = await archive_service.rollback_to_pair(
-            skill_name,
-            pair,
-            subject_kind=subject_kind,
-        )
-    except Exception as exc:
-        logger.warning("[EvolutionSlash] evolve_rollback failed: %s", exc)
-        return _error(f"回滚失败：{exc}")
-    if not restored:
-        return _error(f"回滚失败：无法将 Skill '{skill_name}' 回滚到 `{pair.version}`。")
-
+    resolved = result.get("version") or version_raw
     return _answer(
-        f"Skill '{skill_name}' 已成功回滚到 `{pair.version}`。\n\n"
+        f"Skill '{skill_name}' 已成功回滚到 `{resolved}`。\n\n"
         "当前状态已自动归档，可再次回滚恢复。"
     )
 
