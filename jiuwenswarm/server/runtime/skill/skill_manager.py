@@ -2619,14 +2619,23 @@ class SkillManager:
         """同步下载技能归档（仅 Web 验签安装使用；不改 import_local 远程路径）。"""
         self._assert_import_local_download_url_allowed(download_url)
         timeout = max(30.0, _IMPORT_LOCAL_REMOTE_TIMEOUT)
+        ssl_verify = _get_ssl_verify()
+        _maybe_disable_insecure_warning()
         with requests.Session() as session:
-            session.mount("https://", _ImportLocalTLSAdapter())
+            # 仅在关闭证书校验时挂载跳过校验的 Adapter；开启时走 requests 默认校验。
+            if not ssl_verify:
+                session.mount("https://", _ImportLocalTLSAdapter())
+            logger.info(
+                "[SkillManager] web skill download: url=%s ssl_verify=%s",
+                download_url,
+                ssl_verify,
+            )
             with session.get(
                 download_url.strip(),
                 timeout=timeout,
                 stream=True,
                 allow_redirects=False,
-                verify=False,
+                verify=ssl_verify,
             ) as response:
                 response.raise_for_status()
                 chunks: list[bytes] = []
