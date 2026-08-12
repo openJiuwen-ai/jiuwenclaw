@@ -220,7 +220,7 @@ _TOOL_PARAM_BUILDERS: dict[name, (config) -> params]   # send_file / code_extra_
 
 > **blob builder**（permission / coding_memory / context_processor）签名不动：`config_specs` 抽 config 子树进 params，工厂传子 dict（如 `build_permission_rail(config={"permissions": inp.permissions_config}, ...)`）。**零 legacy 回归面**。
 
-> **env 烘焙**：env 派生位（`EVOLUTION_REVIEW_TRIGGER` / `EVOLUTION_AUTO_SAVE` / `JIUWENSWARM_ADDITIONAL_DIRECTORIES` 等）在 enrich 期一并解析烘焙，随 spec 序列化——与既有 params 一致（团队级配置）。被动扫描在挂载演进 Rail 后始终开启，不再烘焙 `auto_scan` / `signal_trigger`。
+> **env 烘焙**：env 派生位（`EVOLUTION_REVIEW_TRIGGER` / `JIUWENSWARM_ADDITIONAL_DIRECTORIES` 等）在 enrich 期一并解析烘焙，随 spec 序列化——与既有 params 一致（团队级配置）。`auto_save` 仅从 yaml（`react.evolution.auto_save`）解析后烘焙，不读环境变量。被动扫描在挂载演进 Rail 后始终开启，不再烘焙 `auto_scan` / `signal_trigger`。
 
 ---
 
