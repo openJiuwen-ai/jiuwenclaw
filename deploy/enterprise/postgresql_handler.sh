@@ -7,6 +7,7 @@ render_postgresql_files() {
 
     ensure_available_port "POSTGRES_NODE_PORT"
     render_config_template "${template_file}" "${file}" "DEPLOY_VARS"
+    add_resource_if_set "POSTGRES" "${file}"
 }
 
 deploy_postgresql() {
