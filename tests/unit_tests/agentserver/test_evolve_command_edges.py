@@ -184,9 +184,7 @@ async def test_evolve_slash_lazy_init_registers_active_review_rails(monkeypatch,
     call = dict(configure_calls[0])
     store = call.pop("trajectory_store")
     assert isinstance(store, FileTrajectoryStore)
-    assert store._base_dir == JiuWenSwarmDeepAdapter._resolve_evolution_trajectory_dir(  # pylint: disable=protected-access
-        adapter._config_cache  # pylint: disable=protected-access
-    )
+    assert store._base_dir == JiuWenSwarmDeepAdapter._resolve_evolution_trajectory_dir()  # pylint: disable=protected-access
     assert call == {
         "skills_dir": [str(interface_deep_module.get_agent_skills_dir())],
         "llm": adapter._model,  # pylint: disable=protected-access

@@ -239,9 +239,8 @@ The frontend shows the following options under **Self-Evolution Configuration**:
 | **Soft review trigger** | `react.evolution.review_trigger` | `false` | When enabled, periodically enqueue review self-check follow-ups. Env `EVOLUTION_REVIEW_TRIGGER` takes precedence |
 | **Auto-save approvals** | `react.evolution.auto_save` | `false` | When enabled, evolution approvals auto-pass without user clicks |
 | **Auto-suggest new skill creation** | `react.evolution.skill_create` | `false` | When enabled, the system can propose creating a new Skill when no suitable Skill exists. Env `SKILL_CREATE` takes precedence |
-| **Trajectory dump directory** | `react.evolution.trajectory_dir` | `agent/evolution_trajectories` | Directory for skill-evolution execution trajectories (JSONL). Relative paths are resolved against the workspace root; absolute paths are used as-is. Env `EVOLUTION_TRAJECTORY_DIR` takes precedence; if neither is set, defaults to `~/.jiuwenswarm/agent/evolution_trajectories` |
 
-> 💡 **Note**: `react.evolution.enabled` is the product master switch (on by default). After the evolution rail is mounted, passive scanning is always on; there is no separate `auto_scan` / `signal_trigger` sub-switch. `review_trigger` / `auto_save` / `skill_create` are optional. With `skill_create` off and `review_trigger` off, passive scanning still runs and manual `/evolve` remains available.
+> 💡 **Note**: `react.evolution.enabled` is the product master switch (on by default). After the evolution rail is mounted, passive scanning is always on; there is no separate `auto_scan` / `signal_trigger` sub-switch. `review_trigger` / `auto_save` / `skill_create` are optional. With `skill_create` off and `review_trigger` off, passive scanning still runs and manual `/evolve` remains available. Execution trajectories always dump to the default directory `~/.jiuwenswarm/agent/evolution_trajectories`; config and env overrides are not supported.
 
 > 📖 For details on the self-evolution mechanism, see [Skill Self-Evolution](SkillSelfEvolution.md).
 

@@ -20,46 +20,13 @@ def test_get_agent_evolution_trajectories_dir_under_agent_root():
     assert get_agent_evolution_trajectories_dir() == get_agent_root_dir() / "evolution_trajectories"
 
 
-def test_resolve_evolution_trajectory_dir_prefers_env(tmp_path, monkeypatch):
-    env_dir = tmp_path / "from-env"
-    monkeypatch.setenv("EVOLUTION_TRAJECTORY_DIR", str(env_dir))
-    resolved = JiuWenSwarmDeepAdapter._resolve_evolution_trajectory_dir(
-        {"react": {"evolution": {"trajectory_dir": str(tmp_path / "from-config")}}}
-    )
-    assert resolved == env_dir.resolve()
-
-
-def test_resolve_evolution_trajectory_dir_absolute_config(tmp_path, monkeypatch):
-    monkeypatch.delenv("EVOLUTION_TRAJECTORY_DIR", raising=False)
-    abs_dir = tmp_path / "abs-traj"
-    resolved = JiuWenSwarmDeepAdapter._resolve_evolution_trajectory_dir(
-        {"react": {"evolution": {"trajectory_dir": str(abs_dir)}}}
-    )
-    assert resolved == abs_dir
-
-
-def test_resolve_evolution_trajectory_dir_relative_config(tmp_path, monkeypatch):
-    monkeypatch.delenv("EVOLUTION_TRAJECTORY_DIR", raising=False)
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    with patch(
-        "jiuwenswarm.server.runtime.agent_adapter.interface_deep.get_multi_tenant_user_workspace_dir",
-        return_value=workspace,
-    ):
-        resolved = JiuWenSwarmDeepAdapter._resolve_evolution_trajectory_dir(
-            {"react": {"evolution": {"trajectory_dir": "agent/evolution_trajectories"}}}
-        )
-    assert resolved == (workspace / "agent" / "evolution_trajectories").resolve()
-
-
-def test_resolve_evolution_trajectory_dir_default(monkeypatch):
-    monkeypatch.delenv("EVOLUTION_TRAJECTORY_DIR", raising=False)
-    resolved = JiuWenSwarmDeepAdapter._resolve_evolution_trajectory_dir({"react": {"evolution": {}}})
+def test_resolve_evolution_trajectory_dir_always_default(monkeypatch):
+    monkeypatch.setenv("EVOLUTION_TRAJECTORY_DIR", str(Path("/tmp/should-not-use")))
+    resolved = JiuWenSwarmDeepAdapter._resolve_evolution_trajectory_dir()
     assert resolved == get_agent_evolution_trajectories_dir()
 
 
 def test_build_skill_evolution_rail_passes_file_trajectory_store(tmp_path, monkeypatch):
-    monkeypatch.delenv("EVOLUTION_TRAJECTORY_DIR", raising=False)
     traj_dir = tmp_path / "traj"
     captured: dict = {}
 
@@ -87,9 +54,7 @@ def test_build_skill_evolution_rail_passes_file_trajectory_store(tmp_path, monke
             return_value=object(),
         ),
     ):
-        rail = adapter._build_skill_evolution_rail(
-            {"react": {"evolution": {"trajectory_dir": str(traj_dir)}}}
-        )
+        rail = adapter._build_skill_evolution_rail({"react": {"evolution": {}}})
 
     assert rail is not None
     store = captured.get("trajectory_store")
@@ -99,7 +64,6 @@ def test_build_skill_evolution_rail_passes_file_trajectory_store(tmp_path, monke
 
 @pytest.mark.asyncio
 async def test_ensure_active_evolution_rails_passes_file_trajectory_store(tmp_path, monkeypatch):
-    monkeypatch.delenv("EVOLUTION_TRAJECTORY_DIR", raising=False)
     traj_dir = tmp_path / "configured-traj"
     configure = AsyncMock()
 
@@ -107,7 +71,7 @@ async def test_ensure_active_evolution_rails_passes_file_trajectory_store(tmp_pa
     adapter._instance = object()
     adapter._model = object()
     adapter._default_model_name = "gpt-test"
-    adapter._config_cache = {"react": {"evolution": {"trajectory_dir": str(traj_dir)}}}
+    adapter._config_cache = {"react": {"evolution": {}}}
     adapter._skill_manager = SimpleNamespace(list_execution_disabled_skills=lambda: [])
     adapter._skill_evolution_rail = SimpleNamespace(_language="cn")
 
