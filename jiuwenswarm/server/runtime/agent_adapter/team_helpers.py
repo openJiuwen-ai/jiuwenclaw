@@ -1831,12 +1831,9 @@ async def process_team_message_stream(
     # one physical library and per-agent visibility is metadata — so a
     # workspace-local path would leave team slash commands with no Skill at all.
     team_skills_dir = str(get_agent_skills_dir())
-    # Seeds the team's skills-visibility.json; the team owns no skills/ directory.
-    ensure_ready = getattr(team_manager, "ensure_team_skill_visibility_ready_for_session", None)
-    shared_skills_ready_prepared = False
-    if is_first_request and callable(ensure_ready):
-        ensure_ready(session_id, team_spec)
-        shared_skills_ready_prepared = True
+    # No seeding here: the team's skills-visibility.json has a single writer,
+    # ``TeamWorkspaceManager.initialize``, and a missing document simply means
+    # "the team imposes no restriction".
 
     slash_result = await _handle_team_slash_command(
         channel_id,
@@ -2076,9 +2073,6 @@ async def process_team_message_stream(
                 return
 
         if is_first_request:
-            if callable(ensure_ready) and not shared_skills_ready_prepared:
-                ensure_ready(session_id, team_spec)
-                shared_skills_ready_prepared = True
             request_queue = await _start_team_stream_round(
                 channel_id=channel_id,
                 session_id=session_id,

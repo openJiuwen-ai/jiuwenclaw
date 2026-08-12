@@ -11,11 +11,9 @@ import re
 import time
 import weakref
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from openjiuwen.agent_teams.agent.team_agent import TeamAgent
-from openjiuwen.agent_teams.paths import SKILL_VISIBILITY_FILENAME, team_skill_visibility_path
 from openjiuwen.agent_teams.runtime.pool import RuntimeState
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
@@ -28,7 +26,6 @@ from openjiuwen.harness.rails import (
     TeamSkillCreateRail,
     TeamSkillEvolutionRail,
 )
-from openjiuwen.agent_teams.skill import SCOPE_TEAM, bootstrap_skill_visibility
 from jiuwenswarm.agents.harness.team.bootstrap import configure_agent_teams_home
 from jiuwenswarm.common.log_preview import preview_text
 from jiuwenswarm.common.utils import get_user_workspace_dir
@@ -1124,74 +1121,6 @@ class TeamManager:
             post_start_log_every_sec=_PG_POST_START_LOG_EVERY_SEC,
         )
 
-    @staticmethod
-    def _resolve_team_skill_visibility_path(spec: TeamAgentSpec) -> Path:
-        """Return the team-level Skill visibility metadata file.
-
-        Args:
-            spec: Team blueprint, whose workspace override wins when present.
-
-        Returns:
-            Path of ``skills-visibility.json`` at the team workspace root.
-        """
-        ws_config = spec.workspace
-        ws_path = ws_config.root_path if ws_config and ws_config.root_path else None
-        if not ws_path:
-            return team_skill_visibility_path(spec.team_name)
-        return Path(ws_path) / SKILL_VISIBILITY_FILENAME
-
-    @staticmethod
-    def ensure_team_skill_visibility_initialized(spec: TeamAgentSpec) -> None:
-        """Seed the team-level Skill visibility document once per team.
-
-        Skills live in exactly one physical library; a team owns no mirrored
-        ``skills/`` directory, only this document. The team is seeded with an
-        empty allow-list, which means "inherit the whole library": that
-        reproduces the previous unfiltered mirror without freezing the view
-        against Skills installed later. The file is the authority afterwards,
-        so re-seeding an existing document is a no-op and the call is safe to
-        repeat on every team rebuild.
-
-        Args:
-            spec: Team blueprint identifying the team and its workspace.
-        """
-        path = TeamManager._resolve_team_skill_visibility_path(spec)
-        try:
-            visibility = bootstrap_skill_visibility(
-                path,
-                scope=SCOPE_TEAM,
-                entity_id=spec.team_name,
-                allow=(),
-                bootstrapped_from="team:create",
-            )
-        except (OSError, TimeoutError) as exc:
-            logger.warning(
-                "[TeamManager] team skill visibility bootstrap failed: path=%s error=%s",
-                path,
-                exc,
-            )
-            return
-        logger.info(
-            "[TeamManager] team skill visibility ready: path=%s allow=%s deny=%s",
-            path,
-            visibility.allow,
-            visibility.deny,
-        )
-
-    def ensure_team_skill_visibility_ready_for_session(self, session_id: str, spec: TeamAgentSpec) -> None:
-        """Ensure a session's team owns a Skill visibility document.
-
-        Args:
-            session_id: Session that is about to run the team.
-            spec: Team blueprint identifying the team and its workspace.
-        """
-        self.ensure_team_skill_visibility_initialized(spec)
-        logger.debug(
-            "[TeamManager] team skill visibility ensured: session_id=%s team_name=%s",
-            session_id,
-            spec.team_name,
-        )
-
     async def create_team(
         self,
         session_id: str,
@@ -1242,8 +1171,9 @@ class TeamManager:
             team_agent = spec.build()
             team_agent.channel_id = channel_id  # 记录 channel，供 _destroy_other_sessions 按 channel 隔离
             self._team_agents[session_id] = team_agent
-            # After build, seed the team-level Skill visibility document.
-            self.ensure_team_skill_visibility_ready_for_session(session_id, spec)
+            # The team-level Skill visibility document is seeded by
+            # ``TeamWorkspaceManager.initialize`` — the single writer for team
+            # scope — when the team workspace comes up. Nothing to do here.
 
             if self._is_distributed_mode(config_base):
                 try:

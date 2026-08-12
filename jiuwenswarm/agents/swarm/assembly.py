@@ -7,7 +7,8 @@ provider-based assembly. Given a ``TeamAgentSpec`` it:
 
 * registers all swarm providers / rail types (idempotent),
 * points openjiuwen's single Skill library at the platform-owned directory and
-  seeds the team's Skill visibility document,
+  resolves where the team's Skill visibility document lives (it never writes
+  it: ``TeamWorkspaceManager.initialize`` is that document's only seeder),
 * builds the per-team base :class:`SwarmBuildContext` carrying the live runtime
   handles every provider needs,
 * rewrites each present member spec ("leader" / "teammate") with its
@@ -32,7 +33,6 @@ from openjiuwen.agent_teams.paths import (
     team_home,
 )
 from openjiuwen.agent_teams.schema.blueprint import TransportSpec
-from openjiuwen.agent_teams.skill import SCOPE_TEAM, bootstrap_skill_visibility
 
 from jiuwenswarm.agents.swarm.config_specs import build_member_deep_agent_spec
 from jiuwenswarm.agents.swarm.context import SwarmBuildContext
@@ -46,39 +46,6 @@ logger = logging.getLogger(__name__)
 
 # Member roles enriched in place, in deterministic order.
 _MEMBER_ROLES: tuple[str, ...] = ("leader", "teammate")
-
-# Provenance marker for a team document seeded at first assembly.
-_TEAM_BOOTSTRAP_SOURCE = "assembly:team"
-
-
-def _bootstrap_team_skill_visibility(team_name: str, visibility_path: str) -> None:
-    """Seed the team-level Skill visibility document on first assembly.
-
-    Unlike a member, a team has no config-sourced allow-list, so the seed is
-    always an unrestricted document (empty ``allow`` = inherit the whole
-    library). It is still written rather than skipped: it gives the
-    authorization RPC and an operator a discoverable anchor for the team, and
-    ``bootstrap_skill_visibility`` never touches a file that already exists, so
-    re-assembling a team cannot revert a granted or revoked name.
-
-    Args:
-        team_name: Team identifier (the document ``id``).
-        visibility_path: Team ``skills-visibility.json`` path.
-    """
-    try:
-        bootstrap_skill_visibility(
-            visibility_path,
-            scope=SCOPE_TEAM,
-            entity_id=team_name,
-            allow=None,
-            bootstrapped_from=_TEAM_BOOTSTRAP_SOURCE,
-        )
-    except (OSError, TimeoutError) as exc:
-        logger.warning(
-            "[swarm.assembly] team visibility bootstrap failed (%s): %s",
-            visibility_path,
-            exc,
-        )
 
 
 def _external_team_publish_url(channel_id: str | None) -> str:
@@ -183,8 +150,12 @@ def enrich_team_spec_for_swarm(
     # ``paths.team_skill_visibility_path`` so a relocated team workspace keeps
     # its metadata next to the workspace it really uses. For the default layout
     # the two are the same path.
+    #
+    # Resolved only, never written: the team document has exactly one seeder,
+    # ``TeamWorkspaceManager.initialize``, which runs when the team workspace
+    # comes up. A missing document reads back as "no restriction", so a team
+    # without a workspace needs no file here.
     team_visibility_path = str(Path(team_ws_root) / SKILL_VISIBILITY_FILENAME)
-    _bootstrap_team_skill_visibility(spec.team_name, team_visibility_path)
     global_skills_dir = str(skills_library)
 
     base = SwarmBuildContext(
