@@ -3884,14 +3884,23 @@ class AgentWebSocketServer:
         user turn will read — updating them leaves the model still seeing
         rewound turns.
         """
-        agent = self._agent_manager.get_agent_nowait(
-            channel_id=channel_id or "default"
+        sid = str(session_id or "").strip()
+        agent = (
+            self._agent_manager.get_agent_for_session_nowait(
+                channel_id=channel_id or "default",
+                session_id=sid,
+            )
+            if sid
+            else None
         )
+        if agent is None:
+            agent = self._agent_manager.get_agent_nowait(
+                channel_id=channel_id or "default"
+            )
         if agent is None:
             return None
 
         deep_agent = None
-        sid = str(session_id or "").strip()
         if sid:
             adapter = self._resolve_adapter(agent)
             if adapter is not None:
