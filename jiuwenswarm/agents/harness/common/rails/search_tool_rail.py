@@ -93,31 +93,37 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
     priority = 80
     _navigation_extra_tools: Set[str] = {"code"}
 
+    # Legacy single-entry tools that have a flat-fields replacement.
+    # Excluded from the search index so the LLM picks the specific tool
+    # (e.g. cron_create_job) instead of the generic wrapper (cron).
+    _EXCLUDED_FROM_SEARCH: Set[str] = {"cron"}
+
     _RULES_CN = (
         "## 工具使用规则\n"
         "你正在一个渐进式工具环境中工作。\n"
         "\n"
         "1. 当你需要某个工具但它不在当前可用列表中时，"
-        "用 `search_tools` 搜索。导航中的隐藏工具已按类列出工具名和描述——"
-        "优先用其中的工具名当 query。\n"
+        "用 `search_tools` 搜索。导航中的隐藏工具已按类列出工具名和描述，"
+        "供你了解有哪些工具可用。\n"
         "\n"
-        "2. `search_tools` 返回工具的完整定义（含参数 JSON Schema）。"
+        "2. 导航中列出的专用工具必须优先使用。"
+        "只有当导航中没有对应专用工具时，才用 bash、write_file 等通用工具。"
+        "例如：查 wiki 用 wiki_query 而非 bash，创建定时任务用 cron_create_job 而非 bash。\n"
+        "\n"
+        "3. `search_tools` 返回工具的完整定义（含参数 JSON Schema）。"
         "返回的工具不在你的 tools 列表中，但已注册，可直接按 name 调用——"
         "根据 parameters 构造参数后直接发起 tool call，"
         "不会改变 tools 列表。\n"
         "\n"
-        "3. 如果当前对话历史中已有某工具的 schema（来自之前的 "
+        "4. search_tools 的 query 推荐用「工具名 + 简短中文描述」的组合"
+        "（如 `cron_create_job 创建定时任务`、`free_search 免费网页搜索`）。"
+        "这种组合最准：工具名走精确匹配，描述提供语义，系统按混合信号找到最佳工具。"
+        "若不确定工具名，仅用描述亦可。\n"
+        "\n"
+        "5. 如果当前对话历史中已有某工具的 schema（来自之前的 "
         "`search_tools` 返回），切勿再次搜索同一工具，"
-        "直接根据已有 schema 构造参数并调用。\n"
-        "\n"
-        "4. 优先使用专业工具（如 memory_search、cron_create_job）"
-        "而非通用替代（如 bash、edit_file）。"
-        "专业工具提供结构化数据和状态管理。\n"
-        "\n"
-        "5. 工作流程：查看导航（含隐藏工具，按类列出了工具名和描述）→"
-        "用工具名作为 query 调 `search_tools`（名搜走快路径，最准）→"
-        "拿到完整定义后直接按名称调用。\n"
-        "优先用导航里列出的工具名当 query；仅在不确定工具名时才用自然语言描述搜索。\n"
+        "直接根据已有 schema 构造参数并调用。"
+        "确定了要用哪个工具就别犹豫，直接调；调失败再看错误信息调整。\n"
     )
 
     _RULES_EN = (
@@ -126,28 +132,30 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         "\n"
         "1. When you need a tool that isn't in your current available list, "
         "use `search_tools` to find it. Hidden tools in the navigation are "
-        "listed by category with names and descriptions — prefer using a "
-        "listed tool name as the query.\n"
+        "listed by category with names and descriptions, so you know what's "
+        "available.\n"
         "\n"
-        "2. `search_tools` returns full tool definitions (including parameter "
+        "2. Specialized tools listed in the navigation MUST be used first. "
+        "Only use bash, write_file, or other general tools when no specialized "
+        "tool exists for the task. Example: use wiki_query not bash for wiki, "
+        "use cron_create_job not bash for cron.\n"
+        "\n"
+        "3. `search_tools` returns full tool definitions (including parameter "
         "JSON Schema). The returned tools are NOT in your tools list but are "
         "registered and directly callable by name — construct arguments from "
         "the parameters and call directly. The tools list stays unchanged.\n"
         "\n"
-        "3. If a tool's schema already appears in conversation history "
+        "4. Prefer a `search_tools` query that pairs a tool name with a short "
+        "description (e.g. `cron_create_job create scheduled task`, "
+        "`free_search free web search`). This is most accurate: the name "
+        "enables exact matching and the description adds semantic signal. "
+        "If unsure of the name, a description alone also works.\n"
+        "\n"
+        "5. If a tool's schema already appears in conversation history "
         "(from a previous `search_tools` result), do NOT search for it "
-        "again — reuse the existing schema and call directly.\n"
-        "\n"
-        "4. Prefer specialized tools (e.g. memory_search, cron_create_job) "
-        "over general substitutes (e.g. bash, edit_file). "
-        "Specialized tools provide structured data and state management.\n"
-        "\n"
-        "5. Workflow: check navigation (includes hidden tools, with names "
-        "and descriptions listed by category) → call `search_tools` with the "
-        "tool name as the query (name search hits the fast path, most "
-        "accurate) → call directly by name after getting the full "
-        "definition. Prefer tool names listed in navigation as the query; "
-        "use natural-language descriptions only when the name is uncertain.\n"
+        "again — reuse the existing schema and call directly. Once you've "
+        "decided which tool to use, don't hesitate — call it; if it fails, "
+        "adjust based on the error.\n"
     )
 
     def __init__(self, config):
@@ -176,7 +184,6 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         self._bm25_index = None
         self._cached_bm25_sig: frozenset = frozenset()
         self._search_corpus: List = []
-        self._executable_sig: frozenset = frozenset()
         self._ensure_embedding_model()
 
     # ------------------------------------------------------------------
@@ -187,6 +194,9 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         # Refresh the full tool inventory from ability_manager (each turn).
         self._runtime_agent = ctx.agent
         self._cached_all_tool_infos = await self._list_tool_infos(ctx.agent)
+        # DEBUG: log all registered tool names
+        all_names = sorted(str(getattr(t, "name", "") or "") for t in self._cached_all_tool_infos)
+        logger.info("[JiuWenRail] registered tools (%d): %s", len(all_names), all_names)
         session = getattr(ctx, "session", None)
         self._init_visible_tools(
             session, default_visible_tools=list(self.default_visible_tools)
@@ -477,53 +487,55 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         return {"skill": 0, "runtime": 1, "document": 2, "spreadsheet": 3, "general": 9}.get(group, 99)
 
     # ------------------------------------------------------------------
-    # _search_tools — Dense only (keyword fallback dropped post-decouple;
-    # the embedding model is loaded eagerly in __init__, so dense is the
-    # only path; returns [] if the model isn't ready yet).
+    # _search_tools — dispatch by ``method`` (hybrid/dense/bm25), name as
+    # the final fallback. The hand-rolled dense→bm25→name chain was replaced
+    # so that ``method`` config actually drives retrieval (hybrid RRF was
+    # never reached before; dense-unavailable → BM25 degradation lives in
+    # ``tool_retrieval.search``). Name lookup is the last resort: it catches
+    # exact tool-name queries that semantic search missed (e.g. the LLM
+    # searched by ``send_file_to_user`` but dense returned write_file) and
+    # runtime-registered tools absent from the search corpus.
     # ------------------------------------------------------------------
 
     async def _search_tools(self, query, limit=10, detail_level=1):
         query = (query or "").strip()
         if not query:
             return []
-        # Name fast-path: when the query already looks like a tool name,
-        # resolve it directly from _cached_all_tool_infos (the full inventory
-        # navigation/hidden-summary read from), bypassing _search_corpus.
-        # A runtime-registered tool (e.g. send_file_to_user) can be absent
-        # from _search_corpus due to ghost-filter timing while still present
-        # in _cached_all_tool_infos — this recovers it so the model never
-        # fails to find a tool by its own name (and skips the embed/min_sim
-        # path entirely for an exact-name hit).
+        # Main path: dispatch by self._method. The embedding cache / BM25
+        # index are built lazily inside _search's callees if missing.
+        results = await asyncio.to_thread(self._search, query, limit, detail_level)
+        if results:
+            return results
+
+        # Fallback: exact name lookup from the full inventory (also recovers
+        # runtime-registered tools missing from the search corpus).
         name_hits = self._lookup_tool_by_name(query, detail_level=detail_level)
         if name_hits:
             return name_hits[:limit]
-        # v2: no early-return on embedding None — _search degrades to BM25.
-        # Only precompute embeddings lazily if dense/hybrid is the method AND
-        # the model is actually available.
-        if self._embedding_model is not None and not self._cached_tool_embeddings:
-            await asyncio.to_thread(self._precompute_tool_embeddings)
-        if self._bm25_index is None and self._method != "semantic":
-            await asyncio.to_thread(self._build_bm25_index)
 
-        results = await asyncio.to_thread(self._search, query, limit, detail_level)
+        # Last resort: the corpus may be stale (tools registered after the
+        # last before_invoke refresh). Rebuild + retry once.
+        retried = await self._force_refresh_and_retry(query, limit, detail_level)
+        if retried:
+            return retried
 
-        query_lower = query.lower()
-        result_names = {str(r.get("name", "")).lower() for r in results}
-        looks_like_tool_name = "_" in query_lower and query_lower.replace("_", "").isalnum()
-
-        if not results or (looks_like_tool_name and query_lower not in result_names):
-            retried = await self._force_refresh_and_retry(query, limit, detail_level)
-            if retried:
-                results = retried
-
-        return results
+        return []
 
     async def _force_refresh_and_retry(self, query, limit, detail_level):
         agent = self._runtime_agent or self._deep_agent
         if agent is None:
             return []
         live_infos = await self._list_tool_infos(agent)
-        if len(live_infos) == len(self._cached_all_tool_infos):
+        # Compare the name set, not just the count: a tool swap (one
+        # unregistered, another registered) leaves the count unchanged while
+        # the corpus is genuinely stale.
+        live_sig = frozenset(
+            str(getattr(t, "name", "") or "") for t in live_infos
+        )
+        cached_sig = frozenset(
+            str(getattr(t, "name", "") or "") for t in (self._cached_all_tool_infos or [])
+        )
+        if live_sig == cached_sig:
             return []
         logger.info(
             "[JiuWenRail] force-refresh: corpus stale (%d -> %d tools), rebuilding + retrying",
@@ -543,7 +555,17 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         Degradation is handled inside ``tool_retrieval.search``: embedding
         unavailable → BM25 (never []). The old ``_dense_search`` is kept
         below for reference/tests but is no longer the call path.
+
+        Lazy-init guard: if the embedding cache / BM25 index weren't built
+        yet (e.g. first search of the session, or model finished loading
+        after before_invoke), build them now in bulk. Without this,
+        ``dense_search`` would fall back to per-tool ``embed_single`` calls
+        (44 model invocations instead of one batched embed).
         """
+        if self._embedding_model is not None and not self._cached_tool_embeddings:
+            self._precompute_tool_embeddings()
+        if self._bm25_index is None and self._method != "semantic":
+            self._build_bm25_index()
         return tool_retrieval.dispatch_search(
             query,
             self._search_corpus or self._cached_all_tool_infos,
@@ -570,6 +592,19 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
             min_sim=self._min_sim,
         )
 
+    def _bm25_search_fallback(self, query, limit, detail_level):
+        """BM25-only search (fallback when dense is unavailable or empty)."""
+        from jiuwenswarm.common.tool_retrieval import bm25_search
+        return bm25_search(
+            query,
+            self._search_corpus or self._cached_all_tool_infos,
+            self._bm25_index,
+            limit=limit,
+            detail_level=detail_level,
+            desc_cap=self._desc_cap,
+            min_sim=0.0,
+        )
+
     def _lookup_tool_by_name(self, query, *, detail_level=1):
         """Resolve a query that already looks like a tool name directly from
         the full inventory, bypassing ``_search_corpus``.
@@ -580,6 +615,10 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         summary read from). When the model searches by the tool's own name,
         this fast-path recovers it instead of returning no match — the exact
         scenario where dense retrieval consistently failed in practice.
+
+        If the cache misses, fall back to a live ``ability_manager`` lookup
+        so tools registered after the last ``before_invoke`` refresh are
+        still found by name.
         """
         ql = query.strip().lower()
         # "looks like a tool name": contains '_' and is alphanumeric once
@@ -593,6 +632,31 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
             if name and (name == ql or name == ql_norm):
                 hits.append(
                     tool_retrieval.build_tool_summary(tool, detail_level=detail_level)
+                )
+        if hits:
+            return hits
+        # Cache miss — try a live lookup from ability_manager so that
+        # runtime-registered tools (e.g. send_file_to_user added after the
+        # last before_invoke refresh) are still found by exact name.
+        agent = self._runtime_agent or self._deep_agent
+        am = getattr(agent, "ability_manager", None) if agent else None
+        if am is not None:
+            try:
+                card = am.get(query)
+            except Exception:
+                card = None
+            if card is None and query != ql_norm:
+                try:
+                    card = am.get(ql_norm)
+                except Exception:
+                    card = None
+            if card is not None:
+                logger.info(
+                    "[JiuWenRail] name lookup cache miss, live hit: %s",
+                    query,
+                )
+                hits.append(
+                    tool_retrieval.build_tool_summary(card, detail_level=detail_level)
                 )
         return hits
 
@@ -625,10 +689,6 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         # never recovers it. am.get and resource_mgr probes are local dict
         # lookups; the embedding cache (_cached_tool_sig in
         # _precompute_tool_embeddings) is independent and still short-circuits.
-        self._executable_sig = frozenset(
-            str(getattr(t, "name", "") or "") for t in (self._cached_all_tool_infos or [])
-        )
-
         def resolver(name):
             tool_id = name
             card = None
@@ -660,6 +720,11 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         self._search_corpus = tool_retrieval.filter_executable(
             list(self._cached_all_tool_infos or []), resolver,
         )
+        if self._EXCLUDED_FROM_SEARCH:
+            self._search_corpus = [
+                t for t in self._search_corpus
+                if str(getattr(t, "name", "") or "") not in self._EXCLUDED_FROM_SEARCH
+            ]
 
     def _precompute_tool_embeddings(self):
         if self._embedding_model is None:

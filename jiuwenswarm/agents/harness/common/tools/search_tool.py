@@ -146,16 +146,10 @@ class DenseSearchTool(Tool):
                 # v3 default path: full definitions returned in the result; the
                 # LLM calls tools by name directly. tools[] (prefill) is unchanged.
                 note = (
-                    "以上工具已找到（含完整参数定义）。这些工具不在你的 "
-                    "tools 列表中，但已注册可直接按 name 调用。"
-                    "请根据每个工具的 parameters（JSON Schema）构造参数，"
-                    "直接发起 tool call。"
+                    "以上工具已找到。根据每个工具的 parameters 构造参数后直接按 name 调用。"
                     if is_cn
-                    else "The tools above have been found with full "
-                    "parameter definitions. They are NOT in your tools "
-                    "list but are registered and directly callable by "
-                    "name. Construct arguments from each tool's "
-                    "'parameters' (JSON Schema) and call directly."
+                    else "Tools found. Construct arguments from each tool's "
+                    "'parameters' and call directly by name."
                 )
 
             return _JsonToolOutput(
