@@ -38,6 +38,8 @@
 | `/agents` | 管理 Agent 配置（list, get, create, update, enable, disable, delete，见下文） |
 | `/auto-harness` | Auto-Harness 任务管理（`run`/`schedule`/`issue`，见下文） |
 | `/btw` | 旁路快速提问，不中断主对话（见下文） |
+| `/swarmflow` | SwarmFlow 开关、状态查询与 token 预算（`on` / `off` / `--budget`，见 [TUI SwarmFlow 指南](TUI使用SwarmFlow指南.md)） |
+| `/swarmflows` | 全屏 SwarmFlow 运行树查看器（别名 `/swarmworkflows`，同上） |
 
 > 说明：本页的 `/mode` 与 `/switch` 以 Gateway 受控通道行为为主。TUI 本地命令另支持 `/mode plan`、`/mode team.normal`，详见 [TUI 使用指南](TUI使用指南.md)。
 
@@ -68,6 +70,19 @@
 ---
 
 ## 重点命令说明
+
+### `/swarmflow` 与 `/swarmflows`（TUI 本地）
+
+SwarmFlow 专用命令；完整流程见 **[TUI 使用 SwarmFlow 指南](TUI使用SwarmFlow指南.md)**。
+
+| 命令 | 说明 |
+|------|------|
+| `/swarmflow` | 查询状态，如 `swarmflow: on · mode: team · budget: unbounded` |
+| `/swarmflow on` | 写入 `enable_swarmflow=true`；非 team 时一并切到 team；可选 `--budget <tokens\|none>` |
+| `/swarmflow off` | 写入 `enable_swarmflow=false`；不自动离开 team |
+| `/swarmflows` | 打开全屏运行树（工作流 → 阶段 → 节点）；别名 `/swarmworkflows` |
+
+配置变更后当前 session **不热更新**，提示 `Use /new to apply.`；主界面 **`h`** 用于 pending 人工回复（非本命令）。
 
 ### `/workspace`（TUI 可信目录管理）
 

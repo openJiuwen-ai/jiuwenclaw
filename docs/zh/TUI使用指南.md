@@ -170,6 +170,10 @@ jiuwenswarm-tui --session "$(printf 'a%.0s' {1..200})"  # 超 128 → 长度超�
 | `/sandbox` | - | 进出沙箱模式 / 管理 excluded_commands / files | `/sandbox enable`、`/sandbox status`、`/sandbox files allow ./tmp/` | 全部 |
 | `/security-review` | - | 安全审查当前分支待定变更 | `/security-review`、`/security-review 重点关注认证` | 全部 |
 | `/simplify` | - | 代码精简审查（复用性、质量、效率），自动修复问题 | `/simplify`、`/simplify src/auth/` | **仅 `code.*`** |
+| `/swarmflow` | - | SwarmFlow 开关/状态/预算（`on`/`off`/`--budget`） | `/swarmflow on` | **推荐 `team`** |
+| `/swarmflows` | `/swarmworkflows` | 全屏 SwarmFlow 运行树 | `/swarmflows` | **推荐 `team`**（需 `/swarmflow on`） |
+
+> SwarmFlow 完整说明见 **[TUI 使用 SwarmFlow 指南](TUI使用SwarmFlow指南.md)**。
 
 #### `/resume` 与 `/continue` 在 TUI 中的特殊行为
 

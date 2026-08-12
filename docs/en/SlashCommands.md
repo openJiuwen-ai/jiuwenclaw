@@ -38,6 +38,8 @@ Executed locally in the terminal UI, not through Gateway control pipeline.
 | `/agents` | Manage Agent configs (list, get, create, update, enable, disable, delete, see below) |
 | `/auto-harness` | Auto-Harness task management (`run`/`schedule`/`issue`, see below) |
 | `/btw` | Ask a quick side question without interrupting the main conversation (see below) |
+| `/swarmflow` | SwarmFlow toggle, status, and token budget (`on` / `off` / `--budget`, see [TUI SwarmFlow Guide](TUISwarmFlowGuide.md)) |
+| `/swarmflows` | Full-screen SwarmFlow run tree viewer (alias `/swarmworkflows`, same guide) |
 
 > Note: `/mode` controlled switching logic is primarily on Gateway side, see "`/mode` and `/switch`" below. The TUI local command additionally supports `/mode plan` and `/mode team.normal`; see the TUI guide for details.
 
@@ -68,6 +70,19 @@ Identified by Gateway and forwarded to AgentServer and other backend capabilitie
 ---
 
 ## Key Command Details
+
+### `/swarmflow` and `/swarmflows` (TUI local)
+
+SwarmFlow-specific commands. Full walkthrough: **[TUI SwarmFlow Guide](TUISwarmFlowGuide.md)**.
+
+| Command | Description |
+|---------|-------------|
+| `/swarmflow` | Query status, e.g. `swarmflow: on · mode: team · budget: unbounded` |
+| `/swarmflow on` | Set `enable_swarmflow=true`; switches to team if needed; optional `--budget <tokens\|none>` |
+| `/swarmflow off` | Set `enable_swarmflow=false`; does not leave team automatically |
+| `/swarmflows` | Open the full-screen run tree (workflow → phase → node); alias `/swarmworkflows` |
+
+Config changes are **not hot-applied** in the current session (`Use /new to apply.`). Use **`h`** on the main view for pending human replies (not this command).
 
 ### `/workspace` (TUI Trusted Directory Management)
 
