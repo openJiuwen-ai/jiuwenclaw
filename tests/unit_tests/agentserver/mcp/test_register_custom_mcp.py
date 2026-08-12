@@ -284,9 +284,9 @@ def test_disconnect_custom_mcp_back_to_registered(tmp_path: Path, monkeypatch) -
 
 
 def test_register_custom_preserves_connected_state_on_edit(tmp_path: Path, monkeypatch) -> None:
-    """Editing a connected custom MCP keeps state=connected and returns
-    was_connected=True so the handler knows to remove+re-add the live
-    instance. The new config fields (url here) replace the old ones."""
+    """Editing a connected custom MCP rewrites it as state=registered and
+    returns was_connected=True so the handler removes the old live instance;
+    the frontend then calls mcp.connect to activate the new config."""
     from jiuwenswarm.server.runtime.mcp import state_store
     monkeypatch.setattr(registry, "get_workspace_dir", lambda: tmp_path)
     monkeypatch.setattr(state_store, "get_workspace_dir", lambda: tmp_path)
@@ -306,9 +306,9 @@ def test_register_custom_preserves_connected_state_on_edit(tmp_path: Path, monke
     # was_connected flag is returned to the handler (not persisted).
     assert result["was_connected"] is True
     assert result["url"] == "https://new.example/mcp"
-    # state.json keeps connected + the new URL.
+    # state.json rewritten as registered (frontend reconnects to activate).
     rec = state_store.get_mcp_record("live-custom")
-    assert rec["state"] == "connected"
+    assert rec["state"] == "registered"
     assert rec["url"] == "https://new.example/mcp"
 
 

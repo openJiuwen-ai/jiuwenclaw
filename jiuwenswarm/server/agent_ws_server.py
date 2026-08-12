@@ -5524,7 +5524,7 @@ class AgentWebSocketServer:
                     token in key_text for token in ("api_key", "token", "authorization", "secret")
                 )
                 value_sensitive = any(token in value_text for token in ("bearer ", "api-key ", "secret-"))
-                if key_sensitive or value_sensitive:
+                if (key_sensitive or value_sensitive) and not isinstance(value, (dict, list)):
                     masked[key] = "***"
                 else:
                     masked[key] = AgentWebSocketServer._mask_sensitive_fields(value)
@@ -6279,22 +6279,9 @@ class AgentWebSocketServer:
                         # on next connect.
                         try:
                             from jiuwenswarm.server.runtime.mcp.registry import (
-                                _packages_dir,
+                                rollback_failed_connect,
                             )
-                            if (_packages_dir() / name).is_dir():
-                                from jiuwenswarm.server.runtime.mcp.skill_installer import (
-                                    uninstall_mcp_skills,
-                                )
-                                from jiuwenswarm.server.runtime.mcp.state_store import (
-                                    remove_mcp_record,
-                                )
-                                uninstall_mcp_skills(name)
-                                remove_mcp_record(name)
-                            else:
-                                from jiuwenswarm.server.runtime.mcp.state_store import (
-                                    set_mcp_state,
-                                )
-                                set_mcp_state(name, state="registered")
+                            rollback_failed_connect(name)
                         except Exception as rollback_exc:  # noqa: BLE001
                             logger.warning(
                                 "[mcp] rollback failed connect entry '%s' failed: %s",
@@ -6570,22 +6557,9 @@ class AgentWebSocketServer:
             # for retry / edit.
             try:
                 from jiuwenswarm.server.runtime.mcp.registry import (
-                    _packages_dir,
+                    rollback_failed_connect,
                 )
-                if (_packages_dir() / name).is_dir():
-                    from jiuwenswarm.server.runtime.mcp.skill_installer import (
-                        uninstall_mcp_skills,
-                    )
-                    from jiuwenswarm.server.runtime.mcp.state_store import (
-                        remove_mcp_record,
-                    )
-                    uninstall_mcp_skills(name)
-                    remove_mcp_record(name)
-                else:
-                    from jiuwenswarm.server.runtime.mcp.state_store import (
-                        set_mcp_state,
-                    )
-                    set_mcp_state(name, state="registered")
+                rollback_failed_connect(name)
             except Exception as rollback_exc:  # noqa: BLE001
                 logger.warning(
                     "[mcp] rollback after CLI auth failure '%s' failed: %s",
@@ -6699,12 +6673,10 @@ class AgentWebSocketServer:
     ) -> None:
         """Handle ``mcp.register_custom`` RPC: write a user-defined MCP server config.
 
-        Unlike marketplace ``connect``, the entry comes straight from the params
-        (transport/command/url...). It is upserted into state.json and then
-        activated: the handler flips state to connected and applies the MCP
-        server (add). When editing an already-connected custom MCP, the old
-        live instance is removed first so the new config takes effect
-        (register_mcp_by_name is idempotent — without remove it would skip).
+        Only persists the definition to state.json (state=registered) and returns
+        immediately; the frontend follows up with ``mcp.connect`` to actually
+        activate it. Editing an already-connected custom MCP removes the old live
+        instance so the new config takes effect on connect.
         """
         try:
             from jiuwenswarm.server.runtime.mcp.registry import register_custom_mcp
@@ -6713,146 +6685,30 @@ class AgentWebSocketServer:
             if not name:
                 raise ValueError("mcp name is required")
             config = {k: v for k, v in params.items() if k != "name"}
-            # register_custom persists the definition to state.json, preserving
-            # the prior state/enabled for edits (was_connected flag signals
-            # whether a live instance needs tearing down before re-adding).
             entry = await asyncio.to_thread(register_custom_mcp, name, config)
             was_connected = bool(entry.pop("was_connected", False))
-            transport = str(entry.get("transport", "") or "").strip().lower()
-            is_remote = transport in {"sse", "http", "streamable-http", "streamable_http"}
-            # Flip state to connecting (NOT connected): get_mcp_servers merges
-            # connecting (and connected) so apply_mcp_change can read the
-            # entry, while the frontend shows "connecting" until apply
-            # succeeds. register_custom wrote "registered" (new) or preserved
-            # "connected" (edit); either way promote to connecting here, then
-            # to connected after apply succeeds (below), or back to
-            # registered on failure.
-            from jiuwenswarm.server.runtime.mcp.state_store import (
-                set_mcp_state,
-            )
-            set_mcp_state(name, state="connecting")
-            # Remote reachability probe before reload — same logic as
-            # _handle_mcp_connect: on failure roll back the state.json entry
-            # and report failure honestly rather than reporting "connected"
-            # while the reload silently skips registration.
-            unreachable_reason = ""
-            if is_remote:
-                cfg = build_mcp_server_config(entry)
-                if cfg is not None:
-                    reachable, reason = await preflight_mcp_server_reachable(cfg)
-                    if not reachable:
-                        unreachable_reason = reason
-                        # Keep the definition as registered so the user can
-                        # edit the URL and retry (consistent with the
-                        # apply_mcp_change failure rollback below).
-                        try:
-                            from jiuwenswarm.server.runtime.mcp.state_store import (
-                                set_mcp_state,
-                            )
-                            set_mcp_state(name, state="registered")
-                        except Exception as rollback_exc:  # noqa: BLE001
-                            logger.warning(
-                                "[mcp] rollback unreachable custom '%s' failed: %s",
-                                name, rollback_exc,
-                            )
-            if unreachable_reason:
-                resp = AgentResponse(
-                    request_id=request.request_id,
-                    channel_id=request.channel_id,
-                    ok=False,
-                    payload={
-                        "type": "connect_failed",
-                        "error": unreachable_reason,
-                        "code": "MCP_UNREACHABLE",
-                        "name": name,
-                    },
-                )
-            else:
-                applied = True
-                error_message = ""
-                connect_failed = False
+            # Edit of a connected instance: remove the old live server so the
+            # new config (just persisted as state=registered) takes effect on
+            # the frontend's follow-up mcp.connect. Failure here is non-fatal —
+            # the old instance also drops on the next agent reload.
+            if was_connected:
                 try:
-                    # Edit of a connected instance: remove the live server
-                    # first so the new config actually takes effect. A plain
-                    # add would be a no-op (register_mcp_by_name skips when
-                    # the name is already registered with the old config).
-                    if was_connected:
-                        await self._agent_manager.apply_mcp_change(name, "remove")
-                    await self._agent_manager.apply_mcp_change(name, "add")
+                    await self._agent_manager.apply_mcp_change(name, "remove")
                 except Exception as reload_exc:  # noqa: BLE001
-                    # apply_mcp_change surfaces plain Exceptions only (openjiuwen
-                    # add_tool_server coerces cancel-scope errors to WorkflowError).
-                    # Return connect_failed so the frontend gets the real reason
-                    # instead of hanging on a silent failure.
-                    error_message = str(reload_exc) or repr(reload_exc)
-                    applied = False
-                    connect_failed = True
                     logger.warning(
-                        "[mcp][register_custom] apply_mcp_change failed for '%s', "
-                        "returning connect_failed: %s",
-                        name, error_message,
+                        "[mcp] remove old instance after register_custom '%s' failed: %s",
+                        name, reload_exc,
                     )
-                    # Roll back: a custom MCP's definition was just saved by
-                    # register_custom (the user typed it). Flip state back to
-                    # "registered" so the saved config is preserved for the
-                    # user to retry connect / edit — don't delete it, or the
-                    # user loses the config they just typed.
-                    try:
-                        from jiuwenswarm.server.runtime.mcp.state_store import (
-                            set_mcp_state,
-                        )
-                        set_mcp_state(name, state="registered")
-                    except Exception as rollback_exc:  # noqa: BLE001
-                        logger.warning(
-                            "[mcp] rollback failed register_custom '%s' failed: %s",
-                            name, rollback_exc,
-                        )
-                if connect_failed:
-                    resp = AgentResponse(
-                        request_id=request.request_id,
-                        channel_id=request.channel_id,
-                        ok=False,
-                        payload={
-                            "type": "connect_failed",
-                            "error": error_message or f"MCP '{name}' register failed",
-                            "code": "MCP_REGISTER_FAILED",
-                            "name": name,
-                        },
-                    )
-                else:
-                    # apply succeeded — promote connecting → connected.
-                    try:
-                        from jiuwenswarm.server.runtime.mcp.state_store import (
-                            set_mcp_state,
-                        )
-                        set_mcp_state(name, state="connected")
-                    except Exception as flip_exc:  # noqa: BLE001
-                        logger.warning(
-                            "[mcp] flip connecting→connected after register_custom failed for '%s': %s",
-                            name, flip_exc,
-                        )
-                    try:
-                        self._agent_manager.sync_mcp_credentials()
-                    except Exception as sync_exc:  # noqa: BLE001
-                        logger.warning("[mcp] sync_mcp_credentials after register_custom failed: %s", sync_exc)
-                    try:
-                        await self._agent_manager.refresh_skill_rails()
-                    except Exception as skill_exc:  # noqa: BLE001
-                        logger.warning("[mcp] refresh_skill_rails after register_custom failed: %s", skill_exc)
-                    payload = {
-                        "type": "connected",
-                        "name": name,
-                        "applied": applied,
-                        "item": self._mask_sensitive_fields(entry),
-                    }
-                    if error_message:
-                        payload["error"] = error_message
-                    resp = AgentResponse(
-                    request_id=request.request_id,
-                    channel_id=request.channel_id,
-                    ok=True,
-                    payload=payload,
-                )
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload={
+                    "type": "registered",
+                    "name": name,
+                    "item": self._mask_sensitive_fields(entry),
+                },
+            )
         except ValueError as exc:
             resp = AgentResponse(
                 request_id=request.request_id,

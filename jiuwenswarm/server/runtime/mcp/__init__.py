@@ -9,11 +9,13 @@ from jiuwenswarm.server.runtime.mcp.registry import (
     complete_cli_auth,
     register_custom_mcp,
     connect_mcp,
+    delete_custom_mcp,
     disable_mcp,
     disconnect_mcp,
     enable_mcp,
     get_mcp,
     list_marketplace_mcps,
+    save_mcp_credentials,
 )
 
 __all__ = [
@@ -21,9 +23,11 @@ __all__ = [
     "complete_cli_auth",
     "register_custom_mcp",
     "connect_mcp",
+    "delete_custom_mcp",
     "disable_mcp",
     "disconnect_mcp",
     "enable_mcp",
     "get_mcp",
     "list_marketplace_mcps",
+    "save_mcp_credentials",
 ]
