@@ -634,15 +634,12 @@ class TaskExecutionRail(DeepAgentRail):
             return
 
         if tool_name in self.SKILL_COMPLETE_TOOLS:
-            skill_name = ""
-            if isinstance(ctx.inputs.tool_args, dict):
-                skill_name = str(ctx.inputs.tool_args.get("skill_name", "")).strip()
-            if self._todo_map or skill_name != "deepresearch":
+            if self._todo_map:
                 parent_request_id = self._extract_request_id(ctx)
                 await self._emit_task_update_event(ctx.session, parent_request_id)
             else:
                 logger.debug(
-                    "[TaskExecutionRail] skip empty DeepResearch task.update after skill_complete "
+                    "[TaskExecutionRail] skip empty task.update after skill_complete "
                     "session_id=%s",
                     session_id,
                 )
