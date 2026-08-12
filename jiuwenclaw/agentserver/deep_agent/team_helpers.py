@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import re
 import time
@@ -65,12 +66,18 @@ except (TypeError, ValueError):
         '[TeamHelpers] JIUWEN_TEAM_STREAM_IDLE_BREAK_S=%r not numeric; clamped to 240',
         os.environ.get('JIUWEN_TEAM_STREAM_IDLE_BREAK_S'),
     )
-if _TEAM_STREAM_IDLE_BREAK_S <= 0 or _TEAM_STREAM_IDLE_BREAK_S >= 300:
+if not math.isfinite(_TEAM_STREAM_IDLE_BREAK_S) or _TEAM_STREAM_IDLE_BREAK_S <= 0 or _TEAM_STREAM_IDLE_BREAK_S >= 300:
     logger.warning(
         '[TeamHelpers] JIUWEN_TEAM_STREAM_IDLE_BREAK_S=%s out of safe range (0, 300); clamped to 240',
         _TEAM_STREAM_IDLE_BREAK_S,
     )
     _TEAM_STREAM_IDLE_BREAK_S = 240.0
+
+# busy 门控推迟的总时长上限（等用户决策的推迟不设上限——relay 看门狗同样按桥
+# 真相暂停）。成员状态卡 busy（RC1 的 stuck-BUSY 场景）时快照与"长工具合法忙"
+# 无法区分，无上限会让 idle-break 永不触发；封顶后照原路径拆流。推迟期间每次
+# 窗口都会向 relay 广播业务帧保活（见消费循环），relay 300s 看门狗不会抢跑。
+_TEAM_STREAM_IDLE_BREAK_BUSY_DEFER_CAP_S = 1800.0
 
 
 def strip_slash_directive(query: str, prefix: str) -> tuple[str, bool]:
@@ -1254,6 +1261,68 @@ async def _team_round_settled(channel_id: str | None, session_id: str) -> bool:
         return False
 
 
+async def _team_has_pending_user_decision(session_id: str) -> bool:
+    """Return True while an ask_user card for this session is awaiting the user.
+
+    A leader blocked on ask_user produces zero stream chunks; that silence is
+    "waiting for the user", not a stalled sidecar, so idle-break must not tear
+    the stream down (teardown would also aclose() the stream and swallow the
+    user's eventual answer). Conservative: lookup errors -> False (caller keeps
+    the current teardown behavior as fallback).
+    """
+    try:
+        from jiuwenclaw.agentserver.deep_agent.ask_user_question_registry import (
+            AskUserQuestionRegistry,
+        )
+        return AskUserQuestionRegistry.get_instance().has_pending_for_session(session_id)
+    except Exception:
+        logger.debug(
+            '[TeamHelpers] pending user decision check failed: session_id=%s',
+            session_id,
+            exc_info=True)
+        return False
+
+
+async def _team_stream_has_active_member(channel_id: str | None, session_id: str) -> bool:
+    """Return True when any team member (leader included) is genuinely active.
+
+    Any status outside settled/unstarted (e.g. busy: long tool such as
+    deepresearch, or blocked on a permission interaction whose wait lives
+    inside the openjiuwen kernel and is invisible to the ask_user registry)
+    means the silence is legitimate work, not a stalled stream.
+
+    必须走 monitor 的未过滤成员列表：``get_team_snapshot()`` 会把 leader 从
+    members 里剔除（前端展示语义），而阻塞在长工具/权限交互上的恰恰是 leader。
+    Conservative inverse of _team_round_settled: missing monitor/handler or
+    query errors -> False so idle-break keeps its teardown fallback (relay's
+    300s watchdog remains the backstop for a stuck-busy status).
+    """
+    try:
+        team_manager = get_team_manager(channel_id)
+        handler = team_manager.get_monitor_handler(session_id)
+        monitor = getattr(handler, '_monitor', None) if handler is not None else None
+        get_members = getattr(monitor, 'get_members', None) if monitor is not None else None
+        if not callable(get_members):
+            return False
+        members = await get_members()
+        for member in members or []:
+            status = str(getattr(member, 'status', '') or '').strip().lower()
+            if not status:
+                continue
+            if status in _TEAM_MEMBER_SETTLED_STATUSES:
+                continue
+            if status == _TEAM_MEMBER_UNSTARTED_STATUS:
+                continue
+            return True
+        return False
+    except Exception:
+        logger.debug(
+            '[TeamHelpers] active member check failed: session_id=%s',
+            session_id,
+            exc_info=True)
+        return False
+
+
 def _tool_event_name(parsed: dict[str, Any]) -> str:
     """Best-effort tool name from chat.tool_call / tool_result / tool_update."""
     event_type = str(parsed.get('event_type') or '').strip()
@@ -2082,6 +2151,9 @@ async def _consume_stream_with_query_impl(
         # 上次 relay 业务帧时间（monotonic）。流开始前的 chat.processing_status
         # (is_processing=True) 即业务帧，计时起点即循环入口。
         last_relay_business_at = time.monotonic()
+        # idle-break 门控推迟的起始时刻（monotonic）；收到任何 chunk 即重置。
+        # 仅 busy 推迟受 _TEAM_STREAM_IDLE_BREAK_BUSY_DEFER_CAP_S 封顶；等用户决策不封顶。
+        idle_defer_since: float | None = None
         while True:
             try:
                 chunk = await asyncio.wait_for(
@@ -2090,6 +2162,48 @@ async def _consume_stream_with_query_impl(
             except StopAsyncIteration:
                 break
             except asyncio.TimeoutError:
+                # 静默不等于卡死：等用户决策（ask_user 注册表有 pending）或成员仍在忙
+                # （长工具 / leader 阻塞在 openjiuwen 内核的权限交互，该等待 sidecar 侧
+                # 无注册表可查，靠成员快照 busy 覆盖）时继续等，不拆流。
+                pending_decision = await _team_has_pending_user_decision(session_id)
+                busy_member = (
+                    False if pending_decision
+                    else await _team_stream_has_active_member(channel_id, session_id)
+                )
+                if pending_decision or busy_member:
+                    now = time.monotonic()
+                    if idle_defer_since is None:
+                        idle_defer_since = now
+                    deferred_for = now - idle_defer_since
+                    # busy 推迟封顶（stuck-BUSY 与合法长工具快照不可区分，无上限会让
+                    # idle-break 对 RC1 场景失效）；等用户决策不封顶。
+                    if busy_member and not pending_decision and deferred_for > _TEAM_STREAM_IDLE_BREAK_BUSY_DEFER_CAP_S:
+                        logger.warning(
+                            '[TeamHelpers] stream idle %ss with busy member for %.0fs '
+                            '(cap %.0fs); treating as stalled: channel_id=%s session_id=%s',
+                            _TEAM_STREAM_IDLE_BREAK_S, deferred_for,
+                            _TEAM_STREAM_IDLE_BREAK_BUSY_DEFER_CAP_S,
+                            _resolve_channel_id(channel_id), session_id,
+                        )
+                    else:
+                        logger.info(
+                            '[TeamHelpers] stream idle %ss but %s; keep waiting (no teardown): '
+                            'channel_id=%s session_id=%s',
+                            _TEAM_STREAM_IDLE_BREAK_S,
+                            'a user decision is pending' if pending_decision
+                            else 'member(s) still active (long tool / permission wait)',
+                            _resolve_channel_id(channel_id), session_id,
+                        )
+                        # 向 relay 发业务帧保活：relay 看门狗只认业务帧（keepalive 不重置），
+                        # 推迟期间不发帧会让 relay 300s 看门狗抢跑（pause-skip 抑制 chat.file）。
+                        _broadcast_event(channel_id, session_id, {
+                            'event_type': 'chat.processing_status',
+                            'session_id': session_id,
+                            'rid': round_id,
+                            'is_processing': True,
+                            'is_complete': False,
+                        })
+                        continue
                 logger.warning(
                     '[TeamHelpers] stream idle-stalled %ss with no chunk; finalizing '
                     'teardown (not pause): channel_id=%s session_id=%s',
@@ -2098,11 +2212,13 @@ async def _consume_stream_with_query_impl(
                 _broadcast_event(channel_id, session_id, {
                     'event_type': 'team.stalled',
                     'session_id': session_id,
+                    'rid': round_id,
                     'reason': 'idle_break',
                     'idle_seconds': _TEAM_STREAM_IDLE_BREAK_S,
                 })
                 break
             received_chunks += 1
+            idle_defer_since = None
             if received_chunks == 1 or received_chunks % 30 == 0:
                 _role = getattr(chunk, 'role', None)
                 logger.info(

@@ -134,3 +134,154 @@ async def test_pause_skip_branch_unchanged_on_cancel(monkeypatch):
     types = [p.get("event_type") for p in captured]
     assert "team.completed" not in types
     assert "team.stalled" not in types  # pause path: no stalled either
+
+
+@pytest.mark.asyncio
+async def test_idle_break_deferred_while_pending_user_decision(monkeypatch):
+    """08-12 场景：审批/提问等待期间零 chunk 是等用户而非卡死，idle-break 不得拆流。
+
+    pending 查询第一次 True（等用户）→ 继续等；第二次 False（用户已答/记录清）→
+    无 busy 成员 → 正常拆流。断言 stalled 只在第二个窗口后才发，且带 rid。
+    """
+    import time
+
+    import jiuwenclaw.agentserver.deep_agent.team_helpers as th
+
+    monkeypatch.setattr(th, "_TEAM_STREAM_IDLE_BREAK_S", 0.15)
+    pending = AsyncMock(side_effect=[True, False])
+    active = AsyncMock(return_value=False)
+    monkeypatch.setattr(th, "_team_has_pending_user_decision", pending)
+    monkeypatch.setattr(th, "_team_stream_has_active_member", active)
+    stream = _FakeStream(chunks=[_chunk()], block_after=True)
+    captured = _patch_common(monkeypatch, _mock_tm(), stream, settled=False)
+    started = time.monotonic()
+    await th._consume_stream_with_query_impl(
+        "officeclaw", "officeclaw_s1", MagicMock(), "q",
+        round_id=1, envs={}, hide_dm=False,
+    )
+    elapsed = time.monotonic() - started
+    types = [p.get("event_type") for p in captured]
+    assert "team.stalled" in types, types
+    assert pending.await_count == 2, "首个窗口应因 pending 推迟，第二窗口才拆流"
+    stalled = next(p for p in captured if p.get("event_type") == "team.stalled")
+    assert stalled.get("rid") == 1
+    pings = [
+        p for p in captured
+        if p.get("event_type") == "chat.processing_status" and p.get("is_processing")
+    ]
+    assert len(pings) >= 2, "推迟窗口应向 relay 广播业务帧保活（防 relay 看门狗抢跑）"
+    assert elapsed >= 0.25, f"应在第二个空闲窗口才拆流, got {elapsed:.3f}s"
+
+
+@pytest.mark.asyncio
+async def test_idle_break_deferred_while_member_active(monkeypatch):
+    """08-11 场景：长工具执行期间成员快照 busy → 静默是合法工作，idle-break 不得拆流。"""
+    import time
+
+    import jiuwenclaw.agentserver.deep_agent.team_helpers as th
+
+    monkeypatch.setattr(th, "_TEAM_STREAM_IDLE_BREAK_S", 0.15)
+    pending = AsyncMock(return_value=False)
+    active = AsyncMock(side_effect=[True, False])
+    monkeypatch.setattr(th, "_team_has_pending_user_decision", pending)
+    monkeypatch.setattr(th, "_team_stream_has_active_member", active)
+    stream = _FakeStream(chunks=[_chunk()], block_after=True)
+    captured = _patch_common(monkeypatch, _mock_tm(), stream, settled=False)
+    started = time.monotonic()
+    await th._consume_stream_with_query_impl(
+        "officeclaw", "officeclaw_s1", MagicMock(), "q",
+        round_id=1, envs={}, hide_dm=False,
+    )
+    elapsed = time.monotonic() - started
+    types = [p.get("event_type") for p in captured]
+    assert "team.stalled" in types, types
+    assert active.await_count == 2, "首个窗口应因 busy 成员推迟，第二窗口才拆流"
+    assert elapsed >= 0.25, f"应在第二个空闲窗口才拆流, got {elapsed:.3f}s"
+
+
+@pytest.mark.asyncio
+async def test_idle_break_busy_defer_capped(monkeypatch):
+    """busy 推迟必须封顶：成员状态卡 busy（RC1 stuck-BUSY）与合法长工具快照不可区分，
+    无上限会让 idle-break 对 RC1 场景失效。封顶后即使仍 busy 也按 stalled 拆流。
+    """
+    import time
+
+    import jiuwenclaw.agentserver.deep_agent.team_helpers as th
+
+    monkeypatch.setattr(th, "_TEAM_STREAM_IDLE_BREAK_S", 0.15)
+    monkeypatch.setattr(th, "_TEAM_STREAM_IDLE_BREAK_BUSY_DEFER_CAP_S", 0.2)
+    pending = AsyncMock(return_value=False)
+    active = AsyncMock(return_value=True)  # 成员一直 busy（卡死）
+    monkeypatch.setattr(th, "_team_has_pending_user_decision", pending)
+    monkeypatch.setattr(th, "_team_stream_has_active_member", active)
+    stream = _FakeStream(chunks=[_chunk()], block_after=True)
+    captured = _patch_common(monkeypatch, _mock_tm(), stream, settled=False)
+    started = time.monotonic()
+    await th._consume_stream_with_query_impl(
+        "officeclaw", "officeclaw_s1", MagicMock(), "q",
+        round_id=1, envs={}, hide_dm=False,
+    )
+    elapsed = time.monotonic() - started
+    types = [p.get("event_type") for p in captured]
+    assert "team.stalled" in types, "busy 封顶后仍应拆流"
+    assert active.await_count == 3, f"前两个窗口推迟（含保活），第三窗口封顶拆流: {active.await_count}"
+    assert elapsed < 1.0, f"封顶后应尽早拆流, got {elapsed:.3f}s"
+
+
+def test_idle_break_env_clamp_non_finite_and_out_of_range(monkeypatch):
+    """nan/inf 穿过 <=0 / >=300 比较（IEEE 比较恒 False），必须按非有限数钳制。"""
+    import importlib
+
+    import jiuwenclaw.agentserver.deep_agent.team_helpers as th
+
+    cases = [
+        ("nan", 240.0),
+        ("-nan", 240.0),
+        ("inf", 240.0),
+        ("abc", 240.0),
+        ("301", 240.0),
+        ("300", 240.0),
+        ("0", 240.0),
+        ("-1", 240.0),
+        ("0.5", 0.5),
+        ("120", 120.0),
+    ]
+    try:
+        for raw, expected in cases:
+            monkeypatch.setenv("JIUWEN_TEAM_STREAM_IDLE_BREAK_S", raw)
+            importlib.reload(th)
+            assert th._TEAM_STREAM_IDLE_BREAK_S == expected, raw
+    finally:
+        monkeypatch.delenv("JIUWEN_TEAM_STREAM_IDLE_BREAK_S", raising=False)
+        importlib.reload(th)
+
+
+@pytest.mark.asyncio
+async def test_active_member_gate_includes_leader(monkeypatch):
+    """get_team_snapshot 会把 leader 滤掉（前端展示语义），而阻塞在权限交互/长工具
+    上的恰恰是 leader——门控必须走 monitor 未过滤的成员列表。"""
+    from types import SimpleNamespace
+
+    import jiuwenclaw.agentserver.deep_agent.team_helpers as th
+
+    monitor = SimpleNamespace(
+        get_members=AsyncMock(
+            return_value=[SimpleNamespace(member_name="leader", status="busy")]
+        )
+    )
+    handler = SimpleNamespace(_monitor=monitor)
+    tm = SimpleNamespace(get_monitor_handler=lambda sid: handler)
+    monkeypatch.setattr(th, "get_team_manager", lambda cid: tm)
+    assert await th._team_stream_has_active_member("officeclaw", "s1") is True
+
+    # 全部 settled/unstarted → False（放行拆流）
+    monitor.get_members = AsyncMock(return_value=[
+        SimpleNamespace(member_name="leader", status="ready"),
+        SimpleNamespace(member_name="m1", status="unstarted"),
+        SimpleNamespace(member_name="m2", status="paused"),
+    ])
+    assert await th._team_stream_has_active_member("officeclaw", "s1") is False
+
+    # handler/monitor 缺失 → False（保守回退，维持原拆流行为）
+    tm.get_monitor_handler = lambda sid: None
+    assert await th._team_stream_has_active_member("officeclaw", "s1") is False
