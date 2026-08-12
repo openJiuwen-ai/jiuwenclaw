@@ -3084,6 +3084,15 @@ class AgentWebSocketServer:
                         )
                     else:
                         await asyncio.to_thread(shutil.rmtree, session_dir)
+                        # 清理内存中的 agent 实例和缓存绑定
+                        try:
+                            agent_id, service_id = TenantAgentPool.extract_ids(request)
+                            agent_manager = self._agent_manager.get_agent_manager_nowait(agent_id, service_id)
+                            if agent_manager is not None:
+                                channel_id = request.channel_id or "default"
+                                await agent_manager.cleanup_all_modes(channel_id, safe_sid)
+                        except Exception as cleanup_exc:
+                            logger.warning("[AgentServer] session.delete memory cleanup failed: %s", cleanup_exc)
                         resp = AgentResponse(
                             request_id=request.request_id,
                             channel_id=request.channel_id,
