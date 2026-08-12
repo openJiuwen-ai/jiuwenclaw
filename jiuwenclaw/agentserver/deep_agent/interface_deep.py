@@ -8717,15 +8717,45 @@ class JiuWenClawDeepAdapter:
             raw_result = None
         return decode_html_tool_result(raw_result)
 
+    def _build_deepresearch_rewrite_model(self) -> Model:
+        request_env = get_task_env_overlay()
+        if request_env is None:
+            raise RuntimeError(
+                "DeepResearch rewrite requires a bound request environment"
+            )
+
+        config_base = patch_model_config_from_env(get_config(), request_env)
+        entries = get_default_models(config_base)
+        if not entries:
+            raise ValueError(
+                "DeepResearch rewrite model configuration is unavailable"
+            )
+
+        entry = entries[0]
+        model_client_config = dict(entry.get("model_client_config") or {})
+        model_client_config["claw_config"] = config_base
+        return self._build_model_from_entry(
+            model_client_config,
+            entry.get("model_config_obj") or {},
+        )
+
     async def _try_deepresearch_rewrite_fast_path(
             self,
             query: object,
     ) -> RewriteFastPathResult | None:
         from jiuwenclaw.agentserver.tools.deepresearch import rewrite_tools
 
+        rewrite_model: Model | None = None
+
+        async def _invoke_request_model(*args, **kwargs):
+            nonlocal rewrite_model
+            if rewrite_model is None:
+                rewrite_model = self._build_deepresearch_rewrite_model()
+            return await rewrite_model.invoke(*args, **kwargs)
+
         return await run_rewrite_fast_path(
             query,
-            model_invoke=self._model.invoke,
+            model_invoke=_invoke_request_model,
             prepare_invoke=rewrite_tools.deepresearch_prepare_rewrite._func,  # pylint: disable=protected-access
             commit_invoke=rewrite_tools.deepresearch_commit_rewrite._func,  # pylint: disable=protected-access
         )
