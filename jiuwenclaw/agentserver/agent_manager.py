@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
@@ -153,6 +154,9 @@ class AgentManager:
         self.agents: dict[str, dict[str, dict[str, "JiuWenClaw"]]] = {}
         self._client_capabilities_by_channel: dict[str, dict[str, Any]] = {}
 
+        # 空闲 session 淘汰追踪: session_key -> last_used_timestamp
+        self._session_last_used: dict[str, float] = {}
+
         # 保存初始配置（用于后续创建的 agent 重放）
         self._latest_config_base: dict[str, Any] | None = config_base
         self._latest_env_overrides: dict[str, Any] = {}
@@ -236,6 +240,91 @@ class AgentManager:
             f"{self.env_service_id}:{self.env_agent_id}:"
             f"{channel_id}:{mode}:{session_id}"
         )
+
+    # ---- 空闲 session 淘汰 ----
+
+    SESSION_IDLE_TTL_SEC = 2 * 60 * 60  # 2小时空闲后淘汰
+    SESSION_EVICT_BATCH_SIZE = 3
+
+    def _touch_session(self, channel_id: str, mode: str, session_id: str) -> None:
+        """更新 session 的最后使用时间戳。"""
+        session_key = self._build_session_key(channel_id, mode, session_id)
+        self._session_last_used[session_key] = time.time()
+
+    @staticmethod
+    def _is_safe_to_evict(agent: Any, session_id: str) -> bool:
+        """检查 session 是否可以安全淘汰。
+
+        活跃任务/流/队列/team monitor/ACP 由 is_working() 覆盖。
+        Team paused/resumable runtime 需额外检查。
+        """
+        try:
+            if hasattr(agent, "is_working") and agent.is_working():
+                return False
+        except Exception:
+            return False
+
+        # 检查 team paused/resumable runtime
+        adapter = getattr(agent, "_adapter", None)
+        if adapter is not None:
+            team_manager = getattr(adapter, "_team_manager", None)
+            if team_manager is not None:
+                try:
+                    if getattr(team_manager, "has_resumable_runtime", lambda _: False)(session_id):
+                        return False
+                    if getattr(team_manager, "is_pause_in_progress", lambda _: False)(session_id):
+                        return False
+                    if getattr(team_manager, "has_waiters", lambda _: False)(session_id):
+                        return False
+                    if session_id in getattr(team_manager, "_team_evolution_watchers", {}):
+                        return False
+                except Exception:
+                    return False
+
+        return True
+
+    async def _evict_idle_sessions(self) -> None:
+        """扫描并淘汰空闲超时的 session。
+
+        在请求边界的 finally 块中触发，每次最多淘汰 SESSION_EVICT_BATCH_SIZE 个。
+        """
+        if not self._session_last_used:
+            return
+
+        now = time.time()
+        evicted = 0
+
+        for channel_id in list(self.agents.keys()):
+            channel_agents = self.agents.get(channel_id, {})
+            if not isinstance(channel_agents, dict):
+                continue
+            for mode, mode_agents in list(channel_agents.items()):
+                if not isinstance(mode_agents, dict):
+                    continue
+                for session_id in list(mode_agents.keys()):
+                    if evicted >= self.SESSION_EVICT_BATCH_SIZE:
+                        break
+
+                    session_key = self._build_session_key(channel_id, mode, session_id)
+                    last_used = self._session_last_used.get(session_key, 0.0)
+                    if now - last_used < self.SESSION_IDLE_TTL_SEC:
+                        continue
+
+                    agent = mode_agents.get(session_id)
+                    if agent is None or not self._is_safe_to_evict(agent, session_id):
+                        continue
+
+                    logger.info(
+                        "[AgentManager] 空闲淘汰 session: channel=%s mode=%s session=%s idle=%.0fs",
+                        channel_id, mode, session_id, now - last_used,
+                    )
+                    await self.cleanup_session(channel_id, mode, session_id)
+                    evicted += 1
+
+                if evicted >= self.SESSION_EVICT_BATCH_SIZE:
+                    break
+            if evicted >= self.SESSION_EVICT_BATCH_SIZE:
+                break
 
     def _memory_workspace_dir(self) -> str:
         if self.user_workspace_dir:
@@ -454,6 +543,7 @@ class AgentManager:
                     f"[AgentManager] 复用现有Agent: channel={channel_id} mode={mode} session={effective_session_id}",
                     extra={'user_visible': 'critical'}
                 )
+                self._touch_session(channel_id, mode, effective_session_id)
                 return self.agents[channel_id][mode][effective_session_id]
 
         config = {"workspace_dir": workspace_dir} if workspace_dir else {}
@@ -469,6 +559,7 @@ class AgentManager:
             extra={'user_visible': 'critical'}
         )
         await self._create_agent(channel_id, mode, effective_session_id, config)
+        self._touch_session(channel_id, mode, effective_session_id)
         return self.agents.get(channel_id, {}).get(mode, {}).get(effective_session_id)
 
     def get_agent_nowait(
@@ -864,8 +955,12 @@ class AgentManager:
             )
             await session.post_run()  # 写入 checkpointer
 
-        async for chunk in agent.process_message_stream(request):
-            yield chunk
+        try:
+            async for chunk in agent.process_message_stream(request):
+                yield chunk
+        finally:
+            # 流式响应完成后（或异常中断时）触发空闲 session 淘汰扫描
+            await self._evict_idle_sessions()
 
     async def reload_agent_config(
             self,
@@ -910,6 +1005,7 @@ class AgentManager:
                 await release_memory_cache_session(session_key)
             except Exception as exc:
                 logger.warning("[AgentManager] release memory cache failed for %s: %s", session_key, exc)
+            self._session_last_used.pop(session_key, None)
 
             if agent:
                 if hasattr(agent, "cleanup"):
@@ -920,6 +1016,18 @@ class AgentManager:
                 )
         except Exception as e:
             logger.warning("[AgentManager] Session cleanup failed: %s", e)
+
+    async def cleanup_all_modes(self, channel_id: str, session_id: str) -> None:
+        """清理指定 channel 下所有 mode 的 session.
+
+        封装 agents 内部字典的遍历逻辑，供外部调用方使用，
+        避免直接访问 agents 破坏封装性。
+        """
+        channel_agents = self.agents.get(channel_id, {})
+        if not isinstance(channel_agents, dict):
+            return
+        for mode in list(channel_agents.keys()):
+            await self.cleanup_session(channel_id, mode, session_id)
 
     async def cleanup(self) -> None:
         """清理所有 agent 实例."""

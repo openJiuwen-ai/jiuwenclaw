@@ -4364,6 +4364,20 @@ class JiuWenClawDeepAdapter:
         if runtime_tools:
             self._remove_registered_tools(runtime_tools)
         self._cleanup_qualified_runtime_tools()
+        # 显式释放 checkpointer 的 SQLAlchemy AsyncEngine 连接池，
+        # 避免 SQLite 连接泄漏（SDK 未提供 close 方法）。
+        if self._checkpointer is not None:
+            kv_store = getattr(self._checkpointer, "_kv_store", None)
+            if kv_store is not None:
+                engine = getattr(kv_store, "engine", None)
+                if engine is not None:
+                    try:
+                        await engine.dispose()
+                    except Exception as exc:
+                        logger.warning(
+                            "[JiuWenClawDeepAdapter] checkpointer engine dispose failed: %s", exc
+                        )
+            self._checkpointer = None
 
     async def load_user_rails(self) -> None:
         """动态加载用户自定义的 Rail 扩展."""
