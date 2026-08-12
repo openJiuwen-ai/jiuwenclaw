@@ -5,6 +5,7 @@
 from jiuwenclaw.agentserver.permissions.skill_authorization.composer import (
     SkillAuthorizationContext,
     compose_skill_permissions,
+    effective_file_guard_axis_level,
     get_skill_authorization_context,
     reset_skill_authorization_context,
     setup_skill_authorization_context,
@@ -93,6 +94,7 @@ __all__ = [
     # Composer + request context
     "SkillAuthorizationContext",
     "compose_skill_permissions",
+    "effective_file_guard_axis_level",
     "get_skill_authorization_context",
     "reset_skill_authorization_context",
     "setup_skill_authorization_context",

@@ -13,6 +13,7 @@ import { InputArea } from './InputArea';
 import { SubtaskProgress } from './SubtaskProgress';
 import { InlineQuestionCard } from './InlineQuestionCard';
 import { HistoryPagerBar } from './HistoryPagerBar';
+import { scrollNewApprovalIntoView } from './approvalPresentation';
 import './ChatPanel.css';
 
 export interface ChatHistoryPagerProps {
@@ -29,7 +30,7 @@ interface ChatPanelProps {
   isProcessing: boolean;
   hasActiveRequest: boolean;
   onNewSession: () => Promise<void>;
-  onUserAnswer: (requestId: string, answers: UserAnswer[]) => void;
+  onUserAnswer: (requestId: string, answers: UserAnswer[], source?: string) => void;
   /** 自会话管理恢复历史后出现；支持分页加载更早消息 */
   historyPager?: ChatHistoryPagerProps | null;
 }
@@ -75,8 +76,10 @@ export function ChatPanel({
   historyPager = null,
 }: ChatPanelProps) {
   const { t } = useTranslation();
-  const { messages, isThinking } = useChatStore();
+  const { messages, isThinking, pendingQuestion } = useChatStore();
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const approvalCardRef = useRef<HTMLDivElement>(null);
+  const lastApprovalRequestIdRef = useRef<string | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const prependScrollSnapRef = useRef<{ sh: number; st: number } | null>(null);
   const wasHistoryLoadingRef = useRef(false);
@@ -111,6 +114,14 @@ export function ChatPanel({
       messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
   }, [messages, isThinking]);
+
+  useLayoutEffect(() => {
+    lastApprovalRequestIdRef.current = scrollNewApprovalIntoView(
+      approvalCardRef.current,
+      pendingQuestion?.request_id,
+      lastApprovalRequestIdRef.current,
+    );
+  }, [pendingQuestion?.request_id]);
 
   useLayoutEffect(() => {
     if (!historyPager) {
@@ -179,7 +190,9 @@ export function ChatPanel({
                 <MessageList messages={messages} />
                 <SubtaskProgress />
                 {/* 内联审批卡片（演进审批 & 权限审批共用） */}
-                <InlineQuestionCard onSubmit={onUserAnswer} />
+                <div ref={approvalCardRef}>
+                  <InlineQuestionCard onSubmit={onUserAnswer} />
+                </div>
                 {/* 思考中指示器 */}
                 {isThinking && <ThinkingIndicator />}
               </>
