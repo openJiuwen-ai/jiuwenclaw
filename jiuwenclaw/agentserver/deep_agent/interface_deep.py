@@ -1338,6 +1338,7 @@ class JiuWenClawDeepAdapter:
         self._model_request_config: ModelRequestConfig | None = None
         self._config_cache: dict[str, Any] = {}
         self._latest_config_base: dict[str, Any] | None = None
+        self._last_sync_env: dict[str, Any] | None = None
         self._filesystem_rail: FileSystemRail | None = None
         self._skill_rail: JiuWenSkillUseRail | None = None
         self._qualified_memory_tool_ids: list[str] = []
@@ -2463,10 +2464,15 @@ class JiuWenClawDeepAdapter:
             entries = get_default_models(config)
             if entries:
                 base_entry = entries[0]
-                mcc = dict(base_entry.get("model_client_config") or {})
-                mcc["model_name"] = env_model_name
-                mco = base_entry.get("model_config_obj") or {}
-                self._model_cache[env_model_name] = self._build_model_from_entry(mcc, mco)
+            else:
+                # Fallback: use models.default from patched config so that
+                # env_model_name always gets a cache entry even when
+                # get_default_models returns empty.
+                base_entry = config.get("models", {}).get("default", {})
+            mcc = dict(base_entry.get("model_client_config") or {})
+            mcc["model_name"] = env_model_name
+            mco = base_entry.get("model_config_obj") or {}
+            self._model_cache[env_model_name] = self._build_model_from_entry(mcc, mco)
 
         if env_model_name and env_model_name in self._model_cache:
             self._default_model_name = env_model_name
@@ -2480,7 +2486,7 @@ class JiuWenClawDeepAdapter:
         return self._model
 
     def _resolve_model_for_request(self, request: AgentRequest) -> Model:
-        """根据请求中的 model_name 参数查找对应模型，未匹配则回退默认模型。"""
+        """根据请求中的 model_name 参数查找对应模型，未匹配则尝试从 sync env 重建，最终回退默认模型。"""
         requested = (request.params.get("model_name") or "").strip()
         if requested and requested in self._model_cache:
             logger.info(
@@ -2488,10 +2494,45 @@ class JiuWenClawDeepAdapter:
                 extra={'user_visible': 'progress'}
             )
             return self._model_cache[requested]
+
+        # Cache miss: try to rebuild from last sync env_overrides
+        if requested and self._last_sync_env and self._latest_config_base:
+            sync_model_name = str(self._last_sync_env.get("MODEL_NAME") or "").strip()
+            if sync_model_name == requested:
+                try:
+                    patched = patch_model_config_from_env(
+                        self._latest_config_base, self._last_sync_env)
+                    entries = get_default_models(patched)
+                    base_entry = entries[0] if entries else patched.get("models", {}).get("default", {})
+                    mcc = dict(base_entry.get("model_client_config") or {})
+                    mcc["model_name"] = requested
+                    mco = base_entry.get("model_config_obj") or {}
+                    rebuilt = self._build_model_from_entry(mcc, mco)
+                    self._model_cache[requested] = rebuilt
+                    logger.info(
+                        f"[JiuWenClawDeepAdapter] 模型配置解析: requested={requested} -> rebuilt_from_sync_env",
+                        extra={'user_visible': 'progress'}
+                    )
+                    return rebuilt
+                except Exception as exc:
+                    logger.warning(
+                        "[JiuWenClawDeepAdapter] 模型配置解析: rebuild from sync env failed: %s", exc)
+
+        # Final fallback to default model
         logger.info(
             f"[JiuWenClawDeepAdapter] 模型配置解析: using_default_model",
             extra={'user_visible': 'progress'}
         )
+        model_cfg = getattr(self._model, "model_config", None)
+        default_name = getattr(model_cfg, "model_name", None)
+        if not default_name:
+            default_name = self._resolve_model_name() or "?"
+        if requested and requested != default_name:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] 模型配置解析: requested=%s not_in_cache, "
+                "fallback to default_model=%s, cache_keys=%s",
+                requested, default_name, list(self._model_cache.keys()),
+            )
         return self._model
 
     def _resolve_model(
@@ -3757,8 +3798,14 @@ class JiuWenClawDeepAdapter:
     def _update_permission_rail(self, config_base: dict[str, Any] | None) -> None:
         """原地更新已有 PermissionRail 配置，或在首次启用时新建。"""
         permission_config = config_base.get("permissions", {}) if config_base else {}
-        model_name = (config_base or {}).get("models", {}).get(
-            "default", {}).get("model_client_config", {}).get("model_name", "gpt-4")
+        # Prefer self._model's model_name (already patched by _create_model via
+        # patch_model_config_from_env) over raw config_base which may still hold
+        # unresolved ${MODEL_NAME} or .env baseline values.
+        model_name = (
+            getattr(getattr(self._model, "model_config", None), "model_name", None)
+            or (config_base or {}).get("models", {}).get(
+                "default", {}).get("model_client_config", {}).get("model_name", "")
+        )
         if self._permission_rail is not None:
             self._permission_rail.update_config(
                 permission_config,
@@ -4745,6 +4792,8 @@ class JiuWenClawDeepAdapter:
 
             model = self._create_model(config_base, env_overrides)
             self._model = model
+            if isinstance(env_overrides, dict) and env_overrides:
+                self._last_sync_env = dict(env_overrides)
             self._agent_name = self._instance_overrides.get("agent_name", config.get("agent_name", "main_agent"))
             agent_card_id = self._resolve_agent_card_id()
             agent_card = AgentCard(name=self._agent_name, id=agent_card_id)
