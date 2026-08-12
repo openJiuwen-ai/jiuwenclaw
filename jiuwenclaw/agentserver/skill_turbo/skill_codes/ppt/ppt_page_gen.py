@@ -827,7 +827,10 @@ def _build_custom_content_template_fill_prompt(
         "4. 新增样式只引用风格文件已定义变量，不得另立视觉权威，不得覆盖 `@layer utilities`，"
         "不得用 `*`、`body` 或根 `:root` 重定义颜色/字体\n"
         "5. 图表候选页必须优先激活模板内 `CHART_SCAFFOLD`；禁止额外手写第二套 `echarts.init`；"
-        "非图表页保留注释\n"
+        "非图表页保留注释。"
+        "容器高度链须遵从 designer.md / 脚手架注释："
+        "`div.flex.flex-col` → `div.flex-1.min-h-0` → `div#chart-*.w-full.h-full`"
+        "（可读高度建议 ≥300px 由页面预算保证；模板 CSS 已兜底 min-height:160px）\n"
         "6. 完成后不得残留任何 `{{[A-Z][A-Z0-9_]*}}`\n"
         "7. 直接输出完整 HTML，禁止 Markdown 代码块包裹与解释文字\n\n"
         "## 可见文字来源契约（generate-slide-designer-tasks）\n"
@@ -942,8 +945,10 @@ _DESIGN_RULES_DIGEST = (
     "4.2 图表最小高度（强制）：图表容器实际渲染高度必须 ≥ 160px（防塌缩下限），"
     "用 `min-h-[160px]` 或 `flex-1` 确保图表区域能初始化渲染；"
     "建议图表可读高度 ≥ 300px，由页面预算保证\n"
-    "4.2.1 图表高度链（强制）：图表外层卡片须 `flex-1 min-h-0 flex flex-col`（或 `flex-[N] min-h-0 flex flex-col`），"
-    "内层 `#xxx-chart` 用 `flex-1 min-h-0 w-full`；禁止在无 `min-h-0`/`flex-1` 的 flex-col 父容器内单独给 chart div 加 `flex-1`\n"
+    "4.2.1 图表高度链（强制，对齐 designer.md CHART_SCAFFOLD）："
+    "`flex flex-col`（父）→ `flex-1 min-h-0`（包装器）→ `w-full h-full`（chart）；"
+    "也允许等价合并为外层卡片 `flex-1 min-h-0 flex flex-col`（或 `flex-[N] min-h-0 flex flex-col`）直接包住 chart；"
+    "禁止外层仅有 `flex flex-col` 且无中间高度包装时直接挂 chart\n"
     "4.3 图表颜色（强制）：图表数据系列颜色必须来自风格文件的图表配色表，禁止使用相近色；"
     "坐标轴标签用深色，分割线用浅色\n"
     "4.4 图表标签防重叠：建议为 ECharts series 设置 `labelLayout:{moveOverlap:'shiftY'}` 防止同系列标签重叠；"
@@ -1419,11 +1424,28 @@ def _chart_wrapper_has_height_chain(wrapper_tag: str) -> bool:
     return bool(_CHART_WRAPPER_HEIGHT_RE.search(wrapper_tag))
 
 
-def _validate_chart_height_chain(html: str) -> bool:
-    """P8.1 写盘前校验：ECharts 图表外层 flex-col 卡片须具备高度分配类。
+_CHART_HEIGHT_DIV_OPEN_RE = re.compile(
+    r'<div\b[^>]*\bclass="[^"]*"[^>]*>',
+    re.IGNORECASE,
+)
 
-    仅拦截高置信坏案（如 page-5：包装器只有 flex flex-col、无 min-h-0/flex-1）；
-    无法定位包装器时不拦截，避免误伤。
+
+def _segment_has_height_wrapper(segment: str) -> bool:
+    """flex-col 与 chart 之间是否存在带高度分配类的中间包装 div。"""
+    for match in _CHART_HEIGHT_DIV_OPEN_RE.finditer(segment or ""):
+        if _chart_wrapper_has_height_chain(match.group(0)):
+            return True
+    return False
+
+
+def _validate_chart_height_chain(html: str) -> bool:
+    """P8.1 写盘前校验：对齐 designer.md / CHART_SCAFFOLD 高度链。
+
+    官方契约：`flex flex-col`（父）→ `flex-1 min-h-0`（包装器）→ `w-full h-full`（chart）。
+    等价合并写法：`flex-1 min-h-0 flex flex-col` 直接包住 chart 也通过。
+
+    仅拦截高置信坏案：最近 flex-col 自身无高度类，且与 chart 之间也无高度包装；
+    无法定位 flex-col 时不拦截，避免误伤。
     """
     if "echarts.init" not in html.lower():
         return True
@@ -1432,8 +1454,14 @@ def _validate_chart_height_chain(html: str) -> bool:
         wrappers = list(_FLEX_COL_DIV_RE.finditer(before))
         if not wrappers:
             continue
-        if not _chart_wrapper_has_height_chain(wrappers[-1].group(0)):
-            return False
+        nearest = wrappers[-1]
+        if _chart_wrapper_has_height_chain(nearest.group(0)):
+            continue
+        # 官方三层：高度类在 flex-col 与 chart 之间的中间包装上，不要求写在 flex-col 自身。
+        between = before[nearest.end():]
+        if _segment_has_height_wrapper(between):
+            continue
+        return False
     return True
 
 

@@ -1295,6 +1295,26 @@ _CHART_HEIGHT_ENDING_HTML = """<!DOCTYPE html>
 </body></html>
 """
 
+# designer.md / CHART_SCAFFOLD 官方三层：flex-col → flex-1 min-h-0 → chart
+_CHART_HEIGHT_OFFICIAL_SCAFFOLD_HTML = """<!DOCTYPE html>
+<html><body>
+<div class="ppt-slide" type="content">
+  <div class="w-full flex-1 min-h-0 flex flex-col h-full">
+    <header class="flex-shrink-0"><h1>市场规模</h1></header>
+    <div class="flex-1 min-h-0 grid grid-cols-2 gap-4">
+      <div class="flex flex-col">
+        <div class="flex-1 min-h-0">
+          <div id="chart-1" class="w-full h-full"></div>
+        </div>
+      </div>
+      <aside>说明文字</aside>
+    </div>
+  </div>
+</div>
+<script>echarts.init(document.getElementById('chart-1'), null, {renderer:'svg'});</script>
+</body></html>
+"""
+
 
 def test_validate_chart_height_chain_rejects_collapsed_wrapper() -> None:
     assert not ppg._validate_chart_height_chain(_CHART_HEIGHT_BAD_HTML)
@@ -1306,6 +1326,10 @@ def test_validate_chart_height_chain_accepts_flex1_wrapper() -> None:
 
 def test_validate_chart_height_chain_accepts_min_h0_wrapper() -> None:
     assert ppg._validate_chart_height_chain(_CHART_HEIGHT_ENDING_HTML)
+
+
+def test_validate_chart_height_chain_accepts_official_scaffold_three_level() -> None:
+    assert ppg._validate_chart_height_chain(_CHART_HEIGHT_OFFICIAL_SCAFFOLD_HTML)
 
 
 def test_validate_chart_height_chain_skips_non_chart_page() -> None:
@@ -1479,6 +1503,8 @@ def test_custom_content_fill_prompt_follows_official_scaffold_not_freeform() -> 
     assert "页面布局规范" not in prompt
     assert "PART 01" not in prompt
     assert "CHART_SCAFFOLD" in prompt
+    assert "div.flex.flex-col" in prompt
+    assert "div.flex-1.min-h-0" in prompt
     assert "页面内容预算契约" in prompt
 
 
