@@ -203,12 +203,14 @@ from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
     evolution_slash_result,
     is_evolution_approval_event,
     is_evolution_outcome_event,
+    merge_evolution_disabled_skills,
     push_evolution_event,
     push_evolution_progress,
     push_evolution_status,
     record_ids_from_pending_approval,
     reject_evolution_records,
     resolve_evolution_event_timeout_sec,
+    sync_evolution_disabled_skills,
     team_evolution_terminal_progress,
     terminal_stage,
     visible_evolution_progress_from_events,
@@ -5503,7 +5505,9 @@ class JiuWenSwarmDeepAdapter:
                 review_runtime=EvolutionReviewRuntime(),
                 review_trigger=evolution_review_trigger,
                 auto_save=True,
-                disabled_skills=self._skill_manager.list_execution_disabled_skills(),
+                disabled_skills=merge_evolution_disabled_skills(
+                    self._skill_manager.list_execution_disabled_skills()
+                ),
                 trajectory_store=FileTrajectoryStore(trajectory_dir),
             )
             self._skill_evolution_rail = skill_evolution_rail
@@ -5529,7 +5533,7 @@ class JiuWenSwarmDeepAdapter:
         ):
             await self._unconfigure_active_evolution_rails()
 
-        disabled_skills = (
+        disabled_skills = merge_evolution_disabled_skills(
             self._skill_manager.list_execution_disabled_skills()
             if self._skill_manager is not None
             else []
@@ -5549,6 +5553,7 @@ class JiuWenSwarmDeepAdapter:
         )
         self._refresh_active_evolution_rail_refs()
         if self._skill_evolution_rail is not None:
+            sync_evolution_disabled_skills(self._skill_evolution_rail, disabled_skills)
             _set_skill_evolution_triggers(
                 self._skill_evolution_rail,
                 review_trigger=evolution_review_trigger,
@@ -6088,11 +6093,7 @@ class JiuWenSwarmDeepAdapter:
             except Exception as exc:
                 logger.warning("[JiuWenSwarmDeepAdapter] skill rail reload failed: %s", exc)
         if self._skill_evolution_rail is not None:
-            if getattr(self._skill_evolution_rail, "disabled_skills", None) != new_disabled:
-                try:
-                    self._skill_evolution_rail.disabled_skills = new_disabled
-                except (AttributeError, TypeError):
-                    pass
+            sync_evolution_disabled_skills(self._skill_evolution_rail, new_disabled)
 
     def _build_symphony_orchestration_rail(
         self,

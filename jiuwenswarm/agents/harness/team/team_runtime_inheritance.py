@@ -39,6 +39,9 @@ from jiuwenswarm.common.config import (
     get_skill_create_enabled,
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
+from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
+    merge_evolution_disabled_skills,
+)
 from jiuwenswarm.server.runtime.skill import load_execution_disabled_skills
 
 logger = logging.getLogger(__name__)
@@ -276,7 +279,9 @@ def build_member_rails(
                 auto_save=evolution_auto_save,
                 review_trigger=evolution_review_trigger,
                 team_id=team_id,
-                disabled_skills=load_execution_disabled_skills(),
+                disabled_skills=merge_evolution_disabled_skills(
+                    load_execution_disabled_skills()
+                ),
             )
             rails_list.append(
                 EvolutionInterruptRail(
@@ -531,7 +536,9 @@ def build_skill_evolution_rail(
             model=model_name,
             review_runtime=review_runtime,
             auto_save=True,
-            disabled_skills=load_execution_disabled_skills(),
+            disabled_skills=merge_evolution_disabled_skills(
+                load_execution_disabled_skills()
+            ),
         )
         has_team_trajectory_sink = team_trajectory_sink is not None and bool(team_id)
         if has_team_trajectory_sink:

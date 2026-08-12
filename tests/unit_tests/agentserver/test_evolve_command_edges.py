@@ -6,6 +6,7 @@ from openjiuwen.agent_evolving.trajectory import FileTrajectoryStore
 
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenswarm.server.runtime.agent_adapter import evolution_helpers
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep as interface_deep_module
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 
@@ -115,6 +116,11 @@ async def test_evolve_slash_allows_team_without_lazy_registering(monkeypatch):
 @pytest.mark.anyio
 async def test_evolve_slash_lazy_init_registers_active_review_rails(monkeypatch, auto_save):
     monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
+    monkeypatch.setattr(
+        evolution_helpers,
+        "get_builtin_skill_names",
+        lambda: {"builtin-demo"},
+    )
 
     class _FakeSkillEvolutionRail:
         pass
@@ -147,6 +153,7 @@ async def test_evolve_slash_lazy_init_registers_active_review_rails(monkeypatch,
             "enabled": True,
             "review_trigger": False,
             "auto_save": auto_save,
+            "skill_create": False,
         },
         "model_name": "configured-model",
     }
@@ -159,6 +166,8 @@ async def test_evolve_slash_lazy_init_registers_active_review_rails(monkeypatch,
     monkeypatch.setattr(interface_deep_module, "SubagentRail", _FakeSubagentRail)
     monkeypatch.setattr(adapter, "_resolve_runtime_language", lambda: "en")
     monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
+    monkeypatch.delenv("SKILL_CREATE", raising=False)
+    monkeypatch.setattr(interface_deep_module, "get_skill_create_enabled", lambda _config: False)
 
     configure_calls = []
 
@@ -186,13 +195,14 @@ async def test_evolve_slash_lazy_init_registers_active_review_rails(monkeypatch,
     assert isinstance(store, FileTrajectoryStore)
     assert store._base_dir == JiuWenSwarmDeepAdapter._resolve_evolution_trajectory_dir()  # pylint: disable=protected-access
     assert call == {
-        "skills_dir": [str(interface_deep_module.get_agent_skills_dir())],
+        "skills_dir": adapter._resolve_skill_dirs(),  # pylint: disable=protected-access
         "llm": adapter._model,  # pylint: disable=protected-access
         "model": "default-model",
         "review_trigger": False,
         # Rail always persists experiences; config auto_save only gates version merge.
         "auto_save": True,
-        "disabled_skills": ["disabled-demo"],
+        # Execution-disabled + package builtins (sorted by merge_evolution_disabled_skills).
+        "disabled_skills": ["builtin-demo", "disabled-demo"],
         "language": "en",
     }
 
