@@ -9,7 +9,9 @@ def test_default_team_config_enables_managed_worktrees():
 
     data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
 
-    assert data["modes"]["team"]["jiuwen_team"]["worktree"] == {"enabled": True}
+    team_config = data["modes"]["team"]["jiuwen_team"]
+    assert team_config["worktree"] == {"enabled": True}
+    assert team_config["max_debate_rounds"] == 2
 
 
 def test_default_round_level_compressor_config_uses_context_ratio():

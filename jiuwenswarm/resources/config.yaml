@@ -1241,6 +1241,8 @@ modes:
       teammate_mode: build_mode
       spawn_mode: inprocess
       enable_swarmflow: false
+      # Per-teammate soft ceiling for debate messages; task-board collaboration is excluded.
+      max_debate_rounds: 2
 
       # SwarmFlow per-Leader concurrency caps (three-layer governor).
       # Only effective when enable_swarmflow is true.
