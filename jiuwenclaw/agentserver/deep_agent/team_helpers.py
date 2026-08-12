@@ -1588,6 +1588,8 @@ async def process_team_message_stream(request: Any,
             request_metadata=request_metadata,
             requested_model_name=requested_model_name,
             template_id=requested_team_name,
+            request_id=rid,
+            channel_id=channel_id,
         )
         _persist_team_file_monitor_roots(session_id, team_spec)
     except Exception as exc:
