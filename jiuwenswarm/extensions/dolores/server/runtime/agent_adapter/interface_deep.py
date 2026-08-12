@@ -244,6 +244,15 @@ from jiuwenswarm.extensions.dolores.common.utils import (
 
 load_dotenv(dotenv_path=get_env_file(), override=True)
 reset_free_search_runtime_flags()
+# Dolores fork opt-in：上面 reset_free_search_runtime_flags() 会把 FREE_SEARCH_DDG/BING_ENABLED
+# 强制重置成 "false"（覆盖 .env），导致 free_search 一调就报 [182601] "all free search engines
+# are disabled"。用户选了"开免费 DDG+Bing（无 key 兜底）"，这里在 reset 之后按 opt-in env
+# DOLORES_FREE_SEARCH=1 重新打开。AgentServer 进程内搜索时读这两个 env，import 本模块时设一次即可。
+if os.environ.get("DOLORES_FREE_SEARCH", "").strip().lower() in ("1", "true", "yes", "on"):
+    os.environ["FREE_SEARCH_DDG_ENABLED"] = "true"
+    os.environ["FREE_SEARCH_BING_ENABLED"] = "true"
+    # import 期 logging 系统尚未配好，用 print（与 extension.py 的 [DoloresAgent] switch ARMED 同风格）确保可见。
+    print("[DoloresAgent] free search engines re-enabled (DDG+Bing) via DOLORES_FREE_SEARCH")
 TodoModifyTool = CompatibleTodoModifyTool
 install_todo_modify_compat_patch()
 
@@ -555,6 +564,8 @@ class JiuWenSwarmDeepAdapter:
         # SDK's 300s SSE read timeout. Idempotent (module-level _PATCHED guard).
         apply_mcp_call_timeout_patch()
         self._instance: DeepAgent | None = None
+        self._root_instance_lock: asyncio.Lock | None = None
+        self._root_instance_requested: bool = False
         self._project_dir: str | None = None
         self._workspace_dir: str = str(get_agent_workspace_dir())
         self._agent_name: str = "main_agent"
@@ -3395,6 +3406,17 @@ class JiuWenSwarmDeepAdapter:
             except Exception as exc:
                 logger.warning("[JiuWenSwarmDeepAdapter] skill rail reload failed: %s", exc)
 
+    def _get_context_engine(self):
+        """Duck-type context engine: AgentLoop has context_engine, DeepAgent has react_agent.context_engine."""
+        if self._instance is None:
+            return None
+        ce = getattr(self._instance, "context_engine", None)
+        if ce is not None:
+            return ce
+        ra = getattr(self._instance, "react_agent", None)
+        return ra.context_engine if ra is not None else None
+
+
     def _build_agent_rails(
         self, config: dict[str, Any], config_base: dict[str, Any], *, mode: str = "agent"
     ) -> list[Any]:
@@ -3860,6 +3882,35 @@ class JiuWenSwarmDeepAdapter:
         """Backward-compatible no-op hook for tests and legacy call sites."""
         return None
 
+    async def ensure_instance(self) -> Any:
+        """Return this adapter's own DeepAgent, building it on first use.
+
+        Mirrors the stock DeepAgent adapter contract added after the develop
+        merge: stock callers (agent_ws_server, auto_harness, team bootstrap,
+        multi_session_toolkits) call ``await agent.ensure_instance()`` outside the
+        chat path, so the root adapter must build its DeepAgent lazily here rather
+        than requiring an eager ``create_instance``.
+        """
+        if self._instance is not None:
+            return self._instance
+        if self._root_instance_lock is None:
+            self._root_instance_lock = asyncio.Lock()
+        async with self._root_instance_lock:
+            if self._instance is not None:
+                return self._instance
+            self._root_instance_requested = True
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] building root DeepAgent on demand: mode=%s sub_mode=%s",
+                self._session_instance_mode,
+                self._session_instance_sub_mode,
+            )
+            await self.create_instance(
+                self._session_instance_config,
+                mode=self._session_instance_mode or "agent",
+                sub_mode=self._session_instance_sub_mode,
+            )
+            return self._instance
+
     async def create_instance(
         self, config: dict[str, Any] | None = None, *, mode: str = "agent", sub_mode: str = None
     ) -> None:
@@ -3938,17 +3989,96 @@ class JiuWenSwarmDeepAdapter:
             auto_create_workspace=False
         )
 
-        self._instance = create_deep_agent(
-            **common_kwargs,
-            context_engine_config=_deep_agent_context_engine_config(config),
-            vision_model_config=self._vision_model_config,
-            audio_model_config=self._audio_model_config,
-            enable_read_image_multimodal=self._resolve_enable_read_image_multimodal(config),
-            enable_llm_retry_rail=((config_base.get("execution_guard") or {}).get("llm_retry_rail") or {}).get(
-                "enabled", False
-            ),
-            completion_timeout=config.get("completion_timeout", 3600.0),
-        )
+        # env-gate: dolores → AgentLoop, else → DeepAgent
+        if os.getenv("JIUWENSWARM_AGENT_KIND", "").strip().lower() == "dolores":
+            from jiuwenswarm.extensions.dolores.server.runtime.agent_adapter.agent_loop import AgentLoop
+            # 构造最小 DeepAgentConfig：让 AgentLoop 拿到 max_iterations / workspace / language
+            # （model_name 从 Model 实例自身取，deep_config 不含 model_name 字段）
+            _dolores_deep_cfg = DeepAgentConfig(
+                model=common_kwargs.get("model"),
+                card=common_kwargs.get("card"),
+                system_prompt=common_kwargs.get("system_prompt"),
+                max_iterations=common_kwargs.get("max_iterations", 15),
+                workspace=common_kwargs.get("workspace"),
+                sys_operation=sys_operation,
+                language=self._resolve_runtime_language(),
+                enable_task_loop=common_kwargs.get("enable_task_loop", False),
+                tools=tool_cards if tool_cards else [],
+                subagents=configured_subagents,
+                # 路径 5 (task 5.5)：completion_timeout 墙钟。stock 默认 600s 假设已快（压缩+工具暴露做好）；
+                # fork 现在慢（pptx-craft ~753s），设 1800s 容纳+余量，速度修好后降回 600。
+                completion_timeout=1800.0,
+            )
+            self._instance = AgentLoop(
+                card=common_kwargs.get("card"),
+                model=common_kwargs.get("model"),
+                sys_operation=sys_operation,
+                system_prompt=common_kwargs.get("system_prompt"),
+                deep_config=_dolores_deep_cfg,
+                # 路径 2 context_engine 需 model/model_client 做压缩摘要 LLM 调用
+                # （stock 从 react_agent._config 取，AgentLoop 无 react_agent，由 env-gate 传）
+                model_request_config=self._model_request_config,
+                model_client_config=self._model_client_config,
+            )
+            # 注册工具卡到 AgentLoop 的 ability_manager。
+            # _get_tool_cards 已把实例塞进 Runner.resource_mgr，但 AgentLoop 的 ability_manager
+            # 是独立实例，list_tool_info() 只读 self._tools，不扫 resource_mgr。所以模型看不到
+            # free_search / fetch_webpage / wiki_* / search_skill 等全局工具（pptx-craft 的
+            # research-writer 阶段会报"没有搜索工具"）。与 stock factory（ability_manager.add(card)）
+            # 一致，把卡加进去，执行时再从 resource_mgr 取实例。
+            for _tc in (tool_cards or []):
+                try:
+                    self._instance.ability_manager.add(_tc)
+                except Exception as _e:
+                    logger.warning("[DoloresAgent] add tool %s failed: %s", getattr(_tc, "name", "?"), _e)
+            # 注册 rails（跟 create_deep_agent(rails=...) 一样）
+            for _rail in rails_list:
+                # AgentLoop 无 outer task loop 且 load_state 为桩，stock TaskPlanningRail
+                # 依赖 agent.load_state().task_plan 会每轮 after_task_iteration 报
+                # AttributeError（非致命但无意义），且其 init 的 isinstance(DeepAgent)
+                # 守卫会让它在 AgentLoop 上整体 no-op。改用 DoloresTodoRail：只复用其
+                # 无 task-loop 耦合的部分（4 个 TodoTool + build_todo_section 注入），
+                # 给 AgentLoop 补回阶段锚点，防长上下文下中途误判完成（见 _resume_diag
+                # `iter31 break: no tool_calls`）。
+                if isinstance(_rail, TaskPlanningRail):
+                    logger.info("[DoloresAgent] skip TaskPlanningRail, register DoloresTodoRail instead")
+                    try:
+                        from jiuwenswarm.extensions.dolores.server.runtime.agent_adapter.dolores_todo_rail import (
+                            DoloresTodoRail,
+                        )
+                        await self._instance.register_rail(DoloresTodoRail())
+                    except Exception as _e:
+                        logger.warning("[DoloresAgent] register DoloresTodoRail failed: %s", _e)
+                    continue
+                # AgentLoop 跑 pptx-craft 这类任务不需要数字人形象/persona 注入；
+                # AvatarPromptRail 每轮往 system prompt 塞 avatar section 是固定死重
+                # （与 todo/skills 锚点无关），dolores 下直接跳过，给 system prompt 瘦身。
+                try:
+                    from jiuwenswarm.extensions.dolores.agents.harness.common.rails.avatar_rail import (
+                        AvatarPromptRail as _DoloresAvatarRail,
+                    )
+                    _is_avatar = isinstance(_rail, _DoloresAvatarRail)
+                except Exception:
+                    _is_avatar = False
+                if _is_avatar:
+                    logger.info("[DoloresAgent] skip AvatarPromptRail (persona not needed for task agent)")
+                    continue
+                try:
+                    await self._instance.register_rail(_rail)
+                except Exception as _e:
+                    logger.warning("[DoloresAgent] register_rail %s failed: %s", type(_rail).__name__, _e)
+        else:
+            self._instance = create_deep_agent(
+                **common_kwargs,
+                context_engine_config=_deep_agent_context_engine_config(config),
+                vision_model_config=self._vision_model_config,
+                audio_model_config=self._audio_model_config,
+                enable_read_image_multimodal=self._resolve_enable_read_image_multimodal(config),
+                enable_llm_retry_rail=((config_base.get("execution_guard") or {}).get("llm_retry_rail") or {}).get(
+                    "enabled", False
+                ),
+                completion_timeout=config.get("completion_timeout", 3600.0),
+            )
 
         await self._instance.ensure_initialized()
         initial_runtime_workspace = self._project_dir or str(
@@ -4306,11 +4436,15 @@ class JiuWenSwarmDeepAdapter:
 
     async def _update_agent_rails(self) -> None:
         """agent 模式：注册 agent 专属 rails（原 plan 档能力并集）。"""
-        if self._task_planning_rail is None:
+        _is_dolores = os.getenv("JIUWENSWARM_AGENT_KIND", "").strip().lower() == "dolores"
+        if self._task_planning_rail is None and not _is_dolores:
             self._task_planning_rail = self._build_task_planning_rail()
             if self._task_planning_rail is not None:
                 await self._instance.register_rail(self._task_planning_rail)
                 logger.info("[JiuWenSwarmDeepAdapter] TaskPlanningRail registered for agent mode")
+        elif _is_dolores and self._task_planning_rail is None:
+            logger.info("[DoloresAgent] skip TaskPlanningRail lazy registration (AgentLoop has no task loop)")
+            self._task_planning_rail = False  # 标记已决策，避免重复尝试构建
         if self._ask_user_rail is None:
             self._ask_user_rail = self._build_structured_ask_user_rail()
             if self._ask_user_rail is not None:
@@ -7411,11 +7545,10 @@ class JiuWenSwarmDeepAdapter:
             finally:
                 await self._evict_idle_session_adapters()
 
-        if self._instance is None or self._instance.react_agent is None:
+        if self._instance is None or self._get_context_engine() is None:
             raise ValueError("Agent instance not available")
 
-        context_engine = self._instance.react_agent.context_engine
-        react_agent = self._instance.react_agent
+        context_engine = self._get_context_engine()
 
         context = context_engine.get_context(session_id=session_id)
         if context is None:
@@ -7499,8 +7632,7 @@ class JiuWenSwarmDeepAdapter:
         if self._instance is None:
             raise ValueError("Agent instance not available")
 
-        context_engine = self._instance.react_agent.context_engine
-        react_agent = self._instance.react_agent
+        context_engine = self._get_context_engine()
         context = context_engine.get_context(session_id=session_id)
         if context is None:
             return {
@@ -7631,8 +7763,8 @@ class JiuWenSwarmDeepAdapter:
         3. 回退到从磁盘读取兼容格式的 history 文件
         """
         # --- 快速路径：当前 adapter 的 context_engine 已加载 ---
-        if self._instance is not None and self._instance.react_agent is not None:
-            context_engine = self._instance.react_agent.context_engine
+        if self._instance is not None and self._get_context_engine() is not None:
+            context_engine = self._get_context_engine()
             context = context_engine.get_context(session_id=session_id)
             if context is not None:
                 try:
@@ -7775,9 +7907,8 @@ class JiuWenSwarmDeepAdapter:
         """
         if self._last_system_prompt:
             return self._last_system_prompt
-        if self._instance is None or self._instance.react_agent is None:
+        if self._instance is None or self._get_context_engine() is None:
             return ""
-        react_agent = self._instance.react_agent
         if hasattr(react_agent, "prompt_builder") and react_agent.prompt_builder is not None:
             self._last_system_prompt = react_agent.prompt_builder.build()
             return self._last_system_prompt
