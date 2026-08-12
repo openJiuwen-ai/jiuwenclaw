@@ -1582,6 +1582,7 @@ async def test_get_swarm_enriched_team_spec_uses_explicit_tenant_runtime_context
     metadata_calls: list[dict] = []
     entity_calls: list[dict] = []
     load_calls: list[dict] = []
+    enrich_calls: list[dict] = []
 
     class _Spec:
         team_name = "template_team"
@@ -1625,9 +1626,12 @@ async def test_get_swarm_enriched_team_spec_uses_explicit_tenant_runtime_context
     )
     monkeypatch.setattr(TeamManager, "_ensure_postgresql_for_leader", fake_ensure_postgresql)
     monkeypatch.setattr(TeamManager, "_load_team_spec", staticmethod(fake_load_team_spec))
+    def fake_enrich(spec, **kwargs):
+        enrich_calls.append(kwargs)
+
     monkeypatch.setattr(
         "jiuwenswarm.agents.swarm.enrich_team_spec_for_swarm",
-        lambda spec, **kwargs: None,
+        fake_enrich,
     )
 
     spec = await manager.get_swarm_enriched_team_spec(
@@ -1648,6 +1652,7 @@ async def test_get_swarm_enriched_team_spec_uses_explicit_tenant_runtime_context
     ]
     assert entity_calls[0]["config_base"] is tenant_config
     assert load_calls[0]["config_base"] is tenant_config
+    assert enrich_calls[0]["config_base"] is tenant_config
 
 
 @pytest.mark.asyncio

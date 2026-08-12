@@ -813,6 +813,7 @@ def test_enrich_team_spec_for_swarm_has_no_deep_agent_param() -> None:
         "request_id",
         "channel_id",
         "request_metadata",
+        "config_base",
     }
 
 
@@ -844,6 +845,51 @@ def test_enrich_team_spec_for_swarm_rewrites_spec_in_place() -> None:
     # The parent-free contract: openjiuwen removed the imperative customizer
     # hook entirely, so the field no longer exists on the spec.
     assert not hasattr(spec, "agent_customizer")
+
+
+def test_enrich_team_spec_uses_explicit_config_for_evolution_rails(monkeypatch) -> None:
+    tenant_config = {
+        "models": {
+            "default": {
+                "model_client_config": {
+                    "model_name": "tenant-model",
+                    "api_base": "https://tenant.example/v1",
+                    "api_key": "tenant-key",
+                    "client_provider": "OpenAI",
+                },
+                "model_config_obj": {"temperature": 0.2},
+            },
+        },
+    }
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.swarm.assembly.get_config",
+        lambda: {
+            "models": {
+                "default": {
+                    "model_client_config": {"model_name": "global-placeholder"},
+                },
+            },
+        },
+    )
+    spec = _make_team_spec()
+
+    enrich_team_spec_for_swarm(
+        spec,
+        session_id="s",
+        mode="team",
+        channel_id="officeclaw",
+        config_base=tenant_config,
+    )
+
+    evolution_rail = next(
+        rail
+        for rail in spec.agents["leader"].rails or []
+        if rail.type == registry.TEAM_SKILL_EVOLUTION
+    )
+    model_config = evolution_rail.params["evolution_model_config"]
+    assert model_config["model_name"] == "tenant-model"
+    assert model_config["model_client_config"]["api_base"] == "https://tenant.example/v1"
+    assert spec.build_context.config is tenant_config
 
 
 def test_swarm_build_context_seed_round_trip_preserves_language() -> None:

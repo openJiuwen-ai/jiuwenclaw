@@ -2648,6 +2648,7 @@ class JiuWenSwarm:
         stream_done = asyncio.Event()
         final_answer_content = ""
         final_answer_chunks: list[str] = []
+        facade_emitted_terminal_chunk = False
         durable_pending_final_chunks: list[str] = []
         durable_pending_reasoning_chunks: list[str] = []
         durable_final_content = ""
@@ -2934,6 +2935,8 @@ class JiuWenSwarm:
                                     durable_final_content = str(data.payload.get("content", ""))
                             if et == "chat.final":
                                 final_answer_content = str(data.payload.get("content", ""))
+                        if data.is_complete:
+                            facade_emitted_terminal_chunk = True
                         yield data
                     elif isinstance(data, dict) and isinstance(data.get("event_type"), str):
                         et = str(data.get("event_type"))
@@ -3139,12 +3142,13 @@ class JiuWenSwarm:
 
         _schedule_symphony_session_feedback(session_id, rid)
         await self._try_apply_adapter_pending_reload()
-        yield AgentResponseChunk(
-            request_id=rid,
-            channel_id=cid,
-            payload={"is_complete": True},
-            is_complete=True,
-        )
+        if not facade_emitted_terminal_chunk:
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=cid,
+                payload={"is_complete": True},
+                is_complete=True,
+            )
 
     # ---------- 实例获取 ----------
 

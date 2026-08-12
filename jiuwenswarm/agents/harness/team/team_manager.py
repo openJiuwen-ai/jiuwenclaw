@@ -731,6 +731,7 @@ class TeamManager:
             request_id=request_id,
             channel_id=channel_id,
             request_metadata=request_metadata,
+            config_base=runtime_config,
         )
         return spec
 

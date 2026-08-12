@@ -3184,6 +3184,19 @@ async def test_consume_stream_with_query_broadcasts_leader_and_teammate_outputs(
             role=TeamRole.LEADER,
         )
         yield SimpleNamespace(
+            type="llm_usage",
+            payload={
+                "metadata": {
+                    "usage_metadata": {
+                        "input_tokens": 12,
+                        "output_tokens": 3,
+                        "total_tokens": 15,
+                    },
+                },
+            },
+            role=TeamRole.LEADER,
+        )
+        yield SimpleNamespace(
             type="answer",
             payload={"output": {"output": "leader answer"}, "result_type": "answer"},
             role=TeamRole.LEADER,
@@ -3292,6 +3305,7 @@ async def test_consume_stream_with_query_broadcasts_leader_and_teammate_outputs(
     assert [event["event_type"] for event in broadcasted] == [
         "chat.processing_status",
         "team.runtime_ready",
+        "chat.usage_metadata",
         'chat.final',
         'chat.processing_status',
         'chat.final',
@@ -3301,6 +3315,22 @@ async def test_consume_stream_with_query_broadcasts_leader_and_teammate_outputs(
         "chat.processing_status",
         'team.completed',
     ]
+    usage_event = next(
+        event for event in broadcasted if event["event_type"] == "chat.usage_metadata"
+    )
+    assert usage_event == {
+        "event_type": "chat.usage_metadata",
+        "metadata": {
+            "usage_metadata": {
+                "input_tokens": 12,
+                "output_tokens": 3,
+                "total_tokens": 15,
+            },
+        },
+        "session_id": "sess-leader-only",
+        "rid": 1,
+    }
+    assert not any(event["event_type"] == "chat.llm_usage" for event in broadcasted)
     # Round-start processing_status
     assert broadcasted[0]["is_processing"] is True
     assert broadcasted[0]["is_complete"] is False

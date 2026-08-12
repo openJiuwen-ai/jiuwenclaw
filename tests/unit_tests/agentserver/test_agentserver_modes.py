@@ -698,6 +698,12 @@ def test_process_message_stream_routes_team_plan_confirm_interrupt_as_team_follo
             yield AgentResponseChunk(
                 request_id="req-stream-answer",
                 channel_id="tui",
+                payload={"event_type": "chat.delta", "content": "<a2ui-json>\n"},
+                is_complete=False,
+            )
+            yield AgentResponseChunk(
+                request_id="req-stream-answer",
+                channel_id="tui",
                 payload={"event_type": "chat.done"},
                 is_complete=True,
             )
@@ -756,9 +762,8 @@ def test_process_message_stream_routes_team_plan_confirm_interrupt_as_team_follo
     assert len(FakeTeamManager.interact_calls) == 0
     assert isinstance(fake_adapter.seen_inputs["query"], InteractiveInput)
     assert fake_adapter.seen_inputs["query"].user_inputs["exit_plan_mode_call_1"]["approved"] is True
-    assert chunks[0].payload == {"event_type": "chat.done"}
-    assert chunks[0].is_complete is True
-    assert chunks[-1].is_complete is True
+    assert any(chunk.payload == {"event_type": "chat.done"} for chunk in chunks)
+    assert sum(chunk.is_complete for chunk in chunks) == 1
 
 
 def test_process_message_stream_routes_web_evolution_interrupt_without_user_history(monkeypatch):
@@ -1070,8 +1075,7 @@ def test_process_message_stream_treats_team_plan_confirm_resume_as_team_follow_u
     assert len(FakeTeamManager.interact_calls) == 0
     assert chunks[0].payload == {"event_type": "chat.done"}
     assert chunks[0].is_complete is True
-    assert chunks[-1].payload == {"is_complete": True}
-    assert chunks[-1].is_complete is True
+    assert sum(chunk.is_complete for chunk in chunks) == 1
 
 
 def test_process_message_stream_treats_plain_team_query_as_first_request_after_round_end(monkeypatch):

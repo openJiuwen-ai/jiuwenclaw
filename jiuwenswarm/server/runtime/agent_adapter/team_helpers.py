@@ -2101,6 +2101,17 @@ async def process_team_message_stream(
                 )
 
 
+def _extract_team_usage_metadata(chunk: Any) -> dict[str, Any] | None:
+    payload = getattr(chunk, "payload", None)
+    if not isinstance(payload, dict):
+        return None
+    metadata = payload.get("metadata", payload)
+    if not isinstance(metadata, dict):
+        return None
+    usage_metadata = metadata.get("usage_metadata", metadata)
+    return usage_metadata if isinstance(usage_metadata, dict) else None
+
+
 async def _consume_stream_with_query(
     channel_id: str | None,
     session_id: str,
@@ -2193,6 +2204,20 @@ async def _consume_stream_with_query(
                     _resolve_channel_id(channel_id), session_id,
                     received_chunks, _role, getattr(chunk, "type", None),
                 )
+            if getattr(chunk, "type", None) == "llm_usage":
+                usage_metadata = _extract_team_usage_metadata(chunk)
+                if usage_metadata is not None:
+                    _broadcast_event(
+                        channel_id,
+                        session_id,
+                        {
+                            "event_type": "chat.usage_metadata",
+                            "metadata": {"usage_metadata": usage_metadata},
+                            "session_id": session_id,
+                            "rid": round_id,
+                        },
+                    )
+                continue
             is_leader = _is_leader_output(chunk)
             is_teammate = _is_teammate_output(chunk)
             if not is_leader and not is_teammate:

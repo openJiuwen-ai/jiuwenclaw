@@ -63,6 +63,7 @@ def enrich_team_spec_for_swarm(
     request_id: str | None = None,
     channel_id: str | None = None,
     request_metadata: dict[str, Any] | None = None,
+    config_base: dict[str, Any] | None = None,
 ) -> None:
     """Enrich *spec* in place for provider-based swarm assembly.
 
@@ -78,10 +79,11 @@ def enrich_team_spec_for_swarm(
         request_id: Originating request id, if any.
         channel_id: Raw channel id from the request, if any.
         request_metadata: Request metadata mapping (carries ``mode`` etc.).
+        config_base: Explicit effective config snapshot for the active tenant.
     """
     register_swarm_providers()
 
-    config = get_config()
+    config = config_base if config_base is not None else get_config()
     workspace = spec.workspace
     team_ws_root = (
         workspace.root_path
