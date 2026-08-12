@@ -37,6 +37,7 @@ from jiuwenclaw.agentserver.permissions.skill_authorization import (
     SkillPermissionDiff,
     SkillTrustLevel,
     compose_skill_permissions,
+    effective_file_guard_axis_level,
     get_skill_authorization_context,
     get_skill_authorization_generation,
     get_skill_grant_store,
@@ -473,6 +474,35 @@ class SkillAuthorizationRail(BaseInterruptRail):
         raw = base.get("defaults")
         return raw.strip().lower() if isinstance(raw, str) and raw.strip() else "guard"
 
+    @staticmethod
+    def _file_guard_adjudication_view(
+        base: dict[str, Any],
+        merged: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any], Any, bool] | None:
+        """裁决口径的 file_guard 视图：归一后的 global 映射 + workspace 根 + rw_enabled。
+
+        供差分按真实裁决语义计算 before/after；失败时返回 None，调用方回退到
+        同路径条目口径。
+        """
+        try:
+            from jiuwenclaw.agentserver.permissions.file_guard import (
+                FileGuardChecker,
+                merged_file_guard_config,
+            )
+
+            base_map = merged_file_guard_config(base).get("global")
+            merged_map = merged_file_guard_config(merged).get("global")
+            if not isinstance(base_map, dict) or not isinstance(merged_map, dict):
+                return None
+            ws_cfg = merged_file_guard_config(merged).get("workspace")
+            rw_enabled = True
+            if isinstance(ws_cfg, dict) and "rw_enabled" in ws_cfg:
+                rw_enabled = bool(ws_cfg.get("rw_enabled"))
+            ws_root = FileGuardChecker(merged).workspace_root()
+            return base_map, merged_map, ws_root, rw_enabled
+        except Exception:  # noqa: BLE001 — 展示判定失败时保留原有差分口径
+            return None
+
     def _compute_permission_diff(
         self,
         base: dict[str, Any],
@@ -518,6 +548,7 @@ class SkillAuthorizationRail(BaseInterruptRail):
         merged_global = merged_fg.get("global") if isinstance(merged_fg.get("global"), dict) else {}
         base_fg = base.get("file_guard") if isinstance(base.get("file_guard"), dict) else {}
         base_global = base_fg.get("global") if isinstance(base_fg.get("global"), dict) else {}
+        adjudication = self._file_guard_adjudication_view(base, merged)
         for path, entry in overlay_global.items():
             if not isinstance(entry, dict):
                 continue
@@ -525,13 +556,28 @@ class SkillAuthorizationRail(BaseInterruptRail):
             merged_entry = merged_global.get(path) if isinstance(merged_global.get(path), dict) else {}
             for axis, declared in entry.items():
                 declared_level = str(declared).strip().lower()
-                before = str(base_entry.get(axis) or "ask").strip().lower()
-                after = str(merged_entry.get(axis, before)).strip().lower()
-                if after == before and declared_level != before:
+                before = after = None
+                if adjudication is not None:
+                    base_map, merged_map, ws_root, rw_enabled = adjudication
+                    before = effective_file_guard_axis_level(
+                        base_map, str(path), str(axis),
+                        workspace_root=ws_root, rw_enabled=rw_enabled,
+                    )
+                    after = effective_file_guard_axis_level(
+                        merged_map, str(path), str(axis),
+                        workspace_root=ws_root, rw_enabled=rw_enabled,
+                    )
+                if before is None or after is None:
+                    # 展示判定失败时回退到同路径条目口径。
+                    before = str(base_entry.get(axis) or "ask").strip().lower()
+                    after = str(merged_entry.get(axis, before)).strip().lower()
+                if declared_level in ("allow", "ask") and after == "deny":
+                    # 含 base 祖先 deny 与同一 overlay 自声明祖先 deny 两种拦截。
                     rejected.append(
                         f"文件 `{path}` {axis}：父路径/全局 deny 不可改变（声明 {declared_level} 已丢弃）"
                     )
                 elif after == before:
+                    # 声明不改变裁决（如同档声明、workspace 内 read/write 短路），不展示。
                     continue
                 elif after == "allow":
                     widened.append(f"文件 `{path}` {axis}：{before} → allow")

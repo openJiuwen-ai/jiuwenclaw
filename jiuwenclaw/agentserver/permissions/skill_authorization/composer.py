@@ -116,12 +116,30 @@ def _is_same_or_ancestor(ancestor: str, path: str) -> bool:
     return path.startswith(ancestor + "/")
 
 
-def _base_axis_denied_by_ancestor(
+def _collect_overlay_denies(overlay_global: dict[Any, Any]) -> set[tuple[str, str]]:
+    """本 overlay 自声明的 ``(规范化路径, 轴)`` deny 集合（与遍历顺序无关）。
+
+    同一 overlay 先 deny 父路径再 allow/ask 子路径时，子路径声明同样不得突破；
+    该集合让祖先检查把 overlay 自加 deny 与 base deny 一视同仁。
+    """
+    denies: set[tuple[str, str]] = set()
+    for raw_path, entry in overlay_global.items():
+        if not isinstance(raw_path, str) or not raw_path.strip() or not isinstance(entry, dict):
+            continue
+        normalized = _normalize_guard_path(raw_path)
+        for axis, raw_level in entry.items():
+            if axis in _FILE_GUARD_AXES and _normalize_level(raw_level) == "deny":
+                denies.add((normalized, axis))
+    return denies
+
+
+def _axis_denied_by_ancestor(
     base_global: dict[str, Any],
+    overlay_denies: set[tuple[str, str]],
     path: str,
     axis: str,
 ) -> bool:
-    """base 中同级或祖先路径是否已对该轴声明 ``deny``（父路径 deny 不可被覆盖）。"""
+    """base 或本 overlay 中同级/祖先路径是否已对该轴声明 ``deny``（不可被覆盖）。"""
     for base_path, entry in base_global.items():
         if not isinstance(base_path, str) or not isinstance(entry, dict):
             continue
@@ -129,7 +147,10 @@ def _base_axis_denied_by_ancestor(
             continue
         if _is_same_or_ancestor(_normalize_guard_path(base_path), path):
             return True
-    return False
+    return any(
+        deny_axis == axis and _is_same_or_ancestor(deny_path, path)
+        for deny_path, deny_axis in overlay_denies
+    )
 
 
 def _compose_file_guard_global(
@@ -150,6 +171,7 @@ def _compose_file_guard_global(
     base_global = base_fg.get("global") if isinstance(base_fg, dict) else None
     if not isinstance(base_global, dict):
         base_global = {}
+    overlay_denies = _collect_overlay_denies(overlay_global)
 
     for raw_path, entry in overlay_global.items():
         if not isinstance(raw_path, str) or not raw_path.strip() or not isinstance(entry, dict):
@@ -182,8 +204,9 @@ def _compose_file_guard_global(
                 # deny 直接收紧，只增不改（base 已是 deny 时为无害 no-op）。
                 new_entry[axis] = "deny"
                 continue
-            # allow / ask：任何同级或祖先 deny 均不可突破（含本路径显式 deny）。
-            if _base_axis_denied_by_ancestor(base_global, path, axis):
+            # allow / ask：任何同级或祖先 deny 均不可突破（含本路径显式 deny、
+            # 以及同一 overlay 自声明的祖先 deny）。
+            if _axis_denied_by_ancestor(base_global, overlay_denies, path, axis):
                 logger.info(
                     "[skill_authorization] compose.file_guard.keep_deny path=%s axis=%s overlay=%s",
                     path, axis, overlay_level,
@@ -196,8 +219,53 @@ def _compose_file_guard_global(
             # overlay allow：仅提升 ask（缺省轴按 file_guard 语义视为 ask）。
             if base_level in (None, "ask"):
                 new_entry[axis] = "allow"
+        # 继承基线中同级或祖先路径的 deny 轴：裁决端按单条最长前缀条目取档、
+        # 缺轴兜底为 ask（workspace 内甚至被短路为 allow），新条目若不携带
+        # 祖先 deny 轴会静默降级祖先 deny。
+        for axis in _FILE_GUARD_AXES:
+            if axis in new_entry:
+                continue
+            if _axis_denied_by_ancestor(base_global, overlay_denies, path, axis):
+                new_entry[axis] = "deny"
         if new_entry:
             global_map[path] = new_entry
+
+
+def effective_file_guard_axis_level(
+    global_map: dict[str, Any],
+    raw_path: str,
+    axis: str,
+    *,
+    workspace_root: Any,
+    rw_enabled: bool,
+) -> str | None:
+    """按裁决语义计算 ``raw_path`` 在 ``axis`` 上的生效档位（allow/ask/deny）。
+
+    与 ``FileGuardChecker._check_one`` 逐步对齐：最长前缀单条命中、deny 穿透
+    workspace、workspace 内 rw_enabled 时 read/write 短路为 allow、缺省 ask。
+    供审批差分展示使用，确保卡上的 before/after 与真实裁决一致；路径无法解析
+    或运行环境缺依赖时返回 ``None``，调用方应回退到简化口径。
+    """
+    try:
+        from jiuwenclaw.agentserver.permissions.file_guard import (
+            _action_mode,
+            _longest_prefix_match,
+            _posix_str,
+            _resolve_path_str,
+            contains_path,
+        )
+    except ImportError:
+        return None
+    resolved = _resolve_path_str(raw_path, workspace_root)
+    if resolved is None:
+        return None
+    entry = _longest_prefix_match(_posix_str(resolved), global_map, workspace_root)
+    mode = _action_mode(entry, axis) if isinstance(entry, dict) else None
+    if mode == "deny":
+        return "deny"
+    if axis in ("read", "write") and rw_enabled and contains_path(workspace_root, resolved):
+        return "allow"
+    return mode or "ask"
 
 
 # ---------- 合成入口 ----------
