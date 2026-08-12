@@ -110,10 +110,10 @@ def test_officeclaw_e2a_tenant_ids_reach_extract_ids():
         }
     )
     req = e2a_to_agent_request(env)
-    agent_id, service_id = TenantAgentPool.extract_ids(req)
+    agent_id, service_id, workspace_key = TenantAgentPool.extract_ids(req)
     assert agent_id == "office"
     assert service_id == "default"
-
+    assert workspace_key == "default"
 
 def test_e2a_to_agent_request_roundtrip():
     msg = Message(

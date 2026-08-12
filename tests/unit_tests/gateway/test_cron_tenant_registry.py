@@ -8,6 +8,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from jiuwenswarm.common.utils import resolve_gateway_cron_jobs_path
+from tests.unit_tests.tenant_workspace_test_helpers import (
+    tenant_workspace_key,
+    tenant_workspace_root,
+)
 from jiuwenswarm.gateway.cron.tenant_registry import CronTenantRegistry
 
 
@@ -122,14 +126,8 @@ async def test_web_create_mirrors_to_agent_home(tmp_path, monkeypatch) -> None:
     )
 
     gateway_path = resolve_gateway_cron_jobs_path("default", "office")
-    agent_path = (
-        tmp_path
-        / "service_default"
-        / "agent_office"
-        / "agent"
-        / "home"
-        / "cron_jobs.json"
-    )
+    wk = tenant_workspace_key("default", "office")
+    agent_path = tenant_workspace_root(tmp_path, wk) / "agent" / "home" / "cron_jobs.json"
     assert gateway_path.exists()
     assert agent_path.exists()
     assert job["service_id"] == "default"

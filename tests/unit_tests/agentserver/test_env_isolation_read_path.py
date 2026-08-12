@@ -46,9 +46,9 @@ async def test_office_reload_does_not_pollute_assistant_get_local_config():
     assistant_manager._latest_env_overrides = {"MODEL_NAME": "assistant-model"}
 
     async def _fake_get(key):
-        if key == ("office", "default"):
+        if key == ("office", "default", "default"):
             return office_manager
-        if key == ("assistant", "default"):
+        if key == ("assistant", "default", "default"):
             return assistant_manager
         return None
 

@@ -356,7 +356,6 @@ from jiuwenswarm.common.utils import (
     get_multi_tenant_user_workspace_dir,
     get_prompt_attachment_dir,
     get_runtime_state_path,
-    get_tenant_agent_skills_dirs,
     reset_free_search_runtime_flags,
     resolve_agent_registered_skill_dirs,
 )
@@ -2006,9 +2005,7 @@ class JiuWenSwarmDeepAdapter:
         empty workspace skills folder.
         """
         if is_skill_whitelist_tenant(self._agent_id, self._service_id):
-            skills_dirs = [
-                str(p) for p in get_tenant_agent_skills_dirs(self._service_id, self._agent_id)
-            ]
+            skills_dirs = [str(Path(self._workspace_dir) / "skills")]
         else:
             skills_dirs = [str(p) for p in resolve_agent_registered_skill_dirs()]
         if extra_skill_dir:
@@ -4907,11 +4904,9 @@ class JiuWenSwarmDeepAdapter:
         """
         runtime = runtime or {}
         shared_dir: str | None = None
-        if os.getenv("AGENT_RUNTIME", "").strip():
-            # 企业多租户：挂载当前 agent 工作区根，修复下载路径权限
-            mt_root = get_multi_tenant_user_workspace_dir(self._service_id, self._agent_id)
-            if mt_root is not None:
-                shared_dir = str(mt_root)
+        if os.getenv("AGENT_RUNTIME", "").strip() and self._workspace_dir:
+            # 企业多租户：挂载当前 workspace 根，修复下载路径权限
+            shared_dir = str(Path(self._workspace_dir).resolve().parent.parent)
         return create_sandbox_sysop_card(
             sandbox_url,
             sandbox_type,
@@ -5237,10 +5232,8 @@ class JiuWenSwarmDeepAdapter:
         extra["excluded_commands"] = list(runtime.get("excluded_commands") or [])
         extra["fallback_on_failure"] = bool(runtime.get("fallback_on_failure", False))
         shared_dir: str | None = None
-        if os.getenv("AGENT_RUNTIME", "").strip():
-            mt_root = get_multi_tenant_user_workspace_dir(self._service_id, self._agent_id)
-            if mt_root is not None:
-                shared_dir = str(mt_root)
+        if os.getenv("AGENT_RUNTIME", "").strip() and self._workspace_dir:
+            shared_dir = str(Path(self._workspace_dir).resolve().parent.parent)
         new_policy, upload_list = build_filesystem_policy(
             runtime.get("files") or {},
             project_dir=self._resolve_project_dir_for_sandbox(),
@@ -5440,7 +5433,10 @@ class JiuWenSwarmDeepAdapter:
                 )
 
     def _build_skill_rail(
-        self, config: dict[str, Any], include_tools: bool = False
+        self,
+        config: dict[str, Any],
+        include_tools: bool = False,
+        extra_skill_dir: str | None = None,
     ) -> SkillUseRail | None:
         """Build SkillUseRail."""
         try:
@@ -5450,7 +5446,7 @@ class JiuWenSwarmDeepAdapter:
 
             skill_mode = self._resolve_skill_mode(config)
             logger.info("[JiuWenSwarmDeepAdapter] current skill_mode: %s", skill_mode)
-            skills_dirs = self._resolve_skill_dirs()
+            skills_dirs = self._resolve_skill_dirs(extra_skill_dir)
             enabled_skills = self._enabled_skills
             if is_skill_whitelist_tenant(self._agent_id, self._service_id) and enabled_skills is None:
                 enabled_skills = []
@@ -5486,6 +5482,96 @@ class JiuWenSwarmDeepAdapter:
     def _resolve_evolution_trajectory_dir() -> Path:
         """Resolve directory for FileTrajectoryStore (always use default)."""
         return get_agent_evolution_trajectories_dir()
+
+    async def refresh_enabled_skills_from_db(self) -> None:
+        """账本变更后直读 DB 刷新 ``_enabled_skills`` 并热替换 ``SkillUseRail``（D11 轻量路径）。"""
+        if not is_skill_whitelist_tenant(self._agent_id, self._service_id):
+            return
+        if self._instance is None:
+            logger.debug(
+                "[JiuWenSwarmDeepAdapter] refresh_enabled_skills_from_db skipped: instance not ready"
+            )
+            return
+
+        from jiuwenswarm.agents.harness.common.installed_skill import list_enabled_skill_names
+
+        try:
+            names = await list_enabled_skill_names(
+                service_id=str(self._service_id or ""),
+                agent_id=str(self._agent_id or ""),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] list_enabled_skill_names failed: %s",
+                exc,
+            )
+            return
+
+        self._enabled_skills = [str(name) for name in names if str(name).strip()]
+
+        extra_skill_dir: str | None = None
+        try:
+            from jiuwenswarm.extensions.registry import ExtensionRegistry
+            from jiuwenswarm.extensions.hooks_context import SystemPromptHookContext
+            from jiuwenswarm.extensions.hook_event import AgentServerHookEvents
+
+            context = SystemPromptHookContext()
+            await ExtensionRegistry.get_instance().trigger(
+                AgentServerHookEvents.BEFORE_SYSTEM_PROMPT_BUILD, context
+            )
+            extra_skill_dir = context.skill_dir
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "[JiuWenSwarmDeepAdapter] refresh_enabled_skills hook skipped: %s",
+                exc,
+            )
+
+        config = self._config_cache if isinstance(self._config_cache, dict) else {}
+        old_rail = self._skill_rail
+        new_rail = self._build_skill_rail(
+            config,
+            include_tools=self._skill_include_tools_for_profile(),
+            extra_skill_dir=extra_skill_dir,
+        )
+        if new_rail is None:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] refresh_enabled_skills_from_db: SkillUseRail rebuild failed"
+            )
+            return
+
+        old_unregistered = False
+        if old_rail is not None:
+            try:
+                await self._instance.unregister_rail(old_rail)
+                old_unregistered = True
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] unregister old SkillUseRail failed: %s",
+                    exc,
+                )
+
+        try:
+            await self._instance.register_rail(new_rail)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] register new SkillUseRail failed: %s",
+                exc,
+            )
+            if old_rail is not None and old_unregistered:
+                try:
+                    await self._instance.register_rail(old_rail)
+                except Exception as restore_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] restore old SkillUseRail after refresh failure failed: %s",
+                        restore_exc,
+                    )
+            return
+
+        self._skill_rail = new_rail
+        logger.info(
+            "[JiuWenSwarmDeepAdapter] enabled_skills refreshed from DB: count=%s",
+            len(self._enabled_skills),
+        )
 
     def _build_skill_evolution_rail(self, config: dict[str, Any]) -> SkillEvolutionRail | None:
         """Build SkillEvolutionRail.
@@ -6689,7 +6775,12 @@ class JiuWenSwarmDeepAdapter:
                 )
 
         try:
-            skill_toolkit = SkillToolkit(manager=self._skill_manager)
+            skill_toolkit = SkillToolkit(
+                manager=self._skill_manager,
+                service_id=self._service_id,
+                agent_id=self._agent_id,
+                on_installed_skills_changed=self.refresh_enabled_skills_from_db,
+            )
             skill_tool_names: list[str] = []
             for tool in skill_toolkit.get_tools():
                 registered = self._register_shared_tool(tool)
@@ -6874,7 +6965,9 @@ class JiuWenSwarmDeepAdapter:
                     self._agent_id, self._service_id, enterprise_skills
                 )
                 sync_result = await SkillWhitelistSynchronizer(
-                    self._service_id, self._agent_id
+                    self._workspace_dir,
+                    self._service_id,
+                    self._agent_id,
                 ).sync(skill_config)
                 if sync_result.errors:
                     logger.warning(

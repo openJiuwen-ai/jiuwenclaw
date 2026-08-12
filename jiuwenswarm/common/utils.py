@@ -1556,33 +1556,12 @@ def get_agent_sessions_relative_dir() -> Path:
     return get_agent_root_relative_dir() / "sessions"
 
 
-def get_multi_tenant_user_workspace_dir(
-    service_id: str | None, agent_id: str | None
-) -> Path | None:
-    """Get multi-tenant user workspace directory path.
-
-    Path format: <user_workspace>/service_{service_id}/agent_{agent_id}
-
-    二者皆空时返回 ``None``（供单租户分支判断）。仅一侧有值时返回 ``service/.../agents`` 等
-    不完整路径，**不要**用于 Skill 白名单；租户工作区请用 ``get_tenant_agent_*`` 系列（要求双 ID）。
-    Only meaningful for enterprise (AGENT_RUNTIME) multi-tenant isolation.
-    """
-    sid = _normalize_tenant_id(service_id)
-    aid = _normalize_tenant_id(agent_id)
-    if not sid and not aid:
-        return None
-    workspace_dir = get_user_workspace_dir()
-    workspace_dir = workspace_dir / f"service_{sid}" if sid else workspace_dir / "service"
-    workspace_dir = workspace_dir / f"agent_{aid}" if aid else workspace_dir / "agents"
-    return workspace_dir
-
-
 def _normalize_tenant_id(value: str | None) -> str:
     return str(value or "").strip()
 
 
 def _require_tenant_ids(service_id: str | None, agent_id: str | None) -> tuple[str, str]:
-    """白名单 / 租户工作区要求 ``service_id`` 与 ``agent_id`` 均非空."""
+    """白名单等逻辑要求 ``service_id`` 与 ``agent_id`` 均非空（不再用于路径拼接）."""
     sid = _normalize_tenant_id(service_id)
     aid = _normalize_tenant_id(agent_id)
     if not sid or not aid:
@@ -1592,51 +1571,58 @@ def _require_tenant_ids(service_id: str | None, agent_id: str | None) -> tuple[s
     return sid, aid
 
 
-def get_tenant_agent_workspace_dir(
-    service_id: str | None, agent_id: str | None,
-) -> Path:
-    """多租户 DeepAgent 工作区：``<tenant>/agent/workspace``.
+def _require_workspace_key(workspace_key: str | None) -> str:
+    wk = _normalize_tenant_id(workspace_key)
+    if not wk:
+        raise ValueError(f"workspace_key required: workspace_key={workspace_key!r}")
+    return wk
 
-    ``service_id`` / ``agent_id`` 任一缺失时抛 ``ValueError``（不返回 ``None``）。
+
+def get_multi_tenant_user_workspace_dir(workspace_key: str) -> Path:
+    """Get multi-tenant user workspace directory path.
+
+    仅按 ``workspace_key`` 生成目录::
+
+        <user_workspace>/workspace_{workspace_key}
+
+    Only meaningful for enterprise (AGENT_RUNTIME) multi-tenant isolation.
     """
-    sid, aid = _require_tenant_ids(service_id, agent_id)
-    base = get_multi_tenant_user_workspace_dir(sid, aid)
-    if base is None:
-        raise ValueError(
-            f"get_multi_tenant_user_workspace_dir returned None for service_id={sid!r}, agent_id={aid!r}"
-        )
-    return base / get_agent_workspace_relative_dir()
+    wk = _require_workspace_key(workspace_key)
+    return get_user_workspace_dir() / f"workspace_{wk}"
+
+
+def get_tenant_agent_workspace_dir(workspace_key: str | None = None) -> Path:
+    """多租户 DeepAgent 工作区：``workspace_{key}/agent/workspace``.
+
+    必须提供 ``workspace_key``。
+    """
+    wk = _require_workspace_key(workspace_key)
+    return get_multi_tenant_user_workspace_dir(wk) / get_agent_workspace_relative_dir()
 
 
 # 兼容旧命名（上游 jiuwenclaw_workspace）
 get_tenant_agent_jiuwenclaw_workspace_dir = get_tenant_agent_workspace_dir
 
 
-def get_tenant_agent_skills_dirs(
-    service_id: str | None, agent_id: str | None,
-) -> list[Path]:
+def get_tenant_agent_skills_dirs(workspace_key: str | None = None) -> list[Path]:
     """多租户 skills 目录（与 ``JiuWenSwarm`` / ``SkillManager`` 落盘路径一致）.
 
-    要求 ``service_id`` 与 ``agent_id`` 均非空。单租户请用 ``get_multi_tenant_skill_dirs``
+    必须提供 ``workspace_key``。单租户请用 ``get_multi_tenant_skill_dirs``
     或 ``get_agent_skills_dir()``。
     """
-    workspace = get_tenant_agent_workspace_dir(service_id, agent_id)
+    workspace = get_tenant_agent_workspace_dir(workspace_key=workspace_key)
     return [workspace / "skills"]
 
 
-def get_multi_tenant_skill_dirs(
-    service_id: str | None, agent_id: str | None,
-) -> list[Path]:
+def get_multi_tenant_skill_dirs(workspace_key: str | None = None) -> list[Path]:
     """Resolve the skills directory list for multi-tenant / single-tenant mode.
 
-    - Multi-tenant (both ``service_id`` / ``agent_id`` provided): returns
-      ``[<tenant>/agent/workspace/skills]``.
-    - Single-tenant (both empty): returns ``[get_agent_skills_dir()]``.
+    - Multi-tenant（提供 ``workspace_key``）: returns
+      ``[workspace_{key}/agent/workspace/skills]``.
+    - Single-tenant（无 ``workspace_key``）: returns ``[get_agent_skills_dir()]``.
     """
-    sid = _normalize_tenant_id(service_id)
-    aid = _normalize_tenant_id(agent_id)
-    if sid or aid:
-        return get_tenant_agent_skills_dirs(service_id, agent_id)
+    if workspace_key:
+        return get_tenant_agent_skills_dirs(workspace_key=workspace_key)
     return [get_agent_skills_dir()]
 
 
@@ -1752,29 +1738,15 @@ def resolve_gateway_cron_jobs_path(
     )
 
 
-def resolve_tenant_agent_root_dir(
-    service_id: str | None = None,
-    agent_id: str | None = None,
-) -> Path:
-    """``service_{sid}/agent_{aid}/agent`` under the user workspace."""
-    sid = normalize_tenant_scope_id(service_id)
-    aid = normalize_tenant_scope_id(agent_id)
-    base = get_multi_tenant_user_workspace_dir(sid, aid)
-    if base is None:
-        base = get_multi_tenant_user_workspace_dir("default", "default")
-    if base is None:
-        raise RuntimeError(
-            f"failed to resolve tenant agent root (service_id={sid!r}, agent_id={aid!r})"
-        )
-    return base / "agent"
+def resolve_tenant_agent_root_dir(workspace_key: str | None = None) -> Path:
+    """``workspace_{key}/agent`` under the user workspace."""
+    wk = (workspace_key or "").strip() or "default"
+    return get_multi_tenant_user_workspace_dir(wk) / "agent"
 
 
-def resolve_tenant_sessions_dir(
-    service_id: str | None = None,
-    agent_id: str | None = None,
-) -> Path:
-    """``service_{sid}/agent_{aid}/agent/sessions`` for a tenant pair."""
-    return resolve_tenant_agent_root_dir(service_id, agent_id) / "sessions"
+def resolve_tenant_sessions_dir(workspace_key: str | None = None) -> Path:
+    """``workspace_{key}/agent/sessions`` for a workspace key."""
+    return resolve_tenant_agent_root_dir(workspace_key) / "sessions"
 
 
 def resolve_cron_tenant_scope(
@@ -3237,15 +3209,3 @@ def normalize_tenant_scope_id(value: str | None, *, default: str = "default") ->
         raise ValueError(f"tenant scope ID must not contain '__': {text!r}")
     return text
 
-
-def get_multi_tenant_user_workspace_dir(service_id: str | None, agent_id: str | None) -> Path | None:
-    """Get multi-tenant user workspace directory path.
-
-    Path format: ~/.jiuwenswarm/service_{service_id}/agent_{agent_id}
-    """
-    if not service_id and not agent_id:
-        return None
-    workspace_dir = get_user_workspace_dir()
-    workspace_dir = workspace_dir / f"service_{service_id}" if service_id else workspace_dir / "service"
-    workspace_dir = workspace_dir / f"agent_{agent_id}" if agent_id else workspace_dir / "agents"
-    return workspace_dir

@@ -33,17 +33,18 @@ from jiuwenswarm.common.utils import (
 logger = logging.getLogger(__name__)
 
 
-def resolve_cron_jobs_path(service_id: str, agent_id: str) -> Path:
-    """Per-tenant cron_jobs.json under ``service_{sid}/agent_{aid}/agent/home/``."""
+def resolve_cron_jobs_path(
+    service_id: str,
+    agent_id: str,
+    workspace_key: str | None = None,
+) -> Path:
+    """Per-tenant cron_jobs.json under ``workspace_{key}/agent/home/``."""
     sid = normalize_tenant_scope_id(service_id)
     aid = normalize_tenant_scope_id(agent_id)
-    base = get_multi_tenant_user_workspace_dir(sid, aid)
-    if base is None:
-        base = get_multi_tenant_user_workspace_dir("default", "default")
-    if base is None:
-        raise RuntimeError(
-            f"failed to resolve cron jobs path (service_id={sid!r}, agent_id={aid!r})"
-        )
+    wk = (workspace_key or "").strip()
+    if not wk:
+        wk = "default" if sid == "default" and aid == "default" else f"{sid}_{aid}"
+    base = get_multi_tenant_user_workspace_dir(wk)
     return base / "agent" / "home" / "cron_jobs.json"
 
 # 按 asyncio Task 隔离：多 session 并发时不能用单例字段存路由，否则后到的请求会覆盖先到的 session_id。

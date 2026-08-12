@@ -13,23 +13,24 @@ from jiuwenswarm.gateway.channel_manager.im_platforms.dingtalk.dingtalk_file_ser
 from jiuwenswarm.gateway.channel_manager.im_platforms.wecom.wecom_file_service import (
     WecomFileService,
 )
+from tests.unit_tests.tenant_workspace_test_helpers import (
+    patch_multi_tenant_workspace_dirs,
+    tenant_workspace_key,
+)
 
 
 def test_wecom_file_service_tenant_scope_isolates(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        "jiuwenswarm.gateway.tenant_paths.get_multi_tenant_user_workspace_dir",
-        lambda sid, aid: tmp_path / f"service_{sid}" / f"agent_{aid}",
-    )
+    patch_multi_tenant_workspace_dirs(monkeypatch, tmp_path)
     svc = WecomFileService(ws_client=SimpleNamespace(), workspace_dir=None)
-    assert not (tmp_path / "service_default").exists()
+    assert not (tmp_path / "workspace_default_office").exists()
 
     with svc.tenant_scope("default", "office"):
         office_dir = Path(svc._get_download_dir("images"))
     with svc.tenant_scope("default", "default"):
         default_dir = Path(svc._get_download_dir("images"))
 
-    assert "agent_office" in str(office_dir)
-    assert "agent_default" in str(default_dir)
+    assert tenant_workspace_key("default", "office") in str(office_dir)
+    assert tenant_workspace_key("default", "default") in str(default_dir)
     assert office_dir != default_dir
     assert office_dir.exists()
     assert default_dir.exists()
@@ -44,10 +45,7 @@ def test_wecom_file_service_config_override(tmp_path):
 
 
 def test_dingtalk_file_service_tenant_scope_isolates(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        "jiuwenswarm.gateway.tenant_paths.get_multi_tenant_user_workspace_dir",
-        lambda sid, aid: tmp_path / f"service_{sid}" / f"agent_{aid}",
-    )
+    patch_multi_tenant_workspace_dirs(monkeypatch, tmp_path)
 
     async def _token():
         return "tok"
@@ -65,5 +63,5 @@ def test_dingtalk_file_service_tenant_scope_isolates(tmp_path, monkeypatch):
     with svc.tenant_scope("default", "default"):
         default_dir = Path(svc._get_download_dir("image"))
 
-    assert "agent_office" in str(office_dir)
+    assert tenant_workspace_key("default", "office") in str(office_dir)
     assert office_dir != default_dir

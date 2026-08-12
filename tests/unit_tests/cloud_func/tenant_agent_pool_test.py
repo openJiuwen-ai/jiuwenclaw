@@ -210,13 +210,13 @@ class TestTenantAgentPool(TestCase):
 
             async def first_request():
                 pool = TenantAgentPool.get_instance()
-                manager = await pool._ensure_agent_manager("test_agent", "test_service")
+                manager = await pool._ensure_agent_manager("test_agent", "test_service", "test_workspace")
                 self.assertIsNotNone(manager)
                 return True
 
             async def second_request():
                 pool = TenantAgentPool.get_instance()
-                manager = await pool._ensure_agent_manager("test_agent", "test_service")
+                manager = await pool._ensure_agent_manager("test_agent", "test_service", "test_workspace")
                 self.assertIsNotNone(manager)
                 return True
 
@@ -235,7 +235,7 @@ class TestTenantAgentPool(TestCase):
             async def simulate_multiple_requests():
                 pool = TenantAgentPool.get_instance()
                 tasks = [
-                    pool._ensure_agent_manager(f"agent_{i}", f"service_{i}")
+                    pool._ensure_agent_manager(f"agent_{i}", f"service_{i}", f"workspace_{i}")
                     for i in range(5)
                 ]
                 results = await asyncio.gather(*tasks)
@@ -310,7 +310,7 @@ class TestTenantAgentPool(TestCase):
                 pool = TenantAgentPool.get_instance()
                 results = await asyncio.gather(
                     *[
-                        pool._ensure_agent_manager("shared_agent", "shared_service")
+                        pool._ensure_agent_manager("shared_agent", "shared_service", "shared_workspace")
                         for _ in range(3)
                     ]
                 )
@@ -327,7 +327,7 @@ class TestTenantAgentPool(TestCase):
                 async def second_loop():
                     pool = TenantAgentPool.get_instance()
                     manager = await pool._ensure_agent_manager(
-                        "shared_agent", "shared_service"
+                        "shared_agent", "shared_service", "shared_workspace"
                     )
                     self.assertIsNotNone(manager)
 

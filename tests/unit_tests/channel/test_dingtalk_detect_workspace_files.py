@@ -13,6 +13,11 @@ from jiuwenswarm.gateway.channel_manager.im_platforms.dingtalk.dingtalk_connect 
     DingTalkChannel,
     DingTalkConfig,
 )
+from tests.unit_tests.tenant_workspace_test_helpers import (
+    patch_multi_tenant_workspace_dirs,
+    tenant_workspace_key,
+    tenant_workspace_root,
+)
 
 
 def _make_channel() -> DingTalkChannel:
@@ -25,19 +30,8 @@ def _make_channel() -> DingTalkChannel:
     return DingTalkChannel(config, MagicMock(spec=RobotMessageRouter))
 
 
-def _patch_tenant_roots(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(
-        "jiuwenswarm.gateway.tenant_paths.get_multi_tenant_user_workspace_dir",
-        lambda sid, aid: tmp_path / f"service_{sid}" / f"agent_{aid}",
-    )
-    monkeypatch.setattr(
-        "jiuwenswarm.common.utils.get_multi_tenant_user_workspace_dir",
-        lambda sid, aid: tmp_path / f"service_{sid}" / f"agent_{aid}",
-    )
-    monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.session_metadata.get_agent_sessions_dir",
-        lambda: tmp_path / "global_sessions",
-    )
+def _tenant_agent_root(tmp_path: Path, service_id: str, agent_id: str) -> Path:
+    return tenant_workspace_root(tmp_path, tenant_workspace_key(service_id, agent_id)) / "agent"
 
 
 def _write_session_project_dir(
@@ -53,8 +47,8 @@ def _write_session_project_dir(
 
 def test_detect_abs_path_under_tenant_workspace(monkeypatch, tmp_path: Path):
     ch = _make_channel()
-    _patch_tenant_roots(monkeypatch, tmp_path)
-    ws = tmp_path / "service_office" / "agent_bot" / "agent" / "workspace"
+    patch_multi_tenant_workspace_dirs(monkeypatch, tmp_path)
+    ws = _tenant_agent_root(tmp_path, "office", "bot") / "workspace"
     ws.mkdir(parents=True)
     target = ws / "report.docx"
     target.write_bytes(b"docx")
@@ -72,15 +66,15 @@ def test_detect_abs_path_under_tenant_workspace(monkeypatch, tmp_path: Path):
 
 def test_detect_quoted_filename_uses_session_project_dir(monkeypatch, tmp_path: Path):
     ch = _make_channel()
-    _patch_tenant_roots(monkeypatch, tmp_path)
+    patch_multi_tenant_workspace_dirs(monkeypatch, tmp_path)
     project = tmp_path / "my_project"
     project.mkdir()
     target = project / "notes.pdf"
     target.write_bytes(b"%PDF")
-    sessions = tmp_path / "service_default" / "agent_office" / "agent" / "sessions"
+    sessions = _tenant_agent_root(tmp_path, "default", "office") / "sessions"
     _write_session_project_dir(sessions, "sess_proj", project)
 
-    ws = tmp_path / "service_default" / "agent_office" / "agent" / "workspace"
+    ws = _tenant_agent_root(tmp_path, "default", "office") / "workspace"
     ws.mkdir(parents=True)
 
     found = ch._detect_workspace_files(
@@ -97,8 +91,8 @@ def test_detect_falls_back_to_tenant_workspace_when_no_project_dir(
     monkeypatch, tmp_path: Path
 ):
     ch = _make_channel()
-    _patch_tenant_roots(monkeypatch, tmp_path)
-    ws = tmp_path / "service_default" / "agent_office" / "agent" / "workspace"
+    patch_multi_tenant_workspace_dirs(monkeypatch, tmp_path)
+    ws = _tenant_agent_root(tmp_path, "default", "office") / "workspace"
     ws.mkdir(parents=True)
     target = ws / "notes.pdf"
     target.write_bytes(b"%PDF")
@@ -115,11 +109,11 @@ def test_detect_falls_back_to_tenant_workspace_when_no_project_dir(
 
 def test_detect_does_not_use_other_tenant_workspace(monkeypatch, tmp_path: Path):
     ch = _make_channel()
-    _patch_tenant_roots(monkeypatch, tmp_path)
-    other = tmp_path / "service_default" / "agent_other" / "agent" / "workspace"
+    patch_multi_tenant_workspace_dirs(monkeypatch, tmp_path)
+    other = _tenant_agent_root(tmp_path, "default", "other") / "workspace"
     other.mkdir(parents=True)
     (other / "secret.docx").write_bytes(b"x")
-    mine = tmp_path / "service_default" / "agent_office" / "agent" / "workspace"
+    mine = _tenant_agent_root(tmp_path, "default", "office") / "workspace"
     mine.mkdir(parents=True)
 
     found = ch._detect_workspace_files(

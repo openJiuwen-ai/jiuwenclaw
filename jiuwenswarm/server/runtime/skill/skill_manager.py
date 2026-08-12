@@ -436,7 +436,14 @@ def _handle_copy_error(exc: OSError, dest: Path, logger_prefix: str, src: Path |
 class SkillManager:
     """Skill 管理器，对应 skills.* 请求方法."""
 
-    def __init__(self, workspace_dir: str | None = None) -> None:
+    def __init__(
+        self,
+        workspace_dir: str | None = None,
+        *,
+        persist_skills_state: bool = True,
+        service_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> None:
         # 若传入 workspace_dir（harness adapter 使用），优先通过 Workspace/WorkspaceNode
         # 解析 skills 路径；否则使用全局默认路径（react adapter 或无参数时）。
         if workspace_dir is not None:
@@ -459,6 +466,9 @@ class SkillManager:
             self._marketplace_dir = _get_marketplace_dir()
             self._state_file = _get_state_file()
         self._skills_dir.mkdir(parents=True, exist_ok=True)
+        self._persist_skills_state = bool(persist_skills_state)
+        self._service_id = str(service_id or "").strip() or None
+        self._agent_id = str(agent_id or "").strip() or None
         self._state: dict[str, Any] = self._load_state()
         # 把手动拷入 skills 目录、未经任何安装流程登记的本地技能，自动补登记到
         # local_skills，使其与"导入本地技能"完全等价（可展示/卸载/查看详情/禁用）。
@@ -2605,6 +2615,244 @@ class SkillManager:
         )
         return {"success": True, "skill": {"name": skill_name}}
 
+    def _download_web_skill_bytes(self, download_url: str) -> bytes:
+        """同步下载技能归档（仅 Web 验签安装使用；不改 import_local 远程路径）。"""
+        self._assert_import_local_download_url_allowed(download_url)
+        timeout = max(30.0, _IMPORT_LOCAL_REMOTE_TIMEOUT)
+        ssl_verify = _get_ssl_verify()
+        _maybe_disable_insecure_warning()
+        with requests.Session() as session:
+            # 仅在关闭证书校验时挂载跳过校验的 Adapter；开启时走 requests 默认校验。
+            if not ssl_verify:
+                session.mount("https://", _ImportLocalTLSAdapter())
+            logger.info(
+                "[SkillManager] web skill download: url=%s ssl_verify=%s",
+                download_url,
+                ssl_verify,
+            )
+            with session.get(
+                download_url.strip(),
+                timeout=timeout,
+                stream=True,
+                allow_redirects=False,
+                verify=ssl_verify,
+            ) as response:
+                response.raise_for_status()
+                chunks: list[bytes] = []
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        chunks.append(chunk)
+                body = b"".join(chunks)
+        if not body:
+            raise RuntimeError("下载内容为空")
+        return body
+
+    def _install_web_skill_dir(self, skill_dir: Path, *, skill_name: str) -> dict[str, Any]:
+        """Web 安装专用：只拷到 skills/，不写 skills_state（企业账本走 DB）。"""
+        name = str(skill_name or "").strip()
+        if not name:
+            return {"success": False, "detail": "skill name is required"}
+        if not skill_dir.exists() or not skill_dir.is_dir():
+            return {"success": False, "detail": f"skill dir missing: {skill_dir}"}
+        try:
+            safe = _safe_path_name(name, "skill")
+        except ValueError as exc:
+            return {"success": False, "detail": str(exc)}
+        dest = _safe_child_path(self._skills_dir, safe, "skill")
+        if dest.exists():
+            _safe_rmtree(dest)
+        shutil.copytree(skill_dir, dest)
+        logger.info(
+            "[SkillManager] web skill installed to disk: name=%s dest=%s",
+            safe,
+            dest,
+        )
+        return {"success": True, "skill": {"name": safe}}
+
+    def remove_skill_directory(self, skill_name: str) -> None:
+        name = str(skill_name or "").strip()
+        if not name:
+            return
+        try:
+            safe = _safe_path_name(name, "skill")
+        except ValueError:
+            return
+        dest = _safe_child_path(self._skills_dir, safe, "skill")
+        if dest.exists() and dest.is_dir():
+            _safe_rmtree(dest)
+
+    async def handle_skills_web_install(self, params: dict) -> dict:
+        """Web URL 安装：临时下载 →（可选 HMAC）→ 落盘（不写 skills_state）→ 写账本."""
+        from jiuwenswarm.agents.harness.common.installed_skill_ops import (
+            commit_install,
+            precheck_install,
+        )
+        from jiuwenswarm.agents.harness.common.installed_skill import (
+            verify_skill_download_hmac,
+        )
+
+        url = str(params.get("url") or "").strip()
+        signature = str(params.get("signature") or "").strip()
+        if not url:
+            return {
+                "success": False,
+                "error_code": "missing_params",
+                "error_message": "url is required",
+            }
+
+        service_id = str(params.get("service_id") or self._service_id or "").strip()
+        agent_id = str(params.get("agent_id") or self._agent_id or "").strip()
+        if not service_id or not agent_id:
+            return {
+                "success": False,
+                "error_code": "missing_tenant",
+                "error_message": "service_id and agent_id are required",
+            }
+
+        group_id = str(params.get("group_id") or "").strip() or None
+        bot_id = str(params.get("bot_id") or "").strip() or None
+        user_id = str(params.get("user_id") or "").strip() or None
+
+        try:
+            content = await asyncio.to_thread(self._download_web_skill_bytes, url)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[SkillManager] enterprise install download failed: %s", exc)
+            return {
+                "success": False,
+                "error_code": "download_failed",
+                "error_message": str(exc)[:500],
+            }
+
+        # 签名可选：有则验 HMAC；无则跳过验签直接解压安装
+        if signature and not verify_skill_download_hmac(content, signature):
+            return {
+                "success": False,
+                "error_code": "signature_invalid",
+                "error_message": "HMAC verification failed",
+            }
+
+        with tempfile.TemporaryDirectory(prefix="jiuwenclaw_enterprise_install_") as tmpdir:
+            tmp_path = Path(tmpdir)
+            try:
+                self._extract_archive_bytes_to_dir(content, tmp_path)
+            except Exception as exc:  # noqa: BLE001
+                return {
+                    "success": False,
+                    "error_code": "extract_failed",
+                    "error_message": str(exc)[:500],
+                }
+            skill_dir = self._locate_skill_dir(tmp_path)
+            if skill_dir is None:
+                return {
+                    "success": False,
+                    "error_code": "invalid_package",
+                    "error_message": "downloaded content missing SKILL.md",
+                }
+            md = self._try_find_skill_file(skill_dir)
+            meta = self._parse_skill_md(md) if md is not None else {}
+            meta = meta or {}
+            raw_name = meta.get("name") or skill_dir.name
+            try:
+                skill_name = _safe_path_name(str(raw_name), "skill")
+            except ValueError as exc:
+                return {
+                    "success": False,
+                    "error_code": "invalid_skill_name",
+                    "error_message": str(exc),
+                }
+            skill_version = str(meta.get("version") or "").strip() or None
+
+            # 落盘前预检（省无效 force）；commit 内会再 decide 一次写库
+            reject = await precheck_install(
+                service_id=service_id,
+                agent_id=agent_id,
+                skill_name=skill_name,
+                skill_version=skill_version,
+                channel="web",
+            )
+            if reject is not None:
+                return reject
+
+            import_result = self._install_web_skill_dir(skill_dir, skill_name=skill_name)
+            if not import_result.get("success"):
+                return {
+                    "success": False,
+                    "error_code": "install_failed",
+                    "error_message": str(import_result.get("detail") or "install failed"),
+                }
+            skill_name = str((import_result.get("skill") or {}).get("name") or skill_name).strip()
+
+            commit = await commit_install(
+                service_id=service_id,
+                agent_id=agent_id,
+                skill_name=skill_name,
+                skill_version=skill_version,
+                channel="web",
+                identifier=url,
+                group_id=group_id,
+                bot_id=bot_id,
+                user_id=user_id,
+                remove_skill_dir=self.remove_skill_directory,
+            )
+            if not commit.get("success"):
+                return {
+                    "success": False,
+                    "error_code": str(commit.get("error_code") or "install_failed"),
+                    "error_message": str(
+                        commit.get("error_message") or commit.get("detail") or "install failed"
+                    ),
+                }
+
+        return {"success": True, "skill": {"name": skill_name, "version": skill_version}}
+
+    async def handle_skills_web_uninstall(self, params: dict) -> dict:
+        """Web 卸载：仅 source_type=user；删盘 + 硬删账本."""
+        from jiuwenswarm.agents.harness.common.installed_skill_ops import uninstall
+
+        name = str(params.get("name") or "").strip()
+        if not name:
+            return {
+                "success": False,
+                "error_code": "missing_params",
+                "error_message": "name is required",
+            }
+        try:
+            name = _safe_path_name(name, "skill")
+        except ValueError as exc:
+            return {
+                "success": False,
+                "error_code": "invalid_skill_name",
+                "error_message": str(exc),
+            }
+
+        service_id = str(params.get("service_id") or self._service_id or "").strip()
+        agent_id = str(params.get("agent_id") or self._agent_id or "").strip()
+        if not service_id or not agent_id:
+            return {
+                "success": False,
+                "error_code": "missing_tenant",
+                "error_message": "service_id and agent_id are required",
+            }
+
+        async def _remove_disk(n: str) -> dict[str, Any]:
+            return await self.handle_skills_uninstall({"name": n})
+
+        result = await uninstall(
+            service_id=service_id,
+            agent_id=agent_id,
+            skill_name=name,
+            remove_from_disk=_remove_disk,
+        )
+        if result.get("success"):
+            return {"success": True, "name": name}
+        return {
+            "success": False,
+            "error_code": str(result.get("error_code") or "uninstall_failed"),
+            "error_message": str(
+                result.get("error_message") or result.get("detail") or "uninstall failed"
+            ),
+        }
+
     async def _import_skill_from_remote_archive(
         self,
         *,
@@ -4440,7 +4688,9 @@ class SkillManager:
         return default_state
 
     def _save_state(self) -> None:
-        """持久化状态到 skills_state.json."""
+        """持久化状态到 skills_state.json（企业路径可关闭）。"""
+        if not self._persist_skills_state:
+            return
         try:
             self._state_file.parent.mkdir(parents=True, exist_ok=True)
             self._state_file.write_text(
