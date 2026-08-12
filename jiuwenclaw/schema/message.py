@@ -46,6 +46,7 @@ class ReqMethod(Enum):
     SYNC_AGENTS_CONFIGS = "sync_agents_configs"
 
     TEAM_CATALOG_LIST = "team.catalog.list"
+    TEAM_RUNTIME_DISSOLVE = "team.runtime.dissolve"
 
     MEMORY_COMPUTE = "memory.compute"
 

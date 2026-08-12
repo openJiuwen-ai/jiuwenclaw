@@ -10,6 +10,7 @@ import copy
 import logging
 import hashlib
 import re
+import sqlite3
 import time
 import weakref
 from dataclasses import dataclass
@@ -18,17 +19,30 @@ from typing import Any
 
 from openjiuwen.agent_teams.agent.team_agent import TeamAgent
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
-from openjiuwen.agent_teams.paths import team_home
+from openjiuwen.agent_teams.paths import project_agent_teams_home, team_home
+from openjiuwen.agent_teams.runtime.metadata import (
+    TEAM_DB_STATE_CLEANED,
+    merge_team_db_state,
+    merge_team_namespace,
+    read_team_names_in_session,
+    read_team_namespace,
+)
 from openjiuwen.agent_teams.runtime.pool import RuntimeState
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.core.runner import Runner
+from openjiuwen.core.session.agent_team import create_agent_team_session
+from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.harness import DeepAgent
 
-from jiuwenclaw.agentserver.session_metadata import get_session_metadata
+from jiuwenclaw.agentserver.session_metadata import (
+    get_resolved_project_dir,
+    get_session_metadata,
+)
 from jiuwenclaw.agentserver.team import kv_cache_hooks
 from jiuwenclaw.agentserver.team.bootstrap import configure_agent_teams_home
 from jiuwenclaw.agentserver.team.config_loader import (
     load_team_spec_dict,
+    resolve_team_sqlite_db_path,
 )
 from jiuwenclaw.agentserver.team.distributed_runtime import (
     ensure_postgresql_for_leader,
@@ -45,8 +59,17 @@ from jiuwenclaw.agentserver.team.distributed_runtime import (
     runtime_role,
     try_start_pg_cluster,
 )
+from jiuwenclaw.agentserver.team.exceptions import (
+    TeamDissolveConflictError,
+    TeamDissolveError,
+    TeamDissolveNameMismatchError,
+    TeamDissolveUnsupportedError,
+)
 from jiuwenclaw.agentserver.team.handlers.team_monitor_handler import TeamMonitorHandler
-from jiuwenclaw.agentserver.team.remote_member_bootstrap import release_a2x_reservations_for_session
+from jiuwenclaw.agentserver.team.remote_member_bootstrap import (
+    release_a2x_reservations_for_session,
+    wait_for_pending_shutdown_cleanup_for_session,
+)
 from jiuwenclaw.agentserver.team.prompt_skill_mount import (
     PromptSkillMountResult,
     mount_leader_prompt_skills,
@@ -72,6 +95,14 @@ from jiuwenclaw.utils import (
 )
 
 configure_agent_teams_home()
+
+
+# dissolve（团队配置变更）写入 checkpoint 团队桶的换岗标记 key。
+# openjiuwen 的 metadata 是 venv 依赖不可改，此 key 仅 jiuwenclaw 内使用：
+# dissolve 删静态表前捕获旧名单写入，team_helpers 在下一轮 CREATE 前读取
+# 并给 leader 注入换岗简报；CREATE 的 persist_leader_config 整体覆盖桶，
+# 标记随之一次性消除。
+TEAM_ROSTER_CHANGE_KEY = "roster_change"
 
 
 logger = logging.getLogger(__name__)
@@ -2392,6 +2423,377 @@ class TeamManager:
                 exc,
             )
             return False
+
+    async def dissolve_session_runtime_keep_context(
+        self,
+        session_id: str,
+        *,
+        team_name: str | None = None,
+    ) -> dict[str, Any]:
+        """保上下文解散团队 runtime：停运行态、删静态表、标 db_state=cleaned。
+
+        与 ``delete_session_runtime`` 的区别：保留 checkpoint 对话记忆、
+        per-session 动态表（team_task/team_message 等）与 team_home 工作区
+        产物，仅让下一轮 dispatch 落 CREATE 用新 spec 重建团队。供团队配置
+        热更新场景使用（relay 在配置修改后的下一条消息前调用）。
+
+        幂等：session 无团队 runtime / 无静态表行 / 无 checkpoint 桶时均安全
+        跳过，返回 ``dissolved=False`` 而非报错。
+
+        注意：
+
+        * 运行中检查（第 1 步）与 ``stop_session_runtime`` 之间存在 TOCTOU
+          窗口——检查通过后 runtime 仍可能重新进入 RUNNING。正确性依赖
+          「relay 只在会话空档期的下一条消息前调用」这一前提。
+        * 本方法是 session 级操作：删静态表行与标 db_state=cleaned 对
+          checkpoint 桶内所有团队生效，当前假设一个 session 一个团队。
+
+        Args:
+            session_id: 会话 id。
+            team_name: 可选一致性校验名；与 session 实际团队名不符时拒绝。
+
+        Returns:
+            诊断 dict：session_id / team_name / dissolved / had_runtime /
+            had_db_rows / db_state_marked。
+
+        Raises:
+            TeamDissolveConflictError: runtime 正在运行。
+            TeamDissolveUnsupportedError: 分布式模式（v1 不支持）。
+            TeamDissolveNameMismatchError: team_name 校验不符。
+        """
+        sid = str(session_id or "").strip()
+        if not sid:
+            raise TeamDissolveError("session_id is required")
+
+        # 1. 运行中拒绝：stream task 存活，或 Runner 池条目处于 RUNNING。
+        if self.has_stream_task(sid):
+            raise TeamDissolveConflictError(
+                f"team runtime has a live stream task: session_id={sid}"
+            )
+        pool_entry = await self._resolve_resumable_runner_entry(sid)
+        if pool_entry is not None and getattr(pool_entry[1], "state", None) is RuntimeState.RUNNING:
+            raise TeamDissolveConflictError(
+                f"team runtime is running: session_id={sid} team_name={pool_entry[0]}"
+            )
+
+        # 2. 分布式模式 v1 不支持保上下文解散；本地模式先避让 pending
+        #    shutdown cleanup，避免与延迟清理任务并发。
+        if self._is_distributed_mode(get_config()):
+            raise TeamDissolveUnsupportedError(
+                "dissolve_session_runtime_keep_context is not supported in distributed mode"
+            )
+        try:
+            await wait_for_pending_shutdown_cleanup_for_session(sid)
+        except Exception as exc:
+            logger.warning(
+                "[TeamManager] dissolve: wait for shutdown cleanup failed: session_id=%s error=%s",
+                sid,
+                exc,
+            )
+
+        # team_name 一致性校验（在停 runtime 之前，避免误动别的团队）。
+        resolved_name = self._lookup_session_team_name(sid)
+        provided = str(team_name or "").strip()
+        if provided and resolved_name:
+            scoped = self.build_session_scoped_team_name(provided, sid)
+            if resolved_name not in (provided, scoped):
+                raise TeamDissolveNameMismatchError(
+                    f"team_name mismatch: session_id={sid} "
+                    f"expected={resolved_name!r} got={provided!r}"
+                )
+        elif provided and not resolved_name:
+            # 防误删护栏失效要可见：调用方提供了校验名，但本地解析不出
+            # 实际团队名，一致性校验被跳过。
+            logger.warning(
+                "[TeamManager] dissolve: team_name check skipped, no resolvable team name: "
+                "session_id=%s provided=%s",
+                sid,
+                provided,
+            )
+
+        # 3. 停 runtime + 清本地资源。stop_session_runtime 内部持 lifecycle
+        #    lock 串行，且承诺不碰 DB/checkpoint；无 runtime 时返回 False。
+        had_runtime = await self.stop_session_runtime(sid, reason="[dissolve-keep-context] ")
+        if pool_entry is not None:
+            # 注意：stop_session_runtime 返回 True 不代表 Runner 池条目已
+            # 移除——marker 已清时它解析不出 team_name，会跳过 Runner stop
+            # 却仍返回 True（同时还会停掉池条目的 transport）。半停的池
+            # 条目一旦被 resume 复用就会把流卡死（2026-08-12 事故）。所以
+            # 这里只要池条目存在就无条件按名 stop：stop_team 幂等且无条件
+            # 移池，重复调用安全。
+            try:
+                await Runner.stop_agent_team(team_name=pool_entry[0], session_id=sid)
+                had_runtime = True
+            except Exception as exc:
+                logger.warning(
+                    "[TeamManager] dissolve: runner stop failed: session_id=%s team_name=%s error=%s",
+                    sid,
+                    pool_entry[0],
+                    exc,
+                )
+            try:
+                await release_a2x_reservations_for_session(
+                    sid,
+                    team_agent=getattr(pool_entry[1], "agent", None),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[TeamManager] dissolve: release A2X reservations failed: session_id=%s error=%s",
+                    sid,
+                    exc,
+                )
+            try:
+                await self._stop_runner_team_agent_transport(sid)
+            except Exception as exc:
+                logger.warning(
+                    "[TeamManager] dissolve: stop runner team transport failed: session_id=%s error=%s",
+                    sid,
+                    exc,
+                )
+
+        # 4. 删两张静态表。team_name 优先取 marker/metadata 解析值，兜底
+        #    checkpoint 桶里的团队名（marker 已清但桶仍在的场景）。删除前
+        #    捕获旧成员名单，供第 5 步写入换岗标记。
+        bucket_names = await self._read_checkpoint_team_names(sid)
+        db_names = list(bucket_names)
+        if resolved_name and resolved_name not in db_names:
+            db_names.insert(0, resolved_name)
+        had_db_rows = False
+        roster_by_team: dict[str, list[dict[str, str]]] = {}
+        if db_names:
+            db_paths = self._candidate_team_db_paths(sid)
+            if not db_paths:
+                logger.warning(
+                    "[TeamManager] dissolve: team db path unresolved, skip static row delete: "
+                    "session_id=%s names=%s",
+                    sid,
+                    db_names,
+                )
+            else:
+                for db_path in db_paths:
+                    if not db_path.exists():
+                        continue
+                    deleted, rosters = await asyncio.to_thread(
+                        self._delete_static_team_rows_sync,
+                        db_path,
+                        db_names,
+                    )
+                    had_db_rows = had_db_rows or deleted
+                    for roster_name, members in rosters.items():
+                        roster_by_team.setdefault(roster_name, members)
+
+        # 5. 标记 db_state=cleaned。无条件调用：_read_checkpoint_team_names
+        #    读失败会降级成 []，不能用它门控本步——否则删行成功但桶未标
+        #    cleaned，下轮 dispatch 会落 REJECT_ORPHANED。helper 自身有
+        #    session_exists + 桶判空保护，无桶（从未建队）时安全 no-op。
+        #    与第 4 步的先后顺序无正确性影响：relay 保证下一条消息前调用，
+        #    期间无并发 dispatch；任一步失败都会以异常形式上抛。
+        db_state_marked = await self._mark_teams_cleaned_in_checkpoint(sid, roster_by_team)
+
+        dissolved = bool(had_runtime or had_db_rows or db_state_marked)
+        result = {
+            "session_id": sid,
+            "team_name": resolved_name or (bucket_names[0] if bucket_names else None),
+            "dissolved": dissolved,
+            "had_runtime": bool(had_runtime),
+            "had_db_rows": bool(had_db_rows),
+            "db_state_marked": bool(db_state_marked),
+        }
+        logger.info("[TeamManager] dissolve keep-context done: %s", result)
+        return result
+
+    async def _read_checkpoint_team_names(self, session_id: str) -> list[str]:
+        """Read team names persisted in the session checkpoint bucket.
+
+        Returns an empty list when the session has no checkpoint (never built
+        a team) or the bucket is absent — callers treat both as idempotent
+        no-op. Failures degrade to ``[]`` with a debug log.
+        """
+        try:
+            checkpointer = CheckpointerFactory.get_checkpointer()
+            if not await checkpointer.session_exists(session_id):
+                return []
+            session = create_agent_team_session(
+                session_id=session_id,
+                source_metadata_enabled=False,
+            )
+            try:
+                await session.pre_run()
+                return read_team_names_in_session(session)
+            finally:
+                try:
+                    await session.post_run()
+                except Exception:
+                    logger.debug(
+                        "[TeamManager] checkpoint session post_run failed",
+                        exc_info=True,
+                    )
+        except Exception as exc:
+            logger.debug(
+                "[TeamManager] read checkpoint team names failed: session_id=%s error=%s",
+                session_id,
+                exc,
+            )
+            return []
+
+    async def _mark_teams_cleaned_in_checkpoint(
+        self,
+        session_id: str,
+        roster_by_team: dict[str, list[dict[str, str]]] | None = None,
+    ) -> bool:
+        """Mark ``db_state=cleaned`` on every team bucket in the checkpoint.
+
+        Mirrors the no-agent pattern of ``_load_pending_resume_query``:
+        agent-less session → pre_run → merge → flush → post_run. Other
+        bucket fields are left intact — CREATE overwrites the whole bucket
+        via ``_flush_team_manifest``.
+
+        同时写入换岗标记（``TEAM_ROSTER_CHANGE_KEY``）：dissolve 前的旧
+        成员名单 + 时间戳，供 team_helpers 在下一轮 CREATE 前给 leader
+        注入换岗简报。重试语义：本轮已捕获到名单则覆盖写入；未捕获到
+        （重试 dissolve、行已删）且桶里已有标记时保留旧名单，不覆盖。
+        """
+        checkpointer = CheckpointerFactory.get_checkpointer()
+        if not await checkpointer.session_exists(session_id):
+            return False
+        session = create_agent_team_session(
+            session_id=session_id,
+            source_metadata_enabled=False,
+        )
+        try:
+            await session.pre_run()
+            names = read_team_names_in_session(session)
+            if not names:
+                return False
+            roster_by_team = roster_by_team or {}
+            for name in names:
+                merge_team_db_state(session, name, TEAM_DB_STATE_CLEANED)
+                members = roster_by_team.get(name)
+                existing = read_team_namespace(session, name)
+                existing_change = (
+                    existing.get(TEAM_ROSTER_CHANGE_KEY) if isinstance(existing, dict) else None
+                )
+                if members is not None or not isinstance(existing_change, dict):
+                    merge_team_namespace(
+                        session,
+                        name,
+                        {
+                            TEAM_ROSTER_CHANGE_KEY: {
+                                "old_roster": list(members or []),
+                                "dissolved_at": int(time.time() * 1000),
+                            }
+                        },
+                    )
+            await session.flush_checkpoint()
+            return True
+        finally:
+            try:
+                await session.post_run()
+            except Exception:
+                logger.debug(
+                    "[TeamManager] checkpoint session post_run failed",
+                    exc_info=True,
+                )
+
+    def _candidate_team_db_paths(self, session_id: str) -> list[Path]:
+        """候选 team.db 路径：project 作用域优先，全局 home 兜底。
+
+        团队运行在 ``agent_teams_home_scope(project_dir)`` 内执行，真实
+        team.db 位于 ``{project_dir}/.agent_teams/team.db``；而 dissolve 在
+        作用域之外被调用，单用 ``resolve_team_sqlite_db_path`` 会解析到全局
+        home、删错文件（2026-08-12 事故：had_db_rows=False，dispatch 永远
+        落不了 CREATE）。这里返回去重后的候选路径逐个尝试；team_name 带
+        session 后缀，跨文件不会误匹配。
+        """
+        paths: list[Path] = []
+        try:
+            project_dir = str(get_resolved_project_dir(session_id) or "").strip()
+        except Exception:
+            project_dir = ""
+        if project_dir:
+            paths.append(project_agent_teams_home(project_dir) / "team.db")
+        try:
+            global_path = resolve_team_sqlite_db_path(get_config())
+        except Exception:
+            global_path = None
+        if global_path is not None and global_path not in paths:
+            paths.append(global_path)
+        return paths
+
+    @staticmethod
+    def _delete_static_team_rows_sync(
+        db_path: Path, team_names: list[str]
+    ) -> tuple[bool, dict[str, list[dict[str, str]]]]:
+        """删 team_info/team_member 中指定团队的行，并捕获删除前的成员名单。
+
+        不能用 ``TeamDao.delete_team``：engine 每连接 ``PRAGMA foreign_keys=ON``，
+        per-session 动态表对 ``team_info.team_name`` 有 ``ondelete="CASCADE"``，
+        会级联误删任务/消息。也不能在共享 engine/连接池上关 FK——pragma 是
+        连接级状态，还回池子会泄漏给后续使用者。这里用 sqlite3 开一条私有
+        连接，一个事务删两张静态表后立即关闭，异常即回滚。
+
+        动态表悬空引用无害：下一轮 CREATE 用同名 team_name 重建 team_info
+        后自动重新归属。
+
+        名单捕获：同事务内先 SELECT team_member（列存在性按 PRAGMA 探测，
+        兼容没有 display_name/role 列的老库），供 dissolve 写入 checkpoint
+        换岗标记，重建轮次给 leader 注入「谁被移除了」的简报。
+
+        Returns:
+            (had_rows, roster_by_team)：是否确有行被删；团队名 → 删除前
+            成员名单（member_name/display_name/role 子集，按库中实有列）。
+        """
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.execute("PRAGMA foreign_keys=OFF")
+            existing = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type='table' AND name IN ('team_info', 'team_member')"
+                )
+            }
+            if not existing:
+                return False, {}
+            roster_cols: list[str] = []
+            if "team_member" in existing:
+                member_cols = {
+                    row[1] for row in conn.execute("PRAGMA table_info(team_member)")
+                }
+                roster_cols = [
+                    c for c in ("member_name", "display_name", "role") if c in member_cols
+                ]
+            had_rows = False
+            roster_by_team: dict[str, list[dict[str, str]]] = {}
+            try:
+                conn.execute("BEGIN")
+                for name in team_names:
+                    if roster_cols:
+                        rows = conn.execute(
+                            f"SELECT {', '.join(roster_cols)} FROM team_member "
+                            "WHERE team_name = ?",
+                            (name,),
+                        ).fetchall()
+                        if rows:
+                            roster_by_team[name] = [
+                                {col: str(value) for col, value in zip(roster_cols, row)}
+                                for row in rows
+                            ]
+                    for table in ("team_member", "team_info"):
+                        if table not in existing:
+                            continue
+                        cur = conn.execute(
+                            f"DELETE FROM {table} WHERE team_name = ?",
+                            (name,),
+                        )
+                        had_rows = had_rows or cur.rowcount > 0
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            return had_rows, roster_by_team
+        finally:
+            conn.close()
 
     async def _cancel_stream_task(self, session_id: str, reason: str) -> None:
         """Cancel one stream task while serializing its lifecycle operations."""

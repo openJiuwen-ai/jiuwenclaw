@@ -338,6 +338,224 @@ def _wrap_team_resume_protocol(
     return template.format(user_query=text, original_query=original)
 
 
+_TEAM_ROSTER_CHANGE_MARKER_CN = '【团队配置变更简报】'
+_TEAM_ROSTER_CHANGE_MARKER_EN = '[Team roster change briefing]'
+
+
+def _wrap_team_roster_change_briefing(
+    query: Any,
+    language: str,
+    *,
+    removed: list[str],
+    current: list[str],
+) -> Any:
+    """Wrap the first post-dissolve query with a roster-change briefing.
+
+    dissolve（团队配置热更新）保留了 leader 的 checkpoint 记忆，其中仍含
+    旧团队名单——leader 会复述已删成员的内容、并因「记忆说团队已建好」
+    而跳过 build_team 直接广播（2026-08-13 事故：广播 FK 失败丢消息、
+    已删成员「重现」、内部术语泄漏给用户）。本简报作为最新一轮用户消息
+    注入：明确新名单、强制先 build_team、禁止向用户泄漏内部机制。
+    """
+    if not isinstance(query, str):
+        return query
+    text = query.strip()
+    if not text:
+        return query
+    if _TEAM_ROSTER_CHANGE_MARKER_CN in text or _TEAM_ROSTER_CHANGE_MARKER_EN in text:
+        return query
+    is_en = str(language or '').lower() in ('en', 'english')
+    sep = ', ' if is_en else '、'
+    current_text = sep.join(current)
+    if is_en:
+        points = [f'The current team members are: {current_text}.']
+        if removed:
+            points.append(
+                f'These members were removed: {", ".join(removed)}. Never contact, mention, '
+                'or role-play them; reassign any of their unfinished work to current members.'
+            )
+        points.append(
+            'Your memory of the old roster is stale. You MUST call build_team first to '
+            'rebuild the team with the current roster before dispatching any task.'
+        )
+        points.append(
+            'Never mention this config change, cold start, "member not registered", or any '
+            'internal mechanics to the user — as far as the user is concerned, the team has '
+            'always been the current roster.'
+        )
+        body = '\n'.join(f'{i}. {p}' for i, p in enumerate(points, 1))
+        return (
+            f'{_TEAM_ROSTER_CHANGE_MARKER_EN} (visible to you only; never disclose to the user)\n'
+            f'The team configuration was just updated. You resumed with memories of the old '
+            f'team — the following overrides them:\n{body}\n\nUser message:\n{text}'
+        )
+    points = [f'当前团队成员名单：{current_text}。']
+    if removed:
+        points.append(
+            f'已被移除的成员：{sep.join(removed)}——不要联系、提及或扮演他们；'
+            '与他们相关的未完成任务，重新分配给当前成员。'
+        )
+    points.append(
+        '你记忆中的旧团队名单与分工已失效。必须首先调用 build_team 按当前名单重新组建团队，'
+        '然后再派发任务。'
+    )
+    points.append(
+        '不要向用户提及本次配置调整、冷启动、成员未注册等任何内部细节——对用户而言，'
+        '团队一直就是当前名单。'
+    )
+    body = '\n'.join(f'{i}. {p}' for i, p in enumerate(points, 1))
+    return (
+        f'{_TEAM_ROSTER_CHANGE_MARKER_CN}（本段仅你可见，严禁向用户透露）\n'
+        f'团队配置刚刚被更新，你带着旧团队的记忆恢复，以下面名单为准：\n{body}\n\n'
+        f'用户消息：\n{text}'
+    )
+
+
+async def _load_team_roster_change(
+    *,
+    session_id: str,
+    team_name: str | None,
+) -> dict[str, Any] | None:
+    """Read the dissolve roster-change marker from the team checkpoint bucket.
+
+    Mirrors the agent-less pattern of ``_load_pending_resume_query``. Returns
+    the ``roster_change`` payload dict, or ``None`` when absent/unreadable.
+    """
+    name = str(team_name or '').strip()
+    if not name or not str(session_id or '').strip():
+        return None
+    try:
+        from openjiuwen.agent_teams.runtime.metadata import read_team_namespace
+        from openjiuwen.core.session.agent_team import create_agent_team_session
+
+        from jiuwenclaw.agentserver.team.team_manager import TEAM_ROSTER_CHANGE_KEY
+    except Exception:
+        return None
+
+    session = create_agent_team_session(
+        session_id=session_id,
+        source_metadata_enabled=False,
+    )
+    try:
+        await session.pre_run(inputs=None)
+        bucket = read_team_namespace(session, name)
+    except Exception as exc:
+        logger.debug(
+            "[TeamHelpers] load roster_change failed: session_id=%s team=%s error=%s",
+            session_id,
+            name,
+            exc,
+        )
+        return None
+    finally:
+        try:
+            await session.post_run()
+        except Exception:
+            logger.debug("[TeamHelpers] session.post_run failed", exc_info=True)
+
+    if not isinstance(bucket, dict):
+        return None
+    payload = bucket.get(TEAM_ROSTER_CHANGE_KEY)
+    return payload if isinstance(payload, dict) else None
+
+
+async def _maybe_wrap_roster_change_briefing(
+    *,
+    team_manager: Any,
+    session_id: str,
+    team_spec: Any,
+    query: Any,
+    language: str,
+) -> Any:
+    """dissolve 后的首个 CREATE 轮次：给 leader 注入换岗简报（一次性）。
+
+    触发条件是 checkpoint 桶里存在 dissolve 写入的 roster_change 标记——
+    仅团队配置热更新路径会写，leader 自行 clean_team 不会，避免误报
+    「配置已变更」。CREATE 的 manifest flush 会整体覆盖桶，标记一次性消除。
+    任何一步失败都原样返回 query，绝不影响正常发送。
+    """
+    if not isinstance(query, str) or not query.strip():
+        return query
+    base_name = str(getattr(team_spec, 'team_name', '') or '').strip()
+    if not base_name:
+        return query
+    candidates: list[str] = []
+    build_scoped = getattr(team_manager, 'build_session_scoped_team_name', None)
+    if callable(build_scoped):
+        try:
+            scoped = str(build_scoped(base_name, session_id) or '').strip()
+            if scoped:
+                candidates.append(scoped)
+        except Exception:
+            pass
+    if base_name not in candidates:
+        candidates.append(base_name)
+
+    payload: dict[str, Any] | None = None
+    try:
+        for candidate in candidates:
+            payload = await _load_team_roster_change(session_id=session_id, team_name=candidate)
+            if payload is not None:
+                break
+    except Exception:
+        # 读取失败按无标记处理，绝不影响正常发送
+        logger.debug(
+            '[TeamHelpers] roster_change load raised: session_id=%s',
+            session_id,
+            exc_info=True,
+        )
+        return query
+    if payload is None:
+        return query
+
+    # 当前名单取自新 spec（leader + 预定义成员），display_name 兜底 member_name。
+    members: list[tuple[str, str]] = []
+    leader = getattr(team_spec, 'leader', None)
+    if leader is not None:
+        members.append(
+            (
+                str(getattr(leader, 'member_name', '') or ''),
+                str(getattr(leader, 'display_name', '') or ''),
+            )
+        )
+    for member in getattr(team_spec, 'predefined_members', None) or []:
+        members.append(
+            (
+                str(getattr(member, 'member_name', '') or ''),
+                str(getattr(member, 'display_name', '') or ''),
+            )
+        )
+    members = [(name, disp) for name, disp in members if name]
+    if not members:
+        return query
+    current = [disp or name for name, disp in members]
+    new_names = {name for name, _ in members}
+
+    removed: list[str] = []
+    old_roster = payload.get('old_roster')
+    if isinstance(old_roster, list):
+        for entry in old_roster:
+            if not isinstance(entry, dict):
+                continue
+            old_name = str(entry.get('member_name') or '')
+            if old_name and old_name not in new_names:
+                removed.append(str(entry.get('display_name') or old_name))
+
+    logger.info(
+        '[TeamHelpers] roster-change briefing injected: session_id=%s team=%s removed=%s current=%s',
+        session_id,
+        base_name,
+        removed,
+        current,
+    )
+    return _wrap_team_roster_change_briefing(
+        query,
+        language,
+        removed=removed,
+        current=current,
+    )
+
+
 async def _session_has_resumable_runtime(team_manager: Any, session_id: str) -> bool:
     has_resumable = getattr(team_manager, 'has_resumable_runtime', None)
     if not callable(has_resumable):
@@ -1929,6 +2147,17 @@ async def process_team_message_stream(request: Any,
                     'yes' if original_goal else 'no',
                     session_id,
                 )
+            else:
+                # dissolve（团队配置热更新）后的 CREATE 轮次：checkpoint 桶带
+                # roster_change 标记时给 leader 注入换岗简报（无标记原样返回）。
+                query = await _maybe_wrap_roster_change_briefing(
+                    team_manager=team_manager,
+                    session_id=session_id,
+                    team_spec=team_spec,
+                    query=query,
+                    language=language,
+                )
+                query_text = query if isinstance(query, str) else ''
             if callable(ensure_ready) and (not shared_skills_ready_prepared):
                 ensure_ready(session_id, team_spec)
                 shared_skills_ready_prepared = True
