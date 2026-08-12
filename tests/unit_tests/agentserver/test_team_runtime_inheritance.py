@@ -338,16 +338,12 @@ def test_build_member_rails_wires_team_trajectory_processor_to_evolution_rails(
     assert leader_rail.kwargs["member_role"] == "leader"
     assert leader_rail.kwargs["signal_trigger"] is False
     assert leader_rail.kwargs["review_trigger"] is True
-    assert leader_rail.kwargs["skills_dir"] == [
-        str(tmp_path / "skills"),
-        str(global_skills_dir),
-    ]
+    # Skills live in exactly one physical library; the team workspace no longer
+    # contributes a second root.
+    assert leader_rail.kwargs["skills_dir"] == str(global_skills_dir)
     assert member_rail.kwargs["trajectory_span_processor"] is processor
     assert member_rail.kwargs["signal_trigger"] is True
-    assert member_rail.kwargs["skills_dir"] == [
-        str(tmp_path / "skills"),
-        str(global_skills_dir),
-    ]
+    assert member_rail.kwargs["skills_dir"] == str(global_skills_dir)
 
 
 def test_build_member_rails_creates_leader_team_skill_evolution_rail_with_canonical_switch(

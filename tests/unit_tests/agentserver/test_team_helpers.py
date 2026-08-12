@@ -452,10 +452,29 @@ class _CronFakeManager(_InactiveTeamRuntimeManagerMixin):
         return cls._stream_tasks.pop(session_id, None)
 
 
+@pytest.fixture(autouse=True)
+def single_skill_library(tmp_path, monkeypatch):
+    """Point the single physical Skill library at this test's tmp directory.
+
+    Teams no longer own a mirrored ``<team_workspace>/skills`` directory, so
+    team slash commands resolve every Skill through ``get_agent_skills_dir()``.
+    Redirecting it keeps the suite off the developer's real library.
+    """
+    library = _skill_library_dir(tmp_path)
+    library.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(team_helpers, "get_agent_skills_dir", lambda: library)
+    return library
+
+
+def _skill_library_dir(tmp_path):
+    """Return the single physical Skill library used by these tests."""
+    return tmp_path / "global-skills"
+
+
 def _write_team_skill(tmp_path, name: str, *, records: list[dict] | None = None) -> str:
-    skills_dir = tmp_path / "team-workspace" / "skills"
+    skills_dir = _skill_library_dir(tmp_path)
     skill_dir = skills_dir / name
-    skill_dir.mkdir(parents=True)
+    skill_dir.mkdir(parents=True, exist_ok=True)
     skill_dir.joinpath("SKILL.md").write_text(
         "---\n"
         f"name: {name}\n"
@@ -480,9 +499,9 @@ def _write_team_skill(tmp_path, name: str, *, records: list[dict] | None = None)
 
 
 def _write_regular_skill(tmp_path, name: str, *, records: list[dict] | None = None) -> str:
-    skills_dir = tmp_path / "team-workspace" / "skills"
+    skills_dir = _skill_library_dir(tmp_path)
     skill_dir = skills_dir / name
-    skill_dir.mkdir(parents=True)
+    skill_dir.mkdir(parents=True, exist_ok=True)
     skill_dir.joinpath("SKILL.md").write_text(f"# {name}\n", encoding="utf-8")
     skill_dir.joinpath("evolutions.json").write_text(
         json.dumps(
@@ -1750,7 +1769,7 @@ async def test_process_team_message_stream_restarts_round_after_shutdown_race(mo
             )
 
         @classmethod
-        def ensure_team_shared_skills_ready_for_session(cls, session_id: str, team_spec: object):
+        def ensure_team_skill_visibility_ready_for_session(cls, session_id: str, team_spec: object):
             cls.skills_ready_calls.append((session_id, team_spec.team_name))
 
         @staticmethod
@@ -2096,7 +2115,7 @@ async def test_process_team_message_stream_resumes_active_session_without_stream
             return True, None
 
         @staticmethod
-        def ensure_team_shared_skills_ready_for_session(*_args, **_kwargs):
+        def ensure_team_skill_visibility_ready_for_session(*_args, **_kwargs):
             pytest.fail("active team sessions should not be treated as first requests")
 
         @staticmethod
@@ -2161,7 +2180,7 @@ async def test_process_team_message_stream_routes_evolution_interrupt_to_active_
             return SimpleNamespace(team_name="unit-team", enable_swarmflow=False)
 
         @staticmethod
-        def ensure_team_shared_skills_ready_for_session(session_id: str, spec: Any):
+        def ensure_team_skill_visibility_ready_for_session(session_id: str, spec: Any):
             pytest.fail("active evolution interrupt resume should not prepare shared skills")
 
         @staticmethod
@@ -2258,7 +2277,7 @@ async def test_process_team_message_stream_resumes_structured_team_plan_confirm_
             return True, None
 
         @staticmethod
-        def ensure_team_shared_skills_ready_for_session(session_id: str, spec: Any):
+        def ensure_team_skill_visibility_ready_for_session(session_id: str, spec: Any):
             captured["skills_ready"] = (session_id, spec.team_name)
 
         @staticmethod
@@ -2338,7 +2357,7 @@ async def test_process_team_message_stream_rejects_orphaned_interactive_input(mo
             pytest.fail("orphaned interactive inputs should not recreate team runtime")
 
         @staticmethod
-        def ensure_team_shared_skills_ready_for_session(*_args, **_kwargs):
+        def ensure_team_skill_visibility_ready_for_session(*_args, **_kwargs):
             pytest.fail("orphaned interactive inputs should not activate team runtime")
 
         @staticmethod
@@ -2485,7 +2504,7 @@ async def test_process_team_message_stream_treats_plain_query_as_first_request_a
             return SimpleNamespace(team_name="unit-team", enable_swarmflow=False)
 
         @staticmethod
-        def ensure_team_shared_skills_ready_for_session(session_id: str, spec: Any):
+        def ensure_team_skill_visibility_ready_for_session(session_id: str, spec: Any):
             captured["skills_ready"] = (session_id, spec.team_name)
 
         @staticmethod
@@ -2635,7 +2654,7 @@ async def test_process_team_message_stream_defers_first_evolve_until_team_runtim
             )
 
         @staticmethod
-        def ensure_team_shared_skills_ready_for_session(session_id: str, team_spec: object) -> None:
+        def ensure_team_skill_visibility_ready_for_session(session_id: str, team_spec: object) -> None:
             return None
 
         @staticmethod
@@ -2704,7 +2723,7 @@ async def test_process_team_message_stream_syncs_team_skills_before_evolve_slash
             )
 
         @staticmethod
-        def ensure_team_shared_skills_ready_for_session(session_id: str, team_spec: object) -> None:
+        def ensure_team_skill_visibility_ready_for_session(session_id: str, team_spec: object) -> None:
             _write_team_skill(tmp_path, "xlsx")
 
         @staticmethod
@@ -2773,7 +2792,7 @@ async def test_process_team_message_stream_runs_evolve_followup_without_rail(mon
             )
 
         @staticmethod
-        def ensure_team_shared_skills_ready_for_session(session_id: str, team_spec: object) -> None:
+        def ensure_team_skill_visibility_ready_for_session(session_id: str, team_spec: object) -> None:
             return None
 
         @staticmethod
@@ -2839,7 +2858,7 @@ async def test_process_team_message_stream_does_not_emit_evolution_status_for_no
             )
 
         @staticmethod
-        def ensure_team_shared_skills_ready_for_session(session_id: str, team_spec: object) -> None:
+        def ensure_team_skill_visibility_ready_for_session(session_id: str, team_spec: object) -> None:
             return None
 
         @staticmethod
