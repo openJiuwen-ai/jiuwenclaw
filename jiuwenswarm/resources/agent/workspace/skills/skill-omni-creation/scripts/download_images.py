@@ -99,7 +99,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Download images from stage01.json.")
     parser.add_argument("run_id", nargs="?", help="run_id — reads the UUID runtime stage01.json")
     parser.add_argument("--out", default=None)
-    parser.add_argument("--check-deps", action="store_true", help="Run the shared image environment gate with auto-repair, then exit.")
+    parser.add_argument(
+        "--check-deps",
+        action="store_true",
+        help="Run the shared image environment gate with auto-repair, then exit.",
+    )
     args = parser.parse_args()
 
     _load_runtime_dependencies()
