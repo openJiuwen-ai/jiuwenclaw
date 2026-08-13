@@ -98,3 +98,75 @@ async def test_empty_structured_answers_are_rejected():
 
     assert isinstance(decision, RejectResult)
     assert "answers must include at least one non-empty response" in decision.tool_result
+
+
+@pytest.mark.asyncio
+async def test_explicit_skipped_preserves_compact_machine_state():
+    rail = StructuredAskUserRail()
+    tc = _make_tool_call(
+        {
+            "query": "Choose",
+            "questions": [
+                {"question": "Which?", "header": "Choice", "options": []}
+            ],
+        }
+    )
+
+    decision = await rail.resolve_interrupt(
+        MagicMock(),
+        tc,
+        {"status": "skipped", "answers": []},
+    )
+
+    assert isinstance(decision, RejectResult)
+    assert decision.tool_result == '{"status":"skipped","answers":[]}'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "user_input",
+    [
+        {"status": "skipped", "answers": {"Which?": "A"}},
+        {"status": "skipped", "answers": []},
+        {"status": "skipped", "answers": [], "extra": True},
+    ],
+)
+async def test_non_exact_skipped_shapes_are_rejected(user_input):
+    rail = StructuredAskUserRail()
+    tc = _make_tool_call(
+        {
+            "query": "Choose",
+            "questions": [
+                {"question": "Which?", "header": "Choice", "options": []}
+            ],
+        }
+    )
+    if user_input == {"status": "skipped", "answers": []}:
+        user_input = {"status": "skipped"}
+
+    decision = await rail.resolve_interrupt(MagicMock(), tc, user_input)
+
+    assert isinstance(decision, RejectResult)
+    assert "INVALID_ARGUMENT" in decision.tool_result
+
+
+@pytest.mark.asyncio
+async def test_answered_structured_payload_keeps_readable_text_semantics():
+    rail = StructuredAskUserRail()
+    tc = _make_tool_call(
+        {
+            "query": "Choose",
+            "questions": [
+                {"question": "Which?", "header": "Choice", "options": []}
+            ],
+        }
+    )
+
+    decision = await rail.resolve_interrupt(
+        MagicMock(),
+        tc,
+        {"status": "answered", "answers": {"Which?": "A"}},
+    )
+
+    assert isinstance(decision, RejectResult)
+    assert decision.tool_result == "Which?: A"

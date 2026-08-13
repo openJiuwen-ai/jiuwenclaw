@@ -421,10 +421,6 @@ def _is_ask_user_interrupt_value(value_obj: Any) -> bool:
         return True
     if isinstance(value_obj, dict) and "payload_schema" in value_obj and "questions" in value_obj:
         return True
-    tool_args = _normalize_tool_args(_read_value_field(value_obj, "tool_args", None))
-    if isinstance(tool_args, dict) and str(tool_args.get("query") or "").strip():
-        if not tool_args.get("questions"):
-            return True
     return False
 
 

@@ -485,20 +485,20 @@ class TestConfirmAndPermissionInterrupts:
 
     @staticmethod
     def test_permission_interrupt_message_is_classified():
-        message = "**工具 `write_file` 需要授权才能执行**\n\n请确认是否允许该操作。"
+        message = "**工具 `search_web` 需要授权才能执行**\n\n请确认是否允许该操作。"
         result = convert_interactions_to_ask_user_question([
             {
                 "id": "req_perm",
                 "value": {
-                    "tool_name": "write_file",
+                    "tool_name": "search_web",
                     "message": message,
-                    "tool_args": {"file_path": "foo.py"},
+                    "tool_args": {"query": "latest research"},
                 },
             }
         ])
         assert result is not None
         assert result["source"] == "permission_interrupt"
-        assert "write_file" in result["questions"][0]["question"]
+        assert "search_web" in result["questions"][0]["question"]
         assert result["questions"][0]["header"].startswith("权限审批")
 
     @staticmethod

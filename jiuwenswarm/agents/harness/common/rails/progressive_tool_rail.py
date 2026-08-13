@@ -12,9 +12,12 @@ Fixed schema maximizes LLM prefix caching while keeping rarely used tools reacha
 from __future__ import annotations
 
 import logging
-from typing import Any
+from contextlib import ExitStack, contextmanager
+from typing import Any, Callable, Iterator
 
+import anyio
 from openjiuwen.core.runner import Runner
+from openjiuwen.core.single_agent.ability_manager import AbilityManager
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts import PromptSection
 from openjiuwen.harness.prompts.sections import SectionName
@@ -32,6 +35,12 @@ from jiuwenswarm.agents.harness.common.tools.invoke_tool_tool import (
 logger = logging.getLogger(__name__)
 
 _LOG_PREFIX = "[ProgressiveToolRail]"
+_DEEPRESEARCH_CONTEXT_TOOLS = frozenset({
+    "deepresearch_stream",
+    "deepresearch_prepare_rewrite",
+    "deepresearch_commit_rewrite",
+    "deepresearch_generate_rewrite_html",
+})
 
 
 def _json_safe_value(value: Any) -> Any:
@@ -71,6 +80,7 @@ class ProgressiveToolRail(DeepAgentRail):
         agent_id: str | None = None,
         agent_card_id: str | None = None,
         enable_for_models: list[str] | None = None,
+        deepresearch_context_provider: Callable[[], dict[str, str]] | None = None,
     ) -> None:
         super().__init__()
         self.enabled = bool(enabled)
@@ -84,6 +94,7 @@ class ProgressiveToolRail(DeepAgentRail):
             if str(item).strip()
         ]
         self._cached_model_name = ""
+        self._deepresearch_context_provider = deepresearch_context_provider
 
         if "tools_search" not in self.eager_tools:
             self.eager_tools.insert(0, "tools_search")
@@ -97,6 +108,49 @@ class ProgressiveToolRail(DeepAgentRail):
         self._owned_tool_ids: set[str] = set()
         self._cached_all_tool_infos: list[Any] = []
         self._cached_deferred_tool_infos: list[Any] = []
+
+    @contextmanager
+    def _bind_deepresearch_context(self, tool_name: str) -> Iterator[None]:
+        provider = self._deepresearch_context_provider
+        if provider is None or tool_name not in _DEEPRESEARCH_CONTEXT_TOOLS:
+            yield
+            return
+
+        from jiuwenswarm.agents.harness.common.tools.deepresearch import (
+            push_deepresearch_route,
+            reset_deepresearch_route,
+        )
+        from jiuwenswarm.common.local_env_config import (
+            bind_agent_env_ns,
+            bind_task_env_overlay,
+            build_effective_env_overlay,
+            reset_agent_env_ns,
+            reset_task_env_overlay,
+        )
+
+        route = provider()
+        service_id = str(route.get("service_id") or "default")
+        agent_id = str(route.get("agent_id") or "default")
+        with ExitStack() as cleanup:
+            ns_token = bind_agent_env_ns(service_id, agent_id)
+            cleanup.callback(reset_agent_env_ns, ns_token)
+            overlay_token = bind_task_env_overlay(
+                build_effective_env_overlay(
+                    service_id=service_id,
+                    agent_id=agent_id,
+                )
+            )
+            cleanup.callback(reset_task_env_overlay, overlay_token)
+            route_token = push_deepresearch_route(
+                request_id=str(route.get("request_id") or ""),
+                channel_id=str(route.get("channel_id") or ""),
+                session_id=str(route.get("session_id") or ""),
+                service_id=service_id,
+                agent_id=agent_id,
+                output_dir=str(route.get("output_dir") or ""),
+            )
+            cleanup.callback(reset_deepresearch_route, route_token)
+            yield
 
     # ------------------------------------------------------------------
     # Model name resolution & enable check
@@ -700,20 +754,32 @@ class ProgressiveToolRail(DeepAgentRail):
         if target_tool_card is None:
             agent = self._resolve_runtime_agent()
             ability_manager = getattr(agent, "ability_manager", None)
-            if ability_manager is not None:
-                try:
-                    await ability_manager.list_tool_info()
-                except Exception as exc:
-                    logger.warning(
-                        "%s invoke fallback list_tool_info failed: %s",
-                        _LOG_PREFIX,
-                        exc,
-                    )
-            await self._refresh_deferred_tool_cache()
-            for tool in self._cached_deferred_tool_infos:
-                if str(getattr(tool, "name", "") or "") == tool_name:
-                    target_tool_card = tool
-                    break
+            lookup_timeout = getattr(AbilityManager, "_resolve_call_timeout")(None)
+            try:
+                with anyio.fail_after(lookup_timeout):
+                    if ability_manager is not None:
+                        try:
+                            await ability_manager.list_tool_info()
+                        except Exception as exc:
+                            logger.warning(
+                                "%s invoke fallback list_tool_info failed: %s",
+                                _LOG_PREFIX,
+                                exc,
+                            )
+                    await self._refresh_deferred_tool_cache()
+                    for tool in self._cached_deferred_tool_infos:
+                        if str(getattr(tool, "name", "") or "") == tool_name:
+                            target_tool_card = tool
+                            break
+            except TimeoutError:
+                return {
+                    "success": False,
+                    "error": (
+                        f"Tool lookup for '{tool_name}' timed out after "
+                        f"{lookup_timeout}s"
+                    ),
+                    "tool_name": tool_name,
+                }
 
         if target_tool_card is None:
             return {
@@ -738,7 +804,21 @@ class ProgressiveToolRail(DeepAgentRail):
 
         try:
             kwargs_without_session = {k: v for k, v in kwargs.items() if k != "session"}
-            result = await target_tool.invoke(arguments, session=session, **kwargs_without_session)
+            call_timeout = getattr(AbilityManager, "_resolve_call_timeout")(
+                target_tool_card
+            )
+            with self._bind_deepresearch_context(tool_name):
+                try:
+                    with anyio.fail_after(call_timeout) as timeout_scope:
+                        result = await target_tool.invoke(
+                            arguments, session=session, **kwargs_without_session
+                        )
+                except TimeoutError as exc:
+                    if not timeout_scope.cancel_called:
+                        raise
+                    raise TimeoutError(
+                        f"Tool '{tool_name}' timed out after {call_timeout}s"
+                    ) from exc
             logger.info(
                 "%s invoke tool=%s success=True result_type=%s",
                 _LOG_PREFIX,
