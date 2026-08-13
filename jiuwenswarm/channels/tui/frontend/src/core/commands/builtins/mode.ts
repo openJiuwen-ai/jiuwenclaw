@@ -57,7 +57,6 @@ const MODE_ALIASES: Record<string, ClientMode> = {
   agent: "agent.plan",
   code: "code.normal",
   "agent.plan": "agent.plan",
-  "agent.fast": "agent.fast",
   "code.plan": "code.plan",
   "code.normal": "code.normal",
   "code.team": "code.team",
@@ -75,12 +74,15 @@ export function resolveModeTarget(requestedMode: string): ClientMode | undefined
   return MODE_ALIASES[requestedMode.trim()];
 }
 
-/** TUI `/mode` 树形展示；分组行 value 与 modeAlias 默认一致，不修改 pi-tui。 */
+/** TUI `/mode` 树形展示；分组行 value 与 modeAlias 默认一致，不修改 pi-tui。
+ *
+ * 注：`agent.fast`（plan/fast 已合并为单一 agent 模式）已下掉——补全树、directModes
+ * 与 `MODE_ALIASES` 均不再接受该 token，`/mode agent.fast` 视为非法指令报 usage。
+ */
 export function buildModeAutocompleteItems(): AutocompleteItem[] {
   return [
     { value: "agent", label: "agent" },
     { value: "agent.plan", label: "    plan" },
-    { value: "agent.fast", label: "    fast" },
     { value: "code", label: "code" },
     { value: "code.plan", label: "    plan" },
     { value: "code.normal", label: "    normal" },
@@ -95,7 +97,6 @@ export function createModeCommand(): SlashCommand {
     "agent",
     "code",
     "agent.plan",
-    "agent.fast",
     "code.plan",
     "code.normal",
     "team.work",

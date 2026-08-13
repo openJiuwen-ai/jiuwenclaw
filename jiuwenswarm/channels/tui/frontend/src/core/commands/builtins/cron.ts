@@ -41,7 +41,7 @@ async function loadCronJobMeta(ctx: CommandContext): Promise<CronJobMetaPayload>
   const payload = await ctx.request("cron.job.meta", {}) as CronJobMetaPayload;
   cachedCronMeta = {
     modes: Array.isArray(payload.modes) ? payload.modes : [],
-    default_mode: payload.default_mode || "agent.fast",
+    default_mode: payload.default_mode || "agent",
     default_timeout_seconds: payload.default_timeout_seconds ?? 600,
     default_team_timeout_seconds: payload.default_team_timeout_seconds ?? 1200,
   };
@@ -61,7 +61,7 @@ const TEAM_MODES = new Set([
 ]);
 
 function resolveDefaultTimeoutSeconds(job: Pick<CronJobPayload, "mode">, cronMeta: CronJobMetaPayload): number {
-  const mode = String(job.mode || cronMeta.default_mode || "agent.fast").trim().toLowerCase();
+  const mode = String(job.mode || cronMeta.default_mode || "agent").trim().toLowerCase();
   return TEAM_MODES.has(mode)
     ? (cronMeta.default_team_timeout_seconds ?? 1200)
     : (cronMeta.default_timeout_seconds ?? 600);
@@ -294,7 +294,7 @@ export function createCronCommand(): SlashCommand {
         name: "add",
         description: "创建定时任务",
         usage: "/cron add name=... cron_expr=\"...\" description=\"...\"",
-        argGuide: "name=任务名 cron_expr=\"时间表达式(5字段或7字段)\" description=\"让Agent做什么\" mode=agent.fast|team targets=tui (默认 agent.fast；mode=team 走 Team+SwarmFlow)",
+        argGuide: "name=任务名 cron_expr=\"时间表达式(5字段或7字段)\" description=\"让Agent做什么\" mode=agent|team targets=tui (默认 agent；mode=team 走 Team+SwarmFlow)",
         kind: CommandKind.BUILT_IN,
         takesArgs: true,
         action: async (ctx, args) => _handleAdd(ctx, `add ${args}`),

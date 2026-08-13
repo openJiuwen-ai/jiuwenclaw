@@ -256,7 +256,7 @@ function _handleAgentModeToolResult(
   if (existingMode.startsWith("code.")) {
     newMode = subMode === "team" ? "code.team" : "code.normal";
   } else if (existingMode.startsWith("agent.")) {
-    newMode = subMode === "plan" ? "agent.plan" : "agent.fast";
+    newMode = subMode === "plan" ? "agent.plan" : "agent";
   }
 
   if (newMode && newMode !== existingMode) {
