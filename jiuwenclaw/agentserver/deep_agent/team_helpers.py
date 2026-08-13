@@ -2415,6 +2415,15 @@ async def _consume_stream_with_query_impl(
                 if leader_final_seen:
                     # leader 已交总结：静默是"等成员落定"，逐 tick 复评 settle。
                     if await _team_has_pending_user_decision(session_id):
+                        # 等用户决策期间同样要发业务帧保活（与非 leader_final_seen
+                        # 路径一致）——否则用户思考超过 300s，relay 看门狗抢跑拆流。
+                        _broadcast_event(channel_id, session_id, {
+                            'event_type': 'chat.processing_status',
+                            'session_id': session_id,
+                            'rid': round_id,
+                            'is_processing': True,
+                            'is_complete': False,
+                        })
                         continue
                     if (
                         time.monotonic() - idle_since_last_chunk

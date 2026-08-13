@@ -184,6 +184,15 @@ async def test_leader_final_pending_user_decision_defers_recheck(monkeypatch):
     assert pending.await_count == 3, pending.await_count
     # pending 期间不得触发 settle 复评：final 点判定 1 次 + 复评 1 次 + finally 1 次
     assert settled.await_count == 3, settled.await_count
+    # pending 等待期间必须向 relay 广播业务帧保活（防 relay 300s 看门狗抢跑）：
+    # 流启动 1 次 + 2 个 pending tick 各 1 次
+    pings = [
+        p for p in captured
+        if p.get("event_type") == "chat.processing_status"
+        and p.get("is_processing")
+        and not p.get("is_complete")
+    ]
+    assert len(pings) >= 3, f"pending 期间缺少保活帧: {len(pings)}"
 
 
 @pytest.mark.asyncio
