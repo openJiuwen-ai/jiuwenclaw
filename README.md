@@ -182,7 +182,7 @@ Full index: [Documentation](docs/README_EN.md)
 - Build and evolve capabilities: [Skills](docs/en/Skills.md) · [Skill Self-Evolution](docs/en/SkillSelfEvolution.md)
 - Multi-agent and cluster: [Agent Team](docs/en/AgentTeam.md) · [Distributed Team](docs/en/DistributedTeam.md)
 - Memory: [Memory](docs/en/Memory.md) · [Task Memory](docs/en/TaskMemory.md) · [Coding Memory](docs/en/CodingMemory.md)
-- Automation: [Scheduled Tasks](docs/en/ScheduledTasks.md) · [Heartbeat](docs/en/Heartbeat.md)
+- Automation: [Scheduled Tasks](docs/en/ScheduledTasks.md)
 - Terminal: [Quick Start (TUI)](docs/en/Quickstart_tui.md) · [Slash Commands](docs/en/SlashCommands.md) · [SwarmFlow (TUI)](docs/en/TUISwarmFlowGuide.md)
 - Extend and integrate: [MCP Configuration](docs/en/MCPConfiguration.md) · [A2A](docs/en/A2A.md) · [E2A Protocol](docs/en/E2A-protocol.md)
 
