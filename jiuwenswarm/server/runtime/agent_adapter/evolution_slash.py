@@ -36,7 +36,7 @@ _COMMANDS = (
 _DEFAULT_REVIEW_AGENT_NAME = "evolution_reviewer"
 _EVOLVE_REBUILD_REMOVED_MESSAGE = (
     "`/evolve_rebuild` 已移除。请使用控制面接口 `skills.evolution.rebuild` 采纳经验并生成新版本；"
-    "若已开启 `react.evolution.auto_save`，经验落盘后会自动生成版本。"
+    "若技能 `selfEvolution=auto`，经验落盘后会自动生成版本。"
 )
 
 

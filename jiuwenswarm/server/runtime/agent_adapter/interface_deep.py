@@ -79,6 +79,17 @@ from openjiuwen.harness.rails.evolution import EvolutionReviewRuntime
 from openjiuwen.harness.rails.context_engineer.context_assemble_rail import ContextAssembleRail
 from openjiuwen.harness.rails.context_engineer.context_processor_rail import ContextProcessorRail
 from openjiuwen.agent_evolving.trajectory import FileTrajectoryStore
+try:
+    from openjiuwen.agent_evolving.skill_self_evolution import resolve_skill_evolution_action
+except ImportError:
+    def resolve_skill_evolution_action(  # type: ignore[misc]
+        skill_name: str,
+        *,
+        default_auto_save: bool = True,
+        **_kwargs: Any,
+    ) -> str:
+        """Fallback when agent-core lacks skill_self_evolution."""
+        return "auto" if default_auto_save else "suggest"
 from openjiuwen.harness.subagents.browser_agent import build_browser_agent_config
 from openjiuwen.harness.subagents.research_agent import build_research_agent_config
 from openjiuwen.harness.tools import (
@@ -306,7 +317,6 @@ from jiuwenswarm.common.config import (
     get_default_models,
     get_evolution_enabled,
     get_evolution_review_trigger_enabled,
-    get_evolution_auto_save_enabled,
     get_sandbox_endpoint,
     get_sandbox_runtime,
     get_sandbox_startup_mode,
@@ -5577,8 +5587,9 @@ class JiuWenSwarmDeepAdapter:
         """Build SkillEvolutionRail.
 
         Product contract: while the rail is mounted, generated experiences always
-        persist (``rail.auto_save=True``). Config ``react.evolution.auto_save``
-        only gates automatic version merge after persistence.
+        persist (``rail.auto_save=True``). Automatic version merge after
+        persistence is gated per-skill by ``resolve_skill_evolution_action``
+        (``selfEvolution=auto`` only).
         """
         try:
             evolution_review_trigger = get_evolution_review_trigger_enabled(config)
@@ -9951,11 +9962,26 @@ class JiuWenSwarmDeepAdapter:
     def _get_disk_evolution_store(self):
         return evolution_version_ctl.get_disk_evolution_store(self._resolve_skill_dirs())
 
+    def _should_auto_merge_evolved_skill(self, skill_name: str) -> bool:
+        """Return True when per-skill selfEvolution resolves to ``auto``.
+
+        Unlisted skills use ``default_auto_save=False`` → ``suggest`` (no auto merge).
+        """
+        name = str(skill_name or "").strip()
+        if not name:
+            return False
+        action = resolve_skill_evolution_action(
+            name,
+            default_auto_save=False,
+            skills_dirs=self._resolve_skill_dirs(),
+        )
+        return action == "auto"
+
     def _queue_auto_rebuild_skill(self, skill_name: str) -> None:
         name = str(skill_name or "").strip()
         if not name:
             return
-        if not get_evolution_auto_save_enabled(self._config_cache):
+        if not self._should_auto_merge_evolved_skill(name):
             return
         if name not in self._pending_auto_rebuild_skills:
             self._pending_auto_rebuild_skills.append(name)
@@ -10169,9 +10195,6 @@ class JiuWenSwarmDeepAdapter:
         """Fire-and-forget version merge for skills queued after experience persist."""
         if not self._pending_auto_rebuild_skills:
             return
-        if not get_evolution_auto_save_enabled(self._config_cache):
-            self._pending_auto_rebuild_skills.clear()
-            return
         rid = str(request_id or "auto-rebuild").strip() or "auto-rebuild"
         asyncio.create_task(
             self._run_auto_rebuild_skills_detached(request_id=rid),
@@ -10179,12 +10202,17 @@ class JiuWenSwarmDeepAdapter:
         )
 
     async def _run_auto_rebuild_skills_detached(self, *, request_id: str | None = None) -> None:
-        """Background auto version merge gated by config auto_save."""
-        if not get_evolution_auto_save_enabled(self._config_cache):
-            self._pending_auto_rebuild_skills.clear()
-            return
+        """Background auto version merge gated by per-skill selfEvolution=auto."""
         skills = self._take_pending_auto_rebuild_skills()
         for skill_name in skills:
+            if not self._should_auto_merge_evolved_skill(skill_name):
+                logger.info(
+                    "[JiuWenSwarmDeepAdapter] skip auto rebuild: request_id=%s "
+                    "skill=%s reason=selfEvolution_not_auto",
+                    request_id,
+                    skill_name,
+                )
+                continue
             try:
                 await self.generate_evolution_merge_version(skill_name=skill_name)
             except Exception as exc:
@@ -13776,23 +13804,24 @@ class JiuWenSwarmDeepAdapter:
                 last_event_at = time.monotonic()
 
                 # Queue skills for auto version merge when experiences were persisted.
-                if get_evolution_auto_save_enabled(self._config_cache):
-                    for evt in events:
-                        payload = event_payload_dict(evt)
-                        meta = evolution_meta_from_payload(payload) or {}
-                        skill_name = str(
-                            payload.get("skill_name")
-                            or meta.get("skill_name")
-                            or ""
-                        ).strip()
-                        raw_stage = str(
-                            payload.get("stage") or meta.get("stage") or ""
-                        ).strip().lower()
-                        if skill_name and raw_stage in {
-                            "auto_approved",
-                            "completed",
-                        }:
-                            self._queue_auto_rebuild_skill(skill_name)
+                # Per-skill gate: only selfEvolution=auto is queued inside
+                # ``_queue_auto_rebuild_skill``.
+                for evt in events:
+                    payload = event_payload_dict(evt)
+                    meta = evolution_meta_from_payload(payload) or {}
+                    skill_name = str(
+                        payload.get("skill_name")
+                        or meta.get("skill_name")
+                        or ""
+                    ).strip()
+                    raw_stage = str(
+                        payload.get("stage") or meta.get("stage") or ""
+                    ).strip().lower()
+                    if skill_name and raw_stage in {
+                        "auto_approved",
+                        "completed",
+                    }:
+                        self._queue_auto_rebuild_skill(skill_name)
 
                 visible_progress_statuses = visible_evolution_progress_from_events(events)
                 just_started_with_progress = None

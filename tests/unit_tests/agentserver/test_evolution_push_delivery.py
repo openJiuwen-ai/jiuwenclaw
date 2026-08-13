@@ -143,6 +143,12 @@ class _TestAdapter(JiuWenSwarmDeepAdapter):
             {"react": {"evolution": {"auto_save": auto_save}}},
         )
         setattr(adapter, "_pending_auto_rebuild_skills", [])
+        # Minimal attrs so watcher → _queue_auto_rebuild_skill →
+        # _should_auto_merge_evolved_skill → _resolve_skill_dirs works.
+        setattr(adapter, "_agent_id", "test-agent")
+        setattr(adapter, "_service_id", "test-service")
+        setattr(adapter, "_workspace_dir", ".")
+        setattr(adapter, "_resolve_skill_dirs", lambda extra_skill_dir=None: [])
         return adapter
 
     async def watch_evolution_and_push(
@@ -391,7 +397,7 @@ async def test_normal_evolution_watcher_ends_on_auto_approved_progress(monkeypat
 async def test_normal_evolution_watcher_auto_rebuilds_after_auto_approved(
     monkeypatch,
 ):
-    """auto_save=true: persisted experience (auto_approved) must schedule rebuild."""
+    """selfEvolution=auto: persisted experience (auto_approved) must schedule rebuild."""
     _FakeTransport.pushes = []
     rail = _FakeEvolutionRail(
         [
@@ -418,8 +424,8 @@ async def test_normal_evolution_watcher_auto_rebuilds_after_auto_approved(
     )
     monkeypatch.setattr(
         interface_deep_module,
-        "get_evolution_auto_save_enabled",
-        lambda _cfg=None: True,
+        "resolve_skill_evolution_action",
+        lambda skill_name, **_kwargs: "auto",
     )
     monkeypatch.setattr(adapter, "_run_auto_rebuild_skills_detached", _capture_rebuild)
 
@@ -432,9 +438,10 @@ async def test_normal_evolution_watcher_auto_rebuilds_after_auto_approved(
 
 
 @pytest.mark.asyncio
-async def test_normal_evolution_watcher_skips_auto_rebuild_when_auto_save_false(
+async def test_normal_evolution_watcher_skips_auto_rebuild_when_suggest(
     monkeypatch,
 ):
+    """selfEvolution=suggest: persisted experience must not schedule rebuild."""
     _FakeTransport.pushes = []
     rail = _FakeEvolutionRail(
         [
@@ -459,8 +466,8 @@ async def test_normal_evolution_watcher_skips_auto_rebuild_when_auto_save_false(
     )
     monkeypatch.setattr(
         interface_deep_module,
-        "get_evolution_auto_save_enabled",
-        lambda _cfg=None: False,
+        "resolve_skill_evolution_action",
+        lambda skill_name, **_kwargs: "suggest",
     )
     monkeypatch.setattr(adapter, "_run_auto_rebuild_skills_detached", _capture_rebuild)
 
