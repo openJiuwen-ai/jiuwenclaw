@@ -1100,14 +1100,14 @@ def main() -> None:
 
     resolved_title = page_title.strip()
     if not resolved_title:
-       for block in blocks:
-           if block.get("type") != "heading":
-               continue
-   
-           heading_text = str(block.get("text", "")).strip()
-           if heading_text:
-               resolved_title = heading_text
-               break
+        for block in blocks:
+            if block.get("type") != "heading":
+                continue
+
+            heading_text = str(block.get("text", "")).strip()
+            if heading_text:
+                resolved_title = heading_text
+                break
     if not resolved_title:
         logger.warning("[scrape_page] no real page TITLE resolved; keeping UUID workspace for retry/fallback")
         return
