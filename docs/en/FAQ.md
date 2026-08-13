@@ -111,14 +111,13 @@ jiuwenswarm-web --host 0.0.0.0 --port <custom-port>
 
 ### Q: How to use JiuwenSwarm on a remote server?
 
-Bind to an externally accessible address when starting:
+The Web UI binds to `localhost` by default. To access the Web UI on a Linux server from another computer, start it with:
 
 ```bash
-jiuwenswarm-web --host 0.0.0.0 --port <custom-port>
-jiuwenswarm-app
+FRONTEND_HOST=0.0.0.0 jiuwenswarm-start
 ```
 
-Then access via `http://<server-ip>:<port>`.
+Then open `http://<linux-server-ip>:<web-ui-port>`. The default port is `5173`; if startup automatically selects another port, use the Web UI port shown in the terminal. Make sure the Linux firewall or cloud security group allows that port, and restrict access to trusted networks or source IPs.
 
 ### Q: How to start TUI mode?
 

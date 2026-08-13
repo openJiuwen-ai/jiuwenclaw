@@ -11,7 +11,7 @@ Before installing JiuwenSwarm, ensure your system meets the following requiremen
 | Dependency | Version | Description |
 |------------|---------|-------------|
 | Operating System | Windows 10/11, macOS 10.15+, Linux | Supports mainstream operating systems |
-| Python | ≥3.11, <3.14 | Python 3.11 recommended |
+| Python | `≥3.11, <3.14` | Python 3.11 recommended |
 | Node.js | 18.x or higher | For frontend interface |
 | Git | Latest | For source code installation |
 
@@ -100,17 +100,15 @@ jiuwenswarm chat "Hello, introduce yourself"
 
 For details, see [CLI / Terminal Chat](CLI.md#terminal-cli-jiuwenswarm-chat).
 
-### Remote Access (Optional)
+### Remote Web UI Access on Linux (Optional)
 
-For remote access, run the following commands:
+By default, `jiuwenswarm-start` binds the Web UI to `localhost`, so you can open the Web UI address shown in the terminal from a browser on the same Linux host. To access the Web UI on a Linux server from another computer, start it with:
 
 ```bash
-# Start web service
-jiuwenswarm-web --host 0.0.0.0 --port <custom-port>
-
-# Start backend service
-jiuwenswarm-app
+FRONTEND_HOST=0.0.0.0 jiuwenswarm-start
 ```
+
+Then open `http://<linux-server-ip>:<web-ui-port>` from the other computer. The default Web UI port is `5173`; if startup automatically selects another port, use the Web UI port shown in the terminal. Make sure the Linux firewall or cloud security group allows that port, and restrict access to trusted networks or source IPs.
 
 **Configuration Directory Auto-Creation**:
 After first starting the service, the system automatically creates the configuration directory:
@@ -335,9 +333,13 @@ When you need JiuwenSwarm to forget all conversation history and user informatio
 
 **Steps to Clear Memory:**
 
-Memory files are stored in:
+The default built-in memory directory is:
 - **Windows**: `C:\Users\<your-username>\.jiuwenswarm\agent\workspace\memory\`
 - **Linux/Mac**: `~/.jiuwenswarm/agent/workspace/memory/`
+
+The full default path to the long-term memory file `MEMORY.md` is:
+- **Windows**: `C:\Users\<your-username>\.jiuwenswarm\agent\workspace\memory\MEMORY.md`
+- **Linux/Mac**: `~/.jiuwenswarm/agent/workspace/memory/MEMORY.md`
 
 **Method 1: Delete via Agent**
 Tell JiuwenSwarm: "Please delete all memory files" or "Clear my memory", Agent will call file tools to delete files in the memory directory.
