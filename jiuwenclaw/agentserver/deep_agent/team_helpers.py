@@ -1491,7 +1491,14 @@ async def _team_round_settled(channel_id: str | None, session_id: str) -> bool:
 
 
 async def _team_has_pending_user_decision(session_id: str) -> bool:
-    """Return True while an ask_user card for this session is awaiting the user.
+    """Return True while a user decision for this session is still awaiting the user.
+
+    Two pending sources:
+    - ask_user 工具：leader 阻塞在 registry 的 future 上（AskUserQuestionRegistry）。
+    - 权限 ASK（PermissionInterruptRail，如 send_file_to_user 命中 defaults.guard）：
+      审批卡发出后 leader run 即结束、成员快照不 busy，pending 只存在于 rail 的
+      待答索引里——不覆盖它，idle-break 会在用户看卡片时把团队拆掉
+      （2026-08-13 事故：拆流后用户作答撞 interact not_active，只能 hard RESUME）。
 
     A leader blocked on ask_user produces zero stream chunks; that silence is
     "waiting for the user", not a stalled sidecar, so idle-break must not tear
@@ -1503,6 +1510,11 @@ async def _team_has_pending_user_decision(session_id: str) -> bool:
         from jiuwenclaw.agentserver.deep_agent.ask_user_question_registry import (
             AskUserQuestionRegistry,
         )
+        from jiuwenclaw.agentserver.deep_agent.rails.permission_rail import (
+            has_pending_permission_for_session,
+        )
+        if has_pending_permission_for_session(session_id):
+            return True
         return AskUserQuestionRegistry.get_instance().has_pending_for_session(session_id)
     except Exception:
         logger.debug(
@@ -2362,6 +2374,8 @@ async def _consume_stream_with_query_impl(
         "input_cost": 0.0, "output_cost": 0.0, "total_cost": 0.0,
     }
     team_stream: Any = None
+    # 挂起的 team_stream.__anext__() 常驻 task（见循环头部注释）；finally 统一取消。
+    anext_task: asyncio.Task | None = None
     tm_ = get_team_manager(channel_id)
     tm_.reset_seen_team_events(session_id)
     tm_.reset_workflow_completed(session_id)
@@ -2399,19 +2413,23 @@ async def _consume_stream_with_query_impl(
         leader_final_seen = False
         # 最后一个 chunk 的到达时刻（monotonic），复评阶段的 idle 预算计时。
         idle_since_last_chunk = time.monotonic()
+        # __anext__ 常驻 task + asyncio.wait：tick 超时（settle 复评 / idle 检查）
+        # 不取消挂起的 __anext__。wait_for 会在超时时取消它，把 CancelledError 抛进
+        # Runner 生成器，其 finally 链直接 finalize/pause 整个团队（2026-08-13
+        # 复评 tick 2s 误杀事故：leader final 后任何 2s chunk 间隙都会拆队）。
+        # 只有 break 出循环后的 finally（deliberate 拆流/收尾）才取消该 task。
         while True:
-            try:
-                chunk = await asyncio.wait_for(
-                    team_stream.__anext__(),
-                    timeout=(
-                        _TEAM_STREAM_SETTLE_RECHECK_S
-                        if leader_final_seen
-                        else _TEAM_STREAM_IDLE_BREAK_S
-                    ),
-                )
-            except StopAsyncIteration:
-                break
-            except asyncio.TimeoutError:
+            if anext_task is None:
+                anext_task = asyncio.ensure_future(team_stream.__anext__())
+            _done, _pending = await asyncio.wait(
+                {anext_task},
+                timeout=(
+                    _TEAM_STREAM_SETTLE_RECHECK_S
+                    if leader_final_seen
+                    else _TEAM_STREAM_IDLE_BREAK_S
+                ),
+            )
+            if not _done:
                 if leader_final_seen:
                     # leader 已交总结：静默是"等成员落定"，逐 tick 复评 settle。
                     if await _team_has_pending_user_decision(session_id):
@@ -2513,6 +2531,11 @@ async def _consume_stream_with_query_impl(
                     'idle_seconds': _TEAM_STREAM_IDLE_BREAK_S,
                 })
                 break
+            try:
+                chunk = anext_task.result()
+            except StopAsyncIteration:
+                break
+            anext_task = None
             received_chunks += 1
             idle_defer_since = None
             idle_since_last_chunk = time.monotonic()
@@ -2740,6 +2763,16 @@ async def _consume_stream_with_query_impl(
         _broadcast_event(channel_id, session_id, {'event_type': 'team.error',
                          'error': str(exc), 'session_id': session_id})
     finally:
+        # deliberate 拆流/收尾：取消仍挂起的 __anext__。这是唯一允许把
+        # CancelledError 送进 Runner 生成器（触发其 finalize）的出口；tick 路径
+        # 绝不取消（见循环头部注释）。
+        if anext_task is not None and not anext_task.done():
+            anext_task.cancel()
+            try:
+                await anext_task
+            except BaseException:
+                # CancelledError（预期）或生成器 finalize 阶段异常均不影响清理。
+                pass
         # Early break leaves the runner generator suspended on yield; aclose
         # runs its finalize (persistent team auto-pause). No-op if already
         # exhausted.
