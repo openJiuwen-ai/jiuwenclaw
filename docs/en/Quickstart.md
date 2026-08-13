@@ -58,6 +58,16 @@ After successful startup, the terminal will display backend service status:
 
 When you see similar output, the service is ready. Open `http://localhost:5173` in your browser to use.
 
+### Remote Web UI Access on Linux (Optional)
+
+By default, `jiuwenswarm-start` binds the Web UI to `localhost`, so you can open the Web UI address shown in the terminal from a browser on the same Linux host. To access the Web UI on a Linux server from another computer, start it with:
+
+```bash
+FRONTEND_HOST=0.0.0.0 jiuwenswarm-start
+```
+
+Then open `http://<linux-server-ip>:<web-ui-port>` from the other computer. The default Web UI port is `5173`; if startup automatically selects another port, use the Web UI port shown in the terminal. Make sure the Linux firewall or cloud security group allows that port, and restrict access to trusted networks or source IPs.
+
 ### Automatic Port Conflict Resolution
 
 JiuWenSwarm uses a fixed set of default ports (`18092 / 19000 / 19001 / 5173`). If a port is already in use when starting (e.g. a previous run did not fully stop, or another app occupies it), the launcher **automatically scans upward for the next free port group** and uses it instead of failing:
@@ -99,16 +109,6 @@ jiuwenswarm chat "Hello, introduce yourself"
 ```
 
 For details, see [CLI / Terminal Chat](CLI.md#terminal-cli-jiuwenswarm-chat).
-
-### Remote Web UI Access on Linux (Optional)
-
-By default, `jiuwenswarm-start` binds the Web UI to `localhost`, so you can open the Web UI address shown in the terminal from a browser on the same Linux host. To access the Web UI on a Linux server from another computer, start it with:
-
-```bash
-FRONTEND_HOST=0.0.0.0 jiuwenswarm-start
-```
-
-Then open `http://<linux-server-ip>:<web-ui-port>` from the other computer. The default Web UI port is `5173`; if startup automatically selects another port, use the Web UI port shown in the terminal. Make sure the Linux firewall or cloud security group allows that port, and restrict access to trusted networks or source IPs.
 
 **Configuration Directory Auto-Creation**:
 After first starting the service, the system automatically creates the configuration directory:
