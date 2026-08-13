@@ -306,7 +306,7 @@ class _CliClient:
         policy: Any = None,
         policy_mode: str | None = None,
         sandbox_id: str | None = None,
-        sandbox_type: str | None = None,
+        sandbox_runtime: str | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {}
         if env is not None:
@@ -317,8 +317,8 @@ class _CliClient:
             body["policy_mode"] = policy_mode
         if sandbox_id is not None:
             body["sandbox_id"] = sandbox_id
-        if sandbox_type is not None:
-            body["sandbox_type"] = sandbox_type
+        if sandbox_runtime is not None:
+            body["sandbox_runtime"] = sandbox_runtime
         return dict(self._post(f"{_API_PREFIX}/sandboxes", json=body).json())
 
     def sandbox_list(self) -> list[dict[str, Any]]:
@@ -740,7 +740,7 @@ def cmd_sandbox_create(args: argparse.Namespace, client: _CliClient) -> Any:
         policy=policy,
         policy_mode=args.policy_mode,
         sandbox_id=args.sandbox_id,
-        sandbox_type=args.sandbox_type,
+        sandbox_runtime=args.sandbox_runtime,
     )
 
 
@@ -1112,8 +1112,8 @@ def build_parser() -> argparse.ArgumentParser:
             Examples:
               jiuwenbox health
               jiuwenbox sandbox create
-              jiuwenbox sandbox create --sandbox-type conch
-              jiuwenbox sandbox create --sandbox-type conch --policy-file conch-policy.yaml
+              jiuwenbox sandbox create --sandbox-runtime conch
+              jiuwenbox sandbox create --sandbox-runtime conch --policy-file conch-policy.yaml
               jiuwenbox sandbox exec <ID> -- python3 -c 'print(1)'
               jiuwenbox sandbox upload <ID> ./local.txt /tmp/remote.txt
               jiuwenbox --base-url unix:///tmp/jw.sock health
@@ -1153,7 +1153,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="optional sandbox id (4-40 chars: lowercase letters, digits, -, _)",
     )
     p.add_argument(
-        "--sandbox-type",
+        "--sandbox-runtime",
         choices=["bwrap", "conch"],
         default=None,
         help="sandbox backend (default: bwrap/process)",

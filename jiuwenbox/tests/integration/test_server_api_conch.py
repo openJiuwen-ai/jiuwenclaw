@@ -1,5 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
-"""End-to-end API tests for Conch sandbox_type and conch.network policy."""
+"""End-to-end API tests for Conch sandbox_runtime and conch.network policy."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ def _normalize_endpoint(endpoint: str) -> str:
 
 def _build_httpx_client(endpoint: str, *, timeout: float = 60.0) -> httpx.Client:
     if _is_uds_endpoint(endpoint):
-        uds_path = endpoint[len(_UDS_SCHEME) :]
+        uds_path = endpoint[len(_UDS_SCHEME):]
         if not uds_path.startswith("/"):
             raise ValueError(f"unix endpoint requires absolute path: {endpoint!r}")
         return httpx.Client(
@@ -84,7 +84,7 @@ class SandboxTrackingClient:
         prefix = "/api/v1/sandboxes/"
         if not path.startswith(prefix):
             return None
-        suffix = path[len(prefix) :]
+        suffix = path[len(prefix):]
         if "/" in suffix:
             return None
         return suffix or None
@@ -123,7 +123,7 @@ def _conch_create_json(
     sandbox_id: str | None = None,
 ) -> dict:
     """Build a create body; inject template_id via request policy for remote servers."""
-    body: dict = {"sandbox_type": "conch", "policy_mode": policy_mode}
+    body: dict = {"sandbox_runtime": "conch", "policy_mode": policy_mode}
     if env is not None:
         body["env"] = env
     if sandbox_id is not None:
@@ -209,21 +209,24 @@ def _default_conch_block() -> dict:
 class TestConchSandboxTypeAlways:
     """API validation that does not require conchd."""
 
-    def test_missing_empty_and_bwrap_create_process_runtime(self, client):
-        for payload in ({}, {"sandbox_type": ""}, {"sandbox_type": "bwrap"}):
+    @staticmethod
+    def test_missing_empty_and_bwrap_create_process_runtime(client):
+        for payload in ({}, {"sandbox_runtime": ""}, {"sandbox_runtime": "bwrap"}):
             resp = client.post("/api/v1/sandboxes", json=payload)
             assert resp.status_code == 201, (payload, resp.text)
             body = resp.json()
-            assert body["runtime"] == "process"
+            assert body["sandbox_runtime"] == "process"
             assert body["phase"] == "ready"
             assert isinstance(body["pid"], int)
 
-    def test_invalid_sandbox_type_returns_400(self, client):
-        resp = client.post("/api/v1/sandboxes", json={"sandbox_type": "docker"})
+    @staticmethod
+    def test_invalid_sandbox_runtime_returns_400(client):
+        resp = client.post("/api/v1/sandboxes", json={"sandbox_runtime": "docker"})
         assert resp.status_code == 400, resp.text
-        assert "sandbox_type" in resp.json().get("error", "").lower()
+        assert "sandbox_runtime" in resp.json().get("error", "").lower()
 
-    def test_default_policy_includes_conch_block(self, client):
+    @staticmethod
+    def test_default_policy_includes_conch_block(client):
         resp = client.post("/api/v1/sandboxes", json={})
         assert resp.status_code == 201, resp.text
         sandbox_id = resp.json()["id"]
@@ -232,7 +235,8 @@ class TestConchSandboxTypeAlways:
         conch = policy_resp.json()["conch"]
         assert conch == _default_conch_block()
 
-    def test_conch_network_rejects_non_ipv4_and_extra_fields(self, client):
+    @staticmethod
+    def test_conch_network_rejects_non_ipv4_and_extra_fields(client):
         cases = [
             {
                 "conch": {
@@ -272,16 +276,17 @@ class TestConchSandboxTypeAlways:
         for policy in cases:
             resp = client.post(
                 "/api/v1/sandboxes",
-                json={"sandbox_type": "conch", "policy": policy, "policy_mode": "append"},
+                json={"sandbox_runtime": "conch", "policy": policy, "policy_mode": "append"},
             )
             assert resp.status_code == 400, (policy, resp.text)
 
-    def test_conch_network_rejects_over_1024_destinations(self, client):
+    @staticmethod
+    def test_conch_network_rejects_over_1024_destinations(client):
         ips = [f"10.0.{i // 256}.{i % 256}" for i in range(1025)]
         resp = client.post(
             "/api/v1/sandboxes",
             json={
-                "sandbox_type": "conch",
+                "sandbox_runtime": "conch",
                 "policy_mode": "append",
                 "policy": {
                     "conch": {
@@ -294,7 +299,8 @@ class TestConchSandboxTypeAlways:
         )
         assert resp.status_code == 400, resp.text
 
-    def test_conch_resources_reject_invalid_vcpu_and_ram(self, client):
+    @staticmethod
+    def test_conch_resources_reject_invalid_vcpu_and_ram(client):
         cases = [
             {"conch": {"vcpu_max": 4}},
             {"conch": {"vcpu_num": 4, "vcpu_max": 2}},
@@ -306,18 +312,20 @@ class TestConchSandboxTypeAlways:
             resp = client.post(
                 "/api/v1/sandboxes",
                 json={
-                    "sandbox_type": "conch",
+                    "sandbox_runtime": "conch",
                     "policy_mode": "append",
                     "policy": policy,
                 },
             )
             assert resp.status_code == 400, (policy, resp.text)
 
-    def test_get_nonexistent_sandbox_returns_404(self, client):
+    @staticmethod
+    def test_get_nonexistent_sandbox_returns_404(client):
         resp = client.get("/api/v1/sandboxes/nonexistent-sbx")
         assert resp.status_code == 404
 
-    def test_put_policy_nonexistent_sandbox_returns_404(self, client):
+    @staticmethod
+    def test_put_policy_nonexistent_sandbox_returns_404(client):
         resp = client.put(
             "/api/v1/policies/nonexistent-sbx",
             json={
@@ -337,15 +345,17 @@ class TestConchSandboxTypeAlways:
         "invalid_id",
         ["abc", "ABC123", "my sb", " abcd ", "a" * 41, "id!"],
     )
-    def test_create_conch_rejects_invalid_custom_id(self, client, invalid_id):
+    @staticmethod
+    def test_create_conch_rejects_invalid_custom_id(client, invalid_id):
         resp = client.post(
             "/api/v1/sandboxes",
-            json={"sandbox_type": "conch", "sandbox_id": invalid_id},
+            json={"sandbox_runtime": "conch", "sandbox_id": invalid_id},
         )
         assert resp.status_code == 400, resp.text
         assert SANDBOX_ID_FORMAT_MESSAGE in resp.json()["error"]
 
-    def test_exec_unknown_sandbox_returns_404(self, client):
+    @staticmethod
+    def test_exec_unknown_sandbox_returns_404(client):
         resp = client.post(
             "/api/v1/sandboxes/no-such-conch/exec",
             json={"command": ["sh", "-c", "printf x"]},
@@ -362,19 +372,21 @@ class TestConchSandboxRuntime:
     the jiuwenbox **server** host; this client only uses the HTTP API.
     """
 
-    def test_create_ready_with_template(self, client):
+    @staticmethod
+    def test_create_ready_with_template(client):
         _require_conch_template_env()
 
         resp = client.post("/api/v1/sandboxes", json=_conch_create_json())
         assert resp.status_code == 201, resp.text
         body = resp.json()
-        assert body["runtime"] == "conch"
+        assert body["sandbox_runtime"] == "conch"
         assert body["pid"] is None
         assert body["phase"] == "ready", body
         policy = client.get(f"/api/v1/policies/{body['id']}").json()
         assert policy["conch"]["template_id"] == _conch_template_id()
 
-    def test_create_with_vcpu_ram_and_conch_env(self, client):
+    @staticmethod
+    def test_create_with_vcpu_ram_and_conch_env(client):
         """Policy conch.vcpu_*/ram_mb/env persist; API env overrides conch.env; top-level environment ignored."""
         _require_conch_template_env()
 
@@ -401,7 +413,7 @@ class TestConchSandboxRuntime:
         )
         assert create.status_code == 201, create.text
         body = create.json()
-        assert body["runtime"] == "conch"
+        assert body["sandbox_runtime"] == "conch"
         assert body["phase"] == "ready", body
         sandbox_id = body["id"]
 
@@ -436,7 +448,8 @@ class TestConchSandboxRuntime:
         assert "SHARED=from-api" in stdout
         assert "API=from-api" in stdout
 
-    def test_request_policy_template_overrides_env(self, client):
+    @staticmethod
+    def test_request_policy_template_overrides_env(client):
         _require_conch_template_env()
         request_template = (os.environ.get("JIUWENBOX_CONCH_TEMPLATE_ID_OVERRIDE") or "").strip()
         if not request_template:
@@ -453,12 +466,13 @@ class TestConchSandboxRuntime:
         )
         assert resp.status_code == 201, resp.text
         body = resp.json()
-        assert body["runtime"] == "conch"
+        assert body["sandbox_runtime"] == "conch"
         assert body["phase"] == "ready", body
         policy = client.get(f"/api/v1/policies/{body['id']}").json()
         assert policy["conch"]["template_id"] == request_template
 
-    def test_append_bind_mounts_enter_effective_policy(self, client, tmp_path):
+    @staticmethod
+    def test_append_bind_mounts_enter_effective_policy(client, tmp_path):
         _require_conch_template_env()
         host = tmp_path / "conch-vol"
         host.mkdir(parents=True, exist_ok=True)
@@ -492,13 +506,14 @@ class TestConchSandboxRuntime:
         marker.write_text("from-host", encoding="utf-8")
         read_resp = client.post(
             f"/api/v1/sandboxes/{body['id']}/exec",
-            json={"command": ["cat", "/conch-vol/" + marker.name]},
+            json={"command": ["cat", str(Path("/conch-vol") / marker.name)]},
         )
         assert read_resp.status_code == 200, read_resp.text
         assert read_resp.json()["exit_code"] == 0
         assert "from-host" in read_resp.json()["stdout"]
 
-    def test_foreground_exec_stdin_env_timeout(self, client):
+    @staticmethod
+    def test_foreground_exec_stdin_env_timeout(client):
         _require_conch_template_env()
 
         create = client.post(
@@ -550,7 +565,8 @@ class TestConchSandboxRuntime:
         assert timed.status_code == 200, timed.text
         assert timed.json()["exit_code"] == 124
 
-    def test_background_jobs(self, client):
+    @staticmethod
+    def test_background_jobs(client):
         _require_conch_template_env()
 
         create = client.post("/api/v1/sandboxes", json=_conch_create_json())
@@ -588,7 +604,8 @@ class TestConchSandboxRuntime:
         assert killed.status_code == 200, killed.text
         assert killed.json()["killed"] is True
 
-    def test_files_write_read_list_search(self, client):
+    @staticmethod
+    def test_files_write_read_list_search(client):
         _require_conch_template_env()
 
         create = client.post("/api/v1/sandboxes", json=_conch_create_json())
@@ -627,7 +644,8 @@ class TestConchSandboxRuntime:
         assert searched.status_code == 200, searched.text
         assert searched.json().get("items")
 
-    def test_stop_rejected_restart_and_delete(self, client):
+    @staticmethod
+    def test_stop_rejected_restart_and_delete(client):
         _require_conch_template_env()
 
         create = client.post("/api/v1/sandboxes", json=_conch_create_json())
@@ -651,7 +669,7 @@ class TestConchSandboxRuntime:
         assert restarted.status_code == 200, restarted.text
         body = restarted.json()
         assert body["phase"] == "ready", body
-        assert body["runtime"] == "conch"
+        assert body["sandbox_runtime"] == "conch"
 
         exec_after = client.post(
             f"/api/v1/sandboxes/{sandbox_id}/exec",
@@ -665,7 +683,8 @@ class TestConchSandboxRuntime:
         missing = client.get(f"/api/v1/sandboxes/{sandbox_id}")
         assert missing.status_code == 404
 
-    def test_network_create_and_hot_update(self, client):
+    @staticmethod
+    def test_network_create_and_hot_update(client):
         _require_conch_template_env()
         test_ip = (os.environ.get("JIUWENBOX_CONCH_NETWORK_TEST_IP") or "").strip()
 
@@ -704,7 +723,12 @@ class TestConchSandboxRuntime:
                     "command": [
                         "sh",
                         "-c",
-                        f"python3 -c \"import socket; s=socket.create_connection(('{test_ip}', 80), 2); s.close(); print('ok')\"",
+                        (
+                            "python3 -c "
+                            f"\"import socket; "
+                            f"s=socket.create_connection(('{test_ip}', 80), 2); "
+                            "s.close(); print('ok')\""
+                        ),
                     ],
                     "timeout_seconds": 10,
                 },
@@ -769,7 +793,8 @@ class TestConchSandboxRuntime:
             assert "192.0.2.10" in egress["blocked_ips"]
             assert egress["default"] == "deny"
 
-    def test_batch_policy_mixed_runtimes(self, client):
+    @staticmethod
+    def test_batch_policy_mixed_runtimes(client):
         _require_conch_template_env()
 
         process = client.post("/api/v1/sandboxes", json={})
@@ -807,7 +832,8 @@ class TestConchSandboxRuntime:
             assert "198.51.100.10" in process_policy["network"]["egress"]["blocked_ips"]
         assert "203.0.113.10" in conch_policy["conch"]["network"]["egress"]["blocked_ips"]
 
-    def test_crud_list_get_custom_id_and_duplicate(self, client):
+    @staticmethod
+    def test_crud_list_get_custom_id_and_duplicate(client):
         _require_conch_template_env()
 
         auto = client.post("/api/v1/sandboxes", json=_conch_create_json())
@@ -815,7 +841,7 @@ class TestConchSandboxRuntime:
         auto_body = auto.json()
         sandbox_id = auto_body["id"]
         assert re.fullmatch(r"^[0-9a-f]{8}-[0-9a-f]{3}$", sandbox_id), sandbox_id
-        assert auto_body["runtime"] == "conch"
+        assert auto_body["sandbox_runtime"] == "conch"
         assert auto_body["pid"] is None
         assert "ip_address" in auto_body
 
@@ -826,7 +852,7 @@ class TestConchSandboxRuntime:
         got = client.get(f"/api/v1/sandboxes/{sandbox_id}")
         assert got.status_code == 200, got.text
         assert got.json()["id"] == sandbox_id
-        assert got.json()["runtime"] == "conch"
+        assert got.json()["sandbox_runtime"] == "conch"
         assert got.json()["phase"] == "ready"
 
         custom_id = f"cch-{uuid.uuid4().hex[:6]}"
@@ -836,7 +862,7 @@ class TestConchSandboxRuntime:
         )
         assert custom.status_code == 201, custom.text
         assert custom.json()["id"] == custom_id
-        assert custom.json()["runtime"] == "conch"
+        assert custom.json()["sandbox_runtime"] == "conch"
 
         dup = client.post(
             "/api/v1/sandboxes",
@@ -854,7 +880,8 @@ class TestConchSandboxRuntime:
             r"^[0-9a-f]{8}-[0-9a-f]{3}$", empty_id.json()["id"]
         ), empty_id.json()["id"]
 
-    def test_start_ready_sandbox_is_idempotent(self, client):
+    @staticmethod
+    def test_start_ready_sandbox_is_idempotent(client):
         _require_conch_template_env()
 
         create = client.post("/api/v1/sandboxes", json=_conch_create_json())
@@ -865,10 +892,11 @@ class TestConchSandboxRuntime:
         assert started.status_code == 200, started.text
         body = started.json()
         assert body["phase"] == "ready"
-        assert body["runtime"] == "conch"
+        assert body["sandbox_runtime"] == "conch"
         assert body["id"] == sandbox_id
 
-    def test_get_logs_endpoint(self, client):
+    @staticmethod
+    def test_get_logs_endpoint(client):
         _require_conch_template_env()
 
         create = client.post("/api/v1/sandboxes", json=_conch_create_json())
@@ -887,7 +915,8 @@ class TestConchSandboxRuntime:
         assert logs.status_code == 200, logs.text
         assert isinstance(logs.text, str)
 
-    def test_exec_workdir_and_per_call_env(self, client):
+    @staticmethod
+    def test_exec_workdir_and_per_call_env(client):
         _require_conch_template_env()
 
         create = client.post("/api/v1/sandboxes", json=_conch_create_json())
@@ -915,7 +944,8 @@ class TestConchSandboxRuntime:
         assert data["exit_code"] == 0, data
         assert data["stdout"].splitlines() == ["env-ok", "/tmp", "stdin-ok"]
 
-    def test_background_instant_exit_kill_and_filters(self, client):
+    @staticmethod
+    def test_background_instant_exit_kill_and_filters(client):
         _require_conch_template_env()
 
         create = client.post("/api/v1/sandboxes", json=_conch_create_json())
@@ -979,7 +1009,8 @@ class TestConchSandboxRuntime:
             )
 
     @pytest.mark.parametrize("invalid_id", ["ab", "ABC123", "my job", "a" * 41])
-    def test_background_invalid_job_id_returns_400(self, client, invalid_id):
+    @staticmethod
+    def test_background_invalid_job_id_returns_400(client, invalid_id):
         _require_conch_template_env()
 
         create = client.post("/api/v1/sandboxes", json=_conch_create_json())
@@ -993,7 +1024,8 @@ class TestConchSandboxRuntime:
         assert resp.status_code == 400, resp.text
         assert JOB_ID_FORMAT_MESSAGE in resp.json()["error"]
 
-    def test_background_job_gone_after_sandbox_delete(self, client):
+    @staticmethod
+    def test_background_job_gone_after_sandbox_delete(client):
         _require_conch_template_env()
 
         create = client.post("/api/v1/sandboxes", json=_conch_create_json())
@@ -1013,7 +1045,8 @@ class TestConchSandboxRuntime:
         resp = client.get(f"/api/v1/sandboxes/{sandbox_id}/background/{job_id}")
         assert resp.status_code == 404, resp.text
 
-    def test_files_missing_dir_and_recursive_list_search(self, client):
+    @staticmethod
+    def test_files_missing_dir_and_recursive_list_search(client):
         _require_conch_template_env()
 
         create = client.post("/api/v1/sandboxes", json=_conch_create_json())
@@ -1092,7 +1125,8 @@ class TestConchSandboxRuntime:
             for item in searched.json()["items"]
         )
 
-    def test_put_process_network_on_conch_is_rejected(self, client):
+    @staticmethod
+    def test_put_process_network_on_conch_is_rejected(client):
         _require_conch_template_env()
 
         create = client.post("/api/v1/sandboxes", json=_conch_create_json())
@@ -1114,7 +1148,8 @@ class TestConchSandboxRuntime:
         error = resp.json().get("error", "").lower()
         assert "conch" in error or "unsupported" in error or "network" in error
 
-    def test_put_conch_network_override_and_append_round_trip(self, client):
+    @staticmethod
+    def test_put_conch_network_override_and_append_round_trip(client):
         _require_conch_template_env()
 
         create = client.post(
@@ -1195,7 +1230,8 @@ class TestConchSandboxRuntime:
         assert "198.51.100.11" in egress["allowed_ips"]
         assert "203.0.113.20" in egress["blocked_ips"]
 
-    def test_list_includes_multiple_conch_sandboxes(self, client):
+    @staticmethod
+    def test_list_includes_multiple_conch_sandboxes(client):
         _require_conch_template_env()
 
         first = client.post("/api/v1/sandboxes", json=_conch_create_json())
@@ -1211,6 +1247,6 @@ class TestConchSandboxRuntime:
         assert ids <= listed_ids
         for item in listed.json():
             if item["id"] in ids:
-                assert item["runtime"] == "conch"
+                assert item["sandbox_runtime"] == "conch"
                 assert item["pid"] is None
                 assert item["phase"] == "ready"

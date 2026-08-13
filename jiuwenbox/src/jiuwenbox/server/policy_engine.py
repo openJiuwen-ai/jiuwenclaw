@@ -11,19 +11,14 @@ import yaml
 
 from jiuwenbox.logging_config import configure_logging
 from jiuwenbox.models.policy import NetworkRulePolicy, SecurityPolicy
+from jiuwenbox.server.runtime.errors import PolicyValidationError
 from jiuwenbox.server.workspace import SANDBOX_WORKSPACE, JIUWENBOX_HOME
+
+# Re-export for callers that historically imported from this module.
+__all__ = ["PolicyEngine", "PolicyValidationError"]
 
 configure_logging()
 logger = logging.getLogger(__name__)
-
-
-class PolicyValidationError(Exception):
-    """Raised when a policy fails validation."""
-
-    def __init__(self, *args: object) -> None:
-        super().__init__(*args)
-        # Expected request validation failures map to HTTP 400; avoid ERROR noise.
-        logger.warning("%s: %s", self.__class__.__name__, str(self))
 
 
 class PolicyEngine:
@@ -234,7 +229,7 @@ class PolicyEngine:
         return warnings
 
     def validate_conch_policy(self, policy: SecurityPolicy) -> list[str]:
-        """Validate Conch-specific policy fields used when sandbox_type=conch."""
+        """Validate Conch-specific policy fields used when sandbox_runtime=conch."""
         warnings: list[str] = []
         seen_guest_paths: set[str] = set()
         for mount in policy.conch.filesystem_policy.bind_mounts:

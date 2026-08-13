@@ -146,7 +146,7 @@ JIUWENBOX_URL=unix:///tmp/jiuwenbox-sock/jiuwenbox.sock jiuwenbox health
 | --- | --- | --- |
 | `id` | string | 沙箱 ID |
 | `phase` | string | 沙箱状态，取值为 `provisioning`、`ready`、`stopped`、`error`、`deleting` |
-| `runtime` | string | 沙箱后端：`process`（bubblewrap）或 `conch` |
+| `sandbox_runtime` | string | 沙箱后端：`process`（bubblewrap）或 `conch` |
 | `pid` | integer/null | `process` 后端为生命周期进程 PID；`conch` 后端无 host PID，固定为 `null` |
 | `created_at` | string | 创建时间 |
 | `started_at` | string/null | 启动时间 |
@@ -160,7 +160,7 @@ JIUWENBOX_URL=unix:///tmp/jiuwenbox-sock/jiuwenbox.sock jiuwenbox health
 {
   "id": "abc123def456",
   "phase": "ready",
-  "runtime": "process",
+  "sandbox_runtime": "process",
   "pid": 12345,
   "created_at": "2026-04-25T11:30:00.000000",
   "started_at": "2026-04-25T11:30:01.000000+00:00",
@@ -245,7 +245,7 @@ print(resp.json())
 | `policy` | object/null | 否 | 覆盖或追加的 policy 数据 |
 | `policy_mode` | string | 否 | `override` 或 `append`，默认 `override` |
 | `sandbox_id` | string/null | 否 | 可选，指定沙箱 ID。长度 4~16，仅允许小写字母、数字、减号（`-`）和下划线（`_`）。省略或空字符串时服务端自动生成（形如 `6011f5ca-76a`）。格式非法返回 400；与已有 ID 冲突返回 409 |
-| `sandbox_type` | string/null | 否 | 沙箱后端。省略、空字符串或 `bwrap` → `runtime=process`；`conch` → `runtime=conch`。其它值返回 400 |
+| `sandbox_runtime` | string/null | 否 | 沙箱后端。省略、空字符串或 `bwrap` → `sandbox_runtime=process`；`conch` → `sandbox_runtime=conch`。其它值返回 400 |
 
 说明：
 
@@ -253,7 +253,7 @@ print(resp.json())
 - `conch.template_id` 解析顺序：有效 policy → 环境变量 `JIUWENBOX_CONCH_TEMPLATE_ID` → 不传（由 conchd `sandbox.default_template_id` 决定）。
 - `conch.network` 仅支持 IPv4/CIDR 的 `default` + `allowed_ips` / `blocked_ips`（无域名/端口/IPv6）；映射到 Conch `allowOut`/`denyOut`/`allowIn`/`denyIn`，并由 `egress.default` 推导 SDK 内部的 `allow_internet_access`（不对用户暴露）。
 - `ingress.default: deny` 且 `allowed_ips` 为空时，适配层仅在发给 Conch 的 `denyIn` 注入 `0.0.0.0/0`，**不会**写入用户可见/持久化的 jiuwenbox policy。
-- SDK 未安装、conchd 不可达或 template 不存在等属于 runtime 启动错误：仍返回 `201`，`phase=error`，`error_message` 说明原因。非法 `sandbox_type` / 非法 Conch bind mount / 非法网络地址返回 `400`。
+- SDK 未安装、conchd 不可达或 template 不存在等属于 runtime 启动错误：仍返回 `201`，`phase=error`，`error_message` 说明原因。非法 `sandbox_runtime` / 非法 Conch bind mount / 非法网络地址返回 `400`。
 - Conch 不支持 `POST .../stop`（返回 `409`）。销毁用 `DELETE`；`POST .../restart` 为同 ID 冷重建（delete + create）；`start` 可在非运行态下按当前 policy 重建。
 
 Python 请求示例：
@@ -282,7 +282,7 @@ print(resp.json())
 {
   "id": "my-sb_01",
   "phase": "ready",
-  "runtime": "process",
+  "sandbox_runtime": "process",
   "pid": 12345,
   "created_at": "2026-04-25T11:30:00.000000",
   "started_at": "2026-04-25T11:30:01.000000+00:00",
@@ -317,7 +317,7 @@ print(resp.json())
   {
     "id": "abc123def456",
     "phase": "ready",
-    "runtime": "process",
+    "sandbox_runtime": "process",
     "pid": 12345,
     "created_at": "2026-04-25T11:30:00.000000",
     "started_at": "2026-04-25T11:30:01.000000+00:00",
@@ -351,7 +351,7 @@ print(resp.json())
 {
   "id": "abc123def456",
   "phase": "ready",
-  "runtime": "process",
+  "sandbox_runtime": "process",
   "pid": 12345,
   "created_at": "2026-04-25T11:30:00.000000",
   "started_at": "2026-04-25T11:30:01.000000+00:00",
@@ -406,7 +406,7 @@ print(resp.json())
 {
   "id": "abc123def456",
   "phase": "ready",
-  "runtime": "process",
+  "sandbox_runtime": "process",
   "pid": 12345,
   "created_at": "2026-04-25T11:30:00.000000",
   "started_at": "2026-04-25T11:31:00.000000+00:00",
@@ -441,7 +441,7 @@ print(resp.json())
 {
   "id": "abc123def456",
   "phase": "stopped",
-  "runtime": "process",
+  "sandbox_runtime": "process",
   "pid": null,
   "created_at": "2026-04-25T11:30:00.000000",
   "started_at": "2026-04-25T11:31:00.000000+00:00",
@@ -476,7 +476,7 @@ print(resp.json())
 {
   "id": "abc123def456",
   "phase": "ready",
-  "runtime": "process",
+  "sandbox_runtime": "process",
   "pid": 22345,
   "created_at": "2026-04-25T11:30:00.000000",
   "started_at": "2026-04-25T11:32:00.000000+00:00",

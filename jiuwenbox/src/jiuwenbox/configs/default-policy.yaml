@@ -344,7 +344,7 @@ cgroup: {}
 timeout: {}
 
 # ---------------------------------------------------------------------------
-# Conch backend policy (only used when sandbox_type=conch)
+# Conch backend policy (only used when sandbox_runtime=conch)
 # ---------------------------------------------------------------------------
 # bwrap / ProcessRuntime ignores this block. When creating a Conch sandbox:
 #   - template_id may also come from JIUWENBOX_CONCH_TEMPLATE_ID or conchd default

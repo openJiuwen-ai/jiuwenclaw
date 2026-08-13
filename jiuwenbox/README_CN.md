@@ -282,7 +282,7 @@ ls /tmp/jiuwenbox-logs
 | --- | --- | --- |
 | `version` | `1` | Policy schema 版本，当前仅支持 `1`。 |
 | `name` | `"default"` | 可读名称，供 policy API 展示。 |
-| `environment` | `{}` | **仅 bwrap/process**：注入到沙箱内每个进程的环境变量。`sandbox_type=conch` **不会**读取此字段；Conch 请用 `conch.env`。 |
+| `environment` | `{}` | **仅 bwrap/process**：注入到沙箱内每个进程的环境变量。`sandbox_runtime=conch` **不会**读取此字段；Conch 请用 `conch.env`。 |
 
 #### `filesystem_policy`
 
@@ -405,7 +405,7 @@ jiuwenbox **服务端**的空闲沙箱淘汰配置，**仅在 server 启动时�
 
 若 policy 仅包含 `version` / `name` / `inference_privacy_proxies` 且 `listen_port > 0`，jiuwenbox 会进入仅代理模式（跳过沙箱子系统）。参考 [`src/jiuwenbox/configs/inference-policy.yaml`](src/jiuwenbox/configs/inference-policy.yaml)。
 
-#### `conch`（仅 `sandbox_type=conch`）
+#### `conch`（仅 `sandbox_runtime=conch`）
 
 bwrap / ProcessRuntime **忽略**本段。创建 Conch 沙箱时由 `ConchRuntime` 映射到 Conch SDK。
 

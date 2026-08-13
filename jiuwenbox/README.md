@@ -11,7 +11,7 @@ isolation policy in-process by spawning `bubblewrap` directly for each sandbox
 ## Features
 
 - Process isolation with `bubblewrap`
-- Optional Conch sandbox backend (`sandbox_type=conch`) via the Conch Python SDK
+- Optional Conch sandbox backend (`sandbox_runtime=conch`) via the Conch Python SDK
 - Static policy-based filesystem access rules
 - Server-managed sandbox backing storage (`~/.jiuwenbox/workspace`)
 - Optional network isolation with Linux network namespaces and firewall rules
@@ -30,7 +30,7 @@ isolation policy in-process by spawning `bubblewrap` directly for each sandbox
 - `server/runtime`
   - In-process runtime adapters: `ProcessRuntime` (bubblewrap daemon) and
     optional `ConchRuntime` (Conch SDK; selected per sandbox via
-    `sandbox_type`).
+    `sandbox_runtime`).
 - `server/proxy_manager`
   - Manages inference privacy proxies for LLM API routing with API key injection.
 - `server/policy_reader`
@@ -82,8 +82,8 @@ When `JIUWENBOX_POLICY_PATH` is unset, the server uses the bundled
 
 ## Optional Conch Backend
 
-The default backend remains bubblewrap (`sandbox_type` omitted / empty / `bwrap`
-→ `runtime=process`). Setting `sandbox_type=conch` routes lifecycle, exec, files,
+The default backend remains bubblewrap (`sandbox_runtime` omitted / empty / `bwrap`
+→ `sandbox_runtime=process`). Setting `sandbox_runtime=conch` routes lifecycle, exec, files,
 and network updates through `ConchRuntime`.
 
 ### Install the Conch SDK
@@ -158,8 +158,8 @@ for cold recreate (delete + create with the same id and current policy).
 
 ```bash
 export JIUWENBOX_CONCH_TEMPLATE_ID=tmpl_xxx
-jiuwenbox sandbox create --sandbox-type conch
-jiuwenbox sandbox create --sandbox-type conch --policy-file conch-policy.yaml
+jiuwenbox sandbox create --sandbox-runtime conch
+jiuwenbox sandbox create --sandbox-runtime conch --policy-file conch-policy.yaml
 jiuwenbox policy update <ID> --policy \
   '{"conch":{"network":{"egress":{"blocked_ips":["192.0.2.10"]}}}}'
 ```
@@ -890,7 +890,7 @@ flag to maintain in sync:
 
 ### Conch API tests
 
-`tests/integration/test_server_api_conch.py` covers `sandbox_type` validation
+`tests/integration/test_server_api_conch.py` covers `sandbox_runtime` validation
 without Conch, plus lifecycle/exec/files/network cases marked `@pytest.mark.conch`.
 Those opt in with `JIUWENBOX_CONCH_TEMPLATE_ID` and talk to jiuwenbox over HTTP
 only — Conch SDK / `CONCH_SDK_CONFIG` / conchd must be configured on the

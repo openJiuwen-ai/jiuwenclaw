@@ -2598,6 +2598,7 @@ def update_sandbox_endpoint(
     result.update(optional_writes)
     return result
 
+
 def get_sandbox_preserve_file_sharing_mode() -> str | None:
     """返回 ``sandbox.preserve_file_sharing_mode`` (当前仅 ``"mount"``).
 

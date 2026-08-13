@@ -81,7 +81,7 @@ from jiuwenbox.models.sandbox import (
     validate_custom_sandbox_id,
 )
 from jiuwenbox.server.audit_logger import AuditLogger
-from jiuwenbox.server.policy_engine import PolicyEngine, PolicyValidationError
+from jiuwenbox.server.policy_engine import PolicyEngine
 from jiuwenbox.server.policy_reader import PolicyReader
 from jiuwenbox.server.runtime.base import (
     RuntimeAdapter,
@@ -90,7 +90,13 @@ from jiuwenbox.server.runtime.base import (
     RuntimeFileOpResult,
 )
 from jiuwenbox.server.runtime.conch import ConchRuntime
-from jiuwenbox.server.runtime.errors import BackgroundJobNotFoundError
+from jiuwenbox.server.runtime.errors import (
+    BackgroundJobNotFoundError,
+    PolicyValidationError,
+    SandboxConflictError,
+    SandboxNotFoundError,
+    SandboxStateError,
+)
 from jiuwenbox.server.runtime.process import ProcessRuntime
 from jiuwenbox.server.workspace import JIUWENBOX_HOME
 
@@ -128,35 +134,18 @@ class SandboxListRequest:
     include_dirs: bool = True
 
 
-class SandboxNotFoundError(Exception):
-    def __init__(self, *args: object) -> None:
-        super().__init__(*args)
-        logger.warning("%s: %s", self.__class__.__name__, str(self))
-
-
-class SandboxStateError(Exception):
-    def __init__(self, *args: object) -> None:
-        super().__init__(*args)
-        # Expected client/API conflicts (e.g. Conch stop unsupported, exec while
-        # stopped) map to HTTP 4xx; keep them off ERROR to avoid alarm noise.
-        logger.warning("%s: %s", self.__class__.__name__, str(self))
-
-
-class SandboxConflictError(Exception):
-    """Raised for expected request conflicts such as duplicate sandbox IDs."""
-
-
-def normalize_sandbox_runtime(sandbox_type: str | None) -> str:
-    """Map API sandbox_type to SandboxRef.runtime values."""
-    if sandbox_type is None:
+def normalize_sandbox_runtime(sandbox_runtime: str | None) -> str:
+    """Map API ``sandbox_runtime`` create values to stored SandboxRef values."""
+    if sandbox_runtime is None:
         return RUNTIME_PROCESS
-    value = sandbox_type.strip().lower()
+    value = sandbox_runtime.strip().lower()
     if value == "" or value == "bwrap":
         return RUNTIME_PROCESS
     if value == "conch":
         return RUNTIME_CONCH
     raise PolicyValidationError(
-        f"Unsupported sandbox_type {sandbox_type!r}; expected 'bwrap' or 'conch'"
+        f"Unsupported sandbox_runtime {sandbox_runtime!r}; "
+        "expected 'bwrap' or 'conch'"
     )
 
 
@@ -554,7 +543,7 @@ class SandboxManager:
         return ref
 
     def _runtime_for(self, ref: SandboxRef) -> RuntimeAdapter:
-        if ref.runtime == RUNTIME_CONCH:
+        if ref.sandbox_runtime == RUNTIME_CONCH:
             return self._conch_runtime
         return self.runtime
 
@@ -588,7 +577,7 @@ class SandboxManager:
                         f"Sandbox '{spec.sandbox_id}' already exists"
                     )
                 sandbox_id = spec.sandbox_id
-            runtime_name = normalize_sandbox_runtime(spec.sandbox_type)
+            runtime_name = normalize_sandbox_runtime(spec.sandbox_runtime)
             policy = self._resolve_effective_policy(policy_data, policy_mode)
             logger.debug("Creating sandbox %s with policy %s", sandbox_id, str(policy))
             self.policy_engine.validate_policy(policy)
@@ -598,7 +587,7 @@ class SandboxManager:
             ref = SandboxRef(
                 id=sandbox_id,
                 phase=SandboxPhase.PROVISIONING,
-                runtime=runtime_name,
+                sandbox_runtime=runtime_name,
                 env=dict(spec.env),
             )
             self._sandboxes[sandbox_id] = ref
@@ -726,7 +715,7 @@ class SandboxManager:
 
     async def _stop_sandbox_unlocked(self, sandbox_id: str) -> SandboxRef:
         ref = self._get_sandbox(sandbox_id)
-        if ref.runtime == RUNTIME_CONCH:
+        if ref.sandbox_runtime == RUNTIME_CONCH:
             raise SandboxStateError(
                 f"Cannot stop sandbox '{sandbox_id}': Conch runtime does not "
                 "support stop; use DELETE to destroy the sandbox or "
@@ -742,7 +731,7 @@ class SandboxManager:
     async def restart_sandbox(self, sandbox_id: str) -> SandboxRef:
         async with self._lock:
             ref = self._get_sandbox(sandbox_id)
-            if ref.runtime != RUNTIME_CONCH:
+            if ref.sandbox_runtime != RUNTIME_CONCH:
                 await self._stop_sandbox_unlocked(sandbox_id)
                 return await self._start_sandbox_unlocked(sandbox_id)
             runtime = self._runtime_for(ref)
@@ -838,7 +827,7 @@ class SandboxManager:
                 )
             self._mark_active(ref)
             runtime = self._runtime_for(ref)
-            runtime_name = ref.runtime
+            runtime_name = ref.sandbox_runtime
 
         # One audit row per exec, emitted **after** the runtime returns so
         # the payload covers both intent (command/workdir) and outcome
@@ -1168,7 +1157,7 @@ class SandboxManager:
                 )
             self._mark_active(ref)
             runtime = self._runtime_for(ref)
-            runtime_name = ref.runtime
+            runtime_name = ref.sandbox_runtime
 
         # Mirror of ``upload_file_to_sandbox``: a single post-result row
         # carrying intent + outcome. ``size`` is filled in on success
@@ -1762,10 +1751,10 @@ class SandboxManager:
     ) -> SecurityPolicy | None:
         """Merge, persist, and optionally hot-apply process network rules."""
         ref = self._get_sandbox(sandbox_id)
-        if ref.runtime != RUNTIME_PROCESS:
+        if ref.sandbox_runtime != RUNTIME_PROCESS:
             if reject_host:
                 raise PolicyValidationError(
-                    f"Sandbox '{sandbox_id}' uses runtime '{ref.runtime}'; "
+                    f"Sandbox '{sandbox_id}' uses runtime '{ref.sandbox_runtime}'; "
                     "update policy.conch.network instead of policy.network"
                 )
             return None
@@ -1812,10 +1801,10 @@ class SandboxManager:
     ) -> SecurityPolicy | None:
         """Merge and optionally hot-apply Conch network rules for one sandbox."""
         ref = self._get_sandbox(sandbox_id)
-        if ref.runtime != RUNTIME_CONCH:
+        if ref.sandbox_runtime != RUNTIME_CONCH:
             if reject_mismatch:
                 raise PolicyValidationError(
-                    f"Sandbox '{sandbox_id}' uses runtime '{ref.runtime}'; "
+                    f"Sandbox '{sandbox_id}' uses runtime '{ref.sandbox_runtime}'; "
                     "update policy.network instead of policy.conch.network"
                 )
             return None
@@ -1868,7 +1857,7 @@ class SandboxManager:
         """Update network ingress/egress for a single sandbox."""
         async with self._lock:
             ref = self._get_sandbox(sandbox_id)
-            if ref.runtime == RUNTIME_CONCH:
+            if ref.sandbox_runtime == RUNTIME_CONCH:
                 fragments = self.validate_policy_update_payload(
                     policy_data,
                     allow_network=False,
@@ -1876,7 +1865,10 @@ class SandboxManager:
                     require_any=True,
                 )
                 conch = fragments["conch"]
-                assert conch is not None
+                if conch is None:
+                    raise PolicyValidationError(
+                        "policy.conch.network is required for Conch network update"
+                    )
                 egress, ingress = conch
                 updated = await self._apply_conch_network_policy_update_unlocked(
                     sandbox_id,
@@ -1893,7 +1885,10 @@ class SandboxManager:
                     require_any=True,
                 )
                 network = fragments["network"]
-                assert network is not None
+                if network is None:
+                    raise PolicyValidationError(
+                        "policy.network is required for process network update"
+                    )
                 egress, ingress = network
                 updated = await self._apply_network_policy_update_unlocked(
                     sandbox_id,
@@ -1940,7 +1935,7 @@ class SandboxManager:
             try:
                 async with self._lock:
                     ref = self._get_sandbox(sandbox_id)
-                    if ref.runtime == RUNTIME_CONCH:
+                    if ref.sandbox_runtime == RUNTIME_CONCH:
                         if conch_fragment is None:
                             skipped.append({
                                 "sandbox_id": sandbox_id,

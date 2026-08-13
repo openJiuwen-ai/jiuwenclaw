@@ -691,7 +691,7 @@ def create_sandbox_sysop_card(
             extra_params: dict[str, Any] = {
                 "policy": policy,
                 "policy_mode": "append",
-                "api_sandbox_type": "conch",
+                "api_sandbox_runtime": "conch",
                 "excluded_commands": list(excluded_commands or []),
                 "fallback_on_failure": bool(fallback_on_failure),
                 "preserve_file_sharing_mode": _PRESERVE_FILE_SHARING_MODE,
@@ -720,7 +720,7 @@ def create_sandbox_sysop_card(
             )
             logger.info(
                 "[sysop_builder] jiuwenbox-conch SysOperationCard created:\n"
-                "  base_url=%s provider_type=%s api_sandbox_type=conch\n"
+                "  base_url=%s provider_type=%s api_sandbox_runtime=conch\n"
                 "  template_id=%s\n"
                 "  isolation_custom_id=%s\n"
                 "  idle_ttl=%s idle_check_interval=%s\n"
@@ -963,22 +963,25 @@ def list_auto_managed_sandbox_paths(
     else:
         resolved_project = _resolve_project_dir(None)
 
-    if (
-        resolved_project is not None
-        and resolved_project.is_dir()
-        and resolved_project != Path(resolved_project.anchor)
-        and not _is_jiuwenswarm_data_root(resolved_project)
-    ):
-        project_str = str(resolved_project)
-        if not any(item.get("path", "").rstrip("/") == project_str for item in allow):
-            _append_unique(
-                allow,
-                {
-                    "path": project_str + "/",
-                    "access": "rw",
-                    "kind": "directory",
-                },
-            )
+    if resolved_project is not None:
+        is_mountable_project = (
+            resolved_project.is_dir()
+            and resolved_project != Path(resolved_project.anchor)
+            and not _is_jiuwenswarm_data_root(resolved_project)
+        )
+        if is_mountable_project:
+            project_str = str(resolved_project)
+            if not any(
+                item.get("path", "").rstrip("/") == project_str for item in allow
+            ):
+                _append_unique(
+                    allow,
+                    {
+                        "path": project_str + "/",
+                        "access": "rw",
+                        "kind": "directory",
+                    },
+                )
 
     if effective_startup_mode == "internal":
         config_path = _resolve_config_ro_path()

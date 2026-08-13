@@ -91,8 +91,26 @@ class _ConchBackgroundJob:
     watch_task: asyncio.Task[None] | None = None
 
 
-def _import_conch():
+@dataclass(frozen=True)
+class _ConchSdk:
+    """Cached Conch SDK symbols with snake_case attribute names."""
+
+    sandbox: Any
+    command_exit_exception: type[BaseException]
+    timeout_exception: type[BaseException]
+    not_found_error: type[BaseException]
+    invalid_argument_error: type[BaseException]
+    sandbox_error: type[BaseException]
+
+
+_conch_sdk: _ConchSdk | None = None
+
+
+def _import_conch() -> _ConchSdk:
     """Lazy-import Conch SDK so default bwrap installs need no Conch package."""
+    global _conch_sdk
+    if _conch_sdk is not None:
+        return _conch_sdk
     try:
         from conch import (  # type: ignore[import-not-found]
             CommandExitException,
@@ -108,14 +126,15 @@ def _import_conch():
             "`pip install -e <path-to-Conch/sdk>` and ensure CONCH_SDK_CONFIG "
             "points at a valid SDK config."
         ) from exc
-    return (
-        Sandbox,
-        CommandExitException,
-        TimeoutException,
-        NotFoundError,
-        InvalidArgumentError,
-        SandboxError,
+    _conch_sdk = _ConchSdk(
+        sandbox=Sandbox,
+        command_exit_exception=CommandExitException,
+        timeout_exception=TimeoutException,
+        not_found_error=NotFoundError,
+        invalid_argument_error=InvalidArgumentError,
+        sandbox_error=SandboxError,
     )
+    return _conch_sdk
 
 
 def _parse_conch_timestamp(value: str | None, fallback: datetime) -> datetime:
@@ -193,17 +212,10 @@ class ConchRuntime(RuntimeAdapter):
         # Top-level SecurityPolicy.environment is bwrap-only and must not merge.
         create_env = merge_conch_create_env(policy.conch.env, env)
 
-        (
-            Sandbox,
-            _CommandExitException,
-            _TimeoutException,
-            _NotFoundError,
-            _InvalidArgumentError,
-            _SandboxError,
-        ) = _import_conch()
+        sdk = _import_conch()
 
         def _create() -> Any:
-            return Sandbox.create(
+            return sdk.sandbox.create(
                 template_id=template_id,
                 sandbox_id=sandbox_id,
                 volume_mounts=volume_mounts or None,
@@ -261,15 +273,18 @@ class ConchRuntime(RuntimeAdapter):
                 )
                 await self._delete_in_conchd(sandbox_id)
                 await asyncio.sleep(_CONCH_DELETE_POLL_INTERVAL_SECONDS)
-        assert last_error is not None
+        if last_error is None:
+            raise RuntimeError(
+                f"Conch recreate for '{sandbox_id}' failed without an error detail"
+            )
         raise last_error
 
     async def _sandbox_present(self, sandbox_id: str) -> bool:
-        Sandbox, *_ = _import_conch()
+        sdk = _import_conch()
 
         def _probe() -> bool:
             try:
-                Sandbox.get(sandbox_id)
+                sdk.sandbox.get(sandbox_id)
                 return True
             except Exception as exc:
                 if _is_conch_not_found(exc):
@@ -288,14 +303,14 @@ class ConchRuntime(RuntimeAdapter):
         handle: Any | None = None,
     ) -> None:
         """Delete via SDK; retry transient network-slot races; never swallow failures."""
-        Sandbox, *_ = _import_conch()
+        sdk = _import_conch()
         active_handle = handle
 
         def _delete() -> None:
             if active_handle is not None:
                 active_handle.delete(sandbox_id=sandbox_id)
             else:
-                Sandbox.delete_sandbox(sandbox_id)
+                sdk.sandbox.delete_sandbox(sandbox_id)
 
         last_error: Exception | None = None
         for attempt in range(1, _CONCH_DELETE_ATTEMPTS + 1):
@@ -328,7 +343,11 @@ class ConchRuntime(RuntimeAdapter):
                 )
                 await asyncio.sleep(_CONCH_DELETE_RETRY_SECONDS * attempt)
 
-        assert last_error is not None
+        if last_error is None:
+            raise RuntimeError(
+                f"Failed to delete Conch sandbox '{sandbox_id}' "
+                "without an error detail"
+            )
         raise RuntimeError(
             f"Failed to delete Conch sandbox '{sandbox_id}': {last_error}"
         ) from last_error
@@ -412,7 +431,10 @@ class ConchRuntime(RuntimeAdapter):
     ) -> None:
         handle = await self._require_handle(sandbox_id)
         payload = map_conch_network_policy(network_policy, omit_empty=False)
-        assert payload is not None
+        if payload is None:
+            raise RuntimeError(
+                f"Conch network policy mapping returned empty for '{sandbox_id}'"
+            )
 
         def _update() -> None:
             handle.update_network(
@@ -436,14 +458,7 @@ class ConchRuntime(RuntimeAdapter):
         cmd = request.command[0]
         args = list(request.command[1:])
         stdin = request.stdin_data
-        (
-            _Sandbox,
-            CommandExitException,
-            TimeoutException,
-            _NotFoundError,
-            _InvalidArgumentError,
-            _SandboxError,
-        ) = _import_conch()
+        sdk = _import_conch()
 
         def _run() -> ExecResult:
             try:
@@ -456,13 +471,13 @@ class ConchRuntime(RuntimeAdapter):
                     timeout=request.timeout,
                     background=False,
                 )
-            except CommandExitException as exc:
+            except sdk.command_exit_exception as exc:
                 return ExecResult(
                     exit_code=int(exc.exit_code),
                     stdout=exc.stdout or "",
                     stderr=exc.stderr or "",
                 )
-            except TimeoutException as exc:
+            except sdk.timeout_exception as exc:
                 return ExecResult(
                     exit_code=124,
                     stdout="",
@@ -490,14 +505,7 @@ class ConchRuntime(RuntimeAdapter):
             )
         cmd = request.command[0]
         args = list(request.command[1:])
-        (
-            _Sandbox,
-            _CommandExitException,
-            _TimeoutException,
-            _NotFoundError,
-            InvalidArgumentError,
-            SandboxError,
-        ) = _import_conch()
+        sdk = _import_conch()
 
         def _start() -> Any:
             return handle.commands.run(
@@ -512,7 +520,7 @@ class ConchRuntime(RuntimeAdapter):
 
         try:
             command_handle = await asyncio.to_thread(_start)
-        except (InvalidArgumentError, SandboxError, RuntimeError) as exc:
+        except (sdk.invalid_argument_error, sdk.sandbox_error, RuntimeError) as exc:
             message = str(exc)
             lower = message.lower()
             if "already" in lower or "duplicate" in lower or "conflict" in lower:
@@ -634,25 +642,18 @@ class ConchRuntime(RuntimeAdapter):
     ) -> RuntimeFileOpResult:
         del mkdir_parents, mode  # Conch files.write has no mode/mkdir controls.
         handle = await self._require_handle(sandbox_id)
-        (
-            _Sandbox,
-            _CommandExitException,
-            _TimeoutException,
-            NotFoundError,
-            InvalidArgumentError,
-            SandboxError,
-        ) = _import_conch()
+        sdk = _import_conch()
 
         def _write() -> None:
             handle.files.write(sandbox_path, content)
 
         try:
             await asyncio.to_thread(_write)
-        except NotFoundError as exc:
+        except sdk.not_found_error as exc:
             return RuntimeFileOpResult(ok=False, error="not_found", detail=str(exc))
-        except InvalidArgumentError as exc:
+        except sdk.invalid_argument_error as exc:
             return RuntimeFileOpResult(ok=False, error="invalid_argument", detail=str(exc))
-        except SandboxError as exc:
+        except sdk.sandbox_error as exc:
             return RuntimeFileOpResult(ok=False, error="io_error", detail=str(exc))
         except Exception as exc:
             return RuntimeFileOpResult(ok=False, error="io_error", detail=str(exc))
@@ -664,27 +665,20 @@ class ConchRuntime(RuntimeAdapter):
         sandbox_path: str,
     ) -> RuntimeFileOpResult:
         handle = await self._require_handle(sandbox_id)
-        (
-            _Sandbox,
-            _CommandExitException,
-            _TimeoutException,
-            NotFoundError,
-            InvalidArgumentError,
-            SandboxError,
-        ) = _import_conch()
+        sdk = _import_conch()
 
         def _read() -> bytes:
             return handle.files.read(sandbox_path, format="bytes")
 
         try:
             content = await asyncio.to_thread(_read)
-        except NotFoundError as exc:
+        except sdk.not_found_error as exc:
             return RuntimeFileOpResult(ok=False, error="not_found", detail=str(exc))
-        except InvalidArgumentError as exc:
+        except sdk.invalid_argument_error as exc:
             return RuntimeFileOpResult(ok=False, error="invalid_argument", detail=str(exc))
         except IsADirectoryError as exc:
             return RuntimeFileOpResult(ok=False, error="is_directory", detail=str(exc))
-        except SandboxError as exc:
+        except sdk.sandbox_error as exc:
             message = str(exc).lower()
             if "directory" in message:
                 return RuntimeFileOpResult(ok=False, error="is_directory", detail=str(exc))
@@ -708,25 +702,18 @@ class ConchRuntime(RuntimeAdapter):
             depth = max_depth if max_depth is not None else _CONCH_LIST_DEFAULT_MAX_DEPTH
         else:
             depth = 1
-        (
-            _Sandbox,
-            _CommandExitException,
-            _TimeoutException,
-            NotFoundError,
-            InvalidArgumentError,
-            SandboxError,
-        ) = _import_conch()
+        sdk = _import_conch()
 
         def _list() -> list[Any]:
             return handle.files.list(sandbox_path, depth=depth)
 
         try:
             entries = await asyncio.to_thread(_list)
-        except NotFoundError as exc:
+        except sdk.not_found_error as exc:
             return RuntimeFileOpResult(ok=False, error="not_found", detail=str(exc))
-        except InvalidArgumentError as exc:
+        except sdk.invalid_argument_error as exc:
             return RuntimeFileOpResult(ok=False, error="invalid_argument", detail=str(exc))
-        except SandboxError as exc:
+        except sdk.sandbox_error as exc:
             return RuntimeFileOpResult(ok=False, error="io_error", detail=str(exc))
         except Exception as exc:
             return RuntimeFileOpResult(ok=False, error="io_error", detail=str(exc))
@@ -756,14 +743,7 @@ class ConchRuntime(RuntimeAdapter):
         # Conch search accepts a single pattern; join alternatives with '|' is not
         # supported, so use the first pattern (API currently exposes one pattern).
         pattern = patterns[0]
-        (
-            _Sandbox,
-            _CommandExitException,
-            _TimeoutException,
-            NotFoundError,
-            InvalidArgumentError,
-            SandboxError,
-        ) = _import_conch()
+        sdk = _import_conch()
 
         def _search() -> list[Any]:
             return handle.files.search(
@@ -774,11 +754,11 @@ class ConchRuntime(RuntimeAdapter):
 
         try:
             entries = await asyncio.to_thread(_search)
-        except NotFoundError as exc:
+        except sdk.not_found_error as exc:
             return RuntimeFileOpResult(ok=False, error="not_found", detail=str(exc))
-        except InvalidArgumentError as exc:
+        except sdk.invalid_argument_error as exc:
             return RuntimeFileOpResult(ok=False, error="invalid_argument", detail=str(exc))
-        except SandboxError as exc:
+        except sdk.sandbox_error as exc:
             return RuntimeFileOpResult(ok=False, error="io_error", detail=str(exc))
         except Exception as exc:
             return RuntimeFileOpResult(ok=False, error="io_error", detail=str(exc))
@@ -811,20 +791,13 @@ class ConchRuntime(RuntimeAdapter):
         handle = job.command_handle
         if handle is None:
             return
-        (
-            _Sandbox,
-            CommandExitException,
-            _TimeoutException,
-            _NotFoundError,
-            _InvalidArgumentError,
-            _SandboxError,
-        ) = _import_conch()
+        sdk = _import_conch()
 
         def _wait() -> int:
             try:
                 result = handle.wait()
                 return int(getattr(result, "exit_code", 0) or 0)
-            except CommandExitException as exc:
+            except sdk.command_exit_exception as exc:
                 return int(exc.exit_code)
             except Exception as exc:
                 logger.debug(
@@ -838,9 +811,8 @@ class ConchRuntime(RuntimeAdapter):
 
         try:
             exit_code = await asyncio.to_thread(_wait)
-        except asyncio.CancelledError:
-            raise
         except Exception:
+            # CancelledError is BaseException on Py3.9+ and propagates naturally.
             logger.debug(
                 "Conch background watcher crashed for %s/%s",
                 job.sandbox_id,

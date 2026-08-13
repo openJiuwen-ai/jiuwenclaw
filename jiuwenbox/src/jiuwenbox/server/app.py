@@ -19,17 +19,18 @@ from jiuwenbox.logging_config import configure_logging
 from jiuwenbox import __version__
 from jiuwenbox.server.auth import BearerTokenAuthMiddleware, get_configured_token
 from jiuwenbox.server.audit_logger import AuditLogger
-from jiuwenbox.models.sandbox import InvalidJobIdError, InvalidSandboxIdError
-from jiuwenbox.server.runtime.errors import BackgroundJobNotFoundError
-from jiuwenbox.server.sandbox_manager import (
+from jiuwenbox.server.runtime.errors import (
+    BackgroundJobNotFoundError,
+    InvalidJobIdError,
+    InvalidSandboxIdError,
+    PolicyValidationError,
     SandboxConflictError,
-    SandboxManager,
     SandboxNotFoundError,
     SandboxStateError,
 )
+from jiuwenbox.server.sandbox_manager import SandboxManager
 from jiuwenbox.server.policy_reader import PolicyReader
 from jiuwenbox.server.proxy_manager import ProxyManager
-from jiuwenbox.server.policy_engine import PolicyValidationError
 from jiuwenbox.server.runtime.process import enable_child_subreaper
 
 # Operator-facing env: when set, the audit JSONL is persisted to this
