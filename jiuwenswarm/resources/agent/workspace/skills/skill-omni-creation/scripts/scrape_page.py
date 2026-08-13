@@ -390,6 +390,63 @@ def _is_leaf_js_text_container(el) -> bool:
 
 # ── Core: build unified blocks[] ─────────────────────────────────────────────
 
+def _is_candidate_element(el) -> bool:
+    content_tags = {
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "p",
+        "li",
+        "img",
+        "pre",
+        "code",
+        "table",
+        "dl",
+        "textarea",
+        "canvas",
+    }
+
+    if el.name in content_tags:
+        return True
+    if el.get("role") in {"heading", "listitem", "code"}:
+        return True
+    if _is_contenteditable(el):
+        return True
+    if _is_custom_editor(el):
+        return True
+    return _is_leaf_js_text_container(el)
+
+
+def _is_heading_element(el) -> bool:
+    heading_tags = {"h1", "h2", "h3", "h4", "h5", "h6"}
+
+    if el.name in heading_tags:
+        return True
+    return el.get("role") == "heading"
+
+
+def _is_structured_element(el) -> bool:
+    structured_tags = {
+        "pre",
+        "code",
+        "table",
+        "dl",
+        "textarea",
+        "canvas",
+    }
+
+    if el.name in structured_tags:
+        return True
+    if _is_custom_editor(el):
+        return True
+    if _is_contenteditable(el):
+        return True
+    return _is_leaf_js_text_container(el)
+
+
 def build_blocks(soup, page_url: str, source: str) -> list[dict]:
     """Walk DOM in order, output interleaved heading / text / image blocks."""
     root = (
@@ -399,6 +456,7 @@ def build_blocks(soup, page_url: str, source: str) -> list[dict]:
         or soup.body
         or soup
     )
+
     tabpanel_labels = _build_tabpanel_labels(root)
     injected_panels: set[str] = set()
     seen_text: set[str] = set()
@@ -406,16 +464,7 @@ def build_blocks(soup, page_url: str, source: str) -> list[dict]:
 
     candidates = []
     for el in root.find_all(True, recursive=True):
-        if (
-            el.name in {
-                "h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "img",
-                "pre", "code", "table", "dl", "textarea", "canvas",
-            }
-            or el.get("role") in {"heading", "listitem", "code"}
-            or _is_contenteditable(el)
-            or _is_custom_editor(el)
-            or _is_leaf_js_text_container(el)
-        ):
+        if _is_candidate_element(el):
             candidates.append(el)
 
     for el in candidates:
@@ -425,14 +474,23 @@ def build_blocks(soup, page_url: str, source: str) -> list[dict]:
         if tab_label and tab_label.lower() in NOISE_TABPANEL_LABELS:
             continue
 
-        # Inject tab label as a level-2 heading on the first element of each content tabpanel
+        # Inject tab label as a level-2 heading on the first element
+        # of each content tabpanel.
         if panel_id and panel_id not in injected_panels:
             injected_panels.add(panel_id)
             if tab_label:
-                blocks.append({"type": "heading", "level": 2, "text": tab_label, "source": source})
+                blocks.append(
+                    {
+                        "type": "heading",
+                        "level": 2,
+                        "text": tab_label,
+                        "source": source,
+                    }
+                )
 
         # Skip noise CSS classes
-        if any(cls in " ".join(el.get("class", [])) for cls in NOISE_CLASSES):
+        classes = " ".join(el.get("class", []))
+        if any(cls in classes for cls in NOISE_CLASSES):
             continue
 
         # A structured parent (pre/table/dl/editor) already emits its full text.
@@ -440,49 +498,90 @@ def build_blocks(soup, page_url: str, source: str) -> list[dict]:
         if el.name not in {"img", "canvas"} and _is_inside_container(el, root):
             continue
 
-        if el.name in ("h1", "h2", "h3", "h4", "h5", "h6") or el.get("role") == "heading":
+        if _is_heading_element(el):
             text = el_text(el)
             if text and text not in seen_text:
                 seen_text.add(text)
+
                 try:
-                    level = int(el.name[1]) if el.name.startswith("h") else int(el.get("aria-level", 2))
+                    if el.name.startswith("h"):
+                        level = int(el.name[1])
+                    else:
+                        level = int(el.get("aria-level", 2))
                 except (TypeError, ValueError):
                     level = 2
+
                 level = max(1, min(level, 6))
-                blocks.append({"type": "heading", "level": level, "text": text, "source": source})
+                blocks.append(
+                    {
+                        "type": "heading",
+                        "level": level,
+                        "text": text,
+                        "source": source,
+                    }
+                )
 
         elif el.name == "img":
             if not is_content_img(el):
                 continue
+
             url = _best_img_url(el, page_url)
             if not url:
                 continue
-            alt = el.get("alt", "").strip() or resolve_remote_reference(el, soup)
-            blocks.append({"type": "image", "url": url, "alt": alt, "source": source, "path": None})
 
-        elif (
-            el.name in {"pre", "code", "table", "dl", "textarea", "canvas"}
-            or _is_custom_editor(el)
-            or _is_contenteditable(el)
-            or _is_leaf_js_text_container(el)
-        ):
-            if el.name != "canvas" and _is_inside_container(el, root, include_paragraphs=(el.name == "code")):
+            alt = el.get("alt", "").strip() or resolve_remote_reference(
+                el,
+                soup,
+            )
+            blocks.append(
+                {
+                    "type": "image",
+                    "url": url,
+                    "alt": alt,
+                    "source": source,
+                    "path": None,
+                }
+            )
+
+        elif _is_structured_element(el):
+            include_paragraphs = el.name == "code"
+            if el.name != "canvas" and _is_inside_container(
+                el,
+                root,
+                include_paragraphs=include_paragraphs,
+            ):
                 continue
+
             structured = _structured_text(el)
             if not structured:
                 continue
+
             fmt, text = structured
             text = text.strip()
+
             if text and len(text) > 1 and text not in seen_text:
                 seen_text.add(text)
                 limit = STRUCTURED_TEXT_LIMITS[fmt]
-                blocks.append({"type": "text", "text": text[:limit], "format": fmt, "source": source})
+                blocks.append(
+                    {
+                        "type": "text",
+                        "text": text[:limit],
+                        "format": fmt,
+                        "source": source,
+                    }
+                )
 
         else:
             text = el_text(el)
             if text and len(text) > 15 and text not in seen_text:
                 seen_text.add(text)
-                blocks.append({"type": "text", "text": text[:400], "source": source})
+                blocks.append(
+                    {
+                        "type": "text",
+                        "text": text[:400],
+                        "source": source,
+                    }
+                )
 
     return blocks
 
@@ -696,6 +795,7 @@ def build_bounded_stage01_payload(
     payload["content_limits"]["serialized_chars"] = _serialized_chars(payload)
     return payload
 
+
 def parse_page_html(html: str, page_url: str, source: str) -> list[dict]:
     soup = BeautifulSoup(html, "html.parser")
     for noise_id in NOISE_IDS:
@@ -894,7 +994,11 @@ def main() -> None:
     parser.add_argument("url", nargs="?")
     parser.add_argument("run_id", nargs="?", default=None, help="optional UUID workspace id for explicit resume")
     parser.add_argument("--out", default=None)
-    parser.add_argument("--check-deps", action="store_true", help="Run the shared environment gate with auto-repair, then exit.")
+    parser.add_argument(
+       "--check-deps",
+       action="store_true",
+       help="Run the shared environment gate with auto-repair, then exit.",
+   )
     args = parser.parse_args()
 
     if args.check_deps:
@@ -974,7 +1078,10 @@ def main() -> None:
     except Exception as exc:
         message = str(exc).lower()
         logger.error("[scrape_page] Playwright startup failed: %s", exc)
-        logger.error("[scrape_page] Environment gate had passed; this is a runtime browser/page failure, not a missing-package fallback.")
+        logger.error(
+             "[scrape_page] Environment gate had passed; this is a runtime "
+             "browser/page failure, not a missing-package fallback."
+         )
         raise SystemExit(4) from exc
 
     _blocked_markers = ("the request is blocked", "access denied", "403 forbidden", "enable javascript")
@@ -984,16 +1091,24 @@ def main() -> None:
 
     if not blocks or _is_blocked:
         logger.warning("[scrape_page] WARNING: Playwright returned empty/blocked content for %s", args.url)
-        logger.warning("[scrape_page] content blocked/empty; keep RUN_ID and obtain real TITLE/content through fallback")
+        logger.warning(
+             "[scrape_page] content blocked/empty; keep RUN_ID and obtain real "
+             "TITLE/content through fallback"
+         )
         logger.warning("[scrape_page] Tip: use web_fetch_webpage in the agent to fetch raw text as fallback")
         return
 
     resolved_title = page_title.strip()
     if not resolved_title:
         resolved_title = next(
-            (str(block.get("text", "")).strip() for block in blocks if block.get("type") == "heading" and str(block.get("text", "")).strip()),
-            "",
-        )
+          (
+              str(block.get("text", "")).strip()
+              for block in blocks
+              if block.get("type") == "heading"
+              and str(block.get("text", "")).strip()
+          ),
+          "",
+      )
     if not resolved_title:
         logger.warning("[scrape_page] no real page TITLE resolved; keeping UUID workspace for retry/fallback")
         return
