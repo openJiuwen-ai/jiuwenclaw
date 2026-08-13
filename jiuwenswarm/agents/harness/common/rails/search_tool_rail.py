@@ -804,6 +804,12 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
             return "audio"
         if "acp" in text:
             return "acp"
+        # MCP server 工具：mcp_<server>_<action>。按 server 分组成 mcp_<server>，
+        # 渲染时动态生成标签（如 "MCP: filesystem"），不再落进笼统的 "其它"。
+        # 这是 MCP 工具"隐身"问题的修复点：让 LLM 看到 MCP 工具按 server 归类、
+        # 有意义的分组，而不是 18 个英文工具堆在"其它（专业工具）"下、关联不到能力。
+        if name_tokens and name_tokens[0] == "mcp" and len(name_tokens) >= 2:
+            return f"mcp_{name_tokens[1]}"
         return "other"
 
     async def _build_hidden_tool_summary(self, session, language="cn"):
@@ -823,7 +829,14 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         table = _HIDDEN_CATEGORY_CN if language != "en" else _HIDDEN_CATEGORY_EN
         entries = []
         for cat in sorted(cats.keys()):
-            label, capability = table.get(cat, table["other"])
+            if cat.startswith("mcp_"):
+                server = cat[4:]
+                if language != "en":
+                    label, capability = f"MCP: {server}", f"MCP {server} server 提供的工具，按需调用"
+                else:
+                    label, capability = f"MCP: {server}", f"tools from MCP {server} server"
+            else:
+                label, capability = table.get(cat, table["other"])
             tools_in_cat = sorted(cats[cat], key=lambda t: str(getattr(t, "name", "") or ""))
             count = len(tools_in_cat)
             if language != "en":
