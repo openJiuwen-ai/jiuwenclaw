@@ -2695,7 +2695,8 @@ class TeamManager:
                     exc_info=True,
                 )
 
-    def _candidate_team_db_paths(self, session_id: str) -> list[Path]:
+    @staticmethod
+    def _candidate_team_db_paths(session_id: str) -> list[Path]:
         """候选 team.db 路径：project 作用域优先，全局 home 兜底。
 
         团队运行在 ``agent_teams_home_scope(project_dir)`` 内执行，真实
@@ -2746,13 +2747,11 @@ class TeamManager:
         conn = sqlite3.connect(str(db_path))
         try:
             conn.execute("PRAGMA foreign_keys=OFF")
-            existing = {
-                row[0]
-                for row in conn.execute(
-                    "SELECT name FROM sqlite_master "
-                    "WHERE type='table' AND name IN ('team_info', 'team_member')"
-                )
-            }
+            table_rows = conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name IN ('team_info', 'team_member')"
+            )
+            existing = {row[0] for row in table_rows}
             if not existing:
                 return False, {}
             roster_cols: list[str] = []

@@ -75,7 +75,10 @@ from jiuwenclaw.security.ws_origin import (
     get_header_value,
     is_allowed_browser_origin,
 )
-from jiuwenclaw.agentserver.session_id_safe import normalize_safe_session_id
+from jiuwenclaw.agentserver.session_id_safe import (
+    normalize_safe_session_id,
+    resolve_session_dir_under_root,
+)
 from jiuwenclaw.agentserver.team.exceptions import (
     TeamDissolveConflictError,
     TeamDissolveError,
@@ -3043,11 +3046,6 @@ class AgentWebSocketServer:
     ) -> None:
         """处理 session.delete 请求：删除 Agent 本机 sessions 目录下的会话目录。"""
         import shutil
-
-        from jiuwenclaw.agentserver.session_id_safe import (
-            normalize_safe_session_id,
-            resolve_session_dir_under_root,
-        )
 
         logger.info("[AgentServer] session.delete: request_id=%s", request.request_id)
 

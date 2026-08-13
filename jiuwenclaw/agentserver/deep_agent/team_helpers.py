@@ -487,7 +487,12 @@ async def _maybe_wrap_roster_change_briefing(
             if scoped:
                 candidates.append(scoped)
         except Exception:
-            pass
+            # 作用域名构造失败时只用 base_name 兜底，绝不影响正常发送
+            logger.debug(
+                '[TeamHelpers] build scoped team name raised: session_id=%s',
+                session_id,
+                exc_info=True,
+            )
     if base_name not in candidates:
         candidates.append(base_name)
 
