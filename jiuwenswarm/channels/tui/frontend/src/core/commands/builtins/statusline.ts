@@ -81,8 +81,9 @@ function showHelp(ctx: CommandContext): void {
     "  JSON is piped via stdin. On Windows, you can also use the file at $JIUWENSWARM_SL_FILE.",
     "",
     "Subcommands:",
-    "  /statusline                 — show current configuration",
-    "  /statusline get             — show current configuration",
+    "  /statusline                 — not configured: launch the setup agent;",
+    "                                already configured: show current configuration",
+    "  /statusline get             — always show current configuration (never launches setup)",
     "  /statusline set <command>   — set the shell command to run",
     "  /statusline padding <n>     — set left & right padding (0 or positive)",
     "  /statusline clear           — remove statusline configuration",
@@ -162,6 +163,22 @@ function agentGenerate(ctx: CommandContext, prompt: string): void {
   }
 }
 
+const DEFAULT_SETUP_DESCRIPTIONS: Record<"zh" | "en", string> = {
+  zh: "配置一个实用的默认状态栏，显示当前模式、模型和上下文占用百分比",
+  en: "configure a practical default status line showing the current mode, model, and context usage percentage",
+};
+
+function getDefaultSetupDescription(ctx: CommandContext): string {
+  return ctx.preferredLanguage === "zh"
+    ? DEFAULT_SETUP_DESCRIPTIONS.zh
+    : DEFAULT_SETUP_DESCRIPTIONS.en;
+}
+
+function isStatusLineConfigured(): boolean {
+  const sl = getStatusLineConfig();
+  return !!sl && sl.type === "command" && !!sl.command;
+}
+
 // Known subcommands that are handled locally (not sent to agent)
 const KNOWN_SUBCOMMANDS = ["set", "padding", "clear", "help", "json", "get"];
 
@@ -170,7 +187,7 @@ export function createStatusLineCommand(): SlashCommand {
     name: "statusline",
     altNames: ["sl"],
     description: "Configure custom status line footer",
-    usage: "/statusline <set|padding|clear|help|json> | /statusline <prompt>",
+    usage: "/statusline [get|set|padding|clear|help|json|<prompt>]",
     example: "/statusline set 'echo $mode | $model'  OR  /statusline show my PS1 config",
     kind: CommandKind.BUILT_IN,
     takesArgs: true,
@@ -233,8 +250,11 @@ export function createStatusLineCommand(): SlashCommand {
     action: (ctx, args) => {
       const trimmedArgs = args.trim();
       if (!trimmedArgs) {
-        // No args — show current config (per docs: "/statusline" shows current config)
-        showCurrentConfig(ctx);
+        if (!isStatusLineConfigured()) {
+          agentGenerate(ctx, getDefaultSetupDescription(ctx));
+        } else {
+          showCurrentConfig(ctx);
+        }
         return;
       }
 

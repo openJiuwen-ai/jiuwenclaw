@@ -1024,7 +1024,8 @@ hooks:
 
 | 命令 | 说明 |
 |---|---|
-| `/statusline` 或 `/statusline get` | 查看当前状态栏配置 |
+| `/statusline` | 未配置时进入 setup agent 引导；已配置时查看当前状态栏配置 |
+| `/statusline get` | 始终只查看当前状态栏配置，不触发 setup agent |
 | `/statusline set <shell-command>` | 设置状态栏命令（命令输出将显示在 TUI 底部） |
 | `/statusline padding <number>` | 设置左右 padding；参数必须为非负整数，且需要先配置状态栏命令 |
 | `/statusline clear` | 清除状态栏配置（底部栏将不再显示） |
@@ -1119,7 +1120,8 @@ hooks:
 
 #### 更多示例
 
-- `/statusline` — 查看当前配置
+- `/statusline` — 未配置时进入 setup agent 引导；已配置时查看当前配置
+- `/statusline get` — 查看当前配置，不触发 setup agent
 - `/statusline set 'input=$(cat); model=$(echo "$input" | jq -r .model); echo "$model"'` — 只显示模型名
 - `/statusline set 'input=$(cat); proc=$(echo "$input" | jq -r .is_processing); model=$(echo "$input" | jq -r .model); echo "$proc | $model"'` — 显示是否在处理和模型名
 - `/statusline set 'input=$(cat); pct=$(echo "$input" | jq -r .context_window.used_percentage); rem=$(echo "$input" | jq -r .context_window.remaining_percentage); cw=$(echo "$input" | jq -r ".context_window.context_window_size / 1000"); echo "ctx:${pct}% used (${rem}% left, ${cw}K window)"'` — 显示上下文窗口占用百分比

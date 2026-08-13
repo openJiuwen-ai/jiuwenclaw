@@ -1022,7 +1022,8 @@ Configure the TUI footer status bar with a custom shell command that dynamically
 
 | Command | Description |
 |---|---|
-| `/statusline` or `/statusline get` | View current status line configuration |
+| `/statusline` | When unconfigured, launch the setup agent; otherwise view the current status line configuration |
+| `/statusline get` | Always view the current status line configuration without launching the setup agent |
 | `/statusline set <shell-command>` | Set the status line command (its output will appear in the TUI footer) |
 | `/statusline padding <number>` | Set left and right padding; the value must be zero or a positive integer and a status line must already be configured |
 | `/statusline clear` | Remove the status line configuration (footer bar will hide) |
@@ -1117,7 +1118,8 @@ Use the following template to write commands. `input=$(cat)` reads JSON into a v
 
 #### More Examples
 
-- `/statusline` — View current configuration
+- `/statusline` — Launch the setup agent when unconfigured; otherwise view current configuration
+- `/statusline get` — View current configuration without launching the setup agent
 - `/statusline set 'input=$(cat); model=$(echo "$input" | jq -r .model); echo "$model"'` — Show model name only
 - `/statusline set 'input=$(cat); proc=$(echo "$input" | jq -r .is_processing); model=$(echo "$input" | jq -r .model); echo "$proc | $model"'` — Show processing state and model
 - `/statusline set 'input=$(cat); pct=$(echo "$input" | jq -r .context_window.used_percentage); rem=$(echo "$input" | jq -r .context_window.remaining_percentage); cw=$(echo "$input" | jq -r ".context_window.context_window_size / 1000"); echo "ctx:${pct}% used (${rem}% left, ${cw}K window)"'` — Show context window occupancy with percentage bar
