@@ -14,12 +14,11 @@ agent/sessions/{session_id}/ 文件。
 
 from __future__ import annotations
 
-import os
 import threading
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import ClassVar, Dict, List, Optional
+from typing import Callable, ClassVar, Dict, List, Optional
 
 from pydantic import BaseModel
 
@@ -27,6 +26,10 @@ from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 
 from jiuwenclaw.utils import get_agent_sessions_dir
 
+
+# ---------------------------------------------------------------------------
+# Data models
+# ---------------------------------------------------------------------------
 
 class TaskStatus(str, Enum):
     WAITING = "waiting"
@@ -42,8 +45,33 @@ class TodoTask(BaseModel):
     result: str = ""
 
 
-# Operation kinds emitted by the toolkit. Rails match on these exact strings
-# (no string-prefix sniffing on user-facing messages).
+# ---------------------------------------------------------------------------
+# Status ↔ checkbox mapping (shared by load / save / list)
+# ---------------------------------------------------------------------------
+
+_STATUS_CHECKBOX: Dict[TaskStatus, str] = {
+    TaskStatus.COMPLETED: "[x]",
+    TaskStatus.CANCELLED: "[-]",
+    TaskStatus.RUNNING: "[>]",
+    TaskStatus.WAITING: "[ ]",
+}
+
+_CHECKBOX_STATUS: Dict[str, TaskStatus] = {
+    "[x]": TaskStatus.COMPLETED,
+    "[√]": TaskStatus.COMPLETED,
+    "[-]": TaskStatus.CANCELLED,
+    "[>]": TaskStatus.RUNNING,
+    "[ ]": TaskStatus.WAITING,
+}
+
+# Status names for parsing the ``| status`` field (lowercased lookup)
+_STATUS_NAMES = {s.value: s for s in TaskStatus}
+
+
+# ---------------------------------------------------------------------------
+# Operation result (publish / consume bus)
+# ---------------------------------------------------------------------------
+
 class TodoOpKind(str, Enum):
     CREATE = "create"
     START = "start"
@@ -54,23 +82,20 @@ class TodoOpKind(str, Enum):
 
 @dataclass(frozen=True)
 class TodoOpResult:
+    """Structured result of a write operation.
+
+    ``cancelled`` tasks are excluded from both ``remaining_count`` and
+    ``total_count`` (treated as voided, not as plan members).
     """
-    Structured result of a write operation. ``cancelled`` tasks are
-    excluded from both ``remaining_count`` and ``total_count`` (treated as
-    voided, not as plan members).
-    """
+
     kind: TodoOpKind
     success: bool
-    message: str             # human-readable string returned to the LLM
-    remaining_count: int     # waiting + running, after the op
-    total_count: int         # waiting + running + completed, after the op
-    all_completed: bool      # True iff total_count > 0 and remaining_count == 0
+    message: str
+    remaining_count: int      # waiting + running, after the op
+    total_count: int          # waiting + running + completed, after the op
+    all_completed: bool       # True iff total_count > 0 and remaining_count == 0
 
 
-# Per-session publish/consume of the most recent TodoOpResult. The toolkit
-# publishes inside the user-facing method (within the per-session lock) and
-# the rail consumes once in after_tool_call. Same-session writers are
-# serialized by the lock; cross-session writes are isolated by key.
 _last_op_result: Dict[str, TodoOpResult] = {}
 _last_op_result_lock = threading.Lock()
 
@@ -110,6 +135,10 @@ def _resolve_runtime_session_id() -> str:
         return "default"
 
 
+# ---------------------------------------------------------------------------
+# TodoToolkit
+# ---------------------------------------------------------------------------
+
 class TodoToolkit:
     """Toolkit for agent todo task tracking. Persists tasks to markdown under session dir."""
 
@@ -121,13 +150,8 @@ class TodoToolkit:
     EXPOSE_START: ClassVar[bool] = True
     EXPOSE_COMPLETE_BATCH: ClassVar[bool] = False
 
-    # Markdown line format: - [ ] 1. task | status  or  - [x] 1. task | status | result
-    # parts[0]=task, parts[1]=status, parts[2]=result (optional)
-    PARTS_MIN_COUNT_WITH_RESULT = 3  # 至少 3 段才有 result
-    PARTS_INDEX_RESULT = 2  # result 在 split("|") 后的索引
-
-    # 按 {class}:{session_id} 分组的文件锁，防止并发任务对同一 todo.md 进行
-    # read-modify-write 时丢失更新；不同 toolkit 子类不共享锁。
+    # Per {class}:{session_id} file locks — prevents concurrent
+    # read-modify-write races on the same todo.md.
     _session_locks: ClassVar[Dict[str, threading.Lock]] = {}
     _meta_lock: ClassVar[threading.Lock] = threading.Lock()
 
@@ -156,11 +180,7 @@ class TodoToolkit:
         return self._explicit_session_id or _resolve_runtime_session_id()
 
     def set_session_id(self, session_id: str) -> None:
-        """Set the session ID for this toolkit instance.
-
-        Args:
-            session_id: The session/conversation identifier to use.
-        """
+        """Set the session ID for this toolkit instance."""
         self._explicit_session_id = session_id
 
     @property
@@ -197,46 +217,41 @@ class TodoToolkit:
             path.unlink()
             return True
 
+    # ------------------------------------------------------------------
+    # Persistence helpers
+    # ------------------------------------------------------------------
+
     def _load_tasks(self) -> List[TodoTask]:
         """Load tasks from markdown file."""
-        if not self._todo_path.exists():
+        path = self._todo_path
+        if not path.exists():
             return []
         tasks: List[TodoTask] = []
-        with open(self._todo_path, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line or line.startswith("#"):
                     continue
-                # Format: - [ ] 1. task | status  or  - [x] 1. task | status | result
-                if "[-]" in line:
-                    status = TaskStatus.CANCELLED
-                    checked = False
-                elif "[>]" in line:
-                    status = TaskStatus.RUNNING
-                    checked = False
-                else:
-                    checked = "[x]" in line.lower() or "[√]" in line
-                    status = TaskStatus.COMPLETED if checked else TaskStatus.WAITING
-                result = ""
+                # Determine status from checkbox marker
+                status = TaskStatus.WAITING
+                for cb, st in _CHECKBOX_STATUS.items():
+                    if cb in line:
+                        status = st
+                        break
+                # Split on "|" → [task_text, status, result?]
                 parts = [p.strip() for p in line.split("|")]
-                if len(parts) >= self.PARTS_MIN_COUNT_WITH_RESULT:
-                    result = parts[self.PARTS_INDEX_RESULT]
-                # 解析状态字段（第二段）
+                result = parts[2] if len(parts) >= 3 else ""
+                # Status field (parts[1]) overrides checkbox if present
                 if len(parts) >= 2:
-                    status_str = parts[1].strip().lower()
-                    if status_str == "running":
-                        status = TaskStatus.RUNNING
-                    elif status_str == "waiting":
-                        status = TaskStatus.WAITING
-                    elif status_str == "completed":
-                        status = TaskStatus.COMPLETED
-                    elif status_str == "cancelled":
-                        status = TaskStatus.CANCELLED
-                # 解析行："- [ ] 1. xxx" / "- [x] 1. xxx" / "- [>] 1. xxx"
-                rest = line.replace("- [x]", "").replace("- [-]", "").replace("- [>]", "").replace("- [ ]", "").strip()
+                    status = _STATUS_NAMES.get(parts[1].lower(), status)
+                # Strip checkbox prefix to get "idx. task_text"
+                rest = line
+                for cb in _CHECKBOX_STATUS:
+                    rest = rest.replace(f"- {cb}", "")
+                rest = rest.strip()
                 if "." in rest:
                     idx_str, _, task_text = rest.partition(".")
-                    task_text = task_text.split("|")[0].strip()  # drop | status | result
+                    task_text = task_text.split("|")[0].strip()
                     try:
                         idx = int(idx_str.strip())
                         tasks.append(
@@ -250,36 +265,31 @@ class TodoToolkit:
         """Save tasks to markdown file."""
         lines = ["# Todo List", ""]
         for t in sorted(tasks, key=lambda x: x.idx):
-            if t.status == TaskStatus.COMPLETED:
-                checkbox = "[x]"
-            elif t.status == TaskStatus.CANCELLED:
-                checkbox = "[-]"
-            elif t.status == TaskStatus.RUNNING:
-                checkbox = "[>]"
-            else:
-                checkbox = "[ ]"
+            checkbox = _STATUS_CHECKBOX.get(t.status, "[ ]")
+            line = f"- {checkbox} {t.idx}. {t.tasks} | {t.status.value}"
             if t.result:
-                lines.append(f"- {checkbox} {t.idx}. {t.tasks} | {t.status.value} | {t.result}")
-            else:
-                lines.append(f"- {checkbox} {t.idx}. {t.tasks} | {t.status.value}")
+                line += f" | {t.result}"
+            lines.append(line)
         self.todo_dir.mkdir(parents=True, exist_ok=True)
         with open(self._todo_path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
 
+    # ------------------------------------------------------------------
+    # Publish / format helpers
+    # ------------------------------------------------------------------
+
     def _append_todo_list(self, message: str) -> str:
         """Append current todo list to a status message."""
-        current = self.todo_list()
-        return f"{message}\n\nCurrent todo list:\n{current}"
+        return f"{message}\n\nCurrent todo list:\n{self.todo_list()}"
 
     @staticmethod
     def _compute_counts(tasks: List[TodoTask]) -> tuple[int, int]:
-        """Return (remaining_count, total_count). cancelled tasks are excluded
-        from both — they're voided and not considered plan members."""
-        waiting_running = sum(
+        """Return (remaining_count, total_count). cancelled excluded from both."""
+        remaining = sum(
             1 for t in tasks if t.status in (TaskStatus.WAITING, TaskStatus.RUNNING)
         )
         completed = sum(1 for t in tasks if t.status == TaskStatus.COMPLETED)
-        return waiting_running, waiting_running + completed
+        return remaining, remaining + completed
 
     def _publish(
         self, kind: TodoOpKind, success: bool, message: str,
@@ -299,6 +309,20 @@ class TodoToolkit:
             all_completed=(success and total > 0 and remaining == 0),
         ))
 
+    def _fail(self, kind: TodoOpKind, msg: str, tasks: List[TodoTask]) -> str:
+        """Publish failure and return the appended message."""
+        self._publish(kind, False, msg, tasks)
+        return self._append_todo_list(msg)
+
+    def _ok(self, kind: TodoOpKind, msg: str, tasks: List[TodoTask]) -> str:
+        """Publish success and return the appended message."""
+        self._publish(kind, True, msg, tasks)
+        return self._append_todo_list(msg)
+
+    # ------------------------------------------------------------------
+    # Public todo API
+    # ------------------------------------------------------------------
+
     def todo_create(self, tasks: List[str]) -> str:
         """Create a list of todo tasks. Fails if a todo list already exists.
 
@@ -314,16 +338,13 @@ class TodoToolkit:
                     f"Error: A todo list for session {self.session_id} already exists. "
                     f"Use {self.__class__.TOOL_PREFIX}_insert to add more tasks."
                 )
-                self._publish(TodoOpKind.CREATE, False, msg, self._load_tasks())
-                return self._append_todo_list(msg)
+                return self._fail(TodoOpKind.CREATE, msg, self._load_tasks())
             todo_tasks = [
                 TodoTask(idx=i + 1, tasks=t, status=TaskStatus.WAITING, result="")
                 for i, t in enumerate(tasks)
             ]
             self._save_tasks(todo_tasks)
-            msg = f"Created {len(todo_tasks)} todo tasks."
-            self._publish(TodoOpKind.CREATE, True, msg, todo_tasks)
-            return self._append_todo_list(msg)
+            return self._ok(TodoOpKind.CREATE, f"Created {len(todo_tasks)} todo tasks.", todo_tasks)
 
     def todo_start(self, idx: int) -> str:
         """Mark a task as running (in progress).
@@ -339,21 +360,13 @@ class TodoToolkit:
             for t in todo_tasks:
                 if t.idx == idx:
                     if t.status == TaskStatus.COMPLETED:
-                        msg = f"Error: Task {idx} is already completed."
-                        self._publish(TodoOpKind.START, False, msg, todo_tasks)
-                        return self._append_todo_list(msg)
+                        return self._fail(TodoOpKind.START, f"Error: Task {idx} is already completed.", todo_tasks)
                     if t.status == TaskStatus.CANCELLED:
-                        msg = f"Error: Task {idx} is cancelled."
-                        self._publish(TodoOpKind.START, False, msg, todo_tasks)
-                        return self._append_todo_list(msg)
+                        return self._fail(TodoOpKind.START, f"Error: Task {idx} is cancelled.", todo_tasks)
                     t.status = TaskStatus.RUNNING
                     self._save_tasks(todo_tasks)
-                    msg = f"Task {idx} marked as running."
-                    self._publish(TodoOpKind.START, True, msg, todo_tasks)
-                    return self._append_todo_list(msg)
-            msg = f"Error: Task {idx} not found."
-            self._publish(TodoOpKind.START, False, msg, todo_tasks)
-            return self._append_todo_list(msg)
+                    return self._ok(TodoOpKind.START, f"Task {idx} marked as running.", todo_tasks)
+            return self._fail(TodoOpKind.START, f"Error: Task {idx} not found.", todo_tasks)
 
     def todo_complete(self, idx: int, result: str = "") -> str:
         """Mark a task as completed and save a brief result.
@@ -372,12 +385,8 @@ class TodoToolkit:
                     t.status = TaskStatus.COMPLETED
                     t.result = result or "done"
                     self._save_tasks(todo_tasks)
-                    msg = f"Task {idx} marked as completed."
-                    self._publish(TodoOpKind.COMPLETE, True, msg, todo_tasks)
-                    return self._append_todo_list(msg)
-            msg = f"Error: Task {idx} not found."
-            self._publish(TodoOpKind.COMPLETE, False, msg, todo_tasks)
-            return self._append_todo_list(msg)
+                    return self._ok(TodoOpKind.COMPLETE, f"Task {idx} marked as completed.", todo_tasks)
+            return self._fail(TodoOpKind.COMPLETE, f"Error: Task {idx} not found.", todo_tasks)
 
     def todo_complete_batch(
         self, indices: List[int], results: Optional[List[str]] = None,
@@ -395,71 +404,57 @@ class TodoToolkit:
             todo_tasks = self._load_tasks()
 
             if not indices:
-                msg = "Error: indices must be a non-empty list."
-                self._publish(TodoOpKind.COMPLETE, False, msg, todo_tasks)
-                return self._append_todo_list(msg)
+                return self._fail(TodoOpKind.COMPLETE, "Error: indices must be a non-empty list.", todo_tasks)
 
             if results is None:
                 results = ["done"] * len(indices)
             elif len(results) != len(indices):
-                msg = (
-                    f"Error: results length ({len(results)}) does not match "
-                    f"indices length ({len(indices)})."
-                )
-                self._publish(TodoOpKind.COMPLETE, False, msg, todo_tasks)
-                return self._append_todo_list(msg)
+                msg = f"Error: results length ({len(results)}) does not match indices length ({len(indices)})."
+                return self._fail(TodoOpKind.COMPLETE, msg, todo_tasks)
 
+            # Contiguous ascending check
             for i in range(1, len(indices)):
                 if indices[i] != indices[i - 1] + 1:
-                    msg = (
-                        f"Error: indices must be strictly ascending and "
-                        f"contiguous. Got {indices}."
+                    return self._fail(
+                        TodoOpKind.COMPLETE,
+                        f"Error: indices must be strictly ascending and contiguous. Got {indices}.",
+                        todo_tasks,
                     )
-                    self._publish(TodoOpKind.COMPLETE, False, msg, todo_tasks)
-                    return self._append_todo_list(msg)
 
-            first_open_idx: Optional[int] = None
-            for t in todo_tasks:
-                if t.status in (TaskStatus.WAITING, TaskStatus.RUNNING):
-                    first_open_idx = t.idx
-                    break
-            if first_open_idx is None:
-                msg = "Error: no open tasks left to complete."
-                self._publish(TodoOpKind.COMPLETE, False, msg, todo_tasks)
-                return self._append_todo_list(msg)
-            if indices[0] != first_open_idx:
-                msg = (
-                    f"Error: batch must start at idx {first_open_idx} (the "
-                    f"first open task); got start idx {indices[0]}."
+            # Must start at the first open task
+            first_open = next(
+                (t.idx for t in todo_tasks
+                 if t.status in (TaskStatus.WAITING, TaskStatus.RUNNING)),
+                None,
+            )
+            if first_open is None:
+                return self._fail(TodoOpKind.COMPLETE, "Error: no open tasks left to complete.", todo_tasks)
+            if indices[0] != first_open:
+                return self._fail(
+                    TodoOpKind.COMPLETE,
+                    f"Error: batch must start at idx {first_open} (the first open task); got start idx {indices[0]}.",
+                    todo_tasks,
                 )
-                self._publish(TodoOpKind.COMPLETE, False, msg, todo_tasks)
-                return self._append_todo_list(msg)
 
+            # Validate each target task exists and is open
             tasks_by_idx = {t.idx: t for t in todo_tasks}
             for idx in indices:
                 t = tasks_by_idx.get(idx)
                 if t is None:
-                    msg = f"Error: Task {idx} not found."
-                    self._publish(TodoOpKind.COMPLETE, False, msg, todo_tasks)
-                    return self._append_todo_list(msg)
+                    return self._fail(TodoOpKind.COMPLETE, f"Error: Task {idx} not found.", todo_tasks)
                 if t.status == TaskStatus.COMPLETED:
-                    msg = f"Error: Task {idx} is already completed."
-                    self._publish(TodoOpKind.COMPLETE, False, msg, todo_tasks)
-                    return self._append_todo_list(msg)
+                    return self._fail(TodoOpKind.COMPLETE, f"Error: Task {idx} is already completed.", todo_tasks)
                 if t.status == TaskStatus.CANCELLED:
-                    msg = f"Error: Task {idx} is cancelled."
-                    self._publish(TodoOpKind.COMPLETE, False, msg, todo_tasks)
-                    return self._append_todo_list(msg)
+                    return self._fail(TodoOpKind.COMPLETE, f"Error: Task {idx} is cancelled.", todo_tasks)
 
+            # Apply — all validations passed
             for idx, result in zip(indices, results):
                 t = tasks_by_idx[idx]
                 t.status = TaskStatus.COMPLETED
                 t.result = (result or "").strip() or "done"
 
             self._save_tasks(todo_tasks)
-            msg = f"Tasks {list(indices)} marked as completed."
-            self._publish(TodoOpKind.COMPLETE, True, msg, todo_tasks)
-            return self._append_todo_list(msg)
+            return self._ok(TodoOpKind.COMPLETE, f"Tasks {list(indices)} marked as completed.", todo_tasks)
 
     def todo_insert(self, idx: int, tasks: List[str]) -> str:
         """Insert new tasks at the given index. Existing tasks are shifted.
@@ -474,7 +469,7 @@ class TodoToolkit:
         with self._get_session_lock(self.session_id):
             todo_tasks = self._load_tasks()
             if not self._todo_path.exists():
-                # 锁内直接创建，避免释放锁后被其他线程抢先
+                # Lock held — create directly to avoid race after unlock
                 new_tasks = [
                     TodoTask(idx=i + 1, tasks=t, status=TaskStatus.WAITING, result="")
                     for i, t in enumerate(tasks)
@@ -496,9 +491,7 @@ class TodoToolkit:
             todo_tasks.extend(new_tasks)
             todo_tasks.sort(key=lambda x: x.idx)
             self._save_tasks(todo_tasks)
-            msg = f"Inserted {len(tasks)} task(s) at index {idx}."
-            self._publish(TodoOpKind.INSERT, True, msg, todo_tasks)
-            return self._append_todo_list(msg)
+            return self._ok(TodoOpKind.INSERT, f"Inserted {len(tasks)} task(s) at index {idx}.", todo_tasks)
 
     def todo_remove(self, idx: int) -> str:
         """Remove a task and renumber remaining tasks.
@@ -511,19 +504,14 @@ class TodoToolkit:
         """
         with self._get_session_lock(self.session_id):
             todo_tasks = self._load_tasks()
-            found = [t for t in todo_tasks if t.idx == idx]
-            if not found:
-                msg = f"Error: Task {idx} not found."
-                self._publish(TodoOpKind.REMOVE, False, msg, todo_tasks)
-                return self._append_todo_list(msg)
+            if not any(t.idx == idx for t in todo_tasks):
+                return self._fail(TodoOpKind.REMOVE, f"Error: Task {idx} not found.", todo_tasks)
             todo_tasks = [t for t in todo_tasks if t.idx != idx]
             # Renumber
             for i, t in enumerate(todo_tasks, 1):
                 t.idx = i
             self._save_tasks(todo_tasks)
-            msg = f"Removed task {idx}."
-            self._publish(TodoOpKind.REMOVE, True, msg, todo_tasks)
-            return self._append_todo_list(msg)
+            return self._ok(TodoOpKind.REMOVE, f"Removed task {idx}.", todo_tasks)
 
     def todo_list(self) -> str:
         """List all current todo tasks.
@@ -536,17 +524,14 @@ class TodoToolkit:
             return "No todo tasks."
         lines = []
         for t in todo_tasks:
-            if t.status == TaskStatus.COMPLETED:
-                status_icon = "[x]"
-            elif t.status == TaskStatus.RUNNING:
-                status_icon = "[>]"
-            elif t.status == TaskStatus.CANCELLED:
-                status_icon = "[-]"
-            else:
-                status_icon = "[ ]"
+            icon = _STATUS_CHECKBOX.get(t.status, "[ ]")
             suffix = f" | {t.result}" if t.result else ""
-            lines.append(f"- {status_icon} {t.idx}. {t.tasks}{suffix}")
+            lines.append(f"- {icon} {t.idx}. {t.tasks}{suffix}")
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Tool registration
+    # ------------------------------------------------------------------
 
     def get_tools(self) -> List[Tool]:
         """Return all todo tools for registration in the openJiuwen Runner.
@@ -562,51 +547,24 @@ class TodoToolkit:
             List of Tool instances (LocalFunction) ready for Runner/agent registration.
         """
         prefix = self.__class__.TOOL_PREFIX
+        expose_batch = self.__class__.EXPOSE_COMPLETE_BATCH
 
-        def make_tool(
-            name: str,
-            description: str,
-            input_params: dict,
-            func,
-        ) -> Tool:
-            card = ToolCard(
-                name=name,
-                description=description,
-                input_params=input_params,
+        complete_desc = "Mark a task as completed and save a brief result."
+        if expose_batch:
+            complete_desc = (
+                "Mark a single task as completed and save a brief result. "
+                f"When several already-finished steps can be closed together, "
+                f"prefer ``{prefix}_complete_batch`` to avoid extra tool round-trips."
             )
-            return LocalFunction(card=card, func=func)
 
-        def todo_create_wrapper(tasks: List[str]) -> str:
-            return self.todo_create(tasks)
-
-        def todo_start_wrapper(idx: int) -> str:
-            return self.todo_start(idx)
-
-        def todo_complete_wrapper(idx: int, result: str = "") -> str:
-            return self.todo_complete(idx, result)
-
-        def todo_complete_batch_wrapper(
-            indices: List[int], results: Optional[List[str]] = None,
-        ) -> str:
-            return self.todo_complete_batch(indices, results)
-
-        def todo_insert_wrapper(idx: int, tasks: List[str]) -> str:
-            return self.todo_insert(idx, tasks)
-
-        def todo_remove_wrapper(idx: int) -> str:
-            return self.todo_remove(idx)
-
-        def todo_list_wrapper() -> str:
-            return self.todo_list()
-
-        tools: List[Tool] = [
-            make_tool(
-                name=f"{prefix}_create",
-                description=(
-                    "Create a list of todo tasks. Cannot be called when a todo list already exists. "
-                    "Use this to plan and track work. Pass a list of task descriptions."
-                ),
-                input_params={
+        # Ordered tool specs: (name, description, params, func, always_expose)
+        # Conditional tools (start, complete_batch) are filtered by the class flag.
+        specs: List[tuple[str, str, dict, Callable, bool]] = [
+            (
+                f"{prefix}_create",
+                "Create a list of todo tasks. Cannot be called when a todo list already exists. "
+                "Use this to plan and track work. Pass a list of task descriptions.",
+                {
                     "type": "object",
                     "properties": {
                         "tasks": {
@@ -617,66 +575,44 @@ class TodoToolkit:
                     },
                     "required": ["tasks"],
                 },
-                func=todo_create_wrapper,
+                lambda tasks: self.todo_create(tasks),
+                True,
             ),
-        ]
-
-        if self.__class__.EXPOSE_START:
-            tools.append(make_tool(
-                name=f"{prefix}_start",
-                description="Mark a task as running (in progress). Call this before starting to work on a task.",
-                input_params={
+            (
+                f"{prefix}_start",
+                "Mark a task as running (in progress). Call this before starting to work on a task.",
+                {
                     "type": "object",
                     "properties": {
-                        "idx": {
-                            "type": "integer",
-                            "description": "1-based index of the task to start",
-                        },
+                        "idx": {"type": "integer", "description": "1-based index of the task to start"},
                     },
                     "required": ["idx"],
                 },
-                func=todo_start_wrapper,
-            ))
-
-        complete_desc = "Mark a task as completed and save a brief result."
-        if self.__class__.EXPOSE_COMPLETE_BATCH:
-            complete_desc = (
-                "Mark a single task as completed and save a brief result. "
-                f"When several already-finished steps can be closed together, "
-                f"prefer ``{prefix}_complete_batch`` to avoid extra tool round-trips."
-            )
-        tools.append(make_tool(
-            name=f"{prefix}_complete",
-            description=complete_desc,
-            input_params={
-                "type": "object",
-                "properties": {
-                    "idx": {
-                        "type": "integer",
-                        "description": "1-based index of the task to complete",
+                lambda idx: self.todo_start(idx),
+                self.__class__.EXPOSE_START,
+            ),
+            (
+                f"{prefix}_complete",
+                complete_desc,
+                {
+                    "type": "object",
+                    "properties": {
+                        "idx": {"type": "integer", "description": "1-based index of the task to complete"},
+                        "result": {"type": "string", "description": "Brief result or outcome", "default": ""},
                     },
-                    "result": {
-                        "type": "string",
-                        "description": "Brief result or outcome",
-                        "default": "",
-                    },
+                    "required": ["idx"],
                 },
-                "required": ["idx"],
-            },
-            func=todo_complete_wrapper,
-        ))
-
-        if self.__class__.EXPOSE_COMPLETE_BATCH:
-            tools.append(make_tool(
-                name=f"{prefix}_complete_batch",
-                description=(
-                    "Mark several already-finished tasks as completed in one "
-                    "call. Indices must be strictly ascending, contiguous, and "
-                    "start at the first open task — gaps, reordering, and "
-                    "closing already-completed tasks are rejected. Use this "
-                    "only for steps that are truly done; never pre-close steps."
-                ),
-                input_params={
+                lambda idx, result="": self.todo_complete(idx, result),
+                True,
+            ),
+            (
+                f"{prefix}_complete_batch",
+                "Mark several already-finished tasks as completed in one call. "
+                "Indices must be strictly ascending, contiguous, and start at "
+                "the first open task — gaps, reordering, and closing "
+                "already-completed tasks are rejected. Use this only for steps "
+                "that are truly done; never pre-close steps.",
+                {
                     "type": "object",
                     "properties": {
                         "indices": {
@@ -700,20 +636,16 @@ class TodoToolkit:
                     },
                     "required": ["indices"],
                 },
-                func=todo_complete_batch_wrapper,
-            ))
-
-        tools.extend([
-            make_tool(
-                name=f"{prefix}_insert",
-                description="Insert new tasks at the given index. Existing tasks are shifted.",
-                input_params={
+                lambda indices, results=None: self.todo_complete_batch(indices, results),
+                expose_batch,
+            ),
+            (
+                f"{prefix}_insert",
+                "Insert new tasks at the given index. Existing tasks are shifted.",
+                {
                     "type": "object",
                     "properties": {
-                        "idx": {
-                            "type": "integer",
-                            "description": "1-based index where to insert",
-                        },
+                        "idx": {"type": "integer", "description": "1-based index where to insert"},
                         "tasks": {
                             "type": "array",
                             "items": {"type": "string"},
@@ -722,28 +654,37 @@ class TodoToolkit:
                     },
                     "required": ["idx", "tasks"],
                 },
-                func=todo_insert_wrapper,
+                lambda idx, tasks: self.todo_insert(idx, tasks),
+                True,
             ),
-            make_tool(
-                name=f"{prefix}_remove",
-                description="Remove a task by index. Remaining tasks are renumbered.",
-                input_params={
+            (
+                f"{prefix}_remove",
+                "Remove a task by index. Remaining tasks are renumbered.",
+                {
                     "type": "object",
                     "properties": {
-                        "idx": {
-                            "type": "integer",
-                            "description": "1-based index of the task to remove",
-                        },
+                        "idx": {"type": "integer", "description": "1-based index of the task to remove"},
                     },
                     "required": ["idx"],
                 },
-                func=todo_remove_wrapper,
+                lambda idx: self.todo_remove(idx),
+                True,
             ),
-            make_tool(
-                name=f"{prefix}_list",
-                description="List all current todo tasks with their status.",
-                input_params={"type": "object", "properties": {}},
-                func=todo_list_wrapper,
+            (
+                f"{prefix}_list",
+                "List all current todo tasks with their status.",
+                {"type": "object", "properties": {}},
+                lambda: self.todo_list(),
+                True,
             ),
-        ])
+        ]
+
+        tools: List[Tool] = []
+        for name, desc, params, func, expose in specs:
+            if not expose:
+                continue
+            tools.append(LocalFunction(
+                card=ToolCard(name=name, description=desc, input_params=params),
+                func=func,
+            ))
         return tools
