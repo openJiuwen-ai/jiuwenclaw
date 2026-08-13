@@ -21,6 +21,7 @@ from jiuwenswarm.agents.harness.common.rails.multimodal_image_rail import Multim
 from jiuwenswarm.agents.harness.common.rails.stream_event_rail import JiuSwarmStreamEventRail
 from jiuwenswarm.agents.harness.common.rails.task_execution_rail import TaskExecutionRail
 from jiuwenswarm.agents.harness.common.rails.context_overflow_recovery_rail import ContextOverflowRecoveryRail
+from jiuwenswarm.agents.harness.common.rails.model_routing.model_routing_rail import ModelRoutingRail
 
 __all__ = [
     "JiuSwarmStreamEventRail",
@@ -34,5 +35,6 @@ __all__ = [
     "SymphonyOrchestrationRail",
     "MemberSkillToolkitRail",
     "StructuredAskUserRail",
-    "ContextOverflowRecoveryRail"
+    "ContextOverflowRecoveryRail",
+    "ModelRoutingRail",
 ]
