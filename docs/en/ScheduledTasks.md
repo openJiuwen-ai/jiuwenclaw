@@ -16,7 +16,7 @@ A **Scheduled Task (Cron Job)** is a mechanism that automatically executes tasks
 |------------|-------------|
 | **Scheduled Execution** | Automatically triggered based on Cron expression |
 | **Natural Language Description** | Describe tasks in natural language, Agent understands and executes |
-| **Multi-channel Delivery** | Results can be pushed to Web, Feishu, WeChat, etc. |
+| **Channel Delivery** | Results can be pushed to a designated channel (Web, Feishu, WeChat, etc.) |
 | **Auto Wake-up** | Wake up Agent in advance to ensure timely execution |
 | **Team/SwarmFlow** | Support multi-agent collaboration for complex tasks (see [§6](#6-team-mode-and-swarmflow-multi-agent-scheduled-jobs)) |
 
@@ -81,7 +81,7 @@ minute hour day month weekday
 
 | Field | Description | Example |
 |-------|-------------|---------|
-| **Task Name** | Task name (unique identifier) | `daily_reminder` |
+| **Task Name** | Task name (user-readable identifier; system assigns a separate `job_id`) | `daily_reminder` |
 | **Cron Expression** | Cron expression | `0 9 * * *` (every day at 9am) |
 | **Timezone** | Task execution timezone | `Asia/Shanghai` (default) |
 | **Status** | Task status | Enable/Disable |
@@ -89,7 +89,7 @@ minute hour day month weekday
 | **Wake Offset Seconds** | Wake-up advance seconds, default 0 | `0` (default, no advance wake-up) |
 | **Timeout Seconds** | Execution timeout (60-259200), default 600 for normal modes, 1200 for team modes | `600` (default) |
 | **Delete After Run** | Auto-delete after one execution, default false | `false` (default) |
-| **Delivery Channel** | Result delivery channel | `web`, `feishu`, `wechat`, `wecom`, `whatsapp`, `telegram`, etc. |
+| **Delivery Channel** | Result delivery channel (single channel ID) | `tui`, `web`, `feishu`, `wechat`, `wecom`, `whatsapp`, `xiaoyi`, `dingtalk` |
 | **Execution Mode** | Agent execution mode | `agent.fast` (default) |
 | **Project Directory** | Project working directory (absolute path) | `/home/user/my-project`; defaults to current session's project |
 
@@ -105,7 +105,7 @@ The task is automatically assigned to the project matching `project_dir` (falls 
 
 Scheduled task configurations are saved at:
 ```
-~/.jiuwenswarm\agent\home\cron_jobs.json
+~/.jiuwenswarm/agent/home/cron_jobs.json
 ```
 
 ### Create via Chat
@@ -203,7 +203,7 @@ Every morning at 9 AM, automatically generate today's work reminder, including: 
 
 2. After successful creation, the Agent will automatically execute and push results at 9:00 AM every day
 
-**Data Source Explanation:** Todos, schedules, etc. are read by the Agent from `agent/memory/` memory files (written during daily conversations); weather info is obtained via search tools. Content not in memory typically won't appear in the reminder.
+**Data Source Explanation:** Todos, schedules, etc. are read by the Agent from `agent/workspace/memory/` memory files (written during daily conversations); weather info is obtained via search tools. Content not in memory typically won't appear in the reminder.
 
 **Execution Result:**
 
@@ -275,12 +275,14 @@ Scheduled task execution results are:
 ### Q5: Which delivery channels are supported?
 
 Currently supported channels:
+- `tui` - TUI terminal (broadcast to all connected windows)
 - `web` - Web interface
 - `feishu` - Feishu
 - `wechat` - WeChat
 - `wecom` - WeCom (Enterprise WeChat)
 - `whatsapp` - WhatsApp
-- `telegram` - Telegram
+- `xiaoyi` - Xiaoyi
+- `dingtalk` - DingTalk
 
 ---
 
@@ -364,11 +366,11 @@ If you need a longer execution time, you can specify it when creating:
 ## Related Links
 
 - [Channels](Channels.md) - Configure message delivery channels
-- [Task Planning](TaskPlanning.md) - Learn about task management
+- [Task Planning](TaskPlanning.md) - Learn about Agent dynamic task decomposition
 - [Agent Tutorial](Agent.md) - Learn about conversation features
 
 ---
 
 *Document Version: v1.0*  
-*Target Audience: JiuwenClaw Users*  
+*Target Audience: JiuwenSwarm Users*  
 *Last Updated: 2026-05-05*
