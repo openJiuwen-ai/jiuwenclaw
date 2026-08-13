@@ -13,6 +13,10 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
+pytestmark = pytest.mark.asyncio
+
 from jiuwenclaw.agentserver.team.rails.team_workspace_report_path_rail import (
     TeamWorkspaceReportPathRail,
 )

@@ -20,25 +20,22 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 
-class _FakeStream:
-    """Async iterator mock: yields given chunks, then blocks or ends."""
+def _FakeStream(chunks=None, block_after=False):
+    """真实 async generator（不是 mock）：yield chunks 后阻塞或自然结束。
 
-    def __init__(self, chunks=None, block_after=False):
-        self._chunks = list(chunks or [])
-        self._block_after = block_after
+    2026-08-13 事故教训：旧的 _FakeStream 是普通对象，__anext__ 被 wait_for
+    取消后对象不关闭，与真实 async generator 语义不同（后者被取消即运行
+    finally/finalize）——因此盖不住"复评 tick 取消 __anext__ 误杀团队"的回归。
+    这里必须用真生成器复现线上一致的行为。
+    """
 
-    def __aiter__(self):
-        return self
+    async def _gen():
+        for c in list(chunks or []):
+            yield c
+        if block_after:
+            await asyncio.sleep(100)  # blocks -> tick 超时
 
-    async def __anext__(self):
-        if self._chunks:
-            return self._chunks.pop(0)
-        if self._block_after:
-            await asyncio.sleep(100)  # blocks -> wait_for times out
-        raise StopAsyncIteration
-
-    async def aclose(self):
-        pass
+    return _gen()
 
 
 def _chunk():
@@ -218,3 +215,52 @@ async def test_leader_final_recheck_skipped_while_leader_active(monkeypatch):
     assert "team.completed" in types, types
     assert active.await_count == 2, active.await_count
     assert settled.await_count == 3, settled.await_count
+
+
+@pytest.mark.asyncio
+async def test_recheck_tick_keeps_stream_alive_for_late_chunks(monkeypatch):
+    """2026-08-13 复评 tick 误杀事故回归：leader final 之后只要出现超过 recheck
+    tick（2s）的 chunk 间隙（成员 LLM 思考间隙再正常不过），老实现
+    wait_for(__anext__, timeout=recheck) 会在首个 tick 取消挂起的 __anext__，
+    CancelledError 抛进 Runner 生成器，finally 链直接 finalize/pause 整个团队
+    ——下一个 __anext__ 立刻 StopAsyncIteration，流"自然"结束，迟到 chunk 全丢。
+
+    修复后 tick 用 asyncio.wait 不取消：迟到 chunk 必须照常到达，且最终干净收尾。
+    """
+    import time
+
+    import jiuwenclaw.agentserver.deep_agent.team_helpers as th
+
+    _patch_timeouts(monkeypatch, idle_s=5.0, recheck_s=0.05)
+
+    async def _gen():
+        yield _chunk()  # 普通帧（parse 丢弃）
+        yield _chunk()  # leader chat.final
+        await asyncio.sleep(0.2)  # 超过 recheck tick 的 LLM 思考间隙
+        yield _chunk()  # 迟到 chunk——老代码在首个 tick 已杀死生成器，永远收不到
+        await asyncio.sleep(100)
+
+    # final 点判定 False；3 个复评 tick 未落定；迟到 chunk 后下一 tick 落定；finally True
+    settled = AsyncMock(side_effect=[False, False, False, False, True, True])
+    captured = _patch_common(monkeypatch, _mock_tm(), _gen(), settled)
+    parse_results = [
+        None,
+        {"event_type": "chat.final", "content": "总结", "role": "leader"},
+        {"event_type": "chat.late_after_tick"},
+    ]
+    monkeypatch.setattr(
+        th,
+        "parse_stream_chunk",
+        lambda c: parse_results.pop(0) if parse_results else None,
+    )
+    started = time.monotonic()
+    await th._consume_stream_with_query_impl(
+        "officeclaw", "officeclaw_s1", MagicMock(), "q",
+        round_id=1, envs={}, hide_dm=False,
+    )
+    elapsed = time.monotonic() - started
+    types = [p.get("event_type") for p in captured]
+    assert "chat.late_after_tick" in types, f"tick 后流被误杀，迟到 chunk 丢失: {types}"
+    assert "team.stalled" not in types, types
+    assert "team.completed" in types, types
+    assert elapsed < 2.0, f"复评应快速收尾而不是等满 idle 预算, got {elapsed:.3f}s"
