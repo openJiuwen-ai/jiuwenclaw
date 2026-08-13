@@ -437,6 +437,7 @@ def test_reset_runtime_cron_context_resets_shell_session(
             mode=MagicMock(),
             bound=MagicMock(),
             shell=shell_token,
+            send_file=None,
         )
     )
     reset_shell_mock.assert_called_once_with(shell_token)

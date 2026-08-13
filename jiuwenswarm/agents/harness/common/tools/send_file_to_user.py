@@ -15,18 +15,61 @@ from __future__ import annotations
 import json
 import os
 import logging
+from contextvars import ContextVar, Token
 from dataclasses import dataclass
-from typing import Any, List, Union
+from typing import Any, List, Optional, Union
 
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 
 
 logger = logging.getLogger(__name__)
 
+# Per-request send_file routing context (session_id / request_id / channel_id / metadata).
+# send_file_to_user 工具按全局名注册成单例时，并发请求会互相覆盖实例字段。
+# 此 ContextVar 按 async 上下文隔离；工具执行时优先据此解析当前请求路由，
+# 避免「最后一次注册的 session/request」串扰（对齐 test/jiuwenclaw）。
+_send_file_request_context: ContextVar[Optional[dict[str, Any]]] = ContextVar(
+    "send_file_request_context", default=None
+)
+
 # Session-level dedup for send_file_to_user. Compression may drop prior tool
 # results, so the agent can re-call the same path; IM request-level dedup alone
 # cannot stop cross-turn duplicates.
 _SENT_FILE_PATHS_BY_SESSION: dict[str, set[str]] = {}
+
+
+def set_send_file_request_context(
+    *,
+    request_id: str | None = None,
+    session_id: str | None = None,
+    channel_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> Token:
+    """Bind send_file routing context for the current async request.
+
+    返回 Token 供调用方在请求结束时 ``reset_send_file_request_context`` 恢复。
+    仅记录非空字段；调用方应在请求入口设置、finally 中重置。
+    """
+    ctx: dict[str, Any] = {}
+    if request_id is not None:
+        ctx["request_id"] = request_id
+    if session_id is not None:
+        ctx["session_id"] = session_id
+    if channel_id is not None:
+        ctx["channel_id"] = channel_id
+    if metadata is not None:
+        ctx["metadata"] = dict(metadata)
+    return _send_file_request_context.set(ctx)
+
+
+def get_send_file_request_context() -> dict[str, Any] | None:
+    """Return send_file routing context for the current request, or None if unset."""
+    return _send_file_request_context.get()
+
+
+def reset_send_file_request_context(token: Token) -> None:
+    """Restore the previous send_file routing context binding."""
+    _send_file_request_context.reset(token)
 
 
 def _normalize_sent_file_path(path: str) -> str:
@@ -128,33 +171,40 @@ class SendFileToolkit:
         )
 
     def _resolve_route(self) -> SendFileRoute:
-        """Resolve per-request route from contextvars, falling back to instance attrs.
+        """执行时解析路由信息。
 
-        Reading from contextvars at execution time makes the toolkit safe to share
-        across concurrent requests: each async task sees its own request's values.
+        优先从请求级 ``send_file_request_context`` ContextVar 取（按 async 上下文
+        隔离，并发安全），缺失时回退到实例字段。
+
+        不再读取 ``_CRON_TOOL_CHANNEL_ID``：该 ContextVar 默认值是 ``web``，
+        请求结束后 reset 仍会返回默认 web，导致过期 request 的 chat.file 被推到
+        错误 channel（对齐 test/jiuwenclaw 的隔离语义）。
         """
-        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
-            get_runtime_tool_channel_id,
-            get_runtime_tool_metadata,
-            get_runtime_tool_session_id,
-        )
-
-        cv_session_id = get_runtime_tool_session_id()
-        cv_channel_id = get_runtime_tool_channel_id()
-        cv_metadata = get_runtime_tool_metadata()
-        session_id = cv_session_id or self.session_id
-        channel_id = cv_channel_id or self.channel_id
-        if cv_metadata:
-            metadata = dict(cv_metadata)
-            request_id = metadata.get("request_id") or self.request_id
+        ctx = get_send_file_request_context() or {}
+        request_id = ctx.get("request_id") or self.request_id
+        session_id = ctx.get("session_id") or self.session_id
+        channel_id = ctx.get("channel_id") or self.channel_id
+        # ctx 已绑定时以其为权威：缺失即视为本请求无 metadata，避免回退到被并发
+        # 请求覆盖的脏实例字段；仅在无 ContextVar 时回退实例 metadata。
+        if ctx:
+            metadata = ctx.get("metadata")
+            if (
+                ctx.get("session_id")
+                and ctx.get("session_id") != self.session_id
+            ):
+                logger.info(
+                    "[SendFileToolkit] route 由 ContextVar 修正 "
+                    "instance_session=%s ctx_session=%s",
+                    self.session_id,
+                    ctx.get("session_id"),
+                )
         else:
             metadata = self._request_metadata
-            request_id = self.request_id
         return SendFileRoute(
             request_id=request_id,
             session_id=session_id,
             channel_id=channel_id,
-            metadata=metadata,
+            metadata=dict(metadata) if metadata else None,
         )
 
     @staticmethod

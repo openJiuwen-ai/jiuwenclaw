@@ -22,8 +22,8 @@ def test_resolve_tenant_sessions_dir_layout(tmp_path, monkeypatch):
         "jiuwenswarm.common.utils.get_user_workspace_dir",
         lambda: tmp_path,
     )
-    path = resolve_tenant_sessions_dir("office")
-    assert path == tmp_path / "workspace_office" / "agent" / "sessions"
+    path = resolve_tenant_sessions_dir("default", "office")
+    assert path == tmp_path / "service_default" / "agent_office" / "agent" / "sessions"
 
 
 def test_sync_writes_under_tenant_sessions_root(tmp_path, monkeypatch):
@@ -31,14 +31,14 @@ def test_sync_writes_under_tenant_sessions_root(tmp_path, monkeypatch):
         "jiuwenswarm.common.utils.get_user_workspace_dir",
         lambda: tmp_path,
     )
-    global_sessions = tmp_path / "agent" / "sessions"
+    global_sessions = tmp_path / "service_default" / "agent_default" / "agent" / "sessions"
     global_sessions.mkdir(parents=True)
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.session.session_metadata.get_agent_sessions_dir",
         lambda: global_sessions,
     )
 
-    tenant_root = resolve_tenant_sessions_dir("svc_bot")
+    tenant_root = resolve_tenant_sessions_dir("svc", "bot")
     proj = tmp_path / "proj"
     proj.mkdir()
     effective = sync_session_request_metadata(
@@ -66,15 +66,15 @@ def test_cache_isolated_by_sessions_root(tmp_path, monkeypatch):
         "jiuwenswarm.common.utils.get_user_workspace_dir",
         lambda: tmp_path,
     )
-    global_sessions = tmp_path / "agent" / "sessions"
+    global_sessions = tmp_path / "service_default" / "agent_default" / "agent" / "sessions"
     global_sessions.mkdir(parents=True)
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.session.session_metadata.get_agent_sessions_dir",
         lambda: global_sessions,
     )
 
-    root_a = resolve_tenant_sessions_dir("office")
-    root_b = resolve_tenant_sessions_dir("assistant")
+    root_a = resolve_tenant_sessions_dir("default", "office")
+    root_b = resolve_tenant_sessions_dir("default", "assistant")
     init_session_metadata(
         session_id="same_sid",
         channel_id="web",
@@ -99,7 +99,7 @@ def test_sync_then_get_resolved_under_tenant_root(tmp_path, monkeypatch):
         "jiuwenswarm.common.utils.get_user_workspace_dir",
         lambda: tmp_path,
     )
-    global_sessions = tmp_path / "agent" / "sessions"
+    global_sessions = tmp_path / "service_default" / "agent_default" / "agent" / "sessions"
     global_sessions.mkdir(parents=True)
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.session.session_metadata.get_agent_sessions_dir",
@@ -108,7 +108,7 @@ def test_sync_then_get_resolved_under_tenant_root(tmp_path, monkeypatch):
 
     project = tmp_path / "locked"
     project.mkdir()
-    tenant_root = resolve_tenant_sessions_dir("office")
+    tenant_root = resolve_tenant_sessions_dir("default", "office")
     sync_session_request_metadata(
         session_id="chat_sess",
         channel_id="officeclaw",

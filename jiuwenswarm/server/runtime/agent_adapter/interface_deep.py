@@ -418,6 +418,7 @@ class _RuntimeCronContextTokens:
     mode: Token[str | None]
     bound: Token[bool]
     shell: Token[str | None]
+    send_file: Token | None
 
 
 def get_runtime_tool_session_id() -> str | None:
@@ -1870,6 +1871,10 @@ class JiuWenSwarmDeepAdapter:
         self._env_agent_id: str = "default"
         self._env_service_id: str = "default"
         self._user_workspace_dir: Any | None = None
+        self._checkpointer: Any | None = None
+        # Eager lock: lazy None→Lock races let concurrent set_checkpoint callers
+        # each create a distinct lock and double-init the checkpointer.
+        self._checkpoint_init_lock = asyncio.Lock()
         # Root-adapter-only: its own DeepAgent is built on demand (see
         # ``ensure_instance``), so the chat path does not pay for an instance it
         # never runs on.
@@ -2024,6 +2029,24 @@ class JiuWenSwarmDeepAdapter:
         user_ws = getattr(source, "_user_workspace_dir", None)
         if user_ws is not None:
             self._user_workspace_dir = user_ws
+        # Share the parent's tenant checkpointer so session adapters do not open
+        # a second sqlite handle on the same agent .checkpoint path.
+        parent_cp = getattr(source, "_checkpointer", None)
+        if parent_cp is not None:
+            self._checkpointer = parent_cp
+
+    def _bind_checkpointer_to_rails(self) -> None:
+        """Wire adapter-local checkpointer into rails (align with test/jiuwenclaw)."""
+        stream_rail = getattr(self, "_stream_event_rail", None)
+        checkpointer = getattr(self, "_checkpointer", None)
+        if stream_rail is not None and checkpointer is not None:
+            stream_rail.set_checkpointer(checkpointer)
+
+    def _get_adapter_checkpointer(self) -> Any:
+        """Prefer instance checkpointer; fall back to process default only if unset."""
+        if self._checkpointer is not None:
+            return self._checkpointer
+        return CheckpointerFactory.get_checkpointer()
 
     def _new_session_scoped_adapter(self, session_id: str) -> "JiuWenSwarmDeepAdapter":
         """Create a child adapter that owns one DeepAgent for a single session."""
@@ -4132,9 +4155,90 @@ class JiuWenSwarmDeepAdapter:
             warn_label="symphony tools",
         )
 
-    @staticmethod
-    async def set_checkpoint() -> None:
-        await ensure_persistent_checkpointer()
+    def _tenant_disk_ids(self) -> tuple[str, str]:
+        """Return ``(service_id, agent_id)`` for on-disk tenant paths.
+
+        Prefer request-side ``env_*`` ids so ``AGENT_RUNTIME`` rewrite of
+        ``self._agent_id`` (e.g. ``office_default``) does not divert checkpoint
+        / prompt paths away from ``agent_office``.
+        """
+        from jiuwenswarm.server.runtime.tenant_agent_pool import TenantAgentPool
+
+        service_id = TenantAgentPool.normalize_tenant_id(
+            self._env_service_id if self._env_service_id is not None else self._service_id
+        )
+        agent_id = TenantAgentPool.normalize_tenant_id(
+            self._env_agent_id if self._env_agent_id is not None else self._agent_id
+        )
+        return service_id, agent_id
+
+    async def set_checkpoint(self) -> None:
+        """Create / reuse a per-agent sqlite checkpointer under ``…/agent_{aid}/.checkpoint``."""
+        if self._checkpointer is not None:
+            self._bind_checkpointer_to_rails()
+            return
+        async with self._checkpoint_init_lock:
+            if self._checkpointer is not None:
+                self._bind_checkpointer_to_rails()
+                return
+            try:
+                PersistenceCheckpointerProvider()
+                service_id, agent_id = self._tenant_disk_ids()
+                workspace = get_multi_tenant_user_workspace_dir(service_id, agent_id)
+                if workspace is None:
+                    raise ValueError(
+                        f"invalid tenant for checkpoint: service_id={service_id!r}, "
+                        f"agent_id={agent_id!r}"
+                    )
+                checkpoint_path = workspace / ".checkpoint"
+                checkpoint_path.mkdir(parents=True, exist_ok=True)
+                conf: dict[str, Any] = {
+                    "db_type": "sqlite",
+                    "db_path": f"{checkpoint_path}/checkpoint",
+                }
+
+                checkpoint_db_type = os.getenv("CHECKPOINT_DB_TYPE", "").strip().lower()
+                if os.getenv("AGENT_RUNTIME", "").strip():
+                    if checkpoint_db_type == "mysql":
+                        mysql_engine = await _build_mysql_async_engine()
+                        if mysql_engine is not None:
+                            conf["db_client"] = mysql_engine
+                            logger.info(
+                                "[JiuWenSwarmDeepAdapter] use mysql db_client for checkpointer"
+                            )
+                    elif checkpoint_db_type == "postgresql":
+                        postgresql_engine = await _build_postgresql_async_engine()
+                        if postgresql_engine is not None:
+                            conf["db_client"] = postgresql_engine
+                            logger.info(
+                                "[JiuWenSwarmDeepAdapter] use postgresql db_client "
+                                "for checkpointer"
+                            )
+
+                checkpointer = await CheckpointerFactory.create(
+                    CheckpointerConfig(type="persistence", conf=conf),
+                )
+                self._checkpointer = checkpointer
+                # Do not set process-wide default here: concurrent agents must keep
+                # using their own self._checkpointer (align with test/jiuwenclaw).
+                self._bind_checkpointer_to_rails()
+                logger.info(
+                    "[JiuWenSwarmDeepAdapter] persistent checkpointer ready: "
+                    "service_id=%s agent_id=%s path=%s",
+                    service_id,
+                    agent_id,
+                    checkpoint_path / "checkpoint",
+                )
+            except Exception as exc:
+                logger.error(
+                    "[JiuWenSwarmDeepAdapter] fail to setup checkpoint due to: %s",
+                    exc,
+                )
+                # Fall back to process-default checkpointer so create_instance can proceed.
+                await ensure_persistent_checkpointer()
+                if self._checkpointer is None:
+                    self._checkpointer = _shared_checkpoint_checkpointer
+                self._bind_checkpointer_to_rails()
 
     @classmethod
     def _normalize_reload_value(cls, value: Any) -> Any:
@@ -6288,6 +6392,9 @@ class JiuWenSwarmDeepAdapter:
             logger.warning("%s Failed to attach ObservabilityRail: %s", log_prefix, exc)
         stage_timer.mark("observability_rail")
 
+        # Bind tenant checkpointer after rails exist (set_checkpoint runs earlier).
+        self._bind_checkpointer_to_rails()
+
         total_ms = stage_timer.total_ms()
         log_rail_build = _stage_breakdown_logger(total_ms, _SLOW_RAIL_BUILD_MS)
         log_rail_build(
@@ -7637,6 +7744,31 @@ class JiuWenSwarmDeepAdapter:
             session_value = session_metadata.get(key)
             if isinstance(session_value, str) and session_value.strip():
                 normalized_metadata[key] = session_value.strip()
+
+        # 绑定 send_file 专用路由 ContextVar（与 skill_turbo / test 仓对齐）。
+        # 默认值为 None，不会像 _CRON_TOOL_CHANNEL_ID 那样在 reset 后回落成 web。
+        send_file_token: Token | None = None
+        try:
+            from jiuwenswarm.agents.harness.common.tools.send_file_to_user import (
+                set_send_file_request_context,
+            )
+
+            send_file_token = set_send_file_request_context(
+                request_id=(
+                    request_id.strip()
+                    if isinstance(request_id, str) and request_id.strip()
+                    else None
+                ),
+                session_id=session_id,
+                channel_id=normalized_channel,
+                metadata=normalized_metadata,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] set send_file request context failed: %s",
+                exc,
+            )
+
         return _RuntimeCronContextTokens(
             channel=_CRON_TOOL_CHANNEL_ID.set(normalized_channel),
             session=_CRON_TOOL_SESSION_ID.set(session_id),
@@ -7644,6 +7776,7 @@ class JiuWenSwarmDeepAdapter:
             mode=_CRON_TOOL_MODE.set(normalized_mode),
             bound=_CRON_TOOL_BOUND.set(True),
             shell=set_shell_session_id(session_id),
+            send_file=send_file_token,
         )
 
     @staticmethod
@@ -7654,6 +7787,18 @@ class JiuWenSwarmDeepAdapter:
             reset_shell_session_id,
         )
 
+        if tokens.send_file is not None:
+            try:
+                from jiuwenswarm.agents.harness.common.tools.send_file_to_user import (
+                    reset_send_file_request_context,
+                )
+
+                reset_send_file_request_context(tokens.send_file)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] reset send_file request context failed: %s",
+                    exc,
+                )
         reset_shell_session_id(tokens.shell)
         _CRON_TOOL_BOUND.reset(tokens.bound)
         _CRON_TOOL_MODE.reset(tokens.mode)
@@ -7900,16 +8045,15 @@ class JiuWenSwarmDeepAdapter:
     ) -> None:
         """刷新每请求相关的 cron / send_file 工具运行时状态。
 
-        两者的工具实例都只建一次：cron 见 ``_ensure_cron_tools_registered``，
-        send_file 首次注册后改走 ``update_runtime_context``。这里每次请求只做
-        幂等检查和运行时上下文更新。
+        cron 工具实例只建一次（见 ``_ensure_cron_tools_registered``）。
+        send_file 对齐 test/jiuwenclaw：每次请求卸载旧工具并重建 toolkit，
+        避免单例 ``update_runtime_context`` 被并发请求覆盖实例字段。
         """
         self._ensure_cron_tools_registered(session_id)
 
-        # send_file 工具：由 channels.<channel>.send_file_allowed 控制。工具实例只建一次，
-        # 之后每次请求只用 update_runtime_context 刷新 request_id/session_id/channel 等
-        # 运行时上下文（cron 同理，见上）。
+        # send_file 工具：由 channels.<channel>.send_file_allowed 控制。
         # channel_id/metadata 由调用前的 _bind_runtime_cron_context 已写入 contextvar
+        # （含专用 send_file_request_context）。
         config_base = get_config()
         channel = (
             str(channel_id or self._resolve_prompt_channel(session_id) or "web").strip() or "web"
@@ -7917,9 +8061,9 @@ class JiuWenSwarmDeepAdapter:
         send_file_enabled = (
             config_base.get("channels", {}).get(channel, {}).get("send_file_allowed")
         )
-        # web channel defaults to True, others default to False
+        # web 默认 True；officeclaw 与 test 仓对齐默认允许；其它 channel 默认 False
         if send_file_enabled is None:
-            send_file_enabled = (channel == "web")
+            send_file_enabled = channel in {"web", "officeclaw"}
         agent_runtime_env = os.getenv("AGENT_RUNTIME", "").strip()
         if agent_runtime_env:
             send_file_enabled = True
@@ -7938,27 +8082,25 @@ class JiuWenSwarmDeepAdapter:
         if send_file_enabled and request_id and session_id:
             channel_for_tool = _CRON_TOOL_CHANNEL_ID.get()
             metadata_for_tool = _CRON_TOOL_METADATA.get()
-            already_registered = any(
-                getattr(existing, "name", "").startswith("send_file_to_user")
-                for existing in (self._instance.ability_manager.list() or [])
+            # 先卸载上一次请求遗留的 send_file 工具，再按本请求重建。
+            for existing in list(self._instance.ability_manager.list() or []):
+                if getattr(existing, "name", "").startswith("send_file_to_user"):
+                    remove_ability = getattr(
+                        self._instance.ability_manager, "remove_ability", None
+                    )
+                    if callable(remove_ability):
+                        remove_ability(existing.name)
+                    else:
+                        self._instance.ability_manager.remove(existing.name)
+            self._send_file_toolkit = SendFileToolkit(
+                request_id=request_id,
+                session_id=session_id,
+                channel_id=channel_for_tool,
+                metadata=metadata_for_tool,
             )
-            if not already_registered:
-                self._send_file_toolkit = SendFileToolkit(
-                    request_id=request_id,
-                    session_id=session_id,
-                    channel_id=channel_for_tool,
-                    metadata=metadata_for_tool,
-                )
-                for sf_tool in self._send_file_toolkit.get_tools(tool_id="send_file_to_user"):
-                    self._register_agent_owned_tool(sf_tool, self._tool_owner_id())
-                    self._instance.ability_manager.add(sf_tool.card)
-            else:
-                self._send_file_toolkit.update_runtime_context(
-                    request_id=request_id,
-                    session_id=session_id,
-                    channel_id=channel_for_tool,
-                    metadata=metadata_for_tool,
-                )
+            for sf_tool in self._send_file_toolkit.get_tools(tool_id="send_file_to_user"):
+                self._register_agent_owned_tool(sf_tool, self._tool_owner_id())
+                self._instance.ability_manager.add(sf_tool.card)
 
     def _refresh_acp_runtime_tools(
         self,
@@ -10766,7 +10908,9 @@ class JiuWenSwarmDeepAdapter:
             _cron_inner = getattr(_cron_sess, "_inner", None) if _cron_sess is not None else None
             if _cron_inner is not None and not self._cron_session_has_context(_cron_inner):
                 try:
-                    await CheckpointerFactory.get_checkpointer().pre_agent_execute(_cron_inner, None)
+                    await self._get_adapter_checkpointer().pre_agent_execute(
+                        _cron_inner, None
+                    )
                     logger.info(
                         "[CRON-CTX] cron session re-recover(non-stream): session_id=%s "
                         "request_id=%s",
@@ -11171,7 +11315,9 @@ class JiuWenSwarmDeepAdapter:
             _cron_inner = getattr(_cron_sess, "_inner", None) if _cron_sess is not None else None
             if _cron_inner is not None and not self._cron_session_has_context(_cron_inner):
                 try:
-                    await CheckpointerFactory.get_checkpointer().pre_agent_execute(_cron_inner, None)
+                    await self._get_adapter_checkpointer().pre_agent_execute(
+                        _cron_inner, None
+                    )
                     logger.info(
                         "[CRON-CTX] cron session re-recover: session_id=%s request_id=%s",
                         session_id, request.request_id,

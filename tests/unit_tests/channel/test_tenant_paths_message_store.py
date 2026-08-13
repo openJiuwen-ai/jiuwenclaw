@@ -17,7 +17,6 @@ from jiuwenswarm.gateway.tenant_paths import (
 )
 from tests.unit_tests.tenant_workspace_test_helpers import (
     patch_multi_tenant_workspace_dirs,
-    tenant_workspace_key,
 )
 
 
@@ -54,8 +53,9 @@ def test_message_store_lazy_paths_isolate_tenants(tmp_path, monkeypatch):
     assert office_file.exists()
     assert default_file.exists()
     assert office_file != default_file
-    assert tenant_workspace_key("default", "office") in str(office_file)
-    assert tenant_workspace_key("default", "default") in str(default_file)
+    assert "agent_office" in str(office_file)
+    assert "service_default" in str(office_file)
+    assert "agent_default" in str(default_file)
 
     office_hist = store.load_memory(
         "chat_a", service_id="default", agent_id="office"

@@ -479,8 +479,15 @@ class TenantAgentPool:
             )
 
             try:
-                # 工作目录仅由 workspace_key 决定：workspace_{key}/
-                agent_dir_path = get_multi_tenant_user_workspace_dir(request_workspace_key)
+                # 工作目录按 service_id/agent_id 隔离：service_{sid}/agent_{aid}/
+                agent_dir_path = get_multi_tenant_user_workspace_dir(
+                    request_service_id, request_agent_id
+                )
+                if agent_dir_path is None:
+                    raise ValueError(
+                        f"invalid tenant workspace: agent_id={agent_id!r}, "
+                        f"service_id={service_id!r}"
+                    )
 
                 import os
                 # AGENT_RUNTIME: stable string instance id (legacy "aid_sid" form).

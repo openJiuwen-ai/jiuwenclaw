@@ -39,11 +39,11 @@ def test_is_skill_whitelist_tenant_requires_agent_runtime(monkeypatch: pytest.Mo
     assert is_skill_whitelist_tenant("real-agent", "real-svc") is False
 
 
-def test_tenant_workspace_requires_workspace_key() -> None:
-    with pytest.raises(ValueError, match="workspace_key required"):
+def test_tenant_workspace_requires_ids() -> None:
+    with pytest.raises(TypeError, match="tenant scope is required"):
         get_tenant_agent_jiuwenclaw_workspace_dir()
-    with pytest.raises(ValueError, match="workspace_key required"):
-        get_tenant_agent_skills_dirs(workspace_key="")
+    with pytest.raises(TypeError, match="tenant scope requires both"):
+        get_tenant_agent_skills_dirs(service_id="default", agent_id=None)
 
 
 def test_multi_tenant_skill_dirs_single_tenant_fallback() -> None:
@@ -282,10 +282,10 @@ def test_db_same_version_with_disk_missing_redownloads(
     assert "cached-skill" in db.rows
 
 
-def test_multi_tenant_skill_dirs_requires_workspace_key_for_tenant_path() -> None:
-    with pytest.raises(ValueError, match="workspace_key required"):
-        get_tenant_agent_skills_dirs(workspace_key=None)
-    # 无 workspace_key → 单租户回退
+def test_multi_tenant_skill_dirs_requires_ids_for_tenant_path() -> None:
+    with pytest.raises(TypeError, match="tenant scope is required"):
+        get_tenant_agent_skills_dirs()
+    # 无 tenant ids → 单租户回退
     dirs = get_multi_tenant_skill_dirs()
     assert len(dirs) == 1
     assert dirs[0] == get_agent_skills_dir()

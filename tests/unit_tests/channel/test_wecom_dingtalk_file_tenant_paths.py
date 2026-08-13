@@ -15,7 +15,6 @@ from jiuwenswarm.gateway.channel_manager.im_platforms.wecom.wecom_file_service i
 )
 from tests.unit_tests.tenant_workspace_test_helpers import (
     patch_multi_tenant_workspace_dirs,
-    tenant_workspace_key,
 )
 
 
@@ -29,8 +28,9 @@ def test_wecom_file_service_tenant_scope_isolates(tmp_path, monkeypatch):
     with svc.tenant_scope("default", "default"):
         default_dir = Path(svc._get_download_dir("images"))
 
-    assert tenant_workspace_key("default", "office") in str(office_dir)
-    assert tenant_workspace_key("default", "default") in str(default_dir)
+    assert "agent_office" in str(office_dir)
+    assert "service_default" in str(office_dir)
+    assert "agent_default" in str(default_dir)
     assert office_dir != default_dir
     assert office_dir.exists()
     assert default_dir.exists()
@@ -63,5 +63,5 @@ def test_dingtalk_file_service_tenant_scope_isolates(tmp_path, monkeypatch):
     with svc.tenant_scope("default", "default"):
         default_dir = Path(svc._get_download_dir("image"))
 
-    assert tenant_workspace_key("default", "office") in str(office_dir)
+    assert "agent_office" in str(office_dir)
     assert office_dir != default_dir

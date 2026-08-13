@@ -205,9 +205,9 @@ _CODE_MODE_SYNC_METHODS = frozenset({
 
 
 def _sessions_dir_for_request(request: AgentRequest) -> Path:
-    """Resolve tenant ``…/agent/sessions`` for an AgentRequest."""
-    _, _, workspace_key = TenantAgentPool.extract_ids(request)
-    return resolve_tenant_sessions_dir(workspace_key)
+    """Resolve tenant ``service_{sid}/agent_{aid}/agent/sessions`` for an AgentRequest."""
+    agent_id, service_id, _workspace_key = TenantAgentPool.extract_ids(request)
+    return resolve_tenant_sessions_dir(service_id, agent_id)
 
 
 # ── 流式处理心跳间隔：当 Agent 处理时间超过此阈值时，发送心跳 chunk 保持 WebSocket 连接活跃 --

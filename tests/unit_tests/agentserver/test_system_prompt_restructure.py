@@ -1316,17 +1316,17 @@ async def test_runtime_rail_single_tenant_workspace_dirs():
 
 
 def test_interface_deep_skill_rail_uses_multi_tenant_paths():
-    """测试 get_multi_tenant_skill_dirs 按 workspace_key 解析路径。"""
+    """测试 get_multi_tenant_skill_dirs 按 service_id/agent_id 解析路径。"""
     from jiuwenswarm.common.utils import get_multi_tenant_skill_dirs
 
     with patch(
         "jiuwenswarm.common.utils.get_multi_tenant_user_workspace_dir",
     ) as mock_workspace:
-        mock_workspace.return_value = Path("/tmp/test/workspace_key123")
-        skill_dirs = get_multi_tenant_skill_dirs(workspace_key="key123")
+        mock_workspace.return_value = Path("/tmp/test/service_key123/agent_key123")
+        skill_dirs = get_multi_tenant_skill_dirs(service_id="key123", agent_id="key123")
 
     assert len(skill_dirs) == 1
-    assert "workspace_key123" in str(skill_dirs[0])
+    assert "service_key123" in str(skill_dirs[0]) or "agent_key123" in str(skill_dirs[0])
     assert "skills" in str(skill_dirs[0])
     assert "workspace" in str(skill_dirs[0])
 
