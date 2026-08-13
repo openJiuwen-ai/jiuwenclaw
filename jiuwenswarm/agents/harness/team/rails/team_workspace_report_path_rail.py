@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Prompt rail for reporting real team workspace artifact paths."""
+"""Prompt rail separating project deliverables from team collaboration files."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 class TeamWorkspaceReportPathRail(DeepAgentRail):
-    """Inject guidance for reporting real shared-workspace artifact paths."""
+    """Inject the filesystem ownership policy for project and team artifacts."""
 
     priority = 5
 
@@ -24,12 +24,14 @@ class TeamWorkspaceReportPathRail(DeepAgentRail):
         self,
         *,
         root_dir: str,
+        project_dir: str | None = None,
         team_id: str | None = None,
         language: str = "cn",
     ) -> None:
         super().__init__()
         self.system_prompt_builder = None
         self._root_dir = str(Path(root_dir))
+        self._project_dir = str(Path(project_dir)) if project_dir else None
         self._team_id = team_id or ""
         self._language = language
         self._swarm_context: Any | None = None
@@ -80,10 +82,15 @@ class TeamWorkspaceReportPathRail(DeepAgentRail):
                 language=str(getattr(context, "language", None) or self._language),
                 member_name=getattr(context, "member_name", None),
                 root_dir=getattr(context, "team_ws_root", None) or self._root_dir,
-                skills_dir=getattr(context, "team_skills_dir", None),
+                project_dir=getattr(context, "project_dir", None) or self._project_dir,
+                # No skills_dir: a team owns no Skill directory. Every agent
+                # reads the single library and is narrowed by visibility
+                # metadata, so there is nothing team-scoped to thread here.
                 team_id=team_id,
                 config=config,
-                trajectory_registry=getattr(context, "trajectory_registry", None),
+                trajectory_span_processor=getattr(
+                    context, "trajectory_span_processor", None
+                ),
             )
             team_manager = get_team_manager(channel)
             if role == "leader":
@@ -108,23 +115,34 @@ class TeamWorkspaceReportPathRail(DeepAgentRail):
         if self.system_prompt_builder is None:
             return
 
-        mount = f".team/{self._team_id}/" if self._team_id else ".team/"
-        sample = str(Path(self._root_dir) / "prd-review-memo.md")
-        content = (
-            "# Team Workspace Artifact Paths\n\n"
-            f"- Team workspace absolute root: `{self._root_dir}`\n"
-            f"- Internal mount path: `{mount}`\n"
-            "- Use the internal mount path only for tool read/write operations.\n"
-            "- For every final deliverable file, call `send_file_to_user` with its real absolute filesystem path "
-            "before marking the task complete or sending the completion message.\n"
-            "- A file name or path in `send_message`, the final response, or a task-completion summary does not "
-            "deliver the file and must not replace `send_file_to_user`.\n"
-            "- After `send_file_to_user` succeeds, report the real absolute filesystem path under the team "
-            "workspace absolute root, not the `.team/...` mount path.\n"
-            "- If a generated artifact path contains `.team/<team>/team-workspace/`, remove that mount prefix and "
-            "join the remaining file name under the team workspace absolute root before sending and reporting it.\n"
-            f"- Example absolute path to pass to `send_file_to_user`: `{sample}`\n"
+        project_lines = (
+            f"- User project root: `{self._project_dir}`\n"
+            if self._project_dir
+            else "- User project root: unavailable for this session.\n"
         )
+        content = (
+            "# Project and Team Workspace File Policy\n\n"
+            f"{project_lines}"
+            f"- Team collaboration workspace: `{self._root_dir}`\n"
+            "- This policy overrides generic team-artifact guidance when deciding where a file belongs.\n"
+            "- Source code, tests, configuration, project documentation, and files the user asks to create or modify "
+            "belong in the active project working root. When worktree isolation is active, the worktree is the active "
+            "project working root: use its cwd and never bypass it with an absolute path to the main checkout.\n"
+            "- Without worktree isolation, use project-relative paths or absolute paths under the user project root.\n"
+            "- Do not place final project files in the team collaboration workspace, even when another member needs "
+            "to read them or they will be delivered to the user. Other members can use the project path directly.\n"
+            "- Use the team collaboration workspace only for internal coordination artifacts such as plans, drafts, "
+            "review notes, intermediate data, and handoff material that is not part of the user's project, or when the "
+            "user explicitly requests that exact team-workspace destination.\n"
+            "- `send_file_to_user` controls message delivery only; it never changes the required on-disk destination.\n"
+            "- A path mentioned in `send_message` or a completion summary does not deliver the file. Call "
+            "`send_file_to_user` only when the user requested a downloadable file.\n"
+        )
+        if not self._project_dir:
+            content += (
+                "- No user project root is available. Do not silently use the team collaboration workspace for "
+                "project deliverables; resolve the project directory before creating them.\n"
+            )
         self.system_prompt_builder.add_section(
             PromptSection(
                 name="team_workspace_report_paths",

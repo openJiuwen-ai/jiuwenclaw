@@ -571,6 +571,9 @@ body.workspace-resize-active iframe {
   .chat-bubble.user {
     border-color: transparent;
     background: var(--color-chat-bubble-user);
+    width: fit-content;
+    max-width: 100%;
+    margin-left: auto;
   }
 
   .chat-bubble.assistant {

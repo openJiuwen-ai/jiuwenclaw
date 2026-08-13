@@ -53,6 +53,12 @@
   color: var(--color-text-primary);
 }
 
+.markdown-toggle-pill:disabled,
+.markdown-toggle-pill:disabled:hover {
+  color: var(--color-text-placeholder);
+  cursor: not-allowed;
+}
+
 .markdown-toggle-pill--active {
   background: var(--color-surface-elevated);
   color: var(--color-text-primary);

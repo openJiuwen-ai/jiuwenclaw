@@ -231,9 +231,17 @@ function consolidateReasoning(items: RenderItem[], isTeamMode: boolean): RenderI
         const mergedText = [prev.segment.text, item.segment.text]
           .filter((text) => text.trim())
           .join('\n\n');
+        // 合并时推进末帧时刻，避免后一段较新的 updatedAt 被前一段覆盖导致耗时少算
+        const mergedUpdatedAt =
+          Math.max(prev.segment.updatedAt ?? 0, item.segment.updatedAt ?? 0) || undefined;
         out[out.length - 1] = {
           ...prev,
-          segment: { ...prev.segment, text: mergedText, closed: item.segment.closed },
+          segment: {
+            ...prev.segment,
+            text: mergedText,
+            closed: item.segment.closed,
+            updatedAt: mergedUpdatedAt,
+          },
         };
         continue;
       }
@@ -490,6 +498,10 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
       // reasoning.startedAt 必须是真实 epoch ms；忽略 0/过小哨兵，避免撑爆耗时
       if (item.segment.startedAt > 1_000_000_000_000) {
         acc(item.segment.startedAt, true);
+      }
+      // 每个 delta 到达都推进 updatedAt，作为不依赖收尾事件的耗时终点兜底
+      if (typeof item.segment.updatedAt === 'number' && item.segment.updatedAt > 1_000_000_000_000) {
+        acc(item.segment.updatedAt, true);
       }
       if (typeof item.segment.closedAt === 'number' && item.segment.closedAt > 1_000_000_000_000) {
         acc(item.segment.closedAt, true);

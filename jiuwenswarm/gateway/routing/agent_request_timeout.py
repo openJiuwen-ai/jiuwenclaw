@@ -30,8 +30,16 @@ _TUI_EXTENDED_UNARY_METHODS = frozenset({
 # is an async deliver (thin-route publish to wake a pending future) whose
 # latency tracks the human-turn timeout (agent-core default 600s); capping it
 # at 55s aborts legitimate replies while the person is still typing.
+#
+# schedule.run / schedule.check_config: the task execution itself is
+# asyncio.create_task'd (non-blocking); the synchronous wait is dominated by
+# first-time get_agent() + start_scheduler() warmup, which can exceed 25s on a
+# cold AgentServer. Capping at 25/55s aborts a legitimate cold-start. Let the
+# TUI client's own timeout_ms be the ceiling here.
 _TUI_UNARY_TIMEOUT_EXEMPT_METHODS = frozenset({
     "chat.swarmflow_reply",
+    "schedule.run",
+    "schedule.check_config",
 })
 
 

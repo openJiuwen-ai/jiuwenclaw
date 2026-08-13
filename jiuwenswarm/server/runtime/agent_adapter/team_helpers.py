@@ -30,6 +30,7 @@ from openjiuwen.harness import DeepAgent
 from jiuwenswarm.agents.harness.team import TeamManager, get_team_manager
 from jiuwenswarm.agents.harness.team.team_manager import TEAM_EVENT_QUEUE_MAXSIZE
 from jiuwenswarm.common.log_preview import DEFAULT_PREVIEW_MAX_CHARS, preview_text
+from jiuwenswarm.common.utils import get_agent_skills_dir
 from jiuwenswarm.common.config import get_skill_evolution_enabled
 from jiuwenswarm.common.cron_team_completion import (
     _cron_solo_harness_end_pending,
@@ -1489,11 +1490,23 @@ async def _handle_team_slash_command(
 
 
 def _resolve_team_slash_skills_dir(session_id: str) -> str | None:
+    """Resolve the Skill library a team slash command evolves against.
+
+    Teams own no Skill directory of their own — every agent reads the single
+    physical library and is narrowed by visibility metadata — so the team only
+    has to still be bound to the session.
+
+    Args:
+        session_id: Session running the slash command.
+
+    Returns:
+        The Skill library path, or ``None`` when the session has no team.
+    """
     metadata = get_session_metadata(session_id)
     team_name = str(metadata.get("team_name") or "").strip()
     if not team_name:
         return None
-    return str(team_home(team_name) / "team-workspace" / "skills")
+    return str(get_agent_skills_dir())
 
 
 def _resolve_cached_team_evolution_enabled(
@@ -1528,15 +1541,6 @@ def _resolve_cached_team_evolution_enabled(
 
     get_team_rail = getattr(team_manager, "get_team_skill_rail", None)
     return callable(get_team_rail) and get_team_rail(session_id) is not None
-
-
-def _team_spec_skills_dir(team_spec: Any) -> str:
-    workspace = getattr(team_spec, "workspace", None)
-    root_path = str(getattr(workspace, "root_path", "") or "").strip()
-    if root_path:
-        return str(Path(root_path) / "skills")
-    team_name = str(getattr(team_spec, "team_name", "") or "").strip()
-    return str(team_home(team_name) / "team-workspace" / "skills")
 
 
 def _team_spec_monitor_roots(team_spec: Any, session_id: str | None = None) -> list[str]:
@@ -1822,12 +1826,14 @@ async def process_team_message_stream(
         return
 
     team_name = team_spec.team_name
-    team_skills_dir = _team_spec_skills_dir(team_spec)
-    ensure_ready = getattr(team_manager, "ensure_team_shared_skills_ready_for_session", None)
-    shared_skills_ready_prepared = False
-    if is_first_request and callable(ensure_ready):
-        ensure_ready(session_id, team_spec)
-        shared_skills_ready_prepared = True
+    # Breaking change: this used to be ``<team_workspace_root>/skills``. Those
+    # per-workspace Skill directories no longer exist — Skills live in exactly
+    # one physical library and per-agent visibility is metadata — so a
+    # workspace-local path would leave team slash commands with no Skill at all.
+    team_skills_dir = str(get_agent_skills_dir())
+    # No seeding here: the team's skills-visibility.json has a single writer,
+    # ``TeamWorkspaceManager.initialize``, and a missing document simply means
+    # "the team imposes no restriction".
 
     slash_result = await _handle_team_slash_command(
         channel_id,
@@ -2067,9 +2073,6 @@ async def process_team_message_stream(
                 return
 
         if is_first_request:
-            if callable(ensure_ready) and not shared_skills_ready_prepared:
-                ensure_ready(session_id, team_spec)
-                shared_skills_ready_prepared = True
             request_queue = await _start_team_stream_round(
                 channel_id=channel_id,
                 session_id=session_id,
@@ -2435,6 +2438,12 @@ async def _consume_stream_with_query(
                 elif parsed.get("event_type") == "team.completed":
                     # Team completed this round — broadcast a single
                     # round-complete signal that also carries team stats.
+                    logger.info(
+                        "[TeamHelpers] team is completed: channel_id=%s session_id=%s member_count=%s",
+                        _resolve_channel_id(channel_id),
+                        session_id,
+                        parsed.get("member_count"),
+                    )
                     await _broadcast_event(
                         channel_id,
                         session_id,
@@ -2609,14 +2618,27 @@ async def _consume_stream_with_query(
                 # ends normally without a terminal event.  A cancelled stream
                 # must not re-enter bounded waiter backpressure during cleanup.
                 await _broadcast_team_state_snapshot(channel_id, session_id)
+                # Also broadcast chat.processing_status{is_processing:False} so
+                # the frontend gets an explicit terminal signal even when the
+                # agent-core team stream generator silently returns without
+                # emitting team.completed / team.idle.
                 try:
                     await _broadcast_event(
                         channel_id,
                         session_id,
                         {
-                            "event_type": "team.completed",
+                            "event_type": "chat.processing_status",
                             "session_id": session_id,
+                            "rid": round_id,
+                            "is_processing": False,
+                            "is_complete": True,
                         },
+                    )
+                    logger.info(
+                        "[TeamHelpers] team finally completed: channel_id=%s session_id=%s round_id=%s",
+                        _resolve_channel_id(channel_id),
+                        session_id,
+                        round_id,
                     )
                 except Exception:
                     logger.debug(
@@ -2692,6 +2714,18 @@ _WF_PHASE_STATUS_TO_TASK: dict[str, tuple[str, str]] = {
     "stopped": ("team.task.cancelled", "cancelled"),
 }
 
+# At workflow terminal status, a phase still "planned" never started (script
+# returned without calling agent(), or failed early). workflow_state keeps
+# "planned" on purpose (TUI snapshot shows "not executed"), but the web task
+# panel maps "planned" to "pending" (waiting), leaving a stale card forever.
+# Folded here at the web conversion layer: terminal planned -> team.task.skipped
+# / cancelled, clearing the card. type=skipped distinguishes it from a run
+# aborted mid-flight (stopped -> team.task.cancelled). content carries an i18n
+# key (prefixed "i18n:") so the frontend translates it per the current UI
+# language; plain user/agent text is never prefixed.
+_WF_TERMINAL_PLANNED_TASK: tuple[str, str] = ("team.task.skipped", "cancelled")
+_WF_TERMINAL_PLANNED_CONTENT = "i18n:team.taskDetail.skipReasonPlanned"
+
 
 def _team_event_envelope(
     category: str, session_id: str, event: dict[str, Any]
@@ -2723,6 +2757,12 @@ def _workflow_updated_to_team_events(
     if not run_id:
         return []
 
+    # At workflow terminal status, a still-planned phase never started; map it
+    # via _WF_TERMINAL_PLANNED_TASK to skipped/cancelled with a reason string,
+    # so the task panel does not leave a stale waiting card.
+    wf_status = (wf.get("status") or "").strip()
+    wf_terminal = wf_status in ("completed", "failed", "stopped")
+
     out: list[dict[str, Any]] = []
 
     for phase in wf.get("phases", []) or []:
@@ -2731,23 +2771,32 @@ def _workflow_updated_to_team_events(
         if not phase_id or not status:
             continue
         task_id = f"{run_id}:{phase_id}"
-        if seen_phase.get(task_id) != status:
-            seen_phase[task_id] = status
-            mapping = _WF_PHASE_STATUS_TO_TASK.get(status)
+        terminal_planned = wf_terminal and status == "planned"
+        # Use a suffixed seen_phase key for terminal planned so the skipped
+        # record does not clobber / get clobbered by the non-terminal pending
+        # record, which would drop the second event via dedup.
+        seen_key = f"{task_id}#skipped" if terminal_planned else task_id
+        effective_status = "skipped" if terminal_planned else status
+        if seen_phase.get(seen_key) != effective_status:
+            seen_phase[seen_key] = effective_status
+            mapping = (
+                _WF_TERMINAL_PLANNED_TASK
+                if terminal_planned
+                else _WF_PHASE_STATUS_TO_TASK.get(status)
+            )
             if mapping is not None:
                 task_type, task_status = mapping
+                task_event: dict[str, Any] = {
+                    "type": task_type,
+                    "team_id": team_id,
+                    "task_id": task_id,
+                    "title": phase.get("name") or phase_id,
+                    "status": task_status,
+                }
+                if terminal_planned:
+                    task_event["content"] = _WF_TERMINAL_PLANNED_CONTENT
                 out.append(
-                    _team_event_envelope(
-                        "team.task",
-                        session_id,
-                        {
-                            "type": task_type,
-                            "team_id": team_id,
-                            "task_id": task_id,
-                            "title": phase.get("name") or phase_id,
-                            "status": task_status,
-                        },
-                    )
+                    _team_event_envelope("team.task", session_id, task_event)
                 )
 
         for agent in phase.get("agents", []) or []:

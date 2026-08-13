@@ -361,6 +361,7 @@ class CronTools:
             delete_after_run=normalized.get("delete_after_run"),
             project_id=resolved_project_id,
             work_mode=work_mode,
+            user_id=str(normalized.get("user_id") or "").strip(),
             **session_kw,
             **mode_kw,
             **model_kw,

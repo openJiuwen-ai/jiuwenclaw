@@ -1490,6 +1490,15 @@ def _resolve_model_config_obj_for_validate(model_name: str, params: dict[str, An
                 obj = entry.get("model_config_obj")
                 if isinstance(obj, dict):
                     model_config_obj = dict(obj)
+                # AgentOS 备份模型的 mco 含 _source=="agentos" 标记（由
+                # get_default_models 注入）。其 max_tokens 是输入侧上下文窗口
+                # 别名（-> ContextEngineConfig.context_window_tokens，压缩阈值，
+                # 不发厂商），不得进入输出侧的 ModelRequestConfig.max_tokens
+                # （否则会被当输出上限发给厂商）。_source 标记本身由
+                # reasoning_injector._build_model_request_kwargs 统一 pop，
+                # 这里只需清 max_tokens。
+                if model_config_obj.get("_source") == "agentos":
+                    model_config_obj.pop("max_tokens", None)
                 logger.info(
                     "[config.validate_model] loaded model_config_obj for '%s' "
                     "(matched_by=%s): %s",
@@ -1635,6 +1644,17 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send(ack_msg)
 
     channel.on_connect(_on_connect)
+
+    async def _on_disconnect(ws, _session_ids):
+        mh = _resolve(message_handler)
+        cleanup = getattr(mh, "unregister_ws_subscriptions", None)
+        ws_id = str(getattr(ws, "_jiuwen_ws_id", "") or "").strip()
+        if callable(cleanup) and ws_id:
+            await cleanup(channel.channel_id, ws_id)
+
+    register_disconnect = getattr(channel, "on_disconnect", None)
+    if callable(register_disconnect):
+        register_disconnect(_on_disconnect)
 
     async def _config_get(ws, req_id, params, session_id):
         # 返回 _CONFIG_SET_ENV_MAP 里所有键对应的环境变量当前值

@@ -323,37 +323,38 @@ def _root_span(name: str = "root"):
 class TestOtelTeamSpanFallback:
     """Team-span lookups fall back to the run's registered root span when the
     per-request ContextVar is invisible (the agent runs in a session-setup
-    supervisor task), so the rail and OtelCallbackHandler still find a parent."""
+    supervisor task), so the rail and callback parent lookup still find a parent.
+    """
 
     def test_patch_is_installed(self):
-        # The ContextVar itself is replaced, so BOTH lookup paths see the
-        # fallback: the get_team_span accessor (llm/tool span parents, and the
-        # rail, which returns early when it is None) and span_context's direct
-        # _team_span_ctx readers inside ActiveSpanTracker.
+        # Newer openjiuwen resolves team/root spans through get_root_span /
+        # get_team_span (no private _team_span_ctx). Import installs wrappers
+        # that fall back to the session-keyed _ROOT_SPANS registry.
         import openjiuwen.agent_teams.observability.span_context as sc
         import jiuwenswarm.agents.harness.agent_observability as obs  # triggers install
 
-        assert isinstance(sc._team_span_ctx, obs._RootSpanFallbackContextVar)
+        assert getattr(sc.get_team_span, obs._SDK_ROOT_SPAN_FALLBACK_ATTR, False)
+        assert getattr(sc.get_root_span, obs._SDK_ROOT_SPAN_FALLBACK_ATTR, False)
 
     def test_fallback_returns_the_running_root_span(self):
-        # _team_span_ctx ContextVar is unset in the test process -> the lookup
-        # falls back to the single run in flight.
-        import openjiuwen.agent_teams.observability.callback_handler as ch
+        # ContextVar/registry unset in the test process -> the lookup falls
+        # back to the single run in flight.
+        import openjiuwen.agent_teams.observability.span_context as sc
         import jiuwenswarm.agents.harness.agent_observability as obs
 
         span = _root_span()
         obs._ROOT_SPANS["sess-A"] = span
         try:
-            assert ch.get_team_span() is span
+            assert sc.get_team_span() is span
         finally:
             obs._ROOT_SPANS.clear()
 
     def test_fallback_none_when_no_run_and_contextvar_empty(self):
-        import openjiuwen.agent_teams.observability.callback_handler as ch
+        import openjiuwen.agent_teams.observability.span_context as sc
         import jiuwenswarm.agents.harness.agent_observability as obs
 
         obs._ROOT_SPANS.clear()
-        assert ch.get_team_span() is None
+        assert sc.get_team_span() is None
 
     def test_one_session_closing_does_not_blind_another_still_running(self):
         """Overlapping sessions must not share a single fallback slot.
@@ -362,7 +363,7 @@ class TestOtelTeamSpanFallback:
         lost its team span mid-flight — from that moment its sub-agents got no
         agent span and landed flat under the dispatching agent.
         """
-        import openjiuwen.agent_teams.observability.callback_handler as ch
+        import openjiuwen.agent_teams.observability.span_context as sc
         import jiuwenswarm.agents.harness.agent_observability as obs
 
         running = _root_span("still-running")
@@ -372,26 +373,26 @@ class TestOtelTeamSpanFallback:
         obs._ROOT_SPANS["sess-B"] = finished
         try:
             obs.close_agent_run_span(finished, session_id="sess-B")
-            assert ch.get_team_span() is running
+            assert sc.get_team_span() is running
         finally:
             obs._ROOT_SPANS.clear()
 
     def test_ambiguous_runs_resolve_to_nothing_rather_than_the_wrong_trace(self):
         """Two runs in flight with no session id in reach: refuse to guess."""
-        import openjiuwen.agent_teams.observability.callback_handler as ch
+        import openjiuwen.agent_teams.observability.span_context as sc
         import jiuwenswarm.agents.harness.agent_observability as obs
 
         obs._ROOT_SPANS.clear()
         obs._ROOT_SPANS["sess-A"] = _root_span("a")
         obs._ROOT_SPANS["sess-B"] = _root_span("b")
         try:
-            assert ch.get_team_span() is None
+            assert sc.get_team_span() is None
         finally:
             obs._ROOT_SPANS.clear()
 
     def test_run_is_resolved_by_session_id_when_available(self, monkeypatch):
         """With the session id in context, each run resolves to its own span."""
-        import openjiuwen.agent_teams.observability.callback_handler as ch
+        import openjiuwen.agent_teams.observability.span_context as sc
         import jiuwenswarm.agents.harness.agent_observability as obs
         from openjiuwen.agent_teams import context as team_context
 
@@ -401,7 +402,7 @@ class TestOtelTeamSpanFallback:
         obs._ROOT_SPANS["sess-B"] = mine
         monkeypatch.setattr(team_context, "get_session_id", lambda: "sess-B")
         try:
-            assert ch.get_team_span() is mine
+            assert sc.get_team_span() is mine
         finally:
             obs._ROOT_SPANS.clear()
 
@@ -409,10 +410,11 @@ class TestOtelTeamSpanFallback:
 def test_llm_span_lookup_falls_back_to_root_span():
     """The open llm.call span stays findable from the supervisor task.
 
-    ``ActiveSpanTracker._find_llm_span`` reads ``_team_span_ctx`` directly to
-    resolve the trace — no function to wrap. Without the ContextVar stand-in it
-    returns None there, so ``on_llm_output`` never finds the span it must close
-    and the LLM span is exported with input but no completion / usage.
+    ``ActiveSpanTracker._find_llm_span`` resolves the trace through
+    ``get_root_span``. Without the session-keyed fallback wrapper it returns
+    None when the ContextVar is invisible, so ``on_llm_output`` never finds the
+    span it must close and the LLM span is exported with input but no
+    completion / usage.
     """
     import openjiuwen.agent_teams.observability.span_context as sc
     import jiuwenswarm.agents.harness.agent_observability as obs
@@ -805,7 +807,6 @@ class TestAgentObservabilityForce:
     def _reset(self):
         import jiuwenswarm.agents.harness.agent_observability as ao
         ao._agent_observability_active = False
-        ao._agent_owns_provider = False
         ao._force_ever_enabled = False
 
     def test_force_inits_and_sticky_blocks_teardown(self, monkeypatch):
@@ -813,12 +814,14 @@ class TestAgentObservabilityForce:
         import openjiuwen.agent_teams.observability as obs
         self._reset()
         calls = {"init": 0, "shutdown": 0}
+        initialized = {"value": False}
         monkeypatch.setattr(ao, "get_config", lambda: {"agent_observability": {"enabled": False}})
-        monkeypatch.setattr(obs, "is_initialized", lambda: False)
+        monkeypatch.setattr(obs, "is_initialized", lambda: initialized["value"])
         monkeypatch.setattr(obs, "ObservabilityConfig", lambda **kw: kw)
 
-        def fake_init(_cfg):
+        def fake_init(_cfg, **_kwargs):
             calls["init"] += 1
+            initialized["value"] = True
 
         monkeypatch.setattr(obs, "init_observability", fake_init)
         monkeypatch.setattr(
@@ -841,7 +844,6 @@ class TestAgentObservabilityForce:
         calls = {"shutdown": 0}
         # simulate a config-gated active provider (force never used)
         ao._agent_observability_active = True
-        ao._agent_owns_provider = True
         ao._force_ever_enabled = False
         monkeypatch.setattr(ao, "get_config", lambda: {"agent_observability": {"enabled": False}})
         monkeypatch.setattr(
