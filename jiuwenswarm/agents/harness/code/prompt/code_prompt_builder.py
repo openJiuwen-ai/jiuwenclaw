@@ -339,6 +339,9 @@ def _code_using_your_tools_prompt() -> PromptSection:
         "- To edit files use edit_file instead of sed or awk\n"
         "- To create files use write_file instead of cat with heredoc "
         "or echo redirection\n"
+        "- In generated Python source, use literal Unicode in string literals "
+        '(e.g. "文档标题"), not \\uXXXX / \\UXXXXXXXX / \\xXX for visible text; '
+        "save scripts as UTF-8\n"
         "- To search for files use glob or list_files instead of find or ls\n"
         "- To search the content of files, use grep instead of the bash grep command\n"
         "- Reserve bash exclusively for system commands "

@@ -3601,18 +3601,18 @@ class JiuWenSwarmDeepAdapter:
             mcc["model_name"] = (
                 react_mcc.get("model_name")
                 or react.get("model_name")
-                or os.getenv("MODEL_NAME", "")
+                or read_env("MODEL_NAME", "")
                 or "gpt-4"
             )
         if not str(mcc.get("client_provider") or "").strip():
             mcc["client_provider"] = (
                 react_mcc.get("client_provider")
-                or os.getenv("MODEL_PROVIDER", "")
+                or read_env("MODEL_PROVIDER", "")
             )
         if not str(mcc.get("api_base") or "").strip():
-            mcc["api_base"] = react_mcc.get("api_base") or os.getenv("API_BASE", "")
+            mcc["api_base"] = react_mcc.get("api_base") or read_env("API_BASE", "")
         if not str(mcc.get("api_key") or "").strip():
-            mcc["api_key"] = react_mcc.get("api_key") or os.getenv("API_KEY", "")
+            mcc["api_key"] = react_mcc.get("api_key") or read_env("API_KEY", "")
         return mcc, meta
 
     def _collect_default_model_log_fields(self) -> dict[str, str]:

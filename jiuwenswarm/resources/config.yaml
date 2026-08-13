@@ -367,6 +367,11 @@ perf:
     # Parent+subagent breakdown in stats.by_agent (off by default).
     include_by_agent: false
 
+# 生成代码可读性：Prompt 约束 + Python 源码 \uXXXX 兜底转换（仅 .py/.pyw）
+# 设为 false 可紧急关闭整套能力
+code_generation:
+  unicode_readable: true
+
 telemetry:
   # enabled=true 时统一 Runtime 独占 Provider 选择；下方旧
   # agent_observability/team_observability 的 exporter/endpoint 不参与选择。
@@ -798,6 +803,8 @@ minio:
   public_base_url:
 
 channels:
+  officeclaw:
+    send_file_allowed: true
   web:
     send_file_allowed: true
   feishu:

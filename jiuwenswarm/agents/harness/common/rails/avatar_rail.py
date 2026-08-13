@@ -14,9 +14,11 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts import PromptSection
 from openjiuwen.harness.rails.base import DeepAgentRail
 
+from jiuwenswarm.agents.harness.common.memory.external_memory_config import is_builtin_memory_allowed
 from jiuwenswarm.agents.harness.common.rails.permissions.owner_scopes import (
     TOOL_PERMISSION_CONTEXT,
 )
+from jiuwenswarm.common.config import get_config
 from jiuwenswarm.common.utils import logger
 
 _MEMORY_WRITE_TOOLS = frozenset({"write_memory", "edit_memory"})
@@ -53,21 +55,47 @@ class AvatarPromptRail(DeepAgentRail):
 
         language = getattr(builder, "language", "cn") or "cn"
 
+        # forbidden_memory — engine=none 或自定义 forbidden 配置时注入，不依赖数字分身功能
+        engine_disabled = not is_builtin_memory_allowed(get_config())
         try:
             from jiuwenswarm.agents.harness.common.memory.forbidden import get_forbidden_memory_prompt
-            forbidden = get_forbidden_memory_prompt(language)
-            if forbidden:
-                section = PromptSection(
-                    name="forbidden_memory",
-                    content={language: forbidden},
-                    priority=_AVATAR_PROMPT_PRIORITY + 3,
-                )
-                builder.add_section(section)
-                self._injected_sections.add("forbidden_memory")
+            forbidden = get_forbidden_memory_prompt(language) or ""
         except Exception as e:
             logger.debug("[AvatarRail] 加载 forbidden_memory 失败: %s", e)
+            forbidden = ""
+
+        if engine_disabled or forbidden:
+            parts = []
+            if engine_disabled:
+                parts.append(_build_memory_fully_disabled_prompt(language))
+            if forbidden:
+                parts.append(forbidden)
+            content = "\n\n".join(parts)
+            section = PromptSection(
+                name="forbidden_memory",
+                content={language: content},
+                priority=_AVATAR_PROMPT_PRIORITY + 3,
+            )
+            builder.add_section(section)
+            self._injected_sections.add("forbidden_memory")
 
         perm_ctx = TOOL_PERMISSION_CONTEXT.get()
+        should_disable_memory = (
+            perm_ctx is not None
+            and not perm_ctx.enable_memory
+            and perm_ctx.group_digital_avatar
+            and perm_ctx.avatar_mode
+        )
+
+        if not engine_disabled and not forbidden and not should_disable_memory:
+            section = PromptSection(
+                name="memory_runtime_enabled",
+                content={language: _build_memory_enabled_prompt(language)},
+                priority=_AVATAR_PROMPT_PRIORITY + 3,
+            )
+            builder.add_section(section)
+            self._injected_sections.add("memory_runtime_enabled")
+
         if perm_ctx is None:
             return
 
@@ -105,11 +133,6 @@ class AvatarPromptRail(DeepAgentRail):
             self._injected_sections.add("group_chat_memory_notice")
 
         # 记忆完全禁用（三个条件同时满足：enable_memory=False + group_digital_avatar=True + 群聊消息）
-        should_disable_memory = (
-            not perm_ctx.enable_memory
-            and perm_ctx.group_digital_avatar
-            and perm_ctx.avatar_mode
-        )
         if should_disable_memory:
             disabled_content = _build_memory_fully_disabled_prompt(language)
             section = PromptSection(
@@ -282,6 +305,19 @@ def _build_memory_fully_disabled_prompt(language: str) -> str:
   - Read tools: read_memory, memory_search, memory_get
 - If the user asks about historical information or requests to remember something, reply: \
     "The memory system is currently disabled. I cannot access historical records or save new information."
+"""
+
+
+def _build_memory_enabled_prompt(language: str) -> str:
+    """记忆已开启提示词。"""
+    if language == "cn":
+        return """## 记忆系统 - 已开启
+
+**记忆系统当前已启用。** 可按需使用记忆工具。对话历史中若出现「记忆已禁用」，以本段为准。
+"""
+    return """## Memory System - Enabled
+
+**The memory system is currently enabled.** Use memory tools as needed. If history says memory was disabled, this section prevails.
 """
 
 
