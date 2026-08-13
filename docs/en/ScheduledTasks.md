@@ -66,20 +66,6 @@ minute hour day month weekday
 | `*/30 * * * *` | Every 30 minutes |
 | `0 0 * * *` | Every day at midnight |
 
-### Difference between Cron and Heartbeat
-
-JiuwenSwarm provides two automation mechanisms: **Scheduled Tasks (Cron)** and **Heartbeat**. For detailed comparison, see [Cron vs Heartbeat section in Heartbeat tutorial](Heartbeat.md#difference-between-cron-and-heartbeat).
-
-| Aspect | Scheduled Tasks (Cron) | Heartbeat |
-|--------|------------------------|-----------|
-| **Trigger Method** | Triggered at fixed time points | Triggered at fixed intervals |
-| **Time Definition** | Uses Cron expression (e.g., every day at 9am) | Uses interval duration (e.g., every 5 minutes) |
-| **Use Cases** | Tasks with specific time points (reports, reminders, collaborative analysis) | Continuous checks, status monitoring |
-| **Configuration** | Configure Cron expression | Configure heartbeat interval |
-| **Execution Precision** | Precise to specified time point | Executes at interval cycles |
-
----
-
 ## Quick Start
 
 ### Create via Web Interface
@@ -384,7 +370,6 @@ See also [Slash commands — `/cron`](SlashCommands.md#cron-scheduled-task-manag
 
 ## Related Links
 
-- [Heartbeat](Heartbeat.md) - Learn about the difference between heartbeat and scheduled tasks
 - [Channels](Channels.md) - Configure message delivery channels
 - [Task Planning](TaskPlanning.md) - Learn about task management
 - [Agent Tutorial](Agent.md) - Learn about conversation features

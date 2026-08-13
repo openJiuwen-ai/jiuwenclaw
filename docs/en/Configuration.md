@@ -428,7 +428,7 @@ settings are mapped by the JiuwenSwarm Adapter to agent-core's
 
 ## 10. Advanced Configuration
 
-Beyond the **Configuration** page, the product may use a **main configuration** for timeouts, temperature, heartbeat interval, context thresholds, and toggles that work together with **context compression**, **permissions**, **memory restrictions**, and similar UI switches. The main config file is typically located at:
+Beyond the **Configuration** page, the product may use a **main configuration** for timeouts, temperature, context thresholds, and toggles that work together with **context compression**, **permissions**, **memory restrictions**, and similar UI switches. The main config file is typically located at:
 
 ```text
 ~/.jiuwenswarm/config/config.yaml
@@ -444,7 +444,6 @@ These are **conceptual** paths in the main configuration for cross-reference wit
 | `models.*.model_client_config.timeout` | Model request timeout (seconds) | `1800` |
 | `models.*.model_client_config.verify_ssl` | Verify SSL | `false` |
 | `models.*.model_config_obj.temperature` | Temperature | `0.95` |
-| `heartbeat.every` | Heartbeat interval (seconds) | `3600` |
 | `react.context_engine_config.dialogue_compressor_config.tokens_threshold` | Dialogue compression token threshold | `100000` |
 | `react.context_engine_config.round_level_compressor_config.trigger_context_ratio` | Round-level compression trigger ratio of the effective context budget | `0.9` |
 
