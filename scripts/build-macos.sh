@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# JiuwenSwarm macOS .app + .dmg build script
+# WorkSwarm macOS .app + .dmg build script
 #
 # 签名/公证是可选的，按机器是否配置了 Developer ID 身份自动决定：
 #   - 配置了 Developer ID 身份（含私钥）→ 自动用真签名；加 NOTARIZE=1 再做 Apple 公证+staple
@@ -21,11 +21,11 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_NAME="JiuwenSwarm.app"
+APP_NAME="WorkSwarm.app"
 APP_PATH="$PROJECT_ROOT/dist/$APP_NAME"
 DMG_ROOT="$PROJECT_ROOT/dist/dmg-root"
-VERSION="0.2.4.beta3"
-DMG_PATH="$PROJECT_ROOT/dist/JiuwenSwarm-$VERSION.dmg"
+VERSION="v0.2.5.beta1"
+DMG_PATH="$PROJECT_ROOT/dist/WorkSwarm-$VERSION.dmg"
 
 # === 签名 + 公证配置 ===
 # 签名身份（codesign -s 的值）与是否签名。解析顺序：
@@ -138,7 +138,7 @@ copy_node_into_app() {
     "$( "$dest/bin/node" --version )" "$(resolve_node_arch)" "$dest"
 }
 
-printf '=== JiuwenSwarm macOS package build ===\n'
+printf '=== WorkSwarm macOS package build ===\n'
 printf 'Project root: %s\n' "$PROJECT_ROOT"
 if [ "$DO_SIGN" = "1" ]; then
   printf 'Sign identity: %s\n' "$SIGN_IDENTITY"
@@ -211,7 +211,7 @@ if [[ ! -d "$APP_PATH" ]]; then
 fi
 
 printf 'Verifying frozen A2UI v0.8 bundle...\n'
-"$APP_PATH/Contents/MacOS/jiuwenswarm" "$PROJECT_ROOT/scripts/verify_a2ui_bundle.py"
+"$APP_PATH/Contents/MacOS/workswarm" "$PROJECT_ROOT/scripts/verify_a2ui_bundle.py"
 
 if [[ -n "$TUI_BINARY" && -f "$TUI_BINARY" ]]; then
   printf 'Copying TUI binary into app bundle...\n'
@@ -257,7 +257,7 @@ mkdir -p "$DMG_ROOT"
 cp -R "$APP_PATH" "$DMG_ROOT/"
 ln -s /Applications "$DMG_ROOT/Applications"
 rm -f "$DMG_PATH"
-hdiutil create -volname "JiuwenSwarm" -srcfolder "$DMG_ROOT" -ov -format UDZO "$DMG_PATH"
+hdiutil create -volname "WorkSwarm" -srcfolder "$DMG_ROOT" -ov -format UDZO "$DMG_PATH"
 
 printf '\n[9/9] Code sign + notarize + staple the DMG, then verify...\n'
 if [ "$DO_SIGN" = "1" ]; then
