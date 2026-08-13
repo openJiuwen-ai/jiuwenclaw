@@ -33,7 +33,11 @@ from openjiuwen.agent_evolving.trajectory import InMemoryTrajectoryRegistry
 from openjiuwen.agent_teams.rails.builtin_elements import SKILL_USE as CORE_SKILL_USE
 from openjiuwen.harness.schema import deep_agent_spec as das
 from openjiuwen.agent_teams.harness.manifest import get_catalog, resolve_factory
-from openjiuwen.agent_teams.schema.blueprint import LeaderSpec, TeamAgentSpec
+from openjiuwen.agent_teams.schema.blueprint import (
+    LeaderSpec,
+    TeamAgentSpec,
+    TransportSpec,
+)
 from openjiuwen.agent_teams.schema.deep_agent_spec import (
     BuiltinToolSpec,
     DeepAgentSpec,
@@ -794,6 +798,58 @@ def test_enrich_team_spec_for_swarm_rewrites_spec_in_place() -> None:
     # The parent-free contract: openjiuwen removed the imperative customizer
     # hook entirely, so the field no longer exists on the spec.
     assert not hasattr(spec, "agent_customizer")
+
+
+@pytest.mark.parametrize(
+    ("channel_id", "port_env", "port", "expected_url"),
+    [
+        ("web", "WEB_PORT", "29000", "ws://127.0.0.1:29000/ws"),
+        ("tui", "GATEWAY_PORT", "29001", "ws://127.0.0.1:29001/tui"),
+    ],
+)
+def test_enrich_team_spec_configures_external_cli_event_relay(
+    channel_id: str,
+    port_env: str,
+    port: str,
+    expected_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """External CLI events must return through the active client channel."""
+    monkeypatch.delenv("TEAM_EVENT_GATEWAY_WS_URL", raising=False)
+    monkeypatch.setenv(port_env, port)
+    spec = _make_team_spec()
+
+    enrich_team_spec_for_swarm(
+        spec,
+        session_id="s",
+        mode="team",
+        channel_id=channel_id,
+    )
+
+    assert spec.external_transport is not None
+    assert spec.external_transport.type == "hybrid"
+    transport = spec.external_transport.build()
+    assert transport.team_name == spec.team_name
+    assert transport.external_publish_url == expected_url
+
+
+def test_enrich_team_spec_preserves_explicit_external_transport() -> None:
+    """Deployments may provide their own cross-process team transport."""
+    spec = _make_team_spec()
+    configured_transport = TransportSpec(
+        type="hybrid",
+        params={"external_publish_url": "wss://relay.example.test/team-events"},
+    )
+    spec.external_transport = configured_transport
+
+    enrich_team_spec_for_swarm(
+        spec,
+        session_id="s",
+        mode="team",
+        channel_id="web",
+    )
+
+    assert spec.external_transport is configured_transport
 
 
 def test_enrich_team_spec_points_member_cwd_at_project_dir() -> None:
