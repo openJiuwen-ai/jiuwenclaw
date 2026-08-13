@@ -5635,8 +5635,9 @@ class JiuWenSwarmDeepAdapter:
 
         Args:
             config_base: Optional full config snapshot; read from disk when None.
-            env_overrides: Optional environment variable delta applied first; a
-                None value removes the variable.
+            env_overrides: Optional environment variable delta applied after
+                reloading the instance ``.env`` file; a None value removes the
+                variable.
 
         Returns:
             The normalized config snapshot that was cached on this adapter.
@@ -5653,6 +5654,11 @@ class JiuWenSwarmDeepAdapter:
             logger.warning(
                 "[JiuWenSwarmDeepAdapter] aclose openjiuwen memory cache failed: %s", e
             )
+
+        # create_instance() already re-reads .env; reload must too, otherwise
+        # ${MODEL_NAME} stays at process-start values and a later create_instance
+        # is overwritten by the stale pending snapshot.
+        load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
 
         if env_overrides is not None:
             if not isinstance(env_overrides, dict):
