@@ -2503,6 +2503,25 @@ class AgentWebSocketServer:
             )
             return
 
+        # Disk-only evolution RPCs must go through AgentManager so skill_path roots
+        # are bound into session-registered dirs (enterprise parity). Do not use the
+        # skills.* stateless short-circuit, which skips that binding.
+        if request.req_method in (
+            ReqMethod.SKILLS_EVOLUTION_ARCHIVES,
+            ReqMethod.SKILLS_EVOLUTION_ROLLBACK,
+        ):
+            resp = await self._agent_manager.process_message(request)
+            if getattr(resp, "agent_ref", None) is None:
+                resp.agent_ref = request.agent_ref
+            wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+            async with send_lock:
+                await send_wire_payload(ws, wire)
+            logger.info(
+                "[AgentWebSocketServer] 非流式响应已发送 (disk-only evolution): request_id=%s",
+                request.request_id,
+            )
+            return
+
         # 无状态请求（skills / skilldev / plugins / symphony）不需要 mode 解析和
         # code mode 状态管理，直接走 process_message 即可。用轻量 agent 获取，不触发
         # adapter 重建（恢复 8f54b26a7 误删的短路，并修正 5084467df 触发重建的缺陷）。
