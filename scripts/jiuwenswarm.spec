@@ -355,8 +355,8 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleName": "WorkSwarm",
             "CFBundleDisplayName": "WorkSwarm",
-            "CFBundleShortVersionString": "v0.2.5.beta1",
-            "CFBundleVersion": "v0.2.5.beta1",
+            "CFBundleShortVersionString": "0.2.5.beta1",
+            "CFBundleVersion": "0.2.5.beta1",
             "NSHighResolutionCapable": "True",
         },
     )
