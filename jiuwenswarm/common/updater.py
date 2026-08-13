@@ -18,6 +18,7 @@ from jiuwenswarm.common.version_source import (
     GitCodeReleasesSource,
     PyPIVersionSource,
     ReleaseInfo,
+    release_timestamp_key,
 )
 
 DEFAULT_RELEASE_API_GITCODE = "https://api.gitcode.com/api/v5/repos/{owner}/{repo}/releases/latest"
@@ -61,6 +62,13 @@ def _is_newer_version(candidate: str, current: str) -> bool:
     """
     from jiuwenswarm.common.version_source import release_sort_key
     return release_sort_key(candidate) > release_sort_key(current)
+
+
+def _is_newer_release(candidate_published_at: str, current_published_at: str) -> bool:
+    """Compare desktop releases by publication time, independent of their names."""
+    return release_timestamp_key(candidate_published_at) > release_timestamp_key(
+        current_published_at
+    )
 
 
 def _detect_install_mode() -> str:
@@ -294,7 +302,7 @@ class UpdaterService:
     def _check(self, config: dict[str, Any]) -> None:
         source = self._create_version_source(config)
         try:
-            release = source.fetch_latest()
+            release = source.fetch_latest(__version__)
         except Exception as exc:
             raise RuntimeError(
                 f"Failed to fetch latest release from {config['release_api_type']}: {exc}"
@@ -305,7 +313,22 @@ class UpdaterService:
             raise RuntimeError("Latest release version is missing.")
 
         install_mode = _detect_install_mode()
-        has_update = _is_newer_version(latest_version, __version__)
+        timestamp_desktop = install_mode == "desktop" and sys.platform in {
+            "darwin",
+            "win32",
+        }
+        if timestamp_desktop:
+            if not release.current_release_published_at:
+                raise RuntimeError(
+                    "Current desktop release timestamp is missing for version "
+                    f"{__version__}."
+                )
+            has_update = _is_newer_release(
+                release.published_at,
+                release.current_release_published_at,
+            )
+        else:
+            has_update = _is_newer_version(latest_version, __version__)
 
         if not has_update:
             self._update_status(

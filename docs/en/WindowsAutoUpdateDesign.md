@@ -22,7 +22,7 @@ This document describes the auto-update solution for JiuwenSwarm desktop (Window
 - No version-skip, canary releases, or multi-channel distribution
 - No forced updates
 
-## Version Numbers and Pre-release Rules
+## Desktop Release Timestamp Rules
 
 Installer naming examples:
 
@@ -33,20 +33,15 @@ Installer naming examples:
 
 Windows and macOS installers for the same version are released together.
 
-Version comparison uses a total-order key `release_sort_key` with these rules:
+The Windows and macOS desktop updater finds the Release that corresponds to the installed version in the paginated Releases list, then compares its publication timestamp with the newest publication timestamp. If the list does not contain the installed version, its Release is fetched by tag. Timestamps are normalized to UTC, and an update is offered only when the remote timestamp is newer. Linux keeps the existing version comparison behavior.
 
-1. Base version compared numerically first (segment by segment): `0.2.3` > `0.2.2`
-2. At the same base, a stable release ranks above any pre-release: `0.2.3` > `0.2.3.beta1`
-3. Among pre-releases at the same base, the type decides: `dev` < `alpha` < `beta` < `rc` < `pre`
-4. Within the same type, a larger number is newer: `0.2.3.beta2` > `0.2.3.beta1`
-
-Because stable and pre-release releases share a channel, a user running stable `0.2.2` is prompted to update to `0.2.3.beta1` (a higher base version); this is the intended behavior.
+The version string is used only to locate the installed Release, display status, and match the existing installer asset. It does not determine desktop release ordering. The `pip` install mode keeps its existing version comparison behavior.
 
 ## Core Flow
 
 1. After app launch, the frontend asynchronously calls `updater.check`
 2. The backend requests the Releases list endpoint and fetches all published releases (including pre-releases, skipping drafts)
-3. The newest version is selected by `release_sort_key` and compared against the current `__version__`
+3. Select the newest Release by publication time and compare it with the Release time of the installed version
 4. If a newer version is found, the latest version, publish date, release notes, and the platform-matched installer download URL are recorded
 5. The user clicks "Download Update" on the Update page
 6. The backend downloads the installer to the `.updates` directory under the user workspace in the background
@@ -61,7 +56,7 @@ Desktop defaults to the GitCode Releases list endpoint:
 https://api.gitcode.com/api/v5/repos/{owner}/{repo}/releases
 ```
 
-It can also be switched to GitHub Releases. To discover pre-releases, the backend fetches the full releases list (not the `/latest` endpoint, which excludes pre-releases), skips drafts, keeps prereleases, and picks the newest by version sort. It falls back to `/latest` when the list endpoint is unavailable.
+It can also be switched to GitHub Releases. To discover pre-releases, the backend fetches the full releases list (not the `/latest` endpoint, which excludes pre-releases), skips drafts, keeps prereleases, and picks the newest by publication time. It falls back to `/latest` when the list endpoint is unavailable.
 
 Fields read from the release:
 
