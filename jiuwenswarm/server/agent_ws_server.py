@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Optional
 from weakref import WeakValueDictionary
 
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import server_logger
 from websockets.exceptions import ConnectionClosed as WebSocketConnectionClosed
 
@@ -40,6 +41,9 @@ from jiuwenswarm.common.e2a.wire_codec import (
     encode_agent_chunk_for_wire,
     encode_agent_response_for_wire,
     encode_json_parse_error_wire,
+    encode_pcs_chunk_for_wire,
+    encode_pcs_response_for_wire,
+    validate_pcs_e2a_request_dict,
 )
 from jiuwenswarm.common.model_config_validation import is_placeholder_api_base
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
@@ -125,6 +129,7 @@ from jiuwenswarm.agents.harness.code.prompt.plan_approval import (
     PLAN_REMINDER_ORIGINAL_QUERY_KEY,
 )
 from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenswarm.server.proactive_context import PCSHostAPI
 from jiuwenswarm.common.log_preview import preview_text
 
 logger = logging.getLogger(__name__)
@@ -239,10 +244,35 @@ _CODE_MODE_SYNC_METHODS = frozenset({
     ReqMethod.CHAT_ANSWER,
 })
 
+_PCS_REQ_METHODS = frozenset(
+    {
+        ReqMethod.PCS_RUNTIME_STATUS,
+        ReqMethod.PCS_RUNTIME_START,
+        ReqMethod.PCS_RUNTIME_STOP,
+        ReqMethod.PCS_RUNTIME_GET_CONFIG,
+        ReqMethod.PCS_RUNTIME_PATCH_CONFIG,
+        ReqMethod.PCS_RUNTIME_SELECT_MODEL,
+        ReqMethod.PCS_FETCH_LIST_SERVICES,
+        ReqMethod.PCS_FETCH_PATCH_SERVICE,
+        ReqMethod.PCS_FETCH_START_SERVICE,
+        ReqMethod.PCS_FETCH_STOP_SERVICE,
+        ReqMethod.PCS_FETCH_START_SCHEDULER,
+        ReqMethod.PCS_FETCH_STOP_SCHEDULER,
+        ReqMethod.PCS_FETCH_RUN_ALL,
+        ReqMethod.PCS_FETCH_RUN_ONE,
+        ReqMethod.PCS_FETCH_GET_RUN_STATUS,
+        ReqMethod.PCS_FETCH_AUTHORIZE_PROVIDER,
+        ReqMethod.PCS_CONTEXT_STREAM_GRAPH,
+        ReqMethod.PCS_CONTEXT_SEARCH_PAGES,
+        ReqMethod.PCS_CONTEXT_GET_NODE,
+    }
+)
+
+
 # ── 流式处理心跳间隔：当 Agent 处理时间超过此阈值时，发送心跳 chunk 保持 WebSocket 连接活跃 --
 # 避免 ping_timeout 导致连接关闭。默认 10 秒，小于服务端 ping_timeout=20s。
 _STREAM_HEARTBEAT_INTERVAL_SECONDS = 10.0
-from jiuwenswarm.server.wire_truncate import (  # noqa: F401  — re-exported for tests / handlers
+from jiuwenswarm.server.wire_truncate import (  # noqa: E402, F401  — re-exported for tests / handlers
     _HISTORY_PAGE_SIZE,
     _HISTORY_WIRE_STRING_LIMIT,
     _HISTORY_WIRE_METADATA_STRING_LIMIT,
@@ -290,6 +320,28 @@ from jiuwenswarm.server.wire_truncate import (  # noqa: F401  — re-exported fo
     _build_workflow_human_prompt_payload,
     _build_workflow_snapshot_payload,
 )
+
+
+def _pcs_wire_method(data: object) -> str | None:
+    if not isinstance(data, dict):
+        return None
+    for key in ("method", "req_method"):
+        value = data.get(key)
+        if isinstance(value, str) and value.startswith("pcs."):
+            return value
+    return None
+
+
+def _pcs_payload(value: object) -> dict[str, object]:
+    if value is None:
+        return {"ok": True}
+    if isinstance(value, dict):
+        return value
+    if hasattr(value, "model_dump"):
+        dumped = value.model_dump(mode="json")
+        if isinstance(dumped, dict):
+            return dumped
+    raise TypeError("PCS Host result must be an object")
 
 
 
@@ -912,8 +964,13 @@ class AgentWebSocketServer:
         self._default_model: Optional[Any] = None
         # 本地 jiuwenbox 子进程管理器 (lazy 启动, 在 /sandbox enable 时 ensure_running)
         self._jiuwenbox_runner = JiuwenBoxRunner.instance()
-        # checkpointer 后台预热任务 (start() 里 fire-and-forget, stop() 时 cancel)
-        self._checkpointer_warmup_task: Optional[asyncio.Task] = None
+        # AgentServer 内唯一持有的进程内 PCS Host；Context Rail 使用同一固定目录。
+        self._pcs_host = PCSHostAPI(
+            home=Path.home() / ".jiuwenswarm" / ".pcs",
+        )
+        self._pcs_start_task: asyncio.Task[None] | None = None
+        # 后台预热 persistent checkpointer；停止时取消，避免遗留任务。
+        self._checkpointer_warmup_task: asyncio.Task | None = None
         # 图像模态探针重探任务 (模型配置变更时拉起, stop() 时 cancel)
         self._image_modality_refresh_task: Optional[asyncio.Task] = None
         # Proactive recommendation engine (set by app_agentserver for debug trigger)
@@ -1012,6 +1069,7 @@ class AgentWebSocketServer:
             )
         except ImportError:
             import websockets
+
             self._server = await websockets.serve(
                 self._connection_handler,
                 self._host,
@@ -1025,25 +1083,44 @@ class AgentWebSocketServer:
             "[AgentWebSocketServer] 已启动: ws://%s:%s", self._host, self._port
         )
 
-        # 端口已 listen, 后台预热 checkpointer, 不阻塞启动与握手.
-        # _checkpointer_warmup_task 供 shutdown 时 cancel, 避免任务悬挂.
-        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import ensure_persistent_checkpointer
+        # 端口已 listen, 后台预热 checkpointer, 不阻塞启动与握手。
+        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+            ensure_persistent_checkpointer,
+        )
 
         async def _warmup_checkpointer() -> None:
             try:
                 await ensure_persistent_checkpointer()
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "[AgentWebSocketServer] checkpointer 预热失败 (首请求将兜底重试): %s", exc
+                    "[AgentWebSocketServer] checkpointer 预热失败 "
+                    "(首请求将兜底重试): %s",
+                    exc,
                 )
 
         self._checkpointer_warmup_task = asyncio.create_task(
-            _warmup_checkpointer(), name="checkpointer-warmup"
+            _warmup_checkpointer(),
+            name="checkpointer-warmup",
         )
-        # WS 监听已经开放, 现在按 config.yaml::sandbox 的 runtime.enabled +
-        # startup_mode 决定要不要自动把 jiuwenbox 子进程也拉起来。失败不阻塞
-        # 启动 (用户依然可以在 TUI 里跑 /sandbox enable 重试)。
+        self._pcs_start_task = asyncio.create_task(
+            self._start_pcs_best_effort(),
+            name="pcs-host-start",
+        )
+
+        # WS 监听已经开放, 现在按配置尽力启动 jiuwenbox。
         await self._bootstrap_internal_jiuwenbox()
+
+    async def _start_pcs_best_effort(self) -> None:
+        """Start optional PCS without changing AgentServer readiness."""
+        try:
+            await self._pcs_host.start()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[AgentWebSocketServer] optional PCS startup failed: %s",
+                type(exc).__name__,
+            )
 
     async def _bootstrap_internal_jiuwenbox(self) -> None:
         """启动时按 ``config.yaml::sandbox`` 自动拉起 jiuwenbox 子进程。
@@ -1265,8 +1342,38 @@ class AgentWebSocketServer:
         )
         return forbidden_origin_response(args)
 
+    async def _stop_pcs_best_effort(self) -> None:
+        """Cancel PCS startup and stop PCS without masking main shutdown."""
+        start_task = self._pcs_start_task
+        self._pcs_start_task = None
+        if start_task is not None:
+            if not start_task.done():
+                start_task.cancel()
+            try:
+                await start_task
+            except asyncio.CancelledError:
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    raise
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[AgentWebSocketServer] optional PCS startup cleanup failed: %s",
+                    type(exc).__name__,
+                )
+        try:
+            await self._pcs_host.stop()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[AgentWebSocketServer] optional PCS stop failed: %s",
+                type(exc).__name__,
+            )
+
     async def stop(self) -> None:
         """停止 WebSocket 服务端."""
+        await self._stop_pcs_best_effort()
+
         # 先取消 checkpointer 预热任务, 避免在 server 关闭后仍在后台跑.
         warmup = self._checkpointer_warmup_task
         self._checkpointer_warmup_task = None
@@ -1302,7 +1409,6 @@ class AgentWebSocketServer:
         )
 
         await cancel_pending_tasks()
-
         if not had_server:
             return
         try:
@@ -1391,6 +1497,332 @@ class AgentWebSocketServer:
                 await asyncio.gather(*connection_tasks, return_exceptions=True)
             self._session_stream_tasks.clear()
 
+    async def _send_pcs_result(
+        self,
+        ws: Any,
+        request: AgentRequest,
+        send_lock: asyncio.Lock,
+        payload: dict[str, object],
+    ) -> None:
+        if request.is_stream:
+            chunk = AgentResponseChunk(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                payload=payload,
+                is_complete=True,
+                agent_ref=request.agent_ref,
+            )
+            wire = encode_pcs_chunk_for_wire(
+                chunk,
+                response_id=request.request_id,
+                sequence=0,
+            )
+        else:
+            response = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload=payload,
+                agent_ref=request.agent_ref,
+            )
+            wire = encode_pcs_response_for_wire(
+                response,
+                response_id=request.request_id,
+            )
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    async def _send_pcs_error(
+        self,
+        ws: Any,
+        send_lock: asyncio.Lock,
+        *,
+        request_id: str,
+        channel_id: str,
+        message: str,
+        code: object,
+        status: str | None = None,
+        is_stream: bool = False,
+        agent_ref: object = None,
+    ) -> None:
+        payload: dict[str, object] = {"error": message, "code": code}
+        if status is not None:
+            payload["status"] = status
+        if is_stream:
+            payload["event_type"] = "chat.error"
+            chunk = AgentResponseChunk(
+                request_id=request_id,
+                channel_id=channel_id,
+                payload=payload,
+                is_complete=True,
+                agent_ref=agent_ref,
+            )
+            wire = encode_pcs_chunk_for_wire(
+                chunk,
+                response_id=request_id,
+                sequence=0,
+            )
+        else:
+            response = AgentResponse(
+                request_id=request_id,
+                channel_id=channel_id,
+                ok=False,
+                payload=payload,
+                agent_ref=agent_ref,
+            )
+            wire = encode_pcs_response_for_wire(
+                response,
+                response_id=request_id,
+            )
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    async def _handle_pcs_graph_stream(
+        self,
+        ws: Any,
+        request: AgentRequest,
+        send_lock: asyncio.Lock,
+    ) -> None:
+        try:
+            graph = await self._pcs_host.get_graph()
+            nodes = graph.get("nodes")
+            edges = graph.get("edges")
+            if not isinstance(nodes, list) or not isinstance(edges, list):
+                raise TypeError("PCS graph nodes and edges must be arrays")
+            events: list[dict[str, object]] = [
+                {
+                    "event_type": "pcs.graph.start",
+                    "context_ready": bool(graph.get("context_ready")),
+                }
+            ]
+            events.extend(
+                {"event_type": "pcs.graph.nodes", "nodes": nodes[index:index + 200]}
+                for index in range(0, len(nodes), 200)
+            )
+            events.extend(
+                {"event_type": "pcs.graph.edges", "edges": edges[index:index + 200]}
+                for index in range(0, len(edges), 200)
+            )
+            events.append(
+                {
+                    "event_type": "pcs.graph.end",
+                    "node_count": len(nodes),
+                    "edge_count": len(edges),
+                }
+            )
+            for sequence, event in enumerate(events):
+                chunk = AgentResponseChunk(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    payload=event,
+                    is_complete=sequence == len(events) - 1,
+                    agent_ref=request.agent_ref,
+                )
+                wire = encode_pcs_chunk_for_wire(
+                    chunk,
+                    response_id=request.request_id,
+                    sequence=sequence,
+                )
+                async with send_lock:
+                    await send_wire_payload(ws, wire)
+        except asyncio.CancelledError:
+            raise
+        except BaseError as exc:
+            await self._send_pcs_error(
+                ws,
+                send_lock,
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                message=exc.message,
+                code=exc.code,
+                status=exc.status.name,
+                is_stream=True,
+                agent_ref=request.agent_ref,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[AgentWebSocketServer] PCS graph stream failed: %s",
+                type(exc).__name__,
+            )
+            await self._send_pcs_error(
+                ws,
+                send_lock,
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                message="PCS request failed",
+                code="INTERNAL_ERROR",
+                is_stream=True,
+                agent_ref=request.agent_ref,
+            )
+
+    async def _handle_pcs_request(
+        self,
+        ws: Any,
+        request: AgentRequest,
+        send_lock: asyncio.Lock,
+    ) -> None:
+        """Validate and execute one canonical PCS WebSocket request."""
+
+        try:
+            if not isinstance(request.params, dict):
+                raise ValueError("params must be an object")
+            method = request.req_method
+            params = request.params
+            allowed_keys = {
+                ReqMethod.PCS_RUNTIME_STATUS: frozenset(),
+                ReqMethod.PCS_RUNTIME_START: frozenset(),
+                ReqMethod.PCS_RUNTIME_STOP: frozenset(),
+                ReqMethod.PCS_RUNTIME_GET_CONFIG: frozenset(),
+                ReqMethod.PCS_RUNTIME_PATCH_CONFIG: frozenset({"patch"}),
+                ReqMethod.PCS_RUNTIME_SELECT_MODEL: frozenset({"origin_index"}),
+                ReqMethod.PCS_FETCH_LIST_SERVICES: frozenset(),
+                ReqMethod.PCS_FETCH_PATCH_SERVICE: frozenset({"service_id", "patch"}),
+                ReqMethod.PCS_FETCH_START_SERVICE: frozenset({"service_id"}),
+                ReqMethod.PCS_FETCH_STOP_SERVICE: frozenset({"service_id"}),
+                ReqMethod.PCS_FETCH_START_SCHEDULER: frozenset(),
+                ReqMethod.PCS_FETCH_STOP_SCHEDULER: frozenset(),
+                ReqMethod.PCS_FETCH_RUN_ALL: frozenset(),
+                ReqMethod.PCS_FETCH_RUN_ONE: frozenset({"service_id"}),
+                ReqMethod.PCS_FETCH_GET_RUN_STATUS: frozenset({"service_id"}),
+                ReqMethod.PCS_FETCH_AUTHORIZE_PROVIDER: frozenset({"provider"}),
+                ReqMethod.PCS_CONTEXT_STREAM_GRAPH: frozenset(),
+                ReqMethod.PCS_CONTEXT_SEARCH_PAGES: frozenset({"query"}),
+                ReqMethod.PCS_CONTEXT_GET_NODE: frozenset({"node_id"}),
+            }
+            if method not in allowed_keys:
+                raise ValueError("unknown PCS method")
+            if set(params) - allowed_keys[method]:
+                raise ValueError("unknown PCS request parameter")
+            if method == ReqMethod.PCS_CONTEXT_STREAM_GRAPH:
+                if not request.is_stream:
+                    raise ValueError("pcs.context.stream_graph requires is_stream=true")
+                await self._handle_pcs_graph_stream(ws, request, send_lock)
+                return
+
+            if method == ReqMethod.PCS_RUNTIME_STATUS:
+                payload = _pcs_payload(await self._pcs_host.get_status())
+            elif method == ReqMethod.PCS_RUNTIME_START:
+                payload = _pcs_payload(await self._pcs_host.set_runtime_enabled(True))
+            elif method == ReqMethod.PCS_RUNTIME_STOP:
+                payload = _pcs_payload(await self._pcs_host.set_runtime_enabled(False))
+            elif method == ReqMethod.PCS_RUNTIME_GET_CONFIG:
+                payload = await self._pcs_host.get_runtime_config()
+            elif method == ReqMethod.PCS_RUNTIME_PATCH_CONFIG:
+                patch = params.get("patch")
+                if not isinstance(patch, dict):
+                    raise ValueError("patch must be an object")
+                payload = await self._pcs_host.patch_runtime_config(patch)
+            elif method == ReqMethod.PCS_RUNTIME_SELECT_MODEL:
+                origin_index = params.get("origin_index")
+                if type(origin_index) is not int or origin_index < 0:
+                    raise ValueError("origin_index must be a non-negative integer")
+                payload = await self._pcs_host.select_model(origin_index)
+            elif method == ReqMethod.PCS_FETCH_LIST_SERVICES:
+                payload = {"services": await self._pcs_host.list_fetch_services()}
+            elif method == ReqMethod.PCS_FETCH_PATCH_SERVICE:
+                service_id = params.get("service_id")
+                patch = params.get("patch")
+                if not isinstance(service_id, str) or not service_id.strip():
+                    raise ValueError("service_id must be a non-empty string")
+                if not isinstance(patch, dict):
+                    raise ValueError("patch must be an object")
+                payload = await self._pcs_host.patch_fetch_service(
+                    service_id.strip(),
+                    patch,
+                )
+            elif method in {
+                ReqMethod.PCS_FETCH_START_SERVICE,
+                ReqMethod.PCS_FETCH_STOP_SERVICE,
+            }:
+                service_id = params.get("service_id")
+                if not isinstance(service_id, str) or not service_id.strip():
+                    raise ValueError("service_id must be a non-empty string")
+                value = await self._pcs_host.set_fetching(
+                    enabled=method == ReqMethod.PCS_FETCH_START_SERVICE,
+                    service_id=service_id.strip(),
+                )
+                payload = _pcs_payload(value)
+            elif method in {
+                ReqMethod.PCS_FETCH_START_SCHEDULER,
+                ReqMethod.PCS_FETCH_STOP_SCHEDULER,
+            }:
+                value = await self._pcs_host.set_fetching(
+                    enabled=method == ReqMethod.PCS_FETCH_START_SCHEDULER,
+                )
+                payload = _pcs_payload(value)
+            elif method == ReqMethod.PCS_FETCH_RUN_ALL:
+                payload = await self._pcs_host.run_fetch()
+            elif method == ReqMethod.PCS_FETCH_RUN_ONE:
+                service_id = params.get("service_id")
+                if not isinstance(service_id, str) or not service_id.strip():
+                    raise ValueError("service_id must be a non-empty string")
+                payload = await self._pcs_host.run_fetch(service_id=service_id.strip())
+            elif method == ReqMethod.PCS_FETCH_GET_RUN_STATUS:
+                service_id = params.get("service_id")
+                if service_id is not None and (
+                    not isinstance(service_id, str) or not service_id.strip()
+                ):
+                    raise ValueError("service_id must be a non-empty string")
+                payload = await self._pcs_host.get_fetch_run_status(
+                    service_id.strip() if isinstance(service_id, str) else None
+                )
+            elif method == ReqMethod.PCS_FETCH_AUTHORIZE_PROVIDER:
+                provider = params.get("provider")
+                if not isinstance(provider, str) or not provider.strip():
+                    raise ValueError("provider must be a non-empty string")
+                payload = await self._pcs_host.authorize_provider(provider.strip())
+            elif method == ReqMethod.PCS_CONTEXT_SEARCH_PAGES:
+                query = params.get("query")
+                if not isinstance(query, str) or not query.strip():
+                    raise ValueError("query must be a non-empty string")
+                payload = await self._pcs_host.search_graph(query.strip())
+            else:
+                node_id = params.get("node_id")
+                if not isinstance(node_id, str) or not node_id.strip():
+                    raise ValueError("node_id must be a non-empty string")
+                payload = await self._pcs_host.get_graph_page(node_id.strip())
+            await self._send_pcs_result(ws, request, send_lock, payload)
+        except asyncio.CancelledError:
+            raise
+        except ValueError as exc:
+            await self._send_pcs_error(
+                ws,
+                send_lock,
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                message=str(exc),
+                code="BAD_REQUEST",
+                is_stream=request.is_stream,
+                agent_ref=request.agent_ref,
+            )
+        except BaseError as exc:
+            await self._send_pcs_error(
+                ws,
+                send_lock,
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                message=exc.message,
+                code=exc.code,
+                status=exc.status.name,
+                is_stream=request.is_stream,
+                agent_ref=request.agent_ref,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[AgentWebSocketServer] PCS request failed: %s",
+                type(exc).__name__,
+            )
+            await self._send_pcs_error(
+                ws,
+                send_lock,
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                message="PCS request failed",
+                code="INTERNAL_ERROR",
+                is_stream=request.is_stream,
+                agent_ref=request.agent_ref,
+            )
+
     async def _handle_message(self, ws: Any, raw: str | bytes, send_lock: asyncio.Lock) -> None:
         """解析一条 JSON 请求并分发到 IAgentServer 处理."""
         try:
@@ -1415,34 +1847,82 @@ class AgentWebSocketServer:
                 )
             return
 
-        try:
-            env = E2AEnvelope.from_dict(data)
-        except Exception as parse_err:
-            logger.warning(
-                "[AgentWebSocketServer] E2A from_dict 失败，按旧载荷解析: %s",
-                parse_err,
-            )
-            request = _payload_to_request(data)
-        else:
-            jw = (env.channel_context or {}).get(E2A_INTERNAL_CONTEXT_KEY)
-            if isinstance(jw, dict) and jw.get(E2A_FALLBACK_FAILED_KEY):
-                legacy = jw.get(E2A_LEGACY_AGENT_REQUEST_KEY)
-                logger.warning(
-                    "[E2A][fallback] using legacy_agent_request request_id=%s",
-                    env.request_id,
+        pcs_method = _pcs_wire_method(data)
+        if pcs_method is not None:
+            request_id = str(data.get("request_id") or "") if isinstance(data, dict) else ""
+            channel_id = str(data.get("channel") or "") if isinstance(data, dict) else ""
+            is_stream = bool(data.get("is_stream")) if isinstance(data, dict) else False
+            agent_ref = data.get("agent_ref") if isinstance(data, dict) else None
+            try:
+                validate_pcs_e2a_request_dict(data)
+            except ValueError as exc:
+                await self._send_pcs_error(
+                    ws,
+                    send_lock,
+                    request_id=request_id,
+                    channel_id=channel_id,
+                    message=str(exc),
+                    code="BAD_REQUEST",
+                    is_stream=is_stream,
+                    agent_ref=agent_ref,
                 )
-                if not isinstance(legacy, dict):
-                    raise ValueError("legacy_agent_request missing or not a dict")
-                request = _payload_to_request(legacy)
-            else:
-                logger.info(
-                    "[E2A][in] request_id=%s channel=%s method=%s is_stream=%s",
-                    env.request_id,
-                    env.channel,
-                    env.method,
-                    env.is_stream,
+                return
+            if pcs_method not in {item.value for item in _PCS_REQ_METHODS}:
+                await self._send_pcs_error(
+                    ws,
+                    send_lock,
+                    request_id=request_id,
+                    channel_id=channel_id,
+                    message="unknown PCS method",
+                    code="METHOD_NOT_FOUND",
+                    is_stream=is_stream,
+                    agent_ref=agent_ref,
                 )
+                return
+            try:
+                env = E2AEnvelope.from_dict(data)
                 request = e2a_to_agent_request(env)
+            except Exception as exc:
+                await self._send_pcs_error(
+                    ws,
+                    send_lock,
+                    request_id=request_id,
+                    channel_id=channel_id,
+                    message=f"invalid PCS E2A envelope: {exc}",
+                    code="BAD_REQUEST",
+                    is_stream=is_stream,
+                    agent_ref=agent_ref,
+                )
+                return
+        else:
+            try:
+                env = E2AEnvelope.from_dict(data)
+            except Exception as parse_err:
+                logger.warning(
+                    "[AgentWebSocketServer] E2A from_dict 失败，按旧载荷解析: %s",
+                    parse_err,
+                )
+                request = _payload_to_request(data)
+            else:
+                jw = (env.channel_context or {}).get(E2A_INTERNAL_CONTEXT_KEY)
+                if isinstance(jw, dict) and jw.get(E2A_FALLBACK_FAILED_KEY):
+                    legacy = jw.get(E2A_LEGACY_AGENT_REQUEST_KEY)
+                    logger.warning(
+                        "[E2A][fallback] using legacy_agent_request request_id=%s",
+                        env.request_id,
+                    )
+                    if not isinstance(legacy, dict):
+                        raise ValueError("legacy_agent_request missing or not a dict")
+                    request = _payload_to_request(legacy)
+                else:
+                    logger.info(
+                        "[E2A][in] request_id=%s channel=%s method=%s is_stream=%s",
+                        env.request_id,
+                        env.channel,
+                        env.method,
+                        env.is_stream,
+                    )
+                    request = e2a_to_agent_request(env)
 
         logger.info(
             "[AgentWebSocketServer] 收到请求: request_id=%s channel_id=%s is_stream=%s",
@@ -1463,6 +1943,10 @@ class AgentWebSocketServer:
             )
 
         try:
+            if request.req_method in _PCS_REQ_METHODS:
+                await self._handle_pcs_request(ws, request, send_lock)
+                return
+
             if request.channel_id == "acp" and request.req_method != ReqMethod.INITIALIZE:
                 metadata = dict(request.metadata or {})
                 ws_caps = self._get_ws_acp_client_capabilities(ws)

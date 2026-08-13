@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 
 import pytest
@@ -375,3 +376,144 @@ async def test_send_request_clears_connection_when_send_fails():
     response = await asyncio.wait_for(task, timeout=0.1)
     assert response.ok is True
     assert client.has_message_queue_for_test("rid-after-send-close") is False
+
+
+@pytest.mark.asyncio
+async def test_pcs_unary_rejects_legacy_agentserver_response():
+    client = AgentClientHarness()
+    ws = FakeWebSocket()
+    client.set_ws_for_test(ws)
+    env = e2a_from_agent_fields(
+        request_id="pcs-legacy-response",
+        channel_id="web",
+        req_method="pcs.runtime.status",
+        params={},
+    )
+
+    task = asyncio.create_task(client.send_request(env))
+    for _ in range(100):
+        if ws.sent_payloads:
+            break
+        await asyncio.sleep(0.001)
+    queue = client.get_message_queue_for_test("pcs-legacy-response")
+    await queue.put(
+        {
+            "request_id": "pcs-legacy-response",
+            "channel_id": "web",
+            "ok": True,
+            "payload": {"ready": True},
+        }
+    )
+
+    with pytest.raises(ValueError, match="canonical E2AResponse"):
+        await asyncio.wait_for(task, timeout=0.1)
+
+
+@pytest.mark.asyncio
+async def test_non_pcs_unary_keeps_legacy_response_compatibility():
+    client = AgentClientHarness()
+    ws = FakeWebSocket()
+    client.set_ws_for_test(ws)
+    env = e2a_from_agent_fields(
+        request_id="skills-legacy-response",
+        channel_id="web",
+        req_method="skills.list",
+        params={},
+    )
+
+    task = asyncio.create_task(client.send_request(env))
+    for _ in range(100):
+        if ws.sent_payloads:
+            break
+        await asyncio.sleep(0.001)
+    queue = client.get_message_queue_for_test("skills-legacy-response")
+    await queue.put(
+        {
+            "request_id": "skills-legacy-response",
+            "channel_id": "web",
+            "ok": True,
+            "payload": {"items": []},
+        }
+    )
+
+    response = await asyncio.wait_for(task, timeout=0.1)
+    assert response.ok is True
+    assert response.payload == {"items": []}
+
+
+@pytest.mark.asyncio
+async def test_pcs_outbound_request_contains_only_strict_fields():
+    client = AgentClientHarness()
+    ws = FakeWebSocket()
+    client.set_ws_for_test(ws)
+    env = e2a_from_agent_fields(
+        request_id="pcs-strict-request",
+        channel_id="web",
+        req_method="pcs.runtime.status",
+        params={},
+    )
+    env.jsonrpc_id = "must-not-leak"
+    env.task_id = "must-not-leak"
+    env.a2a_metadata = {"must": "not-leak"}
+
+    task = asyncio.create_task(client.send_request(env))
+    for _ in range(100):
+        if ws.sent_payloads:
+            break
+        await asyncio.sleep(0.001)
+    sent = json.loads(ws.sent_payloads[0])
+    queue = client.get_message_queue_for_test("pcs-strict-request")
+    await queue.put(
+        encode_agent_response_for_wire(
+            AgentResponse(
+                request_id="pcs-strict-request",
+                channel_id="web",
+                payload={"ready": True},
+            ),
+            response_id="pcs-strict-request",
+        )
+    )
+    await asyncio.wait_for(task, timeout=0.1)
+
+    assert "jsonrpc_id" not in sent
+    assert "task_id" not in sent
+    assert "a2a_metadata" not in sent
+
+
+@pytest.mark.asyncio
+async def test_pcs_stream_rejects_legacy_agentserver_chunk(monkeypatch):
+    client = AgentClientHarness()
+    ws = FakeWebSocket()
+    client.set_ws_for_test(ws)
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.routing.agent_client._STREAM_TRAILING_MESSAGE_GRACE_SECONDS",
+        0.01,
+    )
+    env = e2a_from_agent_fields(
+        request_id="pcs-legacy-chunk",
+        channel_id="web",
+        req_method="pcs.context.stream_graph",
+        params={},
+        is_stream=True,
+    )
+
+    async def consume_stream():
+        return [chunk async for chunk in client.send_request_stream(env)]
+
+    task = asyncio.create_task(consume_stream())
+    for _ in range(100):
+        if ws.sent_payloads:
+            break
+        await asyncio.sleep(0.001)
+    queue = client.get_message_queue_for_test("pcs-legacy-chunk")
+    await queue.put(
+        {
+            "request_id": "pcs-legacy-chunk",
+            "channel_id": "web",
+            "payload": {"nodes": []},
+            "is_complete": True,
+        }
+    )
+
+    with pytest.raises(ValueError, match="canonical E2AResponse"):
+        await asyncio.wait_for(task, timeout=0.2)

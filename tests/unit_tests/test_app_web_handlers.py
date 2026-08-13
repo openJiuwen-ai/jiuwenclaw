@@ -1002,6 +1002,45 @@ def test_web_exposes_graph_methods_and_rejects_legacy_symphony_methods():
     assert legacy_symphony_methods.isdisjoint(app_web_handlers._FORWARD_REQ_METHODS)
 
 
+def test_web_forwards_only_canonical_pcs_rpc_methods():
+    methods = {
+        "pcs.runtime.status",
+        "pcs.runtime.start",
+        "pcs.runtime.stop",
+        "pcs.runtime.get_config",
+        "pcs.runtime.patch_config",
+        "pcs.runtime.select_model",
+        "pcs.fetch.list_services",
+        "pcs.fetch.patch_service",
+        "pcs.fetch.start_service",
+        "pcs.fetch.stop_service",
+        "pcs.fetch.start_scheduler",
+        "pcs.fetch.stop_scheduler",
+        "pcs.fetch.run_all",
+        "pcs.fetch.run_one",
+        "pcs.fetch.get_run_status",
+        "pcs.fetch.authorize_provider",
+        "pcs.context.stream_graph",
+        "pcs.context.search_pages",
+        "pcs.context.get_node",
+    }
+    forwarded = {
+        method
+        for method in app_web_handlers._FORWARD_REQ_METHODS
+        if method.startswith("pcs.")
+    }
+    no_local = {
+        method
+        for method in app_web_handlers._FORWARD_NO_LOCAL_HANDLER_METHODS
+        if method.startswith("pcs.")
+    }
+
+    assert forwarded == methods
+    assert no_local == methods
+    assert "pcs.fetch.create_service" not in forwarded
+    assert "pcs.fetch.delete_service" not in forwarded
+
+
 # =====================================================================
 # _normalize_feishu_conf 纯函数测试
 # =====================================================================

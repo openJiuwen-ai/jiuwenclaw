@@ -13,6 +13,10 @@ from typing import Any
 from jiuwenswarm.common.e2a.constants import (
     E2A_RESPONSE_KIND_E2A_ERROR,
     E2A_RESPONSE_STATUS_FAILED,
+    E2A_SOURCE_PROTOCOL_A2A,
+    E2A_SOURCE_PROTOCOL_ACP,
+    E2A_SOURCE_PROTOCOL_E2A,
+    E2A_WIRE_INTERNAL_METADATA_KEYS,
     E2A_WIRE_LEGACY_AGENT_CHUNK_KEY,
     E2A_WIRE_LEGACY_AGENT_RESPONSE_KEY,
 )
@@ -22,9 +26,9 @@ from jiuwenswarm.common.e2a.gateway_normalize import (
     e2a_response_to_agent_chunk,
     e2a_response_to_agent_response,
 )
-from jiuwenswarm.common.e2a.constants import E2A_SOURCE_PROTOCOL_E2A
 from jiuwenswarm.common.e2a.models import (
     E2A_PROTOCOL_VERSION,
+    E2AEnvelope,
     E2AProvenance,
     E2AResponse,
     IdentityOrigin,
@@ -33,6 +37,33 @@ from jiuwenswarm.common.e2a.models import (
 from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
 
 logger = logging.getLogger(__name__)
+
+_PCS_E2A_REQUEST_FIELDS = frozenset(
+    {
+        "protocol_version",
+        "request_id",
+        "channel",
+        "session_id",
+        "method",
+        "params",
+        "is_stream",
+        "user_id",
+        "agent_ref",
+        "chat_id",
+        "identity_origin",
+        "channel_context",
+        "auth",
+        "timestamp",
+        "provenance",
+    }
+)
+_PCS_E2A_OPTIONAL_STRING_FIELDS = ("session_id", "user_id", "chat_id")
+_PCS_E2A_OPTIONAL_OBJECT_FIELDS = ("agent_ref", "channel_context", "auth", "provenance")
+_PCS_E2A_SOURCE_PROTOCOLS = {
+    E2A_SOURCE_PROTOCOL_E2A,
+    E2A_SOURCE_PROTOCOL_ACP,
+    E2A_SOURCE_PROTOCOL_A2A,
+}
 
 
 def _json_safe(value: Any) -> Any:
@@ -56,6 +87,72 @@ def _json_safe(value: Any) -> Any:
     if hasattr(value, "__dict__"):
         return _json_safe(vars(value))
     return str(value)
+
+
+def _invalid_pcs_envelope(message: str) -> ValueError:
+    return ValueError(f"invalid PCS E2A envelope: {message}")
+
+
+def validate_pcs_e2a_request_dict(data: dict[str, Any]) -> None:
+    """Validate the canonical PCS-only Gateway-to-AgentServer envelope."""
+
+    if not isinstance(data, dict):
+        raise _invalid_pcs_envelope("request must be an object")
+    unknown = set(data) - _PCS_E2A_REQUEST_FIELDS
+    if unknown:
+        raise _invalid_pcs_envelope("unknown top-level field")
+    if data.get("protocol_version", E2A_PROTOCOL_VERSION) != E2A_PROTOCOL_VERSION:
+        raise _invalid_pcs_envelope("unsupported protocol_version")
+    for name in ("request_id", "channel", "method"):
+        value = data.get(name)
+        if not isinstance(value, str) or not value.strip():
+            raise _invalid_pcs_envelope(f"{name} must be non-empty")
+    if not str(data["method"]).startswith("pcs."):
+        raise _invalid_pcs_envelope("method must start with pcs.")
+    if not isinstance(data.get("params"), dict):
+        raise _invalid_pcs_envelope("params must be an object")
+    if "is_stream" in data and type(data["is_stream"]) is not bool:
+        raise _invalid_pcs_envelope("is_stream must be boolean")
+    for name in _PCS_E2A_OPTIONAL_STRING_FIELDS:
+        value = data.get(name)
+        if value is not None and not isinstance(value, str):
+            raise _invalid_pcs_envelope(f"{name} must be a string or null")
+    for name in _PCS_E2A_OPTIONAL_OBJECT_FIELDS:
+        value = data.get(name)
+        if value is not None and not isinstance(value, dict):
+            raise _invalid_pcs_envelope(f"{name} must be an object or null")
+    origin = data.get("identity_origin")
+    if origin is not None and origin not in {item.value for item in IdentityOrigin}:
+        raise _invalid_pcs_envelope("identity_origin is invalid")
+    provenance = data.get("provenance")
+    if isinstance(provenance, dict):
+        source_protocol = provenance.get("source_protocol", E2A_SOURCE_PROTOCOL_E2A)
+        if source_protocol not in _PCS_E2A_SOURCE_PROTOCOLS:
+            raise _invalid_pcs_envelope("provenance.source_protocol is invalid")
+    if "timestamp" in data:
+        timestamp = data["timestamp"]
+        if not isinstance(timestamp, str):
+            raise _invalid_pcs_envelope("timestamp must be RFC 3339")
+        try:
+            parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise _invalid_pcs_envelope("timestamp must be RFC 3339") from exc
+        if parsed.tzinfo is None:
+            raise _invalid_pcs_envelope("timestamp must include timezone")
+
+
+def encode_pcs_request_for_wire(envelope: E2AEnvelope) -> dict[str, Any]:
+    """Serialize one PCS request without the generic E2A extension fields."""
+
+    if not isinstance(envelope, E2AEnvelope):
+        raise TypeError("envelope must be E2AEnvelope")
+    wire = {
+        name: _json_safe(getattr(envelope, name))
+        for name in _PCS_E2A_REQUEST_FIELDS
+        if getattr(envelope, name) is not None
+    }
+    validate_pcs_e2a_request_dict(wire)
+    return wire
 
 
 def _raw_dict_to_agent_response(data: dict[str, Any]) -> AgentResponse:
@@ -227,6 +324,64 @@ def parse_agent_server_wire_chunk(data: dict[str, Any]) -> AgentResponseChunk:
         return _raw_dict_to_agent_chunk(data)
 
     raise ValueError(f"parse_agent_server_wire_chunk: unrecognized wire shape keys={list(data.keys())[:32]}")
+
+
+def _parse_pcs_e2a_response(data: dict[str, Any]) -> E2AResponse:
+    if not is_e2a_response_wire_dict(data):
+        raise ValueError("PCS response must be canonical E2AResponse")
+    e2a = E2AResponse.from_dict(dict(data))
+    if set(e2a.metadata or {}) & E2A_WIRE_INTERNAL_METADATA_KEYS:
+        raise ValueError("PCS response contains legacy metadata")
+    return e2a
+
+
+def parse_pcs_server_wire_unary(data: dict[str, Any]) -> AgentResponse:
+    """Parse a PCS unary response without legacy shape or metadata fallback."""
+
+    e2a = _parse_pcs_e2a_response(data)
+    response = e2a_response_to_agent_response(e2a)
+    response.agent_ref = e2a.agent_ref
+    return response
+
+
+def parse_pcs_server_wire_chunk(data: dict[str, Any]) -> AgentResponseChunk:
+    """Parse a PCS response chunk without legacy shape or metadata fallback."""
+
+    return e2a_response_to_agent_chunk(_parse_pcs_e2a_response(data))
+
+
+def encode_pcs_response_for_wire(
+    resp: AgentResponse,
+    *,
+    response_id: str,
+    sequence: int = 0,
+) -> dict[str, Any]:
+    """Encode a PCS unary response without the generic legacy fallback."""
+
+    e2a = e2a_response_from_agent_response(
+        resp,
+        response_id=response_id,
+        sequence=sequence,
+    )
+    return _json_safe(e2a.to_dict())
+
+
+def encode_pcs_chunk_for_wire(
+    chunk: AgentResponseChunk,
+    *,
+    response_id: str,
+    sequence: int,
+    is_stream: bool = True,
+) -> dict[str, Any]:
+    """Encode a PCS response chunk without the generic legacy fallback."""
+
+    e2a = e2a_response_from_agent_chunk(
+        chunk,
+        response_id=response_id,
+        sequence=sequence,
+        is_stream=is_stream,
+    )
+    return _json_safe(e2a.to_dict())
 
 
 def encode_agent_response_for_wire(

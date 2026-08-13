@@ -79,6 +79,7 @@ from openjiuwen.harness.rails import (
     configure_skill_evolution_runtime,
     unconfigure_skill_evolution,
 )
+from openjiuwen.harness.rails.proactive_context import PCSContextRail
 from openjiuwen.harness.rails.evolution import EvolutionReviewRuntime
 from openjiuwen.harness.rails.context_engineer.context_assemble_rail import ContextAssembleRail
 from openjiuwen.harness.rails.context_engineer.context_processor_rail import ContextProcessorRail
@@ -1153,6 +1154,8 @@ class JiuWenSwarmDeepAdapter:
         self._context_processor_rail: ContextProcessorRail | None = None
         self._runtime_prompt_rail: RuntimePromptRail | None = None
         self._response_prompt_rail: ResponsePromptRail | None = None
+        self._proactive_context_rail: PCSContextRail | None = None
+        self._proactive_context_rail_lock = asyncio.Lock()
         self._security_rail: SecurityRail | None = None
         self._memory_rail: MemoryRail | None = None
         self._external_memory_rail: Any = None
@@ -5801,6 +5804,61 @@ class JiuWenSwarmDeepAdapter:
         """
         self._last_mode = mode
         await self._update_agent_rails()
+        await self._sync_proactive_context_rail(mode)
+
+    def _proactive_context_rail_enabled(self, mode: str) -> bool:
+        """Return whether this request mode uses the embedded Core Rail."""
+
+        return not self._is_code_agent and mode in {"agent", "agent.fast", "agent.plan"}
+
+    async def _sync_proactive_context_rail(self, mode: str) -> None:
+        """Register or detach the fixed-path Core Rail for normal agent modes."""
+
+        async with self._proactive_context_rail_lock:
+            enabled = self._proactive_context_rail_enabled(mode)
+            rail = self._proactive_context_rail
+
+            if rail is not None and not enabled:
+                try:
+                    await self._instance.unregister_rail(rail)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] optional PCS Rail "
+                        "unregister failed: %s",
+                        type(exc).__name__,
+                    )
+                finally:
+                    self._proactive_context_rail = None
+                rail = None
+
+            if not enabled:
+                return
+
+            if rail is None:
+                try:
+                    rail = PCSContextRail(Path.home() / ".jiuwenswarm" / ".pcs")
+                    await self._instance.register_rail(rail)
+                except Exception as exc:  # noqa: BLE001
+                    if rail is not None:
+                        try:
+                            await self._instance.unregister_rail(rail)
+                        except Exception as cleanup_exc:  # noqa: BLE001
+                            logger.warning(
+                                "[JiuWenSwarmDeepAdapter] optional PCS Rail "
+                                "registration cleanup failed: %s",
+                                type(cleanup_exc).__name__,
+                            )
+                    self._proactive_context_rail = None
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] optional PCS Rail "
+                        "registration failed: %s",
+                        type(exc).__name__,
+                    )
+                    return
+                self._proactive_context_rail = rail
+                logger.info(
+                    "[JiuWenSwarmDeepAdapter] PCSContextRail registered for %s", mode
+                )
 
     @staticmethod
     def _user_interaction_rail_attribute() -> str:
@@ -6524,6 +6582,13 @@ class JiuWenSwarmDeepAdapter:
                     self._parent_session_id,
                     exc,
                 )
+        try:
+            await self._sync_proactive_context_rail("cleanup")
+        except BaseException as exc:  # noqa: BLE001
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] PCSContextRail cleanup failed: %s",
+                exc,
+            )
         self._teardown_agent_owned_tools()
         self._release_sys_operations()
         # 取消未到期的延时重索引 task，避免 adapter cleanup 后仍有孤儿 task
