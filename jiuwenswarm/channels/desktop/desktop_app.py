@@ -43,12 +43,12 @@ PNG_DATA_URL_PREFIX = "data:image/png;base64,"
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 DesktopSaveResult = dict[str, bool]
 UPDATE_CLEANUP_PATTERNS = (
-    "WorkSwarm-setup-*.exe",
-    "WorkSwarm-*.dmg",
-    "WorkSwarm-*.tar.gz",
-    "WorkSwarm-*.exe.part",
-    "WorkSwarm-*.dmg.part",
-    "WorkSwarm-*.tar.gz.part",
+    "*.exe",
+    "*.dmg",
+    "*.tar.gz",
+    "*.exe.part",
+    "*.dmg.part",
+    "*.tar.gz.part",
     "_install_helper.ps1",
     "_install_helper.sh",
 )

@@ -849,10 +849,8 @@ updater:
   repo_owner: openJiuwen
   repo_name: jiuwenswarm
   release_api_url: ""
-  asset_name_pattern_windows: "JiuwenSwarm-setup-{version}.exe"
-  asset_name_pattern_macos: "JiuwenSwarm-{version}.dmg"
+  # Windows / macOS installers are selected by their unique .exe / .dmg suffix.
   asset_name_pattern_linux: "JiuwenSwarm-{version}.tar.gz"
-  sha256_name_pattern: "JiuwenSwarm-setup-{version}.exe.sha256"
   timeout_seconds: 20
   pypi_mirror: "https://mirrors.aliyun.com/pypi"
 
