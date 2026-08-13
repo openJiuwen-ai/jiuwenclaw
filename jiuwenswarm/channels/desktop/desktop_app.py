@@ -43,12 +43,12 @@ PNG_DATA_URL_PREFIX = "data:image/png;base64,"
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 DesktopSaveResult = dict[str, bool]
 UPDATE_CLEANUP_PATTERNS = (
-    "JiuwenSwarm-setup-*.exe",
-    "JiuwenSwarm-*.dmg",
-    "JiuwenSwarm-*.tar.gz",
-    "JiuwenSwarm-*.exe.part",
-    "JiuwenSwarm-*.dmg.part",
-    "JiuwenSwarm-*.tar.gz.part",
+    "WorkSwarm-setup-*.exe",
+    "WorkSwarm-*.dmg",
+    "WorkSwarm-*.tar.gz",
+    "WorkSwarm-*.exe.part",
+    "WorkSwarm-*.dmg.part",
+    "WorkSwarm-*.tar.gz.part",
     "_install_helper.ps1",
     "_install_helper.sh",
 )
@@ -693,7 +693,7 @@ class DesktopRuntime:
 
         # Derive the .app bundle path from the frozen executable.
         # sys.executable is typically:
-        #   /Applications/JiuwenSwarm.app/Contents/MacOS/jiuwenswarm
+        #   /Applications/WorkSwarm.app/Contents/MacOS/workswarm
         # so the bundle is three levels up. Prefer replacing the exact bundle
         # the user launched, but fall back to /Applications when running from a
         # read-only DMG mount or from a non-bundled development executable.
@@ -703,7 +703,7 @@ class DesktopRuntime:
         elif app_bundle.suffix == ".app":
             install_target = f"/Applications/{app_bundle.name}"
         else:
-            install_target = "/Applications/JiuwenSwarm.app"
+            install_target = "/Applications/WorkSwarm.app"
 
         log_file = get_logs_dir() / "update_helper.log"
         backend_port = self.backend_port
@@ -723,7 +723,7 @@ set -e
 LOG_FILE={q_log_file}
 exec >>"$LOG_FILE" 2>&1
 
-echo "=== JiuwenSwarm macOS install helper: $(date) ==="
+echo "=== WorkSwarm macOS install helper: $(date) ==="
 echo "[helper] dmg={q_target}"
 echo "[helper] install_target={q_install_target}"
 echo "[helper] parent_pid={parent_pid}"
@@ -861,7 +861,7 @@ echo "=== install helper finished: $(date) ==="
         q_target = shlex.quote(str(target))
         q_install_dir = shlex.quote(install_dir)
         q_backup_dir = shlex.quote(backup_dir)
-        q_executable = shlex.quote(f"{install_dir}/jiuwenswarm")
+        q_executable = shlex.quote(f"{install_dir}/workswarm")
 
         helper_content = f"""#!/bin/bash
 set -e
@@ -958,7 +958,7 @@ nohup {q_executable} >/dev/null 2>&1 &
         """
         if sys.platform != "darwin":
             return
-        cache_dir = Path.home() / "Library" / "Caches" / "com.jiuwenswarm.desktop"
+        cache_dir = Path.home() / "Library" / "Caches" / "com.workswarm.desktop"
         if cache_dir.exists():
             shutil.rmtree(cache_dir)
             logger.info("[desktop] cleared WKWebView HTTP cache: %s", cache_dir)
@@ -1066,7 +1066,7 @@ transition:opacity .4s ease,transform .4s ease}
 <body>
 <div class="root">
 <div class="logo">__LOGO_SVG__</div>
-<div class="app-name">JiuwenSwarm</div>
+<div class="app-name">WorkSwarm</div>
 <div class="spinner"></div>
 <div class="tip-area">
     <div class="tip-label">专属智能AI Agent助理</div>
@@ -1174,8 +1174,8 @@ def _kill_process_tree(process: subprocess.Popen[bytes]) -> None:
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Launch JiuwenSwarm desktop window.")
-    parser.add_argument("--title", default="JiuwenSwarm", help="Desktop window title.")
+    parser = argparse.ArgumentParser(description="Launch WorkSwarm desktop window.")
+    parser.add_argument("--title", default="WorkSwarm", help="Desktop window title.")
     parser.add_argument("--width", type=int, default=1440, help="Initial window width.")
     parser.add_argument(
         "--height", type=int, default=960, help="Initial window height."
@@ -1207,17 +1207,17 @@ def _setup_tui_path() -> None:
         return
     # Prefer /Applications path over /Volumes (DMG mount) path
     tui_dir = str(tui_binary.parent)
-    apps_dir = "/Applications/JiuwenSwarm.app/Contents/MacOS"
+    apps_dir = "/Applications/WorkSwarm.app/Contents/MacOS"
     if Path(apps_dir).is_dir():
         tui_dir = apps_dir
-    marker = "JiuwenSwarm.app/Contents/MacOS"
+    marker = "WorkSwarm.app/Contents/MacOS"
     zshrc = Path.home() / ".zshrc"
     try:
         existing = zshrc.read_text(encoding="utf-8") if zshrc.exists() else ""
         if marker in existing:
             return
         with open(zshrc, "a", encoding="utf-8") as f:
-            f.write(f"\n# Added by JiuwenSwarm - jiuwenswarm-tui CLI\n")
+            f.write(f"\n# Added by WorkSwarm - jiuwenswarm-tui CLI\n")
             f.write(f'export PATH="{tui_dir}:$PATH"\n')
         logger.info("[desktop] added TUI to PATH in ~/.zshrc")
     except OSError as exc:

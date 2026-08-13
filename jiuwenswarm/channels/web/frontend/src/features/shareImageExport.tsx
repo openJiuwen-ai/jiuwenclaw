@@ -183,7 +183,7 @@ export const ShareImageDocument = forwardRef<HTMLDivElement, ShareImageDocumentP
           <div className="share-image-masthead">
             <div className="share-image-brand">
               <img src="/logo.svg" alt="" className="share-image-brand__logo" />
-              <div className="share-image-brand__name">JiuwenSwarm</div>
+              <div className="share-image-brand__name">WorkSwarm</div>
             </div>
           </div>
         </header>
@@ -500,7 +500,7 @@ const EMPTY_MD5 = '';
  * Alibaba's docs use), since some platforms reject empty reserved fields.
  */
 function buildAigcLabel(): { xmp: string } {
-  const producer = 'JiuwenSwarm';
+  const producer = 'WorkSwarm';
   const produceId = generateUuidV4();
   const payload = {
     Label: '1',
