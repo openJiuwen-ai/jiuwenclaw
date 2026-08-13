@@ -1527,6 +1527,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     message_handler = bind.message_handler
     channel_manager = bind.channel_manager
     on_config_saved = bind.on_config_saved
+
+    from jiuwenswarm.gateway.channel_manager.web.video_live import (
+        register_video_live_handler,
+    )
+
+    register_video_live_handler(channel)
     heartbeat_service = bind.heartbeat_service
     cron_controller = bind.cron_controller
     updater_service = bind.updater_service
