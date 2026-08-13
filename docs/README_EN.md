@@ -165,8 +165,8 @@ This page collects common JiuwenSwarm usage instructions, feature documentation,
     </tr>
     <tr>
       <td width="22%"><strong>TUI Mode</strong></td>
-      <td width="28%"><a href="en/SlashCommandArchitecture.md">Slash Command Architecture</a> / <a href="en/SlashCommands.md">Slash Command Reference</a> / <a href="en/Modes.md">Mode System</a></td>
-      <td width="50%">Supports the TUI slash command system, common command reference, and PLAN / AGENT / CODE / TEAM mode switching and configuration.</td>
+      <td width="28%"><a href="en/SlashCommandArchitecture.md">Slash Command Architecture</a> / <a href="en/SlashCommands.md">Slash Command Reference</a> / <a href="en/Modes.md">Mode System</a> / <a href="en/TUISwarmFlowGuide.md">SwarmFlow (TUI)</a></td>
+      <td width="50%">TUI slash commands, PLAN / AGENT / CODE / TEAM mode switching, and SwarmFlow toggle, run-tree viewer, and HITL replies.</td>
     </tr>
     <tr>
       <th colspan="3" align="left" bgcolor="#f3f4f6"><h3>📄 Appendix</h3></th>

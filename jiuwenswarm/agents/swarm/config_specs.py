@@ -96,6 +96,7 @@ _COMMON_RAIL_NAMES: tuple[str, ...] = (
     registry.STREAM_EVENT,
     registry.TASK_PLANNING,
     registry.SECURITY,
+    registry.MODEL_ANOMALY_DETECTION,
     registry.HEARTBEAT,
     registry.AVATAR_PROMPT,
     registry.MULTIMODAL_IMAGE,
@@ -138,6 +139,7 @@ _CODE_RAIL_NAMES: tuple[str, ...] = (
     registry.STREAM_EVENT,
     registry.MULTIMODAL_IMAGE,
     registry.SECURITY,
+    registry.MODEL_ANOMALY_DETECTION,
     registry.CODE_LSP,
     registry.CODE_PROJECT_MEMORY,
     registry.PERMISSION_INTERRUPT,
@@ -325,6 +327,14 @@ def _context_processor_params(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _model_anomaly_detection_params(config: dict[str, Any]) -> dict[str, Any]:
+    """Attribute params for the model-anomaly / tool-loop compact rail."""
+    guard = _config_section(config, "execution_guard")
+    return {
+        "rail_config": _config_section(guard, "model_anomaly_detection_rail"),
+    }
+
+
 def _permission_params(config: dict[str, Any]) -> dict[str, Any]:
     """Attribute params for the permission-interrupt rail."""
     return {
@@ -351,6 +361,7 @@ def _member_evolution_rail_params(config: dict[str, Any]) -> dict[str, Any]:
 # Per-element attribute params, keyed by provider name; empty for parameterless.
 _RAIL_PARAM_BUILDERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     registry.CONTEXT_PROCESSOR: _context_processor_params,
+    registry.MODEL_ANOMALY_DETECTION: _model_anomaly_detection_params,
     registry.CODE_PROJECT_MEMORY: lambda c: {
         "additional_directories": _additional_directories(c)
     },

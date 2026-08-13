@@ -24,6 +24,7 @@ from jiuwenswarm.server.gateway_push.wire import build_server_push_wire
 from jiuwenswarm.server.ws_send import send_wire_payload
 from jiuwenswarm.agents.harness.common.tools.acp_output_tools import get_acp_output_manager
 from jiuwenswarm.common.utils import get_agent_sessions_dir, get_config_file, mask_sensitive
+from jiuwenswarm.common.todo_snapshot import load_todo_snapshot_for_frontend
 from jiuwenswarm.common.e2a.agent_compat import e2a_to_agent_request
 from jiuwenswarm.common.e2a.constants import (
     E2A_CANCEL_SOURCE_CLIENT_DISCONNECT,
@@ -805,6 +806,7 @@ _SANDBOX_FILES_PARAMS = frozenset(
         "project_dir",
         "cwd",
         "mode",  # injected by gateway for agent routing
+        "agent_type",  # injected by gateway for AgentOS routing
     }
 )
 
@@ -1479,6 +1481,9 @@ class AgentWebSocketServer:
                 return
             if request.req_method == ReqMethod.SESSION_RENAME:
                 await self._handle_session_rename(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.SESSION_REBIND_PROJECT:
+                await self._handle_session_rebind_project(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.SESSION_SWITCH:
                 await self._handle_session_switch(ws, request, send_lock)
@@ -2716,8 +2721,9 @@ class AgentWebSocketServer:
         # 启动心跳任务
         heartbeat_task = asyncio.create_task(_heartbeat_loop())
 
+        response_stream = agent.process_message_stream(request)
         try:
-            async for chunk in agent.process_message_stream(request):
+            async for chunk in response_stream:
                 chunk_count += 1
                 # 通知心跳任务有真实 chunk 发送，重置心跳计时
                 heartbeat_event.set()
@@ -2761,14 +2767,33 @@ class AgentWebSocketServer:
                 # 清除 event，让心跳任务重新开始计时
                 heartbeat_event.clear()
         finally:
+            close_stream = getattr(response_stream, "aclose", None)
+            if callable(close_stream):
+                await close_stream()
             # 停止心跳任务
             if heartbeat_task is not None:
+                logger.info(
+                    "[AgentWebSocketServer] cancelling heartbeat_task: request_id=%s",
+                    request.request_id,
+                )
                 heartbeat_task.cancel()
                 try:
                     await heartbeat_task
+                    logger.info(
+                        "[AgentWebSocketServer] heartbeat_task cancelled cleanly: request_id=%s",
+                        request.request_id,
+                    )
                 except asyncio.CancelledError:
+                    logger.info(
+                        "[AgentWebSocketServer] heartbeat_task cancelled (CancelledError): request_id=%s",
+                        request.request_id,
+                    )
                     pass
                 except WebSocketConnectionClosed:
+                    logger.info(
+                        "[AgentWebSocketServer] heartbeat_task cancelled (ConnectionClosed): request_id=%s",
+                        request.request_id,
+                    )
                     pass
             # 清除自身的宿主生命周期记录；同 session 的其它请求不受影响。
             entries = self._session_stream_tasks.get(session_id)
@@ -2865,6 +2890,118 @@ class AgentWebSocketServer:
                 payload={"error": err or "session.rename failed", "code": code or ""},
                 metadata=request.metadata,
             )
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    async def _handle_session_rebind_project(
+        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
+    ) -> None:
+        """处理 session.rebind_project：TUI /workspace set 切换工作目录时重绑当前会话。
+
+        AgentServer 拥有会话运行态与 metadata 写入权，因此重绑必须在 AgentServer
+        完成：分离部署 / user_id 隔离目录时，Gateway 本地写不会落到 AgentServer
+        所在的会话目录。本 handler 复用 ``find_or_create_code_project_for_tui_params``
+        解析/创建新目录对应的 code 项目，再 ``rebind_session_project`` 强制更新
+        metadata（含 channel_metadata.project_dir/cwd，保证 /resume current-dir 过滤
+        正确归位）。下一轮 chat.send 会读到新 project_dir 并据此重选 agent 实例。
+        """
+        from jiuwenswarm.server.runtime.session.project_store import (
+            find_or_create_code_project_for_tui_params,
+        )
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            get_session_metadata,
+            rebind_session_project,
+        )
+
+        sid = (request.session_id or "").strip()
+        params = request.params if isinstance(request.params, dict) else {}
+        candidate_dir = str(params.get("project_dir") or params.get("cwd") or "").strip()
+        if not sid:
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": "session_id is required", "code": "BAD_REQUEST"},
+                metadata=request.metadata,
+            )
+        elif not candidate_dir:
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": "project_dir is required", "code": "BAD_REQUEST"},
+                metadata=request.metadata,
+            )
+        elif not get_session_metadata(sid):
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": "session not found", "code": "NOT_FOUND"},
+                metadata=request.metadata,
+            )
+        else:
+            try:
+                project = find_or_create_code_project_for_tui_params(
+                    {"project_dir": candidate_dir}
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[AgentServer] session.rebind_project resolve project failed: %s",
+                    exc,
+                )
+                resp = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=False,
+                    payload={
+                        "error": str(exc),
+                        "code": "PROJECT_RESOLVE_FAILED",
+                    },
+                    metadata=request.metadata,
+                )
+            else:
+                if project is None:
+                    resp = AgentResponse(
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        ok=False,
+                        payload={
+                            "error": "project_dir must be a non-empty absolute path",
+                            "code": "BAD_REQUEST",
+                        },
+                        metadata=request.metadata,
+                    )
+                else:
+                    updated = rebind_session_project(
+                        session_id=sid,
+                        project_id=project.project_id,
+                        project_dir=project.project_dir,
+                        work_mode=project.work_mode,
+                    )
+                    if not updated:
+                        resp = AgentResponse(
+                            request_id=request.request_id,
+                            channel_id=request.channel_id,
+                            ok=False,
+                            payload={"error": "session not found", "code": "NOT_FOUND"},
+                            metadata=request.metadata,
+                        )
+                    else:
+                        resp = AgentResponse(
+                            request_id=request.request_id,
+                            channel_id=request.channel_id,
+                            ok=True,
+                            payload={
+                                "session_id": sid,
+                                "project_id": project.project_id,
+                                "project_dir": project.project_dir,
+                                "project_name": project.name,
+                                "work_mode": project.work_mode,
+                            },
+                            metadata=request.metadata,
+                        )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
             await send_wire_payload(ws, wire)
@@ -4844,6 +4981,45 @@ class AgentWebSocketServer:
                     )
                     return
 
+        done_seq = len(messages) if isinstance(messages, list) else 0
+        next_seq = done_seq
+
+        # Session open / refresh: push full todo snapshot before history "done"
+        # so the frontend todo panel restores without reading workspace files.
+        # Only page 1 — pagination must not re-flash the panel.
+        if page_idx == 1 and isinstance(session_id, str) and session_id.strip():
+            todos = load_todo_snapshot_for_frontend(session_id)
+            todo_chunk = AgentResponseChunk(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                payload={
+                    "event_type": "todo.updated",
+                    "todos": todos,
+                    "session_id": session_id.strip(),
+                },
+                is_complete=False,
+            )
+            wire_todo = encode_agent_chunk_for_wire(
+                todo_chunk,
+                response_id=request.request_id,
+                sequence=next_seq,
+            )
+            sent_todo = False
+            async with send_lock:
+                sent_todo = await send_wire_payload(ws, wire_todo)
+            if not sent_todo:
+                # chat timeline still finishes; log so oversized snapshots are visible.
+                logger.warning(
+                    "[AgentWebSocketServer] history todo.updated snapshot send failed "
+                    "(oversized or replaced): request_id=%s session_id=%s seq=%s "
+                    "todo_count=%s",
+                    request.request_id,
+                    session_id.strip(),
+                    next_seq,
+                    len(todos),
+                )
+            next_seq += 1
+
         done_chunk = AgentResponseChunk(
             request_id=request.request_id,
             channel_id=request.channel_id,
@@ -4856,11 +5032,10 @@ class AgentWebSocketServer:
             },
             is_complete=True,
         )
-        done_seq = len(messages) if isinstance(messages, list) else 0
         wire_done = encode_agent_chunk_for_wire(
             done_chunk,
             response_id=request.request_id,
-            sequence=done_seq,
+            sequence=next_seq,
         )
         async with send_lock:
             await send_wire_payload(ws, wire_done)
@@ -5494,6 +5669,31 @@ class AgentWebSocketServer:
                 pass
 
     @staticmethod
+    async def _pre_check_mcp_http_auth(
+        server_payload: dict[str, Any]
+    ) -> tuple[bool, str]:
+        """Config-time HTTP probe: reject bad auth (401/403), timeouts, and
+        unreachable hosts before writing config.yaml. Delegates to
+        ``preflight_mcp_server_reachable`` (shared with cold-start) so both
+        gates stay identical. See that function for the anyio-corruption
+        rationale.
+        """
+        from jiuwenswarm.common.mcp_config import (
+            build_mcp_server_config,
+            preflight_mcp_server_reachable,
+        )
+
+        name = str(server_payload.get("name", "") or "").strip()
+        transport = str(server_payload.get("transport", "") or "").strip().lower()
+        cfg = build_mcp_server_config(server_payload, server_id_scope="jiuwenswarm")
+        if cfg is None:
+            return False, f"{name} ({transport}) pre-check failed: invalid config entry"
+        ok, reason = await preflight_mcp_server_reachable(cfg)
+        if ok:
+            return True, f"{name} ({transport}) pre-check passed: {reason}"
+        return False, f"{name} ({transport}) pre-check failed: {reason}"
+
+    @staticmethod
     async def _fetch_mcp_tools_from_config(entry: dict[str, Any]) -> list[dict[str, Any]]:
         """Create a temporary MCP connection from config entry and list tools."""
         from openjiuwen.core.foundation.tool import McpServerConfig
@@ -5688,23 +5888,27 @@ class AgentWebSocketServer:
             elif action == "add":
                 server_payload = self._normalize_mcp_add_payload(params)
 
-                # Pre-check: only validate when stdio args contain a local file
-                # path (e.g. "node /path/to/server.js").  Skip for package
-                # managers like npx which may need to download first.
+                # Reject a broken MCP entry before it is persisted to config.yaml;
+                # a bad entry (e.g. wrong Bearer → HTTP 401) surviving to
+                # cold-start corrupts the anyio task group ("restart then can't
+                # chat" symptom).
                 pre_check_failed = False
                 if bool(server_payload.get("enabled", True)):
                     _need_pre_check = False
-                    if server_payload.get("transport") == "stdio":
-                        _args = server_payload.get("args")
-                        if isinstance(_args, list):
-                            _need_pre_check = any(
-                                isinstance(a, str)
-                                and (a.startswith(("/", "./", "../"))
-                                     or a.endswith((".js", ".mjs", ".json", ".py")))
-                                for a in _args
-                            )
+                    _transport = str(server_payload.get("transport", "") or "").strip().lower()
+                    if _transport == "stdio":
+                        # Static-only probe (zero spawn): verify command in PATH
+                        # and arg paths exist, catching typos like "pyhton".
+                        _need_pre_check = bool(server_payload.get("command", ""))
+                    elif _transport in ("sse", "http", "streamable-http", "streamable_http"):
+                        # HTTP-family always probed via pure httpx (never
+                        # client.connect(), which leaks on 401/timeout).
+                        _need_pre_check = True
                     if _need_pre_check:
-                        check_ok, check_msg = await self._pre_check_mcp_server(server_payload)
+                        if _transport == "stdio":
+                            check_ok, check_msg = await self._pre_check_mcp_server(server_payload)
+                        else:
+                            check_ok, check_msg = await self._pre_check_mcp_http_auth(server_payload)
                         if not check_ok:
                             logger.warning("[command.mcp] add pre-check failed: %s", check_msg)
                             resp = AgentResponse(
@@ -5845,29 +6049,56 @@ class AgentWebSocketServer:
                 )
             elif action == "update":
                 normalized = self._normalize_mcp_update_payload(params)
-                _, _created = upsert_mcp_server_in_config(normalized)
-                applied = True
-                error_message = ""
-                try:
-                    await self._agent_manager.reload_agents_config(get_config(), None)
-                except Exception as reload_exc:  # noqa: BLE001
-                    applied = False
-                    error_message = str(reload_exc)
-                    logger.warning("[command.mcp] reload after update failed: %s", reload_exc)
-                payload = {
-                    "type": "updated",
-                    "name": normalized["name"],
-                    "applied": applied,
-                    "item": self._mask_sensitive_fields(normalized),
-                }
-                if error_message:
-                    payload["error"] = error_message
-                resp = AgentResponse(
-                    request_id=request.request_id,
-                    channel_id=request.channel_id,
-                    ok=True,
-                    payload=payload,
-                )
+
+                # Same config-time pre-check as add: reject before overwriting
+                # config.yaml (avoid cold-start 401 → anyio corruption).
+                pre_check_failed = False
+                if bool(normalized.get("enabled", True)):
+                    _transport = str(normalized.get("transport", "") or "").strip().lower()
+                    if _transport in ("sse", "http", "streamable-http", "streamable_http"):
+                        check_ok, check_msg = await self._pre_check_mcp_http_auth(normalized)
+                    elif _transport == "stdio":
+                        check_ok, check_msg = await self._pre_check_mcp_server(normalized)
+                    else:
+                        check_ok, check_msg = True, "skipped"
+                    if not check_ok:
+                        logger.warning("[command.mcp] update pre-check failed: %s", check_msg)
+                        resp = AgentResponse(
+                            request_id=request.request_id,
+                            channel_id=request.channel_id,
+                            ok=False,
+                            payload={
+                                "type": "update_failed",
+                                "name": normalized["name"],
+                                "error": check_msg,
+                            },
+                        )
+                        pre_check_failed = True
+
+                if not pre_check_failed:
+                    _, _created = upsert_mcp_server_in_config(normalized)
+                    applied = True
+                    error_message = ""
+                    try:
+                        await self._agent_manager.reload_agents_config(get_config(), None)
+                    except Exception as reload_exc:  # noqa: BLE001
+                        applied = False
+                        error_message = str(reload_exc)
+                        logger.warning("[command.mcp] reload after update failed: %s", reload_exc)
+                    payload = {
+                        "type": "updated",
+                        "name": normalized["name"],
+                        "applied": applied,
+                        "item": self._mask_sensitive_fields(normalized),
+                    }
+                    if error_message:
+                        payload["error"] = error_message
+                    resp = AgentResponse(
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        ok=True,
+                        payload=payload,
+                    )
             elif action == "list_tools":
                 name = str(params.get("name", "")).strip()
                 if not name:

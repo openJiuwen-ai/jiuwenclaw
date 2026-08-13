@@ -228,16 +228,46 @@ export function createWorkspaceCommand(): SlashCommand {
             return;
           }
           if (!result.ok) return;
-          ctx.addItem(
-            addInfo(ctx.sessionId, `Project scope switched: ${result.projectDir}`, "c", {
-              view: "kv",
-              title: "Set Trusted Dir",
-              items: [
-                { label: "project scope", value: result.projectDir },
-                ...result.trustedDirs.map((dir, i) => ({ label: `trusted[${i}]`, value: dir })),
-              ],
-            }),
-          );
+          const rebindItems: Array<{ label: string; value: string }> = [
+            { label: "project scope", value: result.projectDir },
+            ...result.trustedDirs.map((dir, i) => ({ label: `trusted[${i}]`, value: dir })),
+          ];
+          try {
+            const rebind = await ctx.request<{
+              session_id?: string;
+              project_id?: string;
+              project_dir?: string;
+              project_name?: string;
+              work_mode?: string;
+            }>("session.rebind_project", {
+              session_id: ctx.sessionId,
+              project_dir: result.projectDir,
+            });
+            rebindItems.push(
+              { label: "rebind project", value: rebind?.project_name || rebind?.project_id || "" },
+              { label: "rebind project_id", value: rebind?.project_id || "" },
+              { label: "work_mode", value: rebind?.work_mode || "" },
+            );
+            ctx.addItem(
+              addInfo(
+                ctx.sessionId,
+                `Project scope switched & session rebound: ${result.projectDir}`,
+                "c",
+                { view: "kv", title: "Set Trusted Dir", items: rebindItems },
+              ),
+            );
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            rebindItems.push({ label: "rebind", value: `failed: ${message}` });
+            ctx.addItem(
+              addInfo(
+                ctx.sessionId,
+                `Project scope switched but session rebind failed: ${message}`,
+                "c",
+                { view: "kv", title: "Set Trusted Dir", items: rebindItems },
+              ),
+            );
+          }
         },
       },
       {

@@ -67,11 +67,7 @@ export function MarkdownRenderer({ content, className, testId, isStreaming = fal
     <div className={className} data-testid={testId}>
       <MarkdownContentLinesContext.Provider value={contentLines}>
         <MarkdownStreamingContext.Provider value={isStreaming}>
-          <ReactMarkdown
-            remarkPlugins={MARKDOWN_REMARK_PLUGINS}
-            rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
-            components={MARKDOWN_COMPONENTS}
-          >
+          <ReactMarkdown remarkPlugins={MARKDOWN_REMARK_PLUGINS} rehypePlugins={MARKDOWN_REHYPE_PLUGINS} components={MARKDOWN_COMPONENTS}>
             {markdown}
           </ReactMarkdown>
         </MarkdownStreamingContext.Provider>
