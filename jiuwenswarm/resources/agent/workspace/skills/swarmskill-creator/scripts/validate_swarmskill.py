@@ -1192,12 +1192,17 @@ def _runtime_call_issues(tree: ast.Module) -> tuple[list[str], list[str]]:
                     )
             elif call_name == "workflow":
                 path_argument = _workflow_path_argument(node)
-                path_literal = (
-                    _string_literal(path_argument)
+                resolved_path_argument = (
+                    _unwrap_path_expression(path_argument, bindings)
                     if path_argument is not None
                     else None
                 )
-                if _workflow_path_is_missing_or_empty(path_argument):
+                path_literal = (
+                    _string_literal(resolved_path_argument)
+                    if resolved_path_argument is not None
+                    else None
+                )
+                if _workflow_path_is_missing_or_empty(resolved_path_argument):
                     errors.append(
                         f"line {line}: workflow() requires a non-empty child workflow name/path"
                     )
@@ -1211,8 +1216,8 @@ def _runtime_call_issues(tree: ast.Module) -> tuple[list[str], list[str]]:
                         f"line {line}: workflow() does not accept a bare Skill name or relative "
                         "path; derive an absolute child path from Path(__file__).resolve()"
                     )
-                elif path_argument is not None and not _is_portable_child_workflow_path(
-                    path_argument,
+                elif resolved_path_argument is not None and not _is_portable_child_workflow_path(
+                    resolved_path_argument,
                     bindings,
                 ):
                     warnings.append(
