@@ -1033,6 +1033,8 @@ def _flatten_modes_team_for_config_panel(raw: dict[str, Any]) -> dict[str, str]:
         model_cfg = spec.get("model")
         if not isinstance(model_cfg, dict):
             return ""
+        if model_cfg.get("ref") is not None:
+            return str(model_cfg.get("ref") or "")
         if model_cfg.get("model") is not None:
             return str(model_cfg.get("model") or "")
         request_cfg = model_cfg.get("model_request_config")

@@ -311,6 +311,44 @@ def _build_agent_spec_dict(
     return merged
 
 
+def _resolve_agent_model_reference(
+    model_raw: Any,
+    config_base: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not isinstance(model_raw, dict) or "ref" not in model_raw:
+        return None
+
+    model_ref = str(model_raw.get("ref") or "").strip()
+    model_name, separator, index_text = model_ref.rpartition("#")
+    if not separator or not model_name.strip():
+        raise ValueError(f"invalid team model reference: {model_ref!r}")
+    try:
+        model_index = int(index_text)
+    except ValueError as exc:
+        raise ValueError(f"invalid team model reference index: {model_ref!r}") from exc
+
+    defaults = (config_base.get("models") or {}).get("defaults")
+    if not isinstance(defaults, list) or not 0 <= model_index < len(defaults):
+        raise ValueError(f"team model reference index out of range: {model_ref!r}")
+    entry = defaults[model_index]
+    if not isinstance(entry, dict):
+        raise ValueError(f"team model reference points to invalid entry: {model_ref!r}")
+
+    model_client_config = deepcopy(entry.get("model_client_config") or {})
+    actual_name = str(model_client_config.get("model_name") or "").strip()
+    if actual_name != model_name.strip():
+        raise ValueError(
+            "team model reference name mismatch: "
+            f"expected {model_name.strip()!r}, found {actual_name!r} at index {model_index}"
+        )
+    model_request_config = deepcopy(entry.get("model_config_obj") or {})
+    model_request_config.setdefault("model", actual_name)
+    return {
+        "model_client_config": model_client_config,
+        "model_request_config": model_request_config,
+    }
+
+
 def _build_agents_config(
     team_raw: dict[str, Any],
     config_base: dict[str, Any],
@@ -351,6 +389,9 @@ def _build_agents_config(
                 agent_config = {}
         else:
             agent_config = dict(raw_agent_config) if isinstance(raw_agent_config, dict) else {}
+        referenced_model = _resolve_agent_model_reference(agent_config.get("model"), config_base)
+        if referenced_model is not None:
+            agent_config["model"] = referenced_model
         # No longer auto-fill all skills from global into each member by default.
         # On spawn, each member workspace exposes only its configured skill links.
         # Team-shared skills are maintained in the team workspace skill view.

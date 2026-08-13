@@ -161,6 +161,79 @@ def test_load_team_spec_dict_uses_first_models_defaults_entry_for_team(monkeypat
     assert model["model_request_config"]["temperature"] == 0.1
 
 
+def test_load_team_spec_dict_resolves_member_model_reference_by_index():
+    config = {
+        "models": {
+            "defaults": [
+                {
+                    "model_client_config": {
+                        "api_base": "https://first.example.test/v1",
+                        "api_key": "sk-first",
+                        "model_name": "shared-model",
+                        "client_provider": "OpenAI",
+                    },
+                    "model_config_obj": {"temperature": 0.1},
+                },
+                {
+                    "model_client_config": {
+                        "api_base": "https://second.example.test/v1",
+                        "api_key": "sk-second",
+                        "model_name": "shared-model",
+                        "client_provider": "OpenAI",
+                    },
+                    "model_config_obj": {"temperature": 0.9},
+                },
+            ]
+        },
+        **_wrap_modes_team(
+            {
+                "demo_team": {
+                    "team_name": "demo_team",
+                    "agents": {
+                        "leader": {"model": {"ref": "shared-model#1"}},
+                    },
+                }
+            }
+        ),
+    }
+
+    spec = load_team_spec_dict(config_base=config)
+
+    model = spec["agents"]["leader"]["model"]
+    assert model["model_client_config"]["api_base"] == "https://second.example.test/v1"
+    assert model["model_client_config"]["api_key"] == "sk-second"
+    assert model["model_request_config"]["model"] == "shared-model"
+    assert model["model_request_config"]["temperature"] == 0.9
+
+
+def test_load_team_spec_dict_rejects_stale_member_model_reference():
+    config = {
+        "models": {
+            "defaults": [
+                {
+                    "model_client_config": {
+                        "model_name": "different-model",
+                        "api_key": "sk-secret",
+                    }
+                }
+            ]
+        },
+        **_wrap_modes_team(
+            {
+                "demo_team": {
+                    "team_name": "demo_team",
+                    "agents": {
+                        "leader": {"model": {"ref": "expected-model#0"}},
+                    },
+                }
+            }
+        ),
+    }
+
+    with pytest.raises(ValueError, match="model reference name mismatch"):
+        load_team_spec_dict(config_base=config)
+
+
 def test_load_team_spec_dict_supports_member_specific_agents(monkeypatch, tmp_path):
     """Predefined members should resolve to member_name-keyed DeepAgentSpec entries."""
     fake_agent_teams_home = tmp_path / ".agent_teams"

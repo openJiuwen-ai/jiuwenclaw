@@ -6,6 +6,7 @@ export interface ModelIdentity {
 }
 
 interface AgentModelBinding {
+  ref?: string;
   provider: string;
   api_base: string;
   api_key: string;
@@ -74,27 +75,46 @@ export function syncAgentsWithModelChanges<T extends AgentWithModelBinding>(
 ): T[] {
   let changed = false;
   const nextAgents = agents.map((agent) => {
-    const previousModelIndex = previousModels.findIndex(
-      (model) => model.model_name === agent.model.model
+    const refSeparator = agent.model.ref?.lastIndexOf("#") ?? -1;
+    const refIndex = refSeparator >= 0 ? Number(agent.model.ref?.slice(refSeparator + 1)) : -1;
+    const referencedModel = Number.isInteger(refIndex) ? previousModels[refIndex] : undefined;
+    const referencedModelMatches = referencedModel?.model_name === agent.model.model
+      && referencedModel.model_provider === agent.model.provider
+      && referencedModel.api_base === agent.model.api_base;
+    const previousModelIndex = referencedModelMatches
+      ? refIndex
+      : previousModels.findIndex(
+        (model) => model.model_name === agent.model.model
         && model.model_provider === agent.model.provider
         && model.api_base === agent.model.api_base,
-    );
-    if (previousModelIndex < 0 || previousModelIndex >= nextModels.length) {
+      );
+    if (previousModelIndex < 0) {
       return agent;
     }
 
     const previousModel = previousModels[previousModelIndex];
-    const nextModel = nextModels[previousModelIndex];
+    const unchangedObjectIndex = nextModels.indexOf(previousModel);
+    let nextModelIndex = previousModel.origin_index === undefined
+      ? unchangedObjectIndex
+      : nextModels.findIndex((model) => model.origin_index === previousModel.origin_index);
+    if (nextModelIndex < 0 && previousModel.origin_index === undefined && previousModelIndex < nextModels.length) {
+      nextModelIndex = previousModelIndex;
+    }
+    if (nextModelIndex < 0) return agent;
+
+    const nextModel = nextModels[nextModelIndex];
     const modelChanged = nextModel.model_name !== previousModel.model_name
       || nextModel.model_provider !== previousModel.model_provider
       || nextModel.api_base !== previousModel.api_base
-      || nextModel.api_key !== previousModel.api_key;
+      || nextModel.api_key !== previousModel.api_key
+      || nextModelIndex !== previousModelIndex;
     if (!modelChanged) return agent;
 
     changed = true;
     return {
       ...agent,
       model: {
+        ref: `${nextModel.model_name || ""}#${nextModelIndex}`,
         provider: nextModel.model_provider || "",
         api_base: nextModel.api_base || "",
         api_key: nextModel.api_key || "",

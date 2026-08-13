@@ -182,7 +182,31 @@ test("updates only agents linked to the changed model entry", () => {
 
   assert.notEqual(updated, agents);
   assert.equal(updated[0].model.model, "gpt-new");
+  assert.equal(updated[0].model.ref, "gpt-new#0");
   assert.equal(updated[1], agents[1]);
+});
+
+test("keeps agents bound to the same model entry after models are reordered", () => {
+  const agents = [{
+    name: "coding-agent",
+    model: {
+      ref: "gpt-old#0",
+      provider: "OpenAIAccount",
+      api_base: "https://chatgpt.com/backend-api/codex",
+      api_key: "",
+      model: "gpt-old",
+    },
+    skills: ["coding"],
+  }];
+
+  const updated = syncAgentsWithModelChanges(
+    agents,
+    persistedModels,
+    [persistedModels[1], persistedModels[0]],
+  );
+
+  assert.equal(updated[0].model.model, "gpt-old");
+  assert.equal(updated[0].model.ref, "gpt-old#1");
 });
 
 test("keeps the same agent snapshot when no linked model changed", () => {

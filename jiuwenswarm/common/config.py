@@ -1502,59 +1502,24 @@ def _require_non_empty_string(value: Any, field_name: str) -> str:
 
 
 def _transform_front_team_model_config(model_raw: dict[str, Any]) -> dict[str, Any]:
-    model_client_config: dict[str, Any] = {}
-    model_request_config: dict[str, Any] = {}
+    model_ref = str(model_raw.get("ref") or "").strip()
+    if not model_ref:
+        legacy_value = str(model_raw.get("model") or "").strip()
+        if "#" in legacy_value:
+            model_ref = legacy_value
+    if not model_ref:
+        return {}
 
-    # 从 models.defaults 列表中按 #index 查找完整配置
-    model_value = model_raw.get("model")
-    if model_value and isinstance(model_value, str) and "#" in model_value:
-        sep = model_value.rfind("#")
-        model_name_part = model_value[:sep]
-        index_part = model_value[sep + 1:]
-        try:
-            target_index = int(index_part)
-        except ValueError:
-            target_index = None
-        if target_index is not None:
-            defaults_list = get_config_raw().get("models", {}).get("defaults")
-            if isinstance(defaults_list, list) and 0 <= target_index < len(defaults_list):
-                entry = defaults_list[target_index]
-                if isinstance(entry, dict):
-                    mcc = entry.get("model_client_config")
-                    if isinstance(mcc, dict):
-                        model_client_config.update({
-                            k: v for k, v in mcc.items()
-                            if k not in ("model_name",) and v is not None
-                        })
-                        model_request_config["model"] = resolve_env_vars(str(mcc.get("model_name", model_name_part)))
-                    mco = entry.get("model_config_obj")
-                    if isinstance(mco, dict):
-                        model_request_config.update(mco)
-
-    # 前端字段覆盖（优先级高于 #index 解析）
-    if "provider" in model_raw and model_raw["provider"] is not None:
-        model_client_config["client_provider"] = model_raw["provider"]
-    if "api_base" in model_raw and model_raw["api_base"] is not None:
-        model_client_config["api_base"] = model_raw["api_base"]
-    if "api_key" in model_raw and model_raw["api_key"] is not None:
-        model_client_config["api_key"] = model_raw["api_key"]
-    if "model" in model_raw and model_raw["model"] is not None:
-        # 若包含 #index，提取纯 model_name
-        raw_model = model_raw["model"]
-        if isinstance(raw_model, str) and "#" in raw_model:
-            model_request_config["model"] = raw_model[:raw_model.rfind("#")]
-        else:
-            model_request_config["model"] = raw_model
-
-    transformed: dict[str, Any] = {}
-    if model_client_config:
-        model_client_config.setdefault("timeout", 1800)
-        model_client_config.setdefault("verify_ssl", False)
-        model_client_config.setdefault("custom_headers", {})
-        transformed["model_client_config"] = model_client_config
-    if model_request_config:
-        transformed["model_request_config"] = model_request_config
-    return transformed
+    model_name, separator, index_text = model_ref.rpartition("#")
+    if not separator or not model_name.strip():
+        raise ValueError("team agent model.ref must use model_name#index")
+    try:
+        model_index = int(index_text)
+    except ValueError as exc:
+        raise ValueError("team agent model.ref index must be an integer") from exc
+    if model_index < 0:
+        raise ValueError("team agent model.ref index must be non-negative")
+    return {"ref": f"{model_name.strip()}#{model_index}"}
 
 
 def _transform_front_team_agent_spec(agent_key: str, agent_raw: Any) -> dict[str, Any]:

@@ -808,14 +808,7 @@ def test_config_panel_flatten_reads_standalone_agent_registry():
         "web_config_panel": {
             "agent_team_agents": {
                 "agent_1": {
-                    "model": {
-                        "model_request_config": {
-                            "model": "gpt-4.1",
-                            "api_base": "https://api.openai.com/v1",
-                            "api_key": "${OPENAI_API_KEY}",
-                        },
-                        "model_client_config": {"client_provider": "OpenAI"},
-                    },
+                    "model": {"ref": "gpt-4.1#2"},
                     "skills": ["coding"],
                     "max_iterations": 12,
                     "completion_timeout": 34,
@@ -827,7 +820,7 @@ def test_config_panel_flatten_reads_standalone_agent_registry():
     flat = _flatten_modes_team_for_config_panel(raw)
 
     assert flat["agent_name_0"] == "agent_1"
-    assert flat["agent_model_0"] == "gpt-4.1"
+    assert flat["agent_model_0"] == "gpt-4.1#2"
     assert flat["agent_skills_0"] == "coding"
     assert flat["agent_max_iterations_0"] == "12"
     assert flat["agent_completion_timeout_0"] == "34"

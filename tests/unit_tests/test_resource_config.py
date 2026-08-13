@@ -11,7 +11,7 @@ def test_default_team_config_enables_managed_worktrees():
 
     team_config = data["modes"]["team"]["jiuwen_team"]
     assert team_config["worktree"] == {"enabled": True}
-    assert team_config["max_debate_rounds"] == 2
+    assert team_config["max_debate_rounds"] == 3
 
 
 def test_default_round_level_compressor_config_uses_context_ratio():
