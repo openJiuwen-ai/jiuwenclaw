@@ -28,6 +28,7 @@ from jiuwenswarm.agents.harness.common.rails.project_memory import (
 )
 from jiuwenswarm.common.coding_memory_paths import resolve_project_coding_memory_dir
 from jiuwenswarm.common.config import get_config
+from jiuwenswarm.common.utils import get_agent_workspace_dir
 
 logger = logging.getLogger(__name__)
 
@@ -39,8 +40,14 @@ def _is_forbidden_enabled(config: dict[str, Any] | None) -> bool:
 
 
 def _get_coding_memory_dir(workspace: str, project_dir: str | None = None) -> str:
+    """Resolve coding memory below the agent-owned system workspace.
+
+    ``workspace`` is retained for the RPC interface because it is also used
+    for project-memory operations. Coding memory is agent-owned data, though,
+    so it must not follow a project workspace supplied by the caller.
+    """
     return resolve_project_coding_memory_dir(
-        agent_workspace_dir=workspace,
+        agent_workspace_dir=get_agent_workspace_dir(),
         project_dir=project_dir,
     )
 
@@ -78,12 +85,13 @@ def _get_runtime_memory_dirs(workspace: str, project_dir: str | None = None) -> 
     """运行时记忆目录（agent 自动写入，对用户只读）。
 
     使用父目录以覆盖所有项目子目录：
-    - <workspace>/memory            -> agent mode auto memory
-    - <workspace>/coding_memory     -> code mode coding memory（含各项目子目录）
+    - <workspace>/memory                              -> agent mode auto memory
+    - <agent-workspace>/coding_memory                 -> code mode coding memory
+      （含各项目子目录）
     """
     return [
         os.path.normpath(os.path.join(workspace, "memory")),
-        os.path.normpath(os.path.join(workspace, "coding_memory")),
+        os.path.normpath(os.path.join(get_agent_workspace_dir(), "coding_memory")),
     ]
 
 

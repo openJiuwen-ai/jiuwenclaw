@@ -15,6 +15,7 @@ import {
   Volume2,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { contextCompressionRunningText } from '../../utils/contextCompression';
 import {
   Message,
   FileDownloadItem,
@@ -37,6 +38,10 @@ import { MarkdownRenderer } from '../../components/MarkdownRenderer';
 import { isTeamP2PMessageToUser, parseTeamEventMessage } from './teamEventUtils';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import { ProactiveRecommendationCard } from './ProactiveRecommendationCard';
+import { fileArtifactId } from '../ArtifactsPanel';
+import { openArtifactPanel } from '../../features/teamPanelState';
+import { executeDesktopSave, type DesktopSaveApiResult } from '../../utils/desktopSave';
+import { FileIcon } from '../FileIcon';
 
 export const MarkdownMessageBody = memo(function MarkdownMessageBody({
   content,
@@ -69,12 +74,11 @@ export function TeamMemberMessageFrame({
 }) {
   return (
     <div className="team-member-message animate-fade-in">
-      {showAvatar && (
-        <div className="team-member-message__header">
-          <TeamMemberAvatar member={member} />
-        </div>
-      )}
-      <div className={clsx('team-member-message__body', !showAvatar && 'is-continued', contentClassName)}>
+      {/* 始终占住头像列，避免 showAvatar 在多轮/折叠间切换时整列塌掉看起来像「头像消失」。 */}
+      <div className="team-member-message__header" aria-hidden={!showAvatar}>
+        {showAvatar ? <TeamMemberAvatar member={member} /> : null}
+      </div>
+      <div className={clsx('team-member-message__body', contentClassName)}>
         {children}
       </div>
     </div>
@@ -104,7 +108,11 @@ function TeamLeaderPlainTextMessage({
       showAvatar={showAvatar}
     >
       {fileItems && fileItems.length > 0 && (
-        <FileDownloadList files={fileItems} className="w-full md:w-1/2" />
+        <FileDownloadList
+          files={fileItems}
+          className="w-full md:w-1/2"
+          onPreview={(index) => openArtifactPanel(fileArtifactId(fileItems[index]))}
+        />
       )}
       <div className="team-member-message__plain">
         <A2UIMessageContent
@@ -148,7 +156,9 @@ export function ContextCompressionLines({
           isFailed ? 'text-danger' : 'text-text-muted'
         )}>
           <span className={clsx(isRunning && 'context-compression-running-text')}>
-            {runtime?.summary}
+            {isRunning
+              ? contextCompressionRunningText(t, runtime?.processor, runtime?.summary ?? '')
+              : runtime?.summary}
           </span>
         </div>
       )}
@@ -193,6 +203,11 @@ function renderRichContent(content: string): ReactNode[] {
 }
 
 export function getMessageActor(message: Message): string | null {
+  // team-leader 气泡偶发会落成 assistant；按 id 识别，避免 team 聚类把头像判丢。
+  if (message.id?.startsWith('team-leader-')) {
+    return 'team_leader';
+  }
+
   if (message.role !== 'system') {
     return null;
   }
@@ -200,10 +215,6 @@ export function getMessageActor(message: Message): string | null {
   if (message.content?.startsWith('team.event:')) {
     const event = parseTeamEventMessage(message);
     return event?.fromMember || null;
-  }
-
-  if (message.id?.startsWith('team-leader-')) {
-    return 'team_leader';
   }
 
   return null;
@@ -565,6 +576,7 @@ export const MessageItem = memo(function MessageItem({
       withAssistantAvatar && 'assistant-row'
     )}>
       {withAssistantAvatar && (
+        // 始终保留头像占位，与 team 布局一致，避免连续气泡时整列消失。
         <div className="assistant-row__avatar" aria-hidden={!showAvatar}>
           {showAvatar ? <TeamMemberAvatar member="team_leader" /> : null}
         </div>
@@ -622,7 +634,10 @@ export const MessageItem = memo(function MessageItem({
                   <MediaRenderer items={visibleMediaItems} align="start" />
                 )}
                 {visibleFileItems && (
-                  <FileDownloadList files={visibleFileItems} />
+                  <FileDownloadList
+                    files={visibleFileItems}
+                    onPreview={(index) => openArtifactPanel(fileArtifactId(visibleFileItems[index]))}
+                  />
                 )}
               </>
             )}
@@ -727,47 +742,14 @@ function getFileExtension(name: string): string {
   return parts[parts.length - 1].toUpperCase();
 }
 
-function getFileTypeConfig(mimeType: string | undefined, name: string) {
-  const ext = name.split('.').pop()?.toLowerCase() || '';
-  const mt = mimeType || '';
-  if (mt.startsWith('image/') || ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp'].includes(ext))
-    return { label: 'IMG', bg: 'bg-[#3370ff]', icon: '🖼' };
-  if (mt.startsWith('audio/') || ['mp3', 'wav', 'aac', 'flac', 'ogg'].includes(ext))
-    return { label: 'AUDIO', bg: 'bg-[#7b67ee]', icon: '🎵' };
-  if (mt.startsWith('video/') || ['mp4', 'avi', 'mov', 'mkv', 'webm'].includes(ext))
-    return { label: 'VIDEO', bg: 'bg-[#f77234]', icon: '🎬' };
-  if (mt.includes('pdf') || ext === 'pdf')
-    return { label: 'PDF', bg: 'bg-[#f54a45]', icon: '📄' };
-  if (mt.includes('presentation') || mt.includes('ppt') || ['ppt', 'pptx'].includes(ext))
-    return { label: 'PPT', bg: '#FFFFFF', icon: (
-      <svg viewBox="0 0 1024 1024" className="w-7 h-7">
-        <path d="M145.6 0C100.8 0 64 36.8 64 81.6v860.8C64 987.2 100.8 1024 145.6 1024h732.8c44.8 0 81.6-36.8 81.6-81.6V324.8L657.6 0h-512z" fill="#E34221" />
-        <path d="M960 326.4v16H755.2s-100.8-20.8-99.2-108.8c0 0 4.8 92.8 97.6 92.8H960z" fill="#DC3119" />
-        <path d="M657.6 0v233.6c0 25.6 17.6 92.8 97.6 92.8H960L657.6 0z" fill="#FFFFFF" opacity=".5" />
-        <path d="M304 784h-54.4v67.2c0 6.4-4.8 11.2-11.2 11.2-6.4 0-12.8-4.8-12.8-11.2V686.4c0-9.6 8-17.6 17.6-17.6H304c38.4 0 59.2 25.6 59.2 57.6S340.8 784 304 784z m-3.2-94.4h-51.2v73.6h51.2c22.4 0 38.4-16 38.4-36.8 0-22.4-16-36.8-38.4-36.8zM480 784h-54.4v67.2c0 6.4-4.8 11.2-11.2 11.2-6.4 0-11.2-4.8-11.2-11.2V686.4c0-9.6 6.4-17.6 16-17.6H480c38.4 0 59.2 25.6 59.2 57.6S518.4 784 480 784z m-3.2-94.4h-49.6v73.6h49.6c22.4 0 38.4-16 38.4-36.8 0-22.4-16-36.8-38.4-36.8z m225.6 0h-52.8v161.6c0 6.4-4.8 11.2-11.2 11.2-6.4 0-12.8-4.8-12.8-11.2V689.6h-51.2c-6.4 0-11.2-4.8-11.2-11.2 0-4.8 4.8-9.6 11.2-9.6h128c6.4 0 11.2 4.8 11.2 11.2 0 4.8-4.8 9.6-11.2 9.6z" fill="#FFFFFF" />
-      </svg>
-    ) };
-  if (mt.includes('spreadsheet') || mt.includes('excel') || mt.includes('xlsx') || ['xls', 'xlsx', 'csv'].includes(ext))
-    return { label: 'XLS', bg: 'bg-[#2b9348]', icon: '📗' };
-  if (mt.includes('word') || mt.includes('document') || mt.includes('docx') || ['doc', 'docx'].includes(ext))
-    return { label: 'DOC', bg: 'bg-[#3370ff]', icon: '📝' };
-  if (mt.includes('zip') || mt.includes('compressed') || mt.includes('archive') || ['zip', 'rar', '7z', 'tar', 'gz'].includes(ext))
-    return { label: 'ZIP', bg: 'bg-[#8b5cf6]', icon: '📦' };
-  if (['txt', 'md', 'log'].includes(ext))
-    return { label: 'TXT', bg: 'bg-[#6b7280]', icon: '📃' };
-  if (['json', 'xml', 'yaml', 'yml', 'toml', 'ini', 'cfg'].includes(ext))
-    return { label: 'CFG', bg: 'bg-[#6b7280]', icon: '⚙' };
-  if (['py', 'js', 'ts', 'java', 'go', 'rs', 'cpp', 'c', 'h'].includes(ext))
-    return { label: 'CODE', bg: 'bg-[#6b7280]', icon: '�' };
-  return { label: 'FILE', bg: 'bg-[#6b7280]', icon: '��' };
-}
-
 function FileDownloadList({
   files,
   className,
+  onPreview,
 }: {
   files: FileDownloadItem[];
   className?: string;
+  onPreview?: (index: number) => void;
 }) {
   const { t } = useTranslation();
   const [expiredSet, setExpiredSet] = useState<Set<number>>(new Set());
@@ -793,13 +775,15 @@ function FileDownloadList({
   const handleDownload = async (file: FileDownloadItem, index: number) => {
     if (expiredSet.has(index)) return;
 
-    // 检查是否在 PyWebView 环境中（exe 模式）
-    const pywebviewApi = (window as Window & { pywebview?: { api?: { download_file?: (url: string, filename: string) => Promise<boolean> | boolean } } }).pywebview?.api;
+    // 检查是否在 PyWebView 桌面环境中
+    const pywebviewApi = (window as Window & { pywebview?: { api?: { download_file?: (url: string, filename: string) => DesktopSaveApiResult } } }).pywebview?.api;
     if (pywebviewApi?.download_file) {
-      // exe 模式：通过 webview API 下载
-      const success = await pywebviewApi.download_file(file.download_url, file.name || 'download');
-      if (!success) {
-        console.error('Download failed via pywebview API');
+      // 桌面端：通过 webview API 下载
+      const outcome = await executeDesktopSave(() =>
+        pywebviewApi.download_file!(file.download_url, file.name || 'download')
+      );
+      if (outcome === 'failed') {
+        window.alert(t('artifacts.downloadFailed', { name: file.name }));
       }
       return;
     }
@@ -815,7 +799,6 @@ function FileDownloadList({
   return (
     <div className={clsx('mt-2 space-y-2', className)}>
       {files.map((file, index) => {
-        const typeConfig = getFileTypeConfig(file.mime_type, file.name);
         const ext = getFileExtension(file.name);
         const expired = expiredSet.has(index);
         return (
@@ -825,38 +808,57 @@ function FileDownloadList({
               'flex items-center gap-3 rounded-lg border px-3 py-2.5  ',
               expired
                 ? 'border-border/50 bg-card/50 cursor-not-allowed opacity-60'
-                : 'border-border bg-card hover:shadow-md hover:border-border-hover cursor-pointer group'
+                : clsx(
+                  'border-border bg-card',
+                  onPreview && 'cursor-pointer group hover:border-border-hover hover:shadow-md'
+                )
             )}
-            onClick={() => handleDownload(file, index)}
+            onClick={() => {
+              if (!expired) onPreview?.(index);
+            }}
           >
-            <div className={`flex-shrink-0 w-10 h-10 rounded-lg ${typeConfig.bg} flex items-center justify-center`}>
-              {typeof typeConfig.icon === 'string' ? (
-                <span className="text-white text-base leading-none select-none">{typeConfig.icon}</span>
-              ) : (
-                typeConfig.icon
-              )}
-            </div>
-            <div className="flex-1 min-w-0">
-              <div className="text-sm font-medium text-text leading-snug truncate">{file.name}</div>
-              <div className="flex items-center gap-1.5 mt-0.5">
-                <span className="inline-flex items-center px-1 py-px rounded text-[10px] font-mono font-medium text-text-muted bg-secondary leading-none">
-                  {ext || typeConfig.label}
-                </span>
-                <span className="text-xs text-text-muted">{formatFileSize(file.size)}</span>
-                {expired && (
-                  <span className="inline-flex items-center px-1 py-px rounded text-[10px] font-mono font-medium text-danger bg-danger/10 leading-none">
-                    {t('chatUi.fileExpired')}
+            <button
+              type="button"
+              className="flex min-w-0 flex-1 items-center gap-3 text-left"
+              disabled={expired || !onPreview}
+              onClick={(event) => {
+                event.stopPropagation();
+                onPreview?.(index);
+              }}
+              title={onPreview ? t('artifacts.openPreview', { name: file.name }) : undefined}
+              aria-label={onPreview ? t('artifacts.openPreview', { name: file.name }) : undefined}
+            >
+              <FileIcon fileName={file.name} size={40} className="flex-shrink-0 select-none" />
+              <div className="flex-1 min-w-0">
+                <div className="text-sm font-medium text-text leading-snug truncate">{file.name}</div>
+                <div className="flex items-center gap-1.5 mt-0.5">
+                  <span className="inline-flex items-center px-1 py-px rounded text-[10px] font-mono font-medium text-text-muted bg-secondary leading-none">
+                    {ext || 'FILE'}
                   </span>
-                )}
+                  <span className="text-xs text-text-muted">{formatFileSize(file.size)}</span>
+                  {expired && (
+                    <span className="inline-flex items-center px-1 py-px rounded text-[10px] font-mono font-medium text-danger bg-danger/10 leading-none">
+                      {t('chatUi.fileExpired')}
+                    </span>
+                  )}
+                </div>
               </div>
-            </div>
-            <div
+            </button>
+            <button
+              type="button"
               className={clsx(
                 'flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center  ',
                 expired
                   ? 'text-text-muted/40'
-                  : 'text-text-muted group-hover:text-accent group-hover:bg-accent-subtle'
+                  : 'text-text-muted hover:text-accent hover:bg-accent-subtle'
               )}
+              disabled={expired}
+              onClick={(event) => {
+                event.stopPropagation();
+                void handleDownload(file, index);
+              }}
+              title={t('artifacts.download')}
+              aria-label={t('artifacts.download')}
             >
               {expired ? (
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
@@ -867,7 +869,7 @@ function FileDownloadList({
                   <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
                 </svg>
               )}
-            </div>
+            </button>
           </div>
         );
       })}

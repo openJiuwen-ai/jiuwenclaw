@@ -1,7 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import asyncio
-import os
 import threading
 import time
 from pathlib import Path
@@ -23,15 +22,20 @@ from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import (
 
 class FakeWebChannel:
     def __init__(self):
+        self.channel_id = "web"
         self.methods: dict[str, object] = {}
         self.responses: list[dict] = []
         self.connect_handler = None
+        self.disconnect_handler = None
 
     def register_method(self, name, handler):
         self.methods[name] = handler
 
     def on_connect(self, handler):
         self.connect_handler = handler
+
+    def on_disconnect(self, handler):
+        self.disconnect_handler = handler
 
     async def send_response(self, ws, req_id, *, ok, payload=None, error=None, code=None):
         self.responses.append(
@@ -58,6 +62,29 @@ class FakeAgentClient:
             return type("Resp", (), {"ok": True, "payload": {}})()
         finally:
             self.reload_finished.set()
+
+
+class FakeMessageHandler:
+    def __init__(self):
+        self.disconnected_websockets: list[tuple[str, str]] = []
+
+    async def unregister_ws_subscriptions(self, channel_id: str, ws_id: str) -> int:
+        self.disconnected_websockets.append((channel_id, ws_id))
+        return 1
+
+
+@pytest.mark.asyncio
+async def test_web_disconnect_unregisters_physical_subscriptions() -> None:
+    channel = FakeWebChannel()
+    message_handler = FakeMessageHandler()
+    _register_web_handlers(
+        WebHandlersBindParams(channel=channel, message_handler=message_handler)
+    )
+    ws = SimpleNamespace(_jiuwen_ws_id="web-ws-dead")
+
+    await channel.disconnect_handler(ws, {"sess-web"})
+
+    assert message_handler.disconnected_websockets == [("web", "web-ws-dead")]
 
 
 class FakeChannelManager:
@@ -88,6 +115,41 @@ class FakeHeartbeatService:
 
 
 @pytest.mark.asyncio
+async def test_session_list_preserves_team_name_in_projected_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.session_metadata.get_all_sessions_metadata",
+        lambda **_kwargs: (
+            [
+                {
+                    "session_id": "sess-team-1",
+                    "mode": "team",
+                    "team_name": "dev-team-swarm_sess-team-1",
+                    "title": "team task",
+                    "delivery_context": {"channel_id": "internal"},
+                }
+            ],
+            1,
+        ),
+    )
+    channel = FakeWebChannel()
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    await channel.methods["session.list"](
+        object(),
+        "req-session-list",
+        {},
+        "current-session",
+    )
+
+    payload = channel.responses[-1]["payload"]
+    assert payload["sessions"][0]["mode"] == "team"
+    assert payload["sessions"][0]["team_name"] == "dev-team-swarm_sess-team-1"
+    assert "delivery_context" not in payload["sessions"][0]
+
+
+@pytest.mark.asyncio
 async def test_path_set_reloads_config_and_resets_agent_browser_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -101,12 +163,17 @@ async def test_path_set_reloads_config_and_resets_agent_browser_runtime(
         "update_browser_in_config",
         lambda config: saved_configs.append(config),
     )
+    monkeypatch.setattr(
+        app_web_handlers,
+        "get_config",
+        lambda: {"browser": {"chrome_path": "", "headless": True}},
+    )
 
     async def fake_clear(client):
         lifecycle_calls.append(("reload", client))
 
-    async def fake_restart(client):
-        lifecycle_calls.append(("restart", client))
+    async def fake_restart(client, **kwargs):
+        lifecycle_calls.append(("restart", client, kwargs))
 
     monkeypatch.setattr(app_web_handlers, "_clear_agent_config_cache", fake_clear)
     monkeypatch.setattr(
@@ -130,7 +197,14 @@ async def test_path_set_reloads_config_and_resets_agent_browser_runtime(
     ]
     assert lifecycle_calls == [
         ("reload", agent_client),
-        ("restart", agent_client),
+        (
+            "restart",
+            agent_client,
+            {
+                "previous_chrome_path": "",
+                "previous_headless": True,
+            },
+        ),
     ]
     assert channel.responses[-1] == {
         "id": "req-path",
@@ -652,13 +726,14 @@ async def test_config_set_routes_team_payload_to_modes_team_helper(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("value", ["true", "false"])
-async def test_config_set_syncs_auto_scan_to_review_trigger_only(
+async def test_config_set_updates_canonical_skill_evolution(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
     value: str,
 ) -> None:
     channel = FakeWebChannel()
-    saved_updates: list[dict[str, str]] = []
+    saved_updates: list[dict] = []
+    evolution_updates: list[bool] = []
 
     monkeypatch.setattr(
         "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._ENV_FILE",
@@ -670,17 +745,18 @@ async def test_config_set_syncs_auto_scan_to_review_trigger_only(
     )
     monkeypatch.setattr(
         "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config",
-        lambda: {"evolution": {}},
+        lambda: {"react": {"evolution": {"skill_evolution": value == "true"}}},
     )
-    monkeypatch.setenv("EVOLUTION_AUTO_SCAN", "")
-    monkeypatch.setenv("EVOLUTION_REVIEW_TRIGGER", "")
-    monkeypatch.setenv("EVOLUTION_SIGNAL_TRIGGER", "manual")
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_skill_evolution_enabled_in_config",
+        lambda enabled: evolution_updates.append(enabled),
+    )
 
     _register_web_handlers(
         WebHandlersBindParams(
             channel=channel,
-            on_config_saved=lambda _, **kwargs: saved_updates.append(
-                kwargs["env_updates"]
+            on_config_saved=lambda _, **kwargs: (
+                saved_updates.append(kwargs) or True
             ),
         )
     )
@@ -688,23 +764,16 @@ async def test_config_set_syncs_auto_scan_to_review_trigger_only(
     await channel.methods["config.set"](
         object(),
         "req-evolution",
-        {"evolution_auto_scan": value},
+        {"skill_evolution": value},
         "sess-evolution",
     )
 
-    expected = {
-        "EVOLUTION_AUTO_SCAN": value,
-        "EVOLUTION_REVIEW_TRIGGER": value,
-    }
-    assert saved_updates == [expected]
-    assert {key: os.environ[key] for key in expected} == expected
-    assert os.environ["EVOLUTION_SIGNAL_TRIGGER"] == "manual"
-    assert set((tmp_path / ".env").read_text(encoding="utf-8").splitlines()) == {
-        f'{key}="{env_value}"' for key, env_value in expected.items()
-    }
+    assert evolution_updates == [value == "true"]
+    assert saved_updates and saved_updates[0]["env_updates"] == {}
+    assert saved_updates[0]["config_payload"]["react"]["evolution"]["skill_evolution"] is (value == "true")
     assert channel.responses[-1]["payload"] == {
-        "updated": ["evolution_auto_scan"],
-        "applied_without_restart": False,
+        "updated": ["skill_evolution"],
+        "applied_without_restart": True,
     }
 
 
@@ -876,7 +945,7 @@ def test_config_panel_flatten_reads_symphony_enabled_and_skill_retrieval():
     flat = _flatten_symphony_for_config_panel(raw)
 
     assert flat["symphony_enabled"] == "true"
-    assert flat["symphony_dynamic_graph_enabled"] == "false"
+    assert "symphony_dynamic_graph_enabled" not in flat
     assert "symphony_orchestration_mode" not in flat
     assert flat["skill_retrieval_enabled"] == "true"
     assert flat["skill_retrieval_build_branching_factor"] == "64"
@@ -921,7 +990,7 @@ async def test_config_set_routes_symphony_payload_to_config_helper(monkeypatch):
         "sess-3",
     )
 
-    assert recorded_symphony == [{"enabled": True, "evolution": {"enabled": False}}]
+    assert recorded_symphony == [{"enabled": True}]
     assert recorded_skill_retrieval == [{"enabled": False, "retrieve": {"flatten_tree": True}}]
     assert channel.responses[-1] == {
         "id": "req-3",
@@ -929,7 +998,6 @@ async def test_config_set_routes_symphony_payload_to_config_helper(monkeypatch):
         "payload": {
             "updated": [
                 "symphony_enabled",
-                "symphony_dynamic_graph_enabled",
                 "skill_retrieval_enabled",
                 "skill_retrieval_retrieve_flatten_tree",
             ],
@@ -940,10 +1008,26 @@ async def test_config_set_routes_symphony_payload_to_config_helper(monkeypatch):
     }
 
 
-def test_web_does_not_expose_symphony_evolution_rpc_methods():
-    assert "symphony.evolution_status" not in app_web_handlers._FORWARD_REQ_METHODS
-    assert "symphony.evolution_record_outcome" not in app_web_handlers._FORWARD_REQ_METHODS
-    assert "symphony.evolution_rebuild" not in app_web_handlers._FORWARD_REQ_METHODS
+def test_web_exposes_graph_methods_and_rejects_legacy_symphony_methods():
+    skill_graph_methods = {
+        "skills.graph.build",
+        "skills.graph.status",
+        "skills.graph.get",
+        "skills.graph.cancel",
+    }
+    assert skill_graph_methods.issubset(app_web_handlers._FORWARD_REQ_METHODS)
+
+    legacy_symphony_methods = {
+        "symphony.build_score",
+        "symphony.pause_build",
+        "symphony.score_status",
+        "symphony.graph",
+        "symphony.plan",
+        "symphony.evolution_status",
+        "symphony.evolution_record_outcome",
+        "symphony.evolution_rebuild",
+    }
+    assert legacy_symphony_methods.isdisjoint(app_web_handlers._FORWARD_REQ_METHODS)
 
 
 # =====================================================================

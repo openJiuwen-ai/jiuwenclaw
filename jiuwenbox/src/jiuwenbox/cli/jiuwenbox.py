@@ -483,6 +483,29 @@ class _CliClient:
     def policy_get(self, sandbox_id: str) -> dict[str, Any]:
         return dict(self._get(f"{_API_PREFIX}/policies/{sandbox_id}").json())
 
+    def policy_update(
+        self,
+        sandbox_id: str,
+        *,
+        policy: Any,
+        policy_mode: str | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"policy": policy}
+        if policy_mode is not None:
+            body["policy_mode"] = policy_mode
+        return dict(self._put(f"{_API_PREFIX}/policies/{sandbox_id}", json=body).json())
+
+    def policy_update_all(
+        self,
+        *,
+        policy: Any,
+        policy_mode: str | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"policy": policy}
+        if policy_mode is not None:
+            body["policy_mode"] = policy_mode
+        return dict(self._put(f"{_API_PREFIX}/policies", json=body).json())
+
     # ── /api/v1/proxies/* ──
 
     def proxy_create(
@@ -491,6 +514,7 @@ class _CliClient:
         path_prefix: str,
         target_endpoint: str,
         api_key: str | None = None,
+        basic_auth: dict[str, str] | None = None,
         skip_cert_verify: bool = False,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
@@ -500,6 +524,8 @@ class _CliClient:
         }
         if api_key is not None:
             body["api_key"] = api_key
+        if basic_auth is not None:
+            body["basic_auth"] = basic_auth
         return dict(self._post(f"{_API_PREFIX}/proxies", json=body).json())
 
     def proxy_list(self) -> list[dict[str, Any]]:
@@ -524,6 +550,7 @@ class _CliClient:
         path_prefix: str,
         target_endpoint: str,
         api_key: str | None = None,
+        basic_auth: dict[str, str] | None = None,
         skip_cert_verify: bool = False,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
@@ -533,6 +560,8 @@ class _CliClient:
         }
         if api_key is not None:
             body["api_key"] = api_key
+        if basic_auth is not None:
+            body["basic_auth"] = basic_auth
         return dict(self._put(f"{_API_PREFIX}/proxies/{name}", json=body).json())
 
     def proxy_logs(self, name: str, *, lines: int | None = None) -> str:
@@ -593,6 +622,74 @@ def _resolve_stdin_input(value: Optional[str]) -> Optional[str]:
     if value == "-":
         return sys.stdin.read()
     return value
+
+
+def _strip_one_trailing_newline(value: str) -> str:
+    """Remove a single trailing CR/LF/CRLF (mirrors server password_file handling)."""
+    if value.endswith("\n"):
+        value = value[:-1]
+    if value.endswith("\r"):
+        value = value[:-1]
+    return value
+
+
+def _resolve_basic_auth(args: argparse.Namespace) -> dict[str, str] | None:
+    """Resolve a ``basic_auth`` request body from CLI args.
+
+    Enforces the same structural rules as the server model
+    (``models.policy.ProxyBasicAuth`` / ``build_proxy_route``):
+
+    - ``--password``, ``--password-file`` and ``--password-stdin`` are mutually
+      exclusive (exactly one password source when Basic is requested).
+    - ``--username`` is required when any Basic option is given.
+    - ``--password`` / ``--password-stdin`` put the secret in the JSON request
+      body (sent to the server); ``--password-file`` passes a server-side path
+      and the CLI never reads the file contents.
+
+    Returns ``None`` when no Basic option was given (no-auth / api_key route).
+    Raises :class:`_CliError` with a secret-free message on invalid combos so
+    the password is never echoed back in error output.
+    """
+    username: str | None = getattr(args, "username", None)
+    password: str | None = getattr(args, "password", None)
+    password_file: str | None = getattr(args, "password_file", None)
+    password_stdin: bool = getattr(args, "password_stdin", False)
+
+    sources = sum(bool(x) for x in (password, password_file, password_stdin))
+    if sources > 1:
+        raise _CliError(
+            "--password, --password-file and --password-stdin are mutually exclusive"
+        )
+
+    if not (username or password or password_file or password_stdin):
+        return None
+
+    if not username or not username.strip():
+        raise _CliError("--username is required when using Basic auth")
+
+    if password_stdin:
+        # Read the whole stdin and strip one trailing newline. The value lives
+        # only in the request body, never in argv.
+        password = _strip_one_trailing_newline(sys.stdin.read())
+        if not password:
+            raise _CliError("--password-stdin received empty input")
+
+    if password:
+        return {"username": username, "password": password}
+    if password_file:
+        return {"username": username, "password_file": password_file}
+    raise _CliError(
+        "Basic auth requires one of --password, --password-file or --password-stdin"
+    )
+
+
+def _check_api_key_basic_mutex(args: argparse.Namespace, basic_auth: dict[str, str] | None) -> None:
+    """Mirror the server's ``api_key and basic_auth`` mutex at the CLI layer."""
+    api_key = getattr(args, "api_key", None)
+    if api_key and basic_auth is not None:
+        raise _CliError(
+            "--api-key and Basic auth (--username/--password*) are mutually exclusive"
+        )
 
 
 # ────────────────────────────── output formatters ──────────────────────────────
@@ -829,13 +926,44 @@ def cmd_policy_get(args: argparse.Namespace, client: _CliClient) -> Any:
     return client.policy_get(args.sandbox_id)
 
 
+def _resolve_policy_arg(args: argparse.Namespace) -> Any:
+    if args.policy_file and args.policy:
+        raise _CliError("pass only one of --policy / --policy-file")
+    if args.policy_file:
+        return _load_policy_file(args.policy_file)
+    if args.policy:
+        try:
+            return json.loads(args.policy)
+        except json.JSONDecodeError as exc:
+            raise _CliError(f"--policy is not valid JSON: {exc}") from exc
+    raise _CliError("--policy or --policy-file is required")
+
+
+def cmd_policy_update(args: argparse.Namespace, client: _CliClient) -> Any:
+    return client.policy_update(
+        args.sandbox_id,
+        policy=_resolve_policy_arg(args),
+        policy_mode=args.policy_mode,
+    )
+
+
+def cmd_policy_update_all(args: argparse.Namespace, client: _CliClient) -> Any:
+    return client.policy_update_all(
+        policy=_resolve_policy_arg(args),
+        policy_mode=args.policy_mode,
+    )
+
+
 # ── proxy ──
 
 def cmd_proxy_create(args: argparse.Namespace, client: _CliClient) -> Any:
+    basic_auth = _resolve_basic_auth(args)
+    _check_api_key_basic_mutex(args, basic_auth)
     return client.proxy_create(
         path_prefix=args.prefix,
         target_endpoint=args.target,
         api_key=args.api_key,
+        basic_auth=basic_auth,
         skip_cert_verify=args.skip_cert,
     )
 
@@ -868,11 +996,14 @@ def cmd_proxy_stop(args: argparse.Namespace, client: _CliClient) -> Any:
 
 
 def cmd_proxy_update(args: argparse.Namespace, client: _CliClient) -> Any:
+    basic_auth = _resolve_basic_auth(args)
+    _check_api_key_basic_mutex(args, basic_auth)
     return client.proxy_update(
         args.name,
         path_prefix=args.prefix,
         target_endpoint=args.target,
         api_key=args.api_key,
+        basic_auth=basic_auth,
         skip_cert_verify=args.skip_cert,
     )
 
@@ -886,6 +1017,46 @@ def cmd_proxy_logs(args: argparse.Namespace, client: _CliClient) -> Any:
 
 
 # ────────────────────────────── argparse build_parser ──────────────────────────────
+
+
+def _add_basic_auth_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add HTTP Basic auth options to a ``proxy create``/``update`` subparser.
+
+    ``--password`` and ``--password-stdin`` place the secret in the JSON
+    request body (never in argv for stdin); ``--password-file`` passes a
+    server-side path that the CLI never reads locally.
+    """
+    parser.add_argument(
+        "--username",
+        default=None,
+        help="HTTP Basic username (enables Basic auth for this route)",
+    )
+    parser.add_argument(
+        "--password",
+        default=None,
+        help=(
+            "HTTP Basic password; DEV/TEST ONLY — may be exposed via shell "
+            "history and process argument lists. Use --password-file or "
+            "--password-stdin in production."
+        ),
+    )
+    parser.add_argument(
+        "--password-file",
+        default=None,
+        help=(
+            "path to a password file readable by the JiuwenBox server "
+            "(Kubernetes Secret / Docker Secret / Linux 0600 file). The CLI "
+            "does NOT read this file; the server reads it at route assembly."
+        ),
+    )
+    parser.add_argument(
+        "--password-stdin",
+        action="store_true",
+        help=(
+            "read the Basic password from stdin and send it via the REST "
+            "request body (not exposed in process arguments)"
+        ),
+    )
 
 
 def _add_global_options(parser: argparse.ArgumentParser) -> None:
@@ -1114,13 +1285,44 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(_handler=cmd_sandbox_find)
 
     # ── policy group ──
-    p_policy = groups.add_parser("policy", help="inspect sandbox policy")
+    p_policy = groups.add_parser("policy", help="inspect and update sandbox policy")
     policy_subs = p_policy.add_subparsers(dest="action", metavar="ACTION")
     policy_subs.required = True
 
     p = policy_subs.add_parser("get", help="get effective policy of sandbox")
     _add_sandbox_id(p)
     p.set_defaults(_handler=cmd_policy_get)
+
+    def _add_policy_update_args(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument(
+            "--policy",
+            help="policy JSON fragment (e.g. '{\"network\":{\"egress\":{\"default\":\"allow\"}}}')",
+        )
+        parser.add_argument(
+            "--policy-file",
+            help="local JSON or YAML policy fragment file",
+        )
+        parser.add_argument(
+            "--policy-mode",
+            choices=["override", "append"],
+            default=None,
+            help="policy merge mode (default server-side 'override')",
+        )
+
+    p = policy_subs.add_parser(
+        "update",
+        help="update network ingress/egress for one sandbox",
+    )
+    _add_sandbox_id(p)
+    _add_policy_update_args(p)
+    p.set_defaults(_handler=cmd_policy_update)
+
+    p = policy_subs.add_parser(
+        "update-all",
+        help="update network ingress/egress for all sandboxes",
+    )
+    _add_policy_update_args(p)
+    p.set_defaults(_handler=cmd_policy_update_all)
 
     # ── proxy group ──
     p_proxy = groups.add_parser("proxy", help="manage inference proxies")
@@ -1132,6 +1334,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--target", required=True, help="upstream endpoint")
     p.add_argument("--api-key", default=None)
     p.add_argument("--skip-cert", action="store_true", help="skip TLS verify")
+    _add_basic_auth_arguments(p)
     p.set_defaults(_handler=cmd_proxy_create)
 
     p = proxy_subs.add_parser("ls", help="list proxies")
@@ -1160,6 +1363,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--target", required=True)
     p.add_argument("--api-key", default=None)
     p.add_argument("--skip-cert", action="store_true")
+    _add_basic_auth_arguments(p)
     p.set_defaults(_handler=cmd_proxy_update)
 
     p = proxy_subs.add_parser("logs", help="tail proxy logs")

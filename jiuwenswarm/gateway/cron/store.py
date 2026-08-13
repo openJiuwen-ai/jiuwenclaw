@@ -244,6 +244,7 @@ class CronJobStore:
         model_name: str | None = None,
         app_id: str = "",
         work_mode: str = DEFAULT_WEB_WORK_MODE,
+        user_id: str = "",
     ) -> CronJob:
         now = time.time()
         sid = str(session_id).strip() if isinstance(session_id, str) and session_id.strip() else None
@@ -281,6 +282,7 @@ class CronJobStore:
             model_name=model_name_val,
             app_id=str(app_id or "").strip(),
             work_mode=normalize_work_mode(work_mode, default=DEFAULT_WEB_WORK_MODE),
+            user_id=str(user_id or "").strip(),
         )
         # validate via round-trip
         CronJob.from_dict(job.to_dict())

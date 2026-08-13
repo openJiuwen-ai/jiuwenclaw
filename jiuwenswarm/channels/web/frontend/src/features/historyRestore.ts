@@ -13,6 +13,16 @@ import {
 export const HISTORY_GET_METHOD = 'history.get';
 export const HISTORY_MESSAGE_EVENT = 'history.message';
 
+/**
+ * 历史加载兜底超时（毫秒）。
+ * faas 侧 history.get 流若因旧 session runtime 过 TTL 被回收而 init 超时
+ * （60s timed out），后端不会发 done/batch_end 结束帧，也不会发匹配的
+ * chat.error；前端若无限等待会让 isLoadingHistory 永久卡 true，进而吞掉
+ * 后续所有 chat.processing_status(is_processing=false)，表现为「一直加载中」。
+ * 到期强制 finalize，让调用方 setLoadingHistory(false) 恢复可交互。
+ */
+const HISTORY_RESTORE_TIMEOUT_MS = 30_000;
+
 /** 助手侧仅恢复这些事件；用户消息无 event_type，单独保留 */
 const ALLOWED_ASSISTANT_EVENT_TYPES = new Set([
   'chat.final',
@@ -25,7 +35,8 @@ const ALLOWED_ASSISTANT_EVENT_TYPES = new Set([
   'team.task',
   'harness.message',
   'harness.stage_result',
-  'harness.extension_ready'
+  'harness.extension_ready',
+  'context.compact_boundary'
 ]);
 
 /** 后端约定：最后一帧 `history.message` 使用 `payload.status: done`（兼容旧版 `payload.content: done`） */
@@ -41,6 +52,8 @@ export interface HistoryToolReplayItem {
 export interface HistoryReasoningReplayItem {
   at: string;
   text: string;
+  /** 末帧时刻（epoch ms）；异常结束时即使无收尾事件，耗时终点也能落在最后一个真实帧。 */
+  updatedAt?: number;
 }
 
 export interface HistoryHarnessReplayItem {
@@ -74,7 +87,14 @@ type HistoryTimelineEntry =
   | { kind: 'team_task'; at: string; payload: { event: Record<string, unknown> } }
   | { kind: 'harness_message'; at: string; content: string; stage?: string }
   | { kind: 'harness_stage_result'; at: string; stage: string; status: string; error: string; messages: string[]; metrics: Record<string, unknown> }
-  | { kind: 'reasoning'; at: string; text: string };
+  | { kind: 'compaction'; at: string; summary: string }
+  | { kind: 'reasoning'; at: string; text: string; updatedAt?: number };
+
+/** 历史回放出的压缩汇总：boundary 记录计数，metadata 拼 tooltip 明细行 */
+export interface HistoryCompactionReplay {
+  count: number;
+  summaries: string[];
+}
 
 interface BeginHistoryRestoreOptions {
   sessionId: string;
@@ -87,6 +107,8 @@ interface BeginHistoryRestoreOptions {
   onTeamReplay?: (items: HistoryTeamReplayItem[]) => void;
   /** 与消息同一时间线顺序，用于恢复模型思考块（chat.reasoning） */
   onReasoningReplay?: (items: HistoryReasoningReplayItem[]) => void;
+  /** 恢复上下文压缩汇总（context.compact_boundary），用于回显「本轮完成上下文压缩 N 次」 */
+  onCompactionReplay?: (info: HistoryCompactionReplay) => void;
   /** 无消息且无工具回放时调用；`totalPages` 来自流中最后一帧（若有） */
   onEmpty?: (totalPages: number | null) => void;
   onError?: (message: string) => void;
@@ -131,6 +153,28 @@ function extractHistoryReasoningText(record: Record<string, unknown>): string {
     }
   }
   return '';
+}
+
+/** 提取 reasoning 末帧时刻（reasoning_updated_at 可能在顶层或 payload 内），非有效时刻返回 undefined。 */
+function extractHistoryReasoningUpdatedAt(record: Record<string, unknown>): number | undefined {
+  const direct = record.reasoning_updated_at;
+  const raw = typeof direct === 'number' || (typeof direct === 'string' && direct.trim())
+    ? direct
+    : (() => {
+        const payload = record.payload;
+        if (!isRecord(payload)) {
+          return undefined;
+        }
+        const nested = payload.reasoning_updated_at;
+        return typeof nested === 'number' || (typeof nested === 'string' && nested.trim())
+          ? nested
+          : undefined;
+      })();
+  if (raw === undefined) {
+    return undefined;
+  }
+  const ms = parseTimestampToMs(raw);
+  return Number.isFinite(ms) && ms > 0 ? ms : undefined;
 }
 
 function pickFirstString(input: Record<string, unknown>, keys: string[]): string | undefined {
@@ -375,6 +419,52 @@ function isTruthyHistoryFlag(value: unknown): boolean {
   return value === true || value === 'true' || value === 1 || value === '1';
 }
 
+function compactTokenCount(value: number): string {
+  const abs = Math.abs(value);
+  if (abs >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}m`;
+  if (abs >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
+  return String(value);
+}
+
+/** 从 boundary 记录的 compact_metadata 拼一行 tooltip 明细（兼容手动 compact 的 stats 结构） */
+function formatCompactBoundarySummary(record: Record<string, unknown>): string {
+  const meta = isRecord(record.compact_metadata) ? record.compact_metadata : null;
+  if (!meta) return '';
+  const before = isRecord(meta.before) ? meta.before : null;
+  const after = isRecord(meta.after) ? meta.after : null;
+  const saved = isRecord(meta.saved) ? meta.saved : null;
+  const beforeTokens =
+    typeof before?.tokens === 'number'
+      ? before.tokens
+      : typeof meta.raw_total_tokens === 'number'
+        ? meta.raw_total_tokens
+        : null;
+  const afterTokens =
+    typeof after?.tokens === 'number'
+      ? after.tokens
+      : typeof meta.total_tokens === 'number'
+        ? meta.total_tokens
+        : null;
+  const percent =
+    typeof saved?.percent === 'number'
+      ? saved.percent
+      : typeof meta.rate === 'number'
+        ? meta.rate
+        : null;
+  const processor =
+    typeof meta.processor === 'string' && meta.processor.trim() ? meta.processor.trim() : '';
+  const parts: string[] = [];
+  if (beforeTokens != null && afterTokens != null) {
+    parts.push(`~${compactTokenCount(beforeTokens)} -> ~${compactTokenCount(afterTokens)} tokens`);
+  }
+  if (percent != null) {
+    parts.push(`saved ${percent.toFixed(1)}%`);
+  }
+  const line = parts.join(', ');
+  if (processor && line) return `${processor}: ${line}`;
+  return processor || line;
+}
+
 function parseHistoryTimelineEntry(
   record: Record<string, unknown>,
   sessionId: string
@@ -462,7 +552,14 @@ function parseHistoryTimelineEntry(
   const payload = buildEventPayloadForRecord(record);
 
   if (eventType === 'chat.final') {
-    let content = normalizeFinalContent(payload);
+    // Goal 完成卡片落盘的是 `goal.completed:` + JSON 信封，不是展示文本。
+    // normalizeFinalContent 会把字面 `\n` 还原成真换行（GFM 表格要靠这个），信封里的
+    // JSON 字符串于是带上非法控制符，parseGoalCompletedContent 解析失败 →
+    // GoalCompletedCard 返回 null → 整张卡片在历史里凭空消失。信封原样透传。
+    const rawContent = typeof payload.content === 'string' ? payload.content : '';
+    let content = isGoalCompletedContent(rawContent)
+      ? rawContent
+      : normalizeFinalContent(payload);
     const isGoalCompletedMessage =
       isTruthyHistoryFlag(record.is_goal_completed_message) ||
       isTruthyHistoryFlag(record.isGoalCompletedMessage) ||
@@ -504,6 +601,14 @@ function parseHistoryTimelineEntry(
     const histSource = typeof payload.source === 'string' ? payload.source : '';
     const isProactiveRecommendation = histSource === 'proactive_recommendation';
     const histProactiveType = typeof payload.proactive_type === 'string' ? payload.proactive_type : '';
+    // completed_at：收尾时刻（耗时）；timestamp 已是气泡出现/首包时刻（排序）
+    const completedAt =
+      (typeof record.completed_at === 'number' || typeof record.completed_at === 'string'
+        ? recordTimestampIso({ timestamp: record.completed_at })
+        : undefined) ||
+      (typeof payload.completed_at === 'number' || typeof payload.completed_at === 'string'
+        ? recordTimestampIso({ timestamp: payload.completed_at })
+        : undefined);
     return {
       kind: 'message',
       message: {
@@ -511,6 +616,7 @@ function parseHistoryTimelineEntry(
         role: 'assistant',
         content,
         timestamp: at,
+        ...(completedAt ? { completedAt } : {}),
         ...(isProactiveRecommendation ? { isProactiveRecommendation } : {}),
         ...(isProactiveRecommendation && histProactiveType
           ? { proactiveType: histProactiveType as 'skill_recommend' | 'task_reminder' | 'need_exploration' }
@@ -585,6 +691,10 @@ function parseHistoryTimelineEntry(
     return { kind: 'harness_message', at, content, stage };
   }
 
+  if (eventType === 'context.compact_boundary') {
+    return { kind: 'compaction', at, summary: formatCompactBoundarySummary(record) };
+  }
+
   if (eventType === 'harness.stage_result') {
     const stage = typeof payload.stage === 'string' ? payload.stage : '';
     const status = typeof payload.status === 'string' ? payload.status : 'success';
@@ -598,6 +708,182 @@ function parseHistoryTimelineEntry(
   }
 
   return null;
+}
+
+function isAssistantLikeHistoryMessage(message: Message): boolean {
+  return (
+    message.role === 'assistant' ||
+    (message.role === 'system' && Boolean(message.id?.startsWith('team-leader-')))
+  );
+}
+
+/**
+ * 与实时 `addFileItems` 对齐：chat.file 挂到「已经出现的」最近一条助手消息。
+ * 旧逻辑挂到下一条 final，会导致刷新后文件从总结上方跑到总结气泡内部下方。
+ */
+function attachFilesToPreviousAssistant(messages: Message[], files: FileDownloadItem[]): boolean {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (!isAssistantLikeHistoryMessage(messages[i])) {
+      continue;
+    }
+    messages[i] = {
+      ...messages[i],
+      fileItems: mergeFileDownloadItems(messages[i].fileItems, files),
+    };
+    return true;
+  }
+  return false;
+}
+
+function createFileOnlyAssistantMessage(at: string, files: FileDownloadItem[]): Message {
+  const timestamp = at.trim() || new Date().toISOString();
+  return {
+    id: `hist-file-${timestamp}`,
+    role: 'assistant',
+    content: '',
+    timestamp,
+    fileItems: files,
+  };
+}
+
+interface MaterializedHistoryTimeline {
+  messages: Message[];
+  toolReplay: HistoryToolReplayItem[];
+  harnessReplay: HistoryHarnessReplayItem[];
+  teamReplay: HistoryTeamReplayItem[];
+  reasoningReplay: HistoryReasoningReplayItem[];
+}
+
+function entryTimestamp(entry: HistoryTimelineEntry): string {
+  return entry.kind === 'message' ? entry.message.timestamp : entry.at;
+}
+
+/**
+ * Goal 完成卡片沉到本轮末尾。
+ *
+ * 实时侧这张卡是「本轮内容都落地后」才插进对话流的（见 useWebSocket 的
+ * scheduleAfterTurnSettles），历史里它的落盘时刻却可能早于同轮后续的收尾正文。
+ * 不重新盖章，历史就会把完成卡片排到最后一句回答上面，和实时反过来。
+ */
+function sinkGoalCompletionCardsToTurnEnd(
+  entries: HistoryTimelineEntry[]
+): HistoryTimelineEntry[] {
+  const out = [...entries];
+  let changed = false;
+
+  for (let i = 0; i < out.length; i += 1) {
+    const entry = out[i];
+    if (entry.kind !== 'message' || !isGoalCompletedContent(entry.message.content)) {
+      continue;
+    }
+    const cardMs = safeTimestampMs(entryTimestamp(entry));
+    let turnEndMs = cardMs;
+    for (let j = i + 1; j < out.length; j += 1) {
+      const next = out[j];
+      if (next.kind === 'message' && next.message.role === 'user') {
+        break;
+      }
+      turnEndMs = Math.max(turnEndMs, safeTimestampMs(entryTimestamp(next)));
+    }
+    if (turnEndMs <= cardMs) {
+      continue;
+    }
+    const iso = timestampMsToIso(turnEndMs + 1);
+    if (!iso) {
+      continue;
+    }
+    out[i] = { ...entry, message: { ...entry.message, timestamp: iso } };
+    changed = true;
+  }
+
+  if (!changed) {
+    return entries;
+  }
+  return out.sort(
+    (a, b) => safeTimestampMs(entryTimestamp(a)) - safeTimestampMs(entryTimestamp(b))
+  );
+}
+
+/** 将 history 条目折叠成消息/工具/思考，供 restore / page / 文件预览共用。入口统一升序。 */
+function materializeHistoryTimeline(
+  rawEntries: HistoryTimelineEntry[]
+): MaterializedHistoryTimeline {
+  // restore 用 unshift 倒序入列；sink / 折叠依赖时间升序，这里统一排一次。
+  const sortedEntries = [...rawEntries].sort(
+    (a, b) => safeTimestampMs(entryTimestamp(a)) - safeTimestampMs(entryTimestamp(b))
+  );
+  const entries = sinkGoalCompletionCardsToTurnEnd(sortedEntries);
+  const messages: Message[] = [];
+  const toolReplay: HistoryToolReplayItem[] = [];
+  const harnessReplay: HistoryHarnessReplayItem[] = [];
+  const teamReplay: HistoryTeamReplayItem[] = [];
+  const reasoningReplay: HistoryReasoningReplayItem[] = [];
+
+  for (const e of entries) {
+    if (e.kind === 'message') {
+      messages.push(e.message);
+      continue;
+    }
+    if (e.kind === 'usage_summary') {
+      for (let i = messages.length - 1; i >= 0; i -= 1) {
+        if (messages[i].role === 'assistant') {
+          messages[i] = { ...messages[i], usageSummary: e.usage };
+          break;
+        }
+      }
+      continue;
+    }
+    if (e.kind === 'harness_message') {
+      harnessReplay.push({
+        kind: 'harness_message',
+        at: e.at,
+        payload: { content: e.content, stage: e.stage },
+      });
+      messages.push({
+        id: `harness-msg-${e.at}`,
+        role: 'system',
+        content: e.content,
+        timestamp: e.at,
+        isHarnessMessage: true,
+      });
+      continue;
+    }
+    if (e.kind === 'harness_stage_result') {
+      harnessReplay.push({
+        kind: 'harness_stage_result',
+        at: e.at,
+        payload: {
+          stage: e.stage,
+          status: e.status,
+          error: e.error,
+          messages: e.messages,
+          metrics: e.metrics,
+        },
+      });
+      continue;
+    }
+    if (e.kind === 'file_items') {
+      if (!attachFilesToPreviousAssistant(messages, e.files)) {
+        messages.push(createFileOnlyAssistantMessage(e.at, e.files));
+      }
+      continue;
+    }
+    if (e.kind === 'team_member' || e.kind === 'team_task') {
+      teamReplay.push({ kind: e.kind, at: e.at, payload: e.payload });
+      continue;
+    }
+    if (e.kind === 'reasoning') {
+      reasoningReplay.push({ at: e.at, text: e.text, updatedAt: e.updatedAt });
+      continue;
+    }
+    if (e.kind === 'compaction') {
+      // 压缩边界不进 toolReplay，由 beginHistoryRestore 在循环结束后统一汇总回放
+      continue;
+    }
+    toolReplay.push({ kind: e.kind, at: e.at, payload: e.payload });
+  }
+
+  return { messages, toolReplay, harnessReplay, teamReplay, reasoningReplay };
 }
 
 /**
@@ -614,7 +900,7 @@ export function parseHistoryJsonFileToPreviewMessages(
 export interface HistoryTimelinePreview {
   messages: Message[];
   executions: ToolExecution[];
-  reasoningSegments: { id: string; text: string; startedAt: number; closed: true; closedAt?: number }[];
+  reasoningSegments: { id: string; text: string; startedAt: number; closed: true; updatedAt?: number; closedAt?: number }[];
   mode: 'team' | null;
 }
 
@@ -629,9 +915,7 @@ export function parseHistoryJsonFileToTimelinePreview(
     return { messages: [], executions: [], reasoningSegments: [], mode: null };
   }
 
-  const messages: Message[] = [];
-  const toolReplay: HistoryToolReplayItem[] = [];
-  const reasoningReplay: HistoryReasoningReplayItem[] = [];
+  const entries: HistoryTimelineEntry[] = [];
   let isTeam = false;
 
   for (const item of parsed) {
@@ -642,19 +926,28 @@ export function parseHistoryJsonFileToTimelinePreview(
       isTeam = true;
     }
     const entry = parseHistoryTimelineEntry(item, sessionId);
-    if (entry?.kind === 'message') {
-      messages.push(entry.message);
-    } else if (entry?.kind === 'tool_call' || entry?.kind === 'tool_result') {
-      toolReplay.push({ kind: entry.kind, at: entry.at, payload: entry.payload });
+    if (entry) {
+      entries.push(entry);
     }
     const reasoningText = extractHistoryReasoningText(item);
     if (reasoningText) {
-      reasoningReplay.push({ at: recordTimestampIso(item) ?? '', text: reasoningText });
+      entries.push({
+        kind: 'reasoning',
+        at: recordTimestampIso(item) ?? '',
+        text: reasoningText,
+        updatedAt: extractHistoryReasoningUpdatedAt(item),
+      });
     }
   }
 
-  messages.sort((a, b) => safeTimestampMs(a.timestamp) - safeTimestampMs(b.timestamp));
+  // 文件预览按记录原始顺序；同戳时 sourceIndex 由后续 timeline 排序兜底。
+  entries.sort((a, b) => {
+    const aAt = a.kind === 'message' ? a.message.timestamp : a.at;
+    const bAt = b.kind === 'message' ? b.message.timestamp : b.at;
+    return safeTimestampMs(aAt) - safeTimestampMs(bAt);
+  });
 
+  const { messages, toolReplay, reasoningReplay } = materializeHistoryTimeline(entries);
   const executions = buildToolExecutionsFromReplay(toolReplay);
   const reasoningSegments = buildReasoningSegmentsFromReplay(sessionId, reasoningReplay);
 
@@ -684,12 +977,20 @@ function buildReasoningSegmentsFromReplay(
       return;
     }
     const startedAt = parsed - 1;
+    // updatedAt 取落盘的 reasoning_updated_at（末帧时刻）；缺失/非法时回退 startedAt
+    // （老历史无该字段，保持原有保守终点）。
+    const replayUpdatedAt = parseTimestampToMs(item.updatedAt);
+    const updatedAt =
+      Number.isFinite(replayUpdatedAt) && replayUpdatedAt > 1_000_000_000_000
+        ? replayUpdatedAt
+        : startedAt;
     segments.push({
       id: `hist-preview-rsn-${sessionId}-${index}`,
       text,
       startedAt,
       closed: true,
       closedAt: startedAt,
+      updatedAt,
     });
   });
   segments.sort((a, b) => a.startedAt - b.startedAt);
@@ -726,7 +1027,8 @@ function buildToolExecutionsFromReplay(toolReplay: HistoryToolReplayItem[]): Too
           display_name: n.display_name,
           memberName: n.memberName,
         },
-        status: 'completed',
+        // 与实时一致：先 pending，等 tool_result 再落终态；无 result 的孤儿在循环末尾结算。
+        status: 'pending',
         startedAt,
         updatedAt: startedAt,
         timeoutAt: startedAt,
@@ -747,7 +1049,14 @@ function buildToolExecutionsFromReplay(toolReplay: HistoryToolReplayItem[]): Too
       toolCallId: n.toolCallId,
       summary: n.summary,
       skillTree: n.skillTree,
+      ...(n.timedOut ? { timedOut: true as const } : {}),
+      ...(n.beamSearch ? { beamSearch: n.beamSearch } : {}),
     };
+    const resultStatus: ToolExecution['status'] = n.timedOut
+      ? 'timeout'
+      : n.success
+        ? 'completed'
+        : 'error';
     const parsed = parseTimestampToMs(item.at);
     const atIso = Number.isFinite(parsed) ? timestampMsToIso(parsed) : undefined;
     if (!existing) {
@@ -762,7 +1071,7 @@ function buildToolExecutionsFromReplay(toolReplay: HistoryToolReplayItem[]): Too
           arguments: {},
         },
         result,
-        status: n.success ? 'completed' : 'error',
+        status: resultStatus,
         startedAt: atIso,
         updatedAt: atIso,
         timeoutAt: atIso,
@@ -773,8 +1082,27 @@ function buildToolExecutionsFromReplay(toolReplay: HistoryToolReplayItem[]): Too
     byId.set(n.toolCallId, {
       ...existing,
       result,
-      status: n.success ? 'completed' : 'error',
+      status: resultStatus,
       ...(atIso ? { updatedAt: atIso } : {}),
+    });
+  }
+
+  // 与 chatStore.settleHistoricalToolExecutions 对齐：仅结算仍无结果的孤儿 call
+  for (const id of order) {
+    const execution = byId.get(id);
+    if (!execution || execution.status !== 'pending' || execution.result) {
+      continue;
+    }
+    byId.set(id, {
+      ...execution,
+      status: 'completed',
+      updatedAt: execution.startedAt,
+      result: {
+        toolName: execution.toolCall.name,
+        result: '',
+        success: true,
+        toolCallId: id,
+      },
     });
   }
 
@@ -833,6 +1161,8 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
   const entries: HistoryTimelineEntry[] = [];
   let totalPages: number | null = null;
   let disposed = false;
+  let finalized = false;
+  let restoreTimer: ReturnType<typeof setTimeout> | null = null;
 
   const unsubscribe = webClient.on(HISTORY_MESSAGE_EVENT, (event: WsEvent) => {
     if (disposed) {
@@ -862,7 +1192,12 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
       }
       const reasoningText = extractHistoryReasoningText(record);
       if (reasoningText) {
-        entries.unshift({ kind: 'reasoning', at: recordTimestampIso(record) ?? '', text: reasoningText });
+        entries.unshift({
+          kind: 'reasoning',
+          at: recordTimestampIso(record) ?? '',
+          text: reasoningText,
+          updatedAt: extractHistoryReasoningUpdatedAt(record),
+        });
       }
     }
 
@@ -874,6 +1209,10 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
   function dispose(): void {
     if (disposed) return;
     disposed = true;
+    if (restoreTimer) {
+      clearTimeout(restoreTimer);
+      restoreTimer = null;
+    }
     unsubscribe();
     if (activeHistoryRequests.get(requestKey)?.generation === generation) {
       activeHistoryRequests.delete(requestKey);
@@ -881,67 +1220,11 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
   }
 
   function finalize(): void {
-    if (disposed) return;
+    if (disposed || finalized) return;
+    finalized = true;
 
-    const messages: Message[] = [];
-    const toolReplay: HistoryToolReplayItem[] = [];
-    const harnessReplay: HistoryHarnessReplayItem[] = [];
-    const teamReplay: HistoryTeamReplayItem[] = [];
-    const reasoningReplay: HistoryReasoningReplayItem[] = [];
-    let pendingFileItems: FileDownloadItem[] | null = null;
-    for (const e of entries) {
-      if (e.kind === 'message') {
-        if (pendingFileItems && (
-          e.message.role === 'assistant' ||
-          (e.message.role === 'system' && e.message.id?.startsWith('team-leader-'))
-        )) {
-          e.message = { ...e.message, fileItems: pendingFileItems };
-          pendingFileItems = null;
-        }
-        messages.push(e.message);
-      } else if (e.kind === 'usage_summary') {
-        for (let i = messages.length - 1; i >= 0; i--) {
-          if (messages[i].role === 'assistant') {
-            messages[i] = { ...messages[i], usageSummary: e.usage };
-            break;
-          }
-        }
-      } else if (e.kind === 'harness_message') {
-        harnessReplay.push({
-          kind: 'harness_message',
-          at: e.at,
-          payload: { content: e.content, stage: e.stage },
-        });
-        // Also add as system message with harness flag
-        messages.push({
-          id: `harness-msg-${e.at}`,
-          role: 'system',
-          content: e.content,
-          timestamp: e.at,
-          isHarnessMessage: true,
-        });
-      } else if (e.kind === 'harness_stage_result') {
-        harnessReplay.push({
-          kind: 'harness_stage_result',
-          at: e.at,
-          payload: {
-            stage: e.stage,
-            status: e.status,
-            error: e.error,
-            messages: e.messages,
-            metrics: e.metrics,
-          },
-        });
-      } else if (e.kind === 'file_items') {
-        pendingFileItems = mergeFileDownloadItems(pendingFileItems, e.files);
-      } else if (e.kind === 'team_member' || e.kind === 'team_task') {
-        teamReplay.push({ kind: e.kind, at: e.at, payload: e.payload });
-      } else if (e.kind === 'reasoning') {
-        reasoningReplay.push({ at: e.at, text: e.text });
-      } else {
-        toolReplay.push({ kind: e.kind, at: e.at, payload: e.payload });
-      }
-    }
+    const { messages, toolReplay, harnessReplay, teamReplay, reasoningReplay } =
+      materializeHistoryTimeline(entries);
 
     dispose();
 
@@ -962,10 +1245,24 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
     if (reasoningReplay.length > 0) {
       options.onReasoningReplay?.(reasoningReplay);
     }
+    const compactionCount = entries.reduce((n, e) => (e.kind === 'compaction' ? n + 1 : n), 0);
+    if (compactionCount > 0) {
+      const compactionSummaries = entries.flatMap((e) =>
+        e.kind === 'compaction' && e.summary.trim() ? [e.summary] : []
+      );
+      options.onCompactionReplay?.({ count: compactionCount, summaries: compactionSummaries });
+    }
   }
 
   const handle: HistoryRestoreHandle = { generation, dispose };
   activeHistoryRequests.set(requestKey, handle);
+  // 兜底：后端 history.get 流超时（faas 旧 session runtime 过 TTL 被
+  // 回收、init 60s 超时）时不发结束帧，强制 finalize 恢复 isLoadingHistory，
+  // 避免前端永久转圈、吞掉后续 chat.processing_status(is_processing=false)。
+  restoreTimer = setTimeout(() => {
+    if (disposed || finalized) return;
+    finalize();
+  }, HISTORY_RESTORE_TIMEOUT_MS);
   return handle;
 }
 
@@ -1000,6 +1297,8 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
   const entries: HistoryTimelineEntry[] = [];
   let totalPages: number | null = null;
   let disposed = false;
+  let finalized = false;
+  let restoreTimer: ReturnType<typeof setTimeout> | null = null;
 
   const unsubscribe = webClient.on(HISTORY_MESSAGE_EVENT, (event: WsEvent) => {
     if (disposed) {
@@ -1029,7 +1328,12 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
       }
       const reasoningText = extractHistoryReasoningText(record);
       if (reasoningText) {
-        entries.unshift({ kind: 'reasoning', at: recordTimestampIso(record) ?? '', text: reasoningText });
+        entries.unshift({
+          kind: 'reasoning',
+          at: recordTimestampIso(record) ?? '',
+          text: reasoningText,
+          updatedAt: extractHistoryReasoningUpdatedAt(record),
+        });
       }
     }
 
@@ -1041,6 +1345,10 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
   function dispose(): void {
     if (disposed) return;
     disposed = true;
+    if (restoreTimer) {
+      clearTimeout(restoreTimer);
+      restoreTimer = null;
+    }
     unsubscribe();
     if (activeHistoryRequests.get(requestKey)?.generation === generation) {
       activeHistoryRequests.delete(requestKey);
@@ -1048,66 +1356,11 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
   }
 
   function finalize(): void {
-    if (disposed) return;
+    if (disposed || finalized) return;
+    finalized = true;
 
-    const messages: Message[] = [];
-    const toolReplay: HistoryToolReplayItem[] = [];
-    const harnessReplay: HistoryHarnessReplayItem[] = [];
-    const teamReplay: HistoryTeamReplayItem[] = [];
-    const reasoningReplay: HistoryReasoningReplayItem[] = [];
-    let pendingFileItems: FileDownloadItem[] | null = null;
-    for (const e of entries) {
-      if (e.kind === 'message') {
-        if (pendingFileItems && (
-          e.message.role === 'assistant' ||
-          (e.message.role === 'system' && e.message.id?.startsWith('team-leader-'))
-        )) {
-          e.message = { ...e.message, fileItems: pendingFileItems };
-          pendingFileItems = null;
-        }
-        messages.push(e.message);
-      } else if (e.kind === 'usage_summary') {
-        for (let i = messages.length - 1; i >= 0; i--) {
-          if (messages[i].role === 'assistant') {
-            messages[i] = { ...messages[i], usageSummary: e.usage };
-            break;
-          }
-        }
-      } else if (e.kind === 'harness_message') {
-        harnessReplay.push({
-          kind: 'harness_message',
-          at: e.at,
-          payload: { content: e.content, stage: e.stage },
-        });
-        messages.push({
-          id: `harness-msg-${e.at}`,
-          role: 'system',
-          content: e.content,
-          timestamp: e.at,
-          isHarnessMessage: true,
-        });
-      } else if (e.kind === 'harness_stage_result') {
-        harnessReplay.push({
-          kind: 'harness_stage_result',
-          at: e.at,
-          payload: {
-            stage: e.stage,
-            status: e.status,
-            error: e.error,
-            messages: e.messages,
-            metrics: e.metrics,
-          },
-        });
-      } else if (e.kind === 'file_items') {
-        pendingFileItems = mergeFileDownloadItems(pendingFileItems, e.files);
-      } else if (e.kind === 'team_member' || e.kind === 'team_task') {
-        teamReplay.push({ kind: e.kind, at: e.at, payload: e.payload });
-      } else if (e.kind === 'reasoning') {
-        reasoningReplay.push({ at: e.at, text: e.text });
-      } else {
-        toolReplay.push({ kind: e.kind, at: e.at, payload: e.payload });
-      }
-    }
+    const { messages, toolReplay, harnessReplay, teamReplay, reasoningReplay } =
+      materializeHistoryTimeline(entries);
 
     dispose();
 
@@ -1120,5 +1373,10 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
 
   const handle: HistoryRestoreHandle = { generation, dispose };
   activeHistoryRequests.set(requestKey, handle);
+  // 同 beginHistoryRestore：兜底超时，避免分页 history.get 流卡死。
+  restoreTimer = setTimeout(() => {
+    if (disposed || finalized) return;
+    finalize();
+  }, HISTORY_RESTORE_TIMEOUT_MS);
   return handle;
 }

@@ -219,6 +219,19 @@ interface TeamMember {
   name?: string;
   execution_status?: string | null;
   mode?: string;
+  /** TeamRole 值：leader / teammate / human_agent / bridge_agent / worker */
+  role?: string;
+  /** 外部 CLI 后端名（claude / codex / ...），普通成员为空 */
+  cli_agent?: string | null;
+}
+
+/** 增量成员事件里的空字段不得覆盖已知值：返回 next，空则回退 prev。 */
+function keepKnownMemberField(
+  next: string | null | undefined,
+  prev: string | null | undefined
+): string | undefined {
+  if (typeof next === 'string' && next.trim() !== '') return next;
+  return typeof prev === 'string' && prev.trim() !== '' ? prev : undefined;
 }
 
 export type HumanShareStatus = 'pending' | 'joined' | 'left';
@@ -908,13 +921,21 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       if (existingIndex >= 0) {
         const updatedMembers = [...runtime.teamMembers];
         const existingMember = updatedMembers[existingIndex];
+        // 每类成员事件只带自己关心的字段（如 team.member.spawned 不带 name），
+        // 直接展开覆盖会把已知的展示名/模式抹成 undefined，界面就退回显示
+        // member_id。空值一律不覆盖已有值，规则同 ToolPanel 的 mergeById。
         updatedMembers[existingIndex] = {
           ...existingMember,
           ...member,
-          status:
-            typeof member.status === 'string' && member.status.trim() !== ''
-              ? member.status
-              : existingMember.status,
+          name: keepKnownMemberField(member.name, existingMember.name),
+          status: keepKnownMemberField(member.status, existingMember.status) ?? '',
+          execution_status: keepKnownMemberField(
+            member.execution_status,
+            existingMember.execution_status
+          ),
+          mode: keepKnownMemberField(member.mode, existingMember.mode),
+          role: keepKnownMemberField(member.role, existingMember.role),
+          cli_agent: keepKnownMemberField(member.cli_agent, existingMember.cli_agent),
         };
         return {
           runtimes: {

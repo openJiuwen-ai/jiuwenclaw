@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """AgentManager - 管理 Agent 实例."""
 
@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 import uuid
 from typing import Any, TYPE_CHECKING
 from weakref import WeakValueDictionary
@@ -48,9 +49,37 @@ def _normalize_project_dir(project_dir: str | None) -> str:
         return raw
 
 
+# 单 agent 的 plan 是**会话运行期状态**（``DeepAgentState.plan_mode``），不是另一种
+# agent 装配：plan 与非 plan 用的是同一套 rails 和工具，差别只在模型这一轮能看到
+# 哪些工具。所以这里把 plan 子模式并回它的普通形态，用户开关 Plan 时命中同一个
+# 实例——否则换实例就等于换掉 ``context_engine``，整段对话历史会凭空消失。
+#
+# 集群不在此列：``team.plan`` 解析出的子模式是 ``team``，本来就不带 plan。
+_PLAN_SUB_MODE_ALIASES: dict[str, str] = {
+    "agent": "",
+    "code": "normal",
+}
+
+
+def collapse_plan_sub_mode(mode: str | None, sub_mode: str | None) -> str:
+    """把单 agent 的 ``plan`` 子模式并回普通子模式。
+
+    Args:
+        mode: 归一化前后的 manager mode。
+        sub_mode: 归一化前后的子模式。
+
+    Returns:
+        并轨后的子模式；非单 agent plan 时原样返回。
+    """
+    sub_mode_key = _normalize_sub_mode(sub_mode)
+    if sub_mode_key != "plan":
+        return sub_mode_key
+    return _PLAN_SUB_MODE_ALIASES.get(_normalize_mode(mode), sub_mode_key)
+
+
 def _make_agent_cache_key(mode: str | None, sub_mode: str | None, project_dir: str | None) -> str:
     mode_key = _normalize_mode(mode)
-    sub_mode_key = _normalize_sub_mode(sub_mode)
+    sub_mode_key = collapse_plan_sub_mode(mode_key, sub_mode)
     project_key = _normalize_project_dir(project_dir)
     return f"{mode_key}:{sub_mode_key}:{project_key}"
 
@@ -91,6 +120,7 @@ class AgentManager:
         # reload 串行锁: 防止并发 reload 叠加导致内存爆炸
         self._reload_lock: asyncio.Lock = asyncio.Lock()
         self._last_reload_fingerprint: str | None = None
+        self._latest_effective_config: dict[str, Any] | None = None
         # A cached root may be returned before its first session processor or
         # child adapter exists. Track the request task that borrowed it so
         # disconnect cleanup cannot tear it down in that gap.
@@ -104,6 +134,11 @@ class AgentManager:
         # 上一次默认模型的连接身份快照 (diff_key -> ModelClientConfig), 用于
         # 模型热更新后关闭"已被删除/改掉凭证"的 LLM 连接 (增量关闭)。
         self._last_model_conn_configs: dict[tuple, Any] = {}
+        self._session_create_tokens: dict[tuple[str, str], tuple[Any, Any]] = {}
+        self._session_create_token_lock = asyncio.Lock()
+        from jiuwenswarm.server.runtime.agent_warm_pool import AgentWarmPool
+
+        self.warm_pool = AgentWarmPool(self)
 
     def _get_agent_create_lock(
         self,
@@ -382,7 +417,8 @@ class AgentManager:
                 os.environ[key] = str(env_value)
         channel_key = _normalize_channel_id(agent_key)
         mode_key = _normalize_mode(mode)
-        sub_mode_key = _normalize_sub_mode(sub_mode)
+        # 用并轨后的子模式装配实例，和缓存键保持同一套语义。
+        sub_mode_key = collapse_plan_sub_mode(mode_key, sub_mode)
         project_dir = _normalize_project_dir((config or {}).get("project_dir"))
         if project_dir:
             config = dict(config or {})
@@ -575,11 +611,97 @@ class AgentManager:
             logger.info("[AgentManager] session ensured: channel_id=%s session_id=%s", channel_id, explicit_session_id)
             return explicit_session_id
         channel_key = _normalize_channel_id(channel_id)
-        if channel_key == "acp":
-            session_id = f"acp_{uuid.uuid4().hex[:8]}"
-            logger.info("[AgentManager] ACP session created: session_id=%s", session_id)
-            return session_id
-        return "default"
+        session_id = (
+            f"{channel_key}_{int(time.time() * 1000):x}_"
+            f"{uuid.uuid4().hex[:12]}"
+        )
+        logger.info(
+            "[AgentManager] session id allocated: channel_id=%s session_id=%s",
+            channel_key,
+            session_id,
+        )
+        return session_id
+
+    async def sync_prewarm_channels(
+        self,
+        enabled_channels: list[str],
+        *,
+        config: Any | None = None,
+        env: Any = None,
+    ) -> dict[str, int]:
+        return await self.warm_pool.sync(
+            enabled_channels,
+            config=(
+                config
+                if config is not None
+                else self._latest_effective_config or get_config()
+            ),
+            env=env if env is not None else self._latest_env_overrides,
+        )
+
+    async def claim_prewarmed_session(
+        self,
+        *,
+        channel_id: str,
+        project_id: str,
+        project_dir: str | None,
+        work_mode: str,
+        is_swarm: bool,
+        prewarm_eligible: bool = True,
+        create_token: str | None = None,
+    ):
+        token = str(create_token or "").strip()
+        key = self.warm_pool.make_key(
+            channel_id=channel_id,
+            project_id=project_id,
+            project_dir=project_dir,
+            work_mode=work_mode,
+            is_swarm=is_swarm,
+        )
+        create_signature = (key, bool(prewarm_eligible))
+        token_key = (key.channel_id, token)
+        async with self._session_create_token_lock:
+            if token:
+                existing = self._session_create_tokens.get(token_key)
+                if existing is not None:
+                    existing_key, claim = existing
+                    if existing_key != create_signature:
+                        raise ValueError(
+                            "create_token was already used with different session parameters"
+                        )
+                    return claim
+            if prewarm_eligible and not is_swarm:
+                claim = await self.warm_pool.claim(key)
+            else:
+                from jiuwenswarm.server.runtime.agent_warm_pool import WarmClaim
+
+                claim = WarmClaim(
+                    await self.create_session(channel_id=channel_id),
+                    False,
+                    "bypassed",
+                )
+            if token:
+                self._session_create_tokens[token_key] = (create_signature, claim)
+            return claim
+
+    async def wait_for_session_prewarm(self, session_id: str | None) -> None:
+        if session_id:
+            await self.warm_pool.wait_for_session(session_id)
+
+    async def begin_foreground_chat(self) -> None:
+        await self.warm_pool.begin_foreground()
+
+    async def end_foreground_chat(self) -> None:
+        await self.warm_pool.end_foreground()
+
+    def activate_session_prewarm(self, session_id: str | None) -> None:
+        """Mark a claimed prewarm workspace as a normal persisted session."""
+        if session_id:
+            self.warm_pool.clear_marker(session_id)
+
+    async def release_session_prewarm_claim(self, session_id: str | None) -> None:
+        if session_id:
+            await self.warm_pool.release_claim_pin(session_id)
 
     async def get_agent(
             self,
@@ -603,7 +725,7 @@ class AgentManager:
         """
         channel_key = _normalize_channel_id(channel_id)
         mode_key = _normalize_mode(mode)
-        sub_mode_key = _normalize_sub_mode(sub_mode)
+        sub_mode_key = collapse_plan_sub_mode(mode_key, sub_mode)
         project_key = _normalize_project_dir(project_dir)
         cache_key = _make_agent_cache_key(mode_key, sub_mode_key, project_key)
         channel_agents = self.agents.get(channel_key, {})
@@ -633,6 +755,38 @@ class AgentManager:
             )
             return self._borrow_agent(agent)
 
+    def get_agent_for_session_nowait(
+        self,
+        channel_id: str,
+        session_id: str,
+    ) -> "JiuWenSwarm | None":
+        """Return the cached channel agent that owns ``session_id`` runtime."""
+        sid = str(session_id or "").strip()
+        if not sid:
+            return None
+
+        channel_key = _normalize_channel_id(channel_id)
+        channel_agents = self.agents.get(channel_key, {})
+        if not isinstance(channel_agents, dict):
+            return None
+
+        for cache_key, agent in channel_agents.items():
+            has_runtime = getattr(agent, "has_session_runtime", None)
+            if not callable(has_runtime):
+                continue
+            try:
+                if has_runtime(sid):
+                    return self._borrow_agent(agent)
+            except Exception:
+                logger.exception(
+                    "[AgentManager] session runtime lookup failed: "
+                    "channel_id=%s session_id=%s cache_key=%s",
+                    channel_key,
+                    sid,
+                    cache_key,
+                )
+        return None
+
     def get_agent_nowait(
         self,
         channel_id: str = "",
@@ -660,7 +814,9 @@ class AgentManager:
                 return self._borrow_agent(agent)
 
         requested_mode = _normalize_mode(mode) if mode is not None else ""
-        requested_sub_mode = _normalize_sub_mode(sub_mode) if sub_mode is not None else ""
+        requested_sub_mode = (
+            collapse_plan_sub_mode(mode, sub_mode) if sub_mode is not None else ""
+        )
         requested_project_dir = _normalize_project_dir(project_dir) if project_dir is not None else ""
         for agent in channel_agents.values():
             if requested_mode and getattr(agent, "_jiuwenswarm_agent_mode", "") != requested_mode:
@@ -713,7 +869,7 @@ class AgentManager:
                 if mode not in target_modes:
                     continue  # Skip team and other modes
 
-                instance = agent.get_instance()
+                instance = await agent.ensure_instance()
                 if instance is None:
                     continue
 
@@ -897,6 +1053,15 @@ class AgentManager:
                 logger.info(f"channel {channel_id} reload agent config success.")
             if reload_completed:
                 self._last_reload_fingerprint = fingerprint
+                if isinstance(effective_config, dict):
+                    self._latest_effective_config = dict(effective_config)
+                asyncio.create_task(
+                    self.warm_pool.refresh(
+                        config=effective_config,
+                        env=self._latest_env_overrides,
+                    ),
+                    name="agent-prewarm-config-refresh",
+                )
             # 模型配置变更时, 关闭已被删除/改掉凭证的旧 LLM 连接 (增量关闭)。
             if model_scope:
                 await self._evict_stale_llm_clients(effective_config)
@@ -1047,6 +1212,7 @@ class AgentManager:
             AgentResponse 对象
         """
         try:
+            await self.wait_for_session_prewarm(getattr(request, "session_id", None))
             channel_id = getattr(request, "channel_id", "")
             params = getattr(request, "params", {}) if isinstance(getattr(request, "params", {}), dict) else {}
             mode_full = params.get("mode", "agent")
@@ -1076,6 +1242,7 @@ class AgentManager:
             AgentResponseChunk 对象
         """
         try:
+            await self.wait_for_session_prewarm(getattr(request, "session_id", None))
             channel_id = getattr(request, "channel_id", "")
             params = getattr(request, "params", {}) if isinstance(getattr(request, "params", {}), dict) else {}
             mode_full = params.get("mode", "agent")
@@ -1099,6 +1266,7 @@ class AgentManager:
 
     async def cleanup(self) -> None:
         """清理所有 agent 实例."""
+        await self.warm_pool.close()
         retirement_tasks = [
             task
             for task in self._retirement_tasks.values()
@@ -1116,6 +1284,7 @@ class AgentManager:
             del self.agents[key]
         self._agent_create_params.clear()
         self._client_capabilities_by_channel.clear()
+        self._session_create_tokens.clear()
         self._agent_borrowers.clear()
         self._agent_pins.clear()
         self._pending_tui_retirements.clear()

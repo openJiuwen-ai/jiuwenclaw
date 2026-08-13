@@ -7,6 +7,7 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Session } from '../../types';
+import { toDisplaySessionTitle } from '../../utils/documentMessage';
 import clsx from 'clsx';
 
 interface SessionItemProps {
@@ -54,8 +55,9 @@ export function SessionItem({ session, isActive, onClick, onDelete }: SessionIte
   const { t, i18n } = useTranslation();
   const [showDelete, setShowDelete] = useState(false);
   
-  // 优先展示会话标题，缺失时回退到会话 ID 片段
-  const preview = session.title?.trim() || session.session_id.slice(0, 8);
+  // 优先展示会话标题，缺失时回退到会话 ID 片段；隐藏【上传文档】后缀
+  const preview =
+    toDisplaySessionTitle(session.title || '') || session.session_id.slice(0, 8);
 
   const handleDelete = (e: React.MouseEvent) => {
     e.stopPropagation();

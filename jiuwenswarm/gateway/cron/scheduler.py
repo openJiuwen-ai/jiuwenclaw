@@ -11,6 +11,10 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from jiuwenswarm.gateway.routing.agent_client import AgentServerClient
+from jiuwenswarm.gateway.cron.dingtalk_routing import (
+    is_usable_dingtalk_staff_id,
+    resolve_dingtalk_push_metadata,
+)
 from jiuwenswarm.gateway.cron.models import (
     CRON_JOB_DEFAULT_MODE,
     CronJob,
@@ -326,6 +330,7 @@ class CronSchedulerService:
         ``cron_{job_id}`` 与真实会话不匹配，cancel 请求落不到点上。
         """
         target_session_id = (state.exec_session_id or "").strip() or f"cron_{state.job_id}"
+        job = self._jobs.get(state.job_id)
         try:
             interrupt_env = e2a_from_agent_fields(
                 request_id=f"cron-cancel-{state.run_id}",
@@ -335,6 +340,7 @@ class CronSchedulerService:
                 params={"cron": {"job_id": state.job_id, "run_id": state.run_id}},
                 is_stream=False,
                 timestamp=self._now_fn(),
+                user_id=str(getattr(job, "user_id", "") or "").strip() or None,
             )
             await self._agent_client.send_request(interrupt_env)
             logger.info(
@@ -559,6 +565,45 @@ class CronSchedulerService:
             )
         return "__cron__", f"cron_{ts}_{job.id}"
 
+    async def _allocate_single_agent_session(
+        self,
+        job: CronJob,
+        *,
+        mode: str,
+        project_dir: str,
+        run_id: str,
+    ) -> str:
+        cron_user_id = str(job.user_id or "").strip()
+        env = e2a_from_agent_fields(
+            request_id=f"cron-session-create-{run_id}",
+            channel_id="__cron__",
+            req_method=ReqMethod.SESSION_CREATE,
+            params={
+                "create_token": f"cron:{run_id}",
+                "mode": mode,
+                "is_swarm": False,
+                "project_id": job.project_id or "",
+                "project_dir": project_dir,
+                "work_mode": job.work_mode or DEFAULT_WEB_WORK_MODE,
+                "model_name": job.model_name or None,
+                "cron_id": job.id,
+                "user_id": cron_user_id,
+            },
+            is_stream=False,
+            timestamp=self._now_fn(),
+            user_id=cron_user_id or None,
+        )
+        response = await self._agent_client.send_request(env)
+        payload = dict(response.payload or {}) if isinstance(response.payload, dict) else {}
+        if not response.ok:
+            raise RuntimeError(str(payload.get("error") or "cron session.create failed"))
+        session_id = str(
+            payload.get("session_id") or payload.get("sessionId") or ""
+        ).strip()
+        if not session_id:
+            raise RuntimeError("cron session.create returned empty session_id")
+        return session_id
+
     def _schedule_event(self, at_dt: datetime, kind: str, job_id: str, run_id: str) -> None:
         at_ts = float(at_dt.timestamp())
         self._seq += 1
@@ -697,6 +742,7 @@ class CronSchedulerService:
                     is_stream=False,
                     timestamp=self._now_fn(),
                     metadata={"cron": {"job_id": job.id, "run_id": ev.run_id}},
+                    user_id=str(job.user_id or "").strip() or None,
                 )
                 resp = await self._agent_client.send_request(envelope)
 
@@ -903,6 +949,7 @@ class CronSchedulerService:
             mode = CRON_JOB_DEFAULT_MODE
             channel_id = ""
             exec_session_id = ""
+            envelope = None
             try:
                 mode = str(job.mode or CRON_JOB_DEFAULT_MODE).strip() or CRON_JOB_DEFAULT_MODE
                 if state.exec_channel_id and state.exec_session_id:
@@ -921,6 +968,15 @@ class CronSchedulerService:
                         "[Cron] resolve project_dir failed job=%s: %s", job.id, pdir_exc,
                     )
                     exec_project_dir = ""
+                if not is_team_cron_mode(mode):
+                    exec_session_id = await self._allocate_single_agent_session(
+                        job,
+                        mode=mode,
+                        project_dir=exec_project_dir,
+                        run_id=run_id,
+                    )
+                    state.exec_channel_id = "__cron__"
+                    state.exec_session_id = exec_session_id
                 cron_meta = {
                     "job_id": job.id,
                     "job_name": job.name,
@@ -950,7 +1006,14 @@ class CronSchedulerService:
                     is_stream=is_team_cron_mode(mode),
                     timestamp=self._now_fn(),
                     metadata={"cron": {"job_id": job.id, "run_id": run_id}},
+                    user_id=job.user_id,
                 )
+                if not str(job.user_id or "").strip():
+                    logger.warning(
+                        "[Cron] job has no user_id, faas X-Session-Context will be omitted: "
+                        "job_id=%s",
+                        job.id,
+                    )
                 if is_team_cron_mode(mode):
                     timeout_seconds = resolve_cron_job_timeout_seconds(job)
                     text, ok = await self._run_team_stream_job(
@@ -1382,6 +1445,18 @@ class CronSchedulerService:
                             metadata["feishu_open_id"] = open_part
                     msg_session_id = chat_part
 
+        # 钉钉：优先用作业绑定的发起会话（Issue #2449）。
+        # Gateway 内部会话 ID（dingtalk_…）不能当 staffId，此时留空走下方 last_* 兜底。
+        if channel_id == "dingtalk" and routing_sid and metadata is None:
+            bound = resolve_dingtalk_push_metadata(routing_sid)
+            if bound is not None:
+                metadata = dict(bound)
+                sender = str(bound.get("dingtalk_sender_id") or "").strip()
+                if is_usable_dingtalk_staff_id(sender):
+                    # 保留 msg_session_id 为 job.session_id（可能是内部会话），
+                    # 仅在 binding 场景用真实 staff 作为发送目标已写入 metadata。
+                    pass
+
         # 针对 feishu/xiaoyi/whatsapp/dingtalk：从 config.yaml 取最近一次可回发的平台身份，写入 metadata
         # 这样即使 cron 推送没有 session_id，也能让 Channel.send 正常路由到对应会话。
         if metadata is None:
@@ -1495,9 +1570,19 @@ class CronSchedulerService:
         if metadata is None:
             metadata = {}
         if channel_id == "dingtalk":
-            # 若作业创建时绑定了 session_id（一般是 sender_id），补给钉钉单聊路由兜底。
+            # 仅用可用的钉钉 staffId / delivery binding 补路由；禁止把 dingtalk_… 内部会话当 staffId。
             if routing_sid and not str(metadata.get("dingtalk_sender_id") or "").strip():
-                metadata["dingtalk_sender_id"] = routing_sid
+                bound = resolve_dingtalk_push_metadata(routing_sid)
+                if bound and is_usable_dingtalk_staff_id(bound.get("dingtalk_sender_id")):
+                    metadata["dingtalk_sender_id"] = bound["dingtalk_sender_id"]
+                    if not str(metadata.get("conversation_id") or "").strip():
+                        metadata["conversation_id"] = bound.get("conversation_id") or ""
+                        metadata["dingtalk_chat_id"] = bound.get("dingtalk_chat_id") or ""
+                    if not str(metadata.get("conversation_type") or "").strip():
+                        metadata["conversation_type"] = bound.get("conversation_type") or "1"
+            # 若 metadata 里误塞了内部会话 ID，清掉以免 batchSend 报 staffId.notExisted。
+            if not is_usable_dingtalk_staff_id(metadata.get("dingtalk_sender_id")):
+                metadata.pop("dingtalk_sender_id", None)
             if not str(metadata.get("conversation_type") or "").strip():
                 metadata["conversation_type"] = "1"
 
