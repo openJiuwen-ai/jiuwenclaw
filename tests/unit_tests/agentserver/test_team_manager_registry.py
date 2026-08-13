@@ -346,6 +346,7 @@ async def test_initially_disabled_team_context_reenables_role_rails(
         channel="web",
         team_id="disabled-team",
         team_ws_root="/tmp/disabled-team",
+        project_dir="/tmp/user-project",
         team_skills_dir="/tmp/disabled-team/skills",
         trajectory_registry=object(),
         language="cn",

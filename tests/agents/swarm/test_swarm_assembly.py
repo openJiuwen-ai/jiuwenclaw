@@ -1138,6 +1138,68 @@ def test_team_workspace_report_path_returns_none_without_root() -> None:
     assert member_rails._build_team_workspace_report_path_rail({}, ctx) is None
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["team", "code.team"])
+async def test_team_workspace_policy_keeps_project_deliverables_in_project(
+    mode: str,
+    tmp_path: Path,
+) -> None:
+    """Both team profiles separate project files from collaboration artifacts."""
+    project_dir = str(tmp_path / "project")
+    team_ws_root = str(tmp_path / "team-workspace")
+    context = SwarmBuildContext(
+        mode=mode,
+        project_dir=project_dir,
+        team_id="unit-team",
+        team_ws_root=team_ws_root,
+        language="cn",
+    )
+
+    rail = member_rails._build_team_workspace_report_path_rail({}, context)
+    assert rail is not None
+    assert rail._project_dir == project_dir
+
+    builder = SystemPromptBuilder(language="cn")
+    rail.init(SimpleNamespace(system_prompt_builder=builder))
+    await rail.before_model_call(
+        AgentCallbackContext(agent=None, inputs=None, session=SimpleNamespace())
+    )
+
+    content = builder.build()
+    assert f"User project root: `{project_dir}`" in content
+    assert f"Team collaboration workspace: `{team_ws_root}`" in content
+    assert "Source code, tests, configuration" in content
+    assert "When worktree isolation is active" in content
+    assert "Do not place final project files in the team collaboration workspace" in content
+    assert "Use the internal mount path only" not in content
+
+
+@pytest.mark.asyncio
+async def test_team_workspace_policy_does_not_fallback_project_files_to_team_workspace(
+    tmp_path: Path,
+) -> None:
+    """Missing project identity must not turn the team workspace into a project cwd."""
+    team_ws_root = str(tmp_path / "team-workspace")
+    context = SwarmBuildContext(
+        mode="team",
+        team_id="unit-team",
+        team_ws_root=team_ws_root,
+        language="cn",
+    )
+
+    rail = member_rails._build_team_workspace_report_path_rail({}, context)
+    assert rail is not None
+    builder = SystemPromptBuilder(language="cn")
+    rail.init(SimpleNamespace(system_prompt_builder=builder))
+    await rail.before_model_call(
+        AgentCallbackContext(agent=None, inputs=None, session=SimpleNamespace())
+    )
+
+    content = builder.build()
+    assert "User project root: unavailable" in content
+    assert "Do not silently use the team collaboration workspace" in content
+
+
 @pytest.mark.parametrize("role", ["leader", "teammate"])
 def test_disabled_team_specs_keep_mount_context_provider_without_evolution_rails(
     role: str,
@@ -1160,6 +1222,7 @@ def test_disabled_team_specs_keep_mount_context_provider_without_evolution_rails
         channel="web",
         team_id="disabled-team",
         team_ws_root="/tmp/disabled-team",
+        project_dir="/tmp/user-project",
         team_skills_dir="/tmp/disabled-team/skills",
         trajectory_registry=object(),
     )
@@ -1190,6 +1253,7 @@ def test_disabled_team_specs_keep_mount_context_provider_without_evolution_rails
     mount_context = captured[role]
     assert mount_context.member_info.role == role
     assert mount_context.team_workspace.team_id == "disabled-team"
+    assert mount_context.team_workspace.project_dir == "/tmp/user-project"
     assert mount_context.team_workspace.config == config
 
 

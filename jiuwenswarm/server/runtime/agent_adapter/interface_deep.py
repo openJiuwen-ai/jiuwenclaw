@@ -6080,6 +6080,7 @@ class JiuWenSwarmDeepAdapter:
                     session_id=session_id,
                     channel_id=channel_for_tool,
                     metadata=metadata_for_tool,
+                    project_dir=self._project_dir,
                 )
                 for sf_tool in self._send_file_toolkit.get_tools():
                     self._register_agent_owned_tool(sf_tool, self._tool_owner_id())
@@ -6090,6 +6091,7 @@ class JiuWenSwarmDeepAdapter:
                     session_id=session_id,
                     channel_id=channel_for_tool,
                     metadata=metadata_for_tool,
+                    project_dir=self._project_dir,
                 )
 
     def _refresh_acp_runtime_tools(
