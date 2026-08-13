@@ -72,8 +72,9 @@ def _session_id_of(session: Any) -> str:
         if callable(value):
             try:
                 value = value()
-            except Exception:
-                continue
+            except Exception as exc:
+                logger.debug("session.%s() raised, skip: %s", attr_name, exc)
+                value = None
         if isinstance(value, str) and value.strip():
             return value.strip()
     return ""
