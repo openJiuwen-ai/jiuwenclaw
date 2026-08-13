@@ -422,6 +422,7 @@ def test_reset_runtime_cron_context_resets_shell_session(
         "_CRON_TOOL_METADATA",
         "_CRON_TOOL_SESSION_ID",
         "_CRON_TOOL_CHANNEL_ID",
+        "_CRON_TOOL_OFFICE_CLAW_MCP",
     ):
         monkeypatch.setattr(
             f"jiuwenswarm.server.runtime.agent_adapter.interface_deep.{var_name}",
@@ -436,6 +437,7 @@ def test_reset_runtime_cron_context_resets_shell_session(
             metadata=MagicMock(),
             mode=MagicMock(),
             bound=MagicMock(),
+            office_claw_mcp=MagicMock(),
             shell=shell_token,
         )
     )
@@ -511,3 +513,58 @@ def test_runtime_cron_tool_context_falls_back_to_last_bound_session(
     assert metadata["project_id"] == "proj_runtime"
     assert metadata["project_dir"] == "D:\\runtime-project"
     assert metadata["work_mode"] == "work"
+
+
+def test_runtime_cron_tool_context_retains_officeclaw_mcp_until_explicit_clear() -> None:
+    from jiuwenswarm.server.runtime.agent_adapter import interface_deep
+
+    context = interface_deep._RuntimeCronToolContext(tool_scope="runtime_test")
+    config = {
+        "env": {
+            "OFFICE_CLAW_API_URL": "http://127.0.0.1:3000",
+            "OFFICE_CLAW_CALLBACK_TOKEN": "secret",
+        }
+    }
+    tokens = JiuWenSwarmDeepAdapter._bind_runtime_cron_context(
+        channel_id="officeclaw",
+        session_id="sess_runtime",
+        metadata={},
+        request_id="req-runtime",
+        mode="agent",
+        params={"office_claw_mcp": config},
+    )
+    try:
+        assert context.office_claw_mcp == config
+        context.remember_current_binding()
+    finally:
+        JiuWenSwarmDeepAdapter._reset_runtime_cron_context(tokens)
+
+    assert context.office_claw_mcp == config
+    context.clear_sensitive_binding()
+    assert context.office_claw_mcp is None
+
+
+def test_bind_runtime_cron_context_accepts_merged_request_mcp_servers() -> None:
+    from jiuwenswarm.server.runtime.agent_adapter import interface_deep
+
+    context = interface_deep._RuntimeCronToolContext(tool_scope="runtime_test")
+    config = {"env": {"OFFICE_CLAW_API_URL": "http://127.0.0.1:3000"}}
+    tokens = JiuWenSwarmDeepAdapter._bind_runtime_cron_context(
+        channel_id="officeclaw",
+        session_id="sess_runtime",
+        metadata={},
+        request_id="req-runtime",
+        mode="agent",
+        params={
+            "request_mcp_servers": {
+                "mcpServers": {"office-claw": config, "user-server": {}}
+            }
+        },
+    )
+    try:
+        context.remember_current_binding()
+    finally:
+        JiuWenSwarmDeepAdapter._reset_runtime_cron_context(tokens)
+
+    assert context.office_claw_mcp == config
+    context.clear_sensitive_binding()
