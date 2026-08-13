@@ -21,6 +21,7 @@ from jiuwenclaw.agentserver.deep_agent.rails.qa_block_freeze_rail import JiuClaw
 from jiuwenclaw.agentserver.deep_agent.rails.stream_event_rail import JiuClawStreamEventRail
 from jiuwenclaw.agentserver.deep_agent.rails.context_overflow_recovery_rail import ContextOverflowRecoveryRail
 from jiuwenclaw.agentserver.deep_agent.rails.task_execution_rail import TaskExecutionRail
+from jiuwenclaw.agentserver.deep_agent.rails.model_routing.model_routing_rail import ModelRoutingRail
 
 __all__ = [
     "JiuClawContextEngineeringRail",
@@ -38,4 +39,5 @@ __all__ = [
     "SkillCredentialInjectionRail",
     "SkillProtocolPromptRail",
     "MemberSkillToolkitRail",
+    "ModelRoutingRail",
 ]
