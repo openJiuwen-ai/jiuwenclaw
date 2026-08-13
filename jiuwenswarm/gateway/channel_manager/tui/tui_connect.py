@@ -319,6 +319,9 @@ CLI_FORWARD_REQ_METHODS = frozenset(
         "agents.enable",
         "agents.disable",
         "agents.tools_list",
+        # User-defined slash commands
+        "commands.list",
+        "commands.expand",
         # Schedule task management
         "schedule.check_config",
         "schedule.update_config",
@@ -418,6 +421,9 @@ CLI_FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset(
         "agents.enable",
         "agents.disable",
         "agents.tools_list",
+        # User-defined slash commands
+        "commands.list",
+        "commands.expand",
         # Schedule task management
         "schedule.check_config",
         "schedule.update_config",

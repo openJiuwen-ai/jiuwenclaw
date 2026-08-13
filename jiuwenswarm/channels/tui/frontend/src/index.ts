@@ -177,12 +177,14 @@ wsClient.onAuthExpired = () => {
 };
 
 const commandService = new CommandService();
-commandService.register(
-  createBuiltinCommands({
-    harmonyosEnabled: isHarmonyOSCommandsEnabled(),
-    switchEnabled: supervisionEnv.supervised,
-  }),
-);
+commandService.register(createBuiltinCommands({
+  harmonyosEnabled: isHarmonyOSCommandsEnabled(),
+  switchEnabled: supervisionEnv.supervised,
+  // /help reads the live registry, not the built-in array it was built from,
+  // so user-defined commands are discoverable and not merely runnable.
+  listAll: () => commandService.getAll(true),
+  getInactiveUserCommands: () => commandService.getInactiveUserCommands(),
+}));
 
 /** 正常退出 CLI 前显式通知服务端；异常崩溃不走该路径。 */
 async function notifyDisconnectBeforeExit(): Promise<void> {

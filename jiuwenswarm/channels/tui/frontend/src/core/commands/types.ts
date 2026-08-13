@@ -19,6 +19,29 @@ export type StatusViewTab = "status" | "usage" | "config";
 
 export enum CommandKind {
   BUILT_IN = "built-in",
+  /** Loaded from a Markdown file under .jiuwenswarm/commands/. */
+  USER = "user",
+}
+
+/** Where a user-defined command was found; precedence is project > user > local. */
+export type UserCommandSource = "project" | "user" | "local";
+
+/** One command as returned by the `commands.list` RPC. */
+export interface UserCommandDefinition {
+  name: string;
+  description: string;
+  /** Omitted from list payloads; expansion reads the file server-side. */
+  body?: string;
+  source: UserCommandSource;
+  file_path: string;
+  argument_hint: string;
+  allowed_tools: string[] | null;
+  /** Set when the body uses $ARGUMENTS, $1..$9, or argument-hint. */
+  accepts_args?: boolean;
+  /** Set when a higher-precedence source defines the same name. */
+  shadowed_by: UserCommandSource | null;
+  /** Set when the name collides with a built-in, which always wins. */
+  reserved: boolean;
 }
 
 export interface CommandSuggestion {

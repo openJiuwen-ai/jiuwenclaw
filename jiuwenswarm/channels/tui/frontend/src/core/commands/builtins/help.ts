@@ -1,5 +1,6 @@
 import { CommandKind, type SlashCommand, type SlashCommandListProvider } from "../types.js";
 import { makeItem } from "../helpers.js";
+import type { InactiveUserCommand } from "../user-commands.js";
 
 const COMMAND_GROUPS: Record<string, { name: string; commands: string[] }> = {
   core: {
@@ -38,7 +39,10 @@ function getCommandGroup(commandName: string): string | null {
   return null;
 }
 
-export function createHelpCommand(getCommands: SlashCommandListProvider): SlashCommand {
+export function createHelpCommand(
+  getCommands: SlashCommandListProvider,
+  getInactiveUserCommands?: () => readonly InactiveUserCommand[],
+): SlashCommand {
   return {
     name: "help",
     description: "Show available commands",
@@ -50,6 +54,10 @@ export function createHelpCommand(getCommands: SlashCommandListProvider): SlashC
 
       const groupedCommands: Record<string, Array<{ label: string; value?: string; description: string }>> = {};
       const ungroupedCommands: Array<{ label: string; value?: string; description: string }> = [];
+      // User-defined commands get their own group rather than falling into
+      // "Other": which of these came from a file the user can edit is the first
+      // thing they need to know, and it is not derivable from the name.
+      const userCommands: Array<{ label: string; value?: string; description: string }> = [];
 
       for (const command of commands) {
         const item = {
@@ -57,6 +65,11 @@ export function createHelpCommand(getCommands: SlashCommandListProvider): SlashC
           value: command.usage?.replace(/^\/[^\s]+/, "").trim() || undefined,
           description: command.description,
         };
+
+        if (command.kind === CommandKind.USER) {
+          userCommands.push(item);
+          continue;
+        }
 
         const groupKey = getCommandGroup(command.name);
         if (groupKey) {
@@ -80,6 +93,27 @@ export function createHelpCommand(getCommands: SlashCommandListProvider): SlashC
         groups.push({
           name: "Other",
           items: ungroupedCommands,
+        });
+      }
+
+      if (userCommands.length > 0) {
+        groups.push({
+          name: "User-defined",
+          items: userCommands,
+        });
+      }
+
+      // A file the user wrote that does nothing is an unanswerable support
+      // question. Listing it with the reason is the whole point of the server
+      // reporting losers instead of dropping them.
+      const inactive = getInactiveUserCommands?.() ?? [];
+      if (inactive.length > 0) {
+        groups.push({
+          name: "User-defined (not loaded)",
+          items: inactive.map((entry) => ({
+            label: `/${entry.name}`,
+            description: `${entry.reason} — ${entry.filePath}`,
+          })),
         });
       }
 

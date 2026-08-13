@@ -78,6 +78,14 @@ class ReqMethod(Enum):
     TTS_SYNTHESIZE = "tts.synthesize"
 
     AGENTS_LIST = "agents.list"
+    # User-defined slash commands, discovered from Markdown files in the same
+    # three scopes as agents. Loaded server-side because expanding @file and
+    # bounding it to the workspace are the server's job, not a client's.
+    COMMANDS_LIST = "commands.list"
+    # Expand one command body into the prompt to send. Separate from the send
+    # itself so the client can show the user what a command actually resolved
+    # to -- including which files it embedded and which it could not read.
+    COMMANDS_EXPAND = "commands.expand"
     AGENTS_GET = "agents.get"
     AGENTS_CREATE = "agents.create"
     AGENTS_UPDATE = "agents.update"
