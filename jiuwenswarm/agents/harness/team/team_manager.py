@@ -71,6 +71,11 @@ from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
     get_default_model_name,
 )
 from jiuwenswarm.common.utils import get_agent_skills_dir
+from jiuwenswarm.agents.harness.observability_runtime import (
+    acquire_observability_demand,
+    build_observability_config,
+    release_observability_demand,
+)
 from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
 
 logger = logging.getLogger(__name__)
@@ -125,52 +130,53 @@ def sync_team_observability() -> None:
     * disabled → enabled : ``init_observability()``
     * enabled → disabled : ``shutdown_observability()``
     * unchanged          : no-op
+
+    Evolution also requests the provider when the explicit switch is disabled.
     """
     global _observability_active
-    cfg = get_config().get("team_observability", {}) or {}
-    want_enabled = bool(cfg.get("enabled", False))
+    config = get_config()
+    cfg = config.get("team_observability", {}) or {}
+    evolution_requested = get_skill_evolution_enabled(config)
+    want_enabled = bool(cfg.get("enabled", False)) or evolution_requested
 
-    if want_enabled and not _observability_active:
-        try:
-            from openjiuwen.agent_teams.observability import (
-                ObservabilityConfig,
-                init_observability,
-                is_initialized,
-            )
-            if is_initialized():
-                _observability_active = True
-                return
-            obs_cfg = ObservabilityConfig(
-                enabled=True,
-                service_name=cfg.get("service_name", "jiuwenswarm"),
-                exporter=cfg.get("exporter", "otlp_grpc"),
-                endpoint=cfg.get("endpoint", "http://localhost:4317"),
-                sample_rate=cfg.get("sample_rate", 1.0),
-                attribute_value_max_length=cfg.get("attribute_value_max_length", 10240),
-                redact_prompts=cfg.get("redact_prompts", False),
-                redact_completions=cfg.get("redact_completions", False),
-                langfuse_public_key=cfg.get("langfuse_public_key", ""),
-                langfuse_secret_key=cfg.get("langfuse_secret_key", ""),
-                traces_dir=cfg.get("traces_dir") or str(get_user_workspace_dir() / ".trace"),
-                file_retention_days=cfg.get("file_retention_days", 7),
-            )
-            init_observability(obs_cfg)
-            _observability_active = True
-            if obs_cfg.exporter == "file":
+    if not want_enabled:
+        if _observability_active:
+            shutdown_team_observability()
+        return
+
+    try:
+        traces_dir = str(cfg.get("traces_dir") or get_user_workspace_dir() / ".trace")
+        obs_cfg = build_observability_config(
+            cfg,
+            service_name="jiuwenswarm",
+            traces_dir=traces_dir,
+        )
+        provider_existed = acquire_observability_demand(
+            "team",
+            observability_config=obs_cfg,
+        )
+        was_active = _observability_active
+        _observability_active = True
+        if not was_active and not provider_existed:
+            if cfg.get("exporter", "otlp_grpc") == "file":
                 logger.info(
                     "[TeamObservability] enabled: exporter=%s traces_dir=%s",
-                    obs_cfg.exporter, obs_cfg.traces_dir,
+                    cfg.get("exporter", "otlp_grpc"),
+                    traces_dir,
                 )
             else:
                 logger.info(
                     "[TeamObservability] enabled: exporter=%s endpoint=%s",
-                    obs_cfg.exporter, obs_cfg.endpoint,
+                    cfg.get("exporter", "otlp_grpc"),
+                    cfg.get("endpoint", "http://localhost:4317"),
                 )
-        except Exception as exc:
-            logger.warning("[TeamObservability] init failed: %s", exc)
-
-    elif not want_enabled and _observability_active:
-        shutdown_team_observability()
+    except Exception as exc:
+        _observability_active = False
+        if evolution_requested:
+            raise RuntimeError(
+                "Team evolution observability initialization failed"
+            ) from exc
+        logger.warning("[TeamObservability] init failed: %s", exc)
 
 
 def shutdown_team_observability() -> None:
@@ -179,8 +185,7 @@ def shutdown_team_observability() -> None:
     if not _observability_active:
         return
     try:
-        from openjiuwen.agent_teams.observability import shutdown_observability
-        shutdown_observability()
+        release_observability_demand("team")
         _observability_active = False
         logger.info("[TeamObservability] disabled")
     except Exception as exc:

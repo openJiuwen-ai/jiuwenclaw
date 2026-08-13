@@ -407,7 +407,7 @@ team_observability:
 #
 # 注意：OTel 一个进程只允许一个全局 TracerProvider。若本进程内 team 与
 # agent 可观测性同时开启，先初始化的一方生效，另一方复用同一个 provider
-#（其 exporter/endpoint 会被忽略）。代码层面用 ownership 标记保证
+#（其 exporter/endpoint 会被忽略）。代码层面用 demand 状态保证
 # 关闭时不会误拆对方依赖的 provider。
 #
 # 前置条件（otlp 模式）：启动 OTel Collector + Langfuse。
