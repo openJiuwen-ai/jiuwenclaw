@@ -400,7 +400,6 @@ def main() -> None:
                         run_id,
                     )
                     sys.exit(1)
-                logger.info("[analyze_video] no completed video found; recovered source URL from run metadata: %s", source_url)
                 download_dir = common.work_path(run_id, "downloads")
                 video_path = common.download_video(source_url, download_dir)
 
