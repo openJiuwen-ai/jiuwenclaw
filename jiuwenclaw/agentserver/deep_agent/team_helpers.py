@@ -79,6 +79,12 @@ if not math.isfinite(_TEAM_STREAM_IDLE_BREAK_S) or _TEAM_STREAM_IDLE_BREAK_S <= 
 # 窗口都会向 relay 广播业务帧保活（见消费循环），relay 300s 看门狗不会抢跑。
 _TEAM_STREAM_IDLE_BREAK_BUSY_DEFER_CAP_S = 1800.0
 
+# leader 交出 final 后的 settle 复评间隔（秒）。收尾点判定（leader final 那一瞬）
+# 与成员落定之间存在天然竞态——final 早几十毫秒到就永远错过（2026-08-13 事故：
+# 对话1 差 ~60ms 挂死 9.5 分钟；对话2 零任务团队复评兜底为零）。见过 leader final
+# 后把空闲 tick 从 _TEAM_STREAM_IDLE_BREAK_S 缩短为本值，逐 tick 复评 settle。
+_TEAM_STREAM_SETTLE_RECHECK_S = 2.0
+
 
 def strip_slash_directive(query: str, prefix: str) -> tuple[str, bool]:
     if not isinstance(query, str):
@@ -2388,14 +2394,70 @@ async def _consume_stream_with_query_impl(
         # idle-break 门控推迟的起始时刻（monotonic）；收到任何 chunk 即重置。
         # 仅 busy 推迟受 _TEAM_STREAM_IDLE_BREAK_BUSY_DEFER_CAP_S 封顶；等用户决策不封顶。
         idle_defer_since: float | None = None
+        # 是否已见过 leader 的 chat.final；见过之后空闲 tick 缩短为
+        # _TEAM_STREAM_SETTLE_RECHECK_S，逐 tick 复评 settle（修收尾点判定竞态）。
+        leader_final_seen = False
+        # 最后一个 chunk 的到达时刻（monotonic），复评阶段的 idle 预算计时。
+        idle_since_last_chunk = time.monotonic()
         while True:
             try:
                 chunk = await asyncio.wait_for(
-                    team_stream.__anext__(), timeout=_TEAM_STREAM_IDLE_BREAK_S
+                    team_stream.__anext__(),
+                    timeout=(
+                        _TEAM_STREAM_SETTLE_RECHECK_S
+                        if leader_final_seen
+                        else _TEAM_STREAM_IDLE_BREAK_S
+                    ),
                 )
             except StopAsyncIteration:
                 break
             except asyncio.TimeoutError:
+                if leader_final_seen:
+                    # leader 已交总结：静默是"等成员落定"，逐 tick 复评 settle。
+                    if await _team_has_pending_user_decision(session_id):
+                        # 等用户决策期间同样要发业务帧保活（与非 leader_final_seen
+                        # 路径一致）——否则用户思考超过 300s，relay 看门狗抢跑拆流。
+                        _broadcast_event(channel_id, session_id, {
+                            'event_type': 'chat.processing_status',
+                            'session_id': session_id,
+                            'rid': round_id,
+                            'is_processing': True,
+                            'is_complete': False,
+                        })
+                        continue
+                    if (
+                        time.monotonic() - idle_since_last_chunk
+                        < _TEAM_STREAM_IDLE_BREAK_S
+                    ):
+                        # _team_round_settled 的快照按前端展示语义滤掉 leader；
+                        # leader 可能被迟到的成员消息唤醒开新 turn（LLM 静默期
+                        # 超过 tick），必须先确认含 leader 在内无人活跃，否则
+                        # 会在新 turn 半途误收尾。
+                        if not await _team_stream_has_active_member(
+                            channel_id, session_id
+                        ) and await _team_round_settled(channel_id, session_id):
+                            logger.info(
+                                '[TeamHelpers] leader final seen; team settled on '
+                                'recheck, finish round: channel_id=%s session_id=%s',
+                                _resolve_channel_id(channel_id), session_id,
+                            )
+                            break
+                        # 预算未尽，等下一个复评 tick；发业务帧保活，
+                        # 防 relay 300s 看门狗在复评窗口内抢跑。
+                        _broadcast_event(channel_id, session_id, {
+                            'event_type': 'chat.processing_status',
+                            'session_id': session_id,
+                            'rid': round_id,
+                            'is_processing': True,
+                            'is_complete': False,
+                        })
+                        continue
+                    logger.warning(
+                        '[TeamHelpers] leader final seen but team not settled within %ss; '
+                        'falling back to stall handling: channel_id=%s session_id=%s',
+                        _TEAM_STREAM_IDLE_BREAK_S,
+                        _resolve_channel_id(channel_id), session_id,
+                    )
                 # 静默不等于卡死：等用户决策（ask_user 注册表有 pending）或成员仍在忙
                 # （长工具 / leader 阻塞在 openjiuwen 内核的权限交互，该等待 sidecar 侧
                 # 无注册表可查，靠成员快照 busy 覆盖）时继续等，不拆流。
@@ -2453,6 +2515,7 @@ async def _consume_stream_with_query_impl(
                 break
             received_chunks += 1
             idle_defer_since = None
+            idle_since_last_chunk = time.monotonic()
             if received_chunks == 1 or received_chunks % 30 == 0:
                 _role = getattr(chunk, 'role', None)
                 logger.info(
@@ -2610,6 +2673,7 @@ async def _consume_stream_with_query_impl(
                     continue
                 if parsed.get('event_type') == 'chat.final':
                     if is_leader:
+                        leader_final_seen = True
                         final_content = parsed.get('content')
                         if isinstance(final_content, str) and final_content.strip():
                             leader_final_texts.append(final_content)
