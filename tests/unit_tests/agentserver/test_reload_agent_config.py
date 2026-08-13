@@ -444,6 +444,7 @@ class _DeepAdapterReloadHarness:
                     adapter._pending_reload = pending_reload
                     adapter._reload_lock = asyncio.Lock()
                     adapter._working_checker = None
+                    adapter._last_sync_env = None
                     adapter.set_working_checker(lambda: working_checker)
                     return adapter
 
