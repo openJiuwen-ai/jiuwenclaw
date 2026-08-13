@@ -18,6 +18,7 @@ core 默认行为决定，agentos 不参与。
 import pytest
 
 from jiuwenswarm.common.config import get_default_models
+from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
     _deep_agent_context_engine_config,
     build_model_from_entry,
@@ -148,6 +149,27 @@ class TestAgentosMaxTokensNotInModelRequestConfig:
                         if e.get("model_config_obj", {}).get("_source") != "agentos")
         model = build_model_from_entry(defaults["model_client_config"], defaults["model_config_obj"])
         assert model.model_config.max_tokens is None
+
+    @staticmethod
+    def test_source_marker_stripped_by_reasoning_injector():
+        # web 端 config.validate_model 路径不走 build_model_from_entry，而是直接调
+        # build_reasoning_model_request_kwargs 组装 kwargs。_source 标记必须在此层被
+        # 统一 pop，否则会作为 extra 进 ModelRequestConfig，再随 model_dump 流到 SDK 的
+        # AsyncCompletions.create(**params) 触发 "unexpected keyword argument '_source'"。
+        entries = get_default_models(_config())
+        agentos = next(e for e in entries
+                       if e.get("model_config_obj", {}).get("_source") == "agentos")
+        kwargs = build_reasoning_model_request_kwargs(
+            model_client_config={"client_provider": "OpenAI", "api_base": "http://y"},
+            model_config_obj=agentos["model_config_obj"],
+            model_name="agentos-pro",
+        )
+        assert "_source" not in kwargs
+        # 构造 ModelRequestConfig 也不应残留 _source
+        from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig
+        mrc = ModelRequestConfig(**kwargs)
+        assert getattr(mrc, "_source", None) is None
+        assert "_source" not in mrc.model_dump()
 
 
 class TestContextWindowTokensOverride:

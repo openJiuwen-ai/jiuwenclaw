@@ -776,17 +776,18 @@ def build_model_from_entry(mcc: dict, mco: dict) -> Model:
     # （上下文压缩阈值，由 ``_deep_agent_context_engine_config`` 的 per-model
     # 覆盖路径喂入，不发往厂商）。
     # 但 core 的 ``ModelRequestConfig`` 也有同名字段 ``max_tokens``，那是"输出
-    # token 上限"语义、会发往厂商。``_build_model_request_kwargs`` 不 pop
-    # ``max_tokens``，故这里必须在构造 ``ModelRequestConfig`` 之前把它从
-    # kwargs 里 pop 掉，否则 agentos 配的输入窗口值会被误当成输出上限发往厂商。
-    # ``_source`` 同理用后即弃。defaults 无此标记，行为完全不变。
+    # token 上限"语义、会发往厂商。``_source`` 标记已由
+    # ``reasoning_injector._build_model_request_kwargs`` 统一 pop（不进 kwargs），
+    # 故这里从原始 mco 取标记作门控：若是 agentos，把 kwargs 里的 max_tokens
+    # pop 掉，否则 agentos 配的输入窗口值会被误当成输出上限发往厂商。
+    # defaults 无此标记，行为完全不变。
+    is_agentos = isinstance(mco, dict) and mco.get("_source") == "agentos"
     request_kwargs = build_reasoning_model_request_kwargs(
         model_client_config=mcc_fields,
         model_config_obj=mco,
         model_name=name,
     )
-    if request_kwargs.get("_source") == "agentos":
-        request_kwargs.pop("_source", None)
+    if is_agentos:
         request_kwargs.pop("max_tokens", None)
 
     m_config = ModelRequestConfig(**request_kwargs)

@@ -1172,8 +1172,9 @@ def get_default_models(config: dict[str, Any] | None = None) -> list[dict[str, A
                 agentos_entry["is_default"] = False
                 # _source 注入到 model_config_obj 内部，使其经
                 # build_reasoning_model_request_kwargs -> _model_config_to_dict
-                # 展开后进入 kwargs，供 build_model_from_entry 识别并做
-                # max_output_tokens -> max_tokens 映射（用后即弃，不进 core）。
+                # 展开后进入 kwargs，供 build_model_from_entry 识别该条目为 agentos，
+                # 进而把其 max_tokens（输入侧别名）从 ModelRequestConfig 的 kwargs 里
+                # pop 掉（用后即弃，不进 core，也不作为输出上限发往厂商）。
                 agentos_mco = agentos_entry.setdefault("model_config_obj", {})
                 if isinstance(agentos_mco, dict):
                     agentos_mco["_source"] = "agentos"
