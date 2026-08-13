@@ -198,12 +198,12 @@ ATTACHMENT_DIALOG_EXTENSIONS: tuple[str, ...] = (
     ".flv",
 )
 UPDATE_CLEANUP_PATTERNS = (
-    "JiuwenSwarm-setup-*.exe",
-    "JiuwenSwarm-*.dmg",
-    "JiuwenSwarm-*.tar.gz",
-    "JiuwenSwarm-*.exe.part",
-    "JiuwenSwarm-*.dmg.part",
-    "JiuwenSwarm-*.tar.gz.part",
+    "*.exe",
+    "*.dmg",
+    "*.tar.gz",
+    "*.exe.part",
+    "*.dmg.part",
+    "*.tar.gz.part",
     "_install_helper.ps1",
     "_install_helper.sh",
 )
