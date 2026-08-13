@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 
-import { buildStatusLineShellInvocation, findGitBash } from "../dist/core/statusline-runner.js";
+import {
+  buildStatusLineShellInvocation,
+  findGitBash,
+} from "../../../../jiuwenswarm/channels/tui/frontend/dist/core/statusline-runner.js";
 
 const gitBash = "C:\\Program Files\\Git\\bin\\bash.exe";
 const existsOnlyAt = (expected) => (path) => path === expected;

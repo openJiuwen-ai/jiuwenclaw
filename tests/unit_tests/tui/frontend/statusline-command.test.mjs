@@ -7,9 +7,12 @@ const isolatedHome = mkdtempSync(join(tmpdir(), "jiuwenswarm-statusline-"));
 process.env.USERPROFILE = isolatedHome;
 process.env.HOME = isolatedHome;
 
-const { createStatusLineCommand } = await import("../dist/core/commands/builtins/statusline.js");
-const { saveTuiConfig } = await import("../dist/core/tui-config-store.js");
-const { CommandService } = await import("../dist/core/commands/CommandService.js");
+const frontendDist = "../../../../jiuwenswarm/channels/tui/frontend/dist";
+const { createStatusLineCommand } = await import(
+  `${frontendDist}/core/commands/builtins/statusline.js`
+);
+const { saveTuiConfig } = await import(`${frontendDist}/core/tui-config-store.js`);
+const { CommandService } = await import(`${frontendDist}/core/commands/CommandService.js`);
 
 function makeMockContext(overrides = {}) {
   const items = [];
