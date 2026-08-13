@@ -937,13 +937,11 @@ def _unwrap_path_expression(
     bindings: dict[str, ast.AST],
     seen: set[str] | None = None,
 ) -> ast.AST:
-    if (
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "str"
-        and len(node.args) == 1
-        and not node.keywords
-    ):
+    if isinstance(node, ast.Call):
+        if not isinstance(node.func, ast.Name) or node.func.id != "str":
+            return node
+        if len(node.args) != 1 or node.keywords:
+            return node
         return _unwrap_path_expression(node.args[0], bindings, seen)
     if isinstance(node, ast.Name) and node.id in bindings:
         visited = set() if seen is None else set(seen)
@@ -978,24 +976,23 @@ def _is_installed_skills_root(node: ast.AST) -> bool:
     if not isinstance(parents, ast.Attribute) or parents.attr != "parents":
         return False
     resolved_file = parents.value
-    if (
-        not isinstance(resolved_file, ast.Call)
-        or resolved_file.args
-        or resolved_file.keywords
-        or not isinstance(resolved_file.func, ast.Attribute)
-        or resolved_file.func.attr != "resolve"
-    ):
+    if not isinstance(resolved_file, ast.Call):
+        return False
+    if resolved_file.args or resolved_file.keywords:
+        return False
+    if not isinstance(resolved_file.func, ast.Attribute):
+        return False
+    if resolved_file.func.attr != "resolve":
         return False
     path_file = resolved_file.func.value
-    return (
-        isinstance(path_file, ast.Call)
-        and not path_file.keywords
-        and len(path_file.args) == 1
-        and isinstance(path_file.func, ast.Name)
-        and path_file.func.id == "Path"
-        and isinstance(path_file.args[0], ast.Name)
-        and path_file.args[0].id == "__file__"
-    )
+    if not isinstance(path_file, ast.Call):
+        return False
+    if path_file.keywords or len(path_file.args) != 1:
+        return False
+    if not isinstance(path_file.func, ast.Name) or path_file.func.id != "Path":
+        return False
+    path_argument = path_file.args[0]
+    return isinstance(path_argument, ast.Name) and path_argument.id == "__file__"
 
 
 def _is_portable_child_workflow_path(
@@ -1003,24 +1000,23 @@ def _is_portable_child_workflow_path(
     bindings: dict[str, ast.AST],
 ) -> bool:
     node = _unwrap_path_expression(node, bindings)
-    if (
-        not isinstance(node, ast.Call)
-        or node.args
-        or node.keywords
-        or not isinstance(node.func, ast.Attribute)
-        or node.func.attr != "resolve"
-    ):
+    if not isinstance(node, ast.Call):
+        return False
+    if node.args or node.keywords:
+        return False
+    if not isinstance(node.func, ast.Attribute):
+        return False
+    if node.func.attr != "resolve":
         return False
     split = _split_path_join(node.func.value, bindings)
     if split is None:
         return False
     base, parts = split
-    return (
-        _is_installed_skills_root(base)
-        and len(parts) == 3
-        and bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", parts[0]))
-        and parts[1:] == ["scripts", "workflow.py"]
-    )
+    if not _is_installed_skills_root(base) or len(parts) != 3:
+        return False
+    if parts[1:] != ["scripts", "workflow.py"]:
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", parts[0]))
 
 
 def _is_absolute_path_literal(value: str) -> bool:
