@@ -1,11 +1,12 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
-"""skills.import_local download_token / 响应字段契约测试（设计 3.16）."""
+"""skills.import_local download_token / 响应字段契约测试."""
 
 from __future__ import annotations
 
 import io
 import json
+import shutil
 import zipfile
 from pathlib import Path
 
@@ -222,6 +223,32 @@ async def test_import_local_overwrite_preserves_archive(
     assert (skill_dir / ARCHIVE_DIRNAME / VERSIONS_DIRNAME / INDEX_FILENAME).is_file()
     assert "updated description" in (skill_dir / "SKILL.md").read_text(encoding="utf-8")
     assert "updated description" in (content / "SKILL.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_import_local_overwrite_failure_keeps_original(
+    manager: SkillManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """覆盖导入失败时必须保留原 Skill 目录与内容."""
+    skill_dir = manager._skills_dir / "keep-me"
+    skill_dir.mkdir(parents=True)
+    original_md = _skill_md("keep-me", "original body")
+    (skill_dir / "SKILL.md").write_text(original_md, encoding="utf-8")
+    (skill_dir / "notes.txt").write_text("do-not-delete", encoding="utf-8")
+    manager._add_local_skill({"name": "keep-me", "source": "local", "origin": "local"})
+
+    def _boom(*_args, **_kwargs):
+        raise OSError(3, "系统找不到指定的路径")
+
+    monkeypatch.setattr(shutil, "copytree", _boom)
+
+    pkg = _zip_skill(tmp_path, name="keep-me", filename="fail.zip")
+    result = await manager.handle_skills_import_local({"path": str(pkg), "force": True})
+
+    assert result["success"] is False
+    assert skill_dir.is_dir()
+    assert (skill_dir / "SKILL.md").read_text(encoding="utf-8") == original_md
+    assert (skill_dir / "notes.txt").read_text(encoding="utf-8") == "do-not-delete"
 
 
 def test_chat_send_schema_documents_skill_scene_fields() -> None:

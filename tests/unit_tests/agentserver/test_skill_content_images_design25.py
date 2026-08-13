@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
-"""design2.5：skills.get 图片改写 / download 图片预览 / evolution.get 规范化."""
+"""skills.get 图片改写 / download 图片预览 / evolution.get 规范化."""
 
 from __future__ import annotations
 
