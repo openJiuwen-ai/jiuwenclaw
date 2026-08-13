@@ -50,8 +50,10 @@ class SessionManager:
             task.cancel()
             try:
                 await task
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError:
                 pass
+            except Exception:
+                logger.exception("[SessionManager] 取消 session 任务时发生异常: session_id=%s", session_id)
             self._session_tasks[session_id] = None
 
     async def cancel_all_session_tasks(self, log_msg_prefix: str = "") -> None:

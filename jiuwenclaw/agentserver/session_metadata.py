@@ -113,11 +113,9 @@ def get_resolved_project_dir(
 
 
 def _metadata_file(session_id: str, sessions_root: str | None = None) -> Path:
-    """获取会话元数据文件路径"""
+    """获取会话元数据文件路径（不创建目录，避免读路径副作用）。"""
     root = Path(sessions_root) if sessions_root else get_agent_sessions_dir()
-    session_dir = root / session_id
-    session_dir.mkdir(parents=True, exist_ok=True)
-    return session_dir / "metadata.json"
+    return root / session_id / "metadata.json"
 
 
 def _read_metadata(session_id: str, sessions_root: str | None = None) -> dict[str, Any]:
@@ -153,6 +151,7 @@ def _write_metadata_sync(session_id: str, metadata: dict[str, Any], sessions_roo
     """
     fpath = _metadata_file(session_id, sessions_root)
     with _FILE_LOCK:
+        fpath.parent.mkdir(parents=True, exist_ok=True)
         fpath.write_text(
             json.dumps(metadata, ensure_ascii=False, indent=2),
             encoding="utf-8",

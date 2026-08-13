@@ -14,12 +14,14 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict
+from typing import TYPE_CHECKING, Any, Callable, Dict
 from jiuwenclaw.channel.base import ChannelType
 from jiuwenclaw.e2a.constants import E2A_WIRE_INTERNAL_METADATA_KEYS, FILE_TRANSFER_EVENT_TYPES
 from jiuwenclaw.gateway.session_map import SessionMap
 from jiuwenclaw.gateway.slash_command import (
+    ModeSubcommand,
     ParsedControlAction,
+    SwitchSubcommand,
     parse_channel_control_text,
 )
 from jiuwenclaw.schema.hook_event import GatewayHookEvents
@@ -50,6 +52,15 @@ _KNOWN_JIUWENCLAW_SESSION_PREFIXES = (
 )
 
 
+def _channel_original_session_id_key(channel_id: str) -> str | None:
+    """返回 channel_id 对应的 original_session_id metadata key，无则 None。"""
+    if channel_id == _ACP_CHANNEL_ID:
+        return _ACP_ORIGINAL_SESSION_ID_KEY
+    if channel_id == _VIBESKILL_CHANNEL_ID:
+        return _VIBESKILL_ORIGINAL_SESSION_ID_KEY
+    return None
+
+
 
 class ChannelMode(str, Enum):
     AGENT_PLAN = "agent.plan"
@@ -57,6 +68,32 @@ class ChannelMode(str, Enum):
     CODE_PLAN = "code.plan"
     CODE_NORMAL = "code.normal"
     TEAM = "team"
+
+
+# /mode 子命令 → ChannelMode 映射（与 ModeSubcommand 枚举一致，避免手动 if-elif 链）
+_MODE_SUBCOMMAND_TO_CHANNEL_MODE: dict[str, ChannelMode] = {
+    ModeSubcommand.AGENT.value: ChannelMode.AGENT_PLAN,
+    ModeSubcommand.CODE.value: ChannelMode.CODE_NORMAL,
+    ModeSubcommand.TEAM.value: ChannelMode.TEAM,
+    ModeSubcommand.AGENT_PLAN.value: ChannelMode.AGENT_PLAN,
+    ModeSubcommand.AGENT_FAST.value: ChannelMode.AGENT_FAST,
+    ModeSubcommand.CODE_PLAN.value: ChannelMode.CODE_PLAN,
+    ModeSubcommand.CODE_NORMAL.value: ChannelMode.CODE_NORMAL,
+}
+
+# /switch 子命令 → (当前 mode 族 → 目标 mode) 映射
+_SWITCH_TRANSITIONS: dict[str, dict[tuple[ChannelMode, ...], ChannelMode]] = {
+    SwitchSubcommand.PLAN.value: {
+        (ChannelMode.AGENT_PLAN, ChannelMode.AGENT_FAST): ChannelMode.AGENT_PLAN,
+        (ChannelMode.CODE_PLAN, ChannelMode.CODE_NORMAL): ChannelMode.CODE_PLAN,
+    },
+    SwitchSubcommand.FAST.value: {
+        (ChannelMode.AGENT_PLAN, ChannelMode.AGENT_FAST): ChannelMode.AGENT_FAST,
+    },
+    SwitchSubcommand.NORMAL.value: {
+        (ChannelMode.CODE_PLAN, ChannelMode.CODE_NORMAL): ChannelMode.CODE_NORMAL,
+    },
+}
 
 
 @dataclass
@@ -481,10 +518,7 @@ class MessageHandler(ABC):
             ok=True,
             req_method=ReqMethod.CHAT_CANCEL,
             metadata=msg.metadata,
-            provider=getattr(msg, "provider", None),
-            chat_id=getattr(msg, "chat_id", None),
-            user_id=getattr(msg, "user_id", None),
-            bot_id=getattr(msg, "bot_id", None),
+            **self._inherit_identity_kwargs(msg),
         )
         agent_msg = await self._prepare_agent_dispatch_message(cancel_req)
         env_interrupt = self.message_to_e2a(agent_msg)
@@ -556,6 +590,62 @@ class MessageHandler(ABC):
     def _build_mode_change_notice_text(mode_label: str) -> str:
         return f"[收到 CLI 指令], mode 已变更为 {mode_label}"
 
+    @staticmethod
+    def _inherit_identity_kwargs(msg: "Message") -> dict[str, Any]:
+        """从源消息提取身份字段，用于构造新 Message 时 **kwargs 展开。"""
+        return {
+            "provider": getattr(msg, "provider", None),
+            "chat_id": getattr(msg, "chat_id", None),
+            "user_id": getattr(msg, "user_id", None),
+            "bot_id": getattr(msg, "bot_id", None),
+        }
+
+    def _send_illegal_command_notice(
+        self,
+        user_infos: dict[str, Any],
+        channel_id: str,
+        reply_session_id: str | None,
+    ) -> None:
+        """发送"非法指令"提示（统一入口，减少重复 asyncio.create_task 调用）。"""
+        asyncio.create_task(
+            self._send_channel_notice(user_infos, channel_id, reply_session_id, "非法指令")
+        )
+
+    def _apply_mode_change(
+        self,
+        user_infos: dict[str, Any],
+        channel_id: str,
+        reply_session_id: str | None,
+        old_mode: ChannelMode,
+        old_sid: str | None,
+        new_mode: ChannelMode,
+        msg: "Message",
+    ) -> None:
+        """应用 mode 变更并发送对应通知（mode 变更/未变更统一处理）。"""
+        new_label = new_mode.value
+        if old_mode != new_mode:
+            asyncio.create_task(
+                self._mode_change_cancel_and_notice(
+                    ModeChangeCancelParams(
+                        user_infos=user_infos,
+                        channel_id=channel_id,
+                        reply_session_id=reply_session_id,
+                        old_sid=old_sid,
+                        new_mode_label=new_label,
+                    ),
+                    msg,
+                )
+            )
+        else:
+            asyncio.create_task(
+                self._send_channel_notice(
+                    user_infos,
+                    channel_id,
+                    reply_session_id,
+                    self._build_mode_change_notice_text(new_label),
+                )
+            )
+
     def _handle_channel_control(self, msg: "Message") -> bool:
         r"""处理 \new_session / \mode / \skills 指令.
 
@@ -623,136 +713,38 @@ class MessageHandler(ABC):
             )
             return True
         if parsed.action is ParsedControlAction.NEW_SESSION_BAD:
-            asyncio.create_task(
-                self._send_channel_notice(
-                    user_infos,
-                    ch,
-                    msg.session_id,
-                    "非法指令",
-                )
-            )
+            self._send_illegal_command_notice(user_infos, ch, msg.session_id)
             return True
 
         if parsed.action is ParsedControlAction.MODE_OK:
             mode_str = parsed.mode_subcommand or ""
-            if mode_str not in (
-                "agent",
-                "code",
-                "team",
-                "agent.plan",
-                "agent.fast",
-                "code.plan",
-                "code.normal",
-            ):
-                asyncio.create_task(
-                    self._send_channel_notice(
-                        user_infos,
-                        ch,
-                        msg.session_id,
-                        "非法指令",
-                    )
-                )
-                return True
-            old_mode = state.mode
-            old_sid = state.session_id
-            if mode_str == "agent":
-                state.mode = ChannelMode.AGENT_PLAN
-            elif mode_str == "code":
-                state.mode = ChannelMode.CODE_NORMAL
-            elif mode_str == "team":
-                state.mode = ChannelMode.TEAM
-            elif mode_str == "agent.plan":
-                state.mode = ChannelMode.AGENT_PLAN
-            elif mode_str == "agent.fast":
-                state.mode = ChannelMode.AGENT_FAST
-            elif mode_str == "code.plan":
-                state.mode = ChannelMode.CODE_PLAN
-            elif mode_str == "code.normal":
-                state.mode = ChannelMode.CODE_NORMAL
-            new_label = state.mode.value
-            if old_mode != state.mode:
-                asyncio.create_task(
-                    self._mode_change_cancel_and_notice(
-                        ModeChangeCancelParams(
-                            user_infos=user_infos,
-                            channel_id=ch,
-                            reply_session_id=msg.session_id,
-                            old_sid=old_sid,
-                            new_mode_label=new_label,
-                        ),
-                        msg,
-                    )
-                )
-            else:
-                asyncio.create_task(
-                    self._send_channel_notice(
-                        user_infos,
-                        ch,
-                        msg.session_id,
-                        self._build_mode_change_notice_text(new_label),
-                    )
-                )
-            return True
-        if parsed.action is ParsedControlAction.SWITCH_OK:
-            switch_str = parsed.switch_subcommand or ""
-            target_mode: ChannelMode | None = None
-            if switch_str == "plan":
-                if state.mode in (ChannelMode.AGENT_PLAN, ChannelMode.AGENT_FAST):
-                    target_mode = ChannelMode.AGENT_PLAN
-                elif state.mode in (ChannelMode.CODE_PLAN, ChannelMode.CODE_NORMAL):
-                    target_mode = ChannelMode.CODE_PLAN
-            elif switch_str == "fast":
-                if state.mode in (ChannelMode.AGENT_PLAN, ChannelMode.AGENT_FAST):
-                    target_mode = ChannelMode.AGENT_FAST
-            elif switch_str == "normal":
-                if state.mode in (ChannelMode.CODE_PLAN, ChannelMode.CODE_NORMAL):
-                    target_mode = ChannelMode.CODE_NORMAL
+            target_mode = _MODE_SUBCOMMAND_TO_CHANNEL_MODE.get(mode_str)
             if target_mode is None:
-                asyncio.create_task(
-                    self._send_channel_notice(
-                        user_infos,
-                        ch,
-                        msg.session_id,
-                        "非法指令",
-                    )
-                )
+                self._send_illegal_command_notice(user_infos, ch, msg.session_id)
                 return True
             old_mode = state.mode
             old_sid = state.session_id
             state.mode = target_mode
-            new_label = state.mode.value
-            if old_mode != state.mode:
-                asyncio.create_task(
-                    self._mode_change_cancel_and_notice(
-                        ModeChangeCancelParams(
-                            user_infos=user_infos,
-                            channel_id=ch,
-                            reply_session_id=msg.session_id,
-                            old_sid=old_sid,
-                            new_mode_label=new_label,
-                        ),
-                        msg,
-                    )
-                )
-            else:
-                asyncio.create_task(
-                    self._send_channel_notice(
-                        user_infos,
-                        ch,
-                        msg.session_id,
-                        self._build_mode_change_notice_text(new_label),
-                    )
-                )
+            self._apply_mode_change(user_infos, ch, msg.session_id, old_mode, old_sid, target_mode, msg)
+            return True
+        if parsed.action is ParsedControlAction.SWITCH_OK:
+            switch_str = parsed.switch_subcommand or ""
+            transitions = _SWITCH_TRANSITIONS.get(switch_str, {})
+            target_mode: ChannelMode | None = None
+            for mode_family, result_mode in transitions.items():
+                if state.mode in mode_family:
+                    target_mode = result_mode
+                    break
+            if target_mode is None:
+                self._send_illegal_command_notice(user_infos, ch, msg.session_id)
+                return True
+            old_mode = state.mode
+            old_sid = state.session_id
+            state.mode = target_mode
+            self._apply_mode_change(user_infos, ch, msg.session_id, old_mode, old_sid, target_mode, msg)
             return True
         if parsed.action in (ParsedControlAction.MODE_BAD, ParsedControlAction.SWITCH_BAD):
-            asyncio.create_task(
-                self._send_channel_notice(
-                    user_infos,
-                    ch,
-                    msg.session_id,
-                    "非法指令",
-                )
-            )
+            self._send_illegal_command_notice(user_infos, ch, msg.session_id)
             return True
 
         return False
@@ -808,6 +800,65 @@ class MessageHandler(ABC):
         return False
 
 
+    async def _dispatch_slash_request_and_notice(
+        self,
+        *,
+        user_infos: dict[str, Any],
+        channel_id: str,
+        reply_session_id: str | None,
+        msg: "Message",
+        req_method: "ReqMethod",
+        params: dict[str, Any],
+        req_id_prefix: str,
+        error_prefix: str,
+        success_handler: "Callable[[Any], dict[str, Any]]",
+    ) -> None:
+        """公共 slash 请求分发：构造 Message → send_request → 通知 channel。
+
+        Args:
+            success_handler: 接收 resp.payload，返回 notice_payload dict。
+            error_prefix: 失败时的错误前缀，如"获取技能列表失败"。
+        """
+        from jiuwenclaw.schema.message import Message
+
+        req_id = f"{req_id_prefix}_{int(time.time() * 1000):x}_{secrets.token_hex(3)}"
+        req = Message(
+            id=req_id,
+            type="req",
+            channel_id=msg.channel_id,
+            session_id=msg.session_id,
+            params=params,
+            timestamp=time.time(),
+            ok=True,
+            req_method=req_method,
+            is_stream=False,
+            metadata=msg.metadata,
+            **self._inherit_identity_kwargs(msg),
+        )
+        try:
+            env = self.message_to_e2a(req)
+            resp = await self._agent_client.send_request(env)
+            if resp.ok:
+                notice_payload = success_handler(resp.payload)
+            else:
+                err = ""
+                if isinstance(resp.payload, dict):
+                    err = str(resp.payload.get("error") or resp.payload.get("message") or "").strip()
+                notice_payload = {
+                    "error": f"{error_prefix}{(': ' + err) if err else ''}",
+                }
+            await self._send_channel_notice(
+                user_infos, channel_id, reply_session_id, notice_payload
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[MessageHandler] %s 请求失败: %s", req_id_prefix, exc)
+            await self._send_channel_notice(
+                user_infos,
+                channel_id,
+                reply_session_id,
+                {"error": f"{error_prefix}：{exc}"},
+            )
+
     async def _skills_slash_notice(
         self,
         user_infos: dict[str, Any],
@@ -816,51 +867,24 @@ class MessageHandler(ABC):
         msg: "Message",
     ) -> None:
         """受控通道整行 /skills list：请求 skills.list 并以 CHAT_FINAL 通知透传。"""
-        from jiuwenclaw.schema.message import Message, ReqMethod
+        from jiuwenclaw.schema.message import ReqMethod
 
-        req_id = f"skills_slash_{int(time.time() * 1000):x}_{secrets.token_hex(3)}"
-        skills_req = Message(
-            id=req_id,
-            type="req",
-            channel_id=msg.channel_id,
-            session_id=msg.session_id,
-            params={},
-            timestamp=time.time(),
-            ok=True,
+        def _handle_skills_payload(payload: Any) -> dict[str, Any]:
+            if isinstance(payload, dict):
+                return dict(payload)
+            return {"data": payload}
+
+        await self._dispatch_slash_request_and_notice(
+            user_infos=user_infos,
+            channel_id=channel_id,
+            reply_session_id=reply_session_id,
+            msg=msg,
             req_method=ReqMethod.SKILLS_LIST,
-            is_stream=False,
-            metadata=msg.metadata,
-            provider=getattr(msg, "provider", None),
-            chat_id=getattr(msg, "chat_id", None),
-            user_id=getattr(msg, "user_id", None),
-            bot_id=getattr(msg, "bot_id", None),
+            params={},
+            req_id_prefix="skills_slash",
+            error_prefix="获取技能列表失败",
+            success_handler=_handle_skills_payload,
         )
-        try:
-            env = self.message_to_e2a(skills_req)
-            resp = await self._agent_client.send_request(env)
-            if resp.ok:
-                if isinstance(resp.payload, dict):
-                    notice_payload: dict[str, Any] = dict(resp.payload)
-                else:
-                    notice_payload = {"data": resp.payload}
-            else:
-                err = ""
-                if isinstance(resp.payload, dict):
-                    err = str(resp.payload.get("error") or "").strip()
-                notice_payload = {
-                    "error": f"获取技能列表失败{(': ' + err) if err else ''}",
-                }
-            await self._send_channel_notice(
-                user_infos, channel_id, reply_session_id, notice_payload
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("[MessageHandler] /skills list 请求失败: %s", exc)
-            await self._send_channel_notice(
-                user_infos,
-                channel_id,
-                reply_session_id,
-                {"error": f"获取技能列表失败：{exc}"},
-            )
 
     async def _ls_slash_notice(
         self,
@@ -871,61 +895,33 @@ class MessageHandler(ABC):
         path: str,
     ) -> None:
         """/ls [path]：请求 command.ls 并以 CHAT_FINAL 通知透传。"""
-        from jiuwenclaw.schema.message import Message, ReqMethod
+        from jiuwenclaw.schema.message import ReqMethod
 
-        req_id = f"ls_slash_{int(time.time() * 1000):x}_{secrets.token_hex(3)}"
-        ls_req = Message(
-            id=req_id,
-            type="req",
-            channel_id=msg.channel_id,
-            session_id=msg.session_id,
-            params={"path": path},
-            timestamp=time.time(),
-            ok=True,
+        def _handle_ls_payload(payload: Any) -> dict[str, Any]:
+            if isinstance(payload, dict):
+                entries = payload.get("entries", [])
+                if entries:
+                    lines = [f"📁 {payload.get('path', path)}:"]
+                    for entry in entries:
+                        name = entry.get("name", "?")
+                        is_dir = entry.get("is_dir", False)
+                        icon = "📁" if is_dir else "📄"
+                        lines.append(f"  {icon} {name}")
+                    return {"content": "\n".join(lines)}
+                return {"error": payload.get("error", "目录为空或不存在")}
+            return {"data": str(payload)}
+
+        await self._dispatch_slash_request_and_notice(
+            user_infos=user_infos,
+            channel_id=channel_id,
+            reply_session_id=reply_session_id,
+            msg=msg,
             req_method=ReqMethod.COMMAND_LS,
-            is_stream=False,
-            metadata=msg.metadata,
-            provider=getattr(msg, "provider", None),
-            chat_id=getattr(msg, "chat_id", None),
-            user_id=getattr(msg, "user_id", None),
-            bot_id=getattr(msg, "bot_id", None),
+            params={"path": path},
+            req_id_prefix="ls_slash",
+            error_prefix="列出目录失败",
+            success_handler=_handle_ls_payload,
         )
-        try:
-            env = self.message_to_e2a(ls_req)
-            resp = await self._agent_client.send_request(env)
-            if resp.ok:
-                if isinstance(resp.payload, dict):
-                    entries = resp.payload.get("entries", [])
-                    if entries:
-                        lines = [f"📁 {resp.payload.get('path', path)}:"]
-                        for entry in entries:
-                            name = entry.get("name", "?")
-                            is_dir = entry.get("is_dir", False)
-                            icon = "📁" if is_dir else "📄"
-                            lines.append(f"  {icon} {name}")
-                        notice_payload: dict[str, Any] = {"content": "\n".join(lines)}
-                    else:
-                        notice_payload = {"error": resp.payload.get("error", "目录为空或不存在")}
-                else:
-                    notice_payload = {"data": str(resp.payload)}
-            else:
-                err = ""
-                if isinstance(resp.payload, dict):
-                    err = str(resp.payload.get("error") or resp.payload.get("message") or "").strip()
-                notice_payload = {
-                    "error": f"列出目录失败{(': ' + err) if err else ''}",
-                }
-            await self._send_channel_notice(
-                user_infos, channel_id, reply_session_id, notice_payload
-            )
-        except Exception as exc:
-            logger.exception("[MessageHandler] /ls 请求失败: %s", exc)
-            await self._send_channel_notice(
-                user_infos,
-                channel_id,
-                reply_session_id,
-                {"error": f"列出目录失败：{exc}"},
-            )
 
     async def _view_slash_notice(
         self,
@@ -937,7 +933,7 @@ class MessageHandler(ABC):
     ) -> None:
         """/view <path>：请求 command.view 并以 CHAT_FINAL 通知透传。"""
         import re
-        from jiuwenclaw.schema.message import Message, ReqMethod
+        from jiuwenclaw.schema.message import ReqMethod
 
         view_match = re.match(
             r'^/(?:view|cat)\s+(.+?)(?:\s+-f\s+(\d+))?(?:\s+-l\s+(\d+))?(?:\s+-n\s+(\d+))?$',
@@ -956,51 +952,22 @@ class MessageHandler(ABC):
         from_line = int(view_match.group(2) or 1)
         lines = int(view_match.group(3) or view_match.group(4) or 0) or None
 
-        req_id = f"view_slash_{int(time.time() * 1000):x}_{secrets.token_hex(3)}"
-        view_req = Message(
-            id=req_id,
-            type="req",
-            channel_id=msg.channel_id,
-            session_id=msg.session_id,
-            params={"path": path, "from_line": from_line, "lines": lines},
-            timestamp=time.time(),
-            ok=True,
+        def _handle_view_payload(payload: Any) -> dict[str, Any]:
+            if isinstance(payload, dict):
+                return {"content": payload.get("content", "")}
+            return {"data": str(payload)}
+
+        await self._dispatch_slash_request_and_notice(
+            user_infos=user_infos,
+            channel_id=channel_id,
+            reply_session_id=reply_session_id,
+            msg=msg,
             req_method=ReqMethod.COMMAND_VIEW,
-            is_stream=False,
-            metadata=msg.metadata,
-            provider=getattr(msg, "provider", None),
-            chat_id=getattr(msg, "chat_id", None),
-            user_id=getattr(msg, "user_id", None),
-            bot_id=getattr(msg, "bot_id", None),
+            params={"path": path, "from_line": from_line, "lines": lines},
+            req_id_prefix="view_slash",
+            error_prefix="查看文件失败",
+            success_handler=_handle_view_payload,
         )
-        try:
-            env = self.message_to_e2a(view_req)
-            resp = await self._agent_client.send_request(env)
-            if resp.ok:
-                if isinstance(resp.payload, dict):
-                    notice_payload: dict[str, Any] = {
-                        "content": resp.payload.get("content", "")
-                    }
-                else:
-                    notice_payload = {"data": str(resp.payload)}
-            else:
-                err = ""
-                if isinstance(resp.payload, dict):
-                    err = str(resp.payload.get("error") or resp.payload.get("message") or "").strip()
-                notice_payload = {
-                    "error": f"查看文件失败{(': ' + err) if err else ''}",
-                }
-            await self._send_channel_notice(
-                user_infos, channel_id, reply_session_id, notice_payload
-            )
-        except Exception as exc:
-            logger.exception("[MessageHandler] /view 请求失败: %s", exc)
-            await self._send_channel_notice(
-                user_infos,
-                channel_id,
-                reply_session_id,
-                {"error": f"查看文件失败：{exc}"},
-            )
 
     def _apply_channel_state(self, msg: "Message") -> None:
         """将当前 Channel 的控制状态应用到消息上（session_id / mode）."""
@@ -1110,13 +1077,14 @@ class MessageHandler(ABC):
             return True
         return cls._is_session_map_style_session_id(sid)
 
-    async def _ensure_acp_agent_session(self, session_id: str) -> str:
+    async def _ensure_channel_agent_session(self, channel_id: str, session_id: str) -> str:
+        """通用：通过 AgentServer 创建 session（ACP / VibeSkill 共用）。"""
         from jiuwenclaw.e2a.gateway_normalize import e2a_from_agent_fields
         from jiuwenclaw.schema.message import ReqMethod
 
         env = e2a_from_agent_fields(
-            request_id=f"acp-session-create-{int(time.time() * 1000):x}-{secrets.token_hex(3)}",
-            channel_id=_ACP_CHANNEL_ID,
+            request_id=f"{channel_id}-session-create-{int(time.time() * 1000):x}-{secrets.token_hex(3)}",
+            channel_id=channel_id,
             session_id=session_id,
             req_method=ReqMethod.SESSION_CREATE,
             params={"session_id": session_id},
@@ -1126,100 +1094,99 @@ class MessageHandler(ABC):
         resp = await self._agent_client.send_request(env)
         if not resp.ok:
             payload = dict(resp.payload or {}) if isinstance(resp.payload, dict) else {}
-            raise RuntimeError(str(payload.get("error") or "acp session.create failed"))
+            raise RuntimeError(str(payload.get("error") or f"{channel_id} session.create failed"))
         payload = dict(resp.payload or {}) if isinstance(resp.payload, dict) else {}
         resolved = payload.get("sessionId") or payload.get("session_id") or session_id
         resolved_str = str(resolved or "").strip()
         if not resolved_str:
-            raise RuntimeError("acp session.create returned empty session_id")
+            raise RuntimeError(f"{channel_id} session.create returned empty session_id")
         return resolved_str
 
-    async def _resolve_acp_internal_session_id(
+    async def _resolve_alias_internal_session_id(
         self,
+        channel_id: str,
         external_session_id: str | None,
     ) -> tuple[str | None, bool]:
+        """通用：解析外部 session_id → 内部 session_id（ACP / VibeSkill 共用）。
+
+        使用 channel_id 对应的别名缓存与锁，首次未命中时创建 AgentServer session。
+        """
         external = str(external_session_id or "").strip()
         if not external:
             return None, False
 
-        cached = self._acp_session_aliases.get(external)
+        aliases, alias_lock = self._get_alias_store(channel_id)
+        cached = aliases.get(external)
         if cached:
             return cached, cached != external
 
-        async with self._acp_session_alias_lock:
-            cached = self._acp_session_aliases.get(external)
+        async with alias_lock:
+            cached = aliases.get(external)
             if cached:
                 return cached, cached != external
 
             desired = (
                 external
                 if self._is_known_jiuwenclaw_session_id(external)
-                else self._generate_channel_session_id(_ACP_CHANNEL_ID)
+                else self._generate_channel_session_id(channel_id)
             )
-            ensured = await self._ensure_acp_agent_session(desired)
-            self._acp_session_aliases[external] = ensured
+            ensured = await self._ensure_channel_agent_session(channel_id, desired)
+            aliases[external] = ensured
             return ensured, ensured != external
 
-    async def _prepare_agent_dispatch_message(self, msg: "Message") -> "Message":
-        from jiuwenclaw.schema.message import ReqMethod
-
-        if msg.channel_id == _ACP_CHANNEL_ID:
-            if msg.req_method in (ReqMethod.INITIALIZE, ReqMethod.SESSION_CREATE):
-                return msg
-            internal_session_id, aliased = await self._resolve_acp_internal_session_id(msg.session_id)
-            if not internal_session_id:
-                return msg
-            params = dict(msg.params or {})
-            params["session_id"] = internal_session_id
-            metadata = dict(msg.metadata or {})
-            if aliased:
-                metadata.setdefault(_ACP_ORIGINAL_SESSION_ID_KEY, str(msg.session_id or ""))
-            return replace(
-                msg,
-                session_id=internal_session_id,
-                params=params,
-                metadata=metadata or None,
-            )
-
-        if msg.channel_id == _VIBESKILL_CHANNEL_ID:
-            if msg.req_method in (ReqMethod.INITIALIZE, ReqMethod.SESSION_CREATE):
-                return msg
-            internal_session_id, aliased = await self._resolve_vibeskill_internal_session_id(msg.session_id)
-            if not internal_session_id:
-                return msg
-            params = dict(msg.params or {})
-            params["session_id"] = internal_session_id
-            metadata = dict(msg.metadata or {})
-            if aliased:
-                metadata.setdefault(_VIBESKILL_ORIGINAL_SESSION_ID_KEY, str(msg.session_id or ""))
-            return replace(
-                msg,
-                session_id=internal_session_id,
-                params=params,
-                metadata=metadata or None,
-            )
-
-        return msg
-
-    def _resolve_acp_external_session_id(
+    def _resolve_alias_external_session_id(
         self,
+        channel_id: str,
         session_id: str | None,
         metadata: dict[str, Any] | None = None,
     ) -> str | None:
+        """通用：解析内部 session_id → 外部 session_id（ACP / VibeSkill 共用）。"""
         sid = str(session_id or "").strip()
         if not sid:
             return None
 
-        original = ""
-        if isinstance(metadata, dict):
-            original = str(metadata.get(_ACP_ORIGINAL_SESSION_ID_KEY) or "").strip()
-        if original:
-            return original
+        original_key = _channel_original_session_id_key(channel_id)
+        if original_key:
+            original = ""
+            if isinstance(metadata, dict):
+                original = str(metadata.get(original_key) or "").strip()
+            if original:
+                return original
 
-        for external, internal in self._acp_session_aliases.items():
+        aliases, _ = self._get_alias_store(channel_id)
+        for external, internal in aliases.items():
             if internal == sid:
                 return external
         return sid
+
+    def _get_alias_store(self, channel_id: str) -> tuple[dict[str, str], asyncio.Lock]:
+        """获取 channel_id 对应的 (别名缓存, 锁)。"""
+        if channel_id == _ACP_CHANNEL_ID:
+            return self._acp_session_aliases, self._acp_session_alias_lock
+        return self._vibeskill_session_aliases, self._vibeskill_session_alias_lock
+
+    async def _prepare_agent_dispatch_message(self, msg: "Message") -> "Message":
+        from jiuwenclaw.schema.message import ReqMethod
+
+        original_key = _channel_original_session_id_key(msg.channel_id)
+        if original_key is None:
+            return msg
+        if msg.req_method in (ReqMethod.INITIALIZE, ReqMethod.SESSION_CREATE):
+            return msg
+        internal_session_id, aliased = await self._resolve_alias_internal_session_id(msg.channel_id, msg.session_id)
+        if not internal_session_id:
+            return msg
+        params = dict(msg.params or {})
+        params["session_id"] = internal_session_id
+        metadata = dict(msg.metadata or {})
+        if aliased:
+            metadata.setdefault(original_key, str(msg.session_id or ""))
+        return replace(
+            msg,
+            session_id=internal_session_id,
+            params=params,
+            metadata=metadata or None,
+        )
 
     @staticmethod
     def _resolve_at_file_references(
@@ -1381,28 +1348,8 @@ class MessageHandler(ABC):
         return cls._resolve_at_file_references(merged_content, cwd=cwd)
 
     async def create_agent_session(self, session_id: str) -> str:
-        from jiuwenclaw.e2a.gateway_normalize import e2a_from_agent_fields
-        from jiuwenclaw.schema.message import ReqMethod
-
-        env = e2a_from_agent_fields(
-            request_id=f"vibeskill-session-create-{int(time.time() * 1000):x}-{secrets.token_hex(3)}",
-            channel_id=_VIBESKILL_CHANNEL_ID,
-            session_id=session_id,
-            req_method=ReqMethod.SESSION_CREATE,
-            params={"session_id": session_id},
-            is_stream=False,
-            timestamp=time.time(),
-        )
-        resp = await self._agent_client.send_request(env)
-        if not resp.ok:
-            payload = dict(resp.payload or {}) if isinstance(resp.payload, dict) else {}
-            raise RuntimeError(str(payload.get("error") or "vibeskill session.create failed"))
-        payload = dict(resp.payload or {}) if isinstance(resp.payload, dict) else {}
-        resolved = payload.get("sessionId") or payload.get("session_id") or session_id
-        resolved_str = str(resolved or "").strip()
-        if not resolved_str:
-            raise RuntimeError("vibeskill session.create returned empty session_id")
-        return resolved_str
+        """VibeSkill session 创建（委托给通用 _ensure_channel_agent_session）。"""
+        return await self._ensure_channel_agent_session(_VIBESKILL_CHANNEL_ID, session_id)
 
     async def register_skill(self, session_id: str, skill_url: str) -> dict[str, Any]:
         """通过 AgentServer 将远程 skill 包注册到当前 session 的 workspace。
@@ -1431,52 +1378,6 @@ class MessageHandler(ABC):
             payload = dict(resp.payload or {}) if isinstance(resp.payload, dict) else {}
             raise RuntimeError(str(payload.get("error") or payload.get("detail") or "register skill failed"))
         return dict(resp.payload or {}) if isinstance(resp.payload, dict) else {"success": True}
-
-    async def _resolve_vibeskill_internal_session_id(
-        self,
-        external_session_id: str | None,
-    ) -> tuple[str | None, bool]:
-        external = str(external_session_id or "").strip()
-        if not external:
-            return None, False
-
-        cached = self._vibeskill_session_aliases.get(external)
-        if cached:
-            return cached, cached != external
-
-        async with self._vibeskill_session_alias_lock:
-            cached = self._vibeskill_session_aliases.get(external)
-            if cached:
-                return cached, cached != external
-
-            desired = (
-                external
-                if self._is_known_jiuwenclaw_session_id(external)
-                else self._generate_channel_session_id(_VIBESKILL_CHANNEL_ID)
-            )
-            ensured = await self.create_agent_session(desired)
-            self._vibeskill_session_aliases[external] = ensured
-            return ensured, ensured != external
-
-    def _resolve_vibeskill_external_session_id(
-        self,
-        session_id: str | None,
-        metadata: dict[str, Any] | None = None,
-    ) -> str | None:
-        sid = str(session_id or "").strip()
-        if not sid:
-            return None
-
-        original = ""
-        if isinstance(metadata, dict):
-            original = str(metadata.get(_VIBESKILL_ORIGINAL_SESSION_ID_KEY) or "").strip()
-        if original:
-            return original
-
-        for external, internal in self._vibeskill_session_aliases.items():
-            if internal == sid:
-                return external
-        return sid
 
     @staticmethod
     def message_to_e2a(msg: "Message") -> "E2AEnvelope":
@@ -1603,8 +1504,8 @@ class MessageHandler(ABC):
         # 合并 metadata：请求 metadata 在前，响应 metadata 在后（响应优先）
         bus_metadata = MessageHandler._merge_agent_metadata(request_metadata, resp_md)
 
-        if chunk.channel_id == _ACP_CHANNEL_ID:
-            session_id = self._resolve_acp_external_session_id(session_id, bus_metadata)
+        if _channel_original_session_id_key(chunk.channel_id):
+            session_id = self._resolve_alias_external_session_id(chunk.channel_id, session_id, bus_metadata)
 
         # 检查是否是文件下载事件（AgentServer -> Gateway 的文件传输）
         payload = chunk.payload or {}
