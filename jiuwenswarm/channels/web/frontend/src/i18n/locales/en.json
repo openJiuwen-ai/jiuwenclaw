@@ -267,8 +267,8 @@
     "placeholderTeamMode": "Team mode, new input will run in parallel...",
     "placeholderTeamModeProcessing": "Team mode processing, new input will run in parallel...",
     "placeholderVoice": "Listening...",
-    "welcomeLogoAlt": "JiuwenSwarm logo",
-    "welcomeHeading": "Hi, I'm JiuwenSwarm. Nice to meet you!",
+    "welcomeLogoAlt": "WorkSwarm logo",
+    "welcomeHeading": "Hi, I'm WorkSwarm. Nice to meet you!",
     "welcomeSuggestions": {
       "journey": "Let's begin a brand-new journey!",
       "skills": "Can you tell me what skills you have?"
@@ -1157,7 +1157,7 @@
     "autoManagedHint": "This task is auto-created/deleted by the proactive recommendation toggle (Settings → Proactive Recommendation). Only the cron expression and timezone can be edited here; other fields (name/status/description/offset/channel) are read-only. To remove it, turn off the toggle in Settings.",
     "autoManagedToggleDisabled": "The toggle of an auto-managed task is controlled by Settings → Proactive Recommendation and cannot be switched here.",
     "pageTitle": "Scheduled Tasks",
-    "pageSubtitle": "Configure automated tasks that Jiuwen runs on schedule.",
+    "pageSubtitle": "Configure automated tasks that run on schedule.",
     "actions": {
       "confirm": "Confirm"
     },
