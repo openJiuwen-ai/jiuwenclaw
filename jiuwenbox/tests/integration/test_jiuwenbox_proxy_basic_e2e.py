@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 JiuwenBox Proxy Basic 认证测试脚本
 =================================
@@ -16,6 +16,7 @@ JiuwenBox Proxy Basic 认证测试脚本
 执行:
   python test_proxy_basic.py
 """
+import logging
 import base64
 import json
 import os
@@ -23,7 +24,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -31,6 +32,15 @@ import requests
 # 配置输出编码
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
+# 配置 logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] %(message)s',
+    datefmt='%H:%M:%S',
+    stream=sys.stdout
+)
+logger = logging.getLogger(__name__)
 
 # ===== 环境常量 =====
 HOST = "7.221.53.146"
@@ -72,8 +82,7 @@ class TestRecord:
 
 def log(msg: str) -> None:
     """日志输出"""
-    timestamp = datetime.now().strftime('%H:%M:%S')
-    print(f"[{timestamp}] {msg}")
+    logger.info(msg)
 
 
 def record(rec: TestRecord) -> None:
@@ -152,20 +161,20 @@ def ssh_exec(command: str, timeout: int = TIMEOUT) -> Tuple[str, str, int]:
     try:
         with open(stdout_file, 'r', encoding='utf-8', errors='replace') as f:
             stdout = f.read()
-    except:
-        pass
+    except (IOError, OSError) as e:
+        log(f"读取 stdout 文件失败: {e}")
     try:
         with open(stderr_file, 'r', encoding='utf-8', errors='replace') as f:
             stderr = f.read()
-    except:
-        pass
+    except (IOError, OSError) as e:
+        log(f"读取 stderr 文件失败: {e}")
 
     for filepath in [stdout_file, stderr_file]:
         if os.path.exists(filepath):
             try:
                 os.remove(filepath)
-            except:
-                pass
+            except (IOError, OSError) as e:
+                log(f"删除临时文件失败 {filepath}: {e}")
 
     return stdout, stderr, result.returncode
 
@@ -256,9 +265,9 @@ def http_post(url: str, **kwargs) -> Optional[requests.Response]:
 
 def phase1_env_check() -> None:
     """阶段1: 环境检查"""
-    log("\n" + "="*60)
+    log("\n" + "=" * 60)
     log("阶段1: 环境检查")
-    log("="*60)
+    log("=" * 60)
 
     # ENV.1 系统信息
     out, err, code = ssh_exec("hostname && uname -m && cat /etc/os-release | head -3")
@@ -313,7 +322,11 @@ def phase1_env_check() -> None:
     ))
 
     # ENV.5 Neo4j 安装包
-    out, err, code = ssh_exec(f"ls -la {SOFTWARE_DIR}/neo4j*.tar.gz 2>/dev/null || find /jiuwenbox -name 'neo4j*.tar.gz' 2>/dev/null | head -3")
+    out, err, code = ssh_exec(
+        f"ls -la {SOFTWARE_DIR}/neo4j*.tar.gz 2>/dev/null"
+        f" || find /jiuwenbox -name 'neo4j*.tar.gz'"
+        f" 2>/dev/null | head -3"
+    )
     passed = code == 0 and "neo4j" in out.lower()
     record(TestRecord(
         case_id="ENV.5",
@@ -339,7 +352,11 @@ def phase1_env_check() -> None:
     ))
 
     # ENV.7 端口检查
-    out, err, code = ssh_exec(f"ss -tlnp | grep -E ':{NEO4J_HTTP_PORT}|:{JIUWENBOX_API_PORT}|:{JIUWENBOX_PROXY_PORT}' || echo 'ports_free'")
+    out, err, code = ssh_exec(
+        f"ss -tlnp | grep -E"
+        f" ':{NEO4J_HTTP_PORT}|:{JIUWENBOX_API_PORT}|{JIUWENBOX_PROXY_PORT}'"
+        f" || echo 'ports_free'"
+    )
     passed = "ports_free" in out or code == 0
     record(TestRecord(
         case_id="ENV.7",
@@ -354,9 +371,9 @@ def phase1_env_check() -> None:
 
 def phase2_setup_neo4j() -> None:
     """阶段2: Neo4j 环境搭建"""
-    log("\n" + "="*60)
+    log("\n" + "=" * 60)
     log("阶段2: Neo4j 环境搭建")
-    log("="*60)
+    log("=" * 60)
 
     # NEO4J.1 创建工作目录
     out, err, code = ssh_exec(f"mkdir -p {BASE_DIR} && ls -la {BASE_DIR}")
@@ -563,9 +580,9 @@ echo "HTTP_CODE=$HTTP_CODE"
 
 def phase3_setup_jiuwenbox() -> None:
     """阶段3: JiuwenBox 服务启动"""
-    log("\n" + "="*60)
+    log("\n" + "=" * 60)
     log("阶段3: JiuwenBox 服务启动")
-    log("="*60)
+    log("=" * 60)
 
     # JB.1 查找 JiuwenBox 源码
     out, err, code = ssh_exec(f"""
@@ -815,9 +832,9 @@ echo "HTTP_CODE=$HTTP_CODE"
 
 def phase4_basic_tests() -> None:
     """阶段4: 10 个必测场景"""
-    log("\n" + "="*60)
+    log("\n" + "=" * 60)
     log("阶段4: 10 个必测场景")
-    log("="*60)
+    log("=" * 60)
 
     # 创建沙箱
     log("创建沙箱...")
@@ -833,8 +850,8 @@ curl -s -X POST http://127.0.0.1:{JIUWENBOX_API_PORT}/api/v1/sandboxes -H 'Conte
         match = re.search(r'"id"\s*:\s*"([^"]+)"', out)
         if match:
             sandbox_id = match.group(1)
-    except:
-        pass
+    except (ValueError, AttributeError) as e:
+        log(f"提取沙箱 ID 失败: {e}")
     
     if not sandbox_id:
         log("警告: 无法提取沙箱 ID，尝试使用宿主机直接测试")
@@ -892,8 +909,8 @@ curl -s -X POST http://127.0.0.1:{JIUWENBOX_API_PORT}/api/v1/sandboxes/{sandbox_
                 stdout_match = re.search(r'"stdout"\s*:\s*"([^"]*)"', out)
                 if stdout_match:
                     return stdout_match.group(1).replace('\\n', '\n')
-            except:
-                pass
+            except (ValueError, AttributeError) as e:
+                log(f"解析沙箱 exec 响应失败: {e}")
             return out
         else:
             # 直接在宿主机执行
@@ -1206,9 +1223,9 @@ echo "DETAIL_RESPONSE=$DETAIL"
 
 def phase5_security_check() -> None:
     """阶段5: 安全检查"""
-    log("\n" + "="*60)
+    log("\n" + "=" * 60)
     log("阶段5: 安全检查")
-    log("="*60)
+    log("=" * 60)
 
     # TC-012 Proxy 列表不返回密码
     out, err, code = ssh_exec(f"""
@@ -1378,9 +1395,9 @@ fi
 
 def phase6_extra_tests() -> None:
     """阶段6: 补充测试用例（覆盖 Excel 中缺失的用例）"""
-    log("\n" + "="*60)
+    log("\n" + "=" * 60)
     log("阶段6: 补充测试用例")
-    log("="*60)
+    log("=" * 60)
 
     # TC-010: Basic 路由不修改 X-Api-Key（沙箱内执行）
     out, err, code = sandbox_exec(f"""
@@ -1552,7 +1569,10 @@ curl -s -X POST http://127.0.0.1:{JIUWENBOX_API_PORT}/api/v1/proxies \\
     }}'
 rm -f /tmp/bad_password
 """)
-    passed = "400" in out or "invalid" in out.lower() or "control" in out.lower() or "newline" in out.lower() or "contains" in out.lower()
+    passed = ("400" in out or "invalid" in out.lower()
+              or "control" in out.lower()
+              or "newline" in out.lower()
+              or "contains" in out.lower())
     record(TestRecord(
         case_id="TC-027",
         title="密码含 CR/LF/NUL 返回 400",
@@ -1846,7 +1866,11 @@ curl -s -X DELETE http://127.0.0.1:{JIUWENBOX_API_PORT}/api/v1/proxies/neo4j_mem
 
     # 上传开发自验证脚本到测试机
     log("上传开发自验证脚本到测试机...")
-    e2e_local_dir = r"D:\CJDUBS\0805jiuwenboxProxyBasic\sw\jiuwenswarm-feature-jiuwenbox_Basic_Proxy-jiuwenbox\jiuwenbox\tests\manual\e2e_proxy_basic"
+    e2e_local_dir = (
+        r"D:\CJDUBS\0805jiuwenboxProxyBasic\sw"
+        r"\jiuwenswarm-feature-jiuwenbox_Basic_Proxy-jiuwenbox"
+        r"\jiuwenbox\tests\manual\e2e_proxy_basic"
+    )
     
     # 查找测试机上的 E2E 目录
     out, err, code = ssh_exec(f"""
@@ -1868,7 +1892,11 @@ fi
         with open(run_e2e_local, 'r', encoding='utf-8') as f:
             run_e2e_content = f.read()
         run_e2e_b64 = base64.b64encode(run_e2e_content.encode('utf-8')).decode('ascii')
-        ssh_exec(f"echo '{run_e2e_b64}' | base64 -d > {remote_e2e_dir}/run_e2e.py && chmod +x {remote_e2e_dir}/run_e2e.py")
+        ssh_exec(
+            f"echo '{run_e2e_b64}' | base64 -d"
+            f" > {remote_e2e_dir}/run_e2e.py"
+            f" && chmod +x {remote_e2e_dir}/run_e2e.py"
+        )
         log(f"已上传 run_e2e.py 到 {remote_e2e_dir}")
     
     # 上传 upstream_basic.py
@@ -1877,7 +1905,11 @@ fi
         with open(upstream_local, 'r', encoding='utf-8') as f:
             upstream_content = f.read()
         upstream_b64 = base64.b64encode(upstream_content.encode('utf-8')).decode('ascii')
-        ssh_exec(f"echo '{upstream_b64}' | base64 -d > {remote_e2e_dir}/upstream_basic.py && chmod +x {remote_e2e_dir}/upstream_basic.py")
+        ssh_exec(
+            f"echo '{upstream_b64}' | base64 -d"
+            f" > {remote_e2e_dir}/upstream_basic.py"
+            f" && chmod +x {remote_e2e_dir}/upstream_basic.py"
+        )
         log(f"已上传 upstream_basic.py 到 {remote_e2e_dir}")
 
     # TC-035: 真实 Neo4j E2E
@@ -2163,9 +2195,9 @@ fi
 
 def phase6b_sandbox_tests() -> None:
     """阶段6b: 沙箱测试"""
-    log("\n" + "="*60)
+    log("\n" + "=" * 60)
     log("阶段6b: 沙箱测试")
-    log("="*60)
+    log("=" * 60)
 
     # 沙箱环境已在阶段3配置完成，无需重复配置
     log("沙箱环境已在阶段3配置完成")
@@ -2452,9 +2484,9 @@ echo "STDOUT=$STDOUT"
 
 def phase7_cleanup() -> None:
     """阶段7: 环境清理"""
-    log("\n" + "="*60)
+    log("\n" + "=" * 60)
     log("阶段7: 环境清理")
-    log("="*60)
+    log("=" * 60)
 
     out, err, code = ssh_exec(f"""
 # 删除路由
@@ -2493,7 +2525,7 @@ def save_results() -> None:
         "pass_rate": f"{passed/total*100:.1f}%" if total > 0 else "0%",
         "p0_pass_rate": f"{p0_pass/p0_total*100:.1f}%" if p0_total > 0 else "0%",
         "results": results,
-        "exec_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        "exec_time": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
         "host": HOST,
         "elapsed_seconds": int(time.time() - start_time),
     }
@@ -2502,9 +2534,9 @@ def save_results() -> None:
     with open(filename, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-    log("\n" + "="*60)
+    log("\n" + "=" * 60)
     log("测试结果汇总")
-    log("="*60)
+    log("=" * 60)
     log(f"总计: {total}, 通过: {passed}, 失败: {failed}")
     log(f"总通过率: {data['pass_rate']}")
     log(f"P0 用例: {p0_pass}/{p0_total} = {data['p0_pass_rate']}")
@@ -2513,11 +2545,11 @@ def save_results() -> None:
 
 def main():
     """主函数"""
-    log("="*60)
+    log("=" * 60)
     log("JiuwenBox Proxy Basic 认证测试")
     log(f"测试机: {HOST}")
-    log(f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    log("="*60)
+    log(f"时间: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}")
+    log("=" * 60)
 
     global start_time
     start_time = time.time()
