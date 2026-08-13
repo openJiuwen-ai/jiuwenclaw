@@ -1319,12 +1319,13 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         (Boolean(pickString(attachment.persistedMediaItem?.path)) || Boolean(attachment.base64Data)),
     );
     const trimmed = buildSubmitContent(trimmedBase, readyDrafts);
-    // Require typed/voice text — attachments alone must not enable send.
-    if (!trimmedBase || hasUploadingAttachments || hasAttachmentErrors) return;
+    const hasReadyMedia = readyMediaItems.length > 0;
+    // Block only when there is neither text nor a ready attachment to send.
+    if ((!trimmedBase && !hasReadyMedia) || hasUploadingAttachments || hasAttachmentErrors) return;
     // In agent mode attachments queue with the task (taskQueue carries mediaItems).
     // Other non-team modes still go through the text-only onInterrupt channel where
     // attachments would be lost, so keep blocking there.
-    if (isInterruptible && !isTeamMode && !isAgentMode && readyMediaItems.length > 0) return;
+    if (isInterruptible && !isTeamMode && !isAgentMode && hasReadyMedia) return;
 
     if (isListening) {
       stopListening();
@@ -1416,8 +1417,9 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const isImageInterruptBlocked =
     isInterruptible && !isTeamMode && !isAgentMode && readyMediaItems.length > 0;
   const showStop = isProcessing && !isPaused && !hasDraft;
+  const hasReadyMedia = readyMediaItems.length > 0;
   const canSubmit = showStop || (
-    hasTextDraft &&
+    (hasTextDraft || hasReadyMedia) &&
     !isLoadingHistory &&
     !isImageInterruptBlocked &&
     !hasUploadingAttachments &&
