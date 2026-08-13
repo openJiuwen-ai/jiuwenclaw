@@ -9,6 +9,7 @@ import asyncio
 import json
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
+from dataclasses import asdict
 from typing import Any, AsyncIterator
 from urllib.parse import urlsplit
 
@@ -17,11 +18,8 @@ from websockets.exceptions import ConnectionClosed, PayloadTooBig
 from jiuwenswarm.common.e2a.constants import E2A_WIRE_SERVER_PUSH_KEY
 from jiuwenswarm.common.e2a.models import E2AEnvelope
 from jiuwenswarm.common.e2a.wire_codec import (
-    encode_pcs_request_for_wire,
     parse_agent_server_wire_chunk,
     parse_agent_server_wire_unary,
-    parse_pcs_server_wire_chunk,
-    parse_pcs_server_wire_unary,
 )
 from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
 from jiuwenswarm.common.ws_limits import AGENT_WS_MAX_MESSAGE_BYTES
@@ -111,10 +109,6 @@ class AgentServerClient(ABC):
 def _e2a_to_wire(envelope: E2AEnvelope) -> dict[str, Any]:
     """E2AEnvelope → WebSocket JSON（与 AgentServer from_dict 对齐）。"""
     return envelope.to_dict()
-
-
-def _is_pcs_method(method: object) -> bool:
-    return isinstance(method, str) and method.startswith("pcs.")
 
 
 class WebSocketAgentServerClient(AgentServerClient):
@@ -419,11 +413,7 @@ class WebSocketAgentServerClient(AgentServerClient):
         try:
             # 发送请求
             async with self._lock:
-                payload = (
-                    encode_pcs_request_for_wire(envelope)
-                    if _is_pcs_method(envelope.method)
-                    else _e2a_to_wire(envelope)
-                )
+                payload = _e2a_to_wire(envelope)
                 logger.info("[WebSocketAgentServerClient] 发送请求(非流式) payload: %s", _to_json(payload))
                 await self._send_wire_payload(payload)
 
@@ -440,11 +430,7 @@ class WebSocketAgentServerClient(AgentServerClient):
                 raise RuntimeError(
                     f"AgentServer 非流式请求超时 (request_id={rid}, timeout={_UNARY_REQUEST_TIMEOUT_SECONDS}s)"
                 ) from e
-            resp = (
-                parse_pcs_server_wire_unary(data)
-                if _is_pcs_method(envelope.method)
-                else parse_agent_server_wire_unary(data)
-            )
+            resp = parse_agent_server_wire_unary(data)
             return resp
         finally:
             # 清理队列
@@ -481,11 +467,7 @@ class WebSocketAgentServerClient(AgentServerClient):
         try:
             # 发送请求
             async with self._lock:
-                payload = (
-                    encode_pcs_request_for_wire(envelope)
-                    if _is_pcs_method(envelope.method)
-                    else _e2a_to_wire(envelope)
-                )
+                payload = _e2a_to_wire(envelope)
                 logger.info("[WebSocketAgentServerClient] 发送请求(流式) payload: %s", _to_json(payload))
                 await self._send_wire_payload(payload)
 
@@ -505,11 +487,7 @@ class WebSocketAgentServerClient(AgentServerClient):
                     data = await queue.get()
                 if isinstance(data, _ReceiverFailure):
                     raise RuntimeError("AgentServer WebSocket connection closed") from data.exc
-                chunk = (
-                    parse_pcs_server_wire_chunk(data)
-                    if _is_pcs_method(envelope.method)
-                    else parse_agent_server_wire_chunk(data)
-                )
+                chunk = parse_agent_server_wire_chunk(data)
                 chunk_count += 1
                 if chunk_count <= 3:
                     _pl = getattr(chunk, "payload", None) or {}

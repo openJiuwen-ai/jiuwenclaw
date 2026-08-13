@@ -40,15 +40,6 @@ def test_deep_adapter_imports_core_pcs_context_rail_only() -> None:
 
     assert "PCSContextRail" in imported_names
     assert "ProactiveContextRail" not in imported_names
-    assert "PCSContextRail" in imported_names
-
-
-def test_jiuwenswarm_rail_export_points_to_core_rail() -> None:
-    from openjiuwen.harness.rails.proactive_context import PCSContextRail
-
-    import jiuwenswarm.agents.harness.common.rails as rails
-
-    assert rails.PCSContextRail is PCSContextRail
 
 
 @pytest.mark.asyncio

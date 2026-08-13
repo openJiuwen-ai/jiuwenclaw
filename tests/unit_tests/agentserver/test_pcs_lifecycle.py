@@ -174,6 +174,31 @@ async def test_pcs_stop_failure_does_not_change_normal_stop_result(
 
 
 @pytest.mark.asyncio
+async def test_stop_finishes_main_services_before_pcs_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = _server(monkeypatch)
+    host = _FakePCSHost.instances[0]
+    events: list[str] = []
+
+    async def _record_pcs_stop(*, timeout_seconds: float = 30.0) -> None:
+        del timeout_seconds
+        events.append("pcs-stop")
+
+    host.stop = _record_pcs_stop  # type: ignore[method-assign]
+    server._server = _FakeWebSocketServer(events)  # pylint: disable=protected-access
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.kv_cache_product_hooks.cancel_pending_tasks",
+        _noop_async,
+    )
+    monkeypatch.setattr(server._jiuwenbox_runner, "stop", _noop_async)
+
+    await server.stop()
+
+    assert events == ["ws-close", "ws-wait-closed", "pcs-stop"]
+
+
+@pytest.mark.asyncio
 async def test_stop_calls_host_when_websocket_close_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

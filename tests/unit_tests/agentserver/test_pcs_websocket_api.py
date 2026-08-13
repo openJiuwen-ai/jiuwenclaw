@@ -1,24 +1,40 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""PCS WebSocket API routing, strict E2A, and Graph streaming tests."""
+"""PCS WebSocket API routing and Graph streaming tests."""
 
 from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
 
-from jiuwenswarm.common.e2a.wire_codec import parse_pcs_server_wire_unary
+from jiuwenswarm.common.e2a import wire_codec
+from jiuwenswarm.common.e2a.wire_codec import parse_agent_server_wire_unary
+from jiuwenswarm.gateway.routing import agent_client
 from jiuwenswarm.common.schema.agent import AgentResponse
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.server import agent_ws_server as server_module
 from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+from jiuwenswarm.server.proactive_context import ws_handler
+from jiuwenswarm.server.proactive_context.ws_handler import handle_pcs_request
+
+
+def test_pcs_does_not_extend_generic_e2a_codec_or_gateway_client() -> None:
+    assert not hasattr(wire_codec, "validate_pcs_e2a_request_dict")
+    assert not hasattr(wire_codec, "encode_pcs_request_for_wire")
+    assert not hasattr(wire_codec, "encode_pcs_response_for_wire")
+    assert not hasattr(wire_codec, "encode_pcs_chunk_for_wire")
+    assert not hasattr(agent_client, "_is_pcs_method")
+
+
+def test_agent_server_delegates_pcs_requests_to_module_handler() -> None:
+    assert callable(ws_handler.handle_pcs_request)
+    assert not hasattr(AgentWebSocketServer, "_handle_pcs_request")
 
 
 class _FakeHost:
@@ -151,6 +167,7 @@ def capture_wire(monkeypatch: pytest.MonkeyPatch) -> None:
         return True
 
     monkeypatch.setattr(server_module, "send_wire_payload", _capture)
+    monkeypatch.setattr(ws_handler, "send_wire_payload", _capture)
 
 
 def _server() -> tuple[AgentWebSocketServer, _FakeHost]:
@@ -284,7 +301,7 @@ async def test_non_graph_methods_call_exact_host_operation(
     server, host = _server()
     ws = _FakeWebSocket()
 
-    await server._handle_pcs_request(ws, _request(method, params), asyncio.Lock())
+    await handle_pcs_request(host, ws, _request(method, params), asyncio.Lock())
 
     assert host.calls == [(host_method, host_argument)]
     assert len(ws.sent) == 1
@@ -301,7 +318,8 @@ async def test_non_graph_stream_request_is_one_completed_chunk(
     server, host = _server()
     ws = _FakeWebSocket()
 
-    await server._handle_pcs_request(
+    await handle_pcs_request(
+        host,
         ws,
         _request(ReqMethod.PCS_RUNTIME_STATUS, is_stream=True),
         asyncio.Lock(),
@@ -325,7 +343,8 @@ async def test_graph_stream_is_bounded_ordered_and_final(
     }
     ws = _FakeWebSocket()
 
-    await server._handle_pcs_request(
+    await handle_pcs_request(
+        host,
         ws,
         _request(ReqMethod.PCS_CONTEXT_STREAM_GRAPH, is_stream=True),
         asyncio.Lock(),
@@ -364,7 +383,8 @@ async def test_graph_requires_stream_request(capture_wire: None) -> None:
     server, host = _server()
     ws = _FakeWebSocket()
 
-    await server._handle_pcs_request(
+    await handle_pcs_request(
+        host,
         ws,
         _request(ReqMethod.PCS_CONTEXT_STREAM_GRAPH),
         asyncio.Lock(),
@@ -373,80 +393,6 @@ async def test_graph_requires_stream_request(capture_wire: None) -> None:
     assert host.calls == []
     assert ws.sent[0]["status"] == "failed"
     assert ws.sent[0]["body"]["details"]["code"] == "BAD_REQUEST"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("method", "params"),
-    [
-        (ReqMethod.PCS_RUNTIME_PATCH_CONFIG, {"patch": []}),
-        (ReqMethod.PCS_RUNTIME_SELECT_MODEL, {"origin_index": True}),
-        (ReqMethod.PCS_FETCH_PATCH_SERVICE, {"service_id": "x", "patch": []}),
-        (ReqMethod.PCS_FETCH_START_SERVICE, {"service_id": " "}),
-        (ReqMethod.PCS_FETCH_RUN_ONE, {"service_id": 7}),
-        (ReqMethod.PCS_FETCH_AUTHORIZE_PROVIDER, {"provider": ""}),
-        (ReqMethod.PCS_CONTEXT_SEARCH_PAGES, {"query": " "}),
-        (ReqMethod.PCS_CONTEXT_GET_NODE, {"node_id": 7}),
-        (ReqMethod.PCS_RUNTIME_STATUS, {"unknown": True}),
-    ],
-)
-async def test_handler_rejects_invalid_params(
-    capture_wire: None,
-    method: ReqMethod,
-    params: dict[str, Any],
-) -> None:
-    server, host = _server()
-    ws = _FakeWebSocket()
-
-    await server._handle_pcs_request(ws, _request(method, params), asyncio.Lock())
-
-    assert host.calls == []
-    assert ws.sent[0]["status"] == "failed"
-    assert ws.sent[0]["body"]["details"]["code"] == "BAD_REQUEST"
-
-
-@pytest.mark.asyncio
-async def test_legacy_pcs_request_is_rejected_before_fallback(
-    capture_wire: None,
-) -> None:
-    server, host = _server()
-    server._trigger_before_chat_request_hook = AsyncMock()
-    server._handle_unary = AsyncMock()
-    ws = _FakeWebSocket()
-    raw = json.dumps(
-        {
-            "request_id": "legacy-1",
-            "channel_id": "web",
-            "req_method": "pcs.get",
-            "params": {},
-        }
-    )
-
-    await server._handle_message(ws, raw, asyncio.Lock())
-
-    assert host.calls == []
-    assert ws.sent[0]["response_kind"] == "e2a.error"
-    assert ws.sent[0]["body"]["details"]["code"] == "BAD_REQUEST"
-    server._trigger_before_chat_request_hook.assert_not_awaited()
-    server._handle_unary.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_unknown_canonical_pcs_method_returns_method_not_found(
-    capture_wire: None,
-) -> None:
-    server, host = _server()
-    ws = _FakeWebSocket()
-
-    await server._handle_message(
-        ws,
-        _canonical("pcs.unknown"),
-        asyncio.Lock(),
-    )
-
-    assert host.calls == []
-    assert ws.sent[0]["response_kind"] == "e2a.error"
-    assert ws.sent[0]["body"]["details"]["code"] == "METHOD_NOT_FOUND"
 
 
 @pytest.mark.asyncio
@@ -508,10 +454,9 @@ async def test_canonical_wire_round_trip_for_query_methods(
 
     await server._handle_message(ws, _canonical(method, params), asyncio.Lock())
 
-    response = parse_pcs_server_wire_unary(ws.sent[0])
+    response = parse_agent_server_wire_unary(ws.sent[0])
     assert host.calls == [host_call]
     assert response.ok is True
-    assert response.agent_ref == {"mode": "agent", "id": "agent-1"}
 
 
 @pytest.mark.asyncio
@@ -575,7 +520,8 @@ async def test_core_error_is_returned_as_final_e2a_error(capture_wire: None) -> 
     host.failure = BaseError(StatusCode.ERROR, msg="safe PCS error")
     ws = _FakeWebSocket()
 
-    await server._handle_pcs_request(
+    await handle_pcs_request(
+        host,
         ws,
         _request(ReqMethod.PCS_RUNTIME_STATUS),
         asyncio.Lock(),
@@ -595,7 +541,8 @@ async def test_handler_propagates_cancellation(capture_wire: None) -> None:
     host.failure = asyncio.CancelledError()
 
     with pytest.raises(asyncio.CancelledError):
-        await server._handle_pcs_request(
+        await handle_pcs_request(
+            host,
             _FakeWebSocket(),
             _request(ReqMethod.PCS_RUNTIME_STATUS),
             asyncio.Lock(),

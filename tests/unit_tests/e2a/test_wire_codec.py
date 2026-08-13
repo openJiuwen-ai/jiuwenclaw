@@ -10,26 +10,19 @@ from dataclasses import asdict
 import pytest
 from openjiuwen.core.session.stream import OutputSchema
 
-from jiuwenswarm.common.e2a.constants import (
-    E2A_WIRE_LEGACY_AGENT_CHUNK_KEY,
-    E2A_WIRE_LEGACY_AGENT_RESPONSE_KEY,
-)
+from jiuwenswarm.common.e2a.constants import E2A_WIRE_LEGACY_AGENT_RESPONSE_KEY
 from jiuwenswarm.common.e2a.gateway_normalize import (
+    e2a_response_from_agent_chunk,
     e2a_response_from_agent_response,
+    e2a_response_to_agent_chunk,
+    e2a_response_to_agent_response,
 )
 from jiuwenswarm.common.e2a.wire_codec import (
     encode_agent_chunk_for_wire,
     encode_agent_response_for_wire,
-    encode_pcs_chunk_for_wire,
-    encode_pcs_request_for_wire,
-    encode_pcs_response_for_wire,
     parse_agent_server_wire_chunk,
     parse_agent_server_wire_unary,
-    parse_pcs_server_wire_chunk,
-    parse_pcs_server_wire_unary,
-    validate_pcs_e2a_request_dict,
 )
-from jiuwenswarm.common.e2a.models import E2AEnvelope
 from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
 
 
@@ -260,128 +253,3 @@ def test_collapse_phase_keeps_child_meta() -> None:
     assert ph.get("phase_type") == "child"
     assert ph.get("nested_phase") == "▸ intro #0"
     assert ph.get("parent_phase") == "review"
-@pytest.mark.parametrize(
-    "legacy_key, legacy_value",
-    [
-        ("req_method", "pcs.runtime.status"),
-        ("channel_id", "web"),
-        ("payload", {}),
-        ("metadata", {}),
-        ("binding", "e2a"),
-    ],
-)
-def test_validate_pcs_e2a_request_rejects_legacy_top_level_fields(
-    legacy_key: str,
-    legacy_value: object,
-) -> None:
-    wire = {
-        "protocol_version": "1.0",
-        "request_id": "req-1",
-        "channel": "web",
-        "method": "pcs.runtime.status",
-        "params": {},
-    }
-    wire[legacy_key] = legacy_value
-
-    with pytest.raises(ValueError, match="invalid PCS E2A envelope"):
-        validate_pcs_e2a_request_dict(wire)
-
-
-@pytest.mark.parametrize(
-    "field, value",
-    [
-        ("request_id", ""),
-        ("channel", None),
-        ("method", "chat.send"),
-        ("params", []),
-        ("protocol_version", "2.0"),
-        ("is_stream", "true"),
-        ("timestamp", "2026-08-13T12:00:00"),
-        ("identity_origin", "unknown"),
-        ("agent_ref", "agent"),
-        ("channel_context", []),
-        ("auth", "token"),
-        ("provenance", "e2a"),
-    ],
-)
-def test_validate_pcs_e2a_request_rejects_invalid_canonical_fields(
-    field: str,
-    value: object,
-) -> None:
-    wire = {
-        "protocol_version": "1.0",
-        "request_id": "req-1",
-        "channel": "web",
-        "method": "pcs.runtime.status",
-        "params": {},
-    }
-    wire[field] = value
-
-    with pytest.raises(ValueError, match="invalid PCS E2A envelope"):
-        validate_pcs_e2a_request_dict(wire)
-
-
-def test_encode_pcs_request_emits_only_pcs_canonical_fields() -> None:
-    envelope = E2AEnvelope(
-        request_id="req-1",
-        channel="web",
-        method="pcs.runtime.status",
-        params={},
-        jsonrpc_id="must-not-leak",
-        task_id="must-not-leak",
-        a2a_metadata={"must": "not-leak"},
-    )
-
-    wire = encode_pcs_request_for_wire(envelope)
-
-    assert wire["protocol_version"] == "1.0"
-    assert wire["request_id"] == "req-1"
-    assert wire["method"] == "pcs.runtime.status"
-    assert "jsonrpc_id" not in wire
-    assert "task_id" not in wire
-    assert "a2a_metadata" not in wire
-
-
-def test_parse_pcs_wire_unary_rejects_legacy_response() -> None:
-    with pytest.raises(ValueError, match="canonical E2AResponse"):
-        parse_pcs_server_wire_unary(
-            {"request_id": "req-1", "channel_id": "web", "ok": True, "payload": {}}
-        )
-
-
-def test_parse_pcs_wire_unary_rejects_legacy_metadata_blob() -> None:
-    wire = encode_agent_response_for_wire(
-        AgentResponse(request_id="req-1", channel_id="web", payload={"ready": True}),
-        response_id="req-1",
-    )
-    wire["metadata"][E2A_WIRE_LEGACY_AGENT_RESPONSE_KEY] = {"request_id": "req-1"}
-
-    with pytest.raises(ValueError, match="legacy metadata"):
-        parse_pcs_server_wire_unary(wire)
-
-
-def test_encode_pcs_response_never_stashes_legacy_blob() -> None:
-    wire = encode_pcs_response_for_wire(
-        AgentResponse(request_id="req-1", channel_id="web", payload={"ready": True}),
-        response_id="req-1",
-    )
-
-    assert E2A_WIRE_LEGACY_AGENT_RESPONSE_KEY not in json.dumps(wire)
-    assert wire["body"] == {"result": {"ready": True}}
-
-
-def test_pcs_chunk_roundtrip_rejects_legacy_blob() -> None:
-    chunk = AgentResponseChunk(
-        request_id="req-1",
-        channel_id="web",
-        payload={"event_type": "pcs.graph.end", "node_count": 1, "edge_count": 0},
-        is_complete=True,
-    )
-    wire = encode_pcs_chunk_for_wire(chunk, response_id="req-1", sequence=2)
-    back = parse_pcs_server_wire_chunk(wire)
-    assert back.is_complete is True
-    assert back.payload == chunk.payload
-
-    wire["metadata"][E2A_WIRE_LEGACY_AGENT_CHUNK_KEY] = {"request_id": "req-1"}
-    with pytest.raises(ValueError, match="legacy metadata"):
-        parse_pcs_server_wire_chunk(wire)

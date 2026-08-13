@@ -6,7 +6,6 @@
 """
 
 from openjiuwen.harness.rails.security.tool_security_rail import PermissionInterruptRail
-from openjiuwen.harness.rails.proactive_context import PCSContextRail
 from jiuwenswarm.agents.harness.common.rails.avatar_rail import AvatarPromptRail
 from jiuwenswarm.agents.harness.common.rails.browser_task_prompt_rail import (
     BrowserTaskPromptRail,
@@ -27,7 +26,6 @@ from jiuwenswarm.agents.harness.common.rails.stream_event_rail import JiuSwarmSt
 __all__ = [
     "JiuSwarmStreamEventRail",
     "MultimodalImageRail",
-    "PCSContextRail",
     "PermissionInterruptRail",
     "AvatarPromptRail",
     "BrowserTaskPromptRail",
