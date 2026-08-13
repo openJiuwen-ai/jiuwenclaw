@@ -1482,6 +1482,9 @@ class AgentWebSocketServer:
             if request.req_method == ReqMethod.SESSION_RENAME:
                 await self._handle_session_rename(ws, request, send_lock)
                 return
+            if request.req_method == ReqMethod.SESSION_REBIND_PROJECT:
+                await self._handle_session_rebind_project(ws, request, send_lock)
+                return
             if request.req_method == ReqMethod.SESSION_SWITCH:
                 await self._handle_session_switch(ws, request, send_lock)
                 return
@@ -2891,6 +2894,118 @@ class AgentWebSocketServer:
         async with send_lock:
             await send_wire_payload(ws, wire)
 
+    async def _handle_session_rebind_project(
+        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
+    ) -> None:
+        """处理 session.rebind_project：TUI /workspace set 切换工作目录时重绑当前会话。
+
+        AgentServer 拥有会话运行态与 metadata 写入权，因此重绑必须在 AgentServer
+        完成：分离部署 / user_id 隔离目录时，Gateway 本地写不会落到 AgentServer
+        所在的会话目录。本 handler 复用 ``find_or_create_code_project_for_tui_params``
+        解析/创建新目录对应的 code 项目，再 ``rebind_session_project`` 强制更新
+        metadata（含 channel_metadata.project_dir/cwd，保证 /resume current-dir 过滤
+        正确归位）。下一轮 chat.send 会读到新 project_dir 并据此重选 agent 实例。
+        """
+        from jiuwenswarm.server.runtime.session.project_store import (
+            find_or_create_code_project_for_tui_params,
+        )
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            get_session_metadata,
+            rebind_session_project,
+        )
+
+        sid = (request.session_id or "").strip()
+        params = request.params if isinstance(request.params, dict) else {}
+        candidate_dir = str(params.get("project_dir") or params.get("cwd") or "").strip()
+        if not sid:
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": "session_id is required", "code": "BAD_REQUEST"},
+                metadata=request.metadata,
+            )
+        elif not candidate_dir:
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": "project_dir is required", "code": "BAD_REQUEST"},
+                metadata=request.metadata,
+            )
+        elif not get_session_metadata(sid):
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": "session not found", "code": "NOT_FOUND"},
+                metadata=request.metadata,
+            )
+        else:
+            try:
+                project = find_or_create_code_project_for_tui_params(
+                    {"project_dir": candidate_dir}
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[AgentServer] session.rebind_project resolve project failed: %s",
+                    exc,
+                )
+                resp = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=False,
+                    payload={
+                        "error": str(exc),
+                        "code": "PROJECT_RESOLVE_FAILED",
+                    },
+                    metadata=request.metadata,
+                )
+            else:
+                if project is None:
+                    resp = AgentResponse(
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        ok=False,
+                        payload={
+                            "error": "project_dir must be a non-empty absolute path",
+                            "code": "BAD_REQUEST",
+                        },
+                        metadata=request.metadata,
+                    )
+                else:
+                    updated = rebind_session_project(
+                        session_id=sid,
+                        project_id=project.project_id,
+                        project_dir=project.project_dir,
+                        work_mode=project.work_mode,
+                    )
+                    if not updated:
+                        resp = AgentResponse(
+                            request_id=request.request_id,
+                            channel_id=request.channel_id,
+                            ok=False,
+                            payload={"error": "session not found", "code": "NOT_FOUND"},
+                            metadata=request.metadata,
+                        )
+                    else:
+                        resp = AgentResponse(
+                            request_id=request.request_id,
+                            channel_id=request.channel_id,
+                            ok=True,
+                            payload={
+                                "session_id": sid,
+                                "project_id": project.project_id,
+                                "project_dir": project.project_dir,
+                                "project_name": project.name,
+                                "work_mode": project.work_mode,
+                            },
+                            metadata=request.metadata,
+                        )
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
     async def _prepare_session_switch_owner(
         self,
         *,
@@ -3905,14 +4020,23 @@ class AgentWebSocketServer:
         user turn will read — updating them leaves the model still seeing
         rewound turns.
         """
-        agent = self._agent_manager.get_agent_nowait(
-            channel_id=channel_id or "default"
+        sid = str(session_id or "").strip()
+        agent = (
+            self._agent_manager.get_agent_for_session_nowait(
+                channel_id=channel_id or "default",
+                session_id=sid,
+            )
+            if sid
+            else None
         )
+        if agent is None:
+            agent = self._agent_manager.get_agent_nowait(
+                channel_id=channel_id or "default"
+            )
         if agent is None:
             return None
 
         deep_agent = None
-        sid = str(session_id or "").strip()
         if sid:
             adapter = self._resolve_adapter(agent)
             if adapter is not None:

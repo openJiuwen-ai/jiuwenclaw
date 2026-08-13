@@ -1585,6 +1585,134 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             code=None if response.ok else str(payload.get("code") or "SESSION_CREATE_FAILED"),
         )
 
+    async def _session_rebind_project(ws, req_id, params, session_id, user_id=None):
+        """TUI 专用：``/workspace set`` 切换工作目录时同步重绑当前 session 的 project。
+
+        会话运行态与 metadata 写入权由 AgentServer 持有，因此优先经 E2A 转发到
+        AgentServer 的 ``session.rebind_project`` handler（分离部署 / user_id 隔离
+        目录时，Gateway 本地写不会落到正确会话目录）。AgentServer 不可用时回退到
+        本地解析 + ``rebind_session_project``，保证单机部署仍可用。
+        """
+        from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+        from jiuwenswarm.common.schema.message import ReqMethod
+
+        if not isinstance(params, dict):
+            await channel.send_response(
+                ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST"
+            )
+            return
+        target = str(params.get("session_id") or session_id or "").strip()
+        if not target:
+            await channel.send_response(
+                ws, req_id, ok=False, error="session_id is required", code="BAD_REQUEST"
+            )
+            return
+        candidate_dir = str(params.get("project_dir") or "").strip()
+        if not candidate_dir:
+            await channel.send_response(
+                ws, req_id, ok=False, error="project_dir is required", code="BAD_REQUEST"
+            )
+            return
+
+        forward_params = {
+            "session_id": target,
+            "project_dir": candidate_dir,
+            **{k: v for k, v in params.items() if k not in ("session_id", "project_dir")},
+        }
+        real_client = _resolve_agent_client(agent_client)
+        if real_client is not None:
+            try:
+                env = e2a_from_agent_fields(
+                    request_id=req_id,
+                    channel_id="tui",
+                    session_id=target,
+                    req_method=ReqMethod.SESSION_REBIND_PROJECT,
+                    params=forward_params,
+                    is_stream=False,
+                    timestamp=time.time(),
+                    user_id=user_id or getattr(ws, "_gateway_user_id", None),
+                )
+                resp = await _send_tui_agent_request(
+                    real_client, env, label="session.rebind_project",
+                )
+                pl = resp.payload if isinstance(resp.payload, dict) else {}
+                if resp.ok:
+                    await channel.send_response(ws, req_id, ok=True, payload=pl)
+                    return
+                err = pl.get("error", "session.rebind_project failed")
+                code = pl.get("code") or None
+                if isinstance(code, str) and not code.strip():
+                    code = None
+                await channel.send_response(
+                    ws, req_id, ok=False, error=str(err), code=code,
+                )
+                return
+            except Exception as e:
+                logger.warning(
+                    "[tui] session.rebind_project forward to agent failed, "
+                    "fallback local: %s",
+                    e,
+                )
+
+        # 本地回退：AgentServer 不可用（单机部署 / 进程未起）时仍能完成重绑。
+        from jiuwenswarm.server.runtime.session.project_store import (
+            find_or_create_code_project_for_tui_params,
+        )
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            get_session_metadata,
+            rebind_session_project,
+        )
+
+        if not get_session_metadata(target):
+            await channel.send_response(
+                ws, req_id, ok=False, error="session not found", code="NOT_FOUND"
+            )
+            return
+        try:
+            project = find_or_create_code_project_for_tui_params(
+                {"project_dir": candidate_dir}
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[tui] session.rebind_project: resolve project failed: %s", exc
+            )
+            await channel.send_response(
+                ws, req_id, ok=False, error=str(exc), code="PROJECT_RESOLVE_FAILED"
+            )
+            return
+        if project is None:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="project_dir must be a non-empty absolute path",
+                code="BAD_REQUEST",
+            )
+            return
+        updated = rebind_session_project(
+            session_id=target,
+            project_id=project.project_id,
+            project_dir=project.project_dir,
+            work_mode=project.work_mode,
+        )
+        if not updated:
+            await channel.send_response(
+                ws, req_id, ok=False, error="session not found", code="NOT_FOUND"
+            )
+            return
+        await channel.send_response(
+            ws,
+            req_id,
+            ok=True,
+            payload={
+                "session_id": target,
+                "project_id": project.project_id,
+                "project_dir": project.project_dir,
+                "project_name": project.name,
+                "work_mode": project.work_mode,
+            },
+        )
+
     async def _session_delete(ws, req_id, params, session_id, user_id=None):
         from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
@@ -3170,6 +3298,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
     channel.register_local_handler(path, "3rdagent.switch", _3rdagent_switch)
     channel.register_local_handler(path, "session.list", _session_list)
     channel.register_local_handler(path, "session.create", _session_create)
+    channel.register_local_handler(path, "session.rebind_project", _session_rebind_project)
     channel.register_local_handler(path, "session.delete", _session_delete)
     channel.register_local_handler(path, "session.rename", _session_rename)
     channel.register_local_handler(path, "session.color_set", _session_color_set)

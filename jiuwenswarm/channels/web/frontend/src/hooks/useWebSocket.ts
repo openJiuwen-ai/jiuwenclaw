@@ -1397,9 +1397,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const sendMessage = useCallback(
     async (content: string, sessionId: string, mediaItems: MediaItem[] = []): Promise<boolean> => {
       const hasMedia = mediaItems.length > 0;
-      // User-visible text is required; attachment-only / 【上传文档】-only payloads
-      // must not send (matches InputArea canSubmit / handleSubmit).
-      if (!stripUploadDocumentBlocks(content).trim()) return false;
+      // Attachment-only payloads are allowed when mediaItems are present.
+      // 【上传文档】-only text without any mediaItems is still blocked.
+      if (!stripUploadDocumentBlocks(content).trim() && !hasMedia) return false;
 
       const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
       const unsupportedEvolutionMode = unsupportedEvolutionModeMessage(content, currentMode ?? 'agent');

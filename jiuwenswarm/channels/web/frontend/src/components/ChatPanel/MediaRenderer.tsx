@@ -1,10 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { MediaItem } from '../../types';
-import {
-  FileTypeIcon,
-  getFileTypeIconKeyFromFilename,
-  splitFilenameParts,
-} from './FileTypeIcon';
+import { FileIcon, getFileExtensionLabel } from '../FileIcon';
 import { stripUploadDocumentBlocks } from '../../utils/documentMessage';
 
 export { stripUploadDocumentBlocks };
@@ -46,8 +42,7 @@ function mediaSrc(item: MediaItem): string | undefined {
 
 function FileCard({ item }: { item: MediaItem }) {
   const filename = item.filename || 'file';
-  const { extLabel } = splitFilenameParts(filename);
-  const typeKey = getFileTypeIconKeyFromFilename(filename, item.type);
+  const extLabel = getFileExtensionLabel(filename);
   const src = mediaSrc(item);
   const showThumb = isImageItem(item) && Boolean(src);
 
@@ -57,7 +52,7 @@ function FileCard({ item }: { item: MediaItem }) {
         {showThumb ? (
           <img src={src} alt="" className="chat-msg-file-card__thumb" />
         ) : (
-          <FileTypeIcon typeKey={typeKey} size={28} />
+          <FileIcon fileName={filename} size={28} />
         )}
       </span>
       <span className="chat-msg-file-card__meta">
@@ -126,7 +121,6 @@ function OverflowMenu({ items }: { items: MediaItem[] }) {
         <div className="chat-msg-file-more__menu" role="menu">
           {items.map((item, index) => {
             const filename = item.filename || 'file';
-            const typeKey = getFileTypeIconKeyFromFilename(filename, item.type);
             const src = mediaSrc(item);
             const showThumb = isImageItem(item) && Boolean(src);
             const content = (
@@ -134,7 +128,7 @@ function OverflowMenu({ items }: { items: MediaItem[] }) {
                 {showThumb ? (
                   <img src={src} alt="" className="chat-msg-file-more__thumb" />
                 ) : (
-                  <FileTypeIcon typeKey={typeKey} size={20} />
+                  <FileIcon fileName={filename} size={20} />
                 )}
                 <span className="chat-msg-file-more__name" title={filename}>
                   {filename}

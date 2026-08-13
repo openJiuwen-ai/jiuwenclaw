@@ -2309,25 +2309,71 @@ class JiuWenSwarm:
         durable_pending_final_chunks: list[str] = []
         durable_pending_final_started_at: float | None = None
         durable_pending_reasoning_chunks: list[str] = []
+        # reasoning 首/末帧时刻（epoch ms）：随 reasoning_content 一起落盘，供刷新后
+        # 恢复耗时终点；即使 final/closeReasoning 丢失，末帧也是真实事件时刻。
+        durable_pending_reasoning_started_at: float | None = None
+        durable_pending_reasoning_updated_at: float | None = None
         durable_final_content = ""
         # 这条流是否带过 Goal 事件。Goal 仍 active 时流结束是不发 chat.final 的
         # （见 interface_deep._should_emit_stream_end_chat_final），气泡里的正文
         # 就没人落盘；收尾时按这个标记补一次，只影响 Goal 流。
         saw_goal_stream_output = False
 
-        def _consume_durable_reasoning_content() -> str:
-            nonlocal durable_pending_reasoning_chunks
+        def _note_durable_reasoning_delta() -> None:
+            nonlocal durable_pending_reasoning_started_at, durable_pending_reasoning_updated_at
+            now_ms = time.time() * 1000
+            if durable_pending_reasoning_started_at is None:
+                durable_pending_reasoning_started_at = now_ms
+            durable_pending_reasoning_updated_at = now_ms
+
+        def _consume_durable_reasoning_content() -> tuple[str, float | None, float | None]:
+            nonlocal \
+                durable_pending_reasoning_chunks, \
+                durable_pending_reasoning_started_at, \
+                durable_pending_reasoning_updated_at
             reasoning_text = "".join(durable_pending_reasoning_chunks)
+            started_at = durable_pending_reasoning_started_at
+            updated_at = durable_pending_reasoning_updated_at
             durable_pending_reasoning_chunks = []
-            return reasoning_text if reasoning_text.strip() else ""
+            durable_pending_reasoning_started_at = None
+            durable_pending_reasoning_updated_at = None
+            return reasoning_text, started_at, updated_at
 
         def _attach_reasoning_content(extra_fields: dict[str, Any] | None = None) -> dict[str, Any] | None:
-            reasoning_text = _consume_durable_reasoning_content()
-            if not reasoning_text:
+            reasoning_text, started_at, updated_at = _consume_durable_reasoning_content()
+            if not reasoning_text.strip():
                 return extra_fields
             merged = dict(extra_fields) if isinstance(extra_fields, dict) else {}
             merged["reasoning_content"] = reasoning_text
+            merged["reasoning_updated_at"] = updated_at or started_at or (time.time() * 1000)
             return merged
+
+        def _persist_pending_reasoning() -> None:
+            """异常/非 Goal 结束兜底：把未随 tool_call/final 落盘的思考补落一条记录。
+
+            正常完成时 reasoning 已被最后一条 tool_call/final 附走、缓冲为空，这里 no-op。
+            单独落成 chat.reasoning 记录（不带正文 final），前端按 reasoning_content 提取。
+            """
+            started_at = durable_pending_reasoning_started_at
+            updated_at = durable_pending_reasoning_updated_at
+            reasoning_text, _, _ = _consume_durable_reasoning_content()
+            if not reasoning_text.strip():
+                return
+            now_ms = time.time() * 1000
+            append_history_record(
+                session_id=session_id,
+                request_id=rid,
+                channel_id=cid,
+                role="assistant",
+                event_type="chat.reasoning",
+                content="",
+                timestamp=(started_at or now_ms) / 1000,
+                extra={
+                    "reasoning_content": reasoning_text,
+                    "reasoning_updated_at": updated_at or started_at or now_ms,
+                },
+                mode=request.params.get("mode", "unknown"),
+            )
 
         def _reset_durable_pending_final() -> None:
             nonlocal durable_pending_final_chunks, durable_pending_final_started_at
@@ -2739,6 +2785,7 @@ class JiuWenSwarm:
                                 _note_durable_pending_final_delta(payload_content)
                                 should_record = False
                             elif et == "chat.reasoning":
+                                _note_durable_reasoning_delta()
                                 durable_pending_reasoning_chunks.append(payload_content)
                                 should_record = False
                             elif et == "chat.tool_call":
@@ -2910,6 +2957,7 @@ class JiuWenSwarm:
                             _note_durable_pending_final_delta(payload_content)
                             should_record = False
                         elif et == "chat.reasoning":
+                            _note_durable_reasoning_delta()
                             durable_pending_reasoning_chunks.append(payload_content)
                             should_record = False
                         elif et == "chat.tool_call":
@@ -3007,6 +3055,12 @@ class JiuWenSwarm:
             # 消失，和实时看到的不是一回事。非 Goal 流不进这里。
             if saw_goal_stream_output:
                 _persist_pending_final_text()
+            else:
+                # 非 Goal 异常结束（LLM 错误/断连，或流结束无收尾事件）时，pending
+                # reasoning 不会随 tool_call/final 落盘；补落一条，刷新后思考内容
+                # 与耗时终点（末帧时刻）都能恢复。正文 final 故意不落——半截回答
+                # 不该当 chat.final 写进历史。
+                _persist_pending_reasoning()
             # The adapter producer owns RuntimeOutputStream.  Cancelling and
             # awaiting it releases the runtime output lease and aborts the
             # in-flight round when the outer WebSocket consumer disappears.
