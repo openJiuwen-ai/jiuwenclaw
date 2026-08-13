@@ -80,6 +80,36 @@ def disk_only_evolution_skill_dirs(params: dict[str, Any] | None = None) -> list
     return [str(p) for p in resolve_agent_registered_skill_dirs()]
 
 
+def allowed_skill_roots_for_path(
+    adapter_dirs: Sequence[str | Path],
+    skill_path: str | None = None,
+) -> list[str]:
+    """Union adapter dirs, live registered dirs, and control-plane skill_path root.
+
+    Disk-only / control-plane RPCs may pass an explicit ``…/<name>/SKILL.md`` whose
+    skills root is outside a warm agent's workspace-only snapshot. Include that root
+    so path validation matches enterprise AgentManager binding semantics.
+    """
+    roots: list[str] = []
+    seen: set[str] = set()
+    for raw in (
+        *adapter_dirs,
+        *(str(p) for p in resolve_agent_registered_skill_dirs()),
+    ):
+        try:
+            key = str(Path(str(raw)).expanduser().resolve())
+        except OSError:
+            key = str(raw)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        roots.append(key)
+    skill_root = skills_root_from_skill_md_path(skill_path)
+    if skill_root and skill_root not in seen:
+        roots.append(skill_root)
+    return roots
+
+
 def get_disk_evolution_store(skills_dirs: str | list[str] | None = None) -> EvolutionStore:
     """Build a disk-only EvolutionStore (no EvolutionRail / LLM)."""
     if skills_dirs is None:
@@ -436,6 +466,7 @@ def is_body_archive_name(archive_name: str) -> bool:
 
 
 __all__ = [
+    "allowed_skill_roots_for_path",
     "disk_only_evolution_skill_dirs",
     "do_evolve_rollback",
     "finalize_rebuild_followup",

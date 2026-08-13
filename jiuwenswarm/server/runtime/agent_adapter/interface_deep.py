@@ -9996,9 +9996,10 @@ class JiuWenSwarmDeepAdapter:
         )
         skill_path = params.get("skill_path") or params.get("path")
         if skill_path:
-            allowed = list(self._resolve_skill_dirs()) + [
-                str(p) for p in resolve_agent_registered_skill_dirs()
-            ]
+            allowed = evolution_version_ctl.allowed_skill_roots_for_path(
+                self._resolve_skill_dirs(),
+                str(skill_path),
+            )
             evolution_version_ctl.validate_rebuild_skill_path(
                 str(skill_path),
                 skill_name=skill_name,
@@ -10059,9 +10060,10 @@ class JiuWenSwarmDeepAdapter:
         skill_path = params.get("skill_path") or params.get("path")
         resolved_skill_md: str | None = None
         if skill_path:
-            allowed = list(self._resolve_skill_dirs()) + [
-                str(p) for p in resolve_agent_registered_skill_dirs()
-            ]
+            allowed = evolution_version_ctl.allowed_skill_roots_for_path(
+                self._resolve_skill_dirs(),
+                str(skill_path),
+            )
             resolved_skill_md = evolution_version_ctl.validate_rebuild_skill_path(
                 str(skill_path),
                 skill_name=name,
