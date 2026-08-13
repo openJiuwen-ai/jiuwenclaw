@@ -11,6 +11,7 @@ isolation policy in-process by spawning `bubblewrap` directly for each sandbox
 ## Features
 
 - Process isolation with `bubblewrap`
+- Optional Conch sandbox backend (`sandbox_type=conch`) via the Conch Python SDK
 - Static policy-based filesystem access rules
 - Server-managed sandbox backing storage (`~/.jiuwenbox/workspace`)
 - Optional network isolation with Linux network namespaces and firewall rules
@@ -27,9 +28,9 @@ isolation policy in-process by spawning `bubblewrap` directly for each sandbox
   - FastAPI app that manages sandbox lifecycle, policy loading, audit logs, and
     API routing.
 - `server/runtime`
-  - In-process runtime adapter that translates each sandbox policy into a
-    `bubblewrap` command line and spawns it directly from the server (one
-    long-lived daemon per sandbox plus per-call background commands).
+  - In-process runtime adapters: `ProcessRuntime` (bubblewrap daemon) and
+    optional `ConchRuntime` (Conch SDK; selected per sandbox via
+    `sandbox_type`).
 - `server/proxy_manager`
   - Manages inference privacy proxies for LLM API routing with API key injection.
 - `server/policy_reader`
@@ -78,6 +79,90 @@ uv pip install ./dist/jiuwenbox*.whl
 The wheel ships `jiuwenbox/configs/*.yaml` (sources under `src/jiuwenbox/configs/`).
 When `JIUWENBOX_POLICY_PATH` is unset, the server uses the bundled
 `default-policy.yaml`.
+
+## Optional Conch Backend
+
+The default backend remains bubblewrap (`sandbox_type` omitted / empty / `bwrap`
+→ `runtime=process`). Setting `sandbox_type=conch` routes lifecycle, exec, files,
+and network updates through `ConchRuntime`.
+
+### Install the Conch SDK
+
+The Conch SDK is not declared as a jiuwenbox PyPI dependency (the package is not
+a reliable public distribution). Install the checkout that ships with this
+monorepo (adjust the relative path to your tree):
+
+```bash
+# from code_agent/jiuwenbox/
+pip install -e ../../Conch/sdk
+```
+
+jiuwenbox lazy-imports Conch only when a Conch sandbox is created, so default
+bwrap deployments do not need the SDK.
+
+### Runtime prerequisites
+
+- `conchd` is running and reachable
+- `CONCH_SDK_CONFIG` points at a valid Conch SDK config
+- A template id is available via policy `conch.template_id`, env
+  `JIUWENBOX_CONCH_TEMPLATE_ID`, or conchd `sandbox.default_template_id`
+- Bind mounts need Conch volume/virtiofs support on the host
+- Network IP filters need CNI + iptables and the corresponding kernel capabilities
+
+### Conch policy fields (`policy.conch`)
+
+| Field | Purpose |
+| --- | --- |
+| `template_id` | Conch template (also overridable via `JIUWENBOX_CONCH_TEMPLATE_ID`) |
+| `vcpu_num` / `vcpu_max` | Optional VM vCPU boot count and max; omit → SDK/`sdk-config.yaml` defaults |
+| `ram_mb` | Optional VM memory in MB; omit → SDK default |
+| `env` | Guest env for Conch create. **Not** the top-level `environment` (bwrap-only). Create API `env` overrides same keys |
+| `filesystem_policy.bind_mounts` | Host dirs → Conch `volume_mounts` |
+| `network` | IPv4 allow/deny ingress/egress (hot-updatable) |
+
+Changing `vcpu_*` / `ram_mb` / `env` requires recreating the sandbox (not hot-updated).
+
+Example:
+
+```yaml
+conch:
+  template_id: tmpl_xxx
+  vcpu_num: 2
+  vcpu_max: 4
+  ram_mb: 4096
+  env:
+    FOO: bar
+  filesystem_policy:
+    bind_mounts: []
+  network:
+    egress:
+      default: allow
+```
+
+### Environment variables
+
+| Variable | Purpose |
+| --- | --- |
+| `CONCH_SDK_CONFIG` | Path to Conch SDK config (required for Conch sandboxes) |
+| `JIUWENBOX_CONCH_TEMPLATE_ID` | Fallback template id when policy `conch.template_id` is empty |
+| `JIUWENBOX_CONCH_NETWORK_TEST_IP` | Optional stable IPv4 for Conch network e2e enforcement tests |
+
+### Lifecycle note
+
+Conch has no `Sandbox.stop()`. Calling jiuwenbox `POST .../stop` on a Conch
+sandbox returns **409**. Use `DELETE` to destroy the sandbox, or `POST .../restart`
+for cold recreate (delete + create with the same id and current policy).
+`start` still recreates a non-running Conch sandbox from the persisted policy.
+
+### CLI examples
+
+```bash
+export JIUWENBOX_CONCH_TEMPLATE_ID=tmpl_xxx
+jiuwenbox sandbox create --sandbox-type conch
+jiuwenbox sandbox create --sandbox-type conch --policy-file conch-policy.yaml
+jiuwenbox policy update <ID> --policy \
+  '{"conch":{"network":{"egress":{"blocked_ips":["192.0.2.10"]}}}}'
+```
 
 ## Start The Server
 
@@ -801,6 +886,25 @@ flag to maintain in sync:
 # UDS: pass the absolute socket path as a unix:// URL
 ./tests/test.sh default --server-endpoint=unix:///tmp/jiuwenbox.sock
 ./tests/test.sh default --server-endpoint=unix:///tmp/jiuwenbox-sock/jiuwenbox.sock
+```
+
+### Conch API tests
+
+`tests/integration/test_server_api_conch.py` covers `sandbox_type` validation
+without Conch, plus lifecycle/exec/files/network cases marked `@pytest.mark.conch`.
+Those opt in with `JIUWENBOX_CONCH_TEMPLATE_ID` and talk to jiuwenbox over HTTP
+only — Conch SDK / `CONCH_SDK_CONFIG` / conchd must be configured on the
+**server** host, not necessarily on the pytest client:
+
+```bash
+# server: install SDK, set CONCH_SDK_CONFIG, run conchd + jiuwenbox
+# client:
+export JIUWENBOX_CONCH_TEMPLATE_ID=tmpl_xxx
+# optional:
+# export JIUWENBOX_CONCH_TEMPLATE_ID_OVERRIDE=tmpl_yyy
+# export JIUWENBOX_CONCH_NETWORK_TEST_IP=198.51.100.10
+python3 -m pytest tests/integration/test_server_api_conch.py -v \
+  --server-endpoint 127.0.0.1:8321
 ```
 
 `test.sh` does **not** start the server; launch jiuwenbox first on the

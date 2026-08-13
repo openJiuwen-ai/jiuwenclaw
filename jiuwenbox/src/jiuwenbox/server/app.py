@@ -20,7 +20,7 @@ from jiuwenbox import __version__
 from jiuwenbox.server.auth import BearerTokenAuthMiddleware, get_configured_token
 from jiuwenbox.server.audit_logger import AuditLogger
 from jiuwenbox.models.sandbox import InvalidJobIdError, InvalidSandboxIdError
-from jiuwenbox.server.runtime.process import BackgroundJobNotFoundError
+from jiuwenbox.server.runtime.errors import BackgroundJobNotFoundError
 from jiuwenbox.server.sandbox_manager import (
     SandboxConflictError,
     SandboxManager,

@@ -41,6 +41,7 @@ class CreateSandboxRequest(BaseModel):
     policy: dict[str, Any] | None = None
     policy_mode: PolicyMode = PolicyMode.OVERRIDE
     sandbox_id: str | None = None
+    sandbox_type: str | None = None
 
 
 class ExecRequest(BaseModel):
@@ -65,7 +66,11 @@ async def create_sandbox(request: CreateSandboxRequest):
         sandbox_id = None
     else:
         sandbox_id = request.sandbox_id
-    spec = SandboxSpec(env=request.env, sandbox_id=sandbox_id)
+    spec = SandboxSpec(
+        env=request.env,
+        sandbox_id=sandbox_id,
+        sandbox_type=request.sandbox_type,
+    )
     return await _mgr().create_sandbox(
         spec,
         policy_data=request.policy,

@@ -83,6 +83,7 @@ class SandboxSpec(BaseModel):
 
     env: dict[str, str] = Field(default_factory=dict)
     sandbox_id: str | None = None
+    sandbox_type: str | None = None
 
 
 class SandboxRef(BaseModel):
