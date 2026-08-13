@@ -81,7 +81,12 @@ class _TeamPlanApprovalPayloadError(ValueError):
     """Raised when a structured team.plan approval payload is malformed."""
 
 
-def _schedule_symphony_session_feedback(session_id: str, request_id: str) -> None:
+def _schedule_symphony_session_feedback(
+    session_id: str,
+    request_id: str,
+    *,
+    terminal_status: str = "success",
+) -> None:
     """Submit session-based Symphony learning without delaying the response."""
 
     try:
@@ -89,7 +94,11 @@ def _schedule_symphony_session_feedback(session_id: str, request_id: str) -> Non
             schedule_session_evolution_consume,
         )
 
-        schedule_session_evolution_consume(session_id, request_id)
+        schedule_session_evolution_consume(
+            session_id,
+            request_id,
+            terminal_status=terminal_status,
+        )
     except Exception as exc:  # noqa: BLE001
         logging.getLogger(__name__).debug(
             "Failed to schedule Symphony session feedback: %s",
@@ -1892,6 +1901,18 @@ class JiuWenSwarm:
 
         session_id = self._session_manager.get_session_id(request.session_id)
         query = request.params.get("query", "")
+        feedback_scheduled = False
+
+        def _schedule_feedback_once(terminal_status: str) -> None:
+            nonlocal feedback_scheduled
+            if feedback_scheduled:
+                return
+            _schedule_symphony_session_feedback(
+                session_id,
+                request.request_id,
+                terminal_status=terminal_status,
+            )
+            feedback_scheduled = True
         # proactive_recommendation 是系统触发的推荐指令（不是用户说的话），不写 user
         # history——否则刷新页面会显示"[主动推荐指令] xxx"这种用户没说过的消息。
         if _should_record_user_history(request.params):
@@ -1914,7 +1935,11 @@ class JiuWenSwarm:
 
         try:
             inputs, memory_mode, user_turn = self._build_inputs(request)
+        except asyncio.CancelledError:
+            _schedule_feedback_once("cancelled")
+            raise
         except _TeamPlanApprovalPayloadError as exc:
+            _schedule_feedback_once("error")
             return AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -1922,6 +1947,9 @@ class JiuWenSwarm:
                 payload={"error": str(exc)},
                 metadata=request.metadata,
             )
+        except Exception:
+            _schedule_feedback_once("error")
+            raise
 
         # cloud memory: before chat hook
         if memory_mode == "cloud":
@@ -1933,14 +1961,28 @@ class JiuWenSwarm:
                 workspace_dir=str(get_agent_home_dir()),
                 extra=request.params,
             )
-            await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.MEMORY_BEFORE_CHAT, mem_ctx)
+            try:
+                await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.MEMORY_BEFORE_CHAT, mem_ctx)
+            except asyncio.CancelledError:
+                _schedule_feedback_once("cancelled")
+                raise
+            except Exception:
+                _schedule_feedback_once("error")
+                raise
             memory_block = "\n\n".join(b for b in mem_ctx.memory_blocks if b)
             inputs["memory_block"] = memory_block
 
         async def run_agent_task():
             return await adapter.process_message_impl(request, inputs)
 
-        result = await self._session_manager.submit_and_wait(session_id, run_agent_task)
+        try:
+            result = await self._session_manager.submit_and_wait(session_id, run_agent_task)
+        except asyncio.CancelledError:
+            _schedule_feedback_once("cancelled")
+            raise
+        except Exception:
+            _schedule_feedback_once("error")
+            raise
 
         if result.ok and result.payload.get("content"):
             content = result.payload["content"]
@@ -1950,14 +1992,21 @@ class JiuWenSwarm:
                 adapter=adapter,
                 request=request,
             )
-            content_str = await finalize_assistant_response_if_a2ui(
-                content_str,
-                channel=request.channel_id,
-                user_query=user_turn.text,
-                request_id=request.request_id or "",
-                repair_call=repair_call,
-                retry_without_a2ui_call=retry_without_a2ui_call,
-            )
+            try:
+                content_str = await finalize_assistant_response_if_a2ui(
+                    content_str,
+                    channel=request.channel_id,
+                    user_query=user_turn.text,
+                    request_id=request.request_id or "",
+                    repair_call=repair_call,
+                    retry_without_a2ui_call=retry_without_a2ui_call,
+                )
+            except asyncio.CancelledError:
+                _schedule_feedback_once("cancelled")
+                raise
+            except Exception:
+                _schedule_feedback_once("error")
+                raise
             if isinstance(content, str):
                 result.payload["content"] = content_str
             append_history_record(
@@ -1970,6 +2019,7 @@ class JiuWenSwarm:
                 timestamp=time.time(),
                 mode=request.params.get("mode", "unknown"),
             )
+            _schedule_feedback_once("success")
 
             # cloud memory: after chat hook
             if memory_mode == "cloud":
@@ -1991,7 +2041,8 @@ class JiuWenSwarm:
             if is_auto_memory_enabled(mode, config) and is_memory_enabled(mode, config):
                 _trigger_auto_memory_extraction(adapter, request, session_id, is_stream=False)
 
-        _schedule_symphony_session_feedback(session_id, request.request_id)
+        if not feedback_scheduled:
+            _schedule_feedback_once("success" if result.ok else "error")
         return result
 
     async def process_message_stream(
@@ -2147,9 +2198,26 @@ class JiuWenSwarm:
 
         rid = request.request_id
         cid = request.channel_id
+        feedback_scheduled = False
+
+        def _schedule_feedback_once(terminal_status: str) -> None:
+            nonlocal feedback_scheduled
+            if feedback_scheduled:
+                return
+            _schedule_symphony_session_feedback(
+                session_id,
+                rid,
+                terminal_status=terminal_status,
+            )
+            feedback_scheduled = True
+
         try:
             inputs, memory_mode, user_turn = self._build_inputs(request)
+        except asyncio.CancelledError:
+            _schedule_feedback_once("cancelled")
+            raise
         except _TeamPlanApprovalPayloadError as exc:
+            _schedule_feedback_once("error")
             yield AgentResponseChunk(
                 request_id=rid,
                 channel_id=cid,
@@ -2163,6 +2231,9 @@ class JiuWenSwarm:
                 is_complete=True,
             )
             return
+        except Exception:
+            _schedule_feedback_once("error")
+            raise
 
         # Team 模式：把整个 turn 交给 team_helpers。它先用 turn.text（用户原
         # 文）解析 /debug、$member 与 slash，再用同一个 render() 投递，因此
@@ -2189,7 +2260,14 @@ class JiuWenSwarm:
                 workspace_dir=str(get_agent_home_dir()),
                 extra=request.params,
             )
-            await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.MEMORY_BEFORE_CHAT, mem_ctx)
+            try:
+                await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.MEMORY_BEFORE_CHAT, mem_ctx)
+            except asyncio.CancelledError:
+                _schedule_feedback_once("cancelled")
+                raise
+            except Exception:
+                _schedule_feedback_once("error")
+                raise
             memory_block = "\n\n".join(b for b in mem_ctx.memory_blocks if b)
             inputs["memory_block"] = memory_block
 
@@ -2206,9 +2284,16 @@ class JiuWenSwarm:
                 # or recover a paused runtime before calling interact().
                 is_team_first_request = False
             else:
-                is_team_first_request = not await _team_session_has_runtime(
-                    team_manager, session_id
-                )
+                try:
+                    is_team_first_request = not await _team_session_has_runtime(
+                        team_manager, session_id
+                    )
+                except asyncio.CancelledError:
+                    _schedule_feedback_once("cancelled")
+                    raise
+                except Exception:
+                    _schedule_feedback_once("error")
+                    raise
             logger.info(
                 "[JiuWenSwarm] Team模式: session_id=%s is_first=%s interactive_input=%s",
                 session_id,
@@ -2224,25 +2309,71 @@ class JiuWenSwarm:
         durable_pending_final_chunks: list[str] = []
         durable_pending_final_started_at: float | None = None
         durable_pending_reasoning_chunks: list[str] = []
+        # reasoning 首/末帧时刻（epoch ms）：随 reasoning_content 一起落盘，供刷新后
+        # 恢复耗时终点；即使 final/closeReasoning 丢失，末帧也是真实事件时刻。
+        durable_pending_reasoning_started_at: float | None = None
+        durable_pending_reasoning_updated_at: float | None = None
         durable_final_content = ""
         # 这条流是否带过 Goal 事件。Goal 仍 active 时流结束是不发 chat.final 的
         # （见 interface_deep._should_emit_stream_end_chat_final），气泡里的正文
         # 就没人落盘；收尾时按这个标记补一次，只影响 Goal 流。
         saw_goal_stream_output = False
 
-        def _consume_durable_reasoning_content() -> str:
-            nonlocal durable_pending_reasoning_chunks
+        def _note_durable_reasoning_delta() -> None:
+            nonlocal durable_pending_reasoning_started_at, durable_pending_reasoning_updated_at
+            now_ms = time.time() * 1000
+            if durable_pending_reasoning_started_at is None:
+                durable_pending_reasoning_started_at = now_ms
+            durable_pending_reasoning_updated_at = now_ms
+
+        def _consume_durable_reasoning_content() -> tuple[str, float | None, float | None]:
+            nonlocal \
+                durable_pending_reasoning_chunks, \
+                durable_pending_reasoning_started_at, \
+                durable_pending_reasoning_updated_at
             reasoning_text = "".join(durable_pending_reasoning_chunks)
+            started_at = durable_pending_reasoning_started_at
+            updated_at = durable_pending_reasoning_updated_at
             durable_pending_reasoning_chunks = []
-            return reasoning_text if reasoning_text.strip() else ""
+            durable_pending_reasoning_started_at = None
+            durable_pending_reasoning_updated_at = None
+            return reasoning_text, started_at, updated_at
 
         def _attach_reasoning_content(extra_fields: dict[str, Any] | None = None) -> dict[str, Any] | None:
-            reasoning_text = _consume_durable_reasoning_content()
-            if not reasoning_text:
+            reasoning_text, started_at, updated_at = _consume_durable_reasoning_content()
+            if not reasoning_text.strip():
                 return extra_fields
             merged = dict(extra_fields) if isinstance(extra_fields, dict) else {}
             merged["reasoning_content"] = reasoning_text
+            merged["reasoning_updated_at"] = updated_at or started_at or (time.time() * 1000)
             return merged
+
+        def _persist_pending_reasoning() -> None:
+            """异常/非 Goal 结束兜底：把未随 tool_call/final 落盘的思考补落一条记录。
+
+            正常完成时 reasoning 已被最后一条 tool_call/final 附走、缓冲为空，这里 no-op。
+            单独落成 chat.reasoning 记录（不带正文 final），前端按 reasoning_content 提取。
+            """
+            started_at = durable_pending_reasoning_started_at
+            updated_at = durable_pending_reasoning_updated_at
+            reasoning_text, _, _ = _consume_durable_reasoning_content()
+            if not reasoning_text.strip():
+                return
+            now_ms = time.time() * 1000
+            append_history_record(
+                session_id=session_id,
+                request_id=rid,
+                channel_id=cid,
+                role="assistant",
+                event_type="chat.reasoning",
+                content="",
+                timestamp=(started_at or now_ms) / 1000,
+                extra={
+                    "reasoning_content": reasoning_text,
+                    "reasoning_updated_at": updated_at or started_at or now_ms,
+                },
+                mode=request.params.get("mode", "unknown"),
+            )
 
         def _reset_durable_pending_final() -> None:
             nonlocal durable_pending_final_chunks, durable_pending_final_started_at
@@ -2452,6 +2583,11 @@ class JiuWenSwarm:
             "[JiuWenSwarm] consumer loop starting: request_id=%s is_team=%s is_first=%s",
             rid, is_team_mode, is_team_first_request,
         )
+        stream_aborted = False
+        abort_terminal_status = "cancelled"
+        completion_status = "success"
+        terminal_final_persisted = False
+
         try:
             while (
                     not stream_done.is_set()
@@ -2548,6 +2684,7 @@ class JiuWenSwarm:
                         mode=request.params.get("mode", "unknown"),
                         extra={"error_type": error_type} if error_type else None,
                     )
+                    completion_status = "error"
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,
@@ -2562,6 +2699,9 @@ class JiuWenSwarm:
                                 continue
                         if isinstance(data.payload, dict) and isinstance(data.payload.get("event_type"), str):
                             et = str(data.payload.get("event_type"))
+                            if et == "chat.error":
+                                completion_status = "error"
+                                abort_terminal_status = "error"
                             _note_goal_stream_payload(et, data.payload)
                             should_record = et.startswith("chat.")
                             final_segment_started_at: float | None = None
@@ -2645,6 +2785,7 @@ class JiuWenSwarm:
                                 _note_durable_pending_final_delta(payload_content)
                                 should_record = False
                             elif et == "chat.reasoning":
+                                _note_durable_reasoning_delta()
                                 durable_pending_reasoning_chunks.append(payload_content)
                                 should_record = False
                             elif et == "chat.tool_call":
@@ -2718,6 +2859,8 @@ class JiuWenSwarm:
                                 )
                                 if et == "chat.final":
                                     durable_final_content = str(data.payload.get("content", ""))
+                                    if not is_team_mode or data.payload.get("role") != "teammate":
+                                        terminal_final_persisted = True
                             if et == "chat.final":
                                 next_final_content = str(data.payload.get("content", ""))
                                 if next_final_content:
@@ -2726,6 +2869,9 @@ class JiuWenSwarm:
                         yield data
                     elif isinstance(data, dict) and isinstance(data.get("event_type"), str):
                         et = str(data.get("event_type"))
+                        if et == "chat.error":
+                            completion_status = "error"
+                            abort_terminal_status = "error"
                         _note_goal_stream_payload(et, data)
                         should_record = et.startswith("chat.")
                         final_segment_started_at = None
@@ -2811,6 +2957,7 @@ class JiuWenSwarm:
                             _note_durable_pending_final_delta(payload_content)
                             should_record = False
                         elif et == "chat.reasoning":
+                            _note_durable_reasoning_delta()
                             durable_pending_reasoning_chunks.append(payload_content)
                             should_record = False
                         elif et == "chat.tool_call":
@@ -2877,6 +3024,8 @@ class JiuWenSwarm:
                             )
                             if et == "chat.final":
                                 durable_final_content = str(data.get("content", ""))
+                                if not is_team_mode or data.get("role") != "teammate":
+                                    terminal_final_persisted = True
                         if et == "chat.final":
                             next_final_content = str(data.get("content", ""))
                             if next_final_content:
@@ -2890,6 +3039,15 @@ class JiuWenSwarm:
                         )
         except asyncio.CancelledError:
             logger.info("[JiuWenSwarm] 流式处理被中断: request_id=%s", rid)
+            stream_aborted = True
+            raise
+        except GeneratorExit:
+            logger.info("[JiuWenSwarm] 流式连接已关闭: request_id=%s", rid)
+            stream_aborted = True
+            raise
+        except Exception:
+            stream_aborted = True
+            abort_terminal_status = "error"
             raise
         finally:
             # Goal 还在跑时这条流不会收到收尾的 chat.final，气泡里已经展示的正文
@@ -2897,6 +3055,12 @@ class JiuWenSwarm:
             # 消失，和实时看到的不是一回事。非 Goal 流不进这里。
             if saw_goal_stream_output:
                 _persist_pending_final_text()
+            else:
+                # 非 Goal 异常结束（LLM 错误/断连，或流结束无收尾事件）时，pending
+                # reasoning 不会随 tool_call/final 落盘；补落一条，刷新后思考内容
+                # 与耗时终点（末帧时刻）都能恢复。正文 final 故意不落——半截回答
+                # 不该当 chat.final 写进历史。
+                _persist_pending_reasoning()
             # The adapter producer owns RuntimeOutputStream.  Cancelling and
             # awaiting it releases the runtime output lease and aborts the
             # in-flight round when the outer WebSocket consumer disappears.
@@ -2905,10 +3069,15 @@ class JiuWenSwarm:
             ]
             for task in unfinished_a2ui_tasks:
                 task.cancel()
-            if unfinished_a2ui_tasks:
-                await asyncio.gather(*unfinished_a2ui_tasks, return_exceptions=True)
             if not stream_task.done():
                 stream_task.cancel()
+            if stream_aborted:
+                terminal_status = abort_terminal_status
+                if terminal_status == "cancelled" and terminal_final_persisted:
+                    terminal_status = "success"
+                _schedule_feedback_once(terminal_status)
+            if unfinished_a2ui_tasks:
+                await asyncio.gather(*unfinished_a2ui_tasks, return_exceptions=True)
             try:
                 await stream_task
             except asyncio.CancelledError:
@@ -2927,17 +3096,29 @@ class JiuWenSwarm:
         # (which may be full after a disconnect), but preserve the public
         # cancellation contract once all already-produced chunks are drained.
         if producer_cancellation is not None:
+            _schedule_feedback_once(
+                "success" if terminal_final_persisted else "cancelled"
+            )
             raise producer_cancellation
 
         assistant_message = final_answer_content or "".join(final_answer_chunks)
-        finalized_assistant_message = await finalize_assistant_response_if_a2ui(
-            assistant_message,
-            channel=cid,
-            user_query=user_turn.text,
-            request_id=rid or "",
-            repair_call=repair_call,
-            retry_without_a2ui_call=retry_without_a2ui_call,
-        )
+        try:
+            finalized_assistant_message = await finalize_assistant_response_if_a2ui(
+                assistant_message,
+                channel=cid,
+                user_query=user_turn.text,
+                request_id=rid or "",
+                repair_call=repair_call,
+                retry_without_a2ui_call=retry_without_a2ui_call,
+            )
+        except asyncio.CancelledError:
+            _schedule_feedback_once(
+                "success" if terminal_final_persisted else "cancelled"
+            )
+            raise
+        except Exception:
+            _schedule_feedback_once("error")
+            raise
         if finalized_assistant_message and (
                 finalized_assistant_message != assistant_message or suppress_a2ui_stream
         ):
@@ -2957,12 +3138,15 @@ class JiuWenSwarm:
             )
             final_answer_content = finalized_assistant_message
             final_answer_chunks = []
+            _schedule_feedback_once(completion_status)
             yield _make_a2ui_final_chunk(
                 request_id=rid,
                 channel_id=cid,
                 session_id=session_id,
                 content=finalized_assistant_message,
             )
+
+        _schedule_feedback_once(completion_status)
 
         # cloud memory: after chat hook
         if memory_mode == "cloud":
@@ -2985,7 +3169,6 @@ class JiuWenSwarm:
         if is_auto_memory_enabled(mode, config) and is_memory_enabled(mode, config):
             _trigger_auto_memory_extraction(adapter, request, session_id, is_stream=True)
 
-        _schedule_symphony_session_feedback(session_id, rid)
         yield AgentResponseChunk(
             request_id=rid,
             channel_id=cid,

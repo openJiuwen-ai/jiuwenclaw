@@ -60,7 +60,7 @@ curl -L --fail -o JiuwenSwarm-<version>.dmg \
 
 #### 2. Install and first launch
 
-- **macOS**: double-click to mount the dmg, then drag `JiuwenSwarm.app` into `Applications`. You may right-click it in Finder and choose "Open".
+- **macOS**: double-click to mount the dmg, then drag `JiuwenSwarm.app` into `Applications`. If macOS blocks the first launch, right-click it in Finder and choose "Open".
 - **Windows**: double-click the downloaded installer (`.exe`) and follow the prompts; it initializes the workspace automatically. For the portable onedir build, run `jiuwenswarm.exe init` once manually.
 
 On first launch the app creates `~/.jiuwenswarm/`. Then follow [Post-start verification](#3-post-start-verification) to finish model configuration.
@@ -163,8 +163,8 @@ uv pip install -e .
 > ⚠️ **Important:** With a source (editable) install you must build the front end manually, or startup will fail with `dist directory not found`.
 
 ```bash
-# Enter front-end directory (repo root is jiuwenswarm)
-cd channels/web/frontend
+# Enter front-end directory from the repository root
+cd jiuwenswarm/channels/web/frontend
 
 # Install front-end dependencies
 npm install
@@ -179,7 +179,7 @@ xcopy /E /I dist %USERPROFILE%\.jiuwenswarm\channels\web\frontend\dist
 cp -r dist ~/.jiuwenswarm/channels/web/frontend/dist
 
 # Back to repo root
-cd ../../..
+cd ../../../..
 ```
 
 **Notes:**
@@ -260,8 +260,8 @@ pip install -e .
 > ⚠️ **Important:** With a source (editable) install you must build the front end manually, or startup will fail with `dist directory not found`.
 
 ```bash
-# Enter front-end directory (repo root is jiuwenswarm)
-cd channels/web/frontend
+# Enter front-end directory from the repository root
+cd jiuwenswarm/channels/web/frontend
 
 # Install front-end dependencies
 npm install
@@ -276,7 +276,7 @@ xcopy /E /I dist %USERPROFILE%\.jiuwenswarm\channels\web\frontend\dist
 cp -r dist ~/.jiuwenswarm/channels/web/frontend/dist
 
 # Back to repo root
-cd ../../..
+cd ../../../..
 ```
 
 **Notes:**
@@ -340,7 +340,7 @@ git pull
 pip install -e .
 
 # Rebuild the front end (if it was updated)
-cd channels/web/frontend
+cd jiuwenswarm/channels/web/frontend
 npm install
 npm run build
 
@@ -350,7 +350,7 @@ xcopy /E /I dist %USERPROFILE%\.jiuwenswarm\channels\web\frontend\dist
 # macOS/Linux:
 cp -r dist ~/.jiuwenswarm/channels/web/frontend/dist
 
-cd ../../../
+cd ../../../..
 ```
 
 ---
@@ -387,10 +387,12 @@ rsync -av ~/.jiuwenswarm ~/.jiuwenswarm_backup
 |------|-------------|
 | `config/config.yaml` | Main config (models, API keys, etc.) |
 | `config/.env` | Environment variables |
-| `agent/memory/` | User memory data |
-| `agent/home/` | Identity and task data |
-| `agent/skills/` | Skills library (custom skills and config) |
-| `agent/workspace/` | Workspace files |
+| `agent/workspace/` | Identity, task, and workspace files |
+| `agent/workspace/memory/` | User memory data |
+| `agent/workspace/skills/` | Skills library (custom skills and config) |
+| `agent/home/` | Scheduled task data (`cron_jobs.json`) |
+
+> `agent/jiuwenclaw_workspace/`, `agent/memory/`, and `agent/skills/` are legacy locations. Current versions migrate their contents into `agent/workspace/`.
 
 #### 2. Perform the upgrade
 
@@ -412,7 +414,7 @@ After upgrading, migrate data so config and stores match the new version.
 
 ```bash
 # View the new config template (source install)
-cat docs/config_template.yaml
+cat jiuwenswarm/resources/config.yaml
 
 # Or read the changelog
 # https://gitcode.com/openJiuwen/jiuwenswarm/blob/develop/docs/CHANGELOG.md
@@ -452,10 +454,10 @@ Memory is usually backward compatible; still verify:
 
 ```bash
 # Inspect memory layout
-ls ~/.jiuwenswarm/agent/memory/
+ls ~/.jiuwenswarm/agent/workspace/memory/
 
 # If something looks wrong, restore from backup
-cp -r ~/.jiuwenswarm_backup/agent/memory/* ~/.jiuwenswarm/agent/memory/
+cp -r ~/.jiuwenswarm_backup/agent/workspace/memory/* ~/.jiuwenswarm/agent/workspace/memory/
 ```
 
 ##### Step 4: Verify migration
@@ -482,16 +484,16 @@ jiuwenswarm-start
 
 ### Q: On start I see "Python version not supported"
 
-Use Python ≥3.11 and below 3.14 (e.g. 3.11, 3.12, or 3.13).
+Use Python ≥3.11 and below 3.14. See [Environment check](#environment-check) for details.
 
 ### Q: On start I see "Node.js not found"
 
-Install Node.js 18.x or newer.
+Install Node.js 18.x or newer. See [Environment check](#environment-check) for details.
 
 ### Q: How do I check the installed version?
 
 ```bash
-jiuwenswarm --version
+pip show jiuwenswarm
 ```
 
 ### Q: How do I uninstall?
@@ -510,4 +512,4 @@ pip uninstall jiuwenswarm
 
 ---
 
-*Last updated: 2026-05-08*
+*Last updated: 2026-08-12*

@@ -38,6 +38,8 @@
 | `/agents` | 管理 Agent 配置（list, get, create, update, enable, disable, delete，见下文） |
 | `/auto-harness` | Auto-Harness 任务管理（`run`/`schedule`/`issue`，见下文） |
 | `/btw` | 旁路快速提问，不中断主对话（见下文） |
+| `/swarmflow` | SwarmFlow 开关、状态查询与 token 预算（`on` / `off` / `--budget`，见 [TUI SwarmFlow 指南](TUI使用SwarmFlow指南.md)） |
+| `/swarmflows` | 全屏 SwarmFlow 运行树查看器（别名 `/swarmworkflows`，同上） |
 
 > 说明：本页的 `/mode` 与 `/switch` 以 Gateway 受控通道行为为主。TUI 本地命令另支持 `/mode plan`、`/mode team.normal`，详见 [TUI 使用指南](TUI使用指南.md)。
 
@@ -68,6 +70,19 @@
 ---
 
 ## 重点命令说明
+
+### `/swarmflow` 与 `/swarmflows`（TUI 本地）
+
+SwarmFlow 专用命令；完整流程见 **[TUI 使用 SwarmFlow 指南](TUI使用SwarmFlow指南.md)**。
+
+| 命令 | 说明 |
+|------|------|
+| `/swarmflow` | 查询状态，如 `swarmflow: on · mode: team · budget: unbounded` |
+| `/swarmflow on` | 写入 `enable_swarmflow=true`；非 team 时一并切到 team；可选 `--budget <tokens\|none>` |
+| `/swarmflow off` | 写入 `enable_swarmflow=false`；不自动离开 team |
+| `/swarmflows` | 打开全屏运行树（工作流 → 阶段 → 节点）；别名 `/swarmworkflows` |
+
+配置变更后当前 session **不热更新**，提示 `Use /new to apply.`；主界面 **`h`** 用于 pending 人工回复（非本命令）。
 
 ### `/workspace`（TUI 可信目录管理）
 
@@ -719,7 +734,7 @@
 - **嵌套路径**：支持「父 allow + 子 deny」（例如 allow `/tmp`、deny `/tmp/secret`）；不支持「子 allow + 父 deny」（父 deny 会覆盖子 allow），服务端会拒绝此类配置。
 - **生效写入策略**：状态面板里的 `files.allow_write` / `files.deny_write` 是 auto-managed 与 user-configured 合并后的视图，每条路径显示 `(rw)` 或 `(ro)`。
 - **preserve_file_sharing_mode**：由 jiuwenswarm 配置决定，不通过 `/sandbox` 切换。仅支持 `mount`：intrinsic 文件与 `project_dir` 通过 bind mount 注入沙箱，`project_dir/config/config.yaml` 会显式加进 `deny_write`；yaml 里写入其它值会被服务端拒绝。
-- **excluded_commands**：按完整命令字符串匹配（不是只看 `argv[0]`），命中后该次调用穿透到本地，相当于把对应命令的副作用授权给本地环境。
+- **excluded_commands**：按 simple-command 叶子做 fnmatch（可匹配完整叶子文本或命令名）。全命中则整条本地；全未命中则整条沙箱；混合命中时由本地 bash 编排，远端段走 `jiuwenbox sandbox exec`（需宿主 CLI）。
 - **add / remove 的去重与冲突**：`exclude add` 在已存在同名 pattern 时报错；`exclude remove` 在不存在该 pattern 时报错。`files allow|deny` 在同一 bucket 已有同 path 时报错，在对侧 bucket（allow vs deny）已登记同 path 时也报错，需要先 `files remove` 再 add；`files remove` 在用户配置里找不到该 path 时报错。
 - **enable / disable**：会触发 agent 重建，响应里会列出 `rebuilt_modes`（典型 `agent.*` / `code.*`）和 jiuwenbox 端点。
 

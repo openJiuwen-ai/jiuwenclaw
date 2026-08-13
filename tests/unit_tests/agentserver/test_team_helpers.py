@@ -2989,6 +2989,9 @@ async def test_consume_stream_with_query_broadcasts_leader_and_teammate_outputs(
     # After team.runtime_ready is broadcast, seen_team_events=True so
     # chat.final events are suppressed; team.completed emits
     # chat.processing_status(is_complete=True) instead.
+    # The finally block also broadcasts an explicit
+    # chat.processing_status{is_processing:False} as a terminal signal
+    # for the frontend.
     assert [event["event_type"] for event in broadcasted] == [
         "chat.processing_status",
         "team.runtime_ready",
@@ -2999,14 +3002,17 @@ async def test_consume_stream_with_query_broadcasts_leader_and_teammate_outputs(
         'chat.final',
         'chat.processing_status',
         "chat.processing_status",
-        'team.completed',
+        "chat.processing_status",
     ]
     # Round-start processing_status
     assert broadcasted[0]["is_processing"] is True
     assert broadcasted[0]["is_complete"] is False
-    # Round-end processing_status (from team.completed)
+    # Round-end processing_status (from team.completed conversion)
     assert broadcasted[-2]["is_processing"] is False
     assert broadcasted[-2]["is_complete"] is True
+    # Terminal processing_status from the finally block
+    assert broadcasted[-1]["is_processing"] is False
+    assert broadcasted[-1]["is_complete"] is True
     for index, event in enumerate(broadcasted):
         if event.get("event_type") == "chat.final":
             next_event = broadcasted[index + 1]
@@ -3222,7 +3228,7 @@ async def test_consume_stream_with_query_broadcasts_leader_task_failed_detail_an
         "chat.processing_status",
         "chat.error",
         "chat.final",
-        "team.completed",
+        "chat.processing_status",
     ]
     assert "deepseek-v4-X" in broadcasted[1]["error"]
     assert "deepseek-v4-pro" in broadcasted[1]["error"]
@@ -3233,8 +3239,12 @@ async def test_consume_stream_with_query_broadcasts_leader_task_failed_detail_an
         "session_id": "sess-leader-error",
         "rid": 1,
     }
-    assert not any(
-        event.get("event_type") == "chat.processing_status" and event.get("is_processing") is False
+    # The finally block now also broadcasts a terminal
+    # chat.processing_status{is_processing:False} on the error path so
+    # the frontend always gets an explicit terminal signal.
+    assert any(
+        event.get("event_type") == "chat.processing_status"
+        and event.get("is_processing") is False
         for event in broadcasted
     )
 
@@ -3289,7 +3299,7 @@ async def test_consume_stream_with_query_does_not_final_teammate_task_failed(mon
     assert [event["event_type"] for event in broadcasted] == [
         "chat.processing_status",
         "chat.error",
-        "team.completed",
+        "chat.processing_status",
     ]
     assert "deepseek-v4-X" in broadcasted[1]["error"]
     assert broadcasted[1]["role"] == TeamRole.TEAMMATE.value

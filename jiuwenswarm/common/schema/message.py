@@ -45,6 +45,7 @@ class ReqMethod(Enum):
     SESSION_DELETE = "session.delete"
     SESSION_RENAME = "session.rename"
     SESSION_FORK = "session.fork"
+    SESSION_REBIND_PROJECT = "session.rebind_project"
     SESSION_REWIND = "session.rewind"
     SESSION_REWIND_AND_RESTORE = "session.rewind_and_restore"
     SESSION_REWIND_CONTEXT = "session.rewind_context"

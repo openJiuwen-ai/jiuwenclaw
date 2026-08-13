@@ -1437,15 +1437,6 @@ curl -L "https://github.com/checkstyle/checkstyle/releases/download/checkstyle-1
 pip install lark-oapi
 ```
 
-### 7.4 Heartbeat
-
-In `HEARTBEAT.md`, schedule periodic scans:
-
-```markdown
-## Active tasks
-- Run code quality scan  # daily
-```
-
 ## Chapter 8 — Testing
 
 | Method | Notes |

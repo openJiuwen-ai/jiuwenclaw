@@ -2,6 +2,7 @@
 
 """Unit tests for team runtime inheritance helpers."""
 
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -81,6 +82,36 @@ def test_filter_inheritable_ability_cards_includes_extended_swarm_tools():
     assert "exit_worktree" not in inherited_names
     assert "task_tool" not in inherited_names
     assert "send_file_to_user" not in inherited_names
+
+
+@pytest.mark.asyncio
+async def test_build_member_rails_separates_project_and_team_file_destinations(
+    tmp_path: Path,
+) -> None:
+    """Legacy/hot-reload rail construction preserves the user project root."""
+    project_dir = str(tmp_path / "project")
+    team_ws_root = str(tmp_path / "team-workspace")
+    rails = build_member_rails(
+        member_info=MemberInfo(role="leader"),
+        team_workspace=TeamWorkspaceInfo(
+            root_dir=team_ws_root,
+            project_dir=project_dir,
+            team_id="unit-team",
+        ),
+    )
+    rail = next(
+        item for item in rails if item.__class__.__name__ == "TeamWorkspaceReportPathRail"
+    )
+    builder = _FakePromptBuilder()
+    rail.init(SimpleNamespace(system_prompt_builder=builder))
+    await rail.before_model_call(SimpleNamespace())
+
+    section = builder.sections["team_workspace_report_paths"]
+    content = section.render("cn")
+    assert f"User project root: `{project_dir}`" in content
+    assert f"Team collaboration workspace: `{team_ws_root}`" in content
+    assert "Do not place final project files in the team collaboration workspace" in content
+    assert "When worktree isolation is active" in content
 
 
 @pytest.mark.asyncio

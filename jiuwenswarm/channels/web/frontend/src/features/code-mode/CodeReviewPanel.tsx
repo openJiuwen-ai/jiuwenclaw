@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Check, ChevronDown, ChevronRight, ChevronUp, Columns2, FileCode2, Files, Folder, List, LoaderCircle, RefreshCw, Search } from 'lucide-react';
 import type { ProjectInfo, WebError } from '../../types';
 import { CodeCommitPushControl } from './CodeCommitPushControl';
+import { subscribeCodeTurnChange } from './codeTurnChangeEvents';
 import { gitClient } from './gitClient';
 import type { CodeReviewTarget, GitDiffFile, GitDiffHunk, GitDiffStats, GitTurnDiff } from './types';
 import type { CodeGitDiffWatchController } from './useCodeGitDiffWatch';
@@ -322,6 +323,20 @@ export function CodeReviewPanel({ project, sessionId, target = null, diffWatch, 
   }, [loadTurnDiff, source]);
 
   useEffect(() => {
+    if (source !== 'last_turn') return;
+    return subscribeCodeTurnChange(event => {
+      if (event.projectId !== project.project_id || event.sessionId !== sessionId) return;
+      const targetMatches =
+        target?.source === 'last_turn'
+          ? Boolean(event.changeSetId && target.changeSetId === event.changeSetId) || target.turnIndex === event.turnIndex
+          : !turnDiff || Boolean(event.changeSetId && turnDiff.change_set_id === event.changeSetId) || turnDiff.turn_index === event.turnIndex;
+      if (!targetMatches) return;
+      setTurnDiff(previous => (previous ? { ...previous, status: event.status } : previous));
+      void loadTurnDiff();
+    });
+  }, [loadTurnDiff, project.project_id, sessionId, source, target, turnDiff]);
+
+  useEffect(() => {
     diffWatch.setFilesEnabled(source === 'working_tree');
     return () => {
       if (source === 'working_tree') diffWatch.setFilesEnabled(false);
@@ -342,9 +357,9 @@ export function CodeReviewPanel({ project, sessionId, target = null, diffWatch, 
         Object.values(diffWatch.files).map(file => {
           const detail = diffWatch.detailFiles[file.file_path];
           return [file.file_path, detail ? { ...file, ...detail, hunks: detail.hunks } : { ...file, hunks: [] }];
-        })
+        }),
       ),
-    [diffWatch.detailFiles, diffWatch.files]
+    [diffWatch.detailFiles, diffWatch.files],
   );
   const workingTreeFilePaths = useMemo(() => Object.keys(diffWatch.files).sort(), [diffWatch.files]);
 
@@ -593,19 +608,26 @@ export function CodeReviewPanel({ project, sessionId, target = null, diffWatch, 
           <span className="code-review__summary-label">{stats.files_changed} 个文件已更改</span>
           <span className="code-review__stat code-review__stat--added">+{stats.lines_added}</span>
           <span className="code-review__stat code-review__stat--removed">-{stats.lines_removed}</span>
+          {source === 'last_turn' && reviewDocument?.status === 'discarded' ? (
+            <span className="code-review__discarded-status" role="status">
+              此修改已撤销
+            </span>
+          ) : null}
         </div>
         <div className="code-review__toolbar-spacer" />
-        <CodeCommitPushControl
-          project={project}
-          branch={diffWatch.summary?.repo.branch || project.git.branch || null}
-          hasChanges={Boolean(diffWatch.summary?.current?.is_dirty)}
-          filesChanged={diffWatch.summary?.current?.stats.files_changed ?? 0}
-          isGit={Boolean(diffWatch.summary?.repo.is_git)}
-          transient={Boolean(diffWatch.summary?.repo.transient)}
-          isProcessing={isProcessing}
-          variant="review"
-          onSuccess={diffWatch.refresh}
-        />
+        {source === 'working_tree' ? (
+          <CodeCommitPushControl
+            project={project}
+            branch={diffWatch.summary?.repo.branch || project.git.branch || null}
+            hasChanges={Boolean(diffWatch.summary?.current?.is_dirty)}
+            filesChanged={diffWatch.summary?.current?.stats.files_changed ?? 0}
+            isGit={Boolean(diffWatch.summary?.repo.is_git)}
+            transient={Boolean(diffWatch.summary?.repo.transient)}
+            isProcessing={isProcessing}
+            variant="review"
+            onSuccess={diffWatch.refresh}
+          />
+        ) : null}
         <button type="button" className="code-review__icon-button" onClick={reload} title="刷新审核结果">
           <RefreshCw size={16} />
         </button>

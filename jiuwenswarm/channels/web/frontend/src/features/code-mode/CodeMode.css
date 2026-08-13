@@ -76,14 +76,20 @@
   margin-left: auto;
 }
 
-.code-branch--environment .code-branch__menu,
-.code-branch--environment .code-branch__error {
+.code-branch--environment .code-branch__menu {
   top: auto;
   bottom: calc(100% + 7px);
 }
 
 .code-branch--environment .code-branch__menu {
   width: min(286px, calc(var(--tool-panel-width) - 32px));
+}
+
+.code-branch--environment .code-branch__error {
+  position: static;
+  width: 100%;
+  margin: 2px 0 6px;
+  line-height: 18px;
 }
 
 .code-branch__chevron {
@@ -742,6 +748,18 @@ button.code-environment__row:disabled {
 .code-review__stat--removed {
   background: var(--color-feedback-danger-subtle);
   color: var(--color-feedback-danger);
+}
+
+.code-review__discarded-status {
+  display: inline-flex;
+  min-height: 20px;
+  align-items: center;
+  margin-left: 3px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--color-feedback-warning-subtle);
+  color: var(--color-feedback-warning);
+  line-height: 18px;
 }
 
 .code-review__icon-button {

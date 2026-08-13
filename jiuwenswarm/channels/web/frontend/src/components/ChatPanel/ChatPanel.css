@@ -2647,11 +2647,12 @@ overflow: hidden;
   flex-direction: column;
   gap: 2px;
   min-width: 0;
+  max-width: 116px;
 }
 
 .chat-msg-file-card__name {
-  overflow: visible;
-  text-overflow: clip;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: normal;
   word-break: break-word;
   overflow-wrap: anywhere;
@@ -2659,6 +2660,9 @@ overflow: hidden;
   font-size: 13px;
   font-weight: 600;
   line-height: 18px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
 }
 
 .chat-msg-file-card__ext {

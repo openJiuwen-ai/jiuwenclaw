@@ -31,7 +31,6 @@ Shared-provider caveat (important):
 from __future__ import annotations
 
 import logging
-from contextvars import ContextVar
 from typing import Any
 
 from jiuwenswarm.common.config import get_config
@@ -47,11 +46,10 @@ _agent_observability_active: bool = False
 
 # Root spans of the runs currently in flight, keyed by session id.
 #
-# The per-request _team_span_ctx ContextVar can't reach the round tasks (agent
-# execution runs in a session-setup supervisor task), so every SDK team-span
-# lookup returns None there and the whole child-span machinery goes dark. The
-# ContextVar stand-in installed below falls back to this registry, which works
-# regardless of task/context boundary.
+# The per-request root ContextVar can't reach the round tasks (agent execution
+# runs in a session-setup supervisor task), so SDK lookups that only see the
+# ContextVar return None there. The wrappers installed below fall back to this
+# registry, which works regardless of task/context boundary.
 #
 # Keyed rather than a single "current run" slot because sessions overlap: a
 # process serves several chats at once, and a single slot made them fight over
@@ -61,12 +59,9 @@ _agent_observability_active: bool = False
 # slot, so the other run's spans would have joined the wrong trace.
 _ROOT_SPANS: dict[str, Any] = {}
 
-# Name of the SDK-private ContextVar the fallback below rebinds.
-#
-# Held as a constant, and reached through getattr / setattr, so that the single
-# place this package reaches into another package's module internals is
-# explicit and greppable, instead of reading like an ordinary attribute access.
-_SDK_TEAM_SPAN_CTX_ATTR = "_team_span_ctx"
+# Marker set on the wrapped ``get_root_span`` / ``get_team_span`` callables so
+# install stays idempotent and tests can assert the fallback is in place.
+_SDK_ROOT_SPAN_FALLBACK_ATTR = "_jiuwenswarm_root_span_fallback"
 
 
 def _is_recording(span: Any) -> bool:
@@ -107,98 +102,61 @@ def _resolve_root_span() -> Any:
     return None
 
 
-class _RootSpanFallbackContextVar:
-    """Stand-in for the SDK's ``_team_span_ctx`` that falls back to the root span.
-
-    ``span_context`` resolves the current team span in two ways, and both must
-    see the single-agent root span:
-
-    * Through ``get_team_span()`` — used by ``OtelCallbackHandler`` to pick the
-      parent for llm/tool spans, and by ``ObservabilityRail``, which *returns
-      early* when it is None (that is why the agent-tier spans, including the
-      sub-agent ``agent.<type>.invoke`` ones, used to be missing).
-    * By reading the ``_team_span_ctx`` ContextVar **directly**, inside
-      ``ActiveSpanTracker._find_llm_span`` / ``close_llm_spans_by_parent`` —
-      the lookups that resolve the trace before locating the already-open
-      ``llm.call`` span. These are not reachable by wrapping a function.
-
-    Missing the second path is not cosmetic: the llm.call span is created (its
-    parent comes from the first path) but never found again, so no chunk / TTFT
-    / completion / usage attribute is ever written to it and it is force-closed
-    later by the tracker's orphan sweep — an LLM span with input but no output.
-
-    Rebinding the ContextVar itself covers both paths at once, because every
-    reader lives in ``span_context`` and resolves the module global at call
-    time. Only ``get`` changes behavior; ``set`` / ``reset`` delegate to the
-    real ContextVar so team mode keeps exact per-context semantics — its team
-    span is ContextVar-visible, so the fallback never triggers there.
-
-    Upstream offers a related seam as a supported API
-    (``span_context.set_ambient_team_span`` / ``clear_ambient_team_span``,
-    which also spares the root span from the flush by identity rather than by
-    a ``team.`` name prefix), but it is NOT a drop-in replacement for this
-    stand-in and swapping to it would regress two fixes:
-
-    * It registers one process-wide slot, while :data:`_ROOT_SPANS` is keyed by
-      session — overlapping chats in one process would fight over the slot.
-    * It falls back only when the ContextVar holds None, whereas :meth:`get`
-      below also overrides a binding that has already *ended* (the request
-      coroutine's span outliving its run in a context-snapshotting task).
-
-    Adopting it therefore needs those two behaviors upstream first; until then
-    this stand-in stays.
-    """
-
-    def __init__(self, inner: ContextVar) -> None:
-        self._inner = inner
-
-    @property
-    def name(self) -> str:
-        """Return the wrapped ContextVar's name."""
-        return self._inner.name
-
-    def get(self, *default: Any) -> Any:
-        """Return the context-local team span, or this run's root span.
-
-        A binding that has already ended does not win: the request coroutine's
-        span outlives its run in a task that snapshotted the context, and the
-        callers here need the span of the run happening *now*. The stale
-        binding is still returned as a last resort, for the close paths that
-        only need its trace id.
-        """
-        span = self._inner.get(*default)
-        if _is_recording(span):
-            return span
-        root_span = _resolve_root_span()
-        if root_span is not None:
-            return root_span
-        return span
-
-    def set(self, value: Any) -> Any:
-        """Bind *value* in the current context and return the reset token."""
-        return self._inner.set(value)
-
-    def reset(self, token: Any) -> None:
-        """Restore the binding this context had before its matching ``set``."""
-        self._inner.reset(token)
-
-
 def _install_team_span_global_fallback() -> None:
-    """Swap the SDK's ``_team_span_ctx`` for the root-span-aware stand-in.
+    """Wrap SDK root/team span lookups with the session-keyed ``_ROOT_SPANS`` fallback.
 
-    Best-effort, idempotent (a second call sees the stand-in already in place),
-    never raises — observability must never break a run.
+    Newer openjiuwen moved team-span state into
+    ``extensions.observability.span_context.get_root_span`` (session registry +
+    ContextVar). ``get_team_span`` is a thin facade over that. Wrapping both
+    the extension accessor and the team facade keeps:
+
+    * ``get_team_span()`` (rail / callback parent lookup), and
+    * ``ActiveSpanTracker`` parent resolution (via ``get_root_span``),
+
+    able to see the single-agent root even when the ContextVar is invisible to
+    the supervisor task.
+
+    Best-effort, idempotent, never raises — observability must never break a run.
     """
     try:
-        from openjiuwen.agent_teams.observability import span_context
+        from openjiuwen.agent_teams.observability import span_context as team_sc
+        from openjiuwen.extensions.observability import span_context as ext_sc
     except Exception as exc:
         logger.debug("[AgentObservability] skip team-span fallback install: %s", exc)
         return
 
-    current = getattr(span_context, _SDK_TEAM_SPAN_CTX_ATTR, None)
-    if current is None or isinstance(current, _RootSpanFallbackContextVar):
+    original = getattr(ext_sc, "get_root_span", None)
+    if original is None or getattr(original, _SDK_ROOT_SPAN_FALLBACK_ATTR, False):
         return
-    setattr(span_context, _SDK_TEAM_SPAN_CTX_ATTR, _RootSpanFallbackContextVar(current))
+
+    def get_root_span_with_fallback(*, session_id: str | None = None):
+        try:
+            span = original(session_id=session_id)
+        except TypeError:
+            span = original()
+        if _is_recording(span):
+            return span
+        return _resolve_root_span()
+
+    setattr(get_root_span_with_fallback, _SDK_ROOT_SPAN_FALLBACK_ATTR, True)
+    ext_sc.get_root_span = get_root_span_with_fallback
+    team_sc.get_root_span = get_root_span_with_fallback
+    # callback_handler imports get_root_span by name at module load; rebind that
+    # early binding too, otherwise LLM/tool parent lookup still sees the unwrapped
+    # accessor when the handler was imported before this install ran.
+    try:
+        from openjiuwen.extensions.observability import callback_handler as ch
+
+        ch.get_root_span = get_root_span_with_fallback
+    except Exception as exc:
+        logger.debug("[AgentObservability] callback_handler rebind skipped: %s", exc)
+
+    def get_team_span_with_fallback(team_name: str | None = None):
+        del team_name
+        return get_root_span_with_fallback()
+
+    setattr(get_team_span_with_fallback, _SDK_ROOT_SPAN_FALLBACK_ATTR, True)
+    team_sc.get_team_span = get_team_span_with_fallback
 
 
 _install_team_span_global_fallback()
@@ -395,7 +353,7 @@ def _apply_single_agent_team_attr_suppression() -> None:
     """
     try:
         from openjiuwen.agent_teams.observability import rail as _rail
-        from openjiuwen.agent_teams.observability.semconv import (
+        from openjiuwen.extensions.observability.semconv import (
             LANGFUSE_OBSERVATION_TYPE,
             LANGFUSE_SESSION_ID,
         )
@@ -567,12 +525,16 @@ def open_agent_run_span(*, session_id: str = "", mode: str = "") -> Any:
     try:
         from opentelemetry.trace import SpanKind
 
-        from openjiuwen.agent_teams.observability import (
+        from openjiuwen.extensions.observability.setup import (
             get_tracer,
             is_initialized,
         )
-        from openjiuwen.agent_teams.observability.semconv import LANGFUSE_SESSION_ID
-        from openjiuwen.agent_teams.observability.span_context import set_team_span
+        from openjiuwen.extensions.observability.semconv import LANGFUSE_SESSION_ID
+        from openjiuwen.agent_teams.observability.span_context import (
+            set_current_session_id,
+            set_root_span,
+            set_team_span,
+        )
 
         if not is_initialized():
             return None
@@ -586,13 +548,14 @@ def open_agent_run_span(*, session_id: str = "", mode: str = "") -> Any:
         # Tag the mode so traces can be filtered in Langfuse without parsing
         # the span name.
         span.set_attribute("jiuwenswarm.mode", mode or "")
-        # Register as the team span so OtelCallbackHandler's parent lookup
-        # (get_team_span fallback) finds it for LLM/tool span creation.
+        # Register as the team/root span so parent lookup finds it for LLM/tool
+        # span creation. Pass session_id into the SDK registry as well as our
+        # local fallback table — supervisor tasks may not inherit ContextVars.
+        sid = session_id or ""
         set_team_span(span, team_name=SINGLE_AGENT_TEAM_NAME)
-        # Also register under this run's session: the supervisor task doesn't
-        # inherit the ContextVar, so the fallback installed at import resolves
-        # the root span from here for the rail and OtelCallbackHandler.
-        _ROOT_SPANS[session_id or ""] = span
+        set_root_span(span, session_id=sid)
+        set_current_session_id(sid)
+        _ROOT_SPANS[sid] = span
         logger.info("[AgentObservability] root span opened: name=%s", name)
         return span
     except Exception as exc:
@@ -618,8 +581,8 @@ def _stamp_run_output(handle: Any, output: str) -> None:
     """
     if not output:
         return
-    from openjiuwen.agent_teams.observability.redaction import redact_completion
-    from openjiuwen.agent_teams.observability.semconv import LANGFUSE_OBSERVATION_OUTPUT
+    from openjiuwen.extensions.observability.redaction import redact_completion
+    from openjiuwen.extensions.observability.semconv import LANGFUSE_OBSERVATION_OUTPUT
     # Aliased: the module-level ``get_config`` is JiuwenSwarm's own settings
     # reader, and this SDK-side one returns the active ObservabilityConfig.
     from openjiuwen.agent_teams.observability.setup import get_config as get_observability_config
@@ -648,6 +611,7 @@ def close_agent_run_span(handle: Any, *, session_id: str = "", output: str = "")
     try:
         from openjiuwen.agent_teams.observability.span_context import (
             cascade_close_children,
+            clear_root_span,
             clear_team_span,
             flush_child_spans,
         )
@@ -691,6 +655,10 @@ def close_agent_run_span(handle: Any, *, session_id: str = "", output: str = "")
             flush_child_spans()
         except Exception as exc:
             logger.debug("[AgentObservability] flush_child_spans failed: %s", exc)
+        try:
+            clear_root_span(session_id=session_id or "", expected_span=handle)
+        except Exception as exc:
+            logger.debug("[AgentObservability] clear_root_span failed: %s", exc)
         clear_team_span()
     except Exception as exc:
         logger.warning("[AgentObservability] close root span failed: %s", exc)

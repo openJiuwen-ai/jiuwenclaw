@@ -115,12 +115,21 @@ const GOAL_STALE_REFRESH_CHECK_INTERVAL_MS = 15000;
  */
 const GOAL_UNKNOWN_RETRY_INTERVAL_MS = 5 * 60 * 1000;
 /**
- * set 发出后，等这么久还没等到 goal.snapshot/execution.error 把 pendingAction 清掉，才补一次
- * 兜底 get——正常路径下 snapshot 应该早就到了，不必让这个兜底跟它赛跑（赛跑赢了反而会用 set
- * 落地前的旧数据提前清掉 pendingAction，重新打开"按钮提前解禁、能打出冲突指令"的窗口）。这个值
- * 只是给首次设置目标时快照丢包这种小概率情况兜底，不需要很短。
+ * set/resume 发出后，等这么久还没等到 goal.snapshot/execution.error/runtime.accepted 把
+ * pendingAction 清掉，才补一次兜底 get——正常路径下 snapshot 应该早就到了，不必让这个兜底跟它
+ * 赛跑（赛跑赢了反而会用 set/resume 落地前的旧数据提前清掉 pendingAction，重新打开"按钮提前
+ * 解禁、能打出冲突指令"的窗口）。这个值只是给"确认事件丢包/被误判为重复丢弃"这类小概率情况
+ * 兜底，不需要很短。
+ *
+ * resume 原来没有这个兜底（假设 goal.snapshot/goal.updated/execution.error 迟早会到），但
+ * bug001 实测：同一 session 在 EVENT_DEDUP_WINDOW_MS 窗口内被 resume 两次时（例如来回快速切换
+ * 2 个会话），第二次 resume 自己的 goal.snapshot 因为跟第一次内容相同会被去重逻辑当成重复事件
+ * 丢弃，pendingAction 从此没有任何信号能清空，只能等 60s 的无更新兜底巡检（GOAL_STALE_REFRESH_MS）
+ * 才会恢复——用户能明显感知到编辑/暂停按钮"卡死"了几十秒。root cause 已经用 request_id 让去重
+ * 更精确（见 makeEventDedupKey），这里再给 resume 补上跟 set 一样的兜底定时器做双保险，即使
+ * 未来又出现新的"确认事件丢失"场景，也能在几秒内自愈，不会再退化到 60s。
  */
-const GOAL_SET_CONVERGENCE_DELAY_MS = 4000;
+const GOAL_ACTION_CONVERGENCE_DELAY_MS = 4000;
 
 /**
  * 目标完成事件（goal.updated）和它所在这一轮回复的正文（chat.delta/chat.final），走的是两条
@@ -804,13 +813,26 @@ function stringifyPayloadForDedup(payload: Record<string, unknown>): string {
   }
 }
 
+/**
+ * bug001 根因之一：纯内容比对分不清"同一次操作的重复投递"（该去重）和"不同操作但状态没变、
+ * 内容碰巧完全一样"（不该去重——同一 session 在 EVENT_DEDUP_WINDOW_MS 窗口内被 resume 两次时，
+ * 两次的 goal.snapshot 内容经常完全相同，纯内容比对会把第二次误判成第一次的重复事件丢弃，
+ * 导致第二次操作设置的 pendingAction 永远等不到清空信号）。
+ *
+ * 触发事件的那次 RPC/流式命令的 request_id 才是"这是不是同一次操作"的权威标识——后端已经把
+ * chat 前缀、goal 前缀，以及 runtime.accepted / execution.error 这几类事件的
+ * payload.request_id 回填好（见 web_connect.py `_build_event_payload`）。有 request_id 时
+ * 优先用它区分；事件类型本身不带 request_id 的（多数其它事件）维持原来的纯内容比对，行为不变。
+ */
 function makeEventDedupKey(eventName: string, payload: Record<string, unknown>): string {
   const payloadSessionId =
     typeof payload.session_id === 'string' ? payload.session_id : '';
   const payloadEventType =
     typeof payload.event_type === 'string' ? payload.event_type : '';
-  const payloadSnapshot = stringifyPayloadForDedup(payload);
-  return `${eventName}::${payloadSessionId}::${payloadEventType}::${payloadSnapshot}`;
+  const payloadRequestId =
+    typeof payload.request_id === 'string' ? payload.request_id : '';
+  const contentKey = payloadRequestId ? `rid:${payloadRequestId}` : stringifyPayloadForDedup(payload);
+  return `${eventName}::${payloadSessionId}::${payloadEventType}::${contentKey}`;
 }
 
 export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
@@ -1300,27 +1322,26 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           }
           return;
         }
-        // 没有数据可落——pendingAction 会在 goal.snapshot/goal.updated/execution.error 事件到达时
-        // 清掉（applyGoalSnapshot -> applyIncomingGoal）。协议文档确认这条流式失败事件的 payload
-        // 也一定带 goal 字段（哪怕是 null），所以 resume 的业务层失败不需要额外兜底 get。
-        if (action === 'set') {
-          // set 是 fire-and-forget，正常路径下应该很快会收到 goal.snapshot/execution.error
-          // 把 pendingAction 清掉。这里延迟 GOAL_SET_CONVERGENCE_DELAY_MS 后补一次兜底 get，
-          // 只覆盖"事件真的丢了"这类小概率情况（尤其是这个 session 第一次设置目标时，1 分钟
-          // 无更新兜底轮询要求 store 里已有非空 goal 才会巡检，覆盖不到这个场景）——不在发送后
-          // 立刻发，是因为立刻发会跟真正的 snapshot 赛跑，赢了反而用 set 落地前的旧数据提前
-          // 清掉 pendingAction，重新打开"按钮提前解禁、能打出冲突指令"的窗口，等于没解决问题。
-          window.setTimeout(() => {
-            // 到点一看 pendingAction 已经不是 'set' 了，说明真正的事件已经收敛过一次，不需要
-            // 再补——不管是被这次 set 自己的事件清的，还是用户切走后又发起了别的操作。
-            if (useGoalStore.getState().runtimes[sessionId]?.pendingAction !== 'set') return;
-            void requestGoalAction({ sessionId, action: 'get', mode })
-              .then((goal) => applyIncomingGoal(sessionId, goal, goalCompletedHideTimerRef.current, lastGoalEventAtRef.current))
-              .catch(() => {
-                // 静默失败：这只是收敛用的兜底 get，真正的状态最终仍由 goal.updated 事件驱动。
-              });
-          }, GOAL_SET_CONVERGENCE_DELAY_MS);
-        }
+        // 没有数据可落——pendingAction 正常应该在 goal.snapshot/goal.updated/execution.error/
+        // runtime.accepted 事件到达时被清掉（applyGoalSnapshot -> applyIncomingGoal，或
+        // runtime.accepted 的专属处理）。但两类事件都可能因为各种原因没能把这次操作的
+        // pendingAction 清空——比如 bug001：同一 session 在 EVENT_DEDUP_WINDOW_MS 窗口内被
+        // resume 两次，第二次自己的确认事件因为内容跟第一次相同，被事件去重逻辑当成"重复事件"
+        // 丢弃（已经用 request_id 让去重更精确，但作为双保险，这里 set/resume 都统一补一次
+        // 收敛兜底 get，避免未来再出现类似的"确认事件丢失"场景时按钮又卡死到 60s 那么久）。
+        // 不在发送后立刻补，是因为立刻发会跟真正的 snapshot 赛跑，赢了反而用 set/resume 落地前
+        // 的旧数据提前清掉 pendingAction，重新打开"按钮提前解禁、能打出冲突指令"的窗口，等于
+        // 没解决问题。
+        window.setTimeout(() => {
+          // 到点一看 pendingAction 已经不是这次发起的 action 了，说明真正的事件已经收敛过一次，
+          // 不需要再补——不管是被这次操作自己的事件清的，还是用户切走后又发起了别的操作。
+          if (useGoalStore.getState().runtimes[sessionId]?.pendingAction !== action) return;
+          void requestGoalAction({ sessionId, action: 'get', mode })
+            .then((goal) => applyIncomingGoal(sessionId, goal, goalCompletedHideTimerRef.current, lastGoalEventAtRef.current))
+            .catch(() => {
+              // 静默失败：这只是收敛用的兜底 get，真正的状态最终仍由 goal.updated 事件驱动。
+            });
+        }, GOAL_ACTION_CONVERGENCE_DELAY_MS);
         return;
       }
 
@@ -1376,9 +1397,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const sendMessage = useCallback(
     async (content: string, sessionId: string, mediaItems: MediaItem[] = []): Promise<boolean> => {
       const hasMedia = mediaItems.length > 0;
-      // User-visible text is required; attachment-only / 【上传文档】-only payloads
-      // must not send (matches InputArea canSubmit / handleSubmit).
-      if (!stripUploadDocumentBlocks(content).trim()) return false;
+      // Attachment-only payloads are allowed when mediaItems are present.
+      // 【上传文档】-only text without any mediaItems is still blocked.
+      if (!stripUploadDocumentBlocks(content).trim() && !hasMedia) return false;
 
       const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
       const unsupportedEvolutionMode = unsupportedEvolutionModeMessage(content, currentMode ?? 'agent');
@@ -3001,10 +3022,22 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (shouldDropDuplicatedEvent('goal.updated', payload)) return;
         applyGoalSnapshot(payload);
       }),
-      webClient.on('runtime.accepted', () => {
-        // Goal 的 loading 结束统一以 goal.snapshot 为准（文档 §4 中 set/resume 均先于
-        // runtime.accepted 下发 goal.snapshot）；这里仅作为通用 ACK 占位，不做任何状态变更，
+      webClient.on('runtime.accepted', ({ payload }) => {
+        if (shouldDropDuplicatedEvent('runtime.accepted', payload)) return;
+        // Goal 的 loading 正常路径下统一以 goal.snapshot 为准（文档 §4 中 set/resume 均先于
+        // runtime.accepted 下发 goal.snapshot，实测 bug001 复现日志里 16/16 次 resume 也确认了
+        // 这个顺序），所以这里大多数时候只是个通用 ACK 占位。但 goalStore.ts 里 pendingAction
+        // 字段的注释本来就写明"收到 goal.snapshot 或 runtime.accepted 后清空"——留一个防御性
+        // 兜底：如果这个 session 的 pendingAction 还没被 goal.snapshot 清掉（比如极端情况下
+        // goal.snapshot 真的没发下来，只有这一条 runtime.accepted；或者它本身就是被去重逻辑
+        // 丢弃的那次操作的确认），就在这里把它清掉，避免编辑/暂停/删除按钮无限期置灰。
         // 不当作错误、不重试、不新增消息（文档 §6.1）。
+        const sessionId = getPayloadSessionId(payload);
+        if (!sessionId) return;
+        const pendingAction = useGoalStore.getState().runtimes[sessionId]?.pendingAction;
+        if (pendingAction === 'resume' || pendingAction === 'set') {
+          useGoalStore.getState().setPendingAction(sessionId, null);
+        }
       }),
       webClient.on('execution.error', ({ payload }) => {
         const goal = payload.goal;
