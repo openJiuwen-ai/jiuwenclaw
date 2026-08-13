@@ -2,6 +2,7 @@
 
 import logging
 import asyncio
+import re
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -9,7 +10,6 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Callable, Awaitable
 
 from jiuwenswarm.common.schema.message import Message
-from jiuwenswarm.gateway.routing.keys import DeliveryTarget
 from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
 
 
@@ -169,21 +169,31 @@ class BaseChannel(ABC):
 
     def is_allowed(self, sender_id: str) -> bool:
         """
-        检查发送者是否被允许使用此机器人
+        检查发送者是否被允许使用此机器人。
+
+        空白名单或 ``["*"]`` 允许所有发送者；其他值既支持发送者 ID
+        精确匹配，也支持正则表达式整串匹配。
         """
         allow_list = getattr(self.config, "allow_from", [])
 
-        # If no allow list, allow everyone
-        if not allow_list:
+        if not allow_list or "*" in allow_list:
             return True
 
         sender_str = str(sender_id)
-        if sender_str in allow_list:
-            return True
+        candidates = [sender_str]
         if "|" in sender_str:
-            for part in sender_str.split("|"):
-                if part and part in allow_list:
-                    return True
+            candidates.extend(part for part in sender_str.split("|") if part)
+
+        for candidate in candidates:
+            if candidate in allow_list:
+                return True
+            for pattern in allow_list:
+                try:
+                    if re.fullmatch(str(pattern), candidate):
+                        return True
+                except re.error:
+                    logger.warning("Invalid allow_from regex ignored: %r", pattern)
+                    continue
         return False
 
     async def _handle_message(
