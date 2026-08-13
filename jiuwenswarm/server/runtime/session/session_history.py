@@ -166,8 +166,14 @@ def _history_jsonl_file(
 
 
 def use_legacy_history_json() -> bool:
-    raw = str(os.environ.get(_LEGACY_HISTORY_ENV, "") or "").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
+    """Prefer ``history.json`` (JSONL content) to align with OfficeClaw / test layout.
+
+    Set ``JIUWENSWARM_USE_LEGACY_HISTORY_JSON=0`` to force ``history.jsonl`` writes.
+    """
+    raw = os.environ.get(_LEGACY_HISTORY_ENV)
+    if raw is None or not str(raw).strip():
+        return True
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def get_write_history_path(session_id: str, sessions_root: str | None = None) -> Path:

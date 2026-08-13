@@ -501,7 +501,13 @@ class AgentManager:
                 sub_mode_key or None,
                 project_dir or None,
             )
-            agent = JiuWenSwarm()
+            agent = JiuWenSwarm(
+                user_workspace_dir=str(self._user_workspace_dir)
+                if self._user_workspace_dir is not None
+                else None,
+                agent_id=self.agent_id,
+                service_id=self.service_id,
+            )
             setattr(agent, "_env_agent_id", self._env_agent_id)
             setattr(agent, "_env_service_id", self._env_service_id)
             if self._user_workspace_dir is not None:

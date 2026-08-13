@@ -28,12 +28,12 @@ def test_get_rail_manager_requires_scope():
 def test_rail_manager_pool_isolates_tenants(monkeypatch, tmp_path):
     monkeypatch.setenv("AGENT_RUNTIME", "1")
 
-    def _workspace(workspace_key: str) -> Path:
+    def _workspace(service_id: str, agent_id: str | None = None) -> Path:
         mapping = {
-            tenant_workspace_key("svc-a", "agent-1"): tmp_path / "tenant-a",
-            tenant_workspace_key("svc-b", "agent-2"): tmp_path / "tenant-b",
+            ("svc-a", "agent-1"): tmp_path / "tenant-a",
+            ("svc-b", "agent-2"): tmp_path / "tenant-b",
         }
-        return mapping.get(workspace_key, tmp_path / workspace_key)
+        return mapping.get((service_id, agent_id), tmp_path / f"{service_id}_{agent_id}")
 
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.common.plugins.rail_manager.get_multi_tenant_user_workspace_dir",

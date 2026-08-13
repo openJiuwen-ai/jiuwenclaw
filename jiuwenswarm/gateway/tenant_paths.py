@@ -66,13 +66,14 @@ def resolve_channel_agent_workspace(
     *,
     workspace_key: str | None = None,
 ) -> Path:
-    """``workspace_{key}/agent/workspace`` (jiuwenswarm layout)."""
-    wk = (workspace_key or "").strip()
-    if not wk:
-        # Transition: channels not yet passing policy workspace_dir keep routing-derived key.
-        sid, aid = normalize_channel_tenant_ids(service_id, agent_id)
-        wk = "default" if sid == "default" and aid == "default" else f"{sid}_{aid}"
-    base = get_multi_tenant_user_workspace_dir(wk)
+    """``service_{sid}/agent_{aid}/agent/workspace`` (jiuwenswarm layout)."""
+    del workspace_key  # legacy kw; disk isolation is service_id + agent_id
+    sid, aid = normalize_channel_tenant_ids(service_id, agent_id)
+    base = get_multi_tenant_user_workspace_dir(sid, aid)
+    if base is None:
+        raise TypeError(
+            f"invalid tenant for channel workspace: service_id={sid!r}, agent_id={aid!r}"
+        )
     return base / "agent" / "workspace"
 
 

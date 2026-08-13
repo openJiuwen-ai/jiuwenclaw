@@ -1150,11 +1150,19 @@ def prepare_workspace(
         ):
             shutil.copy2(env_template_src, env_dest)
 
-    # ----- copy runtime dirs (new layout) -----
-    agent_root = workspace_dir / "agent"
+    # ----- copy runtime dirs (multi-tenant layout) -----
+    service_root = get_service_root_dir()
+    service_root.mkdir(parents=True, exist_ok=True)
+    (service_root / ".logs").mkdir(parents=True, exist_ok=True)
+
+    agent_workspace = get_multi_tenant_user_workspace_dir("default", "default")
+    if agent_workspace is None:
+        raise RuntimeError("failed to resolve default multi-tenant workspace")
+    agent_workspace.mkdir(parents=True, exist_ok=True)
+    (agent_workspace / ".checkpoint").mkdir(parents=True, exist_ok=True)
+    agent_root = agent_workspace / "agent"
+    agent_root.mkdir(parents=True, exist_ok=True)
     agent_sessions = agent_root / "sessions"
-    (agent_root / ".checkpoint").mkdir(parents=True, exist_ok=True)
-    (agent_root / ".logs").mkdir(parents=True, exist_ok=True)
 
     # ----- DeepAgent workspace (standard DeepAgents schema) -----
     deepagent_workspace = agent_root / "workspace"
@@ -1431,7 +1439,12 @@ def _resolve_paths(force=False) -> None:
     # 优先使用已初始化的用户工作区 (~/.jiuwenswarm)，
     # 保证源码运行与安装包运行后的读写路径完全一致。
     user_config_dir = workspace_dir / "config"
-    user_workspace_dir = workspace_dir / "agent" / "workspace"
+    # 多租户路径：service_default/agent_default/agent/workspace
+    multi_tenant_workspace = get_multi_tenant_user_workspace_dir("default", "default")
+    if multi_tenant_workspace is not None:
+        user_workspace_dir = multi_tenant_workspace / "agent" / "workspace"
+    else:
+        user_workspace_dir = workspace_dir / "agent" / "workspace"
     if user_config_dir.exists():
         _root_dir = workspace_dir
         _config_dir = user_config_dir
@@ -1492,8 +1505,18 @@ def get_agent_workspace_dir() -> Path:
     It contains standard nodes like skills, memory, todo, messages, etc.
 
     Returns:
-        Path to agent workspace: ~/.jiuwenswarm/agent/workspace
+        Path to agent workspace:
+        ``~/.jiuwenswarm/service_default/agent_default/agent/workspace``
+        (or the request-bound tenant workspace when ContextVar is set).
     """
+    try:
+        from jiuwenswarm.server.runtime.tenant_context import get_bound_jiuwenclaw_workspace
+
+        bound = get_bound_jiuwenclaw_workspace()
+        if bound is not None:
+            return bound
+    except ImportError:
+        logger.debug("tenant_context unavailable for workspace bind", exc_info=True)
     return get_agent_root_dir() / "workspace"
 
 
@@ -1537,22 +1560,45 @@ def get_prompt_attachment_dir() -> Path:
     return get_agent_workspace_dir() / "prompt_attachment"
 
 
+def get_service_root_dir(service_id: str = "default") -> Path:
+    """Get the service-level directory path.
+
+    多租户架构下，service 级别存放共享数据（如日志）。
+    Path: ``~/.jiuwenswarm/service_{service_id}/``
+    """
+    sid = str(service_id or "default").strip() or "default"
+    return get_user_workspace_dir() / f"service_{sid}"
+
+
 def get_agent_root_dir() -> Path:
-    return get_user_workspace_dir() / "agent"
+    """Get the agent root directory path (multi-tenant default).
+
+    Path: ``~/.jiuwenswarm/service_default/agent_default/agent/``
+    (or the request-bound agent root when ContextVar is set).
+    """
+    try:
+        from jiuwenswarm.server.runtime.tenant_context import get_bound_agent_root
+
+        bound = get_bound_agent_root()
+        if bound is not None:
+            return bound
+    except ImportError:
+        logger.debug("tenant_context unavailable for agent root bind", exc_info=True)
+    return get_multi_tenant_user_workspace_dir("default", "default") / "agent"
 
 
 def get_agent_root_relative_dir() -> Path:
-    """Get the agent root relative path under user workspace."""
+    """Get the agent root relative path under a tenant workspace root."""
     return Path("agent")
 
 
 def get_agent_workspace_relative_dir() -> Path:
-    """Get the agent workspace relative path under user workspace."""
+    """Get the agent workspace relative path under a tenant workspace root."""
     return get_agent_root_relative_dir() / "workspace"
 
 
 def get_agent_sessions_relative_dir() -> Path:
-    """Get the agent sessions relative path under user workspace."""
+    """Get the agent sessions relative path under a tenant workspace root."""
     return get_agent_root_relative_dir() / "sessions"
 
 
@@ -1561,7 +1607,7 @@ def _normalize_tenant_id(value: str | None) -> str:
 
 
 def _require_tenant_ids(service_id: str | None, agent_id: str | None) -> tuple[str, str]:
-    """白名单等逻辑要求 ``service_id`` 与 ``agent_id`` 均非空（不再用于路径拼接）."""
+    """Require non-empty ``service_id`` and ``agent_id`` for path construction."""
     sid = _normalize_tenant_id(service_id)
     aid = _normalize_tenant_id(agent_id)
     if not sid or not aid:
@@ -1571,58 +1617,94 @@ def _require_tenant_ids(service_id: str | None, agent_id: str | None) -> tuple[s
     return sid, aid
 
 
-def _require_workspace_key(workspace_key: str | None) -> str:
-    wk = _normalize_tenant_id(workspace_key)
-    if not wk:
-        raise ValueError(f"workspace_key required: workspace_key={workspace_key!r}")
-    return wk
-
-
-def get_multi_tenant_user_workspace_dir(workspace_key: str) -> Path:
+def get_multi_tenant_user_workspace_dir(
+    service_id: str | None,
+    agent_id: str | None = None,
+) -> Path | None:
     """Get multi-tenant user workspace directory path.
 
-    仅按 ``workspace_key`` 生成目录::
+    Path format: ``~/.jiuwenswarm/service_{service_id}/agent_{agent_id}``
 
-        <user_workspace>/workspace_{workspace_key}
-
-    Only meaningful for enterprise (AGENT_RUNTIME) multi-tenant isolation.
+    Aligns with test/jiuwenclaw and OfficeClaw on-disk layout
+    (e.g. ``service_default/agent_office``).
     """
-    wk = _require_workspace_key(workspace_key)
-    return get_user_workspace_dir() / f"workspace_{wk}"
+    if not service_id and not agent_id:
+        return None
+    workspace_dir = get_user_workspace_dir()
+    workspace_dir = (
+        workspace_dir / f"service_{service_id}" if service_id else workspace_dir / "service"
+    )
+    workspace_dir = (
+        workspace_dir / f"agent_{agent_id}" if agent_id else workspace_dir / "agents"
+    )
+    return workspace_dir
 
 
-def get_tenant_agent_workspace_dir(workspace_key: str | None = None) -> Path:
-    """多租户 DeepAgent 工作区：``workspace_{key}/agent/workspace``.
+def resolve_tenant_env_ns(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> tuple[str, str]:
+    """Resolve ``(service_id, agent_id)``: explicit pair > bound env_ns > TypeError."""
+    from jiuwenswarm.common.local_env_config import get_bound_agent_env_ns
 
-    必须提供 ``workspace_key``。
-    """
-    wk = _require_workspace_key(workspace_key)
-    return get_multi_tenant_user_workspace_dir(wk) / get_agent_workspace_relative_dir()
+    if service_id is not None or agent_id is not None:
+        if service_id is None or agent_id is None:
+            raise TypeError(
+                "tenant scope requires both service_id and agent_id when either is passed"
+            )
+        sid = str(service_id).strip()
+        aid = str(agent_id).strip()
+        if not sid or not aid:
+            raise TypeError("tenant service_id/agent_id must be non-empty strings")
+        return sid, aid
+    bound = get_bound_agent_env_ns()
+    if bound is not None:
+        return bound
+    raise TypeError(
+        "tenant scope is required: pass service_id=... and agent_id=..., "
+        "or bind_agent_env_ns before resolving tenant paths"
+    )
+
+
+def get_tenant_agent_workspace_dir(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> Path:
+    """多租户 DeepAgent 工作区：``service_{sid}/agent_{aid}/agent/workspace``."""
+    sid, aid = resolve_tenant_env_ns(service_id, agent_id)
+    workspace = get_multi_tenant_user_workspace_dir(sid, aid)
+    if workspace is None:
+        raise TypeError(
+            f"invalid tenant for workspace path: service_id={sid!r}, agent_id={aid!r}"
+        )
+    return workspace / get_agent_workspace_relative_dir()
 
 
 # 兼容旧命名（上游 jiuwenclaw_workspace）
 get_tenant_agent_jiuwenclaw_workspace_dir = get_tenant_agent_workspace_dir
 
 
-def get_tenant_agent_skills_dirs(workspace_key: str | None = None) -> list[Path]:
-    """多租户 skills 目录（与 ``JiuWenSwarm`` / ``SkillManager`` 落盘路径一致）.
-
-    必须提供 ``workspace_key``。单租户请用 ``get_multi_tenant_skill_dirs``
-    或 ``get_agent_skills_dir()``。
-    """
-    workspace = get_tenant_agent_workspace_dir(workspace_key=workspace_key)
+def get_tenant_agent_skills_dirs(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> list[Path]:
+    """多租户 skills 目录（与 ``JiuWenSwarm`` / ``SkillManager`` 落盘路径一致）."""
+    workspace = get_tenant_agent_workspace_dir(service_id, agent_id)
     return [workspace / "skills"]
 
 
-def get_multi_tenant_skill_dirs(workspace_key: str | None = None) -> list[Path]:
+def get_multi_tenant_skill_dirs(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> list[Path]:
     """Resolve the skills directory list for multi-tenant / single-tenant mode.
 
-    - Multi-tenant（提供 ``workspace_key``）: returns
-      ``[workspace_{key}/agent/workspace/skills]``.
-    - Single-tenant（无 ``workspace_key``）: returns ``[get_agent_skills_dir()]``.
+    - Multi-tenant（提供 ``service_id`` / ``agent_id``）: returns
+      ``[service_{sid}/agent_{aid}/agent/workspace/skills]``.
+    - Single-tenant（均未提供）: returns ``[get_agent_skills_dir()]``.
     """
-    if workspace_key:
-        return get_tenant_agent_skills_dirs(workspace_key=workspace_key)
+    if service_id or agent_id:
+        return get_tenant_agent_skills_dirs(service_id, agent_id)
     return [get_agent_skills_dir()]
 
 
@@ -1718,7 +1800,7 @@ def get_interactions_dir() -> Path:
 
 def get_cron_jobs_path() -> Path:
     """Legacy global cron_jobs.json (pre-tenant Gateway). Prefer per-tenant helpers."""
-    return get_user_workspace_dir() / "agent" / "home" / "cron_jobs.json"
+    return get_agent_home_dir() / "cron_jobs.json"
 
 
 def resolve_gateway_cron_jobs_path(
@@ -1738,15 +1820,34 @@ def resolve_gateway_cron_jobs_path(
     )
 
 
-def resolve_tenant_agent_root_dir(workspace_key: str | None = None) -> Path:
-    """``workspace_{key}/agent`` under the user workspace."""
-    wk = (workspace_key or "").strip() or "default"
-    return get_multi_tenant_user_workspace_dir(wk) / "agent"
+def resolve_tenant_agent_root_dir(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> Path:
+    """Resolve ``service_{sid}/agent_{aid}/agent``."""
+    sid, aid = resolve_tenant_env_ns(service_id, agent_id)
+    workspace = get_multi_tenant_user_workspace_dir(sid, aid)
+    if workspace is None:
+        raise TypeError(
+            f"invalid tenant for agent root: service_id={sid!r}, agent_id={aid!r}"
+        )
+    return workspace / "agent"
 
 
-def resolve_tenant_sessions_dir(workspace_key: str | None = None) -> Path:
-    """``workspace_{key}/agent/sessions`` for a workspace key."""
-    return resolve_tenant_agent_root_dir(workspace_key) / "sessions"
+def resolve_tenant_agent_workspace_dir(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> Path:
+    """Resolve ``service_{sid}/agent_{aid}/agent/workspace``."""
+    return resolve_tenant_agent_root_dir(service_id, agent_id) / "workspace"
+
+
+def resolve_tenant_sessions_dir(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> Path:
+    """Resolve ``service_{sid}/agent_{aid}/agent/sessions`` for a tenant pair."""
+    return resolve_tenant_agent_root_dir(service_id, agent_id) / "sessions"
 
 
 def resolve_cron_tenant_scope(
@@ -1865,15 +1966,23 @@ def get_builtin_skills_dir() -> Path:
 
 
 def get_agent_sessions_dir() -> Path:
+    """Get sessions directory (bound tenant or ``service_default/agent_default``).
+
+    Path: ``~/.jiuwenswarm/service_default/agent_default/agent/sessions``
+    """
     return get_agent_root_dir() / "sessions"
 
 
-def get_agent_evolution_trajectories_dir() -> Path:
-    """Get the default evolution execution trajectories directory.
+def get_agent_evolution_trajectories_dir(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> Path:
+    """Get the evolution execution trajectories directory.
 
-    Default path under the agent root, e.g.
-    ``~/.jiuwenswarm/agent/evolution_trajectories``.
+    Path: ``service_{sid}/agent_{aid}/agent/evolution_trajectories``
     """
+    if service_id is not None or agent_id is not None:
+        return resolve_tenant_agent_root_dir(service_id, agent_id) / "evolution_trajectories"
     return get_agent_root_dir() / "evolution_trajectories"
 
 
@@ -1916,43 +2025,47 @@ def resolve_git_branch(project_dir: str | None) -> str:
     return branch
 
 
-_legacy_migration_done: bool = False
-
-
-def _migrate_legacy_checkpoint_and_logs() -> None:
-    """One-time migration: move ~/.jiuwenswarm/.checkpoint and .logs to ~/.jiuwenswarm/agent/."""
-    global _legacy_migration_done
-    if _legacy_migration_done:
-        return
-    _legacy_migration_done = True
-
-    workspace = get_user_workspace_dir()
-    agent_root = workspace / "agent"
-
-    for name in (".checkpoint", ".logs"):
-        legacy = workspace / name
-        new_path = agent_root / name
-        if legacy.exists() and not new_path.exists():
-            agent_root.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(legacy), str(new_path))
-
-
 def get_checkpoint_dir() -> Path:
-    _migrate_legacy_checkpoint_and_logs()
-    return get_agent_root_dir() / ".checkpoint"
+    """Get the default checkpoint directory (agent_default).
+
+    Path: ``~/.jiuwenswarm/service_default/agent_default/.checkpoint``
+
+    Per-agent isolation uses ``set_checkpoint`` / ``get_multi_tenant_user_workspace_dir``.
+    """
+    workspace = get_multi_tenant_user_workspace_dir("default", "default")
+    if workspace:
+        return workspace / ".checkpoint"
+    return get_agent_root_dir().parent / ".checkpoint"
 
 
-def get_logs_dir() -> Path:
-    """Get the logs directory path.
+def _resolve_logs_service_id(service_id: str | None = None) -> str:
+    """Resolve service_id for logs: explicit > bound env_ns > default."""
+    if service_id is not None:
+        return str(service_id).strip() or "default"
+    try:
+        from jiuwenswarm.common.local_env_config import get_bound_agent_env_ns
 
-    Prefer ``LOG_ROOT_PATH`` when set (e.g. container-local disk instead of NFS
-    workspace). Otherwise use ``~/.jiuwenswarm/agent/.logs`` after legacy migration.
+        ns = get_bound_agent_env_ns()
+        if ns is not None:
+            return str(ns[0]).strip() or "default"
+    except Exception:
+        logger.debug("resolve logs service_id from bound env_ns failed", exc_info=True)
+    return "default"
+
+
+def get_logs_dir(service_id: str | None = None) -> Path:
+    """Get the logs directory path (service-level).
+
+    Path: ``~/.jiuwenswarm/service_{sid}/.logs``
+
+    ``service_id`` 解析顺序：显式参数 > 当前 ``bind_agent_env_ns`` 的 sid > ``default``。
+    进程启动时的 FileHandler（``setup_logger``）通常无 bind，仍落在 ``service_default/.logs``。
     """
     log_root_path = os.getenv("LOG_ROOT_PATH", "").strip()
     if log_root_path:
         return Path(log_root_path).expanduser().resolve()
-    _migrate_legacy_checkpoint_and_logs()
-    return get_agent_root_dir() / ".logs"
+    sid = _resolve_logs_service_id(service_id)
+    return get_service_root_dir(sid) / ".logs"
 
 
 def get_xy_tmp_dir() -> Path:

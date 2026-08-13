@@ -105,13 +105,15 @@ def _resolve_tenant_agent_workspace_dir(
     *,
     workspace_key: str | None = None,
 ) -> Path:
-    """``workspace_{key}/agent/workspace`` (jiuwenswarm layout)."""
+    """``service_{sid}/agent_{aid}/agent/workspace`` (jiuwenswarm layout)."""
+    del workspace_key  # legacy kw; disk isolation is service_id + agent_id
     sid = normalize_tenant_scope_id(service_id)
     aid = normalize_tenant_scope_id(agent_id)
-    wk = (workspace_key or "").strip()
-    if not wk:
-        wk = "default" if sid == "default" and aid == "default" else f"{sid}_{aid}"
-    base = get_multi_tenant_user_workspace_dir(wk)
+    base = get_multi_tenant_user_workspace_dir(sid, aid)
+    if base is None:
+        raise TypeError(
+            f"invalid tenant for workspace: service_id={sid!r}, agent_id={aid!r}"
+        )
     return base / "agent" / "workspace"
 
 

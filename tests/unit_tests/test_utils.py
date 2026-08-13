@@ -407,15 +407,18 @@ class TestHardcodedPathsPhase2:
 
     @staticmethod
     def test_cron_tools_path_equivalence():
-        """Test cron_tools.py path matches expected structure (cross-platform)."""
+        """Test cron_tools.py path matches expected multi-tenant structure."""
         from jiuwenswarm.common.utils import get_agent_home_dir, get_user_workspace_dir
 
-        # Original hardcoded: get_user_workspace_dir() / "agent" / "home" / "cron_jobs.json"
-        # New: get_agent_home_dir() / "cron_jobs.json"
-        # get_agent_home_dir() = get_user_workspace_dir() / "agent" / "home"
-
         workspace = get_user_workspace_dir()
-        expected_path = workspace / "agent" / "home" / "cron_jobs.json"
+        expected_path = (
+            workspace
+            / "service_default"
+            / "agent_default"
+            / "agent"
+            / "home"
+            / "cron_jobs.json"
+        )
         actual_path = get_agent_home_dir() / "cron_jobs.json"
 
         assert str(actual_path.resolve()) == str(expected_path.resolve()), \
@@ -435,7 +438,14 @@ class TestHardcodedPathsPhase2:
         from jiuwenswarm.common.utils import get_user_workspace_dir
 
         workspace = get_user_workspace_dir()
-        expected_path = workspace / "agent" / "workspace" / "task-data.json"
+        expected_path = (
+            workspace
+            / "service_default"
+            / "agent_default"
+            / "agent"
+            / "workspace"
+            / "task-data.json"
+        )
         actual_path = Path(_get_task_data_path())
 
         assert str(actual_path.resolve()) == str(expected_path.resolve()), \
@@ -454,7 +464,14 @@ class TestHardcodedPathsPhase2:
         from jiuwenswarm.common.utils import get_deepagent_user_md_path, get_user_workspace_dir
 
         workspace = get_user_workspace_dir()
-        expected_path = workspace / "agent" / "workspace" / "USER.md"
+        expected_path = (
+            workspace
+            / "service_default"
+            / "agent_default"
+            / "agent"
+            / "workspace"
+            / "USER.md"
+        )
         actual_path = get_deepagent_user_md_path()
 
         assert str(actual_path.resolve()) == str(expected_path.resolve()), \
@@ -475,7 +492,9 @@ class TestAdditionalHardcodedPaths:
         from jiuwenswarm.server.runtime.runtime_scope import RuntimeScopeKey
 
         scope = RuntimeScopeKey.from_ids()
-        workspace = get_multi_tenant_user_workspace_dir(scope.workspace_key)
+        workspace = get_multi_tenant_user_workspace_dir(
+            scope.service_id, scope.agent_id
+        )
         expected_path = workspace / "agent" / "workspace" / "extensions"
         import os
         os.environ["AGENT_RUNTIME"] = "1"
@@ -514,7 +533,14 @@ class TestAdditionalHardcodedPaths:
         from jiuwenswarm.common.utils import get_interactions_dir, get_user_workspace_dir
 
         workspace = get_user_workspace_dir()
-        expected_path = workspace / "agent" / "workspace" / "interactions"
+        expected_path = (
+            workspace
+            / "service_default"
+            / "agent_default"
+            / "agent"
+            / "workspace"
+            / "interactions"
+        )
         actual_path = get_interactions_dir()
 
         assert str(actual_path.resolve()) == str(expected_path.resolve()), \

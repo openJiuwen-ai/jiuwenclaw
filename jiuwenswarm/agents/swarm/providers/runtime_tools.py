@@ -135,7 +135,7 @@ def _is_send_file_enabled(config: dict[str, Any] | None, channel_id: str) -> boo
             config.get("channels", {}).get(str(channel_id), {}).get("send_file_allowed")
         )
     if send_file_allowed is None:
-        return channel_id == "web"
+        return channel_id in {"web", "officeclaw"}
     return bool(send_file_allowed)
 
 

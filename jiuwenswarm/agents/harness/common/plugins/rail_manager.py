@@ -91,7 +91,11 @@ class RailManager:
     def _resolve_extensions_dir(self) -> Path:
         import os
         if os.getenv("AGENT_RUNTIME", "").strip():
-            workspace = get_multi_tenant_user_workspace_dir(self.workspace_key)
+            workspace = get_multi_tenant_user_workspace_dir(
+                self.service_id, self.agent_id
+            )
+            if workspace is None:
+                return get_agent_workspace_dir() / "extensions"
             return workspace / "agent" / "workspace" / "extensions"
         return get_agent_workspace_dir() / "extensions"
 

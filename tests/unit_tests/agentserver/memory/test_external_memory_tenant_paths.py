@@ -23,11 +23,15 @@ from tests.unit_tests.tenant_workspace_test_helpers import (
 
 def test_resolve_ltm_dir_isolates_tenants(tmp_path, monkeypatch):
     patch_multi_tenant_workspace_dirs(monkeypatch, tmp_path)
-    monkeypatch.setattr(emc, "get_multi_tenant_user_workspace_dir", lambda wk: tenant_workspace_root(tmp_path, wk))
+    monkeypatch.setattr(
+        emc,
+        "get_multi_tenant_user_workspace_dir",
+        lambda sid, aid=None: tenant_workspace_root(tmp_path, sid, aid),
+    )
     office = emc._resolve_ltm_dir("default", "office")
     default = emc._resolve_ltm_dir("default", "default")
     assert office != default
-    assert tenant_workspace_key("default", "office") in str(office)
+    assert "agent_office" in str(office)
     assert office.name == "ltm"
     assert office.exists()
 
@@ -75,12 +79,17 @@ def test_resolve_openjiuwen_store_paths_falls_back_to_tenant_ltm(tmp_path, monke
 
 def test_resolve_ltm_dir_uses_bound_agent_env_ns(tmp_path, monkeypatch):
     patch_multi_tenant_workspace_dirs(monkeypatch, tmp_path)
-    monkeypatch.setattr(emc, "get_multi_tenant_user_workspace_dir", lambda wk: tenant_workspace_root(tmp_path, wk))
+    monkeypatch.setattr(
+        emc,
+        "get_multi_tenant_user_workspace_dir",
+        lambda sid, aid=None: tenant_workspace_root(tmp_path, sid, aid),
+    )
     reset_local_env_state_for_tests()
     ns = bind_agent_env_ns("bound_svc", "bound_aid")
     try:
         path = emc._resolve_ltm_dir()
-        assert tenant_workspace_key("bound_svc", "bound_aid") in str(path)
+        assert "service_bound_svc" in str(path)
+        assert "agent_bound_aid" in str(path)
     finally:
         reset_agent_env_ns(ns)
         reset_local_env_state_for_tests()

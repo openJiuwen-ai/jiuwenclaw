@@ -971,12 +971,12 @@ class JiuWenSwarm:
     ) -> None:
         self._adapter: AgentAdapter | None = None
         self._sdk_name: str | None = None
-        # 企业多租户：AGENT_RUNTIME 下 user_workspace_dir 为租户根，再拼相对 workspace/sessions
+        # 多租户：user_workspace_dir 为租户根（service_{sid}/agent_{aid}），再拼相对 workspace/sessions
         enterprise = bool(os.getenv("AGENT_RUNTIME", "").strip())
         self._agent_id = agent_id if enterprise else None
         self._service_id = service_id if enterprise else None
         tenant_root = user_workspace_dir or (workspace_dir if enterprise else None)
-        if enterprise and tenant_root:
+        if tenant_root:
             user_ws = Path(tenant_root)
             self._workspace_dir = str(user_ws / get_agent_workspace_relative_dir())
             self._sessions_dir: Path | None = user_ws / get_agent_sessions_relative_dir()
@@ -990,8 +990,8 @@ class JiuWenSwarm:
         self._skilldev_service = None
 
     def _history_kwargs(self) -> dict[str, Any]:
-        """企业版 history/metadata 写入时附带 sessions_root."""
-        if self._sessions_dir is not None and os.getenv("AGENT_RUNTIME", "").strip():
+        """history/metadata 写入时附带 sessions_root（租户隔离）."""
+        if self._sessions_dir is not None:
             return {"sessions_root": self._sessions_dir}
         return {}
 
@@ -1073,6 +1073,7 @@ class JiuWenSwarm:
             bind_memory_agent_id,
             bind_memory_workspace_dir,
         )
+        from jiuwenswarm.common.local_env_config import bind_agent_env_ns
 
         ws = Path(self._resolve_workspace_dir())
         agent_root = ws.parent
@@ -1088,8 +1089,14 @@ class JiuWenSwarm:
             or getattr(self, "_agent_id", None)
             or "default"
         )
+        mem_sid = (
+            getattr(self, "_env_service_id", None)
+            or getattr(self, "_service_id", None)
+            or "default"
+        )
         mem_aid_token = bind_memory_agent_id(str(mem_aid))
-        return tenant_tokens, (mem_ws_token, mem_aid_token)
+        env_ns_token = bind_agent_env_ns(str(mem_sid), str(mem_aid))
+        return tenant_tokens, (mem_ws_token, mem_aid_token, env_ns_token)
 
     @staticmethod
     def _reset_tenant_request_context(tenant_tokens: Any, mem_token: Any) -> None:
@@ -1098,9 +1105,14 @@ class JiuWenSwarm:
             reset_memory_agent_id,
             reset_memory_workspace_dir,
         )
+        from jiuwenswarm.common.local_env_config import reset_agent_env_ns
 
         if isinstance(mem_token, tuple):
-            mem_ws_token, mem_aid_token = mem_token
+            if len(mem_token) == 3:
+                mem_ws_token, mem_aid_token, env_ns_token = mem_token
+                reset_agent_env_ns(env_ns_token)
+            else:
+                mem_ws_token, mem_aid_token = mem_token
             reset_memory_agent_id(mem_aid_token)
             reset_memory_workspace_dir(mem_ws_token)
         else:
