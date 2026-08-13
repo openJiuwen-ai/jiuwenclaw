@@ -371,12 +371,20 @@ class UpdaterService:
                     "in the latest release."
                 )
             if len(candidates) > 1:
-                names = ", ".join(asset.name for asset in candidates)
-                raise RuntimeError(
-                    f"Multiple {platform_key} desktop installers "
-                    f"({desktop_suffix}) found in the latest release: {names}"
-                )
-            matched = candidates[0]
+                preferred = [
+                    asset
+                    for asset in candidates
+                    if "workswarm" in asset.name.lower()
+                ]
+                if len(preferred) != 1:
+                    names = ", ".join(asset.name for asset in candidates)
+                    raise RuntimeError(
+                        f"Multiple {platform_key} desktop installers "
+                        f"({desktop_suffix}) found in the latest release: {names}"
+                    )
+                matched = preferred[0]
+            else:
+                matched = candidates[0]
             asset_name = matched.name
         else:
             # Linux desktop updates are outside the rename adaptation and keep
