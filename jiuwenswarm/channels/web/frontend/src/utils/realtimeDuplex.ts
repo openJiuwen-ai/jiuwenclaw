@@ -18,6 +18,8 @@ const INPUT_RATE = 16_000;
 const OUTPUT_RATE = 24_000;
 const SEND_INTERVAL_MS = 1_000;
 const USER_TURN_SILENCE_MS = 900;
+const BARGE_IN_SPEECH_MS = 240;
+const BARGE_IN_RMS_FLOOR = 1_800;
 const BASE_INSTRUCTIONS = [
   '你是九问实时视觉助手。',
   '始终结合当前会话中的近期聊天、近期画面和最新画面回答；最新画面优先，不得把已经消失的物体当成仍在画面中。',
@@ -98,6 +100,9 @@ export class RealtimeDuplexSession {
   private userActivityActive = false;
   private turnHasUserActivity = false;
   private assistantTranscript = '';
+  private bargeInSpeechMs = 0;
+  private forceListenNextChunk = false;
+  private interruptPending = false;
 
   constructor(
     private readonly config: RealtimeDuplexConfig,
@@ -163,6 +168,13 @@ export class RealtimeDuplexSession {
       if (!this.injecting) {
         const level = this.rms(pcm);
         const frameMs = pcm.length * 1_000 / INPUT_RATE;
+        if (this.assistantPlaying && !this.interruptPending) {
+          const threshold = Math.max(BARGE_IN_RMS_FLOOR, this.noiseFloor * 8);
+          this.bargeInSpeechMs = level > threshold ? this.bargeInSpeechMs + frameMs : 0;
+          if (this.bargeInSpeechMs >= BARGE_IN_SPEECH_MS) this.interrupt();
+        } else {
+          this.bargeInSpeechMs = 0;
+        }
         if (level > Math.max(700, this.noiseFloor * 3)) {
           this.lastVoiceAt = Date.now();
           this.userSpeechMs += frameMs;
@@ -208,6 +220,9 @@ export class RealtimeDuplexSession {
     this.playbackContext = null;
     this.pending = [];
     this.pendingSamples = 0;
+    this.forceListenNextChunk = false;
+    this.interruptPending = false;
+    this.bargeInSpeechMs = 0;
     this.pendingTextInputs = [];
     this.hasActiveTask = false;
     this.sessionReady = false;
@@ -218,6 +233,22 @@ export class RealtimeDuplexSession {
     this.userActivityActive = false;
     this.cancelledResponseIds.clear();
     this.callbacks.onState('closed');
+  }
+
+  interrupt(): boolean {
+    if (!this.sessionReady || this.interruptPending
+      || (!this.responseActive && !this.assistantPlaying)) return false;
+    this.interruptPending = true;
+    this.forceListenNextChunk = true;
+    this.bargeInSpeechMs = 0;
+    if (this.assistantTranscript) {
+      this.callbacks.onAssistantText(this.assistantTranscript, true);
+      this.assistantTranscript = '';
+    }
+    this.playbackNode?.port.postMessage({ type: 'clear', cancelResponse: false });
+    this.assistantPlaying = false;
+    this.callbacks.onState('listening');
+    return true;
   }
 
   async sendAudioDataUrl(dataUrl: string, isFresh: () => boolean = () => true): Promise<void> {
@@ -426,10 +457,15 @@ export class RealtimeDuplexSession {
       audio: bytesToBase64(new Uint8Array(fixed.buffer)),
       max_slice_nums: 1,
     };
+    const forcingListen = this.forceListenNextChunk;
+    if (forcingListen) {
+      input.force_listen = true;
+      this.forceListenNextChunk = false;
+    }
     while (this.pendingTextInputs.length && !this.pendingTextInputs[0].isFresh()) {
       this.pendingTextInputs.shift();
     }
-    const pendingText = this.pendingTextInputs.shift();
+    const pendingText = forcingListen ? undefined : this.pendingTextInputs.shift();
     if (pendingText) {
       input.text = pendingText.text;
       input.force_speak = true;
@@ -452,19 +488,22 @@ export class RealtimeDuplexSession {
     } else if (type === 'response.output.delta') {
       const kind = String(event.kind || '');
       if (kind === 'listen') {
+        this.interruptPending = false;
         this.finishOfficialTurn();
         this.callbacks.onState('listening');
       } else if (kind === 'text') {
+        if (this.interruptPending) return;
         this.beginOfficialTurn();
         const delta = String(event.text || '');
         this.assistantTranscript += delta;
         this.callbacks.onAssistantText(this.assistantTranscript, false);
       } else if (kind === 'audio') {
+        if (this.interruptPending) return;
         this.beginOfficialTurn();
         const encoded = String(event.audio || '');
         if (!encoded || !this.playbackNode) return;
         void this.decodeOutputAudio({ format: 'pcm_f32le', sample_rate_hz: OUTPUT_RATE }, encoded).then((output) => {
-          if (!output || !this.playbackNode) return;
+          if (!output || !this.playbackNode || this.interruptPending) return;
           this.assistantPlaying = true;
           this.playbackNode.port.postMessage({ type: 'audio', pcm: output.buffer }, [output.buffer]);
           // The final short audio chunk can finish decoding after the model has

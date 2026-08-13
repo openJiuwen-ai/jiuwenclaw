@@ -1,5 +1,5 @@
 import { ChangeEvent, FormEvent, useCallback, useEffect, useRef, useState } from 'react';
-import { Camera, FileVideo, Mic, Monitor, Send, Square, Video, X } from 'lucide-react';
+import { Camera, FileVideo, Mic, Monitor, Pause, Send, Square, Video, X } from 'lucide-react';
 import { webClient, webRequest } from '../../services/webClient';
 import { RealtimeDuplexSession } from '../../utils/realtimeDuplex';
 import './VideoLivePanel.css';
@@ -816,6 +816,17 @@ export function VideoLivePanel() {
             >
               {isRecording ? <Square aria-hidden /> : <Mic aria-hidden />}
             </button>
+            {isRecording && (
+              <button
+                type="button"
+                className="video-live__interrupt"
+                onClick={() => duplexRef.current?.interrupt()}
+                aria-label="打断当前回答"
+                title="打断当前回答"
+              >
+                <Pause aria-hidden />
+              </button>
+            )}
             <input
               value={question}
               onChange={(event) => setQuestion(event.target.value)}

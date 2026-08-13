@@ -530,6 +530,12 @@
   animation: video-live-recording-pulse 1.2s ease-in-out infinite;
 }
 
+.video-live__composer .video-live__interrupt {
+  flex: 0 0 auto;
+  color: var(--color-feedback-danger-text);
+  background: var(--color-feedback-danger);
+}
+
 .video-live__capture-canvas {
   display: none;
 }
