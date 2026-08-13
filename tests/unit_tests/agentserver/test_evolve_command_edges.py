@@ -5,6 +5,9 @@ import pytest
 
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenswarm.agents.harness.observability_runtime import (
+    get_trajectory_span_processor,
+)
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep as interface_deep_module
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 
@@ -190,6 +193,7 @@ async def test_evolve_slash_lazy_init_registers_active_review_rails(monkeypatch,
             "auto_save": auto_save,
             "disabled_skills": ["disabled-demo"],
             "language": "en",
+            "trajectory_span_processor": get_trajectory_span_processor(),
         }
     ]
 

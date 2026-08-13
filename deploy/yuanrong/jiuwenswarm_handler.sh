@@ -303,23 +303,11 @@ uninstall_jiuwenswarm() {
         fi
     fi
 
-    # 卸载所有主机上的 jiuwenswarm 和 openjiuwen pip 包
-    local python_version="${DEPLOY_VARS["YR_PYTHON_VERSION"]}"
-    for host in "${JIUWENSWARM_HOST_LIST[@]}"; do
-        info "Uninstalling jiuwenswarm and openjiuwen pip packages on ${host}..."
-        local uninstall_output
-        if uninstall_output=$(exec_on_host "${host}" "python${python_version} -m pip uninstall -y jiuwenswarm openjiuwen 2>&1"); then
-            echo "${uninstall_output}" | sed "s/^/    /"
-            success "pip packages uninstalled on ${host}"
-        else
-            echo "${uninstall_output}" | sed "s/^/    /"
-            warning "Failed to uninstall pip packages on ${host} (may not be installed)"
-        fi
-    done
-
+    # 注意: down 仅停止服务并注销 function，不卸载 pip 包。
+    # pip 包卸载由 agentos uninstall 流程（module.sh 的 jiuwenswarm_uninstall 钩子）负责。
     echo ""
     echo "=========================================="
-    success "jiuwenswarm uninstall completed!"
+    success "jiuwenswarm down completed!"
     echo "=========================================="
     echo "  YR Master: ${master_host}"
     echo "  Function: ${func_svc_name}"

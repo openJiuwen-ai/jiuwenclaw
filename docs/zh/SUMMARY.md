@@ -24,7 +24,6 @@
   - [Slash 命令速查表](Slash命令表.md)
   - [Slash 命令体系设计](SLASH_COMMAND_ARCHITECTURE.md)
   - [工具权限与安全防护](工具权限与安全防护.md)
-  - [心跳](心跳.md)
   - [定时任务](定时任务.md)
   - [任务规划](任务规划.md)
   - [记忆系统](记忆.md)
