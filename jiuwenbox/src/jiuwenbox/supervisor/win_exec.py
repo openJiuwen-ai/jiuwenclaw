@@ -14,9 +14,12 @@ import json
 import logging
 import os
 import re
+import shutil
+import socket
 import sys
 import threading as _threading
 from ctypes import wintypes
+from typing import Any
 
 from jiuwenbox.logging_config import configure_logging
 from jiuwenbox.supervisor import win_constants as const
@@ -41,6 +44,12 @@ logger = logging.getLogger(__name__)
 # runner 脚本路径 (本模块的 runner 入口函数以 `python -m` 形式启动).
 RUNNER_MODULE = "jiuwenbox.supervisor.win_exec"
 RUNNER_SUBCOMMAND = "runner"
+
+# runner shutdown 时等待在途 worker 完成的窗口. 对齐 Linux daemon 的
+# SHUTDOWN_DRAIN_TIMEOUT_SECONDS 但缩短: box-server 侧 _send_runner_shutdown
+# 走 DAEMON_SHUTDOWN_TIMEOUT_SECONDS=3s 等响应, runner 这边 5s 给 exec child
+# 一个优雅退出的机会, 超时则 daemon 线程被强收 (child 由 ephemeral Job 兜杀).
+WIN_RUNNER_SHUTDOWN_DRAIN_SECONDS = 5.0
 
 # box-server 分配空闲端口经命令行传 runner, runner bind 做 server,
 # box-server 每次 exec connect. 对齐 Linux AF_UNIX (Windows 不能传 fd).
@@ -125,18 +134,19 @@ def _push_log(level: str, msg: str, exc: str | None = None) -> None:
         payload[LOG_FIELD_TRACEBACK] = exc
     blob = _json.dumps(payload, ensure_ascii=False).encode("utf-8")
     dead: list = []
+    # send_frame 在 _log_sub_lock 内串行: 并发化后多个 worker 可能同时 _push_log,
+    # 若不加锁, 两个 send_frame 的长度前缀+payload 会在同一 subscribe sock 上
+    # 交错, box-server 侧 recv_frame 解析错乱. push 是低频日志操作, 串行可接受.
     with _log_sub_lock:
         subs = list(_log_subscribers)
-    for sock in subs:
-        try:
-            send_frame(sock, blob)
-        except (OSError, ValueError):
-            dead.append(sock)
-    if dead:
-        with _log_sub_lock:
-            for sock in dead:
-                if sock in _log_subscribers:
-                    _log_subscribers.remove(sock)
+        for sock in subs:
+            try:
+                send_frame(sock, blob)
+            except (OSError, ValueError):
+                dead.append(sock)
+        for sock in dead:
+            if sock in _log_subscribers:
+                _log_subscribers.remove(sock)
     try:
         if level == "ERROR":
             logger.error("[runner] %s", msg)
@@ -494,6 +504,45 @@ def stop_runner(pid: int, process_handle: int, timeout_ms: int = 5000) -> None:
         kernel32.CloseHandle(wintypes.HANDLE(process_handle))
 
 
+def is_runner_alive(process_handle: int) -> bool:
+    """返回 runner 进程是否仍在运行 (未退出).
+
+    用 WaitForSingleObject(handle, 0) 探测: 返回 WAIT_TIMEOUT(0x102) 表示
+    仍在运行, 返回 WAIT_OBJECT_0(0x0) 表示已退出. 用于 _create_windows 后
+    等待 runner 进入 listen() 期间做存活兜底.任何调用异常一律视作"未知/不可判定", 
+    返回 False 让调用方走清理路径.
+    """
+    _require_windows()
+    try:
+        kernel32 = get_kernel32()
+        result = kernel32.WaitForSingleObject(
+            wintypes.HANDLE(process_handle), 0,
+        )
+        return int(result) == 0x102  # WAIT_TIMEOUT
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def probe_runner_listen(control_port: int, timeout: float = 0.5) -> bool:
+    """探测 runner 控制端口是否已进入 listen() 状态.
+
+    runner 在 resume 后才 bind/listen 控制端口 因此 _create_windows 须
+    主动 TCP connect 确认内核已可接受连接. 
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        sock.connect(("127.0.0.1", control_port))
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
 def _write_token_to_pipe(write_handle: int, token: str) -> None:
     """把 control_token 写入匿名 pipe 写端, 协议 [4 字节大端长度][token 字节]."""
     _require_windows()
@@ -805,15 +854,16 @@ def _create_process_as_user(  # pylint: disable=huawei-too-many-arguments
             )
             try:
                 os.makedirs(_child_tmp, exist_ok=True)
-            except OSError:
-                _child_tmp = None
-            if _child_tmp:
-                env["TEMP"] = _child_tmp
-                env["TMP"] = _child_tmp
-                # 补全 profile 变量.
-                env.setdefault("USERPROFILE", _profile_dir)
-                env.setdefault("LOCALAPPDATA", os.path.join(_profile_dir, "AppData", "Local"))
-                env.setdefault("APPDATA", os.path.join(_profile_dir, "AppData", "Roaming"))
+            except OSError as _e:
+                _push_log("WARNING",
+                          f"runner 预建沙箱 Temp 失败 (照设路径, 沙箱内自建): "
+                          f"{_child_tmp}: {_e}")
+            env["TEMP"] = _child_tmp
+            env["TMP"] = _child_tmp
+            # 补全 profile 变量.
+            env.setdefault("USERPROFILE", _profile_dir)
+            env.setdefault("LOCALAPPDATA", os.path.join(_profile_dir, "AppData", "Local"))
+            env.setdefault("APPDATA", os.path.join(_profile_dir, "AppData", "Roaming"))
     # 降级: 拿不到 profile → 回落 workspace/.tmp.
     if "TEMP" not in env and workspace:
         _child_tmp = os.path.join(workspace, ".tmp")
@@ -989,6 +1039,125 @@ def _read_control_token_from_stdin(fallback: str) -> str:
                 pass
 
 
+# ---------------------------------------------------------------------------
+# Runner 并发状态: 对齐 Linux sandbox_daemon.DaemonState.
+# ---------------------------------------------------------------------------
+
+# 单沙箱 worker 并发上限. Linux daemon 无界 (每连接 fork), 但 Windows 线程比
+# fork 重, 且 runner 跑在受限 token 下, 无界线程在突发请求时易耗尽栈/句柄.
+# 与 box-server 的 EXEC_CONCURRENCY 对齐: 优先读 JIUWENBOX_EXEC_CONCURRENCY env,
+# 与全局信号量同值, 避免 box-server 并发发 >limit 个 exec 时 runner 侧排队;
+# env 未设时回落到 16 (覆盖常见 CPU 核数, 超大核机器需显式设 env 提高).
+_WIN_RUNNER_WORKER_LIMIT_ENV = "JIUWENBOX_EXEC_CONCURRENCY"
+_DEFAULT_WIN_RUNNER_WORKER_LIMIT = 16
+
+
+def _resolve_win_runner_worker_limit() -> int:
+    """读 env 解析 worker 上限, 失败回落到默认 16."""
+    raw = os.environ.get(_WIN_RUNNER_WORKER_LIMIT_ENV)
+    if not raw:
+        return _DEFAULT_WIN_RUNNER_WORKER_LIMIT
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DEFAULT_WIN_RUNNER_WORKER_LIMIT
+    return value if value >= 1 else _DEFAULT_WIN_RUNNER_WORKER_LIMIT
+
+
+class _WinRunnerState:
+    """Runner 共享可变状态, guarded by ``lock``."""
+
+    def __init__(self, worker_limit: int = _DEFAULT_WIN_RUNNER_WORKER_LIMIT) -> None:
+        self.shutdown_event = _threading.Event()
+        self.in_flight = 0
+        self.lock = _threading.Lock()
+        self.completion = _threading.Condition(self.lock)
+        # worker 并发上限: 防突发请求耗尽 runner 线程/句柄; 超限的请求在 acquire
+        self.worker_sem = _threading.Semaphore(
+            max(1, worker_limit)
+        ) if worker_limit > 0 else None
+
+    def begin_request(self) -> None:
+        with self.lock:
+            self.in_flight += 1
+
+    def end_request(self) -> None:
+        with self.lock:
+            self.in_flight -= 1
+            if self.in_flight <= 0:
+                self.completion.notify_all()
+
+    def acquire_worker(self) -> None:
+        if self.worker_sem is not None:
+            self.worker_sem.acquire()
+
+    def release_worker(self) -> None:
+        if self.worker_sem is not None:
+            self.worker_sem.release()
+
+    def wait_drain(self, timeout: float) -> bool:
+        import time as _time
+        deadline = _time.monotonic() + max(0.0, timeout)
+        with self.lock:
+            while self.in_flight > 0:
+                remaining = deadline - _time.monotonic()
+                if remaining <= 0:
+                    return False
+                self.completion.wait(timeout=remaining)
+            return True
+
+
+def _handle_one_request(  # pylint: disable=huawei-too-many-arguments
+    conn: Any,
+    header: dict,
+    req_type: str,
+    restricted_token: int | None,
+    workspace: str,
+    state: _WinRunnerState,
+) -> None:
+    """单个业务请求的 worker 线程入口 (exec/write_file/read_file/list_dir).
+
+    主线程已完成 accept + recv header + 鉴权, 本函数接管 conn 做业务派发 +
+    (exec 的) stdin 读取 + conn.close. 
+    """
+    state.begin_request()
+    try:
+        state.acquire_worker()
+        try:
+            if req_type == "exec":
+                stdin_size = int(header.get("stdin_size", 0))
+                stdin_bytes = recv_frame(conn, MAX_STDIN_BYTES) if stdin_size > 0 else b""
+                _handle_exec_request(
+                    conn, header, restricted_token, workspace, stdin_bytes,
+                )
+            elif req_type == "write_file":
+                _handle_write_file_request(conn, header, conn)
+            elif req_type == "read_file":
+                _handle_read_file_request(conn, header)
+            elif req_type == "list_dir":
+                _handle_list_dir_request(conn, header)
+            else:
+                _send_error_response(conn, f"unknown request type: {req_type!r}")
+        finally:
+            state.release_worker()
+        return
+    except OSError as exc:
+        # 连接已断 (box-server 超时关闭 / 对端崩). 单连接失败不杀 runner.
+        logger.debug("runner 处理 %s 请求连接异常, 跳过: %s", req_type, exc)
+    except Exception as exc:  # noqa: BLE001
+        import traceback as _tb_req
+        logger.debug("runner 处理 %s 请求异常: %s", req_type, exc, exc_info=True)
+        _push_log("WARNING",
+                  f"runner 处理 {req_type} 请求异常 (单连接, 不杀 runner): "
+                  f"{exc}", exc=_tb_req.format_exc())
+    finally:
+        try:
+            conn.close()
+        except OSError:
+            pass
+        state.end_request()
+
+
 def runner_main(argv: list[str]) -> int:
     """runner 入口 (运行在 jbx-sandbox 上下文, 由 broker 第一跳拉起)."""
     import argparse
@@ -1033,7 +1202,6 @@ def runner_main(argv: list[str]) -> int:
     if restricted_token is not None:
         _push_log("INFO", f"restricted token 创建成功: handle={restricted_token}")
 
-    import socket
     port = args.control_port
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -1047,9 +1215,17 @@ def runner_main(argv: list[str]) -> int:
     logger.info("runner 监听 127.0.0.1:%d (sandbox_id=%s)", port, args.sandbox_id)
     _push_log("INFO", f"runner 监听 127.0.0.1:{port} (sandbox_id={args.sandbox_id})")
 
+    state = _WinRunnerState(worker_limit=_resolve_win_runner_worker_limit())
+
     try:
-        while True:
-            conn, _ = listener.accept()
+        while not state.shutdown_event.is_set():
+            try:
+                conn, _ = listener.accept()
+            except OSError as exc:
+                if state.shutdown_event.is_set():
+                    break
+                logger.warning("runner accept() 失败: %s", exc)
+                continue
             try:
                 header_frame = recv_frame(conn, MAX_HEADER_BYTES)
             except (OSError, ValueError):
@@ -1075,6 +1251,9 @@ def runner_main(argv: list[str]) -> int:
                     continue
 
             req_type = header.get("type")
+            # subscribe_log / shutdown 必须在主线程串行处理: 前者把 conn 加入长连
+            # 订阅集 (不能并发 append); 后者要 set shutdown_event 让 accept 循环
+            # 退出 + drain 在途 worker.
             if req_type == REQUEST_TYPE_SUBSCRIBE_LOG:
                 try:
                     conn.setblocking(True)
@@ -1092,33 +1271,18 @@ def runner_main(argv: list[str]) -> int:
             if req_type == "shutdown":
                 _send_response(conn, {"ok": True})
                 conn.close()
+                state.shutdown_event.set()
                 break
-            try:
-                if req_type == "exec":
-                    stdin_size = int(header.get("stdin_size", 0))
-                    stdin_bytes = recv_frame(conn, MAX_STDIN_BYTES) if stdin_size > 0 else b""
-                    _handle_exec_request(
-                        conn, header, restricted_token, args.workspace,
-                        stdin_bytes,
-                    )
-                elif req_type == "write_file":
-                    _handle_write_file_request(conn, header, conn)
-                elif req_type == "read_file":
-                    _handle_read_file_request(conn, header)
-                elif req_type == "list_dir":
-                    _handle_list_dir_request(conn, header)
-                else:
-                    _send_error_response(conn, f"unknown request type: {req_type!r}")
-            except OSError as exc:
-                # 连接已断 (box-server 超时关闭 / 对端崩). 单连接失败不杀 runner.
-                logger.debug("runner 处理 %s 请求连接异常, 跳过: %s", req_type, exc)
-            except Exception as exc:  # noqa: BLE001
-                import traceback as _tb_req
-                logger.debug("runner 处理 %s 请求异常: %s", req_type, exc, exc_info=True)
-                _push_log("WARNING",
-                          f"runner 处理 {req_type} 请求异常 (单连接, 不杀 runner): "
-                          f"{exc}", exc=_tb_req.format_exc())
-            conn.close()
+            # exec / write_file / read_file / list_dir: 派发 worker 线程并发处理
+            # (对齐 Linux daemon 的 fork+execve 并发模型). 
+            worker = _threading.Thread(
+                target=_handle_one_request,
+                args=(conn, header, req_type, restricted_token,
+                       args.workspace, state),
+                name=f"win-runner-worker",
+                daemon=True,
+            )
+            worker.start()
     except Exception:  # noqa: BLE001
         import traceback as _tb
         tb = _tb.format_exc()
@@ -1126,6 +1290,11 @@ def runner_main(argv: list[str]) -> int:
         _push_log("ERROR",
                   f"runner accept 循环异常 (sandbox_id={args.sandbox_id})", exc=tb)
     finally:
+        if state.in_flight > 0:
+            _push_log("INFO",
+                      f"runner shutdown: drain {state.in_flight} 个在途 worker "
+                      f"(最多等 {WIN_RUNNER_SHUTDOWN_DRAIN_SECONDS}s)")
+            state.wait_drain(WIN_RUNNER_SHUTDOWN_DRAIN_SECONDS)
         _push_log("INFO", f"runner 退出 (sandbox_id={args.sandbox_id})")
         if _local_log_file is not None:
             try:
@@ -1193,6 +1362,164 @@ def _normalize_bash_script_backslashes(command: list) -> list | None:
     return new_command
 
 
+# box-server 在 _create_windows 把 policy 探测到的 bash 绝对路径 (git 的
+# usr/bin/bash.exe) 经 env 注入 runner. runner exec 时若 cmd0 是裸 "bash"/"sh"
+# (无路径分隔符), 替换成该绝对路径
+_BASH_PATH_ENV = "JIUWENBOX_BASH_PATH"
+
+
+def _rewrite_bash_to_absolute(command: list) -> None:
+    """把裸 bash/sh cmd0 重写为 JIUWENBOX_BASH_PATH 指向的绝对路径 (原地改 command).
+
+    不命中 (无 env / cmd0 非裸名 / 绝对路径文件不存在) 则静默, 回退原 PATH 搜索.
+    """
+    if not command:
+        return
+    exe = str(command[0])
+    exe_base = os.path.basename(exe).lower()
+    if exe_base not in ("bash", "bash.exe", "sh", "sh.exe"):
+        return
+    # 已带路径分隔符 (绝对/相对路径) 不重写, 尊重调用方显式指定.
+    if "\\" in exe or "/" in exe:
+        return
+    bash_path = (os.environ.get(_BASH_PATH_ENV) or "").strip()
+    if not bash_path or not os.path.isfile(bash_path) or _is_wsl_bash(bash_path):
+        return
+    command[0] = bash_path
+    _push_log(
+        "DEBUG",
+        f"bash cmd0 rewritten to absolute path: {exe!r} -> {bash_path!r}",
+    )
+
+
+def _decode_child_output(buf: bytearray | bytes) -> str:
+    """解码 child stdout 原始字节, 自动探测编码.
+
+    Windows 子进程 (cmd.exe / wsl.exe / powershell) 被重定向到匿名管道时,
+    输出编码不固定: cmd 的本地化资源串 / WSL 横幅常为 UTF-16LE; Git bash 的
+    中文常为 GBK/GB18030; 一般工具多为 UTF-8. 旧实现硬解 UTF-8 导致 UTF-16LE
+    输出变 mojibake (故障机 WSL 横幅乱码). 这里按优先级探测:
+
+    1. BOM 判定 (UTF-16LE/BE/UTF-8-sig);
+    2. UTF-8 严格 (ASCII/UTF-8 文本在此成功, 不会误判为 UTF-16);
+    3. UTF-16LE 启发式 (严格 UTF-8 失败后, 高位字节 0x00 占比 >0.3);
+    4. GB18030 (中文 Windows OEM/ANSI 兜底);
+    5. UTF-8 errors=replace (保持旧兜底行为, 永不抛).
+    """
+    data = bytes(buf)
+    if not data:
+        return ""
+
+    # 1. BOM.
+    if data.startswith(b"\xff\xfe"):
+        return data[2:].decode("utf-16-le", errors="replace")
+    if data.startswith(b"\xfe\xff"):
+        return data[2:].decode("utf-16-be", errors="replace")
+    if data.startswith(b"\xef\xbb\xbf"):
+        return data[3:].decode("utf-8", errors="replace")
+
+    # 2. UTF-8 严格. 纯 ASCII / UTF-8 文本在此成功, 不会误判为 UTF-16.
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+
+    # 3. UTF-16LE 启发式: 严格 UTF-8 失败后, 试 UTF-16LE.
+    sample = data[:128]
+    hi = sample[1::2]
+    if len(hi) >= 4:
+        zero_ratio = sum(1 for b in hi if b == 0) / len(hi)
+        if zero_ratio > 0.3:
+            try:
+                return data.decode("utf-16-le", errors="replace")
+            except (UnicodeDecodeError, ValueError):  # pylint: disable=not-get-same-exception
+                pass
+
+    # 4. GB18030 (GBK 超集, 中文 Windows 最可能 OEM/ANSI 代码页).
+    try:
+        return data.decode("gb18030", errors="replace")
+    except (UnicodeDecodeError, LookupError):
+        pass
+
+    # 5. 兜底: 保持旧实现行为.
+    return data.decode("utf-8", errors="replace")
+
+
+_BASH_GONE_CACHE: dict[str, bool] = {}
+
+
+def _is_wsl_bash(path: str) -> bool:
+    """path 是否指向 WSL launcher (C:\\Windows\\System32\\bash.exe = wsl.exe 别名).
+
+    WSL bash 在沙箱里只打印 "没有已安装的发行版" 横幅后退出, 脚本不执行, 视同不可用.
+    """
+    if not path:
+        return True
+    low = os.path.normpath(path).lower()
+    base = os.path.basename(low)
+    if base != "bash.exe":
+        return False
+    # System32\\bash.exe 即 WSL launcher (真 bash 不会装在 System32).
+    return low.endswith(os.sep + "system32" + os.sep + "bash.exe") or \
+        low.endswith("/system32/bash.exe")
+
+
+def _bash_unavailable() -> bool:
+    """沙箱机器上是否找不到可用 bash (PATH 搜索 + JIUWENBOX_BASH_PATH 都无/仅 WSL)."""
+    cached = _BASH_GONE_CACHE.get("gone")
+    if cached is not None:
+        return cached
+    env_bash = (os.environ.get(_BASH_PATH_ENV) or "").strip()
+    if env_bash and os.path.isfile(env_bash) and not _is_wsl_bash(env_bash):
+        _BASH_GONE_CACHE["gone"] = False
+        return False
+    found = shutil.which("bash") or shutil.which("sh")
+    # 搜到的若是 WSL launcher, 视同没有
+    if found and _is_wsl_bash(found):
+        found = None
+    gone = not found
+    _BASH_GONE_CACHE["gone"] = gone
+    return gone
+
+
+def _looks_like_powershell(script: str) -> bool:
+    """粗判 script 是否含 powershell 语法 (cmd 跑不了)."""
+    low = script.lower()
+    return any(tok in low for tok in (  # pylint: disable=complicate-comprehension
+        "get-childitem", "set-location", "remove-item", "test-path",
+        "select-object", "where-object", "foreach-object", "invoke-",
+        "$psversiontable", "write-output", "new-item", "copy-item",
+        "-erroraction", "-recurse", "-force",
+    ))
+
+
+def _fallback_bash_to_native_shell(command: list) -> None:
+    """bash 不可用时, 把 ["bash","-lc",script] 改写为 cmd /c 或 powershell -Command."""
+    if not command or len(command) != 3:
+        return
+    exe = str(command[0])
+    flag = str(command[1])
+    # 已带路径分隔符 (绝对/相对路径) 说明 _rewrite 成功找到了 bash, 不退化.
+    if "\\" in exe or "/" in exe:
+        return
+    exe_base = os.path.basename(exe).lower()
+    if exe_base not in ("bash", "bash.exe", "sh", "sh.exe"):
+        return
+    if flag not in ("-lc", "-c"):
+        return
+    script = str(command[2])
+    if _looks_like_powershell(script):
+        command[0] = "powershell"
+        command[1] = "-Command"
+        _push_log("INFO",
+                  f"bash unavailable, fallback to powershell -Command: {script[:120]!r}")
+    else:
+        command[0] = "cmd"
+        command[1] = "/c"
+        _push_log("INFO",
+                  f"bash unavailable, fallback to cmd /c: {script[:120]!r}")
+
+
 def _handle_exec_request(stream, header, restricted_token, workspace, stdin_bytes) -> None:
     """处理 exec 请求: 起 child 子命令, 回传 stdout/stderr/exit. stdin_bytes 透传给子进程."""
     command = header.get("command", [])
@@ -1206,6 +1533,11 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
     _norm_command = _normalize_bash_script_backslashes(command)
     if _norm_command is not None:
         command = _norm_command
+    # 裸 bash/sh cmd0 重写为 JIUWENBOX_BASH_PATH 绝对路径, 绕开 PATH 搜索误解析到 WSL.
+    _rewrite_bash_to_absolute(command)
+    # 若 bash 确实不可用 (机器无 Git/WSL), 退化为 cmd /c 或 powershell -Command.
+    if _bash_unavailable():
+        _fallback_bash_to_native_shell(command)
     # 建立 pipe 收集子进程 stdout/stderr.
     kernel32 = get_kernel32()
     sa = SecurityAttr()
@@ -1369,7 +1701,7 @@ def _handle_exec_request(stream, header, restricted_token, workspace, stdin_byte
                 _push_log("DEBUG", "正常退出后 close_job 失败 (best-effort)", exc_info=True)
             exec_job_handle = 0
         ec = int(exit_code.value)
-        out_text = bytes(out_buf).decode("utf-8", errors="replace")
+        out_text = _decode_child_output(out_buf)
         _push_log("INFO",
                    f"exec child 结束: pid={pid} exit_code={ec} killed={_child_killed} "
                    f"stdout_len={len(out_text)} cmd={command[:3] if command else []!r}")
