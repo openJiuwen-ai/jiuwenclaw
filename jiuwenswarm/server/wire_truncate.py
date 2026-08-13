@@ -50,6 +50,7 @@ _TRUNCATE_SUFFIX = " [truncated]"
 
 _HISTORY_RESTORABLE_ASSISTANT_EVENT_TYPES = frozenset(
     {
+        "chat.reasoning",
         "chat.final",
         "chat.tool_call",
         "chat.tool_result",

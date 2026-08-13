@@ -234,7 +234,7 @@ In Agent Team mode you can still use and develop **Skills**. Each agent can conf
 2. **Shared tooling** — one shared skill set avoids duplicate setup  
 3. **Higher efficiency** — skills help agents finish assigned work faster  
 
-> For detailed usage and development of Team Skills, see the [SwarmSkills guide](SwarmSkills.md).
+> For detailed usage and development of Team Skills, see [Swarm Skills](SwarmSkills.md).
 
 ### 2.5 Team Memory
 

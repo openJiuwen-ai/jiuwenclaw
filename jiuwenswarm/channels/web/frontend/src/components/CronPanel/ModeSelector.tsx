@@ -58,7 +58,7 @@ export default function ModeSelector({ value, onChange, disabled = false }: Mode
   };
 
   return (
-    <div ref={rootRef} className={clsx('chat-mode-select', open && 'chat-mode-select--open')}>
+    <div ref={rootRef} className={clsx('chat-mode-select', open && 'chat-mode-select--open')} data-testid="cron-mode-selector">
       <button
         type="button"
         className="chat-mode-select__trigger"
@@ -66,7 +66,8 @@ export default function ModeSelector({ value, onChange, disabled = false }: Mode
         disabled={disabled}
         aria-haspopup="menu"
         aria-expanded={open}
-        data-testid={`cron-mode-${currentMode.value}`}
+        data-testid="cron-mode-trigger"
+        data-variant={currentMode.value}
       >
         <span className="chat-mode-select__value">
           <span className="chat-mode-select__icon" aria-hidden="true">
@@ -86,6 +87,7 @@ export default function ModeSelector({ value, onChange, disabled = false }: Mode
           ref={menuPortalRef}
           className="chat-mode-select__menu"
           role="menu"
+          data-testid="cron-mode-menu"
           style={menuDirection === 'up'
             ? { position: 'fixed', bottom: window.innerHeight - menuAnchor.top + 10, left: menuAnchor.left, zIndex: 9999 }
             : { position: 'fixed', top: menuAnchor.bottom + 10, left: menuAnchor.left, zIndex: 9999 }
@@ -102,7 +104,8 @@ export default function ModeSelector({ value, onChange, disabled = false }: Mode
               )}
               role="menuitemradio"
               aria-checked={value === m.value}
-              data-testid={`cron-mode-option-${m.value}`}
+              data-testid="cron-mode-option"
+              data-variant={m.value}
             >
               <span className="chat-mode-select__option-main">
                 <span className="chat-mode-select__icon" aria-hidden="true">

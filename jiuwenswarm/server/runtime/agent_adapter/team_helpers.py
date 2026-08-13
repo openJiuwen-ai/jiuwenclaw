@@ -2435,6 +2435,12 @@ async def _consume_stream_with_query(
                 elif parsed.get("event_type") == "team.completed":
                     # Team completed this round — broadcast a single
                     # round-complete signal that also carries team stats.
+                    logger.info(
+                        "[TeamHelpers] team is completed: channel_id=%s session_id=%s member_count=%s",
+                        _resolve_channel_id(channel_id),
+                        session_id,
+                        parsed.get("member_count"),
+                    )
                     await _broadcast_event(
                         channel_id,
                         session_id,
@@ -2609,14 +2615,27 @@ async def _consume_stream_with_query(
                 # ends normally without a terminal event.  A cancelled stream
                 # must not re-enter bounded waiter backpressure during cleanup.
                 await _broadcast_team_state_snapshot(channel_id, session_id)
+                # Also broadcast chat.processing_status{is_processing:False} so
+                # the frontend gets an explicit terminal signal even when the
+                # agent-core team stream generator silently returns without
+                # emitting team.completed / team.idle.
                 try:
                     await _broadcast_event(
                         channel_id,
                         session_id,
                         {
-                            "event_type": "team.completed",
+                            "event_type": "chat.processing_status",
                             "session_id": session_id,
+                            "rid": round_id,
+                            "is_processing": False,
+                            "is_complete": True,
                         },
+                    )
+                    logger.info(
+                        "[TeamHelpers] team finally completed: channel_id=%s session_id=%s round_id=%s",
+                        _resolve_channel_id(channel_id),
+                        session_id,
+                        round_id,
                     )
                 except Exception:
                     logger.debug(
