@@ -470,8 +470,9 @@ react:
   enable_task_loop: true
   progressive_tool_enabled: true       # 按需检索开关（默认 true = 默认开启）：true=启用（search 返回完整工具定义到 message，LLM 按名直调，不注入 tools[]，prefill 恒定利于 cache）；false=关闭，回到全量工具列表
   tool_retrieval:
-    method: hybrid                   # 检索方法：hybrid（BM25+dense RRF，默认，质量最高）| semantic（纯 dense）| bm25（纯 BM25，无模型永不失败）；embedding 不可用时自动降级到 BM25，不再 return []
-    min_sim: 0.35                     # dense 检索最低相似度阈值（低于此值不返回，避免误导性 top-k；调高更严格、调低更宽松；0=不过滤）
+    method: bm25                     # 检索方法：bm25（纯 BM25+CJK n-gram，零依赖零模型，默认）| hybrid（BM25+dense RRF，需 fastembed+模型）| semantic（纯 dense）；hybrid/semantic 需 dense_enabled: true
+    min_sim: 0.35                     # dense 检索最低相似度阈值（仅 hybrid/semantic 生效；bm25 用 0.0）
+    dense_enabled: false             # v3：dense 默认关闭——不加载 fastembed/模型、不联网、不背 90M 体积；BM25+CJK n-gram 已覆盖纯中文 query。设 true 走 hybrid（需装 fastembed + 下模型）
   max_iterations: 100
   model_name: ${MODEL_NAME}
   skill_mode: all

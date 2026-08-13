@@ -4662,7 +4662,8 @@ class JiuWenSwarmDeepAdapter:
                 ),
                 tool_retrieval_top_k_max=int(tr_cfg.get("top_k_max", 3)),
                 tool_retrieval_min_sim=float(tr_cfg.get("min_sim", 0.35)),
-                tool_retrieval_method=str(tr_cfg.get("method", "hybrid")),
+                tool_retrieval_method=str(tr_cfg.get("method", "bm25")),
+                tool_retrieval_dense_enabled=bool(tr_cfg.get("dense_enabled", False)),
             )
 
             # ── JiuWen ProgressiveToolRail（全部 jiuwenswarm 改动在外部文件）──

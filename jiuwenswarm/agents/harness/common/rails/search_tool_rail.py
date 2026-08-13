@@ -176,7 +176,12 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         )
         self._top_k_max = int(getattr(config, "tool_retrieval_top_k_max", 3))
         self._min_sim = float(getattr(config, "tool_retrieval_min_sim", 0.35))
-        self._method = str(getattr(config, "tool_retrieval_method", "hybrid")).lower()
+        self._method = str(getattr(config, "tool_retrieval_method", "bm25")).lower()
+        # v3: dense disabled by default — BM25 + CJK n-gram covers pure-Chinese
+        # queries without a 90M model / fastembed / network. Set
+        # tool_retrieval_dense_enabled: true to opt back into hybrid (model is
+        # then loaded eagerly in __init__).
+        self._dense_enabled = bool(getattr(config, "tool_retrieval_dense_enabled", False))
         self._embedding_model = None
         self._cached_tool_embeddings: Dict[str, Any] = {}
         self._cached_tool_sig: frozenset = frozenset()
@@ -184,7 +189,8 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         self._bm25_index = None
         self._cached_bm25_sig: frozenset = frozenset()
         self._search_corpus: List = []
-        self._ensure_embedding_model()
+        if self._dense_enabled:
+            self._ensure_embedding_model()
 
     # ------------------------------------------------------------------
     # Lifecycle (inlined from base; no longer inherits ProgressiveToolRail)
@@ -202,7 +208,8 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
             session, default_visible_tools=list(self.default_visible_tools)
         )
         await asyncio.to_thread(self._build_executable_corpus, ctx)
-        await asyncio.to_thread(self._precompute_tool_embeddings)
+        if self._dense_enabled:
+            await asyncio.to_thread(self._precompute_tool_embeddings)
         await asyncio.to_thread(self._build_bm25_index)
 
     async def before_model_call(self, ctx):
@@ -545,7 +552,8 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         self._search_corpus = list(live_infos)
         self._cached_tool_sig = frozenset()
         self._cached_bm25_sig = frozenset()
-        await asyncio.to_thread(self._precompute_tool_embeddings)
+        if self._dense_enabled:
+            await asyncio.to_thread(self._precompute_tool_embeddings)
         await asyncio.to_thread(self._build_bm25_index)
         return await asyncio.to_thread(self._search, query, limit, detail_level)
 

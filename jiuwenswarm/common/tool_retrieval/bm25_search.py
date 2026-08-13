@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 from typing import Any, Dict, List, Optional
 
 from .summary import build_tool_summary
@@ -27,16 +28,39 @@ from .search import haystack_for
 logger = logging.getLogger("jiuwenswarm.common.tool_retrieval.bm25_search")
 
 
-def tokenize(text: str) -> List[str]:
-    """Tokenize for BM25. Lowercase + whitespace split.
+_CJK_RE = re.compile(r"[一-龥]")
 
-    English-oriented (tool names, enum values, field names are ASCII). Chinese
-    in descriptions is passed through verbatim; in ``hybrid`` the dense ranker
-    covers Chinese semantics, so BM25 doesn't need a Chinese tokenizer here.
+
+def tokenize(text: str) -> List[str]:
+    """Tokenize for BM25. ASCII whitespace-split + CJK unigram/bigram.
+
+    Zero-dependency. ASCII segments (tool names, enum values, field names) are
+    whitespace-split as before. CJK runs have no spaces, so ``split()`` leaves
+    ``创建定时任务`` as one opaque token that won't match a description
+    containing ``定时任务``. Emit unigrams + bigrams for CJK runs so the ranker
+    gets overlapping 2-char windows to score on (``创建定时任务`` ->
+    ``创建`` / ``定时`` / ``任务`` as bigrams, matching the corpus).
+
+    This is the BM25-side fix for Chinese; dense still covers semantics in
+    ``hybrid`` when the model is available, but with this BM25 no longer
+    silently misses pure-Chinese queries when dense is absent.
     """
     if not text:
         return []
-    return [t for t in str(text).lower().split() if t]
+    s = str(text).lower()
+    tokens: List[str] = []
+    for seg in re.split(r"([^一-龥]+)", s):
+        if not seg:
+            continue
+        # seg is either a CJK run or a non-CJK run (split captures both sides).
+        if _CJK_RE.search(seg):
+            for i in range(len(seg)):
+                tokens.append(seg[i])
+                if i + 1 < len(seg):
+                    tokens.append(seg[i:i + 2])
+        else:
+            tokens.extend(seg.split())
+    return tokens
 
 
 class BM25Okapi:
@@ -116,6 +140,18 @@ class BM25Index:
         BM25 scores are non-negative; ``min_sim=0`` returns all scored docs
         (useful as a candidate pool for ``hybrid``). Ties broken by tool name
         for determinism (matches ``dense_search``'s tie-break).
+
+        Name-boost (v3 fix, aligns with ``dense_search``): BM25 is purely
+        lexical over the haystack, so a tool whose **name** is in the query
+        can still lose to a different tool whose description shares more
+        Chinese bigrams (term-frequency saturation drowns the exact name
+        hit). This is the real failure for MCP tools — their descriptions are
+        English while the query is Chinese, so a Chinese-described sibling
+        outscores the tool the user named verbatim. Boost name matches so the
+        tool the query names actually wins. Boost is scaled to the top BM25
+        score (IDF-scale, not cosine), so it stays meaningful at any score
+        magnitude. Matches the dense path's tiered boost (exact > contains >
+        prefix > token-overlap) so the two rankers stay consistent.
         """
         if not self.tools:
             return []
@@ -123,10 +159,56 @@ class BM25Index:
         if not q_tokens:
             return []
         scores = self.okapi.get_scores(q_tokens)
-        scored = [
-            (s, self.tools[i]) for i, s in enumerate(scores)
-            if s >= min_sim and s > 0.0  # drop 0-score (no term overlap)
-        ]
+
+        # Name-match boost tier (mirrors dense_search:118-132).
+        ql = (query or "").strip().lower()
+        ql_norm = "_".join(ql.split())
+        top_score = max((s for s in scores if s > 0), default=0.0)
+
+        def _name_boost(tool: Any) -> float:
+            if not ql or top_score <= 0:
+                return 0.0
+            nl = str(getattr(tool, "name", "") or "").lower()
+            if not nl:
+                return 0.0
+            # Scale to the top BM25 score so the boost dominates regardless
+            # of IDF magnitude. Exact name in query >> contains > prefix.
+            if ql == nl or ql_norm == nl:
+                return top_score * 1.0
+            if len(nl) >= 5 and (nl in ql_norm or nl in ql):
+                return top_score * 0.9
+            if len(ql) >= 3 and (nl.startswith(ql) or nl.startswith(ql_norm)):
+                return top_score * 0.4
+            # Token-overlap: only count LONG, distinctive name tokens (>=5
+            # chars). Short tokens like ``list``/``file``/``dir`` are generic
+            # and collide across unrelated tools (e.g. ``list_files``'s
+            # ``list`` appears inside ``mcp_filesystem_list_allowed_...``,
+            # falsely boosting the wrong tool). Require full token equality
+            # against a query token, not a substring inside a longer word.
+            name_tokens = [t for t in nl.split("_") if len(t) >= 5]
+            if name_tokens:
+                q_word_tokens = set(ql_norm.split("_")) | set(ql.split())
+                hit = sum(1 for t in name_tokens if t in q_word_tokens or t.rstrip("s") in q_word_tokens)
+                if hit:
+                    ratio = hit / len(name_tokens)
+                    return top_score * (0.4 if hit == len(name_tokens) else 0.2 * ratio)
+            return 0.0
+
+        scored = []
+        for i, s in enumerate(scores):
+            if s <= 0.0:
+                # A tool with no BM25 term overlap can still be the exact
+                # name the query asked for (e.g. Chinese query, English-desc
+                # MCP tool). Only name-boost rescues it; without it the tool
+                # is invisible to BM25 even when named verbatim.
+                b = _name_boost(self.tools[i])
+                if b <= 0:
+                    continue
+                s = b
+            else:
+                s += _name_boost(self.tools[i])
+            if s >= min_sim:
+                scored.append((s, self.tools[i]))
         scored.sort(key=lambda item: (-item[0], str(getattr(item[1], "name", "") or "")))
         matched = [tool for _s, tool in scored[:limit]]
         return [build_tool_summary(tool, detail_level=detail_level) for tool in matched]
