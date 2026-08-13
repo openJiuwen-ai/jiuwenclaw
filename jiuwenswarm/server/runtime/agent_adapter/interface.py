@@ -40,6 +40,7 @@ from jiuwenswarm.common.config import get_config
 from jiuwenswarm.agents.harness.code.prompt.plan_approval import (
     PLAN_EXECUTE_OPTION_VALUES,
     PLAN_REMINDER_ORIGINAL_QUERY_KEY,
+    PLAN_REVISE_OPTION_VALUES,
     PLAN_SKIP_OPTION_VALUES,
     plan_skip_feedback,
 )
@@ -1456,6 +1457,16 @@ class JiuWenSwarm:
                 "feedback": custom_input
                 or plan_skip_feedback(get_config().get("preferred_language")),
                 "plan_skip": True,
+            }
+        elif value in PLAN_REVISE_OPTION_VALUES:
+            # Web 的"下一步"：不退出 plan，按修改意见续跑。``plan_revise`` 是额外键，
+            # ConfirmPayload 会忽略它；rail 只在看到它时才给假回执包修订前缀。
+            # TUI 仍发 ``reject``，不会进这个分支。
+            confirm_payload = {
+                "approved": False,
+                "auto_confirm": False,
+                "feedback": custom_input or "用户希望继续规划",
+                "plan_revise": True,
             }
         elif value in ("reject", "拒绝", "Reject", "继续规划", "其他意见"):
             feedback = custom_input or (
