@@ -24,8 +24,6 @@ from jiuwenswarm.common.version_source import (
 DEFAULT_RELEASE_API_GITCODE = "https://api.gitcode.com/api/v5/repos/{owner}/{repo}/releases/latest"
 DEFAULT_RELEASE_API_GITHUB = "https://api.github.com/repos/{owner}/{repo}/releases/latest"
 DEFAULT_RELEASE_API_PYPI = "https://pypi.org/simple/{package}/"
-DEFAULT_ASSET_PATTERN_WINDOWS = "JiuwenSwarm-setup-{version}.exe"
-DEFAULT_ASSET_PATTERN_MACOS = "JiuwenSwarm-{version}.dmg"
 DEFAULT_ASSET_PATTERN_LINUX = "JiuwenSwarm-{version}.tar.gz"
 DEFAULT_TIMEOUT_SECONDS = 20
 DEFAULT_TEXT = "WbrW92Yn6jif-4Ks3kvzhWVv"
@@ -38,8 +36,8 @@ DEFAULT_SOURCE_CONFIG: dict[str, Any] = {
     "release_api_url": "",
     "pypi_mirror": "https://mirrors.aliyun.com/pypi",
     "asset_name_pattern": "",
-    "asset_name_pattern_windows": DEFAULT_ASSET_PATTERN_WINDOWS,
-    "asset_name_pattern_macos": DEFAULT_ASSET_PATTERN_MACOS,
+    "asset_name_pattern_windows": "",
+    "asset_name_pattern_macos": "",
     "asset_name_pattern_linux": DEFAULT_ASSET_PATTERN_LINUX,
 }
 
@@ -353,18 +351,47 @@ class UpdaterService:
 
     def _resolve_desktop_asset(self, config: dict[str, Any], release: ReleaseInfo) -> None:
         platform_key = _platform_asset_key()
-        pattern_key = f"asset_name_pattern_{platform_key}"
-        default_pattern = {
-            "windows": DEFAULT_ASSET_PATTERN_WINDOWS,
-            "macos": DEFAULT_ASSET_PATTERN_MACOS,
-            "linux": DEFAULT_ASSET_PATTERN_LINUX,
-        }.get(platform_key, DEFAULT_ASSET_PATTERN_WINDOWS)
-        asset_name_pattern = config.get(pattern_key) or default_pattern
-        asset_name = asset_name_pattern.format(version=release.version)
+        desktop_suffix = {
+            "windows": ".exe",
+            "macos": ".dmg",
+        }.get(platform_key)
 
-        matched = next((a for a in release.assets if a.name == asset_name), None)
-        if not matched:
-            raise RuntimeError(f"Desktop installer not found: {asset_name}")
+        if desktop_suffix:
+            candidates = [
+                asset
+                for asset in release.assets
+                if asset.download_url
+                and "/" not in asset.name
+                and "\\" not in asset.name
+                and asset.name.lower().endswith(desktop_suffix)
+            ]
+            if not candidates:
+                raise RuntimeError(
+                    f"No {platform_key} desktop installer ({desktop_suffix}) found "
+                    "in the latest release."
+                )
+            if len(candidates) > 1:
+                names = ", ".join(asset.name for asset in candidates)
+                raise RuntimeError(
+                    f"Multiple {platform_key} desktop installers "
+                    f"({desktop_suffix}) found in the latest release: {names}"
+                )
+            matched = candidates[0]
+            asset_name = matched.name
+        else:
+            # Linux desktop updates are outside the rename adaptation and keep
+            # the existing versioned filename contract.
+            asset_name_pattern = (
+                config.get("asset_name_pattern_linux")
+                or DEFAULT_ASSET_PATTERN_LINUX
+            )
+            asset_name = asset_name_pattern.format(version=release.version)
+            matched = next(
+                (asset for asset in release.assets if asset.name == asset_name),
+                None,
+            )
+            if not matched:
+                raise RuntimeError(f"Desktop installer not found: {asset_name}")
 
         self._update_status(
             latest_version=release.version,
@@ -448,12 +475,12 @@ class UpdaterService:
             "asset_name_pattern_windows": str(
                 updater.get("asset_name_pattern_windows")
                 or global_asset_name_pattern
-                or DEFAULT_ASSET_PATTERN_WINDOWS
+                or ""
             ),
             "asset_name_pattern_macos": str(
                 updater.get("asset_name_pattern_macos")
                 or global_asset_name_pattern
-                or DEFAULT_ASSET_PATTERN_MACOS
+                or ""
             ),
             "asset_name_pattern_linux": str(
                 updater.get("asset_name_pattern_linux")

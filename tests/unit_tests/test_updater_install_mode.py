@@ -82,21 +82,36 @@ def test_platform_asset_name_pattern_overrides_global_pattern(monkeypatch):
     assert config["asset_name_pattern_linux"] == "MyApp-{version}.tar.gz"
 
 
-def test_gitcode_release_version_can_be_inferred_from_beta_asset_name():
+def test_release_tag_is_authoritative_over_arbitrary_asset_names():
     from jiuwenswarm.common.version_source import GitCodeReleasesSource
 
     source = GitCodeReleasesSource(owner="openJiuwen", repo="jiuwenswarm")
     release = source._parse_release({
-        "tag_name": "0.2.2",
+        "tag_name": "release_0.2.4.beta3",
+        "name": "Legacy product release",
+        "assets": [
+            {
+                "name": "FutureProduct-9.9.9.exe",
+                "url": "https://example.test/FutureProduct-9.9.9.exe",
+            },
+        ],
+    })
+
+    assert release is not None
+    assert release.version == "0.2.4.beta3"
+
+
+def test_release_version_falls_back_to_asset_when_metadata_has_no_version():
+    from jiuwenswarm.common.version_source import GitCodeReleasesSource
+
+    source = GitCodeReleasesSource(owner="openJiuwen", repo="jiuwenswarm")
+    release = source._parse_release({
+        "tag_name": "",
         "name": "JiuwenSwarm",
         "assets": [
             {
-                "name": "JiuwenSwarm-setup-0.2.2.exe",
-                "url": "https://example.test/JiuwenSwarm-setup-0.2.2.exe",
-            },
-            {
-                "name": "JiuwenSwarm-setup-0.2.3.beta1.exe",
-                "url": "https://example.test/JiuwenSwarm-setup-0.2.3.beta1.exe",
+                "name": "LegacyPackage-0.2.3.beta1.exe",
+                "url": "https://example.test/legacy.exe",
             },
         ],
     })
@@ -306,7 +321,18 @@ def test_release_timestamp_requires_timezone():
         release_timestamp_key("2026-06-02T08:00:00")
 
 
-def test_desktop_check_uses_timestamp_and_matches_beta_windows_installer(monkeypatch):
+@pytest.mark.parametrize(
+    ("platform", "asset_name"),
+    [
+        ("win32", "TomorrowDesk-preview-installer.exe"),
+        ("darwin", "AnotherProduct-nightly.dmg"),
+    ],
+)
+def test_desktop_check_uses_timestamp_and_product_agnostic_installer(
+    monkeypatch,
+    platform,
+    asset_name,
+):
     from jiuwenswarm.common.version_source import ReleaseAsset, ReleaseInfo
 
     monkeypatch.delattr(sys, "frozen", raising=False)
@@ -321,18 +347,22 @@ def test_desktop_check_uses_timestamp_and_matches_beta_windows_installer(monkeyp
                 current_release_published_at="2026-06-01T08:00:00+08:00",
                 assets=[
                     ReleaseAsset(
-                        name="JiuwenSwarm-setup-0.2.2.exe",
-                        download_url="https://example.test/JiuwenSwarm-setup-0.2.2.exe",
+                        name="release-notes.txt",
+                        download_url="https://example.test/release-notes.txt",
                     ),
                     ReleaseAsset(
-                        name="JiuwenSwarm-setup-0.2.3.beta1.exe",
-                        download_url="https://example.test/JiuwenSwarm-setup-0.2.3.beta1.exe",
+                        name=f"../{asset_name}",
+                        download_url="https://example.test/unsafe",
+                    ),
+                    ReleaseAsset(
+                        name=asset_name,
+                        download_url=f"https://example.test/{asset_name}",
                     ),
                 ],
                 source_type="gitcode",
             )
 
-    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "platform", platform)
     monkeypatch.setattr(updater, "__version__", "9.0.0")
     monkeypatch.setattr(
         updater.UpdaterService,
@@ -346,6 +376,8 @@ def test_desktop_check_uses_timestamp_and_matches_beta_windows_installer(monkeyp
             "updater": {
                 "enabled": True,
                 "desktop_release_api_type": "gitcode",
+                "asset_name_pattern_windows": "OldProduct-{version}.exe",
+                "asset_name_pattern_macos": "OldProduct-{version}.dmg",
             }
         },
     )
@@ -353,7 +385,30 @@ def test_desktop_check_uses_timestamp_and_matches_beta_windows_installer(monkeyp
     status = updater.UpdaterService().check(manual=True)
 
     assert status["latest_version"] == "0.2.3.beta1"
-    assert status["matched_asset"] == "JiuwenSwarm-setup-0.2.3.beta1.exe"
+    assert status["matched_asset"] == asset_name
+    assert status["download_url"] == f"https://example.test/{asset_name}"
+
+
+def test_desktop_check_rejects_ambiguous_same_platform_installers(monkeypatch):
+    from jiuwenswarm.common.version_source import ReleaseAsset, ReleaseInfo
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    release = ReleaseInfo(
+        version="0.2.5.beta1",
+        assets=[
+            ReleaseAsset(
+                name="FirstName.dmg",
+                download_url="https://example.test/first",
+            ),
+            ReleaseAsset(
+                name="SecondName.dmg",
+                download_url="https://example.test/second",
+            ),
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="Multiple macos desktop installers"):
+        updater.UpdaterService()._resolve_desktop_asset({}, release)
 
 
 @pytest.mark.parametrize(

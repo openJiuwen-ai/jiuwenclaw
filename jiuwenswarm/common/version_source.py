@@ -221,24 +221,29 @@ class VersionSource(ABC):
 
     @classmethod
     def _best_version_from_release_data(cls, data: dict, assets_raw: list) -> str:
-        """Resolve a release version from tags, names, and asset filenames.
+        """Resolve a release version while treating release metadata as canonical.
 
-        Some release APIs can omit or normalize the tag for pre-releases.  The
-        desktop installers still carry the canonical version in their filenames,
-        so include asset names when selecting the newest release.
+        Product and installer names are allowed to change independently of the
+        release version.  Prefer the first explicit tag/version field so digits
+        in arbitrary asset names cannot override the Release identity.  The
+        release name and asset names remain last-resort compatibility fallbacks
+        for hosts that omit all explicit version metadata.
         """
-        candidates = [
-            str(data.get("tag_name") or ""),
-            str(data.get("tag") or ""),
-            str(data.get("version") or ""),
-            str(data.get("name") or ""),
-        ]
-        candidates.extend(
+        for key in ("tag_name", "tag", "version"):
+            version = cls._clean_version(str(data.get(key) or ""))
+            if version:
+                return version
+
+        release_name_version = cls._clean_version(str(data.get("name") or ""))
+        if release_name_version:
+            return release_name_version
+
+        asset_names = [
             str(item.get("name") or "")
             for item in assets_raw
             if isinstance(item, dict)
-        )
-        return cls._best_version_from_texts(candidates)
+        ]
+        return cls._best_version_from_texts(asset_names)
 
     def _fetch_newest_from_list(
         self,

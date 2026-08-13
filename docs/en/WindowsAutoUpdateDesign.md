@@ -9,9 +9,9 @@ This document describes the auto-update solution for JiuwenSwarm desktop (Window
 - Manual update check via the sidebar "Update" page
 - Desktop update source defaults to GitCode Releases, switchable to GitHub Releases; pip install mode uses PyPI
 - Download artifacts differ per platform:
-  - Windows: Inno Setup installer `JiuwenSwarm-setup-<version>.exe`
-  - macOS: DMG image `JiuwenSwarm-<version>.dmg`
-  - Linux: `JiuwenSwarm-<version>.tar.gz`
+  - Windows: the only `.exe` installer in the Release; no product-name prefix is required
+  - macOS: the only `.dmg` image in the Release; no product-name prefix is required
+  - Linux: still matched exactly as `JiuwenSwarm-<version>.tar.gz`
 - After download, an external helper completes installation and restart: Windows via an interactive install wizard, macOS / Linux via a silent helper script that installs and restarts
 - Pre-release support: stable and pre-release releases share the same update channel, so stable users also receive beta pushes
 
@@ -24,18 +24,11 @@ This document describes the auto-update solution for JiuwenSwarm desktop (Window
 
 ## Desktop Release Timestamp Rules
 
-Installer naming examples:
-
-| Type | Windows | macOS |
-|---|---|---|
-| Stable | `JiuwenSwarm-setup-0.2.2.exe` | `JiuwenSwarm-0.2.2.dmg` |
-| Pre-release | `JiuwenSwarm-setup-0.2.3.beta1.exe` | `JiuwenSwarm-0.2.3.beta1.dmg` |
-
 Windows and macOS installers for the same version are released together.
 
 The Windows and macOS desktop updater finds the Release that corresponds to the installed version in the paginated Releases list, then compares its publication timestamp with the newest publication timestamp. If the list does not contain the installed version, its Release is fetched by tag. Timestamps are normalized to UTC, and an update is offered only when the remote timestamp is newer. Linux keeps the existing version comparison behavior.
 
-The version string is used only to locate the installed Release, display status, and match the existing installer asset. It does not determine desktop release ordering. The `pip` install mode keeps its existing version comparison behavior.
+The version string is used only to locate the installed Release and display status. It does not determine desktop release ordering or Windows/macOS installer matching. Each Release should contain exactly one `.exe` and one `.dmg`; other attachments may use arbitrary names. The `pip` install mode keeps its existing version comparison behavior.
 
 ## Core Flow
 
@@ -63,7 +56,7 @@ Fields read from the release:
 - `tag_name` — version number (pre-release suffix preserved, e.g. `0.2.3.beta1`)
 - `body` — release notes
 - `published_at` — publish date
-- `assets[]` — the platform-matched installer
+- `assets[]` — the unique installer matched by platform suffix (`.exe` on Windows, `.dmg` on macOS)
 
 ## Configuration
 
@@ -76,13 +69,11 @@ updater:
   repo_owner: openJiuwen
   repo_name: jiuwenswarm
   release_api_url: ""
-  asset_name_pattern_windows: "JiuwenSwarm-setup-{version}.exe"
-  asset_name_pattern_macos: "JiuwenSwarm-{version}.dmg"
   asset_name_pattern_linux: "JiuwenSwarm-{version}.tar.gz"
   timeout_seconds: 20
 ```
 
-Pip install mode additionally supports a `pypi_mirror` field.
+Windows/macOS no longer read installer filename patterns. Legacy fields remain accepted for configuration compatibility but do not affect selection. Pip install mode additionally supports a `pypi_mirror` field.
 
 ## Backend API
 
