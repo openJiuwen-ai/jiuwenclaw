@@ -1078,6 +1078,18 @@ function AppContent() {
     hasChangesRef.current = hasChanges;
   }, []);
 
+  const handleDiscardAndReloadConfig = useCallback(() => {
+    setConfigChangedConfirmOpen(false);
+    hasChangesRef.current = false;
+    // Load the new server config first, then remount so ConfigPanel initializes
+    // from fresh store data instead of syncing once against the stale snapshot.
+    void (async () => {
+      await fetchConfig();
+      hasChangesRef.current = false;
+      setConfigPanelMountKey((key) => key + 1);
+    })();
+  }, [fetchConfig]);
+
   const handleModelsRefresh = useCallback(async () => {
     try {
       const resp = await request<{ models: ModelEntry[]; active_model: string }>('models.list');
@@ -2673,13 +2685,7 @@ function AppContent() {
               <div className="flex gap-3">
                 <button
                   type="button"
-                  onClick={() => {
-                    setConfigChangedConfirmOpen(false);
-                    hasChangesRef.current = false;
-                    // Remount so drafts reload from the server instead of keeping stale local edits.
-                    setConfigPanelMountKey((key) => key + 1);
-                    void fetchConfig();
-                  }}
+                  onClick={handleDiscardAndReloadConfig}
                   className="btn primary !px-4 !py-2"
                 >
                   {t('config.errors.configChangedConfirm')}
