@@ -110,7 +110,7 @@ function TeamLeaderPlainTextMessage({
       {fileItems && fileItems.length > 0 && (
         <FileDownloadList
           files={fileItems}
-          className="w-full md:w-1/2"
+          className="chat-message-file-list"
           onPreview={(index) => openArtifactPanel(fileArtifactId(fileItems[index]))}
         />
       )}
@@ -581,7 +581,12 @@ export const MessageItem = memo(function MessageItem({
           {showAvatar ? <TeamMemberAvatar member="team_leader" /> : null}
         </div>
       )}
-      <div className="chat-bubble-wrapper max-w-[82%] min-w-0">
+      <div
+        className={clsx(
+          'chat-bubble-wrapper max-w-[82%] min-w-0',
+          !isUser && visibleFileItems && 'chat-bubble-wrapper--with-files'
+        )}
+      >
         {!isUser && (
           <div className="hidden" data-testid="thinking-summary" aria-hidden="true" />
         )}
@@ -636,6 +641,7 @@ export const MessageItem = memo(function MessageItem({
                 {visibleFileItems && (
                   <FileDownloadList
                     files={visibleFileItems}
+                    className="chat-message-file-list"
                     onPreview={(index) => openArtifactPanel(fileArtifactId(visibleFileItems[index]))}
                   />
                 )}

@@ -249,12 +249,9 @@
 /* SVG diagram */
 .svg-diagram__canvas {
   width: 100%;
-  max-height: 720px;
   overflow-x: hidden;
-  overflow-y: auto;
   box-sizing: border-box;
   padding: 24px;
-  scrollbar-gutter: stable;
   background: var(--color-surface-elevated);
 }
 
