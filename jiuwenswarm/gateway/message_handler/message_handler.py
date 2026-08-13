@@ -16,6 +16,11 @@ from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Dict, Literal
+
+from jiuwenswarm.runtime.host_services import (
+    install_runtime_wake_handler,
+    restore_runtime_wake_handler,
+)
 from jiuwenswarm.gateway.channel_manager.base import ChannelType
 from jiuwenswarm.common.e2a.constants import (
     E2A_CANCEL_SOURCE_CLIENT_DISCONNECT,
@@ -203,6 +208,8 @@ class MessageHandler(ABC):
             return
         self._singleton_initialized = True
         self.agent_client = agent_client
+        self._runtime_wake_handler = None
+        self._previous_runtime_wake_handler = None
         self._user_messages: asyncio.Queue["Message"] = asyncio.Queue()
         self._robot_messages: asyncio.Queue["Message"] = asyncio.Queue()
         self._running = False
@@ -4444,6 +4451,10 @@ class MessageHandler(ABC):
         """启动入队 -> AgentServer -> 出队 的转发任务."""
         if self._forward_task is not None:
             return
+        self._runtime_wake_handler = self.publish_user_messages
+        self._previous_runtime_wake_handler = install_runtime_wake_handler(
+            self._runtime_wake_handler
+        )
         self._running = True
         self._forward_task = asyncio.create_task(self._forward_loop())
         logger.info("[MessageHandler] 转发循环已启动 (_user_messages -> AgentServer -> _robot_messages)")
@@ -4486,6 +4497,14 @@ class MessageHandler(ABC):
             except asyncio.CancelledError:
                 pass
             self._forward_task = None
+
+        runtime_wake_handler = getattr(self, "_runtime_wake_handler", None)
+        if runtime_wake_handler is not None:
+            restore_runtime_wake_handler(
+                runtime_wake_handler,
+                getattr(self, "_previous_runtime_wake_handler", None),
+            )
+            self._runtime_wake_handler = None
 
         logger.info("[MessageHandler] 转发循环已停止")
 

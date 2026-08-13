@@ -327,7 +327,7 @@ from jiuwenswarm.server.runtime.agent_adapter.sysop_builder import (
 from jiuwenswarm.server.runtime.agent_adapter.user_turn import TEAM_USER_TURN_KEY, UserTurn
 from jiuwenswarm.agents.harness.common.auto_harness.service import _HARNESS_PACKAGES_FILE
 from jiuwenswarm.agents.harness.common.plugins.rail_manager import get_rail_manager
-from jiuwenswarm.gateway.cron import CronTargetChannel
+from jiuwenswarm.runtime.cron import CronTargetChannel
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.common.utils import (
@@ -976,6 +976,27 @@ async def ensure_persistent_checkpointer() -> None:
     finally:
         if acquired:
             lock.release()
+
+
+async def close_persistent_checkpointer() -> None:
+    """Dispose the process-owned persistent checkpointer connection pool."""
+    global _PERSISTENT_CHECKPOINTER_READY
+
+    if not _PERSISTENT_CHECKPOINTER_READY:
+        return
+    lock = await _get_persistent_checkpointer_lock()
+    async with lock:
+        if not _PERSISTENT_CHECKPOINTER_READY:
+            return
+        checkpointer = CheckpointerFactory.get_checkpointer()
+        kv_store = getattr(checkpointer, "_kv_store", None)
+        engine = getattr(kv_store, "engine", None)
+        dispose = getattr(engine, "dispose", None)
+        if callable(dispose):
+            await dispose()
+        CheckpointerFactory.set_default_checkpointer(None)
+        _PERSISTENT_CHECKPOINTER_READY = False
+        logger.info("[JiuWenSwarmDeepAdapter] persistent checkpointer closed")
 
 
 _MODE_DISPLAY_MAP: dict[str, dict[str, str]] = {
@@ -7007,7 +7028,7 @@ class JiuWenSwarmDeepAdapter:
             }
         ):
             return True
-        from jiuwenswarm.gateway.message_handler.evolution_approval import (
+        from jiuwenswarm.runtime.evolution import (
             is_interrupt_evolution_approval_answer_payload,
         )
 
@@ -7869,7 +7890,7 @@ class JiuWenSwarmDeepAdapter:
         """Close the frontend evolution status after a team skill approval is resolved."""
         if not session_id:
             return
-        from jiuwenswarm.server.gateway_push import WebSocketGatewayPushTransport
+        from jiuwenswarm.runtime.host_services import RuntimeHostPushTransport
 
         stage = "completed" if accepted else "hidden"
         message = (
@@ -7880,7 +7901,7 @@ class JiuWenSwarmDeepAdapter:
         try:
             await push_evolution_status(
                 EvolutionPushContext(
-                    transport=WebSocketGatewayPushTransport(),
+                    transport=RuntimeHostPushTransport(),
                     channel_id=channel_id,
                     session_id=session_id,
                 ),
@@ -11426,10 +11447,10 @@ class JiuWenSwarmDeepAdapter:
 
     async def _watch_evolution_and_push(self, rid: str, cid: str, session_id: str) -> None:
         """Poll passive evolution events and push progress, approval, and terminal status."""
-        from jiuwenswarm.server.gateway_push import WebSocketGatewayPushTransport
+        from jiuwenswarm.runtime.host_services import RuntimeHostPushTransport
 
         push_context = EvolutionPushContext(
-            transport=WebSocketGatewayPushTransport(),
+            transport=RuntimeHostPushTransport(),
             channel_id=cid,
             session_id=session_id,
         )

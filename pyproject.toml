@@ -117,6 +117,7 @@ test = [
 
 [project.scripts]
 jiuwenswarm = "jiuwenswarm.channels.cli.main:main"
+jiuwenswarm-process = "jiuwenswarm.channels.process_cli.main:main"
 jiuwenswarm-app = "jiuwenswarm.app:main"
 jiuwenswarm-agentserver = "jiuwenswarm.server.app_agentserver:main"
 jiuwenswarm-gateway = "jiuwenswarm.gateway.app_gateway:main"

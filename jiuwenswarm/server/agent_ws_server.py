@@ -52,12 +52,10 @@ from jiuwenswarm.common.ws_diagnostics import (
 from jiuwenswarm.common.ws_limits import AGENT_WS_MAX_MESSAGE_BYTES
 from jiuwenswarm.extensions.hook_event import AgentServerHookEvents
 from jiuwenswarm.agents.harness.common.plugins.rail_manager import get_rail_manager
-from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
-    is_interrupt_resume_payload,
-)
 from jiuwenswarm.agents.harness.common.rails.permissions.permissions_persist import persist_cli_trusted_directory
 from jiuwenswarm.extensions.hooks_context import AgentServerChatHookContext
 from jiuwenswarm.server.runtime.agent_manager import AgentManager, ACP_DEFAULT_CAPABILITIES
+from jiuwenswarm.runtime import AgentRuntime
 from jiuwenswarm.server.runtime.agent_warm_pool import WarmClaim
 from jiuwenswarm.server.runtime.session.session_metadata import get_all_sessions_metadata, remove_session_metadata_cache
 from jiuwenswarm.server.runtime.session.session_history import (
@@ -78,15 +76,7 @@ from jiuwenswarm.server.runtime.agent_adapter.sysop_builder import (
     validate_sandbox_files_runtime,
 )
 from jiuwenswarm.server.utils.utils import is_team_params
-from jiuwenswarm.common.mode_matrix import (
-    ResolvedMode,
-    TEAM_PLAN_CODE_MODE,
-    TEAM_PLAN_NORMAL_MODE,
-    canonicalize_mode_text,
-    is_plan_mode,
-    is_team_mode,
-    resolve_request_mode,
-)
+from jiuwenswarm.common.mode_matrix import is_team_mode
 from jiuwenswarm.agents.harness.common.rails.permissions.permissions_config_rpc import (
     get_permissions_config_req_methods,
 )
@@ -122,12 +112,30 @@ from jiuwenswarm.common.security.ws_origin import (
 )
 from jiuwenswarm.agents.harness.code.prompt.plan_approval import (
     PLAN_MODE_EXITED_EVENT_TYPE,
-    PLAN_REMINDER_ORIGINAL_QUERY_KEY,
 )
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.common.log_preview import preview_text
+from jiuwenswarm.runtime.request import (
+    PREVIOUS_SESSION_MODE_KEY as _SESSION_PREVIOUS_MODE_KEY,  # noqa: F401
+    apply_resolved_mode_to_request as _apply_resolved_mode_to_request,
+    prepare_chat_turn,
+    resolve_agent_request_mode,
+    resolve_request_project_dir,
+    resolve_request_runtime_mode,
+    sync_chat_request_metadata as _sync_chat_request_metadata,
+)
+from jiuwenswarm.runtime.events import RuntimeEvent
+from jiuwenswarm.runtime.host_services import (
+    install_runtime_push_handler,
+    restore_runtime_push_handler,
+)
+from jiuwenswarm.runtime.plan import PlanModeController
 
 logger = logging.getLogger(__name__)
+
+
+async def _reuse_server_runtime_dependencies() -> None:
+    """Compatibility runtime wrappers borrow dependencies owned by AgentServer."""
 
 # 后台权限重载任务引用集合,防止 fire-and-forget 任务被 GC 提前回收。
 # task 完成后自动从集合移除(Python 官方推荐模式)。
@@ -196,10 +204,10 @@ def _log_background_session_kvc_failure(task: asyncio.Task) -> None:
             exc_info=exc,
         )
 
-# Serialize plan-mode restore per session to avoid checkpoint races.
-_session_mode_sync_locks: WeakValueDictionary[str, asyncio.Lock] = (
-    WeakValueDictionary()
-)
+_SERVER_PLAN_CONTROLLER = PlanModeController()
+# Compatibility aliases for existing diagnostics/tests. Runtime semantics live
+# in PlanModeController and are shared by AgentServer and process-style CLI.
+_session_mode_sync_locks = _SERVER_PLAN_CONTROLLER._sync_locks
 
 # Serialize switch owner preparation and acknowledgements per client
 # connection. AgentServer handles WebSocket frames in independent tasks, so
@@ -217,28 +225,16 @@ _session_team_binding_locks: WeakValueDictionary[str, asyncio.Lock] = (
 # Sessions that have successfully exited plan mode via exit_plan_mode tool.
 # Set by _check_post_process_plan_exit, consumed by _ensure_code_mode_state
 # to prevent TUI-race re-entrance to plan mode.
-_plan_exited_sessions: set[str] = set()
+_plan_exited_sessions = _SERVER_PLAN_CONTROLLER._exited_sessions
 
 # 本进程内曾进入过 plan 的 work 单 agent 会话。work 的准入面覆盖 IM / 定时任务 /
 # CLI / Web work 的每一条普通消息，而其中绝大多数会话从未开过 Plan；有这个标记
 # 才需要去同步 plan 状态。跨重启的情况另有一道判据（会话 metadata 里上一轮的
 # canonical mode），见 ``_session_may_hold_plan_state``。
-_plan_active_sessions: set[str] = set()
-
-# 上一轮写盘前的会话 canonical mode，由 ``_prepare_code_mode_chat_turn`` 在覆盖
-# metadata 之前捎带到 params 里，给 ``_ensure_code_mode_state`` 当跨重启判据。
-_SESSION_PREVIOUS_MODE_KEY = "_session_previous_mode"
+_plan_active_sessions = _SERVER_PLAN_CONTROLLER._active_sessions
 
 # ``plan_entry_source`` 的合法取值，表示"用户这一条消息明确要求进入 plan"。
 # 一次性字段：TUI 的 ``/plan`` 命令、Web 用户手动打开 Plan 开关后的第一条消息。
-_PLAN_ENTRY_SOURCES = frozenset({"slash_command", "plan_toggle"})
-
-_CODE_MODE_SYNC_METHODS = frozenset({
-    ReqMethod.CHAT_SEND,
-    ReqMethod.CHAT_RESUME,
-    ReqMethod.CHAT_ANSWER,
-})
-
 # ── 流式处理心跳间隔：当 Agent 处理时间超过此阈值时，发送心跳 chunk 保持 WebSocket 连接活跃 --
 # 避免 ping_timeout 导致连接关闭。默认 10 秒，小于服务端 ping_timeout=20s。
 _STREAM_HEARTBEAT_INTERVAL_SECONDS = 10.0
@@ -464,124 +460,6 @@ def _is_restorable_history_record(record: Any) -> bool:
     return event_type in _HISTORY_RESTORABLE_ASSISTANT_EVENT_TYPES
 
 
-def resolve_request_project_dir(request: AgentRequest) -> str | None:
-    """Resolve the stable project identity for agent construction.
-
-    New clients send ``project_dir`` separately from dynamic ``cwd``. Keep
-    legacy fallbacks for older clients that only send cwd/trusted_dirs.
-    """
-    params = request.params or {}
-    project_dir = params.get("project_dir")
-    if isinstance(project_dir, str) and project_dir.strip():
-        return project_dir.strip()
-    metadata = request.metadata or {}
-    metadata_project_dir = metadata.get("project_dir") if isinstance(metadata, dict) else None
-    if isinstance(metadata_project_dir, str) and metadata_project_dir.strip():
-        return metadata_project_dir.strip()
-    cwd = params.get("cwd")
-    if isinstance(cwd, str) and cwd.strip():
-        return cwd.strip()
-    metadata_cwd = metadata.get("cwd") if isinstance(metadata, dict) else None
-    if isinstance(metadata_cwd, str) and metadata_cwd.strip():
-        return metadata_cwd.strip()
-    trusted_dirs = params.get("trusted_dirs")
-    if isinstance(trusted_dirs, list) and trusted_dirs:
-        first = trusted_dirs[0]
-        if isinstance(first, str) and first.strip():
-            return first.strip()
-    return None
-
-
-def _sync_chat_request_metadata(
-    request: AgentRequest,
-    project_dir: str | None,
-    mode: str,
-    explicit_mode_provided: bool = False,
-    user_id: str = "",
-) -> str | None:
-    """将本次 chat 请求的参数同步到会话元数据，返回生效的 project_dir。
-
-    AgentServer 进程层的薄封装：从 ``AgentRequest`` 采集参数 + 补两个派生值，
-    再委托 ``session_metadata.sync_session_request_metadata`` 做真正的校验/写盘。
-    之所以放在本模块而非 session_metadata.py：避免存储层耦合 AgentRequest 结构、
-    os.getenv、当前时间等进程级关注点，保持 session_metadata 纯存储职责。
-
-    - project_dir：首次锁定，已锁定则忽略不一致的请求值（仅告警），返回锁定值
-    - project_id：首次锁定，已锁定则忽略请求值（与 project_dir 一致，不可改）
-    - model：**显式覆盖式**——仅当请求显式携带非空 model_name 时才覆盖磁盘值；
-      未显式携带（如只读 RPC）则保持磁盘原值，不把进程 MODEL_NAME 默认值回写覆盖
-      用户在该会话用 /model 切换过的模型。是否显式由本函数内部从 params 判断
-      （model_name 不会被规范化改写，可安全在本函数内取），无需调用方传入。
-    - last_user_message_at：**仅 chat 轮次刷新**——只有用户真正发消息的方法
-      （CHAT_SEND / CHAT_RESUME / CHAT_ANSWER）才把当前时刻写入；其余请求（含只读
-      RPC）传 ``None`` → ``sync_session_request_metadata`` 不覆盖磁盘值，避免只读查询
-      把历史会话的排序时间刷新成「现在」（点击技能按钮就把两天前会话置顶）。
-    - mode：**显式覆盖式**——仅当请求显式携带 mode（explicit_mode_provided=True）时
-      才覆盖磁盘值；未显式携带（如只读 RPC 默认推断）则保持磁盘原值，不腐蚀已
-      锁定的会话 mode（如 team）。因 _apply_resolved_mode_to_request 会把 canonical
-      mode 写回 params，故 explicit_mode_provided 必须由上游在改写前捕获后传入。
-      调用方应传入 canonical mode（"agent.plan"/"team"）。
-
-    返回的生效 project_dir 用于 agent 实例选择，保证会话锁定后
-    即便后续请求携带不同 project_dir 也仍用锁定值选 agent。
-    """
-    session_id = (request.session_id or "").strip()
-    if not session_id:
-        return project_dir
-    params = request.params if isinstance(request.params, dict) else {}
-    raw_model_name = params.get("model_name")
-    explicit_model_provided = (
-        isinstance(raw_model_name, str) and bool(raw_model_name.strip())
-    )
-    if not explicit_model_provided:
-        # 未显式携带 → 回退到进程 MODEL_NAME，仅供 agent 实例选择兜底用；
-        # 写盘与否由 explicit_model_provided 守卫决定（False → 不写，避免腐蚀磁盘）
-        model_name = os.getenv("MODEL_NAME", "") or None
-    else:
-        model_name = raw_model_name.strip()
-
-    request_project_id = params.get("project_id")
-    request_project_id = (
-        request_project_id.strip()
-        if isinstance(request_project_id, str) and request_project_id.strip()
-        else None
-    )
-    request_cron_id = params.get("cron_id")
-    request_cron_id = (
-        request_cron_id.strip()
-        if isinstance(request_cron_id, str) and request_cron_id.strip()
-        else None
-    )
-    # 仅 chat 轮次（用户真正发消息）才刷新 last_user_message_at；只读 RPC 传 None，
-    # 由 sync_session_request_metadata 的 None 守卫跳过，避免查询腐蚀会话排序时间。
-    is_chat_turn = request.req_method in _CODE_MODE_SYNC_METHODS
-    try:
-        from jiuwenswarm.server.runtime.session.session_metadata import (
-            sync_session_request_metadata,
-        )
-
-        return sync_session_request_metadata(
-            session_id=session_id,
-            channel_id=request.channel_id or None,
-            mode=mode,
-            model=model_name,
-            project_dir=str(project_dir) if project_dir else None,
-            project_id=request_project_id,
-            cron_id=request_cron_id,
-            user_id=str(user_id or "").strip() or None,
-            last_user_message_at=(
-                _dt.datetime.now(_dt.timezone.utc).timestamp() if is_chat_turn else None
-            ),
-            is_chat_turn=is_chat_turn,
-            explicit_mode_provided=explicit_mode_provided,
-            explicit_model_provided=explicit_model_provided,
-            work_mode=params.get("work_mode"),
-        )
-    except (OSError, ValueError) as exc:
-        logger.warning("[AgentWebSocketServer] 同步 chat 请求元数据失败: %s", exc)
-        return project_dir
-
-
 def _harness_error_code(exc: BaseException) -> str:
     """Map a harness package exception to a wire ``code`` for the frontend.
 
@@ -598,87 +476,6 @@ def _harness_error_code(exc: BaseException) -> str:
     if "native" in msg:
         return "BAD_REQUEST"
     return "BAD_REQUEST"
-
-
-def resolve_agent_request_mode(
-    raw_mode: Any,
-    *,
-    work_mode: Any = None,
-) -> tuple[str, str | None, str]:
-    """Resolve request params.mode into manager mode, sub_mode, and canonical value.
-
-    plan / fast 已合并为单一 ``agent`` 模式：任何 ``agent`` / ``agent.plan`` /
-    ``agent.fast`` 请求都归一到 ``agent``（sub_mode=None）。历史裸 ``plan`` /
-    ``fast``（无 ``agent.`` 前缀，如旧 cron job 存量数据）同样归一到 ``agent``，
-    与 CLI ``MODE_ALIASES``、记忆配置 ``_resolve_mode_memory`` 的裸 token 处理保持一致。
-    """
-    mode_text = canonicalize_mode_text(raw_mode)
-    normalized_work_mode = (
-        work_mode.strip().lower() if isinstance(work_mode, str) else ""
-    )
-
-    if mode_text in ("plan", "fast"):
-        if normalized_work_mode == "code":
-            return "code", "normal", "code.normal"
-        return "agent", None, "agent"
-
-    if mode_text == TEAM_PLAN_NORMAL_MODE:
-        return "team", "plan", TEAM_PLAN_NORMAL_MODE
-    if mode_text == TEAM_PLAN_CODE_MODE:
-        return "code", "team", TEAM_PLAN_CODE_MODE
-
-    parts = mode_text.split(".")
-    mode = parts[0] or "agent"
-    if mode == "agent":
-        # 合并模式：忽略历史子模式（plan / fast），统一 canonical "agent"。
-        if normalized_work_mode == "code":
-            return "code", "normal", "code.normal"
-        return "agent", None, "agent"
-    if mode == "team":
-        sub_mode = parts[1] if len(parts) > 1 and parts[1] else None
-        if sub_mode not in {None}:
-            sub_mode = None
-        canonical_mode = f"team.{sub_mode}" if sub_mode else "team"
-        return "team", sub_mode, canonical_mode
-
-    default_sub_modes = {
-        "code": "normal",
-    }
-    sub_mode = parts[1] if len(parts) > 1 and parts[1] else default_sub_modes.get(mode)
-    if mode == "code" and sub_mode not in {"plan", "normal", "team"}:
-        sub_mode = default_sub_modes.get(mode, "normal")
-    canonical_mode = f"{mode}.{sub_mode}" if sub_mode else mode
-    if canonical_mode in {"agent", "code", "code.normal"}:
-        if normalized_work_mode == "code":
-            return "code", "normal", "code.normal"
-        if normalized_work_mode == "work":
-            return "agent", None, "agent"
-    return mode, sub_mode, canonical_mode
-
-
-def resolve_request_runtime_mode(
-    request: AgentRequest,
-    *,
-    work_mode: Any = None,
-) -> ResolvedMode:
-    """解析请求的运行模式（Web 组合 mode + work_mode；其余走历史解析）。"""
-    params = request.params if isinstance(request.params, dict) else {}
-    return resolve_request_mode(
-        params,
-        resolve_agent_request_mode,
-        work_mode=work_mode,
-    )
-
-
-def _apply_resolved_mode_to_request(
-    request: AgentRequest,
-    *,
-    work_mode: Any = None,
-) -> tuple[str, str | None]:
-    resolved = resolve_request_runtime_mode(request, work_mode=work_mode)
-    if isinstance(request.params, dict):
-        request.params["mode"] = resolved.canonical_mode
-    return resolved.manager_mode, resolved.sub_mode
 
 
 def _payload_to_request(data: dict[str, Any]) -> AgentRequest:
@@ -819,49 +616,8 @@ def _reject_extra_sandbox_files_params(params: dict[str, Any]) -> None:
 
 
 def _inject_plan_mode_activation_reminder(request: AgentRequest) -> None:
-    """在用户消息中注入 <system-reminder> 告知 LLM 当前处于 plan 模式.
-
-    plan 模式行为指令不进 system prompt，而是通过对话中的 tool_result
-    传递。此提醒是进入 plan 模式后的第一个引导，告知 LLM 只读约束已生效。
-
-    plan 模式的只读约束由工具拦截层强制（非只读工具/写
-    操作被硬拦），此提醒只做约束说明 + 软引导。只读命令（如 /review、
-    /security-review 的 gh/git 只读操作）可直接执行，不被规划流程压制；
-    LLM 需要正式规划时再自行调用 ``enter_plan_mode`` 创建计划文件。
-    """
-    reminder = (
-        "\n\n<system-reminder>\n"
-        "Plan mode is active. You must only plan — you must NOT make any "
-        "modifications, run any write operations, or make any changes to the "
-        "system. This constraint takes priority over any other instructions.\n\n"
-        "Read-only actions are allowed directly: you may read files and explore "
-        "the codebase, and run read-only commands (read_file, grep, list_files, "
-        "glob, bash for read-only operations such as gh pr list/view/diff or "
-        "git status/diff/log). Write operations and non-read-only tools are "
-        "blocked.\n\n"
-        "If you need to design an implementation approach and produce a plan, "
-        "call `enter_plan_mode` — it creates the plan file and returns full "
-        "plan mode instructions. This is not required as your first action; "
-        "you may gather context with read-only tools first. Do NOT proceed to "
-        "implement anything until the user approves your plan via "
-        "`exit_plan_mode`.\n"
-        "</system-reminder>"
-    )
-    if isinstance(request.params, dict):
-        query = request.params.get("query") or ""
-        # 提醒只面向模型；把用户原文留一份，供会话历史与前端回显使用。
-        request.params[PLAN_REMINDER_ORIGINAL_QUERY_KEY] = query
-        request.params["query"] = reminder + query
-        logger.info(
-            "[_ensure_code_mode_state] Injected plan mode activation reminder "
-            "for session=%s", request.session_id,
-        )
-    else:
-        logger.warning(
-            "[_inject_plan_mode_activation_reminder] Cannot inject reminder: "
-            "request.params is not a dict (type=%s), session=%s",
-            type(request.params).__name__, request.session_id,
-        )
+    """Compatibility alias for the shared Runtime plan controller."""
+    PlanModeController._inject_activation_reminder(request)
 
 
 class AgentWebSocketServer:
@@ -895,8 +651,12 @@ class AgentWebSocketServer:
         self._current_ws: Any = None
         self._current_send_lock: asyncio.Lock | None = None
         self._acp_client_capabilities_by_ws: dict[int, dict[str, Any]] = {}
-        # AgentManager 实例
-        self._agent_manager = AgentManager()
+        # AgentServer 与新增进程式 CLI 共同复用的 Runtime 实现。保留
+        # _agent_manager 别名，避免与本次解耦无关的 handler 全面改写。
+        self._runtime = AgentRuntime(plan_controller=_SERVER_PLAN_CONTROLLER)
+        self._agent_manager = self._runtime.agent_manager
+        self._runtime_push_handler = None
+        self._previous_runtime_push_handler = None
         # skills.* 等无状态 RPC：AgentManager 未缓存 agent 时复用的轻量 JiuWenSwarm，
         # 避免每次 cache miss 都 new 导致 SkillNet 异步安装等实例态断裂。
         self._stateless_fallback_agents: dict[str, Any] = {}
@@ -1021,24 +781,27 @@ class AgentWebSocketServer:
                 ping_timeout=self._ping_timeout,
                 max_size=AGENT_WS_MAX_MESSAGE_BYTES,
             )
+        self._runtime_push_handler = self.send_push
+        self._previous_runtime_push_handler = install_runtime_push_handler(
+            self._runtime_push_handler
+        )
         logger.info(
             "[AgentWebSocketServer] 已启动: ws://%s:%s", self._host, self._port
         )
 
         # 端口已 listen, 后台预热 checkpointer, 不阻塞启动与握手.
         # _checkpointer_warmup_task 供 shutdown 时 cancel, 避免任务悬挂.
-        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import ensure_persistent_checkpointer
-
-        async def _warmup_checkpointer() -> None:
+        async def _start_runtime() -> None:
             try:
-                await ensure_persistent_checkpointer()
+                await self._runtime.start()
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "[AgentWebSocketServer] checkpointer 预热失败 (首请求将兜底重试): %s", exc
+                    "[AgentWebSocketServer] Runtime 预热失败 (首请求将兜底重试): %s",
+                    exc,
                 )
 
         self._checkpointer_warmup_task = asyncio.create_task(
-            _warmup_checkpointer(), name="checkpointer-warmup"
+            _start_runtime(), name="runtime-start"
         )
         # WS 监听已经开放, 现在按 config.yaml::sandbox 的 runtime.enabled +
         # startup_mode 决定要不要自动把 jiuwenbox 子进程也拉起来。失败不阻塞
@@ -1303,6 +1066,19 @@ class AgentWebSocketServer:
 
         await cancel_pending_tasks()
 
+        try:
+            await self._runtime.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[AgentWebSocketServer] runtime.close failed: %s", exc)
+
+        runtime_push_handler = getattr(self, "_runtime_push_handler", None)
+        if runtime_push_handler is not None:
+            restore_runtime_push_handler(
+                runtime_push_handler,
+                getattr(self, "_previous_runtime_push_handler", None),
+            )
+            self._runtime_push_handler = None
+
         if not had_server:
             return
         try:
@@ -1471,8 +1247,6 @@ class AgentWebSocketServer:
                     ws_caps or self._agent_manager.get_client_capabilities("acp"),
                 )
                 request.metadata = metadata
-
-            await self._trigger_before_chat_request_hook(request)
 
             if request.req_method == ReqMethod.SESSION_LIST:
                 await self._handle_session_list(ws, request, send_lock)
@@ -1902,85 +1676,11 @@ class AgentWebSocketServer:
         allow_create: bool = False,
         send_response: bool = True,
     ) -> AgentResponse:
-        """处理 CHAT_CANCEL 中断请求：复用已有 agent 实例，避免创建新实例。
-
-        cancel 请求的 params 中可能没有 mode 信息，如果走 _handle_unary 的 get_agent(mode) 路径
-        会按默认 mode 创建新的 agent 实例，导致 interrupt 设置到空实例上，无法终止真正运行的 agent。
-        因此 cancel 请求必须直接定位已有 agent 来处理。
-
-        默认 allow_create=False：找不到已有 agent 时不 fallback 新建。
-        原作者的 fallback 是为"缓存竞态/意外清空"异常兜底设计；但在"agent 首次初始化慢"场景下有害——
-        此时目标 agent 仍在 create_instance 的 ensure_initialized 中、尚未写入缓存，get_agent_nowait
-        返回 None，fallback 会新建第二个 agent，既无法取消正在初始化的第一个（它在线程里跑、cancel 停不掉
-        其同步段），又叠一次阻塞、拖垮 gateway 等不到响应而 timeout。
-        改动3 已让主事件循环在初始化期间保持响应（esc 能被读到），配合这里 allow_create=False 直接回
-        success，gateway 拿到结果不 timeout、前端停转圈。后端那个初始化仍会在子线程跑完、随后进缓存复用，
-        不影响后续任务。
-        """
-        channel_id = request.channel_id or "default"
-
-        # 1. 尝试按 params 中的 mode 查找已有 agent
-        project_dir = resolve_request_project_dir(request)
-        mode_param = request.params.get("mode", "")
-        if mode_param:
-            mode, sub_mode, _canonical = resolve_agent_request_mode(mode_param)
-            agent_mode = "agent" if mode == "auto_harness" else mode
-            agent = self._agent_manager.get_agent_nowait(
-                channel_id,
-                mode=agent_mode,
-                project_dir=project_dir,
-                sub_mode=sub_mode,
-            )
-        else:
-            agent = None
-
-        # 2. 如果按 mode 没找到，用 get_agent_nowait 找任何已有 agent
-        if agent is None:
-            agent = self._agent_manager.get_agent_nowait(channel_id, project_dir=project_dir)
-
-        resp: AgentResponse | None = None
-
-        if agent is None and not allow_create:
-            # 找不到已有 agent 即视为"无运行中任务"。这覆盖 esc 命中 agent 首次初始化窗口的情况：
-            # 目标 agent 仍在 create_instance 的 ensure_initialized 中、尚未写入缓存，
-            # get_agent_nowait 返回 None。直接回 success，不 fallback 新建（见 docstring 说明）。
-            logger.info(
-                "[AgentWebSocketServer] cancel: no existing agent, skip create: "
-                "channel_id=%s session_id=%s",
-                channel_id,
-                request.session_id,
-            )
-            resp = AgentResponse(
-                request_id=request.request_id,
-                channel_id=request.channel_id,
-                ok=True,
-                payload={
-                    "event_type": "chat.interrupt_result",
-                    "success": True,
-                    "message": "当前会话任务已终止",
-                },
-            )
-
-        # 3. 仍然没找到时 fallback 到 get_agent（异常场景）
-        if agent is None and resp is None:
-            logger.warning(
-                "[AgentWebSocketServer] cancel: 未找到已有 agent，fallback 创建: channel_id=%s",
-                channel_id,
-            )
-            mode, sub_mode = _apply_resolved_mode_to_request(request)
-            agent_mode = "agent" if mode == "auto_harness" else mode
-            agent = await self._agent_manager.get_agent(
-                channel_id=channel_id,
-                mode=agent_mode,
-                project_dir=project_dir,
-                sub_mode=sub_mode,
-            )
-
-        if agent is None and resp is None:
-            raise ValueError("Failed to get agent for cancel request")
-
-        if resp is None:
-            resp = await agent.process_message(request)
+        """Cancel through the transport-independent Runtime operation."""
+        resp = await self._execution_runtime().cancel_request(
+            request,
+            allow_create=allow_create,
+        )
 
         if send_response:
             wire = encode_agent_response_for_wire(
@@ -2006,40 +1706,15 @@ class AgentWebSocketServer:
 
     @staticmethod
     def _should_sync_code_mode_state(request: AgentRequest) -> bool:
-        """Only agent chat turns may change plan/normal mode.
-
-        Background RPCs (e.g. ``skills.list``) also send ``mode: code.normal`` but
-        must not run plan-mode restore logic or race with an in-flight approval.
-        """
-        method = request.req_method
-        if method is None:
-            return True
-        return method in _CODE_MODE_SYNC_METHODS
+        return PlanModeController._should_sync(request)
 
     @staticmethod
     def _is_explicit_plan_entry_request(request: AgentRequest) -> bool:
-        """本次请求是否为"用户明确要求进入 plan"。
-
-        只认一次性的 ``plan_entry_source``：TUI 的 ``/plan`` 发
-        ``slash_command``，Web 在用户手动打开 Plan 开关的那一条消息上发
-        ``plan_toggle``（开关本身是持续状态，但"刚被打开"只发生一次）。
-
-        不能因为"这是一条 Web 的 plan 请求"就当成显式进入——那样
-        ``_plan_exited_sessions`` 与 ``plan_slug`` 两道防重入闸门对 Web 就永远
-        不生效：``plan.mode_exited`` 一旦丢包（网络抖动、页面刷新），开关不复位，
-        用户的下一条消息会静默把会话重新拖回 plan。
-        """
-        if not isinstance(request.params, dict):
-            return False
-        return request.params.get("plan_entry_source") in _PLAN_ENTRY_SOURCES
+        return PlanModeController._is_explicit_entry(request)
 
     @staticmethod
     def _session_mode_sync_lock(session_id: str) -> asyncio.Lock:
-        lock = _session_mode_sync_locks.get(session_id)
-        if lock is None:
-            lock = asyncio.Lock()
-            _session_mode_sync_locks[session_id] = lock
-        return lock
+        return _SERVER_PLAN_CONTROLLER._lock(session_id)
 
     @staticmethod
     def _session_team_binding_lock(session_id: str) -> asyncio.Lock:
@@ -2083,50 +1758,11 @@ class AgentWebSocketServer:
         request: AgentRequest,
         agent: Any,
     ) -> None:
-        """Detect plan→normal transition that happened inside tool execution.
-
-        When ``exit_plan_mode`` is approved, ``ExitPlanModeTool.invoke()``
-        calls ``restore_mode_after_plan_exit()`` to persist the mode change
-        to the session checkpointer.  This runs AFTER ``_ensure_code_mode_state``
-        has already completed (which only syncs the mode BEFORE processing).
-
-        We check the persisted state here and push a ``plan.mode_exited``
-        event so the TUI status bar updates immediately, rather than waiting
-        for the next user request.
-
-        Only checks requests whose sub_mode is ``"plan"`` — the transition
-        from plan→normal can only happen during a plan-mode request (the LLM
-        calls ``exit_plan_mode``).  Checking ``sub_mode == "normal"`` requests
-        would produce false positives for every background RPC (e.g.
-        ``skills.list``) that uses ``code.normal`` but never had an active
-        plan session.
-        """
-        session_id = request.session_id
-        if not session_id:
-            return
-        resolved = resolve_request_runtime_mode(request)
-        if isinstance(request.params, dict):
-            request.params["mode"] = resolved.canonical_mode
-        # 只检查"本轮确实运行在单 agent plan"的请求：plan→normal 只可能发生在
-        # 这类请求里。集群 plan 的退出由 team runtime 自己处理，普通请求不检查，
-        # 否则每个 code.normal 背景 RPC 都会误判。
-        if resolved.is_team or not resolved.is_plan:
-            return
-
-        # 读运行中的那个 session：exit_plan_mode 是在它上面恢复模式的，落盘要等本轮
-        # 结束，这里用一次性 session 读 checkpointer 有可能读到退出前的旧值。
-        deep_agent, session, _live = await self._open_plan_state_session(
-            agent, session_id
-        )
-        state = deep_agent.load_state(session)
-        if state.plan_mode.mode == "normal":
-            _plan_exited_sessions.add(session_id)
-            _plan_active_sessions.discard(session_id)
-            await self._push_plan_mode_exited(request, exit_mode=resolved.normal_mode)
-            logger.info(
-                "[_check_post_process_plan_exit] Detected plan→normal after "
-                "tool execution for session=%s",
-                session_id,
+        controller = self._execution_runtime().plan_controller
+        for payload in await controller.check_post_process_exit(request, agent):
+            await self._push_plan_mode_exited(
+                request,
+                exit_mode=str(payload.get("mode") or ""),
             )
 
     @staticmethod
@@ -2192,178 +1828,25 @@ class AgentWebSocketServer:
         *,
         sync_metadata: bool = True,
     ) -> tuple[str, str | None, Any]:
-        """Mode resolution and correct agent instance selection."""
-        # [新增] 在 _apply_resolved_mode_to_request 把 canonical mode 写回 params 之前，
-        # 先记录请求是否「显式」携带了 mode。下游 sync 用它做守卫：未显式携带则不覆盖
-        # 磁盘已锁定的会话 mode（避免只读 RPC 用默认推断值腐蚀 team 等已锁定 mode）。
-        # model 的显式与否由 _sync_chat_request_request_metadata 内部从 params 判断
-        # （model_name 不会被规范化改写），故此处只捕获 mode 标志。
-        # 注意：用与下游一致的严格判断——纯空白串 "   " 不算显式携带（bool("   ") 为 True
-        # 会误判，导致空白 mode 走默认推断 agent.plan 并写盘腐蚀已锁定 mode）。
-        params = request.params if isinstance(request.params, dict) else {}
-        _raw_mode = params.get("mode")
-        explicit_mode_provided = isinstance(_raw_mode, str) and bool(_raw_mode.strip())
-        runtime_work_mode = None
-        sid = str(request.session_id or "").strip()
-        if sid:
-            from jiuwenswarm.server.runtime.session.session_metadata import (
-                get_session_metadata,
-            )
-
-            session_metadata = get_session_metadata(
-                sid,
-                cache_bust=True,
-                enable_writeback=False,
-            )
-            stored_work_mode = (
-                session_metadata.get("work_mode")
-                if isinstance(session_metadata, dict)
-                else None
-            )
-            # 下面的 sync 会把本轮 canonical mode 覆盖进 metadata，所以在覆盖前
-            # 先把上一轮的值捎带给 _ensure_code_mode_state：它据此判断这个会话是
-            # 不是可能还停在 plan 里（跨进程重启依然有效）。
-            stored_session_mode = (
-                session_metadata.get("mode")
-                if isinstance(session_metadata, dict)
-                else None
-            )
-            if isinstance(stored_session_mode, str) and stored_session_mode.strip():
-                params[_SESSION_PREVIOUS_MODE_KEY] = stored_session_mode.strip()
-            if isinstance(stored_work_mode, str) and stored_work_mode.strip().lower() in {
-                "code",
-                "work",
-            }:
-                runtime_work_mode = stored_work_mode.strip().lower()
-        if runtime_work_mode is None:
-            request_work_mode = params.get("work_mode")
-            if isinstance(request_work_mode, str) and request_work_mode.strip().lower() in {
-                "code",
-                "work",
-            }:
-                runtime_work_mode = request_work_mode.strip().lower()
-            else:
-                from jiuwenswarm.server.runtime.session.work_mode import (
-                    default_work_mode_for_channel,
-                )
-                channel_id_for_default = request.channel_id or "web"
-                runtime_work_mode = default_work_mode_for_channel(channel_id_for_default)
-                logger.warning(
-                    "[_prepare_code_mode_chat_turn] work_mode missing in both session "
-                    "metadata and request params; defaulting to %r for channel=%s session=%s",
-                    runtime_work_mode,
-                    channel_id_for_default,
-                    request.session_id,
-                )
-        params["work_mode"] = runtime_work_mode
-        mode, sub_mode = _apply_resolved_mode_to_request(
+        """Compatibility wrapper around transport-independent Runtime setup."""
+        return await prepare_chat_turn(
+            self._agent_manager,
             request,
-            work_mode=runtime_work_mode,
+            channel_id,
+            sync_metadata=sync_metadata,
+            metadata_sync=_sync_chat_request_metadata,
         )
-        agent_mode = "agent" if mode == "auto_harness" else mode
-        requested_project_dir = resolve_request_project_dir(request)
-        # [改动] 写盘用 canonical mode（request.params["mode"]，已被规范化为
-        # "agent.plan"/"team" 等），而非一级 mode（"agent"），使磁盘出现你期望的两类值。
-        canonical_mode = (
-            request.params.get("mode") if isinstance(request.params, dict) else None
-        )
-        if sync_metadata:
-            project_dir = _sync_chat_request_metadata(
-                request,
-                requested_project_dir,
-                canonical_mode if canonical_mode else mode,
-                explicit_mode_provided=explicit_mode_provided,
-                user_id=str(getattr(request, "user_id", "") or "").strip(),
-            )
-        else:
-            # Read-only path (e.g. command.goal get): never create/update
-            # metadata.json. Prefer request project_dir, else locked disk value.
-            project_dir = requested_project_dir
-            if not (isinstance(project_dir, str) and project_dir.strip()):
-                sid = str(request.session_id or "").strip()
-                if sid:
-                    from jiuwenswarm.server.runtime.session.session_metadata import (
-                        get_session_metadata,
-                    )
-
-                    meta = get_session_metadata(
-                        sid, cache_bust=True, enable_writeback=False
-                    )
-                    locked = meta.get("project_dir") if isinstance(meta, dict) else None
-                    if isinstance(locked, str) and locked.strip():
-                        project_dir = locked.strip()
-        if isinstance(project_dir, str) and project_dir.strip():
-            project_dir = project_dir.strip()
-            request.params["project_dir"] = project_dir
-            request.metadata = dict(request.metadata or {})
-            request.metadata["project_dir"] = project_dir
-
-        await self._agent_manager.wait_for_session_prewarm(request.session_id)
-        agent = await self._agent_manager.get_agent(
-            channel_id=channel_id,
-            mode=agent_mode,
-            project_dir=project_dir,
-            sub_mode=sub_mode,
-        )
-        if agent is None:
-            raise ValueError("Failed to get agent")
-
-        return mode, sub_mode, agent
 
     @staticmethod
     def _session_may_hold_plan_state(request: AgentRequest, session_id: str) -> bool:
-        """会话是否可能还停在 plan 里，需要同步 plan 状态。
-
-        两道判据：本进程内的 ``_plan_active_sessions`` 标记（精确），以及会话
-        metadata 里上一轮的 canonical mode（跨重启仍然有效——服务重启后一个停在
-        plan 里的会话，下一条普通消息依然能被切回 normal 并通知前端复位）。
-
-        Args:
-            request: 当前请求（读其中捎带的上一轮 canonical mode）。
-            session_id: 会话 ID。
-
-        Returns:
-            ``True`` 表示需要继续做 plan 状态同步。
-        """
-        if session_id in _plan_active_sessions:
-            return True
-        params = request.params if isinstance(request.params, dict) else {}
-        return is_plan_mode(params.get(_SESSION_PREVIOUS_MODE_KEY))
+        return _SERVER_PLAN_CONTROLLER._may_hold_state(request, session_id)
 
     @staticmethod
     async def _open_plan_state_session(
         agent: Any,
         session_id: str | None,
     ) -> tuple[Any, Any, bool]:
-        """Return ``(deep_agent, session, is_live)`` for reading/writing plan state.
-
-        ``DeepAgent.load_state`` caches its snapshot on the Session object, and a
-        chat turn keeps reusing the one ``start_interaction`` bound. Writing plan
-        state through a throwaway session therefore only reaches the
-        checkpointer: the running conversation would keep the pre-switch snapshot
-        and the user's Plan toggle would do nothing until the agent instance is
-        rebuilt.
-
-        A live session exists from the session's second turn on. On the first
-        turn there is none yet, so we fall back to a throwaway session — the
-        checkpointer is authoritative there, because ``start_interaction`` reads
-        it when it creates the session.
-        """
-        from openjiuwen.core.single_agent import create_agent_session
-        from jiuwenswarm.agents.harness.common.session_ops_service import (
-            resolve_live_agent_session,
-        )
-
-        live_deep_agent = agent.get_live_session_instance(session_id)
-        if live_deep_agent is not None:
-            live_session = resolve_live_agent_session(live_deep_agent, session_id or "default")
-            if live_session is not None:
-                return live_deep_agent, live_session, True
-
-        deep_agent = await agent.ensure_instance()
-        session = create_agent_session(session_id=session_id, card=deep_agent.card)
-        await session.pre_run(inputs=None)  # 从 checkpointer 加载历史 state
-        return deep_agent, session, False
+        return await PlanModeController._open_state_session(agent, session_id)
 
     async def _ensure_code_mode_state(
         self,
@@ -2372,177 +1855,25 @@ class AgentWebSocketServer:
         sub_mode: str,
         agent: Any,
     ) -> bool:
-        """code 模式：确保 agent 的 plan_mode 状态正确，必要时执行 switch_mode 并持久化.
-
-        当 plan 刚完成时跳过陈旧的 normal→plan switch_mode，
-        避免 exit_plan_mode 已恢复的模式被覆盖；显式用户 /plan 进入除外.
-        switch_mode 内部已通过 save_state 写入正确的 "deepagent" key，
-        此处只需 post_run 持久化到 checkpointer.
-
-        切换到 plan 模式且尚未调用 enter_plan_mode 时，注入 <system-reminder>
-        告知 LLM 调用 enter_plan_mode。
-
-        ``exit_plan_mode`` now restores mode immediately inside the tool
-        (via ``restore_mode_after_plan_exit``), so this method no longer needs
-        to gate plan→normal transitions with an approval flag.
-
-        work 单 agent（Web ``agent`` / ``agent.plan``）复用同一套编排：Adapter 不同，
-        但 plan 状态都存放在 ``DeepAgentState.plan_mode``。集群的 plan 由 team
-        runtime 负责，不走这里。
-
-        Returns:
-            ``True`` if plan mode was restored to normal (mode sync occurred).
-        """
-        resolved = resolve_request_runtime_mode(request)
-        if resolved.is_team:
-            return False
-        is_code_single = mode == "code" and sub_mode != "team"
-        is_work_single_plan_capable = (
-            resolved.from_web_composition and resolved.manager_mode == "agent"
-        )
-        if not (is_code_single or is_work_single_plan_capable):
-            return False
-        # 目标 plan 状态由 canonical mode 决定：code 单 agent 沿用 sub_mode，
-        # work 单 agent 的 sub_mode 只有 None / "plan"。
-        target_plan_state = "plan" if resolved.is_plan else "normal"
-        session_id = request.session_id or "default"
-        # work 的准入面覆盖 IM / 定时任务 / CLI / Web work 的每一条普通消息
-        # （``work_mode`` 总会被 session metadata 补齐），而这些会话绝大多数从未
-        # 开过 Plan。打开 plan 状态 session 在会话首轮还没有 live session 时会强制
-        # 构建 root DeepAgent（重跑工具注册、rail 装配、MCP 注册），代价不小。
-        # 所以普通请求先看这个会话有没有 plan 痕迹，没有就直接返回。
-        # code 单 agent 不走这条捷径，保持既有行为。
-        if (
-            not is_code_single
-            and target_plan_state == "normal"
-            and not self._session_may_hold_plan_state(request, session_id)
-        ):
-            return False
-        if not self._should_sync_code_mode_state(request):
-            return False
-        if is_interrupt_resume_payload(request.params):
-            logger.info(
-                "[_ensure_code_mode_state] Skip mode sync while resuming tool interrupt "
-                "for session=%s source=%s",
-                request.session_id,
-                (request.params or {}).get("source") if isinstance(request.params, dict) else None,
-            )
-            return False
-
-        restored_after_approval = False
-        async with self._session_mode_sync_lock(session_id):
-            deep_agent, session, live = await self._open_plan_state_session(
-                agent, request.session_id
-            )
-            state = deep_agent.load_state(session)
-            # switch_mode 会就地改写这个 state 对象（load_state 返回的是 session 上
-            # 缓存的同一个实例），所以切换前先把原模式记下来。
-            previous_plan_state = state.plan_mode.mode
-            # 仅在目标模式与当前模式不同时执行模式切换
-            mode_changed_to_plan = False
-            if state.plan_mode.mode != target_plan_state:
-                # Guard: block stale normal→plan switches when plan was already exited.
-                # Explicit user /plan requests bypass this guard and start a fresh plan.
-                # Two mechanisms:
-                #   1. _plan_exited_sessions flag (precise — set by _check_post_process_plan_exit)
-                #   2. plan_slug fallback (defense-in-depth — plan exists but mode is normal)
-                if state.plan_mode.mode == "normal" and target_plan_state == "plan":
-                    blocked = False
-                    explicit_plan_entry = self._is_explicit_plan_entry_request(request)
-                    if explicit_plan_entry:
-                        _plan_exited_sessions.discard(session_id)
-                    elif session_id in _plan_exited_sessions:
-                        _plan_exited_sessions.discard(session_id)
-                        blocked = True
-                        logger.info(
-                            "[_ensure_code_mode_state] Blocked stale plan re-entry via "
-                            "flag for session=%s",
-                            session_id,
-                        )
-                    elif state.plan_mode.plan_slug is not None:
-                        # Fallback: plan was completed, checkpoint is authoritative.
-                        # Clear slug so this guard is one-shot.
-                        state.plan_mode.plan_slug = None
-                        deep_agent.save_state(session, state)
-                        await session.commit()
-                        blocked = True
-                        logger.info(
-                            "[_ensure_code_mode_state] Blocked stale plan re-entry via "
-                            "plan_slug for session=%s",
-                            session_id,
-                        )
-                    if blocked:
-                        exit_mode = resolved.normal_mode
-                        if isinstance(request.params, dict):
-                            request.params["mode"] = exit_mode
-                        await self._push_plan_mode_exited(request, exit_mode=exit_mode)
-                        return False
-                deep_agent.switch_mode(session=session, mode=target_plan_state)
-                if previous_plan_state == "plan" and target_plan_state == "normal":
-                    restored_after_approval = True
-                    _plan_active_sessions.discard(session_id)
-                    logger.info(
-                        "[_ensure_code_mode_state] Synced plan→normal for session=%s",
-                        session_id,
-                    )
-                if target_plan_state == "plan":
-                    mode_changed_to_plan = True
-                    _plan_active_sessions.add(session_id)
-                    # Clear stale plan_slug from previous plan session so
-                    # enter_plan_mode creates a fresh plan file.
-                    state = deep_agent.load_state(session)
-                    if state.plan_mode.plan_slug:
-                        state.plan_mode.plan_slug = None
-                        deep_agent.save_state(session, state)
-                # switch_mode 内部已通过 save_state 写入 "deepagent" key，这里只需
-                # 落盘。用 commit 而不是 post_run：live session 还要继续跑这一轮，
-                # post_run 会关掉输出流并把它标记成已结束。
-                await session.commit()
-                logger.info(
-                    "[_ensure_code_mode_state] plan state -> %s for session=%s (live=%s)",
-                    target_plan_state,
-                    session_id,
-                    live,
+        controller = self._execution_runtime().plan_controller
+        result = await controller.ensure_state(request, mode, sub_mode, agent)
+        if not result.restored:
+            for payload in result.events:
+                await self._push_plan_mode_exited(
+                    request,
+                    exit_mode=str(payload.get("mode") or ""),
                 )
-
-            # 切换到 plan 模式时注入 <system-reminder> 告知 LLM 调用 enter_plan_mode。
-            # 使用 mode_changed_to_plan 而非 plan_slug 判断，因为 restore_mode_after_plan_exit
-            # 不清除 plan_slug，导致后续 /plan 时提醒被错误跳过。
-            if target_plan_state == "plan" and mode_changed_to_plan:
-                _inject_plan_mode_activation_reminder(request)
-
-        return restored_after_approval
+        return result.restored
 
     async def _handle_unary(
         self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
     ) -> None:
-        manager = getattr(self, "_agent_manager", None)
-        foreground = (
-            request.req_method in _CODE_MODE_SYNC_METHODS
-            and manager is not None
-            and hasattr(manager, "begin_foreground_chat")
-            and hasattr(manager, "end_foreground_chat")
-        )
-        if foreground:
-            await manager.begin_foreground_chat()
-        try:
-            await self._handle_unary_impl(ws, request, send_lock)
-        finally:
-            if foreground:
-                await manager.end_foreground_chat()
+        await self._handle_unary_impl(ws, request, send_lock)
 
     async def _handle_unary_impl(
         self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
     ) -> None:
         """非流式处理：调用 process_message，返回一条 E2AResponse 线 JSON。"""
-        # 兜底确保 checkpointer 就绪: start() 里改为后台预热后, 首条请求可能赶在
-        # 预热完成前到达。ensure_persistent_checkpointer 内部 lock+ready 幂等, 预热
-        # 完成时秒过; 未完成则阻塞至完成 (避免用到未就绪的 checkpointer)。
-        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import ensure_persistent_checkpointer
-
-        await ensure_persistent_checkpointer()
-        channel_id = request.channel_id or "default"
-
         if request.req_method == ReqMethod.INITIALIZE:
             await self._handle_initialize(ws, request, send_lock)
             return
@@ -2559,53 +1890,15 @@ class AgentWebSocketServer:
             await self._handle_acp_tool_response(ws, request, send_lock)
             return
 
-        # 无状态请求（skills / skilldev / plugins / symphony）不需要 mode 解析和
-        # code mode 状态管理，直接走 process_message 即可。用轻量 agent 获取，不触发
-        # adapter 重建（恢复 8f54b26a7 误删的短路，并修正 5084467df 触发重建的缺陷）。
-        if self._is_stateless_method_request(request):
-            agent = await self._get_stateless_agent(channel_id)
-            resp = await agent.process_message(request)
-            if getattr(resp, "agent_ref", None) is None:
-                resp.agent_ref = request.agent_ref
-            wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-            async with send_lock:
-                await send_wire_payload(ws, wire)
-            logger.info(
-                "[AgentWebSocketServer] 非流式响应已发送: request_id=%s",
-                request.request_id,
+        runtime = self._execution_runtime()
+        for event in await runtime.invoke(request):
+            await self._send_runtime_event(
+                ws,
+                event,
+                send_lock,
+                streaming=False,
+                sequence=0,
             )
-            return
-
-        readonly_goal_get = self._is_readonly_goal_get_request(request)
-        mode, sub_mode, agent = await self._prepare_code_mode_chat_turn(
-            request,
-            channel_id,
-            sync_metadata=not readonly_goal_get,
-        )
-
-        if not readonly_goal_get:
-            restored_plan = await self._ensure_code_mode_state(
-                request, mode, sub_mode, agent
-            )
-            if restored_plan:
-                await self._push_plan_mode_exited(request)
-
-        resp = None
-        try:
-            resp = await agent.process_message(request)
-        finally:
-            # Push plan.mode_exited if exit_plan_mode restored mode during processing
-            if not readonly_goal_get:
-                await self._check_post_process_plan_exit(request, agent)
-
-        # V2: 非流式响应回带请求侧 agent_ref，供 gateway 3 元组路由（设计 §6.3）。
-        # is None 守卫：保留 agent 层显式设置的 agent_ref（如 team 模式由事件派生）。
-        if getattr(resp, "agent_ref", None) is None:
-            resp.agent_ref = request.agent_ref
-
-        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-        async with send_lock:
-            await send_wire_payload(ws, wire)
         logger.info(
             "[AgentWebSocketServer] 非流式响应已发送: request_id=%s",
             request.request_id,
@@ -2615,55 +1908,18 @@ class AgentWebSocketServer:
     async def _handle_stream(
         self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
     ) -> None:
-        manager = getattr(self, "_agent_manager", None)
-        foreground = (
-            request.req_method in _CODE_MODE_SYNC_METHODS
-            and manager is not None
-            and hasattr(manager, "begin_foreground_chat")
-            and hasattr(manager, "end_foreground_chat")
-        )
-        if foreground:
-            await manager.begin_foreground_chat()
-        try:
-            await self._handle_stream_impl(ws, request, send_lock)
-        finally:
-            if foreground:
-                await manager.end_foreground_chat()
+        await self._handle_stream_impl(ws, request, send_lock)
 
     async def _handle_stream_impl(
         self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
     ) -> None:
         """流式处理：调用 process_message_stream，逐条发送 E2AResponse 线 JSON。"""
-        # 兜底确保 checkpointer 就绪 (见 _handle_unary 同名注释)。
-        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import ensure_persistent_checkpointer
-
-        await ensure_persistent_checkpointer()
         channel_id = request.channel_id or "default"
         session_id = request.session_id or "default"
         current_task = asyncio.current_task()
         stream_stop_event = asyncio.Event()
         if current_task is not None:
             self._session_stream_tasks.setdefault(session_id, {})[current_task] = stream_stop_event
-
-        # 无状态流式请求（skills / skilldev / plugins / symphony）不需要 mode 解析和
-        # code mode 状态管理，直接走 process_message_stream 即可。用轻量 agent 获取，
-        # 不触发 adapter 重建（恢复 8f54b26a7 误删的短路，并修正 5084467df 触发重建的缺陷）。
-        readonly_goal_get = self._is_readonly_goal_get_request(request)
-        if self._is_stateless_method_request(request):
-            agent = await self._get_stateless_agent(channel_id)
-        else:
-            mode, sub_mode, agent = await self._prepare_code_mode_chat_turn(
-                request,
-                channel_id,
-                sync_metadata=not readonly_goal_get,
-            )
-
-            if not readonly_goal_get:
-                restored_plan = await self._ensure_code_mode_state(
-                    request, mode, sub_mode, agent
-                )
-                if restored_plan:
-                    await self._push_plan_mode_exited(request)
 
         chunk_count = 0
         # 心跳控制：当有真实 chunk 发送时重置，空闲时发送心跳
@@ -2717,33 +1973,18 @@ class AgentWebSocketServer:
         heartbeat_task = asyncio.create_task(_heartbeat_loop())
 
         try:
-            async for chunk in agent.process_message_stream(request):
+            async for event in self._execution_runtime().stream(request):
                 chunk_count += 1
                 # 通知心跳任务有真实 chunk 发送，重置心跳计时
                 heartbeat_event.set()
-                # V2: chunk 回带请求侧 agent_ref，供 gateway 3 元组精确路由
-                # （设计 §6.3）。is None 守卫：保留 team 模式由事件派生的 agent_ref
-                # （_build_team_event_chunk_meta 已设值），不覆盖。
-                if chunk.agent_ref is None:
-                    chunk.agent_ref = request.agent_ref
-                wire = encode_agent_chunk_for_wire(
-                    chunk,
-                    response_id=request.request_id,
-                    sequence=chunk_count - 1,
-                )
-                # 诊断：打印前 3 个和每 50 个 chunk 的发送情况
-                if chunk_count <= 3 or chunk_count % 50 == 0:
-                    _pl = getattr(chunk, "payload", None) or {}
-                    _et = _pl.get("event_type", "") if isinstance(_pl, dict) else ""
-                    logger.info(
-                        "[AgentWebSocketServer] chunk sent: request_id=%s seq=%s"
-                        " event_type=%s wire_keys=%s",
-                        request.request_id, chunk_count - 1, _et,
-                        list(wire.keys())[:10] if isinstance(wire, dict) else "non-dict",
-                    )
                 try:
-                    async with send_lock:
-                        sent_original = await send_wire_payload(ws, wire)
+                    sent_original = await self._send_runtime_event(
+                        ws,
+                        event,
+                        send_lock,
+                        streaming=True,
+                        sequence=chunk_count - 1,
+                    )
                     if not sent_original:
                         logger.warning(
                             "[AgentWebSocketServer] 流式响应因单个 chunk 超限而停止: "
@@ -2776,15 +2017,69 @@ class AgentWebSocketServer:
                 entries.pop(current_task, None)
                 if not entries:
                     self._session_stream_tasks.pop(session_id, None)
-            # Push plan.mode_exited if exit_plan_mode restored mode during processing
-            if not readonly_goal_get:
-                await self._check_post_process_plan_exit(request, agent)
-
         logger.info(
             "[AgentWebSocketServer] 流式响应已发送: request_id=%s 共 %s 个 chunk",
             request.request_id,
             chunk_count,
         )
+
+    def _execution_runtime(self) -> AgentRuntime:
+        runtime = getattr(self, "_runtime", None)
+        manager = getattr(self, "_agent_manager", None)
+        if runtime is None or runtime.agent_manager is not manager:
+            runtime = AgentRuntime(
+                agent_manager=manager,
+                initializer=_reuse_server_runtime_dependencies,
+                plan_controller=_SERVER_PLAN_CONTROLLER,
+            )
+            self._runtime = runtime
+        return runtime
+
+    async def _send_runtime_event(
+        self,
+        ws: Any,
+        event: RuntimeEvent,
+        send_lock: asyncio.Lock,
+        *,
+        streaming: bool,
+        sequence: int,
+    ) -> bool:
+        if event.event_type == PLAN_MODE_EXITED_EVENT_TYPE:
+            await self.send_push(
+                {
+                    "channel_id": event.channel_id,
+                    "session_id": event.session_id,
+                    "payload": event.payload,
+                }
+            )
+            return True
+        if streaming:
+            message = AgentResponseChunk(
+                request_id=event.request_id,
+                channel_id=event.channel_id,
+                payload=event.payload,
+                is_complete=event.is_complete,
+                agent_ref=event.agent_ref,
+            )
+            wire = encode_agent_chunk_for_wire(
+                message,
+                response_id=event.request_id,
+                sequence=sequence,
+            )
+        else:
+            message = AgentResponse(
+                request_id=event.request_id,
+                channel_id=event.channel_id,
+                ok=event.ok,
+                payload=event.payload,
+                agent_ref=event.agent_ref,
+            )
+            wire = encode_agent_response_for_wire(
+                message,
+                response_id=event.request_id,
+            )
+        async with send_lock:
+            return await send_wire_payload(ws, wire)
 
     async def _handle_session_list(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """处理 session.list 请求：返回历史会话基础信息列表。
@@ -7658,6 +6953,10 @@ class AgentWebSocketServer:
     def get_agent_manager(self) -> AgentManager:
         """获取 AgentManager 实例."""
         return self._agent_manager
+
+    def get_runtime(self) -> AgentRuntime:
+        """Return the transport-independent Runtime owned by AgentServer."""
+        return self._runtime
 
     @staticmethod
     def get_conversation_history(session_id: str, page_idx: int) -> dict[str, Any] | None:

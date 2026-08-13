@@ -24,6 +24,7 @@ import aiohttp
 
 from jiuwenswarm.gateway.channel_manager.base import BaseChannel, ChannelMetadata, RobotMessageRouter
 from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
+from jiuwenswarm.runtime.host_services import install_runtime_xiaoyi_channel_provider
 from jiuwenswarm.gateway.routing.keys import XiaoyiDeliveryTarget
 from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
 from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.xiaoyi_utils.push import XiaoYiPushService, PushConfig
@@ -65,6 +66,9 @@ _xiaoyi_channel_instances: dict[str, "XiaoyiChannel"] = {}
 def get_xiaoyi_channel(channel_id: str = "xiaoyi") -> Optional["XiaoyiChannel"]:
     """获取指定 channel_id 的 XiaoyiChannel 实例（供手机端工具调用使用）."""
     return _xiaoyi_channel_instances.get(channel_id)
+
+
+install_runtime_xiaoyi_channel_provider(get_xiaoyi_channel)
 
 
 @dataclass
