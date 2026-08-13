@@ -1692,6 +1692,7 @@ export class AppScreen implements Component, Focusable {
   private mvController: MemoryViewController | null = null;
   private swarmWorkflowsViewState: SwarmWorkflowsViewState | null = null;
   private shownBudgetExhaustedWorkflowKeys = new Set<string>();
+  private lastWorkflowStatus = new Map<string, string>();
   private workflowUiSessionId = "";
   /** Currently-active swarmflow human reply input (null = not replying). */
   private replyingToHumanPrompt: {
@@ -3806,6 +3807,11 @@ export class AppScreen implements Component, Focusable {
     this.syncEditorSubmitState(snapshot);
     this.syncTeamPanelSelection(snapshot);
     this.refreshSwarmWorkflowsView();
+    for (const wf of snapshot.workflowRuns) {
+      if (!this.lastWorkflowStatus.has(wf.id)) {
+        this.lastWorkflowStatus.set(wf.id, wf.status);
+      }
+    }
     this.maybeOpenCurrentWorkflowBudgetExhausted();
     this.syncAnimationLoop(snapshot);
     // Sync terminal window title with session title when it changes
@@ -5713,6 +5719,13 @@ export class AppScreen implements Component, Focusable {
       .getSnapshot()
       .workflowRuns.find((item) => item.id === state.workflowId);
     if (!workflow || !isWorkflowBudgetExhausted(workflow)) return;
+
+    // 只在 workflow 状态从非 failed 变成 failed（实时失败）时弹窗；
+    // 历史已 failed 的 workflow 用户手动进入时不弹。
+    const prev = this.lastWorkflowStatus.get(workflow.id) ?? workflow.status;
+    this.lastWorkflowStatus.set(workflow.id, workflow.status);
+    if (prev === "failed") return;
+
     const key = `${this.workflowUiSessionId}:${workflow.id}`;
     if (this.shownBudgetExhaustedWorkflowKeys.has(key)) return;
     this.shownBudgetExhaustedWorkflowKeys.add(key);
