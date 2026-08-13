@@ -38,6 +38,7 @@
     "settings": "设置",
     "config": "配置信息",
     "browser": "浏览器",
+    "videoLive": "视频直播",
     "logs": "日志",
     "update": "更新"
   },
@@ -479,7 +480,7 @@
     "formSubmit": "确定",
     "formCancel": "取消",
     "editTitle": "编辑目标",
-    "toolbarTag": "目标",
+    "toolbarTag": "当前任务",
     "toolbarUnavailable": "当前已有进行中的目标，请先完成或清除",
     "toolbarUnavailablePlan": "计划模式进行中，暂不可选择目标",
     "closeTag": "取消目标",

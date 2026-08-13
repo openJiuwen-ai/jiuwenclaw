@@ -38,6 +38,7 @@
     "settings": "Settings",
     "config": "Configuration",
     "browser": "Browser",
+    "videoLive": "Video Live",
     "logs": "Logs",
     "update": "Updates"
   },
