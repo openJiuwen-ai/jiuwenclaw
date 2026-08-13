@@ -55,6 +55,7 @@ from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
     _build_context_processor_rail,
 )
 from jiuwenswarm.agents.swarm.context import SwarmBuildContext
+from jiuwenswarm.research_evidence.rail import ResearchEvidenceRail
 
 logger = logging.getLogger(__name__)
 
@@ -71,12 +72,65 @@ MODEL_ANOMALY_DETECTION = "swarm.model_anomaly_detection"
 PLUGIN_RAILS = "swarm.plugin_rails"
 SKILL_RETRIEVAL_PROMPT = "swarm.skill_retrieval_prompt"
 SYMPHONY_ORCHESTRATION_PROMPT = "swarm.symphony_orchestration_prompt"
+RESEARCH_EVIDENCE = "swarm.research_evidence"
 
 
 def _workspace_root(ctx: SwarmBuildContext) -> str | None:
     """Resolve the member workspace root path."""
     workspace = getattr(ctx, "workspace", None)
     return getattr(workspace, "root_path", None) if workspace else None
+
+
+def _research_project_root(ctx: SwarmBuildContext) -> str:
+    """Resolve the project-owned root for evidence artifacts."""
+
+    return str(ctx.project_dir or _workspace_root(ctx) or ".")
+
+
+class ResearchEvidenceInput(ConstructionInput):
+    """Construction inputs for the opt-in evidence-grounding rail."""
+
+    project_root: str = context_field(
+        resolver=_research_project_root,
+        default=".",
+        description="Project root that owns the evidence store.",
+    )
+    enabled: bool = param_field(default=False, description="Enable research evidence gating.")
+    store_directory: str = param_field(
+        default=".jiuwen/research_evidence",
+        description="Evidence-store directory, relative to the project root by default.",
+    )
+    token_budget: int = param_field(default=2048, description="Evidence prompt token budget.")
+    min_reliability: float = param_field(
+        default=0.35, description="Minimum evidence reliability admitted to context."
+    )
+    required_kinds: list[str] = param_field(
+        default_factory=list,
+        description="Evidence categories to seed before unconstrained greedy selection.",
+    )
+
+
+@harness_element(
+    kind=ElementKind.RAIL,
+    name=RESEARCH_EVIDENCE,
+    description="Opt-in budget-aware research evidence selection, grounding, and resource tracing.",
+    input_model=ResearchEvidenceInput,
+)
+def _build_research_evidence_rail(
+    params: dict[str, Any],
+    context: SwarmBuildContext,
+) -> ResearchEvidenceRail | None:
+    inp = ResearchEvidenceInput.resolve(params, context)
+    if not inp.enabled:
+        return None
+    return ResearchEvidenceRail(
+        project_root=inp.project_root,
+        enabled=True,
+        store_directory=inp.store_directory,
+        token_budget=inp.token_budget,
+        min_reliability=inp.min_reliability,
+        required_kinds=inp.required_kinds,
+    )
 
 
 class SkillRetrievalPromptInput(ConstructionInput):
@@ -478,6 +532,7 @@ def _build_plugin_rails(
 
 
 __all__ = [
+    "RESEARCH_EVIDENCE",
     "RUNTIME_PROMPT",
     "TEAM_SKILL_STORAGE_POLICY",
     "TEAM_SKILL_LIBRARY_RELOAD",

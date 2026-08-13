@@ -108,6 +108,7 @@ _COMMON_RAIL_NAMES: tuple[str, ...] = (
     registry.PLUGIN_RAILS,
     registry.SKILL_RETRIEVAL_PROMPT,
     registry.SYMPHONY_ORCHESTRATION_PROMPT,
+    registry.RESEARCH_EVIDENCE,
 )
 
 # Tools common to both roles. Each element self-gates on config, so all are
@@ -160,6 +161,7 @@ _CODE_RAIL_NAMES: tuple[str, ...] = (
     # ``core.team.skill_use``, shared with the chat profile.
     registry.SKILL_RETRIEVAL_PROMPT,
     registry.SYMPHONY_ORCHESTRATION_PROMPT,
+    registry.RESEARCH_EVIDENCE,
 )
 
 # Rails shared with the team profile, appended to the code profile.
@@ -429,6 +431,23 @@ def _member_evolution_rail_params(config: dict[str, Any]) -> dict[str, Any]:
 
 # Per-element attribute params, keyed by provider name; empty for parameterless.
 _RAIL_PARAM_BUILDERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
+    registry.RESEARCH_EVIDENCE: lambda c: {
+        "enabled": bool(_config_section(c, "research_evidence").get("enabled", False)),
+        "store_directory": str(
+            _config_section(c, "research_evidence").get(
+                "store_directory", ".jiuwen/research_evidence"
+            )
+        ),
+        "token_budget": int(
+            _config_section(c, "research_evidence").get("token_budget", 2048)
+        ),
+        "min_reliability": float(
+            _config_section(c, "research_evidence").get("min_reliability", 0.35)
+        ),
+        "required_kinds": list(
+            _config_section(c, "research_evidence").get("required_kinds", []) or []
+        ),
+    },
     registry.CONTEXT_PROCESSOR: _context_processor_params,
     registry.MODEL_ANOMALY_DETECTION: _model_anomaly_detection_params,
     registry.CODE_PROJECT_MEMORY: lambda c: {
