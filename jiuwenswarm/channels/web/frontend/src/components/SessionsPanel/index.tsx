@@ -6,6 +6,7 @@ import { containsIgnoredDirectory } from '../../features/fileTreeFilters';
 import { isHistoryPreviewFile } from '../../features/historyFilePreview';
 import { webRequest } from '../../services/webClient';
 import { useChatStore } from '../../stores/chatStore';
+import { toDisplaySessionTitle } from '../../utils/documentMessage';
 
 function SessionErrorIndicator({ sessionId }: { sessionId: string }) {
   const error = useChatStore((state) => state.runtimes[sessionId]?.error);
@@ -545,10 +546,10 @@ export function SessionsPanel({
                         setSelectedSessionId(session.session_id);
                         void loadSessionFilesForSession(session.session_id);
                       }}
-                      title={session.title || parseSessionDisplayLabel(session.session_id, t)}
+                      title={toDisplaySessionTitle(session.title || '') || parseSessionDisplayLabel(session.session_id, t)}
                     >
                       <span className="flex items-center gap-2">
-                        <span className="truncate block flex-1">{session.title || parseSessionDisplayLabel(session.session_id, t)}</span>
+                        <span className="truncate block flex-1">{toDisplaySessionTitle(session.title || '') || parseSessionDisplayLabel(session.session_id, t)}</span>
                         <SessionErrorIndicator sessionId={session.session_id} />
                       </span>
                       {session.mode === 'team' && session.team_name ? (

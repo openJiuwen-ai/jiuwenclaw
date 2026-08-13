@@ -1547,15 +1547,6 @@ pip install lark-oapi
 | Go | golangci-lint, gosec | `go install ...` |
 | Rust | Clippy, cargo-audit | `rustup component add clippy` |
 
-### 7.4 心跳配置
-
-在 `HEARTBEAT.md` 中配置定时审查：
-
-```markdown
-## 活跃的任务项
-- 执行代码质量扫描  # 每天扫描代码质量
-```
-
 ## 第八章｜测试验证
 
 | 测试方式 | 说明 |

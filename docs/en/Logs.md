@@ -103,16 +103,18 @@ jq '.' /var/log/jiuwenbox/9284a4bf-870-20260515T112345.audit.log
 
 The logging system adopts the following rotation strategy:
 
-- **Size Limit**: Default maximum 20MB per log file (configurable via `max_bytes`)
-- **Retention Count**: Default 20 log files retained (configurable via `backup_count`)
+- **Size Limit**: Default maximum 20MB per log file (hardcoded constant, not configurable via config.yaml)
+- **Retention Count**: Default 20 log files retained (hardcoded constant, not configurable via config.yaml)
 - **Automatic Rotation**: When a log file reaches the size limit, a new file is automatically created and old files are archived
-- **Naming Format**: Archived files are named `{filename}.{index}`, e.g., `gateway.log.1`
+- **Naming Format**: Archived files are named `{filename}_{YYYYMMDD_HHMMSS}.log`, e.g., `gateway_20260519_153045.log`
+
+> **Note**: To modify rotation parameters (max_bytes, backup_count), you need to modify the source code constants in `jiuwenswarm/common/utils.py` at lines 47-48.
 
 ## 4. Log System Architecture
 
 ### 4.1 Core Modules
 
-- **Log Configuration**: `setup_logger` function in `jiuwenclaw/common/utils.py`
+- **Log Configuration**: `setup_logger` function in `jiuwenswarm/common/utils.py`
 - **Audit Logs**: `jiuwenbox/src/jiuwenbox/server/audit_logger.py`
 - **Default Log Implementation**: `openjiuwen/core/common/logging/default/default_impl.py`
 
@@ -128,19 +130,19 @@ The logging system adopts the following rotation strategy:
 
 ### 5.1 Configuration File
 
-Log levels are mainly configured through the `logging` section in the `config.yaml` file:
+Log levels are configured through the `logging` section in the `config.yaml` file:
 
 ```yaml
 logging:
-  level: INFO            # Default log level
+  level: INFO            # Default log level (DEBUG/INFO/WARNING/ERROR/CRITICAL)
   console_level: INFO    # Console log level
   gateway: INFO          # Gateway component log level
   channel: INFO          # Channel component log level
   agent_server: INFO     # Agent server log level
   full: INFO             # Full log level
-  max_bytes: 20971520    # Log file size limit (20MB)
-  backup_count: 20       # Number of log files to retain
 ```
+
+> **Note**: Log rotation parameters (max_bytes, backup_count) are hardcoded constants and cannot be configured via config.yaml. To adjust them, modify the source code in `jiuwenswarm/common/utils.py` at lines 47-48.
 
 ### 5.2 Environment Variables
 
@@ -150,13 +152,7 @@ The console log level can be overridden through environment variables:
 LOG_LEVEL=DEBUG jiuwenswarm-start
 ```
 
-### 5.3 Command Line Parameters
-
-When starting the service, log level can be specified via parameters:
-
-```bash
-jiuwenswarm-start --log-level DEBUG
-```
+> **Note**: After modifying log configuration, you need to restart the service for changes to take effect.
 
 ## 6. Log Levels
 
@@ -204,9 +200,13 @@ Audit logs use structured JSON format:
 **Problem**: Log files grow too quickly and occupy too much disk space
 
 **Solution**:
-- Lower log level to reduce log output
-- Decrease `max_bytes` configuration to reduce individual log file size
-- Decrease `backup_count` configuration to reduce the number of retained log files
+- Lower log level to reduce log output (modify `logging.level` in config.yaml)
+- Periodically clean up archived log files (manual cleanup or scheduled tasks)
+- To adjust rotation parameters, modify the hardcoded constants in `jiuwenswarm/common/utils.py` at lines 47-48:
+  ```python
+  _LOG_FILE_MAX_BYTES = 20 * 1024 * 1024  # Modify this to change single file size
+  _LOG_FILE_BACKUP_COUNT = 20             # Modify this to change the number of archives
+  ```
 
 ### 8.2 No Log Output
 

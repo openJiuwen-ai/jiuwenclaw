@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import re
+import stat
 import urllib.parse
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
@@ -43,11 +44,16 @@ from jiuwenswarm.extensions.agentos.agentos_router.registry_client import (
     RegistryClient,
     instance_service_id,
 )
-from jiuwenswarm.extensions.agentos.agentos_router.ssh_relay import YuanrongSshRelay
+from jiuwenswarm.extensions.agentos.agentos_router.ssh_relay import (
+    DEFAULT_CLIENT_KEYS_DIR,
+    YuanrongSshRelay,
+    resolve_client_keys_dir,
+)
 from jiuwenswarm.extensions.yuanrong_frontend_client import (
     AgentRuntimeSpec,
     YuanrongFrontendAgentClient,
 )
+from jiuwenswarm.extensions.agentos.auth.ssh_key_issuer import SshKeyIssuer
 from jiuwenswarm.gateway import ChannelManager
 from jiuwenswarm.gateway.channel_manager.base import ChannelType
 from jiuwenswarm.gateway.routing.agent_client import (
@@ -59,6 +65,8 @@ from jiuwenswarm.gateway.routing.agent_client import (
 logger = logging.getLogger(__name__)
 
 _WORKSPACE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+_TEAM_MODES = frozenset({"team", "code.team", "team.plan"})
 
 # create_sandbox 返回后 agentserver 仍在进程内启动；YuanRong WS 代理此时会回
 # HTTP 502。在 deadline 内重试，避免首条 chat 立刻空失败（TUI "Worked for 0s"）。
@@ -72,6 +80,13 @@ _WS_CONNECT_RETRYABLE_TEXT_TOKENS = (
     "connection refused",
     "temporarily unavailable",
 )
+
+
+def _is_team_mode(params: Any) -> bool:
+    """Return True if params["mode"] is a team variant."""
+    if not isinstance(params, dict):
+        return False
+    return str(params.get("mode") or "").strip().lower() in _TEAM_MODES
 
 
 def _is_ws_connect_retryable(exc: BaseException) -> bool:
@@ -90,6 +105,10 @@ def _is_ws_connect_retryable(exc: BaseException) -> bool:
 
 class UnsupportedAgentType(ValueError):
     pass
+
+
+class EphemeralKeyIssueError(RuntimeError):
+    """A configured issuer could not mint an ephemeral SSH key."""
 
 
 def build_inline_runtime_spec(image_info: ImageInfo) -> AgentRuntimeSpec:
@@ -125,22 +144,32 @@ def resolve_agent_workspace(user_id: str, *, workspace_root: str | None = None) 
     Default: ``/home/agentos/users/<user_id>``. Optional ``workspace_root``
     overrides the parent directory (``{workspace_root}/<user_id>``).
 
-    Best-effort ``mkdir``: permission errors are ignored so callers (and unit
-    tests) can still pass the path to YuanRong create; the host/deploy side
-    remains responsible for a writable mount source.
+    The gateway does **not** create the directory. It only validates that the
+    directory already exists and is a directory. The directory's owner/group
+    and permission setup is validated by other management-plane components,
+    so no permission check is performed here. Any validation failure raises
+    :class:`ValueError`, which the caller turns into a failed request.
     """
     safe_user = _WORKSPACE_NAME_RE.sub("_", str(user_id or "").strip()) or "default"
     root = Path(workspace_root or DEFAULT_AGENT_WORKSPACE_ROOT).expanduser()
     workspace = (root / safe_user).resolve()
-    try:
-        workspace.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        logger.warning(
-            "[AgentOSRouter] workspace mkdir skipped: path=%s error=%s",
-            workspace,
-            exc,
-        )
+    _validate_agent_workspace(workspace)
     return str(workspace)
+
+
+def _validate_agent_workspace(workspace: Path) -> None:
+    """Raise :class:`ValueError` unless *workspace* exists and is a directory.
+
+    Owner/group and permission validation is delegated to other management-plane
+    components, so only existence and type are checked here.
+    """
+    if not workspace.exists():
+        raise ValueError(
+            f"agent workspace does not exist: {workspace} "
+            "(create it before creating a sandbox)"
+        )
+    if not stat.S_ISDIR(workspace.stat().st_mode):
+        raise ValueError(f"agent workspace is not a directory: {workspace}")
 
 
 class AgentOSRouterClient(AgentServerClient):
@@ -153,7 +182,9 @@ class AgentOSRouterClient(AgentServerClient):
         agent_manager: AgentManager,
         ssh_relay: YuanrongSshRelay | None = None,
         ssh_channel_endpoint: SshChannelEndpoint | None = None,
-        workspace_root: str = DEFAULT_AGENT_WORKSPACE_ROOT,
+        key_issuer: SshKeyIssuer | None = None,
+        ephemeral_key_ttl_sec: float = 300.0,
+        workspace_root: str | None = None,
         sandbox_idle_timeout_seconds: float = 600.0,
         sandbox_idle_check_interval_seconds: float = 30.0,
         auth_client: AgentOSAuthenticator | None = None,
@@ -164,6 +195,8 @@ class AgentOSRouterClient(AgentServerClient):
         self._agent_manager = agent_manager
         self._ssh_relay = ssh_relay
         self._ssh_channel_endpoint = ssh_channel_endpoint
+        self._key_issuer = key_issuer
+        self._ephemeral_key_ttl_sec = float(ephemeral_key_ttl_sec)
         self._workspace_root = (
             str(workspace_root or "").strip() or DEFAULT_AGENT_WORKSPACE_ROOT
         )
@@ -192,14 +225,13 @@ class AgentOSRouterClient(AgentServerClient):
 
 
     def set_channel_manager(self, channel_manager: ChannelManager) -> None:
-        """订阅 web channel和 tui channel 的连接事件和断开。"""
-        web_channel = channel_manager.get_channel(ChannelType.WEB)
+        """Subscribe TUI connect hooks (token auth) and channel disconnect events.
+
+        Web is intentionally not hooked: browser WS cannot send Authorization
+        headers, and the stock Web UI does not pass ``?token=``.
+        """
         tui_channel = channel_manager.get_channel(ChannelType.CLI)
 
-        if web_channel:
-            on_connect = getattr(web_channel, "on_connect", None)
-            if callable(on_connect):
-                on_connect(self.on_connect)
         if tui_channel:
             on_connect = getattr(tui_channel, "on_connect", None)
             if callable(on_connect):
@@ -233,6 +265,16 @@ class AgentOSRouterClient(AgentServerClient):
                 if hasattr(ret, "__await__"):
                     await ret
         return result
+
+    def set_key_issuer(
+        self,
+        key_issuer: SshKeyIssuer | None,
+        *,
+        ephemeral_key_ttl_sec: float = 300.0,
+    ) -> None:
+        """Inject or clear the northbound SSH ephemeral key issuer."""
+        self._key_issuer = key_issuer
+        self._ephemeral_key_ttl_sec = float(ephemeral_key_ttl_sec)
 
     async def _on_channel_event(self, event: Any) -> None:
         """处理 Channel 连接事件，维护用户连接计数并触发延迟清理。"""
@@ -527,6 +569,7 @@ class AgentOSRouterClient(AgentServerClient):
         # (TUI local_handler), not via E2A send_request.
         if self._is_ssh_relay_request(envelope):
             return await self._handle_ssh_relay(envelope)
+        await self._inject_external_cli_agents(envelope)
         try:
             runtime = await self._resolve_agent(envelope, acquire=True)
         except (ValueError, AgentCreatingTimeout, AgentCreateFailed) as exc:
@@ -545,6 +588,7 @@ class AgentOSRouterClient(AgentServerClient):
     async def send_request_stream(
         self, envelope: E2AEnvelope
     ) -> AsyncIterator[AgentResponseChunk]:
+        await self._inject_external_cli_agents(envelope)
         try:
             runtime = await self._resolve_agent(envelope, acquire=True)
         except (ValueError, AgentCreatingTimeout, AgentCreateFailed) as exc:
@@ -562,6 +606,72 @@ class AgentOSRouterClient(AgentServerClient):
                 yield chunk
         finally:
             await self._agent_manager.release(runtime.key)
+
+    # ---------- external_cli_agents injection for team chat send ----------
+
+    async def _inject_external_cli_agents(self, envelope: E2AEnvelope) -> None:
+        """Inject ``external_cli_agents`` into params for team chat send.
+
+        When the request is a team-mode chat send, fetches registered
+        3rd-party agents from the registry and constructs
+        ``external_cli_agents`` with SSH transport info for each, so the
+        builtin agent (inside the container) can SSH into each 3rd-party
+        agent through the gateway's northbound SSH channel.
+        """
+        if not _is_team_mode(envelope.params):
+            return
+        user_id = str(envelope.user_id or "").strip()
+        if not user_id:
+            return
+        ssh_fields = self._ssh_endpoint_fields()
+        if ssh_fields is None:
+            logger.warning(
+                "[AgentOSRouter] skip external_cli_agents: ssh endpoint unavailable"
+            )
+            return
+        try:
+            images = await self._registry.list_user_images(user_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[AgentOSRouter] list_user_images failed: %s", exc)
+            return
+        key_file = self._resolve_ssh_key_file(user_id)
+        agents: list[dict[str, Any]] = []
+        for image in images:
+            agent_type = str(
+                (image.metadata or {}).get("agent_type") or image.image_name or ""
+            ).strip()
+            if not agent_type or not is_third_party_agent_type(agent_type):
+                continue
+            agents.append(
+                {
+                    "cli_agent": agent_type,
+                    "ssh_transport": {
+                        "host": ssh_fields["ssh_ip"],
+                        "port": ssh_fields["ssh_port"],
+                        "username": user_id,
+                        "agent": False,
+                        "key_file": key_file,
+                        "disable_host_key_check": False,
+                        "use_exec": False
+                    },
+                }
+            )
+        if agents:
+            params = envelope.params if isinstance(envelope.params, dict) else {}
+            params["external_cli_agents"] = agents
+            logger.info(
+                "[AgentOSRouter] injected external_cli_agents: user=%s count=%d",
+                user_id,
+                len(agents),
+            )
+
+    def _resolve_ssh_key_file(self, user_id: str) -> str:
+        """Resolve the SSH key file path for external_cli_agents."""
+        keys_dir_template = DEFAULT_CLIENT_KEYS_DIR
+        if self._ssh_relay is not None:
+            keys_dir_template = self._ssh_relay.client_keys_dir
+        keys_dir = resolve_client_keys_dir(keys_dir_template, user_id)
+        return str(keys_dir / "id_ed25519")
 
     async def thirdagent_list(
         self,
@@ -658,19 +768,31 @@ class AgentOSRouterClient(AgentServerClient):
         ssh_fields = self._ssh_endpoint_fields()
         if ssh_fields is None:
             return self._missing_ssh_endpoint_error()
+        # Fail fast before create: without the key the client cannot pass
+        # SSH public-key auth, so a "successful" switch would be unusable.
+        try:
+            key_fields = self._ephemeral_ssh_key_fields(
+                user_id=uid,
+                session_id=session_id,
+            )
+        except EphemeralKeyIssueError as exc:
+            return {
+                "ok": False,
+                "error": str(exc),
+                "code": "SSH_KEY_ISSUE_FAILED",
+            }
         # Builtin swarm: no registry / create_sandbox; mark current type only.
         if self._uses_direct_yuanrong(normalized):
             self._current_agent_types[uid] = normalized
-            return {
-                "ok": True,
-                "payload": {
-                    "agent_id": "",
-                    "agent_type": normalized,
-                    "sandbox_id": "",
-                    "status": AgentStatus.READY.value,
-                    **ssh_fields,
-                },
+            payload = {
+                "agent_id": "",
+                "agent_type": normalized,
+                "sandbox_id": "",
+                "status": AgentStatus.READY.value,
+                **ssh_fields,
+                **key_fields,
             }
+            return {"ok": True, "payload": payload}
         try:
             runtime = await self._agent_manager.get_or_create_agent(
                 uid,
@@ -687,21 +809,90 @@ class AgentOSRouterClient(AgentServerClient):
             }
         info = runtime.info
         status = info.status.value if hasattr(info.status, "value") else str(info.status)
+        instance_id = str(info.sandbox_id or "").strip()
+        ssh_relay = self._ssh_relay
+        if ssh_relay is not None:
+            if not instance_id:
+                return {
+                    "ok": False,
+                    "error": f"agent has no yuanrong instance_id: user={uid}",
+                    "code": "INTERNAL_ERROR",
+                }
+            try:
+                # create 返回不代表 sshd 已听端口；等南向 SSH 通了再让客户端连。
+                await ssh_relay.wait_until_ready(instance_id, user_id=uid)
+            except Exception as exc:
+                logger.warning(
+                    "[AgentOSRouter] 3rdagent.switch sshd not ready: "
+                    "user=%s instance=%s error=%s",
+                    uid,
+                    instance_id,
+                    exc,
+                )
+                return {
+                    "ok": False,
+                    "error": f"sandbox sshd not ready: {exc}",
+                    "code": "SSH_NOT_READY",
+                }
         # 记录用户当前 agent_type，后续 SSH 接入默认跟随
         self._current_agent_types[uid] = normalized
-        return {
-            "ok": True,
-            "payload": {
-                "agent_id": info.agent_id,
-                "agent_type": info.agent_type,
-                "sandbox_id": info.sandbox_id,
-                "status": status,
-                **ssh_fields,
-            },
+        payload = {
+            "agent_id": info.agent_id,
+            "agent_type": info.agent_type,
+            "sandbox_id": info.sandbox_id,
+            "status": status,
+            **ssh_fields,
+            **key_fields,
         }
+        return {"ok": True, "payload": payload}
+
+    def _ephemeral_ssh_key_fields(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+    ) -> dict[str, Any]:
+        """Mint ``ssh_private_key`` when an issuer is configured.
+
+        Returns an empty mapping when no issuer is injected (auth disabled).
+        Raises :class:`EphemeralKeyIssueError` when issuance is expected but
+        does not yield a usable key.
+        """
+        issuer = self._key_issuer
+        if issuer is None:
+            return {}
+        try:
+            private_key = issuer.issue_ephemeral_key(
+                user_id=user_id,
+                username=user_id,
+                session_id=str(session_id or ""),
+                ttl_sec=self._ephemeral_key_ttl_sec,
+            )
+        except Exception as exc:
+            logger.error(
+                "[AgentOSRouter] failed to issue ephemeral SSH key: user=%s error=%s",
+                user_id,
+                exc,
+            )
+            raise EphemeralKeyIssueError(
+                f"failed to issue ephemeral SSH key: {exc}"
+            ) from exc
+        if not private_key:
+            logger.error(
+                "[AgentOSRouter] ephemeral SSH key issuer returned an empty key: user=%s",
+                user_id,
+            )
+            raise EphemeralKeyIssueError("ephemeral SSH key issuer returned an empty key")
+        return {"ssh_private_key": private_key}
 
     async def shutdown(self) -> None:
-        await self.disconnect()
+        try:
+            await self.disconnect()
+        finally:
+            auth_client = self._auth_client
+            close = getattr(auth_client, "aclose", None)
+            if callable(close):
+                await close()
 
     # ---------- SSH relay (northbound SshChannel -> YuanRong instance) ----------
 

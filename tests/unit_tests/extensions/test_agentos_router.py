@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -417,16 +419,37 @@ async def test_swarm_request_repeated_reuses_single_runtime() -> None:
     assert agents[0].info.agent_type == "jiuwenswarm"
 
 
-def test_resolve_agent_workspace_defaults_under_agentos_users() -> None:
-    assert resolve_agent_workspace("alice") == f"{DEFAULT_AGENT_WORKSPACE_ROOT}/alice"
-    assert resolve_agent_workspace("alice/../bob") == (
-        f"{DEFAULT_AGENT_WORKSPACE_ROOT}/alice_.._bob"
-    )
-    assert resolve_agent_workspace("u1", workspace_root="/data/ws") == "/data/ws/u1"
+def test_resolve_agent_workspace_requires_existing_writable_dir(tmp_path) -> None:
+    workspace_root = tmp_path / "ws"
+    alice = workspace_root / "alice"
+    alice.mkdir(parents=True)
+    alice.chmod(0o777)
+    assert resolve_agent_workspace("alice", workspace_root=str(workspace_root)) == str(alice)
+    # 路径穿越被安全化：sanitized 目录也必须已存在才能通过校验。
+    sanitized = workspace_root / "alice_.._bob"
+    sanitized.mkdir(parents=True)
+    assert resolve_agent_workspace(
+        "alice/../bob", workspace_root=str(workspace_root)
+    ) == str(sanitized)
+
+
+def test_resolve_agent_workspace_rejects_missing_dir(tmp_path) -> None:
+    workspace_root = tmp_path / "ws"
+    with pytest.raises(ValueError, match="does not exist"):
+        resolve_agent_workspace("nobody", workspace_root=str(workspace_root))
+
+
+def test_resolve_agent_workspace_rejects_non_directory(tmp_path) -> None:
+    workspace_root = tmp_path / "ws"
+    file_path = workspace_root / "file"
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_text("x")
+    with pytest.raises(ValueError, match="not a directory"):
+        resolve_agent_workspace("file", workspace_root=str(workspace_root))
 
 
 @pytest.mark.asyncio
-async def test_third_party_type_creates_via_yuanrong() -> None:
+async def test_third_party_type_creates_via_yuanrong(agentos_workspace_root: str) -> None:
     yuanrong = FakeYuanRongClient()
     agent_manager = AgentManager()
     client = _router_client(yuanrong, FakeRegistryClient(), agent_manager)
@@ -435,7 +458,9 @@ async def test_third_party_type_creates_via_yuanrong() -> None:
 
     assert response.ok
     assert yuanrong.create_calls == 1
-    assert yuanrong.create_payloads[0]["workspace"] == f"{DEFAULT_AGENT_WORKSPACE_ROOT}/u1"
+    assert yuanrong.create_payloads[0]["workspace"] == str(
+        Path(agentos_workspace_root) / "u1"
+    )
     assert yuanrong.send_calls == 1
     # 第三方 agent 端口取自 runtime_spec rootfs.ports（tcp:22）。
     assert yuanrong.ws_connect_uris == [
@@ -446,7 +471,9 @@ async def test_third_party_type_creates_via_yuanrong() -> None:
     assert agents[0].info.agent_type == "opencode"
     assert agents[0].info.status is AgentStatus.READY
     assert agents[0].info.sandbox_id == "sbx-1"
-    assert agents[0].info.metadata["workspace"] == f"{DEFAULT_AGENT_WORKSPACE_ROOT}/u1"
+    assert agents[0].info.metadata["workspace"] == str(
+        Path(agentos_workspace_root) / "u1"
+    )
 
 
 @pytest.mark.asyncio
@@ -596,6 +623,110 @@ async def test_switch_to_jiuwenswarm_is_direct_without_create() -> None:
     assert response["payload"]["ssh_port"] == 2222
     assert client.get_current_agent_type("u1") == "jiuwenswarm"
     assert await agent_manager.list_user_agents("u1") == []
+    assert "ssh_private_key" not in response["payload"]
+
+
+@pytest.mark.asyncio
+async def test_agent_switch_includes_ephemeral_ssh_private_key_when_issuer_set() -> None:
+    yuanrong = FakeYuanRongClient()
+    agent_manager = AgentManager()
+    client = AgentOSRouterClient(
+        yuanrong, FakeRegistryClient(), agent_manager, ssh_channel_endpoint=_ssh_channel()
+    )
+
+    class _Issuer:
+        def issue_ephemeral_key(self, *, user_id, username, session_id, ttl_sec):
+            assert user_id == "u1"
+            assert username == "u1"
+            assert session_id == "sess-1"
+            assert ttl_sec == 120.0
+            return "-----BEGIN OPENSSH PRIVATE KEY-----\nTEST\n-----END OPENSSH PRIVATE KEY-----\n"
+
+    client.set_key_issuer(_Issuer(), ephemeral_key_ttl_sec=120.0)
+    response = await client.thirdagent_switch(
+        user_id="u1",
+        agent_type="opencode",
+        session_id="sess-1",
+    )
+    await client.shutdown()
+
+    assert response["ok"] is True
+    assert response["payload"]["ssh_private_key"].startswith("-----BEGIN OPENSSH PRIVATE KEY-----")
+
+
+@pytest.mark.asyncio
+async def test_agent_switch_fails_when_key_issuance_raises() -> None:
+    yuanrong = FakeYuanRongClient()
+    agent_manager = AgentManager()
+    client = AgentOSRouterClient(
+        yuanrong, FakeRegistryClient(), agent_manager, ssh_channel_endpoint=_ssh_channel()
+    )
+
+    class _BrokenIssuer:
+        def issue_ephemeral_key(self, *, user_id, username, session_id, ttl_sec):
+            raise RuntimeError("asyncssh missing")
+
+    client.set_key_issuer(_BrokenIssuer(), ephemeral_key_ttl_sec=120.0)
+    response = await client.thirdagent_switch(
+        user_id="u1",
+        agent_type="opencode",
+        session_id="sess-1",
+    )
+    await client.shutdown()
+
+    assert response["ok"] is False
+    assert response["code"] == "SSH_KEY_ISSUE_FAILED"
+    assert "asyncssh missing" in response["error"]
+    # Fail fast: no sandbox is created for an unusable switch.
+    assert yuanrong.create_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_agent_switch_fails_when_issuer_returns_empty_key() -> None:
+    yuanrong = FakeYuanRongClient()
+    agent_manager = AgentManager()
+    client = AgentOSRouterClient(
+        yuanrong, FakeRegistryClient(), agent_manager, ssh_channel_endpoint=_ssh_channel()
+    )
+    client.set_key_issuer(
+        SimpleNamespace(issue_ephemeral_key=lambda **kwargs: ""),
+        ephemeral_key_ttl_sec=120.0,
+    )
+
+    response = await client.thirdagent_switch(
+        user_id="u1",
+        agent_type="jiuwenswarm",
+        session_id="sess-1",
+    )
+    await client.shutdown()
+
+    assert response["ok"] is False
+    assert response["code"] == "SSH_KEY_ISSUE_FAILED"
+
+
+@pytest.mark.asyncio
+async def test_agent_switch_omits_ssh_private_key_when_issuer_cleared() -> None:
+    yuanrong = FakeYuanRongClient()
+    agent_manager = AgentManager()
+    client = AgentOSRouterClient(
+        yuanrong, FakeRegistryClient(), agent_manager, ssh_channel_endpoint=_ssh_channel()
+    )
+    client.set_key_issuer(
+        SimpleNamespace(
+            issue_ephemeral_key=lambda **kwargs: "KEY",
+        ),
+        ephemeral_key_ttl_sec=60.0,
+    )
+    client.set_key_issuer(None)
+    response = await client.thirdagent_switch(
+        user_id="u1",
+        agent_type="opencode",
+        session_id="sess-1",
+    )
+    await client.shutdown()
+
+    assert response["ok"] is True
+    assert "ssh_private_key" not in response["payload"]
 
 
 @pytest.mark.asyncio
@@ -964,14 +1095,17 @@ def test_load_router_config_sandbox_idle_knobs(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_create_uses_configured_workspace_root() -> None:
+async def test_create_uses_configured_workspace_root(tmp_path) -> None:
     yuanrong = FakeYuanRongClient()
+    ws_user = tmp_path / "ws" / "u1"
+    ws_user.mkdir(parents=True)
+    ws_user.chmod(0o777)
     client = _router_client(
         yuanrong,
         FakeRegistryClient(),
         AgentManager(),
         ssh_channel_endpoint=_ssh_channel(),
-        workspace_root="/mnt/workspaces",
+        workspace_root=str(tmp_path / "ws"),
     )
     try:
         response = await client.thirdagent_switch(
@@ -980,7 +1114,7 @@ async def test_create_uses_configured_workspace_root() -> None:
             session_id="sess-1",
         )
         assert response["ok"] is True
-        assert yuanrong.create_payloads[0]["workspace"] == "/mnt/workspaces/u1"
+        assert yuanrong.create_payloads[0]["workspace"] == str(ws_user)
     finally:
         await client.shutdown()
 

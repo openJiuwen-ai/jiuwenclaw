@@ -22,15 +22,20 @@ from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import (
 
 class FakeWebChannel:
     def __init__(self):
+        self.channel_id = "web"
         self.methods: dict[str, object] = {}
         self.responses: list[dict] = []
         self.connect_handler = None
+        self.disconnect_handler = None
 
     def register_method(self, name, handler):
         self.methods[name] = handler
 
     def on_connect(self, handler):
         self.connect_handler = handler
+
+    def on_disconnect(self, handler):
+        self.disconnect_handler = handler
 
     async def send_response(self, ws, req_id, *, ok, payload=None, error=None, code=None):
         self.responses.append(
@@ -57,6 +62,29 @@ class FakeAgentClient:
             return type("Resp", (), {"ok": True, "payload": {}})()
         finally:
             self.reload_finished.set()
+
+
+class FakeMessageHandler:
+    def __init__(self):
+        self.disconnected_websockets: list[tuple[str, str]] = []
+
+    async def unregister_ws_subscriptions(self, channel_id: str, ws_id: str) -> int:
+        self.disconnected_websockets.append((channel_id, ws_id))
+        return 1
+
+
+@pytest.mark.asyncio
+async def test_web_disconnect_unregisters_physical_subscriptions() -> None:
+    channel = FakeWebChannel()
+    message_handler = FakeMessageHandler()
+    _register_web_handlers(
+        WebHandlersBindParams(channel=channel, message_handler=message_handler)
+    )
+    ws = SimpleNamespace(_jiuwen_ws_id="web-ws-dead")
+
+    await channel.disconnect_handler(ws, {"sess-web"})
+
+    assert message_handler.disconnected_websockets == [("web", "web-ws-dead")]
 
 
 class FakeChannelManager:
@@ -917,7 +945,7 @@ def test_config_panel_flatten_reads_symphony_enabled_and_skill_retrieval():
     flat = _flatten_symphony_for_config_panel(raw)
 
     assert flat["symphony_enabled"] == "true"
-    assert flat["symphony_dynamic_graph_enabled"] == "false"
+    assert "symphony_dynamic_graph_enabled" not in flat
     assert "symphony_orchestration_mode" not in flat
     assert flat["skill_retrieval_enabled"] == "true"
     assert flat["skill_retrieval_build_branching_factor"] == "64"
@@ -962,7 +990,7 @@ async def test_config_set_routes_symphony_payload_to_config_helper(monkeypatch):
         "sess-3",
     )
 
-    assert recorded_symphony == [{"enabled": True, "evolution": {"enabled": False}}]
+    assert recorded_symphony == [{"enabled": True}]
     assert recorded_skill_retrieval == [{"enabled": False, "retrieve": {"flatten_tree": True}}]
     assert channel.responses[-1] == {
         "id": "req-3",
@@ -970,7 +998,6 @@ async def test_config_set_routes_symphony_payload_to_config_helper(monkeypatch):
         "payload": {
             "updated": [
                 "symphony_enabled",
-                "symphony_dynamic_graph_enabled",
                 "skill_retrieval_enabled",
                 "skill_retrieval_retrieve_flatten_tree",
             ],
