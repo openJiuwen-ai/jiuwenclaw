@@ -51,6 +51,11 @@ from jiuwenswarm.agents.harness.team.handlers.team_monitor_handler import TeamMo
 from jiuwenswarm.server.utils.stream_utils import parse_stream_chunk
 from jiuwenswarm.server.runtime.agent_adapter.user_turn import TEAM_USER_TURN_KEY, UserTurn
 from jiuwenswarm.common.schema.agent import AgentResponseChunk
+from jiuwenswarm.common.usage_cost import (
+    build_usage_summary,
+    new_usage_accumulator,
+    record_usage_event,
+)
 from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
     EvolutionProgressStatus,
     EvolutionPushContext,
@@ -1297,6 +1302,71 @@ def _enrich_teammate_event(parsed: dict[str, Any], chunk: Any) -> dict[str, Any]
     return parsed
 
 
+def _chunk_member_name(chunk: Any, *, is_leader: bool) -> str:
+    """Resolve the member bucket key for a team stream chunk."""
+    source_member = getattr(chunk, "source_member", None)
+    if source_member:
+        return str(source_member).strip() or ("leader" if is_leader else "unknown")
+    if is_leader:
+        return "leader"
+    return "unknown"
+
+
+def _record_team_llm_usage(
+    chunk: Any,
+    usage_accumulator: dict[str, Any],
+    *,
+    is_leader: bool,
+) -> dict[str, Any] | None:
+    """Price a team ``llm_usage`` chunk and fold it into the round accumulator.
+
+    Returns a client-facing ``chat.usage_metadata`` payload, or None when the
+    chunk has no usable metadata.
+    """
+    payload = getattr(chunk, "payload", None)
+    if not isinstance(payload, dict):
+        return None
+    usage_meta = payload.get("usage_metadata", {})
+    if not isinstance(usage_meta, dict):
+        return None
+    # Copy so pricing can write cost fields without mutating the stream object
+    # in surprising ways for later consumers (debug dumps, etc.).
+    usage_meta = dict(usage_meta)
+    member = _chunk_member_name(chunk, is_leader=is_leader)
+    record_usage_event(usage_meta, usage_accumulator, member=member)
+    return {
+        "event_type": "chat.usage_metadata",
+        "metadata": {"usage_metadata": usage_meta, **{
+            k: v for k, v in payload.items() if k != "usage_metadata"
+        }},
+        "member_name": member,
+        "role": TeamRole.LEADER.value if is_leader else TeamRole.TEAMMATE.value,
+    }
+
+
+def _broadcast_team_usage_summary(
+    channel_id: str | None,
+    session_id: str,
+    usage_accumulator: dict[str, Any],
+    *,
+    round_id: int,
+) -> None:
+    """Emit one ``chat.usage_summary`` for the round, with by_member breakdown."""
+    if not (usage_accumulator.get("total_tokens") or 0):
+        return
+    summary = build_usage_summary(usage_accumulator)
+    _broadcast_event(
+        channel_id,
+        session_id,
+        {
+            "event_type": "chat.usage_summary",
+            "session_id": session_id,
+            "rid": round_id,
+            "usage": summary,
+        },
+    )
+
+
 _TEAM_TOOL_RESULT_TEXT_LIMIT = 512
 
 
@@ -2231,6 +2301,8 @@ async def _consume_stream_with_query(
     # only emits what is new. See _announce_team_roster.
     announced_members: set[str] = set()
     roster_team_name = str(getattr(team_spec, "team_name", "") or "")
+    usage_accumulator = new_usage_accumulator()
+    usage_summary_emitted = False
     # Reset the team-events flag at the start of a new round so chat.final
     # can correctly determine whether the team is active.
     tm_ = get_team_manager(channel_id)
@@ -2316,6 +2388,18 @@ async def _consume_stream_with_query(
                         " session_id=%s role=%s type=%s",
                         session_id, getattr(chunk, "role", None), getattr(chunk, "type", None),
                     )
+                continue
+            # Price every member's llm_usage before the hide-teammate filter so
+            # /usage still sees cost when the UI only shows leader output.
+            if getattr(chunk, "type", None) == "llm_usage":
+                usage_payload = _record_team_llm_usage(
+                    chunk, usage_accumulator, is_leader=is_leader
+                )
+                if usage_payload is not None:
+                    usage_payload["session_id"] = session_id
+                    usage_payload["rid"] = round_id
+                    if not (_team_hide_teammate_enabled() and not is_leader):
+                        _broadcast_event(channel_id, session_id, usage_payload)
                 continue
             # Optional: filter out all non-leader frames so the frontend only
             # sees leader output. Leader-level control events
@@ -2433,14 +2517,20 @@ async def _consume_stream_with_query(
                     )
                     continue
                 elif parsed.get("event_type") == "team.completed":
-                    # Team completed this round — broadcast a single
-                    # round-complete signal that also carries team stats.
+                    # Team completed this round — broadcast usage first so
+                    # clients see cost before the processing_status complete
+                    # signal (some stop listening as soon as that arrives).
                     logger.info(
                         "[TeamHelpers] team is completed: channel_id=%s session_id=%s member_count=%s",
                         _resolve_channel_id(channel_id),
                         session_id,
                         parsed.get("member_count"),
                     )
+                    if not usage_summary_emitted:
+                        _broadcast_team_usage_summary(
+                            channel_id, session_id, usage_accumulator, round_id=round_id
+                        )
+                        usage_summary_emitted = True
                     await _broadcast_event(
                         channel_id,
                         session_id,
@@ -2534,6 +2624,11 @@ async def _consume_stream_with_query(
                     # as soon as processing_status(False) arrives.
                     await _broadcast_event(channel_id, session_id, parsed)
                     if should_finish_round:
+                        if not usage_summary_emitted:
+                            _broadcast_team_usage_summary(
+                                channel_id, session_id, usage_accumulator, round_id=round_id
+                            )
+                            usage_summary_emitted = True
                         await _broadcast_event(
                             channel_id,
                             session_id,
@@ -2607,6 +2702,19 @@ async def _consume_stream_with_query(
                 lg.flush()
             except Exception as e:
                 logger.warning(f"TeamStreamLogger flush failed, error is {e}")
+        if not usage_summary_emitted:
+            try:
+                _broadcast_team_usage_summary(
+                    channel_id, session_id, usage_accumulator, round_id=round_id
+                )
+                usage_summary_emitted = True
+            except Exception:
+                logger.debug(
+                    "[TeamHelpers] failed to broadcast usage_summary on stream end: "
+                    "session_id=%s",
+                    session_id,
+                    exc_info=True,
+                )
         try:
             if not stream_cancelled:
                 # Broadcast team.completed so cron round watchers (both the

@@ -32,6 +32,7 @@ import { GoalCompletedCard } from '../GoalBar/GoalCompletedCard';
 import { isGoalCompletedContent } from '../GoalBar/goalCompletedMessage';
 import { a2uiContentToText } from '../../features/a2ui/a2uiContent';
 import { formatTimestamp, onTtsStop, sanitizeTtsText } from '../../utils';
+import { formatUsageCostLine } from '../../utils/formatUsageCost';
 import { useSpeechSynthesis } from '../../hooks';
 import clsx from 'clsx';
 import { MarkdownRenderer } from '../../components/MarkdownRenderer';
@@ -568,6 +569,10 @@ export const MessageItem = memo(function MessageItem({
     : Boolean(content) || Boolean(visibleMediaItems) || Boolean(visibleFileItems);
 
   const withAssistantAvatar = !isUser && enableAssistantAvatar;
+  const usageCostLine =
+    message.usageSummary && message.usageSummary.cost_status !== 'unpriced'
+      ? formatUsageCostLine(message.usageSummary)
+      : null;
 
   return (
     <div className={clsx(
@@ -652,11 +657,33 @@ export const MessageItem = memo(function MessageItem({
               {message.usageSummary.output_tokens.toLocaleString()} out /{' '}
               {message.usageSummary.total_tokens.toLocaleString()} total
             </span>
-            {message.usageSummary.total_cost != null && message.usageSummary.total_cost > 0 && (
-              <span>
-                ${message.usageSummary.input_cost?.toFixed(4)} in /{' '}
-                ${message.usageSummary.output_cost?.toFixed(4)} out /{' '}
-                ${message.usageSummary.total_cost.toFixed(4)} total
+            {message.usageSummary.cost_status === 'unpriced' ? (
+              <span>cost unpriced — set models.pricing</span>
+            ) : usageCostLine ? (
+              <span>{usageCostLine}</span>
+            ) : null}
+            {message.usageSummary.by_member && message.usageSummary.by_member.length > 0 && (
+              <span className="w-full">
+                {message.usageSummary.by_member.map((m) => (
+                  <span key={m.member} className="mr-3">
+                    {m.member}:{' '}
+                    {m.cost_status === 'unpriced'
+                      ? 'unpriced'
+                      : `$${(m.total_cost ?? 0).toFixed(4)}${m.cost_status === 'partial' ? ' (partial)' : ''}`}
+                  </span>
+                ))}
+              </span>
+            )}
+            {message.usageSummary.by_agent && message.usageSummary.by_agent.length > 0 && (
+              <span className="w-full">
+                {message.usageSummary.by_agent.map((a) => (
+                  <span key={a.agent} className="mr-3">
+                    {a.agent}:{' '}
+                    {a.cost_status === 'unpriced'
+                      ? 'unpriced'
+                      : `$${(a.total_cost ?? 0).toFixed(4)}${a.cost_status === 'partial' ? ' (partial)' : ''}`}
+                  </span>
+                ))}
               </span>
             )}
           </div>

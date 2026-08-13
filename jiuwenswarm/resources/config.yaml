@@ -291,6 +291,58 @@ models:
       model_config_obj:
         temperature: 0.95
 
+  # ── Token prices, for the USD figures in /usage and the statusline ─────────
+  # Cost cascade:
+  #   1. Provider-reported USD on the usage event wins when present
+  #      (OpenRouter usage.cost, LiteLLM cost headers, etc.).
+  #   2. Else multiply tokens by rates under models.pricing (DeepSeek and any
+  #      API that only returns token counts).
+  #   3. Else UNPRICED — never shown as free $0.00.
+  #
+  # DECISION: DEFAULT_PRICES stays empty. api_base is yours, so the same
+  # model_name may front a hosted provider, a reseller, or a local endpoint that
+  # costs nothing per token -- there is no correct built-in answer, and a stale
+  # bundled table would report confident wrong money. Operators opt in below
+  # for providers that do not return cost (DeepSeek direct, self-hosted).
+  # OpenRouter models typically need no entry here once the client forwards
+  # usage.cost.
+  #
+  # A model with no entry here and no provider cost is UNPRICED: /usage says
+  # "partial" when only some of a turn's calls had a rate. Keyed by the
+  # model_name the provider reports back, which is not always the one you
+  # requested.
+  #
+  # Rates are per MILLION tokens, the unit providers publish, so a number can be
+  # copied straight off a pricing page.
+  #
+  # pricing:
+  #   deepseek-v4-flash:
+  #     input: 0.28            # per 1M prompt tokens
+  #     output: 0.42           # per 1M completion tokens
+  #     cache_read: 0.028      # per 1M prompt tokens served FROM cache;
+  #                            # omit to charge them at the input rate, which
+  #                            # overstates rather than understates
+  #     cache_write: 0.35      # per 1M prompt tokens written INTO cache.
+  #                            # Anthropic charges a PREMIUM over input here,
+  #                            # not a discount. Omit to charge them at the
+  #                            # input rate, which is a floor: it understates
+  #                            # for any provider with a cache-creation premium
+  #     currency: USD
+  #     last_verified: 2026-08-05   # shown in /usage as "rates as of"
+  #
+  # A prompt is billed at up to three rates at once, and the counts partition
+  # the total:  input_tokens = uncached + cache_read + cache_write
+  #
+  # cache_read matters more than it looks: a traced session here reached ~98%
+  # cached input, so pricing cache reads at the full input rate overstates a
+  # long session by roughly an order of magnitude.
+  #
+  # KNOWN LIMITATION: no model client reports the cache-write count yet. The
+  # Anthropic client derives it from cache_creation_input_tokens and forwards
+  # only the read count, so cache writes are currently billed at the input rate
+  # and a cache-creating turn is under-reported. The cache_write rate is honored
+  # the moment that count reaches the usage event.
+
 # 外接 ACP Agent（stdio），供工具 acp_chat 使用。按需取消注释并填写；command/args 可指向任意兼容 ACP 的包（与 VS Code formulahendry.acp-client 预置列表一致）。
 acp_agents:
    codex:

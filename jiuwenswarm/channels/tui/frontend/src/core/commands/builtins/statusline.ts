@@ -116,6 +116,8 @@ function showHelp(ctx: CommandContext): void {
     "  streaming_state, last_error, evolution_status,",
     "  active_subtask_count, todo_count, trusted_dirs,",
     "  usage.total_input_tokens, usage.total_output_tokens, usage.total_tokens,",
+    "  usage.total_cost (USD), usage.cost_status (priced|partial|unpriced),",
+    "  usage.by_member / usage.by_agent (arrays when multi-agent cost is present),",
     "  context_window.context_window_size, .used_percentage, .remaining_percentage",
     "",
     "Use /statusline json to see the actual values right now.",

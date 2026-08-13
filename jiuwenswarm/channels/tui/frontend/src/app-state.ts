@@ -94,13 +94,43 @@ export interface ModelUsageEntry {
   input_tokens: number;
   output_tokens: number;
   total_tokens: number;
+  /** USD billed for this model so far. 0 when no rate is configured. */
+  total_cost: number;
+  /**
+   * True once any call on this model had no rate — its cost may be understated.
+   * Still show total_cost when > 0; unpriced is not the same as free.
+   */
+  unpriced: boolean;
+  /** ISO date from models.pricing.last_verified, when the server sent one. */
+  last_verified?: string;
 }
+
+/** Per-member (team) or per-subagent totals — same shape as model, different key. */
+export interface NamedUsageEntry {
+  name: string;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  total_cost: number;
+  unpriced: boolean;
+  last_verified?: string;
+}
+
+/**
+ * How much of the reported cost is real money rather than a missing rate.
+ * `unpriced` and a zero cost are different facts and must not be rendered alike.
+ */
+export type CostStatus = "priced" | "partial" | "unpriced";
 
 export interface SessionUsageSummary {
   total_input_tokens: number;
   total_output_tokens: number;
   total_tokens: number;
+  total_cost: number;
+  cost_status: CostStatus;
   byModel: ModelUsageEntry[];
+  byMember: NamedUsageEntry[];
+  byAgent: NamedUsageEntry[];
 }
 
 export interface CurrentQueryUsage {
@@ -367,6 +397,8 @@ export class CliPiAppState {
   private statusLineText: string | null = null;
   private statusLineTimer: ReturnType<typeof setInterval> | null = null;
   private usageByModel = new Map<string, ModelUsageEntry>();
+  private usageByMember = new Map<string, NamedUsageEntry>();
+  private usageByAgent = new Map<string, NamedUsageEntry>();
   private currentQueryUsage: CurrentQueryUsage = {
     input_tokens: 0,
     output_tokens: 0,
@@ -579,7 +611,43 @@ export class CliPiAppState {
     },
     tryAutoRestoreAfterCancel: () => this.tryAutoRestoreAfterCancel(),
     appendUsageSummary: (usage, model) => {
-      this.appendUsageDelta(usage, model);
+      // Prefer the server's breakdowns. by_model / by_member / by_agent are
+      // different partitions of the same turn — apply each map, never sum them
+      // together into one bucket.
+      const byModel = usage.by_model;
+      const byMember = usage.by_member;
+      const byAgent = usage.by_agent;
+      let appliedBreakdown = false;
+      if (Array.isArray(byModel) && byModel.length > 0) {
+        appliedBreakdown = true;
+        for (const raw of byModel) {
+          if (typeof raw !== "object" || raw === null) continue;
+          const entry = raw as Record<string, unknown>;
+          const name = typeof entry.model === "string" ? entry.model : undefined;
+          this.appendUsageDelta(entry, name);
+        }
+      }
+      if (Array.isArray(byMember) && byMember.length > 0) {
+        appliedBreakdown = true;
+        for (const raw of byMember) {
+          if (typeof raw !== "object" || raw === null) continue;
+          const entry = raw as Record<string, unknown>;
+          const name = typeof entry.member === "string" ? entry.member : undefined;
+          this.appendNamedUsageDelta(this.usageByMember, entry, name);
+        }
+      }
+      if (Array.isArray(byAgent) && byAgent.length > 0) {
+        appliedBreakdown = true;
+        for (const raw of byAgent) {
+          if (typeof raw !== "object" || raw === null) continue;
+          const entry = raw as Record<string, unknown>;
+          const name = typeof entry.agent === "string" ? entry.agent : undefined;
+          this.appendNamedUsageDelta(this.usageByAgent, entry, name);
+        }
+      }
+      if (!appliedBreakdown) {
+        this.appendUsageDelta(usage, model);
+      }
     },
     appendUsageMetadata: (usage) => {
       this.updateCurrentUsageTokens(usage);
@@ -1261,30 +1329,80 @@ export class CliPiAppState {
 
   getUsageSummary(): SessionUsageSummary {
     const entries = Array.from(this.usageByModel.values());
+    const members = Array.from(this.usageByMember.values());
+    const agents = Array.from(this.usageByAgent.values());
+    // Prefer model partition for session totals; fall back to members when a
+    // team summary somehow omitted by_model.
+    const totalSource = entries.length > 0 ? entries : members.length > 0 ? members : agents;
+    const hasComplete = totalSource.some((e) => !e.unpriced);
+    const hasGap = totalSource.some((e) => e.unpriced);
+    const hasMoney = totalSource.some((e) => e.total_cost > 0);
+    const cost_status: CostStatus =
+      hasComplete && !hasGap
+        ? "priced"
+        : hasMoney && hasGap
+          ? "partial"
+          : "unpriced";
     return {
-      total_input_tokens: entries.reduce((s, e) => s + e.input_tokens, 0),
-      total_output_tokens: entries.reduce((s, e) => s + e.output_tokens, 0),
-      total_tokens: entries.reduce((s, e) => s + e.total_tokens, 0),
+      total_input_tokens: totalSource.reduce((s, e) => s + e.input_tokens, 0),
+      total_output_tokens: totalSource.reduce((s, e) => s + e.output_tokens, 0),
+      total_tokens: totalSource.reduce((s, e) => s + e.total_tokens, 0),
+      total_cost: totalSource.reduce((s, e) => s + e.total_cost, 0),
+      cost_status,
       byModel: entries,
+      byMember: members,
+      byAgent: agents,
     };
   }
 
   private appendUsageDelta(usage: Record<string, unknown>, model?: string): void {
     const key = model || "unknown";
     const existing = this.usageByModel.get(key);
+    const merged = this.mergeUsageBucket(existing, usage, key);
+    this.usageByModel.set(key, { ...merged, model: key });
+  }
+
+  private appendNamedUsageDelta(
+    map: Map<string, NamedUsageEntry>,
+    usage: Record<string, unknown>,
+    name?: string,
+  ): void {
+    const key = name || "unknown";
+    const existing = map.get(key);
+    map.set(key, this.mergeUsageBucket(existing, usage, key));
+  }
+
+  private mergeUsageBucket(
+    existing: { input_tokens: number; output_tokens: number; total_tokens: number; total_cost: number; unpriced: boolean; last_verified?: string } | undefined,
+    usage: Record<string, unknown>,
+    name: string,
+  ): NamedUsageEntry {
     const inputDelta = this.safeTokenCount(usage.input_tokens);
     const outputDelta = this.safeTokenCount(usage.output_tokens);
     const totalDelta =
       typeof usage.total_tokens === "number" && Number.isFinite(usage.total_tokens)
         ? Math.max(0, usage.total_tokens)
         : inputDelta + outputDelta;
-    const entry: ModelUsageEntry = {
-      model: key,
+    const costDelta =
+      typeof usage.total_cost === "number" && Number.isFinite(usage.total_cost)
+        ? Math.max(0, usage.total_cost)
+        : 0;
+    const status = typeof usage.cost_status === "string" ? usage.cost_status : undefined;
+    const turnUnpriced =
+      status === "unpriced" || status === "partial" || (status === undefined && costDelta === 0);
+    const lastVerified =
+      typeof usage.last_verified === "string" && usage.last_verified.trim()
+        ? usage.last_verified.trim()
+        : existing?.last_verified;
+    return {
+      name,
       input_tokens: (existing?.input_tokens ?? 0) + inputDelta,
       output_tokens: (existing?.output_tokens ?? 0) + outputDelta,
       total_tokens: (existing?.total_tokens ?? 0) + totalDelta,
+      total_cost: (existing?.total_cost ?? 0) + costDelta,
+      unpriced: (existing?.unpriced ?? false) || turnUnpriced,
+      ...(lastVerified ? { last_verified: lastVerified } : {}),
     };
-    this.usageByModel.set(key, entry);
   }
 
   private updateCurrentUsageTokens(usage: Record<string, unknown>): void {
@@ -1724,6 +1842,8 @@ export class CliPiAppState {
     this.sessionId = newId;
     this.lastVisibleUserRequest = null;
     this.usageByModel.clear();
+    this.usageByMember.clear();
+    this.usageByAgent.clear();
     this.resetCurrentUsageTokens();
     this.workflowRuns = [];
     this.pendingHumanPrompts = new Map();
@@ -3244,6 +3364,23 @@ export class CliPiAppState {
         total_input_tokens: usage.total_input_tokens,
         total_output_tokens: usage.total_output_tokens,
         total_tokens: usage.total_tokens,
+        // Raw USD, unformatted, so a statusline script can round or convert it.
+        // cost_status travels with it because a script that prints total_cost
+        // alone would render an unpriced session as $0.00.
+        total_cost: usage.total_cost,
+        cost_status: usage.cost_status,
+        by_member: usage.byMember.map((e) => ({
+          member: e.name,
+          total_tokens: e.total_tokens,
+          total_cost: e.total_cost,
+          cost_status: e.unpriced ? (e.total_cost > 0 ? "partial" : "unpriced") : "priced",
+        })),
+        by_agent: usage.byAgent.map((e) => ({
+          agent: e.name,
+          total_tokens: e.total_tokens,
+          total_cost: e.total_cost,
+          cost_status: e.unpriced ? (e.total_cost > 0 ? "partial" : "unpriced") : "priced",
+        })),
       },
       context_window: {
         context_window_size: snapshot.contextWindowLimit ?? 0,

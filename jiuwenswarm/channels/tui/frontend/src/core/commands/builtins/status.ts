@@ -111,6 +111,20 @@ function showUsage(ctx: import("../types.js").CommandContext, summary: SessionUs
       );
     }
   }
+  for (const entry of summary.byMember ?? []) {
+    items.push(
+      { label: `member: ${entry.name}`, value: `${fmt(entry.total_tokens)} tokens` },
+      { label: `  input`, value: fmt(entry.input_tokens) },
+      { label: `  output`, value: fmt(entry.output_tokens) },
+    );
+  }
+  for (const entry of summary.byAgent ?? []) {
+    items.push(
+      { label: `agent: ${entry.name}`, value: `${fmt(entry.total_tokens)} tokens` },
+      { label: `  input`, value: fmt(entry.input_tokens) },
+      { label: `  output`, value: fmt(entry.output_tokens) },
+    );
+  }
 
   ctx.addItem(
     addInfo(ctx.sessionId, "Session usage", "u", {
