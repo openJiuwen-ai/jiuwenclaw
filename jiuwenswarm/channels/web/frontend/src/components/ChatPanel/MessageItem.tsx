@@ -44,6 +44,7 @@ import { openArtifactPanel } from '../../features/teamPanelState';
 import { executeDesktopSave, type DesktopSaveApiResult } from '../../utils/desktopSave';
 import { FileIcon } from '../FileIcon';
 import { webRequest } from '../../services/webClient';
+import { useChatStore } from '../../stores/chatStore';
 import { extractTokenFromDownloadUrl } from '../../utils/fileDownloadDedup';
 
 export const MarkdownMessageBody = memo(function MarkdownMessageBody({
@@ -838,6 +839,7 @@ function FileDownloadList({
   const [savingIndex, setSavingIndex] = useState<number | null>(null);
   const [savedIndex, setSavedIndex] = useState<Set<number>>(new Set());
   const [saveSuccessIndex, setSaveSuccessIndex] = useState<number | null>(null);
+  const sessionId = useChatStore((s) => s.activeSessionId);
 
   useEffect(() => {
     let cancelled = false;
@@ -883,10 +885,15 @@ function FileDownloadList({
     if (expiredSet.has(index) || savingIndex !== null || savedIndex.has(index)) return;
     const downloadToken = resolveFileDownloadToken(file);
     if (!downloadToken) return;
+    if (!sessionId) {
+      window.alert('当前无活跃会话，无法保存 Skill');
+      return;
+    }
 
     const importParams = (force: boolean) => ({
       download_token: downloadToken,
       force,
+      session_id: sessionId,
     });
 
     setSavingIndex(index);
@@ -907,9 +914,11 @@ function FileDownloadList({
           setTimeout(() => setSaveSuccessIndex(null), 2000);
         } catch (err2) {
           console.error('skills.import_local force error:', err2);
+          window.alert(err2 instanceof Error ? err2.message : String(err2));
         }
       } else {
         console.error('skills.import_local error:', error);
+        window.alert(error instanceof Error ? error.message : String(error));
       }
     } finally {
       setSavingIndex(null);
