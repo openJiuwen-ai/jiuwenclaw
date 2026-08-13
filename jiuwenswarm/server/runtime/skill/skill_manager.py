@@ -428,14 +428,22 @@ def _safe_rmtree(path: Path) -> bool:
     return False
 
 
-def _handle_copy_error(exc: OSError, dest: Path, logger_prefix: str, src: Path | None = None) -> dict[str, Any]:
+def _handle_copy_error(
+    exc: BaseException,
+    dest: Path,
+    logger_prefix: str,
+    src: Path | None = None,
+    *,
+    cleanup_dest: bool = True,
+) -> dict[str, Any]:
     """处理文件/目录复制失败的统一错误处理函数.
     
     Args:
         exc: 捕获到的 OSError 异常（包括 shutil.Error）
-        dest: 目标路径（会被清理）
+        dest: 目标路径
         logger_prefix: 日志前缀（用于区分不同操作）
         src: 源路径（可选，用于日志记录）
+        cleanup_dest: 是否清理目标目录。新建半成品可清；覆盖已有 Skill 时必须为 False。
     
     Returns:
         错误响应字典
@@ -446,8 +454,8 @@ def _handle_copy_error(exc: OSError, dest: Path, logger_prefix: str, src: Path |
     else:
         logger.error("[SkillManager] %s copy failed: dest=%s error=%s", logger_prefix, dest, exc)
     
-    # 清理可能已部分创建的目录
-    if dest.exists():
+    # 仅清理新建过程中的半成品；绝不能删除已有 Skill
+    if cleanup_dest and dest.exists():
         _safe_rmtree(dest)
     
     # 获取错误消息字符串（支持普通 OSError 和 shutil.Error）
@@ -1001,7 +1009,7 @@ class SkillManager:
         raw: dict[str, Any] | None,
         detail: str | None = None,
     ) -> dict[str, Any]:
-        """按 design2.5 规范化 EvolutionLog 响应字段."""
+        """规范化 EvolutionLog 响应字段."""
         data = dict(raw) if isinstance(raw, dict) else {}
         skill_id = data.get("skill_id")
         if not isinstance(skill_id, str) or not skill_id.strip():
@@ -1010,7 +1018,7 @@ class SkillManager:
             skill_id = skill_id.strip()
 
         version_raw = data.get("version")
-        # design2.5：version 必须为 string，缺省/非字符串统一回落为 "1.0.0"
+        # version 为 EvolutionLog 数据结构版本，须为非空字符串；缺省/非法时回落为 "1.0.0"
         if isinstance(version_raw, str) and version_raw.strip():
             version = version_raw.strip()
         else:
@@ -2758,7 +2766,7 @@ class SkillManager:
     async def handle_skills_import_local(self, params: dict) -> dict:
         """从 download_token、本地路径或远程归档 URL 导入 skill.
 
-        ``download_token`` 与 ``path`` 必须且只能提供一个（设计 3.16）。
+        ``download_token`` 与 ``path`` 必须且只能提供一个。
         """
         params = params or {}
         download_token = str(params.get("download_token") or "").strip()
@@ -2947,7 +2955,7 @@ class SkillManager:
         force: bool,
         origin: str,
     ) -> dict[str, Any]:
-        """把已校验的 Skill 目录安装到 workspace，并返回设计约定的 skill 字段."""
+        """把已校验的 Skill 目录安装到 workspace，并返回约定的 skill 字段."""
         meta = self._assert_skill_package_safe(src)
         raw_skill_name = str(meta.get("name") or "").strip()
         try:
@@ -2977,7 +2985,17 @@ class SkillManager:
                 preserved_version = get_current_version(dest)
             except SkillArchiveError:
                 preserved_version = None
-            self._overwrite_skill_workspace_preserving_archive(dest, src)
+            try:
+                self._overwrite_skill_workspace_preserving_archive(dest, src)
+            except (OSError, shutil.Error) as exc:
+                # 覆盖失败时绝不能删除原 Skill
+                return _handle_copy_error(
+                    exc,
+                    dest,
+                    "local import overwrite",
+                    src,
+                    cleanup_dest=False,
+                )
         else:
             try:
                 shutil.copytree(
@@ -2985,7 +3003,7 @@ class SkillManager:
                     dest,
                     ignore=shutil.ignore_patterns(ARCHIVE_DIRNAME),
                 )
-            except OSError as exc:
+            except (OSError, shutil.Error) as exc:
                 return _handle_copy_error(exc, dest, "local import dir", src)
 
         # 新建时不把包内 version 当作产品版本；覆盖时保留原 current_version
@@ -3049,7 +3067,10 @@ class SkillManager:
     def _overwrite_skill_workspace_preserving_archive(
         self, dest: Path, src: Path
     ) -> None:
-        """用新内容覆盖 workspace，保留 ``.archive``；若有默认版本则同步该版本副本."""
+        """用新内容覆盖 workspace，保留 ``.archive``；若有默认版本则同步该版本副本.
+
+        先在旁路拼装完整新目录，再原子替换；任一步失败都回滚，不破坏原 Skill。
+        """
         archive_dir = dest / ARCHIVE_DIRNAME
         default_version: str | None = None
         try:
@@ -3057,39 +3078,27 @@ class SkillManager:
         except SkillArchiveError:
             default_version = None
 
-        with tempfile.TemporaryDirectory(
-            prefix="skill-import-overwrite-", dir=str(dest.parent)
-        ) as tmp:
-            tmp_path = Path(tmp)
-            archive_backup: Path | None = None
-            if archive_dir.exists():
-                archive_backup = tmp_path / ARCHIVE_DIRNAME
-                shutil.move(str(archive_dir), str(archive_backup))
+        staged = dest.with_name(f".{dest.name}.new_import_{uuid.uuid4().hex[:8]}")
+        if staged.exists():
+            _safe_rmtree(staged)
 
-            staged = tmp_path / "content"
+        try:
+            # 旁路准备新内容，不动原目录
             shutil.copytree(
                 src,
                 staged,
                 ignore=shutil.ignore_patterns(ARCHIVE_DIRNAME),
             )
+            # 把原 .archive 拷进 staged（拷贝而非挪走，失败时原目录仍完整）
+            if archive_dir.exists():
+                shutil.copytree(archive_dir, staged / ARCHIVE_DIRNAME)
 
-            # 清空 dest 非 archive 内容（archive 已挪走）
-            if dest.exists():
-                for child in list(dest.iterdir()):
-                    if child.is_dir() and not child.is_symlink():
-                        _safe_rmtree(child)
-                    else:
-                        child.unlink(missing_ok=True)
-            else:
-                dest.mkdir(parents=True, exist_ok=True)
-
-            for child in staged.iterdir():
-                shutil.move(str(child), str(dest / child.name))
-
-            if archive_backup is not None and archive_backup.exists():
-                if archive_dir.exists():
-                    _safe_rmtree(archive_dir)
-                shutil.move(str(archive_backup), str(archive_dir))
+            # 原子替换；内部失败会把 backup 恢复为 dest
+            self._atomic_replace_dir(dest, staged)
+        except Exception:
+            if staged.exists():
+                _safe_rmtree(staged)
+            raise
 
         if default_version:
             try:
@@ -3158,7 +3167,9 @@ class SkillManager:
                 try:
                     shutil.copy2(src, dest / src.name)
                 except OSError as exc:
-                    return _handle_copy_error(exc, dest, "local import file", src)
+                    return _handle_copy_error(
+                        exc, dest, "local import file", src, cleanup_dest=False
+                    )
                 self._add_local_skill(
                     {"name": skill_name, "origin": origin, "source": self._resolve_display_source_for_import(skill_name)}
                 )
@@ -3830,7 +3841,7 @@ class SkillManager:
     ) -> dict[str, Any]:
         """与 ``/evolve_rebuild`` 相同：领域准备 + 拼 Agent follow-up prompt.
 
-        版本约束（设计文档）：
+        版本约束：
         - ``version=null``：在无版本 workspace 上执行；
         - ``version`` 非空：在临时目录对版本副本 prepare，再写回版本副本；
           默认版本同步到 workspace，供 Agent 按 skill 名改写；非默认版本由上层

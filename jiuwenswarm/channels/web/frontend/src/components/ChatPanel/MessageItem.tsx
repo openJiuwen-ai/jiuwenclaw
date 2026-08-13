@@ -42,7 +42,6 @@ import { ProactiveRecommendationCard } from './ProactiveRecommendationCard';
 import { fileArtifactId } from '../ArtifactsPanel';
 import { openArtifactPanel } from '../../features/teamPanelState';
 import { webRequest } from '../../services/webClient';
-import { useChatStore } from '../../stores/chatStore';
 import { extractTokenFromDownloadUrl } from '../../utils/fileDownloadDedup';
 
 export const MarkdownMessageBody = memo(function MarkdownMessageBody({
@@ -738,7 +737,7 @@ function formatFileSize(bytes: number | undefined): string {
   return `${size.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
-/** 与后端 `_is_skill_package_file` 对齐：`.skill` / `.zip` / `.skill.zip` */
+/** 识别可保存的 Skill 包：`.skill` / `.zip` / `.skill.zip` */
 function isSkillPackageFile(file: FileDownloadItem): boolean {
   const candidates = [file.name, file.path].filter(Boolean) as string[];
   for (const candidate of candidates) {
@@ -788,9 +787,8 @@ function FileDownloadList({
   const [savingIndex, setSavingIndex] = useState<number | null>(null);
   const [savedIndex, setSavedIndex] = useState<Set<number>>(new Set());
   const [saveSuccessIndex, setSaveSuccessIndex] = useState<number | null>(null);
-  const sessionId = useChatStore((s) => s.activeSessionId);
 
-  // 只显示 Skill 包卡片（.skill / .zip）
+  // 仅展示 Skill 包卡片
   const skillFiles = files
     .map((file, index) => ({ file, index }))
     .filter(({ file }) => isSkillPackageFile(file));
@@ -822,7 +820,6 @@ function FileDownloadList({
     const importParams = (force: boolean) => ({
       download_token: downloadToken,
       force,
-      session_id: sessionId,
     });
 
     setSavingIndex(index);

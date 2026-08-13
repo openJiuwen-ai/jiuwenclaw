@@ -263,14 +263,14 @@ def validate_skill_content_image_payload(
 ) -> str | None:
     """校验 skill_content_image token 载荷；失败返回错误码字符串.
 
-    design2.5：必须存在当前会话，且与 token.sid 一致；无会话一律拒绝。
+    必须存在当前会话，且与 token.sid 一致；无会话一律拒绝。
     """
     if not isinstance(payload, dict):
         return "invalid_or_expired_token"
     if str(payload.get("purpose") or "").strip() != PURPOSE_SKILL_CONTENT_IMAGE:
         return "invalid_or_expired_token"
     if payload.get("path"):
-        # 设计要求：该用途不得携带绝对路径
+        # 该用途不得携带绝对路径
         return "invalid_or_expired_token"
     token_sid = str(payload.get("sid") or "").strip()
     if not token_sid:
