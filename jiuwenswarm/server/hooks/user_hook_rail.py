@@ -14,6 +14,34 @@ from jiuwenswarm.server.hooks.executor import HookExecutor
 
 logger = logging.getLogger(__name__)
 
+# 与 StreamEventRail 一致的会话键：before_invoke 阶段写入 conversation_id，
+# tool_call 阶段可从 ctx.extra 取到。子 agent 不触发自己的 before_invoke，
+# 此时 ctx.session 也为 None，会回退为空串。
+_SESSION_ID_KEY = "__jiuwenswarm_session_id__"
+
+
+def _resolve_session_id(ctx: AgentCallbackContext) -> str:
+    """从回调 ctx 中解析会话 id。
+
+    AgentCallbackContext 没有 session_id 字段（只有 session 对象），ToolCallInputs
+    也没有 conversation_id；直接 getattr(ctx, "session_id", "") 恒返回空串。
+    这里按优先级回退：
+      1. StreamEventRail 在 before_invoke 写入 ctx.extra 的 conversation_id；
+      2. ctx.session.get_session_id()（agent 内部 uuid，兜底）。
+    """
+    sid = ctx.extra.get(_SESSION_ID_KEY, "")
+    if isinstance(sid, str) and sid and sid != "default":
+        return sid
+    session = getattr(ctx, "session", None)
+    if session is not None:
+        try:
+            got = session.get_session_id()
+            if isinstance(got, str) and got:
+                return got
+        except Exception:
+            logger.debug("UserHookRail: get_session_id() failed", exc_info=True)
+    return ""
+
 
 class UserHookRail(DeepAgentRail):
     """用户配置的 hooks 执行引擎.
@@ -47,7 +75,7 @@ class UserHookRail(DeepAgentRail):
                 "event": "PreToolUse",
                 "tool_name": tool_name,
                 "tool_input": tool_args,
-                "session_id": getattr(ctx, "session_id", ""),
+                "session_id": _resolve_session_id(ctx),
             },
         )
 
@@ -90,7 +118,7 @@ class UserHookRail(DeepAgentRail):
                 "tool_name": tool_name,
                 "tool_input": ctx.inputs.tool_args,
                 "tool_result": ctx.inputs.tool_result,
-                "session_id": getattr(ctx, "session_id", ""),
+                "session_id": _resolve_session_id(ctx),
             },
         )
 
@@ -123,7 +151,7 @@ class UserHookRail(DeepAgentRail):
                 "tool_name": tool_name,
                 "tool_input": ctx.inputs.tool_args,
                 "error": str(getattr(ctx, "exception", "")),
-                "session_id": getattr(ctx, "session_id", ""),
+                "session_id": _resolve_session_id(ctx),
             },
         )
 
@@ -139,7 +167,7 @@ class UserHookRail(DeepAgentRail):
             hook_input={
                 "event": "Stop",
                 "final_response": getattr(ctx.inputs, "result", None),
-                "session_id": getattr(ctx, "session_id", ""),
+                "session_id": _resolve_session_id(ctx),
             },
         )
 
