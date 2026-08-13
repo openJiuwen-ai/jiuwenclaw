@@ -3208,6 +3208,12 @@ async def test_consume_stream_with_query_broadcasts_leader_and_teammate_outputs(
             source_member="analyst",
         )
         yield SimpleNamespace(
+            type="tool_call",
+            payload={"tool_call": {"name": "read_file", "arguments": {"path": "notes.md"}}},
+            role=TeamRole.TEAMMATE,
+            member_name="analyst",
+        )
+        yield SimpleNamespace(
             type="answer",
             payload={"output": {"output": "teammate answer"}, "result_type": "answer"},
             role=TeamRole.TEAMMATE,
@@ -3308,6 +3314,8 @@ async def test_consume_stream_with_query_broadcasts_leader_and_teammate_outputs(
         "chat.usage_metadata",
         'chat.final',
         'chat.processing_status',
+        'chat.reasoning',
+        'chat.tool_call',
         'chat.final',
         'chat.processing_status',
         'chat.final',
@@ -3331,6 +3339,12 @@ async def test_consume_stream_with_query_broadcasts_leader_and_teammate_outputs(
         "rid": 1,
     }
     assert not any(event["event_type"] == "chat.llm_usage" for event in broadcasted)
+    reasoning_event = next(event for event in broadcasted if event["event_type"] == "chat.reasoning")
+    assert reasoning_event["role"] == "teammate"
+    assert reasoning_event["member_name"] == "analyst"
+    tool_event = next(event for event in broadcasted if event["event_type"] == "chat.tool_call")
+    assert tool_event["role"] == "teammate"
+    assert tool_event["member_name"] == "analyst"
     # Round-start processing_status
     assert broadcasted[0]["is_processing"] is True
     assert broadcasted[0]["is_complete"] is False

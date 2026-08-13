@@ -1100,13 +1100,41 @@ def _is_teammate_output(chunk: Any) -> bool:
     return str(role_value).strip().lower() != TeamRole.LEADER.value
 
 
+def _resolve_chunk_member_name(parsed: dict[str, Any], chunk: Any) -> str:
+    """Resolve the roster member name carried by a team stream chunk."""
+    for candidate in (
+        getattr(chunk, "source_member", None),
+        getattr(chunk, "member_name", None),
+        parsed.get("member_name"),
+        parsed.get("from_member"),
+    ):
+        member_name = str(candidate or "").strip()
+        if member_name:
+            return member_name
+    payload = getattr(chunk, "payload", None)
+    if isinstance(payload, dict):
+        for key in ("member_name", "from_member", "source_member"):
+            member_name = str(payload.get(key) or "").strip()
+            if member_name:
+                return member_name
+    return ""
+
+
 def _enrich_teammate_event(parsed: dict[str, Any], chunk: Any) -> dict[str, Any]:
-    """Enrich a parsed teammate event with role and source_member for frontend display."""
+    """Enrich a parsed teammate event for relay member-card routing."""
     parsed["role"] = TeamRole.TEAMMATE.value
-    # TeamOutputSchema uses source_member (not member_name) for the member identifier
-    source_member = getattr(chunk, "source_member", None)
-    if source_member:
-        parsed["member_name"] = str(source_member)
+    member_name = _resolve_chunk_member_name(parsed, chunk)
+    if member_name:
+        parsed["member_name"] = member_name
+    return parsed
+
+
+def _enrich_leader_event(parsed: dict[str, Any], chunk: Any) -> dict[str, Any]:
+    """Enrich a parsed leader event with the same attribution contract."""
+    parsed["role"] = TeamRole.LEADER.value
+    member_name = _resolve_chunk_member_name(parsed, chunk)
+    if member_name:
+        parsed["member_name"] = member_name
     return parsed
 
 
@@ -2251,8 +2279,6 @@ async def _consume_stream_with_query(
                         parsed.get("event_type"),
                         parsed.get("role") or getattr(chunk, "role", None),
                     )
-                if not is_leader and parsed.get("event_type") == "chat.reasoning":
-                    continue
                 if _is_duplicate_ask_user_question(parsed, emitted_ask_user_request_ids):
                     continue
                 # Skip non-leader __interaction__ (permission ASK) — approval
@@ -2266,7 +2292,7 @@ async def _consume_stream_with_query(
                 elif is_leader:
                     # 标记 role=leader，使 _build_logical_targets() 走 godview 兜底
                     # （leader 不在 _ROLE_FANOUT 中，落到 [godview]）。
-                    parsed["role"] = TeamRole.LEADER.value
+                    parsed = _enrich_leader_event(parsed, chunk)
                 parsed = _truncate_team_tool_result_event(parsed)
                 if parsed.get("event_type") == "team.runtime_ready":
                     ready_team_name = str(parsed.get("team_name") or team_spec.team_name)
