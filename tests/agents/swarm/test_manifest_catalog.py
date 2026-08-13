@@ -213,13 +213,13 @@ def test_attribute_fields_are_params_env_fields_are_context() -> None:
             "evolution_model_config": "params",
             "auto_save": "params",
             "team_skills_dir": "context",
-            "trajectory_registry": "context",
+            "trajectory_span_processor": "context",
         },
         registry.TEAM_SKILL_CREATE: {},
         registry.MEMBER_SKILL_EVOLUTION: {
             "evolution_model_config": "params",
             "team_skills_dir": "context",
-            "trajectory_registry": "context",
+            "trajectory_span_processor": "context",
         },
     }
     for name, fields in expected.items():

@@ -4163,6 +4163,10 @@ class JiuWenSwarmDeepAdapter:
         """Build SkillEvolutionRail."""
         if not get_skill_evolution_enabled(config):
             return None
+        from jiuwenswarm.agents.harness.observability_runtime import (
+            get_trajectory_span_processor,
+        )
+
         try:
             evolution_auto_save = get_evolution_auto_save_enabled(config)
             model_name = self._default_model_name or config.get("model_name", "gpt-4")
@@ -4175,6 +4179,7 @@ class JiuWenSwarmDeepAdapter:
                 auto_save=evolution_auto_save,
                 review_trigger=True,
                 disabled_skills=self._skill_manager.list_execution_disabled_skills(),
+                trajectory_span_processor=get_trajectory_span_processor(),
             )
             self._skill_evolution_rail = skill_evolution_rail
             logger.info("[JiuWenSwarmDeepAdapter] SkillEvolutionRail create success")
@@ -4203,6 +4208,10 @@ class JiuWenSwarmDeepAdapter:
             if self._skill_manager is not None
             else []
         )
+        from jiuwenswarm.agents.harness.observability_runtime import (
+            get_trajectory_span_processor,
+        )
+
         await configure_skill_evolution_runtime(
             self._instance,
             skills_dir=str(get_agent_skills_dir()),
@@ -4214,6 +4223,7 @@ class JiuWenSwarmDeepAdapter:
             review_trigger=True,
             disabled_skills=disabled_skills,
             language=resolved_language,
+            trajectory_span_processor=get_trajectory_span_processor(),
         )
         self._refresh_active_evolution_rail_refs()
         if self._skill_evolution_rail is not None:
@@ -4302,11 +4312,16 @@ class JiuWenSwarmDeepAdapter:
                 logger.debug("[JiuWenSwarmDeepAdapter] SkillCreateRail disabled by config")
                 return None
 
+            from jiuwenswarm.agents.harness.observability_runtime import (
+                get_trajectory_span_processor,
+            )
+
             language = config.get("language", "cn")
             rail = SkillCreateRail(
                 skills_dir=str(get_agent_skills_dir()),
                 auto_trigger=True,
                 language=language,
+                trajectory_span_processor=get_trajectory_span_processor(),
             )
             self._skill_create_rail = rail
             logger.info("[JiuWenSwarmDeepAdapter] SkillCreateRail created with auto_trigger=True")

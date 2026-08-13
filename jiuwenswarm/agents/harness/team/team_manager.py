@@ -210,7 +210,7 @@ def _make_team_rail_mount_context(
     skills_dir: str | None = None,
     team_id: str | None = "",
     config: dict[str, Any] | None = None,
-    trajectory_registry: Any | None = None,
+    trajectory_span_processor: Any | None = None,
 ) -> TeamRailMountContext:
     """Build the shared rail context used by swarm and legacy rail mounts."""
     card = getattr(agent, "card", None)
@@ -234,7 +234,7 @@ def _make_team_rail_mount_context(
             skills_dir=skills_dir,
             team_id=team_id,
             config=config,
-            trajectory_registry=trajectory_registry,
+            trajectory_span_processor=trajectory_span_processor,
         ),
     )
 

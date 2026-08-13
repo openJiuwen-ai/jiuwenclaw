@@ -86,7 +86,9 @@ class TeamWorkspaceReportPathRail(DeepAgentRail):
                 skills_dir=getattr(context, "team_skills_dir", None),
                 team_id=team_id,
                 config=config,
-                trajectory_registry=getattr(context, "trajectory_registry", None),
+                trajectory_span_processor=getattr(
+                    context, "trajectory_span_processor", None
+                ),
             )
             team_manager = get_team_manager(channel)
             if role == "leader":
