@@ -2027,16 +2027,30 @@ def get_model_config(name: str, index: int | None = None) -> dict[str, Any] | No
 # Sandbox runtime config
 #
 # 字段挂在 ``sandbox`` 顶层 (与 ``url`` / ``type`` / ``startup_mode`` /
-# ``policy_file`` / ``preserve_file_sharing_mode`` 并列):
+# ``policy_file`` / ``preserve_file_sharing_mode`` / ``template_id`` 并列):
 #
 #   sandbox:
-#     url: ...
+#     # type: jiuwenbox | jiuwenbox-conch | yuanrong
+#     type: jiuwenbox
+#     url: http://127.0.0.1:8321
 #     enabled: true
 #     excluded_commands: [...]
-#     files: { allow: [...], deny: [...] }
+#     files: { allow: [...], deny: [...] }   # 仅 jiuwenbox(bwrap); jiuwenbox-conch 不支持
 #     idle_ttl_seconds: 600         # 可选, 默认 None = 不进行 idle 驱逐
 #     idle_check_interval: 60       # 可选, 默认 None = 让 jiuwenbox 端用自身默认值
 #     fallback_on_failure: false    # jiuwenbox exec 异常时回退本地 (见 agent-core jiuwenbox provider)
+#
+# Conch 示例 (走 jiuwenbox HTTP + Conch runtime; 需远端/本机 jiuwenbox 已配 Conch):
+#
+#   sandbox:
+#     type: jiuwenbox-conch
+#     url: http://127.0.0.1:8321
+#     startup_mode: external          # 推荐
+#     template_id: <conch-template>   # 必填
+#     policy_file: code-agent-policy.yaml
+#     enabled: true
+#     preserve_file_sharing_mode: mount
+#     # files: 本模式不支持; 需要写权限裁剪请用 type=jiuwenbox
 #
 # ``get_sandbox_runtime`` 把这些 key 读出来填默认值;
 # ``update_sandbox_runtime`` 写回时也只动这几个 key, 不动 endpoint 字段。
@@ -2180,6 +2194,17 @@ _VALID_SANDBOX_STARTUP_MODES = ("internal", "external")
 _DEFAULT_SANDBOX_STARTUP_MODE = "internal"
 _DEFAULT_SANDBOX_POLICY_FILE = "code-agent-policy.yaml"
 
+# Swarm-facing sandbox.type values (provider registry may still use "jiuwenbox"
+# for both jiuwenbox and jiuwenbox-conch).
+_SANDBOX_TYPE_JIUWENBOX = "jiuwenbox"
+_SANDBOX_TYPE_JIUWENBOX_CONCH = "jiuwenbox-conch"
+_SANDBOX_TYPE_YUANRONG = "yuanrong"
+_VALID_SANDBOX_TYPES = (
+    _SANDBOX_TYPE_JIUWENBOX,
+    _SANDBOX_TYPE_JIUWENBOX_CONCH,
+    _SANDBOX_TYPE_YUANRONG,
+)
+
 # YuanRong sandbox knobs under flat ``sandbox:`` (see get_sandbox_endpoint).
 _VALID_YUANRONG_EXECUTORS = ("default", "docker")
 _DEFAULT_YUANRONG_EXECUTOR = "docker"
@@ -2218,6 +2243,41 @@ def _normalize_sandbox_startup_mode(value: Any) -> str:
     if text not in _VALID_SANDBOX_STARTUP_MODES:
         return _DEFAULT_SANDBOX_STARTUP_MODE
     return text
+
+
+def sandbox_files_has_entries(files: Any) -> bool:
+    """Return True when ``sandbox.files.allow`` or ``deny`` has any non-empty path."""
+    if not isinstance(files, dict):
+        return False
+    for bucket in ("allow", "deny"):
+        entries = files.get(bucket)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if isinstance(entry, str) and entry.strip():
+                return True
+            if isinstance(entry, dict) and str(entry.get("path") or "").strip():
+                return True
+    return False
+
+
+def require_jiuwenbox_conch_template_id(template_id: Any) -> str:
+    """Validate and return non-empty ``sandbox.template_id`` for jiuwenbox-conch."""
+    text = str(template_id or "").strip()
+    if not text:
+        raise ValueError(
+            "sandbox.template_id is required when sandbox.type=jiuwenbox-conch"
+        )
+    return text
+
+
+def reject_files_for_jiuwenbox_conch(files: Any) -> None:
+    """Raise when ``files`` is configured under ``type=jiuwenbox-conch``."""
+    if sandbox_files_has_entries(files):
+        raise ValueError(
+            "sandbox.files is not supported when sandbox.type=jiuwenbox-conch; "
+            "use type=jiuwenbox for write-permission allow/deny, or omit files"
+        )
 
 
 def get_sandbox_startup_mode() -> str:
@@ -2371,7 +2431,8 @@ def update_sandbox_policy_file(value: str) -> str:
 
 def get_sandbox_endpoint() -> dict[str, Any]:
     """返回 ``sandbox.url`` / ``sandbox.type`` / ``sandbox.preserve_file_sharing_mode``
-    / ``sandbox.startup_mode`` / ``sandbox.policy_file``, 以及 yuanrong 可选 knobs。
+    / ``sandbox.startup_mode`` / ``sandbox.policy_file``, 以及 yuanrong /
+    jiuwenbox-conch 可选 knobs。
 
     ``preserve_file_sharing_mode`` 缺省或为空时返回空串, 由调用方决定默认值
     (当前只有 ``"mount"``)。 ``startup_mode`` 未配置时回落到 ``internal``;
@@ -2382,6 +2443,9 @@ def get_sandbox_endpoint() -> dict[str, Any]:
     - 若 yaml 中存在: ``image`` / ``workdir`` / ``mounts`` / ``cpu`` /
       ``cpu_limit`` / ``memory`` / ``mem_limit`` / ``rootfs``
     - ``url`` 为空时回落占位 ``http://yuanrong.local`` (仅作 cache key)
+
+    当 ``type=jiuwenbox-conch`` 时额外返回:
+    - ``template_id`` (字符串; 可能为空, 由 enable / 建 card 再硬校验)
 
     Raises:
         ValueError: yaml 里 ``preserve_file_sharing_mode`` 写了非法值时, 直接
@@ -2400,12 +2464,14 @@ def get_sandbox_endpoint() -> dict[str, Any]:
         "startup_mode": _normalize_sandbox_startup_mode(sandbox.get("startup_mode")),
         "policy_file": str(sandbox.get("policy_file") or "").strip(),
     }
-    if sandbox_type == "yuanrong":
+    if sandbox_type == _SANDBOX_TYPE_YUANRONG:
         result["url"] = url or _DEFAULT_YUANRONG_URL
         result["executor"] = _normalize_yuanrong_executor(sandbox.get("executor"))
         for key in _YUANRONG_ENDPOINT_OPTIONAL_KEYS:
             if key in sandbox:
                 result[key] = sandbox[key]
+    if sandbox_type == _SANDBOX_TYPE_JIUWENBOX_CONCH:
+        result["template_id"] = str(sandbox.get("template_id") or "").strip()
     return result
 
 
@@ -2416,6 +2482,7 @@ def update_sandbox_endpoint(
     preserve_file_sharing_mode: str | None = None,
     startup_mode: str | None = None,
     policy_file: str | None = None,
+    template_id: str | None = None,
     executor: str | None = None,
     image: str | None = None,
     workdir: str | None = None,
@@ -2428,11 +2495,14 @@ def update_sandbox_endpoint(
 ) -> dict[str, Any]:
     """写入 ``sandbox.url`` / ``sandbox.type`` 以及可选的
     ``preserve_file_sharing_mode`` / ``startup_mode`` / ``policy_file``
-    / yuanrong knobs 到 config.yaml; 返回实际写入的字段集合
+    / ``template_id`` / yuanrong knobs 到 config.yaml; 返回实际写入的字段集合
     (没有改动的字段不在返回里)。
 
     所有 ``None`` 入参表示"本次不修改该字段, 保留 config.yaml 中既有值",
     以方便 ``_handle_sandbox_enable`` 在不同阶段分批落盘。
+
+    当 ``type=jiuwenbox-conch`` 时: ``template_id`` 最终必须非空; 且当前
+    ``sandbox.files`` 不得有非空 allow/deny。
     """
     url_value = str(url or "").strip()
     type_value = str(sandbox_type or "").strip()
@@ -2464,16 +2534,30 @@ def update_sandbox_endpoint(
     data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
     if "sandbox" not in data or not isinstance(data.get("sandbox"), dict):
         data["sandbox"] = {}
-    data["sandbox"]["url"] = url_value
-    data["sandbox"]["type"] = type_value
+    sandbox_block = data["sandbox"]
+
+    template_value: str | None = None
+    if template_id is not None:
+        template_value = str(template_id).strip()
+    elif type_value == _SANDBOX_TYPE_JIUWENBOX_CONCH:
+        template_value = str(sandbox_block.get("template_id") or "").strip()
+
+    if type_value == _SANDBOX_TYPE_JIUWENBOX_CONCH:
+        require_jiuwenbox_conch_template_id(template_value)
+        reject_files_for_jiuwenbox_conch(sandbox_block.get("files"))
+
+    sandbox_block["url"] = url_value
+    sandbox_block["type"] = type_value
     if mode_value is not None:
-        data["sandbox"]["preserve_file_sharing_mode"] = mode_value
+        sandbox_block["preserve_file_sharing_mode"] = mode_value
     if startup_value is not None:
-        data["sandbox"]["startup_mode"] = startup_value
+        sandbox_block["startup_mode"] = startup_value
     if policy_value is not None:
-        data["sandbox"]["policy_file"] = policy_value
+        sandbox_block["policy_file"] = policy_value
     if executor_value is not None:
-        data["sandbox"]["executor"] = executor_value
+        sandbox_block["executor"] = executor_value
+    if type_value == _SANDBOX_TYPE_JIUWENBOX_CONCH and template_value is not None:
+        sandbox_block["template_id"] = template_value
 
     optional_writes: dict[str, Any] = {}
     if image is not None:
@@ -2497,7 +2581,7 @@ def update_sandbox_endpoint(
             raise ValueError("rootfs must be a dict")
         optional_writes["rootfs"] = rootfs
     for key, value in optional_writes.items():
-        data["sandbox"][key] = value
+        sandbox_block[key] = value
 
     _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)
     result: dict[str, Any] = {"url": url_value, "type": type_value}
@@ -2509,9 +2593,10 @@ def update_sandbox_endpoint(
         result["policy_file"] = policy_value
     if executor_value is not None:
         result["executor"] = executor_value
+    if type_value == _SANDBOX_TYPE_JIUWENBOX_CONCH and template_value is not None:
+        result["template_id"] = template_value
     result.update(optional_writes)
     return result
-
 
 def get_sandbox_preserve_file_sharing_mode() -> str | None:
     """返回 ``sandbox.preserve_file_sharing_mode`` (当前仅 ``"mount"``).
@@ -2589,10 +2674,15 @@ def update_sandbox_runtime(patch: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("files must be an object")
         allow = files.get("allow")
         deny = files.get("deny")
-        merged["files"] = {
+        merged_files = {
             "allow": list(allow) if isinstance(allow, list) else merged["files"]["allow"],
             "deny": list(deny) if isinstance(deny, list) else merged["files"]["deny"],
         }
+        cfg = get_config() or {}
+        sandbox_type = str((cfg.get("sandbox") or {}).get("type") or "").strip().lower()
+        if sandbox_type == _SANDBOX_TYPE_JIUWENBOX_CONCH:
+            reject_files_for_jiuwenbox_conch(merged_files)
+        merged["files"] = merged_files
     if "idle_ttl_seconds" in patch:
         merged["idle_ttl_seconds"] = _coerce_optional_positive_int(
             patch["idle_ttl_seconds"], field="sandbox.idle_ttl_seconds",
