@@ -105,7 +105,8 @@
     },
     "taskDetail": {
       "sourcePrompt": "来源请求：{{prompt}}",
-      "noDetail": "后端未提供更详细的任务描述"
+      "noDetail": "后端未提供更详细的任务描述",
+      "skipReasonPlanned": "规划未执行：工作流结束时该阶段从未启动"
     },
     "contextCompression": {
       "running": "正在压缩上下文",
