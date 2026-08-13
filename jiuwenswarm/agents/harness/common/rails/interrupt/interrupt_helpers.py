@@ -38,6 +38,73 @@ SKILL_EVOLUTION_APPROVAL_TOOL_KINDS = {
     "simplify_skill_experiences": "simplify",
 }
 
+# ── skill_turbo outer unified approval: generic fallback description + tool list ──
+# After skill_turbo approval, all internal tool calls are released (no per-tool approval).
+# 工具名必须与 tools_loader 实际注册的 card.name 一致；部分工具按配置条件装载，
+# 故文案使用「包括但不限于」。
+SKILL_TURBO_APPROVAL_DESCRIPTION = (
+    "即将调用 skill加速 执行技能任务，需要一次性授权下列工具。"
+    "确认后执行过程中不再逐个询问。"
+)
+
+SKILL_TURBO_APPROVAL_TOOLS: list[tuple[str, str]] = [
+    ("bash", "执行 shell 命令（依赖安装、PPT 导出等）"),
+    ("code", "执行任意代码（高风险）"),
+    ("read_file", "读取文件内容"),
+    ("write_file", "写入文件"),
+    ("edit_file", "编辑/改写文件"),
+    ("list_files", "列出目录"),
+    ("glob", "按模式搜索文件"),
+    ("grep", "按内容搜索文件"),
+    ("free_search", "免费网页搜索"),
+    ("fetch_webpage", "抓取网页内容"),
+    ("paid_search", "付费网页搜索（若已启用）"),
+    ("ask_user", "向用户提问/确认"),
+    ("image_ocr", "图片文字识别（若已启用视觉）"),
+    ("visual_question_answering", "图片视觉理解（若已启用视觉）"),
+    ("generate_image", "文生图（若已启用）"),
+    ("video_understanding", "视频理解（若已启用）"),
+    ("audio_question_answering", "音频问答（若已启用）"),
+    ("send_file_to_user", "发送最终产物"),
+]
+
+
+def _build_skill_turbo_approval_message(tool_call: Any, result: Any, rail: Any) -> str:
+    """Build skill_turbo unified approval message with tool list + risk level."""
+    tool_lines = "\n".join(
+        f"- `{name}`: {desc}" for name, desc in SKILL_TURBO_APPROVAL_TOOLS
+    )
+    risk: dict[str, Any] = {}
+    try:
+        tool_name = tool_call.name if tool_call else ""
+        risk = rail.build_risk_for_message(tool_name, {}, result, None)
+    except Exception as exc:
+        logger.debug(
+            "[InterruptHelpers] build_risk_for_message failed for skill_turbo: %s",
+            exc,
+        )
+    return (
+        f"**即将调用 `skill加速`，需要授权后整体放行。**\n\n"
+        f"{SKILL_TURBO_APPROVAL_DESCRIPTION}\n\n"
+        f"**可能用到的工具（包括但不限于）：**\n\n{tool_lines}\n\n"
+        f"**风险等级：{risk.get('level', '')}风险**\n\n"
+    )
+
+
+def _make_skill_turbo_aware_permission_rail(base_rail_cls: Any) -> Any:
+    """Create a PermissionInterruptRail subclass that adds a skill_turbo_tool
+    branch to ``_build_message`` (Q3: target openjiuwen rail lacks this branch).
+    """
+
+    class SkillTurboAwarePermissionInterruptRail(base_rail_cls):  # type: ignore[misc]
+        def _build_message(self, tool_call: Any, result: Any) -> str:
+            tool_name = tool_call.name if tool_call else ""
+            if tool_name == "skill_turbo_tool":
+                return _build_skill_turbo_approval_message(tool_call, result, self)
+            return super()._build_message(tool_call, result)
+
+    return SkillTurboAwarePermissionInterruptRail
+
 
 def has_interrupt_resume_payload(params: Any) -> bool:
     if not isinstance(params, dict):
@@ -373,7 +440,10 @@ def build_permission_rail(
             permission_scene_hook=_permission_scene_hook,
         )
 
-        permission_rail = PermissionInterruptRail(
+        # Q3: use skill_turbo-aware subclass so skill_turbo_tool gets a unified
+        # approval message (target openjiuwen rail lacks the _build_message branch).
+        SkillTurboAwareRailCls = _make_skill_turbo_aware_permission_rail(PermissionInterruptRail)
+        permission_rail = SkillTurboAwareRailCls(
             config=permission_config,
             tool_names=tool_names,
             llm=llm,
@@ -587,12 +657,22 @@ def convert_interactions_to_ask_user_question(state_outputs: list) -> dict | Non
         tool_name, message, _tool_args = _read_interrupt_fields(value_obj)
         source = _resolve_interrupt_source(tool_name, message)
 
+        # Collect sibling interrupt ids from the same batch so resume can
+        # fan-out one approval across parallel tool interrupts.
+        all_request_ids: list[str] = []
+        for sibling in interactions:
+            sibling_id, _ = _extract_interaction_parts(sibling)
+            if sibling_id and sibling_id not in all_request_ids:
+                all_request_ids.append(sibling_id)
+
         payload = {
             "event_type": "chat.ask_user_question",
             "request_id": request_id,
             "questions": [question_data],
             "source": source,
         }
+        if len(all_request_ids) > 1:
+            payload["all_request_ids"] = all_request_ids
         if (
             source == "confirm_interrupt"
             and tool_name == "exit_plan_mode"

@@ -261,6 +261,13 @@ from jiuwenswarm.agents.harness.common.tools import (
 from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import (
     SkillRetrievalPromptRail,
 )
+from jiuwenswarm.agents.harness.common.rails.skill_turbo_rail import SkillTurboRail
+from jiuwenswarm.agents.harness.common.rails.skill_protocol_prompt_rail import (
+    SkillProtocolPromptRail,
+)
+from jiuwenswarm.agents.skill_turbo.permission_bridge import (
+    set_skill_turbo_id as _skill_turbo_set_agent_id,
+)
 from jiuwenswarm.agents.harness.common.rails.progressive_tool_rail import (
     ProgressiveToolRail,
 )
@@ -998,6 +1005,7 @@ _DEFAULT_PROGRESSIVE_EAGER_TOOLS = [
     "code",
     "skill_tool",
     "skill_complete",
+    "skill_turbo_tool",
     "todo_create",
     "todo_list",
     "todo_modify",
@@ -1802,6 +1810,9 @@ class JiuWenSwarmDeepAdapter:
         self._progressive_tool_rail: ProgressiveToolRail | None = None
         self._skill_rail: SkillUseRail | None = None
         self._enabled_skills: list[str] | None = None
+        self._skill_protocol_prompt_rail: SkillProtocolPromptRail | None = None
+        self._skill_turbo_rail: SkillTurboRail | None = None
+        self._skill_turbo_skill_roots: list[str] = []
         self._stream_event_rail: JiuSwarmStreamEventRail | None = None
         self._task_execution_rail: TaskExecutionRail | None = None
         self._request_summary_rail: Any | None = None
@@ -2011,6 +2022,24 @@ class JiuWenSwarmDeepAdapter:
         if extra_skill_dir:
             skills_dirs.append(extra_skill_dir)
         return skills_dirs
+
+    def get_skill_turbo_skill_roots(self) -> list[str]:
+        """Return tip-sealed skill roots for turbo face discovery.
+
+        Prefer the snapshot captured while tip env was active (rail build),
+        matching SkillUseRail. Never prefer a live re-resolve after tip reset —
+        that returns only empty workspace/skills and hides ``turbo/`` beside
+        standard skills under office-claw-skills.
+        """
+        rail = self._skill_turbo_rail
+        if rail is not None:
+            roots = [str(p) for p in (getattr(rail, "_skill_roots", None) or []) if str(p).strip()]
+            if roots:
+                return roots
+        cached = [str(p) for p in (self._skill_turbo_skill_roots or []) if str(p).strip()]
+        if cached:
+            return cached
+        return self._resolve_skill_dirs()
 
     @staticmethod
     def _session_adapter_key(session_id: str | None) -> str:
@@ -2925,6 +2954,18 @@ class JiuWenSwarmDeepAdapter:
               enable_task_execution_rail: true
         """
         return bool(self._config_cache.get("enable_task_execution_rail", False))
+
+    def _skill_turbo_enabled(self) -> bool:
+        """Whether skill_turbo online execution is enabled.
+
+        Defaults to False. When disabled, skip SkillProtocolPromptRail /
+        SkillTurboRail so prompts do not require ``skill_turbo_tool``.
+        Tool registration is gated separately in ``_init_skill_turbo_tool``.
+        """
+        skill_turbo = self._config_cache.get("skill_turbo", {})
+        if not isinstance(skill_turbo, dict):
+            return False
+        return bool(skill_turbo.get("enabled", False))
 
     def _skill_include_tools_for_profile(self) -> bool:
         if self._is_acp_tool_profile(self._instance_overrides):
@@ -5756,9 +5797,9 @@ class JiuWenSwarmDeepAdapter:
         """Build ContextOverflowRecoveryRail."""
         try:
             recovery_rail = ContextOverflowRecoveryRail(max_recovery_attempts=3)
-            logger.info("[JiuWenClawDeepAdapter] ContextOverflowRecoveryRail create success")
+            logger.info("[JiuWenSwarmDeepAdapter] ContextOverflowRecoveryRail create success")
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] ContextOverflowRecoveryRail create failed: %s", exc)
+            logger.warning("[JiuWenSwarmDeepAdapter] ContextOverflowRecoveryRail create failed: %s", exc)
             recovery_rail = None
         return recovery_rail
 
@@ -6148,6 +6189,53 @@ class JiuWenSwarmDeepAdapter:
             logger.warning("[JiuWenSwarmDeepAdapter] SkillRetrievalPromptRail create failed: %s", exc)
             return None
 
+    @staticmethod
+    def _build_skill_protocol_prompt_rail() -> SkillProtocolPromptRail | None:
+        """Build SkillProtocolPromptRail: inject skill execution protocol prompt."""
+        try:
+            rail = SkillProtocolPromptRail()
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] SkillProtocolPromptRail create success "
+                "(skill protocol prompt)",
+                extra={'user_visible': 'progress'},
+            )
+            return rail
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] SkillProtocolPromptRail create failed: %s", exc,
+                extra={'user_visible': 'progress'},
+            )
+            return None
+
+    def _build_skill_turbo_rail(self) -> SkillTurboRail | None:
+        """Build SkillTurboRail: turbo progressive injection + skill_complete release.
+
+        Capture ``_resolve_skill_dirs()`` while tip env bindings are still
+        active (same window as SkillUseRail). Persist on adapter so later
+        ``_init_skill_turbo_tool`` / tool-time binds do not re-resolve after
+        tip reset and miss ``office-claw-skills/.../turbo``.
+        """
+        try:
+            skill_roots = self._resolve_skill_dirs()
+            # Never downgrade a previously sealed (non-empty) snapshot to empty:
+            # a rebuild triggered after tip reset (mode switch / reload) would
+            # otherwise clobber the good roots with empty workspace/skills.
+            if skill_roots:
+                self._skill_turbo_skill_roots = list(skill_roots)
+            rail = SkillTurboRail(skill_roots=skill_roots)
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] SkillTurboRail create success skill_roots=%s",
+                skill_roots,
+                extra={'user_visible': 'progress'},
+            )
+            return rail
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] SkillTurboRail create failed: %s", exc,
+                extra={'user_visible': 'progress'},
+            )
+            return None
+
     def _build_progressive_tool_rail(
         self, config: dict[str, Any]
     ) -> ProgressiveToolRail | None:
@@ -6361,6 +6449,21 @@ class JiuWenSwarmDeepAdapter:
                 self._build_symphony_orchestration_rail,
             ),
         )
+        if self._skill_turbo_enabled():
+            rail_infos.insert(
+                5 if self._filesystem_rail_enabled_for_profile() else 4,
+                _RailBuildInfo(
+                    "_skill_protocol_prompt_rail",
+                    self._build_skill_protocol_prompt_rail,
+                ),
+            )
+            rail_infos.insert(
+                6 if self._filesystem_rail_enabled_for_profile() else 5,
+                _RailBuildInfo("_skill_turbo_rail", self._build_skill_turbo_rail),
+            )
+        else:
+            self._skill_protocol_prompt_rail = None
+            self._skill_turbo_rail = None
         if isinstance(mode, str) and mode.startswith("agent"):
             rail_infos.append(_RailBuildInfo("_ask_user_rail", self._build_structured_ask_user_rail))
         # TaskExecutionRail 仅在冷启动时创建/注册，不参与热重载重建。
@@ -6381,6 +6484,201 @@ class JiuWenSwarmDeepAdapter:
         )
 
         return self._instantiate_rails(rail_infos, config_base)
+
+    def _init_skill_turbo_tool(self) -> None:
+        """Initialize skill_turbo tool for SkillTurbo integration."""
+        if self._instance is None:
+            return
+        try:
+            config_base = get_config()
+            react_config = config_base.get("react", {}) if isinstance(config_base, dict) else {}
+            skill_turbo_config = react_config.get("skill_turbo", {}) if isinstance(react_config, dict) else {}
+            enabled = skill_turbo_config.get("enabled", False) if isinstance(skill_turbo_config, dict) else False
+            if not enabled:
+                logger.info("[JiuWenSwarmDeepAdapter] SkillTurbo disabled, skipping tool registration")
+                return
+
+            from jiuwenswarm.agents.skill_turbo.skill_turbo_tools import (
+                get_skill_turbo_online_tools,
+            )
+
+            # Register online execution tool skill_turbo_tool
+            for tool in get_skill_turbo_online_tools():
+                try:
+                    Runner.resource_mgr.add_tool(tool)
+                except Exception as e:
+                    if "already exist" not in str(e):
+                        logger.warning("[JiuWenSwarmDeepAdapter] Failed to register skill_turbo_tool: %s", e)
+                        continue
+                self._instance.ability_manager.add(tool.card)
+
+            # Skill roots are bound on SkillTurboRail / stream_event_rail
+            # before_model_call / before_tool_call. Do not set ContextVar here:
+            # this method runs in run_in_executor and thread-local copies do
+            # not propagate back to the event loop.
+
+            # Inject adapter into StreamEventRail (guarded: target rail may lack these setters)
+            if self._stream_event_rail is not None:
+                if hasattr(self._stream_event_rail, "set_skill_turbo_adapter"):
+                    self._stream_event_rail.set_skill_turbo_adapter(self)
+                checkpointer = getattr(self, "_checkpointer", None)
+                if checkpointer is not None and hasattr(self._stream_event_rail, "set_checkpointer"):
+                    self._stream_event_rail.set_checkpointer(checkpointer)
+
+            logger.info("[JiuWenSwarmDeepAdapter] skill_turbo tool initialized")
+        except Exception as exc:
+            logger.warning("[JiuWenSwarmDeepAdapter] Failed to initialize skill_turbo tool: %s", exc)
+
+    def build_skill_turbo_config(self) -> dict[str, Any]:
+        """Build SkillTurbo config."""
+        tool_cards = []
+        if self._instance is not None:
+            ability_manager = getattr(self._instance, "ability_manager", None)
+            if ability_manager is not None:
+                tool_cards = ability_manager.list()
+
+        fallback_handler = self._create_skill_turbo_fallback_handler()
+
+        return {
+            "tool_cards": tool_cards,
+            "model_client": self._model,
+            "fallback_handler": fallback_handler,
+            # Pass agent card so executor can init checkpointer for session pre_run/post_run.
+            "card": self._instance.card if self._instance is not None else None,
+            # LLM concurrency limit within a single SkillTurboExecutor.
+            "llm_concurrency_limit": 20,
+            # Multimodal capability passthrough.
+            "vision_model_config": self._vision_model_config,
+            "audio_model_config": self._audio_model_config,
+            "video_model_enabled": bool(self._video_model_config),
+            "image_gen_enabled": bool(self._image_gen_model_config),
+            # Explicit sys_operation so SkillTurbo uses the agent's unrestricted sysop.
+            "sys_operation": self._sys_operation,
+        }
+
+    def _create_skill_turbo_fallback_handler(self) -> Any:
+        """Create SkillTurbo node fallback handler based on DeepAgent subagent."""
+        from jiuwenswarm.agents.skill_turbo.fallback_handler import DeepAgentFallbackHandler
+
+        return DeepAgentFallbackHandler(
+            adapter=self,
+            request_id="",
+            channel_id="",
+            session_id="",
+        )
+
+    async def _prepare_skill_turbo_resume(
+        self,
+        request: AgentRequest,
+        inputs: dict[str, Any],
+    ) -> None:
+        """准备在线 resume：检测 + 注入 ContextVar，让 harness handle_resume 重执工具调用。
+
+        在线执行走 harness HITL 机制；resume 时通过 ContextVar 传入
+        pending_tool_call_id + user_input，让 skill_turbo_tool 内部的 set_pending_resume 生效。
+        """
+        params = request.params if isinstance(getattr(request, "params", None), dict) else {}
+        answers: list = params.get("answers") or []
+        if not answers:
+            return
+
+        if self._instance is None:
+            return
+
+        from openjiuwen.core.session.agent import create_agent_session
+
+        session = create_agent_session(
+            session_id=request.session_id or "default",
+            card=self._instance.card,
+        )
+        _skill_turbo_set_agent_id(session, self._instance.card)
+
+        try:
+            from jiuwenswarm.agents.skill_turbo.permission_bridge import (
+                clear_resume_ctx,
+                load_resume_ctx,
+            )
+
+            resume_ctx = await load_resume_ctx(session)
+            if resume_ctx is None:
+                return
+
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] SkillTurbo online resume detected: plan=%s tcid=%s",
+                resume_ctx.get("plan_name"),
+                resume_ctx.get("pending_tool_call_id"),
+            )
+
+            user_input_payload = self._skill_turbo_answers_to_resume_payload(
+                answers, resume_ctx
+            )
+            pending_tool_call_id = resume_ctx.get("pending_tool_call_id", "")
+
+            from jiuwenswarm.agents.skill_turbo.skill_turbo_tools import (
+                set_skill_turbo_resume_input,
+            )
+
+            resume_payload = {
+                "pending_tool_call_id": pending_tool_call_id,
+                "user_input": user_input_payload,
+            }
+            set_skill_turbo_resume_input(resume_payload)
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] injected online resume input via ContextVar: tcid=%s",
+                pending_tool_call_id,
+            )
+
+            await clear_resume_ctx(session)
+            try:
+                await session.post_run()
+            except Exception:
+                pass
+
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] prepare online resume failed: %s", exc
+            )
+
+    @staticmethod
+    def _skill_turbo_answers_to_resume_payload(
+        answers: list,
+        resume_ctx: dict[str, Any],
+    ) -> Any:
+        """将前端 answers 转为节点内 resume 载荷。
+
+        - 权限类文案（本次允许 / 总是允许 / 拒绝）→ ConfirmPayload
+        - 结构化问答（question/answer）→ AskUserPayload 兼容 dict
+        """
+        from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmPayload
+
+        text = ""
+        answers_map: dict[str, Any] = {}
+        for ans in answers:
+            if not isinstance(ans, dict):
+                continue
+            a = ans.get("answer") or ans.get("value") or ""
+            q = ans.get("question") or ans.get("prompt") or ""
+            if q and a:
+                answers_map[str(q)] = a
+            if a and not text:
+                text = str(a).strip()
+        if not text and answers:
+            first = answers[0]
+            if isinstance(first, str):
+                text = first
+
+        if text == "拒绝":
+            return ConfirmPayload(approved=False, feedback="user rejected")
+        if text == "总是允许":
+            return ConfirmPayload(approved=True, auto_confirm=True, persist_allow=True)
+        if text == "本次允许":
+            return ConfirmPayload(approved=True)
+
+        if answers_map:
+            return {"answers": answers_map}
+        if text:
+            return {"answers": {"_": text}}
+        return ConfirmPayload(approved=True)
 
     @staticmethod
     def _resolve_enable_task_loop(
@@ -7106,6 +7404,10 @@ class JiuWenSwarmDeepAdapter:
             self._register_extension_tools()
         finally:
             self._reset_request_env_bindings(ns_token, overlay_token)
+
+        # Initialize skill_turbo online tool (guarded by react.skill_turbo.enabled)
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, self._init_skill_turbo_tool)
 
     def _register_extension_tools(self) -> None:
         """将 ExtensionRegistry 登记的扩展本地工具挂到 Runner 与 ability_manager。"""
@@ -10741,6 +11043,25 @@ class JiuWenSwarmDeepAdapter:
         query = request.params.get("query", "")
         mode = request.params.get("mode", "agent")
 
+        # Skill Turbo: propagate request metadata + workspace via ContextVar.
+        try:
+            from jiuwenswarm.agents.skill_turbo.skill_turbo_tools import (
+                set_current_request_metadata,
+            )
+            from jiuwenswarm.agents.skill_turbo.online.context_vars import (
+                set_effective_request_workspace_dir,
+            )
+            _st_md = dict(getattr(request, "metadata", None) or {})
+            _st_md["request_id"] = request.request_id or ""
+            _st_md["channel_id"] = request.channel_id or ""
+            set_current_request_metadata(_st_md)
+            set_effective_request_workspace_dir(self._workspace_dir)
+        except Exception as _st_exc:
+            logger.debug("[JiuWenSwarmDeepAdapter] set skill_turbo request ctx failed: %s", _st_exc)
+
+        # SkillTurbo online HITL resume: inject pending_tool_call_id + user_input.
+        await self._prepare_skill_turbo_resume(request, inputs)
+
         # [CRON-CTX] 非流式入口：与流式对称，跨 channel 时强制 recover cron 历史。
         if str(session_id).startswith("cron_") and self._instance is not None:
             _cron_sess = getattr(self._instance, "_interaction_session", None)
@@ -11137,6 +11458,26 @@ class JiuWenSwarmDeepAdapter:
         cid = request.channel_id
         query = request.params.get("query", "")
         mode = request.params.get("mode", "agent")
+
+        # Skill Turbo: propagate request metadata + workspace via ContextVar so
+        # skill_turbo_tool can read output_dir / effective_project_dir safely.
+        try:
+            from jiuwenswarm.agents.skill_turbo.skill_turbo_tools import (
+                set_current_request_metadata,
+            )
+            from jiuwenswarm.agents.skill_turbo.online.context_vars import (
+                set_effective_request_workspace_dir,
+            )
+            _st_md = dict(getattr(request, "metadata", None) or {})
+            _st_md["request_id"] = rid or ""
+            _st_md["channel_id"] = cid or ""
+            set_current_request_metadata(_st_md)
+            set_effective_request_workspace_dir(self._workspace_dir)
+        except Exception as _st_exc:
+            logger.debug("[JiuWenSwarmDeepAdapter] set skill_turbo request ctx failed: %s", _st_exc)
+
+        # SkillTurbo online HITL resume: inject pending_tool_call_id + user_input.
+        await self._prepare_skill_turbo_resume(request, inputs)
 
         # [CRON-CTX] 跨 channel（cron 写 / web 读）恢复：cron 与 web 是不同 channel_key，
         # 各自持有独立 JiuWenSwarm → 独立 adapter → 独立 _session_adapters 缓存。web adapter
@@ -11972,6 +12313,10 @@ class JiuWenSwarmDeepAdapter:
                     )
                     if reasoning_payload is None:
                         continue
+                    self._attach_skill_turbo_stream_source_id(
+                        reasoning_payload,
+                        chunk.payload if isinstance(chunk.payload, dict) else None,
+                    )
                     boundary = self._begin_visible_chat_content(stream_is_user_originated)
                     if boundary is not None:
                         yield AgentResponseChunk(
@@ -12000,13 +12345,18 @@ class JiuWenSwarmDeepAdapter:
                         continue
                     has_streamed_content = True
                     if accumulated_reasoning:
+                        _reasoning_flush = {
+                            "event_type": "chat.reasoning",
+                            "content": accumulated_reasoning,
+                        }
+                        self._attach_skill_turbo_stream_source_id(
+                            _reasoning_flush,
+                            chunk.payload if isinstance(chunk.payload, dict) else None,
+                        )
                         yield AgentResponseChunk(
                             request_id=rid,
                             channel_id=cid,
-                            payload=note_chat_payload({
-                                "event_type": "chat.reasoning",
-                                "content": accumulated_reasoning,
-                            }),
+                            payload=note_chat_payload(_reasoning_flush),
                             is_complete=False,
                         )
                         accumulated_reasoning = ""
@@ -12019,6 +12369,11 @@ class JiuWenSwarmDeepAdapter:
                             is_complete=False,
                         )
                         emitted_terminal_chat_final = False
+                    # Preserve writer stream_source_id; else inject ContextVar (case_24).
+                    self._attach_skill_turbo_stream_source_id(
+                        delta_payload,
+                        chunk.payload if isinstance(chunk.payload, dict) else None,
+                    )
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,
@@ -12028,22 +12383,36 @@ class JiuWenSwarmDeepAdapter:
                     continue
 
                 if chunk_type == "answer":
+                    _answer_chunk_payload = (
+                        chunk.payload if isinstance(chunk.payload, dict) else None
+                    )
                     if accumulated_text:
+                        _flush_delta = {
+                            "event_type": "chat.delta",
+                            "content": accumulated_text,
+                        }
+                        self._attach_skill_turbo_stream_source_id(
+                            _flush_delta, _answer_chunk_payload
+                        )
                         yield AgentResponseChunk(
                             request_id=rid,
                             channel_id=cid,
-                            payload=note_chat_payload({"event_type": "chat.delta", "content": accumulated_text}),
+                            payload=note_chat_payload(_flush_delta),
                             is_complete=False,
                         )
                         accumulated_text = ""
                     if accumulated_reasoning:
+                        _flush_reasoning = {
+                            "event_type": "chat.reasoning",
+                            "content": accumulated_reasoning,
+                        }
+                        self._attach_skill_turbo_stream_source_id(
+                            _flush_reasoning, _answer_chunk_payload
+                        )
                         yield AgentResponseChunk(
                             request_id=rid,
                             channel_id=cid,
-                            payload=note_chat_payload({
-                                "event_type": "chat.reasoning",
-                                "content": accumulated_reasoning,
-                            }),
+                            payload=note_chat_payload(_flush_reasoning),
                             is_complete=False,
                         )
                         accumulated_reasoning = ""
@@ -12053,6 +12422,9 @@ class JiuWenSwarmDeepAdapter:
                         if parsed is not None:
                             if should_skip_duplicate_ask_user(parsed):
                                 continue
+                            self._attach_skill_turbo_stream_source_id(
+                                parsed, _answer_chunk_payload
+                            )
                             if parsed.get("event_type") == "chat.final":
                                 self._stream_content_run_kind = None
                             yield AgentResponseChunk(
@@ -12067,6 +12439,9 @@ class JiuWenSwarmDeepAdapter:
                     if parsed is not None:
                         if should_skip_duplicate_ask_user(parsed):
                             continue
+                        self._attach_skill_turbo_stream_source_id(
+                            parsed, _answer_chunk_payload
+                        )
                         if parsed.get("event_type") == "chat.final":
                             self._stream_content_run_kind = None
                         yield AgentResponseChunk(
@@ -12078,18 +12453,28 @@ class JiuWenSwarmDeepAdapter:
                     continue
 
                 if accumulated_text:
+                    _acc_delta = {
+                        "event_type": "chat.delta",
+                        "content": accumulated_text,
+                    }
+                    self._attach_skill_turbo_stream_source_id(_acc_delta, None)
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,
-                        payload=note_chat_payload({"event_type": "chat.delta", "content": accumulated_text}),
+                        payload=note_chat_payload(_acc_delta),
                         is_complete=False,
                     )
                     accumulated_text = ""
                 if accumulated_reasoning:
+                    _acc_reasoning = {
+                        "event_type": "chat.reasoning",
+                        "content": accumulated_reasoning,
+                    }
+                    self._attach_skill_turbo_stream_source_id(_acc_reasoning, None)
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,
-                        payload=note_chat_payload({"event_type": "chat.reasoning", "content": accumulated_reasoning}),
+                        payload=note_chat_payload(_acc_reasoning),
                         is_complete=False,
                     )
                     accumulated_reasoning = ""
@@ -12098,6 +12483,14 @@ class JiuWenSwarmDeepAdapter:
                 if parsed is not None:
                     if should_skip_duplicate_ask_user(parsed):
                         continue
+                    _parsed_chunk_payload = (
+                        chunk.payload
+                        if hasattr(chunk, "payload") and isinstance(chunk.payload, dict)
+                        else (chunk if isinstance(chunk, dict) else None)
+                    )
+                    self._attach_skill_turbo_stream_source_id(
+                        parsed, _parsed_chunk_payload
+                    )
                     if parsed.get("event_type") == "chat.final":
                         self._stream_content_run_kind = None
                     yield AgentResponseChunk(
@@ -12122,6 +12515,8 @@ class JiuWenSwarmDeepAdapter:
                         "content": accumulated_text,
                     }
                     self._stream_content_run_kind = None
+                # Skill-turbo only: inject ContextVar source when present (no-op otherwise).
+                self._attach_skill_turbo_stream_source_id(flush_payload, None)
                 yield AgentResponseChunk(
                     request_id=rid,
                     channel_id=cid,
@@ -12129,10 +12524,15 @@ class JiuWenSwarmDeepAdapter:
                     is_complete=False,
                 )
             if accumulated_reasoning:
+                _end_reasoning = {
+                    "event_type": "chat.reasoning",
+                    "content": accumulated_reasoning,
+                }
+                self._attach_skill_turbo_stream_source_id(_end_reasoning, None)
                 yield AgentResponseChunk(
                     request_id=rid,
                     channel_id=cid,
-                    payload=note_chat_payload({"event_type": "chat.reasoning", "content": accumulated_reasoning}),
+                    payload=note_chat_payload(_end_reasoning),
                     is_complete=False,
                 )
 
@@ -12338,10 +12738,60 @@ class JiuWenSwarmDeepAdapter:
         event_type: str,
         content: Any,
     ) -> dict[str, Any] | None:
-        """Build a text event without discarding formatting-only chunks."""
+        """Build a text event without discarding formatting-only chunks.
+
+        When TaskExecutionRail has an in-progress todo, attach ``task_id`` so
+        chat.reasoning (and any consumer that reads it) can bind to the active
+        stage — same batch-era pattern as get_current_task_id() on deltas.
+        """
         if content is None or content == "":
             return None
-        return {"event_type": event_type, "content": content}
+        payload: dict[str, Any] = {"event_type": event_type, "content": content}
+        try:
+            from jiuwenswarm.agents.harness.common.rails.task_execution_rail import (
+                get_current_task_id,
+            )
+
+            task_id = get_current_task_id()
+            if isinstance(task_id, str) and task_id.strip():
+                payload["task_id"] = task_id.strip()
+        except Exception:
+            pass
+        return payload
+
+    @staticmethod
+    def _attach_skill_turbo_stream_source_id(
+        event_payload: dict[str, Any],
+        chunk_payload: dict[str, Any] | None,
+    ) -> None:
+        """Optionally preserve writer ``stream_source_id`` (in-place).
+
+        Online serial execute no longer injects skill-turbo source ids (batch-style
+        task.start routing). Still preserves an explicit writer-provided id when
+        present (e.g. concurrent / nested subagent). ContextVar inject is a no-op
+        during execute because SkillTurboRail clears it.
+        """
+        if not isinstance(event_payload, dict) or "stream_source_id" in event_payload:
+            return
+        if isinstance(chunk_payload, dict):
+            src = chunk_payload.get("stream_source_id")
+            if isinstance(src, str) and src.strip():
+                event_payload["stream_source_id"] = src.strip()
+                return
+        turbo_source = None
+        try:
+            from jiuwenswarm.agents.harness.common.rails.skill_turbo_rail import (
+                get_skill_turbo_online_source_id,
+            )
+
+            turbo_source = get_skill_turbo_online_source_id()
+        except ImportError:
+            logger.debug(
+                "[JiuWenSwarmDeepAdapter] skill_turbo source_id helper unavailable",
+                extra={"error_stack": True},
+            )
+        if isinstance(turbo_source, str) and turbo_source.strip():
+            event_payload["stream_source_id"] = turbo_source.strip()
 
     @staticmethod
     def _run_failure(chunk) -> tuple[str, str] | None:
@@ -12442,9 +12892,15 @@ class JiuWenSwarmDeepAdapter:
                     content = (
                         payload.get("content", "") if isinstance(payload, dict) else str(payload)
                     )
-                    return JiuWenSwarmDeepAdapter._stream_text_payload(
+                    parsed = JiuWenSwarmDeepAdapter._stream_text_payload(
                         "chat.delta", content
                     )
+                    if isinstance(parsed, dict):
+                        JiuWenSwarmDeepAdapter._attach_skill_turbo_stream_source_id(
+                            parsed,
+                            payload if isinstance(payload, dict) else None,
+                        )
+                    return parsed
 
                 if chunk_type == "llm_reasoning":
                     content = (
@@ -12452,17 +12908,29 @@ class JiuWenSwarmDeepAdapter:
                         if isinstance(payload, dict)
                         else str(payload)
                     )
-                    return JiuWenSwarmDeepAdapter._stream_text_payload(
+                    parsed = JiuWenSwarmDeepAdapter._stream_text_payload(
                         "chat.reasoning", content
                     )
+                    if isinstance(parsed, dict):
+                        JiuWenSwarmDeepAdapter._attach_skill_turbo_stream_source_id(
+                            parsed,
+                            payload if isinstance(payload, dict) else None,
+                        )
+                    return parsed
 
                 if chunk_type == "content_chunk":
                     content = (
                         payload.get("content", "") if isinstance(payload, dict) else str(payload)
                     )
-                    return JiuWenSwarmDeepAdapter._stream_text_payload(
+                    parsed = JiuWenSwarmDeepAdapter._stream_text_payload(
                         "chat.delta", content
                     )
+                    if isinstance(parsed, dict):
+                        JiuWenSwarmDeepAdapter._attach_skill_turbo_stream_source_id(
+                            parsed,
+                            payload if isinstance(payload, dict) else None,
+                        )
+                    return parsed
 
                 if chunk_type == "answer":
                     if isinstance(payload, dict):
@@ -12495,10 +12963,16 @@ class JiuWenSwarmDeepAdapter:
                         return None
 
                     if _has_streamed_content and not is_chunked:
-                        return {"event_type": "chat.final", "content": content}
-                    if is_chunked:
-                        return {"event_type": "chat.delta", "content": content}
-                    return {"event_type": "chat.final", "content": content}
+                        parsed = {"event_type": "chat.final", "content": content}
+                    elif is_chunked:
+                        parsed = {"event_type": "chat.delta", "content": content}
+                    else:
+                        parsed = {"event_type": "chat.final", "content": content}
+                    JiuWenSwarmDeepAdapter._attach_skill_turbo_stream_source_id(
+                        parsed,
+                        payload if isinstance(payload, dict) else None,
+                    )
+                    return parsed
 
                 if chunk_type == "tool_call":
                     tool_info = (
