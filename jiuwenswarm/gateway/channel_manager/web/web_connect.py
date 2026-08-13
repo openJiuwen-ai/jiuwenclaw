@@ -148,6 +148,8 @@ class WebChannel(BaseWsChannel):
         # Git diff 监控注册表(设计文档阶段10):由 app_gateway 在启动期注入,
         # handler 通过 ``getattr(channel, "git_watcher_registry", None)`` 防御性读取。
         self.git_watcher_registry: Any = None
+        # AgentOSRouterClient for same-port HTTP container file APIs (set by handlers).
+        self.container_file_client: Any = None
 
     @staticmethod
     def _coalescible_stream_frame(
@@ -360,13 +362,17 @@ class WebChannel(BaseWsChannel):
         return connection_user_id
 
     @staticmethod
-    def _connection_user_id(ws: Any) -> str | None:
+    def connection_user_id(ws: Any) -> str | None:
         """返回 Web 连接建立时缓存的 user_id（query 或 X-User-Id Header）。"""
         uid = getattr(ws, _WEB_CONNECTION_USER_ID_ATTR, None)
         if uid is None:
             return None
         text = str(uid).strip()
         return text or None
+
+    @staticmethod
+    def _connection_user_id(ws: Any) -> str | None:
+        return WebChannel.connection_user_id(ws)
 
     def _extract_ws_user_id(self, ws: Any) -> str:
         """WebChannel: 从 ws 提取连接级 user_id。"""

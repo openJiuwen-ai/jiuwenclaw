@@ -383,11 +383,23 @@ class AgentManager:
         agent_type: str,
         *,
         key_values: Mapping[str, Any] | None = None,
+        acquire: bool = False,
     ) -> AgentRuntime | None:
+        """Return a snapshot of an existing runtime, or ``None``.
+
+        With ``acquire=True`` and a READY runtime, increment ``task_count``
+        under the lock (same contract as :meth:`get_or_create_agent`) so the
+        idle reaper cannot reclaim the sandbox between resolve and use.
+        Callers must pair it with :meth:`release`.
+        """
         key = self._make_key(user_id, agent_type, key_values=key_values)
         async with self._runtimes_lock:
             runtime = self._runtimes.get(key)
-            return runtime.snapshot() if runtime is not None else None
+            if runtime is None:
+                return None
+            if acquire and runtime.is_ready():
+                self._acquire_locked(runtime)
+            return runtime.snapshot()
 
     async def delete_agent(
         self,
@@ -403,7 +415,7 @@ class AgentManager:
             runtime.mark_deleted()
 
     async def release(self, key: AgentKey) -> None:
-        """Drop one task holding acquired via ``get_or_create_agent(acquire=True)``.
+        """Drop one task holding acquired via ``get_or_create_agent`` / ``get_agent``.
 
         No-op when the runtime is already gone (e.g. explicitly deleted).
         """
