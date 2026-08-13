@@ -637,7 +637,7 @@ updater:
   repo_owner: openJiuwen
   repo_name: jiuwenswarm
   release_api_url: ""
-  # Windows / macOS installers are selected by their unique .exe / .dmg suffix.
+  # Windows/macOS use .exe/.dmg; multiple candidates prefer a unique WorkSwarm name.
   asset_name_pattern_linux: "JiuwenSwarm-{version}.tar.gz"
   timeout_seconds: 20
 

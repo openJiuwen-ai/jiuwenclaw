@@ -389,7 +389,47 @@ def test_desktop_check_uses_timestamp_and_product_agnostic_installer(
     assert status["download_url"] == f"https://example.test/{asset_name}"
 
 
-def test_desktop_check_rejects_ambiguous_same_platform_installers(monkeypatch):
+@pytest.mark.parametrize(
+    ("platform", "legacy_name", "preferred_name"),
+    [
+        ("win32", "JiuwenSwarm-legacy.exe", "WorkSwarm-current.exe"),
+        ("darwin", "JiuwenSwarm-legacy.dmg", "WORKSWARM-current.dmg"),
+    ],
+)
+def test_desktop_check_prefers_workswarm_installer_for_multiple_candidates(
+    monkeypatch,
+    platform,
+    legacy_name,
+    preferred_name,
+):
+    from jiuwenswarm.common.version_source import ReleaseAsset, ReleaseInfo
+
+    monkeypatch.setattr(sys, "platform", platform)
+    release = ReleaseInfo(
+        version="0.2.5.beta1",
+        assets=[
+            ReleaseAsset(
+                name=legacy_name,
+                download_url="https://example.test/legacy",
+            ),
+            ReleaseAsset(
+                name=preferred_name,
+                download_url="https://example.test/workswarm",
+            ),
+        ],
+    )
+
+    service = updater.UpdaterService()
+    service._resolve_desktop_asset({}, release)
+
+    status = service.get_status()
+    assert status["matched_asset"] == preferred_name
+    assert status["download_url"] == "https://example.test/workswarm"
+
+
+def test_desktop_check_rejects_ambiguous_same_platform_installers_without_workswarm(
+    monkeypatch,
+):
     from jiuwenswarm.common.version_source import ReleaseAsset, ReleaseInfo
 
     monkeypatch.setattr(sys, "platform", "darwin")
@@ -408,6 +448,28 @@ def test_desktop_check_rejects_ambiguous_same_platform_installers(monkeypatch):
     )
 
     with pytest.raises(RuntimeError, match="Multiple macos desktop installers"):
+        updater.UpdaterService()._resolve_desktop_asset({}, release)
+
+
+def test_desktop_check_rejects_multiple_workswarm_installers(monkeypatch):
+    from jiuwenswarm.common.version_source import ReleaseAsset, ReleaseInfo
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    release = ReleaseInfo(
+        version="0.2.5.beta1",
+        assets=[
+            ReleaseAsset(
+                name="WorkSwarm-user.exe",
+                download_url="https://example.test/user",
+            ),
+            ReleaseAsset(
+                name="WorkSwarm-machine.exe",
+                download_url="https://example.test/machine",
+            ),
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="Multiple windows desktop installers"):
         updater.UpdaterService()._resolve_desktop_asset({}, release)
 
 

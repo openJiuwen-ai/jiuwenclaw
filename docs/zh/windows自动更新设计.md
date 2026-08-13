@@ -9,8 +9,8 @@
 - 用户可在左侧栏 `更新` 页面手动检查更新
 - 桌面版更新源默认使用 GitCode Releases，可切换为 GitHub Releases；pip 安装模式使用 PyPI
 - 下载产物按平台区分：
-  - Windows：Release 中唯一的 `.exe` 安装包，文件名不限制产品名前缀
-  - macOS：Release 中唯一的 `.dmg` 镜像，文件名不限制产品名前缀
+  - Windows：Release 中的 `.exe` 安装包；存在多个候选时，优先选择文件名中唯一包含 `workswarm` 的包
+  - macOS：Release 中的 `.dmg` 镜像；存在多个候选时，优先选择文件名中唯一包含 `workswarm` 的包
   - Linux：仍按 `JiuwenSwarm-<version>.tar.gz` 精确匹配
 - 下载完成后由外部 helper 完成安装与重启：Windows 以交互式安装向导完成，macOS / Linux 由 helper 脚本静默安装并重启
 - 支持预发布版本：稳定版与预发布版共用同一更新通道，稳定版用户也会收到 beta 推送
@@ -28,7 +28,7 @@
 
 Windows 与 macOS 桌面端从分页的 Releases 列表中找到当前安装版本对应的发布记录，将其发布时间与列表中最新的发布时间比较。若列表未包含当前版本，则按 tag 补查当前 Release；时间戳统一转换为 UTC，只有远端时间更新时才提示更新。Linux 保持原有版本比较逻辑。
 
-版本号仅用于定位当前 Release 和界面展示，不参与桌面版本的新旧排序，也不参与 Windows / macOS 安装包匹配。每个 Release 应分别只包含一个 `.exe` 和一个 `.dmg`；其他附件可使用任意名称。`pip` 安装模式仍保持原有版本比较逻辑。
+版本号仅用于定位当前 Release 和界面展示，不参与桌面版本的新旧排序，也不参与 Windows / macOS 安装包匹配。每个 Release 应分别只包含一个 `.exe` 和一个 `.dmg`；作为临时过渡兼容规则，同平台存在多个安装包时，自动更新会选择文件名中唯一包含 `workswarm`（不区分大小写）的包。其他附件可使用任意名称。`pip` 安装模式仍保持原有版本比较逻辑。
 
 ## 核心流程
 
@@ -56,7 +56,7 @@ https://api.gitcode.com/api/v5/repos/{owner}/{repo}/releases
 - `tag_name` 作为版本号（保留预发布后缀，如 `0.2.3.beta1`）
 - `body` 作为更新说明
 - `published_at` 作为发布时间
-- `assets[]` 中按平台扩展名匹配的唯一安装包（Windows `.exe`、macOS `.dmg`）
+- `assets[]` 中按平台扩展名匹配的安装包（Windows `.exe`、macOS `.dmg`）；存在多个候选时优先选择文件名中唯一包含 `workswarm` 的包
 
 ## 配置
 

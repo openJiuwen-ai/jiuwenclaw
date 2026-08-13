@@ -9,8 +9,8 @@ This document describes the auto-update solution for JiuwenSwarm desktop (Window
 - Manual update check via the sidebar "Update" page
 - Desktop update source defaults to GitCode Releases, switchable to GitHub Releases; pip install mode uses PyPI
 - Download artifacts differ per platform:
-  - Windows: the only `.exe` installer in the Release; no product-name prefix is required
-  - macOS: the only `.dmg` image in the Release; no product-name prefix is required
+  - Windows: the `.exe` installer in the Release; when multiple candidates exist, the unique filename containing `workswarm` is preferred
+  - macOS: the `.dmg` image in the Release; when multiple candidates exist, the unique filename containing `workswarm` is preferred
   - Linux: still matched exactly as `JiuwenSwarm-<version>.tar.gz`
 - After download, an external helper completes installation and restart: Windows via an interactive install wizard, macOS / Linux via a silent helper script that installs and restarts
 - Pre-release support: stable and pre-release releases share the same update channel, so stable users also receive beta pushes
@@ -28,7 +28,7 @@ Windows and macOS installers for the same version are released together.
 
 The Windows and macOS desktop updater finds the Release that corresponds to the installed version in the paginated Releases list, then compares its publication timestamp with the newest publication timestamp. If the list does not contain the installed version, its Release is fetched by tag. Timestamps are normalized to UTC, and an update is offered only when the remote timestamp is newer. Linux keeps the existing version comparison behavior.
 
-The version string is used only to locate the installed Release and display status. It does not determine desktop release ordering or Windows/macOS installer matching. Each Release should contain exactly one `.exe` and one `.dmg`; other attachments may use arbitrary names. The `pip` install mode keeps its existing version comparison behavior.
+The version string is used only to locate the installed Release and display status. It does not determine desktop release ordering or Windows/macOS installer matching. Each Release should contain exactly one `.exe` and one `.dmg`; as a temporary transition rule, if multiple same-platform installers exist, the updater selects the unique filename containing `workswarm` (case-insensitive). Other attachments may use arbitrary names. The `pip` install mode keeps its existing version comparison behavior.
 
 ## Core Flow
 
@@ -56,7 +56,7 @@ Fields read from the release:
 - `tag_name` — version number (pre-release suffix preserved, e.g. `0.2.3.beta1`)
 - `body` — release notes
 - `published_at` — publish date
-- `assets[]` — the unique installer matched by platform suffix (`.exe` on Windows, `.dmg` on macOS)
+- `assets[]` — installers matched by platform suffix (`.exe` on Windows, `.dmg` on macOS), with a unique `workswarm` filename preferred when multiple candidates exist
 
 ## Configuration
 
