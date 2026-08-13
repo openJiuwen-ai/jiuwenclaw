@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
 import json
 import logging
@@ -35,6 +35,10 @@ CONFIG_YAML_PATH = get_config_file()
 SWARMFLOW_ENABLED_CONFIG_PATH = ("modes", "team", "jiuwen_team", "enable_swarmflow")
 SWARMFLOW_BUDGET_CONFIG_PATH = ("modes", "team", "jiuwen_team", "swarmflow_budget")
 DEFAULT_SWARMFLOW_ENABLED = False
+EXTERNAL_CLI_PUBLISH_URL_FRONT_KEY = "external_cli_publish_url"
+EXTERNAL_CLI_AGENTS_CONFIG_PATH = ("modes", "team", "jiuwen_team", "external_cli_agents")
+EXTERNAL_TRANSPORT_CONFIG_PATH = ("modes", "team", "jiuwen_team", "external_transport")
+_ALLOWED_EXTERNAL_CLI_AGENTS = {"claude", "codex"}
 # Check if user workspace exists and use it if configured via env
 _user_config = os.getenv("JIUWENSWARM_CONFIG_DIR")
 if _user_config:
@@ -1413,10 +1417,15 @@ def _build_modes_team_mapping(front_payload: dict[str, Any]) -> dict[str, Any]:
 
         transformed_team: dict[str, Any] = {}
         for key, value in team_raw.items():
-            if key in {"leader", "teammate", "predefined_members"}:
+            if key in {"leader", "teammate", "predefined_members", EXTERNAL_CLI_PUBLISH_URL_FRONT_KEY}:
                 continue
             transformed_team[key] = value
         transformed_team["team_name"] = team_name
+        _normalize_external_cli_team_config(
+            transformed_team,
+            publish_url=team_raw.get(EXTERNAL_CLI_PUBLISH_URL_FRONT_KEY),
+            field_name=f"team[{team_index}].external_cli_agents",
+        )
 
         leader_raw = _require_dict(team_raw.get("leader"), f"team[{team_index}].leader")
         transformed_team["leader"] = {
@@ -1491,6 +1500,79 @@ def _build_modes_team_mapping(front_payload: dict[str, Any]) -> dict[str, Any]:
         team_mapping[team_name] = transformed_team
 
     return team_mapping
+
+
+def _normalize_external_cli_team_config(
+    transformed_team: dict[str, Any],
+    *,
+    publish_url: Any,
+    field_name: str,
+) -> None:
+    external_cli_agents = transformed_team.get("external_cli_agents")
+    normalized_cli_agents = _normalize_external_cli_agents(external_cli_agents, field_name)
+    if normalized_cli_agents:
+        transformed_team["external_cli_agents"] = normalized_cli_agents
+    else:
+        transformed_team.pop("external_cli_agents", None)
+
+    has_codex = any(item["cli_agent"] == "codex" for item in normalized_cli_agents)
+    if not has_codex:
+        transformed_team.pop("external_transport", None)
+        return
+
+    if isinstance(transformed_team.get("external_transport"), dict):
+        external_transport = transformed_team["external_transport"]
+    else:
+        external_transport = {}
+
+    transport_type = str(external_transport.get("type") or "").strip()
+    params = external_transport.get("params")
+    params = dict(params) if isinstance(params, dict) else {}
+    if transport_type and transport_type != "hybrid":
+        raise ValueError(f"{field_name} includes codex but external_transport.type must be hybrid")
+
+    if not params.get("external_publish_url"):
+        url = str(publish_url or "").strip()
+        if not url:
+            raise ValueError(f"{field_name} includes codex but external_cli_publish_url is empty")
+        params["external_publish_url"] = url
+
+    transformed_team["external_transport"] = {"type": "hybrid", "params": params}
+
+
+def _normalize_external_cli_agents(value: Any, field_name: str) -> list[dict[str, str]]:
+    if value is None or value == "":
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{field_name} must be an array")
+
+    normalized: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for index, item in enumerate(value):
+        if isinstance(item, str):
+            cli_agent = item.strip()
+        elif isinstance(item, dict):
+            cli_agent = str(item.get("cli_agent") or "").strip()
+        else:
+            raise ValueError(f"{field_name}[{index}] must be an object or string")
+        if not cli_agent:
+            continue
+        if cli_agent not in _ALLOWED_EXTERNAL_CLI_AGENTS:
+            allowed = ", ".join(sorted(_ALLOWED_EXTERNAL_CLI_AGENTS))
+            raise ValueError(f"{field_name}[{index}].cli_agent must be one of: {allowed}")
+        if cli_agent in seen:
+            continue
+        seen.add(cli_agent)
+        normalized_item = {"cli_agent": cli_agent}
+        if isinstance(item, dict):
+            cli_path = str(item.get("cli_path") or "").strip()
+            legacy_codex_bin = str(item.get("codex_bin") or "").strip()
+            if cli_path:
+                normalized_item["cli_path"] = cli_path
+            elif cli_agent == "codex" and legacy_codex_bin:
+                normalized_item["cli_path"] = legacy_codex_bin
+        normalized.append(normalized_item)
+    return normalized
 
 
 def _build_front_agent_registry(front_payload: dict[str, Any]) -> dict[str, Any]:
@@ -1573,6 +1655,44 @@ def update_swarmflow_enabled_in_config(enabled: bool) -> None:
         path_so_far.append(segment)
         current = _ensure_config_object(current, segment, ".".join(path_so_far))
     current[SWARMFLOW_ENABLED_CONFIG_PATH[-1]] = bool(enabled)
+    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+
+
+def update_external_cli_agents_in_config(agents: list[str | dict[str, Any]], publish_url: str | None = None) -> None:
+    """Update the external CLI agent switches for the default team."""
+    data = load_yaml_round_trip(CONFIG_YAML_PATH)
+    current = data
+    path_so_far: list[str] = []
+    for segment in EXTERNAL_CLI_AGENTS_CONFIG_PATH[:-1]:
+        path_so_far.append(segment)
+        current = _ensure_config_object(current, segment, ".".join(path_so_far))
+
+    normalized_agents = _normalize_external_cli_agents(agents, "external_cli_agents")
+    if normalized_agents:
+        current[EXTERNAL_CLI_AGENTS_CONFIG_PATH[-1]] = normalized_agents
+    else:
+        current.pop(EXTERNAL_CLI_AGENTS_CONFIG_PATH[-1], None)
+
+    if any(item["cli_agent"] == "codex" for item in normalized_agents):
+        external_transport = current.get(EXTERNAL_TRANSPORT_CONFIG_PATH[-1])
+        if isinstance(external_transport, dict):
+            transport_type = str(external_transport.get("type") or "").strip()
+            params = external_transport.get("params")
+            params = dict(params) if isinstance(params, dict) else {}
+        else:
+            transport_type = ""
+            params = {}
+        if transport_type and transport_type != "hybrid":
+            raise ValueError("external_cli_agents includes codex but external_transport.type must be hybrid")
+        if not params.get("external_publish_url"):
+            url = str(publish_url or "").strip()
+            if not url:
+                raise ValueError("external_cli_agents includes codex but external_cli_publish_url is empty")
+            params["external_publish_url"] = url
+        current[EXTERNAL_TRANSPORT_CONFIG_PATH[-1]] = {"type": "hybrid", "params": params}
+    else:
+        current.pop(EXTERNAL_TRANSPORT_CONFIG_PATH[-1], None)
+
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
 
 
