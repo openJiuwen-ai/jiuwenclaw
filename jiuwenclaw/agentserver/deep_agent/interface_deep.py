@@ -4670,6 +4670,13 @@ class JiuWenClawDeepAdapter:
         if self._instance is None:
             raise RuntimeError("JiuWenClawDeepAdapter 未初始化，请先调用 create_instance()")
 
+        # When env_overrides is None/empty (e.g., _reload_after_agents_sync or
+        # BEFORE_SYSTEM_PROMPT_BUILD), fall back to the last sync env so that
+        # patch_model_config_from_env applies the correct model_name / api_key
+        # instead of leaving config's ${MODEL_NAME} placeholder unresolved.
+        if not isinstance(env_overrides, dict) or not env_overrides:
+            env_overrides = self._last_sync_env if isinstance(self._last_sync_env, dict) else env_overrides
+
         if _invalidate_memory_cache is None:
             invalidate_memory_cache = self._env_touches_memory(env_overrides)
         else:
