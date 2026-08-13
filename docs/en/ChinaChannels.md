@@ -80,8 +80,8 @@ channels:
         api_id: "<trigger apiId>"
         push_id: "<trigger push_id (required when push notifications are enabled)>"
         agent_id: "<your agent id>"
-        ws_url1: "wss://hag.cloud.huawei.com/openclaw/v1/ws/link"
-        ws_url2: "wss://116.63.174.231/openclaw/v1/ws/link"
+        ws_url1: "<wss://ws-endpoint-1>"
+        ws_url2: "<wss://ws-endpoint-2>"
         enable_streaming: true
         enabled: true
 ``````
