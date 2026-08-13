@@ -2002,6 +2002,7 @@ class SkillManager:
                         "version": "",
                         "updated_at": 0,
                         "plugin_type": "",
+                        "tags": [],
                     }
                 )
 
@@ -3699,6 +3700,7 @@ class SkillManager:
                     "version": str(row.get("latest_version", "")).strip(),
                     "updated_at": int(row.get("update_time") or 0),
                     "plugin_type": plugin_type,
+                    "tags": self._coerce_str_list(row.get("tags")),
                 }
             except Exception as exc:
                 logger.warning("推荐结果补齐失败 asset_id=%s: %s", asset_id, exc)

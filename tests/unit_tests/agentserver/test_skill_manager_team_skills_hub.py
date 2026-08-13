@@ -154,6 +154,7 @@ async def test_handle_skills_swarm_skills_hub_recommend_maps_response(tmp_path, 
                     "latest_version": "1.2.3",
                     "update_time": 123,
                     "plugin_type": "skill",
+                    "tags": ["office", "productivity"],
                 }
             ]
         }
@@ -171,6 +172,7 @@ async def test_handle_skills_swarm_skills_hub_recommend_maps_response(tmp_path, 
     assert payload["skills"][0]["display_name"] == "Demo Skill"
     assert payload["skills"][0]["score"] == 0.9
     assert payload["skills"][0]["plugin_type"] == "skill"
+    assert payload["skills"][0]["tags"] == ["office", "productivity"]
 
 
 @pytest.mark.asyncio
