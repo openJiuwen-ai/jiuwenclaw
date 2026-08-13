@@ -38,6 +38,8 @@ Executed locally in the terminal UI, not through Gateway control pipeline.
 | `/agents` | Manage Agent configs (list, get, create, update, enable, disable, delete, see below) |
 | `/auto-harness` | Auto-Harness task management (`run`/`schedule`/`issue`, see below) |
 | `/btw` | Ask a quick side question without interrupting the main conversation (see below) |
+| `/swarmflow` | SwarmFlow toggle, status, and token budget (`on` / `off` / `--budget`, see [TUI SwarmFlow Guide](TUISwarmFlowGuide.md)) |
+| `/swarmflows` | Full-screen SwarmFlow run tree viewer (alias `/swarmworkflows`, same guide) |
 
 > Note: `/mode` controlled switching logic is primarily on Gateway side, see "`/mode` and `/switch`" below. The TUI local command additionally supports `/mode plan` and `/mode team.normal`; see the TUI guide for details.
 
@@ -68,6 +70,19 @@ Identified by Gateway and forwarded to AgentServer and other backend capabilitie
 ---
 
 ## Key Command Details
+
+### `/swarmflow` and `/swarmflows` (TUI local)
+
+SwarmFlow-specific commands. Full walkthrough: **[TUI SwarmFlow Guide](TUISwarmFlowGuide.md)**.
+
+| Command | Description |
+|---------|-------------|
+| `/swarmflow` | Query status, e.g. `swarmflow: on · mode: team · budget: unbounded` |
+| `/swarmflow on` | Set `enable_swarmflow=true`; switches to team if needed; optional `--budget <tokens\|none>` |
+| `/swarmflow off` | Set `enable_swarmflow=false`; does not leave team automatically |
+| `/swarmflows` | Open the full-screen run tree (workflow → phase → node); alias `/swarmworkflows` |
+
+Config changes are **not hot-applied** in the current session (`Use /new to apply.`). Use **`h`** on the main view for pending human replies (not this command).
 
 ### `/workspace` (TUI Trusted Directory Management)
 
@@ -707,7 +722,7 @@ Enter / leave jiuwenbox sandbox mode and tune its runtime policy. Calls `command
 - **Nested paths**: Supported: parent allow + child deny (e.g. allow `/tmp`, deny `/tmp/secret`). Not supported: child allow + parent deny (parent deny wins); the server rejects such configs.
 - **Effective write policy**: `files.allow_write` / `files.deny_write` in the status panel show the merged view of auto-managed and user-configured entries, each labeled `(rw)` or `(ro)`.
 - **preserve_file_sharing_mode**: Controlled by jiuwenswarm config, not by `/sandbox`. Only `mount` is supported: intrinsic files and `project_dir` are bind-mounted into the sandbox and `project_dir/config/config.yaml` is explicitly added to `deny_write`. Writing any other value into config.yaml is rejected by the server.
-- **excluded_commands**: Match the full command string (not just `argv[0]`); a match makes that tool call run on the host, effectively granting the command's side effects to the local environment.
+- **excluded_commands**: `fnmatch` per simple-command leaf (full leaf text or command name). All matches → whole command on host; none → whole command in sandbox; mixed leaves → local bash orchestrates and wraps remote leaves with `jiuwenbox sandbox exec` (CLI required).
 - **Add / remove are strict**: `exclude add` rejects a pattern that is already in the list; `exclude remove` rejects a pattern that is not in the list. `files allow|deny` rejects a path that is already in the same bucket, and rejects a path that exists in the opposite bucket (allow vs deny conflict) — run `files remove` first if you want to flip it. `files remove` rejects paths that have no matching user-configured entry.
 - **enable / disable**: Triggers an agent rebuild. The response lists `rebuilt_modes` (typically `agent.*` / `code.*`) and the jiuwenbox endpoint.
 

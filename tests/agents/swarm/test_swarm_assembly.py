@@ -111,6 +111,7 @@ _TEAM_SHARED_RAIL_NAMES: frozenset[str] = frozenset(
         registry.SYS_OPERATION,
         registry.STREAM_EVENT,
         registry.SECURITY,
+        registry.MODEL_ANOMALY_DETECTION,
         registry.HEARTBEAT,
         registry.AVATAR_PROMPT,
         registry.MULTIMODAL_IMAGE,
@@ -460,7 +461,7 @@ def test_build_member_capability_specs_rail_names(
 
     assert _TEAM_SHARED_RAIL_NAMES <= rail_names
     assert extra_rails <= rail_names
-    assert len(_TEAM_SHARED_RAIL_NAMES) == 16
+    assert len(_TEAM_SHARED_RAIL_NAMES) == 17
     assert rail_names == expected
     # No DeepAgent is involved; every entry is a plain declarative RailSpec.
     assert all(isinstance(spec, RailSpec) for spec in rails_specs)
@@ -1038,6 +1039,42 @@ def test_context_processor_returns_none_when_engine_disabled() -> None:
     )
 
 
+def test_model_anomaly_detection_provider_wires_tool_loop_compact() -> None:
+    """Swarm provider mounts configured ModelAnomalyDetectionRail with compact on."""
+    from openjiuwen.harness.rails import ModelAnomalyDetectionRail
+
+    ctx = SwarmBuildContext()
+    rail = member_rails._build_model_anomaly_detection(
+        {
+            "rail_config": {
+                "enabled": True,
+                "tool_loop_compact": {"enabled": True, "consecutive_threshold": 4},
+            }
+        },
+        ctx,
+    )
+    assert isinstance(rail, ModelAnomalyDetectionRail)
+    assert rail._tool_loop_compact.enabled is True  # pylint: disable=protected-access
+
+
+def test_model_anomaly_detection_params_from_execution_guard() -> None:
+    """config_specs forwards execution_guard.model_anomaly_detection_rail section."""
+    from jiuwenswarm.agents.swarm.config_specs import _model_anomaly_detection_params
+
+    params = _model_anomaly_detection_params(
+        {
+            "execution_guard": {
+                "model_anomaly_detection_rail": {
+                    "enabled": True,
+                    "tool_loop_compact": {"enabled": True},
+                }
+            }
+        }
+    )
+    assert params["rail_config"]["enabled"] is True
+    assert params["rail_config"]["tool_loop_compact"]["enabled"] is True
+
+
 def test_team_workspace_report_path_returns_none_without_root() -> None:
     """The report-path rail is skipped when no team workspace root is set."""
     ctx = SwarmBuildContext(team_ws_root=None)
@@ -1515,6 +1552,7 @@ _EXPECTED_CODE_RAIL_NAMES_LEADER: frozenset[str] = frozenset(
         registry.RESPONSE_PROMPT,
         registry.STREAM_EVENT,
         registry.SECURITY,
+        registry.MODEL_ANOMALY_DETECTION,
         registry.CODE_LSP,
         registry.CODE_PROJECT_MEMORY,
         registry.SYS_OPERATION,

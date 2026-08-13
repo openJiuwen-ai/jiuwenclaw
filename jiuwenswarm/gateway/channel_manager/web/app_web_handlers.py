@@ -1636,6 +1636,17 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
     channel.on_connect(_on_connect)
 
+    async def _on_disconnect(ws, _session_ids):
+        mh = _resolve(message_handler)
+        cleanup = getattr(mh, "unregister_ws_subscriptions", None)
+        ws_id = str(getattr(ws, "_jiuwen_ws_id", "") or "").strip()
+        if callable(cleanup) and ws_id:
+            await cleanup(channel.channel_id, ws_id)
+
+    register_disconnect = getattr(channel, "on_disconnect", None)
+    if callable(register_disconnect):
+        register_disconnect(_on_disconnect)
+
     async def _config_get(ws, req_id, params, session_id):
         # 返回 _CONFIG_SET_ENV_MAP 里所有键对应的环境变量当前值
         payload = {

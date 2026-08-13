@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import re
+import stat
 import urllib.parse
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
@@ -43,7 +44,11 @@ from jiuwenswarm.extensions.agentos.agentos_router.registry_client import (
     RegistryClient,
     instance_service_id,
 )
-from jiuwenswarm.extensions.agentos.agentos_router.ssh_relay import YuanrongSshRelay
+from jiuwenswarm.extensions.agentos.agentos_router.ssh_relay import (
+    DEFAULT_CLIENT_KEYS_DIR,
+    YuanrongSshRelay,
+    resolve_client_keys_dir,
+)
 from jiuwenswarm.extensions.yuanrong_frontend_client import (
     AgentRuntimeSpec,
     YuanrongFrontendAgentClient,
@@ -61,6 +66,8 @@ logger = logging.getLogger(__name__)
 
 _WORKSPACE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
+_TEAM_MODES = frozenset({"team", "code.team", "team.plan"})
+
 # create_sandbox 返回后 agentserver 仍在进程内启动；YuanRong WS 代理此时会回
 # HTTP 502。在 deadline 内重试，避免首条 chat 立刻空失败（TUI "Worked for 0s"）。
 _WS_CONNECT_READY_TIMEOUT_SECONDS = 60.0
@@ -73,6 +80,13 @@ _WS_CONNECT_RETRYABLE_TEXT_TOKENS = (
     "connection refused",
     "temporarily unavailable",
 )
+
+
+def _is_team_mode(params: Any) -> bool:
+    """Return True if params["mode"] is a team variant."""
+    if not isinstance(params, dict):
+        return False
+    return str(params.get("mode") or "").strip().lower() in _TEAM_MODES
 
 
 def _is_ws_connect_retryable(exc: BaseException) -> bool:
@@ -130,22 +144,32 @@ def resolve_agent_workspace(user_id: str, *, workspace_root: str | None = None) 
     Default: ``/home/agentos/users/<user_id>``. Optional ``workspace_root``
     overrides the parent directory (``{workspace_root}/<user_id>``).
 
-    Best-effort ``mkdir``: permission errors are ignored so callers (and unit
-    tests) can still pass the path to YuanRong create; the host/deploy side
-    remains responsible for a writable mount source.
+    The gateway does **not** create the directory. It only validates that the
+    directory already exists and is a directory. The directory's owner/group
+    and permission setup is validated by other management-plane components,
+    so no permission check is performed here. Any validation failure raises
+    :class:`ValueError`, which the caller turns into a failed request.
     """
     safe_user = _WORKSPACE_NAME_RE.sub("_", str(user_id or "").strip()) or "default"
     root = Path(workspace_root or DEFAULT_AGENT_WORKSPACE_ROOT).expanduser()
     workspace = (root / safe_user).resolve()
-    try:
-        workspace.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        logger.warning(
-            "[AgentOSRouter] workspace mkdir skipped: path=%s error=%s",
-            workspace,
-            exc,
-        )
+    _validate_agent_workspace(workspace)
     return str(workspace)
+
+
+def _validate_agent_workspace(workspace: Path) -> None:
+    """Raise :class:`ValueError` unless *workspace* exists and is a directory.
+
+    Owner/group and permission validation is delegated to other management-plane
+    components, so only existence and type are checked here.
+    """
+    if not workspace.exists():
+        raise ValueError(
+            f"agent workspace does not exist: {workspace} "
+            "(create it before creating a sandbox)"
+        )
+    if not stat.S_ISDIR(workspace.stat().st_mode):
+        raise ValueError(f"agent workspace is not a directory: {workspace}")
 
 
 class AgentOSRouterClient(AgentServerClient):
@@ -160,7 +184,7 @@ class AgentOSRouterClient(AgentServerClient):
         ssh_channel_endpoint: SshChannelEndpoint | None = None,
         key_issuer: SshKeyIssuer | None = None,
         ephemeral_key_ttl_sec: float = 300.0,
-        workspace_root: str = DEFAULT_AGENT_WORKSPACE_ROOT,
+        workspace_root: str | None = None,
         sandbox_idle_timeout_seconds: float = 600.0,
         sandbox_idle_check_interval_seconds: float = 30.0,
         auth_client: AgentOSAuthenticator | None = None,
@@ -545,6 +569,7 @@ class AgentOSRouterClient(AgentServerClient):
         # (TUI local_handler), not via E2A send_request.
         if self._is_ssh_relay_request(envelope):
             return await self._handle_ssh_relay(envelope)
+        await self._inject_external_cli_agents(envelope)
         try:
             runtime = await self._resolve_agent(envelope, acquire=True)
         except (ValueError, AgentCreatingTimeout, AgentCreateFailed) as exc:
@@ -563,6 +588,7 @@ class AgentOSRouterClient(AgentServerClient):
     async def send_request_stream(
         self, envelope: E2AEnvelope
     ) -> AsyncIterator[AgentResponseChunk]:
+        await self._inject_external_cli_agents(envelope)
         try:
             runtime = await self._resolve_agent(envelope, acquire=True)
         except (ValueError, AgentCreatingTimeout, AgentCreateFailed) as exc:
@@ -580,6 +606,72 @@ class AgentOSRouterClient(AgentServerClient):
                 yield chunk
         finally:
             await self._agent_manager.release(runtime.key)
+
+    # ---------- external_cli_agents injection for team chat send ----------
+
+    async def _inject_external_cli_agents(self, envelope: E2AEnvelope) -> None:
+        """Inject ``external_cli_agents`` into params for team chat send.
+
+        When the request is a team-mode chat send, fetches registered
+        3rd-party agents from the registry and constructs
+        ``external_cli_agents`` with SSH transport info for each, so the
+        builtin agent (inside the container) can SSH into each 3rd-party
+        agent through the gateway's northbound SSH channel.
+        """
+        if not _is_team_mode(envelope.params):
+            return
+        user_id = str(envelope.user_id or "").strip()
+        if not user_id:
+            return
+        ssh_fields = self._ssh_endpoint_fields()
+        if ssh_fields is None:
+            logger.warning(
+                "[AgentOSRouter] skip external_cli_agents: ssh endpoint unavailable"
+            )
+            return
+        try:
+            images = await self._registry.list_user_images(user_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[AgentOSRouter] list_user_images failed: %s", exc)
+            return
+        key_file = self._resolve_ssh_key_file(user_id)
+        agents: list[dict[str, Any]] = []
+        for image in images:
+            agent_type = str(
+                (image.metadata or {}).get("agent_type") or image.image_name or ""
+            ).strip()
+            if not agent_type or not is_third_party_agent_type(agent_type):
+                continue
+            agents.append(
+                {
+                    "cli_agent": agent_type,
+                    "ssh_transport": {
+                        "host": ssh_fields["ssh_ip"],
+                        "port": ssh_fields["ssh_port"],
+                        "username": user_id,
+                        "agent": False,
+                        "key_file": key_file,
+                        "disable_host_key_check": False,
+                        "use_exec": False
+                    },
+                }
+            )
+        if agents:
+            params = envelope.params if isinstance(envelope.params, dict) else {}
+            params["external_cli_agents"] = agents
+            logger.info(
+                "[AgentOSRouter] injected external_cli_agents: user=%s count=%d",
+                user_id,
+                len(agents),
+            )
+
+    def _resolve_ssh_key_file(self, user_id: str) -> str:
+        """Resolve the SSH key file path for external_cli_agents."""
+        keys_dir_template = DEFAULT_CLIENT_KEYS_DIR
+        if self._ssh_relay is not None:
+            keys_dir_template = self._ssh_relay.client_keys_dir
+        keys_dir = resolve_client_keys_dir(keys_dir_template, user_id)
+        return str(keys_dir / "id_ed25519")
 
     async def thirdagent_list(
         self,
@@ -717,6 +809,31 @@ class AgentOSRouterClient(AgentServerClient):
             }
         info = runtime.info
         status = info.status.value if hasattr(info.status, "value") else str(info.status)
+        instance_id = str(info.sandbox_id or "").strip()
+        ssh_relay = self._ssh_relay
+        if ssh_relay is not None:
+            if not instance_id:
+                return {
+                    "ok": False,
+                    "error": f"agent has no yuanrong instance_id: user={uid}",
+                    "code": "INTERNAL_ERROR",
+                }
+            try:
+                # create 返回不代表 sshd 已听端口；等南向 SSH 通了再让客户端连。
+                await ssh_relay.wait_until_ready(instance_id, user_id=uid)
+            except Exception as exc:
+                logger.warning(
+                    "[AgentOSRouter] 3rdagent.switch sshd not ready: "
+                    "user=%s instance=%s error=%s",
+                    uid,
+                    instance_id,
+                    exc,
+                )
+                return {
+                    "ok": False,
+                    "error": f"sandbox sshd not ready: {exc}",
+                    "code": "SSH_NOT_READY",
+                }
         # 记录用户当前 agent_type，后续 SSH 接入默认跟随
         self._current_agent_types[uid] = normalized
         payload = {
