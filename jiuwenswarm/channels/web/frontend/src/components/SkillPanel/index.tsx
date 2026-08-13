@@ -2853,13 +2853,12 @@ export function SkillPanel({
                   </div>
 
                   {detailTab === "content" && (
-                    <div data-testid="skill-panel-my-detail-content-preview" className="mt-4">
-                      <div data-testid="skill-panel-my-detail-content-title" className="text-sm font-medium text-text mb-2">
-                        {t('skills.contentPreview')}
-                      </div>
-                      <div data-testid="skill-panel-my-detail-content-text" className="text-sm text-text whitespace-pre-wrap bg-secondary border border-border rounded-md p-3">
-                        {selectedSkill.content || t('skills.noContent')}
-                      </div>
+                    <div data-testid="skill-panel-my-detail-content-preview" className="mt-4 flex-1 min-h-0 overflow-y-auto text-sm text-text bg-secondary border border-border rounded-md p-3">
+                      {selectedSkill.content ? (
+                        <MarkdownRenderer content={selectedSkill.content} className="chat-text chat-markdown" />
+                      ) : (
+                        <div data-testid="skill-panel-my-detail-content-text">{t('skills.noContent')}</div>
+                      )}
                     </div>
                   )}
 
