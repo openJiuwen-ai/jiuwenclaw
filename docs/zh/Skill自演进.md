@@ -88,13 +88,7 @@ react:
 └── ...
 ```
 
-**目录位置（集群 Team 模式）：**
-```
-<team_workspace>/skills/<skill_name>/
-├── SKILL.md           # Skill 源文档
-├── evolutions.json    # 演进经验记录
-└── ...
-```
+> **集群（Agent Team）模式下路径完全相同。** 技能实体只有一份，就在上面这个全局技能库里；团队工作区和成员工作空间下没有 `skills/` 目录，也没有副本。团队成员产生的演进记录，写的就是全局技能库中该 Skill 目录下的同一份 `evolutions.json`。团队成员能看见库里哪些技能，由可见性声明决定，参见 [Agent Team](AgentTeam.md) 的「Team Skills」小节。
 
 **常用操作：**
 - 添加新记录：在 `entries` 数组中追加新对象

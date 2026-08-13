@@ -78,6 +78,7 @@ test('selects adapters by language and explicit streaming policy', () => {
   const streamingSvg = getFencedCodeAdapter({ language: 'svg', code: '<svg>', complete: false });
   assert.equal(streamingSvg?.language, 'svg');
   assert.equal(streamingSvg?.renderWhileStreaming, true);
+  assert.equal(getFencedCodeAdapter({ language: 'xml', code: '<svg />', complete: true }), null);
   assert.equal(getFencedCodeAdapter({ language: 'html', code: '<main>', complete: true }), null);
 });
 

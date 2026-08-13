@@ -570,11 +570,6 @@ async def test_team_skill_evolve_approval_passes_selected_record_ids(monkeypatch
         "find_team_skill_rail",
         staticmethod(lambda request_id, channel_id=None: rail),
     )
-    monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.refresh_team_shared_skill_links_across_managers",
-        lambda session_id: None,
-    )
-
     handled = await adapter.handle_team_skill_evolve_approval(
         "team_skill_evolve_req1",
         [

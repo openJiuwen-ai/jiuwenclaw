@@ -807,8 +807,12 @@ function patchEditorInlineSlash(editor: Editor): void {
   };
 
   // Patch 1: 打字母时的触发判断
+  // 触发条件：(a) 行首以 / 开头（行首 slash 命令，含其参数区，如 /auto-harness run --pipeline），
+  // 或 (b) 光标前最后一个 token 以 / 开头（行内 /skill，如 文字 /sk）。
+  // 原 pi-tui 只判 (a)；若只判 (b) 会丢失命令参数区的自动触发（参数 token 不以 / 开头）。
   target.isInSlashCommandContext = function (textBeforeCursor: string): boolean {
     if (this.state.cursorLine !== 0) return false;
+    if (textBeforeCursor.trimStart().startsWith("/")) return true;
     const tokens = textBeforeCursor.split(/\s+/);
     const lastToken = tokens[tokens.length - 1] ?? "";
     return lastToken.startsWith("/");
@@ -9884,6 +9888,17 @@ export class AppScreen implements Component, Focusable {
       // Track the exact turn so session-detail can close as soon as this reply
       // is accepted, even if the workflow continues or opens another turn.
       this.lastRepliedHumanPrompt = { workflowRunId, correlationId };
+      const currentView = this.swarmWorkflowsViewState;
+      if (
+        currentView?.phase === "agent" &&
+        currentView.returnTo?.kind === "pending-list"
+      ) {
+        // Entering a pending turn's detail is a temporary drill-down. Once the
+        // reply is submitted, return to the screen that opened the pending list
+        // instead of leaving the user on the now-completed detail page.
+        this.restoreFromPendingList(currentView.returnTo.previous_phase);
+        return true;
+      }
       this.replyingToHumanPrompt = null;
       this.editor.setText("");
       this.editor.focused = false;

@@ -1312,7 +1312,10 @@ def test_deep_adapter_subagents_includes_optional_browser_and_configured_researc
     ):
         subagents, _ = adapter.build_configured_subagents(model, config)
 
-    assert subagents == ["research_spec", "browser_spec"]
+    assert [
+        item.agent_card.name if hasattr(item, "agent_card") else item
+        for item in subagents
+    ] == ["statusline-setup", "research_spec", "browser_spec"]
     # sys_operation is forwarded so the subagent shares the parent's filesystem
     # boundary; this bare adapter has none configured.
     mock_research.assert_called_once_with(
@@ -1351,8 +1354,12 @@ def test_deep_adapter_subagents_omits_research_without_explicit_enable():
     ):
         subagents, _ = adapter.build_configured_subagents(model, config)
 
-    # DeepAdapter: no research_agent configured, browser enabled
-    assert subagents == ["browser_spec"]
+    # DeepAdapter: no research_agent configured; built-in status-line setup and
+    # browser remain available.
+    assert [
+        item.agent_card.name if hasattr(item, "agent_card") else item
+        for item in subagents
+    ] == ["statusline-setup", "browser_spec"]
     mock_research.assert_not_called()
     mock_browser.assert_called_once_with(
         model,
