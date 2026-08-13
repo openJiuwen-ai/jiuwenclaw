@@ -5,7 +5,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from 'react-i18next';
-import { ChevronRight } from 'lucide-react';
+import { ChevronRight, Loader2 } from 'lucide-react';
 import { webRequest } from "../../services/webClient";
 import { SourceManagerModal } from "../../features/SourceManagerModal";
 import { SkillNetSearchModal } from "../../features/SkillNetSearchModal";
@@ -132,6 +132,9 @@ type SkillIndexTreeNode = SkillIndexNode & {
 
 interface SkillPanelProps {
   sessionId: string;
+  isConnected: boolean;
+  symphonyEnabled: boolean;
+  onSymphonyEnabledChange: (enabled: boolean) => Promise<void>;
   onNavigateToConfig?: () => void;
   /** 当前是否处于激活状态（左边栏选中技能） */
   isActive?: boolean;
@@ -571,7 +574,14 @@ function SkillIndexTreeView({
   return <div className="space-y-1" role="tree">{roots.map((node) => renderNode(node, 0))}</div>;
 }
 
-export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: SkillPanelProps) {
+export function SkillPanel({
+  sessionId,
+  isConnected,
+  symphonyEnabled,
+  onSymphonyEnabledChange,
+  onNavigateToConfig,
+  isActive = false,
+}: SkillPanelProps) {
   const { t, i18n } = useTranslation();
   const [activeTab, setActiveTab] = useState<"my" | "marketplace" | "index" | "graph">("my");
   const [mySkillsSubTab, setMySkillsSubTab] = useState<"all" | "enabled" | "disabled">("all");
@@ -598,6 +608,9 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   const graphReadingStartedAtRef = useRef<number | null>(null);
   const graphReadingTimerRef = useRef<number | null>(null);
   const [graphReading, setGraphReading] = useState(false);
+  const [symphonyEnabledDraft, setSymphonyEnabledDraft] = useState(symphonyEnabled);
+  const [symphonySaving, setSymphonySaving] = useState(false);
+  const [symphonySaveError, setSymphonySaveError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<"list" | "grid">("list");
   const [retrievalStatus, setRetrievalStatus] = useState<SkillRetrievalStatus | null>(null);
   const [retrievalTree, setRetrievalTree] = useState("");
@@ -626,6 +639,27 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (!symphonySaving) {
+      setSymphonyEnabledDraft(symphonyEnabled);
+    }
+  }, [symphonyEnabled, symphonySaving]);
+
+  const updateSymphonyEnabled = useCallback(async (enabled: boolean) => {
+    if (!isConnected || symphonySaving) return;
+    setSymphonyEnabledDraft(enabled);
+    setSymphonySaving(true);
+    setSymphonySaveError(null);
+    try {
+      await onSymphonyEnabledChange(enabled);
+    } catch {
+      setSymphonyEnabledDraft(symphonyEnabled);
+      setSymphonySaveError(t('skills.graph.orchestration.saveFailed'));
+    } finally {
+      setSymphonySaving(false);
+    }
+  }, [isConnected, onSymphonyEnabledChange, symphonyEnabled, symphonySaving, t]);
 
   const updateGraphReading = useCallback((reading: boolean) => {
     if (graphReadingTimerRef.current !== null) {
@@ -1553,7 +1587,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
               <svg className={`w-4 h-4 ${activeTab === "graph" && graphReading ? "animate-spin" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
               </svg>
-              {activeTab === "graph" && graphReading ? "正在读取技能总谱" : t('common.refresh')}
+              {activeTab === "graph" && graphReading ? t('skills.graph.status.reading') : t('common.refresh')}
             </button>
             <button
               onClick={handleImportLocal}
@@ -1873,8 +1907,45 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
           ) : null}
 
         {activeTab === "graph" ? (
-          <div className="mt-4 flex-1 min-h-0">
-            <SkillGraphPanel ref={skillGraphPanelRef} onReadingChange={updateGraphReading} />
+          <div className="mt-4 flex flex-1 min-h-0 flex-col gap-3">
+            <div className="flex flex-none flex-wrap items-center justify-between gap-4 rounded-lg border border-border bg-panel p-4">
+              <div className="min-w-[240px] flex-1">
+                <h3 className="text-sm font-medium text-text-strong">
+                  {t('skills.graph.orchestration.title')}
+                </h3>
+                <p className="mt-1 text-xs leading-5 text-text-muted">
+                  {t('skills.graph.orchestration.description')}
+                </p>
+                {symphonySaveError ? (
+                  <p className="mt-1 text-xs leading-5 text-danger" role="alert">
+                    {symphonySaveError}
+                  </p>
+                ) : null}
+              </div>
+              <div className="flex flex-shrink-0 items-center gap-2">
+                {symphonySaving ? (
+                  <>
+                    <Loader2 size={16} className="animate-spin text-text-muted" aria-hidden="true" />
+                    <span className="text-xs text-text-muted">
+                      {t('skills.graph.orchestration.saving')}
+                    </span>
+                  </>
+                ) : null}
+                <Switch
+                  checked={symphonyEnabledDraft}
+                  onChange={(enabled) => void updateSymphonyEnabled(enabled)}
+                  disabled={!isConnected || symphonySaving}
+                  title={t(
+                    isConnected
+                      ? 'skills.graph.orchestration.toggleLabel'
+                      : 'skills.graph.orchestration.connectionRequired',
+                  )}
+                />
+              </div>
+            </div>
+            <div className="flex-1 min-h-0">
+              <SkillGraphPanel ref={skillGraphPanelRef} onReadingChange={updateGraphReading} />
+            </div>
           </div>
         ) : null}
 
