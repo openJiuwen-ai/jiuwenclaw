@@ -634,6 +634,11 @@ def _is_subagent_enabled(sub_cfg: Any) -> bool:
     return isinstance(sub_cfg, dict) and bool(sub_cfg.get("enabled", False))
 
 
+def _is_subagent_default_enabled(sub_cfg: Any) -> bool:
+    """Return true unless a subagent is explicitly disabled."""
+    return not isinstance(sub_cfg, dict) or sub_cfg.get("enabled", True) is not False
+
+
 def _subagent_language(mode: str, role: str, config: dict[str, Any]) -> str:
     """Resolve the code sub-agent runtime language (mirrors ``code_runtime_language``).
 
@@ -664,6 +669,8 @@ def _code_subagent_spec(
     sub_cfg = subagents_cfg.get(name) if isinstance(subagents_cfg, dict) else None
     if name == "browser_agent":
         max_iterations = DEFAULT_BROWSER_AGENT_MAX_ITERATIONS
+    elif name == "statusline-setup":
+        max_iterations = registry.DEFAULT_STATUSLINE_SETUP_MAX_ITERATIONS
     else:
         max_iterations = react_cfg.get(
             "max_iterations",
@@ -671,8 +678,11 @@ def _code_subagent_spec(
         )
     if isinstance(sub_cfg, dict) and sub_cfg.get("max_iterations"):
         max_iterations = sub_cfg["max_iterations"]
+    card_kwargs: dict[str, Any] = {"name": name}
+    if name == "statusline-setup":
+        card_kwargs["id"] = "jiuwenswarm.statusline-setup"
     return SubAgentSpec(
-        agent_card=AgentCard(name=name),
+        agent_card=AgentCard(**card_kwargs),
         system_prompt="",
         factory_name=factory_name,
         factory_kwargs={
@@ -708,10 +718,11 @@ def build_member_subagent_specs(
     mode: str,
     role: str,
 ) -> list[SubAgentSpec]:
-    """Build the declarative code sub-agent specs (empty for non-code modes).
+    """Build declarative member subagent specs.
 
-    explore / plan are always present, while code / browser are config-gated via
-    ``react.subagents.<name>.enabled``.
+    The status-line setup agent is available in every mode when enabled.
+    Code modes additionally include explore / plan, while code / browser are
+    config-gated via ``react.subagents.<name>.enabled``.
 
     Args:
         config: The resolved ``config.yaml`` mapping.
@@ -719,19 +730,36 @@ def build_member_subagent_specs(
         role: The member role (reserved, both roles get the same sub-agents).
 
     Returns:
-        The ``SubAgentSpec`` list (empty when not a code mode).
+        The ``SubAgentSpec`` list. Non-code modes contain only the default-enabled
+        status-line setup agent; code modes also contain their code sub-agents.
     """
-    if not _is_code_mode(mode):
-        return []
     react = (config or {}).get("react", {})
     react = react if isinstance(react, dict) else {}
     subagents_cfg = react.get("subagents", {}) if isinstance(react, dict) else {}
     language = _subagent_language(mode, role, config)
 
-    specs: list[SubAgentSpec] = [
-        _code_subagent_spec("explore_agent", registry.EXPLORE_AGENT, react, language),
-        _code_subagent_spec("plan_agent", registry.PLAN_AGENT, react, language),
-    ]
+    specs: list[SubAgentSpec] = []
+    if _is_subagent_default_enabled(
+        subagents_cfg.get("statusline-setup") if isinstance(subagents_cfg, dict) else None
+    ):
+        specs.append(
+            _code_subagent_spec(
+                "statusline-setup",
+                registry.STATUSLINE_SETUP_AGENT,
+                react,
+                language,
+            )
+        )
+
+    if not _is_code_mode(mode):
+        return specs
+
+    specs.extend(
+        [
+            _code_subagent_spec("explore_agent", registry.EXPLORE_AGENT, react, language),
+            _code_subagent_spec("plan_agent", registry.PLAN_AGENT, react, language),
+        ]
+    )
     if isinstance(subagents_cfg, dict):
         if _is_subagent_enabled(subagents_cfg.get("code_agent")):
             specs.append(

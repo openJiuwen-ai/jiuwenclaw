@@ -1819,8 +1819,9 @@ def test_code_subagent_specs_use_factory_names() -> None:
     assert registry.EXPLORE_AGENT in factory_names
     assert registry.PLAN_AGENT in factory_names
     assert registry.CODE_AGENT in factory_names
-    # Team mode has no code sub-agents.
-    assert build_member_subagent_specs({}, "team", "leader") == []
+    # Team mode keeps only the built-in status-line setup subagent.
+    team_subs = build_member_subagent_specs({}, "team", "leader")
+    assert [sub.agent_card.name for sub in team_subs] == ["statusline-setup"]
 
 
 def test_code_member_deep_spec_dedupes_base_explore_agent() -> None:
@@ -1841,7 +1842,7 @@ def test_code_member_deep_spec_dedupes_base_explore_agent() -> None:
     spec = build_member_deep_agent_spec({}, "code.team", "leader", base)
     names = [sub.agent_card.name for sub in spec.subagents or []]
 
-    assert names == ["explore_agent", "plan_agent"]
+    assert names == ["statusline-setup", "explore_agent", "plan_agent"]
 
 
 def test_code_runtime_language_by_mode_and_role() -> None:

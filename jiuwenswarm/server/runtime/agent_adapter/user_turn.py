@@ -31,12 +31,6 @@ TEAM_USER_TURN_KEY = "_user_turn"
 # Channels whose turns are system-driven rather than typed by a person.
 _SYSTEM_CHANNELS = frozenset({"cron", "heartbeat"})
 
-_STATUSLINE_INSTRUCTIONS = {
-    "zh": "\n\n你必须按照以下指令配置状态栏：\n",
-    "en": "\n\nYou must follow these instructions to configure the status line:\n",
-}
-
-
 @dataclass(frozen=True)
 class UserTurn:
     """A single inbound user message plus the context delivered with it.
@@ -88,22 +82,18 @@ class UserTurn:
             return self.text
 
         content = self.text
-        statusline_prompt = ""
         if isinstance(content, str):
             # /statusline <prompt> is a prompt-type command (mirrors Claude Code);
-            # it never goes through /skills.
-            statusline_prompt, statusline_content = _handle_statusline_prompt_command(content)
-            if statusline_prompt:
-                content = statusline_content
+            # it never goes through /skills. The rewritten content instructs
+            # the parent to invoke the dedicated built-in subagent.
+            statusline_dispatch, _description = _handle_statusline_prompt_command(content)
+            if statusline_dispatch:
+                content = statusline_dispatch
 
         envelope = self._build_envelope(content)
         rendered = self._interaction_prefix() + _lead_in(self.channel, self.language)
         rendered += json.dumps(envelope, ensure_ascii=False)
-        if not statusline_prompt:
-            return rendered
-
-        instructions = _STATUSLINE_INSTRUCTIONS.get(self.language, _STATUSLINE_INSTRUCTIONS["en"])
-        return rendered + instructions + statusline_prompt
+        return rendered
 
     def _build_envelope(self, content: Any) -> dict[str, Any]:
         """Assemble the JSON envelope body for ``content``."""

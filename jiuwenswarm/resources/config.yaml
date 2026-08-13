@@ -474,6 +474,9 @@ react:
   # code_agent / research_agent 默认不启用；只有显式配置 enabled: true 才会显示并可被 task_tool 调用
   # browser_agent: code.team 路径通过此 key 门控（单 agent 路径仍由 browser runtime 开关决定）
   subagents:
+    statusline-setup:
+      enabled: true
+      max_iterations: 15
     general_agent:
       enabled: true
     code_agent:

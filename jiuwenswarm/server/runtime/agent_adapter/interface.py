@@ -33,6 +33,10 @@ from jiuwenswarm.server.runtime.session.session_history import (
     collapse_file_content_blocks,
 )
 from jiuwenswarm.server.runtime.agent_adapter.user_turn import TEAM_USER_TURN_KEY, UserTurn
+from jiuwenswarm.server.runtime.agent_adapter.statusline_setup_agent import (
+    STATUSLINE_SETUP_SYSTEM_PROMPT,
+    build_statusline_setup_dispatch,
+)
 from jiuwenswarm.server.runtime.session.session_manager import SessionManager
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
 from jiuwenswarm.server.utils.utils import is_team_params
@@ -599,7 +603,7 @@ _SKILL_COMMAND_REGEX = re.compile(
 )
 
 # /statusline prompt-type 模式：
-# 用户输入 "/statusline <描述>" → 直接注入 statusline-setup 指令到 prompt
+# 用户输入 "/statusline <描述>" → 让父代理调用内置 statusline-setup 子代理
 # 排除已知子命令（set, padding, clear, help, json）——这些由 TUI 前端本地处理，
 # 但如果消息经过 Gateway 传到 AgentServer，后端也需要区分。
 _STATUSLINE_KNOWN_SUBCOMMANDS = {"set", "padding", "clear", "help", "json", "get"}
@@ -607,133 +611,10 @@ _STATUSLINE_PROMPT_REGEX = re.compile(
     r"^/statusline\s+(?P<description>.+)$"
 )
 
-# 不调用 /skills，直接把指令文本嵌入 prompt
-_STATUSLINE_SETUP_PROMPT = """\
-You are a status line setup agent. Your job is to configure the user's TUI status line \
-by generating a shell command and writing it to the config file so the bottom bar \
-updates immediately.
-
-This is NOT about writing Python scripts or creating files — it's about writing a \
-**shell command** that runs every 2 seconds and whose stdout becomes the status bar text.
-
-## How the Status Line Works
-
-1. The TUI runs the configured shell command every 2 seconds
-2. Each time, it pipes a JSON object with session info as stdin to the command
-3. The command's stdout is displayed at the bottom of the TUI screen
-4. Config is stored in ~/.jiuwenswarm-tui/config.json under the "statusLine" field
-
-The shell command can do anything a normal shell command can — read JSON fields, \
-run git, check files, call system utilities, etc. The JSON input is just one \
-convenient data source, not a constraint.
-
-## Three Command Styles
-
-**Style A: Pure JSON fields** — for session info (model, tokens, mode, etc.)
-```
-input=$(cat); field1=$(echo "$input" | jq -r '.field1 // "default"'); \
-echo "label:$field1"
-```
-
-**Style B: Pure shell utilities** — for system info (git branch, disk, \
-time, etc.) — no `input=$(cat)` needed
-```
-branch=$(git branch --show-current 2>/dev/null || echo "?"); \
-time=$(date +%H:%M:%S); echo "$branch | $time"
-```
-
-**Style C: Mixed** — JSON fields + shell utilities (most common)
-```
-input=$(cat); model=$(echo "$input" | jq -r '.model // "?"'); \
-branch=$(git branch --show-current 2>/dev/null || echo "?"); \
-echo "$model | git:$branch"
-```
-
-## JSON Input Field Reference
-
-The command receives this JSON via stdin every 2 seconds:
-
-| Field | Description |
-|-------|-------------|
-| session_id | Current session ID |
-| session_name | Session title (set via /rename) |
-| cwd | Current working directory |
-| mode | Current mode (agent / code.normal / code.team / team) |
-| model | Current model name |
-| provider | Model provider |
-| version | jiuwenswarm version |
-| connection | Connection state (idle / connecting / connected / reconnecting / auth_failed) |
-| is_processing | Is agent currently processing |
-| last_error | Most recent error message or null |
-| evolution_status | Evolution state (idle / running) |
-| active_subtask_count | Number of active subtasks |
-| todo_count | Number of todo items |
-| trusted_dirs | Trusted directory paths (array) |
-| usage.total_input_tokens | Session total input tokens |
-| usage.total_output_tokens | Session total output tokens |
-| usage.total_tokens | Session total tokens |
-| context_window.context_window_size | Max context window tokens |
-| context_window.used_percentage | Context used percentage (0-100) |
-| context_window.remaining_percentage | Context remaining percentage (0-100) |
-
-Common non-JSON shell approaches: git branch --show-current, \
-df -h, date, hostname -s, whoami, etc.
-
-## How to Apply the Config
-
-DO NOT use `python -c "..."` one-liners — they break on Windows due \
-to quoting and escaping issues. Instead, write a Python script file \
-and then execute it. This is the ONLY reliable way on Windows.
-
-Step 1: Write a Python script file (e.g. /tmp/update_statusline.py) \
-that merges the new statusLine into the config:
-```python
-import json, os
-d = os.path.expanduser('~/.jiuwenswarm-tui')
-os.makedirs(d, exist_ok=True)
-p = os.path.join(d, 'config.json')
-if not os.path.exists(p):
-    with open(p, 'w') as f:
-        f.write('{}\\n')
-with open(p) as f:
-    c = json.load(f)
-c['statusLine'] = {
-    'type': 'command',
-    'command': 'YOUR_COMMAND_HERE',
-    'padding': 0
-}
-with open(p, 'w') as f:
-    json.dump(c, f, indent=2)
-    f.write('\\n')
-print('StatusLine configured')
-```
-
-Step 2: Execute the script:
-```bash
-python /tmp/update_statusline.py
-```
-
-IMPORTANT: The TUI polls config.json every 2 seconds, so the status \
-bar updates automatically within 2 seconds after you write the config. \
-No restart needed.
-
-Guidelines:
-- Only write to ~/.jiuwenswarm-tui/config.json — never overwrite \
-  system files
-- Always merge with existing config — preserve trustedDirs, theme, etc.
-- Never hardcode secrets or API keys in the command
-- The statusLine command runs in bash (sh -c) context, NOT in \
-  PowerShell — so `$(cat)`, `$var`, `jq`, `echo` etc. are all \
-  standard bash/sh syntax
-- Commands should handle failures gracefully: use 2>/dev/null, \
-  || echo "fallback"
-- On Windows, $(cat) is automatically patched to read from a temp \
-  file by the TUI
-- DO NOT use `python -c` one-liners for config updates — they \
-  break on Windows. Always write a .py script file and execute it.
-- DO NOT read config.json with `cat` — use Python os.path.expanduser \
-  instead, as `~` may not resolve correctly in some shell environments
-"""
+# Backward-compatible alias for tests and callers that imported the old name.
+# The text is now the dedicated subagent's system prompt, not a suffix appended
+# to every parent-agent user turn.
+_STATUSLINE_SETUP_PROMPT = STATUSLINE_SETUP_SYSTEM_PROMPT
 
 
 def _handle_skills_use_slash_command(query: str) -> Tuple[list, str]:
@@ -756,17 +637,14 @@ def _handle_skills_use_slash_command(query: str) -> Tuple[list, str]:
 def _handle_statusline_prompt_command(query: str) -> Tuple[str, str]:
     """处理 /statusline <prompt>
 
-    不调用 /skills 命令，不依赖 SkillUseRail，
-    直接把 statusline-setup 指令文本嵌入 user prompt。
-
-    _handle_statusline_prompt_command() → 返回 (statusline_prompt, description)
-    build_user_prompt() 把 statusline_prompt 嵌入到 user prompt 后面
+    不调用 /skills 命令。返回一条让父代理通过 ``task_tool`` 调用内置
+    ``statusline-setup`` 子代理的调度指令。
 
     Args:
         query: 用户原始输入（含 "/statusline" 前缀）
 
     Returns:
-        (statusline_prompt, description) — 注入的 prompt 文本和提取的描述
+        (dispatch_prompt, description) — 子代理调度指令和提取的描述
         如果不是 /statusline prompt 模式，返回 ("", query)
     """
     stripped = query.strip()
@@ -782,7 +660,7 @@ def _handle_statusline_prompt_command(query: str) -> Tuple[str, str]:
             return "", query
         if description:
             # 把用户的描述转化为让 Agent 自动配置状态栏的 prompt
-            return _STATUSLINE_SETUP_PROMPT, description
+            return build_statusline_setup_dispatch(description), description
 
     # /statusline 无参数 → 不是 prompt 模式（TUI 应已拦截处理 help）
     return "", query
@@ -1115,14 +993,14 @@ class JiuWenSwarm:
                     final_query = turn.render()
             else:
                 final_query = turn.render()
-                # 调试日志：确认 /statusline prompt 注入是否生效
+                # 调试日志：确认 /statusline 是否已改写为内置子代理调度
                 if isinstance(query, str) and "/statusline" in query:
                     logger.info(
                         "[_build_inputs][STATUSLINE] 原始 query=%s, 最终 prompt 长度=%d, "
-                        "包含 statusline-setup 指令=%s",
+                        "包含 statusline-setup 调度=%s",
                         query[:200],
                         len(final_query) if isinstance(final_query, str) else 0,
-                        "status line setup agent" in final_query if isinstance(final_query, str) else False,
+                        "statusline-setup" in final_query if isinstance(final_query, str) else False,
                     )
 
         inputs: dict[str, Any] = {
