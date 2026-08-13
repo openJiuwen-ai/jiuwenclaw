@@ -119,6 +119,15 @@ function shouldPreviewModelSetupGuide(): boolean {
   return PREVIEW_MODEL_SETUP_GUIDE;
 }
 
+function normalizeConfigBoolean(value: unknown): boolean {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  return ['1', 'true', 'yes', 'on', 'enabled'].includes(
+    String(value ?? '').trim().toLowerCase(),
+  );
+}
+
 type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'browserpanel' | 'updatepanel';
 
 type LoadedHistoryPage = {
@@ -1176,6 +1185,19 @@ function AppContent() {
       }, 5000);
     }
   }, [clearRestartAutoCloseTimer, closeRestartModal]);
+
+  const saveSymphonyEnabled = useCallback(async (enabled: boolean) => {
+    const updates = { symphony_enabled: enabled ? 'true' : 'false' };
+    const result = await request<{ updated?: string[]; applied_without_restart?: boolean }>(
+      'config.set',
+      updates,
+    );
+    setServerConfig((prev) => ({ ...(prev ?? {}), ...updates }));
+    setConfigError(null);
+    if (result?.applied_without_restart !== true) {
+      applyConfigSaveUiState(false);
+    }
+  }, [applyConfigSaveUiState, request]);
 
   const buildAgentsTeamsFlatConfig = useCallback((payload: AgentsTeamsSavePayload) => {
     const updates: Record<string, string> = {};
@@ -2537,7 +2559,10 @@ function AppContent() {
           <div className={`app-section ${activeNav === 'skills' ? '' : 'is-hidden'}`}>
             <SkillPanel
               sessionId={sessionId}
+              isConnected={isConnected}
               isActive={activeNav === 'skills'}
+              symphonyEnabled={normalizeConfigBoolean(serverConfig?.symphony_enabled)}
+              onSymphonyEnabledChange={saveSymphonyEnabled}
               onNavigateToConfig={() => {
                 setConfigInitialExpandGroup('third_party_api');
                 setActiveNav('configpanel');

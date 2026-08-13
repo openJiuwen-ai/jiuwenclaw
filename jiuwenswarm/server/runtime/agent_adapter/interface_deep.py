@@ -774,13 +774,28 @@ def build_model_from_entry(mcc: dict, mco: dict) -> Model:
     mcc_fields = {k: v for k, v in mcc.items() if k != "model_name"}
     if not mcc_fields.get("client_provider"):
         mcc_fields["client_provider"] = "OpenAI"
-    m_config = ModelRequestConfig(
-        **build_reasoning_model_request_kwargs(
-            model_client_config=mcc_fields,
-            model_config_obj=mco,
-            model_name=name,
-        )
+
+    # AgentOS 备份模型：mco 含内部标记 ``_source == "agentos"``（由
+    # ``get_default_models`` 注入）。其 ``max_tokens`` 是用户可读的"输入侧
+    # 上下文窗口"别名，仅作用于 ``ContextEngineConfig.context_window_tokens``
+    # （上下文压缩阈值，由 ``_deep_agent_context_engine_config`` 的 per-model
+    # 覆盖路径喂入，不发往厂商）。
+    # 但 core 的 ``ModelRequestConfig`` 也有同名字段 ``max_tokens``，那是"输出
+    # token 上限"语义、会发往厂商。``_source`` 标记已由
+    # ``reasoning_injector._build_model_request_kwargs`` 统一 pop（不进 kwargs），
+    # 故这里从原始 mco 取标记作门控：若是 agentos，把 kwargs 里的 max_tokens
+    # pop 掉，否则 agentos 配的输入窗口值会被误当成输出上限发往厂商。
+    # defaults 无此标记，行为完全不变。
+    is_agentos = isinstance(mco, dict) and mco.get("_source") == "agentos"
+    request_kwargs = build_reasoning_model_request_kwargs(
+        model_client_config=mcc_fields,
+        model_config_obj=mco,
+        model_name=name,
     )
+    if is_agentos:
+        request_kwargs.pop("max_tokens", None)
+
+    m_config = ModelRequestConfig(**request_kwargs)
     return Model(model_client_config=ModelClientConfig(**mcc_fields), model_config=m_config)
 
 
@@ -794,15 +809,40 @@ def parse_int(value: Any, default: int) -> int:
         return default
 
 
-def _deep_agent_context_engine_config(react_cfg: dict[str, Any] | None) -> ContextEngineConfig:
+def _deep_agent_context_engine_config(
+    react_cfg: dict[str, Any] | None,
+    full_config: dict[str, Any] | None = None,
+    model_name: str | None = None,
+) -> ContextEngineConfig:
     """供 ``create_deep_agent(..., context_engine_config=...)`` 使用（与 agent-core 集成测试方法二一致）。
 
     仅承接 ContextEngine 自身配置；KV cache affinity 由独立
     ``react.kv_cache_affinity_config`` 管理。
+
+    AgentOS per-model 覆盖（路径 B）：当 ``full_config`` 与 ``model_name`` 同时提供，
+    且 ``models.agentos`` 的 ``model_name`` 与之匹配时，用 agentos 块的
+    ``max_tokens``（用户可读的输入侧上下文窗口别名）覆盖基础值，写入 core 的
+    ``ContextEngineConfig.context_window_tokens``（压缩阈值，不发往厂商）。
+    这使输入侧上下文窗口配置仅作用于 agentos，defaults 不受影响（defaults 不会
+    传匹配的 model_name）。注意：agentos mco 的 ``max_tokens`` 在
+    ``build_model_from_entry`` 处已被 pop，不进 ``ModelRequestConfig``。
     """
     react_cfg = react_cfg or {}
     cec = react_cfg.get("context_engine_config")
     cec = cec if isinstance(cec, dict) else {}
+    cw_tokens = parse_int(cec.get("context_window_tokens"), None)
+
+    # AgentOS per-model 覆盖：仅当当前请求模型名与 agentos 配置的模型名一致时生效。
+    if full_config and model_name:
+        agentos_block = (full_config.get("models") or {}).get("agentos")
+        if isinstance(agentos_block, dict):
+            agentos_mcc = agentos_block.get("model_client_config") or {}
+            if agentos_mcc.get("model_name") == model_name:
+                agentos_mco = agentos_block.get("model_config_obj") or {}
+                agentos_cw = parse_int(agentos_mco.get("max_tokens"), None)
+                if agentos_cw is not None:
+                    cw_tokens = agentos_cw
+
     recall = cec.get("compression_recall_config")
     recall = recall if isinstance(recall, dict) else {}
     return ReActAgentConfig().context_engine_config.model_copy(
@@ -812,7 +852,7 @@ def _deep_agent_context_engine_config(react_cfg: dict[str, Any] | None) -> Conte
                 cec.get("enable_openrouter_model_context_window_tokens", False)
             ),
             # 显式设置的上下文窗口上限；非法值回退 None（由 agent-core 按模型解析）
-            "context_window_tokens": parse_int(cec.get("context_window_tokens"), None),
+            "context_window_tokens": cw_tokens,
             # 上下文压缩 debug 落盘开关；目录缺省时由 agent-core 按
             # OPENJIUWEN_CONTEXT_DEBUG_DIR / workspace 默认路径解析
             "enable_context_debug": bool(cec.get("enable_context_debug", False)),
@@ -4982,7 +5022,11 @@ class JiuWenSwarmDeepAdapter:
             system_prompt=build_agent_identity_prompt(
                 language=self._resolve_prompt_language(),
             ),
-            context_engine_config=_deep_agent_context_engine_config(config),
+            context_engine_config=_deep_agent_context_engine_config(
+                config,
+                full_config=config_base,
+                model_name=getattr(getattr(model, "model_config", None), "model_name", ""),
+            ),
             kv_cache_affinity_config=_deep_agent_kv_cache_affinity_config(config, model),
             enable_task_loop=self._resolve_enable_task_loop(config, config_base),
             max_iterations=config.get("max_iterations", 15),
@@ -5517,7 +5561,11 @@ class JiuWenSwarmDeepAdapter:
 
         self._instance = create_deep_agent(
             **common_kwargs,
-            context_engine_config=_deep_agent_context_engine_config(config),
+            context_engine_config=_deep_agent_context_engine_config(
+                config,
+                full_config=config_base,
+                model_name=getattr(getattr(model, "model_config", None), "model_name", ""),
+            ),
             kv_cache_affinity_config=_deep_agent_kv_cache_affinity_config(config, model),
             vision_model_config=self._vision_model_config,
             audio_model_config=self._audio_model_config,
@@ -7849,13 +7897,9 @@ class JiuWenSwarmDeepAdapter:
 
         if accepted:
             await approve_evolution_records(rail, request_id, approved_record_ids)
-            # Sync updated team skill from workspace to global team_skills dir.
-            try:
-                from jiuwenswarm.agents.harness.team import refresh_team_shared_skill_links_across_managers
-
-                refresh_team_shared_skill_links_across_managers(session_id)
-            except Exception as exc:
-                logger.warning("[JiuWenSwarmDeepAdapter] team shared skill link refresh after approval failed: %s", exc)
+            # Skills live in a single physical library, so an approved evolution is visible to
+            # every agent as soon as it lands: SkillUseRail re-stats the library on each model
+            # call and picks the change up on its own. No view has to be re-linked.
             logger.info("[JiuWenSwarmDeepAdapter] team skill evolve accepted: request_id=%s", request_id)
         else:
             await reject_evolution_records(rail, request_id)
@@ -7884,13 +7928,8 @@ class JiuWenSwarmDeepAdapter:
         accepted = answers_select_option(answers, EVOLUTION_EXECUTE_LABELS)
         if accepted:
             await rail.on_approve_simplify(request_id)
-            try:
-                from jiuwenswarm.agents.harness.team import refresh_team_shared_skill_links_across_managers
-
-                if session_id:
-                    refresh_team_shared_skill_links_across_managers(session_id)
-            except Exception as exc:
-                logger.warning("[JiuWenSwarmDeepAdapter] team shared skill link refresh after simplify failed: %s", exc)
+            # No library-side fan-out is needed: the single Skill library is re-read by
+            # SkillUseRail on every model call.
             logger.info("[JiuWenSwarmDeepAdapter] team simplify accepted: request_id=%s", request_id)
         else:
             await rail.on_reject_simplify(request_id)
@@ -10146,7 +10185,11 @@ class JiuWenSwarmDeepAdapter:
                     if self._model_request_config else ""
                 )
                 # 与 ContextEngine 一致：显式配置的 context_window_tokens 优先于按模型名解析
-                cw_override = _deep_agent_context_engine_config(self._config_cache).context_window_tokens
+                cw_override = _deep_agent_context_engine_config(
+                    self._config_cache,
+                    full_config=self._config_base_cache,
+                    model_name=model_name,
+                ).context_window_tokens
                 cw_fallback = ContextUtils.resolve_context_max(
                     model_name=model_name,
                     fallback_context_window_tokens=cw_override,
@@ -11264,6 +11307,16 @@ class JiuWenSwarmDeepAdapter:
         Returns:
             {"status": "ok", "answer": "..."} 或 {"status": "no_context"|"failed", ...}
         """
+        if not self._is_session_scoped_adapter:
+            session_adapter = await self._get_or_create_session_adapter(session_id)
+            try:
+                return await session_adapter.generate_btw_answer(
+                    session_id=session_id,
+                    question=question,
+                )
+            finally:
+                await self._evict_idle_session_adapters()
+
         from jiuwenswarm.server.runtime.agent_adapter.recap_prompts import (
             RECENT_MESSAGE_WINDOW,
             _build_btw_prompt,
