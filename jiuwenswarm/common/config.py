@@ -1160,7 +1160,25 @@ def get_default_models(config: dict[str, Any] | None = None) -> list[dict[str, A
 
     # 新格式：已有 defaults 列表
     if "defaults" in models and isinstance(models["defaults"], list) and models["defaults"]:
-        return _decrypt_model_entries(models["defaults"])
+        entries = _decrypt_model_entries(models["defaults"])
+        # AgentOS 备份模型：作为额外条目进入缓存（可在 models.list 中按名切换），
+        # 但绝不抢主对话——故显式置 is_default=False（覆盖 _infer_is_default 的"组内唯一=默认"推断）。
+        # 仅在 model_name 非空（即用户已在 YAML 填入凭证）时追加，并打 _source 标记供下游识别。
+        agentos_block = models.get("agentos")
+        if isinstance(agentos_block, dict) and agentos_block.get("model_client_config"):
+            mcc = agentos_block["model_client_config"]
+            if isinstance(mcc, dict) and mcc.get("model_name"):
+                agentos_entry = deepcopy(agentos_block)
+                agentos_entry["is_default"] = False
+                # _source 注入到 model_config_obj 内部，使其经
+                # build_reasoning_model_request_kwargs -> _model_config_to_dict
+                # 展开后进入 kwargs，供 build_model_from_entry 识别并做
+                # max_output_tokens -> max_tokens 映射（用后即弃，不进 core）。
+                agentos_mco = agentos_entry.setdefault("model_config_obj", {})
+                if isinstance(agentos_mco, dict):
+                    agentos_mco["_source"] = "agentos"
+                entries.append(agentos_entry)
+        return entries
 
     # 旧格式：单个 default 对象 → 包装为列表
     if "default" in models and isinstance(models["default"], dict):
