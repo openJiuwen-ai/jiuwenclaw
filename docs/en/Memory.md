@@ -115,16 +115,7 @@ The LLM call reuses `models.default`; no extra model config required.
 
 ## File layout
 
-Memory is plain Markdown; the agent uses file tools. By default,
-`{workspace_dir}` is the JiuwenSwarm agent workspace:
-
-- **Windows**: `C:\Users\<your-username>\.jiuwenswarm\agent\workspace`
-- **Linux/macOS**: `~/.jiuwenswarm/agent/workspace`
-
-Therefore, the full default path to the long-term memory file `MEMORY.md` is:
-
-- **Windows**: `C:\Users\<your-username>\.jiuwenswarm\agent\workspace\memory\MEMORY.md`
-- **Linux/macOS**: `~/.jiuwenswarm/agent/workspace/memory/MEMORY.md`
+Memory is plain Markdown; the agent uses file tools:
 
 ```
 {workspace_dir}/memory

@@ -111,13 +111,14 @@ jiuwenswarm-web --host 0.0.0.0 --port <自定义端口>
 
 ### Q: 如何在远程服务器上使用？
 
-Web 前端默认绑定到 `localhost`。如需从其他电脑访问 Linux 服务器上的 Web 前端，请使用以下命令启动：
+启动时绑定外部可访问地址：
 
 ```bash
-FRONTEND_HOST=0.0.0.0 jiuwenswarm-start
+jiuwenswarm-web --host 0.0.0.0 --port <自定义端口>
+jiuwenswarm-app
 ```
 
-然后通过 `http://<Linux服务器IP>:<Web UI端口>` 访问。默认端口为 `5173`；如果启动时自动切换了端口，请使用终端实际显示的 Web UI 端口。请确保 Linux 防火墙或云安全组允许该端口访问，并仅向可信网络或来源 IP 开放。
+然后通过 `http://<服务器IP>:<端口>` 访问。
 
 ### Q: TUI 模式如何启动？
 
