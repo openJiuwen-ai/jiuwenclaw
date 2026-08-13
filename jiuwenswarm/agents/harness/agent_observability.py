@@ -525,7 +525,7 @@ def open_agent_run_span(*, session_id: str = "", mode: str = "") -> Any:
     try:
         from opentelemetry.trace import SpanKind
 
-        from openjiuwen.agent_teams.observability import (
+        from openjiuwen.extensions.observability.setup import (
             get_tracer,
             is_initialized,
         )

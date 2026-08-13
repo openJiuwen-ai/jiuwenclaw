@@ -9888,6 +9888,17 @@ export class AppScreen implements Component, Focusable {
       // Track the exact turn so session-detail can close as soon as this reply
       // is accepted, even if the workflow continues or opens another turn.
       this.lastRepliedHumanPrompt = { workflowRunId, correlationId };
+      const currentView = this.swarmWorkflowsViewState;
+      if (
+        currentView?.phase === "agent" &&
+        currentView.returnTo?.kind === "pending-list"
+      ) {
+        // Entering a pending turn's detail is a temporary drill-down. Once the
+        // reply is submitted, return to the screen that opened the pending list
+        // instead of leaving the user on the now-completed detail page.
+        this.restoreFromPendingList(currentView.returnTo.previous_phase);
+        return true;
+      }
       this.replyingToHumanPrompt = null;
       this.editor.setText("");
       this.editor.focused = false;

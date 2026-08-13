@@ -311,6 +311,10 @@ class TeamWorkspaceReportPathInput(ConstructionInput):
         attr="team_ws_root",
         description="Team shared workspace root path (gate; skipped when absent).",
     )
+    project_dir: str | None = context_field(
+        attr="project_dir",
+        description="User project root for final project deliverables.",
+    )
     team_id: str = context_field(attr="team_id", default="", description="Team name.")
     language: str = context_field(
         attr="language",
@@ -345,6 +349,7 @@ def _build_team_workspace_report_path_rail(
         return None
     rail = TeamWorkspaceReportPathRail(
         root_dir=inp.team_ws_root,
+        project_dir=inp.project_dir,
         team_id=inp.team_id,
         language=inp.language,
     )

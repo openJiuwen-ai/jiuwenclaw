@@ -77,6 +77,7 @@ class TeamWorkspaceInfo:
     team_id: str | None = None
     config: dict[str, Any] | None = None
     trajectory_registry: Any | None = None
+    project_dir: str | None = None
 
 
 RAIL_WHITELIST = frozenset({
@@ -254,6 +255,7 @@ def build_member_rails(
         try:
             rail = TeamWorkspaceReportPathRail(
                 root_dir=team_ws_root,
+                project_dir=team_workspace.project_dir,
                 team_id=team_id,
                 language=language,
             )

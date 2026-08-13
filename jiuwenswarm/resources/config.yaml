@@ -639,7 +639,7 @@ gateway:
       user_template: "yr:instance:{instance}"
       connect_timeout_s: 30
       client_keys_dir: "/root/.ssh"
-    auth_service_url: ${AGENTOS_AUTH_SERVICE_URL:-http://iam-agentos:8080}
+    auth_service_url: ${AGENTOS_AUTH_SERVICE_URL:-http://iam-agentos:8090}
     timeout: ${AGENTOS_AUTH_TIMEOUT:-10}
     # Web/TUI token 鉴权总开关；默认关闭。true 时创建 AgentOSAuthenticator 校验连接。
     auth_enabled: false

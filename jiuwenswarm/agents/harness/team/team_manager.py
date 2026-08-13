@@ -206,6 +206,7 @@ def _make_team_rail_mount_context(
     member_name: str | None = None,
     model_name: str | None = None,
     root_dir: str | None = None,
+    project_dir: str | None = None,
     skills_dir: str | None = None,
     team_id: str | None = "",
     config: dict[str, Any] | None = None,
@@ -229,6 +230,7 @@ def _make_team_rail_mount_context(
         runtime=RuntimeInfo(channel=channel, language=language),
         team_workspace=TeamWorkspaceInfo(
             root_dir=root_dir,
+            project_dir=project_dir,
             skills_dir=skills_dir,
             team_id=team_id,
             config=config,

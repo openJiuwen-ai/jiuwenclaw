@@ -33,7 +33,11 @@ from openjiuwen.agent_evolving.trajectory import InMemoryTrajectoryRegistry
 from openjiuwen.agent_teams.rails.builtin_elements import SKILL_USE as CORE_SKILL_USE
 from openjiuwen.harness.schema import deep_agent_spec as das
 from openjiuwen.agent_teams.harness.manifest import get_catalog, resolve_factory
-from openjiuwen.agent_teams.schema.blueprint import LeaderSpec, TeamAgentSpec
+from openjiuwen.agent_teams.schema.blueprint import (
+    LeaderSpec,
+    TeamAgentSpec,
+    TransportSpec,
+)
 from openjiuwen.agent_teams.schema.deep_agent_spec import (
     BuiltinToolSpec,
     DeepAgentSpec,
@@ -796,6 +800,58 @@ def test_enrich_team_spec_for_swarm_rewrites_spec_in_place() -> None:
     assert not hasattr(spec, "agent_customizer")
 
 
+@pytest.mark.parametrize(
+    ("channel_id", "port_env", "port", "expected_url"),
+    [
+        ("web", "WEB_PORT", "29000", "ws://127.0.0.1:29000/ws"),
+        ("tui", "GATEWAY_PORT", "29001", "ws://127.0.0.1:29001/tui"),
+    ],
+)
+def test_enrich_team_spec_configures_external_cli_event_relay(
+    channel_id: str,
+    port_env: str,
+    port: str,
+    expected_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """External CLI events must return through the active client channel."""
+    monkeypatch.delenv("TEAM_EVENT_GATEWAY_WS_URL", raising=False)
+    monkeypatch.setenv(port_env, port)
+    spec = _make_team_spec()
+
+    enrich_team_spec_for_swarm(
+        spec,
+        session_id="s",
+        mode="team",
+        channel_id=channel_id,
+    )
+
+    assert spec.external_transport is not None
+    assert spec.external_transport.type == "hybrid"
+    transport = spec.external_transport.build()
+    assert transport.team_name == spec.team_name
+    assert transport.external_publish_url == expected_url
+
+
+def test_enrich_team_spec_preserves_explicit_external_transport() -> None:
+    """Deployments may provide their own cross-process team transport."""
+    spec = _make_team_spec()
+    configured_transport = TransportSpec(
+        type="hybrid",
+        params={"external_publish_url": "wss://relay.example.test/team-events"},
+    )
+    spec.external_transport = configured_transport
+
+    enrich_team_spec_for_swarm(
+        spec,
+        session_id="s",
+        mode="team",
+        channel_id="web",
+    )
+
+    assert spec.external_transport is configured_transport
+
+
 def test_enrich_team_spec_points_member_cwd_at_project_dir() -> None:
     """Core receives project-rooted member cwd, not a rewritten workspace.
 
@@ -1082,6 +1138,68 @@ def test_team_workspace_report_path_returns_none_without_root() -> None:
     assert member_rails._build_team_workspace_report_path_rail({}, ctx) is None
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["team", "code.team"])
+async def test_team_workspace_policy_keeps_project_deliverables_in_project(
+    mode: str,
+    tmp_path: Path,
+) -> None:
+    """Both team profiles separate project files from collaboration artifacts."""
+    project_dir = str(tmp_path / "project")
+    team_ws_root = str(tmp_path / "team-workspace")
+    context = SwarmBuildContext(
+        mode=mode,
+        project_dir=project_dir,
+        team_id="unit-team",
+        team_ws_root=team_ws_root,
+        language="cn",
+    )
+
+    rail = member_rails._build_team_workspace_report_path_rail({}, context)
+    assert rail is not None
+    assert rail._project_dir == project_dir
+
+    builder = SystemPromptBuilder(language="cn")
+    rail.init(SimpleNamespace(system_prompt_builder=builder))
+    await rail.before_model_call(
+        AgentCallbackContext(agent=None, inputs=None, session=SimpleNamespace())
+    )
+
+    content = builder.build()
+    assert f"User project root: `{project_dir}`" in content
+    assert f"Team collaboration workspace: `{team_ws_root}`" in content
+    assert "Source code, tests, configuration" in content
+    assert "When worktree isolation is active" in content
+    assert "Do not place final project files in the team collaboration workspace" in content
+    assert "Use the internal mount path only" not in content
+
+
+@pytest.mark.asyncio
+async def test_team_workspace_policy_does_not_fallback_project_files_to_team_workspace(
+    tmp_path: Path,
+) -> None:
+    """Missing project identity must not turn the team workspace into a project cwd."""
+    team_ws_root = str(tmp_path / "team-workspace")
+    context = SwarmBuildContext(
+        mode="team",
+        team_id="unit-team",
+        team_ws_root=team_ws_root,
+        language="cn",
+    )
+
+    rail = member_rails._build_team_workspace_report_path_rail({}, context)
+    assert rail is not None
+    builder = SystemPromptBuilder(language="cn")
+    rail.init(SimpleNamespace(system_prompt_builder=builder))
+    await rail.before_model_call(
+        AgentCallbackContext(agent=None, inputs=None, session=SimpleNamespace())
+    )
+
+    content = builder.build()
+    assert "User project root: unavailable" in content
+    assert "Do not silently use the team collaboration workspace" in content
+
+
 @pytest.mark.parametrize("role", ["leader", "teammate"])
 def test_disabled_team_specs_keep_mount_context_provider_without_evolution_rails(
     role: str,
@@ -1104,6 +1222,7 @@ def test_disabled_team_specs_keep_mount_context_provider_without_evolution_rails
         channel="web",
         team_id="disabled-team",
         team_ws_root="/tmp/disabled-team",
+        project_dir="/tmp/user-project",
         team_skills_dir="/tmp/disabled-team/skills",
         trajectory_registry=object(),
     )
@@ -1134,6 +1253,7 @@ def test_disabled_team_specs_keep_mount_context_provider_without_evolution_rails
     mount_context = captured[role]
     assert mount_context.member_info.role == role
     assert mount_context.team_workspace.team_id == "disabled-team"
+    assert mount_context.team_workspace.project_dir == "/tmp/user-project"
     assert mount_context.team_workspace.config == config
 
 

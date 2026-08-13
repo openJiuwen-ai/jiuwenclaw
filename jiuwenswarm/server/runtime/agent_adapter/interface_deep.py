@@ -6080,6 +6080,7 @@ class JiuWenSwarmDeepAdapter:
                     session_id=session_id,
                     channel_id=channel_for_tool,
                     metadata=metadata_for_tool,
+                    project_dir=self._project_dir,
                 )
                 for sf_tool in self._send_file_toolkit.get_tools():
                     self._register_agent_owned_tool(sf_tool, self._tool_owner_id())
@@ -6090,6 +6091,7 @@ class JiuWenSwarmDeepAdapter:
                     session_id=session_id,
                     channel_id=channel_for_tool,
                     metadata=metadata_for_tool,
+                    project_dir=self._project_dir,
                 )
 
     def _refresh_acp_runtime_tools(
@@ -7349,6 +7351,13 @@ class JiuWenSwarmDeepAdapter:
                 )
 
         cancelled = False
+        # Stop the scheduler execution before asking the interaction owner to
+        # cancel the round.  In particular, task_tool awaits its subagent in
+        # the scheduler's exec task; cancelling only the interaction round can
+        # otherwise block behind that child work and never return an
+        # interrupt_result to the TUI.  This does not cancel the registered
+        # session stream producer -- cancel_round still owns that lifecycle.
+        self._cancel_scheduler_running_tasks()
         # Collect in-flight tools without cancelling the stream producer task —
         # interaction cancel must keep round ownership in cancel_round().
         cancelled_tool_results = self._collect_cancelled_tools_for_session(
@@ -7371,6 +7380,10 @@ class JiuWenSwarmDeepAdapter:
                 "[JiuWenSwarmDeepAdapter] interrupt(%s): interaction cancel failed",
                 intent,
             )
+        finally:
+            # A scheduler task may be installed while cancel_round is
+            # unwinding; repeat the targeted cancellation as a safety net.
+            self._cancel_scheduler_running_tasks()
         if intent == "supplement" and isinstance(new_input, str) and new_input.strip():
             await self._clear_pending_ask_user_interrupt_for_supplement(request.session_id)
         message = "任务已切换" if intent == "supplement" else "任务已取消"

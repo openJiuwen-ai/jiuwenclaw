@@ -543,6 +543,63 @@ assert.equal(completedReplyScreen.swarmWorkflowsViewState, null);
 assert.equal(completedReplyScreen.lastRepliedHumanPrompt, null);
 assert.equal(deferredTranscriptFlushes, 1);
 
+// Submitting from a detail opened by the chat pending list returns directly
+// to chat instead of leaving the completed answer visible in agent detail.
+const submittedReplyEvents = [];
+let submittedReplyFlushes = 0;
+const submittedReplyEditor = {
+  focused: true,
+  text: "ok",
+  getText() {
+    return this.text;
+  },
+  setText(value) {
+    this.text = value;
+  },
+};
+const submittedReplyScreen = Object.create(AppScreen.prototype);
+Object.assign(submittedReplyScreen, {
+  swarmWorkflowsViewState: {
+    phase: "agent",
+    workflowId: "workflow-human-session",
+    agentId: "turn-0",
+    returnTo: { kind: "pending-list", previous_phase: "chat" },
+  },
+  replyingToHumanPrompt: {
+    workflowRunId: "workflow-human-session",
+    correlationId: "interact:relationship-manager:0",
+    label: "relationship-manager",
+    turn: 0,
+    isSession: true,
+  },
+  editor: submittedReplyEditor,
+  state: {
+    getSnapshot: () => ({ sessionId: "session-1" }),
+    sendEventOnly: (type, payload) => submittedReplyEvents.push({ type, payload }),
+    flushDeferredTranscript: () => {
+      submittedReplyFlushes += 1;
+    },
+  },
+  tui: { requestRender: () => undefined },
+});
+assert.equal(submittedReplyScreen.handleSwarmflowHumanReplyInput("\r"), true);
+assert.deepEqual(submittedReplyEvents, [
+  {
+    type: "chat.swarmflow_reply",
+    payload: {
+      session_id: "session-1",
+      run_id: "workflow-human-session",
+      correlation_id: "interact:relationship-manager:0",
+      answer: "ok",
+    },
+  },
+]);
+assert.equal(submittedReplyScreen.swarmWorkflowsViewState, null);
+assert.equal(submittedReplyScreen.replyingToHumanPrompt, null);
+assert.equal(submittedReplyEditor.text, "");
+assert.equal(submittedReplyEditor.focused, false);
+assert.equal(submittedReplyFlushes, 1);
+
 // Completed human nodes consume Tab with a clear notice instead of opening a
 // reply editor or silently doing nothing.
 let completedReplyNotice = "";
