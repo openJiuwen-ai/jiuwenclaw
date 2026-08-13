@@ -414,7 +414,7 @@ After upgrading, migrate data so config and stores match the new version.
 
 ```bash
 # View the new config template (source install)
-cat docs/config_template.yaml
+cat jiuwenswarm/resources/config.yaml
 
 # Or read the changelog
 # https://gitcode.com/openJiuwen/jiuwenswarm/blob/develop/docs/CHANGELOG.md
