@@ -19,14 +19,42 @@ import pytest
 
 
 class FakeWebChannel:
+    channel_id = "web"
+
     def __init__(self):
         self.responses: list[dict] = []
+        self.agent_client = _ProjectAdapterAgentClient()
 
     async def send_response(self, ws, req_id, *, ok, payload=None, error=None, code=None):
         self.responses.append({"id": req_id, "ok": ok, "payload": payload, "error": error, "code": code})
 
     def is_session_busy(self, session_id: str) -> bool:
         return False
+
+    @staticmethod
+    def connection_user_id(_ws) -> str:
+        return "test-user"
+
+
+class _ProjectAdapterAgentClient:
+    """Execute the E2A request in the production AgentServer adapter."""
+
+    server_ready = True
+
+    async def send_request(self, request):
+        from jiuwenswarm.common.schema.agent import AgentRequest
+        from jiuwenswarm.common.schema.message import ReqMethod
+        from jiuwenswarm.server.runtime.gateway_adapter.project_adapter import ProjectAdapter
+
+        response = await ProjectAdapter().handle(AgentRequest(
+            request_id=request.request_id,
+            channel_id=request.channel,
+            session_id=request.session_id,
+            req_method=ReqMethod(request.method),
+            params=dict(request.params or {}),
+            user_id=request.user_id or "",
+        ))
+        return SimpleNamespace(ok=response.ok, payload=response.payload)
 
 
 class FakeRegistry:
@@ -51,7 +79,7 @@ def _common_patches(handler, *, status="discarded", redo_result=None, redo_side_
     from contextlib import ExitStack
     stack = ExitStack()
     stack.enter_context(patch(
-        "jiuwenswarm.gateway.channel_manager.web.git_ws_handler.GitDiffWebSocketHandler._resolve_git_project",
+        "jiuwenswarm.server.runtime.session.project_git.resolve_git_project",
         return_value=(_make_project(), None, None),
     ))
     stack.enter_context(patch(

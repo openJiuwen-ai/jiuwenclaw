@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from jiuwenswarm.gateway.upload_storage import (
+from jiuwenswarm.server.runtime.attachments.upload_storage import (
     safe_session_dirname,
     safe_upload_filename,
     unique_upload_path,

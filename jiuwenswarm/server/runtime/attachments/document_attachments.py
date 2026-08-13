@@ -77,8 +77,11 @@ def is_supported_document(*, filename: str | None = None) -> bool:
     return not is_forbidden_document(filename=name)
 
 
-async def persist_and_parse_documents(params: dict[str, Any]) -> dict[str, Any]:
+def persist_and_parse_documents(params: dict[str, Any]) -> dict[str, Any]:
     """Validate document items by local path; do not write or parse content.
+
+    纯同步校验（路径黑名单/存在性/大小），不落盘、不解析内容；由调用方
+    （WorkspaceFileAdapter）放入线程池执行，避免阻塞事件循环。
 
     Accepts either ``params["documents"]`` or ``params["media_items"]`` entries with
     ``type == "document"``. Each item must provide an existing local ``path``

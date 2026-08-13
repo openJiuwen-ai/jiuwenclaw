@@ -14,7 +14,7 @@ from jiuwenswarm.common.e2a.wire_codec import parse_agent_server_wire_unary
 from jiuwenswarm.common.schema.agent import AgentResponse
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.server import agent_ws_server as agent_ws_server_module
-from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+from jiuwenswarm.server.agent_ws_server import AdapterRegistry, AgentWebSocketServer
 
 
 class FakeWebSocket:
@@ -33,6 +33,11 @@ class ClosedFakeWebSocket:
 
 
 class _AgentWsTestHarness(AgentWebSocketServer):
+    # 测试实例常用 __new__ 绕过 __init__（不会执行 AgentWebSocketServer.__init__
+    # 里的注册表初始化）；提供空注册表，保证 _handle_message 的 Phase 1 适配器
+    # 注册表查找可用，未被注册的 method 继续走既有 if/elif 链。
+    _adapter_registry = AdapterRegistry()
+
     async def handle_message_for_test(self, ws, raw: str, send_lock: asyncio.Lock) -> None:
         await self._handle_message(ws, raw, send_lock)
 
@@ -144,7 +149,10 @@ async def test_handle_message_treats_no_close_frame_as_disconnect(caplog) -> Non
         timestamp=0.0,
     )
     try:
-        await ClosedDuringUnaryServer().handle_message_for_test(
+        # 用 __new__ 绕过 __init__：真实 __init__ 会注册 ConfigAdapter 接管
+        # config.get，导致请求走适配器路径、不再触发 _handle_unary 的关闭帧场景；
+        # 空注册表下 CONFIG_GET 落到 _handle_unary（本类覆写为抛 ConnectionClosedError）。
+        await ClosedDuringUnaryServer.__new__(ClosedDuringUnaryServer).handle_message_for_test(
             FakeWebSocket(),
             json.dumps(env.to_dict(), ensure_ascii=False),
             asyncio.Lock(),

@@ -846,6 +846,7 @@ def test_enrich_team_spec_for_swarm_has_no_deep_agent_param() -> None:
         "project_dir",
         "trusted_dirs",
         "request_id",
+        "user_id",
         "channel_id",
         "request_metadata",
     }

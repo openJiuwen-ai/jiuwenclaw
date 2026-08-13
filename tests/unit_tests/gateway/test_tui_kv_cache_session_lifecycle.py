@@ -13,6 +13,8 @@ from jiuwenswarm.gateway.channel_manager.tui.tui_connect import (
 
 
 class _TuiChannel:
+    channel_id = "tui"
+
     def __init__(self) -> None:
         self.local_handlers: dict[str, dict[str, object]] = {}
         self.responses: list[dict] = []
@@ -75,7 +77,7 @@ async def test_session_create_forwards_external_id_without_prewarm() -> None:
 
 
 @pytest.mark.asyncio
-async def test_tui_session_create_resolves_project_before_agentserver(
+async def test_tui_session_create_leaves_project_resolution_to_agentserver(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
     project_dir = str(tmp_path / "workspace")
@@ -83,11 +85,7 @@ async def test_tui_session_create_resolves_project_before_agentserver(
     channel = _TuiChannel()
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.session.project_store.find_or_create_code_project_for_tui_params",
-        lambda _params: SimpleNamespace(
-            project_id="proj_code_tui",
-            project_dir=project_dir,
-            work_mode="code",
-        ),
+        lambda _params: pytest.fail("Gateway must not own non-explicit project binding"),
     )
     register_cli_handlers(
         CliHandlersBindParams(channel=channel, agent_client=agent_client, path="/tui")
@@ -100,10 +98,10 @@ async def test_tui_session_create_resolves_project_before_agentserver(
     )
 
     request = agent_client.requests[0]
-    assert request.params["project_id"] == "proj_code_tui"
+    assert "project_id" not in request.params
     assert request.params["project_dir"] == project_dir
-    assert request.params["work_mode"] == "code"
     assert "session_id" not in request.params
+    assert request.params.get("create_token")
 
 
 @pytest.mark.asyncio

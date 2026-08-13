@@ -546,6 +546,7 @@ class TestHandleEventStoreValidation:
         cron = msg.payload["cron"]
         assert msg.channel_id == "web"
         assert msg.session_id is None
+        assert msg.payload["user_id"] == ""
         assert cron["exec_channel_id"] == "__cron__"
         assert cron["exec_session_id"] == run_info["session_id"]
 
@@ -1034,6 +1035,35 @@ class TestTeamModeWake:
         env = agent.unary_requests[1]
         assert env.params["model_name"] == "fast-model"
         assert "model" not in env.params
+
+    @pytest.mark.asyncio
+    async def test_agent_wake_does_not_resolve_project_dir_in_gateway(self, tmp_path):
+        """Phase 4：scheduler 触发时不再本地反查 project_id → project_dir。
+
+        SESSION_CREATE / CHAT_SEND 只传 project_id，归属解析由目标 AgentServer
+        在其注入目录内完成（resolve_session_project_binding 规则2 自动补齐）。
+        """
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        job = _make_job(description="reminder", targets="tui", project_id="proj-1")
+
+        agent = FakeAgentClient()
+        handler = FakeMessageHandler()
+        svc = _make_scheduler(store, handler, agent_client=agent)
+
+        run_id = f"{job.id}:1234"
+        await svc.on_wake(job, run_id)
+        task = svc.run_tasks.get(run_id)
+        assert task is not None
+        await task
+
+        create_env = agent.unary_requests[0]
+        assert create_env.method == "session.create"
+        # 不再本地反查 project_dir（Gateway 不访问用户目录项目表）
+        assert "project_dir" not in create_env.params
+        assert create_env.params["project_id"] == "proj-1"
+        chat_env = agent.unary_requests[1]
+        assert "project_dir" not in chat_env.params
+        assert chat_env.params["project_id"] == "proj-1"
 
     @pytest.mark.asyncio
     async def test_team_wake_stream_timeout(self, tmp_path):

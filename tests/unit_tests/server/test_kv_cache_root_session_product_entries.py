@@ -146,265 +146,31 @@ async def test_plan_agentserver_delete_evicts_self_parent_and_preserves_release(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("hook_raises", [False, True])
-@pytest.mark.parametrize("forward_raises", [False, True])
-async def test_web_plan_fallback_evicts_root_without_changing_local_delete(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
-    hook_raises: bool,
-    forward_raises: bool,
-) -> None:
-    sessions_root = tmp_path / "sessions"
-    (sessions_root / "web-root").mkdir(parents=True)
-    channel = _WebChannel()
-    calls: list[dict] = []
-
-    async def fake_evict(**kwargs):
-        calls.append(kwargs)
-        if hook_raises:
-            raise RuntimeError("hook broken")
-        return KVCacheLifecycleResult(status="ok")
-
-    monkeypatch.setattr(
-        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_agent_sessions_dir",
-        lambda: sessions_root,
-    )
-    monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
-        lambda _sid: {"mode": "agent.plan"},
-    )
-    monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle.evict_session_kv_cache",
-        fake_evict,
-    )
-    _register_web_handlers(
-        WebHandlersBindParams(
-            channel=channel,
-            agent_client=_FailingAgentClient() if forward_raises else None,
-        )
-    )
-
-    await channel.methods["session.delete"](
-        object(), "delete-web", {"session_id": "web-root"}, "web-root"
-    )
-
-    assert calls == [{"session_id": "web-root", "parent_session_id": "web-root"}]
-    assert not (sessions_root / "web-root").exists()
-    assert channel.responses[-1] == {
-        "id": "delete-web",
-        "ok": True,
-        "payload": {"session_id": "web-root"},
-        "error": None,
-        "code": None,
-    }
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("hook_raises", [False, True])
-@pytest.mark.parametrize("forward_raises", [False, True])
-async def test_tui_plan_fallback_evicts_root_without_changing_local_delete(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
-    hook_raises: bool,
-    forward_raises: bool,
-) -> None:
-    sessions_root = tmp_path / "sessions"
-    (sessions_root / "tui-root").mkdir(parents=True)
-    channel = _TuiChannel()
-    calls: list[dict] = []
-
-    async def fake_evict(**kwargs):
-        calls.append(kwargs)
-        if hook_raises:
-            raise RuntimeError("hook broken")
-        return KVCacheLifecycleResult(status="ok")
-
-    monkeypatch.setattr("jiuwenswarm.common.utils.get_agent_sessions_dir", lambda: sessions_root)
-    monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
-        lambda _sid: {"mode": "agent.plan"},
-    )
-    monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle.evict_session_kv_cache",
-        fake_evict,
-    )
-    register_cli_handlers(
-        CliHandlersBindParams(
-            channel=channel,
-            agent_client=_FailingAgentClient() if forward_raises else None,
-            path="/tui",
-        )
-    )
-
-    await channel.local_handlers["/tui"]["session.delete"](
-        object(), "delete-tui", {"session_id": "tui-root"}, "tui-root"
-    )
-
-    assert calls == [{"session_id": "tui-root", "parent_session_id": "tui-root"}]
-    assert not (sessions_root / "tui-root").exists()
-    assert channel.responses[-1]["ok"] is True
-    assert channel.responses[-1]["payload"] == {"session_id": "tui-root"}
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("enabled", "supported", "evict_ok", "expected_calls"),
-    [
-        (False, True, True, 0),
-        (True, False, True, 0),
-        (True, True, True, 1),
-        (True, True, False, 1),
-    ],
-)
-async def test_web_plan_fallback_uses_lifecycle_gate_without_changing_delete(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
-    enabled: bool,
-    supported: bool,
-    evict_ok: bool,
-    expected_calls: int,
-) -> None:
-    from jiuwenswarm.server.runtime.session import kv_cache_affinity_lifecycle as lifecycle
-
-    sessions_root = tmp_path / "sessions"
-    (sessions_root / "gated-root").mkdir(parents=True)
-    channel = _WebChannel()
-
-    class GateModel:
-        model_client_config = None
-
-        def __init__(self) -> None:
-            self.calls: list[dict] = []
-
-        def supports_kv_cache_affinity(self) -> bool:
-            return supported
-
-        async def evict_kvc(self, **kwargs):
-            self.calls.append(kwargs)
-            return evict_ok
-
-    model = GateModel()
-    config = {
-        "react": {
-            "kv_cache_affinity_config": {
-                "enable_kv_cache_affinity": enabled,
-            }
-        }
-    }
-    monkeypatch.setattr(
-        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_agent_sessions_dir",
-        lambda: sessions_root,
-    )
-    monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
-        lambda _sid: {"mode": "agent.plan"},
-    )
-    monkeypatch.setattr(lifecycle, "get_config", lambda: config)
-    monkeypatch.setattr(lifecycle, "resolve_kv_cache_affinity_model", lambda **_: model)
-    _register_web_handlers(WebHandlersBindParams(channel=channel, agent_client=None))
-
-    await channel.methods["session.delete"](
-        object(), "delete-gated", {"session_id": "gated-root"}, "gated-root"
-    )
-
-    assert len(model.calls) == expected_calls
-    if model.calls:
-        assert model.calls[0]["target"] == "session"
-        assert model.calls[0]["session_id"] == "gated-root"
-        assert model.calls[0]["parent_session_id"] == "gated-root"
-    assert not (sessions_root / "gated-root").exists()
-    assert channel.responses[-1]["ok"] is True
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("channel_kind", ["web", "tui"])
-async def test_team_fallback_remains_agent_unavailable_without_evict_or_delete(
+async def test_session_delete_unavailable_returns_service_unavailable_without_local_delete(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
     channel_kind: str,
 ) -> None:
+    """Phase 2(决策 D8): session.delete 只走 E2A,AgentServer 不可达返回可重试错误,
+    不再本地 fallback(不以部署侧目录代替用户目录执行删除)。"""
     sessions_root = tmp_path / "sessions"
-    (sessions_root / "team-root").mkdir(parents=True)
-    calls: list[dict] = []
-
-    async def fake_evict(**kwargs):
-        calls.append(kwargs)
-        return KVCacheLifecycleResult(status="ok")
-
-    monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
-        lambda _sid: {"mode": "team"},
-    )
-    monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle.evict_session_kv_cache",
-        fake_evict,
-    )
+    (sessions_root / "unavail-root").mkdir(parents=True)
 
     if channel_kind == "web":
         channel = _WebChannel()
-        monkeypatch.setattr(
-            "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_agent_sessions_dir",
-            lambda: sessions_root,
-        )
         _register_web_handlers(WebHandlersBindParams(channel=channel, agent_client=None))
         handler = channel.methods["session.delete"]
     else:
         channel = _TuiChannel()
-        monkeypatch.setattr("jiuwenswarm.common.utils.get_agent_sessions_dir", lambda: sessions_root)
         register_cli_handlers(CliHandlersBindParams(channel=channel, agent_client=None, path="/tui"))
         handler = channel.local_handlers["/tui"]["session.delete"]
 
-    await handler(object(), "delete-team", {"session_id": "team-root"}, "team-root")
+    await handler(object(), "delete-unavail", {"session_id": "unavail-root"}, "unavail-root")
 
-    assert calls == []
-    assert (sessions_root / "team-root").exists()
     assert channel.responses[-1]["ok"] is False
-    assert channel.responses[-1]["code"] == "AGENT_UNAVAILABLE"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("channel_kind", ["web", "tui"])
-async def test_missing_plan_fallback_preserves_not_found_without_evict(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
-    channel_kind: str,
-) -> None:
-    sessions_root = tmp_path / "sessions"
-    sessions_root.mkdir()
-    calls: list[dict] = []
-
-    async def fake_evict(**kwargs):
-        calls.append(kwargs)
-        return KVCacheLifecycleResult(status="ok")
-
-    monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
-        lambda _sid: {"mode": "agent.plan"},
-    )
-    monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle.evict_session_kv_cache",
-        fake_evict,
-    )
-
-    if channel_kind == "web":
-        channel = _WebChannel()
-        monkeypatch.setattr(
-            "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_agent_sessions_dir",
-            lambda: sessions_root,
-        )
-        _register_web_handlers(WebHandlersBindParams(channel=channel, agent_client=None))
-        handler = channel.methods["session.delete"]
-    else:
-        channel = _TuiChannel()
-        monkeypatch.setattr("jiuwenswarm.common.utils.get_agent_sessions_dir", lambda: sessions_root)
-        register_cli_handlers(CliHandlersBindParams(channel=channel, agent_client=None, path="/tui"))
-        handler = channel.local_handlers["/tui"]["session.delete"]
-
-    await handler(object(), "delete-missing", {"session_id": "missing-root"}, "missing-root")
-
-    assert calls == []
-    assert channel.responses[-1]["ok"] is False
-    assert channel.responses[-1]["code"] == "NOT_FOUND"
+    assert channel.responses[-1]["code"] == "SERVICE_UNAVAILABLE"
+    assert (sessions_root / "unavail-root").exists()
 
 
 @pytest.mark.asyncio
