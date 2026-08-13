@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import re
 import time
@@ -32,11 +33,51 @@ from jiuwenclaw.agentserver.session_metadata import get_session_metadata, update
 from jiuwenclaw.agentserver.session_history import append_history_record
 from jiuwenclaw.agentserver.team.handlers.team_monitor_handler import TeamMonitorHandler
 from jiuwenclaw.agentserver.stream_utils import parse_stream_chunk
+from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
+    reset_send_file_request_context,
+    set_send_file_request_context,
+)
 from jiuwenclaw.schema.agent import AgentResponseChunk
 from jiuwenclaw.schema.message import E2A_SUPPRESSED_EVENT_TYPES
 
 logger = logging.getLogger(__name__)
 DEBUG_PREFIX = '/debug'
+
+# Per-chunk idle break for the team stream consumer. When the openjiuwen
+# generator never finalizes (a teammate stuck in BUSY -> is_team_completed()
+# returns None forever -> close_stream never called -> leader stream() blocks
+# on stream_queue.get() forever), break the consumer and run completion
+# teardown (soft-fallback chat.file) INSTEAD of waiting for the relay 300s
+# watchdog cancel (which routes through pause-skip and suppresses chat.file).
+# Must stay < relay RELAYCLAW_TEAM_STUCK_WATCHDOG_MS (300s). Steady chunks
+# (incl. chat.reasoning, which relay counts as a business frame) reset the
+# timer, so legitimate long reasoning is not killed.
+# Enforced at import: non-numeric / <= 0 / >= 300 → clamped to 240 with a
+# warning. >= 300 lets the relay watchdog fire first (pause-skip path, which
+# suppresses chat.file) and silently defeats this clean-teardown fix; <= 0
+# makes asyncio.wait_for time out before the first chunk is consumed.
+try:
+    _TEAM_STREAM_IDLE_BREAK_S = float(
+        os.environ.get('JIUWEN_TEAM_STREAM_IDLE_BREAK_S', '240')
+    )
+except (TypeError, ValueError):
+    _TEAM_STREAM_IDLE_BREAK_S = 240.0
+    logger.warning(
+        '[TeamHelpers] JIUWEN_TEAM_STREAM_IDLE_BREAK_S=%r not numeric; clamped to 240',
+        os.environ.get('JIUWEN_TEAM_STREAM_IDLE_BREAK_S'),
+    )
+if not math.isfinite(_TEAM_STREAM_IDLE_BREAK_S) or _TEAM_STREAM_IDLE_BREAK_S <= 0 or _TEAM_STREAM_IDLE_BREAK_S >= 300:
+    logger.warning(
+        '[TeamHelpers] JIUWEN_TEAM_STREAM_IDLE_BREAK_S=%s out of safe range (0, 300); clamped to 240',
+        _TEAM_STREAM_IDLE_BREAK_S,
+    )
+    _TEAM_STREAM_IDLE_BREAK_S = 240.0
+
+# busy 门控推迟的总时长上限（等用户决策的推迟不设上限——relay 看门狗同样按桥
+# 真相暂停）。成员状态卡 busy（RC1 的 stuck-BUSY 场景）时快照与"长工具合法忙"
+# 无法区分，无上限会让 idle-break 永不触发；封顶后照原路径拆流。推迟期间每次
+# 窗口都会向 relay 广播业务帧保活（见消费循环），relay 300s 看门狗不会抢跑。
+_TEAM_STREAM_IDLE_BREAK_BUSY_DEFER_CAP_S = 1800.0
 
 
 def strip_slash_directive(query: str, prefix: str) -> tuple[str, bool]:
@@ -295,6 +336,229 @@ def _wrap_team_resume_protocol(
     )
     original = str(original_query or '').strip() or text
     return template.format(user_query=text, original_query=original)
+
+
+_TEAM_ROSTER_CHANGE_MARKER_CN = '【团队配置变更简报】'
+_TEAM_ROSTER_CHANGE_MARKER_EN = '[Team roster change briefing]'
+
+
+def _wrap_team_roster_change_briefing(
+    query: Any,
+    language: str,
+    *,
+    removed: list[str],
+    current: list[str],
+) -> Any:
+    """Wrap the first post-dissolve query with a roster-change briefing.
+
+    dissolve（团队配置热更新）保留了 leader 的 checkpoint 记忆，其中仍含
+    旧团队名单——leader 会复述已删成员的内容、并因「记忆说团队已建好」
+    而跳过 build_team 直接广播（2026-08-13 事故：广播 FK 失败丢消息、
+    已删成员「重现」、内部术语泄漏给用户）。本简报作为最新一轮用户消息
+    注入：明确新名单、强制先 build_team、禁止向用户泄漏内部机制。
+    """
+    if not isinstance(query, str):
+        return query
+    text = query.strip()
+    if not text:
+        return query
+    if _TEAM_ROSTER_CHANGE_MARKER_CN in text or _TEAM_ROSTER_CHANGE_MARKER_EN in text:
+        return query
+    is_en = str(language or '').lower() in ('en', 'english')
+    sep = ', ' if is_en else '、'
+    current_text = sep.join(current)
+    if is_en:
+        points = [f'The current team members are: {current_text}.']
+        if removed:
+            points.append(
+                f'These members were removed: {", ".join(removed)}. Never contact, mention, '
+                'or role-play them; reassign any of their unfinished work to current members.'
+            )
+        points.append(
+            'Your memory of the old roster is stale. You MUST call build_team first to '
+            'rebuild the team with the current roster before dispatching any task.'
+        )
+        points.append(
+            'Never mention this config change, cold start, "member not registered", or any '
+            'internal mechanics to the user — as far as the user is concerned, the team has '
+            'always been the current roster.'
+        )
+        body = '\n'.join(f'{i}. {p}' for i, p in enumerate(points, 1))
+        return (
+            f'{_TEAM_ROSTER_CHANGE_MARKER_EN} (visible to you only; never disclose to the user)\n'
+            f'The team configuration was just updated. You resumed with memories of the old '
+            f'team — the following overrides them:\n{body}\n\nUser message:\n{text}'
+        )
+    points = [f'当前团队成员名单：{current_text}。']
+    if removed:
+        points.append(
+            f'已被移除的成员：{sep.join(removed)}——不要联系、提及或扮演他们；'
+            '与他们相关的未完成任务，重新分配给当前成员。'
+        )
+    points.append(
+        '你记忆中的旧团队名单与分工已失效。必须首先调用 build_team 按当前名单重新组建团队，'
+        '然后再派发任务。'
+    )
+    points.append(
+        '不要向用户提及本次配置调整、冷启动、成员未注册等任何内部细节——对用户而言，'
+        '团队一直就是当前名单。'
+    )
+    body = '\n'.join(f'{i}. {p}' for i, p in enumerate(points, 1))
+    return (
+        f'{_TEAM_ROSTER_CHANGE_MARKER_CN}（本段仅你可见，严禁向用户透露）\n'
+        f'团队配置刚刚被更新，你带着旧团队的记忆恢复，以下面名单为准：\n{body}\n\n'
+        f'用户消息：\n{text}'
+    )
+
+
+async def _load_team_roster_change(
+    *,
+    session_id: str,
+    team_name: str | None,
+) -> dict[str, Any] | None:
+    """Read the dissolve roster-change marker from the team checkpoint bucket.
+
+    Mirrors the agent-less pattern of ``_load_pending_resume_query``. Returns
+    the ``roster_change`` payload dict, or ``None`` when absent/unreadable.
+    """
+    name = str(team_name or '').strip()
+    if not name or not str(session_id or '').strip():
+        return None
+    try:
+        from openjiuwen.agent_teams.runtime.metadata import read_team_namespace
+        from openjiuwen.core.session.agent_team import create_agent_team_session
+
+        from jiuwenclaw.agentserver.team.team_manager import TEAM_ROSTER_CHANGE_KEY
+    except Exception:
+        return None
+
+    session = create_agent_team_session(
+        session_id=session_id,
+        source_metadata_enabled=False,
+    )
+    try:
+        await session.pre_run(inputs=None)
+        bucket = read_team_namespace(session, name)
+    except Exception as exc:
+        logger.debug(
+            "[TeamHelpers] load roster_change failed: session_id=%s team=%s error=%s",
+            session_id,
+            name,
+            exc,
+        )
+        return None
+    finally:
+        try:
+            await session.post_run()
+        except Exception:
+            logger.debug("[TeamHelpers] session.post_run failed", exc_info=True)
+
+    if not isinstance(bucket, dict):
+        return None
+    payload = bucket.get(TEAM_ROSTER_CHANGE_KEY)
+    return payload if isinstance(payload, dict) else None
+
+
+async def _maybe_wrap_roster_change_briefing(
+    *,
+    team_manager: Any,
+    session_id: str,
+    team_spec: Any,
+    query: Any,
+    language: str,
+) -> Any:
+    """dissolve 后的首个 CREATE 轮次：给 leader 注入换岗简报（一次性）。
+
+    触发条件是 checkpoint 桶里存在 dissolve 写入的 roster_change 标记——
+    仅团队配置热更新路径会写，leader 自行 clean_team 不会，避免误报
+    「配置已变更」。CREATE 的 manifest flush 会整体覆盖桶，标记一次性消除。
+    任何一步失败都原样返回 query，绝不影响正常发送。
+    """
+    if not isinstance(query, str) or not query.strip():
+        return query
+    base_name = str(getattr(team_spec, 'team_name', '') or '').strip()
+    if not base_name:
+        return query
+    candidates: list[str] = []
+    build_scoped = getattr(team_manager, 'build_session_scoped_team_name', None)
+    if callable(build_scoped):
+        try:
+            scoped = str(build_scoped(base_name, session_id) or '').strip()
+            if scoped:
+                candidates.append(scoped)
+        except Exception:
+            # 作用域名构造失败时只用 base_name 兜底，绝不影响正常发送
+            logger.debug(
+                '[TeamHelpers] build scoped team name raised: session_id=%s',
+                session_id,
+                exc_info=True,
+            )
+    if base_name not in candidates:
+        candidates.append(base_name)
+
+    payload: dict[str, Any] | None = None
+    try:
+        for candidate in candidates:
+            payload = await _load_team_roster_change(session_id=session_id, team_name=candidate)
+            if payload is not None:
+                break
+    except Exception:
+        # 读取失败按无标记处理，绝不影响正常发送
+        logger.debug(
+            '[TeamHelpers] roster_change load raised: session_id=%s',
+            session_id,
+            exc_info=True,
+        )
+        return query
+    if payload is None:
+        return query
+
+    # 当前名单取自新 spec（leader + 预定义成员），display_name 兜底 member_name。
+    members: list[tuple[str, str]] = []
+    leader = getattr(team_spec, 'leader', None)
+    if leader is not None:
+        members.append(
+            (
+                str(getattr(leader, 'member_name', '') or ''),
+                str(getattr(leader, 'display_name', '') or ''),
+            )
+        )
+    for member in getattr(team_spec, 'predefined_members', None) or []:
+        members.append(
+            (
+                str(getattr(member, 'member_name', '') or ''),
+                str(getattr(member, 'display_name', '') or ''),
+            )
+        )
+    members = [(name, disp) for name, disp in members if name]
+    if not members:
+        return query
+    current = [disp or name for name, disp in members]
+    new_names = {name for name, _ in members}
+
+    removed: list[str] = []
+    old_roster = payload.get('old_roster')
+    if isinstance(old_roster, list):
+        for entry in old_roster:
+            if not isinstance(entry, dict):
+                continue
+            old_name = str(entry.get('member_name') or '')
+            if old_name and old_name not in new_names:
+                removed.append(str(entry.get('display_name') or old_name))
+
+    logger.info(
+        '[TeamHelpers] roster-change briefing injected: session_id=%s team=%s removed=%s current=%s',
+        session_id,
+        base_name,
+        removed,
+        current,
+    )
+    return _wrap_team_roster_change_briefing(
+        query,
+        language,
+        removed=removed,
+        current=current,
+    )
 
 
 async def _session_has_resumable_runtime(team_manager: Any, session_id: str) -> bool:
@@ -1220,6 +1484,68 @@ async def _team_round_settled(channel_id: str | None, session_id: str) -> bool:
         return False
 
 
+async def _team_has_pending_user_decision(session_id: str) -> bool:
+    """Return True while an ask_user card for this session is awaiting the user.
+
+    A leader blocked on ask_user produces zero stream chunks; that silence is
+    "waiting for the user", not a stalled sidecar, so idle-break must not tear
+    the stream down (teardown would also aclose() the stream and swallow the
+    user's eventual answer). Conservative: lookup errors -> False (caller keeps
+    the current teardown behavior as fallback).
+    """
+    try:
+        from jiuwenclaw.agentserver.deep_agent.ask_user_question_registry import (
+            AskUserQuestionRegistry,
+        )
+        return AskUserQuestionRegistry.get_instance().has_pending_for_session(session_id)
+    except Exception:
+        logger.debug(
+            '[TeamHelpers] pending user decision check failed: session_id=%s',
+            session_id,
+            exc_info=True)
+        return False
+
+
+async def _team_stream_has_active_member(channel_id: str | None, session_id: str) -> bool:
+    """Return True when any team member (leader included) is genuinely active.
+
+    Any status outside settled/unstarted (e.g. busy: long tool such as
+    deepresearch, or blocked on a permission interaction whose wait lives
+    inside the openjiuwen kernel and is invisible to the ask_user registry)
+    means the silence is legitimate work, not a stalled stream.
+
+    必须走 monitor 的未过滤成员列表：``get_team_snapshot()`` 会把 leader 从
+    members 里剔除（前端展示语义），而阻塞在长工具/权限交互上的恰恰是 leader。
+    Conservative inverse of _team_round_settled: missing monitor/handler or
+    query errors -> False so idle-break keeps its teardown fallback (relay's
+    300s watchdog remains the backstop for a stuck-busy status).
+    """
+    try:
+        team_manager = get_team_manager(channel_id)
+        handler = team_manager.get_monitor_handler(session_id)
+        monitor = getattr(handler, '_monitor', None) if handler is not None else None
+        get_members = getattr(monitor, 'get_members', None) if monitor is not None else None
+        if not callable(get_members):
+            return False
+        members = await get_members()
+        for member in members or []:
+            status = str(getattr(member, 'status', '') or '').strip().lower()
+            if not status:
+                continue
+            if status in _TEAM_MEMBER_SETTLED_STATUSES:
+                continue
+            if status == _TEAM_MEMBER_UNSTARTED_STATUS:
+                continue
+            return True
+        return False
+    except Exception:
+        logger.debug(
+            '[TeamHelpers] active member check failed: session_id=%s',
+            session_id,
+            exc_info=True)
+        return False
+
+
 def _tool_event_name(parsed: dict[str, Any]) -> str:
     """Best-effort tool name from chat.tool_call / tool_result / tool_update."""
     event_type = str(parsed.get('event_type') or '').strip()
@@ -1571,6 +1897,8 @@ async def process_team_message_stream(request: Any,
             request_metadata=request_metadata,
             requested_model_name=requested_model_name,
             template_id=requested_team_name,
+            request_id=rid,
+            channel_id=channel_id,
         )
         _persist_team_file_monitor_roots(session_id, team_spec)
     except Exception as exc:
@@ -1603,7 +1931,18 @@ async def process_team_message_stream(request: Any,
     if is_first_request and callable(ensure_ready):
         ensure_ready(session_id, team_spec)
         shared_skills_ready_prepared = True
+    # Bind send_file request context for this team run so SendFileToolkit._resolve_route
+    # (send_file_to_user.py) reads per-request ids from the ContextVar (authoritative,
+    # per-async-task isolated) instead of the global-singleton instance fields (which
+    # concurrent team runs overwrite). Mirrors skill_turbo/executor.py:810-814.
+    _sf_ctx_token = None
     try:
+        _sf_ctx_token = set_send_file_request_context(
+            request_id=rid,
+            session_id=session_id,
+            channel_id=channel_id,
+            metadata=getattr(request, 'metadata', None),
+        )
         first_request_source = 'resume_from_pause' if resume_from_pause else 'first'
         if not is_first_request:
             logger.info('[TeamHelpers] follow-up team request: channel_id=%s session_id=%s',
@@ -1813,6 +2152,17 @@ async def process_team_message_stream(request: Any,
                     'yes' if original_goal else 'no',
                     session_id,
                 )
+            else:
+                # dissolve（团队配置热更新）后的 CREATE 轮次：checkpoint 桶带
+                # roster_change 标记时给 leader 注入换岗简报（无标记原样返回）。
+                query = await _maybe_wrap_roster_change_briefing(
+                    team_manager=team_manager,
+                    session_id=session_id,
+                    team_spec=team_spec,
+                    query=query,
+                    language=language,
+                )
+                query_text = query if isinstance(query, str) else ''
             if callable(ensure_ready) and (not shared_skills_ready_prepared):
                 ensure_ready(session_id, team_spec)
                 shared_skills_ready_prepared = True
@@ -1897,6 +2247,8 @@ async def process_team_message_stream(request: Any,
             session_id,
         )
     finally:
+        if _sf_ctx_token is not None:
+            reset_send_file_request_context(_sf_ctx_token)
         if request_queue is not None:
             team_manager.remove_waiter(session_id, rid)
             if not team_manager.has_waiters(session_id):
@@ -2033,8 +2385,74 @@ async def _consume_stream_with_query_impl(
         # 上次 relay 业务帧时间（monotonic）。流开始前的 chat.processing_status
         # (is_processing=True) 即业务帧，计时起点即循环入口。
         last_relay_business_at = time.monotonic()
-        async for chunk in team_stream:
+        # idle-break 门控推迟的起始时刻（monotonic）；收到任何 chunk 即重置。
+        # 仅 busy 推迟受 _TEAM_STREAM_IDLE_BREAK_BUSY_DEFER_CAP_S 封顶；等用户决策不封顶。
+        idle_defer_since: float | None = None
+        while True:
+            try:
+                chunk = await asyncio.wait_for(
+                    team_stream.__anext__(), timeout=_TEAM_STREAM_IDLE_BREAK_S
+                )
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError:
+                # 静默不等于卡死：等用户决策（ask_user 注册表有 pending）或成员仍在忙
+                # （长工具 / leader 阻塞在 openjiuwen 内核的权限交互，该等待 sidecar 侧
+                # 无注册表可查，靠成员快照 busy 覆盖）时继续等，不拆流。
+                pending_decision = await _team_has_pending_user_decision(session_id)
+                busy_member = (
+                    False if pending_decision
+                    else await _team_stream_has_active_member(channel_id, session_id)
+                )
+                if pending_decision or busy_member:
+                    now = time.monotonic()
+                    if idle_defer_since is None:
+                        idle_defer_since = now
+                    deferred_for = now - idle_defer_since
+                    # busy 推迟封顶（stuck-BUSY 与合法长工具快照不可区分，无上限会让
+                    # idle-break 对 RC1 场景失效）；等用户决策不封顶。
+                    if busy_member and not pending_decision and deferred_for > _TEAM_STREAM_IDLE_BREAK_BUSY_DEFER_CAP_S:
+                        logger.warning(
+                            '[TeamHelpers] stream idle %ss with busy member for %.0fs '
+                            '(cap %.0fs); treating as stalled: channel_id=%s session_id=%s',
+                            _TEAM_STREAM_IDLE_BREAK_S, deferred_for,
+                            _TEAM_STREAM_IDLE_BREAK_BUSY_DEFER_CAP_S,
+                            _resolve_channel_id(channel_id), session_id,
+                        )
+                    else:
+                        logger.info(
+                            '[TeamHelpers] stream idle %ss but %s; keep waiting (no teardown): '
+                            'channel_id=%s session_id=%s',
+                            _TEAM_STREAM_IDLE_BREAK_S,
+                            'a user decision is pending' if pending_decision
+                            else 'member(s) still active (long tool / permission wait)',
+                            _resolve_channel_id(channel_id), session_id,
+                        )
+                        # 向 relay 发业务帧保活：relay 看门狗只认业务帧（keepalive 不重置），
+                        # 推迟期间不发帧会让 relay 300s 看门狗抢跑（pause-skip 抑制 chat.file）。
+                        _broadcast_event(channel_id, session_id, {
+                            'event_type': 'chat.processing_status',
+                            'session_id': session_id,
+                            'rid': round_id,
+                            'is_processing': True,
+                            'is_complete': False,
+                        })
+                        continue
+                logger.warning(
+                    '[TeamHelpers] stream idle-stalled %ss with no chunk; finalizing '
+                    'teardown (not pause): channel_id=%s session_id=%s',
+                    _TEAM_STREAM_IDLE_BREAK_S, _resolve_channel_id(channel_id), session_id,
+                )
+                _broadcast_event(channel_id, session_id, {
+                    'event_type': 'team.stalled',
+                    'session_id': session_id,
+                    'rid': round_id,
+                    'reason': 'idle_break',
+                    'idle_seconds': _TEAM_STREAM_IDLE_BREAK_S,
+                })
+                break
             received_chunks += 1
+            idle_defer_since = None
             if received_chunks == 1 or received_chunks % 30 == 0:
                 _role = getattr(chunk, 'role', None)
                 logger.info(
@@ -2304,13 +2722,23 @@ async def _consume_stream_with_query_impl(
                     deliverable_paths.extend(_extract_file_paths_from_text(text, workspace_root))
                 if deliverable_paths:
                     _emit_team_chat_file_events(channel_id, session_id, deliverable_paths)
-                # team.completed includes team_name so the frontend can archive by team.
-                completed_payload = {
-                    'event_type': 'team.completed',
-                    'session_id': session_id,
-                    'team_name': str(getattr(team_spec, 'team_name', '') or ''),
-                }
-                _broadcast_event(channel_id, session_id, completed_payload)
+                # team.completed ONLY when truly settled — avoids archiving a half-done
+                # team when idle-break finalized an unsettled stream. Soft-fallback
+                # chat.file above still delivers leader-cited paths regardless.
+                if await _team_round_settled(channel_id, session_id):
+                    # team.completed includes team_name so the frontend can archive by team.
+                    completed_payload = {
+                        'event_type': 'team.completed',
+                        'session_id': session_id,
+                        'team_name': str(getattr(team_spec, 'team_name', '') or ''),
+                    }
+                    _broadcast_event(channel_id, session_id, completed_payload)
+                else:
+                    logger.info(
+                        '[TeamHelpers] stream finalized without team settled; '
+                        'skip team.completed: session_id=%s',
+                        session_id,
+                    )
         except Exception:
             logger.debug(
                 '[TeamHelpers] team stream-end completion signaling failed: session_id=%s',

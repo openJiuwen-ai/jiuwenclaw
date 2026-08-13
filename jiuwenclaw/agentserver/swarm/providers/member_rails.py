@@ -136,7 +136,12 @@ def _build_platform_member_rails(
         catalog_agent_id=catalog_agent_id,
         enabled_skills=enabled_skills,
     )
-    runtime = RuntimeInfo(channel=channel, language=language)
+    runtime = RuntimeInfo(
+        channel=channel,
+        language=language,
+        session_id=str(getattr(context, "session_id", "") or ""),
+        request_id=getattr(context, "request_id", None),
+    )
     team_workspace = TeamWorkspaceInfo(
         root_dir=context.team_ws_root,
         skills_dir=context.team_skills_dir,
