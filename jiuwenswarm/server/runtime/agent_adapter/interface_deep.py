@@ -2548,12 +2548,11 @@ class JiuWenSwarmDeepAdapter:
                 store = CredentialStore()
                 stored = store.get_all(name)
                 if stored:
-                    import os as _os
 
                     def resolver(key: str) -> str | None:
                         if key in stored:
                             return stored[key]
-                        return _os.environ.get(key)
+                        return os.environ.get(key)
             except Exception:  # noqa: BLE001
                 pass  # no store / not an MCP — leave placeholders as-is
         return build_mcp_server_config(entry, server_id_scope="jiuwenswarm", credential_resolver=resolver)

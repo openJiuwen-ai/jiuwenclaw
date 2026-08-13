@@ -6125,17 +6125,34 @@ class AgentWebSocketServer:
                 is_remote = transport in {"sse", "http", "streamable-http", "streamable_http"}
                 unreachable_reason = ""
                 if is_remote:
-                    cfg = build_mcp_server_config(entry)
+                    # Resolve ${VAR} placeholders before probing (marketplace
+                    # form B stores them verbatim; unresolved, the probe sends
+                    # the literal string → 400). Custom MCPs use plaintext
+                    # tokens — no placeholders, so resolver is a no-op for them.
+                    probe_resolver = None
+                    try:
+                        from jiuwenswarm.server.runtime.mcp.credential import CredentialStore
+                        stored = CredentialStore().get_all(name)
+                        if stored:
+                            def probe_resolver(key: str) -> str | None:
+                                if key in stored:
+                                    return stored[key]
+                                return os.environ.get(key)
+                    except Exception as resolve_exc:  # noqa: BLE001
+                        logger.debug("[mcp] preflight resolver build failed: %s", resolve_exc)
+                    cfg = build_mcp_server_config(entry, credential_resolver=probe_resolver)
                     if cfg is not None:
                         reachable, reason = await preflight_mcp_server_reachable(cfg)
                         if not reachable:
                             unreachable_reason = reason
                             try:
-                                # Roll back the state.json entry.
-                                from jiuwenswarm.server.runtime.mcp.state_store import (
-                                    remove_mcp_record,
+                                # Roll back: marketplace → remove record+skills;
+                                # custom → flip to registered (keep definition for
+                                # edit/retry, do NOT delete).
+                                from jiuwenswarm.server.runtime.mcp.registry import (
+                                    rollback_failed_connect,
                                 )
-                                remove_mcp_record(name)
+                                rollback_failed_connect(name)
                             except Exception as rollback_exc:  # noqa: BLE001
                                 logger.warning(
                                     "[mcp] rollback unreachable entry '%s' failed: %s",

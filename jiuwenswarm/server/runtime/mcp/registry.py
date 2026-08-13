@@ -668,12 +668,13 @@ def connect_mcp(name: str, *, install_only: bool = False) -> dict[str, Any]:
             if key in rec:
                 mcp_entry[key] = rec[key]
 
-        return {
-            "name": n,
-            "integration_type": itype,
-            "auth_required": False,
-            "mcp_entry": mcp_entry,
-        }
+        # Return the entry flat (name/integration_type/auth_required merged in)
+        # so the handler can treat it identically to the marketplace path's
+        # build_config_entry result: build_mcp_server_config(entry) and
+        # _mask_sensitive_fields(item) read transport/url/headers at top level.
+        mcp_entry["integration_type"] = itype
+        mcp_entry["auth_required"] = False
+        return mcp_entry
     itype = _detect_integration_type(pkg_dir)
     if itype != "cli":
         entry = build_config_entry(n)
@@ -1222,7 +1223,6 @@ def _set_mcp_enabled(name: str, enabled: bool) -> dict[str, Any]:
     # so enable/disable on it is a KeyError.
     result = set_mcp_enabled(n, enabled)
     action = "enabled" if enabled else "disabled"
-    pkg_dir = _packages_dir() / n
     # Toggle bundled skill visibility for ALL forms that have skills — not
     # just cli/skill-only. remote/stdio MCPs with bundled skills (notion has
     # 4, canva/baidu/qcc/tyc each have one) must also hide their skills when
