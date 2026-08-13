@@ -1910,10 +1910,7 @@ export function SkillPanel({
           <div className="mt-4 flex flex-1 min-h-0 flex-col gap-3">
             <div className="flex flex-none flex-wrap items-center justify-between gap-4 rounded-lg border border-border bg-panel p-4">
               <div className="min-w-[240px] flex-1">
-                <h3 className="text-sm font-medium text-text-strong">
-                  {t('skills.graph.orchestration.title')}
-                </h3>
-                <p className="mt-1 text-xs leading-5 text-text-muted">
+                <p className="text-xs leading-5 text-text-muted">
                   {t('skills.graph.orchestration.description')}
                 </p>
                 {symphonySaveError ? (

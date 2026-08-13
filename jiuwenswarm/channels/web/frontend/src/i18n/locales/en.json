@@ -1653,7 +1653,6 @@
     },
     "graph": {
       "orchestration": {
-        "title": "Skill orchestration",
         "description": "When enabled, JiuwenSwarm builds a skill graph for installed skills and uses it during task execution to automatically select, combine, and orchestrate skills, improving task success rates. Disabling orchestration does not delete the existing skill graph.",
         "saving": "Saving…",
         "saveFailed": "Failed to save the skill orchestration setting. Please try again.",
