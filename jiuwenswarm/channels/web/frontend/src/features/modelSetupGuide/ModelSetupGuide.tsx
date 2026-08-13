@@ -4,13 +4,15 @@ import { useTranslation } from 'react-i18next';
 import { TeamMemberAvatar } from '../../components/TeamMemberAvatar';
 import './ModelSetupGuide.css';
 
-export type ModelSetupGuideStep = 1 | 2;
+export type ModelSetupGuideStep = 0 | 1 | 2;
 
 interface ModelSetupGuideProps {
   step: ModelSetupGuideStep;
   manual: boolean;
   onAcknowledge: () => void;
   onSkip: () => void;
+  onQuickSetup: () => void;
+  onManualSetup: () => void;
 }
 
 interface SpotlightRect {
@@ -22,7 +24,7 @@ interface SpotlightRect {
   height: number;
 }
 
-const TARGET_SELECTORS: Record<ModelSetupGuideStep, string> = {
+const TARGET_SELECTORS: Record<1 | 2, string> = {
   1: '[data-model-setup-guide-target="more"]',
   2: '#config-group-model_default',
 };
@@ -69,13 +71,17 @@ export function ModelSetupGuide({
   manual,
   onAcknowledge,
   onSkip,
+  onQuickSetup,
+  onManualSetup,
 }: ModelSetupGuideProps) {
   const { t } = useTranslation();
   const [spotlight, setSpotlight] = useState<SpotlightRect | null>(null);
   const acknowledgementRef = useRef<HTMLButtonElement>(null);
   const hasSpotlightTarget = spotlight !== null;
+  const isWelcomeStep = step === 0;
 
   useLayoutEffect(() => {
+    if (isWelcomeStep) return;
     const selector = TARGET_SELECTORS[step];
     let resizeObserver: ResizeObserver | null = null;
     let observedTarget: Element | null = null;
@@ -113,7 +119,7 @@ export function ModelSetupGuide({
   }, [step]);
 
   useLayoutEffect(() => {
-    if (step !== 2 || !hasSpotlightTarget) return;
+    if (isWelcomeStep || step !== 2 || !hasSpotlightTarget) return;
 
     const target = document.querySelector(TARGET_SELECTORS[step]);
     if (!target) return;
@@ -130,6 +136,7 @@ export function ModelSetupGuide({
   }, [hasSpotlightTarget, step]);
 
   useEffect(() => {
+    if (isWelcomeStep) return;
     const target = document.querySelector<HTMLElement>(TARGET_SELECTORS[step]);
     if (!target) return;
 
@@ -183,6 +190,66 @@ export function ModelSetupGuide({
       width,
     };
   }, [spotlight, step]);
+
+  // Welcome step: centered card with config choices, no spotlight
+  if (isWelcomeStep) {
+    return createPortal(
+      <div className="model-setup-guide model-setup-guide--welcome" aria-live="polite">
+        <div className="model-setup-guide__mask" style={{ inset: 0 }} />
+        <section className="model-setup-guide__welcome-card" aria-labelledby="model-setup-guide-title-0">
+          <div className="model-setup-guide__welcome-header">
+            <TeamMemberAvatar member="team_leader" className="model-setup-guide__avatar" alt="" />
+            <div className="model-setup-guide__copy">
+              <h2 id="model-setup-guide-title-0" className="model-setup-guide__title">
+                {t('modelSetupGuide.steps.0.title')}
+              </h2>
+              <p className="model-setup-guide__description">
+                {t('modelSetupGuide.steps.0.description')}
+              </p>
+            </div>
+          </div>
+          <div className="model-setup-guide__choices">
+            <button
+              type="button"
+              className="model-setup-guide__choice model-setup-guide__choice--primary"
+              onClick={onQuickSetup}
+            >
+              <span className="model-setup-guide__choice-title">
+                {t('modelSetupGuide.quickSetup.title')}
+              </span>
+              <span className="model-setup-guide__choice-desc">
+                {t('modelSetupGuide.quickSetup.description')}
+              </span>
+            </button>
+            <button
+              type="button"
+              className="model-setup-guide__choice"
+              onClick={onManualSetup}
+            >
+              <span className="model-setup-guide__choice-title">
+                {t('modelSetupGuide.manualSetup.title')}
+              </span>
+              <span className="model-setup-guide__choice-desc">
+                {t('modelSetupGuide.manualSetup.description')}
+              </span>
+            </button>
+          </div>
+          {manual ? (
+            <button
+              type="button"
+              className="model-setup-guide__skip"
+              onClick={onSkip}
+              aria-label={t('modelSetupGuide.skip')}
+              title={t('modelSetupGuide.skip')}
+            >
+              {t('modelSetupGuide.skip')}
+            </button>
+          ) : null}
+        </section>
+      </div>,
+      document.body
+    );
+  }
 
   if (!spotlight || !calloutStyle) return null;
 

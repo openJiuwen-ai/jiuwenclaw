@@ -29,6 +29,7 @@ parse_dotenv_early("jiuwenswarm-agentserver")
 # --- Now safe to import jiuwenswarm modules ---
 from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.utils import (
+    ensure_default_builtin_skills,
     get_env_file,
     get_root_dir,
     get_user_workspace_dir,
@@ -46,6 +47,9 @@ _old_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
 # Initialize if config doesn't exist, or if legacy workspace exists but new doesn't (migration)
 if not _config_file.exists() or (_old_workspace.exists() and not _new_workspace.exists()):
     prepare_workspace(overwrite=False)
+
+# 幂等地补齐默认内置技能（对已有工作区也生效，新增默认技能时自动安装）
+ensure_default_builtin_skills()
 
 _logging_yaml = get_root_dir() / "config" / "logging.yaml"
 if _logging_yaml.exists():

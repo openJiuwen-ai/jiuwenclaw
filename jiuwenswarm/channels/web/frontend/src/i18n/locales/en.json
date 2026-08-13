@@ -769,6 +769,10 @@
     "skip": "Skip",
     "open": "Setup guide",
     "steps": {
+      "0": {
+        "title": "Welcome to jiuwenswarm",
+        "description": "You have free credits! Choose a way to configure your model service below."
+      },
       "1": {
         "title": "Configure your first model",
         "description": "Model settings are under More, in Configuration."
@@ -777,6 +781,14 @@
         "title": "Complete model configuration",
         "description": "Enter the model name, API URL, API key, and model provider in Default model, then select Save."
       }
+    },
+    "quickSetup": {
+      "title": "Auto-setup Huawei Cloud MaaS",
+      "description": "Guided Huawei Cloud purchase and API configuration"
+    },
+    "manualSetup": {
+      "title": "Manual setup",
+      "description": "Already have an API key, configure manually"
     }
   },
   "config": {

@@ -622,6 +622,7 @@ def _install_default_builtin_skills(
     默认安装的技能：
     - skill-creator: 技能创建助手
     - swarmskill-creator: Swarm技能创建助手
+    - huawei-cloud-maas-setup: 华为云MaaS购买与配置引导
 
     Args:
         builtin_dir: 内置技能目录路径
@@ -630,7 +631,7 @@ def _install_default_builtin_skills(
         cumulative_diff: 累积的文件变更追踪结果
     """
     # 定义默认安装的技能列表
-    default_skills = ["skill-creator", "swarmskill-creator"]
+    default_skills = ["skill-creator", "swarmskill-creator", "huawei-cloud-maas-setup"]
 
     if not builtin_dir.exists() or not builtin_dir.is_dir():
         logger.warning(f"内置技能目录不存在，跳过默认技能安装: {builtin_dir}")
@@ -671,6 +672,47 @@ def _install_default_builtin_skills(
             logger.error(f"安装默认技能失败 {skill_name}: {e}")
 
     # 更新 skills_state.json，记录已安装的技能
+    if installed_skills:
+        _update_skills_state_for_builtin(user_skills_dir, installed_skills)
+
+
+def ensure_default_builtin_skills() -> None:
+    """确保所有默认内置技能已安装到用户技能目录（幂等）。
+
+    与 ``prepare_workspace`` 不同，本函数设计为每次启动都可安全调用：
+    仅复制用户目录中尚不存在的默认技能，已存在的技能不会被覆盖或修改，
+    从而让新增的默认技能在老用户工作区中也能自动补齐。
+    """
+    builtin_dir = get_builtin_skills_dir()
+    user_skills_dir = get_agent_skills_dir()
+
+    if not builtin_dir.exists() or not builtin_dir.is_dir():
+        logger.warning(f"内置技能目录不存在，跳过默认技能补齐: {builtin_dir}")
+        return
+
+    default_skills = ["skill-creator", "swarmskill-creator", "huawei-cloud-maas-setup"]
+
+    user_skills_dir.mkdir(parents=True, exist_ok=True)
+
+    installed_skills = []
+    for skill_name in default_skills:
+        builtin_skill_path = builtin_dir / skill_name
+        user_skill_path = user_skills_dir / skill_name
+
+        if not builtin_skill_path.exists() or not builtin_skill_path.is_dir():
+            logger.warning(f"内置技能不存在，跳过补齐: {skill_name}")
+            continue
+
+        if user_skill_path.exists():
+            continue
+
+        try:
+            shutil.copytree(builtin_skill_path, user_skill_path)
+            logger.info(f"已补齐默认技能: {skill_name}")
+            installed_skills.append(skill_name)
+        except Exception as e:
+            logger.error(f"补齐默认技能失败 {skill_name}: {e}")
+
     if installed_skills:
         _update_skills_state_for_builtin(user_skills_dir, installed_skills)
 

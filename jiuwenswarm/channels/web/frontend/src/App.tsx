@@ -108,8 +108,8 @@ type ChatPanelResizeDrag = {
   startPct: number;
   containerWidth: number;
 };
-const PREVIEW_MODEL_SETUP_GUIDE = import.meta.env.DEV
-  && new URLSearchParams(window.location.search).get('modelSetupGuide') === '1';
+const PREVIEW_MODEL_SETUP_GUIDE =
+  new URLSearchParams(window.location.search).get('modelSetupGuide') === '1';
 
 function isTeamMode(mode: string): boolean {
   return TEAM_SESSION_MODES.has(mode);
@@ -958,7 +958,7 @@ function AppContent() {
         if (shouldPreviewModelSetupGuide() || isSetupGuideEnabled(config.setup_guide_enabled)) {
           setActiveNav('chat');
           setModelSetupGuideManual(false);
-          setModelSetupGuideStep(1);
+          setModelSetupGuideStep(0);
         }
       }
     } catch (error) {
@@ -2179,6 +2179,21 @@ function AppContent() {
     setModelSetupGuideManual(false);
   }, []);
 
+  const quickSetupModelSetupGuide = useCallback(() => {
+    setModelSetupGuideStep(null);
+    setModelSetupGuideManual(false);
+    // 显式指定使用 huawei-cloud-maas-setup skill，避免 agent 自行上网搜索
+    void handleSendMessage(
+      '请使用 huawei-cloud-maas-setup 技能帮我配置华为云 MaaS 服务。'
+      + '先读取该技能的 SKILL.md（位于 skills/huawei-cloud-maas-setup/SKILL.md），'
+      + '严格按照其中的步骤引导我完成购买、获取 API Key 和配置写入，不要自行联网搜索。'
+    );
+  }, [handleSendMessage]);
+
+  const manualSetupModelSetupGuide = useCallback(() => {
+    setModelSetupGuideStep(1);
+  }, []);
+
   const acknowledgeModelSetupGuide = useCallback(() => {
     setModelSetupGuideStep(null);
     setModelSetupGuideManual(false);
@@ -2198,7 +2213,7 @@ function AppContent() {
   const openModelSetupGuide = useCallback(() => {
     setActiveNav('chat');
     setModelSetupGuideManual(true);
-    setModelSetupGuideStep(1);
+    setModelSetupGuideStep(0);
   }, []);
 
   const handleExportShare = useCallback(async () => {
@@ -2315,12 +2330,14 @@ function AppContent() {
         onSetupGuideRequest={openModelSetupGuide}
       />
 
-      {modelSetupGuideStep ? (
+      {modelSetupGuideStep !== null ? (
         <ModelSetupGuide
           step={modelSetupGuideStep}
           manual={modelSetupGuideManual}
           onAcknowledge={acknowledgeModelSetupGuide}
           onSkip={skipModelSetupGuide}
+          onQuickSetup={quickSetupModelSetupGuide}
+          onManualSetup={manualSetupModelSetupGuide}
         />
       ) : null}
 

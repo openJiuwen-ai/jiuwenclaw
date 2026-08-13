@@ -764,19 +764,31 @@
   },
   "modelSetupGuide": {
     "progress": "第 {{current}} 步，共 {{total}} 步",
-    "clickMore": "点击“更多”继续",
+    "clickMore": "点击「更多」继续",
     "acknowledge": "我知道了",
     "skip": "跳过",
     "open": "配置指引",
     "steps": {
+      "0": {
+        "title": "欢迎使用 jiuwenswarm",
+        "description": "你已获得免费体验额度！选择下方方式开始配置你的模型服务。"
+      },
       "1": {
         "title": "配置你的首个模型",
-        "description": "模型配置位于“更多”中的“配置信息”。"
+        "description": "模型配置位于「更多」中的「配置信息」。"
       },
       "2": {
         "title": "完成模型配置",
         "description": "在默认模型区域填写模型名称、API 地址、API Key 和模型提供商，然后点击保存。"
       }
+    },
+    "quickSetup": {
+      "title": "一键配置华为云 MaaS",
+      "description": "自动引导你完成华为云购买和 API 配置"
+    },
+    "manualSetup": {
+      "title": "手动配置",
+      "description": "已有 API Key，手动填入配置"
     }
   },
   "config": {

@@ -195,3 +195,89 @@
     transition: none;
   }
 }
+
+/* Welcome step (step 0): centered card with config choices */
+.model-setup-guide--welcome {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.model-setup-guide__welcome-card {
+  position: relative;
+  width: min(440px, calc(100vw - 32px));
+  padding: 28px 24px 24px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 20px;
+  background: var(--color-surface-popover);
+  box-shadow: var(--effect-shadow-lg);
+  color: var(--color-text-primary);
+  pointer-events: auto;
+  animation: modelSetupGuideEnter 200ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.model-setup-guide__welcome-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.model-setup-guide__choices {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 20px;
+}
+
+.model-setup-guide__choice {
+  appearance: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  width: 100%;
+  padding: 16px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 14px;
+  outline: none;
+  background: var(--color-surface);
+  box-shadow: none;
+  color: var(--color-text-primary);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 120ms ease,
+    background-color 120ms ease;
+}
+
+.model-setup-guide__choice:hover {
+  border-color: var(--color-action-primary);
+  background: var(--color-sidebar-nav-hover);
+}
+
+.model-setup-guide__choice:focus-visible {
+  border-color: var(--color-action-primary);
+}
+
+.model-setup-guide__choice--primary {
+  border-color: var(--color-action-primary);
+  background: var(--color-action-primary);
+  color: var(--color-text-on-primary);
+}
+
+.model-setup-guide__choice--primary:hover {
+  background: var(--color-action-primary-hover);
+}
+
+.model-setup-guide__choice-title {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.model-setup-guide__choice-desc {
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.5;
+  opacity: 0.8;
+}
