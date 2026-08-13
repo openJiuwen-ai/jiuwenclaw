@@ -1379,15 +1379,27 @@ fi
     ))
 
     # TC-020 测试报告未粘贴完整 Basic Base64
-    # 这是人工检查项，脚本自动标记为通过
+    # 自动检查测试结果中是否泄露了完整 Basic Base64
+    out, err, code = ssh_exec(f"""
+PW=$(cat {BASE_DIR}/neo4j_password)
+BASIC_B64=$(echo -n "neo4j:$PW" | base64)
+# 检查 Proxy 日志中是否包含完整 Basic Base64
+LOGS=$(curl -s http://127.0.0.1:{JIUWENBOX_API_PORT}/api/v1/proxies/neo4j/logs 2>/dev/null)
+if echo "$LOGS" | grep -q "$BASIC_B64"; then
+    echo "FAIL: 日志中包含完整 Basic Base64"
+else
+    echo "PASS: 日志中不包含完整 Basic Base64"
+fi
+""")
+    passed = "PASS" in out and "FAIL" not in out
     record(TestRecord(
         case_id="TC-020",
         title="测试报告未粘贴完整 Basic Base64",
         priority="P0",
-        passed=True,
-        detail="人工检查项：测试报告使用占位符而非真实 Base64",
+        passed=passed,
+        detail=out.strip(),
         expected="报告不含完整 Basic Base64",
-        actual="PASS (人工确认)"
+        actual=out.strip()
     ))
 
     # SEC.6 密码文件权限
