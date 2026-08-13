@@ -53,7 +53,10 @@ def main() -> None:
         "--keep",
         nargs="*",
         required=True,
-        help="Verified package-relative script paths, canonical form scripts/.... Pass --keep with no values when none passed.",
+        help=(
+            "Verified package-relative script paths, canonical form scripts/.... "
+            "Pass --keep with no values when none passed."
+        ),
     )
     default_skills_dir = Path(__file__).resolve().parent.parent.parent
     parser.add_argument("--skills-dir", default=str(default_skills_dir))
@@ -68,7 +71,7 @@ def main() -> None:
             keep_rel.add(_relative_script_path(value, script_dir))
         except ValueError as exc:
             logger.error("[finalize_scripts] ERROR: %s", exc)
-            raise SystemExit(2)
+            raise RuntimeError("Invalid script path.") from exc
 
     deleted: list[str] = []
     kept: list[str] = []
