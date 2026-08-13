@@ -153,22 +153,30 @@ async def test_generate_evolution_merge_version_fingerprint_gate(tmp_path, monke
     assert skill_md.read_text(encoding="utf-8").startswith("---")
 
 
-def test_queue_auto_rebuild_respects_auto_save(monkeypatch):
+def test_queue_auto_rebuild_respects_skill_evolution_action(monkeypatch):
     adapter = JiuWenSwarmDeepAdapter()
-    adapter._config_cache = {"react": {"evolution": {"auto_save": False}}}  # pylint: disable=protected-access
+    monkeypatch.setattr(adapter, "_resolve_skill_dirs", lambda: [])
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.agent_adapter.interface_deep.get_evolution_auto_save_enabled",
-        lambda _cfg=None: False,
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep.resolve_skill_evolution_action",
+        lambda skill_name, **_kwargs: "suggest",
     )
     adapter._queue_auto_rebuild_skill("demo-skill")  # pylint: disable=protected-access
     assert adapter._pending_auto_rebuild_skills == []  # pylint: disable=protected-access
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.agent_adapter.interface_deep.get_evolution_auto_save_enabled",
-        lambda _cfg=None: True,
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep.resolve_skill_evolution_action",
+        lambda skill_name, **_kwargs: "auto",
     )
     adapter._queue_auto_rebuild_skill("demo-skill")  # pylint: disable=protected-access
     assert adapter._pending_auto_rebuild_skills == ["demo-skill"]  # pylint: disable=protected-access
+
+    adapter._pending_auto_rebuild_skills.clear()  # pylint: disable=protected-access
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep.resolve_skill_evolution_action",
+        lambda skill_name, **_kwargs: "off",
+    )
+    adapter._queue_auto_rebuild_skill("demo-skill")  # pylint: disable=protected-access
+    assert adapter._pending_auto_rebuild_skills == []  # pylint: disable=protected-access
 
 
 @pytest.mark.anyio
