@@ -66,6 +66,7 @@ S.trust_env = False
 S.proxies = {"http": None, "https": None}
 
 results: List[Dict[str, Any]] = []
+start_time: float = 0.0
 
 
 @dataclass
@@ -2369,11 +2370,11 @@ curl -s -X POST http://127.0.0.1:{JIUWENBOX_API_PORT}/api/v1/sandboxes/$SB_ID/ex
         elif 'Test 4' in line:
             current_section = "4"
         if current_section == "1":
-            sb1_out += line + "\\n"
+            sb1_out += f"{line}\n"
         elif current_section == "2":
-            sb2_out += line + "\\n"
+            sb2_out += f"{line}\n"
         elif current_section == "3":
-            sb3_out += line + "\\n"
+            sb3_out += f"{line}\n"
 
     # TC-SB.1: 检查 Test 1 输出是否包含 Neo4j 成功响应
     sb1_has_row = ('"row":[1]' in sb1_out or '\\"row\\":[1]' in sb1_out or 'row":[1]' in sb1_out 
@@ -2552,7 +2553,7 @@ def main():
     log("=" * 60)
 
     global start_time
-    start_time = time.time()
+    start_time = time.time()  # noqa: PLW0603
 
     # 执行各阶段
     phase1_env_check()
