@@ -31,6 +31,7 @@ import { createMemoryCommand } from "./builtins/memory.js";
 import { createPluginCommand } from "./builtins/plugin.js";
 import { createReloadPluginsCommand } from "./builtins/reload-plugins.js";
 import { createModeCommand } from "./builtins/mode.js";
+import { createNewCommand } from "./builtins/new.js";
 import { createPermissionsCommand } from "./builtins/permissions.js";
 import { createPlanCommand } from "./builtins/plan.js";
 import { createResumeCommand } from "./builtins/resume.js";
@@ -105,6 +106,7 @@ export function createBuiltinCommands(options: BuiltinCommandsOptions = {}): Sla
     createModelCommand(),
     createMcpCommand(),
     createModeCommand(),
+    createNewCommand(),
     createPermissionsCommand(),
     createPlanCommand(),
     createResumeCommand(),
