@@ -216,9 +216,26 @@ def build_member_rails(
 
     try:
         if role != "leader":
-            rail = TaskPlanningRail()
+            from openjiuwen.harness.rails.task_planning_rail import (
+                resolve_task_planning_rail_kwargs,
+            )
+
+            # Prefer team_workspace.config (full or react section); else global config.
+            full_cfg = config if isinstance(config, dict) else get_config()
+            react_cfg = (
+                full_cfg.get("react")
+                if isinstance(full_cfg.get("react"), dict)
+                else full_cfg
+            )
+            rail_kwargs = resolve_task_planning_rail_kwargs(react_cfg)
+            rail = TaskPlanningRail(**rail_kwargs)
             rails_list.append(rail)
-            logger.info("[TeamRuntime] TaskPlanningRail created")
+            logger.info(
+                "[TeamRuntime] TaskPlanningRail created "
+                "enable_progress_repeat=%s list_tool_call_interval=%s",
+                rail.enable_progress_repeat,
+                rail.list_tool_call_interval,
+            )
     except Exception as exc:
         logger.warning("[TeamRuntime] TaskPlanningRail failed: %s", exc)
 
