@@ -596,6 +596,8 @@ _SKILL_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.SKILLS_INSTALL: "handle_skills_install",
     ReqMethod.SKILLS_UNINSTALL: "handle_skills_uninstall",
     ReqMethod.SKILLS_IMPORT_LOCAL: "handle_skills_import_local",
+    ReqMethod.SKILLS_IMPORT_UPLOAD: "handle_skills_import_upload",
+    ReqMethod.SKILLS_CREATE_FROM_KNOWLEDGE: "handle_skills_create_from_knowledge",
     ReqMethod.SKILLS_MARKETPLACE_ADD: "handle_skills_marketplace_add",
     ReqMethod.SKILLS_MARKETPLACE_REMOVE: "handle_skills_marketplace_remove",
     ReqMethod.SKILLS_MARKETPLACE_TOGGLE: "handle_skills_marketplace_toggle",
@@ -1562,6 +1564,7 @@ class JiuWenSwarm:
             _reload_after_skills = handler_name in [
                 "handle_skills_install",
                 "handle_skills_import_local",
+                "handle_skills_import_upload",
                 "handle_skills_toggle",
                 "handle_skills_skillnet_install",
                 "handle_skills_clawhub_download",
@@ -1604,6 +1607,31 @@ class JiuWenSwarm:
                         f"rebuild Agent 失败: {exc}",
                     ) from exc
                 payload = {"success": True}
+            elif (
+                handler_name == "handle_skills_create_from_knowledge"
+                and isinstance(payload, dict)
+                and payload.get("result_type") == "followup"
+                and payload.get("success")
+            ):
+                try:
+                    payload = await self._run_skills_create_from_knowledge_silent(
+                        request, payload
+                    )
+                except SkillRpcError:
+                    raise
+                except Exception as exc:
+                    logger.exception(
+                        "[JiuWenSwarm] skills.create_from_knowledge 静默 Agent 失败: "
+                        "request_id=%s",
+                        request.request_id,
+                    )
+                    raise SkillRpcError(
+                        "SKILL_INVALID_PACKAGE",
+                        f"知识转 Skill 失败: {exc}",
+                    ) from exc
+                if payload.get("success"):
+                    await self.create_instance()
+                    self._refresh_team_shared_skill_links(request.session_id)
         except Exception as exc:
             logger.error("[JiuWenSwarm] skills 请求处理失败: %s", exc)
             err_payload: dict = {"error": str(exc), "message": str(exc)}
@@ -1726,6 +1754,87 @@ class JiuWenSwarm:
                             shutil.copy2(child, dest)
                 finally:
                     shutil.rmtree(workspace_backup, ignore_errors=True)
+
+    async def _run_skills_create_from_knowledge_silent(
+        self,
+        request: AgentRequest,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """静默执行知识转 Skill：隔离临时目录生成 → 校验 → 安装到 workspace."""
+        followup = str(payload.get("followup_prompt") or "").strip()
+        output_dir = str(payload.get("output_dir") or "").strip()
+        if not followup or not output_dir:
+            raise SkillRpcError(
+                "SKILL_INVALID_PACKAGE",
+                "create-from-knowledge follow-up 参数不完整",
+            )
+
+        skills_raw = payload.get("skills")
+        skills: list[str] = []
+        if isinstance(skills_raw, list):
+            skills = [str(s).strip() for s in skills_raw if str(s).strip()]
+
+        trusted_dirs: list[str] = []
+        raw_trusted = payload.get("trusted_dirs")
+        if isinstance(raw_trusted, list):
+            trusted_dirs = [str(d).strip() for d in raw_trusted if str(d).strip()]
+
+        try:
+            params = dict(request.params) if isinstance(request.params, dict) else {}
+            params["query"] = followup
+            params["log_as_user"] = False
+            params.setdefault("mode", params.get("mode") or "agent")
+            params["skills"] = skills
+            if trusted_dirs:
+                params["trusted_dirs"] = trusted_dirs
+            input_file = str(payload.get("input_file") or "").strip()
+            if input_file:
+                params["files"] = {
+                    "uploaded_documents": [
+                        {"path": input_file, "filename": Path(input_file).name}
+                    ]
+                }
+            param_metadata = params.get("metadata") if isinstance(params.get("metadata"), dict) else {}
+            params["metadata"] = {
+                **param_metadata,
+                "scene": "create_skill",
+            }
+
+            metadata = dict(request.metadata) if isinstance(request.metadata, dict) else {}
+            metadata["skills_create_from_knowledge_silent"] = True
+            metadata["scene"] = "create_skill"
+
+            knowledge_session_id = f"skills-knowledge:{request.request_id}"
+            chat_request = AgentRequest(
+                request_id=f"{request.request_id}-knowledge-followup",
+                channel_id=request.channel_id,
+                session_id=knowledge_session_id,
+                chat_id=request.chat_id,
+                req_method=ReqMethod.CHAT_SEND,
+                params=params,
+                is_stream=True,
+                timestamp=request.timestamp,
+                metadata=metadata,
+            )
+            adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(chat_request))
+            inputs, _, _ = self._build_inputs(chat_request)
+            async for _chunk in adapter.process_message_stream_impl(chat_request, inputs):
+                pass
+
+            result = self._skill_manager.finalize_create_from_knowledge(output_dir)
+            await self._refresh_skill_rails_after_change()
+            return result
+        finally:
+            shutil.rmtree(output_dir, ignore_errors=True)
+            input_file = str(payload.get("input_file") or "").strip()
+            # 输入文件由 HTTP 层写入临时目录时可一并清理；仅删除我们认识的临时上传前缀
+            if input_file:
+                try:
+                    p = Path(input_file)
+                    if p.is_file() and "jiuwenswarm_knowledge_upload_" in str(p.parent):
+                        shutil.rmtree(p.parent, ignore_errors=True)
+                except OSError:
+                    pass
 
     async def _handle_plugins_request(self, request: AgentRequest) -> AgentResponse | None:
         """处理 Plugin 相关请求，返回 None 表示不是 Plugin 请求."""

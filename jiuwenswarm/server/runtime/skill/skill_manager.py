@@ -77,6 +77,15 @@ ERROR_SKILL_IMPORT_OVERWRITE_REQUIRED = "SKILL_IMPORT_OVERWRITE_REQUIRED"
 ERROR_SKILL_BUILTIN_READ_ONLY = "SKILL_BUILTIN_READ_ONLY"
 ERROR_SKILL_ALREADY_EXISTS = "SKILL_ALREADY_EXISTS"
 ERROR_SKILL_UNSAFE_PATH = "SKILL_UNSAFE_PATH"
+ERROR_SKILL_FILE_TOO_LARGE = "SKILL_FILE_TOO_LARGE"
+ERROR_SKILL_KNOWLEDGE_INPUT_CONFLICT = "SKILL_KNOWLEDGE_INPUT_CONFLICT"
+
+# ZIP 解包配额（防 zip bomb）
+_SKILL_ZIP_MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+_SKILL_ZIP_MAX_TOTAL_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
+_SKILL_ZIP_MAX_FILE_COUNT = 5000
+_SKILL_ZIP_MAX_SINGLE_FILE_BYTES = 32 * 1024 * 1024
+_SKILL_ZIP_MAX_PATH_DEPTH = 20
 
 
 class SkillRpcError(Exception):
@@ -3355,6 +3364,8 @@ class SkillManager:
                 ERROR_SKILL_INVALID_PACKAGE,
                 "不是有效的 Skill zip/.skill 包",
             ) from exc
+        except SkillRpcError:
+            raise
         except Exception as exc:
             msg = str(exc)
             lower = msg.lower()
@@ -3372,6 +3383,171 @@ class SkillManager:
             )
         self._assert_skill_package_safe(skill_dir)
         return skill_dir
+
+    async def handle_skills_import_upload(self, params: dict) -> dict:
+        """浏览器上传的本地 ``.zip`` Skill 包安装到 workspace.
+
+        仅接受 ``.zip``；``overwrite=false`` 且同名已存在时返回 ``SKILL_ALREADY_EXISTS``。
+        """
+        params = params or {}
+        path_str = str(params.get("path") or "").strip()
+        overwrite = bool(params.get("overwrite", False))
+        if not path_str:
+            raise SkillRpcError(ERROR_SKILL_INVALID_PACKAGE, "缺少上传文件 path")
+
+        src = Path(path_str)
+        try:
+            src = src.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise SkillRpcError(
+                ERROR_SKILL_INVALID_PACKAGE,
+                f"上传文件不存在: {path_str}",
+            ) from exc
+
+        if not src.is_file():
+            raise SkillRpcError(ERROR_SKILL_INVALID_PACKAGE, "上传内容不是文件")
+        name_lower = src.name.lower()
+        if name_lower.endswith(".skill") or name_lower.endswith(".skill.zip"):
+            raise SkillRpcError(
+                ERROR_SKILL_INVALID_PACKAGE,
+                "仅接受 .zip 文件",
+            )
+        if not name_lower.endswith(".zip"):
+            raise SkillRpcError(
+                ERROR_SKILL_INVALID_PACKAGE,
+                "仅接受 .zip 文件",
+            )
+
+        size = src.stat().st_size
+        if size > _SKILL_ZIP_MAX_UPLOAD_BYTES:
+            raise SkillRpcError(
+                ERROR_SKILL_FILE_TOO_LARGE,
+                f"上传包超过限制（{_SKILL_ZIP_MAX_UPLOAD_BYTES} 字节）",
+            )
+
+        with tempfile.TemporaryDirectory(prefix="jiuwenswarm_import_upload_") as tmpdir:
+            try:
+                skill_dir = self._extract_skill_package_file(src, Path(tmpdir))
+            except SkillRpcError:
+                raise
+            except Exception as exc:
+                logger.warning("[SkillManager] upload package extract failed: %s", exc)
+                raise SkillRpcError(
+                    ERROR_SKILL_INVALID_PACKAGE,
+                    f"解包失败: {exc}",
+                ) from exc
+            return self._install_imported_skill_dir(
+                skill_dir,
+                force=overwrite,
+                origin="file-api:upload",
+                conflict_code=ERROR_SKILL_ALREADY_EXISTS,
+            )
+
+    async def handle_skills_create_from_knowledge(self, params: dict) -> dict:
+        """知识转 Skill：校验输入并准备隔离临时目录与 Agent follow-up.
+
+        由上层静默跑主 Agent 后，再调用 ``_finalize_create_from_knowledge`` 安装。
+        """
+        params = params or {}
+        link = str(params.get("link") or "").strip()
+        file_path = str(params.get("file_path") or "").strip()
+        skill_description = str(params.get("skill_description") or "").strip()
+
+        has_link = bool(link)
+        has_file = bool(file_path)
+        if has_link == has_file:
+            raise SkillRpcError(
+                ERROR_SKILL_KNOWLEDGE_INPUT_CONFLICT,
+                "link 与 file 必须且只能提供一个",
+            )
+
+        if has_file:
+            src = Path(file_path)
+            try:
+                src = src.resolve(strict=True)
+            except (OSError, RuntimeError) as exc:
+                raise SkillRpcError(
+                    ERROR_SKILL_INVALID_PACKAGE,
+                    f"知识文档不存在: {file_path}",
+                ) from exc
+            if not src.is_file():
+                raise SkillRpcError(ERROR_SKILL_INVALID_PACKAGE, "知识文档不是文件")
+            size = src.stat().st_size
+            if size > _SKILL_ZIP_MAX_UPLOAD_BYTES:
+                raise SkillRpcError(
+                    ERROR_SKILL_FILE_TOO_LARGE,
+                    f"知识文档超过限制（{_SKILL_ZIP_MAX_UPLOAD_BYTES} 字节）",
+                )
+            file_path = str(src)
+
+        output_dir = Path(tempfile.mkdtemp(prefix="jiuwenswarm_skill_from_knowledge_"))
+        skills = ["skill-omni-creation"] if has_link else ["skill-creator-router"]
+        prompt_parts = [
+            "请根据以下知识来源生成一个完整、可安装的 Skill，并写入指定输出目录。",
+            f"输出目录（必须在此目录内生成含 SKILL.md 的 Skill 根目录）: {output_dir}",
+            "要求：",
+            "1. SKILL.md 必须含有效 YAML front matter，name 与 description 均为非空字符串；",
+            "2. 不得创建根级 .archive/；",
+            "3. 不要调用 send_file_to_user；不要打包投递给用户；直接把完整 Skill 目录写到输出目录；",
+            "4. 生成后确保输出目录内可唯一定位 Skill 根目录。",
+        ]
+        if skill_description:
+            prompt_parts.append(
+                f"用户对目标 Skill 的补充约束（不得当作 Skill 名称直接使用）: {skill_description}"
+            )
+        if has_link:
+            prompt_parts.append(f"知识来源链接: {link}")
+        else:
+            prompt_parts.append(f"知识来源本地文档绝对路径: {file_path}")
+
+        return {
+            "success": True,
+            "result_type": "followup",
+            "action": "run_create_from_knowledge",
+            "followup_prompt": "\n".join(prompt_parts),
+            "skills": skills,
+            "output_dir": str(output_dir),
+            "input_file": file_path if has_file else "",
+            "link": link if has_link else "",
+            "skill_description": skill_description,
+            "trusted_dirs": [str(output_dir)]
+            + ([str(Path(file_path).parent)] if has_file else []),
+        }
+
+    def finalize_create_from_knowledge(self, output_dir: str | Path) -> dict[str, Any]:
+        """校验隔离目录中的生成结果并安装到 workspace（不覆盖已有同名 Skill）."""
+        root = Path(output_dir)
+        if not root.is_dir():
+            raise SkillRpcError(
+                ERROR_SKILL_INVALID_PACKAGE,
+                "知识转 Skill 输出目录不存在",
+            )
+        skill_dir = self._locate_skill_dir(root)
+        if skill_dir is None:
+            raise SkillRpcError(
+                ERROR_SKILL_INVALID_PACKAGE,
+                "未在输出目录找到有效 Skill（缺少 SKILL.md）",
+            )
+        self._assert_skill_package_safe(skill_dir)
+        installed = self._install_imported_skill_dir(
+            skill_dir,
+            force=False,
+            origin="file-api:create-from-knowledge",
+            conflict_code=ERROR_SKILL_ALREADY_EXISTS,
+        )
+        if not installed.get("success"):
+            return installed
+        skill = dict(installed.get("skill") or {})
+        workspace_path = str(skill.get("workspace_path") or "")
+        content = ""
+        if workspace_path:
+            md = Path(workspace_path) / "SKILL.md"
+            if md.is_file():
+                content = md.read_text(encoding="utf-8")
+        skill["content"] = content
+        skill["version"] = None
+        skill["source"] = "local"
+        return {"success": True, "skill": skill}
 
     def _assert_skill_package_safe(
         self,
@@ -3420,6 +3596,7 @@ class SkillManager:
         force: bool,
         origin: str,
         source_trusted: bool = False,
+        conflict_code: str = ERROR_SKILL_IMPORT_OVERWRITE_REQUIRED,
     ) -> dict[str, Any]:
         """把已校验的 Skill 目录安装到 workspace，并返回约定的 skill 字段."""
         meta = self._assert_skill_package_safe(src, source_trusted=source_trusted)
@@ -3443,8 +3620,8 @@ class SkillManager:
                 )
             if not force:
                 raise SkillRpcError(
-                    ERROR_SKILL_IMPORT_OVERWRITE_REQUIRED,
-                    f"skill {skill_name} 已存在，需确认覆盖（force=true）",
+                    conflict_code or ERROR_SKILL_IMPORT_OVERWRITE_REQUIRED,
+                    f"skill {skill_name} 已存在，需确认覆盖",
                 )
             preserved_source = self._resolve_display_source_for_import(skill_name)
             try:
@@ -5369,7 +5546,12 @@ class SkillManager:
 
     @staticmethod
     def _safe_extract_zip_members_into(zf: zipfile.ZipFile, dest_root: Path) -> None:
-        """将已打开的 ZIP 成员解压到 dest_root（须为 resolve() 后的目录），拒绝 Zip Slip。"""
+        """将已打开的 ZIP 成员解压到 dest_root（须为 resolve() 后的目录），拒绝 Zip Slip。
+
+        同时限制解包总大小、文件数量、单文件大小和目录深度。
+        """
+        file_count = 0
+        total_uncompressed = 0
         for info in zf.infolist():
             raw = (info.filename or "").replace("\\", "/")
             if not raw or raw.startswith("/"):
@@ -5383,6 +5565,11 @@ class SkillManager:
             rel = PurePosixPath(rel_str)
             if rel.is_absolute() or ".." in rel.parts:
                 raise RuntimeError("ZIP 包含非法路径")
+            if len(rel.parts) > _SKILL_ZIP_MAX_PATH_DEPTH:
+                raise SkillRpcError(
+                    ERROR_SKILL_FILE_TOO_LARGE,
+                    f"ZIP 目录深度超过限制（{_SKILL_ZIP_MAX_PATH_DEPTH}）",
+                )
             dest_path = dest_root.joinpath(*rel.parts)
             try:
                 dest_path = dest_path.resolve()
@@ -5392,9 +5579,38 @@ class SkillManager:
             if is_dir:
                 dest_path.mkdir(parents=True, exist_ok=True)
                 continue
+            file_count += 1
+            if file_count > _SKILL_ZIP_MAX_FILE_COUNT:
+                raise SkillRpcError(
+                    ERROR_SKILL_FILE_TOO_LARGE,
+                    f"ZIP 文件数量超过限制（{_SKILL_ZIP_MAX_FILE_COUNT}）",
+                )
+            declared = int(getattr(info, "file_size", 0) or 0)
+            if declared > _SKILL_ZIP_MAX_SINGLE_FILE_BYTES:
+                raise SkillRpcError(
+                    ERROR_SKILL_FILE_TOO_LARGE,
+                    f"ZIP 单文件超过限制（{_SKILL_ZIP_MAX_SINGLE_FILE_BYTES} 字节）",
+                )
+            if total_uncompressed + max(declared, 0) > _SKILL_ZIP_MAX_TOTAL_UNCOMPRESSED_BYTES:
+                raise SkillRpcError(
+                    ERROR_SKILL_FILE_TOO_LARGE,
+                    f"ZIP 解包总大小超过限制（{_SKILL_ZIP_MAX_TOTAL_UNCOMPRESSED_BYTES} 字节）",
+                )
             dest_path.parent.mkdir(parents=True, exist_ok=True)
             with zf.open(info, "r") as src:
-                dest_path.write_bytes(src.read())
+                data = src.read(_SKILL_ZIP_MAX_SINGLE_FILE_BYTES + 1)
+            if len(data) > _SKILL_ZIP_MAX_SINGLE_FILE_BYTES:
+                raise SkillRpcError(
+                    ERROR_SKILL_FILE_TOO_LARGE,
+                    f"ZIP 单文件超过限制（{_SKILL_ZIP_MAX_SINGLE_FILE_BYTES} 字节）",
+                )
+            total_uncompressed += len(data)
+            if total_uncompressed > _SKILL_ZIP_MAX_TOTAL_UNCOMPRESSED_BYTES:
+                raise SkillRpcError(
+                    ERROR_SKILL_FILE_TOO_LARGE,
+                    f"ZIP 解包总大小超过限制（{_SKILL_ZIP_MAX_TOTAL_UNCOMPRESSED_BYTES} 字节）",
+                )
+            dest_path.write_bytes(data)
 
     @staticmethod
     def _safe_extract_zip_bytes_to_dir(data: bytes, dest_dir: Path) -> None:

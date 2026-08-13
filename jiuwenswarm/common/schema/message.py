@@ -121,6 +121,8 @@ class ReqMethod(Enum):
     SKILLS_VISIBILITY_UPDATE = "skills.visibility.update"
     SKILLS_INSTALL = "skills.install"
     SKILLS_IMPORT_LOCAL = "skills.import_local"
+    SKILLS_IMPORT_UPLOAD = "skills.import_upload"
+    SKILLS_CREATE_FROM_KNOWLEDGE = "skills.create_from_knowledge"
     SKILLS_MARKETPLACE_ADD = "skills.marketplace.add"
     SKILLS_MARKETPLACE_REMOVE = "skills.marketplace.remove"
     SKILLS_MARKETPLACE_TOGGLE = "skills.marketplace.toggle"
