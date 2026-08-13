@@ -178,18 +178,40 @@ def _python_fastpath_enabled() -> bool:
 
 
 def _python_fastpath_candidate(command: list[str]) -> bool:
-    """Whether ``command`` is the simple ``python3 -c CODE`` fast-path shape.
+    """Whether ``command`` may be worth offering to the in-sandbox fast path.
 
-    Narrow, explicit trigger only (applied solely when the
-    feature flag is on); it is not a general auto-detector of arbitrary
-    Python invocations.
+    Narrow, explicit trigger only (applied solely when the feature flag is
+    on); it is not a general auto-detector of arbitrary Python invocations.
+
+    This is a cheap *pre-filter*, not the decision. The authoritative
+    eligibility check runs inside the sandbox daemon (``_fastpath_plan``),
+    which is the only side that can see the filesystem the script and its
+    imports live on. Marking a request merely lets the daemon consider it;
+    the daemon still falls back on anything it does not fully understand.
+
+    Recognised shapes (Phase 6B):
+      * ``python3 [flags] -c CODE``                    (as released)
+      * ``python|python3 <script>.py [args]``          (direct script)
+      * ``bash -lc|-c '<small payload>'``              (real EDPA wrapper)
     """
-    if not command or command[0] != PYTHON_EXECUTABLE:
+    if not command:
         return False
-    for i, tok in enumerate(command[:-1]):
-        if tok == "-c":
-            return i + 1 < len(command)
+    head = command[0]
+    if head in (PYTHON_EXECUTABLE, "python"):
+        if len(command) < 2:
+            return False
+        for i, tok in enumerate(command[:-1]):
+            if tok == "-c":
+                return head == PYTHON_EXECUTABLE and i + 1 < len(command)
+        # Direct script form: first token after the interpreter is a .py file.
+        return not command[1].startswith("-") and command[1].endswith(".py")
+    if head == "bash" and len(command) == 3 and command[1] in ("-lc", "-c"):
+        # Only bother the daemon when the payload mentions a Python
+        # interpreter at all; the daemon does the strict recognition.
+        payload = command[2]
+        return "python" in payload and len(payload) <= 4096
     return False
+
 
 # Per-sandbox control socket: box-server ``bind()``s a Unix socket on its
 # own host filesystem inside a per-sandbox control directory, then passes

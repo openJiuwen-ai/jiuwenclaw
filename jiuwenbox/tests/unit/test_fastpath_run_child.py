@@ -152,3 +152,48 @@ def test_timeout_returns_124_and_kills_child():
     code = "import time; time.sleep(30)"
     exit_code, out, err = _run_child(ns, code, timeout=1.0)
     assert exit_code == 124
+
+
+@_SKIP_NON_POSIX
+def test_timeout_stderr_carries_the_same_marker_as_the_normal_path():
+    """A deadline kill must be distinguishable from a script exiting 124.
+
+    The normal ``subprocess`` path appends ``Command timed out`` to stderr on
+    ``TimeoutExpired``. box-server forwards only exit_code/stdout/stderr, so
+    without this marker a fast-path timeout is indistinguishable from a script
+    that called ``sys.exit(124)`` -- an observable behaviour difference between
+    the two paths for the same command.
+    """
+    ns = _load_worker_ns()
+    exit_code, out, err = _run_child(ns, "import time; time.sleep(30)",
+                                     timeout=1.0)
+    assert exit_code == 124
+    assert err == b"Command timed out", f"got {err!r}"
+
+
+@_SKIP_NON_POSIX
+def test_timeout_marker_is_appended_after_partial_stderr():
+    """Output written before the deadline must survive, marker appended last.
+
+    The blank line is not incidental: the normal path builds
+    ``f"{stderr_text}\\nCommand timed out"``, and a script's stderr usually
+    already ends in a newline, so it too emits ``partial\\n\\nCommand timed
+    out``. Byte-for-byte sameness with that path is the property under test.
+    """
+    ns = _load_worker_ns()
+    code = ("import sys, time\n"
+            "sys.stderr.write('partial\\n'); sys.stderr.flush()\n"
+            "time.sleep(30)\n")
+    exit_code, out, err = _run_child(ns, code, timeout=1.5)
+    assert exit_code == 124
+    assert err == b"partial\n\nCommand timed out", f"got {err!r}"
+
+
+@_SKIP_NON_POSIX
+def test_script_exiting_124_gets_no_timeout_marker():
+    """The marker must mean "deadline", not merely "exit code 124"."""
+    ns = _load_worker_ns()
+    exit_code, out, err = _run_child(ns, "import sys; sys.exit(124)",
+                                     timeout=10.0)
+    assert exit_code == 124
+    assert b"Command timed out" not in err, f"got {err!r}"

@@ -415,13 +415,366 @@ def _fastpath_idle_timeout() -> float:
     return FASTPATH_DEFAULT_IDLE_TIMEOUT
 
 
+# ---------------------------------------------------------------------------
+# Phase 6B (POC): direct-script and EDPA-wrapper eligibility.
+#
+# Real EDPA traffic never reaches the daemon as ``python3 -c``. The upstream
+# provider hard-codes ``["bash", "-lc", command]``, and 99.93% of those
+# payloads are the single shape ``cd <dir> && python <file>.py [args]``. This
+# block recognises exactly that shape (plus the direct ``python <file>.py``
+# form) and nothing else.
+#
+# This is deliberately NOT a shell parser. It is a strict recogniser with an
+# allowlisted character set: anything it does not positively understand -
+# pipes, redirects, ``;``, command substitution, globs, variable expansion,
+# escapes, env prefixes, extra commands after the interpreter - is rejected
+# and the request takes the normal ``subprocess.Popen`` path. The governing
+# rule for this phase is "rather miss a hit than convert one wrongly".
+FASTPATH_SCRIPT_ENV = "JIUWENBOX_PYTHON_FASTPATH_SCRIPT"
+
+# Unquoted words may only contain these characters. Every shell metacharacter
+# is absent by construction, so a word that tokenises is a literal.
+_FASTPATH_SAFE_WORD_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyz"
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "0123456789"
+    "._-/=+:,@%"
+)
+# Only these bare interpreter names are recognised. A path (``/usr/bin/python``)
+# or a versioned name is not accepted: it would have to be identity-checked
+# against the worker interpreter, which is out of scope for this POC.
+_FASTPATH_INTERP_NAMES = frozenset(("python", "python3"))
+# Env vars a login shell is allowed to introduce/change. Anything else means
+# the sandbox image has profile scripts with real side effects, and the
+# wrapper form is then not equivalent to running the script directly.
+_FASTPATH_LOGIN_ENV_ALLOWED = frozenset(("PWD", "OLDPWD", "SHLVL", "_"))
+# Module names already resident in the interpreter. A script directory that
+# shadows one of these would import differently under a warm fork worker than
+# under a fresh interpreter, so those requests fall back.
+_FASTPATH_RESIDENT_MODULES = frozenset(sys.modules) | frozenset(
+    ("json", "os", "select", "signal", "socket", "struct", "sys", "time",
+     "traceback", "builtins", "base64", "encodings", "codecs", "io", "abc")
+)
+
+_FASTPATH_PROBE_LOCK = threading.Lock()
+_FASTPATH_PROBE_CACHE: dict[str, Any] = {}
+
+
+def _fastpath_script_enabled() -> bool:
+    """Script/wrapper eligibility is a separate opt-in on top of the flag.
+
+    Defaults ON when the fast path itself is on, but can be disabled without
+    turning off the (already released) ``python3 -c`` fast path.
+    """
+    return os.environ.get(FASTPATH_SCRIPT_ENV, "1") == "1"
+
+
+def _fastpath_split_shell(payload: str) -> list[list[str]] | None:
+    """Tokenise a tiny shell payload into ``&&``-separated word lists.
+
+    Returns ``None`` - meaning "not understood, do not touch this" - for
+    anything outside the recognised subset. Single quotes are literal;
+    double quotes reject ``$``, backtick and backslash so no expansion or
+    escape can hide inside them.
+    """
+    segments: list[list[str]] = []
+    words: list[str] = []
+    cur: list[str] = []
+    has_cur = False
+    i = 0
+    n = len(payload)
+    while i < n:
+        ch = payload[i]
+        if ch in " \t":
+            if has_cur:
+                words.append("".join(cur))
+                cur, has_cur = [], False
+            i += 1
+            continue
+        if ch == "'":
+            end = payload.find("'", i + 1)
+            if end == -1:
+                return None
+            cur.append(payload[i + 1:end])
+            has_cur = True
+            i = end + 1
+            continue
+        if ch == '"':
+            j = i + 1
+            buf: list[str] = []
+            while j < n and payload[j] != '"':
+                if payload[j] in '$`\\':
+                    return None
+                buf.append(payload[j])
+                j += 1
+            if j >= n:
+                return None
+            cur.append("".join(buf))
+            has_cur = True
+            i = j + 1
+            continue
+        if ch == "&":
+            # Exactly ``&&`` at top level is a segment separator; a single
+            # ``&`` (background) or anything else is rejected.
+            if i + 1 < n and payload[i + 1] == "&":
+                if has_cur:
+                    words.append("".join(cur))
+                    cur, has_cur = [], False
+                if not words:
+                    return None
+                segments.append(words)
+                words = []
+                i += 2
+                continue
+            return None
+        if ch in _FASTPATH_SAFE_WORD_CHARS:
+            cur.append(ch)
+            has_cur = True
+            i += 1
+            continue
+        # Any other byte (``| ; < > ( ) $ ` * ? ~ [ ] { } ! # \n \\``) means
+        # the payload is outside the recognised subset.
+        return None
+    if has_cur:
+        words.append("".join(cur))
+    if words:
+        segments.append(words)
+    return segments or None
+
+
+def _fastpath_which(name: str) -> str | None:
+    """Resolve a bare interpreter name against PATH (no shutil import)."""
+    path_env = os.environ.get("PATH") or "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+    for directory in path_env.split(os.pathsep):
+        if not directory:
+            continue
+        candidate = os.path.join(directory, name)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def _fastpath_interp_path(name: str) -> str | None:
+    """Resolved path for ``name``, but only if it IS the worker interpreter.
+
+    The fork worker runs the script in its own already-initialised
+    interpreter. If ``python`` on PATH is a different build (python2, a venv,
+    a wrapper script) the fast path would silently run the script under the
+    wrong interpreter, so the request must fall back instead.
+    """
+    with _FASTPATH_PROBE_LOCK:
+        if name in _FASTPATH_PROBE_CACHE:
+            return _FASTPATH_PROBE_CACHE[name]
+    resolved = _fastpath_which(name)
+    verdict: str | None = None
+    if resolved:
+        try:
+            same = os.path.realpath(resolved) == os.path.realpath(sys.executable)
+        except OSError:
+            same = False
+        if same:
+            verdict = resolved
+        else:
+            logger.info(
+                "fastpath: %s resolves to %s which is not the worker "
+                "interpreter (%s); script fastpath disabled for it",
+                name, resolved, sys.executable,
+            )
+    with _FASTPATH_PROBE_LOCK:
+        _FASTPATH_PROBE_CACHE[name] = verdict
+    return verdict
+
+
+def _fastpath_login_env_safe() -> bool:
+    """Whether ``bash -lc`` is env-neutral in this image (probed once).
+
+    The wrapper form runs the script through a *login* shell. If this
+    sandbox image has ``/etc/profile`` or ``profile.d`` scripts that export
+    variables, then ``bash -lc '... python x.py'`` is not equivalent to
+    running the script directly, and the wrapper form must not be converted.
+    """
+    with _FASTPATH_PROBE_LOCK:
+        cached = _FASTPATH_PROBE_CACHE.get("login_env_safe")
+    if cached is not None:
+        return bool(cached)
+
+    safe = False
+    try:
+        probe = subprocess.run(
+            ["bash", "-lc",
+             "exec python3 -c 'import json,os,sys;"
+             "sys.stdout.write(json.dumps(dict(os.environ)))'"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=10,
+        )
+        if probe.returncode == 0:
+            login_env = json.loads(probe.stdout.decode("utf-8", "replace"))
+            base_env = dict(os.environ)
+            # The listener fd var is the daemon's own plumbing. It must be
+            # dropped from BOTH sides: the daemon always has it set, so the
+            # probe shell inherits and re-exports it, and stripping it only
+            # from ``base_env`` would make it a permanent phantom difference
+            # that disables the wrapper fast path in every real deployment.
+            base_env.pop(LISTENER_FD_ENV, None)
+            login_env.pop(LISTENER_FD_ENV, None)
+            diff = {
+                key
+                for key in set(login_env) | set(base_env)
+                if login_env.get(key) != base_env.get(key)
+            }
+            unexpected = diff - _FASTPATH_LOGIN_ENV_ALLOWED
+            safe = not unexpected
+            if unexpected:
+                logger.info(
+                    "fastpath: login shell alters env %s; wrapper fastpath "
+                    "disabled in this image", sorted(unexpected),
+                )
+    except Exception:  # probe must never break exec handling
+        logger.warning("fastpath: login-env probe failed", exc_info=True)
+        safe = False
+
+    with _FASTPATH_PROBE_LOCK:
+        _FASTPATH_PROBE_CACHE["login_env_safe"] = safe
+    return safe
+
+
+def _fastpath_shadow_conflict(script_dir: str) -> bool:
+    """Whether ``script_dir`` shadows a module already loaded in the worker.
+
+    ``python x.py`` puts the script's directory at ``sys.path[0]``, so a
+    local ``json.py`` would win over the stdlib. In a warm fork worker the
+    stdlib module is already in ``sys.modules`` and would win instead - a
+    real semantic difference, so those requests fall back.
+    """
+    try:
+        entries = os.listdir(script_dir)
+    except OSError:
+        return True  # cannot verify -> do not convert
+    for entry in entries:
+        if entry.endswith(".py"):
+            stem = entry[:-3]
+        elif os.path.isfile(os.path.join(script_dir, entry, "__init__.py")):
+            stem = entry
+        else:
+            continue
+        if stem in _FASTPATH_RESIDENT_MODULES:
+            return True
+    return False
+
+
+def _fastpath_script_plan(
+    words: list[str],
+    cwd: str,
+    interp_token: str,
+) -> dict[str, Any] | None:
+    """Build the execution plan for ``<python> <script>.py [args]``."""
+    script_token = words[1]
+    # No interpreter flags: the token right after the interpreter must be the
+    # script itself. ``-c``/``-m``/``-u`` etc. are not this shape.
+    if script_token.startswith("-") or not script_token.endswith(".py"):
+        return None
+    interp_path = _fastpath_interp_path(interp_token)
+    if interp_path is None:
+        return None
+    script_path = script_token
+    if not os.path.isabs(script_path):
+        script_path = os.path.join(cwd, script_path)
+    script_path = os.path.normpath(script_path)
+    script_dir = os.path.dirname(script_path)
+    if _fastpath_shadow_conflict(script_dir):
+        return None
+    return {
+        "mode": "script",
+        "path": script_path,
+        "dir": script_dir,
+        "argv": [script_token] + list(words[2:]),
+        "cwd": cwd,
+        "interp_name": interp_token,
+        "interp_path": interp_path,
+    }
+
+
+def _fastpath_plan(
+    command: list[str],
+    header: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Decide how (or whether) ``command`` can run on the fast path.
+
+    Returns a plan dict for the worker, or ``None`` to fall back.
+    """
+    if not command:
+        return None
+    base_cwd = header.get("workdir") or os.getcwd()
+
+    # --- shape 1: the already-released ``python3 [flags] -c CODE`` ---------
+    if command[0] == "python3":
+        for i, tok in enumerate(command[:-1]):
+            if tok == "-c":
+                if i + 1 < len(command):
+                    return {"mode": "code", "code": command[i + 1]}
+                return None
+        if not _fastpath_script_enabled():
+            return None
+        # --- shape 2: direct ``python3 <script>.py [args]`` ---------------
+        if len(command) >= 2:
+            return _fastpath_script_plan(command, base_cwd, "python3")
+        return None
+
+    if command[0] == "python":
+        if not _fastpath_script_enabled() or len(command) < 2:
+            return None
+        return _fastpath_script_plan(command, base_cwd, "python")
+
+    # --- shape 3: the real EDPA wrapper -----------------------------------
+    #   bash -lc 'cd <dir> && python <script>.py [args]'
+    if command[0] != "bash" or len(command) != 3:
+        return None
+    if command[1] not in ("-lc", "-c"):
+        return None
+    if not _fastpath_script_enabled():
+        return None
+    segments = _fastpath_split_shell(command[2])
+    if segments is None or len(segments) > 2:
+        return None
+
+    cwd = base_cwd
+    if len(segments) == 2:
+        head = segments[0]
+        # The only prefix command understood is a plain ``cd <dir>``.
+        if len(head) != 2 or head[0] != "cd":
+            return None
+        target = head[1]
+        cwd = target if os.path.isabs(target) else os.path.join(base_cwd, target)
+        cwd = os.path.normpath(cwd)
+        if not os.path.isdir(cwd):
+            return None
+    tail = segments[-1]
+    if len(tail) < 2 or tail[0] not in _FASTPATH_INTERP_NAMES:
+        return None
+    # A login shell must be env-neutral before the wrapper can be converted.
+    if command[1] == "-lc" and not _fastpath_login_env_safe():
+        return None
+    plan = _fastpath_script_plan(tail, cwd, tail[0])
+    if plan is None:
+        return None
+    # Reproduce the variables the shell itself would have exported.
+    plan["env_extra"] = {
+        "PWD": cwd,
+        "OLDPWD": base_cwd,
+        "SHLVL": "0",
+        "_": plan["interp_path"],
+    }
+    return plan
+
+
 # Source of the persistent in-sandbox ForkServer worker. Self-contained and
 # stdlib-only. The worker is a single-threaded interpreter; each request
 # ``fork()``s a child that runs the user's ``-c`` code, so the interpreter's
 # already-loaded state (stdlib + site) is shared with the child via copy-on-
 # write instead of paying a full interpreter cold start per exec.
 FORKSERVER_WORKER_SOURCE = r'''
-import json, os, select, signal, socket, struct, sys, time, traceback
+import builtins, json, os, select, signal, socket, struct, sys, time, traceback, types
 
 MARKER = "JIWENBOX_FORK_WORKER"
 
@@ -464,12 +817,105 @@ def _flush_std():
         pass
 
 
-def _run_child(code, stdin_bytes, workdir, env_overrides, timeout, control_fd):
-    """Fork a child that runs ``code``; return (exit_code, stdout, stderr).
+def _exec_script_in_child(plan):
+    """Run ``python <script>.py [args]`` the way CPython itself would.
+
+    Each step mirrors a property measured against the real interpreter on the
+    target image (Phase 6B ground truth):
+
+      * ``sys.argv[0]`` keeps the *token as written* ("p.py"), while
+        ``__file__`` and traceback filenames are the *absolute* path -- these
+        genuinely differ under CPython and scripts observe both.
+      * ``sys.path[0]`` is the script's directory (absolute), which is what
+        makes same-directory imports work.
+      * ``__name__ == "__main__"``, ``__spec__ is None``, ``__package__ is
+        None``, ``__loader__`` is a SourceFileLoader, ``__doc__`` is the
+        script's own docstring -- all as a real ``__main__`` module.
+      * The module object is installed in ``sys.modules["__main__"]`` before
+        execution, so ``sys.modules['__main__'].__file__`` and pickling of
+        ``__main__``-defined classes behave normally.
+      * A missing/unreadable script reproduces CPython's own message and
+        exit status 2, using the interpreter name as invoked.
+
+    ``SystemExit`` and tracebacks propagate to ``_run_child``, which already
+    implements the exit-code and traceback rules.
+    """
+    import importlib.machinery
+    import io
+
+    script_path = plan["path"]
+    interp = plan.get("interp_name") or "python3"
+    try:
+        with io.open_code(script_path) as fh:
+            raw = fh.read()
+    except OSError as exc:
+        # CPython: "python3: can't open file '/abs/x.py': [Errno 2] ..."
+        sys.stderr.write(
+            "%s: can't open file '%s': [Errno %d] %s\n"
+            % (interp, script_path, exc.errno or 0,
+               exc.strerror or "No such file or directory")
+        )
+        _flush_std()
+        os._exit(2)
+
+    if plan.get("env_extra"):
+        os.environ.update(plan["env_extra"])
+
+    sys.argv = list(plan["argv"])
+    # ``sys.path[0]`` is the script's directory. Replace the worker's own
+    # entry rather than inserting, so the child sees exactly one script dir.
+    script_dir = plan["dir"]
+    if sys.path and sys.path[0] in ("", os.getcwd(), script_dir):
+        sys.path[0] = script_dir
+    else:
+        sys.path.insert(0, script_dir)
+
+    main_mod = types.ModuleType("__main__")
+    main_mod.__file__ = script_path
+    main_mod.__loader__ = importlib.machinery.SourceFileLoader(
+        "__main__", script_path)
+    main_mod.__spec__ = None
+    main_mod.__package__ = None
+    main_mod.__builtins__ = builtins
+    sys.modules["__main__"] = main_mod
+
+    try:
+        code_obj = compile(raw, script_path, "exec", dont_inherit=False)
+    except SyntaxError as exc:
+        # CPython prints the offending line + caret with no "Traceback"
+        # header when a *script file* fails to compile, then exits 1.
+        traceback.print_exception(type(exc), exc, None)
+        _flush_std()
+        os._exit(1)
+
+    try:
+        exec(code_obj, main_mod.__dict__)
+    except SystemExit:
+        # Exit-code semantics are shared with the ``-c`` path; let
+        # ``_run_child`` apply them.
+        raise
+    except BaseException as exc:
+        # Print the traceback as CPython would: starting at the script's own
+        # ``<module>`` frame. ``exc.__traceback__`` begins with *this*
+        # function's ``exec`` line, which a real ``python s.py`` never shows,
+        # so drop that one frame before printing.
+        tb = exc.__traceback__
+        traceback.print_exception(
+            type(exc), exc, tb.tb_next if tb is not None else None)
+        _flush_std()
+        os._exit(1)
+
+
+def _run_child(code, stdin_bytes, workdir, env_overrides, timeout, control_fd,
+               plan=None):
+    """Fork a child that runs ``code`` (or a script); return (rc, out, err).
 
     Matches the daemon's sync-exec semantics: child runs in its own session
     (setsid), output is captured separately, and timeout yields exit 124.
     Signal deaths are reported as ``-signum`` (same as ``subprocess``).
+
+    When ``plan`` is given it describes a ``python <script>.py`` execution
+    (Phase 6B) instead of a ``-c`` payload; see ``_exec_script_in_child``.
     """
     r_out, w_out = os.pipe()
     r_err, w_err = os.pipe()
@@ -505,8 +951,11 @@ def _run_child(code, stdin_bytes, workdir, env_overrides, timeout, control_fd):
                     pass
             if env_overrides:
                 os.environ.update(env_overrides)
-            coded = compile(code, "<fastpath>", "exec")
-            exec(coded, {"__name__": "__main__"})
+            if plan:
+                _exec_script_in_child(plan)
+            else:
+                coded = compile(code, "<fastpath>", "exec")
+                exec(coded, {"__name__": "__main__"})
             _flush_std()
             os._exit(0)
         except SystemExit as esc:
@@ -602,6 +1051,13 @@ def _run_child(code, stdin_bytes, workdir, env_overrides, timeout, control_fd):
         pipes_done = stdout_fd == -1 and stderr_fd == -1
         if child_done and pipes_done:
             if timed_out:
+                # Shape stderr exactly like the normal subprocess path's
+                # TimeoutExpired branch. box-server surfaces only
+                # exit_code/stdout/stderr to the caller, so this marker is
+                # the sole observable signal that 124 came from the deadline
+                # rather than from a script that chose to exit(124) itself.
+                marker = b"Command timed out"
+                err = err + b"\n" + marker if err else marker
                 return 124, out, err
             if child_status is None:
                 return 0, out, err
@@ -623,7 +1079,9 @@ def _worker_main(fd_str):
         except Exception:
             break
         code = header.get("code")
-        if not isinstance(code, str):
+        plan = header.get("plan")
+        # Either a ``-c`` payload or a script plan must be present.
+        if not isinstance(code, str) and not isinstance(plan, dict):
             _send_response(sock, {"error": "bad_request"})
             continue
         # The daemon always sends a stdin frame (4-byte length prefix +
@@ -638,6 +1096,7 @@ def _worker_main(fd_str):
                 header.get("env") or {},
                 header.get("timeout"),
                 fd,
+                plan,
             )
             _send_response(sock, {
                 "exit_code": exit_code,
@@ -950,13 +1409,14 @@ class ForkServerPool:
 
     def submit(
         self,
-        code: str,
+        code: str | None,
         stdin_bytes: bytes | None,
         workdir: str | None,
         env_overrides: dict[str, str] | None,
         timeout: float | None,
+        plan: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Send one code payload to a worker and return its JSON response.
+        """Send one code payload or script plan to a worker and return its JSON response.
 
         Raises ``FastPathUnavailable`` (a ``RuntimeError``) when the fast
         path cannot be used, so the caller can fall back to the normal
@@ -972,6 +1432,11 @@ class ForkServerPool:
             "stdin_size": len(stdin_bytes or b""),
             "timeout": timeout,
         }
+        if plan is not None:
+            header["plan"] = plan
+            # A script plan carries its own cwd (post-``cd``); it must win
+            # over the request-level workdir.
+            workdir = plan.get("cwd") or workdir
         if workdir:
             header["workdir"] = workdir
         if env_overrides:
@@ -1080,26 +1545,31 @@ def _try_fastpath_exec(
     header: dict[str, Any],
     stdin_bytes: bytes,
 ) -> bool:
-    """Route a ``python3 -c <code>`` exec to the ForkServer.
+    """Route an eligible exec to the ForkServer.
+
+    Eligible shapes (Phase 6B): ``python3 [flags] -c CODE`` (as released),
+    ``python|python3 <script>.py [args]``, and the real EDPA wrapper
+    ``bash -lc 'cd <dir> && python <script>.py [args]'``. Anything else -
+    including any shell construct the strict recogniser does not fully
+    understand - returns ``False`` and takes the normal path.
 
     Returns ``True`` when a response was sent (fastpath success or timeout),
     ``False`` when the caller should fall back to ``subprocess.Popen``.
     Records fast-path hits / fallback reasons for observability.
     """
-    if not command or command[0] != "python3":
+    try:
+        plan = _fastpath_plan(command, header)
+    except Exception:  # a recogniser bug must never break exec handling
+        logger.warning("fastpath plan failed; falling back", exc_info=True)
+        plan = None
+    if plan is None:
         _FORK_POOL.stats.record_fallback("not_eligible")
         return False
-    # Only the exact ``python3 [-S] [-I] [-E] -c CODE`` shape is eligible;
-    # anything else uses the normal path.
-    exec_index = None
-    for i, tok in enumerate(command[:-1]):
-        if tok == "-c":
-            exec_index = i
-            break
-    if exec_index is None or exec_index + 1 >= len(command):
-        _FORK_POOL.stats.record_fallback("not_eligible")
-        return False
-    source = command[exec_index + 1]
+
+    if plan["mode"] == "code":
+        source, script_plan = plan["code"], None
+    else:
+        source, script_plan = None, plan
 
     try:
         response = _FORK_POOL.submit(
@@ -1108,6 +1578,7 @@ def _try_fastpath_exec(
             header.get("workdir"),
             header.get("env"),
             header.get("timeout"),
+            script_plan,
         )
     except FastPathUnavailable as exc:
         _FORK_POOL.stats.record_fallback(exc.reason)
