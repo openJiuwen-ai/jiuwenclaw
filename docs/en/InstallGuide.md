@@ -4,37 +4,6 @@
 
 ---
 
-## Prerequisites
-
-Before installing JiuwenSwarm, make sure your system meets the following requirements:
-
-| Dependency | Version | Notes |
-|------------|---------|-------|
-| OS | Windows 10/11, macOS 10.15+, Linux | Common desktop OS supported |
-| Python | ≥3.11, below 3.14 | Python 3.11 recommended |
-| Node.js | 18.x or newer | Used for the web UI |
-| Git | Latest | Required for source install |
-
-### Environment check
-
-Run these commands in a terminal:
-
-```bash
-# Check Python
-python --version
-# Expect: Python 3.11.x or Python 3.12.x
-
-# Check Node.js
-node --version
-# Expect: v18.x.x or newer
-
-# Check Git
-git --version
-# Expect: git version 2.x.x
-```
-
----
-
 ## First-time installation
 
 ### Option 1: Desktop installer (dmg / exe)
@@ -70,6 +39,32 @@ On first launch the app creates `~/.jiuwenswarm/`. Then follow [Post-start verif
 ---
 
 ### Option 2: pip install
+
+#### Environment check
+
+The desktop installers already include the Python runtime and front-end static assets, so desktop users do not need to run these checks. This section applies only to pip and source installs; both support Windows 10/11, macOS 10.15+, and Linux.
+
+| Dependency | Version | Applies to | Notes |
+|------------|---------|------------|-------|
+| Python | ≥3.11, below 3.14 | pip and source installs | Python 3.11 recommended |
+| Node.js | 18.x or newer | Source install only | Builds the Web front end; the pip package already includes the static assets |
+| Git | Latest | Source install only | Clones and updates the source tree |
+
+Run the checks that apply to your installation method:
+
+```bash
+# pip and source installs: check Python
+python --version
+# Expect: Python 3.11.x, 3.12.x, or 3.13.x
+
+# Source install only: check Node.js
+node --version
+# Expect: v18.x.x or newer
+
+# Source install only: check Git
+git --version
+# Expect: git version 2.x.x
+```
 
 #### 1. Installation steps
 
@@ -136,6 +131,8 @@ jiuwenswarm-start
 
 #### 1. Environment setup
 
+First complete the Python, Node.js, and Git checks for source installs in [Environment check](#environment-check).
+
 Install **uv** first. If it is not installed, follow the [uv documentation](https://docs.astral.sh/uv/).
 
 ```bash
@@ -160,10 +157,10 @@ uv pip install -e .
 
 #### 3. Build the front end
 
-> ⚠️ **Important:** With a source (editable) install you must build the front end manually, or startup will fail with `dist directory not found`.
+> ⚠️ **Important:** With a source (editable) install you must build the front end manually, or startup will fail with `dist directory not found`. The build output stays at `jiuwenswarm/channels/web/frontend/dist` in the source tree, and the application reads it there directly; do not copy it to `~/.jiuwenswarm/`. The forward-slash paths below work in Windows PowerShell/Command Prompt and macOS/Linux shells.
 
 ```bash
-# Enter front-end directory from the repository root
+# Windows / macOS / Linux: enter the front-end directory from the repository root
 cd jiuwenswarm/channels/web/frontend
 
 # Install front-end dependencies
@@ -172,12 +169,6 @@ npm install
 # Build
 npm run build
 
-# Copy build output into the user workspace
-# Windows:
-xcopy /E /I dist %USERPROFILE%\.jiuwenswarm\channels\web\frontend\dist
-# macOS/Linux:
-cp -r dist ~/.jiuwenswarm/channels/web/frontend/dist
-
 # Back to repo root
 cd ../../../..
 ```
@@ -185,8 +176,8 @@ cd ../../../..
 **Notes:**
 
 - `uv pip install -e .` is an editable install that points at your source tree.
-- `web/dist` is ignored by `.gitignore` and is not shipped in the repo.
-- You must build and copy artifacts to `~/.jiuwenswarm/channels/web/frontend/dist`.
+- `frontend/dist` is ignored by `.gitignore`, so the repository does not contain build output.
+- `jiuwenswarm/channels/web/app_web.py` reads `frontend/dist` directly from the source tree.
 
 #### 4. First launch
 
@@ -219,6 +210,8 @@ jiuwenswarm-start
 ### Option 4: Install from source (conda)
 
 #### 1. Environment setup
+
+First complete the Python, Node.js, and Git checks for source installs in [Environment check](#environment-check).
 
 Install **conda** first. If it is not installed, follow the [Miniconda documentation](https://docs.conda.io/en/latest/miniconda.html).
 
@@ -257,10 +250,10 @@ pip install -e .
 
 #### 4. Build the front end
 
-> ⚠️ **Important:** With a source (editable) install you must build the front end manually, or startup will fail with `dist directory not found`.
+> ⚠️ **Important:** With a source (editable) install you must build the front end manually, or startup will fail with `dist directory not found`. The build output stays at `jiuwenswarm/channels/web/frontend/dist` in the source tree, and the application reads it there directly; do not copy it to `~/.jiuwenswarm/`. The forward-slash paths below work in Windows PowerShell/Command Prompt and macOS/Linux shells.
 
 ```bash
-# Enter front-end directory from the repository root
+# Windows / macOS / Linux: enter the front-end directory from the repository root
 cd jiuwenswarm/channels/web/frontend
 
 # Install front-end dependencies
@@ -269,12 +262,6 @@ npm install
 # Build
 npm run build
 
-# Copy build output into the user workspace
-# Windows:
-xcopy /E /I dist %USERPROFILE%\.jiuwenswarm\channels\web\frontend\dist
-# macOS/Linux:
-cp -r dist ~/.jiuwenswarm/channels/web/frontend/dist
-
 # Back to repo root
 cd ../../../..
 ```
@@ -282,8 +269,8 @@ cd ../../../..
 **Notes:**
 
 - `pip install -e .` is an editable install that points at your source tree.
-- `web/dist` is ignored by `.gitignore` and is not shipped in the repo.
-- You must build and copy artifacts to `~/.jiuwenswarm/channels/web/frontend/dist`.
+- `frontend/dist` is ignored by `.gitignore`, so the repository does not contain build output.
+- `jiuwenswarm/channels/web/app_web.py` reads `frontend/dist` directly from the source tree.
 
 #### 5. First launch
 
@@ -338,18 +325,15 @@ git pull
 
 # Reinstall
 pip install -e .
+```
 
-# Rebuild the front end (if it was updated)
+If the front end changed, rebuild it. Keep the build output in the source tree; do not copy it to the user workspace. The forward-slash paths below work in Windows PowerShell/Command Prompt and macOS/Linux shells.
+
+```bash
+# Windows / macOS / Linux
 cd jiuwenswarm/channels/web/frontend
 npm install
 npm run build
-
-# Copy build output
-# Windows:
-xcopy /E /I dist %USERPROFILE%\.jiuwenswarm\channels\web\frontend\dist
-# macOS/Linux:
-cp -r dist ~/.jiuwenswarm/channels/web/frontend/dist
-
 cd ../../../..
 ```
 
@@ -404,7 +388,7 @@ Follow the same steps as [Routine version upgrade – pip install upgrade](#pip-
 
 ##### Source install upgrade
 
-Follow the same steps as [Routine version upgrade – source install upgrade](#source-install-upgrade) (pull, reinstall, rebuild the front end when needed, and copy `dist` as described there).
+Follow the same steps as [Routine version upgrade – source install upgrade](#source-install-upgrade) (pull, reinstall, and rebuild the front end when needed).
 
 #### 3. Data migration
 
@@ -486,9 +470,9 @@ jiuwenswarm-start
 
 Use Python ≥3.11 and below 3.14. See [Environment check](#environment-check) for details.
 
-### Q: On start I see "Node.js not found"
+### Q: During a source install I see "Node.js not found" or `npm` is unavailable
 
-Install Node.js 18.x or newer. See [Environment check](#environment-check) for details.
+Install Node.js 18.x or newer, then rebuild the front end. The desktop installers and pip package already include the front-end static assets, so normal installation and startup do not require Node.js. See [Environment check](#environment-check) for details.
 
 ### Q: How do I check the installed version?
 
@@ -512,4 +496,4 @@ pip uninstall jiuwenswarm
 
 ---
 
-*Last updated: 2026-08-12*
+*Last updated: 2026-08-13*
