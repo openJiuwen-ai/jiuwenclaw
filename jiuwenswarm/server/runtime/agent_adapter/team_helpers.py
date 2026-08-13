@@ -294,7 +294,7 @@ async def _deliver_followup_interact_across_boundary(
         await asyncio.sleep(sleep_sec)
         if not await _team_session_has_runtime(team_manager, session_id):
             return _FollowupInteractBoundaryResult(success=False, reason=last_reason, first_request_ready=True)
-        success, reason = await team_manager.interact(session_id, query)
+        success, reason = await _interact_payloads(team_manager, session_id, query)
         if success:
             return _FollowupInteractBoundaryResult(success=True, reason=None, first_request_ready=False)
         last_reason = reason
@@ -622,6 +622,58 @@ def _is_member_addressed(text: str) -> bool:
 
     payloads = parse_interact_str(text)
     return bool(payloads) and any(not isinstance(p, GodViewMessage) for p in payloads)
+
+
+_SENDER_ROUTING_RE = re.compile(r"^\s*\$([A-Za-z0-9_.:-]+)\s+")
+_TARGET_ROUTING_RE = re.compile(r"(?<!\S)@([A-Za-z0-9_.:-]+)(?=\s|$)")
+
+
+def _split_multi_member_addressed(text: str) -> list[str]:
+    """Split ``$sender @a body @b body`` into separate routed messages.
+
+    OpenJiuwen's parser treats everything after the first target as that
+    target's body. JiuwenSwarm accepts the compact chat-composer shorthand and
+    expands it before calling ``interact``.
+    """
+    if not isinstance(text, str):
+        return []
+    sender_match = _SENDER_ROUTING_RE.match(text)
+    if not sender_match:
+        return []
+
+    sender = sender_match.group(1)
+    rest = text[sender_match.end():]
+    matches = list(_TARGET_ROUTING_RE.finditer(rest))
+    if len(matches) < 2:
+        return []
+
+    parts: list[str] = []
+    for idx, match in enumerate(matches):
+        target = match.group(1)
+        body_start = match.end()
+        body_end = matches[idx + 1].start() if idx + 1 < len(matches) else len(rest)
+        body = rest[body_start:body_end].strip()
+        if target and body:
+            parts.append(f"${sender} @{target} {body}")
+    return parts if len(parts) >= 2 else []
+
+
+async def _interact_payloads(
+    team_manager: Any,
+    session_id: str,
+    payload: Any,
+) -> tuple[bool, str | None]:
+    payloads = _split_multi_member_addressed(payload) if isinstance(payload, str) else []
+    if not payloads:
+        return await team_manager.interact(session_id, payload)
+
+    last_reason: str | None = None
+    for item in payloads:
+        success, reason = await team_manager.interact(session_id, item)
+        if not success:
+            return False, reason
+        last_reason = reason
+    return True, last_reason
 
 
 def _deliverable(turn: UserTurn, text: Any) -> Any:
@@ -1671,11 +1723,25 @@ async def _start_team_stream_round(
         session_id,
     )
 
+    routed_parts = _split_multi_member_addressed(query) if isinstance(query, str) else []
+    pending_interacts: list[str] = []
+    if routed_parts:
+        query = routed_parts[0]
+        pending_interacts = routed_parts[1:]
+        logger.info(
+            "[TeamHelpers] split first team request into routed messages: "
+            "session_id=%s count=%d",
+            session_id,
+            len(routed_parts),
+        )
+
     stream_envs: dict[str, Any] = {}
     if hide_dm:
         stream_envs["hide_dm"] = True
     if debug:
         stream_envs[_STREAM_TRACE_ENV_KEY] = "1"
+    if pending_interacts:
+        stream_envs["pending_interacts"] = pending_interacts
     round_id = increment_session_round_count(session_id)
     stream_task = asyncio.create_task(
         _consume_stream_with_query(
@@ -1913,7 +1979,7 @@ async def process_team_message_stream(
                 # Follow-up rounds carry their own attachments and context, so
                 # they are rendered exactly like the first one.
                 followup_payload = _deliverable(turn, query)
-                success, reason = await team_manager.interact(session_id, followup_payload)
+                success, reason = await _interact_payloads(team_manager, session_id, followup_payload)
                 if not success:
                     logger.warning(
                         "[TeamHelpers] interact failed: channel_id=%s session_id=%s reason=%s query=%s",
@@ -2224,6 +2290,11 @@ async def _consume_stream_with_query(
     """Consume the team stream in the background and broadcast parsed events."""
     _envs = envs or {}
     hide_dm: bool = bool(_envs.get("hide_dm", False))
+    pending_interacts: list[str] = [
+        item
+        for item in (_envs.get("pending_interacts") or [])
+        if isinstance(item, str) and item.strip()
+    ]
     received_chunks = 0
     first_model_output_at: float | None = None
     emitted_ask_user_request_ids: set[str] = set()
@@ -2231,6 +2302,7 @@ async def _consume_stream_with_query(
     # only emits what is new. See _announce_team_roster.
     announced_members: set[str] = set()
     roster_team_name = str(getattr(team_spec, "team_name", "") or "")
+    pending_interacts_sent = False
     # Reset the team-events flag at the start of a new round so chat.final
     # can correctly determine whether the team is active.
     tm_ = get_team_manager(channel_id)
@@ -2396,6 +2468,19 @@ async def _consume_stream_with_query(
                         roster_team_name,
                         announced_members,
                     )
+                    if pending_interacts and not pending_interacts_sent:
+                        pending_interacts_sent = True
+                        for pending in pending_interacts:
+                            success, reason = await tm.interact(session_id, pending)
+                            if not success:
+                                logger.warning(
+                                    "[TeamHelpers] pending first-request interact failed: "
+                                    "session_id=%s reason=%s payload=%s",
+                                    session_id,
+                                    reason,
+                                    _safe_query_preview(pending),
+                                )
+                                break
                 elif parsed.get("event_type") == "team.interact.failed":
                     reason = str(parsed.get("reason") or "").strip()
                     error_msg = _INTERACT_REASON_ERROR_MAP.get(
