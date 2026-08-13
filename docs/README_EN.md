@@ -15,7 +15,7 @@
 This page collects common JiuwenSwarm usage instructions, feature documentation, and development practices. The content is organized into five sections: **Installation**, **Basic Usage**, **Advanced Operations**, **Appendix**, and **Development Practices**.
 
 * **Installation**: For first-time JiuwenSwarm users, covering basic installation, environment preparation, TUI mode installation, and quick start guidance.
-* **Basic Usage**: Introduces common daily-use entry points, including page overview, conversation, agents, sessions, heartbeat, scheduled tasks, skills, channels, configuration, browser service, logs, and MCP service settings.
+* **Basic Usage**: Introduces common daily-use entry points, including page overview, conversation, agents, sessions, scheduled tasks, skills, channels, configuration, browser service, logs, and MCP service settings.
 * **Advanced Operations**: Covers advanced capabilities and extension mechanisms, including context compression, Skill self-evolution, tool permissions and security, E2A / A2A protocols, multi-agent collaboration, memory systems, and TUI mode.
 * **Appendix**: Provides supplementary materials for project usage and maintenance, including EXE packaging, Windows auto-update design, and developer documentation.
 * **Development Practices**: Collects real Agent application cases built with JiuwenSwarm, helping developers reference existing practices for secondary development and capability extension.
@@ -74,11 +74,6 @@ This page collects common JiuwenSwarm usage instructions, feature documentation,
       <td width="22%"><strong>Session</strong></td>
       <td width="28%"><a href="en/Session.md">Session</a></td>
       <td width="50%">Session information management, viewing and restoring historical chats, and deleting session history.</td>
-    </tr>
-    <tr>
-      <td width="22%"><strong>Heartbeat</strong></td>
-      <td width="28%"><a href="en/Heartbeat.md">Heartbeat</a></td>
-      <td width="50%">Background service keepalive, runtime status checks, and monitoring mechanisms.</td>
     </tr>
     <tr>
       <td width="22%"><strong>Scheduled Tasks</strong></td>
@@ -165,8 +160,8 @@ This page collects common JiuwenSwarm usage instructions, feature documentation,
     </tr>
     <tr>
       <td width="22%"><strong>TUI Mode</strong></td>
-      <td width="28%"><a href="en/SlashCommandArchitecture.md">Slash Command Architecture</a> / <a href="en/SlashCommands.md">Slash Command Reference</a> / <a href="en/Modes.md">Mode System</a></td>
-      <td width="50%">Supports the TUI slash command system, common command reference, and PLAN / AGENT / CODE / TEAM mode switching and configuration.</td>
+      <td width="28%"><a href="en/SlashCommandArchitecture.md">Slash Command Architecture</a> / <a href="en/SlashCommands.md">Slash Command Reference</a> / <a href="en/Modes.md">Mode System</a> / <a href="en/TUISwarmFlowGuide.md">SwarmFlow (TUI)</a></td>
+      <td width="50%">TUI slash commands, PLAN / AGENT / CODE / TEAM mode switching, and SwarmFlow toggle, run-tree viewer, and HITL replies.</td>
     </tr>
     <tr>
       <th colspan="3" align="left" bgcolor="#f3f4f6"><h3>📄 Appendix</h3></th>

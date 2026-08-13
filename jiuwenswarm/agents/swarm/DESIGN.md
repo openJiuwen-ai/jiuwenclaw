@@ -83,7 +83,7 @@ _SUBAGENT_PROVIDER_REGISTRY: dict[str, Callable]  # register_subagent_provider(n
 `BuildContext` 是 **dataclass（非 pydantic）**——Spec→Runtime 边界对象，**不参与 JSON 序列化**。跨序列化边界（spawn / 分布式 / 冷恢复）通过：
 - `register_build_context_factory(factory)`：平台注册「从 seed 重建 context」工厂；
 - `TeamAgentSpec.build_context_seed`：spec 上携带可序列化 seed；
-- 接收侧 `build_context_from_seed(seed)` 用本地句柄（config / registry）重建活 context。
+- 接收侧 `build_context_from_seed(seed)` 用本地句柄（config / trajectory span processor）重建活 context。
 
 ---
 
@@ -98,11 +98,11 @@ _SUBAGENT_PROVIDER_REGISTRY: dict[str, Callable]  # register_subagent_provider(n
 | `project_dir` | str\|None | 请求 | ✅ |
 | `team_id` / `team_ws_root` / `team_skills_dir` / `global_skills_dir` | str | team 工作区 | ✅ |
 | `config` | dict | `get_config()`（config.yaml） | ❌（接收侧本地 `get_config()`） |
-| `trajectory_registry` | Any | 进程内 per-team registry | ❌（接收侧本地重建） |
+| `trajectory_span_processor` | Any | 进程级 trajectory span processor | ❌（接收侧本地注入） |
 | `language` / `member_name` / `role` / `workspace` / `member_card_id` | — | openjiuwen `setup_agent` 经 `derive()` 注入 | per-member 派生 |
 | `extras` | dict | 进程内 side-channel | 运行时句柄（如 `_parent_model` / `_coding_memory_rail`） |
 
-- `to_seed()` / `from_seed(seed, *, config, trajectory_registry)`：序列化只导出原语，`config` / `trajectory_registry` 由接收侧本地注入。
+- `to_seed()` / `from_seed(seed, *, config, trajectory_span_processor)`：序列化只导出原语，`config` / `trajectory_span_processor` 由接收侧本地注入。
 - **`config` 例外说明**：`config` 虽挂在 context 上，但它是 *harness 设定的源*（属性），不是 per-request 环境值。本模块刻意**不让 provider 工厂直接读 `ctx.config` 派生构造参数**——那些属性由 `config_specs` 烘焙进 `params`（见 §6、§7）。`ctx.config` 仅保留给基础设施级用途（如 evolution 热重载 `bind_swarm_context(config=ctx.config)`）。
 
 ---
@@ -229,7 +229,7 @@ _TOOL_PARAM_BUILDERS: dict[name, (config) -> params]   # send_file / code_extra_
 `enrich_team_spec_for_swarm(spec, *, session_id, mode, project_dir, request_id, channel_id, request_metadata)`（就地改写 `spec`）：
 
 1. `register_swarm_providers()`（幂等，把 manifest catalog 驱动注册进 openjiuwen 注册表）；
-2. 用 `get_config()` + 工作区路径 + `InMemoryTrajectoryRegistry` 建 per-team `SwarmBuildContext`；
+2. 用 `get_config()` + 工作区路径 + 进程级 trajectory span processor 建 `SwarmBuildContext`；
 3. 对 `leader` / `teammate` 调 `build_member_deep_agent_spec`，把能力 spec（含烘焙好的 params）折叠到成员 `DeepAgentSpec`；
 4. `spec.build_context = base`；`spec.build_context_seed = base.to_seed()`（跨边界重建）。
 
@@ -366,7 +366,7 @@ SkillUseRail(skills_dir=get_agent_skills_dir(), skill_mode="auto_list", ...)
 
 - `DeepAgentSpec` / `TeamAgentSpec` 全 pydantic，`model_dump_json()` / `model_validate_json()` 完整 round-trip；rails/tools 序列化为 `{type, params}`、subagents 为 `{factory_name, factory_kwargs, ...}`。
 - 属性全在 `params`（含 `evolution_model_config` 等），跨边界自洽——重建侧无需再读 config 即可还原元素设定。
-- 非序列化句柄（`config` / `trajectory_registry` / `extras`）经 `build_context_seed` + `register_build_context_factory` 在接收侧本地重建。
+- 非序列化句柄（`config` / `trajectory_span_processor` / `extras`）经 `build_context_seed` + `register_build_context_factory` 在接收侧本地重建。
 
 ---
 

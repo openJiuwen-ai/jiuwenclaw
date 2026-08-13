@@ -48,8 +48,8 @@ class SwarmBuildContext(BuildContext):
         team_ws_root: Team shared workspace root path.
         team_skills_dir: Team shared skills directory (``team_ws_root/skills``).
         global_skills_dir: Global agent skills directory.
-        trajectory_registry: Per-team in-memory trajectory registry shared by
-            evolution rails.
+        trajectory_span_processor: Process-level trajectory span processor
+            shared by Team evolution rails.
         config: The resolved ``config.yaml`` mapping (``get_config()``).
     """
 
@@ -66,7 +66,7 @@ class SwarmBuildContext(BuildContext):
     team_ws_root: str | None = None
     team_skills_dir: str | None = None
     global_skills_dir: str | None = None
-    trajectory_registry: Any = None
+    trajectory_span_processor: Any = None
     config: dict[str, Any] | None = None
 
     def to_seed(self) -> dict[str, Any]:
@@ -78,7 +78,7 @@ class SwarmBuildContext(BuildContext):
         (``member_name`` / ``role`` / ``language`` / ``workspace`` /
         ``member_card_id``) are intentionally excluded — ``setup_agent`` fills
         them per member through ``derive()``. The live ``config`` and
-        ``trajectory_registry`` are excluded too: the receiver supplies them.
+        ``trajectory_span_processor`` are excluded too: the receiver supplies them.
 
         Returns:
             A plain mapping of serializable primitives.
@@ -105,14 +105,14 @@ class SwarmBuildContext(BuildContext):
         seed: dict[str, Any],
         *,
         config: dict[str, Any] | None,
-        trajectory_registry: Any,
+        trajectory_span_processor: Any,
     ) -> "SwarmBuildContext":
         """Rebuild a context from a :meth:`to_seed` mapping plus local handles.
 
         Args:
             seed: The serializable mapping produced by :meth:`to_seed`.
             config: The receiving process's resolved ``config.yaml`` mapping.
-            trajectory_registry: A per-team trajectory registry for this process.
+            trajectory_span_processor: The process-level Team trajectory processor.
 
         Returns:
             A ``SwarmBuildContext`` with the seed fields restored and the
@@ -132,7 +132,7 @@ class SwarmBuildContext(BuildContext):
             team_ws_root=seed.get("team_ws_root"),
             team_skills_dir=seed.get("team_skills_dir"),
             global_skills_dir=seed.get("global_skills_dir"),
-            trajectory_registry=trajectory_registry,
+            trajectory_span_processor=trajectory_span_processor,
             config=config,
         )
 

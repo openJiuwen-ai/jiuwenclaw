@@ -105,7 +105,8 @@
     },
     "taskDetail": {
       "sourcePrompt": "Source prompt: {{prompt}}",
-      "noDetail": "No detailed task description was provided"
+      "noDetail": "No detailed task description was provided",
+      "skipReasonPlanned": "Planned but not executed: the phase never started before the workflow ended"
     },
     "contextCompression": {
       "running": "Compressing context",

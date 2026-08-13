@@ -20,15 +20,17 @@ purely from the config source plus provider name references.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
-from openjiuwen.agent_evolving.trajectory import InMemoryTrajectoryRegistry
 from openjiuwen.agent_teams.paths import team_home
+from openjiuwen.agent_teams.schema.blueprint import TransportSpec
 
 from jiuwenswarm.agents.swarm.config_specs import build_member_deep_agent_spec
 from jiuwenswarm.agents.swarm.context import SwarmBuildContext
 from jiuwenswarm.agents.swarm.registry import register_swarm_providers
+from jiuwenswarm.agents.harness.observability_runtime import get_trajectory_span_processor
 from jiuwenswarm.common.config import get_config
 from jiuwenswarm.common.mcp_config import build_enabled_mcp_server_configs
 from jiuwenswarm.common.utils import get_agent_skills_dir
@@ -37,6 +39,46 @@ logger = logging.getLogger(__name__)
 
 # Member roles enriched in place, in deterministic order.
 _MEMBER_ROLES: tuple[str, ...] = ("leader", "teammate")
+
+
+def _external_team_publish_url(channel_id: str | None) -> str:
+    """Resolve the Gateway relay used by external CLI team members."""
+    configured_url = os.getenv("TEAM_EVENT_GATEWAY_WS_URL", "").strip()
+    if configured_url:
+        return configured_url
+
+    channel = str(channel_id or "web").strip().lower()
+    if channel == "tui":
+        port = os.getenv("GATEWAY_PORT", "19001")
+        return f"ws://127.0.0.1:{port}/tui"
+
+    port = os.getenv("WEB_PORT", "19000")
+    path = os.getenv("WEB_PATH", "/ws").strip() or "/ws"
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return f"ws://127.0.0.1:{port}{path}"
+
+
+def _ensure_external_team_transport(spec: Any, channel_id: str | None) -> None:
+    """Give cross-process CLI members a live event path back to Gateway."""
+    if spec.external_transport is not None:
+        return
+
+    publish_url = _external_team_publish_url(channel_id)
+    spec.external_transport = TransportSpec(
+        type="hybrid",
+        params={
+            "team_name": spec.team_name,
+            "external_publish_url": publish_url,
+        },
+    )
+    logger.info(
+        "[swarm.assembly] configured external team relay "
+        "(team=%s, channel=%s, url=%s)",
+        spec.team_name,
+        channel_id or "web",
+        publish_url,
+    )
 
 
 def _with_project_cwd(member_spec: Any, project_dir: str | None) -> Any:
@@ -81,6 +123,7 @@ def enrich_team_spec_for_swarm(
         request_metadata: Request metadata mapping (carries ``mode`` etc.).
     """
     register_swarm_providers()
+    _ensure_external_team_transport(spec, channel_id)
 
     config = get_config()
     workspace = spec.workspace
@@ -106,7 +149,7 @@ def enrich_team_spec_for_swarm(
         team_ws_root=team_ws_root,
         team_skills_dir=team_skills_dir,
         global_skills_dir=global_skills_dir,
-        trajectory_registry=InMemoryTrajectoryRegistry(),
+        trajectory_span_processor=get_trajectory_span_processor(),
         config=config,
     )
     mcp_configs = build_enabled_mcp_server_configs(

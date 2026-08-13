@@ -5,7 +5,7 @@ import { CommandKind, type SlashCommand } from "../types.js";
 export function createClearCommand(): SlashCommand {
   return {
     name: "clear",
-    altNames: ["reset", "new"],
+    altNames: ["reset"],
     description: "Clear conversation history and free up context",
     usage: "/clear",
     example: "/new",

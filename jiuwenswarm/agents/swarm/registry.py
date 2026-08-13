@@ -19,7 +19,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from openjiuwen.agent_evolving.trajectory import InMemoryTrajectoryRegistry
 from openjiuwen.agent_teams.harness.manifest import register_from_catalog
 from openjiuwen.agent_teams.rails.builtin_elements import (
     AUDIO as _OJ_AUDIO,
@@ -82,6 +81,7 @@ TEAM_SKILL_STORAGE_POLICY = _member_rails.TEAM_SKILL_STORAGE_POLICY
 TEAM_SHARED_SKILL_LINK_REFRESH = _member_rails.TEAM_SHARED_SKILL_LINK_REFRESH
 TEAM_WORKSPACE_REPORT_PATH = _member_rails.TEAM_WORKSPACE_REPORT_PATH
 CONTEXT_PROCESSOR = _member_rails.CONTEXT_PROCESSOR
+MODEL_ANOMALY_DETECTION = _member_rails.MODEL_ANOMALY_DETECTION
 PLUGIN_RAILS = _member_rails.PLUGIN_RAILS
 SKILL_RETRIEVAL_PROMPT = _member_rails.SKILL_RETRIEVAL_PROMPT
 SYMPHONY_ORCHESTRATION_PROMPT = _member_rails.SYMPHONY_ORCHESTRATION_PROMPT
@@ -113,6 +113,10 @@ EXPLORE_AGENT = _OJ_EXPLORE_AGENT
 PLAN_AGENT = _OJ_PLAN_AGENT
 BROWSER_AGENT = _OJ_BROWSER_AGENT
 CODE_AGENT = _code_subagents.CODE_AGENT
+DEFAULT_STATUSLINE_SETUP_MAX_ITERATIONS = (
+    _code_subagents.DEFAULT_STATUSLINE_SETUP_MAX_ITERATIONS
+)
+STATUSLINE_SETUP_AGENT = _code_subagents.STATUSLINE_SETUP_AGENT
 SWARM_BROWSER_AGENT = _code_subagents.SWARM_BROWSER_AGENT
 
 # Swarm-owned no-parameter class rails declared in ``builtin_rails``.
@@ -133,34 +137,24 @@ CODE_WORKTREE = _OJ_WORKTREE
 
 _REGISTERED = False
 
-# Per-(session_id, team_id) trajectory registries, so members of the same team
-# rebuilt in one process share evolution state while different processes / teams
-# stay isolated. Populated lazily; grows with the process's distinct teams.
-_TRAJECTORY_REGISTRIES: dict[tuple[str, str], Any] = {}
-
-
-def _trajectory_registry_for(seed: dict[str, Any]) -> Any:
-    """Return a process-local trajectory registry for the seed's team."""
-    key = (str(seed.get("session_id") or ""), str(seed.get("team_id") or ""))
-    registry = _TRAJECTORY_REGISTRIES.get(key)
-    if registry is None:
-        registry = InMemoryTrajectoryRegistry()
-        _TRAJECTORY_REGISTRIES[key] = registry
-    return registry
-
 
 def _build_swarm_context_from_seed(seed: dict[str, Any]) -> SwarmBuildContext:
     """Rebuild a :class:`SwarmBuildContext` from a serializable seed.
 
     Sources the non-serializable handles from the receiving process: ``config``
-    from this process's ``config.yaml`` and a per-team ``trajectory_registry``.
+    from this process's ``config.yaml`` and the process-level Team trajectory
+    span processor.
     Registered with openjiuwen so ``from_spawn_payload`` / ``recover_from_session``
     restore the provider build context after deserialization.
     """
+    from jiuwenswarm.agents.harness.observability_runtime import (
+        get_trajectory_span_processor,
+    )
+
     return SwarmBuildContext.from_seed(
         seed,
         config=get_config(),
-        trajectory_registry=_trajectory_registry_for(seed),
+        trajectory_span_processor=get_trajectory_span_processor(),
     )
 
 
@@ -209,6 +203,7 @@ __all__ = [
     "TEAM_SHARED_SKILL_LINK_REFRESH",
     "TEAM_WORKSPACE_REPORT_PATH",
     "CONTEXT_PROCESSOR",
+    "MODEL_ANOMALY_DETECTION",
     "PLUGIN_RAILS",
     "SKILL_RETRIEVAL_PROMPT",
     "SYMPHONY_ORCHESTRATION_PROMPT",
@@ -243,6 +238,8 @@ __all__ = [
     "EXPLORE_AGENT",
     "PLAN_AGENT",
     "CODE_AGENT",
+    "DEFAULT_STATUSLINE_SETUP_MAX_ITERATIONS",
+    "STATUSLINE_SETUP_AGENT",
     "SWARM_BROWSER_AGENT",
     "BROWSER_AGENT",
 ]

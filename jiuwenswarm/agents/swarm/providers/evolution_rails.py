@@ -57,7 +57,7 @@ def _build_team_workspace_info(
     team_skills_dir: str | None,
     team_id: str,
     config: dict[str, Any] | None,
-    trajectory_registry: Any,
+    trajectory_span_processor: Any,
 ) -> Any:
     """Build a fully-populated ``TeamWorkspaceInfo`` for rail-context registration.
 
@@ -73,7 +73,6 @@ def _build_team_workspace_info(
         team_skills_dir: Team shared skills directory (rebuild gate + sync source).
         team_id: Team name.
         config: The resolved ``config.yaml`` mapping.
-        trajectory_registry: Per-team in-memory trajectory registry.
 
     Returns:
         A populated ``TeamWorkspaceInfo``.
@@ -81,13 +80,17 @@ def _build_team_workspace_info(
     from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
         TeamWorkspaceInfo,
     )
-
+    from jiuwenswarm.agents.harness.observability_runtime import (
+        get_trajectory_span_processor,
+    )
     return TeamWorkspaceInfo(
         root_dir=team_ws_root,
         skills_dir=team_skills_dir,
         team_id=team_id,
         config=config,
-        trajectory_registry=trajectory_registry,
+        trajectory_span_processor=(
+            trajectory_span_processor or get_trajectory_span_processor()
+        ),
     )
 
 
@@ -133,7 +136,7 @@ def _register_team_rail_context(
             skills_dir=team_workspace.skills_dir,
             team_id=team_workspace.team_id,
             config=team_workspace.config,
-            trajectory_registry=team_workspace.trajectory_registry,
+            trajectory_span_processor=team_workspace.trajectory_span_processor,
         ),
     )
 
@@ -155,7 +158,7 @@ class SwarmTeamSkillEvolutionRail(TeamSkillEvolutionRail):
         team_skills_dir: str,
         team_id: str,
         config: dict[str, Any] | None,
-        trajectory_registry: Any,
+        trajectory_span_processor: Any = None,
     ) -> None:
         """Capture the build-time handles needed for team-manager registration.
 
@@ -166,7 +169,6 @@ class SwarmTeamSkillEvolutionRail(TeamSkillEvolutionRail):
             team_skills_dir: Team shared skills directory.
             team_id: Team name.
             config: The resolved ``config.yaml`` mapping.
-            trajectory_registry: Per-team in-memory trajectory registry.
         """
         self._swarm_channel = channel
         self._swarm_session_id = session_id
@@ -176,7 +178,7 @@ class SwarmTeamSkillEvolutionRail(TeamSkillEvolutionRail):
             team_skills_dir=team_skills_dir,
             team_id=team_id,
             config=config,
-            trajectory_registry=trajectory_registry,
+            trajectory_span_processor=trajectory_span_processor,
         )
 
     def init(self, agent: Any) -> None:
@@ -232,7 +234,7 @@ class SwarmTeamSkillCreateRail(TeamSkillCreateRail):
         team_skills_dir: str,
         team_id: str,
         config: dict[str, Any] | None,
-        trajectory_registry: Any,
+        trajectory_span_processor: Any = None,
     ) -> None:
         """Capture the build-time handles needed for team-manager registration.
 
@@ -243,7 +245,6 @@ class SwarmTeamSkillCreateRail(TeamSkillCreateRail):
             team_skills_dir: Team shared skills directory.
             team_id: Team name.
             config: The resolved ``config.yaml`` mapping.
-            trajectory_registry: Per-team in-memory trajectory registry.
         """
         self._swarm_channel = channel
         self._swarm_session_id = session_id
@@ -252,7 +253,7 @@ class SwarmTeamSkillCreateRail(TeamSkillCreateRail):
             team_skills_dir=team_skills_dir,
             team_id=team_id,
             config=config,
-            trajectory_registry=trajectory_registry,
+            trajectory_span_processor=trajectory_span_processor,
         )
 
     def init(self, agent: Any) -> None:
@@ -301,8 +302,8 @@ class SwarmMemberSkillEvolutionRail(SkillEvolutionRail):
         team_skills_dir: str | None = None,
         team_id: str = "",
         config: dict[str, Any] | None = None,
-        trajectory_registry: Any = None,
         language: str = "cn",
+        trajectory_span_processor: Any = None,
     ) -> None:
         """Capture the build-time handles needed for team-manager registration.
 
@@ -317,7 +318,7 @@ class SwarmMemberSkillEvolutionRail(SkillEvolutionRail):
             team_skills_dir=team_skills_dir,
             team_id=team_id,
             config=config,
-            trajectory_registry=trajectory_registry,
+            trajectory_span_processor=trajectory_span_processor,
         )
         self._swarm_member_info = (team_id, language)
 
@@ -358,7 +359,9 @@ class SwarmMemberSkillEvolutionRail(SkillEvolutionRail):
                         skills_dir=self._swarm_team_workspace.skills_dir,
                         team_id=team_id,
                         config=self._swarm_team_workspace.config,
-                        trajectory_registry=self._swarm_team_workspace.trajectory_registry,
+                        trajectory_span_processor=(
+                            self._swarm_team_workspace.trajectory_span_processor
+                        ),
                     ),
                 )
             logger.info(
@@ -448,8 +451,8 @@ class TeamSkillEvolutionInput(ConstructionInput):
     )
     role: str | None = context_field(attr="role", description="Team role value.")
     team_id: str = context_field(attr="team_id", default="", description="Team name.")
-    trajectory_registry: Any = context_field(
-        attr="trajectory_registry", description="Per-team trajectory registry."
+    trajectory_span_processor: Any = context_field(
+        attr="trajectory_span_processor", description="Process-level Team trajectory span processor."
     )
     channel: str = context_field(
         attr="channel", default="default", description="Resolved channel key."
@@ -465,8 +468,7 @@ class TeamSkillEvolutionInput(ConstructionInput):
 @harness_element(
     kind=ElementKind.RAIL,
     name=TEAM_SKILL_EVOLUTION,
-    description="Leader-only team skill evolution rail (builds the evolution LLM and "
-    "binds the per-team trajectory registry); skipped for non-leaders.",
+    description="Leader-only team skill evolution rail (builds the evolution LLM); skipped for non-leaders.",
     input_model=TeamSkillEvolutionInput,
 )
 def build_team_skill_evolution_rail(
@@ -476,9 +478,8 @@ def build_team_skill_evolution_rail(
     """Build the leader-only team skill evolution rail from the config source.
 
     Mirrors the leader branch of the legacy ``build_member_rails``: builds the
-    evolution LLM, applies canonical auto-save behavior, binds the per-team trajectory registry
-    when a team id is present, and wires the team-manager registration via the
-    rail subclass ``init``.
+    evolution LLM, applies canonical auto-save behavior, and wires the
+    team-manager registration via the rail subclass ``init``.
 
     Args:
         params: Provider params (unused; kept for the provider contract).
@@ -497,13 +498,16 @@ def build_team_skill_evolution_rail(
     ):
         return []
 
+    from jiuwenswarm.agents.harness.observability_runtime import (
+        get_trajectory_span_processor,
+    )
+
     try:
         inp = TeamSkillEvolutionInput.resolve(params, ctx)
         Path(inp.team_skills_dir).mkdir(parents=True, exist_ok=True)
         llm_model, actual_model_name = _build_evolution_llm_from(
             inp.evolution_model_config
         )
-        bound_registry = inp.trajectory_registry if inp.team_id else None
         review_runtime = EvolutionReviewRuntime()
         rail = SwarmTeamSkillEvolutionRail(
             get_team_evolution_skills_dirs(inp.team_skills_dir, ctx.global_skills_dir),
@@ -513,12 +517,13 @@ def build_team_skill_evolution_rail(
             language=inp.language,
             signal_trigger=False,
             review_trigger=True,
-            trajectory_source=bound_registry,
-            trajectory_sink=bound_registry,
             member_role=inp.role,
             auto_save=inp.auto_save,
             team_id=inp.team_id,
             disabled_skills=load_execution_disabled_skills(),
+            trajectory_span_processor=(
+                inp.trajectory_span_processor or get_trajectory_span_processor()
+            ),
         )
         rail.bind_swarm_context(
             channel=inp.channel,
@@ -527,7 +532,7 @@ def build_team_skill_evolution_rail(
             team_skills_dir=inp.team_skills_dir,
             team_id=inp.team_id,
             config=ctx.config,
-            trajectory_registry=inp.trajectory_registry,
+            trajectory_span_processor=inp.trajectory_span_processor,
         )
         logger.info(
             "[swarm.team_skill_evolution] built: skills_dir=%s, model=%s, "
@@ -568,8 +573,8 @@ class TeamSkillCreateInput(ConstructionInput):
         attr="team_ws_root", description="Team shared workspace root."
     )
     team_id: str = context_field(attr="team_id", default="", description="Team name.")
-    trajectory_registry: Any = context_field(
-        attr="trajectory_registry", description="Per-team trajectory registry."
+    trajectory_span_processor: Any = context_field(
+        attr="trajectory_span_processor", description="Process-level Team trajectory span processor."
     )
 
 
@@ -606,12 +611,19 @@ def build_team_skill_create_rail(
     ):
         return None
 
+    from jiuwenswarm.agents.harness.observability_runtime import (
+        get_trajectory_span_processor,
+    )
+
     inp = TeamSkillCreateInput.resolve(params, ctx)
     try:
         rail = SwarmTeamSkillCreateRail(
             inp.team_skills_dir,
             language=inp.language,
             auto_trigger=True,
+            trajectory_span_processor=(
+                inp.trajectory_span_processor or get_trajectory_span_processor()
+            ),
         )
         rail.bind_swarm_context(
             channel=inp.channel,
@@ -620,7 +632,7 @@ def build_team_skill_create_rail(
             team_skills_dir=inp.team_skills_dir,
             team_id=inp.team_id,
             config=ctx.config,
-            trajectory_registry=inp.trajectory_registry,
+            trajectory_span_processor=inp.trajectory_span_processor,
         )
         logger.info(
             "[swarm.team_skill_create] built: skills_dir=%s", inp.team_skills_dir
@@ -644,8 +656,8 @@ class MemberSkillEvolutionInput(ConstructionInput):
     language: str = context_field(
         attr="language", default="cn", description="Member language code."
     )
-    trajectory_registry: Any = context_field(
-        attr="trajectory_registry", description="Per-team trajectory registry."
+    trajectory_span_processor: Any = context_field(
+        attr="trajectory_span_processor", description="Process-level Team trajectory span processor."
     )
     team_id: str = context_field(attr="team_id", default="", description="Team name.")
     channel: str = context_field(
@@ -659,8 +671,7 @@ class MemberSkillEvolutionInput(ConstructionInput):
 @harness_element(
     kind=ElementKind.RAIL,
     name=MEMBER_SKILL_EVOLUTION,
-    description="Teammate-only member skill evolution rail (auto-save, "
-    "disabled skills, conditional team trajectory sink).",
+    description="Teammate-only member skill evolution rail (auto-save and disabled skills).",
     input_model=MemberSkillEvolutionInput,
 )
 def build_member_skill_evolution_rail(
@@ -669,10 +680,9 @@ def build_member_skill_evolution_rail(
 ) -> list[Any]:
     """Build the teammate-only member skill evolution rail from the config source.
 
-    Replicates ``build_skill_evolution_rail`` (``auto_save=True``,
-    disabled skills, conditional team trajectory sink with
-    ``member_role="teammate"``) but constructs the swarm subclass so the rail can
-    self-register with the team manager from its ``init``.
+    Replicates ``build_skill_evolution_rail`` (``auto_save=True`` and disabled
+    skills) but constructs the swarm subclass so the rail can self-register with
+    the team manager from its ``init``.
 
     Args:
         params: Provider params (unused; kept for the provider contract).
@@ -690,6 +700,10 @@ def build_member_skill_evolution_rail(
     ):
         return []
 
+    from jiuwenswarm.agents.harness.observability_runtime import (
+        get_trajectory_span_processor,
+    )
+
     try:
         inp = MemberSkillEvolutionInput.resolve(params, ctx)
         llm_model, actual_model_name = _build_evolution_llm_from(
@@ -706,14 +720,10 @@ def build_member_skill_evolution_rail(
             auto_save=True,
             review_trigger=False,
             disabled_skills=load_execution_disabled_skills(),
+            trajectory_span_processor=(
+                inp.trajectory_span_processor or get_trajectory_span_processor()
+            ),
         )
-        has_team_trajectory_sink = inp.trajectory_registry is not None and bool(inp.team_id)
-        if has_team_trajectory_sink:
-            rail.set_trajectory_sink(
-                inp.trajectory_registry,
-                team_id=inp.team_id,
-                member_role="teammate",
-            )
         rail.bind_swarm_context(
             channel=inp.channel,
             session_id=inp.session_id,
@@ -721,15 +731,15 @@ def build_member_skill_evolution_rail(
             team_skills_dir=inp.team_skills_dir,
             team_id=inp.team_id,
             config=ctx.config,
-            trajectory_registry=inp.trajectory_registry,
             language=inp.language,
+            trajectory_span_processor=inp.trajectory_span_processor,
         )
         logger.info(
             "[swarm.member_skill_evolution] built: model=%s, auto_save=%s, "
-            "team_trajectory_sink=%s",
+            "trajectory_span_processor=%s",
             actual_model_name,
             True,
-            has_team_trajectory_sink,
+            bool(inp.trajectory_span_processor),
         )
         return [rail]
     except Exception as exc:

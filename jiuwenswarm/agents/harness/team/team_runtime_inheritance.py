@@ -41,6 +41,9 @@ from jiuwenswarm.common.config import (
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.common.utils import get_agent_skills_dir
+from jiuwenswarm.agents.harness.observability_runtime import (
+    get_trajectory_span_processor,
+)
 from jiuwenswarm.server.runtime.skill import load_execution_disabled_skills
 
 logger = logging.getLogger(__name__)
@@ -76,7 +79,8 @@ class TeamWorkspaceInfo:
     skills_dir: str | None = None
     team_id: str | None = None
     config: dict[str, Any] | None = None
-    trajectory_registry: Any | None = None
+    trajectory_span_processor: Any | None = None
+    project_dir: str | None = None
 
 
 RAIL_WHITELIST = frozenset({
@@ -173,7 +177,7 @@ def build_member_rails(
     team_ws_skills_dir = team_workspace.skills_dir
     team_id = team_workspace.team_id
     config = team_workspace.config
-    team_trajectory_registry = team_workspace.trajectory_registry
+    team_trajectory_span_processor = team_workspace.trajectory_span_processor
     skill_evolution_enabled = get_skill_evolution_enabled(config)
 
     rails_list = []
@@ -254,6 +258,7 @@ def build_member_rails(
         try:
             rail = TeamWorkspaceReportPathRail(
                 root_dir=team_ws_root,
+                project_dir=team_workspace.project_dir,
                 team_id=team_id,
                 language=language,
             )
@@ -271,7 +276,6 @@ def build_member_rails(
             Path(team_ws_skills_dir).mkdir(parents=True, exist_ok=True)
             llm_model, actual_model_name = build_evolution_llm(config)
             evolution_auto_save = get_evolution_auto_save_enabled(config)
-            bound_team_trajectory_registry = team_trajectory_registry if team_id else None
             review_runtime = EvolutionReviewRuntime()
             team_skill_rail = TeamSkillEvolutionRail(
                 skills_dir=get_team_evolution_skills_dirs(team_ws_skills_dir),
@@ -281,12 +285,13 @@ def build_member_rails(
                 language=language,
                 signal_trigger=False,
                 review_trigger=True,
-                trajectory_source=bound_team_trajectory_registry,
-                trajectory_sink=bound_team_trajectory_registry,
                 member_role=role,
                 auto_save=evolution_auto_save,
                 team_id=team_id,
                 disabled_skills=load_execution_disabled_skills(),
+                trajectory_span_processor=(
+                    team_trajectory_span_processor or get_trajectory_span_processor()
+                ),
             )
             rails_list.append(
                 EvolutionInterruptRail(
@@ -299,11 +304,11 @@ def build_member_rails(
             rails_list.append(team_skill_rail)
             logger.info(
                 "[TeamRuntime] TeamSkillEvolutionRail created: skills_dir=%s, "
-                "model=%s, auto_save=%s, team_trajectory_registry=%s",
+                "model=%s, auto_save=%s, trajectory_span_processor=%s",
                 team_ws_skills_dir,
                 actual_model_name,
                 evolution_auto_save,
-                bool(bound_team_trajectory_registry),
+                bool(team_trajectory_span_processor),
             )
         except Exception as exc:
             logger.warning("[TeamRuntime] TeamSkillEvolutionRail failed: %s", exc, exc_info=True)
@@ -316,6 +321,9 @@ def build_member_rails(
                 skills_dir=team_ws_skills_dir,
                 language=language,
                 auto_trigger=True,
+                trajectory_span_processor=(
+                    team_trajectory_span_processor or get_trajectory_span_processor()
+                ),
             )
             rails_list.append(team_skill_create_rail)
             logger.info(
@@ -331,7 +339,7 @@ def build_member_rails(
         evo_rail = build_skill_evolution_rail(
             skills_dir=get_team_evolution_skills_dirs(team_ws_skills_dir),
             config=config,
-            team_trajectory_sink=team_trajectory_registry,
+            trajectory_span_processor=team_trajectory_span_processor,
             team_id=team_id,
             review_runtime=review_runtime,
         )
@@ -505,7 +513,7 @@ def build_evolution_llm(
 def build_skill_evolution_rail(
     skills_dir: str | list[str],
     config: dict[str, Any] | None = None,
-    team_trajectory_sink: Any | None = None,
+    trajectory_span_processor: Any | None = None,
     team_id: str | None = None,
     review_runtime: EvolutionReviewRuntime | None = None,
 ) -> Any | None:
@@ -531,20 +539,16 @@ def build_skill_evolution_rail(
             auto_save=True,
             review_trigger=False,
             disabled_skills=load_execution_disabled_skills(),
+            trajectory_span_processor=(
+                trajectory_span_processor or get_trajectory_span_processor()
+            ),
         )
-        has_team_trajectory_sink = team_trajectory_sink is not None and bool(team_id)
-        if has_team_trajectory_sink:
-            rail.set_trajectory_sink(
-                team_trajectory_sink,
-                team_id=team_id,
-                member_role="teammate",
-            )
         logger.info(
             "[TeamRuntime] SkillEvolutionRail created: model=%s, auto_save=%s, "
-            "team_trajectory_sink=%s",
+            "trajectory_span_processor=%s",
             model_name,
             True,
-            has_team_trajectory_sink,
+            bool(trajectory_span_processor),
         )
         return rail
     except Exception as exc:
@@ -585,8 +589,6 @@ def _build_context_processor_rail(config: dict[str, Any] | None) -> ContextProce
     try:
         from typing import List, Tuple
 
-        from openjiuwen.harness.prompts import resolve_language
-
         user_processors: List[Tuple[str, dict]] = []
         ctx_cfg: dict[str, Any] = {}
         if isinstance(config, dict):
@@ -608,16 +610,6 @@ def _build_context_processor_rail(config: dict[str, Any] | None) -> ContextProce
         round_level_cfg = ctx_cfg.get("round_level_compressor_config", {})
         if isinstance(round_level_cfg, dict) and round_level_cfg:
             user_processors.append(("RoundLevelCompressor", round_level_cfg))
-
-        reasoning_loop_cfg = ctx_cfg.get("reasoning_tool_loop_compact_config", {})
-        if isinstance(reasoning_loop_cfg, dict) and reasoning_loop_cfg:
-            reasoning_loop_cfg = {
-                **reasoning_loop_cfg,
-                "language": resolve_language(
-                    str(get_config().get("preferred_language", "zh")).strip().lower()
-                ),
-            }
-            user_processors.append(("ReasoningToolLoopCompactProcessor", reasoning_loop_cfg))
 
         rail = ContextProcessorRail(
             processors=user_processors if user_processors else None,

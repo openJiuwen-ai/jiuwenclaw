@@ -224,7 +224,6 @@ Agent: 🔍 Processing docs in parallel...
 
   Original file                 Beginner version
   ContextCompression.md         ContextCompression_Beginner.md
-  Heartbeat.md                  Heartbeat_Beginner.md
 
   🎉 Both beginner-friendly docs are saved in the same directories as the originals. Want me to refine anything else?
 ```
