@@ -1666,6 +1666,27 @@ function AppContent() {
     requestComposerFocus();
   }, [disposeInFlightHistoryHandles, mode, navigate, requestComposerFocus, setCurrentSession, setSelectedProject, setTeamAreaExpanded]);
 
+  // 监听从 SkillPanel 发来的"新建会话并插入技能"事件
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { skillName: string; prefixText?: string; suffixText?: string; secondSkillName?: string; metadata?: Record<string, unknown> };
+      enterNewConversation();
+      // 存储 metadata，sendMessage 时随 chat.send 发送后清除
+      if (detail.metadata) {
+        useSessionStore.getState().ensureRuntime(NEW_CONVERSATION_ID);
+        useSessionStore.getState().setSessionMetadata(NEW_CONVERSATION_ID, detail.metadata);
+      }
+      // 延迟派发，确保 ChatPanel/InputArea 已挂载并注册了事件监听器
+      setTimeout(() => {
+        window.dispatchEvent(new CustomEvent('chat-input-insert-skill', {
+          detail: { skillName: detail.skillName, prefixText: detail.prefixText, suffixText: detail.suffixText, secondSkillName: detail.secondSkillName }
+        }));
+      }, 0);
+    };
+    window.addEventListener('jiuwen:new-conversation', handler);
+    return () => window.removeEventListener('jiuwen:new-conversation', handler);
+  }, [enterNewConversation]);
+
   const handleNewSession = useCallback(async (options?: NewConversationOptions) => {
     enterNewConversation(mode, options);
   }, [enterNewConversation, mode]);
@@ -1740,6 +1761,12 @@ function AppContent() {
         const pendingSkills = useSessionStore.getState().getRuntime(NEW_CONVERSATION_ID)?.selectedSkills ?? [];
         pendingSkills.forEach((skill) => useSessionStore.getState().addSelectedSkill(newSid, skill));
         useSessionStore.getState().clearSelectedSkills(NEW_CONVERSATION_ID);
+        // 迁移 'new' 会话的 metadata 到新会话（skill-creator-router 等场景）
+        const pendingMetadata = useSessionStore.getState().getRuntime(NEW_CONVERSATION_ID)?.metadata;
+        if (pendingMetadata) {
+          useSessionStore.getState().setSessionMetadata(newSid, pendingMetadata);
+          useSessionStore.getState().setSessionMetadata(NEW_CONVERSATION_ID, null);
+        }
         // Plan 开关是按 session 存的。欢迎页上开关记在 'new' 名下，这里必须搬到真实
         // 会话，否则 sendMessage 取到的是新会话的默认值 false，这条消息就不会带
         // `.plan`，整个 Plan 流程（只读约束、计划审批弹窗）全都不会触发。

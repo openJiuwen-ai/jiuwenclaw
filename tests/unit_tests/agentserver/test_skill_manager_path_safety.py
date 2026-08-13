@@ -74,7 +74,7 @@ async def test_import_local_rejects_skill_name_path_traversal(tmp_path):
     src = tmp_path / "src"
     src.mkdir()
     (src / "SKILL.md").write_text(
-        "---\nname: ../evil\n---\nbody\n",
+        "---\nname: ../evil\ndescription: demo\n---\nbody\n",
         encoding="utf-8",
     )
 

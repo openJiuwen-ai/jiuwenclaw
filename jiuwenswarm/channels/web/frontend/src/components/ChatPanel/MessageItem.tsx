@@ -21,6 +21,7 @@ import {
   FileDownloadItem,
   ContextCompressionRuntime,
   ContextCompressionSummary,
+  WebError,
 } from '../../types';
 import { StreamingContent } from './StreamingContent';
 import { ToolCallDisplay } from './ToolCallDisplay';
@@ -40,7 +41,9 @@ import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import { ProactiveRecommendationCard } from './ProactiveRecommendationCard';
 import { fileArtifactId } from '../ArtifactsPanel';
 import { openArtifactPanel } from '../../features/teamPanelState';
-import { executeDesktopSave, type DesktopSaveApiResult } from '../../utils/desktopSave';
+import { webRequest } from '../../services/webClient';
+import { useChatStore } from '../../stores/chatStore';
+import { extractTokenFromDownloadUrl } from '../../utils/fileDownloadDedup';
 
 export const MarkdownMessageBody = memo(function MarkdownMessageBody({
   content,
@@ -735,45 +738,40 @@ function formatFileSize(bytes: number | undefined): string {
   return `${size.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
-function getFileExtension(name: string): string {
-  const parts = name.split('.');
-  if (parts.length < 2) return '';
-  return parts[parts.length - 1].toUpperCase();
+/** 识别可保存的 Skill 包：`.skill` / `.zip` / `.skill.zip` */
+function isSkillPackageFile(file: FileDownloadItem): boolean {
+  const candidates = [file.name, file.path].filter(Boolean) as string[];
+  for (const candidate of candidates) {
+    const base = candidate.replace(/\\/g, '/').split('/').pop()?.toLowerCase() || '';
+    if (
+      base.endsWith('.skill.zip') ||
+      base.endsWith('.skill') ||
+      base.endsWith('.zip')
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
-function getFileTypeConfig(mimeType: string | undefined, name: string) {
-  const ext = name.split('.').pop()?.toLowerCase() || '';
-  const mt = mimeType || '';
-  if (mt.startsWith('image/') || ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp'].includes(ext))
-    return { label: 'IMG', bg: 'bg-[#3370ff]', icon: '🖼' };
-  if (mt.startsWith('audio/') || ['mp3', 'wav', 'aac', 'flac', 'ogg'].includes(ext))
-    return { label: 'AUDIO', bg: 'bg-[#7b67ee]', icon: '🎵' };
-  if (mt.startsWith('video/') || ['mp4', 'avi', 'mov', 'mkv', 'webm'].includes(ext))
-    return { label: 'VIDEO', bg: 'bg-[#f77234]', icon: '🎬' };
-  if (mt.includes('pdf') || ext === 'pdf')
-    return { label: 'PDF', bg: 'bg-[#f54a45]', icon: '📄' };
-  if (mt.includes('presentation') || mt.includes('ppt') || ['ppt', 'pptx'].includes(ext))
-    return { label: 'PPT', bg: '#FFFFFF', icon: (
-      <svg viewBox="0 0 1024 1024" className="w-7 h-7">
-        <path d="M145.6 0C100.8 0 64 36.8 64 81.6v860.8C64 987.2 100.8 1024 145.6 1024h732.8c44.8 0 81.6-36.8 81.6-81.6V324.8L657.6 0h-512z" fill="#E34221" />
-        <path d="M960 326.4v16H755.2s-100.8-20.8-99.2-108.8c0 0 4.8 92.8 97.6 92.8H960z" fill="#DC3119" />
-        <path d="M657.6 0v233.6c0 25.6 17.6 92.8 97.6 92.8H960L657.6 0z" fill="#FFFFFF" opacity=".5" />
-        <path d="M304 784h-54.4v67.2c0 6.4-4.8 11.2-11.2 11.2-6.4 0-12.8-4.8-12.8-11.2V686.4c0-9.6 8-17.6 17.6-17.6H304c38.4 0 59.2 25.6 59.2 57.6S340.8 784 304 784z m-3.2-94.4h-51.2v73.6h51.2c22.4 0 38.4-16 38.4-36.8 0-22.4-16-36.8-38.4-36.8zM480 784h-54.4v67.2c0 6.4-4.8 11.2-11.2 11.2-6.4 0-11.2-4.8-11.2-11.2V686.4c0-9.6 6.4-17.6 16-17.6H480c38.4 0 59.2 25.6 59.2 57.6S518.4 784 480 784z m-3.2-94.4h-49.6v73.6h49.6c22.4 0 38.4-16 38.4-36.8 0-22.4-16-36.8-38.4-36.8z m225.6 0h-52.8v161.6c0 6.4-4.8 11.2-11.2 11.2-6.4 0-12.8-4.8-12.8-11.2V689.6h-51.2c-6.4 0-11.2-4.8-11.2-11.2 0-4.8 4.8-9.6 11.2-9.6h128c6.4 0 11.2 4.8 11.2 11.2 0 4.8-4.8 9.6-11.2 9.6z" fill="#FFFFFF" />
-      </svg>
-    ) };
-  if (mt.includes('spreadsheet') || mt.includes('excel') || mt.includes('xlsx') || ['xls', 'xlsx', 'csv'].includes(ext))
-    return { label: 'XLS', bg: 'bg-[#2b9348]', icon: '📗' };
-  if (mt.includes('word') || mt.includes('document') || mt.includes('docx') || ['doc', 'docx'].includes(ext))
-    return { label: 'DOC', bg: 'bg-[#3370ff]', icon: '📝' };
-  if (mt.includes('zip') || mt.includes('compressed') || mt.includes('archive') || ['zip', 'rar', '7z', 'tar', 'gz'].includes(ext))
-    return { label: 'ZIP', bg: 'bg-[#8b5cf6]', icon: '📦' };
-  if (['txt', 'md', 'log'].includes(ext))
-    return { label: 'TXT', bg: 'bg-[#6b7280]', icon: '📃' };
-  if (['json', 'xml', 'yaml', 'yml', 'toml', 'ini', 'cfg'].includes(ext))
-    return { label: 'CFG', bg: 'bg-[#6b7280]', icon: '⚙' };
-  if (['py', 'js', 'ts', 'java', 'go', 'rs', 'cpp', 'c', 'h'].includes(ext))
-    return { label: 'CODE', bg: 'bg-[#6b7280]', icon: '�' };
-  return { label: 'FILE', bg: 'bg-[#6b7280]', icon: '��' };
+function skillPackageDisplayName(file: FileDownloadItem): string {
+  const raw = (file.name || file.path || '').replace(/\\/g, '/').split('/').pop() || '';
+  return raw.replace(/(\.skill)?\.zip$/i, '').replace(/\.skill$/i, '') || raw || 'skill';
+}
+
+function resolveFileDownloadToken(file: FileDownloadItem): string | undefined {
+  const direct = file.download_token?.trim();
+  if (direct) return direct;
+  return extractTokenFromDownloadUrl(file.download_url)?.trim() || undefined;
+}
+
+function isImportOverwriteRequired(error: unknown): boolean {
+  const code = (error as WebError | undefined)?.code;
+  if (code === 'SKILL_IMPORT_OVERWRITE_REQUIRED' || code === 'SKILL_ALREADY_EXISTS') {
+    return true;
+  }
+  const msg = error instanceof Error ? error.message : String(error);
+  return msg.includes('已存在') || msg.includes('force=true') || msg.includes('IMPORT_OVERWRITE');
 }
 
 function FileDownloadList({
@@ -787,10 +785,20 @@ function FileDownloadList({
 }) {
   const { t } = useTranslation();
   const [expiredSet, setExpiredSet] = useState<Set<number>>(new Set());
+  const [savingIndex, setSavingIndex] = useState<number | null>(null);
+  const [savedIndex, setSavedIndex] = useState<Set<number>>(new Set());
+  const [saveSuccessIndex, setSaveSuccessIndex] = useState<number | null>(null);
+  const sessionId = useChatStore((s) => s.activeSessionId);
+
+  // 仅展示 Skill 包卡片
+  const skillFiles = files
+    .map((file, index) => ({ file, index }))
+    .filter(({ file }) => isSkillPackageFile(file));
 
   useEffect(() => {
     let cancelled = false;
-    files.forEach((file, index) => {
+    skillFiles.forEach(({ file, index }) => {
+      if (!file.download_url) return;
       fetch(file.download_url, { method: 'HEAD' })
         .then((res) => {
           if (!cancelled && !res.ok) {
@@ -806,36 +814,60 @@ function FileDownloadList({
     return () => { cancelled = true; };
   }, [files]);
 
-  const handleDownload = async (file: FileDownloadItem, index: number) => {
-    if (expiredSet.has(index)) return;
-
-    // 检查是否在 PyWebView 桌面环境中
-    const pywebviewApi = (window as Window & { pywebview?: { api?: { download_file?: (url: string, filename: string) => DesktopSaveApiResult } } }).pywebview?.api;
-    if (pywebviewApi?.download_file) {
-      // 桌面端：通过 webview API 下载
-      const outcome = await executeDesktopSave(() =>
-        pywebviewApi.download_file!(file.download_url, file.name || 'download')
-      );
-      if (outcome === 'failed') {
-        window.alert(t('artifacts.downloadFailed', { name: file.name }));
-      }
+  const handleSave = async (file: FileDownloadItem, index: number) => {
+    if (expiredSet.has(index) || savingIndex !== null || savedIndex.has(index)) return;
+    const downloadToken = resolveFileDownloadToken(file);
+    if (!downloadToken) return;
+    if (!sessionId) {
+      window.alert('当前无活跃会话，无法保存 Skill');
       return;
     }
-    // 浏览器模式：使用标准 <a> 标签下载
-    const link = document.createElement('a');
-    link.href = file.download_url;
-    link.download = file.name || '';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+
+    const importParams = (force: boolean) => ({
+      download_token: downloadToken,
+      force,
+      session_id: sessionId,
+    });
+
+    setSavingIndex(index);
+    try {
+      await webRequest('skills.import_local', importParams(false));
+      setSavedIndex((prev) => new Set(prev).add(index));
+      setSaveSuccessIndex(index);
+      setTimeout(() => setSaveSuccessIndex(null), 2000);
+    } catch (error) {
+      if (isImportOverwriteRequired(error)) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        const overwrite = window.confirm(`${errorMsg}\n是否覆盖保存？`);
+        if (!overwrite) return;
+        try {
+          await webRequest('skills.import_local', importParams(true));
+          setSavedIndex((prev) => new Set(prev).add(index));
+          setSaveSuccessIndex(index);
+          setTimeout(() => setSaveSuccessIndex(null), 2000);
+        } catch (err2) {
+          console.error('skills.import_local force error:', err2);
+          window.alert(err2 instanceof Error ? err2.message : String(err2));
+        }
+      } else {
+        console.error('skills.import_local error:', error);
+        window.alert(error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      setSavingIndex(null);
+    }
   };
 
+  if (!skillFiles.length) return null;
+
   return (
-    <div className={clsx('mt-2 space-y-2', className)}>
-      {files.map((file, index) => {
-        const typeConfig = getFileTypeConfig(file.mime_type, file.name);
-        const ext = getFileExtension(file.name);
+    <div className={clsx('mt-2 space-y-2 w-full', className)}>
+      {skillFiles.map(({ file, index }) => {
         const expired = expiredSet.has(index);
+        const isSaving = savingIndex === index;
+        const isSaved = savedIndex.has(index);
+        const displayName = skillPackageDisplayName(file);
+        const downloadToken = resolveFileDownloadToken(file);
         return (
           <div
             key={`${file.name}-${index}`}
@@ -860,22 +892,17 @@ function FileDownloadList({
                 event.stopPropagation();
                 onPreview?.(index);
               }}
-              title={onPreview ? t('artifacts.openPreview', { name: file.name }) : undefined}
-              aria-label={onPreview ? t('artifacts.openPreview', { name: file.name }) : undefined}
+              title={onPreview ? t('artifacts.openPreview', { name: displayName }) : undefined}
+              aria-label={onPreview ? t('artifacts.openPreview', { name: displayName }) : undefined}
             >
-              <div className={`flex-shrink-0 w-10 h-10 rounded-lg ${typeConfig.bg} flex items-center justify-center`}>
-                {typeof typeConfig.icon === 'string' ? (
-                  <span className="text-white text-base leading-none select-none">{typeConfig.icon}</span>
-                ) : (
-                  typeConfig.icon
-                )}
+              <div className="flex-shrink-0 w-10 h-10 rounded-lg bg-accent-subtle flex items-center justify-center">
+                <svg className="w-5 h-5 text-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" />
+                </svg>
               </div>
               <div className="flex-1 min-w-0">
-                <div className="text-sm font-medium text-text leading-snug truncate">{file.name}</div>
+                <div className="text-sm font-medium text-text leading-snug truncate">{displayName}</div>
                 <div className="flex items-center gap-1.5 mt-0.5">
-                  <span className="inline-flex items-center px-1 py-px rounded text-[10px] font-mono font-medium text-text-muted bg-secondary leading-none">
-                    {ext || typeConfig.label}
-                  </span>
                   <span className="text-xs text-text-muted">{formatFileSize(file.size)}</span>
                   {expired && (
                     <span className="inline-flex items-center px-1 py-px rounded text-[10px] font-mono font-medium text-danger bg-danger/10 leading-none">
@@ -885,32 +912,30 @@ function FileDownloadList({
                 </div>
               </div>
             </button>
-            <button
-              type="button"
-              className={clsx(
-                'flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center  ',
-                expired
-                  ? 'text-text-muted/40'
-                  : 'text-text-muted hover:text-accent hover:bg-accent-subtle'
+            <div className="flex-shrink-0 flex items-center gap-2">
+              {saveSuccessIndex === index && (
+                <span className="text-xs font-medium text-green-600 whitespace-nowrap">保存成功</span>
               )}
-              disabled={expired}
-              onClick={(event) => {
-                event.stopPropagation();
-                void handleDownload(file, index);
-              }}
-              title={t('artifacts.download')}
-              aria-label={t('artifacts.download')}
-            >
-              {expired ? (
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
-                </svg>
-              ) : (
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
-                </svg>
-              )}
-            </button>
+              <button
+                type="button"
+                className={clsx(
+                  'flex-shrink-0 px-3 h-8 rounded-lg flex items-center justify-center text-sm font-medium transition-colors',
+                  expired || isSaved
+                    ? 'text-text-muted/40 cursor-not-allowed'
+                    : isSaving
+                      ? 'text-text-muted cursor-wait'
+                      : 'text-accent hover:bg-accent-subtle'
+                )}
+                disabled={expired || isSaving || isSaved || !downloadToken}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void handleSave(file, index);
+                }}
+                title={isSaved ? '已保存' : '保存'}
+              >
+                {isSaving ? '保存中...' : isSaved ? '已保存' : '保存'}
+              </button>
+            </div>
           </div>
         );
       })}
