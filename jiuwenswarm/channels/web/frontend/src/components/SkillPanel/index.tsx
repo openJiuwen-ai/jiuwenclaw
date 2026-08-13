@@ -1773,9 +1773,11 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   }, []);
 
   const renderSkillTypeCapsules = () => {
+    // "我的技能"下不展示"多模态"胶囊
+    const types = activeTab === "my" ? SKILL_TYPES.filter((t) => t !== "multimodal") : SKILL_TYPES;
     return (
       <div className="flex items-center gap-2">
-        {SKILL_TYPES.map((type) => {
+        {types.map((type) => {
           // 技能包（skill）后端尚未适配，置灰不可点击
           const isDisabled = type === "skill";
           return (
@@ -2750,8 +2752,12 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
 
                   {/* 内容详情 */}
                   {detailTab === "content" && (
-                    <div className="flex-1 min-h-0 overflow-y-auto text-sm text-text whitespace-pre-wrap bg-secondary border border-border rounded-md p-3">
-                      {selectedSkill.content || t('skills.noContent')}
+                    <div className="flex-1 min-h-0 overflow-y-auto text-sm text-text bg-secondary border border-border rounded-md p-3">
+                      {selectedSkill.content ? (
+                        <MarkdownRenderer content={selectedSkill.content} className="chat-text chat-markdown" />
+                      ) : (
+                        t('skills.noContent')
+                      )}
                     </div>
                   )}
 
