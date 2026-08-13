@@ -10343,6 +10343,27 @@ class JiuWenSwarmDeepAdapter:
             name=f"auto-rebuild-{rid}",
         )
 
+    async def _skill_has_live_evolution_records(self, skill_name: str) -> bool:
+        """Return True when disk evolutions.json has at least one live entry."""
+        try:
+            store = self._get_disk_evolution_store()
+            subject = evolution_version_ctl.resolve_subject(store, skill_name)
+            evo_log = await store.load_full_evolution_log(
+                skill_name,
+                subject_kind=str(subject.get("kind") or "skill") or None,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] could not inspect live evolutions for "
+                "skill=%s: %s",
+                skill_name,
+                exc,
+            )
+            # Fail open: let generate_evolution_merge_version decide.
+            return True
+        entries = getattr(evo_log, "entries", None) or []
+        return bool(entries)
+
     async def _run_auto_rebuild_skills_detached(self, *, request_id: str | None = None) -> None:
         """Background auto version merge gated by per-skill selfEvolution=auto."""
         skills = self._take_pending_auto_rebuild_skills()
@@ -10351,6 +10372,14 @@ class JiuWenSwarmDeepAdapter:
                 logger.info(
                     "[JiuWenSwarmDeepAdapter] skip auto rebuild: request_id=%s "
                     "skill=%s reason=selfEvolution_not_auto",
+                    request_id,
+                    skill_name,
+                )
+                continue
+            if not await self._skill_has_live_evolution_records(skill_name):
+                logger.info(
+                    "[JiuWenSwarmDeepAdapter] skip auto rebuild: request_id=%s "
+                    "skill=%s reason=no_evolution_records",
                     request_id,
                     skill_name,
                 )
@@ -13949,8 +13978,12 @@ class JiuWenSwarmDeepAdapter:
                     continue
                 last_event_at = time.monotonic()
 
-                # Queue skills for auto version merge when experiences were persisted.
-                # Per-skill gate: only selfEvolution=auto is queued inside
+                # Queue skills for auto version merge only when experiences were
+                # persisted this cycle (``auto_approved``). Do not treat
+                # ``completed`` as persist: SDK may emit stage=completed with
+                # skill_name for ``no_evolution_no_records``, and team rail emits
+                # completed when a request is merely ready. Per-skill gate:
+                # only selfEvolution=auto is queued inside
                 # ``_queue_auto_rebuild_skill``.
                 for evt in events:
                     payload = event_payload_dict(evt)
@@ -13963,10 +13996,7 @@ class JiuWenSwarmDeepAdapter:
                     raw_stage = str(
                         payload.get("stage") or meta.get("stage") or ""
                     ).strip().lower()
-                    if skill_name and raw_stage in {
-                        "auto_approved",
-                        "completed",
-                    }:
+                    if skill_name and raw_stage == "auto_approved":
                         self._queue_auto_rebuild_skill(skill_name)
 
                 visible_progress_statuses = visible_evolution_progress_from_events(events)

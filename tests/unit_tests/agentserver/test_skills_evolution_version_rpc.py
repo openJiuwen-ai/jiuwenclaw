@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -176,6 +177,51 @@ def test_queue_auto_rebuild_respects_skill_evolution_action(monkeypatch):
         lambda skill_name, **_kwargs: "off",
     )
     adapter._queue_auto_rebuild_skill("demo-skill")  # pylint: disable=protected-access
+    assert adapter._pending_auto_rebuild_skills == []  # pylint: disable=protected-access
+
+
+def _adapter_for_auto_rebuild(monkeypatch, *, entries: list[Any]) -> JiuWenSwarmDeepAdapter:
+    adapter = JiuWenSwarmDeepAdapter()
+    adapter._pending_auto_rebuild_skills = ["demo-skill"]  # pylint: disable=protected-access
+    store = SimpleNamespace(
+        load_full_evolution_log=AsyncMock(return_value=SimpleNamespace(entries=entries)),
+    )
+    monkeypatch.setattr(adapter, "_get_disk_evolution_store", lambda: store)
+    monkeypatch.setattr(adapter, "_should_auto_merge_evolved_skill", lambda _name: True)
+    return adapter
+
+
+@pytest.mark.anyio
+async def test_run_auto_rebuild_skips_when_no_live_records(monkeypatch):
+    adapter = _adapter_for_auto_rebuild(monkeypatch, entries=[])
+    merge_calls: list[str] = []
+
+    async def _fake_merge(*, skill_name: str | None = None, **_kwargs: Any) -> dict[str, Any]:
+        merge_calls.append(str(skill_name))
+        return {"success": True}
+
+    monkeypatch.setattr(adapter, "generate_evolution_merge_version", _fake_merge)
+
+    await adapter._run_auto_rebuild_skills_detached(request_id="rid")  # pylint: disable=protected-access
+
+    assert merge_calls == []
+    assert adapter._pending_auto_rebuild_skills == []  # pylint: disable=protected-access
+
+
+@pytest.mark.anyio
+async def test_run_auto_rebuild_proceeds_when_live_records_exist(monkeypatch):
+    adapter = _adapter_for_auto_rebuild(monkeypatch, entries=[SimpleNamespace(id="e1")])
+    merge_calls: list[str] = []
+
+    async def _fake_merge(*, skill_name: str | None = None, **_kwargs: Any) -> dict[str, Any]:
+        merge_calls.append(str(skill_name))
+        return {"success": True}
+
+    monkeypatch.setattr(adapter, "generate_evolution_merge_version", _fake_merge)
+
+    await adapter._run_auto_rebuild_skills_detached(request_id="rid")  # pylint: disable=protected-access
+
+    assert merge_calls == ["demo-skill"]
     assert adapter._pending_auto_rebuild_skills == []  # pylint: disable=protected-access
 
 
