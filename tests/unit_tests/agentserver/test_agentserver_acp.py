@@ -1149,11 +1149,35 @@ async def test_handle_team_binding_create_uses_officeclaw_tenant_catalog(monkeyp
     binding_store = TeamBindingStore(tmp_path / "teams" / "bindings.json")
     entity_store = TeamEntityStore(tmp_path / ".agent_teams")
     tenant_config = {
+        "models": {
+            "defaults": [
+                {
+                    "model_client_config": {
+                        "model_name": "shared-model",
+                        "api_base": "https://second.test/v1",
+                        "api_key": "second-secret",
+                        "client_provider": "OpenAI",
+                    }
+                }
+            ]
+        },
         "modes": {
             "team": {
                 "relay_team": {
                     "team_name": "relay_team",
                     "leader": {"member_name": "relay_lead"},
+                    "agents": {
+                        "leader": {
+                            "model": {
+                                "model_client_config": {
+                                    "api_base": "https://second.test/v1",
+                                    "api_key": "second-secret",
+                                    "client_provider": "OpenAI",
+                                },
+                                "model_request_config": {"model": "shared-model"},
+                            }
+                        }
+                    },
                 }
             }
         }
@@ -1197,7 +1221,13 @@ async def test_handle_team_binding_create_uses_officeclaw_tenant_catalog(monkeyp
         TenantCatalogRegistry.reset_for_tests()
 
     assert fake_ws.sent[0]["ok"] is True
-    assert entity_store.get("relay_team").template_snapshot["leader"]["member_name"] == "relay_lead"
+    entity = entity_store.get("relay_team")
+    assert entity.template_snapshot["leader"]["member_name"] == "relay_lead"
+    model_ref = entity.template_snapshot["agents"]["leader"]["model"]["ref"]
+    assert model_ref.startswith("model-identity-v1:")
+    persisted = entity_store.entity_path("relay_team").read_text(encoding="utf-8")
+    assert "api_key" not in persisted
+    assert "api_base" not in persisted
 
 
 @pytest.mark.asyncio

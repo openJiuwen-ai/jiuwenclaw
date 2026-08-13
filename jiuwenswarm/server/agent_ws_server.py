@@ -3067,7 +3067,7 @@ class AgentWebSocketServer:
             get_team_binding_store,
             validate_team_name,
         )
-        from jiuwenswarm.server.runtime.team_entity_store import get_team_entity_store
+        from jiuwenswarm.server.runtime.team_entity_store import ensure_team_entity, get_team_entity_store
 
         normalized_name = validate_team_name(team_name)
         template_ids = {
@@ -3084,12 +3084,16 @@ class AgentWebSocketServer:
         binding_store = get_team_binding_store()
         binding = binding_store.create(team_name=normalized_name, template_id=template_id)
         try:
-            entity_store.write(
+            entity = ensure_team_entity(
                 team_name=binding.team_name,
                 template_id=binding.template_id,
                 template_snapshot=template_snapshot,
+                config_base=config_base,
                 created_at=binding.created_at,
+                store=entity_store,
             )
+            if entity is None:
+                raise TeamBindingStoreError("team entity config missing", code="NOT_FOUND")
         except Exception:
             binding_store.delete(binding.team_name)
             raise

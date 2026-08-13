@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from copy import deepcopy
 from pathlib import Path
@@ -17,6 +19,8 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_ITERATIONS = 200
 _DEFAULT_COMPLETION_TIMEOUT = 600.0
+_DEFAULT_MAX_DEBATE_ROUNDS = 5
+_MODEL_IDENTITY_REF_PREFIX = "model-identity-v1:"
 _DEFAULT_AGENT_WORKSPACE = {"stable_base": True}
 _DEFAULT_TEAM_WORKSPACE = {"enabled": True}
 _DEFAULT_TRANSPORT = {"type": "inprocess"}
@@ -311,6 +315,101 @@ def _build_agent_spec_dict(
     return merged
 
 
+def _normalized_model_identity_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def build_model_identity_reference(model_name: Any, client_config: dict[str, Any]) -> str:
+    """Build a credential-free model identity that is independent of list order."""
+    identity = {
+        "api_base": _normalized_model_identity_text(client_config.get("api_base")).rstrip("/"),
+        "model_name": _normalized_model_identity_text(model_name),
+        "provider": _normalized_model_identity_text(client_config.get("client_provider")).lower(),
+    }
+    digest = hashlib.sha256(
+        json.dumps(identity, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    return f"{_MODEL_IDENTITY_REF_PREFIX}{digest}"
+
+
+def resolve_model_identity_reference(
+    model_ref: Any,
+    config_base: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve one stable model identity to its unique tenant-owned model entry."""
+    normalized_ref = str(model_ref or "").strip().lower()
+    digest = normalized_ref.removeprefix(_MODEL_IDENTITY_REF_PREFIX)
+    if (
+        not normalized_ref.startswith(_MODEL_IDENTITY_REF_PREFIX)
+        or len(digest) != 64
+        or any(char not in "0123456789abcdef" for char in digest)
+    ):
+        raise ValueError(f"invalid team model reference: {normalized_ref!r}")
+
+    defaults = (config_base.get("models") or {}).get("defaults")
+    if not isinstance(defaults, list):
+        raise ValueError(f"team model reference owner is unavailable: {normalized_ref!r}")
+
+    matches: list[dict[str, Any]] = []
+    for entry in defaults:
+        if not isinstance(entry, dict):
+            continue
+        client_config = entry.get("model_client_config")
+        if not isinstance(client_config, dict):
+            continue
+        candidate_name = client_config.get("model_name")
+        if build_model_identity_reference(candidate_name, client_config) == normalized_ref:
+            matches.append(entry)
+    if not matches:
+        raise ValueError(f"team model reference owner not found: {normalized_ref!r}")
+    if len(matches) != 1:
+        raise ValueError(f"team model reference owner is ambiguous: {normalized_ref!r}")
+    return matches[0]
+
+
+def resolve_legacy_index_model_reference(
+    model_ref: Any,
+    config_base: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve the legacy model_name#index format used by the Web config writer."""
+    normalized_ref = str(model_ref or "").strip()
+    model_name, separator, index_text = normalized_ref.rpartition("#")
+    if not separator or not model_name.strip():
+        raise ValueError(f"invalid team model reference: {normalized_ref!r}")
+    try:
+        model_index = int(index_text)
+    except ValueError as exc:
+        raise ValueError(f"invalid team model reference index: {normalized_ref!r}") from exc
+
+    defaults = (config_base.get("models") or {}).get("defaults")
+    if not isinstance(defaults, list) or not 0 <= model_index < len(defaults):
+        raise ValueError(f"team model reference index out of range: {normalized_ref!r}")
+    entry = defaults[model_index]
+    if not isinstance(entry, dict):
+        raise ValueError(f"team model reference points to invalid entry: {normalized_ref!r}")
+    client_config = entry.get("model_client_config")
+    if not isinstance(client_config, dict):
+        raise ValueError(f"team model reference points to invalid entry: {normalized_ref!r}")
+    actual_name = _normalized_model_identity_text(client_config.get("model_name"))
+    if actual_name != model_name.strip():
+        raise ValueError(
+            "team model reference name mismatch: "
+            f"expected {model_name.strip()!r}, found {actual_name!r} at index {model_index}"
+        )
+    return entry
+
+
+def resolve_team_model_reference(
+    model_ref: Any,
+    config_base: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve stable identities and legacy index references during transition."""
+    normalized_ref = str(model_ref or "").strip()
+    if normalized_ref.lower().startswith(_MODEL_IDENTITY_REF_PREFIX):
+        return resolve_model_identity_reference(normalized_ref, config_base)
+    return resolve_legacy_index_model_reference(normalized_ref, config_base)
+
+
 def _resolve_agent_model_reference(
     model_raw: Any,
     config_base: dict[str, Any],
@@ -318,29 +417,10 @@ def _resolve_agent_model_reference(
     if not isinstance(model_raw, dict) or "ref" not in model_raw:
         return None
 
-    model_ref = str(model_raw.get("ref") or "").strip()
-    model_name, separator, index_text = model_ref.rpartition("#")
-    if not separator or not model_name.strip():
-        raise ValueError(f"invalid team model reference: {model_ref!r}")
-    try:
-        model_index = int(index_text)
-    except ValueError as exc:
-        raise ValueError(f"invalid team model reference index: {model_ref!r}") from exc
-
-    defaults = (config_base.get("models") or {}).get("defaults")
-    if not isinstance(defaults, list) or not 0 <= model_index < len(defaults):
-        raise ValueError(f"team model reference index out of range: {model_ref!r}")
-    entry = defaults[model_index]
-    if not isinstance(entry, dict):
-        raise ValueError(f"team model reference points to invalid entry: {model_ref!r}")
+    entry = resolve_team_model_reference(model_raw.get("ref"), config_base)
 
     model_client_config = deepcopy(entry.get("model_client_config") or {})
     actual_name = str(model_client_config.get("model_name") or "").strip()
-    if actual_name != model_name.strip():
-        raise ValueError(
-            "team model reference name mismatch: "
-            f"expected {model_name.strip()!r}, found {actual_name!r} at index {model_index}"
-        )
     model_request_config = deepcopy(entry.get("model_config_obj") or {})
     model_request_config.setdefault("model", actual_name)
     return {
@@ -636,6 +716,10 @@ def load_team_spec_dict(
     spec_dict["spawn_mode"] = team_raw.get("spawn_mode", "inprocess")
     spec_dict["enable_hitt"] = team_raw.get("enable_hitt", True)
     spec_dict["enable_permissions"] = _resolve_enable_permissions(config_base, team_raw)
+    configured_debate_rounds = team_raw.get("max_debate_rounds")
+    spec_dict["max_debate_rounds"] = (
+        _DEFAULT_MAX_DEBATE_ROUNDS if configured_debate_rounds is None else configured_debate_rounds
+    )
     language = _normalize_prompt_language(config_base.get("preferred_language"))
     spec_dict["leader"] = _build_leader_spec(team_raw, language=language)
     spec_dict["agents"] = agents

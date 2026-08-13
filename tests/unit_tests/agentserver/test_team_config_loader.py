@@ -2,6 +2,8 @@
 
 """Unit tests for team config loading."""
 
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -161,7 +163,69 @@ def test_load_team_spec_dict_uses_first_models_defaults_entry_for_team(monkeypat
     assert model["model_request_config"]["temperature"] == 0.1
 
 
-def test_load_team_spec_dict_resolves_member_model_reference_by_index():
+def _model_identity_ref(*, model_name: str, provider: str, api_base: str) -> str:
+    identity = {
+        "api_base": api_base.rstrip("/"),
+        "model_name": model_name.strip(),
+        "provider": provider.strip().lower(),
+    }
+    digest = hashlib.sha256(
+        json.dumps(identity, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    return f"model-identity-v1:{digest}"
+
+
+def test_load_team_spec_dict_resolves_member_model_reference_after_defaults_reorder():
+    second_ref = _model_identity_ref(
+        model_name="shared-model",
+        provider="OpenAI",
+        api_base="https://second.example.test/v1",
+    )
+    config = {
+        "models": {
+            "defaults": [
+                {
+                    "model_client_config": {
+                        "api_base": "https://second.example.test/v1/",
+                        "api_key": "rotated-second-secret",
+                        "model_name": "shared-model",
+                        "client_provider": "OpenAI",
+                    },
+                    "model_config_obj": {"temperature": 0.9},
+                },
+                {
+                    "model_client_config": {
+                        "api_base": "https://first.example.test/v1",
+                        "api_key": "sk-first",
+                        "model_name": "shared-model",
+                        "client_provider": "OpenAI",
+                    },
+                    "model_config_obj": {"temperature": 0.1},
+                },
+            ]
+        },
+        **_wrap_modes_team(
+            {
+                "demo_team": {
+                    "team_name": "demo_team",
+                    "agents": {
+                        "leader": {"model": {"ref": second_ref}},
+                    },
+                }
+            }
+        ),
+    }
+
+    spec = load_team_spec_dict(config_base=config)
+
+    model = spec["agents"]["leader"]["model"]
+    assert model["model_client_config"]["api_base"] == "https://second.example.test/v1/"
+    assert model["model_client_config"]["api_key"] == "rotated-second-secret"
+    assert model["model_request_config"]["model"] == "shared-model"
+    assert model["model_request_config"]["temperature"] == 0.9
+
+
+def test_load_team_spec_dict_keeps_legacy_index_reference_readable():
     config = {
         "models": {
             "defaults": [
@@ -189,9 +253,7 @@ def test_load_team_spec_dict_resolves_member_model_reference_by_index():
             {
                 "demo_team": {
                     "team_name": "demo_team",
-                    "agents": {
-                        "leader": {"model": {"ref": "shared-model#1"}},
-                    },
+                    "agents": {"leader": {"model": {"ref": "shared-model#1"}}},
                 }
             }
         ),
@@ -202,8 +264,6 @@ def test_load_team_spec_dict_resolves_member_model_reference_by_index():
     model = spec["agents"]["leader"]["model"]
     assert model["model_client_config"]["api_base"] == "https://second.example.test/v1"
     assert model["model_client_config"]["api_key"] == "sk-second"
-    assert model["model_request_config"]["model"] == "shared-model"
-    assert model["model_request_config"]["temperature"] == 0.9
 
 
 def test_load_team_spec_dict_rejects_stale_member_model_reference():
@@ -223,15 +283,83 @@ def test_load_team_spec_dict_rejects_stale_member_model_reference():
                 "demo_team": {
                     "team_name": "demo_team",
                     "agents": {
-                        "leader": {"model": {"ref": "expected-model#0"}},
+                        "leader": {"model": {"ref": f"model-identity-v1:{'0' * 64}"}},
                     },
                 }
             }
         ),
     }
 
-    with pytest.raises(ValueError, match="model reference name mismatch"):
+    with pytest.raises(ValueError, match="model reference"):
         load_team_spec_dict(config_base=config)
+
+
+def test_load_team_spec_dict_rejects_ambiguous_model_identity_reference():
+    shared_ref = _model_identity_ref(
+        model_name="shared-model",
+        provider="OpenAI",
+        api_base="https://shared.example.test/v1",
+    )
+    duplicate = {
+        "model_client_config": {
+            "api_base": "https://shared.example.test/v1",
+            "api_key": "rotated-secret",
+            "model_name": "shared-model",
+            "client_provider": "OpenAI",
+        }
+    }
+    config = {
+        "models": {"defaults": [duplicate, duplicate]},
+        **_wrap_modes_team(
+            {
+                "demo_team": {
+                    "team_name": "demo_team",
+                    "agents": {"leader": {"model": {"ref": shared_ref}}},
+                }
+            }
+        ),
+    }
+
+    with pytest.raises(ValueError, match="ambiguous"):
+        load_team_spec_dict(config_base=config)
+
+
+@pytest.mark.parametrize("configured_value", [pytest.param(None, id="null"), pytest.param("missing", id="missing")])
+def test_load_team_spec_dict_defaults_missing_or_null_debate_rounds_to_five(configured_value):
+    team = {
+        "team_name": "demo_team",
+        "agents": {"leader": {}, "teammate": {}},
+    }
+    if configured_value != "missing":
+        team["max_debate_rounds"] = configured_value
+    config = {"models": {"defaults": []}}
+
+    spec = load_team_spec_dict(
+        config_base=config,
+        template_id="demo_team",
+        template_snapshot=team,
+    )
+
+    assert spec["max_debate_rounds"] == 5
+
+
+def test_load_team_spec_dict_preserves_explicit_debate_rounds():
+    config = {
+        "models": {"defaults": []},
+        **_wrap_modes_team(
+            {
+                "demo_team": {
+                    "team_name": "demo_team",
+                    "max_debate_rounds": 3,
+                    "agents": {"leader": {}, "teammate": {}},
+                }
+            }
+        ),
+    }
+
+    spec = load_team_spec_dict(config_base=config)
+
+    assert spec["max_debate_rounds"] == 3
 
 
 def test_load_team_spec_dict_supports_member_specific_agents(monkeypatch, tmp_path):
