@@ -67,6 +67,7 @@ import {
   findOverlappingFileExecutionEvent,
   mergeFileDownloadItems,
 } from '../utils/fileDownloadDedup';
+import { makeEventDedupKey } from '../utils/wsEventDedup';
 import {
   normalizeToolCallPayload,
   normalizeToolResultPayload,
@@ -799,40 +800,6 @@ function stringifyCompact(value: unknown): string {
   } catch {
     return String(value ?? '');
   }
-}
-
-function stringifyPayloadForDedup(payload: Record<string, unknown>): string {
-  try {
-    const serialized = JSON.stringify(payload);
-    if (!serialized) {
-      return '';
-    }
-    return serialized.length > 800 ? serialized.slice(0, 800) : serialized;
-  } catch {
-    return '';
-  }
-}
-
-/**
- * bug001 根因之一：纯内容比对分不清"同一次操作的重复投递"（该去重）和"不同操作但状态没变、
- * 内容碰巧完全一样"（不该去重——同一 session 在 EVENT_DEDUP_WINDOW_MS 窗口内被 resume 两次时，
- * 两次的 goal.snapshot 内容经常完全相同，纯内容比对会把第二次误判成第一次的重复事件丢弃，
- * 导致第二次操作设置的 pendingAction 永远等不到清空信号）。
- *
- * 触发事件的那次 RPC/流式命令的 request_id 才是"这是不是同一次操作"的权威标识——后端已经把
- * chat 前缀、goal 前缀，以及 runtime.accepted / execution.error 这几类事件的
- * payload.request_id 回填好（见 web_connect.py `_build_event_payload`）。有 request_id 时
- * 优先用它区分；事件类型本身不带 request_id 的（多数其它事件）维持原来的纯内容比对，行为不变。
- */
-function makeEventDedupKey(eventName: string, payload: Record<string, unknown>): string {
-  const payloadSessionId =
-    typeof payload.session_id === 'string' ? payload.session_id : '';
-  const payloadEventType =
-    typeof payload.event_type === 'string' ? payload.event_type : '';
-  const payloadRequestId =
-    typeof payload.request_id === 'string' ? payload.request_id : '';
-  const contentKey = payloadRequestId ? `rid:${payloadRequestId}` : stringifyPayloadForDedup(payload);
-  return `${eventName}::${payloadSessionId}::${payloadEventType}::${contentKey}`;
 }
 
 export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {

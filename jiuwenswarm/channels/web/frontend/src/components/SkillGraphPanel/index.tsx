@@ -740,7 +740,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
     setBuildMode(null);
     setLoading(false);
     if (status === 'error') {
-      setError(data.detail || data.build_progress?.label || '技能总谱刷新失败');
+      setError(data.detail || data.build_progress?.label || t('skills.graph.errors.refreshFailed'));
     }
     return true;
   }, []);
@@ -1100,7 +1100,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
           }
         }
       } catch {
-        // 被动轮询只用于同步对话侧触发的总谱进度，不影响当前总谱交互。
+        // 被动轮询只用于同步对话侧触发的图谱进度，不影响当前图谱交互。
       }
       if (!stopped) {
         timer = window.setTimeout(() => {

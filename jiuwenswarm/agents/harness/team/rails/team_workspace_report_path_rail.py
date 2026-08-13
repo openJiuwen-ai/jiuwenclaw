@@ -83,10 +83,14 @@ class TeamWorkspaceReportPathRail(DeepAgentRail):
                 member_name=getattr(context, "member_name", None),
                 root_dir=getattr(context, "team_ws_root", None) or self._root_dir,
                 project_dir=getattr(context, "project_dir", None) or self._project_dir,
-                skills_dir=getattr(context, "team_skills_dir", None),
+                # No skills_dir: a team owns no Skill directory. Every agent
+                # reads the single library and is narrowed by visibility
+                # metadata, so there is nothing team-scoped to thread here.
                 team_id=team_id,
                 config=config,
-                trajectory_registry=getattr(context, "trajectory_registry", None),
+                trajectory_span_processor=getattr(
+                    context, "trajectory_span_processor", None
+                ),
             )
             team_manager = get_team_manager(channel)
             if role == "leader":

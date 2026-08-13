@@ -118,6 +118,12 @@ def _build_model_request_kwargs(
     request_kwargs.pop("model", None)
     request_kwargs.pop("model_name", None)
     request_kwargs.pop("reasoning_level", None)
+    # _source 是 jiuwenswarm 内部标记（如 agentos 备份模型），不得进入 core 的
+    # ModelRequestConfig；core 侧 extra="allow" 会静默收下它，但下游 SDK 调
+    # AsyncCompletions.create(**params) 时不认该 kwarg 会抛 "unexpected keyword
+    # argument"。统一在此清理，覆盖 build_model_from_entry / config.validate_model
+    # / image_modality_warmup 等所有走本函数的路径。
+    request_kwargs.pop("_source", None)
     request_kwargs["model"] = _resolve_model_name(model_name, model_config_obj)
     return request_kwargs
 

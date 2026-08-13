@@ -1475,7 +1475,7 @@
       "mySkills": "My Skills",
       "marketplace": "Marketplace",
       "skillIndex": "Skill Index",
-      "skillGraph": "Skill Score"
+      "skillGraph": "Skill Graph"
     },
     "mySkillsTabs": {
       "all": "All",
@@ -1652,6 +1652,13 @@
       }
     },
     "graph": {
+      "orchestration": {
+        "description": "When enabled, JiuwenSwarm builds a skill graph for installed skills and uses it during task execution to automatically select, combine, and orchestrate skills, improving task success rates. Disabling orchestration does not delete the existing skill graph.",
+        "saving": "Saving…",
+        "saveFailed": "Failed to save the skill orchestration setting. Please try again.",
+        "toggleLabel": "Enable skill orchestration",
+        "connectionRequired": "Connect to the server to change skill orchestration"
+      },
       "stats": {
         "skillsSuffix": " skills",
         "edgesSuffix": " edges"
@@ -1676,40 +1683,40 @@
       "noRelatedEdges": "No related edges.",
       "selectSkillHint": "Select a skill to view its fingerprint",
       "actions": {
-        "read": "Read score",
+        "read": "Read graph",
         "incrementalBuild": "Incremental build",
         "cancelBuild": "Cancel build",
         "fullRebuild": "Full rebuild",
         "fitView": "Fit view"
       },
       "status": {
-        "refreshing": "Refreshing skill score",
-        "cancelled": "Skill score build cancelled",
-        "reading": "Reading skill score",
+        "refreshing": "Refreshing skill graph",
+        "cancelled": "Skill graph build cancelled",
+        "reading": "Reading skill graph",
         "noBuildLogs": "No build logs",
         "waitingBuildLogs": "Waiting for build logs...",
-        "prepareFull": "Preparing full skill score rebuild",
-        "prepareIncremental": "Preparing incremental skill score build"
+        "prepareFull": "Preparing full skill graph rebuild",
+        "prepareIncremental": "Preparing incremental skill graph build"
       },
       "errors": {
-        "readFailed": "Unable to read the skill score. Refresh the score first.",
-        "refreshFailed": "Failed to refresh the skill score",
-        "cancelFailed": "Failed to cancel the skill score build",
-        "buildFailedWithDetail": "Symphony score build failed: {{detail}}"
+        "readFailed": "Unable to read the skill graph. Refresh the graph first.",
+        "refreshFailed": "Failed to refresh the skill graph",
+        "cancelFailed": "Failed to cancel the skill graph build",
+        "buildFailedWithDetail": "Symphony graph build failed: {{detail}}"
       },
       "serverDetails": {
-        "noRunningBuild": "No skill score build is currently running.",
-        "buildStarted": "Skill score background build started.",
-        "cancelRequested": "Skill score build cancelled. Completed cache and checkpoints will be kept.",
-        "buildRunning": "A skill score build is already running in the background.",
-        "buildCancelled": "Skill score build cancelled. Run an incremental build again to continue.",
-        "graphMissing": "The skill score is missing or incomplete. Build the score first."
+        "noRunningBuild": "No skill graph build is currently running.",
+        "buildStarted": "Skill graph background build started.",
+        "cancelRequested": "Skill graph build cancelled. Completed cache and checkpoints will be kept.",
+        "buildRunning": "A skill graph build is already running in the background.",
+        "buildCancelled": "Skill graph build cancelled. Run an incremental build again to continue.",
+        "graphMissing": "The skill graph is missing or incomplete. Build the graph first."
       },
       "buildStages": {
         "idle": "No build logs",
-        "updateStart": "Starting skill score build",
-        "updateCancelRequested": "Cancelling skill score build",
-        "updateCancelled": "Skill score build cancelled",
+        "updateStart": "Starting skill graph build",
+        "updateCancelRequested": "Cancelling skill graph build",
+        "updateCancelled": "Skill graph build cancelled",
         "scanStart": "Scanning skill directories",
         "scanDone": "Skill directory scan complete",
         "diffDone": "Checking skill changes",
@@ -1728,17 +1735,17 @@
         "graphResolveStart": "Resolving candidate relations",
         "graphResolveProgress": "Resolving candidate relations",
         "graphResolveDone": "Candidate relation resolution complete",
-        "graphMaterializeStart": "Generating score structure",
-        "graphMaterializeDone": "Score structure generated",
-        "graphLookupStart": "Building score lookup structure",
-        "graphLookupDone": "Score lookup structure built",
+        "graphMaterializeStart": "Generating graph structure",
+        "graphMaterializeDone": "Graph structure generated",
+        "graphLookupStart": "Building graph lookup structure",
+        "graphLookupDone": "Graph lookup structure built",
         "graphBuildDone": "Skill relation graph built",
-        "artifactGraphWriteStart": "Writing score files",
-        "artifactGraphWriteDone": "Score files written",
-        "stateWriteStart": "Writing score state",
-        "stateWriteDone": "Score state written",
-        "updateFailed": "Score build failed",
-        "updateDone": "Score build complete"
+        "artifactGraphWriteStart": "Writing graph files",
+        "artifactGraphWriteDone": "Graph files written",
+        "stateWriteStart": "Writing graph state",
+        "stateWriteDone": "Graph state written",
+        "updateFailed": "Graph build failed",
+        "updateDone": "Graph build complete"
       }
     },
     "evolution": {
