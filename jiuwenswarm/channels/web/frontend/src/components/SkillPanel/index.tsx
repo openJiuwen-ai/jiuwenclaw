@@ -655,6 +655,48 @@ function SkillIndexTreeView({
   return <div className="space-y-1" role="tree">{roots.map((node) => renderNode(node, 0))}</div>;
 }
 
+/**
+ * 将技能内容中的图片路径转换为 /file-api/raw-file 可访问的 URL。
+ * 处理两种情况：
+ * 1. 相对路径（references/img_00.png）→ 直接拼接技能目录
+ * 2. 后端改写的 /file-api/download?token=xxx → 解码 token 获取 relative_path
+ * skillFilePath 为 SKILL.md 的绝对路径，用于推导技能所在目录。
+ */
+function transformSkillContentImages(content: string, skillFilePath: string): string {
+  if (!content || !skillFilePath) return content;
+  const lastSlash = Math.max(skillFilePath.lastIndexOf('/'), skillFilePath.lastIndexOf('\\'));
+  const skillDir = lastSlash >= 0 ? skillFilePath.substring(0, lastSlash).replace(/\\/g, '/') : '';
+
+  const toRawFileUrl = (relativePath: string): string => {
+    const fullPath = skillDir ? `${skillDir}/${relativePath}`.replace(/\\/g, '/') : relativePath;
+    return `/file-api/raw-file?path=${encodeURIComponent(fullPath)}`;
+  };
+
+  return content.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (match, alt, imgPath: string) => {
+    // 跳过外部 URL 和 data URI
+    if (/^(https?:|data:|file:\/\/\/)/.test(imgPath)) return match;
+
+    // 处理后端改写的 /file-api/download?token=xxx URL
+    if (imgPath.startsWith('/file-api/download?token=')) {
+      try {
+        const token = new URL(imgPath, 'http://localhost').searchParams.get('token') || '';
+        const payloadB64 = token.split('.')[0];
+        const payload = JSON.parse(atob(payloadB64));
+        if (payload.relative_path) {
+          return `![${alt}](${toRawFileUrl(payload.relative_path)})`;
+        }
+      } catch {
+        // 解码失败，保留原 URL
+      }
+      return match;
+    }
+
+    // 处理相对路径
+    if (imgPath.startsWith('/file-api/')) return match;
+    return `![${alt}](${toRawFileUrl(imgPath)})`;
+  });
+}
+
 export function SkillPanel({
   sessionId,
   isConnected,
@@ -2855,7 +2897,7 @@ export function SkillPanel({
                   {detailTab === "content" && (
                     <div data-testid="skill-panel-my-detail-content-preview" className="mt-4 flex-1 min-h-0 overflow-y-auto text-sm text-text bg-secondary border border-border rounded-md p-3">
                       {selectedSkill.content ? (
-                        <MarkdownRenderer content={selectedSkill.content} className="chat-text chat-markdown" />
+                        <MarkdownRenderer content={transformSkillContentImages(selectedSkill.content, selectedSkill.file_path)} className="chat-text chat-markdown" />
                       ) : (
                         <div data-testid="skill-panel-my-detail-content-text">{t('skills.noContent')}</div>
                       )}
