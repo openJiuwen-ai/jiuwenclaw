@@ -50,6 +50,7 @@ _PROFILE_EXECUTABLES: dict[str, tuple[str, ...]] = {
 class EnvironmentGateError(RuntimeError):
     """Raised when the runtime cannot be made ready."""
 
+
 def _resolved(path: Path | str) -> Path:
     return Path(path).expanduser().resolve()
 
@@ -132,7 +133,7 @@ def _create_project_venv(root: Path) -> Path | None:
         if result.returncode == 0 and _is_executable_python(target):
             return _absolute_executable(target)
     except (OSError, subprocess.SubprocessError) as exc:
-        print(f"Virtual-environment creation failed: {exc}")
+        return None
     return None
 
 
@@ -174,6 +175,7 @@ def _reexec_with_selected(selected: Path) -> None:
     current = _absolute_executable(sys.executable)
     if _same_executable(selected, current):
         return
+
     if os.environ.get(_REEXEC_FLAG) == "1":
         raise EnvironmentGateError(
             f"Interpreter selection loop detected: current={current}, selected={selected}"
@@ -183,19 +185,21 @@ def _reexec_with_selected(selected: Path) -> None:
     env = os.environ.copy()
     env[_REEXEC_FLAG] = "1"
 
+    args = [
+        str(selected),
+        str(caller),
+        *sys.argv[1:],
+    ]
+
     try:
-        result = subprocess.run(
-            [str(selected), str(caller), *sys.argv[1:]],
-            env=env,
-            check=False,
-        )
+        os.execve(str(selected), args, env)
     except OSError as exc:
-        raise EnvironmentGateError(f"Could not start selected interpreter {selected}: {exc}") from exc
-    raise SystemExit(result.returncode)
+        raise EnvironmentGateError(
+            f"Could not start selected interpreter {selected}: {exc}"
+        ) from exc
 
 
 def _run(command: list[str], *, timeout: int, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    print("Running: " + subprocess.list2cmdline(command))
     return subprocess.run(
         command,
         check=False,
@@ -365,7 +369,10 @@ def _external_tool_hint(tools: Iterable[str]) -> str:
         elif sys.platform == "darwin":
             hints.append("Install Node.js, for example: brew install node.")
         else:
-            hints.append("Install Node.js with the system package manager, for example on Debian/Ubuntu: sudo apt-get install -y nodejs.")
+            hints.append(
+                "Install Node.js with the system package manager, "
+                "for example on Debian/Ubuntu: sudo apt-get install -y nodejs."
+            )
     if {"ffmpeg", "ffprobe"} & tools:
         if os.name == "nt":
             hints.append(
@@ -475,11 +482,11 @@ def ensure_environment(
         return selected
     except EnvironmentGateError as exc:
         _write_status(profile=profile, ready=False, error=str(exc))
-        raise SystemExit(2) from exc
+        raise RuntimeError("Operation failed.") from exc
     except subprocess.TimeoutExpired as exc:
         message = f"Environment repair command timed out: {exc}"
         _write_status(profile=profile, ready=False, error=message)
-        raise SystemExit(2) from exc
+        raise RuntimeError("Operation failed.") from exc
 
 
 def main() -> None:
