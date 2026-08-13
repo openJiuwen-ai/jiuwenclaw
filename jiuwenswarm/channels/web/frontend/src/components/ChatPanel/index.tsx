@@ -440,7 +440,7 @@ function WelcomeHeading() {
   if (isZh) {
     return (
       <>
-        JiuwenSwarm 轻松解决工作每个问题！
+        Weile Agent
       </>
     );
   }
