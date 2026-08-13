@@ -1382,3 +1382,29 @@ modes:
         # 控制记忆内容如何注入到每个成员的 system prompt 中：
         #   "proactive" — 每轮对话开始时主动注入最新记忆摘要
         member_memory_prompt_mode: "proactive"
+
+# ==================== 模型路由 ====================
+model_routing:
+  # 总开关：true 启用模型路由，false 禁用
+  enabled: false
+  # apply: true = 真切换模型（set_llm）；false = 仅推荐不切换
+  apply: true
+  # privacy_check: true = 启用隐私检测，含隐私内容时路由到可信模型
+  privacy_check: false
+  # stats_path: 自定义统计文件路径；空则用默认 ~/.jiuwenswarm/config/routing_state/model_routing_list.json
+  stats_path: ""
+  health_check:
+    enabled: true
+    # 健康检查间隔（秒），TTL 缓存过期后重新检查
+    interval_seconds: 180
+    # 单次健康检查超时（秒）
+    timeout_seconds: 10
+    # 并发检查轮次
+    max_rounds: 1
+    # 连续失败次数达到此值后标记为不健康
+    max_consecutive_failures: 2
+    # 连续成功次数达到此值后恢复为健康
+    recovery_consecutive_successes: 1
+    # 健康检查使用的 prompt
+    health_check_prompt: "hi"
+    max_tokens: 1
