@@ -1304,6 +1304,7 @@ modes:
       - user_todos
       - skill_toolkit
       - skill_retrieval
+      - ask_user_question
 
     embedding_config:
       model_name: null
