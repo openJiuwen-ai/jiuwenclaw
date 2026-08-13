@@ -31,6 +31,7 @@ TEAM_USER_TURN_KEY = "_user_turn"
 # Channels whose turns are system-driven rather than typed by a person.
 _SYSTEM_CHANNELS = frozenset({"cron", "heartbeat"})
 
+
 @dataclass(frozen=True)
 class UserTurn:
     """A single inbound user message plus the context delivered with it.

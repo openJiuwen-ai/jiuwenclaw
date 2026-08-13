@@ -98,12 +98,6 @@ from openjiuwen.harness.schema.interaction import (
     SendInputRequest,
 )
 
-from jiuwenswarm.server.runtime.agent_adapter.statusline_setup_agent import (
-    DEFAULT_STATUSLINE_SETUP_MAX_ITERATIONS,
-    STATUSLINE_SETUP_AGENT_TYPE,
-    build_statusline_setup_agent_config,
-)
-
 GOAL_UPDATED_EVENT_TYPE = InteractionEventType.GOAL_UPDATED.value
 _ERROR_EVENT = getattr(InteractionEventType, "EXECUTION_ERROR", None)
 if _ERROR_EVENT is None:
@@ -159,6 +153,11 @@ except ImportError:  # Compatibility with older agent-core versions.
 from openjiuwen.harness.schema.task import TodoStatus
 from openjiuwen.harness.workspace.workspace import Workspace, WorkspaceNode
 
+from jiuwenswarm.server.runtime.agent_adapter.statusline_setup_agent import (
+    DEFAULT_STATUSLINE_SETUP_MAX_ITERATIONS,
+    STATUSLINE_SETUP_AGENT_TYPE,
+    build_statusline_setup_agent_config,
+)
 from jiuwenswarm.agents.harness.team.a2x.a2x_registry_runtime import (
     init_a2x_client,
     register_blank_agent_if_teammate,
