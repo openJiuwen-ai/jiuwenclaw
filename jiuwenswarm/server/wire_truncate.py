@@ -21,7 +21,10 @@ of the JSON encoding) — never character count.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
+
+from jiuwenswarm.common.ws_limits import AGENT_WS_SEND_BUDGET_BYTES
 
 # ---------------------------------------------------------------------------
 # Wire byte budgets
@@ -47,6 +50,19 @@ _WORKFLOW_COLLAPSED_AGENT_TEXT_LIMIT = 512
 _WORKFLOW_WAITING_HUMAN_PROMPT_MAX_BYTES = 512 * 1024
 
 _TRUNCATE_SUFFIX = " [truncated]"
+
+# SVG and Mermaid diagrams have increased limits to allow rendering
+_HISTORY_WIRE_DIAGRAM_LIMIT = 2 * 1024 * 1024
+
+_HISTORY_FRAME_OVERHEAD_BYTES = 64 * 1024
+_HISTORY_FRAME_WIRE_MAX_BYTES = AGENT_WS_SEND_BUDGET_BYTES - _HISTORY_FRAME_OVERHEAD_BYTES
+
+_DIAGRAM_FENCE_LANGUAGES = ("svg", "mermaid")
+# Matches an opening fence whose info string starts with a diagram language
+_DIAGRAM_FENCE_RE = re.compile(
+    r"^[ \t]{0,3}(?:`{3,}|~{3,})[ \t]*(?:" + "|".join(_DIAGRAM_FENCE_LANGUAGES) + r")\b",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 _HISTORY_RESTORABLE_ASSISTANT_EVENT_TYPES = frozenset(
     {
@@ -133,18 +149,33 @@ def _coerce_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, parsed))
 
 
-def _truncate_string_by_bytes(value: str, max_bytes: int) -> str:
-    """Truncate ``value`` to at most ``max_bytes`` UTF-8 bytes.
+def _contains_diagram_markup(value: str) -> bool:
+    return bool(_DIAGRAM_FENCE_RE.search(value))
 
-    Appends ``" [truncated]"`` and decodes the byte slice with
-    ``errors="ignore"`` so a split multi-byte character is dropped rather than
-    producing invalid UTF-8 (which would break the frontend's JSON parse).
-    """
+
+def _truncate_raw_by_bytes(raw: bytes, max_bytes: int) -> str:
+    budget = max(0, max_bytes - len(_TRUNCATE_SUFFIX.encode("utf-8")))
+    return raw[:budget].decode("utf-8", errors="ignore") + _TRUNCATE_SUFFIX
+
+
+def _truncate_string_by_bytes(value: str, max_bytes: int) -> str:
+    """Truncate ``value`` to at most ``max_bytes`` UTF-8 bytes."""
     raw = value.encode("utf-8")
     if len(raw) <= max_bytes:
         return value
-    budget = max(0, max_bytes - len(_TRUNCATE_SUFFIX.encode("utf-8")))
-    return raw[:budget].decode("utf-8", errors="ignore") + _TRUNCATE_SUFFIX
+    return _truncate_raw_by_bytes(raw, max_bytes)
+
+
+def _sanitize_wire_string(value: str) -> str:
+    """Bound one wire string, granting diagram payloads a larger ceiling."""
+    raw = value.encode("utf-8")
+    if len(raw) <= _HISTORY_WIRE_STRING_LIMIT:
+        return value
+    if not _contains_diagram_markup(value):
+        return _truncate_raw_by_bytes(raw, _HISTORY_WIRE_STRING_LIMIT)
+    if len(raw) <= _HISTORY_WIRE_DIAGRAM_LIMIT:
+        return value
+    return _truncate_raw_by_bytes(raw, _HISTORY_WIRE_DIAGRAM_LIMIT)
 
 
 def _compact_wire_metadata_value(value: Any) -> Any:
@@ -161,7 +192,7 @@ def _sanitize_history_wire_value(value: Any, *, depth: int = 0) -> Any:
     if depth > _HISTORY_WIRE_DEPTH_LIMIT:
         return "<truncated>"
     if isinstance(value, str):
-        return _truncate_string_by_bytes(value, _HISTORY_WIRE_STRING_LIMIT)
+        return _sanitize_wire_string(value)
     if isinstance(value, dict):
         return {
             str(key): _sanitize_history_wire_value(item, depth=depth + 1)
@@ -184,8 +215,24 @@ def _sanitize_history_wire_value(value: Any, *, depth: int = 0) -> Any:
 # History record shaping
 # ---------------------------------------------------------------------------
 
-def _collapse_oversized_history_record(record: dict[str, Any]) -> dict[str, Any]:
-    """Collapse a too-large history record to a metadata stub + short content."""
+def _record_has_diagram_content(record: dict[str, Any]) -> bool:
+    """True when a record's ``content`` carries a fenced diagram block."""
+    content = record.get("content")
+    return isinstance(content, str) and _contains_diagram_markup(content)
+
+
+def _collapse_oversized_history_record(
+    record: dict[str, Any],
+    *,
+    preserve_diagram: bool = True,
+) -> dict[str, Any]:
+    """Collapse a too-large history record to a metadata stub + short content.
+
+    Diagram content is preserved at its own ceiling by default — a record that is
+    oversized for unrelated reasons (say a huge ``tool_result`` alongside the SVG)
+    must not lose the diagram. Callers that need the record to actually shrink,
+    such as the non-streaming page fitter, pass ``preserve_diagram=False``.
+    """
     collapsed = {
         key: _sanitize_history_wire_value(value)
         for key, value in record.items()
@@ -193,7 +240,10 @@ def _collapse_oversized_history_record(record: dict[str, Any]) -> dict[str, Any]
     }
     content = record.get("content")
     if isinstance(content, str) and content.strip():
-        collapsed["content"] = _truncate_string_by_bytes(content, 512)
+        if preserve_diagram and _contains_diagram_markup(content):
+            collapsed["content"] = _sanitize_wire_string(content)
+        else:
+            collapsed["content"] = _truncate_string_by_bytes(content, 512)
     event = record.get("event")
     if isinstance(event, dict):
         collapsed["event"] = {
@@ -203,6 +253,11 @@ def _collapse_oversized_history_record(record: dict[str, Any]) -> dict[str, Any]
         }
     collapsed["truncated"] = True
     return collapsed
+
+
+def _collapse_non_diagram_record(record: dict[str, Any]) -> dict[str, Any]:
+    """Collapse a record without the diagram carve-out (content → 512 bytes)."""
+    return _collapse_oversized_history_record(record, preserve_diagram=False)
 
 
 def _minimal_history_record_for_wire(record: dict[str, Any]) -> dict[str, Any]:
@@ -224,7 +279,7 @@ def _sanitize_history_record_for_wire(record: Any) -> dict[str, Any]:
     sanitized = _sanitize_history_wire_value(record)
     if not isinstance(sanitized, dict):
         return {"content": str(sanitized), "truncated": True}
-    if _json_wire_size(sanitized) <= _HISTORY_WIRE_RECORD_MAX_BYTES:
+    if _json_wire_size(sanitized) <= _HISTORY_WIRE_DIAGRAM_LIMIT:
         return sanitized
     return _collapse_oversized_history_record(sanitized)
 
@@ -267,12 +322,17 @@ def _select_history_record_page(
             break
         record = records[idx]
         record_size = _json_wire_size(record) + 1
-        if record_size > budget:
+        is_diagram = isinstance(record, dict) and _record_has_diagram_content(record)
+        if record_size > budget and not is_diagram:
             record = _collapse_oversized_history_record(record)
             record_size = _json_wire_size(record) + 1
         if page and used + record_size > budget:
             break
         if not page and used + record_size > budget:
+            if is_diagram:
+                page.append(record)
+                next_cursor = idx + 1
+                break
             record = _collapse_oversized_history_record(record)
             record_size = _json_wire_size(record) + 1
             if used + record_size > budget:
@@ -286,6 +346,74 @@ def _select_history_record_page(
         next_cursor = idx + 1
 
     return page, next_cursor
+
+
+def _fit_history_page_to_budget(
+    messages: list[dict[str, Any]],
+    *,
+    max_bytes: int,
+) -> list[dict[str, Any]]:
+    """Shrink a fixed-size history page until its JSON fits ``max_bytes``.
+       Larger messages are shrinked first excepty if they contain SVG diagrams 
+       that are useless with only partial data.
+    """
+
+    if _json_wire_size(messages) <= max_bytes:
+        return messages
+
+    shrunk = list(messages)
+    diagram_indices = [
+        index
+        for index, record in enumerate(shrunk)
+        if isinstance(record, dict) and _record_has_diagram_content(record)
+    ]
+    ordinary_indices = [
+        index for index in range(len(shrunk)) if index not in set(diagram_indices)
+    ]
+
+    def _apply(indices: list[int], transform: Any) -> bool:
+        """Run ``transform`` largest-first; return True once the page fits."""
+        largest_first = sorted(
+            indices,
+            key=lambda index: _json_wire_size(shrunk[index]),
+            reverse=True,
+        )
+        for index in largest_first:
+            if _json_wire_size(shrunk) <= max_bytes:
+                return True
+            if isinstance(shrunk[index], dict):
+                shrunk[index] = transform(shrunk[index])
+        return _json_wire_size(shrunk) <= max_bytes
+
+    for indices, transform in (
+        (ordinary_indices, _collapse_non_diagram_record),
+        (ordinary_indices, _minimal_history_record_for_wire),
+        (diagram_indices, _collapse_oversized_history_record),
+        (diagram_indices, _collapse_non_diagram_record),
+        (diagram_indices, _minimal_history_record_for_wire),
+    ):
+        if _apply(indices, transform):
+            break
+    return shrunk
+
+
+def _fit_history_record_to_frame(
+    record: Any,
+    *,
+    max_bytes: int = _HISTORY_FRAME_WIRE_MAX_BYTES,
+) -> Any:
+    """Bound one streamed history record so its chunk cannot blow the frame."""
+    if not isinstance(record, dict) or _json_wire_size(record) <= max_bytes:
+        return record
+    for transform in (
+        _collapse_oversized_history_record,
+        _collapse_non_diagram_record,
+        _minimal_history_record_for_wire,
+    ):
+        record = transform(record)
+        if _json_wire_size(record) <= max_bytes:
+            break
+    return record
 
 
 # ---------------------------------------------------------------------------
@@ -779,6 +907,10 @@ __all__ = [
     "_HISTORY_WIRE_LIST_LIMIT",
     "_HISTORY_WIRE_DEPTH_LIMIT",
     "_HISTORY_WIRE_RECORD_MAX_BYTES",
+    "_HISTORY_WIRE_DIAGRAM_LIMIT",
+    "_HISTORY_FRAME_OVERHEAD_BYTES",
+    "_HISTORY_FRAME_WIRE_MAX_BYTES",
+    "_DIAGRAM_FENCE_LANGUAGES",
     "_TEAM_HISTORY_DEFAULT_LIMIT",
     "_TEAM_HISTORY_MAX_LIMIT",
     "_TEAM_HISTORY_DEFAULT_MAX_BYTES",
@@ -794,13 +926,20 @@ __all__ = [
     "_HISTORY_RESTORABLE_ASSISTANT_EVENT_TYPES",
     "_json_wire_size",
     "_coerce_int",
+    "_contains_diagram_markup",
+    "_truncate_raw_by_bytes",
     "_truncate_string_by_bytes",
+    "_sanitize_wire_string",
     "_compact_wire_metadata_value",
     "_sanitize_history_wire_value",
+    "_record_has_diagram_content",
     "_collapse_oversized_history_record",
+    "_collapse_non_diagram_record",
     "_minimal_history_record_for_wire",
     "_sanitize_history_record_for_wire",
     "_select_history_record_page",
+    "_fit_history_page_to_budget",
+    "_fit_history_record_to_frame",
     "_is_waiting_human_agent",
     "_extract_waiting_human_prompts",
     "_restore_waiting_human_prompts",

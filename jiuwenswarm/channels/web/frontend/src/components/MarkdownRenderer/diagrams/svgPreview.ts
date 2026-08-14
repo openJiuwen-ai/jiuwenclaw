@@ -1,7 +1,9 @@
 import { createStaticPreviewDocument } from '../isolatedPreview';
 import { getSvgNaturalHeight, getSvgNaturalWidth } from '../../../utils/svgDimensions';
 
-export type SvgMarkupStatus = 'streaming' | 'ready' | 'invalid';
+export type SvgMarkupStatus = 'streaming' | 'ready' | 'truncated' | 'invalid';
+
+const TRUNCATION_MARKER = '[truncated]';
 
 export interface SvgPreview {
   markup: string;
@@ -111,7 +113,22 @@ export function updateSvgPreview(frame: HTMLIFrameElement | null, code: string):
   else body.appendChild(nextSvg);
 }
 
-export function getSvgMarkupStatus(preview: SvgPreview | null, complete: boolean, isStreaming: boolean): SvgMarkupStatus {
+export function isTruncatedMarkup(code: string): boolean {
+  return code.trimEnd().endsWith(TRUNCATION_MARKER);
+}
+
+export function stripTruncationMarker(code: string): string {
+  if (!isTruncatedMarkup(code)) return code;
+  return code.slice(0, code.lastIndexOf(TRUNCATION_MARKER)).trimEnd();
+}
+
+export function getSvgMarkupStatus(
+  preview: SvgPreview | null,
+  complete: boolean,
+  isStreaming: boolean,
+  truncated: boolean = false,
+): SvgMarkupStatus {
   if (!complete && isStreaming) return 'streaming';
+  if (truncated) return 'truncated';
   return preview?.wellFormed ? 'ready' : 'invalid';
 }

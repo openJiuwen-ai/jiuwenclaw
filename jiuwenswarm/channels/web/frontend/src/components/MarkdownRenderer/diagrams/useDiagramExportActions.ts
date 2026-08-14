@@ -9,6 +9,9 @@ export interface DiagramExportConfig {
   renderedSvg: string;
   imageFilename: string;
   downloadEnabled?: boolean;
+  resolveSourceCode?: () => Promise<string | null>;
+  partialSourceFilename?: string;
+  partialImageFilename?: string;
 }
 
 interface DiagramExportActions {
@@ -28,9 +31,20 @@ export function useDiagramExportActions(config: DiagramExportConfig): DiagramExp
     return () => window.clearTimeout(timeout);
   }, [feedback]);
 
-  async function copyCode(): Promise<void> {
+  async function resolveFullSource(): Promise<string | null> {
+    if (!config.resolveSourceCode) return null;
+    setFeedback(t('diagram.restoringSource'));
     try {
-      await navigator.clipboard.writeText(config.sourceCode);
+      return await config.resolveSourceCode();
+    } catch {
+      return null;
+    }
+  }
+
+  async function copyCode(): Promise<void> {
+    const source = (await resolveFullSource()) ?? config.sourceCode;
+    try {
+      await navigator.clipboard.writeText(source);
       setFeedback(t('diagram.copied'));
     } catch {
       setFeedback(t('diagram.copyFailed'));
@@ -38,9 +52,13 @@ export function useDiagramExportActions(config: DiagramExportConfig): DiagramExp
   }
 
   async function downloadSource(): Promise<void> {
-    const source = new Blob([config.sourceCode], { type: config.sourceMimeType });
+    const full = await resolveFullSource();
+    const filename = full === null && config.partialSourceFilename
+      ? config.partialSourceFilename
+      : config.sourceFilename;
+    const source = new Blob([full ?? config.sourceCode], { type: config.sourceMimeType });
     try {
-      const outcome = await saveBlob(source, config.sourceFilename);
+      const outcome = await saveBlob(source, filename);
       setFeedback(outcome === 'failed' ? t('diagram.downloadSourceFailed') : null);
     } catch {
       setFeedback(t('diagram.downloadSourceFailed'));
@@ -48,10 +66,14 @@ export function useDiagramExportActions(config: DiagramExportConfig): DiagramExp
   }
 
   async function downloadImage(): Promise<void> {
+    const full = await resolveFullSource();
+    const filename = full === null && config.partialImageFilename
+      ? config.partialImageFilename
+      : config.imageFilename;
     setFeedback(t('diagram.preparingImage'));
     try {
-      const image = await convertSvgToPng(config.renderedSvg);
-      const outcome = await saveBlob(image, config.imageFilename);
+      const image = await convertSvgToPng(full ?? config.renderedSvg);
+      const outcome = await saveBlob(image, filename);
       setFeedback(outcome === 'failed' ? t('diagram.downloadImageFailed') : null);
     } catch {
       setFeedback(t('diagram.downloadImageFailed'));

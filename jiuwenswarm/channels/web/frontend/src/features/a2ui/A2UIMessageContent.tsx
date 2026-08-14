@@ -27,13 +27,13 @@ interface A2UIMessageContentProps {
 type RenderPart =
   | { kind: 'text'; text: string; key: string }
   | {
-      kind: 'a2ui';
-      key: string;
-      protocolVersion: string;
-      messages: Extract<A2UIContentPart, { kind: 'a2ui' }>['messages'];
-      surfaceIds: string[];
-      resetKey: string;
-    };
+    kind: 'a2ui';
+    key: string;
+    protocolVersion: string;
+    messages: Extract<A2UIContentPart, { kind: 'a2ui' }>['messages'];
+    surfaceIds: string[];
+    resetKey: string;
+  };
 
 function safeNamespace(input: string): string {
   return input.replace(/[^A-Za-z0-9_-]/g, '_');
@@ -166,6 +166,7 @@ export const A2UIMessageContent = memo(function A2UIMessageContent({
               content={part.text}
               className="chat-markdown"
               isStreaming={isStreaming}
+              recordId={messageId}
             />
           );
         }

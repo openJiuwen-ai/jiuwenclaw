@@ -608,6 +608,7 @@ _FORWARD_REQ_METHODS = frozenset({
     "chat.resume",
     "chat.user_answer",
     "history.get",
+    "history.record.get",
     # "tts.synthesize",
     "skills.marketplace.list",
     "skills.list",
@@ -706,6 +707,9 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "command.goal",
     "team.snapshot",
     "team.history.get",
+    # 纯转发、无本地 ack handler（与 team.history.get 同形），
+    # 否则会落到 unknown method 分支。
+    "history.record.get",
     "team.mq.publish",
     "skills.marketplace.list",
     "skills.list",

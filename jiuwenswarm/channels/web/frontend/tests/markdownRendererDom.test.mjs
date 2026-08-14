@@ -10,7 +10,7 @@ import { MarkdownRenderer } from '../node_modules/.cache/markdown-renderer/Markd
 import { convertSvgToPng, downloadBlob, saveBlob } from '../node_modules/.cache/markdown-renderer/diagrams/diagramExport.js';
 import { MermaidDiagram } from '../node_modules/.cache/markdown-renderer/diagrams/MermaidDiagram.js';
 import { SvgDiagram } from '../node_modules/.cache/markdown-renderer/diagrams/SvgDiagram.js';
-import { getSvgMarkupStatus, getSvgPreview, SVG_PREVIEW_DOCUMENT, updateSvgPreview } from '../node_modules/.cache/markdown-renderer/diagrams/svgPreview.js';
+import { getSvgMarkupStatus, getSvgPreview, isTruncatedMarkup, stripTruncationMarker, SVG_PREVIEW_DOCUMENT, updateSvgPreview } from '../node_modules/.cache/markdown-renderer/diagrams/svgPreview.js';
 import { UNTRUSTED_STATIC_PREVIEW_CSP, UNTRUSTED_STATIC_PREVIEW_SANDBOX } from '../node_modules/.cache/markdown-renderer/isolatedPreview.js';
 
 const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
@@ -86,6 +86,70 @@ test('classifies streaming, valid, and malformed SVG markup with browser DOM par
     const normalized = new dom.window.DOMParser().parseFromString(unclosedPreview.markup, 'image/svg+xml');
     assert.equal(normalized.querySelector('parsererror'), null);
     assert.equal(normalized.documentElement.namespaceURI, SVG_NAMESPACE);
+  } finally {
+    restore();
+    dom.window.close();
+  }
+});
+
+test('reports server-truncated SVG markup as truncated rather than malformed', () => {
+  const dom = new JSDOM();
+  const restore = installGlobals({ DOMParser: dom.window.DOMParser });
+  try {
+    // The server appends this suffix when it has to shrink a history string.
+    assert.equal(isTruncatedMarkup('<svg><g> [truncated]'), true);
+    assert.equal(isTruncatedMarkup('<svg><g> [truncated]\n'), true);
+    assert.equal(isTruncatedMarkup(`<svg xmlns="${SVG_NAMESPACE}"><rect /></svg>`), false);
+
+    const cutPreview = getSvgPreview('<svg><g> [truncated]');
+    // Truncation explains the breakage, so it wins over the generic states.
+    assert.equal(getSvgMarkupStatus(cutPreview, true, false, true), 'truncated');
+    assert.equal(getSvgMarkupStatus(cutPreview, true, false, false), 'invalid');
+    // Still streaming takes precedence — the block is simply not finished yet.
+    assert.equal(getSvgMarkupStatus(cutPreview, false, true, true), 'streaming');
+    // With no parseable root the viewer must still fall back to the code view.
+    assert.equal(getSvgMarkupStatus(getSvgPreview('<div />'), true, false, true), 'invalid');
+  } finally {
+    restore();
+    dom.window.close();
+  }
+});
+
+test('keeps the truncation marker out of exported SVG source', () => {
+  // The marker is transport metadata — it must never reach a saved .svg file.
+  assert.equal(stripTruncationMarker('<svg><g> [truncated]'), '<svg><g>');
+  assert.equal(stripTruncationMarker('<svg><g> [truncated]\n'), '<svg><g>');
+  // Untruncated markup is returned untouched, byte for byte.
+  const intact = `<svg xmlns="${SVG_NAMESPACE}"><rect /></svg>`;
+  assert.equal(stripTruncationMarker(intact), intact);
+  // A literal "[truncated]" mid-content is not a marker and must survive.
+  const inline = '<svg><text>[truncated]</text></svg>';
+  assert.equal(stripTruncationMarker(inline), inline);
+});
+
+test('renders a truncated SVG as an image and still allows its export', () => {
+  const dom = new JSDOM();
+  const restore = installGlobals({ DOMParser: dom.window.DOMParser });
+  try {
+    const cut = '<svg xmlns="http://www.w3.org/2000/svg"><rect x="1" /><g> [truncated]';
+    // Mirror SvgDiagram: strip the marker first, then parse.
+    const source = stripTruncationMarker(cut);
+    const preview = getSvgPreview(source);
+    const status = getSvgMarkupStatus(preview, true, false, isTruncatedMarkup(cut));
+
+    assert.equal(status, 'truncated');
+    // A parseable root means there is something worth previewing and exporting.
+    assert.ok(preview);
+    // The marker must not survive as a text node in the rendered/exported image.
+    assert.equal(preview.markup.includes('[truncated]'), false);
+    // Parsing the raw string instead would have leaked it — this is the bug the
+    // strip-before-parse ordering prevents.
+    assert.equal(getSvgPreview(cut).markup.includes('[truncated]'), true);
+
+    // The image export path rasterizes the normalized markup, which the HTML
+    // parser has auto-closed — so a partial diagram still produces a PNG.
+    const normalized = new dom.window.DOMParser().parseFromString(preview.markup, 'image/svg+xml');
+    assert.equal(normalized.querySelector('parsererror'), null);
   } finally {
     restore();
     dom.window.close();

@@ -243,6 +243,11 @@ _CODE_MODE_SYNC_METHODS = frozenset({
 # ── 流式处理心跳间隔：当 Agent 处理时间超过此阈值时，发送心跳 chunk 保持 WebSocket 连接活跃 --
 # 避免 ping_timeout 导致连接关闭。默认 10 秒，小于服务端 ping_timeout=20s。
 _STREAM_HEARTBEAT_INTERVAL_SECONDS = 10.0
+
+# history.record.get：只允许回源这些字段，避免变成任意历史字段的读取接口。
+_HISTORY_RECORD_GET_ALLOWED_FIELDS = frozenset({"content"})
+# 单条回源仍是一个 wire 帧，留出 JSON 与信封的余量（发送预算 6 MiB）。
+_HISTORY_RECORD_GET_MAX_BYTES = 5 * 1024 * 1024
 from jiuwenswarm.server.wire_truncate import (  # noqa: F401  — re-exported for tests / handlers
     _HISTORY_PAGE_SIZE,
     _HISTORY_WIRE_STRING_LIMIT,
@@ -250,6 +255,7 @@ from jiuwenswarm.server.wire_truncate import (  # noqa: F401  — re-exported fo
     _HISTORY_WIRE_LIST_LIMIT,
     _HISTORY_WIRE_DEPTH_LIMIT,
     _HISTORY_WIRE_RECORD_MAX_BYTES,
+    _HISTORY_WIRE_DIAGRAM_LIMIT,
     _TEAM_HISTORY_DEFAULT_LIMIT,
     _TEAM_HISTORY_MAX_LIMIT,
     _TEAM_HISTORY_DEFAULT_MAX_BYTES,
@@ -272,6 +278,10 @@ from jiuwenswarm.server.wire_truncate import (  # noqa: F401  — re-exported fo
     _minimal_history_record_for_wire,
     _sanitize_history_record_for_wire,
     _select_history_record_page,
+    _fit_history_page_to_budget,
+    _fit_history_record_to_frame,
+    _HISTORY_FRAME_WIRE_MAX_BYTES,
+    _contains_diagram_markup,
     _is_waiting_human_agent,
     _extract_waiting_human_prompts,
     _restore_waiting_human_prompts,
@@ -1533,6 +1543,9 @@ class AgentWebSocketServer:
                     await self._handle_history_get_stream(ws, request, send_lock)
                 else:
                     await self._handle_history_get(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.HISTORY_RECORD_GET:
+                await self._handle_history_record_get(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.TEAM_SNAPSHOT:
                 await self._handle_team_snapshot(ws, request, send_lock)
@@ -4434,6 +4447,15 @@ class AgentWebSocketServer:
                 payload={"error": "invalid page_idx or session history not found"},
             )
         else:
+            messages = data.get("messages")
+            if isinstance(messages, list):
+                data = {
+                    **data,
+                    "messages": _fit_history_page_to_budget(
+                        messages,
+                        max_bytes=_HISTORY_FRAME_WIRE_MAX_BYTES,
+                    ),
+                }
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -4444,6 +4466,101 @@ class AgentWebSocketServer:
         async with send_lock:
             await send_wire_payload(ws, wire)
 
+    async def _handle_history_record_get(
+            self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
+    ) -> None:
+        params = request.params if isinstance(request.params, dict) else {}
+        session_id = params.get("session_id")
+        record_id = params.get("record_id")
+        field = params.get("field") or "content"
+        channel_id = request.channel_id or "web"
+
+        def _fail(error: str) -> AgentResponse:
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=channel_id,
+                ok=False,
+                payload={"error": error},
+            )
+
+        if not isinstance(session_id, str) or not session_id.strip():
+            resp = _fail("session_id is required")
+        elif not isinstance(record_id, str) or not record_id.strip():
+            resp = _fail("record_id is required")
+        elif not isinstance(field, str) or field not in _HISTORY_RECORD_GET_ALLOWED_FIELDS:
+            resp = _fail("unsupported field")
+        else:
+            resp = await asyncio.to_thread(
+                self._build_history_record_payload,
+                request_id=request.request_id,
+                channel_id=channel_id,
+                session_id=session_id.strip(),
+                record_id=record_id.strip(),
+                field=field,
+            )
+
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    @staticmethod
+    def _build_history_record_payload(
+            *,
+            request_id: str,
+            channel_id: str,
+            session_id: str,
+            record_id: str,
+            field: str,
+    ) -> AgentResponse:
+        """读盘定位单条记录，返回该字段原文（阻塞调用，交给线程执行）。"""
+
+        def _fail(error: str) -> AgentResponse:
+            return AgentResponse(
+                request_id=request_id,
+                channel_id=channel_id,
+                ok=False,
+                payload={"error": error},
+            )
+
+        if not history_exists(session_id):
+            return _fail("session history not found")
+        try:
+            records = load_history_records(session_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[history.record.get] read failed: session_id=%s error=%s", session_id, exc
+            )
+            return _fail("history read failed")
+        if not isinstance(records, list):
+            return _fail("history read failed")
+
+        for record in records:
+            if not isinstance(record, dict) or record.get("id") != record_id:
+                continue
+            value = record.get(field)
+            if not isinstance(value, str):
+                return _fail("record field not available")
+            truncated = False
+            if len(value.encode("utf-8")) > _HISTORY_RECORD_GET_MAX_BYTES:
+                value = _truncate_string_by_bytes(value, _HISTORY_RECORD_GET_MAX_BYTES)
+                truncated = True
+            logger.debug(
+                "[history.record.get] session_id=%s record_id=%s field=%s bytes=%d truncated=%s",
+                session_id, record_id, field, len(value.encode("utf-8")), truncated,
+            )
+            return AgentResponse(
+                request_id=request_id,
+                channel_id=channel_id,
+                ok=True,
+                payload={
+                    "session_id": session_id,
+                    "record_id": record_id,
+                    "field": field,
+                    "content": value,
+                    "truncated": truncated,
+                },
+            )
+        return _fail("record not found")
 
     async def _handle_proactive_tick(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """Handle proactive.tick request from CronScheduler.
@@ -4965,6 +5082,10 @@ class AgentWebSocketServer:
         page = data.get("page_idx")
         if isinstance(messages, list):
             for seq, item in enumerate(messages):
+                item = _fit_history_record_to_frame(
+                    item,
+                    max_bytes=_HISTORY_FRAME_WIRE_MAX_BYTES,
+                )
                 chunk = AgentResponseChunk(
                     request_id=request.request_id,
                     channel_id=request.channel_id,

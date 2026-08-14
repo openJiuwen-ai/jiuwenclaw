@@ -2437,6 +2437,7 @@
   "svg": {
     "streaming": "绘制中…",
     "invalid": "SVG 代码存在异常",
+    "truncated": "SVG 代码被截断了。内容可以下载",
     "previewTitle": "SVG 图片预览"
   },
   "authPrompt": {

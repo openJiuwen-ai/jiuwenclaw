@@ -4,6 +4,7 @@ import type { Element as HastElement } from 'hast';
 import { unescapeLiteralNewlines } from '../../utils/finalContent';
 import { getFencedCodeBlock } from './codeBlocks/fencedCode';
 import { getFencedCodeAdapter } from './codeBlocks/registry';
+import { MarkdownRecordIdContext } from './markdownRecordContext';
 import { MARKDOWN_REHYPE_PLUGINS, MARKDOWN_REMARK_PLUGINS } from './markdownPlugins';
 import { repairCollapsedGfmTables } from './markdownTransforms';
 import './MarkdownRenderer.css';
@@ -13,6 +14,7 @@ interface MarkdownRendererProps {
   className?: string;
   testId?: string;
   isStreaming?: boolean;
+  recordId?: string;
 }
 
 const MarkdownContentLinesContext = createContext<string[]>([]);
@@ -59,19 +61,21 @@ const MARKDOWN_COMPONENTS = {
   table: MarkdownTable,
 };
 
-export function MarkdownRenderer({ content, className, testId, isStreaming = false }: MarkdownRendererProps): JSX.Element {
+export function MarkdownRenderer({ content, className, testId, isStreaming = false, recordId }: MarkdownRendererProps): JSX.Element {
   const markdown = useMemo(() => repairCollapsedGfmTables(unescapeLiteralNewlines(content)), [content]);
   const contentLines = useMemo(() => markdown.split(/\r\n|\n|\r/), [markdown]);
 
   return (
     <div className={className} data-testid={testId}>
-      <MarkdownContentLinesContext.Provider value={contentLines}>
-        <MarkdownStreamingContext.Provider value={isStreaming}>
-          <ReactMarkdown remarkPlugins={MARKDOWN_REMARK_PLUGINS} rehypePlugins={MARKDOWN_REHYPE_PLUGINS} components={MARKDOWN_COMPONENTS}>
-            {markdown}
-          </ReactMarkdown>
-        </MarkdownStreamingContext.Provider>
-      </MarkdownContentLinesContext.Provider>
+      <MarkdownRecordIdContext.Provider value={recordId ?? null}>
+        <MarkdownContentLinesContext.Provider value={contentLines}>
+          <MarkdownStreamingContext.Provider value={isStreaming}>
+            <ReactMarkdown remarkPlugins={MARKDOWN_REMARK_PLUGINS} rehypePlugins={MARKDOWN_REHYPE_PLUGINS} components={MARKDOWN_COMPONENTS}>
+              {markdown}
+            </ReactMarkdown>
+          </MarkdownStreamingContext.Provider>
+        </MarkdownContentLinesContext.Provider>
+      </MarkdownRecordIdContext.Provider>
     </div>
   );
 }

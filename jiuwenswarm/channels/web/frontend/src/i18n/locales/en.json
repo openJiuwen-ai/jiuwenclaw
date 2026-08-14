@@ -2436,6 +2436,7 @@
   "svg": {
     "streaming": "Drawing…",
     "invalid": "SVG code contains errors",
+    "truncated": "SVG code was truncated. Content can be downloaded.",
     "previewTitle": "SVG image preview"
   },
   "authPrompt": {
