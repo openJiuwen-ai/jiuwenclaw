@@ -240,12 +240,19 @@ class TestValidateTopLevelModels:
             ])
 
     @staticmethod
-    def test_rejects_alias_same_as_model_name():
+    def test_rejects_alias_matching_other_entry_model_name():
         with pytest.raises(ValueError, match="duplicate"):
             _validate_top_level_models([
                 _model_entry("model-a", alias="model-b"),
                 _model_entry("model-b"),
             ])
+
+    @staticmethod
+    def test_accepts_alias_same_as_own_model_name():
+        result = _validate_top_level_models([
+            _model_entry("model-a", alias="model-a"),
+        ])
+        assert len(result) == 1
 
     @staticmethod
     def test_rejects_duplicate_alias():

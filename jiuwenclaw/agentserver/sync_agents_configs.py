@@ -259,7 +259,7 @@ def _validate_top_level_models(models_raw: Any) -> list[dict[str, Any]]:
     if not isinstance(models_raw, list):
         raise ValueError("models must be an array when provided")
     validated: list[dict[str, Any]] = []
-    seen_names: set[str] = set()
+    seen: set[str] = set()
     for i, entry in enumerate(models_raw):
         if not isinstance(entry, dict):
             raise ValueError(f"models[{i}] must be an object")
@@ -269,14 +269,14 @@ def _validate_top_level_models(models_raw: Any) -> list[dict[str, Any]]:
         model_name = str(mcc.get("model_name") or "").strip()
         if not model_name:
             raise ValueError(f"models[{i}].model_client_config.model_name is required")
-        if model_name in seen_names:
+        if model_name in seen:
             raise ValueError(f"models[{i}].model_client_config.model_name duplicate: {model_name!r}")
-        seen_names.add(model_name)
         alias = str(entry.get("alias") or "").strip()
-        if alias and alias in seen_names:
+        if alias and alias in seen:
             raise ValueError(f"models[{i}].alias duplicates an existing model_name or alias: {alias!r}")
+        seen.add(model_name)
         if alias:
-            seen_names.add(alias)
+            seen.add(alias)
         validated.append(entry)
     return validated
 
