@@ -318,7 +318,6 @@ function AppContent() {
   const [hasVisitedChannels, setHasVisitedChannels] = useState(false);
   const [sidebarMorePanelOpen, setSidebarMorePanelOpen] = useState(false);
   const [modelSetupGuideStep, setModelSetupGuideStep] = useState<ModelSetupGuideStep | null>(null);
-  const [modelSetupGuideManual, setModelSetupGuideManual] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Session | null>(null);
   const [dialogBusy, setDialogBusy] = useState(false);
   const [dialogError, setDialogError] = useState<string | null>(null);
@@ -957,7 +956,6 @@ function AppContent() {
         modelSetupGuideEvaluatedRef.current = true;
         if (shouldPreviewModelSetupGuide() || isSetupGuideEnabled(config.setup_guide_enabled)) {
           setActiveNav('chat');
-          setModelSetupGuideManual(false);
           setModelSetupGuideStep(1);
         }
       }
@@ -2174,14 +2172,8 @@ function AppContent() {
     if (nav === 'channels') setHasVisitedChannels(true);
   }, [modelSetupGuideStep]);
 
-  const skipModelSetupGuide = useCallback(() => {
+  const dismissModelSetupGuide = useCallback(() => {
     setModelSetupGuideStep(null);
-    setModelSetupGuideManual(false);
-  }, []);
-
-  const acknowledgeModelSetupGuide = useCallback(() => {
-    setModelSetupGuideStep(null);
-    setModelSetupGuideManual(false);
 
     void request('config.set', { setup_guide_enabled: 'false' })
       .then(() => {
@@ -2194,12 +2186,6 @@ function AppContent() {
         console.error('Failed to disable setup guide:', error);
       });
   }, [request]);
-
-  const openModelSetupGuide = useCallback(() => {
-    setActiveNav('chat');
-    setModelSetupGuideManual(true);
-    setModelSetupGuideStep(1);
-  }, []);
 
   const handleExportShare = useCallback(async () => {
     const currentSessionId = sessionIdRef.current;
@@ -2312,15 +2298,13 @@ function AppContent() {
         showNewSession={false}
         hiddenNavItems={['sessions']}
         onMorePanelOpenChange={setSidebarMorePanelOpen}
-        onSetupGuideRequest={openModelSetupGuide}
       />
 
       {modelSetupGuideStep ? (
         <ModelSetupGuide
           step={modelSetupGuideStep}
-          manual={modelSetupGuideManual}
-          onAcknowledge={acknowledgeModelSetupGuide}
-          onSkip={skipModelSetupGuide}
+          onAcknowledge={dismissModelSetupGuide}
+          onSkip={dismissModelSetupGuide}
         />
       ) : null}
 
