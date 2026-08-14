@@ -368,9 +368,14 @@ from jiuwenswarm.common.config import (
     resolve_env_vars,
 )
 from jiuwenswarm.common.mcp_config import (
+    OfficeClawMcpRegistration,
+    RequestScopedOfficeClawMcpTool,
     build_mcp_server_config,
     extract_enabled_mcp_server_entries,
+    extract_office_claw_mcp,
+    list_office_claw_mcp_tools,
     preflight_mcp_server_reachable,
+    validate_office_claw_mcp_config,
 )
 from jiuwenswarm.common.mcp_call_timeout_patch import apply_mcp_call_timeout_patch
 from jiuwenswarm.perf.interface_hooks import (
@@ -3486,6 +3491,133 @@ class JiuWenSwarmDeepAdapter:
                 logger.warning("[JiuWenSwarmDeepAdapter] MCP ability remove failed: %s", exc)
         self._registered_mcp_server_ids.discard(server_id)
         self._registered_mcp_servers.pop(server_id, None)
+
+    async def register_request_scoped_office_claw_mcp(
+        self,
+        request: AgentRequest,
+    ) -> OfficeClawMcpRegistration | None:
+        """Install Relay's legacy OfficeClaw MCP tools for one request only."""
+
+        raw_config = extract_office_claw_mcp(request.params)
+        if raw_config is None:
+            return None
+        if self._instance is None:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] request-scoped OfficeClaw MCP skipped: "
+                "request_id=%s agent is not initialized",
+                request.request_id,
+            )
+            return None
+
+        tool_ids: list[str] = []
+        tool_names: list[str] = []
+        try:
+            params = validate_office_claw_mcp_config(raw_config)
+            tool_defs = await list_office_claw_mcp_tools(params)
+            request_scope = hashlib.sha256(
+                f"{request.session_id}:{request.request_id}".encode("utf-8")
+            ).hexdigest()[:20]
+            seen_names: set[str] = set()
+            for tool_def in tool_defs:
+                tool_name = str(tool_def.get("name") or "").strip()
+                if not tool_name or tool_name in seen_names:
+                    raise RuntimeError("OfficeClaw MCP returned an invalid or duplicate tool name")
+                seen_names.add(tool_name)
+                tool_id = f"office-claw-request-{request_scope}.office-claw.{tool_name}"
+                card = ToolCard(
+                    id=tool_id,
+                    name=tool_name,
+                    description=str(tool_def.get("description") or ""),
+                    input_params=tool_def.get("input_params") or {},
+                )
+                tool = RequestScopedOfficeClawMcpTool(card, params)
+                add_result = Runner.resource_mgr.add_tool(tool, tag="office-claw")
+                is_ok = getattr(add_result, "is_ok", None)
+                add_succeeded = True
+                if callable(is_ok):
+                    add_succeeded = bool(is_ok())
+                elif isinstance(add_result, bool):
+                    add_succeeded = add_result
+                if not add_succeeded:
+                    raise RuntimeError(f"failed to register OfficeClaw MCP tool: {tool_name}")
+                # Track before touching the AbilityManager so partial failures
+                # are still fully removable by the common cleanup path.
+                tool_ids.append(tool_id)
+                tool_names.append(tool_name)
+                ability_result = self._instance.ability_manager.add(card)
+                if not bool(getattr(ability_result, "added", True)):
+                    raise RuntimeError(f"OfficeClaw MCP tool name conflicts with an existing tool: {tool_name}")
+
+            registration = OfficeClawMcpRegistration(
+                request_id=request.request_id,
+                tool_ids=tuple(tool_ids),
+                tool_names=tuple(tool_names),
+            )
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] request-scoped OfficeClaw MCP registered: "
+                "request_id=%s tools=%s",
+                request.request_id,
+                tool_names,
+            )
+            return registration
+        except asyncio.CancelledError:
+            registration = OfficeClawMcpRegistration(
+                request_id=request.request_id,
+                tool_ids=tuple(tool_ids),
+                tool_names=tuple(tool_names),
+            )
+            await self.cleanup_request_scoped_office_claw_mcp(registration)
+            raise
+        except Exception as exc:
+            registration = OfficeClawMcpRegistration(
+                request_id=request.request_id,
+                tool_ids=tuple(tool_ids),
+                tool_names=tuple(tool_names),
+            )
+            await self.cleanup_request_scoped_office_claw_mcp(registration)
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] request-scoped OfficeClaw MCP registration failed; "
+                "continuing without it: request_id=%s error=%s",
+                request.request_id,
+                exc,
+            )
+            return None
+
+    async def cleanup_request_scoped_office_claw_mcp(
+        self,
+        registration: OfficeClawMcpRegistration | None,
+    ) -> None:
+        """Best-effort removal of tools installed for one Relay request."""
+
+        if registration is None:
+            return
+        for tool_id in registration.tool_ids:
+            try:
+                Runner.resource_mgr.remove_tool(tool_id)
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] request-scoped OfficeClaw MCP resource cleanup failed: "
+                    "request_id=%s tool_id=%s error=%s",
+                    registration.request_id,
+                    tool_id,
+                    exc,
+                )
+        if self._instance is not None:
+            for tool_name in registration.tool_names:
+                try:
+                    self._instance.ability_manager.remove(tool_name)
+                except Exception as exc:
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] request-scoped OfficeClaw MCP ability cleanup failed: "
+                        "request_id=%s tool=%s error=%s",
+                        registration.request_id,
+                        tool_name,
+                        exc,
+                    )
+        logger.info(
+            "[JiuWenSwarmDeepAdapter] request-scoped OfficeClaw MCP cleaned up: request_id=%s",
+            registration.request_id,
+        )
 
     async def _register_mcp_servers_from_config(
         self, config_base: dict[str, Any], *, tag: str = "agent.main"
@@ -8231,6 +8363,15 @@ class JiuWenSwarmDeepAdapter:
         """
         if session_id is not None and session_id.startswith(("heartbeat", "cron")):
             return
+        if os.getenv("JIUWENCLAW_DISABLE_CRON_TOOLS") == "1":
+            for existing in list(self._instance.ability_manager.list() or []):
+                if getattr(existing, "name", "") in _CRON_TOOL_NAMES:
+                    self._instance.ability_manager.remove(existing.name)
+            self._cron_tools_registered_language = None
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] skip cron tool registration: disabled by env"
+            )
+            return
         language = self._resolve_runtime_language()
         registered_names = {
             getattr(existing, "name", "")
@@ -12148,10 +12289,14 @@ class JiuWenSwarmDeepAdapter:
         """
         if not self._is_session_scoped_adapter:
             session_adapter = await self._get_or_create_session_adapter(request.session_id)
+            request_mcp = await session_adapter.register_request_scoped_office_claw_mcp(request)
             try:
                 return await session_adapter.process_message_impl(request, inputs)
             finally:
-                await self._evict_idle_session_adapters()
+                try:
+                    await session_adapter.cleanup_request_scoped_office_claw_mcp(request_mcp)
+                finally:
+                    await self._evict_idle_session_adapters()
 
         if self._deepresearch_rewrite_tx_uncertain:
             return AgentResponse(
@@ -12713,12 +12858,16 @@ class JiuWenSwarmDeepAdapter:
         stream_impl_started_at = time.monotonic()
         if not self._is_session_scoped_adapter:
             session_adapter = await self._get_or_create_session_adapter(request.session_id)
+            request_mcp = await session_adapter.register_request_scoped_office_claw_mcp(request)
             try:
                 async for chunk in session_adapter.process_message_stream_impl(request, inputs):
                     yield chunk
                 return
             finally:
-                await self._evict_idle_session_adapters()
+                try:
+                    await session_adapter.cleanup_request_scoped_office_claw_mcp(request_mcp)
+                finally:
+                    await self._evict_idle_session_adapters()
 
         if self._deepresearch_rewrite_tx_uncertain:
             yield AgentResponseChunk(
