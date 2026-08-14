@@ -1048,7 +1048,7 @@ _DEFAULT_PROGRESSIVE_EAGER_TOOLS = [
     "invoke_tool",
     "web_search",
     "fetch_webpage",
-    "ask_user_question",
+    "ask_user",
     "list_files",
     "read_file",
     "write_file",
@@ -1065,6 +1065,9 @@ _DEFAULT_PROGRESSIVE_EAGER_TOOLS = [
 ]
 
 _PROGRESSIVE_META_TOOL_NAMES = frozenset({"tools_search", "invoke_tool"})
+_LEGACY_PROGRESSIVE_EAGER_TOOL_ALIASES = {
+    "ask_user_question": "ask_user",
+}
 
 
 def _normalize_tool_names(value: Any, default: list[str] | None = None) -> list[str]:
@@ -1083,6 +1086,22 @@ def _ensure_progressive_meta_tools(eager_tools: list[str]) -> list[str]:
     if "invoke_tool" not in eager_tools:
         eager_tools.insert(1, "invoke_tool")
     return eager_tools
+
+
+def _normalize_progressive_eager_tools(
+    value: Any,
+    default: list[str] | None = None,
+) -> list[str]:
+    """Normalize eager tools and migrate legacy registered names."""
+    eager_tools: list[str] = []
+    for tool_name in _normalize_tool_names(value, default):
+        normalized_name = _LEGACY_PROGRESSIVE_EAGER_TOOL_ALIASES.get(
+            tool_name,
+            tool_name,
+        )
+        if normalized_name not in eager_tools:
+            eager_tools.append(normalized_name)
+    return _ensure_progressive_meta_tools(eager_tools)
 
 
 def is_subagent_tool_lazy_load_enabled(react_config: dict[str, Any] | None) -> bool:
@@ -1135,27 +1154,21 @@ def build_progressive_tool_rail_from_config(
         if not sub_cfg.get("enabled", False):
             return None
 
-        main_eager = _ensure_progressive_meta_tools(
-            _normalize_tool_names(
-                lazy_cfg.get("eager_tools", _DEFAULT_PROGRESSIVE_EAGER_TOOLS),
-                _DEFAULT_PROGRESSIVE_EAGER_TOOLS,
-            )
+        main_eager = _normalize_progressive_eager_tools(
+            lazy_cfg.get("eager_tools", _DEFAULT_PROGRESSIVE_EAGER_TOOLS),
+            _DEFAULT_PROGRESSIVE_EAGER_TOOLS,
         )
         if sub_cfg.get("inherit_parent_eager_tools", False):
             eager_tools = list(main_eager)
         else:
-            eager_tools = _ensure_progressive_meta_tools(
-                _normalize_tool_names(
-                    sub_cfg.get("eager_tools", _DEFAULT_PROGRESSIVE_EAGER_TOOLS),
-                    _DEFAULT_PROGRESSIVE_EAGER_TOOLS,
-                )
-            )
-    else:
-        eager_tools = _ensure_progressive_meta_tools(
-            _normalize_tool_names(
-                lazy_cfg.get("eager_tools", _DEFAULT_PROGRESSIVE_EAGER_TOOLS),
+            eager_tools = _normalize_progressive_eager_tools(
+                sub_cfg.get("eager_tools", _DEFAULT_PROGRESSIVE_EAGER_TOOLS),
                 _DEFAULT_PROGRESSIVE_EAGER_TOOLS,
             )
+    else:
+        eager_tools = _normalize_progressive_eager_tools(
+            lazy_cfg.get("eager_tools", _DEFAULT_PROGRESSIVE_EAGER_TOOLS),
+            _DEFAULT_PROGRESSIVE_EAGER_TOOLS,
         )
 
     normalized_language = resolve_language(language)

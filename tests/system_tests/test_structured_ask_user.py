@@ -92,12 +92,15 @@ class TestStructuredAskUserToolSchema:
 
     @staticmethod
     def test_en_schema_has_query_and_questions():
-        """English schema must include both `query` and `questions` properties."""
+        """English schema exposes structured questions and opt-in JSON results."""
         props = EXTENDED_INPUT_PARAMS_EN["properties"]
         assert "query" in props
         assert "questions" in props
+        assert "return_json" in props
         assert props["query"]["type"] == "string"
         assert props["questions"]["type"] == "array"
+        assert props["return_json"]["type"] == "boolean"
+        assert props["return_json"]["default"] is False
 
     @staticmethod
     def test_cn_schema_has_query_and_questions():
@@ -105,6 +108,7 @@ class TestStructuredAskUserToolSchema:
         props = EXTENDED_INPUT_PARAMS_CN["properties"]
         assert "query" in props
         assert "questions" in props
+        assert "return_json" in props
 
     @staticmethod
     def test_required_fields_only_query():

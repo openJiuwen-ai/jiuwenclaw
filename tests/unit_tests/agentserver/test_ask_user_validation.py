@@ -223,3 +223,49 @@ async def test_answered_structured_payload_keeps_readable_text_semantics():
 
     assert isinstance(decision, RejectResult)
     assert decision.tool_result == "Which?: A"
+@pytest.mark.asyncio
+async def test_answered_structured_payload_can_opt_in_to_machine_state():
+    rail = StructuredAskUserRail()
+    tc = _make_tool_call(
+        {
+            "query": "Choose",
+            "return_json": True,
+            "questions": [
+                {"question": "Which?", "header": "Choice", "options": []}
+            ],
+        }
+    )
+    answer_envelope = {
+        "status": "answered",
+        "answers": [
+            {
+                "question": "Which?",
+                "selected_options": ["A"],
+                "custom_input": None,
+            }
+        ],
+    }
+
+    decision = await rail.resolve_interrupt(
+        MagicMock(),
+        tc,
+        {
+            "answers": {"Which?": "A"},
+            "_structured_response": answer_envelope,
+        },
+    )
+
+    assert isinstance(decision, RejectResult)
+    assert json.loads(decision.tool_result) == answer_envelope
+
+    from jiuwenswarm.agents.harness.common.tools.deepresearch.tools import (
+        _normalize_feedback_handler_resume_feedback,
+    )
+
+    assert (
+        _normalize_feedback_handler_resume_feedback(
+            "问题: Which?\n回答: A",
+            decision.tool_result,
+        )
+        == "问题: Which?\n回答: A"
+    )
