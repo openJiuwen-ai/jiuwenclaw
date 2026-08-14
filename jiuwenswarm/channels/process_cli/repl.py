@@ -14,17 +14,13 @@ from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from jiuwenswarm.channels.process_cli.ui import ProcessCliUI, resolved_cwd
+
 if TYPE_CHECKING:
     import argparse
     from asyncio.subprocess import Process
 
 _EXIT_COMMANDS = frozenset({"/exit", "/quit", "exit", "quit"})
-_HELP = """Commands:
-  /help       Show this help
-  /new        Start the next instruction in a new Runtime Session
-  /session    Show the current Runtime Session ID
-  /exit       Exit the interactive CLI
-"""
 
 
 def _worker_command(
@@ -97,9 +93,7 @@ async def _run_worker(
 ) -> tuple[int, str | None]:
     with tempfile.TemporaryDirectory(prefix="jiuwenswarm-process-repl-") as temp_dir:
         result_path = Path(temp_dir) / "session-id.txt"
-        creationflags = (
-            subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
-        )
+        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
         process = await asyncio.create_subprocess_exec(
             *_worker_command(
                 args,
@@ -126,7 +120,7 @@ async def _run_worker(
             if value:
                 next_session = value
         if return_code != 0 and not result_path.exists() and log_tail:
-            print("\nWorker diagnostics:", file=sys.stderr)
+            print("\n工作进程诊断信息：", file=sys.stderr)
             print("\n".join(log_tail), file=sys.stderr)
         return return_code, next_session
 
@@ -137,11 +131,22 @@ async def _read_prompt() -> str:
 
 async def run_repl(args: argparse.Namespace) -> int:
     """Run a UI-only shell; every instruction owns a fresh worker process."""
-    print("JiuwenSwarm Process CLI")
-    print("Each instruction runs in a fresh process; Runtime Session is preserved.")
-    print("Type /help for commands.\n")
+    ui = ProcessCliUI()
     session_id = args.session
+    cwd = resolved_cwd(args.cwd)
+    ui.startup(
+        mode=args.mode,
+        work_mode=args.work_mode,
+        cwd=cwd,
+        session_id=session_id,
+    )
     while True:
+        ui.status(
+            mode=args.mode,
+            work_mode=args.work_mode,
+            cwd=cwd,
+            session_id=session_id,
+        )
         try:
             prompt = (await _read_prompt()).strip()
         except EOFError:
@@ -153,14 +158,14 @@ async def run_repl(args: argparse.Namespace) -> int:
         if lowered in _EXIT_COMMANDS:
             return 0
         if lowered == "/help":
-            print(_HELP)
+            ui.help()
             continue
         if lowered == "/new":
             session_id = None
-            print("The next instruction will create a new Runtime Session.")
+            ui.notice("下一条指令将创建新的 Runtime 会话。")
             continue
         if lowered == "/session":
-            print(session_id or "No Runtime Session has been created yet.")
+            ui.session(session_id)
             continue
         _return_code, session_id = await _run_worker(
             args,

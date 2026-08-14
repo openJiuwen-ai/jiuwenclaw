@@ -8,7 +8,12 @@ import json
 import sys
 from typing import Any, TextIO
 
+from jiuwenswarm.channels.process_cli.ui import HumanRunUI
 from jiuwenswarm.runtime.events import RuntimeEvent
+
+_HUMAN_ERROR_TRANSLATIONS = {
+    "process CLI execution timed out": "进程式 CLI 执行超时",
+}
 
 
 def _event_text(payload: dict[str, Any]) -> str:
@@ -39,15 +44,33 @@ class EventRenderer:
         self.events: list[dict[str, Any]] = []
         self._wrote_delta = False
         self.failed = False
+        self._human_ui = HumanRunUI(self.stdout, self.stderr)
+
+    def start(self) -> None:
+        if self.output_format == "human":
+            self._human_ui.start()
+
+    def working(self) -> None:
+        if self.output_format == "human":
+            self._human_ui.working()
+
+    def interrupted(self) -> None:
+        if self.output_format == "human":
+            self._human_ui.interrupted()
 
     def render(self, event: RuntimeEvent) -> None:
         data = event.to_dict()
         self.events.append(data)
-        self.failed = self.failed or not event.ok or event.event_type in {
-            "chat.error",
-            "runtime.error",
-            "team.error",
-        }
+        self.failed = (
+            self.failed
+            or not event.ok
+            or event.event_type
+            in {
+                "chat.error",
+                "runtime.error",
+                "team.error",
+            }
+        )
         if self.output_format == "jsonl":
             self.stdout.write(json.dumps(data, ensure_ascii=False, default=str) + "\n")
             self.stdout.flush()
@@ -69,6 +92,8 @@ class EventRenderer:
             )
         elif self.output_format == "human" and self._wrote_delta:
             self.stdout.write("\n")
+        if self.output_format == "human" and not self.failed:
+            self._human_ui.completed(session_id)
         self.stdout.flush()
 
     def _render_human(self, event: RuntimeEvent) -> None:
@@ -76,20 +101,33 @@ class EventRenderer:
         payload = event.payload
         text = _event_text(payload)
         if event_type == "chat.delta":
+            self._human_ui.begin_assistant()
             self.stdout.write(text)
             self.stdout.flush()
             self._wrote_delta = True
         elif event_type == "chat.final":
             if text and not self._wrote_delta:
+                self._human_ui.begin_assistant()
                 self.stdout.write(text)
         elif event_type == "chat.reasoning" and self.show_reasoning and text:
-            self.stderr.write(f"[reasoning] {text}\n")
+            self._human_ui.begin_assistant()
+            self._human_ui.reasoning(text)
         elif event_type in {"chat.tool_call", "chat.tool_result"} and self.show_tools:
-            self.stderr.write(f"[{event_type}] {text or payload}\n")
-        elif not event.ok or event_type in {"chat.error", "runtime.error", "team.error"}:
-            self.stderr.write(f"error: {text or payload.get('error') or payload}\n")
+            self._human_ui.begin_assistant()
+            label = "工具" if event_type == "chat.tool_call" else "工具结果"
+            self._human_ui.tool(label, text or str(payload))
+        elif not event.ok or event_type in {
+            "chat.error",
+            "runtime.error",
+            "team.error",
+        }:
+            message = str(text or payload.get("error") or payload)
+            self._human_ui.failed(_HUMAN_ERROR_TRANSLATIONS.get(message, message))
         elif event_type == "plan.mode_exited":
-            self.stderr.write(f"[plan] exited to {payload.get('mode', 'normal')}\n")
+            self._human_ui.clear_status()
+            self.stderr.write(
+                f"\n! 计划模式已退出，当前模式：{payload.get('mode', 'normal')}\n"
+            )
         self.stderr.flush()
 
 

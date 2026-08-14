@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import ast
 import asyncio
+import io
+import json
 from pathlib import Path
 
 import pytest
@@ -160,6 +162,31 @@ async def test_timeout_precisely_cancels_then_cleans_up(
 
 
 @pytest.mark.asyncio
+async def test_timeout_keeps_jsonl_error_machine_compatible(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    FakeClient.delay = 0.1
+    monkeypatch.setattr(app, "InProcessRuntimeClient", FakeClient)
+    stdout = io.StringIO()
+
+    try:
+        result = await app.run(
+            _args(tmp_path, timeout=0.01),
+            stdout=stdout,
+            stderr=io.StringIO(),
+        )
+    finally:
+        FakeClient.delay = 0.0
+
+    document = json.loads(stdout.getvalue().strip())
+    assert result == 124
+    assert document["payload"]["event_type"] == "runtime.error"
+    assert document["payload"]["error"] == "process CLI execution timed out"
+    assert "\033[" not in stdout.getvalue()
+
+
+@pytest.mark.asyncio
 async def test_runtime_error_returns_failure_and_cleans_up(
     monkeypatch,
     tmp_path: Path,
@@ -206,6 +233,38 @@ async def test_task_cancellation_precisely_cancels_then_cleans_up(
             "cleanup:process_cli:runtime-session",
             "close",
         ]
+    finally:
+        FakeClient.delay = 0.0
+
+
+@pytest.mark.asyncio
+async def test_human_task_cancellation_shows_interrupted_state(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    FakeClient.delay = 10.0
+    FakeClient.latest = None
+    monkeypatch.setattr(app, "InProcessRuntimeClient", FakeClient)
+    monkeypatch.setenv("NO_COLOR", "1")
+    output = io.StringIO()
+    try:
+        task = asyncio.create_task(
+            app.run(
+                _args(tmp_path, output="human"),
+                stdout=output,
+                stderr=output,
+            )
+        )
+        while FakeClient.latest is None or not any(
+            call.startswith("stream:") for call in FakeClient.latest.calls
+        ):
+            await asyncio.sleep(0)
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert "! 已中断" in output.getvalue()
     finally:
         FakeClient.delay = 0.0
 
@@ -288,7 +347,4 @@ def test_new_entry_does_not_replace_existing_remote_cli() -> None:
     pyproject = Path(app.__file__).parents[3] / "pyproject.toml"
     text = pyproject.read_text(encoding="utf-8")
     assert 'jiuwenswarm = "jiuwenswarm.channels.cli.main:main"' in text
-    assert (
-        'jiuwenswarm-process = "jiuwenswarm.channels.process_cli.main:main"'
-        in text
-    )
+    assert 'jiuwenswarm-process = "jiuwenswarm.channels.process_cli.main:main"' in text

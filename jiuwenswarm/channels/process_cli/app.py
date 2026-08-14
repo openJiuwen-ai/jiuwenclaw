@@ -30,9 +30,7 @@ INTERRUPT_RESUME_SOURCES = frozenset(
         "evolution_interrupt",
     }
 )
-INTERACTION_EVENTS = frozenset(
-    {"chat.ask_user_question", "plan.approval_required"}
-)
+INTERACTION_EVENTS = frozenset({"chat.ask_user_question", "plan.approval_required"})
 SHUTDOWN_STEP_TIMEOUT_SECONDS = 5.0
 
 
@@ -78,15 +76,15 @@ def _interaction_answer(
     payload: dict[str, Any],
     stream: TextIO,
 ) -> tuple[str, list[dict[str, Any]]]:
-    prompt = str(payload.get("question") or payload.get("message") or "Input needed")
-    print(f"\n[{payload.get('event_type', 'interaction')}] {prompt}", file=stream)
+    prompt = str(payload.get("question") or payload.get("message") or "需要输入")
+    print(f"\n? {prompt}", file=stream)
     options = [item for item in payload.get("options", []) if isinstance(item, dict)]
     for index, option in enumerate(options, 1):
         label = option.get("label") or option.get("value") or "?"
         description = option.get("description") or ""
         suffix = f" — {description}" if description else ""
         print(f"  {index}. {label}{suffix}", file=stream)
-    stream.write("> ")
+    stream.write("请输入选项或自定义内容：")
     stream.flush()
     answer = sys.stdin.readline().strip()
     selected = answer
@@ -94,9 +92,7 @@ def _interaction_answer(
         index = int(answer) - 1
         if 0 <= index < len(options):
             selected = str(
-                options[index].get("value")
-                or options[index].get("label")
-                or answer
+                options[index].get("value") or options[index].get("label") or answer
             )
     return answer, [{"selected_options": [selected], "custom_input": answer}]
 
@@ -205,6 +201,7 @@ async def run(
         show_reasoning=args.show_reasoning,
         show_tools=args.show_tools,
     )
+    renderer.start()
     try:
         await client.start()
         session_id = await client.create_or_resume_session(
@@ -219,6 +216,7 @@ async def run(
             session_id=session_id,
             request_id=_new_request_id(),
         )
+        renderer.working()
         interactive = bool(getattr(args, "_interactive_worker", False)) or (
             args.output == "human" and sys.stdin.isatty()
         )
@@ -255,6 +253,7 @@ async def run(
     except asyncio.CancelledError:
         if request is not None:
             await _bounded_cleanup(client.cancel(_cancel_request(request)))
+        renderer.interrupted()
         raise
     finally:
         if session_id:

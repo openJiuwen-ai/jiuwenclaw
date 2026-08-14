@@ -35,6 +35,39 @@ def test_parser_enters_interactive_mode_without_prompt() -> None:
     assert args.output == "human"
 
 
+def test_process_cli_help_uses_chinese_labels() -> None:
+    help_text = build_parser().format_help()
+
+    assert help_text.startswith("用法：")
+    assert "位置参数：" in help_text
+    assert "选项：" in help_text
+    assert "显示帮助信息并退出" in help_text
+
+
+def test_invalid_choice_error_is_fully_chinese(capsys) -> None:
+    with pytest.raises(SystemExit, match="2"):
+        build_parser().parse_args(["--work-mode", "invalid", "task"])
+
+    error = capsys.readouterr().err
+    assert "参数 --work-mode 的值无效" in error
+    assert "可选值：'code', 'work'" in error
+    assert "invalid choice" not in error
+
+
+@pytest.mark.asyncio
+async def test_interactive_prompt_keeps_existing_text(monkeypatch) -> None:
+    prompts: list[str] = []
+
+    def fake_input(prompt: str) -> str:
+        prompts.append(prompt)
+        return "/exit"
+
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    assert await repl._read_prompt() == "/exit"
+    assert prompts == ["jiuwenswarm> "]
+
+
 def test_worker_command_uses_a_fresh_process_entry_and_runtime_session() -> None:
     command = repl._worker_command(
         _args(timeout=30.0, trusted_dir=["D:/trusted"]),
@@ -85,5 +118,8 @@ async def test_repl_runs_every_instruction_in_a_new_worker_and_reuses_session(
         ("third", None),
     ]
     output = capsys.readouterr().out
-    assert "JiuwenSwarm Process CLI" in output
+    assert "JiuwenSwarm" in output
+    assert "进程式 CLI · 本地 Runtime" in output
+    assert "每条指令均在独立进程中运行" in output
+    assert "下一条指令将创建新的 Runtime 会话" in output
     assert "runtime-session-3" in output
