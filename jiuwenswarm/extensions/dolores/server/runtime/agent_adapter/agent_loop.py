@@ -850,13 +850,12 @@ class AgentLoop:
                     except Exception:
                         pass
                 messages = ctx.inputs.messages or messages
-                try:
-                    new_tools = await self._ability_manager.list_tool_info()
-                    if new_tools:
-                        tools = new_tools
-                        ctx.inputs.tools = tools
-                except Exception:
-                    pass
+                # BEFORE_MODEL_CALL 后，v3 rail（JiuWenProgressiveToolRail.before_model_call）
+                # 已把 ctx.inputs.tools 过滤到按需检索的少量工具（基础工具 + search_tools）。
+                # 发给 model 必须用 ctx.inputs.tools（rail 过滤后的），而不是局部 tools 变量
+                # （那是 BEFORE_INVOKE 前拿的全量）——否则 rail 过滤被绕过，LLM 看到全量工具
+                # 就不再 search_tools（Dolores "像全量注入"的根因）。
+                tools = ctx.inputs.tools if ctx.inputs.tools else tools
 
                 accumulated = None
                 chunk_index = 0
