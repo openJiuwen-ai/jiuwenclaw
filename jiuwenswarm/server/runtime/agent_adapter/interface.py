@@ -54,6 +54,7 @@ from jiuwenswarm.common.utils import (
     get_agent_sessions_relative_dir,
     get_agent_workspace_dir,
     get_agent_workspace_relative_dir,
+    collapse_nested_agent_workspace_dir,
     get_env_file,
     reset_free_search_runtime_flags,
 )
@@ -978,10 +979,16 @@ class JiuWenSwarm:
         tenant_root = user_workspace_dir or (workspace_dir if enterprise else None)
         if tenant_root:
             user_ws = Path(tenant_root)
-            self._workspace_dir = str(user_ws / get_agent_workspace_relative_dir())
+            self._workspace_dir = str(
+                collapse_nested_agent_workspace_dir(
+                    user_ws / get_agent_workspace_relative_dir()
+                )
+            )
             self._sessions_dir: Path | None = user_ws / get_agent_sessions_relative_dir()
         else:
-            self._workspace_dir = str(get_agent_workspace_dir())
+            self._workspace_dir = str(
+                collapse_nested_agent_workspace_dir(get_agent_workspace_dir())
+            )
             self._sessions_dir = None
         self._skill_manager = SkillManager(workspace_dir=self._workspace_dir)
         self._session_manager = SessionManager()
@@ -1064,8 +1071,10 @@ class JiuWenSwarm:
     def _resolve_workspace_dir(self) -> str:
         user_ws = getattr(self, "_user_workspace_dir", None)
         if user_ws is not None:
-            return str(Path(user_ws) / "agent" / "workspace")
-        return str(get_agent_workspace_dir())
+            return str(
+                collapse_nested_agent_workspace_dir(Path(user_ws) / "agent" / "workspace")
+            )
+        return str(collapse_nested_agent_workspace_dir(get_agent_workspace_dir()))
 
     def _bind_tenant_request_context(self) -> tuple[Any, Any]:
         from jiuwenswarm.server.runtime.tenant_context import bind_tenant_workspace_dirs
@@ -2932,7 +2941,7 @@ class JiuWenSwarm:
                                 continue
                         if isinstance(data.payload, dict) and isinstance(data.payload.get("event_type"), str):
                             et = str(data.payload.get("event_type"))
-                            should_record = et.startswith("chat.")
+                            should_record = et.startswith("chat.") or et.startswith("task.")
                             if not should_record and et == EventType.TEAM_MESSAGE.value:
                                 should_record = True
                             if et == "context_compression_state":
@@ -3014,7 +3023,7 @@ class JiuWenSwarm:
                             if should_record:
                                 payload_dict = dict(data.payload)
                                 extra_fields = {k: v for k, v in payload_dict.items() if
-                                                k not in ("event_type", "content")}
+                                                k not in ("event_type", "content", "task_id")}
                                 if et == EventType.TEAM_MESSAGE.value and "event" in payload_dict:
                                     event_data = payload_dict.get("event", {})
                                     if isinstance(event_data, dict):
@@ -3037,6 +3046,7 @@ class JiuWenSwarm:
                                     timestamp=time.time(),
                                     extra=extra_fields if extra_fields else None,
                                     mode=request.params.get("mode", "unknown"),
+                                    task_id=payload_dict.get("task_id"),
                                 )
                                 if et == "chat.final":
                                     durable_final_content = str(data.payload.get("content", ""))
@@ -3045,7 +3055,7 @@ class JiuWenSwarm:
                         yield data
                     elif isinstance(data, dict) and isinstance(data.get("event_type"), str):
                         et = str(data.get("event_type"))
-                        should_record = et.startswith("chat.")
+                        should_record = et.startswith("chat.") or et.startswith("task.")
                         if not should_record and et == EventType.TEAM_MESSAGE.value:
                             should_record = True
                         if et == "context_compression_state":
@@ -3125,7 +3135,11 @@ class JiuWenSwarm:
                             durable_pending_final_chunks = []
 
                         if should_record:
-                            extra_fields = {k: v for k, v in data.items() if k not in ("event_type", "content")}
+                            extra_fields = {
+                                k: v
+                                for k, v in data.items()
+                                if k not in ("event_type", "content", "task_id")
+                            }
                             if et == EventType.TEAM_MESSAGE.value and "event" in data:
                                 event_data = data.get("event", {})
                                 if isinstance(event_data, dict):
@@ -3148,6 +3162,7 @@ class JiuWenSwarm:
                                 timestamp=time.time(),
                                 extra=extra_fields if extra_fields else None,
                                 mode=request.params.get("mode", "unknown"),
+                                task_id=data.get("task_id"),
                             )
                             if et == "chat.final":
                                 durable_final_content = str(data.get("content", ""))

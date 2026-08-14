@@ -76,6 +76,22 @@ class TestPathResolution:
         assert session_workspace.exists()
 
     @staticmethod
+    def test_collapse_nested_agent_workspace_dir():
+        """PPT historically appended /workspace onto the agent workspace."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            agent_ws = tmp_path / "service_default" / "agent_office" / "agent" / "workspace"
+            nested = agent_ws / "workspace"
+            nested.mkdir(parents=True)
+            assert utils.collapse_nested_agent_workspace_dir(nested) == agent_ws.resolve()
+            assert utils.collapse_nested_agent_workspace_dir(agent_ws) == agent_ws.resolve()
+            other = tmp_path / "decks" / "demo"
+            other.mkdir(parents=True)
+            assert utils.collapse_nested_agent_workspace_dir(other) == other.resolve()
+
+    @staticmethod
     def test_path_caching():
         """Test that path results are cached."""
         # First call

@@ -710,6 +710,22 @@ def _user_text(records: list[dict[str, Any]]) -> str:
     ).strip()
 
 
+def _history_path_uses_jsonl(history_path: Path) -> bool:
+    """True when the file is JSONL (including history.json with JSONL content)."""
+    if history_path.suffix.lower() == ".jsonl":
+        return True
+    try:
+        with history_path.open("r", encoding="utf-8") as handle:
+            while True:
+                ch = handle.read(1)
+                if not ch:
+                    return True
+                if not ch.isspace():
+                    return ch != "["
+    except OSError:
+        return True
+
+
 def _read_new_records(
     history_path: Path,
     session_state: dict[str, Any],
@@ -717,7 +733,7 @@ def _read_new_records(
     completed_request_id: str,
     history_limit_bytes: int | None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    if history_path.suffix.lower() == ".jsonl":
+    if _history_path_uses_jsonl(history_path):
         return _read_new_jsonl_records(
             history_path,
             session_state,

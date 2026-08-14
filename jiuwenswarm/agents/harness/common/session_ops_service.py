@@ -16,6 +16,7 @@ from jiuwenswarm.server.runtime.session.session_history import (
     load_history_records,
     write_history_records,
     _write_records_to_path,
+    flush_session_history,
 )
 
 if TYPE_CHECKING:
@@ -83,6 +84,7 @@ def fork_session(
     history_data: list[dict[str, Any]] = []
     if history_exists(source_session_id):
         try:
+            flush_session_history(source_session_id)
             data = load_history_records(source_session_id)
             if isinstance(data, list):
                 history_data = data
@@ -175,6 +177,7 @@ def rewind_session(
 
     from jiuwenswarm.server.runtime.session.session_history import truncate_history_records
 
+    flush_session_history(session_id)
     history = load_history_records(session_id)
     if not isinstance(history, list):
         raise ValueError("invalid history format")
@@ -264,6 +267,7 @@ def compact_partial_session(
     if not history_path.exists():
         raise ValueError("session history not found")
 
+    flush_session_history(session_id)
     history = load_history_records(session_id)
     if not isinstance(history, list):
         raise ValueError("invalid history format")
@@ -452,6 +456,7 @@ def list_session_turns(
         return {"turns": [], "total": 0}
 
     try:
+        flush_session_history(session_id)
         history = load_history_records(session_id)
     except Exception as exc:
         logger.warning("list_session_turns: failed to read history: %s", exc)
