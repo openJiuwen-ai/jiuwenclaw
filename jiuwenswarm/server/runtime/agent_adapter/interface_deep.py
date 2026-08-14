@@ -1184,6 +1184,14 @@ def parse_int(value: Any, default: int) -> int:
         return default
 
 
+def _resolve_instance_config_base(config_base: dict[str, Any] | None) -> dict[str, Any]:
+    if config_base is None:
+        return get_config()
+    if not isinstance(config_base, dict):
+        raise TypeError("config_base must be a dict when provided")
+    return resolve_env_vars(config_base)
+
+
 def _deep_agent_context_engine_config(react_cfg: dict[str, Any] | None) -> ContextEngineConfig:
     """供 ``create_deep_agent(..., context_engine_config=...)`` 使用（与 agent-core 集成测试方法二一致）。
 
@@ -2294,6 +2302,7 @@ class JiuWenSwarmDeepAdapter:
                 config,
                 mode=self._session_instance_mode,
                 sub_mode=self._session_instance_sub_mode,
+                config_base=self._config_base_cache,
             )
             instance_ready_at = time.monotonic()
 
@@ -7050,11 +7059,17 @@ class JiuWenSwarmDeepAdapter:
                 self._session_instance_config,
                 mode=self._session_instance_mode or "agent",
                 sub_mode=self._session_instance_sub_mode,
+                config_base=self._config_base_cache,
             )
             return self._instance
 
     async def create_instance(
-        self, config: dict[str, Any] | None = None, *, mode: str = "agent", sub_mode: str = None
+        self,
+        config: dict[str, Any] | None = None,
+        *,
+        mode: str = "agent",
+        sub_mode: str = None,
+        config_base: dict[str, Any] | None = None,
     ) -> None:
         """初始化 DeepAgent 实例.
 
@@ -7083,7 +7098,7 @@ class JiuWenSwarmDeepAdapter:
         ns_token, overlay_token = self._bind_request_env_overlay()
         try:
             load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
-            config_base = get_config()
+            config_base = _resolve_instance_config_base(config_base)
             # 企业版：create_instance 时可带 request，按 params 加载企业配置并合并模型
             bootstrap_request = self._instance_overrides.pop("request", None)
             if bootstrap_request is not None and os.getenv("AGENT_RUNTIME", "").strip():
