@@ -10,6 +10,11 @@ from pathlib import Path
 import pytest
 
 
+class _FakeToolCall:
+    def __init__(self, name: str):
+        self.name = name
+
+
 def _load_patch_module():
     path = Path(__file__).resolve().parents[2] / "jiuwenclaw" / "jiuwen_core_patch.py"
     spec = importlib.util.spec_from_file_location("jiuwen_core_patch_under_test", path)
@@ -49,6 +54,8 @@ async def test_wait_all_excludes_paused_hitl_time(monkeypatch):
         def cancel_all(self):
             self.cancelled = True
 
+    tool_call = _FakeToolCall("tool")
+
     async def _slow_wait_all(executor):
         # Simulate tool body: pause during HITL, then finish after total ~0.25s wall.
         clock = mod._executor_wait_clock(executor)
@@ -57,12 +64,12 @@ async def test_wait_all_excludes_paused_hitl_time(monkeypatch):
         await asyncio.sleep(0.20)
         clock.resume()
         await asyncio.sleep(0.05)
-        return [("tool", "ok")]
+        return [(tool_call, "ok")]
 
     executor = _FakeExecutor()
     # Active budget 0.15s; wall ~0.30s but paused 0.20s => should succeed.
     results = await mod._wait_all_with_pauseable_timeout(executor, _slow_wait_all, 0.15)
-    assert results == [("tool", "ok")]
+    assert results == [(tool_call, "ok")]
     assert not executor.cancelled
 
 
@@ -79,9 +86,11 @@ async def test_wait_all_still_times_out_without_enough_budget():
             self.cancelled = True
             self._done.set()
 
+    tool_call = _FakeToolCall("tool")
+
     async def _hang_until_cancelled(executor):
         await executor._done.wait()
-        return [("tool", asyncio.CancelledError())]
+        return [(tool_call, asyncio.CancelledError())]
 
     executor = _FakeExecutor()
     results = await mod._wait_all_with_pauseable_timeout(executor, _hang_until_cancelled, 0.05)
