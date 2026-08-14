@@ -72,6 +72,9 @@ class _TeamPlanApprovalPayloadError(ValueError):
     """Raised when a structured team.plan approval payload is malformed."""
 
 
+_ASK_USER_OTHER_OPTION_LABELS = {"Other", "其他"}
+
+
 def _permission_response_key(request: AgentRequest) -> str | None:
     """Return the opaque request ID for a permission continuation."""
     if request.req_method not in (ReqMethod.CHAT_SEND, ReqMethod.CHAT_RESUME):
@@ -1667,7 +1670,9 @@ class JiuWenSwarm:
                             # "Other" is only a UI placeholder. Preserve normal
                             # multi-select choices and append the user's text.
                             normal_options = [
-                                option for option in cleaned_options if option != "Other"
+                                option
+                                for option in cleaned_options
+                                if option not in _ASK_USER_OTHER_OPTION_LABELS
                             ]
                             if normal_options:
                                 answer_value: Any = [*normal_options, custom_input]
@@ -1676,11 +1681,17 @@ class JiuWenSwarm:
                         elif len(cleaned_options) == 1:
                             # Bare "Other" without custom text is incomplete (#2330).
                             sole = cleaned_options[0]
-                            answer_value = "" if sole == "Other" else sole
+                            answer_value = (
+                                ""
+                                if sole in _ASK_USER_OTHER_OPTION_LABELS
+                                else sole
+                            )
                         elif cleaned_options:
                             # Multi-select: preserve real choices; drop placeholder-only Other.
                             normal_options = [
-                                option for option in cleaned_options if option != "Other"
+                                option
+                                for option in cleaned_options
+                                if option not in _ASK_USER_OTHER_OPTION_LABELS
                             ]
                             answer_value = normal_options if normal_options else ""
                         else:
@@ -1700,15 +1711,24 @@ class JiuWenSwarm:
             if not answers_dict and free_text_answer:
                 answers_dict["__free_text__"] = free_text_answer
             payload: dict[str, Any] = {"answers": answers_dict}
+            normalized_status = (
+                status.strip().lower() if isinstance(status, str) else ""
+            )
+            if normalized_status == "answered":
+                payload["_structured_response"] = {
+                    "status": "answered",
+                    "answers": answers,
+                }
             if isinstance(original_request, str) and original_request.strip():
                 payload["original_request"] = original_request.strip()
             interactive_input.update(request_id, payload)
             logger.info(
                 "[JiuWenSwarm] AskUserRail InteractiveInput.update: request_id=%s "
-                "answer_count=%s has_original_request=%s",
+                "answer_count=%s has_original_request=%s has_structured_response=%s",
                 request_id,
                 len(answers_dict),
                 "original_request" in payload,
+                "_structured_response" in payload,
             )
             return interactive_input
 

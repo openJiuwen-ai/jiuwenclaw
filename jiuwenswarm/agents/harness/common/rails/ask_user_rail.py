@@ -118,6 +118,15 @@ EXTENDED_INPUT_PARAMS_EN: dict[str, Any] = {
             "items": _QUESTIONS_ITEM_SCHEMA,
             "maxItems": MAX_STRUCTURED_QUESTIONS,
         },
+        "return_json": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "Return the answered structured-question envelope as compact JSON "
+                "instead of readable text. Use only when a downstream tool must "
+                "preserve status and the original answers array."
+            ),
+        },
     },
     "required": ["query"],
 }
@@ -139,6 +148,14 @@ EXTENDED_INPUT_PARAMS_CN: dict[str, Any] = {
             ),
             "items": _QUESTIONS_ITEM_SCHEMA,
             "maxItems": MAX_STRUCTURED_QUESTIONS,
+        },
+        "return_json": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "将结构化问题的回答 envelope 作为紧凑 JSON 返回，而不是可读文本。"
+                "仅当下游工具必须保留 status 和原始 answers 数组时使用。"
+            ),
         },
     },
     "required": ["query"],
@@ -313,6 +330,13 @@ class StructuredAskUserRail(AskUserRail):
         For plain query: delegate to parent class behavior (AskUserPayload).
         """
         args = self._parse_tool_args(tool_call)
+        return_json = args.get("return_json", False)
+        if not isinstance(return_json, bool):
+            return self.reject(
+                tool_result=(
+                    "[INVALID_ARGUMENT] return_json must be a boolean when provided."
+                )
+            )
         raw_questions = args.get("questions")
         if "questions" in args and not isinstance(raw_questions, list):
             return self.reject(
@@ -421,6 +445,34 @@ class StructuredAskUserRail(AskUserRail):
                     )
                 )
             try:
+                if return_json:
+                    envelope = (
+                        user_input.get("_structured_response")
+                        if isinstance(user_input, dict)
+                        else None
+                    )
+                    if not (
+                        isinstance(envelope, dict)
+                        and envelope.get("status") == "answered"
+                        and isinstance(envelope.get("answers"), list)
+                    ):
+                        return self.reject(
+                            tool_result=(
+                                "[INVALID_ARGUMENT] return_json requires an answered "
+                                "structured response envelope."
+                            )
+                        )
+                    return self.reject(
+                        tool_result=json.dumps(
+                            {
+                                "status": "answered",
+                                "answers": envelope["answers"],
+                            },
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+                    )
+
                 if isinstance(user_input, StructuredAskUserPayload):
                     payload = user_input
                 elif isinstance(user_input, dict):

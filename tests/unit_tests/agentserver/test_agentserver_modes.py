@@ -1,8 +1,10 @@
 import asyncio
 import json
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
+import yaml
 
 from jiuwenswarm.server import agent_ws_server as agent_ws_server_module
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
@@ -40,6 +42,50 @@ def _is_regular_skill_evolution_rail(rail):
         rail,
         interface_deep_module.EvolutionInterruptRail,
     )
+
+
+def test_progressive_defaults_expose_registered_ask_user_tool():
+    rail = interface_deep_module.build_progressive_tool_rail_from_config(
+        {"tool_lazy_load": {"enabled": True}},
+        language="zh",
+    )
+
+    assert rail is not None
+    assert "ask_user" in rail.eager_tools
+    assert "ask_user_question" not in rail.eager_tools
+
+
+def test_progressive_runtime_config_exposes_registered_ask_user_tool():
+    config_path = Path(__file__).parents[3] / "jiuwenswarm/resources/config.yaml"
+    config = yaml.safe_load(config_path.read_text())
+    eager_tools = config["react"]["tool_lazy_load"]["eager_tools"]
+
+    assert "ask_user" in eager_tools
+    assert "ask_user_question" not in eager_tools
+
+
+def test_progressive_legacy_eager_config_exposes_registered_ask_user_tool():
+    rail = interface_deep_module.build_progressive_tool_rail_from_config(
+        {
+            "tool_lazy_load": {
+                "enabled": True,
+                "eager_tools": [
+                    "read_file",
+                    "ask_user_question",
+                    "ask_user",
+                ],
+            }
+        },
+        language="zh",
+    )
+
+    assert rail is not None
+    assert rail.eager_tools == [
+        "tools_search",
+        "invoke_tool",
+        "read_file",
+        "ask_user",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -576,6 +622,49 @@ def test_build_inputs_preserves_explicit_skipped_ask_user_envelope(monkeypatch):
     }
 
 
+def test_build_inputs_preserves_answered_ask_user_envelope_for_opt_in_consumers(
+    monkeypatch,
+):
+    from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+    from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
+
+    monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
+    monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
+
+    answers = [
+        {
+            "question": "研究重点是什么？",
+            "selected_options": ["技术实现"],
+            "custom_input": None,
+        }
+    ]
+    request = AgentRequest(
+        request_id="req-answered",
+        channel_id="web",
+        session_id="web-session",
+        params={
+            "query": "",
+            "request_id": "tool-ask-answered-1",
+            "source": "ask_user_interrupt",
+            "status": "answered",
+            "answers": answers,
+        },
+    )
+
+    inputs, _, _ = interface_module.JiuWenSwarm().build_inputs(request)
+
+    assert isinstance(inputs["query"], InteractiveInput)
+    assert inputs["query"].user_inputs == {
+        "tool-ask-answered-1": {
+            "answers": {"研究重点是什么？": "技术实现"},
+            "_structured_response": {
+                "status": "answered",
+                "answers": answers,
+            },
+        }
+    }
+
+
 def test_build_inputs_maps_explicit_skipped_with_empty_answers_to_interactive_input(monkeypatch):
     from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
     from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
@@ -626,12 +715,12 @@ def test_build_inputs_merges_multi_select_custom_input(monkeypatch):
             "answers": [
                 {
                     "question": "启用哪些模块？",
-                    "selected_options": ["auth", "Other"],
+                    "selected_options": ["auth", "其他"],
                     "custom_input": "metrics",
                 },
                 {
                     "question": "还有其他需求吗？",
-                    "selected_options": ["Other"],
+                    "selected_options": ["其他"],
                     "custom_input": "tracing",
                 },
             ],
