@@ -841,6 +841,12 @@ class AgentLoop:
                     messages.append(UserMessage(content=f"[STEERING] {s}"))
 
                 ctx.inputs = ModelCallInputs(messages=messages, tools=tools)
+                # BEFORE_MODEL_CALL 前，记下刚塞进 ctx.inputs.tools 的引用。
+                # v3 rail（JiuWenProgressiveToolRail.before_model_call）会把 ctx.inputs.tools
+                # 整体替换为按需检索的少量工具（基础工具 + search_tools）。用 id() 比对 fire 前后
+                # 引用是否被替换，来判定 rail 是否接管了工具过滤——而不靠真假性兜底（空列表会
+                # 被误判成"没接管"而回退全量，重蹈"像全量注入"覆辙）。
+                _railed_tools_id = id(ctx.inputs.tools)
                 await self._safe_fire(ctx, AgentCallbackEvent.BEFORE_MODEL_CALL)
                 if self._system_prompt_builder is not None:
                     try:
@@ -850,12 +856,22 @@ class AgentLoop:
                     except Exception:
                         pass
                 messages = ctx.inputs.messages or messages
-                # BEFORE_MODEL_CALL 后，v3 rail（JiuWenProgressiveToolRail.before_model_call）
-                # 已把 ctx.inputs.tools 过滤到按需检索的少量工具（基础工具 + search_tools）。
-                # 发给 model 必须用 ctx.inputs.tools（rail 过滤后的），而不是局部 tools 变量
-                # （那是 BEFORE_INVOKE 前拿的全量）——否则 rail 过滤被绕过，LLM 看到全量工具
-                # 就不再 search_tools（Dolores "像全量注入"的根因）。
-                tools = ctx.inputs.tools if ctx.inputs.tools else tools
+                if id(ctx.inputs.tools) != _railed_tools_id:
+                    # 开关开启：progressive rail 已注册并改写了 ctx.inputs.tools
+                    # （即使过滤后为空也用过滤结果——rail 主动清空代表本轮无可见工具，
+                    # 仍应让 model 看到 nav 摘要去 search，而非塞回全量）。
+                    tools = ctx.inputs.tools
+                else:
+                    # 开关关闭（progressive_tool_enabled=false，rail 未注册）或 rail 未改写：
+                    # 回退原逻辑——重新拉一次 ability_manager 最新工具列表刷新进 tools，
+                    # 再同步给 ctx.inputs.tools，保持 model 与运行期动态增删的工具一致。
+                    try:
+                        new_tools = await self._ability_manager.list_tool_info()
+                        if new_tools:
+                            tools = new_tools
+                            ctx.inputs.tools = tools
+                    except Exception:
+                        pass
 
                 accumulated = None
                 chunk_index = 0
