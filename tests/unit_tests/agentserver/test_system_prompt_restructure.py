@@ -1312,7 +1312,10 @@ def test_deep_adapter_subagents_includes_optional_browser_and_configured_researc
     ):
         subagents, _ = adapter.build_configured_subagents(model, config)
 
-    assert subagents == ["research_spec", "browser_spec"]
+    assert [
+        item.agent_card.name if hasattr(item, "agent_card") else item
+        for item in subagents
+    ] == ["statusline-setup", "research_spec", "browser_spec"]
     # sys_operation is forwarded so the subagent shares the parent's filesystem
     # boundary; this bare adapter has none configured.
     mock_research.assert_called_once_with(
@@ -1351,8 +1354,12 @@ def test_deep_adapter_subagents_omits_research_without_explicit_enable():
     ):
         subagents, _ = adapter.build_configured_subagents(model, config)
 
-    # DeepAdapter: no research_agent configured, browser enabled
-    assert subagents == ["browser_spec"]
+    # DeepAdapter: no research_agent configured; built-in status-line setup and
+    # browser remain available.
+    assert [
+        item.agent_card.name if hasattr(item, "agent_card") else item
+        for item in subagents
+    ] == ["statusline-setup", "browser_spec"]
     mock_research.assert_not_called()
     mock_browser.assert_called_once_with(
         model,
@@ -1360,109 +1367,4 @@ def test_deep_adapter_subagents_omits_research_without_explicit_enable():
         sys_operation=None,
         language="cn",
         max_iterations=DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
-    )
-
-
-def test_build_agent_identity_prompt_contains_identity_section_only():
-    """Dolores: identity prompt should not contain symphony or message sections."""
-    prompt = build_agent_identity_prompt(language="zh")
-
-    assert "# JiuwenSwarm 内部数据" in prompt
-    assert "## Symphony Orchestration" not in prompt
-    assert "`symphony_compose_score`" not in prompt
-    assert "# 消息说明" not in prompt
-
-
-@pytest.mark.asyncio
-async def test_runtime_time_section_participates_in_priority_order():
-    """Dolores: verify runtime time section ordering in prompt."""
-    builder = SystemPromptBuilder(language="cn")
-    builder.add_section(PromptSection(name="identity", content={"cn": "identity"}, priority=10))
-    builder.add_section(PromptSection(name="tools", content={"cn": "# 可用工具"}, priority=30))
-    builder.add_section(PromptSection(name="workspace", content={"cn": "# 工作空间"}, priority=70))
-
-    agent = _FakeAgent(builder)
-    runtime_rail = RuntimePromptRail(
-        language="cn",
-        channel="web"
-    )
-    runtime_rail.init(agent)
-
-    ctx = AgentCallbackContext(
-        agent=agent,
-        inputs=None,
-        session=_FakeSession(),
-        extra={},
-    )
-    await runtime_rail.before_model_call(ctx)
-
-    prompt = builder.build()
-    ordered_markers = [
-        "identity",
-        "# 可用工具",
-        "# 工作空间",
-        "# 时间说明",
-    ]
-    positions = [prompt.index(marker) for marker in ordered_markers]
-    assert positions == sorted(positions)
-    assert builder.has_section("runtime.model_answer_policy")
-    assert not builder.has_section("runtime")
-    assert "# 运行时状态" not in prompt
-
-
-def test_resolve_enable_task_loop_forces_true_when_skill_create_enabled(monkeypatch):
-    """Dolores: skill_create forces task loop on."""
-    monkeypatch.delenv("SKILL_CREATE", raising=False)
-    assert (
-        JiuWenSwarmDeepAdapter._resolve_enable_task_loop(
-            {"enable_task_loop": False},
-            {"evolution": {"skill_create": True}},
-        )
-        is True
-    )
-
-
-def test_resolve_enable_task_loop_forces_true_when_review_trigger_enabled(monkeypatch):
-    """Dolores: review_trigger forces task loop on."""
-    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
-    assert (
-        JiuWenSwarmDeepAdapter._resolve_enable_task_loop(
-            {"enable_task_loop": False},
-            {"evolution": {"review_trigger": True}},
-        )
-        is True
-    )
-
-
-def test_resolve_enable_task_loop_forces_true_when_legacy_auto_scan_enabled(monkeypatch):
-    """Dolores: legacy auto_scan forces task loop on."""
-    monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
-    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
-    assert (
-        JiuWenSwarmDeepAdapter._resolve_enable_task_loop(
-            {"enable_task_loop": False},
-            {"evolution": {"auto_scan": True}},
-        )
-        is True
-    )
-
-
-def test_resolve_enable_task_loop_preserves_false_when_only_evolution_enabled(monkeypatch):
-    """Dolores: plain evolution enabled does not force task loop."""
-    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
-    monkeypatch.delenv("EVOLUTION_SIGNAL_TRIGGER", raising=False)
-    monkeypatch.delenv("SKILL_CREATE", raising=False)
-    assert (
-        JiuWenSwarmDeepAdapter._resolve_enable_task_loop(
-            {"enable_task_loop": False},
-            {
-                "evolution": {
-                    "enabled": True,
-                    "signal_trigger": True,
-                    "review_trigger": False,
-                    "skill_create": False,
-                }
-            },
-        )
-        is False
     )

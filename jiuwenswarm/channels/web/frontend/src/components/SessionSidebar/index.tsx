@@ -292,7 +292,7 @@ export function SessionSidebar({
 
       <button
         ref={settingsRef}
-        className="icon-rail-nav-item"
+        className="icon-rail-nav-item icon-rail-settings-button"
         onClick={toggleAdvancedConfig}
         aria-label={t('sessionSidebar.moreSettings')}
       >

@@ -1062,7 +1062,7 @@ class GatewayServer(BaseWebChannel):
             matched_path,
         )
 
-        # 触发连接钩子（如发送 connection.ack）
+        # 触发连接钩子（GatewayServer 自身 + 外部 ws_channel，如 TuiChannel 鉴权）
         for hook in self._connect_hooks:
             try:
                 result = hook(ws)
@@ -1077,6 +1077,23 @@ class GatewayServer(BaseWebChannel):
                         describe_ws_exception(e),
                     ),
                 )
+        ws_channel = getattr(route, "ws_channel", None)
+        if ws_channel is not None:
+            for hook in getattr(ws_channel, "_connect_hooks", []):
+                try:
+                    result = hook(ws)
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception as e:
+                    logger.warning(
+                        "%s on_connect hook error: %s",
+                        type(ws_channel).__name__,
+                        format_ws_diagnostics(
+                            {"remote": remote, "path": request_path},
+                            describe_ws_peer(ws),
+                            describe_ws_exception(e),
+                        ),
+                    )
 
         # 上报连接事件
         if route.ws_channel is not None:
@@ -1490,6 +1507,7 @@ async def _run(
         web_host: str,
         web_port: int,
         web_path: str,
+        web_dual_protocol: bool = True,
 ) -> None:
     from jiuwenswarm.gateway.channel_manager.protocol.a2a.a2a_connect import A2AChannel, A2AChannelConfig
     from jiuwenswarm.gateway.channel_manager.im_platforms.dingtalk.dingtalk_connect import DingTalkChannel, \
@@ -1510,6 +1528,7 @@ async def _run(
         SlackChannelConfig
     from jiuwenswarm.gateway.channel_manager.im_platforms.wecom.wecom_connect import WecomChannel, WecomConfig
     from jiuwenswarm.gateway.channel_manager.protocol.ssh.ssh_connect import SshChannel, SshChannelConfig
+    from jiuwenswarm.extensions.agentos.auth.ssh_key_registry import KeyRegistry
     from jiuwenswarm.common.config import get_config
     from jiuwenswarm.common.cleanup import start_background_cleanup
     from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
@@ -1843,7 +1862,13 @@ async def _run(
 
     web_channel = None
     tui_channel = None
-    web_config = WebChannelConfig(enabled=True, host=web_host, port=web_port, path=web_path)
+    web_config = WebChannelConfig(
+        enabled=True,
+        host=web_host,
+        port=web_port,
+        path=web_path,
+        dual_protocol=web_dual_protocol,
+    )
     web_channel = WebChannel(web_config, _DummyBus())
 
     # 注入 Git diff 监控注册表(设计文档阶段10):
@@ -2046,6 +2071,20 @@ async def _run(
     wechat_task = None
     ssh_channel = None
     ssh_task = None
+
+    def _set_agentos_ssh_key_issuer(
+        issuer,
+        *,
+        ephemeral_key_ttl_sec: float = 300.0,
+    ) -> None:
+        """Inject/clear SshChannel as ephemeral key issuer on AgentOSRouter extension."""
+        setter = getattr(agent_server_ext, "set_key_issuer", None)
+        if not callable(setter):
+            return
+        try:
+            setter(issuer, ephemeral_key_ttl_sec=ephemeral_key_ttl_sec)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[App] failed to set AgentOS SSH key issuer: %s", exc)
 
     _last_channels_conf: dict = {}
 
@@ -2598,6 +2637,8 @@ async def _run(
             ssh_conf = conf.get("ssh") if isinstance(conf, dict) else None
             await _stop_channel(ssh_channel, ssh_task, "ssh")
             ssh_channel, ssh_task = None, None
+            # Clear issuer whenever SSH channel is torn down / reconfigured.
+            _set_agentos_ssh_key_issuer(None)
 
             if isinstance(ssh_conf, dict):
                 # 南向经 agent client（如 agentos_router -> yuanrong）动态解析。
@@ -2622,7 +2663,11 @@ async def _run(
                     )
                 else:
                     ssh_config = SshChannelConfig.from_dict({**ssh_conf, "enabled": True})
-                    ssh_channel = SshChannel(ssh_config, _DummyBus())
+                    ssh_channel = SshChannel(
+                        ssh_config,
+                        _DummyBus(),
+                        key_registry=KeyRegistry(),
+                    )
                     channel_manager.register_channel(ssh_channel)
                     ssh_task = asyncio.create_task(ssh_channel.start(), name="ssh")
 
@@ -2640,11 +2685,17 @@ async def _run(
                             )
 
                     ssh_task.add_done_callback(_on_ssh_task_done)
+                    if ssh_config.auth.enabled:
+                        _set_agentos_ssh_key_issuer(
+                            ssh_channel.key_issuer,
+                            ephemeral_key_ttl_sec=ssh_config.auth.ephemeral_key_ttl_sec,
+                        )
                     logger.info(
                         "[App] SshChannel registered from config.yaml.channels.ssh "
-                        "(listen %s:%s -> MessageHandler; southbound via agent client)",
+                        "(listen %s:%s -> MessageHandler; southbound via agent client; auth=%s)",
                         ssh_config.listen_host,
                         ssh_config.listen_port,
+                        ssh_config.auth.enabled,
                     )
             else:
                 logger.info("[App] channels.ssh missing or invalid, SshChannel disabled")
@@ -2837,6 +2888,7 @@ async def _run(
             except asyncio.CancelledError:
                 pass
             await ssh_channel.stop()
+            _set_agentos_ssh_key_issuer(None)
 
         await cron_scheduler.stop()
         await channel_manager.stop_dispatch()
@@ -2921,6 +2973,8 @@ def main() -> None:
     web_host = args.host or os.getenv("WEB_HOST", "127.0.0.1")
     web_port = args.port or int(os.getenv("WEB_PORT", "19000"))
     web_path = args.web_path or os.getenv("WEB_PATH", "/ws")
+    _dual_raw = os.getenv("WEB_DUAL_PROTOCOL", "1").strip().lower()
+    web_dual_protocol = _dual_raw not in {"0", "false", "no", "off"}
 
     install_async_dump_handler("gateway")
     asyncio.run(
@@ -2929,6 +2983,7 @@ def main() -> None:
             web_host=web_host,
             web_port=web_port,
             web_path=web_path,
+            web_dual_protocol=web_dual_protocol,
         )
     )
 

@@ -52,7 +52,9 @@ def test_web_cluster_adapter_is_not_affected_by_work_mode(work_mode):
         ("code.normal", "code"),
         ("code.plan", "code"),
         ("code.team", "code"),
-        ("team.plan", "code"),
+        ("team.plan", "agent"),
+        ("team.plan.normal", "agent"),
+        ("team.plan.code", "code"),
     ],
 )
 def test_legacy_requests_keep_previous_adapter_choice(raw_mode, expected_adapter):
@@ -77,13 +79,13 @@ def test_web_team_modes_never_enable_team_plan(mode):
     assert spec.enable_team_plan is False
 
 
-def test_tui_code_team_plan_still_enables_team_plan():
-    """TUI 的 ``team.plan`` 行为保持不变。"""
+@pytest.mark.parametrize("mode", ["team.plan", "team.plan.normal", "team.plan.code"])
+def test_team_plan_modes_enable_team_plan(mode):
     from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
     from jiuwenswarm.agents.harness.team.team_manager import TeamManager
 
     spec = TeamAgentSpec.model_construct(team_name="t", agents={}, enable_team_plan=False)
-    TeamManager.apply_team_plan_mode(spec, request_metadata={"mode": "team.plan"})
+    TeamManager.apply_team_plan_mode(spec, request_metadata={"mode": mode})
 
     assert spec.enable_team_plan is True
 
@@ -100,18 +102,19 @@ def test_work_team_has_no_plan_rails(role):
     assert registry.TEAM_PLAN_APPROVAL not in rail_types
 
 
-def test_code_team_subagents_unchanged_for_both_roles():
+def test_code_team_subagents_include_statusline_setup_for_both_roles():
     from jiuwenswarm.agents.swarm.config_specs import build_member_subagent_specs
 
     for role in ("leader", "teammate"):
         names = [spec.agent_card.name for spec in build_member_subagent_specs({}, "code.team", role)]
-        assert names == ["explore_agent", "plan_agent"]
+        assert names == ["statusline-setup", "explore_agent", "plan_agent"]
 
 
-def test_plain_work_team_has_no_code_subagents():
+def test_plain_work_team_has_only_statusline_setup_subagent():
     from jiuwenswarm.agents.swarm.config_specs import build_member_subagent_specs
 
-    assert build_member_subagent_specs({}, "team", "leader") == []
+    names = [spec.agent_card.name for spec in build_member_subagent_specs({}, "team", "leader")]
+    assert names == ["statusline-setup"]
 
 
 # ── 审批动作：执行 / 跳过 / 下一步 都复用 approve / reject ──────────────────
@@ -150,20 +153,22 @@ def test_skip_action_rejects_and_flags_force_finish():
 
 
 def test_revise_action_rejects_and_carries_feedback():
-    payload = _confirm_payload(["reject"], "把迁移拆成两个阶段")
+    payload = _confirm_payload(["plan_revise"], "把迁移拆成两个阶段")
 
     assert payload["approved"] is False
     assert payload["feedback"] == "把迁移拆成两个阶段"
+    assert payload["plan_revise"] is True
     assert "plan_skip" not in payload
 
 
 def test_tui_reject_is_unchanged():
-    """TUI 的 reject 不带 plan_skip，行为与改动前一致。"""
+    """TUI 的 reject 不带 plan_skip / plan_revise，行为与改动前一致。"""
     payload = _confirm_payload(["reject"])
 
     assert payload["approved"] is False
     assert payload["feedback"] == "用户拒绝"
     assert "plan_skip" not in payload
+    assert "plan_revise" not in payload
 
 
 def test_plan_approval_actions_describe_three_web_buttons():
@@ -174,7 +179,7 @@ def test_plan_approval_actions_describe_three_web_buttons():
     actions = build_plan_approval_actions("cn")
 
     assert [a["kind"] for a in actions] == ["execute", "skip", "revise"]
-    assert [a["value"] for a in actions] == ["plan_execute", "plan_skip", "reject"]
+    assert [a["value"] for a in actions] == ["plan_execute", "plan_skip", "plan_revise"]
 
 
 def test_plan_approval_actions_differ_only_by_label():

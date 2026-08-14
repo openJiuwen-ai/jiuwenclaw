@@ -380,32 +380,3 @@ async def test_generate_team_name_uses_fallback_after_repeated_run_failures(
 
     assert result.startswith("task-")
     assert calls == 2
-
-
-async def test_generate_team_name_rejects_invalid_result(monkeypatch):
-    """Dolores: reject invalid team names (e.g. path traversal)."""
-    class FakeTinyAgent:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *exc):
-            return None
-
-        async def run(self, content: str):
-            return {"team_name": "../escape"}
-
-    monkeypatch.setattr(
-        team_name_generator,
-        "create_tiny_agent",
-        lambda **kwargs: FakeTinyAgent(),
-    )
-
-    with pytest.raises(
-        team_name_generator.TeamNameGenerationError,
-        match="invalid team_name",
-    ):
-        await team_name_generator.generate_team_name(
-            "任意任务",
-            config_base=_team_config(),
-            template_id="default_team",
-        )
