@@ -1,3 +1,5 @@
+import os
+
 from jiuwenswarm.agents.harness.search.tools.tool_registry import tool
 
 @tool(name="check_confidence_gate",
@@ -9,7 +11,7 @@ from jiuwenswarm.agents.harness.search.tools.tool_registry import tool
                   "ikely answer, confidence statement, or “unknown/insufficient evidence” answer, and must continue searching for stronger evidence. "
                   "he tool result is mandatory and cannot be ignored.")
 def check_answer(confidence:int):
-    confidence_threshold = 90
+    confidence_threshold = int(os.getenv("SEARCH_CONFIDENCE_THRESHOLD", "90"))
     if confidence>=confidence_threshold:
         return "The evidence is sufficient. You may provide the final answer."
     else:

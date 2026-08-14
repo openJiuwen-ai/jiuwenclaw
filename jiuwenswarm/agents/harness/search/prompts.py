@@ -24,6 +24,26 @@ class SystemPrompts:
         - Prefer at most one or two web_fetch_and_summary calls per question
           unless two independent primary sources are truly required. If the
           snippets plus one fetch already support the answer, stop and answer.
+
+        Answer completeness (do not stop with a thin answer):
+        - Your final answer's Explanation MUST include every key fact the query
+          asks for. For a person: nationality, representative works, and
+          biographical highlights; for an event: date, location, key
+          participants, and outcome; for a concept: definition, origin, and
+          significance. If the query lists specific required details, each one
+          must appear in your answer.
+        - If a key fact is missing from your gathered evidence, you MUST run one
+          more web_search or web_fetch_and_summary to obtain it BEFORE
+          answering — do not answer with a gap and do not substitute a
+          confidence score for the missing fact.
+        - Calibrate confidence to completeness: if any key fact the query
+          requires is absent from your evidence, your Confidence MUST be below
+          90%. Reporting 90% or higher while a required fact is missing is a
+          failure.
+        - A fetched page that is thin (lacks the key facts) or that errors
+          (404 / empty) does NOT count as "snippets plus one fetch support the
+          answer." Fall back to the search snippets (which may already contain
+          the key facts) or fetch an alternative primary source before stopping.
         """.strip()
         return SYSTEM_TEMPLATE_XIAOHAN0319
 

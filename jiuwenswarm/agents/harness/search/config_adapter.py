@@ -24,7 +24,7 @@ _DEFAULT_TOOL_NAMES = [
     "web_fetch_and_summary",
     "check_confidence_gate",
 ]
-_DEFAULT_MAX_ITERATIONS = 15
+_DEFAULT_MAX_ITERATIONS = 6
 _DEFAULT_MAX_CONTEXT_TOKENS = 262144
 
 
@@ -74,10 +74,17 @@ def build_search_agent_config_from_jiuwenswarm(
         tool_names=sa_cfg.get("tool_names") or list(_DEFAULT_TOOL_NAMES),
         max_iterations=int(sa_cfg.get("max_iterations", _DEFAULT_MAX_ITERATIONS)),
         max_context_tokens=int(sa_cfg.get("max_context_tokens", _DEFAULT_MAX_CONTEXT_TOKENS)),
+        # Token threshold that triggers conversation compaction (0 disables).
+        # Default 48000 bounds context growth from large page summaries.
+        compact_threshold=int(sa_cfg.get("compact_threshold", 48000)),
         temperature=temperature,
-        # No hard per-call timeout for the subagent's LLM calls (mirror NLPRunner);
-        # the OpenAIClient retry/semaphore still bounds runaway calls.
-        timeout=None,
+        # Per-call LLM timeout (seconds); None would mean no timeout. Driven by
+        # config; 45s bounds slow single calls while the OpenAIClient retry/
+        # semaphore still bounds runaway calls.
+        timeout=sa_cfg.get("llm_call_timeout", 45),
+        # Cap completion length per call; bounds runaway outputs. (Probe
+        # confirmed DashScope accepts non-None max_completion_tokens.)
+        max_completion_tokens=int(sa_cfg.get("max_completion_tokens", 4096)),
         # Avoid the hardcoded tokenizer path from the upstream default; let
         # ContextManager degrade to char estimation when no tokenizer is loadable.
         tokenizer_name=None,

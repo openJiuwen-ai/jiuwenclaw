@@ -498,7 +498,10 @@ react:
       # max_iterations: 100
     search_agent:                   # 独立搜索子 agent（自有 ReAct loop + web_search/web_fetch_and_summary + 独立搜索模型 models.search）；默认开，但未配 models.search.model_name 时安静跳过（不挂载）；配好 SEARCH_MODEL_NAME 后即自动生效
       enabled: true
-      # max_iterations: 15
+      max_iterations: 6
+      compact_threshold: 48000
+      llm_call_timeout: 45
+      max_completion_tokens: 4096
       # system_prompt_name: SYSTEM_TEMPLATE_XIAOHAN0319
       # query_prompt_name: QUERY_TEMPLATE
       # tool_names: [web_search, web_fetch_and_summary, check_confidence_gate]

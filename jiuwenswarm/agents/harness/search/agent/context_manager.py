@@ -309,17 +309,30 @@ class ContextManager:
         exhausted = total_tokens > self.max_context_tokens
 
         # 第三步：若 compact_threshold > 0 且 token 总量超限，截断对话历史
+        # 保留：system + 首条 user（原始 query）+ 最近 KEEP_RECENT_ROUNDS 轮
+        # （每轮 = assistant(tool_calls) + 紧随其后的 tool 响应），丢弃中间历史。
+        # 比旧逻辑"只留 system+首条 user"温和：保留最近证据，避免重搜循环。
+        KEEP_RECENT_ROUNDS = 2
         compacted = False
         if self.compact_threshold > 0 and total_tokens > self.compact_threshold:
             system_msgs = [m for m in messages if m.get("role") == "system"]
             user_msgs = [m for m in messages if m.get("role") == "user"]
             first_user = user_msgs[0] if user_msgs else None
-            truncated = system_msgs + ([first_user] if first_user else [])
+            rounds = self._group_rounds(messages)  # list[list[int]]，按轮分组
+            keep_idx: set[int] = set()
+            for _r in rounds[-KEEP_RECENT_ROUNDS:]:
+                keep_idx.update(_r)
+            tail = [m for i, m in enumerate(messages) if i in keep_idx]
+            truncated = system_msgs + ([first_user] if first_user else []) + tail
+            # 保留末尾 user 消息（如最后一轮注入的强制终止提示 force_answer），
+            # 避免被压缩丢弃导致 LLM 看不到"必须作答"指令。
+            if messages and messages[-1].get("role") == "user" and messages[-1] not in truncated:
+                truncated.append(messages[-1])
             self.logger.warning(
                 f"上下文 token 超限截断 | 阈值: {self.compact_threshold} | "
                 f"截断前: {total_tokens} tokens / {len(messages)} 条消息 | "
                 f"截断后: {len(truncated)} 条消息"
-                f"（{len(system_msgs)} 条 system + 1 条 user）"
+                f"（{len(system_msgs)} system + 1 user + {len(tail)} 最近{KEEP_RECENT_ROUNDS}轮）"
             )
             messages.clear()
             messages.extend(truncated)

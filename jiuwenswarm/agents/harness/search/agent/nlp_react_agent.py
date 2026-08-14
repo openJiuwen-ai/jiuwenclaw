@@ -541,12 +541,17 @@ class MMSearchAgent:
                     if not content:
                         # LLM 停止了工具调用但没有返回文本内容，属于异常情况
                         self.logger.error(f"finish_reason != tool_calls but no content returned:{finish_reason}")
+                        failure_reason = f"no final answer content (finish_reason={finish_reason})"
+                        if finish_reason == "length":
+                            failure_reason += " - output truncated by max_completion_tokens; raise the cap"
                     else:
                         self.logger.info(f"finish_reason != tool_calls,will return;finish_reason:{finish_reason}")
+                        failure_reason = None
                     # 返回成功结果
                     return ReactLoopResult(success=True,
                                            turn_num=cur_loop_step,
                                            finish_reason=finish_reason,
+                                           failure_reason=failure_reason,
                                            trace_list=normalized_results,
                                            ctx_status=self._build_final_ctx_status(last_ctx_status, has_repeated_truncation, has_compacted_truncation),
                                            total_usage=total_usage)
