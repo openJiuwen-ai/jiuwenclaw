@@ -1669,6 +1669,59 @@ async def test_first_team_chat_reuses_legacy_session_team_without_tiny_agent(mon
 
 
 @pytest.mark.asyncio
+async def test_first_team_chat_selects_requested_configured_team(monkeypatch, tmp_path):
+    from jiuwenswarm.agents.harness import team as team_module
+    from jiuwenswarm.server.runtime.session.session_metadata import (
+        get_session_metadata,
+        init_session_metadata,
+    )
+
+    sessions_root = tmp_path / "sessions"
+    patch_session_roots(monkeypatch, sessions_root)
+    config = {
+        "modes": {
+            "team": {
+                "debate_A": {
+                    "team_name": "debate_A",
+                    "leader": {"member_name": "moderator_a"},
+                },
+                "debate_B": {
+                    "team_name": "debate_B",
+                    "leader": {"member_name": "moderator_b"},
+                },
+            }
+        }
+    }
+    monkeypatch.setattr(agent_ws_server_module, "get_config", lambda: config)
+    monkeypatch.setattr(
+        team_module,
+        "generate_team_name",
+        lambda *args, **kwargs: pytest.fail("an explicit team must not generate a new team"),
+    )
+    init_session_metadata(
+        session_id="sess-select-team",
+        channel_id="officeclaw",
+        mode="team",
+    )
+    request = AgentRequest(
+        request_id="req-select-team",
+        channel_id="officeclaw",
+        session_id="sess-select-team",
+        req_method=ReqMethod.CHAT_SEND,
+        params={"mode": "team", "team_name": "debate_B", "query": "start"},
+    )
+
+    selected = await AgentWebSocketServerHarness().ensure_auto_team_binding_for_chat_for_test(request)
+
+    assert selected == "debate_B"
+    assert request.params["team_name"] == "debate_B"
+    assert request.params["team_template_id"] == "debate_B"
+    persisted = get_session_metadata("sess-select-team", cache_bust=True)
+    assert persisted["team_name"] == "debate_B"
+    assert persisted["team_template_id"] == "debate_B"
+
+
+@pytest.mark.asyncio
 async def test_handle_team_bindings_list_selects_entity_when_template_deleted(monkeypatch, tmp_path):
     from jiuwenswarm.server.runtime.team_binding_store import TeamBindingStore
     from jiuwenswarm.server.runtime.team_entity_store import TeamEntityStore

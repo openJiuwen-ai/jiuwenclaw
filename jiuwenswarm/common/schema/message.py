@@ -85,6 +85,7 @@ class ReqMethod(Enum):
     AGENTS_ENABLE = "agents.enable"
     AGENTS_DISABLE = "agents.disable"
     AGENTS_TOOLS_LIST = "agents.tools_list"
+    AGENTS_SYNC_CONFIGS = "sync_agents_configs"
     AGENT_SWITCH = "3rdagent.switch"
     AGENT_LIST = "3rdagent.list"
 

@@ -15,6 +15,7 @@ from jiuwenswarm.common.config import (
     migrate_config_from_template,
     replace_teams_in_config,
     resolve_env_vars,
+    sync_agents_configs_in_config,
     update_skill_retrieval_in_config,
     update_setup_guide_enabled_in_config,
     update_xiaoyi_runtime_in_config,
@@ -702,6 +703,94 @@ modes:
 
         raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
         assert "team" not in raw["modes"]
+
+    @staticmethod
+    def test_sync_agents_configs_in_config_only_replaces_modes_team(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        temp_config_file.write_text(
+            """
+# keep this comment
+channels:
+  web:
+    enabled: true
+team:
+  team_name: legacy_team
+web_config_panel:
+  untouched: relay-must-not-change-this
+modes:
+  agent:
+    memory:
+      enabled: true
+  team:
+    old_team:
+      team_name: old_team
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        payload = TestTeamModesConfig._front_payload(["debate_A", "debate_B"])
+
+        result = sync_agents_configs_in_config(payload)
+
+        saved_text = temp_config_file.read_text(encoding="utf-8")
+        raw = yaml.safe_load(saved_text)
+        assert "# keep this comment" in saved_text
+        assert raw["channels"] == {"web": {"enabled": True}}
+        assert raw["team"] == {"team_name": "legacy_team"}
+        assert raw["web_config_panel"] == {"untouched": "relay-must-not-change-this"}
+        assert raw["modes"]["agent"] == {"memory": {"enabled": True}}
+        assert list(raw["modes"]["team"]) == ["debate_A", "debate_B"]
+        assert raw["modes"]["team"]["debate_B"]["agents"]["coder"]["skills"] == ["coding"]
+        assert result == {
+            "team_names": ["debate_A", "debate_B"],
+            "agent_names": ["agent_1", "agent_2"],
+        }
+
+    @staticmethod
+    def test_sync_agents_configs_in_config_validates_before_writing(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        original = "modes:\n  agent:\n    memory:\n      enabled: true\n"
+        temp_config_file.write_text(original, encoding="utf-8")
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        payload = TestTeamModesConfig._front_payload(["debate_A"])
+        payload["team"][0]["leader"]["agent_key"] = "missing"
+
+        with pytest.raises(ValueError, match="unknown agent_key"):
+            sync_agents_configs_in_config(payload)
+
+        assert temp_config_file.read_text(encoding="utf-8") == original
+
+    @staticmethod
+    def test_sync_agents_configs_in_config_empty_team_removes_only_modes_team(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        temp_config_file.write_text(
+            """
+channels:
+  web:
+    enabled: true
+modes:
+  agent:
+    tools: [web_fetch]
+  team:
+    old_team:
+      team_name: old_team
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+
+        result = sync_agents_configs_in_config({"agents": {}, "team": []})
+
+        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+        assert raw["channels"] == {"web": {"enabled": True}}
+        assert raw["modes"] == {"agent": {"tools": ["web_fetch"]}}
+        assert result == {"team_names": [], "agent_names": []}
 
 
 class TestUpdateXiaoyiRuntimeInConfig:

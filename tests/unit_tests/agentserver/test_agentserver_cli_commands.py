@@ -48,6 +48,9 @@ class AgentWebSocketServerHarness(agent_ws_server_module.AgentWebSocketServer):
     async def handle_permissions_config_for_test(self, ws, request, send_lock):
         await self._handle_permissions_config(ws, request, send_lock)
 
+    async def handle_agents_sync_configs_for_test(self, ws, request, send_lock):
+        await self._handle_agents_sync_configs(ws, request, send_lock)
+
     def get_agent_manager_for_test(self):
         return self._agent_manager
 
@@ -58,6 +61,90 @@ def fake_encode_agent_response_for_wire(resp, response_id):
         "payload": resp.payload,
         "ok": resp.ok,
     }
+
+
+@pytest.mark.asyncio
+async def test_handle_agents_sync_configs_applies_relay_team_payload(
+    server,
+    fake_ws,
+    monkeypatch,
+):
+    applied = []
+    monkeypatch.setattr(
+        "jiuwenswarm.common.config.replace_teams_in_config",
+        lambda _payload: pytest.fail("relay sync must not use replace_teams_in_config"),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.common.config.sync_agents_configs_in_config",
+        lambda payload: applied.append(payload) or {
+            "team_names": ["debate_A", "debate_B"],
+            "agent_names": ["leader_tpl"],
+        },
+    )
+    teams = {
+        "agents": {"leader_tpl": {"skills": ["team-management"]}},
+        "team": [
+            {
+                "team_name": "debate_A",
+                "leader": {"member_name": "moderator", "agent_key": "leader_tpl"},
+            },
+            {
+                "team_name": "debate_B",
+                "leader": {"member_name": "moderator", "agent_key": "leader_tpl"},
+            },
+        ],
+    }
+    request = AgentRequest(
+        request_id="req-sync-agents",
+        channel_id="officeclaw",
+        req_method=ReqMethod.AGENTS_SYNC_CONFIGS,
+        params={
+            "revision": "sha256-value",
+            "service_id": "officeclaw",
+            "agents": [{"agent_id": "default", "config": {}}],
+            "teams": teams,
+        },
+    )
+
+    await server.handle_agents_sync_configs_for_test(fake_ws, request, asyncio.Lock())
+
+    assert applied == [teams]
+    assert fake_ws.sent == [
+        {
+            "response_id": "req-sync-agents",
+            "payload": {
+                "revision": "sha256-value",
+                "service_id": "officeclaw",
+                "team_names": ["debate_A", "debate_B"],
+                "agent_names": ["leader_tpl"],
+                "teams_applied": True,
+            },
+            "ok": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_handle_agents_sync_configs_keeps_config_when_teams_omitted(
+    server,
+    fake_ws,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "jiuwenswarm.common.config.sync_agents_configs_in_config",
+        lambda _payload: pytest.fail("omitted teams must not replace config"),
+    )
+    request = AgentRequest(
+        request_id="req-sync-agents-no-teams",
+        channel_id="officeclaw",
+        req_method=ReqMethod.AGENTS_SYNC_CONFIGS,
+        params={"revision": "same", "service_id": "officeclaw", "agents": []},
+    )
+
+    await server.handle_agents_sync_configs_for_test(fake_ws, request, asyncio.Lock())
+
+    assert fake_ws.sent[0]["ok"] is True
+    assert fake_ws.sent[0]["payload"]["teams_applied"] is False
 
 
 @pytest.fixture
