@@ -334,6 +334,8 @@ react:
   # 当指定 skill 处于激活状态时，对应的环境变量会自动注入到 shell 工具（mcp_exec_command / bash）
   # 的子进程中，skill 脚本可通过 os.getenv() 读取认证信息。
   # 值支持 ${ENV_VAR:-default} 语法，由框架的 resolve_env_vars 统一解析。
+  # 空对象 {} 只是占位符：catalog 注入的 skill_envs 热重载时不得被它覆盖。
+  # 清空凭证时 catalog 会带技能名和空字符串，例如 hwocr: { HWOCR_AK: "" }。
   # 示例：
   # skill_envs:
   #   akg-agents:

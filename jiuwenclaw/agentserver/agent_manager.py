@@ -48,6 +48,9 @@ from jiuwenclaw.utils import (
     resolve_agent_registered_skill_dirs,
 )
 from jiuwenclaw.config import _sandbox_yaml_to_env_overlay
+from jiuwenclaw.agentserver.deep_agent.rails.skill_credential_injection_rail import (
+    coalesce_config_skill_envs,
+)
 
 if TYPE_CHECKING:
     from jiuwenclaw.agentserver.interface import JiuWenClaw
@@ -382,6 +385,12 @@ class AgentManager:
             "agent_name",
             f"agent_{self.agent_id}_{self.service_id}_{agent_key}_{session_id}",
         )
+        # create_instance bootstraps from config.yaml (skill_envs: {}). Carry catalog
+        # credentials on the override so the injection rail is not born empty.
+        if isinstance(self._latest_config_base, dict):
+            merged_config = coalesce_config_skill_envs(
+                merged_config, self._latest_config_base
+            )
         # Always bind (incl. {}): seal; tip = formula B ∪ latest overrides.
         overlay = build_effective_env_overlay(
             self._latest_env_overrides or None,
@@ -615,6 +624,7 @@ class AgentManager:
             self._latest_env_overrides,
             env,
         )
+        config = coalesce_config_skill_envs(config, previous_config)
         self._latest_config_base = config
 
         # 把 config['sandbox'] 的 url/type/enabled 翻译成 env overlay 并 stage,
@@ -696,6 +706,7 @@ class AgentManager:
     ) -> ReloadAggregateResult:
         """Apply sync_agents_configs write-through config/env to live adapters."""
         previous_config = self._latest_config_base
+        config = coalesce_config_skill_envs(config, previous_config)
         self._latest_config_base = config
         self._latest_env_overrides = dict(env)
         replace_active_env(

@@ -234,6 +234,8 @@ from jiuwenclaw.agentserver.deep_agent.rails import (
     SkillCredentialInjectionRail,
     SkillProtocolPromptRail,
     TaskExecutionRail,
+    coalesce_config_skill_envs,
+    coalesce_skill_envs,
 )
 from jiuwenclaw.agentserver.deep_agent.rails.recent_tool_results_rail import (
     RecentToolResultsRail,
@@ -3442,7 +3444,7 @@ class JiuWenClawDeepAdapter:
     ) -> SkillCredentialInjectionRail | None:
         """Build SkillCredentialInjectionRail for per-skill env-var injection."""
         try:
-            skill_envs = config.get("skill_envs", {})
+            skill_envs = coalesce_skill_envs(config.get("skill_envs"), None)
             rail = SkillCredentialInjectionRail(skill_envs=skill_envs)
             logger.info(
                 "[JiuWenClawDeepAdapter] SkillCredentialInjectionRail create success "
@@ -3934,8 +3936,25 @@ class JiuWenClawDeepAdapter:
 
         # --- SkillCredentialInjectionRail hot-update (before permission rail) ---
         skill_credential_rail_newly_created = False
-        new_skill_envs = config.get("skill_envs", {})
-        if self._skill_credential_injection_rail is not None:
+        incoming_skill_envs = config.get("skill_envs", {})
+        current_skill_envs = (
+            self._skill_credential_injection_rail.get_skill_envs()
+            if getattr(self, "_skill_credential_injection_rail", None) is not None
+            else None
+        )
+        new_skill_envs = coalesce_skill_envs(incoming_skill_envs, current_skill_envs)
+        if new_skill_envs is not incoming_skill_envs and new_skill_envs:
+            logger.info(
+                "[JiuWenClawDeepAdapter] keeping skill_envs skills=[%s]; "
+                "empty YAML/overlay would wipe catalog credentials",
+                ", ".join(new_skill_envs.keys()),
+            )
+            config["skill_envs"] = new_skill_envs
+            if isinstance(config_base, dict):
+                react_base = config_base.get("react")
+                if isinstance(react_base, dict):
+                    react_base["skill_envs"] = new_skill_envs
+        if getattr(self, "_skill_credential_injection_rail", None) is not None:
             self._skill_credential_injection_rail.update_skill_envs(new_skill_envs)
             logger.info("[JiuWenClawDeepAdapter] skill_envs hot-updated for SkillCredentialInjectionRail")
         else:
@@ -4297,6 +4316,7 @@ class JiuWenClawDeepAdapter:
         # Preserve sealed overlay / agent env ns across the executor thread.
         _cfg_ctx = copy_context()
         config_base = await loop.run_in_executor(None, _cfg_ctx.run, get_config)
+        config_base = coalesce_config_skill_envs(config_base, self._instance_overrides)
         self._latest_config_base = config_base if isinstance(config_base, dict) else None
         self._refresh_multimodal_configs(config_base)
         config = config_base.get('react', {}).copy()
@@ -4764,6 +4784,18 @@ class JiuWenClawDeepAdapter:
                 full_config = get_config()
                 merged = deep_merge_dicts(full_config, resolve_env_vars(config_base))
                 config_base = merged
+
+            live_skill_envs = (
+                self._skill_credential_injection_rail.get_skill_envs()
+                if getattr(self, "_skill_credential_injection_rail", None) is not None
+                else None
+            )
+            previous_for_skill_envs = (
+                {"react": {"skill_envs": live_skill_envs}}
+                if live_skill_envs
+                else getattr(self, "_latest_config_base", None)
+            )
+            config_base = coalesce_config_skill_envs(config_base, previous_for_skill_envs)
 
             self._latest_config_base = config_base if isinstance(config_base, dict) else None
 
