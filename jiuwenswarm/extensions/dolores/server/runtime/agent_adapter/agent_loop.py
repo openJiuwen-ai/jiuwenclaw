@@ -1091,33 +1091,57 @@ class AgentLoop:
 
     # —— 子 agent 物化（task 4.x）——
 
-    async def create_subagent(self, subagent_type: Any, session_id: Any = None) -> "AgentLoop":
-        """从 SubAgentConfig 建 AgentLoop 子 agent（极简，不走 create_deep_agent）。"""
-        spec = subagent_type
-        if hasattr(spec, "agent_card"):
-            sub = AgentLoop(
-                card=spec.agent_card,
-                model=getattr(spec, "model", None) or self._model,
-                system_prompt=getattr(spec, "system_prompt", None),
-                deep_config=self._deep_config,
-            )
-            for tool in getattr(spec, "tools", None) or []:
-                try:
-                    sub._ability_manager.add(tool)
-                except Exception:
-                    pass
-            for rail in getattr(spec, "rails", None) or []:
-                try:
-                    await sub.register_rail(rail)
-                except Exception:
-                    pass
-            return sub
-        return AgentLoop(
-            card=self._card,
-            model=self._model,
-            deep_config=self._deep_config,
-            system_prompt=f"You are a {subagent_type} sub-agent.",
+    def create_subagent(
+        self,
+        subagent_type: str,
+        session_id: str,
+        browser_capabilities: Optional[list[str]] = None,
+    ) -> Any:
+        """Synchronously create a configured subagent by its registered name.
+
+        TaskTool's contract is synchronous at creation time. Reuse the stock
+        DeepAgent implementation so factory routing (notably browser_agent),
+        workspace inheritance, and future factory additions stay aligned with
+        the SDK instead of being partially reimplemented here.
+        """
+        from openjiuwen.harness.deep_agent import DeepAgent
+
+        return DeepAgent.create_subagent(
+            self,
+            subagent_type,
+            session_id,
+            browser_capabilities=browser_capabilities,
         )
+
+    def _find_subagent_spec(self, subagent_type: str) -> Any:
+        """Find the registered config or DeepAgent matching ``subagent_type``."""
+        if self._deep_config is None:
+            return None
+
+        from openjiuwen.harness.deep_agent import DeepAgent
+        from openjiuwen.harness.schema.config import SubAgentConfig
+
+        for spec in self._deep_config.subagents or []:
+            if isinstance(spec, SubAgentConfig) and spec.agent_card.name == subagent_type:
+                return spec
+            if (
+                isinstance(spec, DeepAgent)
+                and getattr(getattr(spec, "card", None), "name", None) == subagent_type
+            ):
+                return spec
+        return None
+
+    @staticmethod
+    def _bind_inherited_artifact_root(subagent: Any) -> Any:
+        """Bind the current task artifact root without changing its ContextVar."""
+        from openjiuwen.core.sys_operation.cwd import get_cwd, get_workspace
+
+        artifact_root = get_cwd() or get_workspace()
+        try:
+            setattr(subagent, "_inherited_artifact_root", artifact_root)
+        except (AttributeError, TypeError):
+            pass
+        return subagent
 
     # —— 热重载 ——
 
