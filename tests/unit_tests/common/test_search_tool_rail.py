@@ -70,10 +70,6 @@ def _names(tools) -> List[str]:
 def _make_rail(monkeypatch):
     from jiuwenswarm.agents.harness.common.rails import search_tool_rail as mod
 
-    # Avoid loading the fastembed model (95MB) in unit tests.
-    monkeypatch.setattr(
-        mod.tool_retrieval, "ensure_embedding_model", lambda *a, **k: None
-    )
     config = SimpleNamespace(
         progressive_tool_enabled=True,
         progressive_tool_always_visible_tools=["bash", "read_file"],
@@ -81,7 +77,6 @@ def _make_rail(monkeypatch):
         progressive_tool_max_loaded_tools=16,
         language="cn",
         tool_retrieval_desc_cap=64,
-        tool_retrieval_embedding_model="BAAI/bge-small-zh-v1.5",
         tool_retrieval_top_k_max=3,
     )
     rail = mod.JiuWenProgressiveToolRail(config)
@@ -165,32 +160,13 @@ def test_loaded_tool_would_enter_tools_list_if_session_visible_mutated(monkeypat
     assert "cron_create_job" not in after
 
 
-def test_search_tools_runs_dense_off_event_loop(monkeypatch):
-    """P1: _search_tools runs the CPU-bound dense search via asyncio.to_thread
+def test_search_tools_runs_bm25_off_event_loop(monkeypatch):
+    """P1: _search_tools runs the CPU-bound BM25 search via asyncio.to_thread
     (off the event loop, not blocking it). Verifies the threaded path returns
     results without deadlocking."""
-    import numpy as np
     from types import SimpleNamespace
 
     rail = _make_rail(monkeypatch)
-    rail._min_sim = -1.0  # disable threshold; this test verifies to_thread, not min_sim
-
-    class FakeModel:
-        def __init__(self, dim=8):
-            self._dim = dim
-
-        def embed(self, texts):
-            out = []
-            for t in texts:
-                v = np.zeros(self._dim, dtype=float)
-                for w in str(t).lower().split():
-                    v[sum(ord(c) for c in w) % self._dim] += 1.0
-                out.append(v)
-            return out
-
-    model = FakeModel()
-    rail._embedding_model = model
-    rail._cached_tool_embeddings = {"memory_search": model.embed(["memory_search"])[0]}
     rail._search_corpus = [
         SimpleNamespace(
             name="memory_search",
@@ -200,7 +176,7 @@ def test_search_tools_runs_dense_off_event_loop(monkeypatch):
     ]
 
     results = asyncio.run(rail._search_tools("memory", 3, 3))
-    assert results, "dense search returned no results"
+    assert results, "BM25 search returned no results"
     assert results[0]["name"] == "memory_search"
 
 
@@ -218,8 +194,6 @@ def test_search_tools_name_fast_path_recovers_tool_missing_from_corpus(monkeypat
     rail._cached_all_tool_infos = [tool_info]
     # 但 _search_corpus 不含它（ghost 过滤误杀 + sig 缓存锁死）
     rail._search_corpus = []
-    # embedding model 没就绪也能命中（name fast-path 不走 dense）
-    rail._embedding_model = None
 
     results = asyncio.run(rail._search_tools("send_file_to_user", 3, 3))
 
@@ -235,7 +209,6 @@ def test_search_tools_name_fast_path_ignores_non_name_query(monkeypatch):
     ]
     rail._search_corpus = []
     # "发送文件" 不含下划线 → 不是工具名 → name fast-path 返回 []
-    rail._embedding_model = None
 
     results = asyncio.run(rail._search_tools("发送文件", 3, 3))
 
@@ -297,9 +270,6 @@ def _setup_hidden_rail(monkeypatch, *, visible: List[str] | None = None,
     """
     from jiuwenswarm.agents.harness.common.rails import search_tool_rail as mod
 
-    monkeypatch.setattr(
-        mod.tool_retrieval, "ensure_embedding_model", lambda *a, **k: None
-    )
     config = SimpleNamespace(
         progressive_tool_enabled=True,
         progressive_tool_always_visible_tools=always_visible or ["bash", "read_file"],
@@ -307,10 +277,7 @@ def _setup_hidden_rail(monkeypatch, *, visible: List[str] | None = None,
         progressive_tool_max_loaded_tools=16,
         language="cn",
         tool_retrieval_desc_cap=64,
-        tool_retrieval_embedding_model="BAAI/bge-small-zh-v1.5",
         tool_retrieval_top_k_max=3,
-        tool_retrieval_min_sim=0.35,
-        tool_retrieval_method="hybrid",
     )
     rail = mod.JiuWenProgressiveToolRail(config)
     # _get_real_tool_infos reads _cached_all_tool_infos (set per-test).

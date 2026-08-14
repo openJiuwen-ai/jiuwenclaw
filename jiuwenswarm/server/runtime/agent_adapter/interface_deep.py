@@ -4663,15 +4663,10 @@ class JiuWenSwarmDeepAdapter:
                 #       如需添加请确认工具已注册到 ability_manager
                 progressive_tool_default_visible_tools=[],
                 language="cn",
-                # 按需检索算法旋钮（react.tool_retrieval.*）
+                # 按需检索算法旋钮（react.tool_retrieval.*）—— v3 仅 BM25+CJK，
+                # dense/embedding 已移除（fastembed/bge 太大无法部署）。
                 tool_retrieval_desc_cap=int(tr_cfg.get("desc_cap", 256)),
-                tool_retrieval_embedding_model=str(
-                    tr_cfg.get("embedding_model", "BAAI/bge-small-zh-v1.5")
-                ),
                 tool_retrieval_top_k_max=int(tr_cfg.get("top_k_max", 3)),
-                tool_retrieval_min_sim=float(tr_cfg.get("min_sim", 0.35)),
-                tool_retrieval_method=str(tr_cfg.get("method", "bm25")),
-                tool_retrieval_dense_enabled=bool(tr_cfg.get("dense_enabled", False)),
             )
 
             # ── JiuWen ProgressiveToolRail（全部 jiuwenswarm 改动在外部文件）──

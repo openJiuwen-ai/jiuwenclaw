@@ -6,8 +6,8 @@ and inlines the subset of base helpers we use (see the class docstring). ALL
 jiuwenswarm-specific changes live here — agent-core stays upstream-clean.
 
 What's here (nothing in agent-core is modified):
-- Dense retrieval (_dense_search, _ensure_embedding_model, _precompute_tool_embeddings)
-  backed by the agent-core-free ``common.tool_retrieval`` lib.
+- BM25 retrieval (_search, backed by the agent-core-free ``common.tool_retrieval``
+  lib — BM25 + CJK n-gram, no model/embedding).
 - Executable-corpus filter (_build_executable_corpus) — drops ghost tools
   (card registered but no resource_mgr instance).
 - Hidden tool summary (_build_hidden_tool_summary, _HIDDEN_CATEGORY_*)
@@ -171,26 +171,12 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         self._runtime_agent = None
         # JiuWen retrieval knobs.
         self._desc_cap = int(getattr(config, "tool_retrieval_desc_cap", 256))
-        self._embedding_model_name = getattr(
-            config, "tool_retrieval_embedding_model", "BAAI/bge-small-zh-v1.5"
-        )
         self._top_k_max = int(getattr(config, "tool_retrieval_top_k_max", 3))
-        self._min_sim = float(getattr(config, "tool_retrieval_min_sim", 0.35))
-        self._method = str(getattr(config, "tool_retrieval_method", "bm25")).lower()
-        # v3: dense disabled by default — BM25 + CJK n-gram covers pure-Chinese
-        # queries without a 90M model / fastembed / network. Set
-        # tool_retrieval_dense_enabled: true to opt back into hybrid (model is
-        # then loaded eagerly in __init__).
-        self._dense_enabled = bool(getattr(config, "tool_retrieval_dense_enabled", False))
-        self._embedding_model = None
-        self._cached_tool_embeddings: Dict[str, Any] = {}
-        self._cached_tool_sig: frozenset = frozenset()
         # BM25 index + sig cache (pure-text, ghost-probe-free → sig is safe).
+        # v3 removed the dense/embedding path — retrieval is BM25 + CJK only.
         self._bm25_index = None
         self._cached_bm25_sig: frozenset = frozenset()
         self._search_corpus: List = []
-        if self._dense_enabled:
-            self._ensure_embedding_model()
 
     # ------------------------------------------------------------------
     # Lifecycle (inlined from base; no longer inherits ProgressiveToolRail)
@@ -208,8 +194,6 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
             session, default_visible_tools=list(self.default_visible_tools)
         )
         await asyncio.to_thread(self._build_executable_corpus, ctx)
-        if self._dense_enabled:
-            await asyncio.to_thread(self._precompute_tool_embeddings)
         await asyncio.to_thread(self._build_bm25_index)
 
     async def before_model_call(self, ctx):
@@ -494,13 +478,10 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         return {"skill": 0, "runtime": 1, "document": 2, "spreadsheet": 3, "general": 9}.get(group, 99)
 
     # ------------------------------------------------------------------
-    # _search_tools — dispatch by ``method`` (hybrid/dense/bm25), name as
-    # the final fallback. The hand-rolled dense→bm25→name chain was replaced
-    # so that ``method`` config actually drives retrieval (hybrid RRF was
-    # never reached before; dense-unavailable → BM25 degradation lives in
-    # ``tool_retrieval.search``). Name lookup is the last resort: it catches
-    # exact tool-name queries that semantic search missed (e.g. the LLM
-    # searched by ``send_file_to_user`` but dense returned write_file) and
+    # _search_tools — BM25 main path, name as the final fallback. Name lookup
+    # is the last resort: it catches exact tool-name queries that BM25 ranked
+    # below a higher-scoring tool (e.g. the LLM searched by
+    # ``send_file_to_user`` but BM25 returned write_file) and
     # runtime-registered tools absent from the search corpus.
     # ------------------------------------------------------------------
 
@@ -508,7 +489,7 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         query = (query or "").strip()
         if not query:
             return []
-        # Main path: dispatch by self._method. The embedding cache / BM25
+        # Main path: BM25. The index / corpus are built lazily inside
         # index are built lazily inside _search's callees if missing.
         results = await asyncio.to_thread(self._search, query, limit, detail_level)
         if results:
@@ -550,67 +531,26 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         )
         self._cached_all_tool_infos = live_infos
         self._search_corpus = list(live_infos)
-        self._cached_tool_sig = frozenset()
         self._cached_bm25_sig = frozenset()
-        if self._dense_enabled:
-            await asyncio.to_thread(self._precompute_tool_embeddings)
         await asyncio.to_thread(self._build_bm25_index)
         return await asyncio.to_thread(self._search, query, limit, detail_level)
 
     def _search(self, query, limit, detail_level):
-        """Dispatch to dense / bm25 / hybrid by ``self._method``.
+        """BM25-only search. v3 removed the dense/embedding path; this is the
+        sole retrieval call.
 
-        Degradation is handled inside ``tool_retrieval.search``: embedding
-        unavailable → BM25 (never []). The old ``_dense_search`` is kept
-        below for reference/tests but is no longer the call path.
-
-        Lazy-init guard: if the embedding cache / BM25 index weren't built
-        yet (e.g. first search of the session, or model finished loading
-        after before_invoke), build them now in bulk. Without this,
-        ``dense_search`` would fall back to per-tool ``embed_single`` calls
-        (44 model invocations instead of one batched embed).
+        Lazy-init guard: if the BM25 index wasn't built yet (e.g. first search
+        of the session before ``before_invoke`` finished), build it now.
         """
-        if self._embedding_model is not None and not self._cached_tool_embeddings:
-            self._precompute_tool_embeddings()
-        if self._bm25_index is None and self._method != "semantic":
+        if self._bm25_index is None:
             self._build_bm25_index()
         return tool_retrieval.dispatch_search(
             query,
             self._search_corpus or self._cached_all_tool_infos,
-            method=self._method,
-            embedding_model=self._embedding_model,
-            embedding_cache=self._cached_tool_embeddings,
             bm25_index=self._bm25_index,
             limit=limit,
             detail_level=detail_level,
             desc_cap=self._desc_cap,
-            min_sim=self._min_sim,
-        )
-
-    def _dense_search(self, query, limit, detail_level):
-        """Legacy dense-only path. Kept for tests; production uses _search."""
-        return tool_retrieval.dense_search(
-            query,
-            self._search_corpus or self._cached_all_tool_infos,
-            self._embedding_model,
-            self._cached_tool_embeddings,
-            limit=limit,
-            detail_level=detail_level,
-            desc_cap=self._desc_cap,
-            min_sim=self._min_sim,
-        )
-
-    def _bm25_search_fallback(self, query, limit, detail_level):
-        """BM25-only search (fallback when dense is unavailable or empty)."""
-        from jiuwenswarm.common.tool_retrieval import bm25_search
-        return bm25_search(
-            query,
-            self._search_corpus or self._cached_all_tool_infos,
-            self._bm25_index,
-            limit=limit,
-            detail_level=detail_level,
-            desc_cap=self._desc_cap,
-            min_sim=0.0,
         )
 
     def _lookup_tool_by_name(self, query, *, detail_level=1):
@@ -622,7 +562,7 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         listed in ``_cached_all_tool_infos`` (which navigation and the hidden
         summary read from). When the model searches by the tool's own name,
         this fast-path recovers it instead of returning no match — the exact
-        scenario where dense retrieval consistently failed in practice.
+        scenario where BM25 would otherwise miss a tool the LLM named by id.
 
         If the cache misses, fall back to a live ``ability_manager`` lookup
         so tools registered after the last ``before_invoke`` refresh are
@@ -672,13 +612,6 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
     # Embedding + corpus helpers
     # ------------------------------------------------------------------
 
-    def _ensure_embedding_model(self):
-        if self._embedding_model is not None:
-            return
-        self._embedding_model = tool_retrieval.ensure_embedding_model(self._embedding_model_name)
-        if self._embedding_model is not None:
-            logger.info("[JiuWenRail] embedding model loaded: %s", self._embedding_model_name)
-
     def _build_executable_corpus(self, ctx):
         try:
             from openjiuwen.core.runner import Runner
@@ -695,8 +628,7 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
         # _search_corpus would stay missing the tool while navigation (which
         # reads _cached_all_tool_infos directly) still lists it, so search
         # never recovers it. am.get and resource_mgr probes are local dict
-        # lookups; the embedding cache (_cached_tool_sig in
-        # _precompute_tool_embeddings) is independent and still short-circuits.
+        # lookups; they don't depend on the BM25 sig cache.
         def resolver(name):
             tool_id = name
             card = None
@@ -734,31 +666,12 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
                 if str(getattr(t, "name", "") or "") not in self._EXCLUDED_FROM_SEARCH
             ]
 
-    def _precompute_tool_embeddings(self):
-        if self._embedding_model is None:
-            return
-        all_tools = self._search_corpus or self._cached_all_tool_infos
-        if not all_tools:
-            return
-        sig = frozenset(str(getattr(t, "name", "") or "") for t in all_tools)
-        if sig == self._cached_tool_sig and self._cached_tool_embeddings:
-            return
-        self._cached_tool_sig = sig
-        tool_retrieval.precompute_embeddings(
-            all_tools,
-            self._embedding_model,
-            self._cached_tool_embeddings,
-            desc_cap=self._desc_cap,
-        )
-
     def _build_bm25_index(self):
         """Build/refresh the BM25 index over the search corpus.
 
         Sig cache is safe here: BM25 is a pure-text index over haystacks (no
         ghost-probe timing like the executable-corpus filter), so a name-set
-        sig correctly identifies an unchanged corpus. Kept separate from
-        ``_cached_tool_sig`` (dense) because their invalidation conditions
-        differ — BM25 only depends on text, dense depends on model + text.
+        sig correctly identifies an unchanged corpus.
         """
         all_tools = self._search_corpus or self._cached_all_tool_infos
         if not all_tools:
