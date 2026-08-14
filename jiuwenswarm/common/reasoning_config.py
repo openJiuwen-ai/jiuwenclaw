@@ -1,6 +1,8 @@
 # coding: utf-8
 from __future__ import annotations
 
+import re
+import re
 from enum import Enum
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -96,6 +98,37 @@ def resolve_reasoning_target(
     return provider_kind, model
 
 
+def is_new_generation_openai_model(model_name: str | None) -> bool:
+    """OpenAI gpt-5 系列与 o 系列（o1/o3/o4 等）新代际模型判断。
+
+    这类模型已弃用 ``max_tokens``（须改用 ``max_completion_tokens``），
+    且在 /v1/chat/completions 中使用 function tools 时必须显式
+    ``reasoning_effort="none"``，否则 OpenAI API 返回 400。
+    """
+    name = str(model_name or "").strip().lower()
+    return name.startswith("gpt-5") or bool(re.match(r"^o\d", name))
+
+
+def is_gpt5_family(model_name: str | None) -> bool:
+    """OpenAI gpt-5 系列模型判断（不含 o 系列推理模型）。
+
+    gpt-5 系列在 /v1/chat/completions 中使用 function tools 时必须显式
+    ``reasoning_effort="none"``，否则 OpenAI API 返回 400；o 系列原生
+    支持 function calling，不应注入以免禁用其推理能力。
+    """
+    return str(model_name or "").strip().lower().startswith("gpt-5")
+
+
+def is_new_generation_openai_model(model_name: str | None) -> bool:
+    """OpenAI gpt-5 系列与 o 系列（o1/o3/o4 等）新代际模型判断。
+
+    这类模型已弃用 ``max_tokens``（须改用 ``max_completion_tokens``），
+    否则 OpenAI API 返回 400 unsupported_parameter。
+    """
+    name = str(model_name or "").strip().lower()
+    return is_gpt5_family(name) or bool(re.match(r"^o\d", name))
+
+
 __all__ = [
     "LEVEL_MAPPING",
     "OPENAI_SDK_REASONING_PROVIDERS",
@@ -103,6 +136,9 @@ __all__ = [
     "ReasoningEffort",
     "ReasoningLevel",
     "ReasoningProviderKind",
+    "is_new_generation_openai_model",
+    "is_gpt5_family",
+    "is_new_generation_openai_model",
     "normalize_reasoning_level",
     "resolve_reasoning_provider_kind",
     "resolve_reasoning_target",

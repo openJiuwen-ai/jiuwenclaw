@@ -326,6 +326,7 @@ from jiuwenswarm.common.mcp_call_timeout_patch import apply_mcp_call_timeout_pat
 from jiuwenswarm.common.task_loop_config import (
     resolve_task_loop_completion_timeout,
 )
+from jiuwenswarm.common.reasoning_config import is_new_generation_openai_model
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.server.runtime.agent_adapter.sysop_builder import (
     build_filesystem_policy,
@@ -799,6 +800,10 @@ def build_model_from_entry(mcc: dict, mco: dict) -> Model:
         request_kwargs.pop("max_tokens", None)
 
     m_config = ModelRequestConfig(**request_kwargs)
+    if is_new_generation_openai_model(name):
+        # gpt-5/o 系列只接受默认采样参数（temperature/top_p 非默认值会报
+        # unsupported_value），清空后由 API 使用默认值
+        m_config = m_config.model_copy(update={"temperature": None, "top_p": None})
     return Model(model_client_config=ModelClientConfig(**mcc_fields), model_config=m_config)
 
 

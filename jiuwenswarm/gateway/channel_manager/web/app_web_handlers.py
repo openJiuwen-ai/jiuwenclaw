@@ -84,6 +84,7 @@ from jiuwenswarm.server.runtime.a2ui.integration import (
     validate_a2ui_config_update,
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
+from jiuwenswarm.common.reasoning_config import is_new_generation_openai_model
 from jiuwenswarm.common.updater import DEFAULT_SOURCE_CONFIG, UpdaterService
 from jiuwenswarm.common.utils import (
     get_agent_sessions_dir,
@@ -1522,6 +1523,13 @@ def _resolve_model_config_obj_for_validate(model_name: str, params: dict[str, An
     return model_config_obj
 
 
+def _uses_max_completion_tokens(model_name: str) -> bool:
+    """OpenAI gpt-5 系列与 o 系列（o1/o3/o4 等）新代际模型已弃用 ``max_tokens``
+    参数，必须改用 ``max_completion_tokens``；其余模型（如 DeepSeek）仍用 ``max_tokens``。
+    """
+    return is_new_generation_openai_model(model_name)
+
+
 def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     """注册 Web 前端需要的 method 与 on_connect。
     on_config_saved: 可选，config.set 写回后调用的回调；
@@ -2181,6 +2189,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 model_name=model,
             )
         )
+        if _uses_max_completion_tokens(model):
+            # gpt-5/o 系列新代际模型只接受默认采样参数（temperature/top_p 非默认值
+            # 会报 unsupported_value），清空后由 API 使用默认值，仅验证连通性
+            model_request_config = model_request_config.model_copy(
+                update={"temperature": None, "top_p": None}
+            )
         logger.info(
             "[config.validate_model] final model_request_config for '%s': %s",
             model,
@@ -2198,6 +2212,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         llm = Model(model_config=model_request_config, model_client_config=model_client_config)
 
         async def test_invoke(max_tokens: int):
+            if _uses_max_completion_tokens(model):
+                # gpt-5/o 系列新代际模型不接受 max_tokens，改用 max_completion_tokens 透传
+                return await llm.invoke(
+                    [{"role": "user", "content": "Hi"}],
+                    max_completion_tokens=max_tokens,
+                )
             return await llm.invoke(
                 [{"role": "user", "content": "Hi"}],
                 max_tokens=max_tokens,

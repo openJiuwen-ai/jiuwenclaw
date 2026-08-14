@@ -7,6 +7,7 @@ from typing import Any
 from jiuwenswarm.common.reasoning_config import (
     LEVEL_MAPPING,
     ReasoningEffort,
+    is_new_generation_openai_model,
     normalize_reasoning_level,
     resolve_reasoning_target,
 )
@@ -125,6 +126,21 @@ def _build_model_request_kwargs(
     # / image_modality_warmup 等所有走本函数的路径。
     request_kwargs.pop("_source", None)
     request_kwargs["model"] = _resolve_model_name(model_name, model_config_obj)
+    if is_new_generation_openai_model(request_kwargs["model"]):
+        # gpt-5/o 系列在 /v1/chat/completions 中使用 function tools 时必须
+        # 显式 reasoning_effort="none"，否则 OpenAI API 返回 400
+        request_kwargs["reasoning_effort"] = "none"
+    if is_new_generation_openai_model(request_kwargs["model"]):
+        # gpt-5/o 系列已弃用 max_tokens（发送会 400 unsupported_parameter），
+        # 移除并映射为等价的 max_completion_tokens 保留调用方意图
+        configured_max_tokens = request_kwargs.pop("max_tokens", None)
+        if configured_max_tokens is not None:
+            request_kwargs["max_completion_tokens"] = configured_max_tokens
+    if is_gpt5_family(request_kwargs["model"]):
+        # gpt-5 系列在 /v1/chat/completions 中使用 function tools 时必须
+        # 显式 reasoning_effort="none"，否则 OpenAI API 返回 400；
+        # o 系列原生支持 tools，不注入以免禁用其推理能力
+        request_kwargs["reasoning_effort"] = "none"
     return request_kwargs
 
 
