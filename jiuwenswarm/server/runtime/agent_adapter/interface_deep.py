@@ -10227,9 +10227,19 @@ class JiuWenSwarmDeepAdapter:
 
         skill_path = params.get("skill_path") or params.get("path")
         resolved_skill_md: str | None = None
+        skills_dirs_param = params.get("skills_dirs")
+        if isinstance(skills_dirs_param, (list, tuple)):
+            store_dirs: list[str] | None = [
+                str(item).strip() for item in skills_dirs_param if str(item).strip()
+            ] or None
+        elif skills_dirs_param is not None and str(skills_dirs_param).strip():
+            store_dirs = [str(skills_dirs_param).strip()]
+        else:
+            store_dirs = None
+        resolve_dirs = store_dirs if store_dirs is not None else self._resolve_skill_dirs()
         if skill_path:
             allowed = evolution_version_ctl.allowed_skill_roots_for_path(
-                self._resolve_skill_dirs(),
+                resolve_dirs,
                 str(skill_path),
             )
             resolved_skill_md = evolution_version_ctl.validate_rebuild_skill_path(
@@ -10250,7 +10260,11 @@ class JiuWenSwarmDeepAdapter:
         try:
             if self._instance is None:
                 await self.ensure_instance()
-            store = self._get_disk_evolution_store()
+            store = (
+                evolution_version_ctl.get_disk_evolution_store(store_dirs)
+                if store_dirs is not None
+                else self._get_disk_evolution_store()
+            )
             prepared = await evolution_version_ctl.prepare_rebuild_followup(
                 store,
                 name,
@@ -10480,6 +10494,11 @@ class JiuWenSwarmDeepAdapter:
             ),
         )
         if slash_result is not None:
+            if str(slash_result.get("action") or "").strip() == "run_rebuild_inline":
+                slash_result = await self._execute_slash_rebuild_request(
+                    slash_result,
+                    skills_dirs=slash_dirs or None,
+                )
             return evolution_slash_result(
                 evolution_slash_command_name(stripped),
                 slash_result,
@@ -10487,6 +10506,46 @@ class JiuWenSwarmDeepAdapter:
             )
 
         return None
+
+    async def _execute_slash_rebuild_request(
+        self,
+        slash_result: dict[str, Any],
+        *,
+        skills_dirs: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Run shared rebuild pipeline for `/evolve_rebuild` (not a followup turn)."""
+        skill_name = str(slash_result.get("skill_name") or "").strip()
+        user_intent = slash_result.get("user_intent")
+        if user_intent is not None:
+            user_intent = str(user_intent).strip() or None
+        params: dict[str, Any] = {"name": skill_name}
+        if user_intent is not None:
+            params["user_intent"] = user_intent
+        if skills_dirs:
+            params["skills_dirs"] = list(skills_dirs)
+        try:
+            merge = await self.generate_evolution_merge_version(params)
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] /evolve_rebuild failed: skill=%s error=%s",
+                skill_name,
+                exc,
+            )
+            return {
+                "result_type": "error",
+                "output": str(exc) or f"Skill '{skill_name}' 重建失败。",
+            }
+        new_version = merge.get("new_version")
+        version_text = f"`{new_version}`" if new_version else "新版本"
+        return {
+            "result_type": "answer",
+            "output": (
+                f"Skill '{skill_name}' 已采纳演进经验并生成版本 {version_text}。"
+            ),
+            "new_version": new_version,
+            "name": skill_name,
+            "cleared": merge.get("cleared"),
+        }
 
     # Goal capability adapter -------------------------------------------------
 
@@ -11438,7 +11497,12 @@ class JiuWenSwarmDeepAdapter:
                     or self._workspace_dir,
                 )
 
-                async for chunk in process_team_message_stream(request, inputs, self._instance):
+                async for chunk in process_team_message_stream(
+                    request,
+                    inputs,
+                    self._instance,
+                    rebuild_skill=self.generate_evolution_merge_version,
+                ):
                     maybe_mark_answer_first_byte(getattr(chunk, "payload", None))
                     yield chunk
             except asyncio.CancelledError:

@@ -1232,6 +1232,62 @@ async def _handle_team_slash_command(
     )
 
 
+async def _execute_team_slash_rebuild(
+    slash_result: dict[str, Any],
+    *,
+    skills_dir: str | list[str] | None,
+    rebuild_skill: Any | None,
+) -> dict[str, Any]:
+    """Run shared rebuild pipeline for team `/evolve_rebuild`."""
+    skill_name = str(slash_result.get("skill_name") or "").strip()
+    user_intent = slash_result.get("user_intent")
+    if user_intent is not None:
+        user_intent = str(user_intent).strip() or None
+    if not callable(rebuild_skill):
+        return {
+            "result_type": "error",
+            "output": "团队模式下重建不可用：未绑定 rebuild 实现。",
+        }
+    params: dict[str, Any] = {"name": skill_name}
+    if user_intent is not None:
+        params["user_intent"] = user_intent
+    if skills_dir is not None:
+        if isinstance(skills_dir, (list, tuple)):
+            dirs = [str(item).strip() for item in skills_dir if str(item).strip()]
+        else:
+            dirs = [str(skills_dir).strip()] if str(skills_dir).strip() else []
+        if dirs:
+            params["skills_dirs"] = dirs
+    try:
+        merge = await rebuild_skill(params)
+    except Exception as exc:
+        logger.warning(
+            "[TeamHelpers] /evolve_rebuild failed: skill=%s error=%s",
+            skill_name,
+            exc,
+        )
+        return {
+            "result_type": "error",
+            "output": str(exc) or f"Skill '{skill_name}' 重建失败。",
+        }
+    if not isinstance(merge, dict) or not merge.get("success"):
+        return {
+            "result_type": "error",
+            "output": f"Skill '{skill_name}' 重建失败。",
+        }
+    new_version = merge.get("new_version")
+    version_text = f"`{new_version}`" if new_version else "新版本"
+    return {
+        "result_type": "answer",
+        "output": (
+            f"Skill '{skill_name}' 已采纳演进经验并生成版本 {version_text}。"
+        ),
+        "new_version": new_version,
+        "name": skill_name,
+        "cleared": merge.get("cleared"),
+    }
+
+
 def _resolve_team_slash_skills_dir(session_id: str) -> str | None:
     metadata = get_session_metadata(session_id)
     team_name = str(metadata.get("team_name") or "").strip()
@@ -1405,8 +1461,14 @@ async def process_team_message_stream(
     request: Any,
     inputs: dict[str, Any],
     deep_agent: DeepAgent,
+    *,
+    rebuild_skill: Any | None = None,
 ) -> AsyncIterator[AgentResponseChunk]:
-    """Process a team-mode streaming request."""
+    """Process a team-mode streaming request.
+
+    ``rebuild_skill`` is an optional async callable matching
+    ``generate_evolution_merge_version(params)`` for ``/evolve_rebuild``.
+    """
     session_id = request.session_id or "default"
     rid = request.request_id
     channel_id = request.channel_id
@@ -1558,6 +1620,44 @@ async def process_team_message_stream(
                 request_id=rid,
                 channel_id=channel_id,
                 payload={"event_type": "chat.done"},
+                is_complete=True,
+            )
+            return
+
+        if str(slash_result.get("action") or "").strip() == "run_rebuild_inline":
+            slash_result = await _execute_team_slash_rebuild(
+                slash_result,
+                skills_dir=team_skills_dir,
+                rebuild_skill=rebuild_skill,
+            )
+            slash_result = evolution_slash_result(
+                evolution_slash_command_name(query_text),
+                slash_result,
+                warning_phrases=TEAM_EVOLUTION_SLASH_WARNING_PHRASES,
+            )
+            result_type = str(slash_result.get("result_type", "answer")).strip().lower()
+            content = str(slash_result.get("output", ""))
+            slash_meta = {
+                "source": slash_result.get("source"),
+                "slash_command": slash_result.get("slash_command"),
+                "display_level": slash_result.get("display_level"),
+            }
+            payload = (
+                {"event_type": "chat.error", "error": content, **slash_meta}
+                if result_type == "error"
+                else {"event_type": "chat.final", "content": content, **slash_meta}
+            )
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=channel_id,
+                payload=payload,
+                is_complete=False,
+            )
+            yield _team_processing_done_chunk(rid, channel_id, session_id)
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=channel_id,
+                payload=None,
                 is_complete=True,
             )
             return

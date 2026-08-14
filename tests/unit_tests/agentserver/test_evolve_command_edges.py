@@ -357,29 +357,50 @@ async def test_handle_user_answer_does_not_route_call_interrupt_approval_to_regu
 
 
 @pytest.mark.anyio
-async def test_agent_evolve_rebuild_routes_to_removed_message(monkeypatch):
+async def test_agent_evolve_rebuild_routes_to_merge_version(monkeypatch):
     adapter = JiuWenSwarmDeepAdapter()
     adapter._config_cache = {"evolution": {"enabled": True}}  # pylint: disable=protected-access
+    merge_calls: list[dict] = []
 
     async def _fake_handler(query, _context):
-        assert query == "/evolve_rebuild demo-skill"
+        assert query == "/evolve_rebuild demo-skill tighten examples"
         return {
-            "result_type": "error",
-            "output": "`/evolve_rebuild` 已移除。请使用控制面接口 `skills.evolution.rebuild`",
+            "result_type": "rebuild_request",
+            "action": "run_rebuild_inline",
+            "skill_name": "demo-skill",
+            "user_intent": "tighten examples",
+        }
+
+    async def _fake_merge(params=None, **_kwargs):
+        merge_calls.append(dict(params or {}))
+        return {
+            "success": True,
+            "name": "demo-skill",
+            "new_version": "1.2.0",
+            "cleared": True,
         }
 
     monkeypatch.setattr(interface_deep_module, "handle_evolution_slash_command", _fake_handler)
+    monkeypatch.setattr(adapter, "generate_evolution_merge_version", _fake_merge)
+    monkeypatch.setattr(adapter, "_resolve_skill_dirs", lambda: ["D:/skills"])
 
     result = await adapter._handle_slash_command(  # pylint: disable=protected-access
-        "/evolve_rebuild demo-skill",
+        "/evolve_rebuild demo-skill tighten examples",
         session_id="sess-agent-evolve",
         mode="agent.plan",
     )
 
     assert result is not None
     assert result["slash_command"] == "evolve_rebuild"
-    assert result["result_type"] == "error"
-    assert "skills.evolution.rebuild" in result["output"]
+    assert result["result_type"] == "answer"
+    assert "1.2.0" in result["output"]
+    assert merge_calls == [
+        {
+            "name": "demo-skill",
+            "user_intent": "tighten examples",
+            "skills_dirs": ["D:/skills"],
+        }
+    ]
 
 
 @pytest.mark.anyio
@@ -577,7 +598,7 @@ async def test_team_stream_injects_image_tool_context_for_non_vision_model(monke
     monkeypatch.setattr(adapter, "_native_image_input_enabled", lambda *_args: False)
     monkeypatch.setattr(adapter, "_write_runtime_state", lambda **_kwargs: None)
 
-    async def _capture_team_inputs(_request, inputs, _instance):
+    async def _capture_team_inputs(_request, inputs, _instance, *, rebuild_skill=None):
         captured.update(inputs)
         if False:
             yield None
