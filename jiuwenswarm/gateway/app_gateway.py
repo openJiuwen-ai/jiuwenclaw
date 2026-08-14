@@ -2716,6 +2716,15 @@ async def _run(
         name="agent-prewarm-periodic-sync",
     )
 
+    # ---------- Opencode Zen 免费模型预热 ----------
+    # Gateway 进程独立拉取 Zen 免费模型到内存缓存（_models_list 在此进程处理，
+    # 与 AgentServer 内存不共享，故各自预热）。失败留空，不阻断启动。
+    try:
+        from jiuwenswarm.server.runtime.opencode_zen import warm_zen_free_models
+        await warm_zen_free_models(reason="gateway-startup")
+    except Exception as e:  # noqa: BLE001 - 兜底
+        logger.warning("[App] zen free models warm failed (non-fatal): %s", e)
+
     await channel_manager.start_dispatch()
     # cron jobs 的 work_mode 补全已改为惰性迁移:scheduler.start() → reload() →
     # list_jobs() 读取时按需推断并写回磁盘(见 CronJobStore.list_jobs),无需启动全量扫描。

@@ -86,7 +86,16 @@ export function resolveEffectiveModel(
 ): ModelEntry | null {
   if (chatAvailableModels.length === 0) return null;
   const displayed = selectedModelName || defaultModelName;
+  // selectedModelName 可能存的是展示名（用户从下拉框选择时存的是 alias），
+  // 也可能存的是真实 API id（后端 session.metadata.model 回传恢复时是
+  // model_name，例如 Zen 免费模型的 "deepseek-v4-flash-free"）。两者都要能
+  // 命中同一个 entry，否则后端回传 model_name 后无法匹配有 alias 的免费
+  // 模型，会回退到 chatAvailableModels[0]（首个配置模型），表现为"对话
+  // 完成后下拉框自动切回配置的模型"。
   return (
+    chatAvailableModels.find(
+      (m) => m.alias === displayed || m.model_name === displayed,
+    ) ??
     chatAvailableModels.find((m) => (m.alias || m.model_name) === displayed) ??
     chatAvailableModels[0]
   );
@@ -443,13 +452,17 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     if (runtime.mode === 'team') return state.defaultModelName;
     // 不再原样吐出 runtime.selectedModelName（可能是模型改名后失配的陈旧字符串），
     // 而是走与 UI 显示（ModelSelector）相同的解析逻辑，确保发给后端的 model_name
-    // 参数与界面上显示的模型永远一致（bug003）。
+    // 参数与界面上显示的模型永远指向同一个 entry（bug003）。
+    //
+    // 注意：这里返回的是 model_name 而非 alias。后端 _model_cache 以 model_name 为
+    // key 查找（包括 Zen 免费模型如 "laguna-s-2.1-free"）；alias 只是展示名（如
+    // "Laguna S 2.1"），后端无法据此解析，会回退到默认模型。
     const resolved = resolveEffectiveModel(
       state.chatAvailableModels,
       runtime.selectedModelName,
       state.defaultModelName,
     );
-    return resolved ? (resolved.alias || resolved.model_name) : runtime.selectedModelName;
+    return resolved ? resolved.model_name : runtime.selectedModelName;
   },
 
   removeRuntime: (sessionId) => {
@@ -1192,7 +1205,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   setAvailableModels: (models, activeModel) => {
     set(() => {
-      const chatModels = models.filter((m) => m.is_default !== false);
+      const defaultModels = models.filter((m) => m.is_default !== false);
+      // 过滤为空时回退到全量列表，保证聊天下拉框始终有可选项（例如用户自配模型
+      // 均未设为 is_default、且关闭了 Opencode Zen 免费模型时，不至于无模型可选）。
+      const chatModels = defaultModels.length > 0 ? defaultModels : models;
       // 优先使用后端返回的 activeModel（默认模型），其次取第一个；有别名时存别名
       const matchedModel = activeModel ? chatModels.find((m) => m.model_name === activeModel) : null;
       const selected = matchedModel

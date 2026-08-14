@@ -308,6 +308,7 @@
       "tooltip": "切换对话使用的模型",
       "clusterLockedTooltip": "集群模式使用配置的默认模型，不支持修改",
       "configured": "已配置模型",
+      "free": "免费模型",
       "addModel": "添加自定义模型",
       "placeholder": "选择模型"
     },
@@ -877,7 +878,8 @@
       "proactiveEnabled": "启用主动推荐",
       "proactiveTickInterval": "检查间隔（分钟）",
       "proactiveMaxPerDay": "每日推荐上限",
-      "proactiveMaxRounds": "每次检查对话轮数"
+      "proactiveMaxRounds": "每次检查对话轮数",
+      "enableFreeModels": "启用免费模型"
     },
     "defaults": {
       "teamLeaderDisplayName": "团队领导",
@@ -922,7 +924,8 @@
       "teamMemberName": "成员内部 ID：须以小写字母开头，仅含小写字母、数字或连字符。",
       "teamPersona": "角色人设与职责描述，影响该成员的行为风格与分工。",
       "teamPromptHint": "额外提示词片段，会注入该成员的系统提示中。",
-      "teamAgentKey": "绑定到「多 Agent 配置」中已有 Agent 的名称（name）。"
+      "teamAgentKey": "绑定到「多 Agent 配置」中已有 Agent 的名称（name）。",
+      "enableFreeModels": "开启后实时拉取可用的免费模型，注意免费模型可能有限流、限窗口大小等限制。"
     },
     "hideValue": "隐藏明文",
     "showValue": "显示明文",

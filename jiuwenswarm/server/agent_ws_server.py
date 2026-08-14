@@ -8868,6 +8868,25 @@ class AgentWebSocketServer:
                 len(self._model_cache), first_name
             )
 
+        # 追加 Opencode Zen 免费模型（内存态，不入 config.yaml）。
+        # 这些模型可被 _resolve_model 按名解析，但 _default_model 保持上面的用户自配模型。
+        try:
+            from jiuwenswarm.server.runtime.opencode_zen import (
+                get_zen_free_model_entries,
+            )
+            for zent in get_zen_free_model_entries():
+                zmcc = zent.get("model_client_config") or {}
+                zname = zmcc.get("model_name", "")
+                if zname and zname not in self._model_cache:
+                    self._model_cache[zname] = build_model_from_entry(
+                        zmcc, zent.get("model_config_obj") or {}
+                    )
+        except Exception:
+            logger.debug(
+                "[AgentServer] append zen free models to cache failed",
+                exc_info=True,
+            )
+
     async def _handle_schedule_request(
         self,
         ws: Any,

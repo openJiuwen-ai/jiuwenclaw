@@ -307,6 +307,7 @@
       "tooltip": "Switch the model used for chat",
       "clusterLockedTooltip": "Cluster mode uses the configured default model and cannot be changed",
       "configured": "Configured Models",
+      "free": "Free Models",
       "addModel": "Add Custom Model",
       "placeholder": "Select Model"
     },
@@ -877,7 +878,8 @@
       "proactiveEnabled": "Enable proactive recommendation",
       "proactiveTickInterval": "Check interval (minutes)",
       "proactiveMaxPerDay": "Daily recommendation limit",
-      "proactiveMaxRounds": "Max rounds per check"
+      "proactiveMaxRounds": "Max rounds per check",
+      "enableFreeModels": "Enable free models"
     },
     "defaults": {
       "teamLeaderDisplayName": "Team Leader",
@@ -922,7 +924,8 @@
       "teamMemberName": "Internal member ID: must start with a lowercase letter, then lowercase letters, digits, or hyphens.",
       "teamPersona": "Role persona and responsibilities; shapes behavior and division of labor.",
       "teamPromptHint": "Extra prompt fragment injected into this member's system prompt.",
-      "teamAgentKey": "Name of an existing Agent from Multi-Agent Configuration."
+      "teamAgentKey": "Name of an existing Agent from Multi-Agent Configuration.",
+      "enableFreeModels": "When enabled, available free models are fetched live. Note that free models may have limitations such as rate limits or restricted context window size."
     },
     "hideValue": "Hide value",
     "showValue": "Show value",

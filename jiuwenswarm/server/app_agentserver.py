@@ -204,6 +204,12 @@ async def _run(host: str, port: int) -> None:
 
     await warm_image_modality_cache(get_config(), reason="startup")
 
+    # ---------- Opencode Zen 免费模型注入 ----------
+    # 开箱即用：从 Zen 拉取限时免费模型，追加到 models.defaults。失败兜底、不阻断启动。
+    from jiuwenswarm.server.runtime.opencode_zen import warm_zen_free_models
+
+    await warm_zen_free_models(reason="startup")
+
     server = AgentWebSocketServer.get_instance(
         host=host,
         port=port
