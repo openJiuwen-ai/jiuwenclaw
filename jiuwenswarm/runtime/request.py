@@ -79,8 +79,8 @@ def sync_chat_request_metadata(
         return project_dir
     params = request.params if isinstance(request.params, dict) else {}
     raw_model_name = params.get("model_name")
-    explicit_model_provided = (
-        isinstance(raw_model_name, str) and bool(raw_model_name.strip())
+    explicit_model_provided = isinstance(raw_model_name, str) and bool(
+        raw_model_name.strip()
     )
     model_name = (
         raw_model_name.strip()
@@ -116,9 +116,7 @@ def sync_chat_request_metadata(
             cron_id=request_cron_id,
             user_id=str(user_id or "").strip() or None,
             last_user_message_at=(
-                dt.datetime.now(dt.timezone.utc).timestamp()
-                if is_chat_turn
-                else None
+                dt.datetime.now(dt.timezone.utc).timestamp() if is_chat_turn else None
             ),
             is_chat_turn=is_chat_turn,
             explicit_mode_provided=explicit_mode_provided,
@@ -165,9 +163,7 @@ def resolve_agent_request_mode(
         return "team", sub_mode, canonical_mode
 
     default_sub_modes = {"code": "normal"}
-    sub_mode = (
-        parts[1] if len(parts) > 1 and parts[1] else default_sub_modes.get(mode)
-    )
+    sub_mode = parts[1] if len(parts) > 1 and parts[1] else default_sub_modes.get(mode)
     if mode == "code" and sub_mode not in {"plan", "normal", "team"}:
         sub_mode = default_sub_modes.get(mode, "normal")
     canonical_mode = f"{mode}.{sub_mode}" if sub_mode else mode
@@ -235,9 +231,7 @@ async def prepare_chat_turn(
             else None
         )
         stored_session_mode = (
-            session_metadata.get("mode")
-            if isinstance(session_metadata, dict)
-            else None
+            session_metadata.get("mode") if isinstance(session_metadata, dict) else None
         )
         if isinstance(stored_session_mode, str) and stored_session_mode.strip():
             params[PREVIOUS_SESSION_MODE_KEY] = stored_session_mode.strip()
@@ -249,10 +243,10 @@ async def prepare_chat_turn(
 
     if runtime_work_mode is None:
         request_work_mode = params.get("work_mode")
-        if (
-            isinstance(request_work_mode, str)
-            and request_work_mode.strip().lower() in {"code", "work"}
-        ):
+        if isinstance(request_work_mode, str) and request_work_mode.strip().lower() in {
+            "code",
+            "work",
+        }:
             runtime_work_mode = request_work_mode.strip().lower()
         else:
             from jiuwenswarm.server.runtime.session.work_mode import (

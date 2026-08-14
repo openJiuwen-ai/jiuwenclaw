@@ -40,9 +40,7 @@ class PlanModeController:
     """Own process-local plan state for the single Runtime lifecycle."""
 
     def __init__(self) -> None:
-        self._sync_locks: WeakValueDictionary[str, asyncio.Lock] = (
-            WeakValueDictionary()
-        )
+        self._sync_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
         self._exited_sessions: set[str] = set()
         self._active_sessions: set[str] = set()
 
@@ -155,7 +153,9 @@ class PlanModeController:
             and not self._may_hold_state(request, session_id)
         ):
             return PlanStateResult()
-        if not self._should_sync(request) or is_interrupt_resume_payload(request.params):
+        if not self._should_sync(request) or is_interrupt_resume_payload(
+            request.params
+        ):
             return PlanStateResult()
 
         events: list[dict[str, Any]] = []
@@ -184,9 +184,7 @@ class PlanModeController:
                         exit_mode = resolved.normal_mode
                         if isinstance(request.params, dict):
                             request.params["mode"] = exit_mode
-                        return PlanStateResult(
-                            events=[self._exit_payload(exit_mode)]
-                        )
+                        return PlanStateResult(events=[self._exit_payload(exit_mode)])
 
                 deep_agent.switch_mode(session=session, mode=target_state)
                 if previous_state == "plan" and target_state == "normal":
@@ -209,9 +207,7 @@ class PlanModeController:
             if target_state == "plan" and changed_to_plan:
                 self._inject_activation_reminder(request)
         return PlanStateResult(
-            restored=bool(
-                previous_state == "plan" and target_state == "normal"
-            ),
+            restored=bool(previous_state == "plan" and target_state == "normal"),
             events=events,
         )
 

@@ -51,9 +51,7 @@ class RuntimeEvent:
                 if getattr(message, "agent_ref", None) is not None
                 else default_agent_ref
             ),
-            is_complete=bool(
-                getattr(message, "is_complete", default_complete)
-            ),
+            is_complete=bool(getattr(message, "is_complete", default_complete)),
             ok=bool(getattr(message, "ok", True)),
         )
 

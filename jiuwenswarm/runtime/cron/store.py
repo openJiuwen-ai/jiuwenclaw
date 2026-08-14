@@ -81,6 +81,7 @@ def _build_cron_project_lookup() -> dict[str, str]:
     """
     try:
         from jiuwenswarm.server.runtime.session.project_store import list_projects
+
         return {
             p.project_id: p.work_mode
             for p in list_projects(include_hidden=True, cache_bust=True)
@@ -183,10 +184,10 @@ class CronJobStore:
                     if not isinstance(item, dict):
                         continue
                     existing_wm = item.get("work_mode")
-                    if (
-                        isinstance(existing_wm, str)
-                        and existing_wm.strip() in {"code", "work"}
-                    ):
+                    if isinstance(existing_wm, str) and existing_wm.strip() in {
+                        "code",
+                        "work",
+                    }:
                         continue
                     item["work_mode"] = _resolve_cron_job_work_mode(
                         item, id_to_work_mode
@@ -196,9 +197,7 @@ class CronJobStore:
                     try:
                         self._write_json_unlocked(data)
                     except (OSError, ValueError, TypeError) as exc:
-                        logger.warning(
-                            "Cron 惰性迁移写回 cron_jobs.json 失败: %s", exc
-                        )
+                        logger.warning("Cron 惰性迁移写回 cron_jobs.json 失败: %s", exc)
 
             jobs: list[CronJob] = []
             for item in jobs_raw:
@@ -212,7 +211,9 @@ class CronJobStore:
             return jobs
 
         jobs = await self._run_locked(_body)
-        jobs.sort(key=lambda j: (j.updated_at or 0.0, j.created_at or 0.0), reverse=True)
+        jobs.sort(
+            key=lambda j: (j.updated_at or 0.0, j.created_at or 0.0), reverse=True
+        )
         return jobs
 
     async def get_job(self, job_id: str) -> CronJob | None:
@@ -247,16 +248,32 @@ class CronJobStore:
         user_id: str = "",
     ) -> CronJob:
         now = time.time()
-        sid = str(session_id).strip() if isinstance(session_id, str) and session_id.strip() else None
-        ct = str(chat_type).strip() if isinstance(chat_type, str) and chat_type.strip() else None
-        m = normalize_cron_job_mode(mode) if mode is not None and str(mode).strip() else CRON_JOB_DEFAULT_MODE
+        sid = (
+            str(session_id).strip()
+            if isinstance(session_id, str) and session_id.strip()
+            else None
+        )
+        ct = (
+            str(chat_type).strip()
+            if isinstance(chat_type, str) and chat_type.strip()
+            else None
+        )
+        m = (
+            normalize_cron_job_mode(mode)
+            if mode is not None and str(mode).strip()
+            else CRON_JOB_DEFAULT_MODE
+        )
         dar = bool(delete_after_run) if delete_after_run is not None else False
         timeout = (
             normalize_cron_job_timeout_seconds(timeout_seconds)
             if timeout_seconds is not None
             else None
         )
-        pid = str(project_id).strip() if isinstance(project_id, str) and project_id.strip() else ""
+        pid = (
+            str(project_id).strip()
+            if isinstance(project_id, str) and project_id.strip()
+            else ""
+        )
         model_name_val = (
             str(model_name).strip()
             if isinstance(model_name, str) and model_name.strip()
@@ -268,7 +285,9 @@ class CronJobStore:
             enabled=bool(enabled),
             cron_expr=str(cron_expr or "").strip(),
             timezone=str(timezone or "").strip(),
-            wake_offset_seconds=int(wake_offset_seconds) if wake_offset_seconds is not None else 0,
+            wake_offset_seconds=int(wake_offset_seconds)
+            if wake_offset_seconds is not None
+            else 0,
             description=str(description or ""),
             targets=str(targets or "").strip(),
             session_id=sid,
@@ -301,14 +320,23 @@ class CronJobStore:
         # proactive.tick job：只接受调度字段（cron_expr/timezone），其余字段一律丢弃，
         # 防止前端或其它调用方改 name/enabled/description/wake_offset/targets/mode 等，
         # 这些字段由 config 开关 / proactive_cron_sync / scheduler 统一维护。
-        if str(getattr(existing, "mode", "") or "").strip().lower() == _PROACTIVE_TICK_MODE:
+        if (
+            str(getattr(existing, "mode", "") or "").strip().lower()
+            == _PROACTIVE_TICK_MODE
+        ):
             dropped = [k for k in patch if k not in _PROACTIVE_UPDATE_ALLOWED_KEYS]
             if dropped:
                 logger.warning(
                     "[CronStore] reject proactive.tick update fields on job=%s: %s (only %s allowed)",
-                    job_id, ", ".join(dropped), ", ".join(sorted(_PROACTIVE_UPDATE_ALLOWED_KEYS)),
+                    job_id,
+                    ", ".join(dropped),
+                    ", ".join(sorted(_PROACTIVE_UPDATE_ALLOWED_KEYS)),
                 )
-                patch = {k: v for k, v in patch.items() if k in _PROACTIVE_UPDATE_ALLOWED_KEYS}
+                patch = {
+                    k: v
+                    for k, v in patch.items()
+                    if k in _PROACTIVE_UPDATE_ALLOWED_KEYS
+                }
 
         updated = existing
         if "name" in patch:
@@ -320,12 +348,16 @@ class CronJobStore:
             if enabled_val and "expired" not in patch:
                 updated = replace(updated, expired=False)
         if "cron_expr" in patch:
-            updated = replace(updated, cron_expr=str(patch.get("cron_expr") or "").strip())
+            updated = replace(
+                updated, cron_expr=str(patch.get("cron_expr") or "").strip()
+            )
             # Editing schedule implies it is no longer expired, unless caller explicitly sets expired.
             if "expired" not in patch:
                 updated = replace(updated, expired=False)
         if "timezone" in patch:
-            updated = replace(updated, timezone=str(patch.get("timezone") or "").strip())
+            updated = replace(
+                updated, timezone=str(patch.get("timezone") or "").strip()
+            )
         if "wake_offset_seconds" in patch:
             raw = patch.get("wake_offset_seconds")
             try:
@@ -339,18 +371,28 @@ class CronJobStore:
             updated = replace(updated, targets=str(patch.get("targets") or "").strip())
         if "session_id" in patch:
             raw_sid = patch.get("session_id")
-            new_sid = str(raw_sid).strip() if isinstance(raw_sid, str) and str(raw_sid).strip() else None
+            new_sid = (
+                str(raw_sid).strip()
+                if isinstance(raw_sid, str) and str(raw_sid).strip()
+                else None
+            )
             updated = replace(updated, session_id=new_sid)
         if "chat_type" in patch:
             raw_ct = patch.get("chat_type")
-            new_ct = str(raw_ct).strip() if isinstance(raw_ct, str) and str(raw_ct).strip() else None
+            new_ct = (
+                str(raw_ct).strip()
+                if isinstance(raw_ct, str) and str(raw_ct).strip()
+                else None
+            )
             updated = replace(updated, chat_type=new_ct)
         if "expired" in patch:
             updated = replace(updated, expired=bool(patch.get("expired")))
         if "mode" in patch:
             updated = replace(updated, mode=normalize_cron_job_mode(patch.get("mode")))
         if "delete_after_run" in patch:
-            updated = replace(updated, delete_after_run=bool(patch.get("delete_after_run")))
+            updated = replace(
+                updated, delete_after_run=bool(patch.get("delete_after_run"))
+            )
         if "timeout_seconds" in patch:
             raw_timeout = patch.get("timeout_seconds")
             if raw_timeout is None:
@@ -362,7 +404,11 @@ class CronJobStore:
                 )
         if "project_id" in patch:
             raw_pid = patch.get("project_id")
-            new_pid = str(raw_pid).strip() if isinstance(raw_pid, str) and raw_pid.strip() else ""
+            new_pid = (
+                str(raw_pid).strip()
+                if isinstance(raw_pid, str) and raw_pid.strip()
+                else ""
+            )
             updated = replace(updated, project_id=new_pid)
         if "last_session_id" in patch:
             raw_lsid = patch.get("last_session_id")
@@ -385,7 +431,9 @@ class CronJobStore:
             # 或由 project_id 变更时从 Project 记录注入。store 层仅做规范化写入。
             updated = replace(
                 updated,
-                work_mode=normalize_work_mode(patch.get("work_mode"), default=DEFAULT_WEB_WORK_MODE),
+                work_mode=normalize_work_mode(
+                    patch.get("work_mode"), default=DEFAULT_WEB_WORK_MODE
+                ),
             )
 
         updated.updated_at = time.time()
@@ -404,8 +452,9 @@ class CronJobStore:
         if not force:
             existing = await self.get_job(job_id)
             if (
-                    existing is not None
-                    and str(getattr(existing, "mode", "") or "").strip().lower() == _PROACTIVE_TICK_MODE
+                existing is not None
+                and str(getattr(existing, "mode", "") or "").strip().lower()
+                == _PROACTIVE_TICK_MODE
             ):
                 raise _ProactiveJobProtected(
                     "主动推荐定时任务由设置→主动推荐开关控制，不能删除；请到设置关闭开关。"

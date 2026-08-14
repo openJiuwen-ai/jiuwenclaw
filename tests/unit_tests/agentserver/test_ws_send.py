@@ -17,6 +17,8 @@ from jiuwenswarm.common.schema.agent import (
     AgentResponseChunk,
 )
 from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenswarm.runtime import AgentRuntime
+from jiuwenswarm.runtime.plan import PlanStateResult
 from jiuwenswarm.server import agent_ws_server
 from jiuwenswarm.server import ws_send
 from jiuwenswarm.server.gateway_push.wire import build_server_push_wire
@@ -134,8 +136,12 @@ async def test_oversized_server_push_preserves_push_marker(monkeypatch):
 @pytest.mark.asyncio
 async def test_stream_stops_after_oversized_chunk_is_replaced(monkeypatch):
     class FakeAgent:
+        def __init__(self) -> None:
+            self.yielded: list[int] = []
+
         async def process_message_stream(self, request):
             for index in range(2):
+                self.yielded.append(index)
                 yield AgentResponseChunk(
                     request_id=request.request_id,
                     channel_id=request.channel_id,
@@ -143,15 +149,17 @@ async def test_stream_stops_after_oversized_chunk_is_replaced(monkeypatch):
                     is_complete=False,
                 )
 
-    server = agent_ws_server.AgentWebSocketServer.__new__(
-        agent_ws_server.AgentWebSocketServer
-    )
-    server._session_stream_tasks = {}
-    server._is_stateless_method_request = lambda request: True
-
-    class ForegroundManager:
+    class RuntimeManager:
         def __init__(self):
-            self.events = []
+            self.agent = FakeAgent()
+            self.events: list[str] = []
+
+        async def wait_for_session_prewarm(self, session_id):
+            self.events.append("wait")
+
+        async def get_agent(self, **kwargs):
+            self.events.append("get")
+            return self.agent
 
         async def begin_foreground_chat(self):
             self.events.append("begin")
@@ -159,14 +167,39 @@ async def test_stream_stops_after_oversized_chunk_is_replaced(monkeypatch):
         async def end_foreground_chat(self):
             self.events.append("end")
 
-    foreground_manager = ForegroundManager()
-    server._agent_manager = foreground_manager
+    class PlanController:
+        def __init__(self) -> None:
+            self.events: list[str] = []
 
-    async def get_agent(channel_id):
-        return FakeAgent()
+        async def ensure_state(self, *args):
+            self.events.append("ensure")
+            return PlanStateResult()
 
-    async def no_plan_exit_check(request, agent):
+        async def check_post_process_exit(self, *args):
+            self.events.append("check")
+            return []
+
+    async def no_runtime_initialization() -> None:
         return None
+
+    async def no_extension_hook(request) -> None:
+        return None
+
+    runtime_manager = RuntimeManager()
+    plan_controller = PlanController()
+    runtime = AgentRuntime(
+        agent_manager=runtime_manager,
+        initializer=no_runtime_initialization,
+        plan_controller=plan_controller,
+    )
+    runtime._trigger_before_chat_request_hook = no_extension_hook
+
+    server = agent_ws_server.AgentWebSocketServer.__new__(
+        agent_ws_server.AgentWebSocketServer
+    )
+    server._session_stream_tasks = {}
+    server._agent_manager = runtime_manager
+    server._runtime = runtime
 
     send_count = 0
 
@@ -175,8 +208,6 @@ async def test_stream_stops_after_oversized_chunk_is_replaced(monkeypatch):
         send_count += 1
         return False
 
-    server._get_stateless_agent = get_agent
-    server._check_post_process_plan_exit = no_plan_exit_check
     monkeypatch.setattr(
         agent_ws_server,
         "send_wire_payload",
@@ -185,16 +216,21 @@ async def test_stream_stops_after_oversized_chunk_is_replaced(monkeypatch):
     request = AgentRequest(
         request_id="stream-too-large",
         channel_id="web",
-        session_id="session-1",
+        session_id=None,
         req_method=ReqMethod.CHAT_SEND,
-        params={},
+        params={"mode": "agent", "work_mode": "work"},
         is_stream=True,
     )
 
     await server._handle_stream(FakeWebSocket(), request, asyncio.Lock())
+    await asyncio.sleep(0)
 
     assert send_count == 1
-    assert foreground_manager.events == ["begin", "end"]
+    assert runtime.started is True
+    assert runtime_manager.agent.yielded == [0]
+    assert runtime_manager.events == ["begin", "wait", "get", "end"]
+    assert plan_controller.events == ["ensure", "check"]
+    assert server._session_stream_tasks == {}
 
 
 def test_agent_ws_server_has_no_direct_websocket_send_calls():

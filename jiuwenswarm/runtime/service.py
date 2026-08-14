@@ -342,9 +342,7 @@ class AgentRuntime:
                 return
             cleanup_errors: list[Exception] = []
             try:
-                await self._agent_manager.cancel_all_inflight_work(
-                    "[runtime close] "
-                )
+                await self._agent_manager.cancel_all_inflight_work("[runtime close] ")
             except Exception as exc:  # noqa: BLE001
                 cleanup_errors.append(exc)
             for agent in self._stateless_agents.values():
@@ -408,11 +406,8 @@ class AgentRuntime:
 
     @staticmethod
     def _is_stateless_method_request(request: AgentRequest) -> bool:
-        return (
-            request.req_method is not None
-            and request.req_method.value.startswith(
-                ("skills.", "skilldev.", "plugins.", "symphony.")
-            )
+        return request.req_method is not None and request.req_method.value.startswith(
+            ("skills.", "skilldev.", "plugins.", "symphony.")
         )
 
     @staticmethod

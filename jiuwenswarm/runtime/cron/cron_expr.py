@@ -68,8 +68,6 @@ def validate_cron_expression(expr: str, *, timezone: str) -> None:
 
     # Use second_at_beginning=True for Quartz 7-field format
     if not croniter.is_valid(normalized, second_at_beginning=True):
-        raise ValueError(
-            f"invalid cron expression: '{raw}'"
-        )
+        raise ValueError(f"invalid cron expression: '{raw}'")
     _ = ZoneInfo(timezone)
     croniter(normalized, datetime.now(tz=ZoneInfo(timezone)), second_at_beginning=True)

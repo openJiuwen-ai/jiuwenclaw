@@ -50,7 +50,9 @@ def is_valid_target_channel_id(raw: str) -> bool:
         return False
 
 
-def normalize_target_channel_id(raw: str, *, default: str = CronTargetChannel.WEB.value) -> str:
+def normalize_target_channel_id(
+    raw: str, *, default: str = CronTargetChannel.WEB.value
+) -> str:
     s = str(raw or "").strip()
     if not s:
         return default
@@ -74,9 +76,9 @@ def _normalize_targets_str(raw: str) -> str:
 # Cron job execution modes (passed to AgentServer as chat.send params["mode"]).
 CRON_JOB_MODES: frozenset[str] = frozenset(
     {
-        "agent",       # 合并后的单一 agent 模式
-        "plan",        # legacy shorthand（归一到 agent）
-        "team",        # multi-agent team mode
+        "agent",  # 合并后的单一 agent 模式
+        "plan",  # legacy shorthand（归一到 agent）
+        "team",  # multi-agent team mode
         "agent.plan",  # legacy（归一到 agent）
         "agent.fast",  # legacy（归一到 agent）
         "team.plan",
@@ -119,8 +121,7 @@ def normalize_cron_job_mode(raw: Any, *, default: str = CRON_JOB_DEFAULT_MODE) -
         return default
     if value not in CRON_JOB_MODES:
         raise ValueError(
-            f"Invalid cron job mode {raw!r}. "
-            f"Valid: {', '.join(sorted(CRON_JOB_MODES))}"
+            f"Invalid cron job mode {raw!r}. Valid: {', '.join(sorted(CRON_JOB_MODES))}"
         )
     return _CRON_JOB_MODE_ALIASES.get(value, value)
 
@@ -194,9 +195,7 @@ def validate_cron_model(raw: Any) -> str | None:
     hint = ", ".join(available[:20]) if available else "(no models configured)"
     if len(available) > 20:
         hint += f" ... and {len(available) - 20} more"
-    raise ValueError(
-        f"Unknown model {value!r}. Available models: {hint}"
-    )
+    raise ValueError(f"Unknown model {value!r}. Available models: {hint}")
 
 
 def resolve_cron_job_timeout_seconds(job: "CronJob") -> float:
@@ -231,7 +230,9 @@ class CronTarget:
     def from_dict(data: dict[str, Any]) -> "CronTarget":
         channel_id = str(data.get("channel_id") or "").strip()
         session_id_raw = data.get("session_id", None)
-        session_id = str(session_id_raw).strip() if isinstance(session_id_raw, str) else None
+        session_id = (
+            str(session_id_raw).strip() if isinstance(session_id_raw, str) else None
+        )
         if not channel_id:
             raise ValueError("target.channel_id is required")
         return CronTarget(channel_id=channel_id, session_id=session_id or None)
@@ -363,15 +364,21 @@ class CronJob:
 
         created_at = data.get("created_at", None)
         updated_at = data.get("updated_at", None)
-        created_at_f = float(created_at) if isinstance(created_at, (int, float)) else None
-        updated_at_f = float(updated_at) if isinstance(updated_at, (int, float)) else None
+        created_at_f = (
+            float(created_at) if isinstance(created_at, (int, float)) else None
+        )
+        updated_at_f = (
+            float(updated_at) if isinstance(updated_at, (int, float)) else None
+        )
 
         if not job_id:
             raise ValueError("id is required")
         if not name:
             raise ValueError("name is required")
         if len(name) > CRON_JOB_NAME_MAX_LENGTH:
-            raise ValueError(f"name must be at most {CRON_JOB_NAME_MAX_LENGTH} characters")
+            raise ValueError(
+                f"name must be at most {CRON_JOB_NAME_MAX_LENGTH} characters"
+            )
         if not cron_expr:
             raise ValueError("cron_expr is required")
         if not timezone:
@@ -383,7 +390,11 @@ class CronJob:
         targets_str = _normalize_targets_str(targets_str)
 
         sid_raw = data.get("session_id", None)
-        job_session_id = str(sid_raw).strip() if isinstance(sid_raw, str) and str(sid_raw).strip() else None
+        job_session_id = (
+            str(sid_raw).strip()
+            if isinstance(sid_raw, str) and str(sid_raw).strip()
+            else None
+        )
 
         chat_type_raw = data.get("chat_type", None)
         job_chat_type = (
@@ -407,7 +418,9 @@ class CronJob:
 
         # project_id / last_session_id：老数据兜底（无 project_id → ""，无 last_session_id → None）
         project_id_raw = data.get("project_id", "")
-        project_id = str(project_id_raw).strip() if isinstance(project_id_raw, str) else ""
+        project_id = (
+            str(project_id_raw).strip() if isinstance(project_id_raw, str) else ""
+        )
         last_session_id_raw = data.get("last_session_id", None)
         last_session_id = (
             str(last_session_id_raw).strip()
@@ -416,18 +429,26 @@ class CronJob:
         )
 
         model_raw = data.get("model_name", None)
-        job_model_name = str(model_raw).strip() if isinstance(model_raw, str) and str(model_raw).strip() else None
+        job_model_name = (
+            str(model_raw).strip()
+            if isinstance(model_raw, str) and str(model_raw).strip()
+            else None
+        )
         app_id_raw = data.get("app_id", "")
         job_app_id = str(app_id_raw).strip() if isinstance(app_id_raw, str) else ""
 
         # user_id：老数据兜底（无 user_id → ""）
         job_user_id_raw = data.get("user_id", "")
-        job_user_id = str(job_user_id_raw).strip() if isinstance(job_user_id_raw, str) else ""
+        job_user_id = (
+            str(job_user_id_raw).strip() if isinstance(job_user_id_raw, str) else ""
+        )
 
         # work_mode：仅做 normalize + 兜底 "work"，不做跨层 Project 反查
         # （gateway.cron.models 是底层数据模型，不应反向依赖 server.runtime.session.project_store）
         # 精确值由创建/更新路径从 Project 记录注入，或由展示层二次查询覆盖。
-        job_work_mode = normalize_work_mode(data.get("work_mode"), default=DEFAULT_WEB_WORK_MODE)
+        job_work_mode = normalize_work_mode(
+            data.get("work_mode"), default=DEFAULT_WEB_WORK_MODE
+        )
 
         return CronJob(
             id=job_id,
