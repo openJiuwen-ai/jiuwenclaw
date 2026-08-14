@@ -538,6 +538,75 @@ def test_build_inputs_preserves_original_request_on_ask_user_answers(monkeypatch
     }
 
 
+def test_build_inputs_preserves_explicit_skipped_ask_user_envelope(monkeypatch):
+    from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+    from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
+
+    monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
+    monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
+
+    answers = [
+        {
+            "question": "是否继续？",
+            "selected_options": [],
+            "custom_input": None,
+        }
+    ]
+    request = AgentRequest(
+        request_id="req-skipped-answer",
+        channel_id="web",
+        session_id="web-session",
+        params={
+            "query": "",
+            "request_id": "tool-ask-skipped-1",
+            "source": "ask_user_interrupt",
+            "status": "skipped",
+            "answers": answers,
+        },
+    )
+
+    inputs, _, _ = interface_module.JiuWenSwarm().build_inputs(request)
+
+    assert isinstance(inputs["query"], InteractiveInput)
+    assert inputs["query"].user_inputs == {
+        "tool-ask-skipped-1": {
+            "status": "skipped",
+            "answers": answers,
+        }
+    }
+
+
+def test_build_inputs_maps_explicit_skipped_with_empty_answers_to_interactive_input(monkeypatch):
+    from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+    from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
+
+    monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
+    monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
+
+    request = AgentRequest(
+        request_id="req-skipped-answer",
+        channel_id="web",
+        session_id="web-session",
+        params={
+            "query": "",
+            "request_id": "tool-ask-skipped-1",
+            "source": "ask_user_interrupt",
+            "status": "skipped",
+            "answers": [],
+        },
+    )
+
+    inputs, _, _ = interface_module.JiuWenSwarm().build_inputs(request)
+
+    assert isinstance(inputs["query"], InteractiveInput)
+    assert inputs["query"].user_inputs == {
+        "tool-ask-skipped-1": {
+            "status": "skipped",
+            "answers": [],
+        }
+    }
+
+
 def test_build_inputs_merges_multi_select_custom_input(monkeypatch):
     from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
     from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module

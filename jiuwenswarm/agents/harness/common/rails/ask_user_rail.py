@@ -186,6 +186,25 @@ class StructuredAskUserPayload(BaseModel):
     )
 
 
+def _skipped_answer_has_user_input(item: Any) -> bool:
+    """Return whether a skipped answer shell contains an effective response."""
+    if not isinstance(item, dict):
+        return True
+    selected = item.get("selected_options")
+    if isinstance(selected, list):
+        if any(
+            not isinstance(option, str) or bool(option.strip())
+            for option in selected
+        ):
+            return True
+    elif selected is not None:
+        return True
+    custom_input = item.get("custom_input")
+    if custom_input is None:
+        return False
+    return not isinstance(custom_input, str) or bool(custom_input.strip())
+
+
 # ---------------------------------------------------------------------------
 # Extended AskUserTool
 # ---------------------------------------------------------------------------
@@ -377,6 +396,30 @@ class StructuredAskUserRail(AskUserRail):
         is_structured = questions_data is not None and len(questions_data) > 0
 
         if is_structured:
+            if isinstance(user_input, dict) and user_input.get("status") == "skipped":
+                skipped_answers = user_input.get("answers")
+                if (
+                    set(user_input) == {"status", "answers"}
+                    and isinstance(skipped_answers, list)
+                    and not any(
+                        _skipped_answer_has_user_input(answer)
+                        for answer in skipped_answers
+                    )
+                ):
+                    return self.reject(
+                        tool_result=json.dumps(
+                            {"status": "skipped", "answers": []},
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+                    )
+                return self.reject(
+                    tool_result=(
+                        "[INVALID_ARGUMENT] skipped responses must contain only "
+                        "status='skipped' and answers without selected options "
+                        "or custom input."
+                    )
+                )
             try:
                 if isinstance(user_input, StructuredAskUserPayload):
                     payload = user_input

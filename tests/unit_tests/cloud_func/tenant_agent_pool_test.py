@@ -5,6 +5,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenswarm.agents.harness.common.tools.deepresearch_task_manager import (
+    DeepResearchTaskManagerPool,
+)
 from jiuwenswarm.server.runtime.tenant_agent_pool import TenantAgentPool
 
 
@@ -58,9 +61,11 @@ class TestTenantAgentPool(TestCase):
     def setUp(self) -> None:
         """每个测试前重置单例."""
         TenantAgentPool.reset_instance()
+        DeepResearchTaskManagerPool.reset_for_tests()
 
     def tearDown(self) -> None:
         TenantAgentPool.reset_instance()
+        DeepResearchTaskManagerPool.reset_for_tests()
 
     def test_community_singleton(self) -> None:
         """未设置 AGENT_RUNTIME 时，同租户键复用同一 AgentManager."""
@@ -150,6 +155,82 @@ class TestTenantAgentPool(TestCase):
                 ensure.assert_awaited()
 
             asyncio.run(_run())
+
+    def test_evict_isolates_deepresearch_tenants_and_shuts_target_once(self) -> None:
+        async def _run():
+            pool = TenantAgentPool.get_instance()
+            target = await DeepResearchTaskManagerPool.get_or_create(("svc-a", "agent-a"))
+            other = await DeepResearchTaskManagerPool.get_or_create(("svc-b", "agent-b"))
+            target.shutdown = AsyncMock()
+            other.shutdown = AsyncMock()
+
+            with (
+                patch(
+                    "jiuwenswarm.agents.harness.common.plugins.rail_manager.RailManagerPool.remove"
+                ),
+                patch(
+                    "jiuwenswarm.server.runtime.cron_local_runtime.AgentCronRegistry.remove",
+                    new=AsyncMock(),
+                ),
+            ):
+                await pool._evict_manager_cache("agent-a", "svc-a")
+
+            target.shutdown.assert_awaited_once_with()
+            other.shutdown.assert_not_awaited()
+            self.assertIs(
+                await DeepResearchTaskManagerPool.get_or_create(("svc-b", "agent-b")),
+                other,
+            )
+            self.assertIsNot(
+                await DeepResearchTaskManagerPool.get_or_create(("svc-a", "agent-a")),
+                target,
+            )
+
+        asyncio.run(_run())
+
+    def test_evict_isolates_deepresearch_workspaces_and_shuts_target_once(self) -> None:
+        async def _run():
+            pool = TenantAgentPool.get_instance()
+            target = await DeepResearchTaskManagerPool.get_or_create(
+                ("svc-a", "agent-a", "workspace-a")
+            )
+            other = await DeepResearchTaskManagerPool.get_or_create(
+                ("svc-a", "agent-a", "workspace-b")
+            )
+            target.shutdown = AsyncMock()
+            other.shutdown = AsyncMock()
+
+            with (
+                patch(
+                    "jiuwenswarm.agents.harness.common.plugins.rail_manager.RailManagerPool.remove"
+                ),
+                patch(
+                    "jiuwenswarm.server.runtime.cron_local_runtime.AgentCronRegistry.remove",
+                    new=AsyncMock(),
+                ),
+            ):
+                await pool._evict_manager_cache(
+                    "agent-a",
+                    "svc-a",
+                    "workspace-a",
+                )
+
+            target.shutdown.assert_awaited_once_with()
+            other.shutdown.assert_not_awaited()
+            self.assertIs(
+                await DeepResearchTaskManagerPool.get_or_create(
+                    ("svc-a", "agent-a", "workspace-b")
+                ),
+                other,
+            )
+            self.assertIsNot(
+                await DeepResearchTaskManagerPool.get_or_create(
+                    ("svc-a", "agent-a", "workspace-a")
+                ),
+                target,
+            )
+
+        asyncio.run(_run())
 
 
     def test_get_lock_recreates_on_different_event_loop(self) -> None:

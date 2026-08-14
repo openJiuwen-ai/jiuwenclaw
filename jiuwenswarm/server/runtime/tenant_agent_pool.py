@@ -602,7 +602,11 @@ class TenantAgentPool:
                 DeepResearchTaskManagerPool,
             )
 
-            await DeepResearchTaskManagerPool.remove(service_id, agent_id)
+            await DeepResearchTaskManagerPool.remove(
+                service_id,
+                agent_id,
+                workspace_key,
+            )
         except Exception as exc:
             logger.warning(
                 "[TenantAgentPool] DeepResearchTaskManagerPool.remove failed for %s: %s",

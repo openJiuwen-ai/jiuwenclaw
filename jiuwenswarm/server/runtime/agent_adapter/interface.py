@@ -1355,15 +1355,20 @@ class JiuWenSwarm:
                 if stripped:
                     supplementary = stripped
             answers = params.get("answers", [])
-            if answers:
+            source = params.get("source", "")
+            status = params.get("status", "")
+            is_explicit_ask_user_skip = (
+                source == "ask_user_interrupt" and status == "skipped"
+            )
+            if answers or is_explicit_ask_user_skip:
                 request_id = params.get("request_id", "")
-                source = params.get("source", "")
                 raw_original_request = params.get("original_request") if source == "ask_user_interrupt" else ""
                 original_request = raw_original_request.strip() if isinstance(raw_original_request, str) else ""
                 interactive_input = self._build_interactive_input_from_answers(
                     request_id,
                     answers,
                     source,
+                    status=status,
                     original_request=original_request,
                 )
                 if interactive_input is not None:
@@ -1612,6 +1617,7 @@ class JiuWenSwarm:
             answers: list[dict],
             source: str = "",
             *,
+            status: str = "",
             original_request: str = "",
     ) -> Any:
         """从用户答案构建 InteractiveInput.
@@ -1620,6 +1626,7 @@ class JiuWenSwarm:
             request_id: 工具调用 ID
             answers: 用户答案列表，每个答案对应一个问题
             source: 中断来源，用于区分 PermissionRail 和 AskUserRail
+            status: 显式交互状态；仅 AskUserRail 的 skipped 状态参与构建
 
         Returns:
             InteractiveInput 实例
@@ -1629,6 +1636,19 @@ class JiuWenSwarm:
         interactive_input = InteractiveInput()
 
         if source == "ask_user_interrupt":
+            if status == "skipped":
+                interactive_input.update(
+                    request_id,
+                    {"status": "skipped", "answers": answers},
+                )
+                logger.info(
+                    "[JiuWenSwarm] AskUserRail skipped InteractiveInput.update: "
+                    "request_id=%s answer_shell_count=%s",
+                    request_id,
+                    len(answers) if isinstance(answers, list) else -1,
+                )
+                return interactive_input
+
             answers_dict = {}
             free_text_answer = ""
             for answer in answers:
