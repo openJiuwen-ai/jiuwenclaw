@@ -44,9 +44,15 @@ from jiuwenswarm.server.runtime.skill.archive_store import (
     ARCHIVE_DIRNAME,
     SkillArchiveError,
     build_versions_list_payload,
+    compute_content_checksum,
     get_current_version,
+    get_installed_asset_id,
+    get_last_published_version,
     resolve_version_content_root,
     touch_version_metadata,
+    update_publish_remote_metadata,
+    version_content_dir,
+    write_skillhub_first_install_index,
 )
 from jiuwenswarm.server.runtime.skill.skill_files import (
     DEFAULT_TEXT_PREVIEW_MAX_BYTES,
@@ -76,9 +82,13 @@ ERROR_SKILL_RESERVED_PATH = "SKILL_RESERVED_PATH"
 ERROR_SKILL_IMPORT_OVERWRITE_REQUIRED = "SKILL_IMPORT_OVERWRITE_REQUIRED"
 ERROR_SKILL_BUILTIN_READ_ONLY = "SKILL_BUILTIN_READ_ONLY"
 ERROR_SKILL_ALREADY_EXISTS = "SKILL_ALREADY_EXISTS"
+ERROR_SKILL_NAME_CONFLICT = "SKILL_NAME_CONFLICT"
 ERROR_SKILL_UNSAFE_PATH = "SKILL_UNSAFE_PATH"
 ERROR_SKILL_FILE_TOO_LARGE = "SKILL_FILE_TOO_LARGE"
 ERROR_SKILL_KNOWLEDGE_INPUT_CONFLICT = "SKILL_KNOWLEDGE_INPUT_CONFLICT"
+ERROR_SKILL_PUBLISH_VERSION_CONFLICT = "SKILL_PUBLISH_VERSION_CONFLICT"
+ERROR_SKILLHUB_INSTALL_FAILED = "SKILLHUB_INSTALL_FAILED"
+ERROR_SKILLHUB_PUBLISH_FAILED = "SKILLHUB_PUBLISH_FAILED"
 
 # ZIP 解包配额（防 zip bomb）
 _SKILL_ZIP_MAX_UPLOAD_BYTES = 50 * 1024 * 1024
@@ -2618,7 +2628,7 @@ class SkillManager:
         }
 
     async def handle_skills_team_skills_hub_pack(self, params: dict) -> dict:
-        """将 TeamSkills 目录打包为 zip。"""
+        """将 TeamSkills 目录打包为 zip（排除根级 ``.archive/``）."""
         path_raw = str(params.get("path") or "").strip()
         if not path_raw:
             return {"success": False, "detail": "缺少参数: path"}
@@ -2635,9 +2645,21 @@ class SkillManager:
         except ValueError as exc:
             return {"success": False, "detail": str(exc)}
 
-        skill_md = self._try_find_skill_file(skill_root)
+        skill_dir = self._locate_skill_dir(skill_root) or skill_root
+        skill_md = self._try_find_skill_file(skill_dir)
         if skill_md is None:
             return {"success": False, "detail": f"目录中未找到 SKILL.md: {skill_root}"}
+        meta = self._parse_skill_md(skill_md)
+        if meta is None:
+            return {"success": False, "detail": "无法解析 SKILL.md"}
+        skill_name = str(meta.get("name") or "").strip()
+        description = str(meta.get("description") or "").strip()
+        if not skill_name or not description:
+            return {
+                "success": False,
+                "detail": "SKILL.md YAML 须包含非空 name 与 description",
+                "code": ERROR_SKILL_INVALID_METADATA,
+            }
 
         output_raw = str(params.get("output") or "out").strip() or "out"
         output_path = Path(output_raw).expanduser()
@@ -2652,6 +2674,8 @@ class SkillManager:
             with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
                 for child in skill_root.rglob("*"):
                     if not child.is_file():
+                        continue
+                    if self._is_under_skill_archive(skill_root, child):
                         continue
                     rel = child.relative_to(skill_root).as_posix()
                     zf.write(child, arcname=rel)
@@ -2741,14 +2765,17 @@ class SkillManager:
                     continue
                 asset_id = str(item.get("asset_id", "")).strip()
                 name = str(item.get("name", "")).strip() or asset_id
+                version_raw = str(item.get("latest_version", "")).strip()
                 normalized.append(
                     {
                         "asset_id": asset_id,
                         "name": name,
                         "display_name": str(item.get("display_name", "")).strip() or name,
                         "summary": str(item.get("short_desc", "")).strip(),
-                        "version": str(item.get("latest_version", "")).strip(),
-                        "updated_at": int(item.get("update_time") or 0),
+                        "version": version_raw or None,
+                        "updated_at": self._normalize_teamskills_hub_updated_at(
+                            item.get("update_time")
+                        ),
                     }
                 )
             return {
@@ -2766,7 +2793,7 @@ class SkillManager:
             }
 
     async def handle_skills_team_skills_hub_install(self, params: dict) -> dict:
-        """从 Team Skills Hub 安装技能（/api/v1/artifacts/{asset_id}）。"""
+        """从 Team Skills Hub 安装技能（首次安装落盘完整版本副本）."""
         asset_id = str(params.get("asset_id", "")).strip()
         if not asset_id:
             return {"success": False, "detail": "缺少参数: asset_id"}
@@ -2775,8 +2802,23 @@ class SkillManager:
         version = params.get("version")
         version_str = str(version).strip() if version is not None else ""
 
+        existing = self._find_skill_dir_by_installed_asset_id(asset_id)
+        if existing is not None:
+            return {
+                "success": True,
+                "skill": {
+                    "name": existing.name,
+                    "source": "teamskillshub",
+                    "asset_id": asset_id,
+                    "path": str(existing),
+                },
+            }
+
         try:
-            base_url = self._get_team_skills_hub_base_url(str(params.get("market_url") or "").strip() or None)
+            base_url = self._get_team_skills_hub_base_url(
+                str(params.get("market_url") or "").strip() or None
+            )
+            # 页面不传 version 时取远端最新；兼容内部诊断传 version
             artifact_data = await self._team_skills_hub_http_get_data(
                 f"/api/v1/artifacts/{asset_id}",
                 params={"version": version_str} if version_str else None,
@@ -2784,42 +2826,92 @@ class SkillManager:
                 base_url=base_url,
             )
             if not isinstance(artifact_data, dict):
-                return {"success": False, "detail": "marketplace 返回数据格式错误"}
+                raise SkillRpcError(
+                    ERROR_SKILLHUB_INSTALL_FAILED,
+                    "marketplace 返回数据格式错误",
+                )
 
             download_url = str(artifact_data.get("download_url", "")).strip()
             if not download_url:
-                return {"success": False, "detail": "marketplace 未返回 download_url"}
+                raise SkillRpcError(
+                    ERROR_SKILLHUB_INSTALL_FAILED,
+                    "marketplace 未返回 download_url",
+                )
             self._assert_team_skills_hub_download_url_allowed(download_url)
             checksum_sha256 = str(artifact_data.get("checksum_sha256", "")).strip()
 
-            artifact_bytes = await self._download_zip_and_verify(download_url, checksum_sha256=checksum_sha256)
+            artifact_bytes = await self._download_zip_and_verify(
+                download_url, checksum_sha256=checksum_sha256
+            )
 
             with tempfile.TemporaryDirectory(prefix="jiuwenswarm_team_skills_hub_") as tmpdir:
                 tmp_path = Path(tmpdir)
-                # 与 ClawHub 一致：从内存解压，避免在临时目录写入 skill.zip（扁平包时 copytree 曾误拷入安装目录）。
                 self._safe_extract_zip_bytes_to_dir(artifact_bytes, tmp_path)
 
                 skill_dir = self._locate_skill_dir(tmp_path)
                 if skill_dir is None:
-                    return {"success": False, "detail": "下载内容不完整，未找到 SKILL.md"}
+                    raise SkillRpcError(
+                        ERROR_SKILL_INVALID_PACKAGE,
+                        "下载内容不完整，未找到 SKILL.md",
+                    )
 
-                md = self._try_find_skill_file(skill_dir)
-                meta = self._parse_skill_md(md) if md else None
-                if meta is None:
-                    return {"success": False, "detail": "无法解析下载的技能文件"}
+                meta = self._assert_skill_package_safe(skill_dir)
+                # 触发类型识别（与导入路径一致）
+                detect_skill_type(skill_dir)
 
-                skill_name = str(meta.get("name", "")).strip() or asset_id
+                raw_skill_name = str(meta.get("name") or "").strip() or asset_id
+                try:
+                    skill_name = _safe_path_name(raw_skill_name, "skill")
+                except ValueError as exc:
+                    raise SkillRpcError(ERROR_SKILL_INVALID_METADATA, str(exc)) from exc
+
+                product_version = (
+                    str(artifact_data.get("version") or "").strip()
+                    or str(meta.get("version") or "").strip()
+                )
+                if not product_version:
+                    raise SkillRpcError(
+                        ERROR_SKILLHUB_INSTALL_FAILED,
+                        "marketplace 未返回可用版本号",
+                    )
+
                 output_raw = str(params.get("output", "")).strip()
                 use_custom_output = bool(output_raw)
-                install_root = Path(output_raw).expanduser().resolve() if use_custom_output else self._skills_dir
+                install_root = (
+                    Path(output_raw).expanduser().resolve()
+                    if use_custom_output
+                    else self._skills_dir
+                )
                 install_root.mkdir(parents=True, exist_ok=True)
                 dest = install_root / skill_name
-                if dest.exists():
-                    if not force:
-                        return {"success": False, "detail": f"技能 {skill_name} 已安装"}
-                    _safe_rmtree(dest)
 
-                shutil.copytree(skill_dir, dest)
+                if dest.exists():
+                    # 即使 force=true 也不得覆盖同名本地 Skill
+                    installed_same = get_installed_asset_id(dest) == asset_id
+                    if installed_same:
+                        return {
+                            "success": True,
+                            "skill": {
+                                "name": skill_name,
+                                "source": "teamskillshub",
+                                "asset_id": asset_id,
+                                "path": str(dest),
+                            },
+                        }
+                    raise SkillRpcError(
+                        ERROR_SKILL_NAME_CONFLICT,
+                        f"本地已存在同名 Skill: {skill_name}",
+                    )
+                # force 仅保留兼容字段，本期禁止用于删除覆盖
+                _ = force
+
+                self._install_teamskills_hub_first_copy(
+                    skill_dir=skill_dir,
+                    dest=dest,
+                    asset_id=asset_id,
+                    product_version=product_version,
+                )
+
                 if use_custom_output:
                     return {
                         "success": True,
@@ -2830,14 +2922,17 @@ class SkillManager:
                             "path": str(dest),
                         },
                     }
+
                 for mirror_root in self._get_mirror_skills_dirs():
                     mirror_dest = mirror_root / skill_name
                     if mirror_dest.exists():
-                        if not force:
-                            continue
-                        _safe_rmtree(mirror_dest)
+                        continue
                     mirror_root.mkdir(parents=True, exist_ok=True)
-                    shutil.copytree(skill_dir, mirror_dest)
+                    shutil.copytree(
+                        skill_dir,
+                        mirror_dest,
+                        ignore=shutil.ignore_patterns(ARCHIVE_DIRNAME),
+                    )
 
                 installed_at = datetime.now(timezone.utc).isoformat()
                 self._add_local_skill(
@@ -2852,8 +2947,6 @@ class SkillManager:
                     {
                         "name": skill_name,
                         "marketplace": "teamskillshub",
-                        "version": str(meta.get("version", "")).strip()
-                        or str(artifact_data.get("version", "")).strip(),
                         "commit": "",
                         "source": "teamskillshub",
                         "installed_at": installed_at,
@@ -2869,16 +2962,19 @@ class SkillManager:
                         "path": str(dest),
                     },
                 }
+        except SkillRpcError:
+            raise
         except Exception as exc:
             logger.error("Team Skills Hub 安装失败: %s", exc)
             return {
                 "success": False,
                 "detail": str(exc)[:500],
                 "detail_key": "skills.teamskillshub.errors.installFailed",
+                "code": ERROR_SKILLHUB_INSTALL_FAILED,
             }
 
     async def handle_skills_team_skills_hub_publish(self, params: dict) -> dict:
-        """发布 TeamSkills（对齐 jiuwen-teamskills 的 /api/v1/plugins 协议）。"""
+        """发布 TeamSkills；成功后仅写入本地远端发布元数据."""
         auth = self._resolve_teamskills_hub_auth(params)
         if auth.get("error"):
             return {"success": False, "detail": str(auth["error"])}
@@ -2896,6 +2992,21 @@ class SkillManager:
         file_raw = str(params.get("file") or "").strip()
         if not path_raw and not file_raw:
             return {"success": False, "detail": "缺少参数: path 或 file"}
+
+        local_skill_dir = self._resolve_teamskills_publish_local_skill_dir(
+            path_raw=path_raw, file_raw=file_raw
+        )
+        if local_skill_dir is not None:
+            last_published = get_last_published_version(local_skill_dir)
+            if (
+                last_published is not None
+                and last_published == plugin_version
+                and not force
+            ):
+                raise SkillRpcError(
+                    ERROR_SKILL_PUBLISH_VERSION_CONFLICT,
+                    f"发布版本与最近已发布版本冲突: {plugin_version}",
+                )
 
         try:
             with tempfile.TemporaryDirectory(prefix="jiuwenswarm_teamskills_publish_") as tmpdir:
@@ -2925,13 +3036,29 @@ class SkillManager:
                 ).strip()
                 name = str(response_data.get("name") or "").strip()
                 version = str(response_data.get("version") or plugin_version).strip() or plugin_version
+
+                meta_dir = local_skill_dir
+                if meta_dir is None and name:
+                    candidate = self._skills_dir / name
+                    if candidate.is_dir():
+                        meta_dir = candidate
+                if meta_dir is not None and meta_dir.is_dir() and skill_id:
+                    update_publish_remote_metadata(
+                        meta_dir,
+                        remote_asset_id=skill_id,
+                        last_published_version=version,
+                    )
+
                 return {"success": True, "skill_id": skill_id, "name": name, "version": version}
+        except SkillRpcError:
+            raise
         except Exception as exc:
             logger.error("Team Skills Hub 发布失败: %s", exc)
             return {
                 "success": False,
                 "detail": str(exc)[:500],
                 "detail_key": "skills.teamskillshub.errors.publishFailed",
+                "code": ERROR_SKILLHUB_PUBLISH_FAILED,
             }
 
     async def handle_skills_team_skills_hub_delete(self, params: dict) -> dict:
@@ -5159,9 +5286,102 @@ class SkillManager:
             for child in skill_dir.rglob("*"):
                 if not child.is_file():
                     continue
+                if self._is_under_skill_archive(skill_dir, child):
+                    continue
                 rel = child.relative_to(skill_dir).as_posix()
                 zf.write(child, arcname=f"{skill_name}/{skill_name}/{rel}")
         return zip_path
+
+    def _find_skill_dir_by_installed_asset_id(self, asset_id: str) -> Path | None:
+        """按 ``installed_asset_id`` 查找本地 Skill 目录."""
+        target = str(asset_id or "").strip()
+        if not target or not self._skills_dir.is_dir():
+            return None
+        for child in self._skills_dir.iterdir():
+            if not child.is_dir() or child.name.startswith("."):
+                continue
+            if get_installed_asset_id(child) == target:
+                return child
+        return None
+
+    def _install_teamskills_hub_first_copy(
+        self,
+        *,
+        skill_dir: Path,
+        dest: Path,
+        asset_id: str,
+        product_version: str,
+    ) -> None:
+        """首次安装：workspace 工作副本 + ``.archive`` 完整版本副本."""
+        storage_id = f"ver-{uuid.uuid4().hex[:12]}"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        # 先落工作副本（不含包内根级 .archive，校验阶段已拒绝）
+        shutil.copytree(
+            skill_dir,
+            dest,
+            ignore=shutil.ignore_patterns(ARCHIVE_DIRNAME),
+        )
+        content_root = version_content_dir(dest, storage_id)
+        content_root.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(
+            skill_dir,
+            content_root,
+            ignore=shutil.ignore_patterns(ARCHIVE_DIRNAME),
+        )
+        checksum = compute_content_checksum(content_root)
+        write_skillhub_first_install_index(
+            dest,
+            version=product_version,
+            asset_id=asset_id,
+            storage_id=storage_id,
+            checksum_sha256=checksum,
+        )
+
+    def _resolve_teamskills_publish_local_skill_dir(
+        self,
+        *,
+        path_raw: str,
+        file_raw: str,
+    ) -> Path | None:
+        """解析发布请求对应的本地 Skill 根目录（用于读写发布元数据）."""
+        if path_raw:
+            root = Path(path_raw).expanduser().resolve()
+            if root.is_dir():
+                located = self._locate_skill_dir(root)
+                return located or root
+            return None
+        # 仅 file 时无法可靠定位本地 workspace；发布成功后再按 name 回落
+        _ = file_raw
+        return None
+
+    @staticmethod
+    def _is_under_skill_archive(skill_root: Path, path: Path) -> bool:
+        """路径是否位于 Skill 根级 ``.archive/`` 下."""
+        try:
+            rel = path.resolve().relative_to(skill_root.resolve())
+        except ValueError:
+            return False
+        return bool(rel.parts) and rel.parts[0] == ARCHIVE_DIRNAME
+
+    @staticmethod
+    def _normalize_teamskills_hub_updated_at(raw: Any) -> str | None:
+        """将 Hub 的 update_time 规范为 ISO 字符串或 null."""
+        if raw is None or raw == "":
+            return None
+        if isinstance(raw, (int, float)):
+            ts = int(raw)
+            if ts <= 0:
+                return None
+            # Hub 可能返回秒或毫秒
+            if ts > 10_000_000_000:
+                ts = ts // 1000
+            return (
+                datetime.fromtimestamp(ts, tz=timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
+        text = str(raw).strip()
+        return text or None
 
     @staticmethod
     def _normalize_teamskills_hub_http_error(resp: httpx.Response) -> str:
