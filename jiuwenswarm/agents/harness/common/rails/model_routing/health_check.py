@@ -4,8 +4,10 @@
 1. 不修改 ModelCapability — 健康状态完全由 ModelHealthChecker 内部 _status_map 缓存维护
 2. 缓存 TTL — 默认 600s（10 分钟），用 time.monotonic() 不受系统时钟调整影响
 3. 进程级共享 — 缓存存在 ModelHealthChecker 实例上，不持久化（重启后重新检查）
-4. 全不健康回退 — 与 vision/trusted 过滤一致，全不健康时回退原表
+4. 全不健康回退 — 全不健康时回退原表，不阻断路由
 5. 能力验证 — 通用模型用纯文本 ping；vision/audio 模型发送已知内容验证模型真正具备多模态能力
+6. 后台异步 — 由 ModelRoutingRail 在首次 before_invoke 时启动后台循环周期调用，
+   路由决策直接读缓存，不阻塞
 """
 from __future__ import annotations
 import asyncio

@@ -50,14 +50,12 @@ def _decide_and_select(
     *,
     category: str = "",
     difficulty: str = "",
-    privacy_trusted_only: bool = False,
     required_model_type: str = "",
 ) -> tuple[Optional[ModelCapability], str]:
     """按目标分数匹配 model_score 最接近的模型。
 
     - target_score: 分类器返回的目标分数（0-100）；50 为兜底。
     - category / difficulty: 分类器给出的任务类型和难度。
-    - privacy_trusted_only：隐私命中时候选限到 is_trusted=True（无 trusted 则保持原表兜底）。
     - expertise：difficulty=="hard" 时优先选 model_expertise_category 含 category 的模型；
       无匹配特长模型则保持原表兜底（与 vision 约束同样的 fallback 策略）。
     - required_model_type：通用 model_type 约束。
@@ -67,12 +65,6 @@ def _decide_and_select(
     """
     if not capability_table:
         return None, "empty capability table"
-
-    # 隐私约束：隐私命中时只选 trusted 模型（无 trusted 则保持原表兜底）
-    if privacy_trusted_only:
-        trusted_caps = [c for c in capability_table if c.is_trusted]
-        if trusted_caps:
-            capability_table = trusted_caps
 
     # Hard 难度特长约束：优先选 model_expertise_category 含任务 category 的模型
     # （如 coding/hard → 只选标了 coding 专长的模型；无特长匹配则全表兜底）

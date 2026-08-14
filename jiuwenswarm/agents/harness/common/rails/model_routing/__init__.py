@@ -1,4 +1,4 @@
-"""ModelRoutingRail package — model routing with capability-based selection."""
+"""ModelRoutingRail package — capability-based model routing with async health check."""
 from __future__ import annotations
 
 from .capability import (
@@ -19,7 +19,6 @@ from .stats import (
     get_stats_store,
     reset_stats_store_for_test,
 )
-from .privacy import _check_privacy
 from .routing import _decide_and_select, _detect_model_type
 from .health_check import ModelHealthChecker, HealthCheckConfig, HealthStatus
 from .types import (

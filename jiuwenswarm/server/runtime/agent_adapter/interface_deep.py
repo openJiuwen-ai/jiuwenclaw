@@ -4622,7 +4622,6 @@ class JiuWenSwarmDeepAdapter:
 
         - 使能：config.yaml ``model_routing.enabled`` = true。
         - ``model_routing.apply=true``：apply_routing=True 真切换（默认 false 只推荐不切）。
-        - ``model_routing.privacy_check=true``：开隐私检查（默认关）。
         - ``model_routing.classifier``：分类器专用模型（只有 api_base/api_key/model_name/temperature 四个字段）；
           api_base 非空即生效；不配则用 agent 当前 LLM。
         - 能力表来自 config.yaml ``models.defaults`` + ``models.vision``（后者作 model_type="vision"
@@ -4632,7 +4631,7 @@ class JiuWenSwarmDeepAdapter:
         if not (mr_cfg.get("enabled") is True):
             return None
 
-        # （模板拷贝已在 classifier/capability/privacy 模块加载时完成，此处不再重复）
+        # （模板拷贝已在 classifier/capability 模块加载时完成，此处不再重复）
 
         try:
             from jiuwenswarm.agents.harness.common.rails.model_routing import (
@@ -4664,7 +4663,6 @@ class JiuWenSwarmDeepAdapter:
                 stats_path=stats_path,
                 classifier=classifier,
                 mapper=mapper,
-                privacy_check=bool(mr_cfg.get("privacy_check", False)),
                 health_check_config=mr_cfg.get("health_check"),
             )
             logger.info(

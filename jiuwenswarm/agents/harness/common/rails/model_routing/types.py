@@ -75,16 +75,15 @@ class RoutingDecision:
     reasoning: str
     prior_calls_otel: list[dict] = field(default_factory=list)
     model_usage_stats: dict[str, Any] = field(default_factory=dict)
-    privacy_hit: bool = False
 
 
 
 def _extract_prompt_text(messages: list[Any]) -> str:
-    """取最后一条 user 消息文本作为分类/隐私输入。
+    """取最后一条 user 消息文本作为分类输入。
 
     TUI 等通道会把用户输入包成 ``你收到一条消息：\\n{json envelope}``（真实文本在
-    envelope 的 ``content`` 字段）。先解包 envelope 再返回，否则隐私正则会命中
-    envelope 里的时间戳/数字，且 1/2 确认回复会被当成整段 JSON 而永远匹配不上。
+    envelope 的 ``content`` 字段）。先解包 envelope 再返回，否则信封中的时间戳/数字
+    会干扰分类器，且 1/2 确认回复会被当成整段 JSON 而永远匹配不上。
     """
     for msg in reversed(messages or []):
         role = getattr(msg, "role", None) or (msg.get("role") if isinstance(msg, dict) else None)

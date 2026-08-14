@@ -127,7 +127,7 @@ def _lookup_score(
 # routing_state 文件缺失补拷（build rail 时的安全网）
 # --------------------------------------------------------------------------- #
 
-_ROUTING_STATE_FILES = ("classifier_mapper.json", "model_routing_privacy.json", "model_capability_map.json")
+_ROUTING_STATE_FILES = ("classifier_mapper.json", "model_capability_map.json")
 
 
 def ensure_routing_state_files() -> None:

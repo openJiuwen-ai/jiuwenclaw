@@ -1,4 +1,4 @@
-# Model Routing: Task-Driven Model Selection & Privacy Filtering
+# Model Routing: Task-Driven Model Selection
 
 ---
 
@@ -6,12 +6,11 @@
 
 ### What is Model Routing
 
-Model Routing is JiuwenSwarm's task-adaptation and privacy-protection system for multi-model environments. It solves two core problems: **which model to use** and **where to send sensitive data**.
+Model Routing is JiuwenSwarm's task-adaptation system for multi-model environments. It solves the core problem: **which model to use** — automatically selecting the most suitable model based on task type and difficulty.
 
 - **Score-based routing** solves "which model to use": it calculates a target score based on task type and difficulty, then selects the model with the closest `model_score` from the capability table — heavy tasks get strong models, light tasks get weak models, avoiding overkill or underkill.
-- **Privacy filtering** solves "where to send sensitive data": when privacy content (ID numbers, passwords, bank cards, etc.) is detected, it routes to a model marked `is_trusted`; if no trusted model is available, it cancels the request outright, preventing sensitive data from reaching uncontrolled endpoints.
 
-Think of model routing as a "four-stage security check + smart dispatch": **Health check → Single-model skip → Privacy filtering → Score routing**. If a model endpoint is unhealthy, it's filtered out first; if only one model is available, routing is skipped; if privacy detection is enabled and triggers, it routes to a trusted model; otherwise, it matches by closest score.
+Think of model routing as a "three-stage smart dispatch": **Health check → Single-model skip → Score routing**. If a model endpoint is unhealthy, it's filtered out first; if only one model is available, routing is skipped; otherwise, it matches by closest score.
 
 #### How Score-Based Routing Dispatches
 
@@ -30,15 +29,6 @@ Medium/easy tasks don't require specialized models — general-purpose models ca
 Expertise constraints ensure hard tasks are prioritized for **models that claim expertise in the relevant domain**. If a model is tagged `model_expertise_category=["coding", "reasoning"]`, it indicates specialized optimization in programming and reasoning; coding/hard requests will be routed to it rather than a similarly-scored chat-only model.
 
 When no model is tagged with the relevant expertise, the full table is used as fallback — no empty constraint is applied.
-
-#### How Privacy Filtering Protects
-
-Privacy filtering executes before score-based routing and is a hard constraint — when privacy is triggered, score routing is bypassed entirely:
-
-- Privacy hit + `is_trusted` model available → Select the strongest trusted model (highest model_score).
-- Privacy hit + no `is_trusted` model → Cancel the request outright, leaving a message for the user, preventing sensitive content from reaching any model.
-
-Privacy regexes come from `model_routing_privacy.json`, covering common sensitive information: passwords/keys, Chinese privacy keywords, ID numbers, phone numbers, Bearer tokens, email addresses.
 
 #### How model_type Constraints Work
 
@@ -60,16 +50,18 @@ Constraint logic:
 
 #### How Health Checks Protect
 
-Model endpoint health checks execute before routing, filtering out unavailable model endpoints:
+Model endpoint health checks run as a **background async loop**, started on the first `before_invoke` and running at configurable intervals. Routing decisions read from a cached status map — **never blocking** the routing path.
 
+- **Background loop**: Periodically calls `update_health` every `interval_seconds` (default 600s). First invoke lazily starts the loop; subsequent invokes just read cached results.
 - **Cache TTL**: Default 600s (10 minutes), using `time.monotonic()` unaffected by system clock adjustments
 - **Capability verification**: General models use plain-text ping; vision models receive a red square image to verify visual capability; audio models receive a voice WAV to verify audio capability
 - **All-unhealthy fallback**: When all models are unhealthy, fall back to the full table — never block routing
 - **Consecutive judgment**: A model is marked unhealthy only after `max_consecutive_failures` (default 2) consecutive failures; it recovers only after `recovery_consecutive_successes` (default 1) consecutive successes
+- **Non-blocking**: Routing reads cached `_status_map` directly; the health check loop updates the cache in the background for the next invoke
 
-#### Per-Invoke Routing Deduplication
+#### Routing Lifecycle
 
-Subsequent model calls within the same user turn (e.g., tool call follow-ups) automatically skip the classifier and model switching, avoiding redundant routing that wastes time and tokens. The flag is reset on each new user turn (`before_invoke`), triggering a fresh routing cycle.
+Routing executes once per invoke in the `before_invoke` hook (priority 95), before any model calls. Each new user turn triggers a fresh routing cycle. There is no per-invoke dedup mechanism needed — `before_invoke` naturally fires exactly once per invoke.
 
 #### What Problems It Solves
 
@@ -78,27 +70,25 @@ Subsequent model calls within the same user turn (e.g., tool call follow-ups) au
 | Heavy and light tasks use the same model | Manual switching or fixed strongest model | Auto-select by score — heavy tasks get strong, light tasks get weak |
 | Hard tasks assigned to non-expert models | No expertise distinction, arbitrary selection by score/brand | hard → expertise constraint → select models claiming domain expertise |
 | Same model with multiple APIs not distinguished | Not distinguished, token stats conflated | client_id derived from (api_base+api_key) hash, independent accounting |
-| Sensitive data sent to uncontrolled endpoints | No control, all sent to default model | Privacy hit → only trusted models; no trusted → cancel |
 | Specific request types select wrong models | No distinction, image/coding/audio may select wrong | model_type explicit injection → constrain to matching type models |
-| Model endpoints down but still routed | Not detected, routes to down endpoint | Health check → filter unhealthy endpoints |
-| Repeated routing within same turn | Classifier runs on every model_call | Per-invoke dedup → first call routes, subsequent calls skip |
-| Model capability parameters scattered | Hard-coded in config | External JSON (capability_map/privacy/mapper), user-customizable |
+| Model endpoints down but still routed | Not detected, routes to down endpoint | Async health check → filter unhealthy endpoints |
+| Health check blocks routing | Synchronous health check before each call | Background loop + cached status, routing never waits |
+| Model capability parameters scattered | Hard-coded in config | External JSON (capability_map/mapper), user-customizable |
 
 ### Basic Workflow
 
 ```text
-Startup → Load capability table + classifier + privacy regexes + score table + health checker
+Startup → Load capability table + classifier + score table + health checker
   ↓
-User request arrives
+First user request → lazily start health check background loop
   ↓
-[Health Check] Endpoint reachable? Capability verified?
+Each user request (before_invoke):
+  ↓
+[Health Check] Read cached status (non-blocking)
   ├─ Filter unhealthy models (all-unhealthy fallback to full table)
   └─ ↓
-[Check 1] Single-model skip?
+[Check] Single-model skip?
   ├─ Yes → Output the only model, skip the rest
-  └─ No ↓
-[Check 2] Privacy hit?
-  ├─ Yes → Has trusted? Select strongest trusted / No trusted? Cancel request
   └─ No ↓
 [Normal Routing] Classifier → (raw_score, category, difficulty)
   ↓
@@ -115,9 +105,9 @@ apply_routing=True? set_llm to switch model / No: recommend only
 
 ### Runtime Behavior
 
-Model routing runs as a DeepAgentRail with priority 95, automatically executing before each model call. Users don't need to trigger it manually — as long as `model_routing.enabled` is configured, all requests go through routing.
+Model routing runs as a DeepAgentRail with priority 95, automatically executing in `before_invoke` on each user turn. Users don't need to trigger it manually — as long as `model_routing.enabled` is configured, all requests go through routing.
 
-The first model_call within an invoke executes full routing (classifier + switch); subsequent model_calls automatically skip (per-invoke dedup). The flag resets on each new invoke (new user turn), triggering a fresh routing cycle.
+Health checks run in a background async loop that starts on the first `before_invoke` and periodically refreshes the cached status map. Routing decisions always read from cache — they never block on HTTP health checks.
 
 After routing completes, the decision is written to `ctx.extra["model_routing_decision"]`, containing:
 
@@ -128,7 +118,6 @@ After routing completes, the decision is written to `ctx.extra["model_routing_de
 | `reasoning` | Routing reasoning process ("classifier score=90; score match: target=90 → big-model(score=90)") |
 | `prior_calls_otel` | OTel span list for prior calls within this invoke |
 | `model_usage_stats` | Current token usage statistics snapshot |
-| `privacy_hit` | Whether privacy filtering was triggered |
 
 ---
 
@@ -159,40 +148,13 @@ Related configuration items:
 |------------|---------|-------------|
 | `model_routing.enabled` | `false` | Enable model routing |
 | `model_routing.apply` | `false` | Whether routing actually switches models (`set_llm`); `false` = recommend only |
-| `model_routing.privacy_check` | `false` | Enable privacy detection filtering |
 | `model_routing.stats_path` | empty string | Stats file path; empty = default location |
 | `model_routing.health_check.enabled` | `true` | Enable health checks |
 | `model_routing.health_check.interval_seconds` | `600` | Health check cache TTL (seconds) |
 
 > **Tip**: `apply=false` is a safe starting point — routing only produces recommendations without switching models, allowing you to observe routing effectiveness before enabling actual switching.
 
-### 3. Configure Trusted Models
-
-Privacy filtering requires at least one model marked `is_trusted`. Set this in `config.yaml` model entries:
-
-```yaml
-models:
-  defaults:
-    - model_client_config:
-        model_name: GLM-5.1
-        client_provider: DashScope
-        api_key: "your-key"
-        api_base: "https://..."
-      is_trusted: true          # ← Mark as trusted model
-    - model_client_config:
-        model_name: deepseek-chat
-        client_provider: DeepSeek
-        api_key: "your-key"
-        api_base: "https://..."
-      # No is_trusted → not selected when privacy is triggered
-```
-
-- **`is_trusted: true`**: This model can receive sensitive data when privacy is triggered. When multiple trusted models exist, the strongest (highest model_score) is selected.
-- **Not marked or `is_trusted: false`**: Not selected when privacy is triggered.
-
-> **Note**: The trusted mark should only be used for models with controllable data compliance (e.g., private deployments, compliant cloud services), not for public APIs with opaque data flows.
-
-### 4. Configure Vision Models
+### 3. Configure Vision Models
 
 Image-containing requests require at least one `model_type: vision` model. Set this in model entries:
 
@@ -223,7 +185,7 @@ models:
 
 Vision models are excluded for non-image requests; for image requests, only vision models are selected (fallback to full table if no vision models).
 
-### 5. Configure Model Expertise
+### 4. Configure Model Expertise
 
 Hard-difficulty tasks are preferentially routed to models claiming expertise in the relevant domain. Mark expertise via `model_expertise_category` in model entries:
 
@@ -270,13 +232,13 @@ You can also override in `model_capability_map.json`:
 }
 ```
 
-### 6. model_type Explicit Injection
+### 5. model_type Explicit Injection
 
 Model routing supports explicit model_type constraints via `ctx.extra["_required_model_type"]`, controlling routing to specific model types. This is currently the only source for model_type detection.
 
 #### Injection Method
 
-During the `before_invoke` phase (or any time before `before_model_call`), write to `ctx.extra` from the adapter layer, frontend, or another rail:
+During the `before_invoke` phase, write to `ctx.extra` from the adapter layer, frontend, or another rail:
 
 ```python
 # Method 1: Inject in a Rail's before_invoke
@@ -340,7 +302,7 @@ You can also override in `model_capability_map.json`:
 2. Write `ctx.extra["_required_model_type"] = "audio"` from the injection point (adapter / rail / frontend)
 3. Routing takes effect automatically — `_decide_and_select` filters candidates by `required_model_type`
 
-### 7. Customize Classifier and Score Table
+### 6. Customize Classifier and Score Table
 
 The classifier and score table are controlled by `classifier_mapper.json`. On first startup, it's copied from the package template to the user directory:
 
@@ -417,34 +379,7 @@ from jiuwenclaw.agentserver.deep_agent.rails.model_routing.classifier import (
 
 If `classifier_mapper.json` is missing the `classifier` field, or the classifier fails to load, routing falls back to `(raw_score=50, category="unknown", difficulty="hard")`. The target score is fixed at 50, selecting the model with model_score closest to 50. This ensures routing still produces decisions even when the classifier is unavailable — just without task-lightness differentiation.
 
-### 8. Customize Privacy Regexes
-
-Privacy regexes are controlled by `model_routing_privacy.json`:
-
-```text
-~/.jiuwenswarm/config/routing_state/model_routing_privacy.json
-```
-
-```json
-{
-  "patterns": [
-    {"label": "credentials", "regex": "(?:password|secret|token|api_key|apikey)..."},
-    {"label": "chinese_privacy", "regex": "身份证|密码|银行卡..."},
-    {"label": "chinese_id", "regex": "\\d{6}(?:19|20)\\d{2}..."},
-    {"label": "phone", "regex": "1[3-9]\\d{9}"},
-    {"label": "bearer_token", "regex": "Bearer [A-Za-z0-9._-]+"},
-    {"label": "email", "regex": "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+..."}
-  ]
-}
-```
-
-- Each regex contains a `label` (identifier) and `regex` (regex pattern string).
-- Any regex hit → triggers privacy filtering.
-- Users can modify this file in the `routing_state` directory to add or adjust regexes. Changes take effect on next startup.
-
-> **Note**: Overly broad regexes may cause normal conversations to be misidentified as privacy hits. When debugging, first enable `privacy_check=true` with `apply=false`, observe `PRIVACY-HIT` markers in logs, and confirm hit rates before enabling actual switching.
-
-### 9. Customize Model Capability Mapping
+### 7. Customize Model Capability Mapping
 
 Model capability mapping is controlled by `model_capability_map.json`, containing two parts:
 
@@ -495,32 +430,28 @@ models:
 
 > **Tip**: If a model is never selected, check whether its `model_score` is too far from task scores. You can override a specific model's score in the `models` field.
 
-### 10. View Routing Logs
+### 8. View Routing Logs
 
 The routing process outputs via logs, observable in server-side logs:
 
 ```text
-[ModelRouting] classifier: [coding,hard] score=90 in_tok=4 privacy=False model_type=coding -> recommend=f345159ce878
-[ModelRouting] classifier: [format,easy] score=10 in_tok=2 privacy=False model_type=(none) -> recommend=abc123
+[ModelRouting] classifier: [coding,hard] score=90 in_tok=4 model_type=coding -> recommend=f345159ce878
+[ModelRouting] classifier: [format,easy] score=10 in_tok=2 model_type=(none) -> recommend=abc123
 [ModelRouting] skipped (single model); in_tok=4
-[ModelRouting] PRIVACY-HIT: session=xxx caps=2 trusted=1 prompt_preview='my password...'
-[ModelRouting] privacy hit -> trusted model big-model
-[ModelRouting] PRIVACY-CANCEL (no trusted): session=xxx -> cancel + leave message
 [ModelRouting] applied set_llm -> GLM-5.1
 [ModelRouting] filtered 1 unhealthy models: ['def456']
 [ModelRouting] all models unhealthy, falling back to full table
+[ModelRouting] health check background loop started
 ```
 
 | Log Keyword | Meaning |
 |-------------|---------|
 | `classifier: [...]` | Normal routing: classification result, target score, model_type, recommended model |
 | `skipped (single model)` | Single-model skip |
-| `PRIVACY-HIT` | Privacy hit |
-| `privacy hit -> trusted model` | Privacy hit, selected trusted model |
-| `PRIVACY-CANCEL (no trusted)` | Privacy hit but no trusted model, request cancelled |
 | `applied set_llm ->` | Actual model switch |
 | `filtered N unhealthy models` | Health check filtered unhealthy models |
 | `all models unhealthy, falling back` | All unhealthy, falling back to full table |
+| `health check background loop started` | Async health check loop started on first invoke |
 
 ---
 
@@ -532,7 +463,6 @@ The routing process outputs via logs, observable in server-side logs:
 model_routing:
   enabled: true             # Enable model routing
   apply: false              # Whether routing actually switches models
-  privacy_check: false      # Enable privacy detection
   stats_path: ""            # Stats file path (empty = default location)
   health_check:
     enabled: true           # Enable health checks
@@ -549,7 +479,7 @@ model_routing:
 
 Whether to enable model routing. Default `false`.
 
-When enabled, routing logic executes before each model call. When disabled, all requests use the default model — no classification, privacy detection, or model selection.
+When enabled, routing logic executes in `before_invoke` on each user turn. When disabled, all requests use the default model — no classification or model selection.
 
 ### `model_routing.apply`
 
@@ -559,15 +489,6 @@ Whether routing actually switches models (`set_llm`). Default `false`.
 - `true`: After routing, the agent's current model is actually switched to the recommended model, and config's `model_name`, `model_client_config`, and `model_config_obj` are synced. Subsequent model calls use the routed model.
 
 > **Note**: With `apply=true`, all requests are routed to the recommended model. It's recommended to first observe routing logs in `apply=false` mode, confirming routing selections are reasonable before enabling actual switching.
-
-### `model_routing.privacy_check`
-
-Whether to enable privacy detection filtering. Default `false`.
-
-- `false`: Skip privacy detection, all requests go through normal score routing.
-- `true`: Execute privacy detection before score routing. Privacy hit → select trusted model or cancel request.
-
-> **Note**: Privacy detection relies on regex matching and may produce false positives. It's recommended to first enable `privacy_check=true` with `apply=false`, observe `PRIVACY-HIT` markers in logs, and confirm hit rates before enabling actual switching.
 
 ### `model_routing.stats_path`
 
@@ -583,13 +504,18 @@ The statistics file records each model's token usage (input/output/call_count/la
 
 Health check configuration. See the "How Health Checks Protect" section above.
 
+Key points:
+
+- Health checks run as a **background async loop**, started lazily on the first `before_invoke`.
+- `interval_seconds` controls both the cache TTL and the loop interval.
+- Routing reads cached status and never blocks on health check HTTP requests.
+
 ### Full Configuration Example
 
 ```yaml
 model_routing:
   enabled: true
   apply: true                # Actually switch models
-  privacy_check: true        # Enable privacy filtering
   stats_path: ""             # Use default path
   health_check:
     enabled: true
@@ -604,13 +530,12 @@ model_routing:
 
 ### External JSON Configuration Files
 
-Three JSON files are stored in the `routing_state` directory, auto-copied from package templates on first startup. Users can modify and override them:
+Two JSON files are stored in the `routing_state` directory, auto-copied from package templates on first startup. Users can modify and override them:
 
 ```text
 ~/.jiuwenswarm/config/routing_state/
 ├── classifier_mapper.json      Classification/difficulty/score table + classifier config
 ├── model_capability_map.json   Vendor prefix mapping + model score overrides
-├── model_routing_privacy.json  Privacy regex config
 ├── model_routing_list.json     Token statistics (auto-generated, do not edit manually)
 ```
 
@@ -631,12 +556,6 @@ Three JSON files are stored in the `routing_state` directory, auto-copied from p
 |-------|------|-------------|
 | `vendor_map` | `list[{prefix, group, provider}]` | model_name substring → brand group/vendor mapping |
 | `models` | `dict{name → {model_score, model_type, ...}}` | model_name exact match → capability field overrides |
-
-#### `model_routing_privacy.json`
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `patterns` | `list[{label, regex}]` | Privacy regex list |
 
 ---
 
@@ -661,14 +580,6 @@ Possible causes:
 - Classifier misjudgment — heavy tasks classified as light tasks.
 
 Check the `classifier: [...]` line in logs for category, difficulty, and score, and compare against `classifier_mapper.json` score table and `model_capability_map.json` model scores.
-
-### Why does privacy detection produce false positives?
-
-Privacy regexes may be too broad. For example, the `password` keyword regex may match normal requests like "please help me reset my password". Recommendations:
-
-1. First enable `privacy_check=true` with `apply=false`, observe logs.
-2. Adjust `model_routing_privacy.json` regex scope.
-3. Confirm acceptable false positive rate before enabling `apply=true`.
 
 ### Why are image requests selecting non-vision models?
 
@@ -727,6 +638,10 @@ ctx.extra["_required_model_type"] = "coding"
 ```
 
 Ensure config has a `model_type: coding` model entry, and routing will automatically constrain to that model.
+
+### Does health check slow down routing?
+
+No. Health checks run as a background async loop — routing reads cached status directly and never waits for HTTP health check requests to complete. On first invoke, the loop is lazily started and the cache is populated asynchronously. Until the first health check completes, all models are treated as healthy (conservative default).
 
 ## Related Documentation
 

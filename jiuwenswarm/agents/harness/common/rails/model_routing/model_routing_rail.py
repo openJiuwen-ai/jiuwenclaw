@@ -1,10 +1,10 @@
 """model_routing.rail — ModelRoutingRail."""
 from __future__ import annotations
+import asyncio
 from dataclasses import asdict
 from datetime import datetime, timezone
-import re
-import time
 from typing import Any, Callable, Optional
+from openjiuwen.core.common.background_tasks import create_background_task, BackgroundTask
 from openjiuwen.core.context_engine import TiktokenCounter
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.base import DeepAgentRail
@@ -12,18 +12,22 @@ from jiuwenswarm.common.utils import logger
 from .capability import ModelCapability, build_capability_table_from_config, _capability_rank
 from .classifier import task_score
 from .stats import _ModelUsageStats, get_stats_store, reset_stats_store_for_test
-from .privacy import _check_privacy
 from .routing import _decide_and_select, _detect_model_type
 from .health_check import ModelHealthChecker, HealthCheckConfig
 from .types import (
     PriorModelCall, TaskAnalysis, RoutingDecision,
     _extract_prompt_text, _message_text, _agent_model_name,
     _extract_agent_info, _get_session_id, _new_trace_id, _new_span_id,
+    _unwrap_user_message,
 )
 
 
 class ModelRoutingRail(DeepAgentRail):
-    """模型路由 Rail（穿刺版）—— 产出推荐模型 + 任务分析 + token 统计；apply_routing 控制是否真切换。"""
+    """模型路由 Rail —— 产出推荐模型 + 任务分析 + token 统计；apply_routing 控制是否真切换。
+
+    路由在 before_invoke 中执行（每个 invoke 一次），before_model_call 不再需要。
+    健康检查以后台循环运行，首次 before_invoke 时懒启动；路由直接读缓存，不阻塞。
+    """
 
     priority: int = 95  # 早于 TaskPlanningRail(90)，确保路由先生效
 
@@ -36,7 +40,6 @@ class ModelRoutingRail(DeepAgentRail):
         stats: Optional[_ModelUsageStats] = None,
         stats_path: Optional[str] = None,
         apply_routing: bool = False,
-        privacy_check: bool = False,
         health_check_config: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
@@ -48,10 +51,8 @@ class ModelRoutingRail(DeepAgentRail):
         self._stats: _ModelUsageStats = stats or get_stats_store(stats_path)
         self._apply_routing: bool = apply_routing
         self._trace_id: str = _new_trace_id()
-        self._call_start: str = ""
-        self._privacy_check: bool = privacy_check
-        self._routed_this_invoke: bool = False
         self._health_checker = ModelHealthChecker(HealthCheckConfig.from_dict(health_check_config))
+        self._bg_tasks: set[BackgroundTask] = set()
         self._load_persisted_table(persist=False)
 
     # ---- 生命周期钩子 ---- #
@@ -86,46 +87,69 @@ class ModelRoutingRail(DeepAgentRail):
         except Exception as exc:
             logger.debug("[ModelRouting] persist_table failed: %s", exc)
 
-    async def before_invoke(self, ctx: AgentCallbackContext) -> None:
-        """invoke 开始时铸造新 trace_id，本次 invoke 内所有 prior-call span 共享。"""
-        self._trace_id = _new_trace_id()
-        self._call_history = []  # 新 invoke 重置前置调用链
-        self._routed_this_invoke = False  # 新 invoke 允许再次路由
+    # ---- 健康检查后台循环 ---- #
 
-    async def before_model_call(self, ctx: AgentCallbackContext) -> None:
-        self._call_start = datetime.now(tz=timezone.utc).isoformat()
+    async def _ensure_health_check_loop(self) -> None:
+        """确保健康检查后台循环在运行；若无运行中的任务则启动。
 
-        # 对话级路由去重：同一 invoke 内的后续 model_call 跳过分类器/切换
-        if self._routed_this_invoke:
-            self._emit_decision(
-                ctx,
-                recommended_cap=None,
-                category="skipped",
-                difficulty="skipped",
-                input_tokens=0,
-                agent_info=_extract_agent_info(ctx),
-                reasoning="already routed this invoke, skip classifier and set_llm",
-                privacy_hit=False,
-            )
+        在 before_invoke 中调用，利用 _bg_tasks 是否为空判断（无需额外标志位）。
+        路由决策直接读取缓存的 _status_map，不阻塞。
+        """
+        self._bg_tasks = {t for t in self._bg_tasks if not t.done()}
+        if self._bg_tasks:
             return
+        bg_task = await create_background_task(
+            self._health_check_loop(),
+            name="model-routing-health",
+            group="model_routing",
+        )
+        self._bg_tasks.add(bg_task)
+        logger.info("[ModelRouting] health check background loop started")
+
+    async def _health_check_loop(self) -> None:
+        """后台周期性健康检查循环。
+
+        按 interval_seconds 间隔调用 update_health 刷新 _status_map 缓存。
+        路由决策读取缓存即可，不会被阻塞。
+        """
+        interval = self._health_checker._config.interval_seconds
+        while True:
+            try:
+                await self._health_checker.update_health(self._capability_table)
+            except Exception as exc:
+                logger.debug("[ModelRouting] health check loop error: %s", exc)
+            await asyncio.sleep(interval)
+
+    async def cleanup_background_tasks(self) -> None:
+        """取消并清理所有后台任务。宿主通过 getattr(rail, 'cleanup_background_tasks') 鸭子类型调用。"""
+        for task in self._bg_tasks:
+            if not task.done():
+                await task.cancel(reason="model_routing_shutdown")
+        self._bg_tasks.clear()
+        logger.info("[ModelRouting] health check background loop stopped")
+
+    # ---- 路由 ---- #
+
+    async def before_invoke(self, ctx: AgentCallbackContext) -> None:
+        """invoke 开始时：重置 trace_id / call_history，执行路由决策。"""
+        self._trace_id = _new_trace_id()
+        self._call_history = []
 
         try:
-            messages = getattr(getattr(ctx, "inputs", None), "messages", None) or []
-            prompt_text = _extract_prompt_text(messages)
-            input_tokens = self._count_tokens(messages)
+            # 从 ctx.inputs.query 提取用户查询文本（before_invoke 时无 messages 列表）
+            query = getattr(getattr(ctx, "inputs", None), "query", None) or ""
+            prompt_text = _unwrap_user_message(str(query)) if query else ""
+            input_tokens = self._count_text_tokens(prompt_text)
             agent_info = _extract_agent_info(ctx)
             session_id = _get_session_id(ctx)
 
-            # --- 健康检查：过滤不健康模型 ---
-            await self._health_checker.update_health(self._capability_table)
+            # --- 健康检查：确保后台循环运行，直接读缓存（不阻塞）---
+            await self._ensure_health_check_loop()
             routing_caps = self._health_checker.get_healthy_caps(self._capability_table)
 
-            # --- 安全检查 1：单模型跳过 ---
-            #    可用模型 ≤ 1 时无法路由，直接用唯一模型。
-            #    隐私检查不执行——单模型场景下 rail 不负责隐私过滤，用户自行承担。
+            # --- 单模型跳过 ---
             if len(routing_caps) <= 1:
                 single = routing_caps[0] if routing_caps else None
-                privacy_note = " (privacy check NOT performed, rail not responsible)" if self._privacy_check else ""
                 self._emit_decision(
                     ctx,
                     recommended_cap=single,
@@ -133,63 +157,12 @@ class ModelRoutingRail(DeepAgentRail):
                     difficulty="skipped",
                     input_tokens=input_tokens,
                     agent_info=agent_info,
-                    reasoning="single model available, routing skipped" + privacy_note,
-                    privacy_hit=False,
+                    reasoning="single model available, routing skipped",
                 )
                 logger.info(
-                    "[ModelRouting] skipped (single model)%s; in_tok=%d",
-                    privacy_note, input_tokens,
+                    "[ModelRouting] skipped (single model); in_tok=%d",
+                    input_tokens,
                 )
-                self._routed_this_invoke = True
-                return
-
-            # --- 安全检查 2：隐私命中优先可信(is_trusted)模型 ---
-            #    privacy_check=false（默认）时跳过隐私检查，直接进正常路由。
-            if not self._privacy_check:
-                pass  # 跳过隐私检查，进正常路由
-            elif _check_privacy(prompt_text):
-                logger.info(
-                    "[ModelRouting] PRIVACY-HIT: session=%s caps=%d trusted=%d prompt_preview=%r",
-                    session_id, len(routing_caps),
-                    sum(1 for c in routing_caps if c.is_trusted),
-                    (prompt_text or "")[:40],
-                )
-                # 按能力排序取最强 trusted
-                trusted_candidates = [c for c in routing_caps if c.is_trusted]
-                trusted = max(trusted_candidates, key=_capability_rank) if trusted_candidates else None
-                if trusted is not None:
-                    self._emit_decision(
-                        ctx,
-                        recommended_cap=trusted,
-                        category="privacy",
-                        difficulty="unknown",
-                        input_tokens=input_tokens,
-                        agent_info=agent_info,
-                        reasoning="privacy hit -> trusted model (is_trusted)",
-                        privacy_hit=True,
-                    )
-                    logger.info(
-                        "[ModelRouting] privacy hit -> trusted model %s",
-                        trusted.model_name,
-                    )
-                    self._routed_this_invoke = True
-                    return
-                # 无可信模型：直接取消本次请求，给前端留消息（不做 2 分支确认）
-                logger.warning(
-                    "[ModelRouting] PRIVACY-CANCEL (no trusted): session=%s -> cancel + leave message",
-                    session_id,
-                )
-                ctx.request_force_finish(
-                    {
-                        "output": (
-                            "⚠️ 检测到隐私/敏感信息，"
-                            "且无可信(is_trusted)模型，已取消本次请求。"
-                            "请配置 is_trusted 模型后再试。"
-                        ),
-                        "result_type": "answer",
-                    }
-                )
-                self._routed_this_invoke = True
                 return
 
             # --- 正常路由（含图请求会在 _decide_and_select 里限到 model_type=="vision" 候选）---
@@ -215,7 +188,6 @@ class ModelRoutingRail(DeepAgentRail):
                 input_tokens=input_tokens,
                 agent_info=agent_info,
                 reasoning=f"{cls_reasoning}; {reason}",
-                privacy_hit=False,
             )
             rec_id = (
                 recommended_cap.model_id or recommended_cap.model_name
@@ -223,7 +195,7 @@ class ModelRoutingRail(DeepAgentRail):
                 else None
             )
             logger.info(
-                "[ModelRouting] classifier: [%s,%s] score=%d in_tok=%d privacy=False model_type=%s -> recommend=%s",
+                "[ModelRouting] classifier: [%s,%s] score=%d in_tok=%d model_type=%s -> recommend=%s",
                 category,
                 difficulty,
                 target,
@@ -231,9 +203,8 @@ class ModelRoutingRail(DeepAgentRail):
                 required_model_type or "(none)",
                 rec_id,
             )
-            self._routed_this_invoke = True  # 标记本 invoke 已完成路由
         except Exception as exc:
-            logger.warning("[ModelRouting] before_model_call failed: %s", exc, exc_info=True)
+            logger.warning("[ModelRouting] before_invoke failed: %s", exc, exc_info=True)
 
     async def after_model_call(self, ctx: AgentCallbackContext) -> None:
         try:
@@ -251,7 +222,7 @@ class ModelRoutingRail(DeepAgentRail):
                     output_tokens=output_tokens,
                     iteration=len(self._call_history),
                     trace_id=self._trace_id,
-                    start_time=self._call_start or end_time,
+                    start_time=end_time,  # before_model_call 已移除，无精确 start_time
                     end_time=end_time,
                 )
             )
@@ -284,7 +255,6 @@ class ModelRoutingRail(DeepAgentRail):
         input_tokens: int,
         agent_info: dict[str, Any],
         reasoning: str,
-        privacy_hit: bool,
     ) -> None:
         recommended_model_id = (
             recommended_cap.model_id or recommended_cap.model_name
@@ -342,20 +312,15 @@ class ModelRoutingRail(DeepAgentRail):
             reasoning=reasoning,
             prior_calls_otel=[c.to_otel_span() for c in self._call_history],
             model_usage_stats=self._stats.snapshot(),
-            privacy_hit=privacy_hit,
         )
         ctx.extra["model_routing_decision"] = asdict(decision)
 
-    def _count_tokens(self, messages: list[Any]) -> int:
-        """独立计算 prompt token（tiktoken），不依赖模型上报。"""
+    def _count_text_tokens(self, text: str) -> int:
+        """独立计算文本 token（tiktoken），不依赖模型上报。"""
         try:
-            return int(self._token_counter.count_messages(messages))
+            return int(self._token_counter.count(text))
         except Exception:
-            text = "\n".join(_message_text(m) for m in messages)
-            try:
-                return int(self._token_counter.count(text))
-            except Exception:
-                return max(0, len(text) // 4)
+            return max(0, len(text) // 4)
 
     def reload_capability_table(
         self,
