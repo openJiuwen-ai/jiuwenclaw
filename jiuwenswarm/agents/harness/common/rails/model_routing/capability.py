@@ -23,7 +23,7 @@ class ModelCapability:
     model_cost: int = 0  # 相对成本
     model_performance: int = 0  # 基准得分
     model_score: int = 0  # 综合评分
-    is_trusted: bool = False  # 隐私可信
+    is_trusted: bool = False  # 可信标记（如内部端点）
     model_type: str = ""  # 模型类型（vision / audio / video / "" = 普通）
 
     # 框架扩展字段（set_llm 用，不在能力表内）

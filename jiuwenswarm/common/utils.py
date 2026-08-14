@@ -1155,7 +1155,7 @@ def prepare_workspace(
     routing_state_dir.mkdir(parents=True, exist_ok=True)
     model_routing_src_dir = resources_dir / "model_routing"
     if model_routing_src_dir.is_dir():
-        for mr_filename in ("classifier_mapper.json", "model_routing_privacy.json", "model_capability_map.json"):
+        for mr_filename in ("classifier_mapper.json", "model_capability_map.json"):
             mr_src = model_routing_src_dir / mr_filename
             if mr_src.is_file():
                 mr_dst = routing_state_dir / mr_filename
