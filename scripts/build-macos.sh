@@ -24,7 +24,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="WorkSwarm.app"
 APP_PATH="$PROJECT_ROOT/dist/$APP_NAME"
 DMG_ROOT="$PROJECT_ROOT/dist/dmg-root"
-VERSION="v0.2.5.beta1"
+VERSION="0.2.5.beta1"
 DMG_PATH="$PROJECT_ROOT/dist/WorkSwarm-$VERSION.dmg"
 
 # === 签名 + 公证配置 ===
