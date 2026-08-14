@@ -41,10 +41,12 @@ _MIN_SESSION_AGE_BYPASS_DAYS = 7
 class DreamingConfig:
     enabled: bool = False
     interval_seconds: float = 14400.0
+    cron_expr: str | None = None
+    timezone: str = "Asia/Shanghai"
 
     @classmethod
     def load(cls, mode: str = "code") -> "DreamingConfig":
-        """Load configuration from the config.yaml memory.dreaming.{mode} or return enabled=False."""
+        """Load ``memory.dreaming.{mode}`` configuration."""
         try:
             from jiuwenswarm.common.config import get_config
             raw = get_config().get("memory", {}).get("dreaming", {}).get(mode, {})
@@ -56,13 +58,41 @@ class DreamingConfig:
                 enabled = env_val.lower() in ("true", "1", "yes")
             else:
                 enabled = bool(raw.get("enabled", False))
-            interval = float(os.getenv(
-                "DREAMING_INTERVAL",
-                str(raw.get("interval_seconds", 14400.0)),
-            ))
-            return cls(enabled=enabled, interval_seconds=interval)
+
+            cron_expr = str(
+                os.getenv(
+                    "DREAMING_CRON_EXPR",
+                    raw.get("cron_expr", ""),
+                )
+                or ""
+            ).strip() or None
+            timezone_name = str(
+                os.getenv(
+                    "DREAMING_TIMEZONE",
+                    raw.get("timezone", "Asia/Shanghai"),
+                )
+                or "Asia/Shanghai"
+            ).strip() or "Asia/Shanghai"
+
+            interval = 14400.0
+            if cron_expr is None:
+                interval = float(os.getenv(
+                    "DREAMING_INTERVAL",
+                    str(raw.get("interval_seconds", 14400.0)),
+                ))
+            return cls(
+                enabled=enabled,
+                interval_seconds=interval,
+                cron_expr=cron_expr,
+                timezone=timezone_name,
+            )
         except Exception as exc:
-            logger.warning("[dreaming] %s configuration load failed, using default values: %s", mode, exc)
+            logger.warning(
+                "[dreaming] %s configuration load failed, "
+                "using default values: %s",
+                mode,
+                exc,
+            )
             return cls()
 
 

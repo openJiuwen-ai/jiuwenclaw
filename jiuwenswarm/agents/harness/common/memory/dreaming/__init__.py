@@ -17,19 +17,24 @@ from typing import Callable
 
 from openjiuwen.core.memory.dreaming import DreamingOrchestrator
 
+from .scheduler import CronDreamingOrchestrator
+
 __all__ = [
     "start_dreaming",
     "stop_dreaming",
     "get_dreaming_orchestrator",
     "DreamingOrchestrator",
+    "CronDreamingOrchestrator",
 ]
 
 logger = logging.getLogger(__name__)
 
-_orchestrators: dict[str, DreamingOrchestrator] = {}
+DreamingService = DreamingOrchestrator | CronDreamingOrchestrator
+
+_orchestrators: dict[str, DreamingService] = {}
 
 
-def get_dreaming_orchestrator(mode: str = "agent") -> DreamingOrchestrator | None:
+def get_dreaming_orchestrator(mode: str = "agent") -> DreamingService | None:
     return _orchestrators.get(mode)
 
 
@@ -38,7 +43,7 @@ async def start_dreaming(
     output_dir: str,
     mode: str = "agent",
     busy_checker: Callable[[], bool] | None = None,
-) -> DreamingOrchestrator | None:
+) -> DreamingService | None:
     """Start dreaming service.
     Idempotent: same mode repeated call returns existing instance.
     """
@@ -55,12 +60,21 @@ async def start_dreaming(
     sweeper = Sweeper(sessions_dir, output_dir, mode=mode)
     sweeper.init()
 
-    orch = DreamingOrchestrator(
-        sweep_fn=sweeper.run_sweep,
-        interval_seconds=cfg.interval_seconds,
-        busy_checker=busy_checker,
-        name=f"dreaming-{mode}",
-    )
+    if cfg.cron_expr is not None:
+        orch: DreamingService = CronDreamingOrchestrator(
+            sweep_fn=sweeper.run_sweep,
+            cron_expr=cfg.cron_expr,
+            timezone=cfg.timezone,
+            busy_checker=busy_checker,
+            name=f"dreaming-{mode}",
+        )
+    else:
+        orch = DreamingOrchestrator(
+            sweep_fn=sweeper.run_sweep,
+            interval_seconds=cfg.interval_seconds,
+            busy_checker=busy_checker,
+            name=f"dreaming-{mode}",
+        )
     await orch.start()
     _orchestrators[mode] = orch
     return orch
