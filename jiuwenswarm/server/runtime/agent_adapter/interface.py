@@ -1553,11 +1553,8 @@ class JiuWenSwarm:
                 self._refresh_team_shared_skill_links(request.session_id)
             elif handler_name == "handle_skills_evolution_save" and payload.get("success"):
                 await self._refresh_skill_rails_after_change()
-            elif (
-                handler_name == "handle_skills_rebuild"
-                and isinstance(payload, dict)
-                and payload.get("result_type") == "followup"
-                and payload.get("success")
+            elif handler_name == "handle_skills_rebuild" and self._is_skills_rebuild_followup(
+                payload
             ):
                 # 与 /evolve_rebuild 同 prompt+Agent，但 RPC 内同步静默跑完，不经 Gateway chat.send
                 try:
@@ -1596,6 +1593,13 @@ class JiuWenSwarm:
             metadata=request.metadata,
         )
 
+    @staticmethod
+    def _is_skills_rebuild_followup(payload: Any) -> bool:
+        """判断 skills.rebuild 响应是否需要静默 follow-up."""
+        if not isinstance(payload, dict):
+            return False
+        return payload.get("result_type") == "followup" and bool(payload.get("success"))
+
     async def _run_skills_rebuild_followup(
         self,
         request: AgentRequest,
@@ -1617,6 +1621,7 @@ class JiuWenSwarm:
         is_default = bool(target.get("is_default"))
         skill_dir = Path(skill_dir_raw) if skill_dir_raw else None
         content_root = Path(content_root_raw) if content_root_raw else None
+        should_write_back = is_default or swap_workspace
 
         workspace_backup: Path | None = None
         try:
@@ -1631,7 +1636,7 @@ class JiuWenSwarm:
                         shutil.copytree(child, dest)
                     elif child.is_file():
                         shutil.copy2(child, dest)
-                self._skill_manager._sync_workspace_from_version_content(skill_dir, content_root)
+                self._skill_manager.sync_workspace_from_version_content(skill_dir, content_root)
 
             params = dict(request.params) if isinstance(request.params, dict) else {}
             params["query"] = followup
@@ -1658,9 +1663,9 @@ class JiuWenSwarm:
             async for _chunk in adapter.process_message_stream_impl(chat_request, inputs):
                 pass
 
-            if skill_dir is not None and content_root is not None and (is_default or swap_workspace):
+            if skill_dir is not None and content_root is not None and should_write_back:
                 # Agent 改写 workspace 后回写目标版本副本
-                self._skill_manager._copy_workspace_business_to_version(skill_dir, content_root)
+                self._skill_manager.copy_workspace_business_to_version(skill_dir, content_root)
                 version = target.get("version")
                 if isinstance(version, str) and version.strip():
                     from jiuwenswarm.server.runtime.skill.archive_store import touch_version_metadata
