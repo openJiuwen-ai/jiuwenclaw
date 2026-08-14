@@ -78,11 +78,7 @@ import {
   buildA2UIClientEventContent,
   setA2UIActionHandler,
 } from './features/a2ui/actionBridge';
-import {
-  isDesktopSaveCancelled,
-  isDesktopSaveOk,
-} from './utils/desktopSave';
-import type { DesktopSaveApiResult } from './utils/desktopSave';
+import { saveBlob } from './utils/desktopSave';
 import { generateUuidV4 } from './utils/uuid';
 import {
   ModelSetupGuide,
@@ -158,17 +154,6 @@ type ConfigSaveAllPayload = {
   models?: ModelEntry[];
   agents?: AgentsTeamsSavePayload["agents"];
   team?: AgentsTeamsSavePayload["team"];
-};
-
-type WindowWithPyWebview = Window & {
-  pywebview?: {
-    api?: {
-      save_data_url?: (
-        dataUrl: string,
-        filename: string,
-      ) => DesktopSaveApiResult;
-    };
-  };
 };
 
 function getWorkContextForSession(sessionId: string): {
@@ -262,29 +247,12 @@ function ErrorFallback({ error }: { error: Error | null }) {
   );
 }
 
-function downloadDataUrl(dataUrl: string, filename: string): void {
-  const link = document.createElement('a');
-  link.href = dataUrl;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-}
-
-async function saveShareImage(dataUrl: string, filename: string): Promise<boolean> {
-  const pywebviewApi = (window as WindowWithPyWebview).pywebview?.api;
-  if (pywebviewApi?.save_data_url) {
-    const result = await pywebviewApi.save_data_url(dataUrl, filename);
-    if (isDesktopSaveCancelled(result)) {
-      return false;
-    }
-    if (!isDesktopSaveOk(result)) {
-      throw new Error('share_desktop_save_failed');
-    }
-    return true;
+async function saveShareImage(blob: Blob, filename: string): Promise<boolean> {
+  const outcome = await saveBlob(blob, filename);
+  if (outcome === 'failed') {
+    throw new Error('share_desktop_save_failed');
   }
-  downloadDataUrl(dataUrl, filename);
-  return true;
+  return outcome === 'saved';
 }
 
 function AppContent() {
@@ -2239,8 +2207,7 @@ function AppContent() {
       setShareExportSnapshot(payload.snapshot);
     } catch (error) {
       console.error('Failed to export share image:', error);
-      const detail = error instanceof Error && error.message ? `: ${error.message}` : '';
-      window.alert(`${t('share.exportFailed')}${detail}`);
+      window.alert(t('share.exportFailed'));
       setIsExportingShare(false);
       setShareExportSnapshot(null);
     }
@@ -2259,18 +2226,17 @@ function AppContent() {
         if (!node) {
           throw new Error('share_image_node_missing');
         }
-        const dataUrl = await exportShareImageNode(node);
+        const imageBlob = await exportShareImageNode(node);
         if (shareExportTokenRef.current !== token) {
           return;
         }
-        const saved = await saveShareImage(dataUrl, shareExportFilenameRef.current);
+        const saved = await saveShareImage(imageBlob, shareExportFilenameRef.current);
         if (saved) {
           showSaveToast();
         }
       } catch (error) {
         console.error('Failed to render share image:', error);
-        const detail = error instanceof Error && error.message ? `: ${error.message}` : '';
-        window.alert(`${t('share.exportFailed')}${detail}`);
+        window.alert(t('share.exportFailed'));
       } finally {
         if (shareExportTokenRef.current === token) {
           setIsExportingShare(false);

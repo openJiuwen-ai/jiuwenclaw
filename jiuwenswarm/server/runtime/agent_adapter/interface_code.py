@@ -86,6 +86,9 @@ from jiuwenswarm.common.coding_memory_paths import (
 )
 from jiuwenswarm.server.runtime.agent_adapter.code_agent_rail import CodeAgentRail
 from jiuwenswarm.common.hooks_config import load_hooks_config
+from jiuwenswarm.common.task_loop_config import (
+    resolve_task_loop_completion_timeout,
+)
 from jiuwenswarm.server.hooks.user_hook_rail import UserHookRail
 from jiuwenswarm.common.utils import (
     get_agent_workspace_dir,
@@ -581,7 +584,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             context_engine_config=_deep_agent_context_engine_config(config),
             kv_cache_affinity_config=_deep_agent_kv_cache_affinity_config(config, model),
             auto_create_workspace=False,
-            completion_timeout=config.get("completion_timeout", 3600.0),
+            completion_timeout=resolve_task_loop_completion_timeout(config),
         )
 
         # 改动3：让 agent 初始化（ensure_initialized）在独立线程 + 独立事件循环里跑，
