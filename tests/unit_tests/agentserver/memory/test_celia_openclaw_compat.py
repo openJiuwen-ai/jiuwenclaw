@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import hashlib
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
@@ -12,7 +11,11 @@ import pytest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
-from jiuwenswarm.agents.harness.common.memory.celia.config import CeliaConfig, _endpoint
+from jiuwenswarm.agents.harness.common.memory.celia.config import (
+    CeliaConfig,
+    _endpoint,
+    build_celia_config,
+)
 from jiuwenswarm.agents.harness.common.memory.celia.runtime_state import (
     ensure_runtime_state,
     read_memory_state,
@@ -38,7 +41,6 @@ from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.memory_query import
     memory_query_command,
 )
 from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.xiaoyi_connect import XiaoyiChannel
-from jiuwenswarm.common.celia_setup import CELIA_BINARY_SHA256
 from jiuwenswarm.common.utils import prepare_workspace
 
 
@@ -358,14 +360,15 @@ def test_endpoint_priority_is_source_local(monkeypatch):
     assert endpoint.model == "jiuwen-model"
 
 
-def test_empty_home_workspace_init_installs_celia_compatibility(tmp_path, monkeypatch):
+def test_empty_home_workspace_init_creates_celia_compatibility_state_without_binary(tmp_path, monkeypatch):
     home = tmp_path / "home"
     data = home / ".jiuwenswarm"
     home.mkdir()
     monkeypatch.setattr(Path, "home", lambda: home)
     prepare_workspace(overwrite=False, workspace_dir=data)
-    binary = data / "celia" / "bin" / "gspd_memory_mcp_server"
-    assert hashlib.sha256(binary.read_bytes()).hexdigest() == CELIA_BINARY_SHA256
+    binary_dir = data / "celia" / "bin"
+    assert binary_dir.is_dir()
+    assert not (binary_dir / "gspd_memory_mcp_server").exists()
     assert (data / "agent" / "workspace" / "USER.md").is_file()
     assert (data / "agent" / "workspace" / "MEMORY.md").is_file()
     assert (data / "agent" / "workspace" / "memory" / "celia_memory" / "celia_memory.db").is_file()
@@ -383,3 +386,37 @@ def test_empty_home_workspace_init_installs_celia_compatibility(tmp_path, monkey
     assert user_md.read_text(encoding="utf-8") == "user marker data"
     assert memory_md.read_text(encoding="utf-8") == "memory marker data"
     assert db.read_bytes() == b"existing-db"
+
+
+def test_celia_binary_uses_fixed_extension_path_then_legacy_fallback(tmp_path, monkeypatch):
+    data_dir = tmp_path / ".jiuwenswarm"
+    workspace = data_dir / "agent" / "workspace"
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.memory.celia.config.get_user_workspace_dir",
+        lambda: data_dir,
+    )
+
+    package_dir = data_dir / "extensions" / "celia_memory" / "package"
+    gspd_binary = package_dir / "openclaw" / "bin" / "gspd_memory_mcp_server"
+    ignored_binary = package_dir / "bin" / "gspd_memory_mcp_server"
+    gspd_binary.parent.mkdir(parents=True)
+    ignored_binary.parent.mkdir(parents=True)
+    gspd_binary.touch()
+    ignored_binary.touch()
+
+    resolved = build_celia_config(
+        {},
+        {"celia": {"server_binary_path": "/configured/legacy-binary"}},
+        workspace_dir=str(workspace),
+    )
+    assert Path(resolved.server_binary_path) == gspd_binary
+
+    gspd_binary.unlink()
+    resolved = build_celia_config(
+        {},
+        {"celia": {"server_binary_path": "/configured/legacy-binary"}},
+        workspace_dir=str(workspace),
+    )
+    assert Path(resolved.server_binary_path) == (
+        data_dir / "celia" / "bin" / "gspd_memory_mcp_server"
+    )
