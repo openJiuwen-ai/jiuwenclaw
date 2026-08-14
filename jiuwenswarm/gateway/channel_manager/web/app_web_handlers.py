@@ -1364,6 +1364,18 @@ class WebHandlersBindParams:
     updater_service: UpdaterService | None = None
 
 
+_CONTAINER_FILE_API_METHODS = (
+    "upload_container_file",
+    "download_container_file",
+    "list_container_files",
+)
+
+
+def _supports_container_file_api(client: Any) -> bool:
+    """True when *client* can back WebChannel ``/file-api`` (no extensions import)."""
+    return all(callable(getattr(client, name, None)) for name in _CONTAINER_FILE_API_METHODS)
+
+
 def _attribute_session_project(
     meta: dict[str, Any],
     visible_by_id: set[str],
@@ -6462,3 +6474,13 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error=f"Export failed: {exc}", code="INTERNAL_ERROR")
 
     channel.register_method("harness.export", _harness_export_handler)
+
+    real_agent_client = _resolve(agent_client)
+    # Container file transfer is HTTP on the WebChannel port (dual_protocol),
+    # not WS JSON-RPC. Bind any client that already exposes the container-file
+    # methods so build_web_channel_app can mount /file-api/* at channel.start().
+    # Do not import AgentOSRouterClient here: this module must not depend on extensions.
+    if _supports_container_file_api(real_agent_client):
+        channel.container_file_client = real_agent_client
+    else:
+        channel.container_file_client = None

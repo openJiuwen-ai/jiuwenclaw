@@ -78,11 +78,7 @@ import {
   buildA2UIClientEventContent,
   setA2UIActionHandler,
 } from './features/a2ui/actionBridge';
-import {
-  isDesktopSaveCancelled,
-  isDesktopSaveOk,
-} from './utils/desktopSave';
-import type { DesktopSaveApiResult } from './utils/desktopSave';
+import { saveBlob } from './utils/desktopSave';
 import { generateUuidV4 } from './utils/uuid';
 import {
   ModelSetupGuide,
@@ -158,17 +154,6 @@ type ConfigSaveAllPayload = {
   models?: ModelEntry[];
   agents?: AgentsTeamsSavePayload["agents"];
   team?: AgentsTeamsSavePayload["team"];
-};
-
-type WindowWithPyWebview = Window & {
-  pywebview?: {
-    api?: {
-      save_data_url?: (
-        dataUrl: string,
-        filename: string,
-      ) => DesktopSaveApiResult;
-    };
-  };
 };
 
 function getWorkContextForSession(sessionId: string): {
@@ -262,29 +247,12 @@ function ErrorFallback({ error }: { error: Error | null }) {
   );
 }
 
-function downloadDataUrl(dataUrl: string, filename: string): void {
-  const link = document.createElement('a');
-  link.href = dataUrl;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-}
-
-async function saveShareImage(dataUrl: string, filename: string): Promise<boolean> {
-  const pywebviewApi = (window as WindowWithPyWebview).pywebview?.api;
-  if (pywebviewApi?.save_data_url) {
-    const result = await pywebviewApi.save_data_url(dataUrl, filename);
-    if (isDesktopSaveCancelled(result)) {
-      return false;
-    }
-    if (!isDesktopSaveOk(result)) {
-      throw new Error('share_desktop_save_failed');
-    }
-    return true;
+async function saveShareImage(blob: Blob, filename: string): Promise<boolean> {
+  const outcome = await saveBlob(blob, filename);
+  if (outcome === 'failed') {
+    throw new Error('share_desktop_save_failed');
   }
-  downloadDataUrl(dataUrl, filename);
-  return true;
+  return outcome === 'saved';
 }
 
 function AppContent() {
@@ -318,7 +286,6 @@ function AppContent() {
   const [hasVisitedChannels, setHasVisitedChannels] = useState(false);
   const [sidebarMorePanelOpen, setSidebarMorePanelOpen] = useState(false);
   const [modelSetupGuideStep, setModelSetupGuideStep] = useState<ModelSetupGuideStep | null>(null);
-  const [modelSetupGuideManual, setModelSetupGuideManual] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Session | null>(null);
   const [dialogBusy, setDialogBusy] = useState(false);
   const [dialogError, setDialogError] = useState<string | null>(null);
@@ -957,7 +924,6 @@ function AppContent() {
         modelSetupGuideEvaluatedRef.current = true;
         if (shouldPreviewModelSetupGuide() || isSetupGuideEnabled(config.setup_guide_enabled)) {
           setActiveNav('chat');
-          setModelSetupGuideManual(false);
           setModelSetupGuideStep(1);
         }
       }
@@ -2174,14 +2140,8 @@ function AppContent() {
     if (nav === 'channels') setHasVisitedChannels(true);
   }, [modelSetupGuideStep]);
 
-  const skipModelSetupGuide = useCallback(() => {
+  const dismissModelSetupGuide = useCallback(() => {
     setModelSetupGuideStep(null);
-    setModelSetupGuideManual(false);
-  }, []);
-
-  const acknowledgeModelSetupGuide = useCallback(() => {
-    setModelSetupGuideStep(null);
-    setModelSetupGuideManual(false);
 
     void request('config.set', { setup_guide_enabled: 'false' })
       .then(() => {
@@ -2194,12 +2154,6 @@ function AppContent() {
         console.error('Failed to disable setup guide:', error);
       });
   }, [request]);
-
-  const openModelSetupGuide = useCallback(() => {
-    setActiveNav('chat');
-    setModelSetupGuideManual(true);
-    setModelSetupGuideStep(1);
-  }, []);
 
   const handleExportShare = useCallback(async () => {
     const currentSessionId = sessionIdRef.current;
@@ -2239,8 +2193,7 @@ function AppContent() {
       setShareExportSnapshot(payload.snapshot);
     } catch (error) {
       console.error('Failed to export share image:', error);
-      const detail = error instanceof Error && error.message ? `: ${error.message}` : '';
-      window.alert(`${t('share.exportFailed')}${detail}`);
+      window.alert(t('share.exportFailed'));
       setIsExportingShare(false);
       setShareExportSnapshot(null);
     }
@@ -2259,18 +2212,17 @@ function AppContent() {
         if (!node) {
           throw new Error('share_image_node_missing');
         }
-        const dataUrl = await exportShareImageNode(node);
+        const imageBlob = await exportShareImageNode(node);
         if (shareExportTokenRef.current !== token) {
           return;
         }
-        const saved = await saveShareImage(dataUrl, shareExportFilenameRef.current);
+        const saved = await saveShareImage(imageBlob, shareExportFilenameRef.current);
         if (saved) {
           showSaveToast();
         }
       } catch (error) {
         console.error('Failed to render share image:', error);
-        const detail = error instanceof Error && error.message ? `: ${error.message}` : '';
-        window.alert(`${t('share.exportFailed')}${detail}`);
+        window.alert(t('share.exportFailed'));
       } finally {
         if (shareExportTokenRef.current === token) {
           setIsExportingShare(false);
@@ -2312,15 +2264,13 @@ function AppContent() {
         showNewSession={false}
         hiddenNavItems={['sessions']}
         onMorePanelOpenChange={setSidebarMorePanelOpen}
-        onSetupGuideRequest={openModelSetupGuide}
       />
 
       {modelSetupGuideStep ? (
         <ModelSetupGuide
           step={modelSetupGuideStep}
-          manual={modelSetupGuideManual}
-          onAcknowledge={acknowledgeModelSetupGuide}
-          onSkip={skipModelSetupGuide}
+          onAcknowledge={dismissModelSetupGuide}
+          onSkip={dismissModelSetupGuide}
         />
       ) : null}
 
