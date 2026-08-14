@@ -99,3 +99,5 @@ reasonix.toml
 
 # Build-time Node runtime cache used by packaging scripts.
 vendor/node/
+# Build-time WebView2 Fixed Version Runtime used by Windows packaging.
+vendor/webview2-fixed/

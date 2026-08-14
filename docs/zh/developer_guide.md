@@ -337,6 +337,22 @@ scripts\build-exe.bat
 
 产物目录：`dist\jiuwenswarm\jiuwenswarm.exe`
 
+默认构建不内置 WebView2，目标机器需要安装系统 WebView2 Runtime。若需要生成完全自包含的 Windows 安装包，
+请使用 PowerShell 并传入 `-BundleWebView2`：
+
+```powershell
+.\scripts\build-exe.ps1 -BundleWebView2
+```
+
+脚本会优先使用构建机已安装的 Fixed Version WebView2 Runtime；也可以显式指定已解压的 Runtime 目录：
+
+```powershell
+.\scripts\build-exe.ps1 -BundleWebView2 -WebView2RuntimeDir "D:\packages\WebView2FixedRuntime"
+```
+
+指定的 Runtime 根目录必须直接包含 `msedgewebview2.exe` 和 `msedge.dll`。未启用
+`-BundleWebView2` 时，`-WebView2RuntimeDir` 不会生效。
+
 #### 6.2.3 macOS 平台打包（DMG）
 
 ```bash

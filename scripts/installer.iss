@@ -44,6 +44,14 @@ Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
+; Fixed WebView2 Runtime 120+ on Windows 10 requires AppContainer read/execute access.
+Filename: "{sys}\icacls.exe"; Parameters: """{app}\runtime\webview2"" /grant *S-1-15-2-2:(OI)(CI)(RX) /grant *S-1-15-2-1:(OI)(CI)(RX) /T /C"; StatusMsg: "Configuring WebView2 Runtime permissions..."; Flags: runhidden waituntilterminated; Check: FixedWebView2RuntimeIncluded
 ; 通过 Explorer 代启动程序，使安装完成后的启动上下文更接近桌面快捷方式启动
 ; postinstall 在安装向导最后一页显示"运行 JiuwenSwarm"复选框，由用户决定是否启动
 Filename: "{win}\explorer.exe"; Parameters: """{app}\{#MyAppExeName}"""; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall
+
+[Code]
+function FixedWebView2RuntimeIncluded(): Boolean;
+begin
+  Result := FileExists(ExpandConstant('{app}\runtime\webview2\msedgewebview2.exe'));
+end;
