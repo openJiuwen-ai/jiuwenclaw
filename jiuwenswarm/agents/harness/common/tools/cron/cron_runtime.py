@@ -3,7 +3,11 @@ from __future__ import annotations
 import asyncio
 import time
 from copy import deepcopy
+from datetime import datetime
 from typing import Any, Optional
+from urllib.parse import urljoin
+
+import httpx
 
 from openjiuwen.harness.tools.cron import CronToolBackend, CronToolContext, create_cron_tools
 
@@ -53,9 +57,171 @@ def _tenant_scope_from_context(context: Any | None) -> tuple[str, str]:
 class _CronToolsCronBackend(CronToolBackend):
     """Adapt AgentServer CronTools to the DeepAgents CronToolBackend interface."""
 
-    def __init__(self, cron_tools: CronTools, message_handler: MessageHandler | None = None) -> None:
+    def __init__(
+        self,
+        cron_tools: CronTools,
+        message_handler: MessageHandler | None = None,
+        default_context: CronToolContext | None = None,
+    ) -> None:
         self._cron_tools = cron_tools
         self._message_handler = message_handler
+        self._default_context = default_context
+
+    def with_default_context(
+        self,
+        context: CronToolContext | None,
+    ) -> "_CronToolsCronBackend":
+        """Return a session-scoped view without exposing protected state."""
+        return _CronToolsCronBackend(
+            self._cron_tools,
+            message_handler=self._message_handler,
+            default_context=context,
+        )
+
+    @staticmethod
+    def _officeclaw_proxy_config(context: CronToolContext | None) -> dict[str, str] | None:
+        if context is None:
+            # The upstream unified cron dispatcher does not pass context to
+            # list_jobs. Resolve the same per-invocation ContextVars directly.
+            from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+                get_runtime_office_claw_mcp,
+                get_runtime_tool_channel_id,
+            )
+
+            channel_id = get_runtime_tool_channel_id()
+            raw = get_runtime_office_claw_mcp()
+        else:
+            channel_id = str(context.channel_id or "").strip()
+            raw = getattr(context, "office_claw_mcp", None)
+        if channel_id != "officeclaw":
+            return None
+        if not isinstance(raw, dict):
+            raise RuntimeError(
+                "OfficeClaw cron proxy configuration is unavailable for this request"
+            )
+        env = raw.get("env")
+        if not isinstance(env, dict):
+            raise RuntimeError(
+                "OfficeClaw cron proxy environment is unavailable for this request"
+            )
+        resolved = {
+            "api_url": str(env.get("OFFICE_CLAW_API_URL") or "").strip(),
+            "invocation_id": str(env.get("OFFICE_CLAW_INVOCATION_ID") or "").strip(),
+            "callback_token": str(env.get("OFFICE_CLAW_CALLBACK_TOKEN") or "").strip(),
+            "agent_id": str(env.get("OFFICE_CLAW_AGENT_ID") or "").strip(),
+            "ca_cert": str(env.get("NODE_EXTRA_CA_CERTS") or "").strip(),
+        }
+        required = ("api_url", "invocation_id", "callback_token")
+        missing = [key for key in required if not resolved.get(key)]
+        if missing:
+            raise RuntimeError(
+                "OfficeClaw cron proxy is missing required callback configuration: "
+                + ", ".join(missing)
+            )
+        return resolved
+
+    @staticmethod
+    async def _officeclaw_request(
+        config: dict[str, str],
+        method: str,
+        path: str,
+        *,
+        body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        url = urljoin(config["api_url"].rstrip("/") + "/", path.lstrip("/"))
+        headers = {
+            "x-invocation-id": config["invocation_id"],
+            "x-callback-token": config["callback_token"],
+        }
+        verify: bool | str = config.get("ca_cert") or True
+        async with httpx.AsyncClient(timeout=30.0, verify=verify) as client:
+            response = await client.request(method, url, headers=headers, json=body)
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {"error": response.text}
+        if response.is_error:
+            detail = payload.get("error") if isinstance(payload, dict) else None
+            raise RuntimeError(
+                f"OfficeClaw schedule request failed ({response.status_code}): "
+                f"{detail or response.reason_phrase}"
+            )
+        if not isinstance(payload, dict):
+            raise RuntimeError("OfficeClaw schedule response must be a JSON object")
+        return payload
+
+    @staticmethod
+    def _officeclaw_trigger(params: dict[str, Any]) -> dict[str, Any]:
+        schedule = params.get("schedule") if isinstance(params.get("schedule"), dict) else {}
+        kind = str(schedule.get("kind") or "cron").strip().lower()
+        if kind == "at":
+            at_raw = str(schedule.get("at") or "").strip()
+            if not at_raw:
+                raise ValueError("schedule.kind='at' requires schedule.at field with ISO datetime")
+            try:
+                fire_at = datetime.fromisoformat(at_raw.replace("Z", "+00:00")).timestamp() * 1000
+            except ValueError as exc:
+                raise ValueError(f"Invalid schedule.at value: {at_raw}") from exc
+            return {"type": "once", "fireAt": int(fire_at)}
+        if kind != "cron":
+            raise ValueError(
+                f"Unsupported schedule.kind='{kind}' for OfficeClaw cron proxy"
+            )
+        expression = str(
+            schedule.get("expr")
+            or schedule.get("cron")
+            or params.get("cron_expr")
+            or ""
+        ).strip()
+        if not expression:
+            raise ValueError("schedule.kind='cron' requires schedule.expr")
+        trigger: dict[str, Any] = {"type": "cron", "expression": expression}
+        timezone = str(
+            schedule.get("tz")
+            or schedule.get("timezone")
+            or params.get("timezone")
+            or ""
+        ).strip()
+        if timezone:
+            trigger["timezone"] = timezone
+        return trigger
+
+    @classmethod
+    def _officeclaw_create_body(
+        cls,
+        params: dict[str, Any],
+        config: dict[str, str],
+    ) -> dict[str, Any]:
+        payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
+        message = str(
+            payload.get("message")
+            or payload.get("text")
+            or params.get("description")
+            or ""
+        ).strip()
+        if not message:
+            raise ValueError("cron payload message/text is required")
+        task_params: dict[str, Any] = {"message": message}
+        if config.get("agent_id"):
+            task_params["targetAgentId"] = config["agent_id"]
+        name = str(params.get("name") or message).strip()
+        return {
+            "templateId": "reminder",
+            "trigger": cls._officeclaw_trigger(params),
+            "params": task_params,
+            "display": {
+                "label": name[:64],
+                "category": "system",
+                "description": message,
+            },
+        }
+
+    @staticmethod
+    def _officeclaw_backend_job(task: dict[str, Any]) -> dict[str, Any]:
+        row = dict(task)
+        row.setdefault("source", "officeclaw")
+        row.setdefault("enabled", bool(row.get("effectiveEnabled", True)))
+        return row
 
     @staticmethod
     def _route_from_context(context: CronToolContext | None) -> CronToolRoute:
@@ -103,7 +269,20 @@ class _CronToolsCronBackend(CronToolBackend):
             user_id=user_id,
         )
 
-    async def list_jobs(self, *, include_disabled: bool = True) -> list[dict[str, Any]]:
+    async def list_jobs(
+        self,
+        *,
+        include_disabled: bool = True,
+        context: CronToolContext | None = None,
+    ) -> list[dict[str, Any]]:
+        proxy = self._officeclaw_proxy_config(context or self._default_context)
+        if proxy is not None:
+            payload = await self._officeclaw_request(proxy, "GET", "/api/schedule/tasks")
+            raw_tasks = payload.get("tasks")
+            if not isinstance(raw_tasks, list):
+                raise RuntimeError("OfficeClaw schedule list response is missing tasks")
+            rows = [self._officeclaw_backend_job(task) for task in raw_tasks if isinstance(task, dict)]
+            return rows if include_disabled else [job for job in rows if job.get("enabled", True)]
         jobs = await self._cron_tools.list_jobs()
         rows = [self._to_backend_job(job) for job in jobs]
         if include_disabled:
@@ -135,6 +314,25 @@ class _CronToolsCronBackend(CronToolBackend):
             request_id,
             sorted(list((params or {}).keys())),
         )
+        proxy = self._officeclaw_proxy_config(context or self._default_context)
+        if proxy is not None:
+            body = self._officeclaw_create_body(dict(params or {}), proxy)
+            logger.info(
+                "[CronRuntimeBridge] proxy create_job to OfficeClaw schedule API: "
+                "template=%s trigger_type=%s",
+                body["templateId"],
+                body["trigger"]["type"],
+            )
+            payload = await self._officeclaw_request(
+                proxy,
+                "POST",
+                "/api/schedule/tasks",
+                body=body,
+            )
+            task = payload.get("task")
+            if not isinstance(task, dict):
+                raise RuntimeError("OfficeClaw schedule create response is missing task")
+            return self._officeclaw_backend_job(task)
         payload = _extract_legacy_params(dict(params or {}), context=context, require_schedule=True)
         logger.info(
             "[CronRuntimeBridge] create_job mapped payload.targets=%s payload.id=%s payload.name=%s",
@@ -545,8 +743,15 @@ class CronRuntimeBridge:
             getattr(context, "tool_scope", "unknown"),
         )
         self.ensure_scheduler_started(service_id=sid, agent_id=aid)
+        tool_backend = backend
+        if isinstance(backend, _CronToolsCronBackend):
+            # The upstream list wrappers omit ``context``. Bind a lightweight
+            # per-tool-suite backend so both unified and legacy list calls use
+            # the owning session's runtime context without mutating the shared
+            # tenant backend.
+            tool_backend = backend.with_default_context(context)
         tools = create_cron_tools(
-            backend,
+            tool_backend,
             context=context,
             target_channels=[channel.value for channel in CronTargetChannel],
             default_target_channel=None,

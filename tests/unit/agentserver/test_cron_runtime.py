@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
+from openjiuwen.harness.tools.cron import create_cron_tools
 
 from jiuwenswarm.agents.harness.common.tools.cron.cron_runtime import (
     _CronToolsCronBackend,
@@ -45,6 +46,7 @@ class _FakeCronTools:
         self.routes: list[object] = []
         self.reset_tokens: list[str] = []
         self.create_payloads: list[dict] = []
+        self.list_calls = 0
 
     def push_cron_route(self, route):
         self.routes.append(route)
@@ -58,6 +60,7 @@ class _FakeCronTools:
         return payload
 
     async def list_jobs(self):
+        self.list_calls += 1
         return []
 
     async def get_job(self, job_id: str):
@@ -89,6 +92,23 @@ class _FakeGatewayPush:
 
     async def send_push(self, payload: dict) -> None:
         self.payloads.append(payload)
+
+
+def _officeclaw_context():
+    return SimpleNamespace(
+        channel_id="officeclaw",
+        session_id="officeclaw_session",
+        metadata={"request_id": "req-officeclaw"},
+        tool_scope="officeclaw_test",
+        office_claw_mcp={
+            "env": {
+                "OFFICE_CLAW_API_URL": "http://127.0.0.1:3000",
+                "OFFICE_CLAW_INVOCATION_ID": "inv-1",
+                "OFFICE_CLAW_CALLBACK_TOKEN": "token-1",
+                "OFFICE_CLAW_AGENT_ID": "office",
+            }
+        },
+    )
 
 
 def _setup_project_store(tmp_path, monkeypatch):
@@ -237,6 +257,240 @@ async def test_cron_backend_create_job_pushes_and_resets_route() -> None:
     assert cron_tools.routes[0].session_id == "sess-1"
     assert cron_tools.reset_tokens == ["token-1"]
     assert cron_tools.create_payloads[0]["id"] == "job-1"
+
+
+@pytest.mark.asyncio
+async def test_cron_backend_officeclaw_create_proxies_reminder(monkeypatch) -> None:
+    cron_tools = _FakeCronTools()
+    backend = _CronToolsCronBackend(cron_tools=cron_tools, message_handler=None)
+    calls = []
+
+    async def fake_request(config, method, path, *, body=None):
+        calls.append((config, method, path, body))
+        return {
+            "success": True,
+            "task": {
+                "id": "dyn-1",
+                "label": "喝水提醒",
+                "trigger": {"type": "once", "fireAt": 1786584210000},
+            },
+        }
+
+    monkeypatch.setattr(backend, "_officeclaw_request", fake_request)
+    job = await backend.create_job(
+        {
+            "name": "喝水提醒",
+            "schedule": {"kind": "at", "at": "2026-08-13T09:23:30+08:00"},
+            "payload": {"kind": "systemEvent", "text": "该喝水啦"},
+            "sessionTarget": "current",
+        },
+        context=_officeclaw_context(),
+    )
+
+    assert job["id"] == "dyn-1"
+    assert job["source"] == "officeclaw"
+    assert cron_tools.create_payloads == []
+    config, method, path, body = calls[0]
+    assert config["callback_token"] == "token-1"
+    assert method == "POST"
+    assert path == "/api/schedule/tasks"
+    assert body == {
+        "templateId": "reminder",
+        "trigger": {"type": "once", "fireAt": 1786584210000},
+        "params": {"message": "该喝水啦", "targetAgentId": "office"},
+        "display": {
+            "label": "喝水提醒",
+            "category": "system",
+            "description": "该喝水啦",
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_cron_backend_officeclaw_list_returns_only_remote_tasks(monkeypatch) -> None:
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+        JiuWenSwarmDeepAdapter,
+    )
+
+    cron_tools = _FakeCronTools()
+    backend = _CronToolsCronBackend(cron_tools=cron_tools, message_handler=None)
+
+    async def fake_request(config, method, path, *, body=None):
+        assert config["invocation_id"] == "inv-1"
+        assert method == "GET"
+        assert path == "/api/schedule/tasks"
+        assert body is None
+        return {
+            "tasks": [
+                {"id": "dyn-enabled", "effectiveEnabled": True},
+                {"id": "dyn-disabled", "effectiveEnabled": False},
+            ]
+        }
+
+    monkeypatch.setattr(backend, "_officeclaw_request", fake_request)
+    tokens = JiuWenSwarmDeepAdapter._bind_runtime_cron_context(
+        channel_id="officeclaw",
+        session_id="officeclaw_session",
+        metadata={"request_id": "req-officeclaw"},
+        request_id="req-officeclaw",
+        mode="agent",
+        params={"office_claw_mcp": _officeclaw_context().office_claw_mcp},
+    )
+    try:
+        # The unified upstream cron list dispatcher omits the context argument.
+        jobs = await backend.list_jobs(include_disabled=False)
+    finally:
+        JiuWenSwarmDeepAdapter._reset_runtime_cron_context(tokens)
+
+    assert [job["id"] for job in jobs] == ["dyn-enabled"]
+    assert jobs[0]["source"] == "officeclaw"
+
+
+@pytest.mark.asyncio
+async def test_cron_backend_officeclaw_legacy_create_uses_flat_schedule(monkeypatch) -> None:
+    cron_tools = _FakeCronTools()
+    backend = _CronToolsCronBackend(cron_tools=cron_tools, message_handler=None)
+    calls = []
+
+    async def fake_request(config, method, path, *, body=None):
+        calls.append((method, path, body))
+        return {"task": {"id": "dyn-legacy", "effectiveEnabled": True}}
+
+    monkeypatch.setattr(backend, "_officeclaw_request", fake_request)
+    job = await backend.create_job(
+        {
+            "name": "legacy reminder",
+            "cron_expr": "0 35 17 13 8 ? 2026",
+            "timezone": "Asia/Shanghai",
+            "description": "drink water",
+        },
+        context=_officeclaw_context(),
+    )
+
+    assert job["id"] == "dyn-legacy"
+    assert calls == [
+        (
+            "POST",
+            "/api/schedule/tasks",
+            {
+                "templateId": "reminder",
+                "trigger": {
+                    "type": "cron",
+                    "expression": "0 35 17 13 8 ? 2026",
+                    "timezone": "Asia/Shanghai",
+                },
+                "params": {"message": "drink water", "targetAgentId": "office"},
+                "display": {
+                    "label": "legacy reminder",
+                    "category": "system",
+                    "description": "drink water",
+                },
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cron_backend_officeclaw_list_uses_bound_default_context(monkeypatch) -> None:
+    cron_tools = _FakeCronTools()
+    backend = _CronToolsCronBackend(
+        cron_tools=cron_tools,
+        message_handler=None,
+        default_context=_officeclaw_context(),
+    )
+
+    async def fake_request(config, method, path, *, body=None):
+        assert method == "GET"
+        assert path == "/api/schedule/tasks"
+        return {"tasks": [{"id": "dyn-scoped", "effectiveEnabled": True}]}
+
+    monkeypatch.setattr(backend, "_officeclaw_request", fake_request)
+    jobs = await backend.list_jobs()
+
+    assert [job["id"] for job in jobs] == ["dyn-scoped"]
+    assert cron_tools.list_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_officeclaw_unified_and_legacy_add_list_tool_entries(monkeypatch) -> None:
+    cron_tools = _FakeCronTools()
+    context = _officeclaw_context()
+    backend = _CronToolsCronBackend(
+        cron_tools=cron_tools,
+        message_handler=None,
+        default_context=context,
+    )
+    calls = []
+
+    async def fake_request(config, method, path, *, body=None):
+        calls.append((method, path, body))
+        if method == "GET":
+            return {"tasks": [{"id": "dyn-listed", "effectiveEnabled": True}]}
+        return {"task": {"id": f"dyn-created-{len(calls)}", "effectiveEnabled": True}}
+
+    monkeypatch.setattr(backend, "_officeclaw_request", fake_request)
+    tools = {
+        tool.card.name: tool
+        for tool in create_cron_tools(backend, context=context, language="cn")
+    }
+
+    unified_created = await tools["cron"].invoke(
+        {
+            "action": "add",
+            "job": {
+                "name": "unified reminder",
+                "schedule": {"kind": "at", "at": "2026-08-13T21:00:00+08:00"},
+                "payload": {"kind": "systemEvent", "text": "unified message"},
+            },
+        }
+    )
+    unified_listed = await tools["cron"].invoke({"action": "list"})
+    legacy_created = await tools["cron_create_job"].invoke(
+        {
+            "name": "legacy reminder",
+            "cron_expr": "0 0 21 13 8 ? 2026",
+            "timezone": "Asia/Shanghai",
+            "description": "legacy message",
+        }
+    )
+    legacy_listed = await tools["cron_list_jobs"].invoke({})
+
+    assert unified_created["source"] == "officeclaw"
+    assert [job["id"] for job in unified_listed["jobs"]] == ["dyn-listed"]
+    assert legacy_created["source"] == "officeclaw"
+    assert [job["id"] for job in legacy_listed] == ["dyn-listed"]
+    assert [(method, path) for method, path, _ in calls] == [
+        ("POST", "/api/schedule/tasks"),
+        ("GET", "/api/schedule/tasks"),
+        ("POST", "/api/schedule/tasks"),
+        ("GET", "/api/schedule/tasks"),
+    ]
+    assert cron_tools.create_payloads == []
+    assert cron_tools.list_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_cron_backend_officeclaw_without_callback_config_fails_explicitly() -> None:
+    cron_tools = _FakeCronTools()
+    backend = _CronToolsCronBackend(cron_tools=cron_tools, message_handler=None)
+    context = SimpleNamespace(
+        channel_id="officeclaw",
+        session_id="officeclaw_session",
+        metadata={"request_id": "req-officeclaw"},
+        office_claw_mcp=None,
+    )
+
+    with pytest.raises(RuntimeError, match="proxy configuration is unavailable"):
+        await backend.create_job(
+            {
+                "name": "must not fall back",
+                "schedule": {"kind": "cron", "expr": "0 9 * * *"},
+                "payload": {"kind": "agentTurn", "message": "fallback"},
+            },
+            context=context,
+        )
+
+    assert cron_tools.create_payloads == []
 
 
 @pytest.mark.asyncio

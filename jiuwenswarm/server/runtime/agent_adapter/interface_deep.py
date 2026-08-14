@@ -398,6 +398,10 @@ _CRON_TOOL_BOUND: ContextVar[bool] = ContextVar(
     "cron_tool_bound",
     default=False,
 )
+_CRON_TOOL_OFFICE_CLAW_MCP: ContextVar[dict[str, Any] | None] = ContextVar(
+    "cron_tool_office_claw_mcp",
+    default=None,
+)
 
 _LLM_TRACE_SESSION_ID: ContextVar[str] = ContextVar(
     "llm_trace_session_id",
@@ -427,6 +431,7 @@ class _RuntimeCronContextTokens:
     metadata: Token[dict[str, Any] | None]
     mode: Token[str | None]
     bound: Token[bool]
+    office_claw_mcp: Token[dict[str, Any] | None]
     shell: Token[str | None]
     send_file: Token | None
 
@@ -444,6 +449,31 @@ def get_runtime_tool_channel_id() -> str:
 def get_runtime_tool_metadata() -> dict[str, Any] | None:
     """Request metadata bound for the current agent tool invocation (ContextVar)."""
     return _CRON_TOOL_METADATA.get()
+
+
+def get_runtime_office_claw_mcp() -> dict[str, Any] | None:
+    """Return the request-scoped OfficeClaw MCP configuration, if any."""
+    value = _CRON_TOOL_OFFICE_CLAW_MCP.get()
+    return dict(value) if isinstance(value, dict) else None
+
+
+def _extract_runtime_office_claw_mcp(
+    params: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Extract Relay's system MCP config from legacy or merged request fields."""
+    if not isinstance(params, dict):
+        return None
+    legacy = params.get("office_claw_mcp")
+    if isinstance(legacy, dict):
+        return dict(legacy)
+    request_servers = params.get("request_mcp_servers")
+    if not isinstance(request_servers, dict):
+        return None
+    mcp_servers = request_servers.get("mcpServers")
+    if not isinstance(mcp_servers, dict):
+        return None
+    merged = mcp_servers.get("office-claw")
+    return dict(merged) if isinstance(merged, dict) else None
 
 logger = logging.getLogger(__name__)
 
@@ -1711,6 +1741,7 @@ class _RuntimeCronToolContext:
         self._fallback_session_id: str | None = None
         self._fallback_metadata: dict[str, Any] | None = None
         self._fallback_mode: str | None = None
+        self._fallback_office_claw_mcp: dict[str, Any] | None = None
 
     def remember_current_binding(self) -> None:
         self._fallback_channel_id = _CRON_TOOL_CHANNEL_ID.get()
@@ -1718,6 +1749,14 @@ class _RuntimeCronToolContext:
         metadata = _CRON_TOOL_METADATA.get()
         self._fallback_metadata = dict(metadata) if isinstance(metadata, dict) else None
         self._fallback_mode = _CRON_TOOL_MODE.get()
+        office_claw_mcp = get_runtime_office_claw_mcp()
+        self._fallback_office_claw_mcp = (
+            dict(office_claw_mcp) if isinstance(office_claw_mcp, dict) else None
+        )
+
+    def clear_sensitive_binding(self) -> None:
+        """Drop request credentials retained for the long-lived agent task."""
+        self._fallback_office_claw_mcp = None
 
     @property
     def channel_id(self) -> str:
@@ -1744,6 +1783,13 @@ class _RuntimeCronToolContext:
         if _CRON_TOOL_BOUND.get():
             return _CRON_TOOL_MODE.get()
         return self._fallback_mode
+
+    @property
+    def office_claw_mcp(self) -> dict[str, Any] | None:
+        if _CRON_TOOL_BOUND.get():
+            return get_runtime_office_claw_mcp()
+        value = self._fallback_office_claw_mcp
+        return dict(value) if isinstance(value, dict) else None
 
     @property
     def tool_scope(self) -> str:
@@ -7720,6 +7766,7 @@ class JiuWenSwarmDeepAdapter:
         normalized_metadata = dict(metadata) if isinstance(metadata, dict) else None
         if normalized_metadata is None:
             normalized_metadata = {}
+        office_claw_mcp = _extract_runtime_office_claw_mcp(params)
         if isinstance(request_id, str) and request_id.strip():
             normalized_metadata["request_id"] = request_id.strip()
         g, b, u = extract_routing_triple(params, normalized_metadata)
@@ -7786,6 +7833,7 @@ class JiuWenSwarmDeepAdapter:
             metadata=_CRON_TOOL_METADATA.set(normalized_metadata),
             mode=_CRON_TOOL_MODE.set(normalized_mode),
             bound=_CRON_TOOL_BOUND.set(True),
+            office_claw_mcp=_CRON_TOOL_OFFICE_CLAW_MCP.set(office_claw_mcp),
             shell=set_shell_session_id(session_id),
             send_file=send_file_token,
         )
@@ -7811,6 +7859,7 @@ class JiuWenSwarmDeepAdapter:
                     exc,
                 )
         reset_shell_session_id(tokens.shell)
+        _CRON_TOOL_OFFICE_CLAW_MCP.reset(tokens.office_claw_mcp)
         _CRON_TOOL_BOUND.reset(tokens.bound)
         _CRON_TOOL_MODE.reset(tokens.mode)
         _CRON_TOOL_METADATA.reset(tokens.metadata)
@@ -11275,6 +11324,7 @@ class JiuWenSwarmDeepAdapter:
             TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
             cleanup_permission_context(token_perm)
             reset_permissions_session_scope(token_perm_sid)
+            self._runtime_cron_tool_context.clear_sensitive_binding()
             self._reset_runtime_cron_context(cron_context_tokens)
             _LLM_TRACE_SESSION_ID.reset(token_trace_sid)
             _LLM_TRACE_REQUEST_ID.reset(token_trace_rid)
@@ -12454,6 +12504,7 @@ class JiuWenSwarmDeepAdapter:
             TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
             cleanup_permission_context(token_perm)
             reset_permissions_session_scope(token_perm_sid)
+            self._runtime_cron_tool_context.clear_sensitive_binding()
             if not stream_consumer_cancelled:
                 self._reset_runtime_cron_context(cron_context_tokens)
             _LLM_TRACE_SESSION_ID.reset(token_trace_sid)
