@@ -46,7 +46,8 @@ class TestSubagentStreamMapping:
         assert parsed["subagent_id"] == projection["subagent_id"]
         assert parsed["task_id"] == projection["subagent_id"]
         assert parsed["description"] == "Researcher"
-        assert parsed["status"] == "starting"
+        assert parsed["status"] == "running"
+        assert parsed["legacy_status"] == "starting"
         assert parsed["index"] == 0
         assert parsed["total"] == 1
         assert parsed["is_parallel"] is False
@@ -77,9 +78,9 @@ class TestSubagentStreamMapping:
         assert second_parsed is not None
         assert first_parsed["index"] == 0
         assert second_parsed["index"] == 1
-        assert first_parsed["total"] == 2
+        assert first_parsed["total"] == 1
         assert second_parsed["total"] == 2
-        assert first_parsed["is_parallel"] is True
+        assert first_parsed["is_parallel"] is False
         assert second_parsed["is_parallel"] is True
 
     def test_maps_idle_completed_to_legacy_completed(self) -> None:
@@ -91,13 +92,36 @@ class TestSubagentStreamMapping:
                     "parent_session_id": "parent-sess-idle",
                     "status": "idle",
                     "turn_outcome": "completed",
+                    "lifecycle": "live",
+                    "can_send_input": True,
                     "display_name": "Explorer",
                 }
             },
         )
         assert parsed is not None
-        assert parsed["status"] == "completed"
-        assert parsed["status"] != "starting"
+        assert parsed["status"] == "idle"
+        assert parsed["turn_outcome"] == "completed"
+        assert parsed["legacy_status"] == "completed"
+        assert parsed["can_send_input"] is True
+
+    def test_maps_idle_failed_preserves_error_and_legacy(self) -> None:
+        parsed = _map_subagent_updated_chunk(
+            SUBAGENT_UPDATED_EVENT_TYPE,
+            {
+                "subagent_updated": {
+                    "subagent_id": "sid-1",
+                    "status": "idle",
+                    "turn_outcome": "failed",
+                    "error": {"code": "TIMEOUT", "message": "turn timeout"},
+                    "display_name": "Explorer",
+                }
+            },
+        )
+        assert parsed is not None
+        assert parsed["status"] == "idle"
+        assert parsed["legacy_status"] == "error"
+        assert parsed["error"] == {"code": "TIMEOUT", "message": "turn timeout"}
+        assert parsed["message"] == "turn timeout"
 
     def test_maps_closed_completed_to_legacy_completed(self) -> None:
         parsed = _map_subagent_updated_chunk(
@@ -106,13 +130,18 @@ class TestSubagentStreamMapping:
                 "subagent_updated": {
                     "subagent_id": "sid-1",
                     "status": "closed",
-                    "closed_reason": "completed",
+                    "closed_reason": "manual",
+                    "lifecycle": "closed",
+                    "needs_resume": True,
                     "display_name": "Explorer",
                 }
             },
         )
         assert parsed is not None
-        assert parsed["status"] == "completed"
+        assert parsed["status"] == "closed"
+        assert parsed["closed_reason"] == "manual"
+        assert parsed["legacy_status"] == "completed"
+        assert parsed["needs_resume"] is True
 
     def test_maps_closed_failed_to_legacy_error(self) -> None:
         parsed = _map_subagent_updated_chunk(
@@ -127,7 +156,8 @@ class TestSubagentStreamMapping:
             },
         )
         assert parsed is not None
-        assert parsed["status"] == "error"
+        assert parsed["status"] == "closed"
+        assert parsed["legacy_status"] == "error"
         assert parsed["message"] == "turn timeout"
 
     def test_invalid_subagent_updated_payload_is_skipped(self) -> None:

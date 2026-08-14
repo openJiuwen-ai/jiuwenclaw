@@ -114,6 +114,8 @@ export interface SubtaskUpdatePayload {
   task_id: string;
   description: string;
   status: SubtaskStatus;
+  /** Legacy progress-bar status mapped from runtime running/idle/closed. */
+  legacy_status?: SubtaskStatus;
   index: number;
   total: number;
   tool_name?: string;

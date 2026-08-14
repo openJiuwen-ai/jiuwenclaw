@@ -10266,16 +10266,10 @@ class JiuWenSwarmDeepAdapter:
             return index, total, total > 1
 
     @staticmethod
-    def _project_subagent_updated_for_web(projection: dict) -> dict:
-        """Map runtime subagent_updated fields to legacy Web SubtaskUpdatePayload."""
-        subagent_id = str(projection.get("subagent_id") or "")
+    def _resolve_subagent_legacy_status(projection: dict) -> tuple[str, str]:
+        """Return (legacy_status, message) for Web SubtaskProgress compatibility."""
         status = str(projection.get("status") or "running")
         closed_reason = projection.get("closed_reason")
-        description = (
-            str(projection.get("display_name") or "").strip()
-            or str(projection.get("task_description") or "").strip()
-            or subagent_id
-        )
         message = ""
         if status == "closed":
             if closed_reason == "failed":
@@ -10296,6 +10290,18 @@ class JiuWenSwarmDeepAdapter:
                 legacy_status = "completed"
         else:
             legacy_status = "starting"
+        return legacy_status, message
+
+    @staticmethod
+    def _project_subagent_updated_for_web(projection: dict) -> dict:
+        """Project runtime subagent_updated for Web without overwriting canonical status."""
+        subagent_id = str(projection.get("subagent_id") or "")
+        description = (
+            str(projection.get("display_name") or "").strip()
+            or str(projection.get("task_description") or "").strip()
+            or subagent_id
+        )
+        legacy_status, message = JiuWenSwarmDeepAdapter._resolve_subagent_legacy_status(projection)
 
         parent_session_id = str(projection.get("parent_session_id") or "")
         index, total, is_parallel = JiuWenSwarmDeepAdapter._resolve_subagent_parallel_fields(
@@ -10309,7 +10315,7 @@ class JiuWenSwarmDeepAdapter:
             **projection,
             "task_id": subagent_id,
             "description": description,
-            "status": legacy_status,
+            "legacy_status": legacy_status,
             "index": index,
             "total": total,
             "is_parallel": is_parallel,
