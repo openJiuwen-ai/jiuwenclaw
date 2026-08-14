@@ -836,8 +836,8 @@ def _deep_agent_context_engine_config(
     Model 对象、各带自己的 extra，故同名多条目也能精确区分"选中哪个用哪个的值"。
 
     路径 B（回退，兼容）：``model`` 不可用时，从 ``full_config["models"]["agentos"]``
-    按 ``model_name`` 反查。agentos 现为列表（兼容旧单块 dict），取首个 model_name
-    匹配的条目。此路径在同名多条目时无法区分，仅供旧调用方/未传 model 时兜底。
+    按 ``model_name`` 反查。agentos 为列表，取首个 model_name 匹配的条目。此路径
+    在同名多条目时无法区分，仅供未传 model 的调用方兜底。
     defaults 不受影响（不会传匹配 agentos 的 model_name 或带 agentos extra 的 model）。
     """
     react_cfg = react_cfg or {}
@@ -852,15 +852,10 @@ def _deep_agent_context_engine_config(
         m_cfg = getattr(model, "model_config", None)
         if m_cfg is not None:
             agentos_cw = parse_int(getattr(m_cfg, "_agentos_ctx_window", None), None)
-    # 路径 B：model 不可用时，从 config 的 agentos 列表按 model_name 反查（兼容旧调用）。
+    # 路径 B：model 不可用时，从 config 的 agentos 列表按 model_name 反查（兜底）。
     if agentos_cw is None and full_config and model_name:
         agentos_raw = (full_config.get("models") or {}).get("agentos")
-        if isinstance(agentos_raw, dict):
-            agentos_list = [agentos_raw]
-        elif isinstance(agentos_raw, list):
-            agentos_list = agentos_raw
-        else:
-            agentos_list = []
+        agentos_list = agentos_raw if isinstance(agentos_raw, list) else []
         for blk in agentos_list:
             if not isinstance(blk, dict):
                 continue

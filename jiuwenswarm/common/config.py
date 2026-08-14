@@ -1164,15 +1164,10 @@ def get_default_models(config: dict[str, Any] | None = None) -> list[dict[str, A
         # AgentOS 备份模型：作为额外条目进入缓存（可在 models.list 中按名切换），
         # 但绝不抢主对话——故显式置 is_default=False（覆盖 _infer_is_default 的"组内唯一=默认"推断）。
         # 仅在 model_name 非空（即用户已在 YAML 填入凭证）时追加，并打 _source 标记供下游识别。
-        # 列表语义：models.agentos 可配多个备份模型（同名/异名皆可，填写约束为
-        # (model_name, api_base, api_key) 三元组唯一）；兼容旧的单块 dict（包成单元素列表处理）。
+        # 列表语义：models.agentos 是列表，可配多个备份模型（同名/异名皆可，填写约束为
+        # (model_name, api_base, api_key) 三元组唯一）。非 list 视为未配置。
         agentos_raw = models.get("agentos")
-        if isinstance(agentos_raw, dict):
-            agentos_list = [agentos_raw]
-        elif isinstance(agentos_raw, list):
-            agentos_list = agentos_raw
-        else:
-            agentos_list = []
+        agentos_list = agentos_raw if isinstance(agentos_raw, list) else []
         for agentos_block in agentos_list:
             if not isinstance(agentos_block, dict):
                 continue
