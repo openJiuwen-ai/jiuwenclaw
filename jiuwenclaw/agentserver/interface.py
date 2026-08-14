@@ -36,6 +36,7 @@ from jiuwenclaw.agentserver.session_metadata import (
     validate_project_dir,
 )
 from jiuwenclaw.agentserver.skill_manager import SkillManager
+from jiuwenclaw.agentserver.skill_whitelist import is_skill_whitelist_tenant
 from jiuwenclaw.config import get_config
 from jiuwenclaw.extensions.registry import ExtensionRegistry
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
@@ -81,7 +82,17 @@ _SKILL_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.SKILLS_EVOLUTION_STATUS: "handle_skills_evolution_status",
     ReqMethod.SKILLS_EVOLUTION_GET: "handle_skills_evolution_get",
     ReqMethod.SKILLS_EVOLUTION_SAVE: "handle_skills_evolution_save",
+    ReqMethod.SKILLS_ENTERPRISE_INSTALL: "handle_skills_web_install",
+    ReqMethod.SKILLS_ENTERPRISE_UNINSTALL: "handle_skills_web_uninstall",
 }
+
+# Web 企业装卸（对外 RPC 仍为 skills.enterprise.*）
+_SKILLS_WEB_HANDLERS: frozenset[str] = frozenset(
+    {
+        "handle_skills_web_install",
+        "handle_skills_web_uninstall",
+    }
+)
 
 # Tools 管理请求路由表
 _TOOL_ROUTES: dict[ReqMethod, str] = {
@@ -175,7 +186,12 @@ class JiuWenClaw:
         user_workspace_path = Path(user_workspace_dir) if user_workspace_dir else get_user_workspace_dir()
         self._workspace_dir = str(user_workspace_path / get_agent_workspace_relative_dir())
         self._sessions_dir = user_workspace_path / get_agent_sessions_relative_dir()
-        self._skill_manager = SkillManager(workspace_dir=self._workspace_dir)
+        self._skill_manager = SkillManager(
+            workspace_dir=self._workspace_dir,
+            persist_skills_state=not is_skill_whitelist_tenant(agent_id, service_id),
+            service_id=service_id,
+            agent_id=agent_id,
+        )
         self._session_manager = SessionManager()
         # session_id -> 已解析的 project_dir（与 metadata 绑定，见 _effective_project_dir_for_session）
         self._session_project_dir: OrderedDict[str, str] = OrderedDict()
@@ -373,6 +389,18 @@ class JiuWenClaw:
         except Exception as exc:
             logger.warning("[JiuWenClaw] 从 agent/tools 加载落盘 MCP 工具失败: %s", exc)
         self._register_extension_tools()
+
+    async def refresh_enabled_skills_from_db(self) -> None:
+        """企业账本变更后轻量刷新启用集（直读 DB + 重建 SkillUseRail）。
+
+        适配器不支持时回退 ``create_instance``。
+        """
+        adapter = await self._ensure_adapter()
+        refresh = getattr(adapter, "refresh_enabled_skills_from_db", None)
+        if callable(refresh):
+            await refresh()
+            return
+        await self.create_instance()
 
     def _register_extension_tools(self) -> None:
         """将 ExtensionRegistry 登记的扩展本地工具挂到 Runner 与 ability_manager。"""
@@ -600,18 +628,29 @@ class JiuWenClaw:
         handler_name = _SKILL_ROUTES[request.req_method]
         handler = getattr(self._skill_manager, handler_name)
         try:
-            payload = await handler(request.params)
+            params = dict(request.params) if isinstance(request.params, dict) else {}
+            # Web 企业装卸：补齐最终租户键（Pod 上已是 Runtime 算好的 ID，勿再 MD5）
+            if handler_name in _SKILLS_WEB_HANDLERS:
+                if self._service_id and not str(params.get("service_id") or "").strip():
+                    params["service_id"] = self._service_id
+                if self._agent_id and not str(params.get("agent_id") or "").strip():
+                    params["agent_id"] = self._agent_id
+            payload = await handler(params)
             _reload_after_skills = handler_name in [
                 "handle_skills_install",
                 "handle_skills_uninstall",
                 "handle_skills_import_local",
                 "handle_skills_skillnet_install",
                 "handle_skills_clawhub_download",
+                *_SKILLS_WEB_HANDLERS,
             ]
             if handler_name == "handle_skills_skillnet_install" and payload.get("pending"):
                 _reload_after_skills = False
-            if _reload_after_skills:
-                await self.create_instance()
+            if _reload_after_skills and payload.get("success") is not False:
+                if handler_name in _SKILLS_WEB_HANDLERS:
+                    await self.refresh_enabled_skills_from_db()
+                else:
+                    await self.create_instance()
         except Exception as exc:
             logger.error("[JiuWenClaw] skills 请求处理失败: %s", exc)
             return AgentResponse(

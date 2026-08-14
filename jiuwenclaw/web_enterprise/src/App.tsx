@@ -9,6 +9,7 @@ import { ChatPanel } from './components/ChatPanel';
 import { SessionSidebar } from './components/SessionSidebar';
 import { ToolPanel } from './components/ToolPanel';
 import { StatusBar } from './components/StatusBar';
+import SkillPanel from './components/SkillPanel';
 import { HeartbeatMessageModal } from './features/HeartbeatMessageModal';
 import { FEATURE_HEARTBEAT_UI } from './featureFlags';
 import {
@@ -40,7 +41,7 @@ import i18n from './i18n';
 import { getProductName } from './utils/env';
 import './App.css';
 
-type MainNavKey = 'chat';
+type MainNavKey = 'chat' | 'skills';
 
 // 错误边界组件
 interface ErrorBoundaryState {
@@ -1144,6 +1145,12 @@ function AppContent() {
               <ToolPanel />
             </div>
           </>
+        )}
+
+        {activeNav === 'skills' && (
+          <div className="flex-1 min-h-0 overflow-auto p-4">
+            <SkillPanel sessionId={sessionId} ensureSessionId={ensureSessionForSend} />
+          </div>
         )}
       </main>
 
