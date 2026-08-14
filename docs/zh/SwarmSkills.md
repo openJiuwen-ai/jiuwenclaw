@@ -935,3 +935,9 @@ A: 默认地址为 `https://swarmskills.openjiuwen.com`，可通过环境变量 
 *文档版本：v2.0*
 *适用对象：jiuwenSwarm 用户、技能开发者*
 *最后更新：2026-07-13*
+---
+
+## 返回导航
+
+- [返回文档首页](../README.md)
+- [返回项目首页](../../README_CN.md)

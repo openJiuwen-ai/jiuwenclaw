@@ -565,20 +565,33 @@ test('downloads a blob through a temporary anchor and always revokes its object 
   }
 });
 
-test('saves diagram blobs through the desktop data URL bridge', async () => {
+test('saves diagram blobs through the bounded desktop chunk bridge', async () => {
   const dom = new JSDOM('<!doctype html><html><body></body></html>');
-  const saves = [];
+  const calls = [];
   class FileReaderStub {
-    readAsDataURL() {
+    readAsDataURL(blob) {
+      calls.push(['encode', blob.size]);
       this.result = 'data:image/svg+xml;charset=utf-8;base64,PHN2Zy8+';
       queueMicrotask(() => this.onload());
     }
   }
   dom.window.pywebview = {
     api: {
-      save_data_url: async (...args) => {
-        saves.push(args);
+      begin_blob_save: async (...args) => {
+        calls.push(['begin', ...args]);
+        return { ok: true, cancelled: false, transfer_id: 'transfer-1' };
+      },
+      append_blob_save: async (...args) => {
+        calls.push(['append', ...args]);
+        return true;
+      },
+      finish_blob_save: async (...args) => {
+        calls.push(['finish', ...args]);
         return { ok: true, cancelled: false };
+      },
+      abort_blob_save: async (...args) => {
+        calls.push(['abort', ...args]);
+        return true;
       },
     },
   };
@@ -590,7 +603,12 @@ test('saves diagram blobs through the desktop data URL bridge', async () => {
   try {
     const outcome = await saveBlob(new Blob(['<svg/>'], { type: 'image/svg+xml;charset=utf-8' }), 'diagram.svg');
     assert.equal(outcome, 'saved');
-    assert.deepEqual(saves, [['data:image/svg+xml;charset=utf-8;base64,PHN2Zy8+', 'diagram.svg']]);
+    assert.deepEqual(calls, [
+      ['begin', 'diagram.svg', 'image/svg+xml;charset=utf-8', 6],
+      ['encode', 6],
+      ['append', 'transfer-1', 'PHN2Zy8+'],
+      ['finish', 'transfer-1'],
+    ]);
   } finally {
     restore();
     dom.window.close();

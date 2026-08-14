@@ -2,17 +2,32 @@
 
 import pytest
 
+from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.mode_matrix import (
     base_mode_without_plan,
     is_plan_mode,
     is_team_mode,
     resolve_request_mode,
 )
-from jiuwenswarm.server.agent_ws_server import resolve_agent_request_mode
+from jiuwenswarm.server.agent_ws_server import (
+    _apply_resolved_mode_to_request,
+    resolve_agent_request_mode,
+)
 
 
 def _resolve(params):
     return resolve_request_mode(params, resolve_agent_request_mode)
+
+
+def test_request_preserves_original_mode_when_web_composition_rewrites_it():
+    request = AgentRequest(
+        request_id="req-1",
+        params={"mode": "agent.plan", "work_mode": "code"},
+    )
+
+    assert _apply_resolved_mode_to_request(request, work_mode="code") == ("code", "plan")
+    assert request.params["mode"] == "code.plan"
+    assert getattr(request, "_original_mode") == "agent.plan"
 
 
 # ── Web 组合：只覆盖单 agent，work_mode 决定 profile，mode 决定是否 plan ─────
