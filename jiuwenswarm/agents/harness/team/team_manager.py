@@ -69,7 +69,10 @@ from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
     build_member_rails,
 )
 from jiuwenswarm.common.utils import get_agent_skills_dir
-from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+from jiuwenswarm.server.runtime.session.session_metadata import (
+    get_session_metadata,
+    get_session_team_template_snapshot,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -613,14 +616,21 @@ class TeamManager:
         metadata = get_session_metadata(session_id, **metadata_kwargs)
         team_name = str(metadata.get("team_name") or "").strip()
         template_id = str(metadata.get("team_template_id") or "").strip()
-        template_snapshot: dict[str, Any] | None = None
+        template_snapshot = get_session_team_template_snapshot(
+            session_id,
+            sessions_root=sessions_root,
+        )
+        if template_snapshot is None and isinstance(metadata.get("team_template_snapshot"), dict):
+            template_snapshot = copy.deepcopy(metadata["team_template_snapshot"])
         if team_name:
             from jiuwenswarm.server.runtime.team_binding_store import get_team_binding_store
             from jiuwenswarm.server.runtime.team_entity_store import ensure_team_entity, ensure_team_entity_for_binding
 
             runtime_config = config_base if config_base is not None else get_config()
             binding = get_team_binding_store().get(team_name)
-            if binding is not None:
+            if template_snapshot is not None:
+                entity = None
+            elif binding is not None:
                 if not template_id:
                     template_id = binding.template_id
                 entity = ensure_team_entity_for_binding(binding, config_base=runtime_config)
@@ -636,7 +646,7 @@ class TeamManager:
                     template_snapshot=legacy_snapshot,
                     config_base=runtime_config,
                 )
-            if entity is not None:
+            if template_snapshot is None and entity is not None:
                 template_id = entity.template_id
                 template_snapshot = copy.deepcopy(entity.template_snapshot)
         return team_name or None, template_id or None, template_snapshot

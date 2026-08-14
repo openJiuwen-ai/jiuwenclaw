@@ -3504,7 +3504,14 @@ class AgentWebSocketServer:
             await send_wire_payload(ws, wire)
 
     async def _handle_team_session_bind(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
-        from jiuwenswarm.server.runtime.session.session_metadata import update_session_metadata
+        from jiuwenswarm.agents.harness.team import get_team_template_snapshot
+        from jiuwenswarm.agents.harness.team.config_loader import TeamTemplateNotFoundError
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            capture_session_team_binding_artifacts,
+            resolve_session_subdir,
+            restore_session_team_binding_artifacts,
+            update_session_metadata,
+        )
         from jiuwenswarm.server.runtime.team_binding_store import TeamBindingStoreError, get_team_binding_store
         from jiuwenswarm.server.runtime.team_entity_store import (
             TeamEntityStoreError,
@@ -3520,33 +3527,89 @@ class AgentWebSocketServer:
             if not session_id:
                 raise TeamBindingStoreError("session_id is required", code="BAD_REQUEST")
             sessions_root = _sessions_dir_for_request(request)
-            if not (sessions_root / session_id).is_dir() and not (
-                get_agent_sessions_dir() / session_id
-            ).is_dir():
-                raise TeamBindingStoreError("session not found", code="NOT_FOUND")
-            binding_store = get_team_binding_store()
-            existing_binding = binding_store.get(team_name)
-            if existing_binding is None:
-                raise TeamBindingStoreError("team binding not found", code="NOT_FOUND")
-            entity = ensure_team_entity_for_binding(
-                existing_binding,
-                config_base=self._effective_config_for_request(request),
-            )
-            if entity is None:
-                raise TeamBindingStoreError("team entity config missing", code="NOT_FOUND")
-            binding = binding_store.bind_session(
-                team_name=team_name,
-                session_id=session_id,
-            )
-            update_session_metadata(
-                session_id=session_id,
-                channel_id=str(request.channel_id or "").strip() or None,
-                mode=canonical_mode,
-                team_name=binding.team_name,
-                team_template_id=binding.template_id,
-                sync=True,
+            session_dir = resolve_session_subdir(
+                session_id,
                 sessions_root=sessions_root,
             )
+            if session_dir is None:
+                raise TeamBindingStoreError("invalid session_id", code="BAD_REQUEST")
+            has_tenant_scope = bool(
+                str(request.service_id or "").strip()
+                or str(request.agent_id or "").strip()
+                or request.channel_id == "officeclaw"
+            )
+            legacy_session_exists = False
+            if not has_tenant_scope and not session_dir.is_dir():
+                legacy_session_dir = resolve_session_subdir(
+                    session_id,
+                    sessions_root=get_agent_sessions_dir(),
+                )
+                legacy_session_exists = bool(
+                    legacy_session_dir is not None and legacy_session_dir.is_dir()
+                )
+            if not session_dir.is_dir() and not legacy_session_exists:
+                raise TeamBindingStoreError("session not found", code="NOT_FOUND")
+            async with self._session_team_binding_lock(session_id):
+                binding_store = get_team_binding_store()
+                existing_binding = binding_store.get(team_name)
+                if existing_binding is None:
+                    raise TeamBindingStoreError("team binding not found", code="NOT_FOUND")
+                config_base = self._effective_config_for_request(request)
+                entity = ensure_team_entity_for_binding(
+                    existing_binding,
+                    config_base=config_base,
+                )
+                if entity is None:
+                    raise TeamBindingStoreError("team entity config missing", code="NOT_FOUND")
+                from jiuwenswarm.server.runtime.team_entity_store import normalize_team_entity_snapshot
+
+                session_snapshot = None
+                if has_tenant_scope:
+                    try:
+                        raw_snapshot = get_team_template_snapshot(
+                            config_base,
+                            template_id=existing_binding.template_id,
+                        )
+                    except TeamTemplateNotFoundError:
+                        raw_snapshot = entity.template_snapshot
+                    session_snapshot = normalize_team_entity_snapshot(raw_snapshot, config_base)
+                artifacts = capture_session_team_binding_artifacts(
+                    session_id,
+                    sessions_root=sessions_root,
+                )
+                try:
+                    update_session_metadata(
+                        session_id=session_id,
+                        channel_id=str(request.channel_id or "").strip() or None,
+                        mode=canonical_mode,
+                        team_name=existing_binding.team_name,
+                        team_template_id=existing_binding.template_id,
+                        team_template_snapshot=session_snapshot,
+                        sync=True,
+                        sessions_root=sessions_root,
+                    )
+                    binding = binding_store.bind_session(
+                        team_name=team_name,
+                        session_id=session_id,
+                    )
+                except Exception as exc:
+                    try:
+                        restore_session_team_binding_artifacts(
+                            session_id,
+                            artifacts,
+                            sessions_root=sessions_root,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "[AgentWebSocketServer] failed to roll back Team session bind: "
+                            "session_id=%s team_name=%s",
+                            session_id,
+                            team_name,
+                        )
+                    raise TeamBindingStoreError(
+                        "team session bind failed",
+                        code="INTERNAL_ERROR",
+                    ) from exc
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -3561,7 +3624,7 @@ class AgentWebSocketServer:
                 },
                 metadata=request.metadata,
             )
-        except (TeamBindingStoreError, TeamEntityStoreError) as exc:
+        except (TeamBindingStoreError, TeamEntityStoreError, OSError, ValueError) as exc:
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,

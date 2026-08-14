@@ -1503,7 +1503,7 @@ async def test_get_swarm_enriched_team_spec_uses_bound_stable_team_name(
 
 
 @pytest.mark.asyncio
-async def test_get_swarm_enriched_team_spec_uses_bound_team_entity_snapshot(
+async def test_get_swarm_enriched_team_spec_prefers_session_snapshot_over_entity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager = _TeamManagerHarness()
@@ -1528,6 +1528,13 @@ async def test_get_swarm_enriched_team_spec_uses_bound_team_entity_snapshot(
         lambda _session_id, cache_bust=False: {
             "team_name": "custom_team",
             "team_template_id": "deleted_template",
+        },
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.get_session_team_template_snapshot",
+        lambda _session_id, sessions_root=None: {
+            "team_name": "template_team",
+            "leader": {"member_name": "session_snapshot_leader"},
         },
     )
     monkeypatch.setattr(
@@ -1565,7 +1572,7 @@ async def test_get_swarm_enriched_team_spec_uses_bound_team_entity_snapshot(
             "strict_template": False,
             "template_snapshot": {
                 "team_name": "template_team",
-                "leader": {"member_name": "snapshot_leader"},
+                "leader": {"member_name": "session_snapshot_leader"},
             },
         }
     ]

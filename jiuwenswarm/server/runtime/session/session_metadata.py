@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import os
 import queue
 import re
 import shutil
@@ -21,6 +22,8 @@ from jiuwenswarm.server.runtime.session.work_mode import (
 )
 
 logger = logging.getLogger(__name__)
+
+_TEAM_TEMPLATE_SNAPSHOT_FILE = ".team-template-snapshot.json"
 
 # ---------- 异步写入队列(与 session_history 保持一致的模式) ----------
 # (session_id, metadata, sessions_root|None, preserve_pin_fields)
@@ -303,6 +306,111 @@ def _safe_session_subdir(
     return target
 
 
+def resolve_session_subdir(
+    session_id: str,
+    *,
+    sessions_root: str | Path | None = None,
+) -> Path | None:
+    """Resolve a session directory without escaping the selected sessions root."""
+    return _safe_session_subdir(session_id, sessions_root)
+
+
+def get_session_team_template_snapshot(
+    session_id: str,
+    *,
+    sessions_root: str | Path | None = None,
+) -> dict[str, Any] | None:
+    """Read the private Team template snapshot pinned to one session."""
+    session_dir = resolve_session_subdir(session_id, sessions_root=sessions_root)
+    if session_dir is None:
+        return None
+    path = session_dir / _TEAM_TEMPLATE_SNAPSHOT_FILE
+    if not path.is_file():
+        return None
+    try:
+        snapshot = json.loads(path.read_text(encoding="utf-8") or "{}")
+    except (OSError, ValueError) as exc:
+        logger.warning("failed to read session Team snapshot session=%s: %s", session_id, exc)
+        return None
+    return snapshot if isinstance(snapshot, dict) and snapshot else None
+
+
+def _write_session_team_template_snapshot(
+    session_id: str,
+    snapshot: dict[str, Any],
+    *,
+    sessions_root: str | Path | None = None,
+) -> None:
+    session_dir = resolve_session_subdir(session_id, sessions_root=sessions_root)
+    if session_dir is None:
+        raise ValueError("invalid session_id")
+    session_dir.mkdir(parents=True, exist_ok=True)
+    path = session_dir / _TEAM_TEMPLATE_SNAPSHOT_FILE
+    tmp_path = path.with_name(
+        f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    with _FILE_LOCK:
+        try:
+            tmp_path.write_text(
+                json.dumps(snapshot, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            tmp_path.replace(path)
+        except OSError:
+            tmp_path.unlink(missing_ok=True)
+            raise
+
+
+def capture_session_team_binding_artifacts(
+    session_id: str,
+    *,
+    sessions_root: str | Path | None = None,
+) -> tuple[bytes | None, bytes | None]:
+    """Capture metadata and Team snapshot bytes for bind rollback."""
+    session_dir = resolve_session_subdir(session_id, sessions_root=sessions_root)
+    if session_dir is None:
+        raise ValueError("invalid session_id")
+    metadata_path = session_dir / "metadata.json"
+    snapshot_path = session_dir / _TEAM_TEMPLATE_SNAPSHOT_FILE
+    with _FILE_LOCK:
+        metadata = metadata_path.read_bytes() if metadata_path.is_file() else None
+        snapshot = snapshot_path.read_bytes() if snapshot_path.is_file() else None
+    return metadata, snapshot
+
+
+def restore_session_team_binding_artifacts(
+    session_id: str,
+    artifacts: tuple[bytes | None, bytes | None],
+    *,
+    sessions_root: str | Path | None = None,
+) -> None:
+    """Restore metadata and Team snapshot after a failed bind transaction."""
+    session_dir = resolve_session_subdir(session_id, sessions_root=sessions_root)
+    if session_dir is None:
+        raise ValueError("invalid session_id")
+    root_s = _normalize_sessions_root_s(sessions_root)
+    paths = (
+        session_dir / "metadata.json",
+        session_dir / _TEAM_TEMPLATE_SNAPSHOT_FILE,
+    )
+    with _FILE_LOCK:
+        for path, content in zip(paths, artifacts, strict=True):
+            if content is None:
+                path.unlink(missing_ok=True)
+                continue
+            tmp_path = path.with_name(
+                f"{path.name}.{os.getpid()}.{threading.get_ident()}.rollback.tmp"
+            )
+            try:
+                tmp_path.write_bytes(content)
+                tmp_path.replace(path)
+            except OSError:
+                tmp_path.unlink(missing_ok=True)
+                raise
+    with _CACHE_LOCK:
+        _METADATA_CACHE.pop(_metadata_cache_key(session_id, root_s), None)
+
+
 def validate_project_dir(path: str, *, default: Path | None = None) -> Path:
     """Normalize ``project_dir``; create missing dirs; fall back on failure."""
     fallback = default if default is not None else get_agent_workspace_dir().resolve()
@@ -492,10 +600,18 @@ def _write_metadata_sync(
                     to_write = _merge_pin_fields(current, metadata)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("读取 metadata.json 置顶字段失败: %s", exc)
-        fpath.write_text(
-            json.dumps(to_write, ensure_ascii=False, indent=2),
-            encoding="utf-8",
+        tmp_path = fpath.with_name(
+            f"{fpath.name}.{os.getpid()}.{threading.get_ident()}.tmp"
         )
+        try:
+            tmp_path.write_text(
+                json.dumps(to_write, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            tmp_path.replace(fpath)
+        except OSError:
+            tmp_path.unlink(missing_ok=True)
+            raise
     return to_write
 
 
@@ -712,6 +828,7 @@ def update_session_metadata(
     mode: str | None = None,
     team_name: str | None = None,
     team_template_id: str | None = None,
+    team_template_snapshot: dict[str, Any] | None = None,
     accent_color: str | None = None,
     project_dir: str | None = None,
     project_id: str | None = None,
@@ -751,6 +868,12 @@ def update_session_metadata(
     内会读到陈旧数据,后续整份 metadata 回写会覆盖刚写入的 ``pinned`` 状态。
     """
     root_s = _normalize_sessions_root_s(sessions_root)
+    if isinstance(team_template_snapshot, dict) and team_template_snapshot:
+        _write_session_team_template_snapshot(
+            session_id,
+            team_template_snapshot,
+            sessions_root=root_s,
+        )
     metadata = _read_metadata_prefer_root(
         session_id, cache_bust=cache_bust, sessions_root=root_s
     )

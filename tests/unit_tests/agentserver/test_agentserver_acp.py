@@ -1805,10 +1805,53 @@ async def test_handle_team_session_bind_allows_existing_session_dir_without_meta
         "jiuwenswarm.server.runtime.team_entity_store.get_team_entity_store",
         lambda: entity_store,
     )
+    monkeypatch.setattr(
+        server,
+        "_effective_config_for_request",
+        lambda _request: {
+            "modes": {
+                "team": {
+                    "default": {
+                        "team_name": "template_team",
+                        "leader": {"member_name": "lead_1"},
+                        "agents": {
+                            "lead_1": {},
+                            "new_analyst": {
+                                "description": "new member",
+                                "model": {
+                                    "model_client_config": {
+                                        "model_name": "team-model",
+                                        "client_provider": "OpenAI",
+                                        "api_base": "https://models.example/v1",
+                                        "api_key": "secret",
+                                    },
+                                    "model_request_config": {"model": "team-model"},
+                                },
+                            },
+                        },
+                    }
+                }
+            },
+            "models": {
+                "defaults": [
+                    {
+                        "model_client_config": {
+                            "model_name": "team-model",
+                            "client_provider": "OpenAI",
+                            "api_base": "https://models.example/v1",
+                            "api_key": "secret",
+                        }
+                    }
+                ]
+            },
+        },
+    )
 
     request = AgentRequest(
         request_id="req-team-session-bind-existing",
         channel_id="web",
+        service_id="officeclaw_service_owner",
+        agent_id="agentteam",
         req_method=ReqMethod.TEAM_SESSION_BIND,
         params={
             "session_id": "existing_session",
@@ -1823,13 +1866,71 @@ async def test_handle_team_session_bind_allows_existing_session_dir_without_meta
     assert metadata["mode"] == "code.team"
     assert metadata["team_name"] == "research_team"
     assert metadata["team_template_id"] == "default"
+    snapshot_path = sessions_root / "existing_session" / ".team-template-snapshot.json"
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    analyst = snapshot["agents"]["new_analyst"]
+    assert analyst["description"] == "new member"
+    assert analyst["model"]["ref"].startswith("model-identity-v1:")
     assert "team_template_snapshot" not in metadata
+    persisted_snapshot = snapshot_path.read_text(encoding="utf-8")
+    assert "api_key" not in persisted_snapshot
+    assert "api_base" not in persisted_snapshot
     assert store.get("research_team").session_ids == ("existing_session",)
     assert entity_store.get("research_team") is not None
     assert fake_ws.sent[0]["ok"] is True
     assert fake_ws.sent[0]["payload"]["session_id"] == "existing_session"
     assert fake_ws.sent[0]["payload"]["team_name"] == "research_team"
     assert fake_ws.sent[0]["payload"]["team_template_id"] == "default"
+
+
+@pytest.mark.asyncio
+async def test_handle_team_session_bind_preserves_native_legacy_session_root(monkeypatch, tmp_path):
+    from jiuwenswarm.server.runtime.team_binding_store import TeamBindingStore
+    from jiuwenswarm.server.runtime.team_entity_store import TeamEntityStore
+
+    server = AgentWebSocketServerHarness()
+    fake_ws = FakeWebSocket()
+    tenant_sessions_root = tmp_path / "tenant-sessions"
+    legacy_sessions_root = tmp_path / "legacy-sessions"
+    (legacy_sessions_root / "native_session").mkdir(parents=True)
+    store = TeamBindingStore(tmp_path / "teams" / "bindings.json")
+    binding = store.create(team_name="research_team", template_id="default")
+    entity_store = TeamEntityStore(tmp_path / ".agent_teams")
+    entity_store.write(
+        team_name=binding.team_name,
+        template_id=binding.template_id,
+        template_snapshot={"team_name": "template_team", "leader": {"member_name": "lead_1"}},
+        created_at=binding.created_at,
+    )
+
+    monkeypatch.setattr(agent_ws_server_module, "encode_agent_response_for_wire", fake_encode_agent_response_for_wire)
+    monkeypatch.setattr(agent_ws_server_module, "_sessions_dir_for_request", lambda _request: tenant_sessions_root)
+    monkeypatch.setattr(agent_ws_server_module, "get_agent_sessions_dir", lambda: legacy_sessions_root)
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.team_binding_store.get_team_binding_store",
+        lambda: store,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.team_entity_store.get_team_entity_store",
+        lambda: entity_store,
+    )
+    monkeypatch.setattr(server, "_effective_config_for_request", lambda _request: {})
+    request = AgentRequest(
+        request_id="req-team-session-bind-native",
+        channel_id="web",
+        req_method=ReqMethod.TEAM_SESSION_BIND,
+        params={"session_id": "native_session", "team_name": "research_team", "mode": "team"},
+    )
+
+    await server.handle_team_session_bind_for_test(fake_ws, request, asyncio.Lock())
+
+    metadata = json.loads(
+        (tenant_sessions_root / "native_session" / "metadata.json").read_text(encoding="utf-8")
+    )
+    assert metadata["team_name"] == "research_team"
+    assert store.get("research_team").session_ids == ("native_session",)
+    assert not (tenant_sessions_root / "native_session" / ".team-template-snapshot.json").exists()
+    assert fake_ws.sent[0]["ok"] is True
 
 
 @pytest.mark.asyncio
@@ -1876,6 +1977,122 @@ async def test_handle_team_session_bind_rejects_missing_session(monkeypatch, tmp
             "ok": False,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_handle_team_session_bind_rejects_unsafe_session_path_before_binding(monkeypatch, tmp_path):
+    from jiuwenswarm.server.runtime.team_binding_store import TeamBindingStore
+
+    server = AgentWebSocketServerHarness()
+    fake_ws = FakeWebSocket()
+    sessions_root = tmp_path / "sessions"
+    sessions_root.mkdir()
+    (tmp_path / "outside-session").mkdir()
+    store = TeamBindingStore(tmp_path / "teams" / "bindings.json")
+    store.create(team_name="research_team", template_id="default")
+
+    monkeypatch.setattr(agent_ws_server_module, "encode_agent_response_for_wire", fake_encode_agent_response_for_wire)
+    patch_session_roots(monkeypatch, sessions_root)
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.team_binding_store.get_team_binding_store",
+        lambda: store,
+    )
+    request = AgentRequest(
+        request_id="req-team-session-bind-unsafe",
+        channel_id="web",
+        req_method=ReqMethod.TEAM_SESSION_BIND,
+        params={"session_id": "../outside-session", "team_name": "research_team", "mode": "team"},
+    )
+
+    await server.handle_team_session_bind_for_test(fake_ws, request, asyncio.Lock())
+
+    assert fake_ws.sent[0]["ok"] is False
+    assert store.get("research_team").session_ids == ()
+
+
+@pytest.mark.asyncio
+async def test_handle_team_session_bind_rejects_unsafe_deleted_template_snapshot(monkeypatch, tmp_path):
+    from jiuwenswarm.server.runtime.team_binding_store import TeamBindingStore
+
+    server = AgentWebSocketServerHarness()
+    fake_ws = FakeWebSocket()
+    sessions_root = tmp_path / "sessions"
+    (sessions_root / "existing_session").mkdir(parents=True)
+    store = TeamBindingStore(tmp_path / "teams" / "bindings.json")
+    store.create(team_name="research_team", template_id="deleted")
+
+    monkeypatch.setattr(agent_ws_server_module, "encode_agent_response_for_wire", fake_encode_agent_response_for_wire)
+    patch_session_roots(monkeypatch, sessions_root)
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.team_binding_store.get_team_binding_store",
+        lambda: store,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.team_entity_store.ensure_team_entity_for_binding",
+        lambda *_args, **_kwargs: types.SimpleNamespace(
+            template_snapshot={"team_name": "legacy", "api_key": "plaintext-secret"}
+        ),
+    )
+    monkeypatch.setattr(server, "_effective_config_for_request", lambda _request: {})
+    request = AgentRequest(
+        request_id="req-team-session-bind-unsafe-legacy",
+        channel_id="web",
+        service_id="officeclaw_service_owner",
+        agent_id="agentteam",
+        req_method=ReqMethod.TEAM_SESSION_BIND,
+        params={"session_id": "existing_session", "team_name": "research_team", "mode": "team"},
+    )
+
+    await server.handle_team_session_bind_for_test(fake_ws, request, asyncio.Lock())
+
+    assert fake_ws.sent[0]["ok"] is False
+    assert store.get("research_team").session_ids == ()
+    assert not (sessions_root / "existing_session" / ".team-template-snapshot.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_handle_team_session_bind_snapshot_write_failure_does_not_change_binding(monkeypatch, tmp_path):
+    from jiuwenswarm.server.runtime.team_binding_store import TeamBindingStore
+
+    server = AgentWebSocketServerHarness()
+    fake_ws = FakeWebSocket()
+    sessions_root = tmp_path / "sessions"
+    (sessions_root / "existing_session").mkdir(parents=True)
+    store = TeamBindingStore(tmp_path / "teams" / "bindings.json")
+    store.create(team_name="research_team", template_id="default")
+
+    monkeypatch.setattr(agent_ws_server_module, "encode_agent_response_for_wire", fake_encode_agent_response_for_wire)
+    patch_session_roots(monkeypatch, sessions_root)
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.team_binding_store.get_team_binding_store",
+        lambda: store,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.team_entity_store.ensure_team_entity_for_binding",
+        lambda *_args, **_kwargs: types.SimpleNamespace(template_snapshot={"team_name": "template"}),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.session_metadata._write_session_team_template_snapshot",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
+    monkeypatch.setattr(
+        server,
+        "_effective_config_for_request",
+        lambda _request: {"modes": {"team": {"default": {"team_name": "template"}}}},
+    )
+    request = AgentRequest(
+        request_id="req-team-session-bind-write-failure",
+        channel_id="web",
+        service_id="officeclaw_service_owner",
+        agent_id="agentteam",
+        req_method=ReqMethod.TEAM_SESSION_BIND,
+        params={"session_id": "existing_session", "team_name": "research_team", "mode": "team"},
+    )
+
+    await server.handle_team_session_bind_for_test(fake_ws, request, asyncio.Lock())
+
+    assert fake_ws.sent[0]["ok"] is False
+    assert store.get("research_team").session_ids == ()
 
 
 @pytest.mark.asyncio

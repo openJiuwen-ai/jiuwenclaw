@@ -179,30 +179,33 @@ def _resolve_snapshot_model_ref(model: dict[str, Any], config_base: dict[str, An
     return model_ref if owner_count == 1 else None
 
 
-def _normalize_new_snapshot(
+def normalize_team_entity_snapshot(
     template_snapshot: dict[str, Any],
     config_base: dict[str, Any] | None,
 ) -> dict[str, Any]:
     snapshot = deepcopy(template_snapshot)
-    if not isinstance(config_base, dict):
-        return snapshot
     agents = snapshot.get("agents")
-    if not isinstance(agents, dict):
-        return snapshot
-    for agent_config in agents.values():
-        if not isinstance(agent_config, dict):
-            continue
-        model = agent_config.get("model")
-        if not isinstance(model, dict):
-            continue
-        model_ref = _resolve_snapshot_model_ref(model, config_base)
-        if model_ref:
-            agent_config["model"] = {"ref": model_ref}
-        elif "ref" in model:
-            raise TeamEntityStoreError(
-                "template_snapshot contains an invalid or unowned model reference",
-                code="BAD_REQUEST",
-            )
+    if isinstance(config_base, dict) and isinstance(agents, dict):
+        for agent_config in agents.values():
+            if not isinstance(agent_config, dict):
+                continue
+            model = agent_config.get("model")
+            if not isinstance(model, dict):
+                continue
+            model_ref = _resolve_snapshot_model_ref(model, config_base)
+            if model_ref:
+                agent_config["model"] = {"ref": model_ref}
+            elif "ref" in model:
+                raise TeamEntityStoreError(
+                    "template_snapshot contains an invalid or unowned model reference",
+                    code="BAD_REQUEST",
+                )
+    sensitive_path = _find_sensitive_snapshot_path(snapshot)
+    if sensitive_path is not None:
+        raise TeamEntityStoreError(
+            f"template_snapshot contains sensitive configuration at {'.'.join(sensitive_path)}",
+            code="BAD_REQUEST",
+        )
     return snapshot
 
 
@@ -389,7 +392,7 @@ def ensure_team_entity(
 
     if not snapshot or not normalized_template:
         return None
-    snapshot = _normalize_new_snapshot(snapshot, config_base)
+    snapshot = normalize_team_entity_snapshot(snapshot, config_base)
     return entity_store.write(
         team_name=team_name,
         template_id=normalized_template,
