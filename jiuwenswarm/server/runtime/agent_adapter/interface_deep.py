@@ -13990,11 +13990,17 @@ class JiuWenSwarmDeepAdapter:
                 build_server_push_message,
             )
 
-        async def _cleanup_evolution_rail() -> None:
+        async def _cleanup_evolution_rail(*, cancel: bool = False) -> None:
             if self._skill_evolution_rail is None:
                 return
             try:
-                await self._skill_evolution_rail.cleanup_background_tasks()
+                rail = self._skill_evolution_rail
+                if cancel:
+                    cancel_fn = getattr(rail, "cancel_pending_evolution", None)
+                    if cancel_fn is not None:
+                        await cancel_fn()
+                        return
+                await rail.cleanup_background_tasks()
             except Exception as exc:
                 logger.warning(
                     "[JiuWenSwarmDeepAdapter] evolution cleanup failed: request_id=%s "
@@ -14036,7 +14042,7 @@ class JiuWenSwarmDeepAdapter:
                                 f"{event_timeout_sec:.0f}s without host events"
                             )
                             await _push_status("end", "hidden", message)
-                        await _cleanup_evolution_rail()
+                        await _cleanup_evolution_rail(cancel=True)
                         return
                     await asyncio.sleep(TEAM_EVOLUTION_IDLE_SLEEP_SEC)
                     continue
@@ -14182,7 +14188,7 @@ class JiuWenSwarmDeepAdapter:
                     return
         except asyncio.CancelledError:
             try:
-                await _cleanup_evolution_rail()
+                await _cleanup_evolution_rail(cancel=True)
             finally:
                 raise
         except Exception as exc:

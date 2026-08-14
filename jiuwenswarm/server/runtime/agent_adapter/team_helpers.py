@@ -2702,11 +2702,18 @@ async def _watch_team_evolution_and_push(
     fallback_cycle_index = 0
     active_cycle_request_id: str | None = None
 
-    async def _cleanup_evolution_rail() -> None:
-        cleanup = getattr(rail, "cleanup_background_tasks", None)
-        if cleanup is None:
-            return
+    async def _cleanup_evolution_rail(*, cancel: bool = True) -> None:
         try:
+            if cancel:
+                cancel_fn = getattr(rail, "cancel_pending_evolution", None)
+                if cancel_fn is not None:
+                    result = cancel_fn()
+                    if asyncio.iscoroutine(result):
+                        await result
+                    return
+            cleanup = getattr(rail, "cleanup_background_tasks", None)
+            if cleanup is None:
+                return
             result = cleanup()
             if asyncio.iscoroutine(result):
                 await result
