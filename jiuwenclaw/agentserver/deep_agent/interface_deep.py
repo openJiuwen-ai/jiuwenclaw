@@ -1599,13 +1599,44 @@ class JiuWenClawDeepAdapter:
             return name.strip()
         return "unknown"
 
+    @staticmethod
+    def _is_placeholder_model_name(name: str) -> bool:
+        """True for empty / unresolved / template placeholder model ids."""
+        text = str(name or "").strip()
+        if not text or text == "unknown":
+            return True
+        # jiuwenclaw resources/.env.template leaves MODEL_NAME=your-model-name
+        return text.startswith("your-") and text.endswith("-name")
+
+    def _resolve_evolution_model_name(self, config: dict[str, Any] | None = None) -> str:
+        """Prefer the live main-chat model over static config placeholders.
+
+        SkillEvolutionRail previously used ``config['model_name']`` which often
+        stays as the template value ``your-model-name`` while tip/sync env already
+        drives the real chat model (e.g. glm-5.2).
+        """
+        cfg = config if isinstance(config, dict) else (self._config_cache or {})
+        candidates = [
+            self._resolve_model_name(),
+            str(self._default_model_name or "").strip(),
+            str((self._last_sync_env or {}).get("MODEL_NAME") or "").strip(),
+            str(cfg.get("model_name") or "").strip(),
+        ]
+        for name in candidates:
+            if name and not self._is_placeholder_model_name(name):
+                return name
+        logger.warning(
+            "[JiuWenClawDeepAdapter] evolution model unresolved; candidates=%s",
+            candidates,
+        )
+        return "gpt-4"
+
     def _make_rebuild_service(self, store: Any) -> Any:
         """Build ExperienceRebuildService with current LLM for changelog classification."""
         if ExperienceRebuildService is None:
             raise RuntimeError("ExperienceRebuildService is unavailable")
-        model_name = self._resolve_model_name()
-        if model_name in ("", "unknown"):
-            model_name = (self._config_cache or {}).get("model_name", "gpt-4")
+        model_name = self._resolve_evolution_model_name()
+        if self._is_placeholder_model_name(model_name):
             logger.warning(
                 "[JiuWenClawDeepAdapter] model name unresolved, falling back to '%s' "
                 "for changelog classification",
@@ -2634,6 +2665,12 @@ class JiuWenClawDeepAdapter:
             config.model_name = model.model_config.model_name
             config.model_client_config = model.model_client_config
             config.model_config_obj = model.model_config
+        # Keep skill evolution on the same live model as the main conversation.
+        if self._skill_evolution_rail is not None:
+            applied_name = getattr(model.model_config, "model_name", None)
+            if self._is_placeholder_model_name(str(applied_name or "")):
+                applied_name = self._resolve_evolution_model_name()
+            self._skill_evolution_rail.update_llm(model, str(applied_name))
 
     @staticmethod
     def _resolve_skill_mode(config: dict[str, Any]) -> str:
@@ -3011,16 +3048,19 @@ class JiuWenClawDeepAdapter:
             evolution_auto_save = config.get("evolution", {}).get("auto_save", True)
             trajectory_dir = self._resolve_evolution_trajectory_dir()
             registered_skill_dirs = self._registered_skill_dirs_for_rail()
+            evolution_model = self._resolve_evolution_model_name(config)
             skill_evolution_rail = JiuClawSkillEvolutionRail(
                 skills_dir=registered_skill_dirs,
                 llm=self._model,
-                model=config.get("model_name", "gpt-4"),
+                model=evolution_model,
                 auto_save=evolution_auto_save,
                 trajectory_store=FileTrajectoryStore(trajectory_dir),
             )
             self._skill_evolution_rail = skill_evolution_rail
             logger.info(
-                "[JiuWenClaw] SkillEvolutionRail create success,  trajectory_dir=%s, auto_save=%r",
+                "[JiuWenClaw] SkillEvolutionRail create success, model=%s, "
+                "trajectory_dir=%s, auto_save=%r",
+                evolution_model,
                 trajectory_dir,
                 evolution_auto_save,
                 extra={'user_visible': 'progress'},
@@ -3874,7 +3914,9 @@ class JiuWenClawDeepAdapter:
             new_evolution_rail = self._build_skill_evolution_rail(config)
         elif self._skill_evolution_rail is not None and evolution_enabled:
             # enabled unchanged (on): in-place update LLM / auto_save, rail retained.
-            self._skill_evolution_rail.update_llm(self._model, config.get("model_name", "gpt-4"))
+            self._skill_evolution_rail.update_llm(
+                self._model, self._resolve_evolution_model_name(config)
+            )
             self._skill_evolution_rail.auto_save = config.get("evolution", {}).get("auto_save", True)
 
         self._skill_rail = self._build_skill_rail(

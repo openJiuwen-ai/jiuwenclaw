@@ -58,6 +58,11 @@ class _EvolutionRailReloadHarness(JiuWenClawDeepAdapter):
         for attr in cls._RAIL_ATTRS:
             setattr(adapter, attr, None)
         adapter._model = MagicMock()
+        # Required by _resolve_evolution_model_name / _resolve_model_name on retain path.
+        adapter._model_request_config = None
+        adapter._default_model_name = None
+        adapter._last_sync_env = {}
+        adapter._config_cache = {}
         adapter._context_engineering_rail_mode = None
         adapter._context_engine_config_fp = None
         adapter._last_runtime_mode = "agent.plan"

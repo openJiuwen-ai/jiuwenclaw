@@ -547,7 +547,8 @@ def test_make_rebuild_service_warns_on_model_fallback(adapter, monkeypatch):
     assert captured["model"] == "gpt-4"
     assert captured["language"] == "cn"
     assert any(
-        "model name unresolved" in record.getMessage() and record.levelno == logging.WARNING
+        "evolution model unresolved" in record.getMessage()
+        and record.levelno == logging.WARNING
         for record in records
     )
 
