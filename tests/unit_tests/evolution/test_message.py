@@ -59,6 +59,13 @@ class TestEventType:
         assert EventType.CHAT_SYMPHONY_STATUS.value == "chat.symphony_status"
         assert EventType.CHAT_ERROR.value == "chat.error"
 
+    @staticmethod
+    def test_task_lifecycle_events():
+        """Test task.start/update/complete event types for relay-claw."""
+        assert EventType.TASK_START.value == "task.start"
+        assert EventType.TASK_UPDATE.value == "task.update"
+        assert EventType.TASK_COMPLETE.value == "task.complete"
+
 
 class TestMode:
     """Test Mode enum."""

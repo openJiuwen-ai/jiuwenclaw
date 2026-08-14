@@ -1597,6 +1597,28 @@ def get_agent_workspace_relative_dir() -> Path:
     return get_agent_root_relative_dir() / "workspace"
 
 
+_AGENT_WORKSPACE_DIR_NAMES = frozenset({"workspace", "jiuwenclaw_workspace"})
+
+
+def collapse_nested_agent_workspace_dir(path: Path | str) -> Path:
+    """Collapse ``.../workspace/workspace`` back to the agent workspace.
+
+    The agent workspace is ``.../agent/workspace`` (this project) or
+    ``.../agent/jiuwenclaw_workspace`` (upstream). PPT tooling historically
+    used ``{cwd}/workspace`` as the session parent, which nests a second
+    ``workspace`` directory when cwd is already the agent workspace.
+    """
+    resolved = Path(path).expanduser()
+    try:
+        resolved = resolved.resolve()
+    except OSError:
+        resolved = resolved.absolute()
+    parent_name = resolved.parent.name.lower()
+    if resolved.name.lower() == "workspace" and parent_name in _AGENT_WORKSPACE_DIR_NAMES:
+        return resolved.parent
+    return resolved
+
+
 def get_agent_sessions_relative_dir() -> Path:
     """Get the agent sessions relative path under a tenant workspace root."""
     return get_agent_root_relative_dir() / "sessions"
