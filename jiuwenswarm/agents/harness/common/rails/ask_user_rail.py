@@ -186,6 +186,25 @@ class StructuredAskUserPayload(BaseModel):
     )
 
 
+def _skipped_answer_has_user_input(item: Any) -> bool:
+    """Return whether a skipped answer shell contains an effective response."""
+    if not isinstance(item, dict):
+        return True
+    selected = item.get("selected_options")
+    if isinstance(selected, list):
+        if any(
+            not isinstance(option, str) or bool(option.strip())
+            for option in selected
+        ):
+            return True
+    elif selected is not None:
+        return True
+    custom_input = item.get("custom_input")
+    if custom_input is None:
+        return False
+    return not isinstance(custom_input, str) or bool(custom_input.strip())
+
+
 # ---------------------------------------------------------------------------
 # Extended AskUserTool
 # ---------------------------------------------------------------------------
@@ -378,12 +397,18 @@ class StructuredAskUserRail(AskUserRail):
 
         if is_structured:
             if isinstance(user_input, dict) and user_input.get("status") == "skipped":
-                if set(user_input) == {"status", "answers"} and user_input.get(
-                    "answers"
-                ) == []:
+                skipped_answers = user_input.get("answers")
+                if (
+                    set(user_input) == {"status", "answers"}
+                    and isinstance(skipped_answers, list)
+                    and not any(
+                        _skipped_answer_has_user_input(answer)
+                        for answer in skipped_answers
+                    )
+                ):
                     return self.reject(
                         tool_result=json.dumps(
-                            user_input,
+                            {"status": "skipped", "answers": []},
                             ensure_ascii=False,
                             separators=(",", ":"),
                         )
@@ -391,7 +416,8 @@ class StructuredAskUserRail(AskUserRail):
                 return self.reject(
                     tool_result=(
                         "[INVALID_ARGUMENT] skipped responses must contain only "
-                        "status='skipped' and an empty answers array."
+                        "status='skipped' and answers without selected options "
+                        "or custom input."
                     )
                 )
             try:

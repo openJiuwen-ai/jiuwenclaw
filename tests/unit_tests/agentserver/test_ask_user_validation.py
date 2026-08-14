@@ -123,12 +123,65 @@ async def test_explicit_skipped_preserves_compact_machine_state():
 
 
 @pytest.mark.asyncio
+async def test_explicit_skipped_accepts_empty_frontend_answer_shells():
+    rail = StructuredAskUserRail()
+    tc = _make_tool_call(
+        {
+            "query": "Choose",
+            "questions": [
+                {"question": "Which?", "header": "Choice", "options": []}
+            ],
+        }
+    )
+
+    decision = await rail.resolve_interrupt(
+        MagicMock(),
+        tc,
+        {
+            "status": "skipped",
+            "answers": [
+                {"question": "First?", "selected_options": []},
+                {
+                    "question": "Second?",
+                    "selected_options": [],
+                    "custom_input": None,
+                },
+                {
+                    "question": "Third?",
+                    "selected_options": [],
+                    "custom_input": "   ",
+                },
+            ],
+        },
+    )
+
+    assert isinstance(decision, RejectResult)
+    assert decision.tool_result == '{"status":"skipped","answers":[]}'
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "user_input",
     [
         {"status": "skipped", "answers": {"Which?": "A"}},
         {"status": "skipped", "answers": []},
         {"status": "skipped", "answers": [], "extra": True},
+        {
+            "status": "skipped",
+            "answers": [
+                {"question": "Which?", "selected_options": ["A"]}
+            ],
+        },
+        {
+            "status": "skipped",
+            "answers": [
+                {
+                    "question": "Which?",
+                    "selected_options": [],
+                    "custom_input": "A custom answer",
+                }
+            ],
+        },
     ],
 )
 async def test_non_exact_skipped_shapes_are_rejected(user_input):
