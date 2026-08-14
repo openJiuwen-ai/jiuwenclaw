@@ -22,6 +22,9 @@ from unittest.mock import MagicMock
 import pytest
 
 from jiuwenclaw.agentserver.deep_agent.interface_deep import JiuWenClawDeepAdapter
+from jiuwenclaw.agentserver.deep_agent.rails.skill_credential_injection_rail import (
+    SkillCredentialInjectionRail,
+)
 
 
 class _EvolutionRailReloadHarness(JiuWenClawDeepAdapter):
@@ -235,3 +238,33 @@ async def test_reload_create_passes_exactly_the_built_object(adapter, monkeypatc
     assert appended == [built]
     assert adapter._skill_evolution_rail is built
     adapter._build_skill_evolution_rail.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_reload_keeps_skill_envs_when_yaml_overlay_is_empty(adapter):
+    """Live rail credentials survive a config.yaml ``skill_envs: {}`` hot-reload."""
+    live = SkillCredentialInjectionRail(
+        skill_envs={"hwocr": {"HWOCR_AK": "ak", "HWOCR_PROJECT_ID": "p1"}}
+    )
+    adapter._skill_credential_injection_rail = live
+
+    await adapter.get_current_agent_rails(
+        {"skill_envs": {}, "evolution": {"enabled": False}},
+        {"react": {"skill_envs": {}}},
+    )
+
+    assert live.get_skill_envs()["hwocr"]["HWOCR_AK"] == "ak"
+
+
+@pytest.mark.asyncio
+async def test_reload_applies_catalog_clear_for_skill_envs(adapter):
+    live = SkillCredentialInjectionRail(skill_envs={"hwocr": {"HWOCR_AK": "ak"}})
+    adapter._skill_credential_injection_rail = live
+    cleared = {"hwocr": {"HWOCR_AK": ""}}
+
+    await adapter.get_current_agent_rails(
+        {"skill_envs": cleared, "evolution": {"enabled": False}},
+        {"react": {"skill_envs": cleared}},
+    )
+
+    assert live.get_skill_envs()["hwocr"]["HWOCR_AK"] == ""
