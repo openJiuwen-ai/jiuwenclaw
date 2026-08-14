@@ -17,10 +17,13 @@ from ..config import get_embed_config
 
 logger = logging.getLogger(__name__)
 
-_EXTENSION_PACKAGE_PATH = Path("extensions") / "celia_memory" / "package"
-_EXTENSION_BINARY_NAMES = (
-    "gspd_memory_mcp_server",
-    "celia_memory_mcp_server",
+_EXTENSION_BINARY_PATH = (
+    Path("extensions")
+    / "celia_memory"
+    / "package"
+    / "openclaw"
+    / "bin"
+    / "gspd_memory_mcp_server"
 )
 _LEGACY_BINARY_NAME = "gspd_memory_mcp_server"
 
@@ -71,18 +74,10 @@ def _first(*values: Any) -> str:
 
 
 def _find_extension_binary(data_dir: Path) -> Path | None:
-    """按兼容优先级扫描外置 Celia extension package 中的 MCP 二进制。"""
+    """仅检查外置 extension package 中约定的 OpenClaw MCP 二进制路径。"""
 
-    package_dir = data_dir / _EXTENSION_PACKAGE_PATH
-    if not package_dir.is_dir():
-        return None
-    for binary_name in _EXTENSION_BINARY_NAMES:
-        matches = sorted(
-            path for path in package_dir.rglob(binary_name) if path.is_file()
-        )
-        if matches:
-            return matches[0]
-    return None
+    binary = data_dir / _EXTENSION_BINARY_PATH
+    return binary if binary.is_file() else None
 
 
 def _default_binary_path(data_dir: Path) -> Path:

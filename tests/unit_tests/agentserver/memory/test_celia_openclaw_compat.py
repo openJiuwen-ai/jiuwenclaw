@@ -388,7 +388,7 @@ def test_empty_home_workspace_init_creates_celia_compatibility_state_without_bin
     assert db.read_bytes() == b"existing-db"
 
 
-def test_celia_binary_prefers_extension_package_then_legacy_fallback(tmp_path, monkeypatch):
+def test_celia_binary_uses_fixed_extension_path_then_legacy_fallback(tmp_path, monkeypatch):
     data_dir = tmp_path / ".jiuwenswarm"
     workspace = data_dir / "agent" / "workspace"
     monkeypatch.delenv("CELIA_MEMORY_BINARY_PATH", raising=False)
@@ -398,12 +398,12 @@ def test_celia_binary_prefers_extension_package_then_legacy_fallback(tmp_path, m
     )
 
     package_dir = data_dir / "extensions" / "celia_memory" / "package"
-    celia_binary = package_dir / "install" / "bin" / "celia_memory_mcp_server"
-    gspd_binary = package_dir / "bin" / "gspd_memory_mcp_server"
-    celia_binary.parent.mkdir(parents=True)
+    gspd_binary = package_dir / "openclaw" / "bin" / "gspd_memory_mcp_server"
+    ignored_binary = package_dir / "bin" / "gspd_memory_mcp_server"
     gspd_binary.parent.mkdir(parents=True)
-    celia_binary.touch()
+    ignored_binary.parent.mkdir(parents=True)
     gspd_binary.touch()
+    ignored_binary.touch()
 
     resolved = build_celia_config(
         {},
@@ -413,10 +413,6 @@ def test_celia_binary_prefers_extension_package_then_legacy_fallback(tmp_path, m
     assert Path(resolved.server_binary_path) == gspd_binary
 
     gspd_binary.unlink()
-    resolved = build_celia_config({}, {"celia": {}}, workspace_dir=str(workspace))
-    assert Path(resolved.server_binary_path) == celia_binary
-
-    celia_binary.unlink()
     resolved = build_celia_config({}, {"celia": {}}, workspace_dir=str(workspace))
     assert Path(resolved.server_binary_path) == (
         data_dir / "celia" / "bin" / "gspd_memory_mcp_server"
